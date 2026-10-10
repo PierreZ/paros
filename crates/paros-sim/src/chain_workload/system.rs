@@ -36,7 +36,8 @@ use std::time::Duration;
 
 use moonpool_sim::{SimContext, assert_always, assert_reachable, buggify_with_prob};
 use paros::client::checkpoint::{
-    CheckpointOutcome, CheckpointPolicy, Checkpointer, Folded, Folder, OpenOutcome,
+    CheckpointOutcome, CheckpointPolicy, CheckpointRecord, Checkpointer, Folded, Folder,
+    OpenOutcome,
 };
 use paros::client::{Answered, Attempted, CallObserver, ClaimOutcome, TruncateOutcome, Writer};
 use paros::system::{
@@ -560,6 +561,14 @@ impl SystemOps {
                 };
                 if let Folded::Checkpoint { verified, .. } = &folded {
                     assert_always!(
+                        matches!(
+                            CheckpointRecord::decode(record),
+                            Some(Ok(CheckpointRecord::End { .. }))
+                        ),
+                        "checkpoint: a fold restores only at a run's valid end",
+                        { "journal" => journal.to_string(), "seq" => position }
+                    );
+                    assert_always!(
                         *verified != Some(false),
                         "checkpoint: a client's read-back finds each checkpoint its prefix's state",
                         { "journal" => journal.to_string(), "seq" => position }
@@ -781,6 +790,10 @@ impl SystemOps {
         // outcomes are the truncation and the restarts it forces).
         assert_reachable!("checkpoint: an owner finds a registry checkpoint due");
         if buggify_with_prob!(0.15) {
+            self.stop_inside_run(&client, &mut owner, first).await;
+            return;
+        }
+        if buggify_with_prob!(0.15) {
             // A crash between the checkpoint and its truncate.
             if owner.write_checkpoint(&client, first).await.is_ok() {
                 assert_reachable!(
@@ -827,6 +840,40 @@ impl SystemOps {
             assert_reachable!("checkpoint: an owner truncates the registry to its checkpoint");
             board_lock(&system_board(ctx.state())).truncated_to_checkpoint();
         }
+    }
+
+    /// An owner that stops inside its checkpoint run, before its `End`
+    /// (#353): no fold restores from it, and the next owner's entry or run
+    /// drops it. On a BUGGIFY decision a rival claims the registry and the
+    /// superseded owner tries again: the fence refuses every write of its
+    /// run.
+    async fn stop_inside_run(
+        &self,
+        client: &ChainClient,
+        owner: &mut Checkpointer<Registry>,
+        first: usize,
+    ) {
+        if owner.write_run_without_end(client, first).await.is_err() {
+            return;
+        }
+        assert_reachable!("checkpoint: an owner stops inside its run");
+        if !buggify_with_prob!(0.5) {
+            return;
+        }
+        let mut rival = Writer::new(self.registry, self.leader_seeds.next());
+        if !matches!(
+            rival.claim(client, first, true).await,
+            ClaimOutcome::Won { .. }
+        ) {
+            return;
+        }
+        let again = owner.write_checkpoint(client, first).await;
+        assert_always!(
+            again.is_err(),
+            "checkpoint: a superseded owner never commits a run",
+            { "journal" => self.registry.to_string() }
+        );
+        assert_reachable!("checkpoint: a superseded owner's run is refused");
     }
 
     /// `BOOK_CAPACITY` (#211): what the cell coordinator writes — book one

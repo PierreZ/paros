@@ -143,6 +143,17 @@ pub struct ClientTunables {
     /// ... or once this long has passed since its last checkpoint, with any
     /// entry since. Floor 0: a checkpoint after every entry.
     pub checkpoint_interval: Duration,
+    /// The most state bytes in one checkpoint `Chunk` record (#353).
+    /// Floor 1: a chunk per byte. Keep it well under the nodes' batch bytes:
+    /// a chunk no batch holds fails every checkpoint.
+    pub checkpoint_chunk_bytes: usize,
+    /// The most checkpoint run records in one `Write`. Floor 1: a batch per
+    /// record. A node's `TooLarge` lowers it for the rest of the run.
+    pub checkpoint_batch_records: usize,
+    /// The most checkpoint run record bytes in one `Write`. Floor 1: a
+    /// batch per record. A node's `TooLarge` lowers it for the rest of the
+    /// run.
+    pub checkpoint_batch_bytes: usize,
 }
 
 impl Default for ClientTunables {
@@ -158,6 +169,9 @@ impl Default for ClientTunables {
             wait_ms: 0,
             checkpoint_factor: 4,
             checkpoint_interval: Duration::from_mins(1),
+            checkpoint_chunk_bytes: 8 << 10,
+            checkpoint_batch_records: 64,
+            checkpoint_batch_bytes: 256 << 10,
         }
     }
 }
@@ -169,6 +183,9 @@ impl ClientTunables {
         checkpoint::CheckpointPolicy {
             factor: self.checkpoint_factor,
             interval: self.checkpoint_interval,
+            chunk_bytes: self.checkpoint_chunk_bytes,
+            batch_records: self.checkpoint_batch_records,
+            batch_bytes: self.checkpoint_batch_bytes,
         }
     }
 }

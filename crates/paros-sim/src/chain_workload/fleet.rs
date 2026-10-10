@@ -377,6 +377,14 @@ impl FleetOps {
             "checkpoint: an owner's load finds each checkpoint its prefix's state",
             { "journal" => fleet.to_string(), "seq" => diverged.unwrap_or_default() }
         );
+        if buggify_with_prob!(0.3) {
+            // It stops inside the run instead (#353): no fold restores from
+            // it.
+            if owner.write_run_without_end(client, first).await.is_ok() {
+                assert_reachable!("fleet: an operator stops inside the directory's checkpoint run");
+            }
+            return;
+        }
         if owner.write_checkpoint(client, first).await.is_ok() {
             assert_reachable!(
                 "fleet: an operator stops between the directory's checkpoint and its truncate"

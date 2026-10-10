@@ -449,13 +449,8 @@ impl<P: Providers> ControlFollower<P> {
                 if seq < fold.next_seq() {
                     continue;
                 }
-                let folded = match fold.fold(seq, &record) {
-                    Some(Folded::NeedsRef(_)) => {
-                        fold.skip(seq);
-                        continue;
-                    }
-                    Some(folded) => folded,
-                    None => continue,
+                let Some(folded) = fold.fold(seq, &record) else {
+                    continue;
                 };
                 let Some(event) = tenant_event(folded) else {
                     continue;
@@ -505,12 +500,6 @@ impl<P: Providers> ControlFollower<P> {
                     covers_up_to,
                     verified,
                 }
-            }
-            // A node reads no checkpoint journal: it moves on, waiting for
-            // an `Inline` checkpoint (the writer emits no other in M9).
-            Folded::NeedsRef(_) => {
-                self.registry.skip(seq);
-                return None;
             }
             other => other,
         };

@@ -543,7 +543,7 @@ pub enum TenantEvent {
     /// state the fold now holds. Never folded from an entry: a reader of the
     /// journal through a [`crate::client::checkpoint::Folder`] reports it.
     Checkpoint {
-        /// The checkpoint's horizon, its own position.
+        /// The checkpoint's horizon, the position of its run's `Begin`.
         covers_up_to: u64,
     },
     /// The entry changed nothing and recorded nothing.
@@ -552,14 +552,14 @@ pub enum TenantEvent {
 
 /// The event a [`Folded`] tenant record is reported as: an entry's own
 /// event, a checkpoint's, or a refusal for a record the fold cannot use.
-/// `None` for a record the fold skipped (above a gap) or is waiting on.
+/// `None` for a record the fold skipped (above a gap) or a checkpoint run record.
 #[must_use]
 pub fn tenant_event(folded: Folded<TenantEvent>) -> Option<TenantEvent> {
     match folded {
         Folded::Entry(event) => Some(event),
         Folded::Checkpoint { covers_up_to, .. } => Some(TenantEvent::Checkpoint { covers_up_to }),
         Folded::Unreadable(_) => Some(TenantEvent::Refused(TenantRefusal::Malformed)),
-        Folded::NeedsRef(_) | Folded::Skipped => None,
+        Folded::Run | Folded::Skipped => None,
     }
 }
 

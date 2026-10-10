@@ -630,9 +630,13 @@ pub enum RegistryEvent {
     /// (the fold reports which through its audit, not here, so every fold
     /// of the same position folds the same event).
     Checkpoint {
-        /// The checkpoint's horizon, its own position.
+        /// The checkpoint's horizon, the position of its run's `Begin`.
         covers_up_to: u64,
     },
+    /// A checkpoint run's `Begin` or `Chunk` (#353): nothing changed until
+    /// the run's `End`. Reported so every position of the registry folds to
+    /// an event.
+    CheckpointRun,
     /// The entry changed nothing.
     Refused(RegistryRefusal),
 }
@@ -1404,14 +1408,15 @@ impl Checkpointable for Registry {
 
 /// The event a [`Folded`] registry record is reported as: an entry's own
 /// event, a checkpoint's, or a refusal for a record the fold cannot use.
-/// `None` for a record the fold skipped (above a gap) or is waiting on.
+/// `None` for a record the fold skipped (above a gap).
 #[must_use]
 pub fn registry_event(folded: Folded<RegistryEvent>) -> Option<RegistryEvent> {
     match folded {
         Folded::Entry(event) => Some(event),
         Folded::Checkpoint { covers_up_to, .. } => Some(RegistryEvent::Checkpoint { covers_up_to }),
         Folded::Unreadable(_) => Some(RegistryEvent::Refused(RegistryRefusal::Malformed)),
-        Folded::NeedsRef(_) | Folded::Skipped => None,
+        Folded::Run => Some(RegistryEvent::CheckpointRun),
+        Folded::Skipped => None,
     }
 }
 
@@ -1782,7 +1787,7 @@ mod tests {
 
     #[test]
     fn a_registry_restored_from_its_checkpoint_is_the_registry_folded_whole() {
-        use crate::client::checkpoint::{CheckpointRecord, Folded, Folder};
+        use crate::client::checkpoint::{Folded, Folder, run};
         let records = [
             register(100, Class::Storage, 2),
             register(200, Class::Stateless, 1),
@@ -1795,14 +1800,19 @@ mod tests {
             assert!(matches!(whole.fold(seq, record), Some(Folded::Entry(_))));
         }
         let at = records.len() as u64;
-        let checkpoint = CheckpointRecord::Inline {
-            covers_up_to: at,
-            chunks: vec![whole.state().checkpoint()],
-        }
-        .encode();
+        // A small chunk: the run spans many records.
+        let run = run(at, &whole.state().checkpoint(), 8);
+        assert!(run.len() > 3, "the registry's state takes several chunks");
+        let end = at + run.len() as u64 - 1;
+        let fold_run = |fold: &mut Folder<Registry>| {
+            for (seq, record) in (at..end).zip(&run) {
+                assert_eq!(fold.fold(seq, record), Some(Folded::Run));
+            }
+            fold.fold(end, run.last().unwrap())
+        };
         // The fold that held every position verifies the checkpoint.
         assert_eq!(
-            whole.fold(at, &checkpoint),
+            fold_run(&mut whole),
             Some(Folded::Checkpoint {
                 covers_up_to: at,
                 verified: Some(true)
@@ -1813,7 +1823,7 @@ mod tests {
         restored.jump(at);
         assert!(!restored.is_whole());
         assert_eq!(
-            restored.fold(at, &checkpoint),
+            fold_run(&mut restored),
             Some(Folded::Checkpoint {
                 covers_up_to: at,
                 verified: None
@@ -1822,7 +1832,7 @@ mod tests {
         assert!(restored.is_whole());
         assert_eq!(restored.state().checkpoint(), whole.state().checkpoint());
         let next = register(300, Class::Storage, 1);
-        assert_eq!(whole.fold(at + 1, &next), restored.fold(at + 1, &next));
+        assert_eq!(whole.fold(end + 1, &next), restored.fold(end + 1, &next));
         assert_eq!(restored.state(), whole.state());
     }
 

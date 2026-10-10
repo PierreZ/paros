@@ -47,7 +47,7 @@
 //!   control journal's generation wins over it, and the directory is
 //!   rebuilt from the cells' tenant lists when lost (the recovery issue,
 //!   #231). The fleet directory is checkpointed with `paros::client::checkpoint` (#227),
-//!   `Inline` in M9: [`FleetDirectory`] is [`Checkpointable`].
+//!   a run of small records (#353): [`FleetDirectory`] is [`Checkpointable`].
 //!
 //! Every malformed entry folds to a refusal, never a panic: the entries are
 //! external input.
@@ -556,7 +556,7 @@ pub enum FleetEvent {
     /// A checkpoint (#227): every position below `covers_up_to` is in the
     /// state this fold now holds.
     Checkpoint {
-        /// The checkpoint's horizon, its own position.
+        /// The checkpoint's horizon, the position of its run's `Begin`.
         covers_up_to: u64,
     },
     /// The entry changed nothing.
@@ -1142,14 +1142,14 @@ impl Checkpointable for FleetDirectory {
 
 /// The event a [`Folded`] fleet record is reported as (see
 /// [`crate::system::registry_event`]). `None` for a record the fold skipped
-/// or is waiting on.
+/// or a checkpoint run record.
 #[must_use]
 pub fn fleet_event(folded: Folded<FleetEvent>) -> Option<FleetEvent> {
     match folded {
         Folded::Entry(event) => Some(event),
         Folded::Checkpoint { covers_up_to, .. } => Some(FleetEvent::Checkpoint { covers_up_to }),
         Folded::Unreadable(_) => Some(FleetEvent::Refused(FleetDirectoryRefusal::Malformed)),
-        Folded::NeedsRef(_) | Folded::Skipped => None,
+        Folded::Run | Folded::Skipped => None,
     }
 }
 

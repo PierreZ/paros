@@ -16,7 +16,7 @@ use paros_core::{JournalIdentifier, LogRead, NodeId, Seq};
 
 use super::journals::Journals;
 use crate::Address;
-use crate::client::checkpoint::{Folded, Folder};
+use crate::client::checkpoint::Folder;
 use crate::machine::{FormedCell, address_book};
 use crate::system::Registry;
 
@@ -83,12 +83,7 @@ impl PeerBook {
             {
                 LogRead::Page(page) if page.next().0 > from => {
                     for (seq, record) in (page.from.0..).zip(&page.records) {
-                        if let Some(Folded::NeedsRef(_)) = self.fold.fold(seq, &record.0) {
-                            // A node reads no checkpoint journal: it waits
-                            // for an `Inline` checkpoint, as the system
-                            // follower does.
-                            self.fold.skip(seq);
-                        }
+                        self.fold.fold(seq, &record.0);
                     }
                 }
                 LogRead::Truncated(state) if state.first_seq.0 > from => {

@@ -2,36 +2,42 @@ syntax = "proto3";
 
 package paros.checkpoint.v1;
 
-// A checkpoint record (#227, #230): the state an owner folded from every
-// record below `covers_up_to`, written by the owner as an ordinary fenced
-// `Write` at exactly that position, then made the journal's floor by a fenced
-// `Truncate(up_to = covers_up_to)`. The record follows a magic prefix
-// (`paros::client::checkpoint::MAGIC`) so a reader tells it from the owner's
-// own entries, which paros never interprets.
+// A checkpoint is a run of records in the journal it checkpoints (#353):
+// `Begin`, then `Chunk` records, then `End`. Each record follows a magic
+// prefix (`paros::client::checkpoint::MAGIC`) so a reader tells it from the
+// owner's own entries, which paros never interprets. The owner writes the
+// run as ordinary fenced `Write` batches, with no entry inside it, then
+// makes `Begin` the journal's floor with a fenced `Truncate(up_to = Begin)`.
 //
-// Both forms are read from day one; the writer emits `Inline` only (M9).
+// `End` is the commit point: a run with no `End`, or with an `End` whose
+// count or checksum is wrong, is not a checkpoint.
+//
+// Fields 1 to 3 held the retired `Inline` and `Ref` forms (#230); an old
+// record decodes to no form, which a reader refuses.
 message CheckpointRecord {
-  uint64 covers_up_to = 1;
+  reserved 1, 2, 3;
   oneof form {
-    Inline inline = 2;
-    Ref ref = 3;
+    Begin begin = 4;
+    Chunk chunk = 5;
+    End end = 6;
   }
 }
 
-// The state itself, chunked by key range (one chunk in M9). The state is the
-// chunks concatenated in order.
-message Inline {
-  repeated bytes chunks = 1;
+// The start of a run. The state covers every position below
+// `covers_up_to`, which is the position of this record.
+message Begin {
+  uint64 covers_up_to = 1;
 }
 
-// The state lives in a separate checkpoint journal of the same tenant
-// (Pulsar PIP-14's compacted ledger): its records `[0, end_seq)` are the
-// chunks, and `checksum` is the CRC-32C of their concatenation.
-// `covers_up_to` repeats the record's own, so the referenced journal names
-// the horizon it was built for.
-message Ref {
-  uint64 journal_id = 1;
-  uint64 covers_up_to = 2;
-  uint64 end_seq = 3;
-  uint32 checksum = 4;
+// One piece of the state. The state is the run's chunks concatenated in
+// position order.
+message Chunk {
+  bytes bytes = 1;
+}
+
+// The end of a run: the count of its chunks and the CRC-32C of the chunks
+// concatenated.
+message End {
+  uint64 chunks = 1;
+  uint32 checksum = 2;
 }

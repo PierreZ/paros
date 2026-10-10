@@ -359,6 +359,15 @@ struct ChainConfig {
     /// The `CHECKPOINT` step opens a fresh owner each time, so this leg fires
     /// only near the floor; the factor carries the rest of the range.
     checkpoint_interval_ms: u64,
+    /// The most state bytes in one checkpoint chunk
+    /// (`ClientTunables::checkpoint_chunk_bytes`, #353). Floor 1: a chunk
+    /// per byte. The activated range is tiny, so a registry checkpoint is a
+    /// run of many chunks over many batches.
+    checkpoint_chunk_bytes: usize,
+    /// The most checkpoint run records in one write
+    /// (`ClientTunables::checkpoint_batch_records`). Floor 1: a batch per
+    /// record.
+    checkpoint_batch_records: usize,
     /// How long into a fleet operation its target is killed (#247, the
     /// process kill mid fleet-step). Floor 0: the kill leaves with the
     /// operation's first ask; ceiling 200 ms, a few round trips in, when a
@@ -457,6 +466,8 @@ impl ChainConfig {
             ack_race_timeout_ms: buggify_knob!(5_u64, 1_u64..21_u64),
             checkpoint_factor: buggify_knob!(4_u32, 1_u32..9_u32),
             checkpoint_interval_ms: buggify_knob!(60_000_u64, 0_u64..5_001_u64),
+            checkpoint_chunk_bytes: buggify_knob!(8_192_usize, 16_usize..257_usize),
+            checkpoint_batch_records: buggify_knob!(64_usize, 1_usize..9_usize),
             fleet_kill_delay_ms: buggify_knob!(20_u64, 0_u64..201_u64),
             fleet_kill_down_ms: buggify_knob!(500_u64, 50_u64..2_001_u64),
             init_patience_ms: buggify_knob!(3_000_u64, 500_u64..10_001_u64),
@@ -572,6 +583,9 @@ impl ChainConfig {
             wait_ms: self.read_wait_ms,
             checkpoint_factor: self.checkpoint_factor,
             checkpoint_interval: Duration::from_millis(self.checkpoint_interval_ms),
+            checkpoint_chunk_bytes: self.checkpoint_chunk_bytes,
+            checkpoint_batch_records: self.checkpoint_batch_records,
+            ..ClientTunables::default()
         }
     }
 
