@@ -26,7 +26,9 @@
 //!    `machine_down_after` is written `MachineDown`. Only changes are
 //!    written, never a heartbeat. The watch ends with the term, or at the
 //!    term's first write that does not land: a coordinator an admin session
-//!    fenced does not fight back.
+//!    fenced does not fight back. It resigns the term instead, so that the
+//!    next term installs itself under a fresh uuid and its duties go on
+//!    (#349: a moved machine is otherwise refused for the rest of the term).
 //! 6. **Register moved machines** (#349): a machine of the cell asks the
 //!    coordinator with `Register` to record the address it advertises now
 //!    (`super::register`). The coordinator checks that the machine answers
@@ -37,8 +39,8 @@
 //!
 //! Until admin calls become requests to the coordinator (#212, #225), an
 //! admin session still claims the cell control journal and fences the
-//! coordinator. The coordinator does not fight back: it writes only when a
-//! term starts.
+//! coordinator. The coordinator does not fight back within its term: it
+//! resigns, and the next term claims the journal again.
 //!
 //! The candidate draws no randomness of its own: its seed and its two
 //! BUGGIFY decisions (a stalled leader, a hand-off) are drawn on the node
@@ -516,6 +518,17 @@ async fn campaign<P: Providers>(
                     }
                     TermDuty::Unavailable => {}
                 }
+            }
+            Step::Leading { .. } if served.is_some() && watching.is_none() => {
+                // Another writer fenced the term's session (an operator's
+                // claim): the term cannot do its duties, and a machine that
+                // asks it to register is refused. Never fight the session:
+                // give the term to the next campaign, which installs itself
+                // under a fresh uuid (#349).
+                moonpool_assertions::reachable!("coordinator: a fenced term resigned");
+                election.resign(None).await;
+                served = None;
+                assert!(watching.is_none(), "a resigned term holds no session");
             }
             Step::Leading { leader, .. } if handing => {
                 handing = false;

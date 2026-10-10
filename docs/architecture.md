@@ -639,7 +639,8 @@ coordinator is `paros::machine::coordinator`:
   publishes its interface. A lost install ends the term, and the coordinator resigns.
 - **Interim.** The admin calls are not yet requests to the coordinator (#212, #225). An
   admin session still claims the cell control journal and fences the coordinator. The
-  coordinator writes only when a term starts, so the two do not fight. `parosctl init` claims
+  coordinator does not fight back within its term: it resigns, and the next term installs
+  a fresh uuid (#349: a fenced term cannot register a moved machine). `parosctl init` claims
   nothing: it waits until the coordinator installed its uuid, then runs the fleet steps.
 - **Knobs.** `DriverTunables::election_lease`, `election_renew` and `election_compact_after`,
   each with a floor; `parosd` reads them as `PAROS_ELECTION_*` variables.
