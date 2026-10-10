@@ -180,6 +180,10 @@ pub(crate) struct StorageWorld {
     /// with an ambiguous last batch: lost copies, budgeted like rot (see
     /// [`StorageWorld::permit_power_cut`]).
     cut_nodes: BTreeSet<String>,
+    /// Slots a permitted cut marked lost on its node (#331), until that
+    /// node's next open says which of them came back faulty: the open keeps
+    /// those marks and clears the rest.
+    cut_marks: BTreeMap<String, BTreeSet<u64>>,
     /// The matchmaker (#176) a `Batched` commit's cut may have left with an
     /// ambiguous registration, a crash verdict: the run's one matchmaker
     /// loss (see [`StorageWorld::permit_matchmaker_power_cut`]).
@@ -308,11 +312,16 @@ impl StorageWorld {
             return false;
         }
         self.marks.remove(key);
+        self.cut_marks.remove(key);
         self.rotted.remove(key);
         self.custody.remove(key);
         // A copy an outage planned to lose goes with the whole disk.
         self.pending.remove(key);
         self.park_as(key, node, ParkReason::Wiped);
+        assert_always!(
+            self.marked_slots_keep_quorum(),
+            "storage: cut and parked acceptors fit one loss budget"
+        );
         tracing::info!(node, "storage_wiped");
         true
     }
@@ -489,24 +498,84 @@ impl StorageWorld {
     }
 
     /// Whether acceptor `key` may lose power inside a `Batched` journal
-    /// commit now (#176). Such a cut can leave the commit ambiguous, its
-    /// entries reported faulty: a lost copy of every slot the commit wrote,
-    /// which on a quorum system that tolerates no loss (`q2 = 1`, a grid)
-    /// leaves a slot that may have been chosen with no value anywhere, a
-    /// correct wait forever. So the cut nodes are budgeted like rot: at most
-    /// `tolerated` distinct acceptors per run (the floor minus the clean
-    /// copies every record keeps), a node already cut staying permitted.
-    pub(crate) fn permit_power_cut(&mut self, key: &str, tolerated: usize) -> bool {
-        if !self.may_cut_node(key, tolerated) {
+    /// commit that writes `slots` now (#176). Such a cut can leave the
+    /// commit ambiguous, its entries reported faulty: a lost copy of every
+    /// slot the commit wrote, which on a quorum system that tolerates no loss
+    /// (`q2 = 1`, a grid) leaves a slot that may have been chosen with no
+    /// value anywhere, a correct wait forever. So the cut nodes are budgeted
+    /// like rot: at most `tolerated` distinct acceptors per run (the floor
+    /// minus the clean copies every record keeps), a node already cut
+    /// staying permitted, and every slot the commit writes is a lost copy
+    /// the per-record budget must permit (#331).
+    ///
+    /// The cut marks those slots on `key` like rot, so the other losses
+    /// (a wipe, a corruption park, rot, an outage's plan) and the oracle's
+    /// [`storage_fault_stats`] count them too: before #331 a cut spent only
+    /// its own node budget, and a wipe of a second member of a majority of
+    /// three left a slot chosen through the two lost copies undecidable (a
+    /// correct wait forever, which the oracle called unexplained). The next
+    /// open of `key` clears the marks of the slots that came back whole.
+    pub(crate) fn permit_power_cut(&mut self, key: &str, tolerated: usize, slots: &[u64]) -> bool {
+        if !self.may_cut_node(key, tolerated, slots) {
             return false;
         }
         self.cut_nodes.insert(key.to_string());
+        for &slot in slots {
+            if self.marks.entry(key.to_string()).or_default().insert(slot) {
+                self.cut_marks
+                    .entry(key.to_string())
+                    .or_default()
+                    .insert(slot);
+            }
+        }
+        assert_always!(
+            self.marked_slots_keep_quorum(),
+            "storage: cut and parked acceptors fit one loss budget"
+        );
         true
     }
 
     /// [`StorageWorld::permit_power_cut`]'s answer, spending nothing.
-    pub(crate) fn may_cut_node(&self, key: &str, tolerated: usize) -> bool {
-        self.cut_nodes.contains(key) || self.cut_nodes.len() < tolerated
+    pub(crate) fn may_cut_node(&self, key: &str, tolerated: usize, slots: &[u64]) -> bool {
+        (self.cut_nodes.contains(key) || self.cut_nodes.len() < tolerated)
+            && slots.iter().all(|&slot| self.may_corrupt_record(key, slot))
+    }
+
+    /// `key`'s store opened and reported `faulty`: a slot a cut marked lost
+    /// that came back whole was never lost, so its mark goes (#331).
+    fn settle_cut_marks(&mut self, key: &str, faulty: &[u64]) {
+        let Some(cut) = self.cut_marks.remove(key) else {
+            return;
+        };
+        if let Some(marks) = self.marks.get_mut(key) {
+            for slot in cut.iter().filter(|slot| !faulty.contains(slot)) {
+                marks.remove(slot);
+            }
+        }
+    }
+
+    /// Whether every marked slot outside the loss budget's spent ones keeps
+    /// a clean quorum under the oracle's own formula
+    /// ([`storage_fault_stats`]): cut, rotted and parked acceptors share one
+    /// loss budget (#331).
+    fn marked_slots_keep_quorum(&self) -> bool {
+        let marked: BTreeSet<u64> = self
+            .marks
+            .values()
+            .flatten()
+            .copied()
+            .filter(|slot| !self.lossy.contains(slot))
+            .collect();
+        marked.into_iter().all(|slot| {
+            let unclean: BTreeSet<&String> = self
+                .marks
+                .iter()
+                .filter(|(_, marks)| marks.contains(&slot))
+                .map(|(node, _)| node)
+                .chain(self.parked.keys())
+                .collect();
+            self.cluster_size.saturating_sub(unclean.len()) >= self.quorum()
+        })
     }
 
     /// Whether matchmaker `key` may lose power inside a `Batched` registry
