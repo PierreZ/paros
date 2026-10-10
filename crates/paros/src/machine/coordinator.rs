@@ -365,6 +365,8 @@ fn cell_client<P: Providers>(providers: &P, rpc: &RpcHandle<P>, formed: &FormedC
 }
 
 /// A founding member's candidacy, as the node loop hands it to the task.
+/// Its bools are independent BUGGIFY decisions.
+#[allow(clippy::struct_excessive_bools)]
 struct Candidacy {
     me: NodeId,
     addr: Address,
