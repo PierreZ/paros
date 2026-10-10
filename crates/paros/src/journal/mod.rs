@@ -84,8 +84,8 @@ pub use matchmaker::JournalMatchmakerStorage;
 pub use moonpool_core::LayoutRegion;
 pub use moonpool_journal::{BLOCK, Durability, Geometry, Layout};
 pub use node::{JournalBootFacts, JournalStorage};
-pub(crate) use settle::sync_names;
 pub use settle::settle;
+pub(crate) use settle::sync_names;
 
 /// How a journal store lays out and writes its journal.
 ///
