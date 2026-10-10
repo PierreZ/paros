@@ -9,7 +9,6 @@
 //! `cell init` draws the cell's ballot and its plan).
 
 use std::collections::BTreeMap;
-use std::net::SocketAddr;
 use std::time::Duration;
 
 use moonpool_core::{Providers, TimeProvider};
@@ -19,8 +18,30 @@ use paros_core::{JournalId, JournalIdentifier, TenantId};
 use super::Client;
 use crate::machine::{Admission, CellPlan, ControlJournals};
 use crate::rpc::machine as wire;
-use crate::rpc::methods::{AdmitRpc, CellInitRpc, IdentifyRpc, InspectRpc};
+use crate::rpc::methods::{AdmitRpc, CellInitRpc, IdentifyRpc, InspectRpc, WellKnownMethod};
 use crate::rpc::{InspectReply, InspectRequest, well_known};
+use crate::{Address, Names};
+
+/// One attempt of `M` at `target`, its address resolved now through `names`
+/// (#257), within `timeout`: `None` when the name does not resolve or
+/// nothing came back.
+async fn call_once<P: Providers, M: WellKnownMethod>(
+    providers: &P,
+    rpc: &RpcHandle<P>,
+    names: &Names,
+    target: &Address,
+    request: &M::Request,
+    timeout: Duration,
+) -> Option<Result<M::Reply, moonpool_rpc::RpcError>>
+where
+    M::Request: Sync,
+{
+    let call = async {
+        let addr = names.resolve(target).await.ok()?;
+        Some(well_known::<P, M>(rpc, addr).try_get_reply(request).await)
+    };
+    providers.time().timeout(timeout, call).await.ok().flatten()
+}
 
 /// What one `CellInit` sent to a listed machine came back with.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -59,32 +80,38 @@ const INIT_RETRY: Duration = Duration::from_millis(500);
 pub async fn cell_init<P: Providers>(
     providers: &P,
     rpc: &RpcHandle<P>,
-    target: SocketAddr,
-    members: &[SocketAddr],
+    names: &Names,
+    target: &Address,
+    members: &[Address],
     patience: Duration,
 ) -> InitOutcome {
     let time = providers.time();
     let deadline = time.now() + patience;
-    let client = well_known::<P, CellInitRpc>(rpc, target);
     let request = wire::CellInit {
-        members: members.iter().map(SocketAddr::to_string).collect(),
+        members: members.iter().map(Address::to_string).collect(),
     };
     loop {
         let remaining = deadline.saturating_sub(time.now());
-        let reply = time
-            .timeout(remaining.min(INIT_ATTEMPT), client.try_get_reply(&request))
-            .await;
+        let reply = call_once::<P, CellInitRpc>(
+            providers,
+            rpc,
+            names,
+            target,
+            &request,
+            remaining.min(INIT_ATTEMPT),
+        )
+        .await;
         match reply {
-            Ok(Ok(ack)) if ack.initialized => {
+            Some(Ok(ack)) if ack.initialized => {
                 return CellPlan::from_cell_init_ack(&ack)
                     .map_or(InitOutcome::Malformed, InitOutcome::Formed);
             }
             // Nothing was decided, and the decree resumes, so ask again: the
             // machines of a fresh deployment start in any order, and two
             // `cell init`s may outbid each other a while.
-            Ok(Ok(ack)) if ack.refusal == "member_unreachable" || ack.refusal == "contended" => {}
-            Ok(Ok(ack)) => return InitOutcome::Refused(ack.refusal),
-            Ok(Err(error)) if *error.reason() == ErrorReason::EndpointNotFound => {
+            Some(Ok(ack)) if ack.refusal == "member_unreachable" || ack.refusal == "contended" => {}
+            Some(Ok(ack)) => return InitOutcome::Refused(ack.refusal),
+            Some(Err(error)) if *error.reason() == ErrorReason::EndpointNotFound => {
                 return InitOutcome::NotWaiting;
             }
             _ => {}
@@ -100,16 +127,14 @@ pub async fn cell_init<P: Providers>(
 pub async fn identify<P: Providers>(
     providers: &P,
     rpc: &RpcHandle<P>,
-    target: SocketAddr,
+    names: &Names,
+    target: &Address,
     timeout: Duration,
 ) -> Option<wire::IdentifyAck> {
-    let client = well_known::<P, IdentifyRpc>(rpc, target);
-    match providers
-        .time()
-        .timeout(timeout, client.try_get_reply(&wire::Identify {}))
+    match call_once::<P, IdentifyRpc>(providers, rpc, names, target, &wire::Identify {}, timeout)
         .await
     {
-        Ok(Ok(ack)) if ack.node_id != 0 => Some(ack),
+        Some(Ok(ack)) if ack.node_id != 0 => Some(ack),
         _ => None,
     }
 }
@@ -132,18 +157,15 @@ pub enum AdmitOutcome {
 pub async fn admit<P: Providers>(
     providers: &P,
     rpc: &RpcHandle<P>,
-    target: SocketAddr,
+    names: &Names,
+    target: &Address,
     admission: &Admission,
     timeout: Duration,
 ) -> AdmitOutcome {
-    let client = well_known::<P, AdmitRpc>(rpc, target);
-    match providers
-        .time()
-        .timeout(timeout, client.try_get_reply(&admission.to_wire()))
-        .await
-    {
-        Ok(Ok(ack)) if ack.admitted => AdmitOutcome::Admitted,
-        Ok(Ok(ack)) => AdmitOutcome::Refused(ack.refusal),
+    let request = admission.to_wire();
+    match call_once::<P, AdmitRpc>(providers, rpc, names, target, &request, timeout).await {
+        Some(Ok(ack)) if ack.admitted => AdmitOutcome::Admitted,
+        Some(Ok(ack)) => AdmitOutcome::Refused(ack.refusal),
         _ => AdmitOutcome::Unreachable,
     }
 }
@@ -154,20 +176,18 @@ pub async fn admit<P: Providers>(
 pub async fn discover<P: Providers>(
     providers: &P,
     rpc: &RpcHandle<P>,
-    addrs: &[SocketAddr],
+    names: &Names,
+    addrs: &[Address],
     timeout: Duration,
-) -> Vec<(u64, SocketAddr)> {
+) -> Vec<(u64, Address)> {
     let mut found = Vec::with_capacity(addrs.len());
-    for &addr in addrs {
-        let client = well_known::<P, InspectRpc>(rpc, addr);
-        let request = InspectRequest::node_only();
-        if let Ok(Ok(reply)) = providers
-            .time()
-            .timeout(timeout, client.try_get_reply(&request))
-            .await
+    let request = InspectRequest::node_only();
+    for addr in addrs {
+        if let Some(Ok(reply)) =
+            call_once::<P, InspectRpc>(providers, rpc, names, addr, &request, timeout).await
             && reply.node != 0
         {
-            found.push((reply.node, addr));
+            found.push((reply.node, addr.clone()));
         }
     }
     found
@@ -189,17 +209,15 @@ pub async fn discover<P: Providers>(
 pub async fn majority_cell<P: Providers>(
     providers: &P,
     rpc: &RpcHandle<P>,
-    addrs: &[SocketAddr],
+    names: &Names,
+    addrs: &[Address],
     timeout: Duration,
-) -> Option<(ControlJournals, Vec<(u64, SocketAddr)>)> {
-    let mut cells: BTreeMap<u64, (ControlJournals, Vec<(u64, SocketAddr)>)> = BTreeMap::new();
-    for &addr in addrs {
-        let client = well_known::<P, InspectRpc>(rpc, addr);
-        let request = InspectRequest::node_only();
-        if let Ok(Ok(reply)) = providers
-            .time()
-            .timeout(timeout, client.try_get_reply(&request))
-            .await
+) -> Option<(ControlJournals, Vec<(u64, Address)>)> {
+    let mut cells: BTreeMap<u64, (ControlJournals, Vec<(u64, Address)>)> = BTreeMap::new();
+    let request = InspectRequest::node_only();
+    for addr in addrs {
+        if let Some(Ok(reply)) =
+            call_once::<P, InspectRpc>(providers, rpc, names, addr, &request, timeout).await
             && reply.node != 0
             && let Some(journals) = control_journals_of(&reply)
         {
@@ -209,17 +227,17 @@ pub async fn majority_cell<P: Providers>(
             // One cell names one set of control journals: another answer is
             // wire input from a broken server, never this cell's.
             if *held == journals {
-                servers.push((reply.node, addr));
+                servers.push((reply.node, addr.clone()));
             }
         }
     }
     let majority = addrs.len() / 2 + 1;
-    let mut named = cells
+    let mut majorities = cells
         .into_values()
         .filter(|(_, servers)| servers.len() >= majority);
-    let cell = named.next()?;
+    let cell = majorities.next()?;
     assert!(
-        named.next().is_none(),
+        majorities.next().is_none(),
         "two majorities of one list name one cell"
     );
     Some(cell)

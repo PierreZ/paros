@@ -108,6 +108,6 @@ rm -rf /tmp/paros-demo
   answered.
 - A machine that exits with `78` refuses to start on purpose (amnesia, a changed class, a lost
   identity): do not restart it blindly; see `crates/parosd/README.md`.
-- `Cannot assign requested address (os error 99)` on a restarted machine: the demo's IPs are
-  pinned in `docker-compose.yml` for this reason; if you still see it, `docker compose down -v`
-  and `up -d --build` again to pick up the pinned network.
+- A restarted container can get a new IP. Its peers find it again at its name: each machine
+  advertises its service name (`PAROS_ADVERTISE`, #257), and a peer resolves the name when it
+  dials.

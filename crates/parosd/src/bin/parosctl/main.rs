@@ -25,15 +25,15 @@ mod output;
 #[path = "../../resolve.rs"]
 mod resolve;
 
-use std::net::SocketAddr;
 use std::process::ExitCode;
 use std::str::FromStr;
 use std::time::Duration;
 
 use clap::{Args, Parser, Subcommand};
-use moonpool_core::TokioProviders;
+use moonpool_core::{TokioProviders, TokioResolver};
 use moonpool_rpc::{RpcConfig, RpcDriver, RpcHandle};
 use paros::client::{Client, ClientTunables, bootstrap};
+use paros::{Address, Names};
 
 use crate::output::Printer;
 
@@ -54,7 +54,8 @@ struct Global {
     /// resolves to several machines (a Compose alias) stands for
     /// them all, and each server's node id is learned from its own
     /// `Inspect` — or `ID=HOST:PORT` to name the id outright. A host is an
-    /// IP or a name, resolved once, at startup.
+    /// IP or a name; a name of one machine is resolved each time it is
+    /// dialed (#257).
     #[arg(long, env = "PAROSCTL_SERVERS", value_delimiter = ',', global = true)]
     servers: Vec<ServerArg>,
     /// Print JSON, one document per answer, instead of text.
@@ -65,12 +66,12 @@ struct Global {
     timeout_ms: u64,
 }
 
-/// One server entry: an explicit node id, or the addresses a name resolves
-/// to.
+/// One server entry: an explicit node id, or the addresses a name stands
+/// for.
 #[derive(Clone, Debug)]
 struct ServerArg {
     id: Option<u64>,
-    addrs: Vec<SocketAddr>,
+    addrs: Vec<Address>,
 }
 
 impl FromStr for ServerArg {
@@ -85,13 +86,13 @@ impl FromStr for ServerArg {
                         .map_err(|e| format!("bad id in {s:?}: {e}"))?,
                 ),
                 addrs: vec![
-                    resolve::resolve(addr.trim())
+                    Address::parse(addr.trim())
                         .map_err(|e| format!("bad address in {s:?}: {e}"))?,
                 ],
             }),
             None => Ok(Self {
                 id: None,
-                addrs: resolve::resolve_all(s.trim())
+                addrs: resolve::expand(s.trim())
                     .map_err(|e| format!("bad address in {s:?}: {e}"))?,
             }),
         }
@@ -100,9 +101,9 @@ impl FromStr for ServerArg {
 
 impl Global {
     /// Every address named, in order, without duplicates.
-    fn addrs(&self) -> Vec<SocketAddr> {
+    fn addrs(&self) -> Vec<Address> {
         let mut addrs = Vec::new();
-        for addr in self.servers.iter().flat_map(|s| s.addrs.iter().copied()) {
+        for addr in self.servers.iter().flat_map(|s| s.addrs.iter().cloned()) {
             if !addrs.contains(&addr) {
                 addrs.push(addr);
             }
@@ -184,6 +185,9 @@ impl From<Ending> for ExitCode {
 struct Runtime {
     providers: TokioProviders,
     rpc: RpcHandle<TokioProviders>,
+    /// The operating system's resolver: names are resolved as they are
+    /// dialed (#257).
+    names: Names,
 }
 
 fn runtime() -> Result<Runtime, String> {
@@ -198,13 +202,17 @@ fn runtime() -> Result<Runtime, String> {
         let error = driver.run().await;
         tracing::warn!(%error, "client RPC runtime failed");
     });
-    Ok(Runtime { providers, rpc })
+    Ok(Runtime {
+        providers,
+        rpc,
+        names: Names::new(TokioResolver::new()),
+    })
 }
 
 /// The library client of `servers` (id and address each).
 fn client(
     runtime: &Runtime,
-    servers: &[(u64, SocketAddr)],
+    servers: &[(u64, Address)],
     timeout: Duration,
 ) -> Client<TokioProviders> {
     let tunables = ClientTunables {
@@ -212,23 +220,35 @@ fn client(
         read_timeout: timeout,
         ..ClientTunables::default()
     };
-    Client::connect(&runtime.providers, &runtime.rpc, servers, tunables)
+    Client::connect_named(
+        &runtime.providers,
+        &runtime.rpc,
+        &runtime.names,
+        servers,
+        tunables,
+    )
 }
 
 /// The servers `global` names, each with its node id: an explicit one, or
 /// the one its own `Inspect` reports (#196: ids are random). A server that
 /// does not answer is left out.
-async fn servers(runtime: &Runtime, global: &Global) -> Vec<(u64, SocketAddr)> {
+async fn servers(runtime: &Runtime, global: &Global) -> Vec<(u64, Address)> {
     let mut known = Vec::new();
     let mut unknown = Vec::new();
     for server in &global.servers {
         match server.id {
-            Some(id) => known.push((id, server.addrs[0])),
-            None => unknown.extend(server.addrs.iter().copied()),
+            Some(id) => known.push((id, server.addrs[0].clone())),
+            None => unknown.extend(server.addrs.iter().cloned()),
         }
     }
-    let found =
-        bootstrap::discover(&runtime.providers, &runtime.rpc, &unknown, global.timeout()).await;
+    let found = bootstrap::discover(
+        &runtime.providers,
+        &runtime.rpc,
+        &runtime.names,
+        &unknown,
+        global.timeout(),
+    )
+    .await;
     known.extend(found);
     known
 }
@@ -265,10 +285,11 @@ async fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
-            let connect = |servers: &[(u64, SocketAddr)]| client(&runtime, servers, timeout);
+            let connect = |servers: &[(u64, Address)]| client(&runtime, servers, timeout);
             return init::run(
                 &runtime.providers,
                 &runtime.rpc,
+                &runtime.names,
                 &members,
                 connect,
                 &out,
@@ -287,6 +308,7 @@ async fn main() -> ExitCode {
             return cell::run(
                 &runtime.providers,
                 &runtime.rpc,
+                &runtime.names,
                 &client,
                 &servers,
                 &out,

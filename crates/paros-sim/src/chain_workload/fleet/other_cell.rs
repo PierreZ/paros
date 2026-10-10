@@ -23,20 +23,21 @@ impl FleetOps {
         let Some(target) = crate::machine::other_cell_target(ctx.state()) else {
             return false;
         };
-        crate::machine::note_other_cell(ctx.state(), target);
+        crate::machine::note_other_cell(ctx.state(), &target);
         assert_reachable!("admit: an operator founds another cell on a wiped member's address");
         let outcome = bootstrap::cell_init(
             self.connector.providers(),
             self.connector.rpc(),
-            target,
-            &[target],
+            self.connector.names(),
+            &target,
+            std::slice::from_ref(&target),
             self.patience,
         )
         .await;
         match outcome {
             InitOutcome::Formed(plan) => {
                 assert_always!(
-                    plan.addrs().into_iter().eq(std::iter::once(target)),
+                    plan.addrs().into_iter().eq(std::iter::once(target.clone())),
                     "admit: another cell forms over the one machine it lists",
                     { "cell" => plan.cell_id }
                 );

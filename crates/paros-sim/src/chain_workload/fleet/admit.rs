@@ -7,7 +7,7 @@
 //! operator's next `ADMIT`. On its own BUGGIFY location, an operator founds
 //! another cell on a wiped member's address instead (`other_cell`).
 
-use std::net::SocketAddr;
+use paros::Address;
 
 use moonpool_sim::{
     SimContext, assert_always, assert_reachable, assert_sometimes, buggify_with_prob,
@@ -43,21 +43,21 @@ impl FleetOps {
         let target = match self.admitting.take() {
             Some(target) => target,
             None if outside.is_empty() || buggify_with_prob!(0.1) => {
-                self.machines[usize::try_from(draw % founders.max(1) as u64).unwrap_or(0)]
+                self.machines[usize::try_from(draw % founders.max(1) as u64).unwrap_or(0)].clone()
             }
             None => {
                 let span = (outside.end - outside.start) as u64;
-                self.machines[outside.start + usize::try_from(draw % span).unwrap_or(0)]
+                self.machines[outside.start + usize::try_from(draw % span).unwrap_or(0)].clone()
             }
         };
         let Some(cell) = self.learn(ctx).await else {
             assert_reachable!("admit: an admission finds no cell formed yet");
             return;
         };
-        let founders: Vec<(NodeId, SocketAddr)> = cell
+        let founders: Vec<(NodeId, Address)> = cell
             .servers
             .iter()
-            .map(|(id, addr)| (NodeId(*id), *addr))
+            .map(|(id, addr)| (NodeId(*id), addr.clone()))
             .collect();
         let mut session =
             CellSession::new(cell.journals, founders, self.leader_seeds.next(), policy);
@@ -65,9 +65,10 @@ impl FleetOps {
         let first = cell.first(draw);
         let providers = self.connector.providers().clone();
         let rpc = self.connector.rpc().clone();
+        let names = self.connector.names().clone();
         if buggify_with_prob!(0.25) {
             let step = session
-                .admit_step(&providers, &rpc, &client, first, target)
+                .admit_step(&providers, &rpc, &client, &names, first, &target)
                 .await;
             if let Step::Advanced(stage) = step {
                 assert_reachable!("admit: an admission stops after its registration");
@@ -77,7 +78,15 @@ impl FleetOps {
             return;
         }
         let run = session
-            .add_machine(&providers, &rpc, &client, first, target, self.patience)
+            .add_machine(
+                &providers,
+                &rpc,
+                &client,
+                &names,
+                first,
+                &target,
+                self.patience,
+            )
             .await;
         self.judge_admission(ctx, &session, target, run);
     }
@@ -97,21 +106,30 @@ impl FleetOps {
             return false;
         }
         let span = (outside.end - outside.start) as u64;
-        let target = self.machines[outside.start + usize::try_from(draw % span).unwrap_or(0)];
+        let target =
+            self.machines[outside.start + usize::try_from(draw % span).unwrap_or(0)].clone();
         let Some(cell) = self.learn(ctx).await else {
             return false;
         };
-        let founders: Vec<(NodeId, SocketAddr)> = cell
+        let founders: Vec<(NodeId, Address)> = cell
             .servers
             .iter()
-            .map(|(id, addr)| (NodeId(*id), *addr))
+            .map(|(id, addr)| (NodeId(*id), addr.clone()))
             .collect();
         let mut session =
             CellSession::new(cell.journals, founders, self.leader_seeds.next(), policy);
         let providers = self.connector.providers().clone();
         let rpc = self.connector.rpc().clone();
+        let names = self.connector.names().clone();
         let step = session
-            .admit_step(&providers, &rpc, &cell.client, cell.first(draw), target)
+            .admit_step(
+                &providers,
+                &rpc,
+                &cell.client,
+                &names,
+                cell.first(draw),
+                &target,
+            )
             .await;
         if let Step::Advanced(stage) = step {
             assert_reachable!("admit: an admission stops after its registration");
@@ -126,11 +144,11 @@ impl FleetOps {
         &mut self,
         ctx: &SimContext,
         session: &CellSession,
-        target: SocketAddr,
+        target: Address,
         run: Run<NodeId>,
     ) {
         run.steps.iter().copied().for_each(reach);
-        let founder = crate::machine::is_founder(ctx.state(), target);
+        let founder = crate::machine::is_founder(ctx.state(), &target);
         match run.outcome {
             Step::Done { result, .. } => {
                 if run.steps.is_empty() {

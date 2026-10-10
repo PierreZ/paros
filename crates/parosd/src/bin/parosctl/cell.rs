@@ -5,22 +5,21 @@
 //! authority. A re-run resumes, and a machine already in the cell is left
 //! unchanged.
 
-use std::net::SocketAddr;
 use std::time::Duration;
 
 use clap::{Args, Subcommand};
 use moonpool_core::TokioProviders;
 use moonpool_rpc::RpcHandle;
-use paros::NodeId;
 use paros::client::Client;
 use paros::client::bootstrap::{cell_members, control_journals};
 use paros::client::cell::CellSession;
 use paros::client::fleet::Step;
+use paros::{Address, Names, NodeId};
 use serde_json::json;
 
+use crate::Ending;
 use crate::fleet::{interrupted, leader_seed, refused, steps};
 use crate::output::{Printer, note};
-use crate::{Ending, resolve};
 
 /// `parosctl cell`.
 #[derive(Args, Debug)]
@@ -38,7 +37,9 @@ enum CellAdminCommand {
     /// Admit an idle machine into the cell: register it in the cell control
     /// journal, then send it `Admit`. Send it to any member (`--servers`).
     AddMachine {
-        /// The idle machine's address, `HOST:PORT`.
+        /// The idle machine's address, `HOST:PORT`: a literal or a name,
+        /// resolved as it is dialed. The registry records the address the
+        /// machine advertises (#257).
         addr: String,
     },
 }
@@ -48,13 +49,14 @@ enum CellAdminCommand {
 pub async fn run(
     providers: &TokioProviders,
     rpc: &RpcHandle<TokioProviders>,
+    names: &Names,
     client: &Client<TokioProviders>,
-    servers: &[(u64, SocketAddr)],
+    servers: &[(u64, Address)],
     out: &Printer,
     args: CellArgs,
 ) -> Ending {
     let CellAdminCommand::AddMachine { addr } = args.command;
-    let target = match resolve::resolve(&addr) {
+    let target = match Address::parse(&addr) {
         Ok(target) => target,
         Err(error) => {
             note(&format!("bad machine address {addr:?}: {error}"));
@@ -71,10 +73,10 @@ pub async fn run(
         note("no server served the cell control journal");
         return Ending::Unreachable;
     };
-    let founders: Vec<(NodeId, SocketAddr)> = servers
+    let founders: Vec<(NodeId, Address)> = servers
         .iter()
         .filter(|(id, _)| members.contains(id))
-        .map(|(id, addr)| (NodeId(*id), *addr))
+        .map(|(id, addr)| (NodeId(*id), addr.clone()))
         .collect();
     let mut session = CellSession::new(
         journals,
@@ -84,7 +86,7 @@ pub async fn run(
     );
     let patience = Duration::from_millis(args.patience_ms);
     let run = session
-        .add_machine(providers, rpc, client, 0, target, patience)
+        .add_machine(providers, rpc, client, names, 0, &target, patience)
         .await;
     match run.outcome {
         Step::Done { result, .. } => {

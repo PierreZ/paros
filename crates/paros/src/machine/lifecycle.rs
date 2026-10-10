@@ -22,7 +22,10 @@
 //! `parosd` passes Tokio's filesystem, the simulation moonpool's simulated
 //! disk, and both run this code and nothing else (#294: no sim wrapper).
 //! What the run observes goes to the caller's audit port ([`AuditScope`]).
-//! Names are the caller's too: the library sees socket addresses only.
+//! The machine binds its listen address and advertises another one
+//! ([`MachineAddresses`], #257): the advertised address is what the cell
+//! plan, an admission and the registry hold, and every dialer resolves it at
+//! dial time through the caller's [`Names`].
 //!
 //! Two moments of a machine's life are worth a fault, and the code names
 //! them (`hint!`, inert outside a simulation): a late boot, and the two
@@ -43,7 +46,7 @@ use super::{
     Admission, AdmittedMachine, CellLedger, CellPlan, Class, FormedCell, Joined, MachineFacts,
     ProviderDisk,
 };
-use crate::{Audit, DriverTunables, RunError};
+use crate::{Address, Audit, DriverTunables, Names, RunError};
 
 /// What a machine is configured with: the operator's half of its record.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -54,6 +57,50 @@ pub struct MachineSettings {
     pub capacity: u64,
     /// Its failure domain; may change across starts.
     pub failure_domain: String,
+}
+
+/// A machine's two addresses (#257, `docs/architecture.md` §3.2): what it
+/// binds, and what its peers and clients dial.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MachineAddresses {
+    /// What it binds (`PAROS_LISTEN`), resolved once at start; may be a
+    /// wildcard.
+    pub listen: SocketAddr,
+    /// What it advertises (`PAROS_ADVERTISE`): a literal or a name, kept as
+    /// a name and resolved by whoever dials it.
+    pub advertise: Address,
+}
+
+impl MachineAddresses {
+    /// The addresses of a machine that binds `listen` and advertises
+    /// `advertise`, which defaults to `listen` when that is not a wildcard.
+    ///
+    /// # Errors
+    ///
+    /// `listen` is a wildcard and `advertise` is unset, or `advertise` is a
+    /// wildcard: nobody can dial a wildcard, so the start is refused.
+    pub fn new(listen: SocketAddr, advertise: Option<Address>) -> Result<Self, String> {
+        let advertise = match advertise {
+            Some(advertise) => advertise,
+            None if listen.ip().is_unspecified() => {
+                moonpool_assertions::reachable!(
+                    "machine: a wildcard listen address with no advertised address is refused"
+                );
+                return Err(format!(
+                    "PAROS_LISTEN {listen} is a wildcard: set PAROS_ADVERTISE to the HOST:PORT \
+                     peers and clients dial"
+                ));
+            }
+            None => Address::from(listen),
+        };
+        if advertise.literal().is_some_and(|a| a.ip().is_unspecified()) {
+            return Err(format!(
+                "PAROS_ADVERTISE {advertise} is a wildcard: set the HOST:PORT peers and \
+                 clients dial"
+            ));
+        }
+        Ok(Self { listen, advertise })
+    }
 }
 
 /// How a machine's run ended before or instead of a clean shutdown.
@@ -90,7 +137,7 @@ impl core::fmt::Display for MachineError {
 struct DiskLedger<'a, S, A> {
     disk: &'a ProviderDisk<S>,
     audit: &'a A,
-    addr: SocketAddr,
+    addr: Address,
     record: MachineRecord,
 }
 
@@ -138,7 +185,7 @@ impl<S: StorageProvider + Clone, A: Audit> CellLedger for DiskLedger<'_, S, A> {
             );
         }
         self.audit
-            .cell_formatting(self.addr, self.record.node_id, plan, leftovers);
+            .cell_formatting(&self.addr, self.record.node_id, plan, leftovers);
         self.disk.format(self.record.node_id, plan).await?;
         moonpool_assertions::reachable!("machine: a seed formats its cell's journals");
         Ok(())
@@ -196,8 +243,9 @@ const LATE_BOOT_MS: u64 = 2_500;
 
 /// Run a machine on `disk` until `shutdown`: format it on its first start,
 /// wait for its cell while it has none, then serve the cell's journals.
-/// `audits` names the audit port of each [`AuditScope`]. `addr` is the
-/// address this machine serves at. `assignment` is how many user journals a
+/// `audits` names the audit port of each [`AuditScope`]. `addresses` are
+/// what this machine binds and what it advertises; `names` resolves every
+/// address it dials. `assignment` is how many user journals a
 /// cell this machine draws at `cell init` serves beside its control journals
 /// (the static assignment, until #212).
 ///
@@ -209,14 +257,15 @@ const LATE_BOOT_MS: u64 = 2_500;
 ///
 /// When the record breaks its contract: a formed record that is not the
 /// plan the wait formed, or a plan this machine is not a member of.
-#[tracing::instrument(level = "debug", skip_all, fields(addr = %addr))]
+#[tracing::instrument(level = "debug", skip_all, fields(addr = %addresses.advertise))]
 #[allow(clippy::too_many_arguments)]
 pub async fn run_machine<P, S, A, F>(
     providers: P,
     disk: ProviderDisk<S>,
     audits: F,
     settings: &MachineSettings,
-    addr: SocketAddr,
+    addresses: MachineAddresses,
+    names: Names,
     assignment: usize,
     tunables: DriverTunables,
     shutdown: CancellationToken,
@@ -242,18 +291,22 @@ where
         }
     }
     let audit = audits(AuditScope::Machine);
-    let record = identity(&providers, &disk, &audit, addr, settings).await?;
+    let MachineAddresses { listen, advertise } = addresses;
+    let record = identity(&providers, &disk, &audit, &advertise, settings).await?;
     assert_eq!(record.class, settings.class, "the class is fixed at format");
     let facts = MachineFacts {
         node_id: record.node_id,
         class: record.class,
         capacity: record.capacity,
         failure_domain: record.failure_domain.clone(),
-        addr,
+        addr: advertise.clone(),
+        listen,
+        names,
     };
     tracing::info!(
         node = facts.node_id.0,
-        %addr,
+        addr = %advertise,
+        %listen,
         class = facts.class.as_str(),
         "machine_starting"
     );
@@ -272,7 +325,7 @@ where
         let mut ledger = DiskLedger {
             disk: &disk,
             audit: &audit,
-            addr,
+            addr: advertise,
             record,
         };
         let waited = super::wait_for_cell(
@@ -317,7 +370,7 @@ async fn identity<P: Providers, S: StorageProvider + Clone, A: Audit>(
     providers: &P,
     disk: &ProviderDisk<S>,
     audit: &A,
-    addr: SocketAddr,
+    addr: &Address,
     settings: &MachineSettings,
 ) -> Result<MachineRecord, MachineError> {
     let refused = |error: String| MachineError::Refused(format!("machine record: {error}"));
@@ -416,22 +469,20 @@ where
         .map(|&journal| (journal, journal_config(plan, node_id, journal)))
         .collect();
     let stores = MachineStores::new(disk, node_id, genesis, audits);
-    let addr = plan
-        .members
-        .iter()
-        .find(|(id, _)| *id == node_id)
-        .map_or(cell.facts.addr, |(_, addr)| *addr);
+    // Bind where the machine is (#257), never at the address the plan
+    // froze: a machine whose address changed across a restart still serves.
+    let listen = cell.facts.listen;
     let book: Vec<(NodeId, String)> = plan
         .members
         .iter()
         .map(|(id, addr)| (*id, addr.to_string()))
         .collect();
-    tracing::info!(node = node_id.0, cell = plan.cell_id, %addr, "machine_serving");
+    tracing::info!(node = node_id.0, cell = plan.cell_id, addr = %cell.facts.addr, %listen, "machine_serving");
     crate::run_journals(
         providers,
         stores,
         node_id,
-        addr.to_string(),
+        listen.to_string(),
         book,
         Vec::new(),
         Vec::new(),
