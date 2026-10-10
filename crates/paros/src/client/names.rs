@@ -11,8 +11,8 @@
 //!    has no name and is never resolved through this path, and a tenant
 //!    mid-creation or mid-removal is refused.
 //! 2. **Journal**: the journal's name to its `JournalId`, through the
-//!    tenant's control journal (the [`Directory`] fold). Only a live journal
-//!    resolves.
+//!    tenant's control journal (the [`TenantControl`] fold, #210). Only a
+//!    live journal resolves.
 //!
 //! Only the entry roles resolve (§3.5): a client sends names and never reads
 //! the universe tenant. Until the frontend exists (#192), `parosctl`
@@ -34,12 +34,11 @@ use moonpool_core::Providers;
 use paros_core::{JournalIdentifier, TenantId};
 
 use super::Client;
-use super::checkpoint::LoadOutcome;
+use super::checkpoint::{Folder, LoadOutcome, load};
 use super::fleet::read_directory;
-use super::reader::{Reader, ReaderOutcome};
 use crate::fleet::{FleetDirectory, Group, TenantState};
 use crate::name::JournalName;
-use crate::system::Directory;
+use crate::tenant::TenantControl;
 
 /// What resolving a tenant's name came to.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -75,8 +74,8 @@ pub enum Unreadable {
     Unavailable,
     /// No server serves the control journal.
     UnknownJournal,
-    /// The journal was truncated below the fold's cursor: a tenant's
-    /// control journal is not checkpointed yet (#210).
+    /// The journal was truncated below the fold's cursor, and no
+    /// checkpoint healed the gap.
     Truncated,
 }
 
@@ -161,58 +160,35 @@ pub async fn resolve_tenant<P: Providers>(
 }
 
 /// Read the tenant control journal `control` to its tail from server
-/// `first` on, folded as its [`Directory`].
+/// `first` on, folded as its [`TenantControl`] (from its checkpoint when
+/// the journal was truncated).
 ///
 /// # Errors
 ///
 /// The journal could not be read to its tail.
-///
-/// # Panics
-///
-/// If a server's page skips or repeats a position the reader asked for.
 #[tracing::instrument(level = "debug", skip_all, fields(control = %control))]
-pub async fn read_tenant_directory<P: Providers>(
+pub async fn read_tenant_control<P: Providers>(
     client: &Client<P>,
     first: usize,
     control: JournalIdentifier,
-) -> Result<Directory, Unreadable> {
-    let mut directory = Directory::new([]);
-    let mut reader = Reader::new(control, 0);
-    loop {
-        match reader.next(client, first).await {
-            ReaderOutcome::Records {
-                from,
-                records,
-                state,
-            } => {
-                assert_eq!(
-                    from,
-                    directory.next_seq(),
-                    "a page starts at the fold's cursor"
-                );
-                for (seq, record) in (from..).zip(&records) {
-                    directory.fold(seq, record);
-                }
-                assert_eq!(directory.next_seq(), reader.cursor());
-                if records.is_empty() || reader.at_tail(&state) {
-                    return Ok(directory);
-                }
-            }
-            ReaderOutcome::Gap { .. } => return Err(Unreadable::Truncated),
-            ReaderOutcome::Unavailable => return Err(Unreadable::Unavailable),
-            ReaderOutcome::UnknownJournal => return Err(Unreadable::UnknownJournal),
-        }
+) -> Result<TenantControl, Unreadable> {
+    let mut folder = Folder::new(TenantControl::new(control.tenant, control.journal));
+    match load(&mut folder, control, client, first, 0).await {
+        LoadOutcome::Loaded { .. } => Ok(folder.state().clone()),
+        LoadOutcome::Unavailable => Err(Unreadable::Unavailable),
+        LoadOutcome::UnknownJournal => Err(Unreadable::UnknownJournal),
+        LoadOutcome::Unhealed { .. } => Err(Unreadable::Truncated),
     }
 }
 
-/// The journal hop's verdict on a directory already folded.
+/// The journal hop's verdict on a tenant control journal already folded.
 ///
 /// # Panics
 ///
 /// If the directory names a deleted journal by a live name.
 #[must_use]
 pub fn journal_in(
-    directory: &Directory,
+    directory: &TenantControl,
     control: JournalIdentifier,
     name: &[u8],
 ) -> JournalResolution {
@@ -241,7 +217,7 @@ pub async fn resolve_journal<P: Providers>(
     control: JournalIdentifier,
     name: &[u8],
 ) -> JournalResolution {
-    match read_tenant_directory(client, first, control).await {
+    match read_tenant_control(client, first, control).await {
         Ok(directory) => journal_in(&directory, control, name),
         Err(why) => JournalResolution::Unreadable(why),
     }
@@ -392,20 +368,26 @@ mod tests {
     use paros_core::{AcceptorConfig, JournalId, NodeId, QuorumSystem, WriterMode};
 
     use super::*;
-    use crate::system::SystemCommand;
+    use crate::tenant::{Desired, TenantCommand};
 
-    fn create(id: u64, name: &[u8]) -> Vec<u8> {
-        SystemCommand::CreateJournal {
+    fn create(request: u64, id: u64, name: &[u8]) -> Vec<u8> {
+        TenantCommand::CreateJournal {
+            request,
             id: JournalId(id),
             name: name.to_vec(),
+            writer: WriterMode::Single,
+            desired: Desired::DOUBLE,
             config: AcceptorConfig::new(vec![NodeId(1)], QuorumSystem::Majority),
-            mode: WriterMode::Single,
         }
         .encode()
     }
 
-    fn delete(id: u64) -> Vec<u8> {
-        SystemCommand::DeleteJournal { id: JournalId(id) }.encode()
+    fn delete(request: u64, id: u64) -> Vec<u8> {
+        TenantCommand::DeleteJournal {
+            request,
+            id: JournalId(id),
+        }
+        .encode()
     }
 
     const CONTROL: JournalIdentifier = JournalIdentifier {
@@ -415,8 +397,8 @@ mod tests {
 
     #[test]
     fn a_recreated_name_resolves_to_its_new_id_and_the_old_one_never_again() {
-        let mut directory = Directory::new([]);
-        directory.fold(0, &create(7, b"orders"));
+        let mut directory = TenantControl::new(CONTROL.tenant, CONTROL.journal);
+        directory.fold(0, &create(1, 7, b"orders"));
         let first = journal_in(&directory, CONTROL, b"orders");
         assert_eq!(
             first,
@@ -425,12 +407,12 @@ mod tests {
                 at: 1
             }
         );
-        directory.fold(1, &delete(7));
+        directory.fold(1, &delete(2, 7));
         assert_eq!(
             journal_in(&directory, CONTROL, b"orders"),
             JournalResolution::Unknown { at: 2 }
         );
-        directory.fold(2, &create(9, b"orders"));
+        directory.fold(2, &create(3, 9, b"orders"));
         let again = journal_in(&directory, CONTROL, b"orders");
         assert_eq!(
             again,

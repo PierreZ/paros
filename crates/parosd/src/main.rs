@@ -20,10 +20,10 @@
 //!    phases as an acceptor, and `CellInit` as its proposer (#277). It never
 //!    forms a cell on its own (#216).
 //! 3. **Serve.** A formed machine runs `paros::run_journals` over its
-//!    cell's plan: the cell control journal, the fleet tenant's, and the static
-//!    assignment that stands in for placement until M9 (#212) — every identifier
-//!    drawn at `cell init`, none fixed — plain Multi-Paxos over the
-//!    founding members. Every start after formation is an existing member's
+//!    cell's plan: the cell control and election journals and the fleet
+//!    tenant's — every identifier drawn at `cell init`, none fixed — plain
+//!    Multi-Paxos over the founding members, and every journal its tenants
+//!    create through their coordinator (#210). Every start after formation is an existing member's
 //!    ([`BootKind::ExistingMember`]), so a lost store is refused as amnesia.
 //!
 //! The lifecycle is the library's, `paros::machine::run_machine` (#246): the
@@ -113,17 +113,16 @@ async fn run(settings: Settings) -> ExitCode {
         settings.data_dir.to_string_lossy(),
         settings.layout.config(),
     );
-    let ran = paros::machine::run_machine(
+    let ran = Box::pin(paros::machine::run_machine(
         TokioProviders::new(),
         disk,
         |_| NoAudit,
         &machine,
         addresses,
         Names::new(TokioResolver::new()),
-        1,
         tunables,
         shutdown_on_signal(),
-    )
+    ))
     .await;
     match ran {
         Ok(()) => {

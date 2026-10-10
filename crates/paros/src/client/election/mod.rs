@@ -508,7 +508,9 @@ impl<P: Providers> Election<P> {
 /// The election over `journal` as a reader that is no candidate sees it:
 /// its fold from the floor to the tail, from server `first` on (`init`
 /// names the cell's first coordinator with it). `None` when the tail was not
-/// reached.
+/// reached. It reads until the tail while each page moves it forward: a
+/// fixed page count leaves the tail out of reach of a long journal read in
+/// small pages.
 pub async fn read_election<P: Providers>(
     client: &Client<P>,
     journal: JournalIdentifier,
@@ -516,7 +518,7 @@ pub async fn read_election<P: Providers>(
 ) -> Option<ElectionFold> {
     let mut fold = ElectionFold::new();
     let mut first = first;
-    for _ in 0..WATCH_PAGES {
+    loop {
         let from = fold.next();
         let request = Read {
             journal: journal.journal.0,
@@ -543,11 +545,12 @@ pub async fn read_election<P: Providers>(
                     return None;
                 }
             }
-            ReadOutcome::Truncated { state } => fold.gap(state.first_seq.0),
+            ReadOutcome::Truncated { state } if state.first_seq.0 > from => {
+                fold.gap(state.first_seq.0);
+            }
             _ => return None,
         }
     }
-    None
 }
 
 /// Hand the governed journal to the successor `resign` named:

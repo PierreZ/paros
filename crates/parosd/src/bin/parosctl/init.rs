@@ -34,8 +34,8 @@ use serde_json::json;
 
 use crate::Ending;
 use crate::fleet::{interrupted, leader_seed, nonzero, refusal_text, steps};
-use crate::output::{Printer, note, short};
-use paros::name::{Abbreviations, full_hex};
+use crate::output::{Printer, note};
+use paros::name::Abbreviations;
 
 /// `parosctl init`.
 #[derive(Args, Debug)]
@@ -102,13 +102,6 @@ pub async fn run(
     };
     match initialize::initialize(providers, rpc, names, members, connect, params).await {
         InitRun::Initialized(done) => {
-            if !done.users.is_empty() {
-                note(&format!(
-                    "formed cell {} over {} members",
-                    short(done.journals.cell_id),
-                    done.servers.len()
-                ));
-            }
             print_initialized(out, &done);
             Ending::Success
         }
@@ -170,15 +163,12 @@ fn unreachable_text(why: Unreachable, target: Option<&Address>) -> String {
     }
 }
 
-/// Print an initialized universe: every identifier, the only time the user
-/// journals are named. Ids print abbreviated (#239), but a user journal
-/// prints whole, `id:TENANT/JOURNAL` in hex: no later listing knows it, so
-/// no prefix of it resolves (until #210 names every user journal).
+/// Print an initialized fleet: every control journal's identifier. Ids
+/// print abbreviated (#239 (names at the edge)); `--json` prints them whole.
 fn print_initialized(out: &Printer, done: &Initialized) {
     let journals = done.journals;
     let fleet_control = journals.fleet.map(|f| f.to_string()).unwrap_or_default();
     let election = journals.election.map(|e| e.to_string()).unwrap_or_default();
-    let users: Vec<String> = done.users.iter().map(ToString::to_string).collect();
     out.emit(
         || {
             let ids = Abbreviations::new(
@@ -186,13 +176,8 @@ fn print_initialized(out: &Printer, done: &Initialized) {
                     .into_iter()
                     .chain(journals.fleet.into_iter().chain(journals.election).chain([journals.cell]).flat_map(|j| [j.tenant.0, j.journal.0])),
             );
-            let users: Vec<String> = done
-                .users
-                .iter()
-                .map(|j| format!("id:{}/{}", full_hex(j.tenant.0), full_hex(j.journal.0)))
-                .collect();
             format!(
-                "initialized universe={} cell={} coordinator={} members={} control=id:{} election={} universe_control={} journals={} steps={}",
+                "initialized fleet={} cell={} coordinator={} members={} control=id:{} election={} fleet_control={} steps={}",
                 ids.id(done.fleet_id),
                 ids.id(journals.cell_id),
                 ids.id(done.coordinator.0),
@@ -200,7 +185,6 @@ fn print_initialized(out: &Printer, done: &Initialized) {
                 ids.journal(journals.cell),
                 journals.election.map_or_else(|| "none".to_string(), |e| format!("id:{}", ids.journal(e))),
                 journals.fleet.map_or_else(|| "none".to_string(), |f| format!("id:{}", ids.journal(f))),
-                users.join(","),
                 steps(&done.steps).join(",")
             )
         },
@@ -214,7 +198,6 @@ fn print_initialized(out: &Printer, done: &Initialized) {
                 "control": journals.cell.to_string(),
                 "election": election,
                 "fleet_control": fleet_control,
-                "journals": users,
                 "members": done
                     .servers
                     .iter()

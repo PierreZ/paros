@@ -1,35 +1,24 @@
-//! The **system journals** (#189): the directory (the user tenant's control
-//! journal) and the node registry (the cell tenant's control journal, #235).
-//! A service must create and delete journals, and add
-//! and retire nodes, while it runs; paros already has the right tool for
-//! both — a replicated log — so both lists are journals of their own, and
-//! every node learns them by reading them.
+//! The **cell control journal** (#189, #211): the node registry, the cell
+//! tenant's control journal (#235). A service must add and retire machines
+//! while it runs; paros already has the right tool — a replicated log — so
+//! the cell's machines and capacity are a journal of their own, and every
+//! node learns them by reading it. A tenant's journals live in its own
+//! control journal ([`crate::tenant`], #210).
 //!
-//! This module is the one reading of their entries: the typed
-//! [`SystemCommand`] a client writes (one record per position, encoded by
-//! [`SystemCommand::encode`]), and the two pure folds — [`Directory`] and
-//! [`Registry`] — that every node, and every client reading back its own
-//! request, runs over the chosen entries in position order. A fold is a function
-//! of the log alone, so every reader that has folded a prefix agrees on it.
+//! This module is the one reading of its entries: the typed
+//! [`SystemCommand`] a writer appends (one record per position, encoded by
+//! [`SystemCommand::encode`]), and the pure fold [`Registry`] that every
+//! node, and every client reading back its own request, runs over the
+//! chosen entries in position order. A fold is a function of the log alone,
+//! so every reader that has folded a prefix agrees on it.
 //!
 //! **This is not an application** (#186): paros still decides nothing about
-//! the bytes of a user journal. The system journals are paros's own control
+//! the bytes of a user journal. The control journals are paros's own control
 //! plane, like the matchmaker registry; the core keeps their entries as
 //! opaque as any other, and only this module and the driver read them.
 //!
-//! - **Directory.** A created journal's id is random (#226, #235): its
-//!   creator draws it and this fold, the tenant's single writer of journal
-//!   ids, checks it at apply. There is no reserved range (no id is fixed,
-//!   `docs/architecture.md` §3.8): an unset id is malformed, and an id the
-//!   deployment was booted with (its *genesis* journals) or the directory
-//!   already created — deleted or not, ids are never reused — folds to
-//!   [`DirectoryRefusal::IdTaken`], and the creator redraws. Never a log
-//!   position: an id must not change when its tenant moves. Of two creates
-//!   with one name the lower position wins; the other folds to
-//!   [`DirectoryRefusal::NameTaken`], which its creator reads back. Names
-//!   are opaque bytes.
 //! - **Registry** (#211), keyed by `node_id` (random, minted at format). The
-//!   node pool is the genesis pool plus every registered node not yet
+//!   node pool is the founding members plus every registered node not yet
 //!   retired ([`Registry::pool`]). A node registers with its class
 //!   (`storage` or `stateless`) and its capacity (role slots of its class);
 //!   a reboot registers the same id again, updating address and capacity,
@@ -56,22 +45,23 @@
 //!   the fleet this cell belongs to and its own `cell_id` (`init` step 3),
 //!   and `HostTenant` / `DropTenant` the tenants it hosts — the cell's
 //!   tenant list, which the fleet directory ([`crate::fleet`]) must equal.
-//!   Every one names its fleet, and an entry naming another fleet than the
-//!   one the cell joined is refused; a repeat folds to
-//!   [`RegistryEvent::Unchanged`], so a re-run step is harmless.
+//!   `HostTenant` records the tenant's control journal, name and
+//!   `survives` ([`HostedTenant`], #210). Every one names its fleet, and an
+//!   entry naming another fleet than the one the cell joined is refused; a
+//!   repeat folds to [`RegistryEvent::Unchanged`], so a re-run step is
+//!   harmless.
 //!
 //!   Not yet: placement by booking and re-placement of a machine down past
 //!   its bound (#212), and the durable cached registry fold on every
-//!   machine. The directory is not checkpointed yet (#229).
+//!   machine.
 //!
-//! Every malformed entry — a record that does not decode,
-//! a configuration that does not admit its quorum system, a registry entry
-//! in the directory — folds to a refusal, never a panic: the entries are
-//! external input.
+//! Every malformed entry — a record that does not decode, a configuration
+//! that does not admit its quorum system — folds to a refusal, never a
+//! panic: the entries are external input.
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use paros_core::{AcceptorConfig, JournalId, JournalIdentifier, NodeId, TenantId, WriterMode};
+use paros_core::{JournalId, JournalIdentifier, NodeId, TenantId};
 use prost::Message as _;
 
 use crate::client::checkpoint::{Checkpointable, Folded};
@@ -79,32 +69,13 @@ pub use crate::machine::Class;
 use crate::machine::{incarnation_from_halves, incarnation_halves};
 
 use crate::rpc::system as wire;
-use crate::rpc::{config_from_proto, config_to_proto};
 
-// The two system journals have no fixed identifier (§3.8): a deployment draws
-// both and hands them to whoever folds them (`crate::SystemPlan`).
+// The cell control journal has no fixed identifier (§3.8): a deployment draws
+// it and hands it to whoever folds it (`crate::ControlPlan`).
 
 /// One system-journal entry, as a client appends it and a fold reads it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SystemCommand {
-    /// Create journal `id` named `name` over the static configuration
-    /// `config`.
-    CreateJournal {
-        /// The id its creator drew (user range); refused at apply when
-        /// reserved or taken.
-        id: JournalId,
-        /// Opaque bytes; paros never interprets them.
-        name: Vec<u8>,
-        /// The journal's static acceptor configuration.
-        config: AcceptorConfig,
-        /// Who may write it (#241), fixed for its life.
-        mode: WriterMode,
-    },
-    /// Delete journal `id` (a tombstone, never a reuse).
-    DeleteJournal {
-        /// The journal to delete.
-        id: JournalId,
-    },
     /// Add node `id`, reachable at `addr`, to the pool as a machine of
     /// `class` with `capacity` role slots — or, for a node registered
     /// already, register it again (a reboot).
@@ -176,12 +147,16 @@ pub enum SystemCommand {
         /// The metadata version.
         version: u32,
     },
-    /// Tenant creation's cell step (#229): the cell hosts `tenant`.
+    /// Tenant creation's cell step (#229): the cell hosts `tenant`, whose
+    /// control journal is `control` (#210).
     HostTenant {
         /// The fleet the writer believes the cell belongs to.
         fleet_id: u64,
         /// The tenant.
         tenant: TenantId,
+        /// What the cell records of it: its control journal, name and
+        /// `survives`, which its first coordinator describes it with.
+        hosted: HostedTenant,
     },
     /// Tenant removal's cell step (#229): the cell forgets `tenant`.
     DropTenant {
@@ -198,20 +173,6 @@ impl SystemCommand {
     pub fn encode(&self) -> Vec<u8> {
         use wire::system_entry::Kind;
         let kind = match self {
-            SystemCommand::CreateJournal {
-                id,
-                name,
-                config,
-                mode,
-            } => Kind::CreateJournal(wire::CreateJournal {
-                name: name.clone(),
-                config: Some(config_to_proto(config)),
-                id: id.0,
-                mode: crate::rpc::writer_mode_to_proto(*mode).into(),
-            }),
-            SystemCommand::DeleteJournal { id } => {
-                Kind::DeleteJournal(wire::DeleteJournal { id: id.0 })
-            }
             SystemCommand::RegisterNode {
                 id,
                 addr,
@@ -274,9 +235,16 @@ impl SystemCommand {
                 cell_id: *cell_id,
                 version: *version,
             }),
-            SystemCommand::HostTenant { fleet_id, tenant } => Kind::HostTenant(wire::HostTenant {
+            SystemCommand::HostTenant {
+                fleet_id,
+                tenant,
+                hosted,
+            } => Kind::HostTenant(wire::HostTenant {
                 fleet_id: *fleet_id,
                 tenant: tenant.0,
+                control_journal: hosted.control.0,
+                name: hosted.name.clone(),
+                survives: hosted.survives.to_wire(),
             }),
             SystemCommand::DropTenant { fleet_id, tenant } => Kind::DropTenant(wire::DropTenant {
                 fleet_id: *fleet_id,
@@ -296,16 +264,6 @@ impl SystemCommand {
         use wire::system_entry::Kind;
         let entry = wire::SystemEntry::decode(record).map_err(|_| "not a system entry")?;
         Ok(match entry.kind.ok_or("a system entry names no kind")? {
-            Kind::CreateJournal(create) => SystemCommand::CreateJournal {
-                id: JournalId(create.id),
-                name: create.name,
-                config: config_from_proto(create.config)?
-                    .ok_or("a created journal names no configuration")?,
-                mode: crate::rpc::writer_mode_from_proto(create.mode)?,
-            },
-            Kind::DeleteJournal(delete) => SystemCommand::DeleteJournal {
-                id: JournalId(delete.id),
-            },
             Kind::RegisterNode(register) => SystemCommand::RegisterNode {
                 id: NodeId(register.id),
                 addr: register.addr,
@@ -348,6 +306,11 @@ impl SystemCommand {
             Kind::HostTenant(host) => SystemCommand::HostTenant {
                 fleet_id: host.fleet_id,
                 tenant: TenantId(host.tenant),
+                hosted: HostedTenant {
+                    control: JournalId(host.control_journal),
+                    name: host.name,
+                    survives: crate::tenant::Survives::from_wire(host.survives)?,
+                },
             },
             Kind::DropTenant(drop) => SystemCommand::DropTenant {
                 fleet_id: drop.fleet_id,
@@ -493,193 +456,6 @@ impl BookingTarget {
             }),
             _ => Err("a booking names a journal or a matchmaker set, not both"),
         }
-    }
-}
-
-/// A journal the directory created.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CreatedJournal {
-    /// Its name.
-    pub name: Vec<u8>,
-    /// Its static acceptor configuration.
-    pub config: AcceptorConfig,
-    /// Who may write it (#241).
-    pub mode: WriterMode,
-    /// The position of the `DeleteJournal` that tombstoned it, if any.
-    pub deleted_at: Option<u64>,
-}
-
-/// What one directory record folded to.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum DirectoryEvent {
-    /// A journal was created with this id.
-    Created {
-        /// The id its creator drew.
-        id: JournalId,
-        /// Its name.
-        name: Vec<u8>,
-        /// Its configuration.
-        config: AcceptorConfig,
-        /// Who may write it (#241).
-        mode: WriterMode,
-    },
-    /// A journal was tombstoned.
-    Deleted {
-        /// The deleted journal.
-        id: JournalId,
-    },
-    /// The entry changed nothing.
-    Refused(DirectoryRefusal),
-}
-
-/// Why a directory entry changed nothing.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum DirectoryRefusal {
-    /// Not exactly one decodable directory entry, or an unset id.
-    Malformed,
-    /// A genesis journal holds this id, or the directory already created it
-    /// (ids are never reused, a deleted one included): the creator redraws.
-    IdTaken {
-        /// The id asked for.
-        id: JournalId,
-    },
-    /// A live journal already holds the name: the lower position won.
-    NameTaken {
-        /// The journal that holds it.
-        winner: JournalId,
-    },
-    /// A delete of a journal the directory never created, or already deleted.
-    UnknownJournal {
-        /// The journal named.
-        id: JournalId,
-    },
-}
-
-/// The directory's fold: every journal created at runtime, by id, with its
-/// tombstone. Genesis journals — the ones the deployment was booted with —
-/// are reserved ids the directory never allocates and never deletes.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Directory {
-    genesis: BTreeSet<JournalId>,
-    journals: BTreeMap<JournalId, CreatedJournal>,
-    /// Live names, to the journal holding each.
-    names: BTreeMap<Vec<u8>, JournalId>,
-    next_seq: u64,
-}
-
-impl Directory {
-    /// An empty directory over the deployment's `genesis` journals.
-    #[must_use]
-    pub fn new(genesis: impl IntoIterator<Item = JournalId>) -> Self {
-        Self {
-            genesis: genesis.into_iter().collect(),
-            ..Self::default()
-        }
-    }
-
-    /// The next position this fold expects (one past the last folded one).
-    #[must_use]
-    pub fn next_seq(&self) -> u64 {
-        self.next_seq
-    }
-
-    /// Fold the record at position `seq` of the directory (in position order;
-    /// a gap is simply skipped).
-    ///
-    /// # Panics
-    ///
-    /// If `seq` is below a position already folded: a fold is fed in log order,
-    /// once (a programmer error of the caller, never an operating one).
-    pub fn fold(&mut self, seq: u64, record: &[u8]) -> DirectoryEvent {
-        assert!(
-            seq >= self.next_seq,
-            "the directory folds in position order"
-        );
-        self.next_seq = seq + 1;
-        match SystemCommand::decode(record).ok() {
-            Some(SystemCommand::CreateJournal {
-                id,
-                name,
-                config,
-                mode,
-            }) => {
-                if !id.is_set() {
-                    return DirectoryEvent::Refused(DirectoryRefusal::Malformed);
-                }
-                if self.genesis.contains(&id) || self.journals.contains_key(&id) {
-                    return DirectoryEvent::Refused(DirectoryRefusal::IdTaken { id });
-                }
-                if let Some(&winner) = self.names.get(&name) {
-                    return DirectoryEvent::Refused(DirectoryRefusal::NameTaken { winner });
-                }
-                self.names.insert(name.clone(), id);
-                self.journals.insert(
-                    id,
-                    CreatedJournal {
-                        name: name.clone(),
-                        config: config.clone(),
-                        mode,
-                        deleted_at: None,
-                    },
-                );
-                DirectoryEvent::Created {
-                    id,
-                    name,
-                    config,
-                    mode,
-                }
-            }
-            Some(SystemCommand::DeleteJournal { id }) => {
-                let Some(created) = self
-                    .journals
-                    .get_mut(&id)
-                    .filter(|c| c.deleted_at.is_none())
-                else {
-                    return DirectoryEvent::Refused(DirectoryRefusal::UnknownJournal { id });
-                };
-                created.deleted_at = Some(seq);
-                self.names.remove(&created.name);
-                DirectoryEvent::Deleted { id }
-            }
-            _ => DirectoryEvent::Refused(DirectoryRefusal::Malformed),
-        }
-    }
-
-    /// The journal the directory created as `id`, deleted or not.
-    #[must_use]
-    pub fn get(&self, id: JournalId) -> Option<&CreatedJournal> {
-        self.journals.get(&id)
-    }
-
-    /// Whether `id` was created and then deleted.
-    #[must_use]
-    pub fn is_deleted(&self, id: JournalId) -> bool {
-        self.journals
-            .get(&id)
-            .is_some_and(|c| c.deleted_at.is_some())
-    }
-
-    /// The live journal named `name` (#239): names are reusable once a
-    /// delete completes, so a recreated name names its new id.
-    ///
-    /// # Panics
-    ///
-    /// If the fold's name index disagrees with its journals.
-    #[must_use]
-    pub fn named(&self, name: &[u8]) -> Option<JournalId> {
-        let id = *self.names.get(name)?;
-        assert!(
-            self.journals
-                .get(&id)
-                .is_some_and(|c| c.deleted_at.is_none() && c.name == name),
-            "a live name names a live journal of that name"
-        );
-        Some(id)
-    }
-
-    /// Every journal created so far, deleted ones included, in id order.
-    pub fn journals(&self) -> impl Iterator<Item = (JournalId, &CreatedJournal)> {
-        self.journals.iter().map(|(id, c)| (*id, c))
     }
 }
 
@@ -838,6 +614,8 @@ pub enum RegistryEvent {
     TenantHosted {
         /// The tenant.
         tenant: TenantId,
+        /// Its control journal's id (#210).
+        control: JournalId,
     },
     /// The cell forgot a tenant (#229).
     TenantDropped {
@@ -969,8 +747,9 @@ pub struct Registry {
     bookings: BTreeMap<u64, Booking>,
     /// The fleet registration (#229): `(fleet_id, cell_id, version)`.
     fleet: Option<FleetRegistration>,
-    /// The tenants the cell hosts (#229).
-    hosted: BTreeSet<TenantId>,
+    /// The tenants the cell hosts (#229), with what it records of each
+    /// (#210).
+    hosted: BTreeMap<TenantId, HostedTenant>,
     /// The tenants the cell dropped (#229): never hosted again, so a stale
     /// `HostTenant` — decided by an operator from a fleet directory fold another
     /// operator's removal has since overtaken — is refused here, where the
@@ -982,6 +761,19 @@ pub struct Registry {
     /// What the cell coordinator last wrote of each machine's liveness.
     liveness: BTreeMap<NodeId, Liveness>,
     next_seq: u64,
+}
+
+/// What the cell records of a tenant it hosts (#210): its control journal,
+/// where every machine that serves the tenant learns its journals, and the
+/// name and `survives` its first coordinator describes it with.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostedTenant {
+    /// The tenant control journal's id, inside the tenant.
+    pub control: JournalId,
+    /// The tenant's name.
+    pub name: Vec<u8>,
+    /// What it survives (#252).
+    pub survives: crate::tenant::Survives,
 }
 
 /// The cell side of the fleet's registration (#229, §3.7).
@@ -1017,7 +809,7 @@ impl Registry {
     ///
     /// # Panics
     ///
-    /// If `seq` is below a position already folded (see [`Directory::fold`]).
+    /// If `seq` is below a position already folded (a programmer error of the caller).
     pub fn fold(&mut self, seq: u64, record: &[u8]) -> RegistryEvent {
         assert!(seq >= self.next_seq, "the registry folds in position order");
         self.next_seq = seq + 1;
@@ -1075,11 +867,13 @@ impl Registry {
                 cell_id,
                 version,
             }),
-            Some(SystemCommand::HostTenant { fleet_id, tenant }) => {
-                self.host(fleet_id, tenant, true)
-            }
+            Some(SystemCommand::HostTenant {
+                fleet_id,
+                tenant,
+                hosted,
+            }) => self.host(fleet_id, tenant, Some(hosted)),
             Some(SystemCommand::DropTenant { fleet_id, tenant }) => {
-                self.host(fleet_id, tenant, false)
+                self.host(fleet_id, tenant, None)
             }
             _ => RegistryEvent::Refused(RegistryRefusal::Malformed),
         }
@@ -1178,22 +972,32 @@ impl Registry {
     /// refused unless the cell joined that fleet. A drop is a tombstone,
     /// written whether the tenant was hosted or not: a dropped tenant is
     /// never hosted again ([`RegistryRefusal::TenantDropped`]).
-    fn host(&mut self, fleet_id: u64, tenant: TenantId, host: bool) -> RegistryEvent {
+    fn host(
+        &mut self,
+        fleet_id: u64,
+        tenant: TenantId,
+        host: Option<HostedTenant>,
+    ) -> RegistryEvent {
         if self.fleet.is_none_or(|fleet| fleet.fleet_id != fleet_id) {
             return RegistryEvent::Refused(RegistryRefusal::OtherFleet { fleet_id });
         }
         if !tenant.is_set() {
             return RegistryEvent::Refused(RegistryRefusal::Malformed);
         }
-        if host {
+        if let Some(hosted) = host {
+            if !hosted.control.is_set() {
+                return RegistryEvent::Refused(RegistryRefusal::Malformed);
+            }
             if self.dropped.contains(&tenant) {
                 return RegistryEvent::Refused(RegistryRefusal::TenantDropped { tenant });
             }
-            return if self.hosted.insert(tenant) {
-                RegistryEvent::TenantHosted { tenant }
-            } else {
-                RegistryEvent::Unchanged
-            };
+            // The first host wins: a re-run step names the same tenant again.
+            if self.hosted.contains_key(&tenant) {
+                return RegistryEvent::Unchanged;
+            }
+            let control = hosted.control;
+            self.hosted.insert(tenant, hosted);
+            return RegistryEvent::TenantHosted { tenant, control };
         }
         self.hosted.remove(&tenant);
         if self.dropped.insert(tenant) {
@@ -1219,12 +1023,18 @@ impl Registry {
     /// Whether the cell hosts `tenant` (#229).
     #[must_use]
     pub fn hosts(&self, tenant: TenantId) -> bool {
-        self.hosted.contains(&tenant)
+        self.hosted.contains_key(&tenant)
     }
 
     /// The tenants the cell hosts, in id order (#229).
     pub fn hosted(&self) -> impl Iterator<Item = TenantId> + '_ {
-        self.hosted.iter().copied()
+        self.hosted.keys().copied()
+    }
+
+    /// What the cell records of `tenant`, while it hosts it (#210).
+    #[must_use]
+    pub fn hosted_tenant(&self, tenant: TenantId) -> Option<&HostedTenant> {
+        self.hosted.get(&tenant)
     }
 
     fn book(
@@ -1477,7 +1287,16 @@ impl Registry {
             fleet_id: self.fleet.map_or(0, |f| f.fleet_id),
             cell_id: self.fleet.map_or(0, |f| f.cell_id),
             version: self.fleet.map_or(0, |f| f.version),
-            tenants: self.hosted.iter().map(|t| t.0).collect(),
+            hosted: self
+                .hosted
+                .iter()
+                .map(|(t, h)| wire::HostedTenantState {
+                    tenant: t.0,
+                    control_journal: h.control.0,
+                    name: h.name.clone(),
+                    survives: h.survives.to_wire(),
+                })
+                .collect(),
             dropped: self.dropped.iter().map(|t| t.0).collect(),
         }
     }
@@ -1550,10 +1369,23 @@ impl Checkpointable for Registry {
                 version: state.version,
             }),
         };
-        let hosted: BTreeSet<TenantId> = state.tenants.into_iter().map(TenantId).collect();
+        let mut hosted = BTreeMap::new();
+        for h in state.hosted {
+            if h.control_journal == 0 {
+                return Err("a registry state hosts a tenant with no control journal");
+            }
+            hosted.insert(
+                TenantId(h.tenant),
+                HostedTenant {
+                    control: JournalId(h.control_journal),
+                    name: h.name,
+                    survives: crate::tenant::Survives::from_wire(h.survives)?,
+                },
+            );
+        }
         let dropped: BTreeSet<TenantId> = state.dropped.into_iter().map(TenantId).collect();
-        if hosted.iter().chain(&dropped).any(|t| !t.is_set())
-            || hosted.iter().any(|t| dropped.contains(t))
+        if hosted.keys().chain(&dropped).any(|t| !t.is_set())
+            || hosted.keys().any(|t| dropped.contains(t))
             || (fleet.is_none() && !(hosted.is_empty() && dropped.is_empty()))
         {
             return Err("a registry state hosts a tenant it cannot");
@@ -1583,36 +1415,25 @@ pub fn registry_event(folded: Folded<RegistryEvent>) -> Option<RegistryEvent> {
     }
 }
 
-/// What one system-journal record folded to — the directory's or the
-/// registry's event — as the driver reports it.
+/// What one control-journal record folded to — the registry's or a
+/// tenant control journal's event (#210) — as the driver reports it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SystemEvent {
-    /// A directory record.
-    Directory(DirectoryEvent),
-    /// A registry record.
+    /// A cell control journal (registry) record.
     Registry(RegistryEvent),
+    /// A tenant control journal record (#210).
+    Tenant(crate::tenant::TenantEvent),
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use paros_core::QuorumSystem;
-
-    fn config(members: &[u64]) -> AcceptorConfig {
-        AcceptorConfig::new(
-            members.iter().copied().map(NodeId).collect(),
-            QuorumSystem::Majority,
-        )
-    }
-
-    fn create(id: u64, name: &[u8], members: &[u64]) -> Vec<u8> {
-        SystemCommand::CreateJournal {
-            id: JournalId(id),
-            name: name.to_vec(),
-            config: config(members),
-            mode: WriterMode::Single,
+    fn hosted(control: u64) -> HostedTenant {
+        HostedTenant {
+            control: JournalId(control),
+            name: b"acme".to_vec(),
+            survives: crate::tenant::Survives::Az,
         }
-        .encode()
     }
 
     fn one(command: &SystemCommand) -> Vec<u8> {
@@ -1622,13 +1443,6 @@ mod tests {
     #[test]
     fn every_command_round_trips() {
         let commands = [
-            SystemCommand::CreateJournal {
-                id: JournalId(0x9e37_79b9),
-                name: b"orders".to_vec(),
-                config: config(&[0, 1, 2]),
-                mode: WriterMode::Multi,
-            },
-            SystemCommand::DeleteJournal { id: JournalId(131) },
             SystemCommand::RegisterNode {
                 id: NodeId(100),
                 addr: "10.0.5.1:4500".into(),
@@ -1674,6 +1488,7 @@ mod tests {
             SystemCommand::HostTenant {
                 fleet_id: 11,
                 tenant: TenantId(300),
+                hosted: hosted(301),
             },
             SystemCommand::DropTenant {
                 fleet_id: 11,
@@ -1684,118 +1499,6 @@ mod tests {
             assert_eq!(SystemCommand::decode(&command.encode()), Ok(command));
         }
         assert!(SystemCommand::decode(b"\xff\xff").is_err());
-    }
-
-    #[test]
-    fn a_created_journal_takes_its_drawn_id_and_an_id_is_never_reused() {
-        let genesis = JournalId(0x6e5e);
-        let mut dir = Directory::new([genesis]);
-        // A genesis id is taken; an unset id is malformed. No range is
-        // reserved: a small id is as good as any.
-        assert_eq!(
-            dir.fold(0, &create(genesis.0, b"a", &[0, 1, 2])),
-            DirectoryEvent::Refused(DirectoryRefusal::IdTaken { id: genesis })
-        );
-        assert_eq!(
-            dir.fold(1, &create(0, b"a", &[0, 1, 2])),
-            DirectoryEvent::Refused(DirectoryRefusal::Malformed)
-        );
-        assert!(matches!(
-            dir.fold(2, &create(7, b"seven", &[0, 1, 2])),
-            DirectoryEvent::Created {
-                id: JournalId(7),
-                ..
-            }
-        ));
-        let drawn = JournalId(0xdead_beef);
-        assert!(matches!(
-            dir.fold(3, &create(drawn.0, b"a", &[0, 1, 2])),
-            DirectoryEvent::Created { id, .. } if id == drawn
-        ));
-        // A second create of the same id is refused: the creator redraws.
-        assert_eq!(
-            dir.fold(4, &create(drawn.0, b"b", &[0, 1, 2])),
-            DirectoryEvent::Refused(DirectoryRefusal::IdTaken { id: drawn })
-        );
-        assert_eq!(
-            dir.fold(5, &one(&SystemCommand::DeleteJournal { id: drawn })),
-            DirectoryEvent::Deleted { id: drawn }
-        );
-        assert!(dir.is_deleted(drawn));
-        // A deleted journal is not deleted twice, its id is never reused,
-        // and its name frees up for a new journal under a new id.
-        assert_eq!(
-            dir.fold(6, &one(&SystemCommand::DeleteJournal { id: drawn })),
-            DirectoryEvent::Refused(DirectoryRefusal::UnknownJournal { id: drawn })
-        );
-        assert_eq!(
-            dir.fold(7, &create(drawn.0, b"a", &[0, 1, 2])),
-            DirectoryEvent::Refused(DirectoryRefusal::IdTaken { id: drawn })
-        );
-        assert!(matches!(
-            dir.fold(8, &create(drawn.0 + 1, b"a", &[0, 1, 2])),
-            DirectoryEvent::Created { id, .. } if id.0 == drawn.0 + 1
-        ));
-        assert!(dir.is_deleted(drawn), "the tombstone stays");
-    }
-
-    #[test]
-    fn a_name_race_is_decided_by_position_order() {
-        let mut dir = Directory::new([]);
-        assert!(matches!(
-            dir.fold(0, &create(300, b"x", &[0])),
-            DirectoryEvent::Created {
-                id: JournalId(300),
-                ..
-            }
-        ));
-        assert_eq!(
-            dir.fold(1, &create(301, b"x", &[1])),
-            DirectoryEvent::Refused(DirectoryRefusal::NameTaken {
-                winner: JournalId(300)
-            })
-        );
-    }
-
-    #[test]
-    fn malformed_records_change_nothing() {
-        let mut dir = Directory::new([]);
-        assert_eq!(
-            dir.fold(0, b""),
-            DirectoryEvent::Refused(DirectoryRefusal::Malformed)
-        );
-        assert_eq!(
-            dir.fold(1, b"junk"),
-            DirectoryEvent::Refused(DirectoryRefusal::Malformed)
-        );
-        assert_eq!(
-            dir.fold(2, &one(&SystemCommand::DrainNode { id: NodeId(1) })),
-            DirectoryEvent::Refused(DirectoryRefusal::Malformed),
-            "a registry entry is not a directory entry"
-        );
-        // A grid that does not tile its membership is refused at decode.
-        let bad = wire::SystemEntry {
-            kind: Some(wire::system_entry::Kind::CreateJournal(
-                wire::CreateJournal {
-                    id: 300,
-                    name: b"g".to_vec(),
-                    config: Some(crate::rpc::common::AcceptorConfig {
-                        members: vec![0, 1, 2],
-                        quorum_system: crate::rpc::common::QuorumSystem::Grid.into(),
-                        rows: 2,
-                        cols: 2,
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                },
-            )),
-        }
-        .encode_to_vec();
-        assert_eq!(
-            dir.fold(3, &bad),
-            DirectoryEvent::Refused(DirectoryRefusal::Malformed)
-        );
-        assert_eq!(dir.journals().count(), 0);
     }
 
     #[test]
@@ -2123,6 +1826,7 @@ mod tests {
         assert_eq!(restored.state(), whole.state());
     }
 
+    #[allow(clippy::too_many_lines)]
     #[test]
     fn the_cell_joins_one_fleet_and_hosts_tenants_only_for_it() {
         let fleet = 0xf1ee7;
@@ -2134,10 +1838,11 @@ mod tests {
                 version,
             })
         };
-        let host = |fleet_id, tenant| {
+        let host = |fleet_id, tenant: u64| {
             one(&SystemCommand::HostTenant {
                 fleet_id,
                 tenant: TenantId(tenant),
+                hosted: hosted(tenant + 1),
             })
         };
         let drop = |fleet_id, tenant| {
@@ -2174,7 +1879,8 @@ mod tests {
         assert_eq!(
             registry.fold(5, &host(fleet, 300)),
             RegistryEvent::TenantHosted {
-                tenant: TenantId(300)
+                tenant: TenantId(300),
+                control: JournalId(301),
             }
         );
         assert_eq!(

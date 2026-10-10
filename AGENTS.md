@@ -288,11 +288,14 @@ Depth: module docs of `matchmaking.rs`, `node/matchmaking.rs`, `node/reconfigure
   `journals/<tenant>/<journal>/`.
 - **A storage fault quarantines its journal, not the process**; it re-opens after
   `DriverTunables::quarantine_ticks`. A crash at a driver `hint!` is the process dying, for every journal.
-- **System journals** (the directory = a user tenant's control journal, the node registry = the
-  cell tenant's control journal, both identifiers in the `SystemPlan`) are opt-in through a
-  `SystemPlan` (`None` is the static deployment), folded by `paros::system::{Directory,
-  Registry}`; a created journal's id is drawn by its creator and checked at apply (`IdTaken`: the creator
-  redraws), never reused. The core's pool grows, never shrinks
+- **Control journals** (#189, #210): the node registry is the cell tenant's control journal
+  (`paros::system::Registry`), and every hosted tenant has its own control journal
+  (`paros::tenant::TenantControl`): its description and every journal it created, each create or
+  delete a request with an idempotency id judged at apply, its outcome recorded under that id. A
+  node follows them through a `ControlPlan` (`None` is the static deployment). The tenant
+  coordinator (the elected cell coordinator until #212, #225) draws a created journal's id; the
+  fold refuses a used one (`IdTaken`: the coordinator redraws), and an id is never reused.
+  Clients send requests with `paros::client::journals`. The core's pool grows, never shrinks
   (`extend_pool`), and only with matchmakers. The registry is keyed by `node_id` with each
   machine's class and capacity, judges capacity bookings at apply (#211), and is checkpointed
   and truncated with `paros::client::checkpoint` (#230); a `stateless` machine never serves a

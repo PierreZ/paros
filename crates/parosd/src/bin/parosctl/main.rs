@@ -21,6 +21,7 @@ mod cell;
 mod commands;
 mod fleet;
 mod init;
+mod journal;
 mod names;
 mod output;
 #[path = "../../resolve.rs"]
@@ -153,6 +154,9 @@ enum CellCommand {
     Retire(commands::RetireArgs),
     /// Create, delete and list tenants through the fleet directory (#229).
     Tenant(fleet::TenantArgs),
+    /// Create, delete and list a tenant's journals through its control
+    /// journal and the tenant coordinator (#210).
+    Journal(journal::JournalArgs),
 }
 
 /// How a command ended, as an exit code.
@@ -340,6 +344,17 @@ async fn main() -> ExitCode {
         CellCommand::Tenant(args) => {
             let ids: Vec<u64> = servers.iter().map(|(id, _)| *id).collect();
             fleet::run(&runtime.providers, &client, &ids, &out, args).await
+        }
+        CellCommand::Journal(args) => {
+            journal::run(
+                &runtime.providers,
+                &runtime.rpc,
+                &runtime.names,
+                &client,
+                &out,
+                args,
+            )
+            .await
         }
     };
     ending.into()

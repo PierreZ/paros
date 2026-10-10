@@ -29,6 +29,7 @@ image and the Compose toy are `Dockerfile` and `docker-compose.yml` at the repos
   what it came to (`cell init`, the elected coordinator, the fleet steps; #229, #240, #246, #277).
 - `src/bin/parosctl/fleet.rs` → `parosctl tenant create|delete|list` over
   `paros::client::fleet`; the session, refusal labels and endings `init` shares.
+- `src/bin/parosctl/journal.rs` → `parosctl journal create|delete|list` over `paros::client::journals` (#210): the tenant named, found in the fleet directory; one request id per run, re-sent by the library until decided.
 - `src/bin/parosctl/cell.rs` → `parosctl cell add-machine <addr>` over `paros::client::cell` (#216): registers an idle machine in the cell control journal, then admits it.
 - `src/bin/parosctl/commands.rs` → one fn per cell command: `write`, `read`, `tail`, `truncate`,
   `set-leader`, `inspect`, `reconfigure`, `retire`.
@@ -60,8 +61,9 @@ image and the Compose toy are `Dockerfile` and `docker-compose.yml` at the repos
 
 ## Local rules
 
-- **Interim (M8 → M9)**: the cell's journals are the cell control journal, the fleet tenant's, plus one
-  static user journal (every identifier drawn at `init` and printed), plain Multi-Paxos over the founding members; any other
+- **Interim (M8 → M9)**: the cell's journals are the cell control journal, the fleet tenant's,
+  the election journal, every hosted tenant's control journal and the journals tenants create
+  (#210), plain Multi-Paxos or a grid over the founding members; any other
   machine idles until `parosctl cell add-machine` admits it, and then, like every `stateless` one, waits for placement (#211, #212). The founding members
   elect the cell coordinator over the cell's election journal (#240); admin sessions still claim the cell control journal until
   admin calls become requests to it (#212, #225). Do not build on these as final; the machine record, the boot rule and

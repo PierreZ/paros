@@ -21,6 +21,12 @@
 //! `peer`).
 //! A record holds a vote or an admission, never both.
 //!
+//! A formed machine also records every journal it **provisioned** at run
+//! time (`created`, #210): a journal a tenant's control journal created
+//! naming it, or a hosted tenant's control journal. The store is formatted
+//! first, then the line is written, both before the journal's first boot,
+//! so a store the record names and the disk lost is refused as amnesia.
+//!
 //! ```text
 //! node_id 6150928431937019931
 //! class storage
@@ -35,7 +41,7 @@
 //! journal 11986532017395081213/1735003470911288215
 //! journal 11986532017395081213/5302873011246751929
 //! journal 7240096361733624127/14183513009914637262
-//! journal 2965734451981346203/9861377130450924019
+//! created 2965734451981346203/9861377130450924019
 //! ```
 
 use std::collections::BTreeMap;
@@ -119,6 +125,8 @@ pub struct MachineRecord {
     /// Its admission into a cell by `cell add-machine` (#216), which is its
     /// cell when it has no vote.
     pub admitted: Option<Admission>,
+    /// The journals it provisioned at run time (#210), in the order it did.
+    pub created: Vec<JournalIdentifier>,
 }
 
 impl MachineRecord {
@@ -183,6 +191,9 @@ impl MachineRecord {
                 let _ = writeln!(text, "peer {} {addr}", id.0);
             }
         }
+        for journal in &self.created {
+            let _ = writeln!(text, "created {journal}");
+        }
         text
     }
 
@@ -203,6 +214,7 @@ impl MachineRecord {
         let mut control = None;
         let mut fleet = None;
         let mut election = None;
+        let mut created = Vec::new();
         for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
             let (key, value) = line.split_once(' ').unwrap_or((line, ""));
             let identifier =
@@ -237,6 +249,7 @@ impl MachineRecord {
                 "control" => control = Some(identifier()?),
                 "fleet" => fleet = Some(identifier()?),
                 "election" => election = Some(identifier()?),
+                "created" => created.push(identifier()?),
                 _ => return Err(format!("unknown machine record key {key:?}")),
             }
         }
@@ -246,6 +259,9 @@ impl MachineRecord {
                 .copied()
                 .ok_or_else(|| format!("the machine record names no {name}"))
         };
+        if plan.is_none() && !created.is_empty() {
+            return Err("the machine record provisioned journals outside a cell".into());
+        }
         if plan.is_some() && admitted.is_some() {
             return Err("the machine record holds a vote and an admission".into());
         }
@@ -283,6 +299,7 @@ impl MachineRecord {
             promised,
             plan,
             admitted,
+            created,
         })
     }
 }
@@ -328,6 +345,7 @@ mod tests {
             promised,
             plan,
             admitted: None,
+            created: Vec::new(),
         }
     }
 
@@ -349,10 +367,12 @@ mod tests {
                 identifier(0x51, 0x52),
                 identifier(0x51, 0x53),
                 identifier(0x61, 0x62),
-                identifier(0x71, 0x72),
             ],
         };
-        let formed = record(ballot(9), Some((ballot(7), plan.clone())));
+        let formed = MachineRecord {
+            created: vec![identifier(0x71, 0x72), identifier(0x71, 0x73)],
+            ..record(ballot(9), Some((ballot(7), plan.clone())))
+        };
         let read = MachineRecord::parse(&formed.render()).expect("a record");
         assert_eq!(read.formed(), Some(&plan));
         assert_eq!(read, formed);
@@ -405,6 +425,8 @@ mod tests {
         );
         let bare = record(Ballot::default(), None).render();
         assert!(MachineRecord::parse(&format!("{bare}peer 5 10.0.0.2:4500\n")).is_err());
+        // A provisioned journal lives inside a cell.
+        assert!(MachineRecord::parse(&format!("{bare}created 1/2\n")).is_err());
     }
 
     #[test]

@@ -156,3 +156,9 @@ well_known_method!(
     RegisterRpc, 0x5041_0307, machine::Register => machine::RegisterAck,
     "paros.machine.Register"
 );
+well_known_method!(
+    /// A tenant's journal create or delete, sent to the tenant coordinator
+    /// (#210).
+    JournalRequestRpc, 0x5041_0308, machine::JournalRequest => machine::JournalRequestAck,
+    "paros.machine.JournalRequest"
+);

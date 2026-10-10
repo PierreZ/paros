@@ -112,15 +112,16 @@ const QUORUM_READ: u8 = 14;
 const READ: u8 = 15;
 /// **Retired** with `CheckTail` (#204). A no-op that keeps its id.
 const CHECK_TAIL: u8 = 16;
-/// Create a journal through the **directory** (#189): a `CreateJournal` of a
-/// name drawn from a four-name alphabet over three members of the pool
-/// (genesis nodes and registered joiners), under a journal id it draws
-/// (#235), written to the directory at a seed, then read back — `Created`
-/// with its id, refused for a taken id (redrawn once) or a taken name — and
-/// one record written to a journal it created. On a seed without system
-/// journals the write is still sent, and must be refused as unknown.
+/// Create a journal in a `READY` tenant through the **tenant coordinator**
+/// (#210, on the machines): a request with an idempotency id this client
+/// draws, a name from a three-name alphabet, a writer mode and a desired
+/// mode, sent through `paros::client::journals`. The coordinator draws the
+/// id and picks the members; the answer is what the tenant's control
+/// journal recorded. An undecided request is sent again with the same id at
+/// the next journal step; a created single-writer journal takes one append.
 const CREATE_JOURNAL: u8 = 17;
-/// Tombstone a journal this client created (#189): a `DeleteJournal`.
+/// Delete a journal of a `READY` tenant by name, through the tenant
+/// coordinator (#210).
 const DELETE_JOURNAL: u8 = 18;
 /// Register a joiner in the **node registry** (#189): a `RegisterNode` of
 /// its id and address, written to the registry at a seed.
@@ -502,7 +503,8 @@ impl ChainConfig {
                 // ceiling is a tailing reader.
                 buggify_knob!(20_u64, 0_u64..41_u64),
                 0,
-                // A create is two system appends' worth of reads and one
+                // A create is a request to the tenant coordinator, which
+                // claims and writes the tenant's control journal, and one
                 // append to the new journal; the ceiling is a client that
                 // mostly manages journals, the floor one that never does.
                 buggify_knob!(6_u64, 0_u64..41_u64),
@@ -1456,10 +1458,6 @@ impl Workload for ChainWorkload {
             &deployment,
             crate::shape::identifiers(ctx.state()),
             crate::shape::system_journals(ctx.state()),
-            self.plan
-                .as_ref()
-                .map(|plan| plan.ids.clone())
-                .unwrap_or_default(),
             &crate::shape::joiner_machines(ctx.state(), deployment.joiners().len()),
             (client_id, LeaderSeeds::new(ctx.random().random::<u128>())),
             request_timeout,
@@ -1613,8 +1611,8 @@ impl Workload for ChainWorkload {
         }
 
         // Static stability (#247): on its own location, client 0 of a
-        // system-journal run holds the seed — the one node hosting the fleet tenant, the
-        // cell's control journal and the directory — down for
+        // system-journal run holds the seed — the one node hosting the
+        // registry — down for
         // `parent_hold_ms` of the chaos window, while every tenant journal
         // keeps committing without it (the journal board's gate).
         let parent_seed = (client_id == 0 && crate::shape::system_journals(ctx.state()))
@@ -3184,20 +3182,32 @@ impl Workload for ChainWorkload {
                     }
                 }
                 CREATE_JOURNAL => {
-                    system_ops
-                        .create(ctx, &nodes, (raw_class, raw_payload))
+                    fleet_ops
+                        .create_journal(
+                            ctx,
+                            config.tunables().checkpoint_policy(),
+                            (raw_class, raw_payload),
+                        )
                         .await;
                 }
-                DELETE_JOURNAL => system_ops.delete(ctx, &nodes, raw_payload).await,
+                DELETE_JOURNAL => {
+                    fleet_ops
+                        .delete_journal(ctx, config.tunables().checkpoint_policy(), raw_payload)
+                        .await;
+                }
                 REGISTER_NODE => {
                     // An operator who registers a node usually adds it next
                     // (#189): the client's next step grows a configuration
                     // onto the joiner it just registered.
+                    // On a lagging-fold seed the reconfiguration follows
+                    // whatever the swarm mask: the scenario's ingredients
+                    // come together (`crate::shape::lagging_fold`).
                     reconfigure_next = system_ops
                         .registry_step(ctx, &nodes, None, raw_payload)
                         .await
                         && journal == main
-                        && operations.contains(&RECONFIGURE);
+                        && (operations.contains(&RECONFIGURE)
+                            || crate::shape::lagging_fold(ctx.state()));
                 }
                 DRAIN_NODE => {
                     let _ = system_ops
@@ -4020,15 +4030,16 @@ impl Workload for ChainWorkload {
             }
         }
         // The control journals' histories (#247): every client's library
-        // calls at the registry and the directory, and at the control
-        // journals of the cell the machines formed (#246), searched once (by
-        // client 0, after every run) against the journal model.
+        // calls at the registry, at the control journals of the cell the
+        // machines formed (#246) and at every tenant control journal a
+        // machine folded (#210), searched once (by client 0, after every
+        // run) against the journal model.
         if self.client_id == 0 {
             let identifiers = crate::shape::identifiers(ctx.state());
-            let system = crate::shape::system_journals(ctx.state())
-                .then_some([identifiers.registry, identifiers.directory])
-                .into_iter()
-                .flatten();
+            let system = crate::shape::system_journals(ctx.state()).then_some(identifiers.registry);
+            let tenants =
+                crate::audit::tenants::lock(&crate::audit::tenants::tenant_board(ctx.state()))
+                    .controls();
             let formed = crate::machine::formed_cell(ctx.state());
             let cell = formed
                 .map(|cell| [Some(cell.cell), cell.fleet])
@@ -4042,7 +4053,7 @@ impl Workload for ChainWorkload {
                         .unwrap_or_else(PoisonError::into_inner),
                 )
             };
-            for journal in system.chain(cell) {
+            for journal in system.into_iter().chain(cell).chain(tenants) {
                 crate::audit::check_control_history(take(journal), paros::WriterMode::Single);
             }
             // The cell's election journal (#240): every candidate's
@@ -4077,8 +4088,8 @@ fn owner_never_of_wrong_mode() {
 /// journal (`Journals::plane`), which on a matchmaker deployment is the
 /// journal whose configuration names the matchmakers (the main one), but on
 /// a plain deployment is the node's first live user journal in id order —
-/// with system journals, possibly a journal the directory created at
-/// runtime and led by a joiner that never serves this one. Adopting that
+/// with system journals, possibly a journal created at runtime and led by a
+/// joiner that never serves this one. Adopting that
 /// leader sends this journal's next `Write` to a node that answers
 /// `UnknownJournal` (seed 10308963497620992383: node 4's plane was a
 /// created journal led by joiner 100).

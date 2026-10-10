@@ -44,6 +44,7 @@ mod rpc;
 pub mod scenario;
 mod storage;
 pub mod system;
+pub mod tenant;
 
 pub use address::{Address, Names};
 pub use audit::{
@@ -53,9 +54,9 @@ pub use audit::{
 pub use corruption::{CorruptionVerdict, IntegrityFault};
 pub use driver::reply::Reply;
 pub use driver::{
-    BelowFloor, BootKind, BootRefusal, DriverTunables, JournalStores, MAX_READ_RECORDS, RunError,
-    SystemPlan, command_hash, message_kind, parse_addr, registration_history_hash, run_journals,
-    run_node,
+    BelowFloor, BootKind, BootRefusal, ControlPlan, DriverTunables, JournalStores,
+    MAX_READ_RECORDS, RunError, command_hash, message_kind, parse_addr, registration_history_hash,
+    run_journals, run_node,
 };
 pub use rpc::{
     EdgeRejection, InspectRefusal, InspectReply, InspectRequest, InspectTarget, MAX_FRAME_BYTES,
@@ -70,7 +71,7 @@ pub use rpc::{
 pub mod wire {
     pub use crate::rpc::methods;
     pub use crate::rpc::{
-        checkpoint, common, election, fleet, internal, machine, matchmaker, public, system,
+        checkpoint, common, election, fleet, internal, machine, matchmaker, public, system, tenant,
     };
 }
 pub use journal::{JournalBootFacts, JournalMatchmakerStorage, JournalStorage, JournalStoreConfig};

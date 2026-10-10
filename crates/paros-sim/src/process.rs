@@ -39,9 +39,9 @@ use crate::world::node_store::LedgeredJournal;
 use crate::world::registry_store::LedgeredRegistry;
 use crate::world::{ParkReason, StorageWorld, storage_world, storage_world_for};
 use paros::{
-    AcceptorConfig, BootKind, BootRefusal, Config, JournalStorage, JournalStoreConfig,
+    AcceptorConfig, BootKind, BootRefusal, Config, ControlPlan, JournalStorage, JournalStoreConfig,
     JournalStores, MatchmakerConfig, MatchmakerId, NodeId, ProxyConfig, ProxyId, ReplicaId,
-    RunError, SystemPlan, parse_addr, run_journals, run_matchmaker, run_proxy, run_replica,
+    RunError, parse_addr, run_journals, run_matchmaker, run_proxy, run_replica,
 };
 
 /// One role's address book: the group's IPs in rank order, each paired with
@@ -185,9 +185,9 @@ impl ReplicaProcess {
 
 /// A joiner in the simulation (#189): its own process group, a node outside
 /// the genesis pool. On a seed that runs the system journals it follows the
-/// directory and the registry from the seeds, is admitted to the pool when a
-/// client registers it, and serves every journal the directory creates
-/// naming it; on any other seed it idles.
+/// registry from the seeds, is admitted to the pool when a client registers
+/// it, and joins the default journal as a spare where a reconfiguration may
+/// name it; on any other seed it idles.
 pub(crate) struct JoinerProcess;
 
 impl JoinerProcess {
@@ -241,9 +241,8 @@ async fn run_joiner(
     // A joiner that joins the default journal as a spare campaigns through
     // the matchmakers like any member of it.
     let matchmakers = ranked(deployment.matchmakers(), MatchmakerId)?;
-    let plan = crate::shape::journals(ctx.state());
     let board = crate::audit::system::system_board(ctx.state());
-    let (system_plan, _) = system_plan(ctx, deployment, &members, &plan, id);
+    let (system_plan, _) = system_plan(ctx, deployment, &members, id);
     let RoleRig { incarnation, .. } = arm_role(ctx, my_ip);
     let tunables = incarnation.shape.tunables;
     let layout = crate::shape::journal_layout(ctx.state());
@@ -523,6 +522,7 @@ async fn run_acceptor(
     // by its first caller.
     crate::shape::withhold_gc(ctx.state());
     crate::shape::lost_verdict(ctx.state());
+    crate::shape::lagging_fold(ctx.state());
     let shape = incarnation.shape;
     // The copy budget is sized by the run's configuration floor
     // (`crate::shape::config_floor`): the whole pool on a plain seed, the
@@ -588,11 +588,11 @@ async fn run_acceptor(
         })
         .collect();
     // The system journals (#189), on a seed that drew them: every node
-    // follows the directory and the registry, and the seeds — the lowest
+    // follows the registry, and the seeds — the lowest
     // ranks — host them, a static configuration of plain Multi-Paxos on a
     // fault-free disk.
     let system = crate::shape::system_journals(ctx.state())
-        .then(|| system_rig(ctx, deployment, &members, &plan, &mut seats, self_rank));
+        .then(|| system_rig(ctx, deployment, &members, &mut seats, self_rank));
     let tunables = shape.tunables;
     if incarnation.is_restart() {
         // A process-level revival (attrition, or the chain client's
@@ -875,14 +875,14 @@ struct Seat {
     /// numbers its storage world was sized by).
     floor: usize,
     clean_copies: usize,
-    /// A system journal or a journal the directory created (#189): stored
+    /// A system journal or a spare's (#189): stored
     /// ordered, with the injector dark, outside the copy budget — the
     /// storage fault model is the genesis journals' business.
     quiet: bool,
-    /// Created at runtime by the directory (#189): opened only when the
-    /// directory names it, never at boot.
+    /// Created at runtime (#189, a spare's): opened only when the registry
+    /// admits the node, never at boot.
     created: bool,
-    /// The directory tombstoned it (#189): never opened again.
+    /// Tombstoned (#189): never opened again.
     deleted: bool,
 }
 
@@ -942,7 +942,7 @@ struct SimStores<'a> {
     /// The simulated disk and the run's journal layout (#187, #261).
     journal_store: (SimStorageProvider, JournalStoreConfig),
     /// The system board, on a seed that runs the system journals (#189):
-    /// the directory's created journals get seats here at runtime.
+    /// a spare's journal gets a seat here at runtime.
     system: Option<Arc<Mutex<crate::audit::system::SystemBoard>>>,
 }
 
@@ -1112,9 +1112,9 @@ impl JournalStores for SimStores<'_> {
         self.world_audit(crate::shape::identifiers(self.ctx.state()).main)
     }
 
-    /// A journal the directory created naming this node (#189): a quiet seat
+    /// A journal created naming this node (#189, a spare's): a quiet seat
     /// under `config`, kept across incarnations (a restart re-folds the
-    /// directory and asks again).
+    /// registry and asks again).
     fn create(&mut self, journal: paros::JournalIdentifier, config: Config) -> bool {
         let Some(board) = &self.system else {
             return false;
@@ -1162,25 +1162,23 @@ fn system_rig(
     ctx: &SimContext,
     deployment: &Deployment,
     members: &[(NodeId, String)],
-    plan: &crate::shape::JournalPlan,
     seats: &mut Vec<Seat>,
     self_rank: NodeId,
-) -> (SystemPlan, Arc<Mutex<crate::audit::system::SystemBoard>>) {
+) -> (ControlPlan, Arc<Mutex<crate::audit::system::SystemBoard>>) {
     let board = crate::audit::system::system_board(ctx.state());
-    let (system_plan, seeds) = system_plan(ctx, deployment, members, plan, self_rank);
+    let (system_plan, seeds) = system_plan(ctx, deployment, members, self_rank);
     for seat in seats.iter_mut() {
         seat.audit = seat.audit.clone().with_system(board.clone());
     }
     if seeds.contains(&self_rank) {
         let identifiers = crate::shape::identifiers(ctx.state());
-        for journal in [identifiers.directory, identifiers.registry] {
-            let config = Config {
-                peers: seeds.clone(),
-                quorum_system: paros::QuorumSystem::Majority,
-                ..Config::new(self_rank, journal)
-            };
-            seats.push(Seat::quiet(ctx, journal, config, &board));
-        }
+        let journal = identifiers.registry;
+        let config = Config {
+            peers: seeds.clone(),
+            quorum_system: paros::QuorumSystem::Majority,
+            ..Config::new(self_rank, journal)
+        };
+        seats.push(Seat::quiet(ctx, journal, config, &board));
     }
     (system_plan, board)
 }
@@ -1191,9 +1189,8 @@ fn system_plan(
     ctx: &SimContext,
     deployment: &Deployment,
     members: &[(NodeId, String)],
-    plan: &crate::shape::JournalPlan,
     self_id: NodeId,
-) -> (SystemPlan, Vec<NodeId>) {
+) -> (ControlPlan, Vec<NodeId>) {
     let identifiers = crate::shape::identifiers(ctx.state());
     let seeds: Vec<NodeId> = crate::shape::seed_ranks(members.len())
         .into_iter()
@@ -1203,7 +1200,6 @@ fn system_plan(
     let spares = spare_template(ctx, deployment);
     let machines = crate::shape::joiner_machines(ctx.state(), deployment.joiners().len());
     crate::audit::system::lock(&board).arm(
-        plan.ids.iter().copied(),
         members.iter().map(|(id, _)| id.0),
         !deployment.joiners().is_empty(),
         spares.is_some() && !deployment.joiners().is_empty(),
@@ -1221,7 +1217,7 @@ fn system_plan(
         .find(|(rank, _)| crate::roles::joiner_node_id(*rank) == self_id)
         .map_or(paros::system::Class::Storage, |(_, machine)| machine.class);
     (
-        SystemPlan {
+        ControlPlan {
             self_id,
             class,
             seeds: members
@@ -1229,11 +1225,9 @@ fn system_plan(
                 .filter(|(id, _)| seeds.contains(id))
                 .cloned()
                 .collect(),
-            genesis_pool: members.iter().map(|(id, _)| *id).collect(),
-            genesis_journals: plan.ids.clone(),
+            cell: identifiers.registry,
+            founders: members.iter().map(|(id, _)| *id).collect(),
             spares: spares.into_iter().collect(),
-            directory: identifiers.directory,
-            registry: identifiers.registry,
         },
         seeds,
     )

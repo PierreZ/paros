@@ -59,6 +59,7 @@ use prost::Message as _;
 
 use crate::client::checkpoint::{Checkpointable, Folded};
 use crate::rpc::fleet as wire;
+pub use crate::tenant::Survives;
 
 /// The metadata version this fold speaks: written into every entry, and
 /// into the cell's side of the registration (`crate::system`). `2` since
@@ -333,6 +334,8 @@ pub enum FleetCommand {
         name: Vec<u8>,
         /// The cell it is assigned to.
         cell_id: u64,
+        /// What it survives (#252).
+        survives: Survives,
     },
     /// Move `tenant` to `state`.
     MarkTenant {
@@ -398,11 +401,13 @@ impl FleetEntry {
                 control,
                 name,
                 cell_id,
+                survives,
             } => Kind::RegisterTenant(wire::RegisterTenant {
                 tenant: control.tenant.0,
                 name: name.clone(),
                 cell_id: *cell_id,
                 control_journal: control.journal.0,
+                survives: survives.to_wire(),
             }),
             FleetCommand::MarkTenant { tenant, state } => Kind::MarkTenant(wire::MarkTenant {
                 tenant: tenant.0,
@@ -445,6 +450,7 @@ impl FleetEntry {
                 control: identifier(register.tenant, register.control_journal),
                 name: register.name,
                 cell_id: register.cell_id,
+                survives: Survives::from_wire(register.survives)?,
             },
             Kind::MarkTenant(mark) => FleetCommand::MarkTenant {
                 tenant: TenantId(mark.tenant),
@@ -501,6 +507,9 @@ pub struct TenantEntry {
     pub config_seq: u64,
     /// Its groups, fixed at registration.
     pub groups: Groups,
+    /// What it survives (#252), recorded at `REGISTERING` and mirrored into
+    /// its control journal (#210). An `internal` tenant survives a zone.
+    pub survives: Survives,
 }
 
 /// What one fleet record folded to.
@@ -794,7 +803,8 @@ impl FleetDirectory {
                 control,
                 name,
                 cell_id,
-            } => self.register_tenant(*control, name, *cell_id),
+                survives,
+            } => self.register_tenant(*control, name, *cell_id, *survives),
             FleetCommand::MarkTenant { tenant, state } => self.mark_tenant(*tenant, *state),
             FleetCommand::RemoveTenant { tenant } => self.remove_tenant(*tenant),
         }
@@ -825,6 +835,7 @@ impl FleetDirectory {
                         state: TenantState::Ready,
                         config_seq: 0,
                         groups: Groups::FLEET_TENANT,
+                        survives: Survives::Az,
                     },
                 );
                 Ok(FleetEvent::FleetFormed { fleet_id })
@@ -879,6 +890,7 @@ impl FleetDirectory {
                 state: TenantState::Ready,
                 config_seq: 0,
                 groups: Groups::CELL_TENANT,
+                survives: Survives::Az,
             },
         );
         // The fleet's first cell hosts the fleet tenant (#226).
@@ -918,6 +930,7 @@ impl FleetDirectory {
         control: JournalIdentifier,
         name: &[u8],
         cell_id: u64,
+        survives: Survives,
     ) -> Result<FleetEvent, FleetDirectoryRefusal> {
         let tenant = control.tenant;
         if !control.is_set() {
@@ -928,7 +941,8 @@ impl FleetDirectory {
             let same = existing.groups == Groups::SERVED
                 && existing.name == name
                 && existing.cell_id == cell_id
-                && existing.control == control.journal;
+                && existing.control == control.journal
+                && existing.survives == survives;
             return if same {
                 Ok(FleetEvent::Unchanged)
             } else {
@@ -954,6 +968,7 @@ impl FleetDirectory {
                 state: TenantState::Registering,
                 config_seq: 0,
                 groups: Groups::SERVED,
+                survives,
             },
         );
         Ok(FleetEvent::TenantRegistered { tenant, cell_id })
@@ -1039,6 +1054,7 @@ impl FleetDirectory {
                     config_seq: t.config_seq,
                     control_journal: t.control.0,
                     groups: t.groups.to_wire(),
+                    survives: t.survives.to_wire(),
                 })
                 .collect(),
             removed: self.removed.iter().map(|id| id.0).collect(),
@@ -1106,6 +1122,7 @@ impl Checkpointable for FleetDirectory {
                     state: TenantState::from_wire(t.state).ok_or("an unknown tenant state")?,
                     config_seq: t.config_seq,
                     groups,
+                    survives: Survives::from_wire(t.survives)?,
                 },
             );
         }

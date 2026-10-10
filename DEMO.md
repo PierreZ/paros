@@ -4,10 +4,9 @@ A cell of `parosd` machines you start by hand, write to and read from. This is a
 test: nothing in CI runs it (CI only builds the image). The walkthrough that explains what each
 step does is [`crates/parosd/README.md`](crates/parosd/README.md).
 
-No id is fixed: `init` draws the cell's journals at random and prints them, so every command
-below takes the journal from `init`'s output (`journals=id:TENANT/JOURNAL`, both ids in hex).
-A journal is named by its name, `TENANT/JOURNAL` or `paros://TENANT/JOURNAL`, or by its ids,
-`id:TENANT/JOURNAL`. The journal `init` creates has no name yet (#210), so the demo uses its ids.
+No id is fixed: `init` draws the cell's control journals at random, and the tenant coordinator
+draws a journal's id when it creates the journal. A journal is named by its name,
+`TENANT/JOURNAL` or `paros://TENANT/JOURNAL`, or by its ids, `id:TENANT/JOURNAL` in hex.
 Human output prints ids as short hex, like git; `--json` prints them whole.
 
 ## With Docker Compose
@@ -19,11 +18,17 @@ Needs Docker with the Compose plugin; nothing else (the image is a plain Rust bu
 docker compose up -d --build
 
 # Form the cell over node1..node3, register the fleet and the fleet tenant. Prints one line:
-#   initialized universe=… cell=… coordinator=… members=3 control=id:T/J election=id:T/J universe_control=id:T/J journals=id:T/J steps=…
-docker compose run --rm init | tee init.out
-J=$(sed -n 's/.* journals=\([^ ,]*\).*/\1/p' init.out)
+#   initialized fleet=… cell=… coordinator=… members=3 control=id:T/J election=id:T/J fleet_control=id:T/J steps=…
+docker compose run --rm init
 
-# Write and read the cell's user journal. `--leader 7` claims the journal under the leader
+# A tenant, then a journal in it (#210). The tenant coordinator draws the journal's id and
+# picks its members from the desired mode (`--desired double` by default). Prints:
+#   created journal=id:T/J members=…
+docker compose run --rm parosctl tenant create acme
+docker compose run --rm parosctl journal create acme orders
+J=acme/orders
+
+# Write and read the journal. `--leader 7` claims the journal under the leader
 # uuid 7 (a uuid is drawn when absent), then writes at the tail.
 docker compose run --rm parosctl write "$J" hello world --leader 7
 docker compose run --rm parosctl read "$J"
@@ -38,10 +43,15 @@ docker compose run --rm parosctl write "$J" stale --leader 7 --no-claim
 docker compose run --rm parosctl write "$J" fresh --leader 8
 
 # Tenants: created once (a second create of a name is refused).
-docker compose run --rm parosctl tenant create acme
-docker compose run --rm parosctl tenant create globex
+docker compose run --rm parosctl tenant create globex --survives region
 docker compose run --rm parosctl tenant list
-docker compose run --rm parosctl tenant delete acme
+
+# A tenant's journals: a second create of a live name is refused (exit 3), a delete is a
+# tombstone, and the list shows both.
+docker compose run --rm parosctl journal create acme events --mode multi
+docker compose run --rm parosctl journal create acme events
+docker compose run --rm parosctl journal delete acme events
+docker compose run --rm parosctl journal list acme
 
 # Admit the two idle machines into the cell (#216): each is registered in the cell
 # control journal, then records its cell. A re-run prints `unchanged`.
@@ -65,7 +75,7 @@ docker compose down -v
 Add `--json` after `parosctl` for machine-readable output, e.g.
 `docker compose run --rm parosctl --json tenant list`.
 
-The journal `init` creates is single-writer: a writer must hold the current leader uuid. The
+The journal `orders` is single-writer: a writer must hold the current leader uuid. The
 four calls, the two writer modes and the limits are on the site's journal API page
 (`web/site/content/parosd/journal-api.md`).
 
@@ -90,13 +100,15 @@ done
 export PAROSCTL_SERVERS=127.0.0.1:4501,127.0.0.1:4502,127.0.0.1:4503
 
 # `cell init` over the three, every one of them needed (the servers, by default).
-parosctl init --members "$PAROSCTL_SERVERS" | tee /tmp/paros-demo/init.out
-J=$(sed -n 's/.* journals=\([^ ,]*\).*/\1/p' /tmp/paros-demo/init.out)
+parosctl init --members "$PAROSCTL_SERVERS"
+parosctl tenant create acme
+parosctl journal create acme orders | tee /tmp/paros-demo/create.out
+J=$(sed -n 's/.*journal=\([^ ]*\).*/\1/p' /tmp/paros-demo/create.out)
 
 parosctl write "$J" hello world --leader 7
 parosctl read "$J"
-parosctl tenant create acme
 parosctl tenant list
+parosctl journal list acme
 
 # Stop: SIGTERM shuts each machine down cleanly; remove the data to start over.
 pkill parosd

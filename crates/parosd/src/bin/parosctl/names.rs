@@ -6,8 +6,7 @@
 //! may name a journal by its ids instead, `id:TENANT/JOURNAL` in hex, each
 //! half a unique prefix of an id `parosctl` can list (the cell's control
 //! journals, the universe directory's tenants, a tenant's journals) or the
-//! full 16 digits. A journal `init` created is named this way until #210
-//! names every user journal.
+//! full 16 digits.
 //!
 //! Ids print as abbreviated hex (`paros::name::Abbreviations`); `--json`
 //! keeps them whole.
@@ -20,7 +19,7 @@ use paros::client::Client;
 use paros::client::bootstrap::control_journals;
 use paros::client::fleet::read_directory;
 use paros::client::names::{
-    JournalResolution, NameResolution, TenantResolution, Unreadable, read_tenant_directory, resolve,
+    JournalResolution, NameResolution, TenantResolution, Unreadable, read_tenant_control, resolve,
 };
 use paros::name::{Abbreviations, JournalName, PrefixMatch, match_prefix, parse_prefix};
 use paros::{JournalId, JournalIdentifier, TenantId};
@@ -175,7 +174,7 @@ pub async fn known_journals(client: &ParosClient) -> Vec<JournalIdentifier> {
     for (tenant, entry) in directory.tenants() {
         let control = JournalIdentifier::new(tenant, entry.control);
         known.push(control);
-        if let Ok(tenant_directory) = read_tenant_directory(client, 0, control).await {
+        if let Ok(tenant_directory) = read_tenant_control(client, 0, control).await {
             known.extend(
                 tenant_directory
                     .journals()

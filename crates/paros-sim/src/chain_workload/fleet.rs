@@ -75,6 +75,7 @@ use crate::shape::MachineLayout;
 mod admit;
 mod cell;
 mod election;
+mod journals;
 mod other_cell;
 
 use cell::Cell;
@@ -152,6 +153,13 @@ pub(super) struct FleetOps {
     /// The machine whose admission this operator stopped after its
     /// registration (#216), to finish on its next `ADMIT`.
     admitting: Option<Address>,
+    /// A journal request no answer decided yet (#210): sent again, with the
+    /// same id, at this client's next journal step.
+    journal_pending: Option<paros::client::journals::JournalRequest>,
+    /// Each tenant's journal names, as this client resolved them through
+    /// the library (#239 (names at the edge)): a cached resolution goes
+    /// stale when its journal is deleted and the name created again.
+    journal_names: BTreeMap<TenantId, paros::client::names::JournalNames>,
     /// The run's shared state: the completed removals (#239).
     state: StateHandle,
 }
@@ -191,6 +199,8 @@ impl FleetOps {
             killed: false,
             learned: super::system::Learned::default(),
             admitting: None,
+            journal_pending: None,
+            journal_names: BTreeMap::new(),
             state: ctx.state().clone(),
         })
     }

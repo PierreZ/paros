@@ -43,6 +43,14 @@ service Machine {
   // `RegisterNode` into the cell control journal when the address changed.
   // Idempotent: the registry holding the address is the answer.
   rpc Register(.paros.machine.v1.Register) returns (.paros.machine.v1.RegisterAck);
+  // A tenant's journal create or delete (#210), sent to the tenant
+  // coordinator: until #212 and #225, the elected cell coordinator, at the
+  // interface its election renewals publish. The coordinator writes the
+  // request to the tenant's control journal; the fold judges it at apply and
+  // records its outcome under `request`. A retry with the same `request`
+  // reads that outcome back, so it acts once, across a coordinator change
+  // too.
+  rpc JournalRequest(.paros.machine.v1.JournalRequest) returns (.paros.machine.v1.JournalRequestAck);
 }
 
 message Identify {}
@@ -186,4 +194,48 @@ message RegisterAck {
   // or retired), "unreachable" (it does not answer as itself at the
   // address), "unavailable" (the write did not land), "malformed".
   string refusal = 2;
+}
+
+message JournalRequest {
+  // The idempotency id: drawn by the caller, set, and the same on every
+  // retry of one request.
+  uint64 request = 1;
+  // The tenant whose journal it is.
+  uint64 tenant = 2;
+  oneof op {
+    CreateJournalOp create = 3;
+    DeleteJournalOp delete = 4;
+  }
+}
+
+// Create journal `name`, written in `writer` mode, under a desired mode: a
+// redundancy (1 single, 2 double, 3 triple), or a grid `{rows, cols}`
+// (redundancy 0, both at least 2). `replicas` is the replica count. The
+// coordinator draws the id and picks the members: a caller never names one.
+message CreateJournalOp {
+  bytes name = 1;
+  paros.common.v1.WriterMode writer = 2;
+  uint32 redundancy = 3;
+  uint32 rows = 4;
+  uint32 cols = 5;
+  uint32 replicas = 6;
+}
+
+// Delete the live journal named `name`: a tombstone, never a reuse.
+message DeleteJournalOp {
+  bytes name = 1;
+}
+
+message JournalRequestAck {
+  // What the request folded to: "created", "deleted", "name_taken" (a live
+  // journal holds the name: `journal` is its id), "unknown_journal" (no live
+  // journal has the name). Or why it did not reach the fold, to retry with
+  // the same `request`: "not_coordinator", "unavailable". Or a refusal:
+  // "unknown_tenant", "unplaceable" (too few machines for the desired mode),
+  // "malformed".
+  string outcome = 1;
+  // The journal's id, on "created", "deleted" and "name_taken".
+  uint64 journal = 2;
+  // Its members, on "created".
+  paros.common.v1.AcceptorConfig config = 3;
 }

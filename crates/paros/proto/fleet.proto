@@ -65,6 +65,9 @@ message RegisterTenant {
   // 5 was the `movable`/`pinned` placement, dropped on 2026-10-04 (#243):
   // the groups alone decide whether a tenant moves.
   reserved 5;
+  // What the tenant survives (#252): 1 az, 2 region. Mirrored into its
+  // control journal (#210).
+  uint32 survives = 6;
 }
 
 // Move tenant `tenant` to `state` (see `TenantState` for the transitions).
@@ -114,4 +117,6 @@ message TenantEntry {
   // fleet, 8 users. Only {internal, fleet} (5), {internal, cell} (3) and
   // {users} (8) exist; any other set is refused.
   uint32 groups = 10;
+  // What the tenant survives (#252): 1 az, 2 region.
+  uint32 survives = 11;
 }

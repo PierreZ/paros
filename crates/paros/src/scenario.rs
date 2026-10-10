@@ -3,7 +3,7 @@
 //!
 //! Every driver choice is an inline BUGGIFY site at the line that makes it
 //! (#294, #318). Most sites are keyed by their `file:line`, so moonpool draws
-//! their activation alone. The three locations here are named instead
+//! their activation alone. The locations here are named instead
 //! (`moonpool_buggify::buggify_named!`): each is one ingredient of a per-seed
 //! scenario, and the harness turns it on together with the scenario's other
 //! ingredients with `moonpool_buggify::set_activation(label, active)`, so the
@@ -40,6 +40,26 @@ pub const HOLD_JOURNAL: &str = "paros: a node holds one of its journals";
 /// response can be lost in production at any time. Recovery gate: the
 /// client's retry takes the dedup path.
 pub const LOSE_VERDICTS: &str = "paros: a node loses write verdicts";
+
+/// The node opens its control-journal follow reads late (#189): on most
+/// ticks it opens none, so its registry fold lags the registry's commits.
+/// A node registered at runtime then speaks to members whose fold has not
+/// admitted it yet, and they refuse it until the fold catches up. Always
+/// safe: a slow follower is within the model, and a refused peer message is
+/// re-sent. The simulation couples it to the lagging-fold scenario.
+/// Recovery gate: "system: a message from a not-yet-folded node is refused
+/// and later accepted".
+pub const LAG_FOLLOW: &str = "paros: a node follows its control journals late";
+
+/// Whether this node skips opening its follow reads on this tick
+/// ([`LAG_FOLLOW`]).
+pub(crate) fn lag_follow() -> bool {
+    let lagging = moonpool_buggify::buggify_named!(LAG_FOLLOW, 0.9);
+    if lagging {
+        moonpool_assertions::reachable!("system: a node follows its control journals late");
+    }
+    lagging
+}
 
 /// Whether this node withholds its garbage-collection requests now
 /// ([`WITHHOLD_GC`]).

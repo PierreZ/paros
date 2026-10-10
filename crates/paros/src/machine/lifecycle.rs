@@ -46,6 +46,7 @@ use super::{
     Admission, AdmittedMachine, CellLedger, CellPlan, Class, FormedCell, Joined, MachineFacts,
     ProviderDisk,
 };
+use crate::ControlPlan;
 use crate::{Address, Audit, DriverTunables, Names, RunError};
 
 /// What a machine is configured with: the operator's half of its record.
@@ -245,9 +246,7 @@ const LATE_BOOT_MS: u64 = 2_500;
 /// wait for its cell while it has none, then serve the cell's journals.
 /// `audits` names the audit port of each [`AuditScope`]. `addresses` are
 /// what this machine binds and what it advertises; `names` resolves every
-/// address it dials. `assignment` is how many user journals a
-/// cell this machine draws at `cell init` serves beside its control journals
-/// (the static assignment, until #212).
+/// address it dials.
 ///
 /// # Errors
 ///
@@ -266,7 +265,6 @@ pub async fn run_machine<P, S, A, F>(
     settings: &MachineSettings,
     addresses: MachineAddresses,
     names: Names,
-    assignment: usize,
     tunables: DriverTunables,
     shutdown: CancellationToken,
 ) -> Result<(), MachineError>
@@ -332,7 +330,6 @@ where
         let waited = super::wait_for_cell(
             providers.clone(),
             &facts,
-            assignment,
             &mut ledger,
             &tunables,
             shutdown.clone(),
@@ -404,6 +401,7 @@ async fn identity<P: Providers, S: StorageProvider + Clone, A: Audit>(
             promised: Ballot::default(),
             plan: None,
             admitted: None,
+            created: Vec::new(),
         };
         disk.write_record(&record.render()).await.map_err(failed)?;
         audit.machine_recorded(&record);
@@ -469,7 +467,34 @@ where
         .iter()
         .map(|&journal| (journal, journal_config(plan, node_id, journal)))
         .collect();
-    let stores = MachineStores::new(disk, node_id, genesis, audits);
+    // The record as the formation left it: the stores rewrite it when they
+    // provision a created journal (#210).
+    let record = disk
+        .read_record()
+        .await
+        .map_err(|e| MachineError::Storage(format!("machine record: {e}")))?
+        .ok_or_else(|| MachineError::Storage("machine record: gone after formation".into()))
+        .and_then(|text| {
+            MachineRecord::parse(&text)
+                .map_err(|e| MachineError::Refused(format!("machine record: {e}")))
+        })?;
+    assert_eq!(
+        record.node_id, node_id,
+        "the record names the serving machine"
+    );
+    let control = ControlPlan {
+        self_id: node_id,
+        class: cell.facts.class,
+        seeds: plan
+            .members
+            .iter()
+            .map(|(id, addr)| (*id, addr.to_string()))
+            .collect(),
+        cell: plan.control,
+        founders: plan.members.iter().map(|(id, _)| *id).collect(),
+        spares: Vec::new(),
+    };
+    let stores = MachineStores::new(disk, record, genesis, audits);
     // Bind where the machine is (#257), never at the address the plan
     // froze: a machine whose address changed across a restart still serves.
     let listen = cell.facts.listen;
@@ -488,7 +513,7 @@ where
         Vec::new(),
         Vec::new(),
         Vec::new(),
-        None,
+        Some(control),
         Some(cell.clone()),
         *tunables,
         shutdown,

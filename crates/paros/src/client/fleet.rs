@@ -73,7 +73,8 @@ use crate::fleet::{
     CellState, FleetCommand, FleetDirectory, FleetEntry, METADATA_VERSION, TenantState,
 };
 use crate::machine::ControlJournals;
-use crate::system::{FleetRegistration, Registry, SystemCommand};
+use crate::system::{FleetRegistration, HostedTenant, Registry, SystemCommand};
+use crate::tenant::Survives;
 
 /// One step a fleet operation wrote.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -253,6 +254,8 @@ pub struct FleetSession {
     /// The first checkpoint a fold of this session found unequal to its own
     /// state, with its journal (see [`LoadOutcome::Loaded`]).
     diverged: Option<(JournalIdentifier, u64)>,
+    /// What a tenant this session registers survives (#252).
+    survives: Survives,
 }
 
 impl FleetSession {
@@ -279,7 +282,16 @@ impl FleetSession {
             directory_open: false,
             cell_open: false,
             diverged: None,
+            survives: Survives::Az,
         })
+    }
+
+    /// Register every tenant this session creates as surviving `survives`
+    /// (#252; `az` otherwise).
+    #[must_use]
+    pub fn with_survives(mut self, survives: Survives) -> Self {
+        self.survives = survives;
+        self
     }
 
     /// The first checkpoint any fold of this session — the fleet
@@ -450,6 +462,7 @@ impl FleetSession {
                 control: draw,
                 name: name.to_vec(),
                 cell_id,
+                survives: self.survives,
             };
             return self
                 .write_directory(client, first, fleet, register, Stage::RegisterTenant)
@@ -473,6 +486,11 @@ impl FleetSession {
             TenantState::Removing => return Step::Refused(FleetRefusal::Removed { tenant }),
             state => return Step::Refused(FleetRefusal::NameTaken { tenant, state }),
         };
+        let hosted = HostedTenant {
+            control: entry.control,
+            name: entry.name.clone(),
+            survives: entry.survives,
+        };
         if let Err(stop) = self.cell_of(client, first, fleet, cell_id).await {
             return stop;
         }
@@ -485,6 +503,7 @@ impl FleetSession {
             let host = SystemCommand::HostTenant {
                 fleet_id: fleet,
                 tenant,
+                hosted,
             };
             return self
                 .write_cell(client, first, &host, Stage::HostTenant)

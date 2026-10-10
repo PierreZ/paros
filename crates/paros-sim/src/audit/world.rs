@@ -45,36 +45,11 @@ pub(crate) fn audit_world_for(
     )
 }
 
-/// Well-known key of the writer modes clients asked for in directory
-/// creates (#241).
-const CREATED_MODES_KEY: &str = "paros-audit-created-modes";
-
-/// Record the writer mode a client asks for `journal` in a directory
-/// create (#241), before the create is sent. A journal keeps the first mode
-/// recorded for it, as the directory keeps the first create of an id. Every
-/// node that opens the journal pairs it with the mode the decided create
-/// gave it ([`AuditWorld::mode`] against its `Config`).
-pub(crate) fn note_created_mode(
-    state: &StateHandle,
-    journal: paros::JournalIdentifier,
-    mode: paros::WriterMode,
-) {
-    let modes = crate::state::published(
-        state,
-        CREATED_MODES_KEY,
-        BTreeMap::<paros::JournalIdentifier, paros::WriterMode>::new,
-    );
-    modes
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .entry(journal)
-        .or_insert(mode);
-}
-
 /// The writer mode `journal` runs in (#241): the plan's for a journal of the
-/// run, the creator's for a journal created through the directory,
-/// multi-writer for a cell's election journal (#240), and
-/// single-writer for every other one (a system journal, a control journal).
+/// run, the one its tenant's control journal created it in (#210, folded
+/// before any machine starts it), multi-writer for a cell's election journal
+/// (#240), and single-writer for every other one (a system journal, a
+/// control journal).
 fn writer_mode(state: &StateHandle, journal: paros::JournalIdentifier) -> paros::WriterMode {
     let plan = crate::shape::journals(state);
     if plan.ids.contains(&journal) {
@@ -83,15 +58,8 @@ fn writer_mode(state: &StateHandle, journal: paros::JournalIdentifier) -> paros:
     if crate::machine::is_election(state, journal) {
         return paros::WriterMode::Multi;
     }
-    let modes = crate::state::published(
-        state,
-        CREATED_MODES_KEY,
-        BTreeMap::<paros::JournalIdentifier, paros::WriterMode>::new,
-    );
-    let modes = modes.lock().unwrap_or_else(PoisonError::into_inner);
-    modes
-        .get(&journal)
-        .copied()
+    super::tenants::lock(&super::tenants::tenant_board(state))
+        .mode(journal)
         .unwrap_or(paros::WriterMode::Single)
 }
 
@@ -726,6 +694,7 @@ pub(crate) fn check_run(
     crate::world::check_storage_gates(state, journal);
     super::journals::lock(&super::journals::journal_board(state)).check_gates();
     super::system::lock(&super::system::system_board(state)).check_gates();
+    super::tenants::lock(&super::tenants::tenant_board(state)).check_gates();
     // Every slot a call was answered at is inside what every live node
     // walked by the end (#204: answers name positions to the client, slots
     // to the audit).

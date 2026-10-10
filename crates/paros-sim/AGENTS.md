@@ -23,7 +23,7 @@ fault world, the one client workload and the audit. Stack: `paros-core` ←
 - `chain_workload/races.rs` → races 1 and 2 of #205 (`burst`, `ack_race`).
 - `chain_workload/multi.rs` → the ops on a multi-writer journal (#241): unfenced appends through `paros::client::multi`, re-sent at-least-once, open truncations, and the wrong-mode calls (a claim, a fenced write) that must be refused; a single-writer journal's unfenced write is refused too.
 - `chain_workload/foreign.rs` → the cross-tenant attack (#247): a `Write`, `Truncate` or `SetLeader` under another tenant's journal or an identifier nobody serves, refused and never applied (`AuditWorld::note_foreign`).
-- `chain_workload/fold.rs` → the client's fold and the trim fence · `chain_workload/system.rs` → ops 17–21, 23 and 24, and their read-back (the registry's through a checkpoint `Folder`); `Announce`, the audit observer for library writes to system journals and the logger of every attempt at them into the control journals' shared history (#247, `rpc::control_attempts`); over the machines it holds the "no unlearned id" oracle (`Announce::learned_only`, #246): every call names a journal its operator learned from `init`'s reply or through `Inspect`.
+- `chain_workload/fold.rs` → the client's fold and the trim fence · `chain_workload/system.rs` → ops 19–21, 23 and 24, and their read-back (the registry's through a checkpoint `Folder`); `Announce`, the audit observer for library writes to system journals and the logger of every attempt at them into the control journals' shared history (#247, `rpc::control_attempts`); over the machines it holds the "no unlearned id" oracle (`Announce::learned_only`, #246): every call names a journal its operator learned from `init`'s reply or through `Inspect`.
 - `chain_workload/fleet.rs` → `FleetOps` → ops 25 and 26 (#229, #246): `init` whole through `paros::client::initialize` against the machines (`cell init` over the layout's founding members — started at a drawn founder, or with a second concurrent `cell init` at another founder that must converge on the one cell, on their own BUGGIFY locations — again once known, or misdirected to a non-founder that must refuse it as `not_a_member`), the cell learned from that run or through `Inspect` (never injected), `init`'s fleet half and tenant create/remove through `FleetSession`, the crash-at-a-step, target-kill (#247), changed-identity and fleet-tenant checkpoint-crash shapes, a reachable per `Stage`, and the check that the fleet directory equals the cell's tenant list — mid-run when both folds are one instant's, and on every run over the final folds, with the recovery tail's control-plane liveness (`settle`, `final_check`).
 - `chain_workload/fleet/other_cell.rs` → another cell (#216): on its own BUGGIFY location in `ADMIT`, an operator founds a one-machine cell on the machine that replaced a wiped member the run's cell still names, so that cell's peer traffic meets another cell (`Deliver`'s `cell_id` refuses it); operators learn their cell from a majority of the founding members.
 - Names (#239): a created journal is addressed by its name through `paros::client::names` (`SystemOps::address_created`), each resolution held against the directory the nodes folded at the position it was read at (`SystemBoard::named_at`); a cached resolution is read through on a later step and, refused as unknown, dropped and resolved again; a created tenant's name resolves through the universe directory, never to a removed tenant, and an internal tenant never resolves (`FleetOps::resolve_tenant_name`).
@@ -44,9 +44,10 @@ fault world, the one client workload and the audit. Stack: `paros-core` ←
 - `audit/mod.rs` → `NodeAudit`, `reach_once!` · `audit/world.rs` → `AuditWorld`, `audit_world_for`, `check_run`, `check_final_convergence`.
 - `audit/state.rs` → `AuditState` (per-transition protocol safety) · `audit/matchmaker.rs` → `MatchmakerAudit`.
 - `audit/losses.rs` → `Losses` → an outage's losses as the journal reports them (#263): the shape recognized (no, one, fewer than a quorum of clean copies; `faulty, faulty, none`; the only clean copy on a removed node), the CTRL rule re-derived to name a slot unrecoverable, "an unrecoverable slot is never accepted again", the four outcome gates, and the convergence excuse.
-- `audit/client.rs` → `ClientHistory`, `check_control_history` (the registry, the directory, and the control journals of the cell the machines formed, #247, #246; the cell's election journal multi-writer, #240) · `audit/linearizability.rs` → Wing & Gong search over every attempt (#205), its own journal model.
+- `audit/client.rs` → `ClientHistory`, `check_control_history` (the registry, the control journals of the cell the machines formed, and every tenant control journal a machine folded, #247, #246, #210; the cell's election journal multi-writer, #240) · `audit/linearizability.rs` → Wing & Gong search over every attempt (#205), its own journal model.
 - `audit/journal_model.rs` → the §6 invariants over every node's `applied` reports (one verdict per slot, dense positions, the leader chain — every verdict names the leader in force, a write accepted only under a uuid won in the log — monotone `first_seq`; a reinstated uuid is reachable, never a violation, #241).
-- `audit/journals.rs`, `audit/system.rs` → the journal board (#188) and system board (#189), below.
+- `audit/journals.rs`, `audit/system.rs`, `audit/tenants.rs` → the journal board (#188), the system board (#189) and the tenant board (#210), below.
+- `chain_workload/fleet/journals.rs` → ops 17 and 18 (#210): a tenant's journals through the tenant coordinator (`paros::client::journals`).
 - `audit/liveness.rs` → `JudgedRegistry` → the cell control journal's fold with an observer (#211): the final fleet check reads the cell through it, and every liveness refusal in the log (`LivenessUnchanged`, `StaleIncarnation`) is a coordinator that wrote a non-change; gates for a machine marked down, one back up without re-placement, and a rebooted machine registered again.
 
 ## Harness shape
@@ -55,7 +56,7 @@ fault world, the one client workload and the audit. Stack: `paros-core` ←
   `paros-proxy` (0–3, `ProxyId(rank)`), `paros-replica` (0–2, `NodeId(1000 + rank)`, a quiet
   journal store outside the copy budget), `paros-joiner` (0–2, `NodeId(100 + rank)`, idle without system
   journals), `paros-machine` (1–3, a minted `node_id`; `shape::machine_layout` draws the founding
-  members, each machine's class, capacity and failure domain, and the assignment). Attrition per group (`AttritionVictims::group`); joiners are no victim. 1–3
+  members, each machine's class, capacity and failure domain). Attrition per group (`AttritionVictims::group`); joiners are no victim. 1–3
   `ChainWorkload` clients. Zero matchmakers = the plain Multi-Paxos deployment.
 - **Bootstrap**: `bootstrap_ranks` — the whole pool, or on a matchmaker seed a subset of at least
   `MIN_BOOTSTRAP` leaving *spares* a `Reconfigure` pulls in.
@@ -88,7 +89,7 @@ fault world, the one client workload and the audit. Stack: `paros-core` ←
   power loss the attrition regime takes, a cut mid-commit is a journal store's own `hint!` budgeted by `world/cut.rs`, a wipe deletes the journal's files, the ledgered injector
   damages a boot, and moonpool's storage chaos runs under it. A quiet seat (a replica, a held
   journal) stores ordered with the injector dark; a cut there is torn or whole and spends no budget. `withhold_gc` → a seed
-  whose nodes withhold GC requests for the chaos window (#263). `system_journals` → the directory and the registry on half the seeds (kept at 50% from the sweep's coverage, #247; the fleet operations run on every seed, against the machines, #246), on
+  whose nodes withhold GC requests for the chaos window (#263). `system_journals` → the registry on half the seeds (kept at 50% from the sweep's coverage, #247; the fleet operations run on every seed, against the machines, #246), on
   `SEED_COUNT` (1) seed ranks. `NodeShape::draw` → `DriverTunables` (one knob per field, the recovery page size included (#330: `1..=LEADER_RECOVERY_BATCH`, so a leader's recovery spans several pages), or on its own location the whole `DriverTunables::production()` profile `parosd` ships, #209), wipe/loss %, `config_edit_pct`.
 
 ## Chain workload op ids (`chain_workload.rs:47-127`; ids never shift)
@@ -99,8 +100,12 @@ refused, unless a reinstatement made its uuid lead again) · `WRITE_TO_NON_LEADE
 position per verdict) · `TRUNCATE_STORM=7` · `READ_INDEX=8` retired · `MATCHMAKE=9`,
 `MATCH_GC=10` retired · `RECONFIGURE=11` (compose from the live pool; refused on a plain seed)
 · `RECONFIGURE_MATCHMAKERS=12` · `RETIRE=13` · `QUORUM_READ=14` retired · `READ=15` (judged as
-it arrives) · `CHECK_TAIL=16` retired · `CREATE_JOURNAL=17`, `DELETE_JOURNAL=18`,
-`REGISTER_NODE=19`, `DRAIN_NODE=20`, `RETIRE_NODE=21` (a `Write` to the directory or the registry; a create draws its id and redraws on `IdTaken`; refused
+it arrives) · `CHECK_TAIL=16` retired · `CREATE_JOURNAL=17`, `DELETE_JOURNAL=18` (#210: a request to the tenant
+coordinator on the machines through `paros::client::journals`, in a `READY` tenant of the fleet
+directory: an idempotency id the client draws, a name from three, a writer mode and a desired
+mode; an undecided request is sent again with the same id at the next journal step, a decided one
+on a BUGGIFY location must read back its first answer; a created single-writer journal takes one
+append) · `REGISTER_NODE=19`, `DRAIN_NODE=20`, `RETIRE_NODE=21` (a `Write` to the registry; refused
 `unknown_journal` without system journals; a register carries the joiner's drawn class and
 capacity, and a registered joiner registering again is a reboot, #211) · `SET_LEADER=22` (CAS on
 the leader uuid; a superseded writer reinstates the uuid it last led with, `reinstate_pct`, the misbehaviour the journal does not refuse, #241) · `CHECKPOINT=23` (the registry's owner, through `paros::client::checkpoint`:
@@ -134,17 +139,21 @@ then admitted; it may stop after the registration and is resumed by the client's
   quarantined journal sends nothing; a sibling keeps committing while one is held; a node keeps
   serving the rest while one is quarantined; a tenant journal commits while the control
   journals' seed is held down (static stability, #247).
-- **System board** (`audit/system.rs`): every node folds each system journal alike per LSN; a
-  created journal takes its creator's drawn user id, never reused (`IdTaken` only for an id
-  created before); no append acked after its tombstone; a checkpoint a node (or a client) meets
+- **System board** (`audit/system.rs`): every node folds the registry alike per LSN; a checkpoint a node (or a client) meets
   with the whole prefix folded is that prefix's state (#230); a `stateless` joiner never serves
   a journal, a booking takes a slot of its node's class and never past its capacity, and a
   booking id is booked at most once, across checkpoints (#211, on the registry's events in LSN
   order; the model crosses a truncation at the checkpoint a restoring node meets, resuming its
   bookings and spent ids, and equals every checkpoint it reaches, #247); no genesis node's message waits on the registry fold; every live node's
-  registry fold reaches the tail after chaos; gates for name races,
+  registry fold reaches the tail after chaos; gates for
   joiners learning before admission, refused-then-accepted joiner messages, a re-registration,
   and a fold restarting from a checkpoint once one truncated.
+- **Tenant board** (`audit/tenants.rs`, #210): every machine folds a tenant control journal alike
+  per LSN; a created journal takes a set id never used before, inside its own tenant (`IdTaken`
+  only for an id used before); a request folds to one outcome, and a repeat reads it back; a
+  delete names a journal created before; no append acked after its tombstone; the writer mode a
+  created journal runs in (`writer_mode`); gates for `name_taken`, an `IdTaken` redraw and a
+  retried request.
 
 ## Entry points (`lib.rs:323-428`)
 

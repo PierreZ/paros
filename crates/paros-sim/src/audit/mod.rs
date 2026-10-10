@@ -49,12 +49,13 @@ mod losses;
 mod matchmaker;
 mod state;
 pub(crate) mod system;
+pub(crate) mod tenants;
 mod world;
 
 pub(crate) use client::{ClientHistory, check_control_history};
 pub(crate) use linearizability::{Attempt, Call, Seen};
 pub(crate) use matchmaker::RegistryOp;
-pub(crate) use world::{AuditWorld, audit_world, audit_world_for, check_run, note_created_mode};
+pub(crate) use world::{AuditWorld, audit_world, audit_world_for, check_run};
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -89,6 +90,9 @@ pub(crate) struct NodeAudit<T> {
     /// The run's system-journal board (#189), on a node that follows the
     /// system journals.
     system: Option<Arc<Mutex<system::SystemBoard>>>,
+    /// The run's tenant board (#210), on a machine that follows the tenant
+    /// control journals.
+    tenants: Option<Arc<Mutex<tenants::TenantBoard>>>,
     /// The run's machine board (#246), on a machine's own port.
     machines: Option<(Arc<Mutex<crate::machine::MachineBoard>>, paros::Address)>,
     /// The observer of the node's own client's calls (the cell
@@ -138,9 +142,17 @@ impl<T: TimeProvider> NodeAudit<T> {
             world,
             journal: None,
             system: None,
+            tenants: None,
             machines: None,
             calls: None,
         }
+    }
+
+    /// This port also reports the tenant control journals' folds and the
+    /// appends they judge to `board` (#210).
+    pub(crate) fn with_tenants(mut self, board: Arc<Mutex<tenants::TenantBoard>>) -> Self {
+        self.tenants = Some(board);
+        self
     }
 
     /// This port also hands `observer` to the node's own client (#240).
@@ -1011,12 +1023,12 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
     }
 
     fn answered(&self, node: NodeId, slot: Slot, command: &Command, outcome: &paros::Outcome) {
-        // #189: a node acknowledges no write to a journal after folding its
-        // tombstone.
+        // #189, #210: a node acknowledges no write to a journal after
+        // folding its tombstone.
         if command.write().is_some()
-            && let (Some(board), Some((journal, _))) = (self.system_board(), &self.journal)
+            && let (Some(board), Some((journal, _))) = (&self.tenants, &self.journal)
         {
-            board.acked(node, *journal);
+            tenants::lock(board).acked(node, *journal);
         }
         let mut st = self.state();
         st.any_ack_checked = true;
@@ -1138,8 +1150,17 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         seq: u64,
         event: &paros::system::SystemEvent,
     ) {
-        if let Some(mut board) = self.system_board() {
-            board.folded(node, journal, seq, event);
+        match event {
+            paros::system::SystemEvent::Registry(event) => {
+                if let Some(mut board) = self.system_board() {
+                    board.folded(node, journal, seq, event);
+                }
+            }
+            paros::system::SystemEvent::Tenant(event) => {
+                if let Some(board) = &self.tenants {
+                    tenants::lock(board).folded(node, journal, seq, event);
+                }
+            }
         }
     }
 

@@ -1,21 +1,15 @@
-//! The system journals' oracles (#189): what every node's folds of the
-//! directory (the user tenant's control journal) and the node registry (the
-//! cell tenant's control journal, #235) owe each other,
-//! and what a created or deleted journal owes its clients.
+//! The node registry's oracles (#189): what every node's folds of the
+//! registry (a harness tenant's control journal on the acceptors, #235) owe
+//! each other. A tenant control journal's oracles are the machines'
+//! (`super::tenants`, #210).
 //!
-//! Each journal's own [`AuditWorld`](super::AuditWorld) already judges its
-//! protocol safety — the system journals and every created journal get one
-//! like any other — so what lives here is only the *meaning* of their
-//! entries, on one board every node's audit port reports to:
+//! The registry's own [`AuditWorld`](super::AuditWorld) already judges its
+//! protocol safety, so what lives here is only the *meaning* of its entries,
+//! on one board every node's audit port reports to:
 //!
-//! - **agreement** — every node that folded LSN `l` of a system journal
-//!   folded it to the same event (the directory's and the registry's folds
-//!   are one sequence at every node, only lagging);
-//! - **allocation** — a created journal's id is the one its creator drew
-//!   (#235), in the user range, never a genesis journal's and never one
-//!   created before;
-//! - **tombstones** — a node that folded a journal's tombstone acknowledges
-//!   no append to it afterwards;
+//! - **agreement** — every node that folded LSN `l` of the registry folded
+//!   it to the same event (the registry's fold is one sequence at every
+//!   node, only lagging);
 //! - **checkpoints** (#230) — a node whose fold held the registry's whole
 //!   prefix finds every checkpoint equal to its own state (folding from a
 //!   checkpoint yields what folding the full history does);
@@ -27,26 +21,20 @@
 //!   the checkpoint a restoring node meets, which the model equals —
 //!   bookings and spent ids — wherever it reaches one whole, #247).
 //!
-//! The gates are outcomes the run must be proven to reach: a name race
-//! decided by slot order, a joiner that learned the system journals before
-//! any node had it in its pool, and a joiner's message refused by a node
-//! that had not folded its registration and accepted once it had.
+//! The gates are outcomes the run must be proven to reach: a joiner that
+//! learned the registry before any node had it in its pool, and a joiner's
+//! message refused by a node that had not folded its registration and
+//! accepted once it had.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use moonpool_sim::{StateHandle, assert_always, assert_reachable, assert_sometimes};
-use paros::system::{
-    Class, DirectoryEvent, DirectoryRefusal, Registry, RegistryEvent, RegistryRefusal, SystemEvent,
-};
-use paros::{JournalId, JournalIdentifier, NodeId};
+use paros::system::{Class, Registry, RegistryEvent, RegistryRefusal};
+use paros::{JournalIdentifier, NodeId};
 
 const SYSTEM_BOARD_KEY: &str = "paros-system-board";
-
-/// No node reported some position of the directory yet.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Unreported;
 
 /// The run's system-journal facts, shared by every node's audit port.
 #[derive(Default)]
@@ -59,40 +47,21 @@ pub(crate) struct SystemBoard {
     /// A joiner joins the default journal as a spare a reconfiguration may
     /// pull in (a seed with matchmakers, no proxies, no replicas).
     spares: bool,
-    /// The genesis journals: identifiers the directory never allocates.
-    genesis: BTreeSet<JournalIdentifier>,
     /// The genesis pool: a node outside it is a joiner.
     genesis_pool: BTreeSet<u64>,
     /// Per `(journal, lsn)`: the digest of the event the first node to fold
     /// it folded it to.
     folded: BTreeMap<(JournalIdentifier, u64), u64>,
-    /// Every id the directory created, with the LSN that created it.
-    created: BTreeMap<JournalId, u64>,
-    /// `(node, journal)`: the node folded the journal's tombstone.
-    tombstoned: BTreeSet<(u64, JournalIdentifier)>,
     /// Joiners some node has admitted to its pool.
     admitted_anywhere: BTreeSet<u64>,
     /// `(node, from)`: `node` refused a message from `from`, not yet in its
     /// pool.
     refused: BTreeSet<(u64, u64)>,
-    /// A name race was decided by slot order.
-    name_race: bool,
-    /// The directory's events, as first folded anywhere, by position: what
-    /// a name resolved at a position must agree with (#239).
-    directory_events: BTreeMap<u64, DirectoryEvent>,
-    /// Each created journal's name.
-    created_names: BTreeMap<JournalId, Vec<u8>>,
-    /// Names a completed delete freed.
-    freed_names: BTreeSet<Vec<u8>>,
-    /// A name was created again after a completed delete freed it (#239).
-    name_reused: bool,
-    /// A create naming an id the directory already created was refused.
-    id_taken: bool,
     /// A joiner folded a system entry before any node had it in its pool.
     learned_before_pool: bool,
     /// A node refused a joiner's message and later admitted it.
     refused_then_admitted: bool,
-    /// A joiner started a journal the directory created naming it.
+    /// A joiner started a journal (a spare's).
     joiner_started: bool,
     /// A leadership ran under a configuration naming a joiner: a node the
     /// registry admitted at runtime joined a journal through `Reconfigure`.
@@ -140,7 +109,7 @@ pub(crate) fn lock(board: &Mutex<SystemBoard>) -> MutexGuard<'_, SystemBoard> {
 
 /// A stable digest of one folded event (its `Debug` rendering is a pure
 /// function of the event).
-fn digest(event: &SystemEvent) -> u64 {
+pub(super) fn digest(event: &impl std::fmt::Debug) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     format!("{event:?}").hash(&mut hasher);
     hasher.finish()
@@ -150,7 +119,6 @@ impl SystemBoard {
     /// Record the run's genesis (idempotent: every node arms the same).
     pub(crate) fn arm(
         &mut self,
-        genesis: impl IntoIterator<Item = JournalIdentifier>,
         pool: impl IntoIterator<Item = u64>,
         joiners: bool,
         spares: bool,
@@ -163,109 +131,35 @@ impl SystemBoard {
         self.armed = true;
         self.joiners = joiners;
         self.spares = spares;
-        self.genesis = genesis.into_iter().collect();
         self.genesis_pool = pool.into_iter().collect();
     }
 
-    /// `node` folded LSN `lsn` of system journal `journal` to `event`.
+    /// `node` folded LSN `lsn` of the registry `journal` to `event`.
     #[tracing::instrument(level = "trace", skip(self, event), fields(node = node.0, journal = %journal, lsn))]
     pub(crate) fn folded(
         &mut self,
         node: NodeId,
         journal: JournalIdentifier,
         lsn: u64,
-        event: &SystemEvent,
+        event: &RegistryEvent,
     ) {
         let digest = digest(event);
         let known = *self.folded.entry((journal, lsn)).or_insert(digest);
-        if let SystemEvent::Directory(_) = event {
-            assert_always!(
-                known == digest,
-                "system: every node folds the directory to the same event at every lsn",
-                { "node" => node.0, "lsn" => lsn }
-            );
-        } else {
-            assert_always!(
-                known == digest,
-                "system: every node folds the registry to the same event at every lsn",
-                { "node" => node.0, "lsn" => lsn }
-            );
-        }
+        assert_always!(
+            known == digest,
+            "system: every node folds the registry to the same event at every lsn",
+            { "node" => node.0, "lsn" => lsn }
+        );
         if !self.genesis_pool.contains(&node.0) && !self.admitted_anywhere.contains(&node.0) {
             if !self.learned_before_pool {
                 assert_reachable!("system: a joiner folds a system entry before it is in any pool");
             }
             self.learned_before_pool = true;
         }
-        if let SystemEvent::Registry(event) = event {
-            self.registry_at.insert(node.0, lsn + 1);
-            if known == digest {
-                self.model_registry(lsn, event);
-            }
+        self.registry_at.insert(node.0, lsn + 1);
+        if known == digest {
+            self.model_registry(lsn, event);
         }
-        if let SystemEvent::Directory(event) = event {
-            self.directory_events
-                .entry(lsn)
-                .or_insert_with(|| event.clone());
-        }
-        match event {
-            SystemEvent::Directory(DirectoryEvent::Created { id, name, .. }) => {
-                if self.created_names.insert(*id, name.clone()).is_none()
-                    && self.freed_names.contains(name)
-                {
-                    assert_reachable!("names: a journal name is reused after a completed delete");
-                    self.name_reused = true;
-                }
-                let at = *self.created.entry(*id).or_insert(lsn);
-                assert_always!(
-                    id.is_set()
-                        && at == lsn
-                        && !self.genesis.contains(&JournalIdentifier::new(journal.tenant, *id)),
-                    "system: a created journal takes a drawn user id, never reused",
-                    { "id" => id.0, "lsn" => lsn, "first" => at }
-                );
-            }
-            SystemEvent::Directory(DirectoryEvent::Deleted { id }) => {
-                if let Some(name) = self.created_names.get(id) {
-                    self.freed_names.insert(name.clone());
-                }
-                self.tombstoned
-                    .insert((node.0, JournalIdentifier::new(journal.tenant, *id)));
-            }
-            SystemEvent::Directory(DirectoryEvent::Refused(DirectoryRefusal::NameTaken {
-                winner,
-            })) if self.created.get(winner).is_some_and(|at| *at < lsn) => {
-                self.name_race = true;
-            }
-            SystemEvent::Directory(DirectoryEvent::Refused(DirectoryRefusal::IdTaken { id })) => {
-                assert_always!(
-                    self.created.get(id).is_some_and(|at| *at < lsn),
-                    "system: a create is refused as taken only for an id created before",
-                    { "id" => id.0, "lsn" => lsn }
-                );
-                self.id_taken = true;
-            }
-            _ => {}
-        }
-    }
-
-    /// The live journal named `name` after the directory's positions below
-    /// `at`, as the nodes folded them (#239): `Err` while some position
-    /// below `at` was not reported yet.
-    pub(crate) fn named_at(&self, name: &[u8], at: u64) -> Result<Option<JournalId>, Unreported> {
-        let mut holder = None;
-        for lsn in 0..at {
-            match self.directory_events.get(&lsn).ok_or(Unreported)? {
-                DirectoryEvent::Created {
-                    id, name: created, ..
-                } if created == name => {
-                    holder = Some(*id);
-                }
-                DirectoryEvent::Deleted { id } if holder == Some(*id) => holder = None,
-                _ => {}
-            }
-        }
-        Ok(holder)
     }
 
     /// Advance the registry model by the event first folded at `lsn` (#211).
@@ -440,18 +334,8 @@ impl SystemBoard {
         self.truncated = true;
     }
 
-    /// `node` acknowledged an append to `journal`: never after it folded the
-    /// journal's tombstone.
-    pub(crate) fn acked(&self, node: NodeId, journal: JournalIdentifier) {
-        assert_always!(
-            !self.tombstoned.contains(&(node.0, journal)),
-            "system: a node acknowledges no append to a journal after folding its tombstone",
-            { "node" => node.0, "journal" => journal.to_string() }
-        );
-    }
-
-    /// `node` started `journal`, a journal the directory created naming it
-    /// (or a spare's): never a `stateless` machine (#211).
+    /// `node` started a journal (a spare's): never a `stateless` machine
+    /// (#211).
     pub(crate) fn started(&mut self, node: NodeId) {
         assert_always!(
             self.machines
@@ -506,18 +390,6 @@ impl SystemBoard {
         if !self.armed {
             return;
         }
-        assert_sometimes!(
-            self.name_race,
-            "system: a name race is decided by slot order"
-        );
-        assert_sometimes!(
-            self.id_taken,
-            "system: a create naming a taken id is refused"
-        );
-        assert_sometimes!(
-            self.name_reused,
-            "names: a journal name is created again after a completed delete"
-        );
         if self.truncated {
             assert_sometimes!(
                 self.restarted,

@@ -73,11 +73,12 @@ pub trait JournalStores {
     /// §3.8, #243).
     fn node_audit(&self) -> Self::Audit;
 
-    /// Provision a store for `journal`, a journal the directory created
-    /// naming this node (#189), under `config`; `false` when this opener
-    /// cannot (the default: a static list). A later [`JournalStores::open`]
-    /// of `journal` opens it. Idempotent: a node that re-folds the directory
-    /// after a restart asks again for a journal it already holds.
+    /// Provision a store for `journal`, a journal a tenant's control journal
+    /// created naming this node (#189, #210), or a spare's, under `config`;
+    /// `false` when this opener cannot (the default: a static list). A later
+    /// [`JournalStores::open`] of `journal` opens it. Idempotent: a node that
+    /// re-folds the control journal after a restart asks again for a journal
+    /// it already holds.
     fn create(&mut self, journal: JournalIdentifier, config: paros_core::Config) -> bool {
         let _ = (journal, config);
         false
@@ -235,9 +236,9 @@ pub(crate) struct Journals<S, A> {
     /// The fault that ended the most recent incarnation, the node's exit
     /// when nothing is left.
     last_fault: Option<RunError>,
-    /// The control journals among the ones served (the cell's, the fleet tenant's, a
-    /// tenant's directory): no identifier is fixed (§3.8), so the deployment says
-    /// which they are. They serve no user plane and outlive a retirement.
+    /// The control journals among the ones served (the cell's, the fleet
+    /// tenant's, a hosted tenant's): no identifier is fixed (§3.8), so the
+    /// deployment says which they are. They serve no user plane and outlive a retirement.
     control: BTreeSet<JournalIdentifier>,
     /// The journal whose configuration carries the deployment (matchmakers,
     /// proxy leaders, replicas), once one booted here: the plane, whether it

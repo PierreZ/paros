@@ -281,6 +281,20 @@ fn is_other_cell(board: &MachineBoard, addr: &Address, plan: &CellPlan) -> bool 
         && plan.addrs() != board.founders
 }
 
+/// Whether another cell an operator founded holds the address of one of
+/// this run's founders (#216 (another cell)): a re-run `init` over the
+/// founders is then refused `other_cell_init`, because no vote of the run's
+/// own plan survives to adopt.
+pub(crate) fn founder_in_other_cell(state: &StateHandle) -> bool {
+    let board = machine_board(state);
+    let board = lock(&board);
+    board
+        .other_founder
+        .as_ref()
+        .is_some_and(|addr| board.founders.contains(addr))
+        && !board.others.is_empty()
+}
+
 /// Whether the run's cell is lost (#246): a vote named a plan that lost a
 /// majority of its members to wipes, so no `cell init` can choose it and
 /// every later one refuses `cell_lost`, and the cell's majority journals
@@ -736,6 +750,7 @@ async fn run_machine_role(
             // (#240), as client `MACHINE_CLIENT_BASE + rank`.
             AuditScope::Node(home) => {
                 NodeAudit::new(time.clone(), crate::audit::audit_world_for(&state, home))
+                    .with_tenants(crate::audit::tenants::tenant_board(&state))
                     .with_calls(Arc::new(
                         crate::chain_workload::system::Announce::of_machine(
                             &state,
@@ -747,6 +762,7 @@ async fn run_machine_role(
             AuditScope::Journal(journal) => {
                 NodeAudit::new(time.clone(), crate::audit::audit_world_for(&state, journal))
                     .in_journal(journal, journal_board(&state))
+                    .with_tenants(crate::audit::tenants::tenant_board(&state))
             }
         }
     };
@@ -762,7 +778,6 @@ async fn run_machine_role(
             &settings,
             addresses.clone(),
             names.clone(),
-            layout.assignment,
             tunables,
             ctx.shutdown().clone(),
         ))
@@ -813,13 +828,15 @@ pub(crate) fn booted(board: &Mutex<MachineBoard>, addr: &Address, record: Option
         let founder = board.founders.contains(addr);
         let unformed = board.voters.len() < board.founders.len();
         board.wiped.insert((addr.clone(), old));
+        // Judge the loss while the wiped machine's vote still names its
+        // plan: a wipe of a plan's last voter loses its cell too.
+        board.note_lost();
         if board.others.remove(&old).is_some() {
             assert_reachable!("machine: a wipe takes the other cell's vote with its disk");
         }
         if board.voters.remove(&old).is_some() {
             assert_reachable!("machine: a wipe takes a machine's vote with its disk");
         }
-        board.note_lost();
         if board.admitted.remove(&old).is_some() {
             assert_reachable!("machine: a wipe takes a machine's admission with its disk");
         }

@@ -558,6 +558,9 @@ struct Registry {
     /// Run-level: whether the run draws the lost-verdict scenario (see
     /// [`lost_verdict`]), fixed by the first caller.
     lost_verdict: Option<bool>,
+    /// Run-level: whether the run draws the lagging-fold scenario (see
+    /// [`lagging_fold`]), fixed by the first caller.
+    lagging_fold: Option<bool>,
     /// Run-level: whether the run draws the wiped-founder scenario (see
     /// [`wiped_founder`]), fixed by the first caller.
     wiped_founder: Option<bool>,
@@ -603,22 +606,19 @@ pub(crate) struct JournalPlan {
 }
 
 /// Every identifier the run names (`docs/architecture.md` §3.8: no identifier is
-/// fixed), drawn once per seed: the deployment's journal and the system
-/// journals (the directory — a user tenant's control journal — and the
-/// joiners' registry). Each a random tenant and a random journal, both set;
-/// no two share a tenant except the main journal and the directory, which
-/// belong to the one user tenant. The cell's id, its control journal and the
-/// fleet tenant's are not the harness's: `init` draws them on a machine
-/// (#246), and every process learns them.
+/// fixed), drawn once per seed: the deployment's journal and the joiners'
+/// registry. Each a random tenant and a random journal, both set; the two
+/// never share a tenant. The cell's id, its control journal, the fleet
+/// tenant's and every tenant's control journal are not the harness's:
+/// `init` and tenant creation draw them on a machine (#246, #210), and every
+/// process learns them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Identifiers {
     /// The deployment's journal.
     pub(crate) main: JournalIdentifier,
-    /// The directory: the main journal's tenant's control journal.
-    pub(crate) directory: JournalIdentifier,
     /// The node registry the joiners register in (#189): a harness journal
-    /// on the acceptors until #210 and #211 make it the cell control
-    /// journal the machines serve.
+    /// on the acceptors until #211 makes it the cell control journal the
+    /// machines serve.
     pub(crate) registry: JournalIdentifier,
 }
 
@@ -635,24 +635,12 @@ pub(crate) fn identifiers(state: &StateHandle) -> Identifiers {
     *guard.identifiers.get_or_insert_with(|| {
         let users = TenantId(draw_id());
         let main = JournalIdentifier::new(users, JournalId(draw_id()));
-        let mut directory = JournalIdentifier::new(users, JournalId(draw_id()));
-        while directory == main {
-            directory = JournalIdentifier::new(users, JournalId(draw_id()));
+        let mut tenant = TenantId(draw_id());
+        while tenant == users {
+            tenant = TenantId(draw_id());
         }
-        let mut tenants = vec![users];
-        let mut fresh = || loop {
-            let tenant = TenantId(draw_id());
-            if !tenants.contains(&tenant) {
-                tenants.push(tenant);
-                break JournalIdentifier::new(tenant, JournalId(draw_id()));
-            }
-        };
-        let registry = fresh();
-        Identifiers {
-            main,
-            directory,
-            registry,
-        }
+        let registry = JournalIdentifier::new(tenant, JournalId(draw_id()));
+        Identifiers { main, registry }
     })
 }
 
@@ -797,6 +785,32 @@ pub(crate) fn lost_verdict(state: &StateHandle) -> bool {
     })
 }
 
+/// Whether the run draws the **lagging-fold scenario** (#189): drawn once
+/// per seed, its own BUGGIFY location. A node registered at runtime is
+/// refused by a member whose registry fold has not admitted it yet only
+/// when it speaks before that fold catches up: a joiner reconfigured into
+/// the default journal and a member's lagging follow read. Without the
+/// scenario the gate fired on about 0.1% of seeds (2,000 hunt seeds, after
+/// #210 (tenant control journal) removed the directory's create that named
+/// an unregistered joiner). On a scenario seed every node opens its follow
+/// reads late (`paros::scenario::LAG_FOLLOW`), the seed runs the system
+/// journals ([`system_journals`]), and a client that registers a joiner
+/// reconfigures onto it next whatever the swarm mask (`ChainWorkload`):
+/// the gate fired on 0 of 417 checks (600 hunt seeds) before these
+/// ingredients came together and 7 of 637 (600) after. Rare-but-valid: a
+/// slow follower is, and each ingredient keeps its own coin on the other
+/// seeds.
+#[tracing::instrument(level = "debug", skip_all)]
+pub(crate) fn lagging_fold(state: &StateHandle) -> bool {
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    *guard.lagging_fold.get_or_insert_with(|| {
+        let lag = moonpool_sim::buggify_with_prob!(1.0);
+        moonpool_sim::set_activation(paros::scenario::LAG_FOLLOW, lag);
+        lag
+    })
+}
+
 /// Whether the run draws the **wiped-founder scenario** (#246): drawn once
 /// per seed, its own BUGGIFY location. A founding member wiped during
 /// `init` needs `init` inside the chaos window, the machines' attrition
@@ -911,8 +925,8 @@ pub(crate) fn seed_ranks(pool: usize) -> Vec<u64> {
     (0..pool.min(SEED_COUNT) as u64).collect()
 }
 
-/// Whether the run runs the **system journals** (#189) — the directory and
-/// the node registry on the seeds, every node following them, and the
+/// Whether the run runs the **system journals** (#189) — the node registry
+/// on the seeds, every node following them, and the
 /// joiners joining the pool through the registry — drawn once per seed: a
 /// seeded coin. Deployment shape: half the seeds keep #188's static
 /// deployment. On a
@@ -931,10 +945,11 @@ pub(crate) fn seed_ranks(pool: usize) -> Vec<u64> {
 /// in `chain_workload/fleet.rs`, not by this draw.
 #[tracing::instrument(level = "debug", skip(state))]
 pub(crate) fn system_journals(state: &StateHandle) -> bool {
+    let lagging = lagging_fold(state);
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     *guard.system.get_or_insert_with(|| {
-        if !moonpool_sim::sim_random_bool(0.5) {
+        if !lagging && !moonpool_sim::sim_random_bool(0.5) {
             return false;
         }
         // BUGGIFY pairing: a seed genuinely runs the system journals (a
@@ -996,9 +1011,6 @@ pub(crate) struct MachineLayout {
     pub(crate) founders: usize,
     /// Each machine's settings, in rank order.
     pub(crate) machines: Vec<MachineDraw>,
-    /// How many user journals a formed cell serves beside its control
-    /// journals (the static assignment, until #212).
-    pub(crate) assignment: usize,
     /// The machines advertise names, not literal addresses (#257): every
     /// dialer resolves them through the run's name table.
     pub(crate) named: bool,
@@ -1018,14 +1030,13 @@ pub(crate) struct MachineLayout {
 /// refuses a `stateless` member) and every other machine is `storage` or
 /// `stateless` on a coin, idle, waiting for a placement that is #212's. The
 /// capacity is one `buggify_knob!` for the run (default 2, extreme 1..=4;
-/// floor 1, as a joiner's); the assignment one more (default 1, `parosd`'s;
-/// extreme 0..=2: a cell of control journals alone, or two user journals
-/// beside them). The machines advertise names on a coin (#257); on such a
-/// seed a reboot lands at a new address with the `move_pct` knob (default
-/// 0; extreme 20..=80, floor 0: a machine that never moves), and a cell
-/// machine's reboot comes back under a new name with the `rename_pct` knob
-/// (#349, default 0; extreme 20..=60, floor 0: a machine that keeps its
-/// name).
+/// floor 1, as a joiner's). A formed cell serves its control journals and
+/// whatever its tenants create (#210). The machines advertise names on a
+/// coin (#257); on such a seed a reboot lands at a new address with the
+/// `move_pct` knob (default 0; extreme 20..=80, floor 0: a machine that
+/// never moves), and a cell machine's reboot comes back under a new name
+/// with the `rename_pct` knob (#349, default 0; extreme 20..=60, floor 0: a
+/// machine that keeps its name).
 #[tracing::instrument(level = "debug", skip(state))]
 pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout {
     let registry = registry(state);
@@ -1039,7 +1050,6 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
                 moonpool_sim::sim_random_range(1..count + 1)
             };
             let capacity = buggify_knob!(2_u64, 1_u64..5_u64);
-            let assignment = buggify_knob!(1_usize, 0_usize..3_usize);
             let named = moonpool_sim::sim_random_bool(0.5);
             let move_pct = buggify_knob!(0_u32, 20_u32..81_u32);
             let rename_pct = buggify_knob!(0_u32, 20_u32..61_u32);
@@ -1069,7 +1079,6 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
             MachineLayout {
                 founders,
                 machines,
-                assignment,
                 named,
                 move_pct,
                 rename_pct,
