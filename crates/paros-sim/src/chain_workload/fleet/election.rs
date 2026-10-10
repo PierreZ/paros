@@ -83,10 +83,10 @@ impl FleetOps {
             );
             return;
         };
-        let founders: Vec<(NodeId, std::net::SocketAddr)> = cell
+        let founders: Vec<(NodeId, paros::Address)> = cell
             .servers
             .iter()
-            .map(|(id, addr)| (NodeId(*id), *addr))
+            .map(|(id, addr)| (NodeId(*id), addr.clone()))
             .collect();
         // Far from every minted machine id: a candidate of its own.
         let me = Candidate {
@@ -107,6 +107,7 @@ impl FleetOps {
         }
         let providers = self.connector.providers().clone();
         let rpc = self.connector.rpc().clone();
+        let names = self.connector.names().clone();
         let half_lease = u64::try_from(tunables.lease.as_millis() / 2).unwrap_or(0);
         let pace = tunables.renew_every / 4;
         let mut served = None;
@@ -140,6 +141,7 @@ impl FleetOps {
                         &providers,
                         &rpc,
                         &cell.client,
+                        &names,
                         (cell.journals, founders.clone()),
                         &leader,
                         policy,
@@ -184,7 +186,7 @@ impl FleetOps {
 async fn leave(
     election: &mut Election<moonpool_sim::SimProviders>,
     cell: &Cell,
-    founders: &[(NodeId, std::net::SocketAddr)],
+    founders: &[(NodeId, paros::Address)],
     leader: &paros::client::election::Leader,
     draw: u64,
 ) -> bool {

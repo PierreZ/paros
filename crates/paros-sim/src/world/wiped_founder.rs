@@ -66,11 +66,6 @@ impl FaultInjector for WipedFounder {
             assert_reachable!("machine: the scenario wipes a promised founder before any vote");
         }
         tracing::info!(%target, after_vote, "wiped_founder_strikes");
-        ctx.reboot_with_delays(
-            &target.ip().to_string(),
-            RebootKind::CrashAndWipe,
-            &(250..1_501),
-            &(0..1),
-        )
+        ctx.reboot_with_delays(&target, RebootKind::CrashAndWipe, &(250..1_501), &(0..1))
     }
 }

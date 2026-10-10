@@ -19,6 +19,7 @@ use tokio_util::sync::CancellationToken;
 use crate::audit::Audit;
 use crate::rpc::methods::DeliverRpc;
 use crate::rpc::{internal, message_to_proto, well_known};
+use crate::{Address, Names};
 
 use super::config::{DELIVERY_BATCH, DELIVERY_BATCH_BYTES, DriverTunables};
 use super::events::{command_hash, message_kind, message_route, proto_message_kind};
@@ -601,6 +602,98 @@ impl Outbound {
     }
 }
 
+/// A peer's address of a deployment-map entry: `HOST:PORT`, a literal or a
+/// name resolved at dial time (#257).
+///
+/// # Errors
+///
+/// An entry that is not `HOST:PORT`.
+pub(crate) fn peer_target(addr: &str) -> SimulationResult<Address> {
+    Address::parse(addr)
+        .map_err(|e| SimulationError::InvalidState(format!("bad peer address {addr}: {e}")))
+}
+
+/// How one lane reaches its peer (#257): the peer's address, resolved at
+/// dial time through the lane's [`Names`], and the client of the address it
+/// resolved to. A failed delivery to a name forgets that address, so the
+/// next batch resolves the name again (FDB's `removeCachedDNS`): a peer
+/// whose IP changed behind its name is reached again with no write.
+struct Dialer<P: Providers> {
+    rpc: RpcHandle<P>,
+    names: Names,
+    address: Address,
+    /// The address the name resolved to last, and its client.
+    resolved: Option<(SocketAddr, ServiceClient<P, DeliverRpc>)>,
+    /// The last address the name resolved to, kept across a forget: a
+    /// re-resolution that lands elsewhere is a peer that moved.
+    last: Option<SocketAddr>,
+    /// The name resolved elsewhere and no delivery reached the new address
+    /// yet.
+    moved: bool,
+}
+
+impl<P: Providers> Dialer<P> {
+    fn new(rpc: &RpcHandle<P>, names: Names, address: Address) -> Self {
+        Self {
+            rpc: rpc.clone(),
+            names,
+            address,
+            resolved: None,
+            last: None,
+            moved: false,
+        }
+    }
+
+    /// The client of the peer's current address: the one resolved last, or
+    /// a fresh resolution. `None` while the name does not resolve.
+    async fn client(&mut self) -> Option<ServiceClient<P, DeliverRpc>> {
+        if let Some((_, client)) = &self.resolved {
+            return Some(client.clone());
+        }
+        let addr = match self.names.resolve(&self.address).await {
+            Ok(addr) => addr,
+            Err(error) => {
+                tracing::debug!(address = %self.address, %error, "peer_name_unresolved");
+                return None;
+            }
+        };
+        if self.last.is_some_and(|last| last != addr) {
+            moonpool_assertions::reachable!(
+                "transport: a peer re-resolved a name to a new address"
+            );
+            tracing::info!(address = %self.address, %addr, "peer_address_moved");
+            self.moved = true;
+        }
+        self.last = Some(addr);
+        let client: ServiceClient<P, DeliverRpc> = well_known(&self.rpc, addr);
+        self.resolved = Some((addr, client.clone()));
+        Some(client)
+    }
+
+    /// A delivery succeeded: a peer that moved is reached at its new
+    /// address.
+    fn delivered(&mut self) {
+        assert!(
+            self.resolved.is_some(),
+            "a delivery goes to a resolved address"
+        );
+        if self.moved {
+            self.moved = false;
+            moonpool_assertions::reachable!(
+                "transport: a peer reached a moved peer at its new address"
+            );
+        }
+    }
+
+    /// A delivery failed: a name is resolved again before the next batch;
+    /// a literal address stays as it is.
+    fn failed(&mut self) {
+        if self.address.literal().is_none() {
+            self.resolved = None;
+        }
+    }
+}
+
 /// The resolved address of a deployment-map entry (`ip:port`).
 ///
 /// # Errors
@@ -625,28 +718,32 @@ pub(crate) struct LaneOpener<'a, P: Providers, A: Audit> {
     pub(crate) from: Party,
     /// The sender's cell, stamped on every batch (`0` without a cell plan).
     pub(crate) cell_id: u64,
+    /// How the lanes resolve their peers' addresses (#257):
+    /// [`Names::literal`] where every address is literal.
+    pub(crate) names: Names,
 }
 
 impl<P: Providers, A: Audit + Clone + Send + Sync + 'static> LaneOpener<'_, P, A> {
     /// Open one outbound lane toward `to` at `addr`: a bounded keep-newest
     /// mailbox of the tunables' `peer_queue_capacity`, drained by a detached
     /// delivery task (named `task`) over a reconnecting channel on `rpc`
-    /// until the incarnation's shutdown fires.
+    /// until the incarnation's shutdown fires. A name in `addr` is resolved
+    /// at dial time, and again after a failed delivery (#257).
     pub(crate) fn open(
         &self,
         rpc: &RpcHandle<P>,
         task: &'static str,
-        addr: SocketAddr,
+        addr: Address,
         to: Party,
     ) -> PeerMailbox {
-        let client: ServiceClient<P, DeliverRpc> = well_known(rpc, addr);
+        let dialer = Dialer::new(rpc, self.names.clone(), addr);
         let mailbox = PeerMailbox::new(self.tunables.peer_queue_capacity);
         self.providers
             .task()
             .spawn_task(
                 task,
                 run_peer_delivery(
-                    client,
+                    dialer,
                     self.providers.time().clone(),
                     self.shutdown.clone(),
                     mailbox.clone(),
@@ -663,7 +760,7 @@ impl<P: Providers, A: Audit + Clone + Send + Sync + 'static> LaneOpener<'_, P, A
 
     /// Open one lane per `(id, address)` of `peers` ([`LaneOpener::open`]),
     /// each addressed as `party(id)` — the per-peer lanes a driver builds at
-    /// boot. An address that does not parse fails the whole set.
+    /// boot. An address that is not `HOST:PORT` fails the whole set.
     pub(crate) fn open_all<I: Copy + Ord>(
         &self,
         rpc: &RpcHandle<P>,
@@ -673,7 +770,7 @@ impl<P: Providers, A: Audit + Clone + Send + Sync + 'static> LaneOpener<'_, P, A
     ) -> SimulationResult<BTreeMap<I, PeerMailbox>> {
         peers
             .into_iter()
-            .map(|(id, addr)| Ok((id, self.open(rpc, task, peer_address(&addr)?, party(id)))))
+            .map(|(id, addr)| Ok((id, self.open(rpc, task, peer_target(&addr)?, party(id)))))
             .collect()
     }
 }
@@ -694,7 +791,7 @@ impl<P: Providers, A: Audit + Clone + Send + Sync + 'static> LaneOpener<'_, P, A
 #[allow(clippy::too_many_arguments, clippy::large_types_passed_by_value)]
 #[tracing::instrument(level = "debug", skip_all, fields(from = %from, to = %to))]
 async fn run_peer_delivery<P: Providers, A: Audit>(
-    client: ServiceClient<P, DeliverRpc>,
+    mut dialer: Dialer<P>,
     time: P::Time,
     shutdown: CancellationToken,
     messages: PeerMailbox,
@@ -737,14 +834,29 @@ async fn run_peer_delivery<P: Providers, A: Audit>(
         carried = next;
         assert_eq!(batch.cell_id, 0, "a batch is stamped once, here");
         batch.cell_id = cell_id;
+        let client = moonpool_core::select! {
+            biased;
+            () = shutdown.cancelled() => return,
+            client = dialer.client() => client,
+        };
+        let Some(client) = client else {
+            // The peer's name does not resolve (yet): the batch is lost, as
+            // on a failed delivery, and Paxos resends what matters.
+            audit.delivery_failed(from, to);
+            continue;
+        };
         let outcome = moonpool_core::select! {
             biased;
             () = shutdown.cancelled() => return,
             result = client.try_get_reply_within(&batch, tunables.delivery_timeout) => result,
         };
-        if let Err(error) = outcome {
-            audit.delivery_failed(from, to);
-            tracing::debug!(%error, "peer delivery failed");
+        match outcome {
+            Ok(_) => dialer.delivered(),
+            Err(error) => {
+                audit.delivery_failed(from, to);
+                dialer.failed();
+                tracing::debug!(%error, "peer delivery failed");
+            }
         }
     }
 }

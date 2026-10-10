@@ -1,15 +1,43 @@
-//! Hostname resolution (#209), shared by `parosd` and `parosctl`: an
-//! address book entry is `HOST:PORT`, where the host is a literal IP or a
-//! name (a Compose service), and the port is always explicit — the
-//! simulator's default port 4500 is not a production convention.
+//! Hostname resolution (#209, #257), shared by `parosd` and `parosctl`: an
+//! address is `HOST:PORT`, where the host is a literal IP or a name (a
+//! Compose service), and the port is always explicit — the simulator's
+//! default port 4500 is not a production convention.
 //!
-//! A name is resolved **once, at startup**, in the configuration layer,
-//! never inside a driver: the drivers (and the simulation, which hands them
-//! literal addresses) see socket addresses only. A peer whose address
-//! changes later is reached again after a restart of the process that
-//! resolved it.
+//! A listen address is resolved **once, at startup** ([`resolve`]): a
+//! machine binds where it is. An address a machine or a client **dials** is
+//! kept as a name ([`paros::Address`]) and resolved at dial time by the
+//! library (`paros::Names`, #257), so a machine whose IP changes behind its
+//! name is reached again with no restart. One exception: a name that
+//! stands for several machines (a Compose network alias, #216) is expanded
+//! here into their literal addresses ([`expand`]).
 
 use std::net::{SocketAddr, ToSocketAddrs};
+
+use paros::Address;
+
+/// `entry` (`HOST:PORT`) as the addresses to dial: a literal as it is, a
+/// name that resolves to one machine kept as the name (resolved again at
+/// dial time), and a name that resolves to several machines (an alias)
+/// expanded into their literal addresses ([`resolve_all`]).
+///
+/// # Errors
+///
+/// `entry` is malformed, or the name does not resolve (yet).
+#[allow(
+    dead_code,
+    reason = "parosctl's (its servers and founding members); parosd resolves one listen address"
+)]
+pub fn expand(entry: &str) -> Result<Vec<Address>, String> {
+    let address = Address::parse(entry)?;
+    if address.literal().is_some() {
+        return Ok(vec![address]);
+    }
+    let found = resolve_all(entry)?;
+    if found.len() == 1 {
+        return Ok(vec![address]);
+    }
+    Ok(found.into_iter().map(Address::from).collect())
+}
 
 /// Check that `addr` is `HOST:PORT` (a literal socket address, or a
 /// non-empty host and a port), without resolving anything.
@@ -39,6 +67,10 @@ pub fn check_shape(addr: &str) -> Result<(), String> {
 /// # Errors
 ///
 /// `addr` is malformed, or the name does not resolve (yet).
+#[allow(
+    dead_code,
+    reason = "parosd's (its listen address); parosctl dials names as they are"
+)]
 pub fn resolve(addr: &str) -> Result<SocketAddr, String> {
     check_shape(addr)?;
     if let Ok(literal) = addr.parse::<SocketAddr>() {

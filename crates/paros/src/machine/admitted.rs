@@ -16,12 +16,12 @@
 //!   it is refused as `cell_exists`, and it accepts no plan.
 
 use std::collections::BTreeSet;
-use std::net::SocketAddr;
 
 use moonpool_core::Providers;
 use tokio_util::sync::CancellationToken;
 
 use super::{Admission, MachineFacts};
+use crate::Address;
 use crate::driver::edge::RpcEdge;
 use crate::driver::{DriverTunables, RunError};
 use crate::rpc::machine as wire;
@@ -44,11 +44,11 @@ impl AdmittedMachine {
     /// The cell's machines this one knows, by address: what it caches of the
     /// registry (§3.2).
     #[must_use]
-    pub fn known(&self) -> BTreeSet<SocketAddr> {
+    pub fn known(&self) -> BTreeSet<Address> {
         self.admission
             .members
             .iter()
-            .map(|(_, addr)| *addr)
+            .map(|(_, addr)| addr.clone())
             .collect()
     }
 
@@ -82,7 +82,7 @@ impl AdmittedMachine {
     }
 
     /// Serve the machine contract and a node-only `Inspect` at the
-    /// machine's address until `shutdown`.
+    /// machine's listen address until `shutdown`.
     ///
     /// # Errors
     ///
@@ -103,7 +103,7 @@ impl AdmittedMachine {
             self.facts.node_id.0 != 0,
             "an admitted machine has a minted identity"
         );
-        let addr = self.facts.addr.to_string();
+        let addr = self.facts.listen.to_string();
         let mut edge = RpcEdge::listen(providers, &addr, "machine", tunables)
             .await
             .map_err(RunError::Infra)?;

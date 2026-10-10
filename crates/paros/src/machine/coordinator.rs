@@ -38,7 +38,6 @@
 //! loop before the task starts, and the backoff jitter derives from the seed.
 
 use std::collections::BTreeMap;
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -48,7 +47,6 @@ use paros_core::NodeId;
 use tokio_util::sync::CancellationToken;
 
 use super::{CellPlan, Class, ControlJournals, FormedCell, incarnation_from_halves};
-use crate::DriverTunables;
 use crate::client::cell::CellSession;
 use crate::client::checkpoint::CheckpointPolicy;
 use crate::client::election::{Candidate, Election, ElectionTunables, Leader, Step, hand_off};
@@ -56,6 +54,7 @@ use crate::client::fleet::{Interrupted, Stage, Step as FleetStep};
 use crate::client::{CallObserver, ClaimOutcome, Client, ClientTunables, Server, bootstrap};
 use crate::rpc::NodeClient;
 use crate::system::{NodeStanding, SystemCommand};
+use crate::{Address, DriverTunables, Names};
 
 /// What serving one term's duties came to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -89,11 +88,12 @@ pub async fn serve_term<P: Providers>(
     providers: &P,
     rpc: &RpcHandle<P>,
     client: &Client<P>,
-    cell: (ControlJournals, Vec<(NodeId, SocketAddr)>),
+    names: &Names,
+    cell: (ControlJournals, Vec<(NodeId, Address)>),
     leader: &Leader,
     policy: CheckpointPolicy,
 ) -> TermDuty {
-    open_term(providers, rpc, client, cell, leader, policy)
+    open_term(providers, rpc, client, names, cell, leader, policy)
         .await
         .0
 }
@@ -104,7 +104,8 @@ async fn open_term<P: Providers>(
     providers: &P,
     rpc: &RpcHandle<P>,
     client: &Client<P>,
-    (journals, founders): (ControlJournals, Vec<(NodeId, SocketAddr)>),
+    names: &Names,
+    (journals, founders): (ControlJournals, Vec<(NodeId, Address)>),
     leader: &Leader,
     policy: CheckpointPolicy,
 ) -> (TermDuty, Option<CellSession>) {
@@ -122,18 +123,20 @@ async fn open_term<P: Providers>(
         Err(_) => return (TermDuty::Unavailable, None),
     }
     let founder = |id: NodeId| session.founders().iter().any(|(f, _)| *f == id);
-    let in_flight: Vec<SocketAddr> = session
+    let in_flight: Vec<Address> = session
         .registry()
         .nodes()
         .filter(|(id, n)| n.standing != NodeStanding::Retired && !founder(*id))
-        .filter_map(|(_, n)| n.addr.parse().ok())
+        .filter_map(|(_, n)| Address::parse(&n.addr).ok())
         .collect();
     let mut admitted = 0;
     for target in in_flight {
         if let FleetStep::Done {
             last: Some(Stage::Admit),
             ..
-        } = session.admit_step(providers, rpc, client, 0, target).await
+        } = session
+            .admit_step(providers, rpc, client, names, 0, &target)
+            .await
         {
             admitted += 1;
             moonpool_assertions::sometimes!(
@@ -204,6 +207,7 @@ impl Watch {
         providers: &P,
         rpc: &RpcHandle<P>,
         client: &Client<P>,
+        names: &Names,
         session: &mut CellSession,
     ) -> Result<usize, Interrupted> {
         if client.now() < self.next {
@@ -211,24 +215,23 @@ impl Watch {
         }
         self.next = client.now() + self.every;
         let timeout = client.tunables().request_timeout;
-        let mut machines: BTreeMap<NodeId, SocketAddr> =
-            session.founders().iter().copied().collect();
+        let mut machines: BTreeMap<NodeId, Address> = session.founders().iter().cloned().collect();
         machines.extend(
             session
                 .registry()
                 .nodes()
                 .filter(|(_, n)| n.standing != NodeStanding::Retired)
-                .filter_map(|(id, n)| n.addr.parse().ok().map(|addr| (id, addr))),
+                .filter_map(|(id, n)| Address::parse(&n.addr).ok().map(|addr| (id, addr))),
         );
         let mut wrote = 0;
         for (id, addr) in machines {
-            let answer = bootstrap::identify(providers, rpc, addr, timeout)
+            let answer = bootstrap::identify(providers, rpc, names, &addr, timeout)
                 .await
                 .filter(|ack| ack.node_id == id.0);
             let command = match answer {
                 Some(ack) => {
                     self.heard.insert(id, client.now());
-                    Self::answered(session, id, addr, &ack)
+                    Self::answered(session, id, &addr, &ack)
                 }
                 None => self.silent(session, id, client.now()),
             };
@@ -244,7 +247,7 @@ impl Watch {
     fn answered(
         session: &CellSession,
         id: NodeId,
-        addr: SocketAddr,
+        addr: &Address,
         ack: &crate::rpc::machine::IdentifyAck,
     ) -> Option<SystemCommand> {
         let incarnation = incarnation_from_halves(ack.incarnation_high, ack.incarnation_low);
@@ -313,14 +316,16 @@ pub fn election_tunables(tunables: &DriverTunables) -> ElectionTunables {
     }
 }
 
-/// The library client of the cell's members.
-fn cell_client<P: Providers>(providers: &P, rpc: &RpcHandle<P>, plan: &CellPlan) -> Client<P> {
-    let servers = plan
+/// The library client of the cell's members, each dialed by its advertised
+/// address, resolved at each call (#257).
+fn cell_client<P: Providers>(providers: &P, rpc: &RpcHandle<P>, formed: &FormedCell) -> Client<P> {
+    let servers = formed
+        .plan
         .members
         .iter()
         .map(|(id, addr)| Server {
             id: id.0,
-            node: NodeClient::new(rpc, *addr),
+            node: NodeClient::named(rpc, formed.facts.names.clone(), addr.clone()),
         })
         .collect();
     Client::new(providers, servers, ClientTunables::default())
@@ -329,7 +334,8 @@ fn cell_client<P: Providers>(providers: &P, rpc: &RpcHandle<P>, plan: &CellPlan)
 /// A founding member's candidacy, as the node loop hands it to the task.
 struct Candidacy {
     me: NodeId,
-    addr: SocketAddr,
+    addr: Address,
+    names: Names,
     plan: CellPlan,
     seed: u128,
     tunables: ElectionTunables,
@@ -361,7 +367,8 @@ pub(crate) fn spawn<P: Providers>(
     }
     let candidacy = Candidacy {
         me: formed.facts.node_id,
-        addr: formed.facts.addr,
+        addr: formed.facts.addr.clone(),
+        names: formed.facts.names.clone(),
         plan: formed.plan.clone(),
         seed: providers.random().random(),
         tunables: election,
@@ -369,7 +376,7 @@ pub(crate) fn spawn<P: Providers>(
         stall: moonpool_buggify::buggify_with_prob!(0.3),
         hand_off: formed.plan.members.len() > 1 && moonpool_buggify::buggify_with_prob!(0.25),
     };
-    let mut client = cell_client(providers, rpc, &formed.plan).with_shutdown(shutdown.clone());
+    let mut client = cell_client(providers, rpc, formed).with_shutdown(shutdown.clone());
     if let Some(observer) = observer {
         client = client.with_observer(observer);
     }
@@ -428,6 +435,7 @@ async fn campaign<P: Providers>(
     let Candidacy {
         me,
         addr,
+        names,
         plan,
         seed,
         tunables,
@@ -462,6 +470,7 @@ async fn campaign<P: Providers>(
                     &providers,
                     &rpc,
                     &client,
+                    &names,
                     (journals, founders.clone()),
                     &leader,
                     policy,
@@ -506,7 +515,7 @@ async fn campaign<P: Providers>(
             Step::Leading { .. } if watching.is_some() => {
                 if let Some((session, watch)) = watching.as_mut()
                     && watch
-                        .round(&providers, &rpc, &client, session)
+                        .round(&providers, &rpc, &client, &names, session)
                         .await
                         .is_err()
                 {
@@ -542,10 +551,14 @@ mod tests {
 
     #[test]
     fn the_successor_is_the_next_founder_by_id_and_wraps() {
-        let addr: SocketAddr = "10.0.0.1:1".parse().expect("an address");
+        let addr: Address = "10.0.0.1:1".parse().expect("an address");
         let plan = CellPlan {
             cell_id: 1,
-            members: vec![(NodeId(3), addr), (NodeId(7), addr), (NodeId(9), addr)],
+            members: vec![
+                (NodeId(3), addr.clone()),
+                (NodeId(7), addr.clone()),
+                (NodeId(9), addr),
+            ],
             control: paros_core::JournalIdentifier::new(
                 paros_core::TenantId(1),
                 paros_core::JournalId(1),

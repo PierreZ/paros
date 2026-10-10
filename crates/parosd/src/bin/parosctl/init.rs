@@ -22,7 +22,6 @@
 //! run's leader uuids (#241). Every step is idempotent: `init` is refused only when it
 //! found nothing left to do.
 
-use std::net::SocketAddr;
 use std::time::Duration;
 
 use clap::Args;
@@ -30,6 +29,7 @@ use moonpool_core::TokioProviders;
 use moonpool_rpc::RpcHandle;
 use paros::client::Client;
 use paros::client::initialize::{self, InitParams, InitRefusal, InitRun, Initialized, Unreachable};
+use paros::{Address, Names};
 use serde_json::json;
 
 use crate::Ending;
@@ -41,9 +41,10 @@ use paros::name::{Abbreviations, full_hex};
 #[derive(Args, Debug)]
 pub struct InitArgs {
     /// The founding members, comma-separated `HOST:PORT`s: the idle
-    /// machines the cell forms on, every one of them needed (a name that
-    /// resolves to several machines stands for them all). The servers
-    /// (`--servers`) by default.
+    /// machines the cell forms on, every one of them needed, each by the
+    /// address it advertises (`PAROS_ADVERTISE`, #257: a machine refuses a
+    /// list that does not name it so). A name that resolves to several
+    /// machines stands for them all. The servers (`--servers`) by default.
     #[arg(long, value_delimiter = ',')]
     members: Vec<String>,
     /// How long the decree may take to form the cell, and the cell to elect
@@ -53,13 +54,13 @@ pub struct InitArgs {
 }
 
 impl InitArgs {
-    /// The founding members, resolved, without duplicates: `--members`, or
-    /// `servers` when none is given.
+    /// The founding members, without duplicates: `--members`, or `servers`
+    /// when none is given.
     ///
     /// # Errors
     ///
-    /// A member that does not resolve.
-    pub fn members(&self, servers: &[SocketAddr]) -> Result<Vec<SocketAddr>, String> {
+    /// A member that is malformed or does not resolve.
+    pub fn members(&self, servers: &[Address]) -> Result<Vec<Address>, String> {
         if self.members.is_empty() {
             return Ok(servers.to_vec());
         }
@@ -70,8 +71,8 @@ impl InitArgs {
             .map(|m| m.trim())
             .filter(|m| !m.is_empty())
         {
-            for addr in crate::resolve::resolve_all(entry)
-                .map_err(|e| format!("bad member {entry:?}: {e}"))?
+            for addr in
+                crate::resolve::expand(entry).map_err(|e| format!("bad member {entry:?}: {e}"))?
             {
                 if !members.contains(&addr) {
                     members.push(addr);
@@ -88,8 +89,9 @@ impl InitArgs {
 pub async fn run(
     providers: &TokioProviders,
     rpc: &RpcHandle<TokioProviders>,
-    members: &[SocketAddr],
-    connect: impl Fn(&[(u64, SocketAddr)]) -> Client<TokioProviders>,
+    names: &Names,
+    members: &[Address],
+    connect: impl Fn(&[(u64, Address)]) -> Client<TokioProviders>,
     out: &Printer,
     args: &InitArgs,
 ) -> Ending {
@@ -98,7 +100,7 @@ pub async fn run(
         fleet_id: nonzero(providers),
         leader_seed: leader_seed(providers),
     };
-    match initialize::initialize(providers, rpc, members, connect, params).await {
+    match initialize::initialize(providers, rpc, names, members, connect, params).await {
         InitRun::Initialized(done) => {
             if !done.users.is_empty() {
                 note(&format!(
@@ -145,7 +147,7 @@ pub async fn run(
 }
 
 /// What `init` waited on in vain, for the operator.
-fn unreachable_text(why: Unreachable, target: Option<&SocketAddr>) -> String {
+fn unreachable_text(why: Unreachable, target: Option<&Address>) -> String {
     let target = target.map_or_else(|| "?".to_string(), ToString::to_string);
     match why {
         Unreachable::NoTarget => "no member to form the cell on".into(),

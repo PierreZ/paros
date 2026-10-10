@@ -97,6 +97,7 @@ impl ClientRuntime {
             providers: ctx.providers().clone(),
             shutdown: ctx.shutdown().clone(),
             tunables,
+            names: crate::machine::names(ctx.state()),
         }
     }
 
@@ -144,6 +145,8 @@ pub(crate) struct Connector {
     providers: SimProviders,
     shutdown: CancellationToken,
     tunables: ClientTunables,
+    /// The run's name table (#257): the machines' advertised names.
+    names: paros::Names,
 }
 
 impl Connector {
@@ -157,9 +160,14 @@ impl Connector {
         &self.providers
     }
 
-    /// The library client of `servers` (`(node id, address)`, in the order
-    /// the client indexes them).
-    pub(crate) fn client(&self, servers: &[(u64, std::net::SocketAddr)]) -> ChainClient {
+    /// How the clients resolve the machines' advertised names (#257).
+    pub(crate) fn names(&self) -> &paros::Names {
+        &self.names
+    }
+
+    /// The library client of `servers` (`(node id, advertised address)`, in
+    /// the order the client indexes them), each resolved at every call.
+    pub(crate) fn client(&self, servers: &[(u64, paros::Address)]) -> ChainClient {
         moonpool_sim::assert_always!(
             !servers.is_empty(),
             "client: a client over learned servers names at least one"
@@ -168,7 +176,7 @@ impl Connector {
             .iter()
             .map(|(id, addr)| Server {
                 id: *id,
-                node: NodeClient::new(&self.rpc, *addr),
+                node: NodeClient::named(&self.rpc, self.names.clone(), addr.clone()),
             })
             .collect();
         paros::client::Client::new(&self.providers, servers, self.tunables)

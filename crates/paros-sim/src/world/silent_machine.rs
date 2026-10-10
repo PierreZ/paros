@@ -66,11 +66,6 @@ impl FaultInjector for SilentMachine {
         };
         assert_reachable!("machine: the scenario holds a machine of the cell down");
         tracing::info!(%target, "silent_machine_strikes");
-        ctx.reboot_with_delays(
-            &target.ip().to_string(),
-            RebootKind::Crash,
-            &DOWN_MS,
-            &(0..1),
-        )
+        ctx.reboot_with_delays(&target, RebootKind::Crash, &DOWN_MS, &(0..1))
     }
 }

@@ -4,7 +4,8 @@
 //!
 //! | variable | meaning |
 //! |---|---|
-//! | `PAROS_LISTEN` | `HOST:PORT` this machine serves at, which its peers dial |
+//! | `PAROS_LISTEN` | `HOST:PORT` this machine binds; may be a wildcard (`0.0.0.0:4500`) |
+//! | `PAROS_ADVERTISE` | `HOST:PORT` its peers and clients dial; `PAROS_LISTEN` by default, required when that is a wildcard (#257) |
 //! | `PAROS_DATA_DIR` | where its identity and its stores live |
 //! | `PAROS_CLASS` | `storage` or `stateless` (fixed at format) |
 //! | `PAROS_CAPACITY` | its capacity, in placement units (default 1) |
@@ -22,8 +23,9 @@ use paros::JournalStoreConfig;
 use paros::machine::Class;
 
 /// The variables this module reads.
-const VARIABLES: [&str; 6] = [
+const VARIABLES: [&str; 7] = [
     "PAROS_LISTEN",
+    "PAROS_ADVERTISE",
     "PAROS_DATA_DIR",
     "PAROS_CLASS",
     "PAROS_CAPACITY",
@@ -55,9 +57,15 @@ impl Layout {
 #[derive(Parser, Debug)]
 #[command(name = "parosd", version, about)]
 pub struct Settings {
-    /// `HOST:PORT` this machine serves at, which its peers dial.
+    /// `HOST:PORT` this machine binds, resolved once at start; may be a
+    /// wildcard (`0.0.0.0:4500`).
     #[arg(long, env = "PAROS_LISTEN")]
     pub listen: String,
+    /// `HOST:PORT` its peers and clients dial (#257): a literal or a name,
+    /// kept as a name and resolved by whoever dials it. `PAROS_LISTEN` by
+    /// default; required when `PAROS_LISTEN` is a wildcard.
+    #[arg(long, env = "PAROS_ADVERTISE")]
+    pub advertise: Option<String>,
     /// Where its identity (`machine`) and its stores live.
     #[arg(long, env = "PAROS_DATA_DIR")]
     pub data_dir: PathBuf,
@@ -112,7 +120,13 @@ mod tests {
 
     #[test]
     fn an_unknown_paros_variable_is_refused_and_others_pass() {
-        let ok = ["PAROS_LISTEN", "PAROS_TICK_INTERVAL_MS", "RUST_LOG", "HOME"];
+        let ok = [
+            "PAROS_LISTEN",
+            "PAROS_ADVERTISE",
+            "PAROS_TICK_INTERVAL_MS",
+            "RUST_LOG",
+            "HOME",
+        ];
         assert_eq!(check_unknown(ok.map(String::from)), Ok(()));
         let typo = check_unknown(["PAROS_LISTN".to_string()]);
         assert!(typo.is_err_and(|e| e.contains("PAROS_LISTN")));
