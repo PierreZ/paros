@@ -615,6 +615,58 @@ impl<P: Providers> Shared<'_, P> {
     }
 }
 
+/// Campaign before an `Accept` overwrites a different value this node
+/// accepted at a lower ballot, or not (#376). The `Accept` proves that a
+/// later leadership chose another value for the slot without this node's
+/// copy. Campaigning first is a rare-but-valid choice (any node may campaign
+/// at any time, at any fresh round; `ColocatedNode::campaign_above`): the raised promise refuses
+/// the `Accept`, and the campaign's Phase 1 reads both values for the slot,
+/// this node's own and the later one, where P2c must keep the higher ballot
+/// (the gate "phase1: a promise quorum reports two different values for one
+/// slot and P2c keeps the higher ballot"). Without it the `Accept` erases
+/// the lower copy before any Phase 1 reads it, and the gate fired on about
+/// 0.25% of seeds.
+///
+/// A plain choice, not a disruptive one: it costs one election, and only
+/// when two values for one slot already exist, so it stays on in the
+/// recovery tail, where most of a run's Phase-2 traffic is.
+fn contest_overwrite(node: &mut ColocatedNode, msg: &Message, self_id: u64) {
+    let Message::Accept {
+        ballot,
+        slot,
+        command,
+        ..
+    } = msg
+    else {
+        return;
+    };
+    if node.role() == NodeRole::Leader {
+        return;
+    }
+    let overwrites = node
+        .acceptor()
+        .record(*slot)
+        .is_some_and(|(held, value)| held < ballot && value != command);
+    if !overwrites || !moonpool_buggify::buggify_with_prob!(1.0) {
+        return;
+    }
+    moonpool_assertions::reachable!(
+        "an acceptor campaigns before an Accept overwrites a different value"
+    );
+    tracing::info!(
+        node = self_id,
+        slot = slot.0,
+        round = ballot.round,
+        "overwrite_contested"
+    );
+    let promised = node.acceptor().promised();
+    node.campaign_above(*ballot);
+    assert!(
+        node.acceptor().promised() >= promised,
+        "a contest never lowers the promise"
+    );
+}
+
 /// Surface a peer message's arrival (mirror of `msg_sent`), so a human reading
 /// the trace can pair sends with receives and spot the unmatched ones as
 /// network drops.
@@ -1462,6 +1514,7 @@ where
                         "prepare_below_floor"
                     );
                 }
+                contest_overwrite(&mut rt.node, &msg, self_id);
                 rt.node.step(msg);
                 let outcome = shared.settle(rt).await;
                 journals.fold(journal, outcome, ticks, self_id)?;

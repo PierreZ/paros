@@ -32,7 +32,7 @@ buggified: perturbed only through its public API. Doctrine lives in the root `AG
 - `matchmaker/handover_model.rs` → the handover model checker (test-only).
 - `proxy_model.rs` → the proxy-leader model checker (test-only); `model_support.rs` → seeded RNG + lossy mailbox both share.
 - `retained.rs` → `RetainedWindow` → a map with a floor under it.
-- `node.rs` → `ColocatedNode`, `Delegation`, the private `Counters` → entry points and driver-policy methods (`resend_pending`, `take_back_delegated`, `step_down`, `relinquish_to`, `reconfigure`, `quorum_read`).
+- `node.rs` → `ColocatedNode`, `Delegation`, the private `Counters` → entry points and driver-policy methods (`resend_pending`, `take_back_delegated`, `step_down`, `campaign_above`, `relinquish_to`, `reconfigure`, `quorum_read`).
 - `node/{election,phase2,learn,replication,catch_up}.rs` → campaign, Phase-2 open/delegate/decide (`record_own_round`), learner, catch-up + trim-point jump.
 - `node/{authority,quorum_reads}.rs` → `CheckQuorum`; the read path (`PreRead` wiring, `serve_quorum_reads`/`tick_quorum_reads`, `READ_TTL_TICKS`).
 - `node/{handoff,gc,matchmaking,reconfigure}.rs` → `DPaxos` handoff, GC wiring, matchmaking wiring, online reconfiguration.
