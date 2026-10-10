@@ -54,6 +54,9 @@ struct SlotFact {
     write: Option<WriteFact>,
     /// A `Truncate`'s fence, the leader uuid it names (#228).
     truncate: Option<LeaderUuid>,
+    /// A `SetLeader`'s `(new, old)` (#339: a won one is judged in slot
+    /// order).
+    set_leader: Option<(LeaderUuid, Option<LeaderUuid>)>,
     outcome: Outcome,
 }
 
@@ -79,6 +82,7 @@ pub(super) struct JournalModel {
     duplicate_any: bool,
     fenced_any: bool,
     gap_refused_any: bool,
+    ahead_refused_any: bool,
     won_any: bool,
     lost_any: bool,
     truncated_any: bool,
@@ -133,9 +137,14 @@ impl JournalModel {
             Command::Control(Control::Truncate { leader, .. }) => Some(*leader),
             _ => None,
         };
+        let set_leader = match command {
+            Command::Control(Control::SetLeader { new, old }) => Some((*new, *old)),
+            _ => None,
+        };
         let fact = SlotFact {
             write,
             truncate,
+            set_leader,
             outcome: outcome.clone(),
         };
         if let Some(known) = self.slots.get(&slot) {
@@ -154,6 +163,15 @@ impl JournalModel {
     fn first_verdict(&mut self, slot: u64, command: &Command, fact: &SlotFact) {
         if let Some(state) = revealed(&fact.outcome) {
             self.next_seq = self.next_seq.max(state.next_seq.0);
+        }
+        // The mode check's other half (#339): a call shaped for the other
+        // mode is refused as such, never judged as a call of this one.
+        if self.of_wrong_mode(command) {
+            assert_always!(
+                matches!(fact.outcome, Outcome::WrongMode(_)),
+                "journal: a call of the wrong mode is refused as such",
+                { "slot" => slot, "multi" => self.mode == WriterMode::Multi }
+            );
         }
         match (&fact.outcome, fact.write) {
             (Outcome::Accepted { seq, count }, Some(write)) => {
@@ -178,6 +196,10 @@ impl JournalModel {
                     );
                 } else if state.leader != Some(write.leader) {
                     self.fenced_any = true;
+                } else if write.seq > state.next_seq.0 {
+                    // Ahead of the journal (#339): its own gate, apart from
+                    // a write at a position another write took.
+                    self.ahead_refused_any = true;
                 } else if write.seq != state.next_seq.0 {
                     self.gap_refused_any = true;
                 }
@@ -410,6 +432,23 @@ impl JournalModel {
                     );
                 }
             }
+            if let (Outcome::Leader(_), Some((new, old))) = (&fact.outcome, fact.set_leader) {
+                // A won `SetLeader` (#339) replaced the leader it named with
+                // another uuid: the current leader never wins its own term
+                // again.
+                assert_always!(
+                    old != Some(new),
+                    "journal: a won SetLeader installs another uuid than the one it named",
+                    { "slot" => slot }
+                );
+                if let Some(current) = current {
+                    assert_always!(
+                        old == Some(current) && new != current,
+                        "journal: a SetLeader wins only over the leader in force",
+                        { "slot" => slot }
+                    );
+                }
+            }
             if let Outcome::Leader(state) = &fact.outcome {
                 current = state.leader;
             }
@@ -484,6 +523,10 @@ impl JournalModel {
         assert_sometimes!(
             self.gap_refused_any,
             "journal: a write at the wrong position is refused"
+        );
+        assert_sometimes!(
+            self.ahead_refused_any,
+            "journal: a write ahead of the journal is refused"
         );
         assert_sometimes!(
             self.lost_any,

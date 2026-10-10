@@ -11,9 +11,10 @@
 //! An ambiguous append is sent again on a coin: delivery is at-least-once,
 //! and the journal model's gate asks for a batch that lands twice.
 //!
-//! The mode confusion, each on its own BUGGIFY location: a fenced write sent
-//! to a multi-writer journal and an unfenced one sent to a single-writer
-//! journal, both refused as of the wrong mode and never applied.
+//! The mode confusion, each on its own BUGGIFY location: a fenced write or
+//! truncation sent to a multi-writer journal and an unfenced one sent to a
+//! single-writer journal, all refused as of the wrong mode and never applied
+//! (the truncations, #339).
 //!
 //! Every attempt goes through the library client, so the linearizability
 //! search judges it against the multi-writer model.
@@ -23,7 +24,10 @@ use std::time::Duration;
 use moonpool_sim::{SimContext, TimeProvider, assert_always, assert_reachable, buggify_with_prob};
 use paros::client::multi::{append_entry, append_request, open_truncate_request};
 use paros::client::{Retarget, SetLeaderOutcome, TruncateOutcome, WriteOptions, WriteOutcome};
-use paros::{Command, Entry, JournalIdentifier, LeaderUuid, Seq, Value, command_hash};
+use paros::{
+    Command, Entry, JournalIdentifier, LeaderUuid, Seq, Truncate, Value, command_hash,
+    leader_uuid_to_proto,
+};
 
 use super::rpc::{CallLog, judged_truncate, judged_write, set_leader_once, within, write_once};
 use super::{
@@ -66,10 +70,18 @@ impl ChainWorkload {
     ) {
         match op {
             SET_LEADER => claim_refused(step).await,
+            TRUNCATE | TRUNCATE_STORM if buggify_with_prob!(0.3) => {
+                assert_reachable!("chain: a fenced truncate meets a multi-writer journal");
+                fenced_truncate_refused(step).await;
+            }
             TRUNCATE | TRUNCATE_STORM => truncate_open(step).await,
             _ if buggify_with_prob!(0.05) => {
                 assert_reachable!("chain: a fenced write meets a multi-writer journal");
                 fenced_write_refused(step).await;
+            }
+            _ if buggify_with_prob!(0.05) => {
+                assert_reachable!("chain: a fenced truncate meets a multi-writer journal");
+                fenced_truncate_refused(step).await;
             }
             _ => {
                 let submission = self.submit_append(step, next_op);
@@ -408,5 +420,72 @@ pub(super) async fn unfenced_write_refused(
                 | WriteOutcome::Truncated { .. }
         ),
         "chain: an unfenced write to a single-writer journal is refused as of the wrong mode"
+    );
+}
+
+/// A truncation under a leader uuid to a journal that has none (#339):
+/// refused as of the wrong mode, or no verdict. Sent through the library's
+/// truncate, redirects followed, so it reaches a node that proposes it.
+#[tracing::instrument(level = "debug", skip_all, fields(journal = %step.journal))]
+async fn fenced_truncate_refused(step: &Step<'_>) {
+    let request = Truncate {
+        journal: step.journal.journal.0,
+        tenant: step.journal.tenant.0,
+        up_to: step.trim_to.unwrap_or(0),
+        leader: Some(leader_uuid_to_proto(LeaderUuid(
+            u128::from(step.draws.1) | 1,
+        ))),
+    };
+    let truncator = step.nodes.with_tunables(step.config.truncate_tunables());
+    let first = step.nodes.leader().unwrap_or(step.target);
+    let outcome = judged_truncate(truncator.truncate(&request, first).await);
+    if matches!(outcome, TruncateOutcome::WrongMode { .. }) {
+        assert_reachable!("chain: a multi-writer journal refuses a fenced truncate");
+    }
+    assert_always!(
+        !matches!(
+            outcome,
+            TruncateOutcome::Applied { .. } | TruncateOutcome::Refused { .. }
+        ),
+        "chain: a fenced truncate to a multi-writer journal is refused as of the wrong mode"
+    );
+}
+
+/// The mode confusion on a single-writer journal (#339): an unfenced
+/// truncation below `up_to`, refused as of the wrong mode, or no verdict.
+/// Sent to the believed leader, and once more to the leader a redirect
+/// names, so it reaches a node that proposes it.
+#[tracing::instrument(level = "debug", skip_all, fields(journal = %journal))]
+pub(super) async fn unfenced_truncate_refused(
+    ctx: &SimContext,
+    nodes: &ChainClient,
+    journal: JournalIdentifier,
+    (target, up_to): (usize, u64),
+    timeout: Duration,
+) {
+    let request = open_truncate_request(journal, up_to);
+    let send = |target: usize| {
+        let attempt = nodes.truncate_attempt(target, request);
+        within(ctx, timeout, TruncateOutcome::Ambiguous, async move {
+            judged_truncate(attempt.await)
+        })
+    };
+    let mut outcome = send(nodes.leader().unwrap_or(target)).await;
+    if let TruncateOutcome::Redirect {
+        leader: Some(leader),
+    } = outcome
+        && let Some(target) = nodes.index_of(leader)
+    {
+        outcome = send(target).await;
+    }
+    if matches!(outcome, TruncateOutcome::WrongMode { .. }) {
+        assert_reachable!("chain: a single-writer journal refuses an unfenced truncate");
+    }
+    assert_always!(
+        !matches!(
+            outcome,
+            TruncateOutcome::Applied { .. } | TruncateOutcome::Refused { .. }
+        ),
+        "chain: an unfenced truncate to a single-writer journal is refused as of the wrong mode"
     );
 }
