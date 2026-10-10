@@ -20,13 +20,16 @@
 //!
 //! The coordinator writes `RegisterNode` only when the address changed, so
 //! a restart at the same address writes nothing. The request draws no
-//! randomness: it runs in a task of its own beside the machine.
+//! randomness: it runs in a task of its own beside the machine. It tells
+//! the machine when it ends ([`spawn`]'s receiver): a moved founding member
+//! holds its journals' clocks until then (#390, `crate::driver`).
 
 use std::time::Duration;
 
 use moonpool_core::{Detach, Providers, TaskProvider, TimeProvider};
 use moonpool_rpc::RpcHandle;
 use paros_core::{JournalIdentifier, NodeId};
+use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use super::MachineFacts;
@@ -50,22 +53,26 @@ pub(crate) struct Registration {
 
 /// Start the registration of `registration` in a task that ends with its
 /// answer or with `shutdown`. Nothing starts without an election journal or
-/// a known machine to read it from.
+/// a known machine to read it from. The receiver turns `true` once the
+/// registration ended: the registry holds the address, or nothing can
+/// change the answer.
 pub(crate) fn spawn<P: Providers>(
     providers: &P,
     rpc: &RpcHandle<P>,
     registration: Registration,
     tunables: &DriverTunables,
     shutdown: CancellationToken,
-) {
+) -> watch::Receiver<bool> {
     let Registration {
         facts,
         cell_id,
         election,
         book,
     } = registration;
+    let (ended, receiver) = watch::channel(false);
     if !election.is_set() || book.is_empty() || cell_id == 0 {
-        return;
+        ended.send_replace(true);
+        return receiver;
     }
     assert!(facts.node_id.0 != 0, "a machine of a cell has an identity");
     let servers = book
@@ -89,11 +96,12 @@ pub(crate) fn spawn<P: Providers>(
                 rpc,
                 client,
                 (facts, cell_id, election),
-                every,
+                (every, ended),
                 shutdown,
             ),
         )
         .detach();
+    receiver
 }
 
 /// The registration's loop: find the coordinator, ask it, and stop once
@@ -105,7 +113,7 @@ async fn run<P: Providers>(
     rpc: RpcHandle<P>,
     client: Client<P>,
     (facts, cell_id, election): (MachineFacts, u64, JournalIdentifier),
-    every: Duration,
+    (every, ended): (Duration, watch::Sender<bool>),
     shutdown: CancellationToken,
 ) {
     let identity = facts.identify_ack(cell_id);
@@ -129,10 +137,12 @@ async fn run<P: Providers>(
             {
                 RegisterOutcome::Registered => {
                     tracing::info!(node = facts.node_id.0, addr = %facts.addr, "machine_registered");
+                    ended.send_replace(true);
                     return;
                 }
                 RegisterOutcome::Refused(refusal) if final_refusal(&refusal) => {
                     tracing::warn!(node = facts.node_id.0, %refusal, "machine_register_refused");
+                    ended.send_replace(true);
                     return;
                 }
                 RegisterOutcome::Refused(_) | RegisterOutcome::Unreachable => {}

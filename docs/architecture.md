@@ -547,6 +547,14 @@ The same change fixed a restore bug from #349: a founding member that registered
 broke every restore of a registry checkpoint, because the restore refused a genesis node in the
 state.
 
+It also fixed #390 (renamed founder never registers). A founding member that comes back at a
+new address hears none of its peers: they send to the address the registry knows. Its election
+clocks still fired, and each campaign raised its peers' promises above the sitting leader's. The
+cell control journal then stalled, so the registration that would move the peers' lanes never
+landed. Now such a member holds its journals' clocks until its registration ends
+(`driver/mod.rs`). It still answers every message that reaches it. A lone founding member is its
+own quorum, so it never holds.
+
 **Finding the cell** (amended on 2026-10-09). There is no cluster file and no rendezvous name.
 A machine's configuration names no cell and no peer: it learns its cell when it is admitted
 (`FormCell` or `Admit`, section 3.1) and caches it durably. On every later start it finds the cell
