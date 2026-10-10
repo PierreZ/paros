@@ -68,6 +68,7 @@ pub mod election;
 pub mod fleet;
 pub mod initialize;
 pub mod multi;
+pub mod names;
 mod observer;
 pub mod outcome;
 mod reader;

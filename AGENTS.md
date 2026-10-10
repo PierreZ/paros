@@ -78,6 +78,8 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   in `PierreZ/moonpool`; keep paros-side defense in depth meanwhile (`upstream-to-moonpool`).
   When paros needs the fix, improve moonpool autonomously (decided on 2026-10-09): open the
   moonpool PR, merge it once its CI is green, then advance paros's pin (all eleven lines).
+- **Name every issue and PR number** (decided on 2026-10-10): write a short name next to it,
+  e.g. "#216 (finish bootstrap)", in chats, comments, PR descriptions and commit messages.
 - **Never edit a `CHANGELOG.md` by hand**: release-plz generates it; the commit message is where
   a change is described.
 - **Eat your own food, a first-class citizen** (decided on 2026-10-09, `docs/architecture.md` §1): solve

@@ -21,6 +21,7 @@ mod cell;
 mod commands;
 mod fleet;
 mod init;
+mod names;
 mod output;
 #[path = "../../resolve.rs"]
 mod resolve;
@@ -53,9 +54,9 @@ struct Global {
     /// The servers to ask, comma-separated: `HOST:PORT` — a name that
     /// resolves to several machines (a Compose alias) stands for
     /// them all, and each server's node id is learned from its own
-    /// `Inspect` — or `ID=HOST:PORT` to name the id outright. A host is an
-    /// IP or a name; a name of one machine is resolved each time it is
-    /// dialed (#257).
+    /// `Inspect` — or `ID=HOST:PORT` to name the id outright (its 16 hex
+    /// digits). A host is an IP or a name; a name of one machine is
+    /// resolved each time it is dialed (#257).
     #[arg(long, env = "PAROSCTL_SERVERS", value_delimiter = ',', global = true)]
     servers: Vec<ServerArg>,
     /// Print JSON, one document per answer, instead of text.
@@ -81,9 +82,7 @@ impl FromStr for ServerArg {
         match s.split_once('=') {
             Some((id, addr)) => Ok(Self {
                 id: Some(
-                    id.trim()
-                        .parse()
-                        .map_err(|e| format!("bad id in {s:?}: {e}"))?,
+                    names::parse_node_id(id.trim()).map_err(|e| format!("bad id in {s:?}: {e}"))?,
                 ),
                 addrs: vec![
                     Address::parse(addr.trim())

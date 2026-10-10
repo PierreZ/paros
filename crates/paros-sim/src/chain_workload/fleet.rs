@@ -51,15 +51,17 @@
 //! at the tail.
 
 use paros::Address;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::time::Duration;
 
 use moonpool_sim::{
-    RandomProvider, SimContext, TimeProvider, assert_always, assert_reachable, assert_sometimes,
-    buggify_with_prob,
+    RandomProvider, SimContext, StateHandle, TimeProvider, assert_always, assert_reachable,
+    assert_sometimes, buggify_with_prob,
 };
 use paros::client::checkpoint::{CheckpointPolicy, Checkpointer, Folder, LoadOutcome, OpenOutcome};
 use paros::client::fleet::{FleetRefusal, FleetSession, Interrupted, Run, Stage, Step};
+use paros::client::names::{TenantResolution, resolve_tenant};
 use paros::client::{ClaimOutcome, Writer};
 use paros::fleet::{CellState, FleetDirectory, Groups, TenantState};
 use paros::machine::ControlJournals;
@@ -79,6 +81,25 @@ use cell::Cell;
 /// The tenant names an operation is drawn from: few, so two operators race
 /// for one often.
 const NAMES: [&[u8]; 3] = [b"acme", b"globex", b"initech"];
+
+/// The run's completed tenant removals (#239), shared by every operator:
+/// a name is reusable once its removal completes, its id never is.
+#[derive(Default)]
+struct TenantNames {
+    /// Each removed tenant, to the name it held.
+    removed: BTreeMap<TenantId, Vec<u8>>,
+}
+
+/// Run `f` over the run's [`TenantNames`].
+fn with_names<R>(state: &StateHandle, f: impl FnOnce(&mut TenantNames) -> R) -> R {
+    let names = crate::state::published(state, TENANT_NAMES_KEY, TenantNames::default);
+    let mut names = names
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    f(&mut names)
+}
+
+const TENANT_NAMES_KEY: &str = "paros-tenant-names";
 
 /// An operation this client stopped in the middle of — the crash shape, or
 /// a run that did not end (interrupted, its target killed under it, going
@@ -130,6 +151,8 @@ pub(super) struct FleetOps {
     /// The machine whose admission this operator stopped after its
     /// registration (#216), to finish on its next `ADMIT`.
     admitting: Option<Address>,
+    /// The run's shared state: the completed removals (#239).
+    state: StateHandle,
 }
 
 impl FleetOps {
@@ -167,6 +190,7 @@ impl FleetOps {
             killed: false,
             learned: super::system::Learned::default(),
             admitting: None,
+            state: ctx.state().clone(),
         })
     }
 
@@ -568,8 +592,15 @@ impl FleetOps {
         run.steps.iter().copied().for_each(reach);
         self.created(session, &name, &run);
         match run.outcome {
-            Step::Done { .. } => {
+            Step::Done { result, .. } => {
                 self.check_directory(client, session, first).await;
+                self.resolve_tenant_name(client, first, &name, Some(result))
+                    .await;
+                // An internal tenant has no name: the user path never
+                // resolves one.
+                if buggify_with_prob!(0.2) {
+                    self.resolve_tenant_name(client, first, b"", None).await;
+                }
                 true
             }
             Step::Refused(FleetRefusal::NotInitialized) => {
@@ -610,6 +641,63 @@ impl FleetOps {
         }
     }
 
+    /// Resolve the tenant `name` through the library (#239), as an entry
+    /// role does, and hold it: a name never resolves to a tenant whose
+    /// removal completed before the resolution started (ids are never
+    /// reused, names are), and an internal tenant never resolves.
+    async fn resolve_tenant_name(
+        &self,
+        client: &ChainClient,
+        first: usize,
+        name: &[u8],
+        created: Option<TenantId>,
+    ) {
+        let Some(cell) = &self.cell else {
+            return;
+        };
+        let removed: BTreeSet<TenantId> =
+            with_names(&self.state, |names| names.removed.keys().copied().collect());
+        let resolution = resolve_tenant(client, first, cell.fleet, name).await;
+        if let TenantResolution::Resolved {
+            tenant, control, ..
+        } = &resolution
+        {
+            assert_always!(
+                !removed.contains(tenant),
+                "names: a tenant name never resolves to a removed tenant",
+                { "tenant" => tenant.0 }
+            );
+            assert_always!(
+                !name.is_empty() && control.tenant == *tenant && control.is_set(),
+                "names: a tenant name resolves to a named tenant and its control journal",
+                { "tenant" => tenant.0 }
+            );
+        }
+        if name.is_empty() {
+            assert_always!(
+                matches!(
+                    resolution,
+                    TenantResolution::Internal | TenantResolution::Unreadable(_)
+                ),
+                "names: an internal tenant is never resolved through the user path"
+            );
+            if resolution == TenantResolution::Internal {
+                assert_reachable!("names: an internal tenant's resolution is refused");
+            }
+        } else {
+            assert_always!(
+                resolution != TenantResolution::Internal,
+                "names: a user's tenant name is never an internal tenant's"
+            );
+        }
+        if let Some(created) = created {
+            assert_sometimes!(
+                matches!(resolution, TenantResolution::Resolved { tenant, .. } if tenant == created),
+                "names: a tenant name resolves to the tenant its creation made"
+            );
+        }
+    }
+
     /// The oracles of a creation's run.
     fn created(&mut self, session: &FleetSession, name: &[u8], run: &Run<TenantId>) {
         let Step::Done { result, last } = run.outcome else {
@@ -630,6 +718,16 @@ impl FleetOps {
                 run.steps.first() != Some(&Stage::RegisterTenant),
                 "fleet: a tenant creation resumed from REGISTERING"
             );
+            if with_names(&self.state, |names| {
+                names
+                    .removed
+                    .iter()
+                    .any(|(tenant, removed)| removed == name && *tenant != result)
+            }) {
+                assert_reachable!(
+                    "names: a tenant name is created again after a completed removal"
+                );
+            }
         }
         assert_sometimes!(created, "fleet: a tenant is created READY");
         if let Some(entry) = session.directory().tenant(result) {
@@ -656,6 +754,9 @@ impl FleetOps {
             Step::Done { result, last } => {
                 let removed = last == Some(Stage::RemoveTenant);
                 if let (Some(tenant), true) = (result, removed) {
+                    with_names(&self.state, |names| {
+                        names.removed.insert(tenant, name.to_vec())
+                    });
                     assert_always!(
                         session.directory().named(name).is_none()
                             && session.directory().is_removed(tenant)

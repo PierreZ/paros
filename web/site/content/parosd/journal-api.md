@@ -123,9 +123,10 @@ Every journal call names its journal by the pair `(tenant, journal)`. Each half 
 
 ## From the command line
 
-`parosctl` sends these calls. `parosctl write T/J hello --leader 7` claims the journal under
-the uuid `7` if it does not lead yet, and then writes at the tail. `parosctl set-leader T/J
---new 8` takes the journal from the current leader. `parosctl read T/J --limit 10 --wait-ms
-500` reads ten records and waits half a second at the tail. `parosctl write --multi` and
+`parosctl` sends these calls. A journal is named `TENANT/JOURNAL` (or `paros://TENANT/JOURNAL`),
+or by its hex ids, `id:TENANT/JOURNAL`. `parosctl write acme/orders hello --leader 7` claims the
+journal under the uuid `7` if it does not lead yet, and then writes at the tail. `parosctl
+set-leader acme/orders --new 8` takes the journal from the current leader. `parosctl read
+acme/orders --limit 10 --wait-ms 500` reads ten records and waits half a second at the tail. `parosctl write --multi` and
 `parosctl truncate --multi` send the calls of a multi-writer journal. The `DEMO.md` file in
 the repository shows a full session.

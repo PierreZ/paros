@@ -36,6 +36,7 @@ pub mod fleet;
 pub mod journal;
 pub mod machine;
 mod matchmaker;
+pub mod name;
 mod provision;
 mod proxy;
 mod replica_tier;

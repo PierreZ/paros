@@ -34,7 +34,8 @@ use serde_json::json;
 
 use crate::Ending;
 use crate::fleet::{interrupted, leader_seed, nonzero, refusal_text, steps};
-use crate::output::{Printer, note};
+use crate::output::{Printer, note, short};
+use paros::name::{Abbreviations, full_hex};
 
 /// `parosctl init`.
 #[derive(Args, Debug)]
@@ -104,7 +105,7 @@ pub async fn run(
             if !done.users.is_empty() {
                 note(&format!(
                     "formed cell {} over {} members",
-                    done.journals.cell_id,
+                    short(done.journals.cell_id),
                     done.servers.len()
                 ));
             }
@@ -169,8 +170,10 @@ fn unreachable_text(why: Unreachable, target: Option<&Address>) -> String {
     }
 }
 
-/// Print an initialized fleet: every identifier, the only time the user
-/// journals are named.
+/// Print an initialized universe: every identifier, the only time the user
+/// journals are named. Ids print abbreviated (#239), but a user journal
+/// prints whole, `id:TENANT/JOURNAL` in hex: no later listing knows it, so
+/// no prefix of it resolves (until #210 names every user journal).
 fn print_initialized(out: &Printer, done: &Initialized) {
     let journals = done.journals;
     let fleet_control = journals.fleet.map(|f| f.to_string()).unwrap_or_default();
@@ -178,15 +181,25 @@ fn print_initialized(out: &Printer, done: &Initialized) {
     let users: Vec<String> = done.users.iter().map(ToString::to_string).collect();
     out.emit(
         || {
+            let ids = Abbreviations::new(
+                [done.fleet_id, journals.cell_id, done.coordinator.0]
+                    .into_iter()
+                    .chain(journals.fleet.into_iter().chain(journals.election).chain([journals.cell]).flat_map(|j| [j.tenant.0, j.journal.0])),
+            );
+            let users: Vec<String> = done
+                .users
+                .iter()
+                .map(|j| format!("id:{}/{}", full_hex(j.tenant.0), full_hex(j.journal.0)))
+                .collect();
             format!(
-                "initialized fleet={} cell={} coordinator={} members={} control={} election={} fleet_control={} journals={} steps={}",
-                done.fleet_id,
-                journals.cell_id,
-                done.coordinator.0,
+                "initialized universe={} cell={} coordinator={} members={} control=id:{} election={} universe_control={} journals={} steps={}",
+                ids.id(done.fleet_id),
+                ids.id(journals.cell_id),
+                ids.id(done.coordinator.0),
                 done.servers.len(),
-                journals.cell,
-                election,
-                fleet_control,
+                ids.journal(journals.cell),
+                journals.election.map_or_else(|| "none".to_string(), |e| format!("id:{}", ids.journal(e))),
+                journals.fleet.map_or_else(|| "none".to_string(), |f| format!("id:{}", ids.journal(f))),
                 users.join(","),
                 steps(&done.steps).join(",")
             )

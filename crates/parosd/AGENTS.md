@@ -32,8 +32,9 @@ image and the Compose toy are `Dockerfile` and `docker-compose.yml` at the repos
 - `src/bin/parosctl/cell.rs` → `parosctl cell add-machine <addr>` over `paros::client::cell` (#216): registers an idle machine in the cell control journal, then admits it.
 - `src/bin/parosctl/commands.rs` → one fn per cell command: `write`, `read`, `tail`, `truncate`,
   `set-leader`, `inspect`, `reconfigure`, `retire`.
-- `src/bin/parosctl/output.rs` → `Printer` → text or one JSON document per answer (`--json`);
-  diagnostics to stderr.
+- `src/bin/parosctl/names.rs` → `JournalRef`, `NodeRef` → a journal argument as a name (`TENANT/JOURNAL`, `paros://…`, resolved through `paros::client::names` with operator rights until #192) or as ids (`id:TENANT/JOURNAL`, hex prefixes matched among the journals `parosctl` can list); a node id as a hex prefix of a server's id (#239).
+- `src/bin/parosctl/output.rs` → `Printer`, `short` → text or one JSON document per answer (`--json`);
+  diagnostics to stderr; ids in text as short hex (#239), whole in JSON.
 - `tests/real_fs.rs` → both storage contract suites on a real disk; a store dropped mid-batch
   reopens with every acked write; the machine record on a real disk.
 
