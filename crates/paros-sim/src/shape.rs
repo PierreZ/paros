@@ -1005,6 +1005,11 @@ pub(crate) struct MachineLayout {
     /// On a seed whose machines advertise names, the percent of reboots that
     /// land at a new address (#257).
     pub(crate) move_pct: u32,
+    /// On a seed whose machines advertise names, the percent of a cell
+    /// machine's reboots that come back under a new name at a new address
+    /// (#349): the advertised string changes, and the cell's registry must
+    /// learn it.
+    pub(crate) rename_pct: u32,
 }
 
 /// The run's machine layout (#246), drawn once per seed by whoever asks
@@ -1017,7 +1022,10 @@ pub(crate) struct MachineLayout {
 /// extreme 0..=2: a cell of control journals alone, or two user journals
 /// beside them). The machines advertise names on a coin (#257); on such a
 /// seed a reboot lands at a new address with the `move_pct` knob (default
-/// 0; extreme 20..=80, floor 0: a machine that never moves).
+/// 0; extreme 20..=80, floor 0: a machine that never moves), and a cell
+/// machine's reboot comes back under a new name with the `rename_pct` knob
+/// (#349, default 0; extreme 20..=60, floor 0: a machine that keeps its
+/// name).
 #[tracing::instrument(level = "debug", skip(state))]
 pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout {
     let registry = registry(state);
@@ -1034,6 +1042,7 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
             let assignment = buggify_knob!(1_usize, 0_usize..3_usize);
             let named = moonpool_sim::sim_random_bool(0.5);
             let move_pct = buggify_knob!(0_u32, 20_u32..81_u32);
+            let rename_pct = buggify_knob!(0_u32, 20_u32..61_u32);
             let machines = (0..count)
                 .map(|rank| {
                     let class = if rank >= founders && moonpool_sim::sim_random_bool(0.5) {
@@ -1063,6 +1072,7 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
                 assignment,
                 named,
                 move_pct,
+                rename_pct,
             }
         })
         .clone()

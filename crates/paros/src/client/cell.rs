@@ -139,13 +139,15 @@ impl CellSession {
         let founder = |id: NodeId| self.founders.iter().any(|(f, _)| *f == id);
         let rank = |id: NodeId| (id != node, !founder(id), id);
         let mut by_addr: BTreeMap<Address, NodeId> = BTreeMap::new();
-        let registered = self
-            .cell
-            .state()
+        let registry = self.cell.state();
+        // A founding member registered its address (#349): its registered
+        // address replaces the plan's.
+        let founders = crate::machine::address_book(&self.founders, registry);
+        let registered = registry
             .nodes()
-            .filter(|(_, n)| n.standing != NodeStanding::Retired)
+            .filter(|(id, n)| n.standing != NodeStanding::Retired && !founder(*id))
             .filter_map(|(id, n)| Address::parse(&n.addr).ok().map(|addr| (id, addr)));
-        for (id, addr) in self.founders.iter().cloned().chain(registered) {
+        for (id, addr) in founders.into_iter().chain(registered) {
             let held = by_addr.entry(addr).or_insert(id);
             if rank(id) < rank(*held) {
                 *held = id;

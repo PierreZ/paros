@@ -42,6 +42,7 @@
 //! `mod.rs` itself holds only [`run_node`], the select loop that wires them,
 //! and the per-arm steps that loop shares (`NodeLoop`).
 
+mod book;
 pub(crate) mod boot;
 mod calls;
 mod config;
@@ -971,6 +972,11 @@ where
 ///
 /// As [`run_node`]; [`RunError::Infra`] when several journals are asked of a
 /// deployment with matchmakers, proxies or replicas.
+///
+/// # Panics
+///
+/// When `formed`'s plan names a founding member `members` has no lane to (a
+/// programmer error: a machine passes its plan's members).
 #[tracing::instrument(level = "debug", skip_all, fields(local_addr = %local_addr, members = members.len(), matchmakers = matchmakers.len(), proxies = proxies.len(), replicas = replicas.len()))]
 // One cohesive select loop: every arm is a thin feed into the core plus the
 // same drain/maintain tail; splitting arms out would only scatter the loop's
@@ -1132,6 +1138,9 @@ where
     let names = formed
         .as_ref()
         .map_or_else(crate::Names::literal, |formed| formed.facts.names.clone());
+    // A founding member's peers are dialed where the registry fold says
+    // (#349), from the plan's addresses on.
+    let mut peer_book = formed.as_ref().map(book::PeerBook::new);
     if let Some(formed) = formed {
         // Every founding member campaigns for the cell coordinator (#240).
         crate::machine::coordinator::spawn(
@@ -1141,7 +1150,32 @@ where
             &tunables,
             node_audit.call_observer(),
             incarnation_shutdown.clone(),
-        );
+        )?;
+        // It asks the coordinator to register the address it advertises
+        // now (#349): the cell may know another one.
+        if let Some(election) = formed
+            .plan
+            .election
+            .is_set()
+            .then_some(formed.plan.election)
+        {
+            crate::machine::register::spawn(
+                &providers,
+                &rpc_handle,
+                crate::machine::register::Registration {
+                    facts: formed.facts.serving(&rpc_handle),
+                    cell_id: formed.plan.cell_id,
+                    election,
+                    book: crate::machine::with_own(
+                        &formed.plan.members,
+                        formed.facts.node_id,
+                        &formed.facts.addr,
+                    ),
+                },
+                &tunables,
+                incarnation_shutdown.clone(),
+            );
+        }
         formed.serve(&providers, &rpc_handle, incarnation_shutdown.clone())?;
     }
 
@@ -1654,6 +1688,15 @@ where
                     }
                     let outcome = shared.beat(rt, &mut handover, ticks).await;
                     journals.fold(journal, outcome, ticks, self_id)?;
+                }
+                // The peer book (#349): a peer the registry moved is dialed
+                // at its registered address from its lane's next batch on.
+                if let Some(book) = peer_book.as_mut() {
+                    for (peer, addr) in book.follow(&journals) {
+                        let moved = out.readdress(peer, addr.clone());
+                        assert!(moved, "every founding member but this one has a lane");
+                        tracing::info!(node = self_id, peer = peer.0, %addr, "peer_book_moved");
+                    }
                 }
                 // The system journals (#189): fold what this node's own
                 // the system journals chose, apply it, and keep a follow read

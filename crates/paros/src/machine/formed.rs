@@ -46,10 +46,13 @@ impl FormedCell {
     /// Phase 1b from a formed member: its vote, whatever the ballot.
     pub(super) fn prepare_ack(&self) -> wire::PrepareCellAck {
         assert!(self.ballot.round != 0, "a formed member voted at a ballot");
+        // A member by id: the address it advertises may have changed since
+        // the plan (#349).
         assert!(
             self.plan
                 .members
-                .contains(&(self.facts.node_id, self.facts.addr.clone())),
+                .iter()
+                .any(|(id, _)| *id == self.facts.node_id),
             "a formed member is a member of its plan"
         );
         wire::PrepareCellAck {

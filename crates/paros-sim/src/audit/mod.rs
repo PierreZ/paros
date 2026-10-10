@@ -1518,8 +1518,11 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         addr: &paros::Address,
         record: Option<&paros::machine::MachineRecord>,
     ) {
-        if let Some((board, _)) = &self.machines {
-            crate::machine::booted(board, addr, record);
+        // The board knows a machine by its rank's address (#349): a renamed
+        // machine advertises another one.
+        let _ = addr;
+        if let Some((board, rank_addr)) = &self.machines {
+            crate::machine::booted(board, rank_addr, record);
         }
     }
 
@@ -1536,8 +1539,9 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         plan: &paros::machine::CellPlan,
         _leftovers: bool,
     ) {
-        if let Some((board, _)) = &self.machines {
-            crate::machine::formatting(board, addr, node, plan);
+        let _ = addr;
+        if let Some((board, rank_addr)) = &self.machines {
+            crate::machine::formatting(board, rank_addr, node, plan);
         }
     }
 

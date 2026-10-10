@@ -90,6 +90,9 @@ pub(crate) struct PeerMailbox {
     /// Set by the enqueue side: the next drained batch is handed to the peer
     /// in reverse order. Read-and-cleared by the delivery task.
     reverse_next: Arc<AtomicBool>,
+    /// Set by the node loop when the cell's address book moved this peer
+    /// (#349): the delivery task dials it there from its next batch on.
+    readdress: Arc<Mutex<Option<Address>>>,
 }
 
 /// A mailbox's journal lanes and the round-robin cursor over them.
@@ -218,7 +221,25 @@ impl PeerMailbox {
             wake: Arc::new(tokio::sync::Notify::new()),
             hold_next: Arc::new(AtomicBool::new(false)),
             reverse_next: Arc::new(AtomicBool::new(false)),
+            readdress: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Dial this lane's peer at `addr` from the next batch on (#349): the
+    /// queued messages stay, and go there.
+    pub(crate) fn readdress(&self, addr: Address) {
+        *self
+            .readdress
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(addr);
+    }
+
+    /// The address the node loop moved this peer to since the last call.
+    fn take_address(&self) -> Option<Address> {
+        self.readdress
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Lanes> {
@@ -382,6 +403,18 @@ impl Outbound {
     /// Whether a lane to `node` exists.
     pub(crate) fn has_peer(&self, node: NodeId) -> bool {
         self.peers().contains_key(&node)
+    }
+
+    /// Dial `node`'s lane at `addr` from its next batch on (#349): the
+    /// cell's address book moved it. `false` when no lane to `node` exists.
+    pub(crate) fn readdress(&self, node: NodeId, addr: Address) -> bool {
+        match self.peers().get(&node) {
+            Some(lane) => {
+                lane.readdress(addr);
+                true
+            }
+            None => false,
+        }
     }
 
     /// Add a lane to `node` (#189: a node the registry admitted at runtime).
@@ -685,6 +718,21 @@ impl<P: Providers> Dialer<P> {
         }
     }
 
+    /// The peer is dialed at `address` from now on (#349): the cell's
+    /// address book moved it. Nothing resolved for the old one is kept.
+    fn readdress(&mut self, address: Address) {
+        if address == self.address {
+            return;
+        }
+        moonpool_assertions::reachable!("transport: a peer lane follows a registered address");
+        tracing::info!(from = %self.address, to = %address, "peer_readdressed");
+        self.address = address;
+        self.resolved = None;
+        self.last = None;
+        self.moved = false;
+        assert!(self.resolved.is_none(), "a new address is resolved afresh");
+    }
+
     /// A delivery failed: a name is resolved again before the next batch;
     /// a literal address stays as it is.
     fn failed(&mut self) {
@@ -834,6 +882,9 @@ async fn run_peer_delivery<P: Providers, A: Audit>(
         carried = next;
         assert_eq!(batch.cell_id, 0, "a batch is stamped once, here");
         batch.cell_id = cell_id;
+        if let Some(address) = messages.take_address() {
+            dialer.readdress(address);
+        }
         let client = moonpool_core::select! {
             biased;
             () = shutdown.cancelled() => return,
