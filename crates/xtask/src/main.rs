@@ -123,6 +123,11 @@ const MUTANT_HUNT: &[&str] = &[
     "mutants",
 ];
 
+/// Incremental compilation for the release profile, which turns it off by
+/// default. It makes a mutant's rebuild about ten times faster (5 s against
+/// 58 s on 4 cores); the baseline sets it too, so both share one build cache.
+const MUTANT_INCREMENTAL: (&str, &str) = ("CARGO_PROFILE_RELEASE_INCREMENTAL", "true");
+
 /// `cargo xtask mutants`: `cargo mutants` with the hunt's seed count in
 /// `PAROS_MUTANT_SEEDS`. The scope, the test target and the release profile
 /// live in `.cargo/mutants.toml`.
@@ -132,6 +137,10 @@ const MUTANT_HUNT: &[&str] = &[
 /// baseline itself: the unmutated hunt must be clean, and its time sizes the
 /// per-mutant timeout passed with `--baseline skip`. A listing (`--list`,
 /// `--list-files`) or an explicit `--baseline`/`--timeout` skips it.
+///
+/// Every build is an incremental release build (`MUTANT_INCREMENTAL`): a
+/// mutant edits one function of paros-core, and an incremental rebuild of
+/// the hunt takes seconds where a full one takes about a minute.
 fn mutants(args: &[String]) {
     if args
         .first()
@@ -162,6 +171,7 @@ fn mutants(args: &[String]) {
     });
     let mut cmd = Command::new("cargo");
     cmd.arg("mutants");
+    cmd.env(MUTANT_INCREMENTAL.0, MUTANT_INCREMENTAL.1);
     if let Some(n) = seeds {
         // Inherited by cargo-mutants' test runs.
         cmd.env("PAROS_MUTANT_SEEDS", n.to_string());
@@ -189,6 +199,7 @@ fn mutant_baseline(seeds: Option<u64>) -> u64 {
     let hunt = || {
         let mut cmd = Command::new("cargo");
         cmd.args(MUTANT_HUNT);
+        cmd.env(MUTANT_INCREMENTAL.0, MUTANT_INCREMENTAL.1);
         if let Some(n) = seeds {
             cmd.env("PAROS_MUTANT_SEEDS", n.to_string());
         }
