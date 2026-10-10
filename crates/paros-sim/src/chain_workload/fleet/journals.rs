@@ -69,6 +69,7 @@ impl FleetOps {
         let Some((cell, tenant, control, label)) = self.journal_tenant(ctx, payload).await else {
             return;
         };
+        self.through_frontend(&label, control, payload).await;
         let request = if let Some(request) = self.journal_pending.take() {
             request
         } else {
@@ -79,11 +80,6 @@ impl FleetOps {
             // its cached resolution first: the journal may be gone since.
             if self.cached_name(tenant, &name).is_some() && buggify_with_prob!(0.5) {
                 self.read_through_name(&cell, control, &name, payload).await;
-            }
-            // A tenant's client reaches its journals through a frontend, by
-            // name, with a token (#192 (the frontend)).
-            if !self.frontends.is_empty() && buggify_with_prob!(0.5) {
-                self.through_frontend(&label, control, &name, payload).await;
             }
             JournalRequest {
                 request: ctx.random().random_range(1..u64::MAX),
@@ -108,9 +104,10 @@ impl FleetOps {
         policy: CheckpointPolicy,
         payload: u64,
     ) {
-        let Some((cell, tenant, control, _)) = self.journal_tenant(ctx, payload).await else {
+        let Some((cell, tenant, control, label)) = self.journal_tenant(ctx, payload).await else {
             return;
         };
+        self.through_frontend(&label, control, payload).await;
         let request = match self.journal_pending.take() {
             Some(request) => request,
             None => JournalRequest {
@@ -464,24 +461,25 @@ impl FleetOps {
         }
     }
 
-    /// One call to the journal `name` of the tenant `tenant` (its control
-    /// journal `control`) through a frontend (#192 (the frontend)), with a
-    /// token of the kind `draw` picks. A call in the token's rights is never
-    /// denied; any other is denied for its cause and never served.
-    async fn through_frontend(
-        &mut self,
-        tenant: &str,
-        control: JournalIdentifier,
-        name: &[u8],
-        draw: u64,
-    ) {
+    /// On a seed that runs frontends, one call to a journal of the tenant
+    /// `tenant` (its control journal `control`) through a frontend (#192
+    /// (the frontend)): a name from [`JOURNAL_NAMES`] and a token of the
+    /// kind `draw` picks. A call in the token's rights is never denied; any
+    /// other is denied for its cause and never served.
+    async fn through_frontend(&mut self, tenant: &str, control: JournalIdentifier, draw: u64) {
+        if self.frontends.is_empty() {
+            return;
+        }
+        let name =
+            JOURNAL_NAMES[usize::try_from((draw >> 40) % JOURNAL_NAMES.len() as u64).unwrap_or(0)];
         let Ok(named) = JournalName::new(tenant, &String::from_utf8_lossy(name)) else {
             return;
         };
         let presented = Presented::drawn(draw >> 24);
-        // On its own coin the call names a journal by its ids instead: the
-        // tenant's control journal, an internal journal only `admin` reaches.
-        let internal = buggify_with_prob!(0.2);
+        // On one draw in three the call names a journal by its ids instead:
+        // the tenant's control journal, an internal journal only `admin`
+        // reaches.
+        let internal = (draw >> 48).is_multiple_of(3);
         let now = self.connector.providers().time().now();
         let pass = Arc::new(Pass::new(frontend::token(
             &self.state,
@@ -504,7 +502,7 @@ impl FleetOps {
         };
         let client = self.connector.through(&self.frontends, &pass);
         let first = usize::try_from(draw % self.frontends.len() as u64).unwrap_or(0);
-        if !internal && buggify_with_prob!(0.5) {
+        if !internal && (draw >> 52).is_multiple_of(2) {
             self.write_through_frontend(&client, journal, expected, first, draw)
                 .await;
             return;
