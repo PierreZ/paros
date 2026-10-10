@@ -151,12 +151,23 @@ async fn found<P: Providers>(
     }
     let client = connect(&servers);
     // The genesis pool is the cell's members, never only the servers that
-    // answered: one of them may be down.
-    let mut members = client
-        .inspect(0, journals.cell)
-        .await
-        .map(|view| view.members)
-        .unwrap_or_default();
+    // answered: one of them may be down. A server that answered may also
+    // be a machine `cell add-machine` admitted (#423), which serves no
+    // journal yet and refuses the `Inspect`: the next server is asked.
+    let mut members = Vec::new();
+    for target in 0..servers.len() {
+        if let Some(view) = client.inspect(target, journals.cell).await
+            && !view.members.is_empty()
+        {
+            if target > 0 {
+                moonpool_assertions::reachable!(
+                    "init: a found cell's members come from a server past the first"
+                );
+            }
+            members = view.members;
+            break;
+        }
+    }
     members.sort_unstable();
     members.dedup();
     if members.is_empty() {
