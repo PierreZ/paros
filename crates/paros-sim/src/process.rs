@@ -1497,6 +1497,9 @@ async fn run_proxy_role(
     // nodes of the pool.
     let members = ranked(deployment.acceptors(), NodeId)?;
     let has_matchmakers = !deployment.matchmakers().is_empty();
+    // The stalled-proxy scenario decides the driver's named location before
+    // the proxy's first vote (#341).
+    crate::shape::stalled_proxy(ctx.state());
     let config = ProxyConfig {
         id,
         acceptors: bootstrap_config(ctx, members.len(), has_matchmakers),

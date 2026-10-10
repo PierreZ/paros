@@ -51,6 +51,46 @@ pub const LOSE_VERDICTS: &str = "paros: a node loses write verdicts";
 /// and later accepted".
 pub const LAG_FOLLOW: &str = "paros: a node follows its control journals late";
 
+/// The proxy leader stalls (#341): it drops the `Accepted`s and `Nack`s it
+/// hears, so none of its rounds closes. Its leader then takes each delegated round back
+/// on its own budget, the proxy evicts each round on its retention budget,
+/// and a leadership change meets the rounds the proxy still holds. Always
+/// safe: a proxy decides nothing, and a lost vote is within the model. The
+/// simulation couples it to the stalled-proxy scenario, which also runs an
+/// acceptor grid where the pool tiles one. Recovery gates: "proxy: a leader
+/// takes a delegated round back on a grid column", "proxy: a proxy evicts a
+/// round nobody answers".
+pub const STALL_PROXY: &str = "paros: a proxy leader stalls";
+
+/// The leader resigns while it holds delegated rounds (#341), at its own
+/// rate per beat, and campaigns again at once. Its next leadership's first
+/// delegation then meets the rounds a proxy still holds for the old one,
+/// which the proxy must close. Always safe: `step_down` is, and any node
+/// may campaign at any time, at any fresh round. The simulation couples it to the stalled-proxy
+/// scenario, whose proxies hold every round open. Recovery gate: "proxy: a
+/// higher-ballot delegation meets a superseded leadership's rounds".
+pub const RESIGN_DELEGATING: &str = "paros: a leader resigns while it holds delegated rounds";
+
+/// Whether this leader, which holds delegated rounds, resigns on this beat
+/// ([`RESIGN_DELEGATING`]).
+pub(crate) fn resign_delegating() -> bool {
+    let resigned = moonpool_buggify::buggify_named!(RESIGN_DELEGATING, 0.05);
+    if resigned {
+        moonpool_assertions::reachable!("proxy: a leader resigns while it holds delegated rounds");
+    }
+    resigned
+}
+
+/// Whether this proxy drops the acceptor's answer it just heard
+/// ([`STALL_PROXY`]).
+pub(crate) fn stall_proxy() -> bool {
+    let stalled = moonpool_buggify::buggify_named!(STALL_PROXY, 1.0);
+    if stalled {
+        moonpool_assertions::reachable!("proxy: a stalled proxy drops an acceptor's answer");
+    }
+    stalled
+}
+
 /// Whether this node skips opening its follow reads on this tick
 /// ([`LAG_FOLLOW`]).
 pub(crate) fn lag_follow() -> bool {
@@ -148,5 +188,7 @@ mod tests {
         assert!(!withhold_gc());
         assert!(!hold_journal(Some(id(9)), id(9)));
         assert!(!lose_verdict());
+        assert!(!stall_proxy());
+        assert!(!resign_delegating());
     }
 }
