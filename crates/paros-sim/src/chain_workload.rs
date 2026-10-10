@@ -38,6 +38,7 @@ mod fleet;
 mod fold;
 mod foreign;
 mod multi;
+mod owner;
 mod races;
 mod rpc;
 pub(crate) mod system;
@@ -1782,6 +1783,44 @@ impl Workload for ChainWorkload {
                     ctx,
                     (&nodes, &audit),
                     journal,
+                    target,
+                    request_timeout,
+                )
+                .await;
+            }
+            // The same confusion for a truncation (#339), its own location:
+            // an unfenced `Truncate`, refused as of the wrong mode.
+            if op == TRUNCATE && buggify_with_prob!(0.15) {
+                assert_reachable!("chain: an unfenced truncate meets a single-writer journal");
+                let up_to = fold::clamp(ctx.state(), journal, writer.next_seq()).unwrap_or(0);
+                multi::unfenced_truncate_refused(
+                    ctx,
+                    &nodes,
+                    journal,
+                    (target, up_to),
+                    request_timeout,
+                )
+                .await;
+            }
+            // An owner's own misbehaviours (#339), each its own location: a
+            // write ahead of the journal and a claim of the term it leads.
+            if op == WRITE && writer.owned().is_some() && buggify_with_prob!(0.2) {
+                assert_reachable!("chain: an owner writes ahead of the journal");
+                owner::ahead_write_refused(
+                    ctx,
+                    (&nodes, &audit),
+                    (journal, &mut writer),
+                    (target, raw_payload),
+                    request_timeout,
+                )
+                .await;
+            }
+            if op == SET_LEADER && writer.owned().is_some() && buggify_with_prob!(0.25) {
+                assert_reachable!("chain: an owner claims the term it leads");
+                owner::own_term_refused(
+                    ctx,
+                    &nodes,
+                    (journal, &mut writer),
                     target,
                     request_timeout,
                 )
