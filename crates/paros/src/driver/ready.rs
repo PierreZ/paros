@@ -109,22 +109,37 @@ fn answer_applied_calls<A>(
 }
 
 /// Report one leader-recovery batch this `Ready` carried: how many recovered
-/// slots it started, how many of them were gap fills, and how many remain.
-fn report_recovery_batch<A: Audit>(audit: &A, self_id: u64, batch: (usize, usize, usize)) {
+/// slots it started, how many of them were gap fills, how many remain, and
+/// the node's page size that bounds it (#330).
+fn report_recovery_batch<A: Audit>(
+    audit: &A,
+    self_id: u64,
+    batch: (usize, usize, usize),
+    page: usize,
+) {
     let (started, gap_fills, remaining) = batch;
     assert!(
         gap_fills <= started,
         "a recovery page fills only rounds it started"
     );
+    assert!(started <= page, "a recovery page is bounded");
+    // A small drawn page (`DriverTunables::recovery_page`) is what makes a
+    // recovery span several pages: the window `advance_recovery` paces.
+    moonpool_assertions::sometimes!(
+        remaining > 0,
+        "recovery: a leader's recovery spans more than one bounded page"
+    );
     let started = u64::try_from(started).unwrap_or(u64::MAX);
     let gap_fills = u64::try_from(gap_fills).unwrap_or(u64::MAX);
     let remaining = u64::try_from(remaining).unwrap_or(u64::MAX);
-    audit.recovery_batch(NodeId(self_id), started, gap_fills, remaining);
+    let page = u64::try_from(page).unwrap_or(u64::MAX);
+    audit.recovery_batch(NodeId(self_id), started, gap_fills, remaining, page);
     tracing::info!(
         node = self_id,
         started,
         gap_fills,
         remaining,
+        page,
         "leader_recovery_batch"
     );
     if gap_fills > 0 {
@@ -216,7 +231,7 @@ where
     persist_writes(storage, &writes, must_sync, promised, self_id, audit).await?;
 
     if let Some(batch) = recovery_batch {
-        report_recovery_batch(audit, self_id, batch);
+        report_recovery_batch(audit, self_id, batch, node.recovery_page());
     }
 
     // Hint: the batch is durable, its messages have not left. A crash here

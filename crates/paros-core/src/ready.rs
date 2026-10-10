@@ -190,7 +190,7 @@ impl<'a> Ready<'a> {
                 "a recovery page fills only rounds it started"
             );
             assert!(
-                started <= crate::LEADER_RECOVERY_BATCH,
+                started <= self.node.recovery_page(),
                 "a recovery page is bounded"
             );
         }

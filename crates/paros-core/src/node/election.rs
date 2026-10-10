@@ -666,7 +666,7 @@ impl ColocatedNode {
         let mut processed = 0_usize;
         let mut started = 0_usize;
         let mut gap_fills = 0_usize;
-        while processed < RECOVERY_BATCH {
+        while processed < self.recovery_page {
             let Some((slot, step)) = self.proposer.recovery_next() else {
                 break;
             };
@@ -723,7 +723,14 @@ impl ColocatedNode {
             started <= processed,
             "a recovery page starts at most what it visited"
         );
-        assert!(processed <= RECOVERY_BATCH, "a recovery page is bounded");
+        assert!(
+            processed <= self.recovery_page,
+            "a recovery page is bounded"
+        );
+        assert!(
+            self.recovery_page <= RECOVERY_BATCH,
+            "a recovery page never exceeds its ceiling"
+        );
         let remaining = self.proposer.recovery_remaining();
         if remaining == 0 {
             // Closure postconditions live in the component: a recovery only
