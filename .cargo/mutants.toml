@@ -27,7 +27,46 @@ exclude_re = [
   "impl (std::fmt::|fmt::|core::fmt::)?(Debug|Display) for",
   # An invariant check emptied changes nothing while the invariant holds, and
   # the hunt runs code that keeps it: no test can catch it.
-  "replace .*::assert_invariants with \\(\\)",
+  "replace .*::assert_(invariants|mode) with \\(\\)",
+
+  # The first run's triage (#269, 2026-10-10). Each line names a whole
+  # function, or one kind of edit in a function where every such edit is
+  # equivalent. Edits a regex cannot isolate from a real mutant stay in the
+  # report, listed in `docs/analysis/simulation/mutation-triage.md`.
+  #
+  # Observability only: a metric, or a read view nothing in the shipped code
+  # decides on (examples, the game and test-only checkers read them).
+  "Acceptor<V>::faulty_repaired",
+  "Replica::chosen_gap",
+  "RegisteredPage::from_reply",
+  "Matchmaking::(effective|history)\\b",
+  "Election<Id, V>::(prior|recovered|promised)\\b",
+  "Proposer<Id, V>::(probe_elapsed|round_column)\\b",
+  "Rounds<Id, V>::all_at\\b",
+  "ReplicaId::(of|is_in)\\b",
+  "AcceptorConfig<Id>::(row_of|admits_read_row|is_well_formed)\\b",
+  "MatchmakerSet::is_well_formed\\b",
+  "impl Fingerprint for Vec<MatchmakerId>",
+  # An assertion's own guard: the edit only switches a check off (or on
+  # where it holds), never a decision.
+  "replace > with (==|<|>=) in Matchmaking::(watermark|disagreements)$",
+  "replace Matchmaking::heard_anyone -> bool with true",
+  "replace > with (==|<|>=) in majority_of$",
+  "replace == with != in QuorumSystem::phase[12]_quorum_size$",
+  "delete ! in QuorumSystem::(is_majority|is_phase[12]_quorum_in)$",
+  "replace >= with < in QuorumSystem::read_row$",
+  "replace < with (==|>|<=) in MatchmakerGeneration::next$",
+  "delete ! in Proposer<Id, V>::phase1_won$",
+  # Every caller runs `Replica::advance` right after a learn, and it refolds
+  # first: the learn's own refold guard decides nothing the walk does not.
+  "replace (&&|==|<) with .* in Replica::learn$",
+  # Unreachable by construction: a grid of at least two rows and two
+  # columns makes any row or column a valid quorum (only load moves), and
+  # the drivers name only admitted rows.
+  "replace residue -> usize with [01]$",
+  "replace QuorumSystem::admits_read_row -> bool with true",
+  "replace < with <= in QuorumSystem::admits_read_row$",
+  "replace match guard self.admits_read_row\\(Some\\(row\\)\\) with true in QuorumSystem::read_row$",
 ]
 
 # The hunt is the test: only `paros-sim-runner`'s `mutants` target runs, in

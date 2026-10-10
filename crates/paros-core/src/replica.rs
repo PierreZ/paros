@@ -502,6 +502,10 @@ impl Replica {
                 "a fold hole is a slot not held"
             );
             assert!(hole >= self.floor, "a fold hole lies at or above the floor");
+            assert!(
+                hole < self.first_unchosen(),
+                "a fold hole lies below the first unchosen slot"
+            );
         }
         hole
     }
@@ -887,6 +891,12 @@ impl Replica {
             );
         }
         assert!(self.folded > slot, "the fold moves past the slot it folded");
+        // The write side of the outcomes pair `outcome_at` reads back: a
+        // waiter's answer and a rebooted node's replay both read it there.
+        assert!(
+            self.outcome_at(slot) == (outcome != Outcome::Noop).then_some(&outcome),
+            "a folded verdict reads back as its slot's outcome"
+        );
         outcome
     }
 
@@ -1005,6 +1015,12 @@ impl Replica {
             "a truncation never drops a retained record"
         );
         let base = self.state_at(first);
+        // Checked apart from `compaction_target` (#269): every record the
+        // dropped prefix accepted lies below the journal's first position.
+        assert!(
+            base.next_seq <= self.state.first_seq,
+            "a truncation drops no record at or past first_seq"
+        );
         let chosen_index = self.chosen_index;
         self.drop_prefix(first, base);
         self.advance_pending = self.chosen.contains_key(&self.first_unchosen());

@@ -233,11 +233,16 @@ impl Matchmaking {
             self.history.values().all(|configs| !configs.is_empty()),
             "every unioned ballot holds a configuration"
         );
+        // Every extra configuration at a ballot is one disagreement, and
+        // nothing else is (#269: the bound alone let a fold count every
+        // fresh ballot).
+        let extra: u64 = self
+            .history
+            .values()
+            .map(|configs| u64::try_from(configs.len()).unwrap_or(u64::MAX) - 1)
+            .sum();
         assert!(
-            self.history
-                .values()
-                .all(|configs| u64::try_from(configs.len()).unwrap_or(u64::MAX)
-                    <= self.disagreements + 1),
+            self.disagreements == extra,
             "every extra configuration at a ballot was counted as a disagreement"
         );
     }

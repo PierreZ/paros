@@ -79,7 +79,16 @@ impl ColocatedNode {
         let count = self.config.proxy_count;
         match delegation {
             Delegation::Colocated => None,
-            Delegation::Auto => ProxyId::of(slot, count),
+            Delegation::Auto => {
+                let proxy = ProxyId::of(slot, count);
+                // A proxy deployment delegates every automatic round; a
+                // deployment without proxies runs it colocated (#269).
+                assert!(
+                    proxy.is_some() == (count > 0),
+                    "auto delegation delegates exactly on a proxy deployment"
+                );
+                proxy
+            }
             Delegation::To(proxy) => {
                 assert!(
                     proxy.is_in(count),
@@ -113,6 +122,12 @@ impl ColocatedNode {
         // successor re-proposing this slot and a restarted leader's re-send
         // derive the same column without carrying it.
         let column = self.acceptors.column_of(slot);
+        // A grid addresses every slot to one column; a majority or a flexible
+        // split to the whole membership (#269).
+        assert!(
+            column.is_some() == matches!(self.acceptors.quorum_system(), QuorumSystem::Grid { .. }),
+            "a slot names a column exactly under a grid"
+        );
         self.start_accept_round_in(slot, command, column, delegation);
     }
 
@@ -180,6 +195,12 @@ impl ColocatedNode {
             // any other member of the column.
             self.proposer
                 .open_delegated_round(slot, ballot, command.clone(), column, proxy);
+            // The opener tracks the delegated round: its re-send and its
+            // take-back from a dead proxy both read it there (#269).
+            assert!(
+                self.proposer.is_round_open_at(slot, ballot),
+                "a delegated round is tracked by its opener"
+            );
             self.send_accept(slot, ballot, command, column, Some(proxy));
             return;
         }
@@ -268,6 +289,11 @@ impl ColocatedNode {
         if vote.is_some() {
             assert!(recorded, "an own vote is backed by an own record");
             assert!(self.is_acceptor(), "an own vote is a member's");
+            // Read from the addressee list, apart from the predicate above.
+            assert!(
+                self.acceptors.phase2_addressees(column).contains(&me),
+                "an own vote is in the round's column"
+            );
         }
         vote
     }
