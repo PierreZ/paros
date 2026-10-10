@@ -16,7 +16,8 @@
 //! that outcome, written again by no one. The steps:
 //!
 //! 1. find the tenant's control journal in the cell control journal's
-//!    `HostTenant` (a dropped or unknown tenant is refused);
+//!    `HostTenant`, its fold caught up first (a dropped or unknown tenant is
+//!    refused, #395);
 //! 2. claim and fold the control journal, and write the tenant's
 //!    `Describe` when it is empty;
 //! 3. answer from the recorded outcome, when there is one;
@@ -251,9 +252,15 @@ impl TenantDesk {
     }
 
     /// The control journal, name and `survives` the cell control journal's
-    /// `HostTenant` gives `tenant`, its fold read to the tail first when the
-    /// tenant is not in it yet. `Ok(None)` when the cell hosts no such tenant
-    /// (or dropped it).
+    /// `HostTenant` gives `tenant`, its fold read to the tail first. `Ok(None)`
+    /// when the cell hosts no such tenant (or dropped it).
+    ///
+    /// The fold is caught up at every request, not only for a tenant it does
+    /// not hold yet (#395): a tenant removed since the desk last read the
+    /// cell is refused at once, by this term as by the next, so the answer to
+    /// a request never depends on how stale one coordinator's fold is. A
+    /// dropped tenant is dropped for good: the desk forgets its control
+    /// journal and never reads the cell for it again.
     ///
     /// # Errors
     ///
@@ -263,21 +270,25 @@ impl TenantDesk {
         client: &Client<P>,
         tenant: TenantId,
     ) -> Result<Option<Hosted>, ()> {
-        let held = |registry: &Registry| {
-            registry
-                .hosted_tenant(tenant)
-                .map(|hosted| (hosted.control, hosted.name.clone(), hosted.survives))
-        };
-        if let Some(hosted) = held(self.registry.state()) {
-            return Ok(Some(hosted));
+        if !self.registry.state().dropped(tenant) {
+            match load(&mut self.registry, self.cell, client, 0, 0).await {
+                LoadOutcome::Loaded { .. } => {}
+                _ => return Err(()),
+            }
         }
         if self.registry.state().dropped(tenant) {
+            if self.tenants.remove(&tenant).is_some() {
+                moonpool_assertions::reachable!(
+                    "tenant coordinator: a desk forgets a tenant the cell dropped"
+                );
+            }
             return Ok(None);
         }
-        match load(&mut self.registry, self.cell, client, 0, 0).await {
-            LoadOutcome::Loaded { .. } => Ok(held(self.registry.state())),
-            _ => Err(()),
-        }
+        Ok(self
+            .registry
+            .state()
+            .hosted_tenant(tenant)
+            .map(|hosted| (hosted.control, hosted.name.clone(), hosted.survives)))
     }
 
     /// Claim `tenant`'s control journal under the term's uuid and fold it to
