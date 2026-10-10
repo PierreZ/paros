@@ -76,6 +76,7 @@ mod admit;
 mod cell;
 mod election;
 mod journals;
+mod load;
 mod other_cell;
 mod resolve;
 mod view;

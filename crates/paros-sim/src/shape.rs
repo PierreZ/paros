@@ -332,6 +332,11 @@ impl NodeShape {
             machine_down_after: ms(
                 election_renew_ms + buggify_knob!(1000_u64, ROUND_TRIP_FLOOR_MS..3001_u64)
             ),
+            // A machine's busyness window (#424). Floor 1 s (the shipped
+            // floor): shorter measures the sampler, not the machine. The
+            // short end gives a run many windows, so `LOAD` meets a full
+            // one early and often.
+            load_interval: ms(buggify_knob!(5000_u64, 1000_u64..5001_u64)),
         };
         // The production profile `parosd` ships (#209), whole: every field
         // at once, which the per-field locations above would draw together

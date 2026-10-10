@@ -65,6 +65,7 @@ mod disk;
 mod follow;
 mod formed;
 mod lifecycle;
+pub mod load;
 mod record;
 pub(crate) mod register;
 mod resolve;
@@ -174,6 +175,9 @@ pub struct MachineFacts {
     /// ([`MachineFacts::serving`]). The registry records it, and the cell
     /// coordinator tells a reboot by it (#211).
     pub incarnation: u128,
+    /// Its last full busyness window (#424), which every phase's `Load`
+    /// answers from.
+    pub load: load::LoadBoard,
 }
 
 /// The incarnation of the RPC runtime `rpc`, or `0` once it stopped.

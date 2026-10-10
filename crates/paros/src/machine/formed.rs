@@ -157,6 +157,8 @@ impl FormedCell {
         let mut prepare = Inbound::plain(serve_well_known::<P, PrepareCellRpc>(rpc)?);
         let mut form = Inbound::plain(serve_well_known::<P, FormCellRpc>(rpc)?);
         let mut admit = Inbound::plain(serve_well_known::<P, AdmitRpc>(rpc)?);
+        // Every machine answers `Load` (#424).
+        super::load::serve(providers, rpc, &self.facts, shutdown.clone())?;
         // Any machine of the cell answers `Resolve` (#216).
         super::resolve::spawn(
             providers,

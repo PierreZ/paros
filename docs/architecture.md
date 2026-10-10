@@ -1029,6 +1029,29 @@ cell coordinator, the acceptors and matchmakers of each journal, and the capacit
 `--as-tenant NAME` asks in the scope of one tenant. `parosctl status` (above) stays the target
 that these views grow into.
 
+**Busyness** (#424, decided on 2026-10-10; the plan is `design/busyness-metrics.md` of the
+project). `parosctl machine list` shows how busy each machine is, as FDB's status does: `CPU`
+(`cpu.usage_cores`), `MACHINE` (`machine.cpu.logical_core_utilization`) and `DISK`
+(`disk.busy`, the share of the window with at least one I/O in flight). `machine show` adds a
+`load` block with the run loop, the queue depth, the reads and the writes per second. `--json`
+uses FDB's key names.
+
+- **Measure.** moonpool's sixth provider, `SystemProvider`, gives cumulative counters: the
+  process CPU time (`getrusage`), the machine CPU (`/proc/stat`), the run loop's busiest worker
+  (Tokio's `worker_total_busy_duration`) and the data disk (`/proc/diskstats`, found from the
+  data directory). `paros::load::Busyness::between` turns two samples into one window. It is
+  pure arithmetic; a counter that goes back gives no window.
+- **Sample.** Every machine samples itself every `load_interval` (default 5 s, floor 1 s,
+  `PAROS_LOAD_INTERVAL_MS`) and keeps only its last full window.
+- **Pull.** Every machine answers `Load` (`paros.machine.Load`, method `0x5041_030B`) in every
+  phase, from that window. Nothing is pushed and nothing is written into a journal.
+  `paros::client::load::ask_all` asks every machine of a cell view at once. A machine that does
+  not answer in time shows `no metrics`, the fdbcli wording; a field with no value shows `-`.
+  `Load` is for the admin scope; the token check comes with #192.
+- **Simulation.** The same code runs there. moonpool's simulated disk counts its own activity
+  per process, and the operator's `LOAD` operation checks that every answer is exactly
+  `Busyness::between` of two samples the simulator handed to that machine.
+
 ### 3.7 The universe
 
 The universe runs from M9 with one cell (decided on 2026-10-02, #226).

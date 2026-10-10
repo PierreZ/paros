@@ -86,6 +86,7 @@ impl DriverTunables {
     /// | `election_lease`, `election_renew` | 3 s, 1 s | a cell coordinator renews three times per lease (#240) |
     /// | `election_compact_after` | 64 | the election journal's log stays a few kilobytes |
     /// | `machine_down_after` | 10 s | a machine silent for ten renewal periods is down; a reboot is shorter (#211) |
+    /// | `load_interval` | the default (5 s) | FDB's `WORKER_LOGGING_INTERVAL` (#424) |
     ///
     /// # Panics
     ///
@@ -151,7 +152,7 @@ impl DriverTunables {
     pub fn check_floors(&self) -> Result<(), BelowFloor> {
         let ms = |d: Duration| u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
         let count = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
-        let fields: [(&'static str, u64, u64); 35] = [
+        let fields: [(&'static str, u64, u64); 36] = [
             ("tick_interval", ms(self.tick_interval), 1),
             (
                 "election_timeout_base",
@@ -223,6 +224,11 @@ impl DriverTunables {
             ("resend_page", count(self.resend_page), 1),
             ("apply_page", count(self.apply_page), 1),
             ("registry_page", count(self.registry_page), 1),
+            (
+                "load_interval",
+                ms(self.load_interval),
+                ms(super::config::LOAD_INTERVAL_FLOOR),
+            ),
         ];
         assert!(
             fields.iter().all(|(field, _, _)| !field.is_empty()),

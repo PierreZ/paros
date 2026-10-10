@@ -64,6 +64,12 @@ impl<S: StorageProvider + Clone> ProviderDisk<S> {
         }
     }
 
+    /// The directory the machine's identity and stores live under.
+    #[must_use]
+    pub fn root(&self) -> &str {
+        &self.root
+    }
+
     /// The provider the disk is on.
     #[must_use]
     pub fn provider(&self) -> &S {

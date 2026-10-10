@@ -35,7 +35,7 @@ image and the Compose toy are `Dockerfile` and `docker-compose.yml` at the repos
 - `src/bin/parosctl/entry.rs` → `parosctl resolve <tenant>` over `paros::client::resolve` (#216): the servers are the entry endpoint; prints the tenant's cell and the cell's machines.
 - `src/bin/parosctl/key.rs` → `parosctl key generate|show` (#400): root key pairs, offline, entropy from the provider's random source; `<label>.private` (mode 0600) and `<label>.public`, written once; outputs name a key by its label, never its id.
 - `src/bin/parosctl/token.rs` → `parosctl token mint|derive|inspect` (#400): Biscuit tokens over `paros-authz-biscuit`, offline; a token from the argument, `--token-file` or `PAROS_TOKEN`.
-- `src/bin/parosctl/views.rs` → `Asker`, `parosctl machine list|show`, `cell list|show`, `tenant list|show`, `roles [--cell|--tenant|--machine]` (#399): one `View` to the servers' cell, printed as a table (`output::table`) or JSON; the global `--as-tenant NAME` asks in one tenant's scope.
+- `src/bin/parosctl/views.rs` → `Asker`, `parosctl machine list|show`, `cell list|show`, `tenant list|show`, `roles [--cell|--tenant|--machine]` (#399): one `View` to the servers' cell, printed as a table (`output::table`) or JSON; the global `--as-tenant NAME` asks in one tenant's scope. `machine list|show` also ask every machine for `Load` (#424): the `CPU`, `MACHINE` and `DISK` columns, a `load` block, `no metrics` for a machine that does not answer.
 - `src/bin/parosctl/labels.rs` → `Labels` → the names every command prints (#399): one admin cell view per command; short hex only when no view names an entity.
 - `src/bin/parosctl/commands.rs` → one fn per cell command: `write`, `read`, `tail`, `truncate`,
   `set-leader`, `inspect`, `reconfigure`, `retire`.

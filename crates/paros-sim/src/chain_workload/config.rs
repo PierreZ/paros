@@ -127,7 +127,11 @@ pub(super) const ELECTION: u8 = 28;
 /// `paros::client::views`, under the admin's scope or a tenant's: the
 /// answers `parosctl machine|cell|tenant|roles` print, filtered by the cell.
 pub(super) const VIEW: u8 = 29;
-pub(super) const OP_COUNT: u8 = 30;
+/// Ask every machine of the cell how busy it is (#424 (busyness metrics))
+/// through `paros::client::load`: the columns `parosctl machine list`
+/// prints, judged against the simulator's own counters.
+pub(super) const LOAD: u8 = 30;
+pub(super) const OP_COUNT: u8 = 31;
 
 /// The most records one write carries (`ChainConfig::batch_records`'s
 /// ceiling): with [`MAX_LARGE_COMMAND_BYTES`], the largest entry a node's
@@ -434,7 +438,7 @@ impl ChainConfig {
             // QUORUM_READ (retired), READ, CHECK_TAIL (retired),
             // CREATE_JOURNAL, DELETE_JOURNAL, REGISTER_NODE, DRAIN_NODE,
             // RETIRE_NODE, SET_LEADER, CHECKPOINT, BOOK_CAPACITY, FLEET_INIT,
-            // TENANT, ADMIT, ELECTION, VIEW
+            // TENANT, ADMIT, ELECTION, VIEW, LOAD
             weights: [
                 buggify_knob!(20_u64, 0_u64..41_u64),
                 buggify_knob!(10_u64, 0_u64..41_u64),
@@ -504,6 +508,10 @@ impl ChainConfig {
                 buggify_knob!(3_u64, 0_u64..21_u64),
                 // A view reads the cell's journals at one member and writes
                 // nothing; the ceiling is an operator that mostly watches.
+                buggify_knob!(3_u64, 0_u64..21_u64),
+                // A load asks for one view, then every machine once, and
+                // writes nothing; the ceiling is an operator that mostly
+                // watches its machines.
                 buggify_knob!(3_u64, 0_u64..21_u64),
             ],
             // grow, shrink, replace, remove-leader, rotate
