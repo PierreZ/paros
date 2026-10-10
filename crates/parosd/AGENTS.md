@@ -22,8 +22,9 @@ image and the Compose toy are `Dockerfile` and `docker-compose.yml` at the repos
 - `src/tunables.rs` → `from_env`, `variables` → `DriverTunables::production()` plus a
   `PAROS_<FIELD>[_MS]` override per field, refused below its floor (#209); the cell election's
   `PAROS_ELECTION_LEASE_MS`, `PAROS_ELECTION_RENEW_MS`, `PAROS_ELECTION_COMPACT_AFTER` (#240).
-- `src/bin/parosctl/main.rs` → `parosctl` → global options, server ids discovered from
-  `Inspect`, `init` vs the cell commands, exit codes.
+- `src/bin/parosctl/main.rs` → `parosctl` → global options, the offline `key` and `token`
+  commands (no server, no runtime), server ids discovered from `Inspect`, `init` vs the cell
+  commands, exit codes.
 - `src/bin/parosctl/init.rs` → `parosctl init [--members a,b,c] [--patience-ms N]`: resolves the
   founding members (default: the servers), runs `paros::client::initialize` over them and prints
   what it came to (`cell init`, the elected coordinator, the fleet steps; #229, #240, #246, #277).
@@ -31,6 +32,8 @@ image and the Compose toy are `Dockerfile` and `docker-compose.yml` at the repos
   `paros::client::fleet`; the session, refusal labels and endings `init` shares.
 - `src/bin/parosctl/journal.rs` → `parosctl journal create|delete|list` over `paros::client::journals` (#210): the tenant named, found in the fleet directory; one request id per run, re-sent by the library until decided.
 - `src/bin/parosctl/cell.rs` → `parosctl cell add-machine <addr>` over `paros::client::cell` (#216): registers an idle machine in the cell control journal, then admits it.
+- `src/bin/parosctl/key.rs` → `parosctl key generate|show` (#400): root key pairs, offline, entropy from the provider's random source; key files written once, the private one mode 0600.
+- `src/bin/parosctl/token.rs` → `parosctl token mint|derive|inspect` (#400): Biscuit tokens over `paros-authz-biscuit`, offline; a token from the argument, `--token-file` or `PAROS_TOKEN`.
 - `src/bin/parosctl/commands.rs` → one fn per cell command: `write`, `read`, `tail`, `truncate`,
   `set-leader`, `inspect`, `reconfigure`, `retire`.
 - `src/bin/parosctl/names.rs` → `JournalRef`, `NodeRef` → a journal argument as a name (`TENANT/JOURNAL`, `paros://…`, resolved through `paros::client::names` with operator rights until #192) or as ids (`id:TENANT/JOURNAL`, hex prefixes matched among the journals `parosctl` can list); a node id as a hex prefix of a server's id (#239).

@@ -1,0 +1,24 @@
+[package]
+name = "paros-authz-biscuit"
+description = "paros authorization with Biscuit tokens: root keys, offline minting and derivation, and the verifier of each request (#245, #400)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+# `biscuit-auth` comes by git rev until 6.1 is on crates.io: 6.0.0 pins
+# prost 0.10 and rand_core 0.6, main uses prost 0.14 and rand 0.10 like
+# paros and moonpool (#400).
+publish = false
+
+[dependencies]
+# Default features off: no PEM loaders and no compile-time Datalog macro.
+# Every key and every block key comes from a caller's `Entropy`, never from
+# the crate's thread RNG (`clippy.toml` bans the defaults).
+biscuit-auth = { git = "https://github.com/eclipse-biscuit/biscuit-rust", rev = "93832a82bf509ad81f05fdb6adaf69d03c56887b", default-features = false }
+rand_chacha = { version = "0.10", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[lints]
+workspace = true

@@ -129,3 +129,9 @@ group = "<!-- 7 -->⚙️ Miscellaneous Tasks"
 [[changelog.commit_parsers]]
 message = ".*"
 group = "<!-- 8 -->📦 Other"
+
+# Pins `biscuit-auth` by git rev until 6.1 (#400).
+[[package]]
+name = "paros-authz-biscuit"
+release = false
+publish = false

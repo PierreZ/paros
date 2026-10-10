@@ -1,0 +1,17 @@
+# The workspace's own bans (the root clippy.toml), repeated: clippy reads
+# the nearest clippy.toml only.
+disallowed-types = [
+  { path = "std::collections::HashMap", reason = "randomized iteration order breaks deterministic replay", replacement = "std::collections::BTreeMap" },
+  { path = "std::collections::HashSet", reason = "randomized iteration order breaks deterministic replay", replacement = "std::collections::BTreeSet" },
+]
+# #245 rule 1 and rule 3: every key comes from the caller's entropy, and the
+# time is a fact the caller adds. These defaults read the thread RNG or the
+# system clock.
+disallowed-methods = [
+  { path = "biscuit_auth::PrivateKey::new", reason = "draws from the thread RNG", replacement = "PrivateKey::new_with_rng" },
+  { path = "biscuit_auth::PrivateKey::new_with_algorithm", reason = "draws from the thread RNG", replacement = "PrivateKey::new_with_rng" },
+  { path = "biscuit_auth::Biscuit::append", reason = "draws the next block key from the thread RNG", replacement = "Biscuit::append_with_key" },
+  { path = "biscuit_auth::UnverifiedBiscuit::append", reason = "draws the next block key from the thread RNG", replacement = "UnverifiedBiscuit::append_with_key" },
+  { path = "biscuit_auth::builder::BiscuitBuilder::build", reason = "draws the next block key from the thread RNG", replacement = "BiscuitBuilder::build_with_rng" },
+  { path = "biscuit_auth::builder::AuthorizerBuilder::time", reason = "reads SystemTime::now(); the caller adds time(...)" },
+]

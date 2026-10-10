@@ -787,7 +787,7 @@ and that cell's entry references. It **redirects**: it never carries data and ne
 a call. It keeps resolving from its cached fold while the universe tenant is unavailable, which is the
 AWS guidance's thinnest possible router and static stability one level up (section 3.3). Before
 it answers, it verifies the token's Biscuit signature and that its scope covers the tenant asked
-for (an `admin` or `tenant-manager` token may resolve any tenant), using only the root public keys
+for (an `admin` token may resolve any tenant), using only the root public keys
 the universe entry carries: it holds no private key and no state of its own, and Biscuit stays out of
 `paros` and `paros-core` as below. A resolver folds the universe directory and nothing else, never a
 cell's registry, so it stays thin and every cell answers for itself.
@@ -844,22 +844,43 @@ universe entry; rotation is adding a key then removing the old one. Tokens are s
 is no revocation. `parosctl` works **offline**, with no running universe: it generates root key
 pairs and mints tokens for any role.
 
-- **Roles** are facts in the authority block: `admin` administers the universe (`init`, cells,
-  machines, everything below), `tenant-manager` creates, deletes and lists `users` tenants
-  through the universe tenant, and a `tenant` token is scoped to one `TenantId` for its data plane
-  and journals. The frontend's policies are Datalog, one per call.
-- **Creating a tenant returns a valid tenant token**: the frontend *attenuates* the caller's
-  token with a block that restricts it to the new tenant. Attenuation needs no private key, so no
-  frontend or resolver holds the root key.
-- **Users attenuate offline**: a tenant can narrow its own token (read-only, one journal, an
-  earlier expiry) without asking paros.
+- **Roles** are facts in the authority block, and there are two (decided on 2026-10-10, #400):
+  `admin` administers the universe (`init`, cells, machines, tenants, everything below), and a
+  `tenant` token is scoped to one tenant for its data plane, its journals and its own view of its
+  spread over its cell (#399). There is no `tenant-manager` role: it would have needed the data
+  rights of every `users` tenant. Only `admin` creates, deletes and lists tenants, tenant creation
+  returns no token, and a key holder mints each `tenant` token offline. No frontend or resolver
+  holds a key.
+- **Names, not ids** (decided on 2026-10-10, #400): a token and the verifier's facts name a
+  tenant and a journal by their full string names, never by hex ids. The entry roles already
+  resolve names. An `internal` tenant has no resolvable name, so only `admin` reaches it. A name
+  is free again after its delete, so a token for `acme` also works on a later tenant named
+  `acme`; short lifetimes limit this.
+- **Token content** (#400, `paros-authz-biscuit`). The authority block holds `role(..)`,
+  `tenant(<name>)` for the tenant role, a `subject(..)` label and an expiry check. For each
+  request the verifier adds `time`, `operation`, `op_class`, `access` (`read` or `write`),
+  `target_tenant`, `target_kind` (`users` or `internal`) and `target_journal`, then runs one
+  Datalog policy in the server: the meaning of a role changes without new tokens. A view of #399
+  asks `view.detail` (admin only) for full detail, else its own operation for the tenant detail.
+  A refusal is `InvalidToken`, `Expired` or `Forbidden`.
+- **Keys** (#400). `parosctl key generate` writes `root-<key id>.private` (mode 0600) and
+  `.public`: JSON with a random `u32` key id (the Biscuit `root_key_id`), a label, and the key
+  in Biscuit's own text form. A token without a key id the universe entry holds is refused. An
+  idle machine pins the key with `parosd --root-public-key` to check `FormCell` and `Admit`
+  (#245).
+- **Derive, macaroon style**: any holder narrows a token offline with `parosctl token derive`
+  (read-only, one tenant, one journal, an earlier expiry), with no key: the key that signs the
+  next block is inside the token. `--seal` removes it, so nothing more can be derived.
 
 **Deterministic first, fewer features** (decided on 2026-10-04). Biscuit runs only in a way the
 simulation can replay, and features that cannot are left out:
 
-- Every key and every appended block's next key comes from a seeded RNG
-  (`new_with_rng`, `build_with_rng`, `append_with_key`); the `OsRng` defaults are banned
-  (clippy `disallowed-methods`).
+- Every key and every appended block's next key comes from an RNG the caller passes in
+  (`new_with_rng`, `build_with_rng`, `append_with_key`): a `ChaCha20Rng` seeded with 32 bytes
+  drawn from the provider's random source, the OS-seeded thread RNG in production and the seeded
+  RNG in the simulation (#400). The thread-RNG defaults are banned (clippy
+  `disallowed-methods`). `biscuit-auth` is pinned by git rev until 6.1: 6.0.0 still uses
+  `prost` 0.10 and `rand_core` 0.6.
 - The authorizer's wall-clock budget (`RunLimits::max_time`, default 1 ms, checked against
   `Instant::now()`) is set out of reach; evaluation is bounded by `max_iterations` and
   `max_facts`, which count deterministically. The returned execution time is never read.
@@ -872,7 +893,8 @@ simulation can replay, and features that cannot are left out:
   Datalog queries.
 - Biscuit stays out of `paros-core` and `paros` (its wasm32 clock needs JavaScript's
   `performance`): `paros` defines the `Authz` trait and carries tokens as opaque bytes; the
-  Biscuit implementation is its own crate, used by `parosd`, `parosctl` and `paros-sim`.
+  Biscuit implementation is its own crate, `paros-authz-biscuit` (#400), used by `parosctl` now
+  and by `parosd` and `paros-sim` with #245.
 
 **Routing goes through the universe tenant from M9.** The tenant name → `TenantId` → cell step is
 the resolver's from M12; until then the frontend resolves it from its fold of the universe directory,
@@ -881,8 +903,8 @@ journal name → `JournalId` and its placement from its fold of the tenant's con
 Resolvers and the cell's machines answer the same `Resolve` call, "which references serve tenant
 T", so `paros://<tenant>/<journal>` never changes when a second cell appears.
 
-Tenants are created and administered through the same frontends, with an `admin` or
-`tenant-manager` token, through the universe tenant (section 3.7): one API, one `Authz` trait, exercised in the simulation like
+Tenants are created and administered through the same frontends, with an `admin` token,
+through the universe tenant (section 3.7): one API, one `Authz` trait, exercised in the simulation like
 every other call.
 
 **The frontend routes to the data-plane roles** (decided on 2026-10-04).
@@ -1688,7 +1710,7 @@ the toy cannot run `triple` (decided on 2026-10-07, #215).
 
 From a fresh clone: `docker compose up`, then `parosctl init` against `node1`, which creates the
 universe, its one cell and the universe tenant. Generate a root key and mint an `admin` token offline with `parosctl`, then create a tenant and
-receive its token. Create a
+mint its `tenant` token offline. Create a
 journal. `write`, `read` and `tail` from `parosctl`, addressing `acme/orders`. `set-leader` to a second
 client and see the first one refused, for a `write` and for a `truncate`. Create a multi-writer
 journal and append to it from two clients at once. Kill one `storage` and one `stateless`

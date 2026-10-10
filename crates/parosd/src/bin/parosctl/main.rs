@@ -22,10 +22,12 @@ mod commands;
 mod fleet;
 mod init;
 mod journal;
+mod key;
 mod names;
 mod output;
 #[path = "../../resolve.rs"]
 mod resolve;
+mod token;
 
 use std::process::ExitCode;
 use std::str::FromStr;
@@ -127,6 +129,12 @@ enum Command {
     /// machine into the cell of the servers.
     #[command(name = "cell")]
     CellAdmin(cell::CellArgs),
+    /// Root key pairs for Biscuit tokens, offline (#400): `key generate`,
+    /// `key show`.
+    Key(key::KeyArgs),
+    /// Biscuit tokens, offline (#400): `token mint` with a root key,
+    /// `token derive` (narrower, macaroon style, no key), `token inspect`.
+    Token(token::TokenArgs),
     /// A call to a formed cell.
     #[command(flatten)]
     Cell(CellCommand),
@@ -256,8 +264,7 @@ async fn servers(runtime: &Runtime, global: &Global) -> Vec<(u64, Address)> {
     known
 }
 
-#[tokio::main(flavor = "current_thread")]
-async fn main() -> ExitCode {
+fn main() -> ExitCode {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -266,6 +273,27 @@ async fn main() -> ExitCode {
         .with_writer(std::io::stderr)
         .init();
     let cli = Cli::parse();
+    // The key and token commands are offline: no server, no runtime.
+    let out = Printer::new(cli.global.json);
+    match cli.command {
+        Command::Key(args) => key::run(&out, args).into(),
+        Command::Token(args) => token::run(&out, args).into(),
+        command => match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(runtime) => runtime.block_on(online(cli.global, command)),
+            Err(error) => {
+                eprintln!("parosctl: runtime: {error}");
+                ExitCode::FAILURE
+            }
+        },
+    }
+}
+
+/// The commands that talk to servers.
+async fn online(global: Global, command: Command) -> ExitCode {
+    let cli = Cli { global, command };
     if cli.global.servers.is_empty() {
         eprintln!("parosctl: no servers: pass --servers or set PAROSCTL_SERVERS");
         return ExitCode::FAILURE;
@@ -321,6 +349,7 @@ async fn main() -> ExitCode {
             .into();
         }
         Command::Cell(command) => command,
+        Command::Key(_) | Command::Token(_) => unreachable!("offline, handled in main"),
     };
     let servers = servers(&runtime, &cli.global).await;
     if servers.is_empty() {
