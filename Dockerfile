@@ -25,13 +25,13 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/src/target \
     cargo build --release -p parosd \
- && cp target/release/parosd target/release/parosctl /usr/local/bin/
+ && cp target/release/parosd target/release/parosctl target/release/paros-frontend /usr/local/bin/
 
 FROM debian:bookworm-slim
 RUN useradd --system --uid 10001 --home-dir /var/lib/paros paros \
  && mkdir -p /var/lib/paros \
  && chown paros:paros /var/lib/paros
-COPY --from=builder /usr/local/bin/parosd /usr/local/bin/parosctl /usr/local/bin/
+COPY --from=builder /usr/local/bin/parosd /usr/local/bin/parosctl /usr/local/bin/paros-frontend /usr/local/bin/
 USER paros
 # A named volume mounted here takes the directory's ownership on first use.
 VOLUME ["/var/lib/paros"]

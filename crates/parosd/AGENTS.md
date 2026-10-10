@@ -22,7 +22,8 @@ image and the Compose toy are `Dockerfile` and `docker-compose.yml` at the repos
 - `src/tunables.rs` → `from_env`, `variables` → `DriverTunables::production()` plus a
   `PAROS_<FIELD>[_MS]` override per field, refused below its floor (#209); the cell election's
   `PAROS_ELECTION_LEASE_MS`, `PAROS_ELECTION_RENEW_MS`, `PAROS_ELECTION_COMPACT_AFTER` (#240).
-- `src/bin/parosctl/main.rs` → `parosctl` → global options, the offline `key` and `token`
+- `src/bin/paros-frontend.rs` → `paros-frontend` (#192 (the frontend)): `paros::frontend::run_frontend` over Tokio with `paros_authz_biscuit::BiscuitAuthz`; `PAROS_FRONTEND_LISTEN`, `PAROS_FRONTEND_CELL` (the founding members), `PAROS_FRONTEND_ROOT_PUBLIC_KEY` (one or more `.public` files: the ring), `PAROS_FRONTEND_TIMEOUT_MS`; its wall clock is `SystemTime::now()` at start plus the provider's time.
+- `src/bin/parosctl/main.rs` → `parosctl` → global options (`--frontends`/`PAROSCTL_FRONTENDS`: `write`, `read`, `tail`, `truncate` and `set-leader` go through the frontends with the token in `PAROS_TOKEN`, #192 (the frontend)), the offline `key` and `token`
   commands (no server, no runtime), server ids discovered from `Inspect`, `init` vs the cell
   commands, exit codes.
 - `src/bin/parosctl/init.rs` → `parosctl init [--members a,b,c] [--patience-ms N]`: resolves the
@@ -36,7 +37,7 @@ image and the Compose toy are `Dockerfile` and `docker-compose.yml` at the repos
 - `src/bin/parosctl/token.rs` → `parosctl token mint|derive|inspect` (#400): Biscuit tokens over `paros-authz-biscuit`, offline; a token from the argument, `--token-file` or `PAROS_TOKEN`.
 - `src/bin/parosctl/commands.rs` → one fn per cell command: `write`, `read`, `tail`, `truncate`,
   `set-leader`, `inspect`, `reconfigure`, `retire`.
-- `src/bin/parosctl/names.rs` → `JournalRef`, `NodeRef` → a journal argument as a name (`TENANT/JOURNAL`, `paros://…`, resolved through `paros::client::names` with operator rights until #192) or as ids (`id:TENANT/JOURNAL`, hex prefixes matched among the journals `parosctl` can list); a node id as a hex prefix of a server's id (#239).
+- `src/bin/parosctl/names.rs` → `JournalRef`, `NodeRef` → a journal argument as a name (`TENANT/JOURNAL`, `paros://…`, resolved through `paros::client::names` with operator rights, or sent as it is to a frontend, #192 (the frontend)) or as ids (`id:TENANT/JOURNAL`, hex prefixes matched among the journals `parosctl` can list); a node id as a hex prefix of a server's id (#239).
 - `src/bin/parosctl/output.rs` → `Printer`, `short` → text or one JSON document per answer (`--json`);
   diagnostics to stderr; ids in text as short hex (#239), whole in JSON.
 - `tests/real_fs.rs` → both storage contract suites on a real disk; a store dropped mid-batch

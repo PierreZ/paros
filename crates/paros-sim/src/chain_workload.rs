@@ -1548,6 +1548,7 @@ impl Workload for ChainWorkload {
                     }
                     ClaimOutcome::Lost { .. }
                     | ClaimOutcome::Owned { .. }
+                    | ClaimOutcome::Denied(_)
                     | ClaimOutcome::UnknownJournal
                     | ClaimOutcome::Malformed => break,
                     ClaimOutcome::Redirect { leader } => {
@@ -2096,7 +2097,8 @@ impl Workload for ChainWorkload {
                             owner_never_of_wrong_mode();
                             self.history.record_write_failed(submission.op);
                         }
-                        WriteOutcome::UnknownJournal
+                        WriteOutcome::Denied(_)
+                        | WriteOutcome::UnknownJournal
                         | WriteOutcome::Malformed
                         | WriteOutcome::Ambiguous => {
                             self.history.record_write_failed(submission.op);
@@ -2220,6 +2222,7 @@ impl Workload for ChainWorkload {
                             WriteOutcome::WrongMode { .. } => owner_never_of_wrong_mode(),
                             WriteOutcome::TooLarge { .. }
                             | WriteOutcome::Truncated { .. }
+                            | WriteOutcome::Denied(_)
                             | WriteOutcome::UnknownJournal
                             | WriteOutcome::Malformed
                             | WriteOutcome::Ambiguous => {}
@@ -2290,6 +2293,7 @@ impl Workload for ChainWorkload {
                                 WriteOutcome::Redirect { leader } => nodes.observe_leader(leader),
                                 WriteOutcome::WrongMode { .. } => owner_never_of_wrong_mode(),
                                 WriteOutcome::TooLarge { .. }
+                                | WriteOutcome::Denied(_)
                                 | WriteOutcome::UnknownJournal
                                 | WriteOutcome::Malformed
                                 | WriteOutcome::Ambiguous => {}
@@ -2431,6 +2435,7 @@ impl Workload for ChainWorkload {
                                 // learns it from its next write.
                                 TruncateOutcome::WrongMode { .. } => owner_never_of_wrong_mode(),
                                 TruncateOutcome::Refused { .. }
+                                | TruncateOutcome::Denied(_)
                                 | TruncateOutcome::UnknownJournal
                                 | TruncateOutcome::Malformed
                                 | TruncateOutcome::Ambiguous => {}
@@ -3636,7 +3641,8 @@ impl Workload for ChainWorkload {
                                 .unwrap_or((target + 1) % server_count);
                         }
                         ClaimOutcome::WrongMode { .. } => owner_never_of_wrong_mode(),
-                        ClaimOutcome::UnknownJournal
+                        ClaimOutcome::Denied(_)
+                        | ClaimOutcome::UnknownJournal
                         | ClaimOutcome::Malformed
                         | ClaimOutcome::Unread
                         | ClaimOutcome::Ambiguous => {
@@ -3729,7 +3735,7 @@ impl Workload for ChainWorkload {
                             .and_then(|id| nodes.index_of(id))
                             .unwrap_or((target + 1) % server_count);
                     }
-                    WriterOutcome::UnknownJournal => {
+                    WriterOutcome::Denied(_) | WriterOutcome::UnknownJournal => {
                         self.history.record_write_failed(submission.op);
                         let journal = writer.journal();
                         assert_always!(

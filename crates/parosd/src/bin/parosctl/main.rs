@@ -62,6 +62,13 @@ struct Global {
     /// resolved each time it is dialed (#257).
     #[arg(long, env = "PAROSCTL_SERVERS", value_delimiter = ',', global = true)]
     servers: Vec<ServerArg>,
+    /// The frontends to send the journal calls (`write`, `read`, `tail`,
+    /// `truncate`, `set-leader`) through, comma-separated `HOST:PORT`
+    /// (#192 (the frontend)): each call carries the token in `PAROS_TOKEN`
+    /// and names its journal by name. The other commands still ask the
+    /// servers.
+    #[arg(long, env = "PAROSCTL_FRONTENDS", value_delimiter = ',', global = true)]
+    frontends: Vec<String>,
     /// Print JSON, one document per answer, instead of text.
     #[arg(long, global = true)]
     json: bool,
@@ -240,6 +247,50 @@ fn client(
     )
 }
 
+/// A client of the frontends `global` names (#192 (the frontend)), each
+/// call carrying the token in `PAROS_TOKEN`.
+fn frontend_client(runtime: &Runtime, global: &Global) -> Result<Client<TokioProviders>, String> {
+    let text = std::env::var("PAROS_TOKEN")
+        .map_err(|_| "no token for the frontends: set PAROS_TOKEN".to_string())?;
+    let token = paros_authz_biscuit::Token::from_text(&text).map_err(|e| e.to_string())?;
+    let pass = std::sync::Arc::new(paros::Pass::new(token.as_bytes().to_vec()));
+    let mut servers = Vec::new();
+    for (index, entry) in global.frontends.iter().enumerate() {
+        let address =
+            Address::parse(entry.trim()).map_err(|e| format!("frontend {entry:?}: {e}"))?;
+        servers.push(paros::client::Server {
+            // A frontend has no node id: the index names it, and no answer
+            // through it ever names a node.
+            id: index as u64 + 1,
+            node: paros::NodeClient::frontend(
+                &runtime.rpc,
+                runtime.names.clone(),
+                address,
+                pass.clone(),
+            ),
+        });
+    }
+    let timeout = global.timeout();
+    let tunables = ClientTunables {
+        request_timeout: timeout,
+        read_timeout: timeout,
+        ..ClientTunables::default()
+    };
+    Ok(Client::new(&runtime.providers, servers, tunables))
+}
+
+/// Whether `command` is a journal call a frontend serves.
+fn through_frontend(command: &CellCommand) -> bool {
+    matches!(
+        command,
+        CellCommand::Write(_)
+            | CellCommand::Read(_)
+            | CellCommand::Tail(_)
+            | CellCommand::Truncate(_)
+            | CellCommand::SetLeader(_)
+    )
+}
+
 /// The servers `global` names, each with its node id: an explicit one, or
 /// the one its own `Inspect` reports (#196: ids are random). A server that
 /// does not answer is left out.
@@ -291,10 +342,36 @@ fn main() -> ExitCode {
     }
 }
 
+/// The client for a cell command: through the frontends when `fronted`,
+/// else over the servers, each with its node id.
+async fn connect(
+    runtime: &Runtime,
+    global: &Global,
+    fronted: bool,
+) -> Result<(Vec<(u64, Address)>, Client<TokioProviders>), ExitCode> {
+    if fronted {
+        return frontend_client(runtime, global)
+            .map(|client| (Vec::new(), client))
+            .map_err(|error| {
+                eprintln!("parosctl: {error}");
+                ExitCode::FAILURE
+            });
+    }
+    let servers = servers(runtime, global).await;
+    if servers.is_empty() {
+        eprintln!("parosctl: no server answered with its node id");
+        return Err(Ending::Unreachable.into());
+    }
+    let client = client(runtime, &servers, global.timeout());
+    Ok((servers, client))
+}
+
 /// The commands that talk to servers.
 async fn online(global: Global, command: Command) -> ExitCode {
     let cli = Cli { global, command };
-    if cli.global.servers.is_empty() {
+    let fronted = !cli.global.frontends.is_empty()
+        && matches!(&cli.command, Command::Cell(command) if through_frontend(command));
+    if cli.global.servers.is_empty() && !fronted {
         eprintln!("parosctl: no servers: pass --servers or set PAROSCTL_SERVERS");
         return ExitCode::FAILURE;
     }
@@ -351,12 +428,10 @@ async fn online(global: Global, command: Command) -> ExitCode {
         Command::Cell(command) => command,
         Command::Key(_) | Command::Token(_) => unreachable!("offline, handled in main"),
     };
-    let servers = servers(&runtime, &cli.global).await;
-    if servers.is_empty() {
-        eprintln!("parosctl: no server answered with its node id");
-        return Ending::Unreachable.into();
-    }
-    let client = client(&runtime, &servers, cli.global.timeout());
+    let (servers, client) = match connect(&runtime, &cli.global, fronted).await {
+        Ok(connected) => connected,
+        Err(code) => return code,
+    };
     let ending = match command {
         CellCommand::Write(args) => commands::write(&runtime.providers, &client, &out, args).await,
         CellCommand::Read(args) => commands::read(&client, &out, args).await,

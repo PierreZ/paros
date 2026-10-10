@@ -33,6 +33,7 @@ pub mod client;
 mod corruption;
 mod driver;
 pub mod fleet;
+pub mod frontend;
 pub mod journal;
 pub mod machine;
 mod matchmaker;
@@ -60,7 +61,7 @@ pub use driver::{
 };
 pub use rpc::{
     EdgeRejection, InspectRefusal, InspectReply, InspectRequest, InspectTarget, MAX_FRAME_BYTES,
-    NodeClient, Read, ReadAck, Reconfigure, ReconfigureAck, ReconfigureMatchmakers,
+    NodeClient, Pass, Read, ReadAck, Reconfigure, ReconfigureAck, ReconfigureMatchmakers,
     ReconfigureMatchmakersAck, RetireAck, RetireRequest, SetLeader, SetLeaderAck, Truncate,
     TruncateAck, WireQuorumSystem, Write, WriteAck, journal_state_from_proto,
     journal_state_to_proto, journal_view_from_proto, journal_view_to_proto, leader_from_proto,

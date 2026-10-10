@@ -32,6 +32,7 @@ use crate::Address;
 use crate::client::CallObserver;
 use crate::driver::BootRefusal;
 use crate::machine::{CachedRegistry, CellPlan, MachineRecord};
+use crate::name::JournalName;
 use crate::rpc::{EdgeRejection, MatchmakersRefusal, RetireRefusal};
 use crate::storage::StorageError;
 
@@ -429,6 +430,18 @@ pub trait Audit {
         chosen_index: Option<Slot>,
         deployment: &Deployment,
         accepted: &[(Slot, Ballot, u64)],
+    ) {
+    }
+
+    /// A frontend resolved `name` to `journal` (#192 (the frontend)), read
+    /// from the tenant control journal `control` at position `at`: the
+    /// journal its directory records there.
+    fn frontend_resolved(
+        &self,
+        name: &JournalName,
+        journal: JournalIdentifier,
+        control: JournalIdentifier,
+        at: u64,
     ) {
     }
 

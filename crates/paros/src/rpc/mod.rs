@@ -81,7 +81,7 @@ pub mod tenant {
 mod client;
 mod codec;
 mod consensus;
-mod inbound;
+pub(crate) mod inbound;
 mod inspect;
 mod matchmaker_codec;
 pub mod methods;
@@ -89,8 +89,8 @@ mod refusal;
 #[cfg(test)]
 mod tests;
 
-pub use client::NodeClient;
 pub(crate) use client::{MatchmakerClient, well_known};
+pub use client::{NodeClient, Pass};
 pub use inbound::{EdgeRejection, MAX_FRAME_BYTES};
 pub(crate) use inbound::{
     Inbound, OnReject, ReplySender, rpc_config, serve_deliveries, serve_well_known,
@@ -103,8 +103,9 @@ pub(crate) use matchmaker::{
     ReconfigureReply as WireReconfigureReply, ReconfigureRequest as WireReconfigureRequest,
 };
 pub use public::{
-    Read, ReadAck, Reconfigure, ReconfigureAck, ReconfigureMatchmakers, ReconfigureMatchmakersAck,
-    SetLeader, SetLeaderAck, Truncate, TruncateAck, Write, WriteAck, WriteOutcome,
+    Entry, FrontRead, FrontSetLeader, FrontTruncate, FrontWrite, FrontendVerdict, Read, ReadAck,
+    Reconfigure, ReconfigureAck, ReconfigureMatchmakers, ReconfigureMatchmakersAck, SetLeader,
+    SetLeaderAck, Truncate, TruncateAck, Write, WriteAck, WriteOutcome,
 };
 pub use refusal::{MatchmakersRefusal, RetireRefusal};
 

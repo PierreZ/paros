@@ -846,8 +846,8 @@ names data, not a location, and the client's entry endpoint (the resolvers' addr
 frontend's address until the resolver exists) is client configuration. **Only the entry roles resolve names**:
 clients send names and never read the universe tenant, so no tenant sees another tenant's names
 (amended on 2026-10-07, #233: the resolver resolves the tenant name, only for a tenant the token's
-scope covers, and the frontend the journal name). Until the frontend exists (#192), `parosctl`
-resolves with operator rights. A name is free again once its delete completes; a recreated
+scope covers, and the frontend the journal name). Without `--frontends`, `parosctl` resolves
+with operator rights; with it, `parosctl` sends names to a frontend (#192 (the frontend)). A name is free again once its delete completes; a recreated
 tenant or journal draws a fresh id, so an old id never aliases a new name.
 
 **Display** (decided on 2026-10-07, #239). Human output prints an id as short hex, git-style
@@ -866,6 +866,32 @@ again. `parosctl` resolves the names its journal commands take. An operator can 
 its ids, `id:<tenant>/<journal>` in hex, each half a unique prefix of an id that `parosctl` can
 list, or all 16 digits. Since #210 (tenant control journal), the machines serve every tenant's
 control journal, so a name resolves both hops on `parosd`, and `init` creates no user journal.
+
+**Where the frontend stands** (#192 (the frontend), landed on 2026-10-10). `paros::frontend`
+runs the frontend, and the `paros-frontend` binary ships it with `BiscuitAuthz`. The contract
+is the `Frontend` service in `proto/paros.proto`: each of the four calls with an `Entry` (the
+token, the tenant name and the journal name). The frontend does these steps for each call:
+
+1. It authorizes the call in names, before any I/O. A denied call reaches no machine. The
+   answer carries a `FrontendVerdict` (`INVALID_TOKEN`, `EXPIRED`, `FORBIDDEN` or `MALFORMED`),
+   which the client reads as `Denied`.
+2. It resolves the names with the library's two hops and caches each result. A machine that
+   refuses the journal as unknown makes the cached result stale. While the universe directory
+   cannot be read, the frontend uses the directory it read last (static stability).
+3. It forwards the call to the machines. It follows the leader hints itself and removes them
+   from the answer. It never sends a write a second time: when an attempt that may have run gets
+   no answer, the answer is `UNANSWERED`, which the client reads as `Ambiguous`. A read moves on
+   to the next server after any failure.
+
+An entry with an empty tenant name names an internal journal by the call's ids, and only an
+`admin` token reaches it. Until placement (#212 (placement)), a frontend fronts the cell's
+founding members, which it learns from a majority of their addresses. Until `Resolve` (#216
+(finish bootstrap)), a client gets its frontends' addresses from its configuration
+(`parosctl --frontends`, `PAROS_TOKEN`). The simulation runs zero to two frontends per seed, the
+same code, with root keys drawn per seed and a second key rotated in. The workload calls the
+tenants' journals through them by name, with the tenant's own token, and with tokens that must
+be denied: another tenant's token, an expired token, a key that no ring holds, bytes that are not
+a token, and a tenant token on an internal journal.
 
 **Trust** (decided on 2026-10-04). The boundary is the network: only frontends and peers reach
 a node's journals (a separate network in the Compose toy; a client reaches a machine only for the
@@ -930,8 +956,8 @@ simulation can replay, and features that cannot are left out:
   Datalog queries.
 - Biscuit stays out of `paros-core` and `paros` (its wasm32 clock needs JavaScript's
   `performance`): `paros` defines the `Authz` trait and carries tokens as opaque bytes; the
-  Biscuit implementation is its own crate, `paros-authz-biscuit` (#400), used by `parosctl` now
-  and by `parosd` and `paros-sim` with #245.
+  Biscuit implementation is its own crate, `paros-authz-biscuit` (#400), used by `parosctl`,
+  the `paros-frontend` binary and `paros-sim` (#192 (the frontend)), and by `parosd` with #245.
 
 **Routing goes through the universe tenant from M9.** The tenant name → `TenantId` → cell step is
 the resolver's from M12; until then the frontend resolves it from its fold of the universe directory,

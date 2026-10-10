@@ -8,6 +8,8 @@
 use moonpool_rpc::RpcError;
 use paros_core::{JournalView, ReconfigureRefusal};
 
+use crate::frontend::Denial;
+use crate::rpc::FrontendVerdict;
 use crate::rpc::public::WriteOutcome as WireWriteOutcome;
 pub use crate::rpc::{MatchmakersRefusal, RetireRefusal};
 use crate::rpc::{
@@ -68,6 +70,10 @@ pub enum WriteOutcome {
     },
     /// The reply named a journal state that does not decode: no verdict.
     Malformed,
+    /// Refused by a frontend before it reached any machine (#192 (the
+    /// frontend)): the token or the entry does not allow the call. Nothing
+    /// moved, and the call never will run.
+    Denied(Denial),
     /// No answer: the write may or may not be in the journal.
     Ambiguous,
 }
@@ -79,6 +85,13 @@ impl WriteOutcome {
         let Ok(ack) = response else {
             return Self::Ambiguous;
         };
+        match ack.frontend() {
+            FrontendVerdict::None => {}
+            FrontendVerdict::Unanswered => return Self::Ambiguous,
+            verdict => {
+                return Denial::of(verdict).map_or(Self::Malformed, Self::Denied);
+            }
+        }
         if ack.unknown_journal {
             return Self::UnknownJournal;
         }
@@ -149,6 +162,10 @@ pub enum SetLeaderOutcome {
     UnknownJournal,
     /// The reply named a journal state that does not decode.
     Malformed,
+    /// Refused by a frontend before it reached any machine (#192 (the
+    /// frontend)): the token or the entry does not allow the call. Nothing
+    /// moved, and the call never will run.
+    Denied(Denial),
     /// No answer: the swap may or may not have been decided.
     Ambiguous,
 }
@@ -160,6 +177,13 @@ impl SetLeaderOutcome {
         let Ok(ack) = response else {
             return Self::Ambiguous;
         };
+        match ack.frontend() {
+            FrontendVerdict::None => {}
+            FrontendVerdict::Unanswered => return Self::Ambiguous,
+            verdict => {
+                return Denial::of(verdict).map_or(Self::Malformed, Self::Denied);
+            }
+        }
         if ack.unknown_journal {
             return Self::UnknownJournal;
         }
@@ -217,6 +241,11 @@ pub enum ClaimOutcome {
     Malformed,
     /// No server served the read the claim starts with: nothing was asked.
     Unread,
+    /// Refused by a frontend before it reached any machine (#192 (the
+    /// frontend)): the token or the entry does not allow the call. Nothing
+    /// moved, and the call never will run.
+    Denied(Denial),
+
     /// The `SetLeader` went unanswered.
     Ambiguous,
 }
@@ -230,6 +259,7 @@ impl From<SetLeaderOutcome> for ClaimOutcome {
             SetLeaderOutcome::Redirect { leader } => Self::Redirect { leader },
             SetLeaderOutcome::UnknownJournal => Self::UnknownJournal,
             SetLeaderOutcome::Malformed => Self::Malformed,
+            SetLeaderOutcome::Denied(denial) => Self::Denied(denial),
             SetLeaderOutcome::Ambiguous => Self::Ambiguous,
         }
     }
@@ -261,6 +291,10 @@ pub enum ReadOutcome {
     UnknownJournal,
     /// The reply named a journal state that does not decode.
     Malformed,
+    /// Refused by a frontend before it reached any machine (#192 (the
+    /// frontend)): the token or the entry does not allow the call. Nothing
+    /// moved, and the call never will run.
+    Denied(Denial),
     /// No answer.
     Ambiguous,
 }
@@ -272,6 +306,13 @@ impl ReadOutcome {
         let Ok(ack) = response else {
             return Self::Ambiguous;
         };
+        match ack.frontend() {
+            FrontendVerdict::None => {}
+            FrontendVerdict::Unanswered => return Self::Ambiguous,
+            verdict => {
+                return Denial::of(verdict).map_or(Self::Malformed, Self::Denied);
+            }
+        }
         if ack.unknown_journal {
             return Self::UnknownJournal;
         }
@@ -339,6 +380,10 @@ pub enum TruncateOutcome {
     UnknownJournal,
     /// The reply named a journal state that does not decode.
     Malformed,
+    /// Refused by a frontend before it reached any machine (#192 (the
+    /// frontend)): the token or the entry does not allow the call. Nothing
+    /// moved, and the call never will run.
+    Denied(Denial),
     /// No answer, or the re-ask budget ran out.
     Ambiguous,
 }
@@ -350,6 +395,13 @@ impl TruncateOutcome {
         let Ok(ack) = response else {
             return Self::Ambiguous;
         };
+        match ack.frontend() {
+            FrontendVerdict::None => {}
+            FrontendVerdict::Unanswered => return Self::Ambiguous,
+            verdict => {
+                return Denial::of(verdict).map_or(Self::Malformed, Self::Denied);
+            }
+        }
         if ack.unknown_journal {
             return Self::UnknownJournal;
         }

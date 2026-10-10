@@ -15,6 +15,9 @@
 //!   served by a matchmaker.
 //! - `0x5041_0301..` — the machine contract (`proto/machine.proto`, #196),
 //!   served by an uninitialized `parosd` while it waits for `init`.
+//! - `0x5041_0401..` — the frontend contract (`proto/paros.proto`'s
+//!   `Frontend` service, #192), served by a frontend: a public call with the
+//!   caller's entry (token and names).
 //!
 //! A role that does not serve a method simply does not register it, and a
 //! call to it is refused `EndpointNotFound` before any handler runs.
@@ -161,4 +164,26 @@ well_known_method!(
     /// (#210).
     JournalRequestRpc, 0x5041_0308, machine::JournalRequest => machine::JournalRequestAck,
     "paros.machine.JournalRequest"
+);
+// 0x5041_04xx: the frontend contract (#192 (the frontend)), served by a
+// frontend only: a public call with the caller's entry.
+well_known_method!(
+    /// A `Write` through a frontend: checked, resolved and forwarded.
+    FrontWriteRpc, 0x5041_0401, public::FrontWrite => public::WriteAck,
+    "paros.frontend.Write"
+);
+well_known_method!(
+    /// A `Read` through a frontend.
+    FrontReadRpc, 0x5041_0402, public::FrontRead => public::ReadAck,
+    "paros.frontend.Read"
+);
+well_known_method!(
+    /// A `Truncate` through a frontend.
+    FrontTruncateRpc, 0x5041_0403, public::FrontTruncate => public::TruncateAck,
+    "paros.frontend.Truncate"
+);
+well_known_method!(
+    /// A `SetLeader` through a frontend.
+    FrontSetLeaderRpc, 0x5041_0404, public::FrontSetLeader => public::SetLeaderAck,
+    "paros.frontend.SetLeader"
 );

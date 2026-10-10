@@ -124,6 +124,8 @@ pub(super) struct FleetOps {
     connector: Connector,
     /// Every machine's address, in rank order.
     machines: Vec<Address>,
+    /// Every frontend's address, in rank order (#192 (the frontend)).
+    frontends: Vec<Address>,
     /// The machines' layout: the founding members `cell init` lists.
     layout: MachineLayout,
     /// The cell, once this operator learned it.
@@ -186,6 +188,7 @@ impl FleetOps {
         Ok(Self {
             connector,
             machines,
+            frontends: crate::frontend::frontend_addrs(deployment),
             layout,
             cell: None,
             patience,
