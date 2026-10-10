@@ -1240,6 +1240,55 @@ impl ColocatedNode {
         self.assert_invariants();
     }
 
+    /// Campaign now, strictly above `seen`, as if the election clock had
+    /// just run out: a follower or a candidate opens a fresh campaign (or its
+    /// membership probe, the same path a timeout takes) at a round above
+    /// `seen.round`. A no-op on the leader and on a campaign that still waits
+    /// on its matchmakers (its ballot is already promised).
+    ///
+    /// Always sound: any node may campaign at any time, at any fresh round,
+    /// and a campaign costs availability only. Paxos safety never depends on
+    /// who campaigns or when. `seen` only raises the volatile round floor, as
+    /// a matchmaker's `Stale` refusal does. The driver calls it for an
+    /// acceptor about to overwrite a value it accepted with a different one
+    /// at `seen` (#376): the campaign promises above the overwriting
+    /// `Accept`, so that `Accept` is refused, and its Phase 1 reads both
+    /// values for the slot, where P2c keeps the higher ballot.
+    ///
+    /// # Panics
+    ///
+    /// If an internal invariant is broken (a programmer error, never an
+    /// operating condition).
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, round = seen.round)))]
+    pub fn campaign_above(&mut self, seen: Ballot) {
+        if self.role == NodeRole::Leader || self.matchmaking.is_some() {
+            return;
+        }
+        let marks = self.durable_marks();
+        let ballot = self.ballot;
+        let promised = self.acceptor.promised();
+        self.round_floor = self.round_floor.max(seen.round);
+        // The timeout's own bookkeeping: the clock restarts and the driver
+        // draws the next timeout.
+        self.election_elapsed = 0;
+        self.needs_election_timeout = true;
+        self.on_check_leader();
+        assert!(
+            self.round_floor >= seen.round,
+            "the round floor covers the ballot seen"
+        );
+        assert!(
+            self.ballot >= ballot,
+            "a campaign never lowers the operating ballot"
+        );
+        assert!(
+            self.acceptor.promised() >= promised,
+            "a campaign never lowers the promise"
+        );
+        self.assert_marks_monotone(marks);
+        self.assert_invariants();
+    }
+
     /// The driver supplies a randomized election timeout (in ticks, jitter drawn
     /// from its `RandomProvider`). Clears the [`ColocatedNode::needs_election_timeout`]
     /// flag.

@@ -741,3 +741,112 @@ fn an_acceptor_pinned_at_the_higher_ballot_gives_the_stale_leader_nothing() {
         "a below-promise beat is not acked: {out:?}"
     );
 }
+
+#[test]
+fn campaign_above_opens_a_campaign_without_waiting_for_the_clock() {
+    let mut n = node(0, &[0, 1, 2]);
+    n.set_election_timeout(10);
+    let promised = n.acceptor().promised();
+    n.campaign_above(ballot(7, 2));
+    assert_eq!(n.role(), NodeRole::Candidate, "the campaign opened at once");
+    assert!(
+        n.acceptor().promised() > promised,
+        "the campaign raised the promise"
+    );
+    assert!(
+        n.acceptor().promised() > ballot(7, 2),
+        "the campaign opened above the ballot seen"
+    );
+    assert!(n.needs_election_timeout(), "driver must reseed the timeout");
+    let out = drain(&mut n);
+    assert_eq!(
+        out.iter()
+            .filter(|(_, m)| matches!(m, Message::Prepare { .. }))
+            .count(),
+        2,
+        "Prepare broadcast to the two peers"
+    );
+}
+
+#[test]
+fn campaign_above_is_a_no_op_on_the_leader() {
+    let mut nodes = cluster::<3>();
+    make_leader(&mut nodes, 0);
+    let promised = nodes[0].acceptor().promised();
+    nodes[0].campaign_above(ballot(9, 1));
+    assert_eq!(
+        nodes[0].role(),
+        NodeRole::Leader,
+        "the leader keeps leading"
+    );
+    assert_eq!(
+        nodes[0].acceptor().promised(),
+        promised,
+        "the leader's promise does not move"
+    );
+}
+
+/// #376: an acceptor holding a value the next leadership never saw campaigns
+/// before that leadership's `Accept` overwrites it. The `Accept` is refused,
+/// and the campaign's Phase 1 reads both values for the slot: P2c keeps the
+/// higher ballot's.
+#[test]
+fn campaign_above_an_overwrite_reads_both_values() {
+    let mut nodes = cluster::<3>();
+    make_leader(&mut nodes, 0);
+    // Slot 0 reaches the leader alone: every `Accept` is lost.
+    nodes[0].propose(entry(1, 1, 10));
+    let q = drain(&mut nodes[0]);
+    deliver_filtered(&mut nodes, q, |_, msg| {
+        !matches!(msg, Message::Accept { .. })
+    });
+    // Node 1 campaigns with node 2; node 0 never answers, so the new
+    // leadership does not see slot 0 and puts another value there.
+    campaign(&mut nodes[1]);
+    let q = drain(&mut nodes[1]);
+    deliver_filtered(&mut nodes, q, |to, _| to != NodeId(0));
+    assert_eq!(
+        nodes[1].role(),
+        NodeRole::Leader,
+        "node 1 won without node 0"
+    );
+    nodes[1].propose(entry(2, 1, 20));
+    let q = drain(&mut nodes[1]);
+    let overwrite = q
+        .iter()
+        .find(|(to, m)| {
+            *to == NodeId(0) && matches!(m, Message::Accept { slot, .. } if *slot == Slot(0))
+        })
+        .cloned()
+        .expect("the new leader sends node 0 an Accept for slot 0");
+    deliver_filtered(&mut nodes, q, |to, _| to != NodeId(0));
+    assert_eq!(
+        chosen_at(&nodes[1], 0),
+        Some(val(20)),
+        "slot 0 is chosen with the new value"
+    );
+    // Node 0, deposed without knowing it, contests before the overwrite
+    // reaches it.
+    nodes[0].step_down();
+    let Message::Accept { ballot: seen, .. } = overwrite.1 else {
+        unreachable!("found as an Accept")
+    };
+    nodes[0].campaign_above(seen);
+    step_at(&mut nodes, overwrite.0, overwrite.1);
+    let held = nodes[0].acceptor().record(Slot(0)).cloned();
+    assert!(
+        held.is_some_and(|(b, _)| b.node == NodeId(0)),
+        "the raised promise refused the overwrite"
+    );
+    // Its Phase 1 meets node 2, which holds the chosen value.
+    let q = drain(&mut nodes[0]);
+    deliver_filtered(&mut nodes, q, |to, _| to != NodeId(1));
+    assert_eq!(nodes[0].role(), NodeRole::Leader, "node 0 won with node 2");
+    let q = drain(&mut nodes[0]);
+    deliver_all(&mut nodes, q);
+    assert_eq!(
+        chosen_at(&nodes[0], 0),
+        Some(val(20)),
+        "P2c kept the higher ballot's value"
+    );
+}
