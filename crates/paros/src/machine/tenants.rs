@@ -26,25 +26,48 @@
 //! 5. write the request, and answer with what the fold recorded. An id the
 //!    tenant used (`IdTaken`) records nothing: the coordinator draws again.
 //!
-//! Placement is the founding members until #212: a redundancy mode takes
-//! as many as it asks for, at most all of them; a grid needs all its cells.
+//! **Placement inside granted capacity** (#212 (placement)). Only the
+//! founding members serve journals until journals move onto admitted
+//! machines, so they are the machines a create may use: a redundancy mode
+//! takes as many as it asks for, at most all of them, and a grid needs all
+//! its cells. Inside them, [`crate::placement::plan`] picks the members
+//! (zone by zone, least-loaded first, ties by a draw seeded with the
+//! tenant), and the coordinator books one acceptor slot on each in the cell
+//! control journal, through the term's cell session, *before* it writes the
+//! create. The cell control journal has one writer, the elected cell
+//! coordinator, which is also the tenant coordinator until #225; the
+//! request for capacity is the call into that session. A create the cell has
+//! no slot for is refused and the refusal recorded (`Unplaceable`), so a
+//! retry reads it back; the caller asks again under a new id. A delete
+//! releases the journal's bookings after its tombstone. A booking an
+//! unanswered create left behind (a crash between the bookings and the
+//! create, or an abandoned create) names a journal the tenant never
+//! created: the next create in that tenant releases it, after the claim on
+//! the tenant control journal fenced every earlier term, and only while the
+//! desk's fold is settled: an unanswered write of the term itself may still
+//! land, so its fold may lack a live journal until a later write lands at
+//! the tail.
 //!
-//! The desk draws no randomness of its own: its ids derive from the seed the
-//! node loop drew for the candidacy, and its BUGGIFY decisions (reuse a
-//! taken id once, an impatient term) were drawn there too.
+//! The desk draws no randomness of its own: its journal and booking ids
+//! derive from the seed the node loop drew for the candidacy, and its
+//! BUGGIFY decisions (reuse a taken id once, an impatient term, a create
+//! abandoned after its bookings) were drawn there too.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use moonpool_core::Providers;
 use paros_core::{AcceptorConfig, JournalId, JournalIdentifier, LeaderUuid, NodeId, TenantId};
 
+use crate::client::cell::CellSession;
 use crate::client::checkpoint::{
     AppendOutcome, CheckpointPolicy, Checkpointer, Folder, LoadOutcome, OpenOutcome, load,
 };
+use crate::client::fleet::Interrupted;
 use crate::client::journals::{JournalAnswer, JournalOp, JournalRequest};
 use crate::client::{ClaimOutcome, Client, ClientTunables, WriterOutcome};
-use crate::system::Registry;
+use crate::placement::{self, Shortfall, Step, Want};
+use crate::system::{Booking, BookingTarget, Registry, Role, SystemCommand};
 use crate::tenant::{
     CellKind, Description, Desired, DesiredMode, RequestOutcome, TenantCommand, TenantControl,
 };
@@ -80,12 +103,17 @@ pub(crate) struct TenantDesk {
     /// The cell control journal, where `HostTenant` names each tenant's
     /// control journal.
     cell: JournalIdentifier,
-    /// The founding members, in id order: the placement until #212.
+    /// The founding members, in id order: the only machines that serve
+    /// journals, so the only ones a create may use.
     founders: Vec<NodeId>,
     /// The cell control journal's fold, read (never written) here.
     registry: Folder<Registry>,
     /// Each tenant's control journal, claimed under the term's uuid.
     tenants: BTreeMap<TenantId, Checkpointer<TenantControl>>,
+    /// The tenants whose last write is not known written: an unanswered
+    /// write may still land past the desk's fold, so the fold may lack a
+    /// live journal. A write that lands at the tail settles the fold again.
+    unsettled: BTreeSet<TenantId>,
     /// The seed ids derive from, and how many were drawn.
     seed: u128,
     draws: u64,
@@ -98,6 +126,11 @@ pub(crate) struct TenantDesk {
     /// (ignored load result)): an unanswered create, then an unavailable
     /// catch-up. Each is cleared once used.
     impatient: (bool, bool),
+    /// The term's first create that books a slot stops right after its
+    /// bookings and answers unavailable (a BUGGIFY decision of the node
+    /// loop, #212 (placement)): the bookings are left to the next create's
+    /// release. Cleared once used.
+    abandon: bool,
     policy: CheckpointPolicy,
     /// A tenant control journal refused the term's uuid: a later term
     /// fenced it. The term is over for the desk, which claims nothing again
@@ -112,7 +145,7 @@ impl TenantDesk {
         uuid: LeaderUuid,
         cell: JournalIdentifier,
         founders: &[NodeId],
-        (seed, reuse, impatient): (u128, bool, bool),
+        (seed, reuse, impatient, abandon): (u128, bool, bool, bool),
         policy: CheckpointPolicy,
     ) -> Self {
         assert!(uuid.is_set(), "a term's uuid is set");
@@ -125,10 +158,12 @@ impl TenantDesk {
             registry: Folder::new(Registry::new(founders.iter().copied())),
             founders,
             tenants: BTreeMap::new(),
+            unsettled: BTreeSet::new(),
             seed,
             draws: 0,
             reuse,
             impatient: (impatient, impatient),
+            abandon,
             policy,
             superseded: false,
         }
@@ -140,17 +175,21 @@ impl TenantDesk {
         self.superseded
     }
 
-    /// Answer `request`, through `client`.
+    /// Answer `request`, through `client`, booking and releasing capacity
+    /// through the term's cell session `cell` (`None` once the term's
+    /// session ended: a create or a delete then answers unavailable or
+    /// leaves its release to a later term).
     #[tracing::instrument(level = "debug", skip_all, fields(tenant = request.tenant.0))]
     pub(crate) async fn answer<P: Providers>(
         &mut self,
         client: &Client<P>,
         request: &JournalRequest,
+        cell: Option<&mut CellSession>,
     ) -> JournalAnswer {
         if self.superseded {
             return JournalAnswer::NotCoordinator;
         }
-        let answer = self.decide(client, request).await;
+        let answer = self.decide(client, request, cell).await;
         if matches!(answer, JournalAnswer::NotCoordinator) {
             // A later term's claim fenced a tenant control journal. A fresh
             // claim under the same uuid would take back what the journal
@@ -167,6 +206,7 @@ impl TenantDesk {
         &mut self,
         client: &Client<P>,
         request: &JournalRequest,
+        cell: Option<&mut CellSession>,
     ) -> JournalAnswer {
         let (control, name, survives) = match self.hosted(client, request.tenant).await {
             Ok(Some(hosted)) => hosted,
@@ -213,44 +253,8 @@ impl TenantDesk {
                 writer,
                 desired,
             } => {
-                let Some(members) = self.place(desired) else {
-                    moonpool_assertions::reachable!("tenant coordinator: a create is unplaceable");
-                    return JournalAnswer::Unplaceable;
-                };
-                for attempt in 0..ID_DRAWS {
-                    let id = self.draw(request.tenant, attempt == 0);
-                    let start = usize::try_from(id.0 % members.len() as u64).unwrap_or(0);
-                    let mut chosen: Vec<NodeId> = members
-                        .iter()
-                        .cycle()
-                        .skip(start)
-                        .take(members.len())
-                        .copied()
-                        .collect();
-                    chosen.sort_unstable();
-                    let config = AcceptorConfig::new(chosen, desired.quorum_system());
-                    let command = TenantCommand::CreateJournal {
-                        request: request.request,
-                        id,
-                        name: name.clone(),
-                        writer: *writer,
-                        desired: *desired,
-                        config,
-                    };
-                    moonpool_buggify::hint!("tenant create drawn, not written").await;
-                    if let Err(answer) = self.append(client, request.tenant, &command).await {
-                        return answer;
-                    }
-                    if let Some(outcome) =
-                        self.desk(request.tenant).state().outcome(request.request)
-                    {
-                        return self.answer_of(request.tenant, outcome);
-                    }
-                    moonpool_assertions::reachable!(
-                        "tenant coordinator: an id taken is drawn again"
-                    );
-                }
-                JournalAnswer::Unavailable
+                self.create(client, request, (name, *writer, *desired), cell)
+                    .await
             }
             JournalOp::Delete { name } => {
                 let id = self
@@ -265,12 +269,262 @@ impl TenantDesk {
                 if let Err(answer) = self.append(client, request.tenant, &command).await {
                     return answer;
                 }
-                match self.desk(request.tenant).state().outcome(request.request) {
-                    Some(outcome) => self.answer_of(request.tenant, outcome),
-                    None => JournalAnswer::Unavailable,
+                let Some(outcome) = self.desk(request.tenant).state().outcome(request.request)
+                else {
+                    return JournalAnswer::Unavailable;
+                };
+                if let (RequestOutcome::Deleted(deleted), Some(cell)) = (outcome, cell) {
+                    // The tombstone is written: its slots go back to the
+                    // cell. A release that does not land is left to the next
+                    // create in the tenant.
+                    let target =
+                        BookingTarget::Journal(JournalIdentifier::new(request.tenant, deleted));
+                    if release(client, cell, |b| b.target == target)
+                        .await
+                        .is_ok_and(|released| released > 0)
+                    {
+                        moonpool_assertions::reachable!(
+                            "tenant coordinator: a delete releases its journal's slots"
+                        );
+                    }
                 }
+                self.answer_of(request.tenant, outcome)
             }
         }
+    }
+
+    /// A create: place it inside the founding members' free slots, book
+    /// them, then write it. A create the cell has no slot for is recorded
+    /// `Unplaceable`; one whose founding members are not all registered yet
+    /// answers unavailable.
+    async fn create<P: Providers>(
+        &mut self,
+        client: &Client<P>,
+        request: &JournalRequest,
+        (name, writer, desired): (&[u8], paros_core::WriterMode, Desired),
+        cell: Option<&mut CellSession>,
+    ) -> JournalAnswer {
+        let tenant = request.tenant;
+        let wanted = desired.acceptors();
+        let count = match desired.mode {
+            DesiredMode::Redundancy(_) => wanted.max(1).min(self.founders.len()),
+            DesiredMode::Grid { .. } => wanted,
+        };
+        if count > self.founders.len() {
+            moonpool_assertions::reachable!("tenant coordinator: a create is unplaceable");
+            return self.refuse(client, request, name).await;
+        }
+        let Some(cell) = cell else {
+            // The term's cell session ended: no slot can be booked.
+            return JournalAnswer::Unavailable;
+        };
+        // A live name answers `NameTaken` at apply: it books nothing. An
+        // unsettled fold may lack a live journal whose create landed
+        // unanswered: its orphans wait for a settled one.
+        let named = self.desk(tenant).state().named(name).is_some();
+        if !named
+            && !self.unsettled.contains(&tenant)
+            && self.release_orphans(client, tenant, cell).await.is_err()
+        {
+            return JournalAnswer::Unavailable;
+        }
+        for attempt in 0..ID_DRAWS {
+            let id = self.draw(tenant, attempt == 0);
+            let journal = JournalIdentifier::new(tenant, id);
+            let want = Want {
+                role: Role::Acceptor,
+                target: BookingTarget::Journal(journal),
+                count,
+            };
+            let members = if named || self.desk(tenant).state().is_taken(id) {
+                // Refused at apply (`NameTaken` or `IdTaken`): any members do.
+                self.founders.iter().copied().take(count).collect()
+            } else {
+                let machines = placement::machines(cell.registry(), self.founders.iter().copied());
+                let current: Vec<(u64, Booking)> = cell
+                    .registry()
+                    .bookings()
+                    .filter(|(_, b)| b.target == want.target)
+                    .map(|(id, b)| (id, *b))
+                    .collect();
+                match placement::plan(&want, &machines, &current, tenant.0) {
+                    Ok(steps) => {
+                        if let Err(answer) = self.book(client, cell, &want, &steps).await {
+                            return answer;
+                        }
+                        moonpool_buggify::hint!("capacity booked, journal not written").await;
+                        if std::mem::take(&mut self.abandon) {
+                            moonpool_assertions::reachable!(
+                                "tenant coordinator: a create abandoned after its bookings"
+                            );
+                            return JournalAnswer::Unavailable;
+                        }
+                        placement::booked(&steps)
+                    }
+                    Err(Shortfall::Capacity { .. }) => {
+                        moonpool_assertions::reachable!(
+                            "tenant coordinator: a create the cell has no slot for is refused"
+                        );
+                        return self.refuse(client, request, name).await;
+                    }
+                    Err(Shortfall::Machines { .. }) => {
+                        moonpool_assertions::reachable!(
+                            "tenant coordinator: a create waits for its founding members to register"
+                        );
+                        return JournalAnswer::Unavailable;
+                    }
+                }
+            };
+            assert_eq!(
+                members.len(),
+                count,
+                "a create names as many members as it asked"
+            );
+            let mut chosen = members;
+            chosen.sort_unstable();
+            let config = AcceptorConfig::new(chosen, desired.quorum_system());
+            let command = TenantCommand::CreateJournal {
+                request: request.request,
+                id,
+                name: name.to_vec(),
+                writer,
+                desired,
+                config,
+            };
+            moonpool_buggify::hint!("tenant create drawn, not written").await;
+            if let Err(answer) = self.append(client, tenant, &command).await {
+                return answer;
+            }
+            if let Some(outcome) = self.desk(tenant).state().outcome(request.request) {
+                return self.answer_of(tenant, outcome);
+            }
+            moonpool_assertions::reachable!("tenant coordinator: an id taken is drawn again");
+        }
+        JournalAnswer::Unavailable
+    }
+
+    /// Release every slot booked for a journal of `tenant` that is not a
+    /// live journal of its control journal: what an unanswered create left
+    /// (a crash between its bookings and its write, or an abandoned create),
+    /// or a delete whose release did not land. Only after the desk claimed
+    /// the tenant control journal, so no earlier term can still write the
+    /// create those slots were booked for, and only on a settled fold, so no
+    /// write of this term can either.
+    async fn release_orphans<P: Providers>(
+        &self,
+        client: &Client<P>,
+        tenant: TenantId,
+        cell: &mut CellSession,
+    ) -> Result<(), Interrupted> {
+        let state = self.desk(tenant).state();
+        let orphan = |b: &Booking| match b.target {
+            BookingTarget::Journal(journal) => {
+                journal.tenant == tenant
+                    && state
+                        .get(journal.journal)
+                        .is_none_or(|j| j.deleted_at.is_some())
+            }
+            BookingTarget::Set { .. } => false,
+        };
+        if release(client, cell, orphan).await? > 0 {
+            moonpool_assertions::reachable!(
+                "tenant coordinator: a slot no journal holds is released"
+            );
+        }
+        Ok(())
+    }
+
+    /// Record `request`, a create of `name`, as unplaceable (or name taken,
+    /// when a live journal holds the name), and answer what the fold
+    /// recorded.
+    async fn refuse<P: Providers>(
+        &mut self,
+        client: &Client<P>,
+        request: &JournalRequest,
+        name: &[u8],
+    ) -> JournalAnswer {
+        let command = TenantCommand::Unplaceable {
+            request: request.request,
+            name: name.to_vec(),
+        };
+        if let Err(answer) = self.append(client, request.tenant, &command).await {
+            return answer;
+        }
+        match self.desk(request.tenant).state().outcome(request.request) {
+            Some(outcome) => self.answer_of(request.tenant, outcome),
+            None => JournalAnswer::Unavailable,
+        }
+    }
+
+    /// Book the slots `steps` asks for `want`, through the term's cell
+    /// session, each under a booking id drawn from the seed (drawn again
+    /// when the registry spent it).
+    ///
+    /// # Errors
+    ///
+    /// `Unavailable` when a booking did not land: the term's session is
+    /// over.
+    ///
+    /// # Panics
+    ///
+    /// If the registry refuses a booking the placement computed from its own
+    /// fold for another reason than a spent id: the session is the cell
+    /// control journal's one writer, so its fold is the registry at its tail.
+    async fn book<P: Providers>(
+        &mut self,
+        client: &Client<P>,
+        cell: &mut CellSession,
+        want: &Want,
+        steps: &[Step],
+    ) -> Result<(), JournalAnswer> {
+        for step in steps {
+            let Step::Book { node } = *step else {
+                continue;
+            };
+            let held = Booking {
+                node,
+                role: want.role,
+                target: want.target,
+            };
+            let mut booked = false;
+            for _ in 0..ID_DRAWS {
+                let booking = self.mix(0xB00C).max(1);
+                if cell.registry().spent().any(|spent| spent == booking) {
+                    continue;
+                }
+                let command = SystemCommand::BookCapacity {
+                    booking,
+                    node,
+                    role: want.role,
+                    target: want.target,
+                };
+                if cell.record(client, 0, &command).await.is_err() {
+                    return Err(JournalAnswer::Unavailable);
+                }
+                assert_eq!(
+                    cell.registry().booking(booking),
+                    Some(&held),
+                    "a booking the placement computed from the registry's tail lands"
+                );
+                booked = true;
+                break;
+            }
+            if !booked {
+                return Err(JournalAnswer::Unavailable);
+            }
+        }
+        assert!(
+            placement::booked(steps)
+                .iter()
+                .all(
+                    |node| cell.registry().bookings().any(|(_, b)| b.node == *node
+                        && b.role == want.role
+                        && b.target == want.target)
+                ),
+            "every slot a plan asked for is booked"
+        );
+        moonpool_assertions::reachable!("tenant coordinator: a create books its acceptors' slots");
+        Ok(())
     }
 
     /// The control journal, name and `survives` the cell control journal's
@@ -395,6 +649,8 @@ impl TenantDesk {
             moonpool_assertions::reachable!("tenant coordinator: an impatient create");
         }
         let writer = impatient(client, impatient_write);
+        // Unsettled until the write is known written and folded.
+        self.unsettled.insert(tenant);
         match desk.append(&writer, command.encode(), 0).await {
             AppendOutcome::Written(WriterOutcome::Written { .. }) => {
                 let tail = desk.writer().next_seq();
@@ -435,23 +691,10 @@ impl TenantDesk {
             desk.folder().next_seq() > before,
             "a written entry moves the fold"
         );
+        // The write landed at the tail and the fold reached it: every
+        // earlier write of the term is folded, or never lands.
+        self.unsettled.remove(&tenant);
         Ok(())
-    }
-
-    /// The members a create under `desired` takes: the founding members, as
-    /// many as a redundancy asks for (at most all of them), exactly a
-    /// grid's cells. `None` when a grid has too few.
-    fn place(&self, desired: &Desired) -> Option<Vec<NodeId>> {
-        let wanted = desired.acceptors();
-        match desired.mode {
-            DesiredMode::Redundancy(_) => {
-                Some(self.founders.iter().copied().take(wanted.max(1)).collect())
-            }
-            DesiredMode::Grid { .. } if self.founders.len() >= wanted => {
-                Some(self.founders.iter().copied().take(wanted).collect())
-            }
-            DesiredMode::Grid { .. } => None,
-        }
     }
 
     /// The next journal id of `tenant`: derived from the seed and the draw
@@ -471,17 +714,22 @@ impl TenantDesk {
             moonpool_assertions::reachable!("tenant coordinator: a create reuses a taken id");
             return taken;
         }
+        JournalId(self.mix(tenant.0).max(1))
+    }
+
+    /// The next value of the desk's own sequence, salted with `salt`:
+    /// derived from the seed and the draw count.
+    fn mix(&mut self, salt: u64) -> u64 {
         self.draws += 1;
         let low = u64::try_from(self.seed & u128::from(u64::MAX)).unwrap_or(0);
         let high = u64::try_from(self.seed >> 64).unwrap_or(0);
         let mut x = low ^ high.rotate_left(17) ^ self.draws.wrapping_mul(0x9E37_79B9_7F4A_7C15);
-        x ^= tenant.0.rotate_left(29);
+        x ^= salt.rotate_left(29);
         x ^= x >> 30;
         x = x.wrapping_mul(0xBF58_476D_1CE4_E5B9);
         x ^= x >> 27;
         x = x.wrapping_mul(0x94D0_49BB_1331_11EB);
-        x ^= x >> 31;
-        JournalId(x.max(1))
+        x ^ (x >> 31)
     }
 
     /// The answer `outcome` gives, from `tenant`'s fold.
@@ -501,6 +749,37 @@ impl TenantDesk {
             RequestOutcome::Deleted(id) => JournalAnswer::Deleted { id },
             RequestOutcome::NameTaken(id) => JournalAnswer::NameTaken { id },
             RequestOutcome::UnknownJournal => JournalAnswer::UnknownJournal,
+            RequestOutcome::Unplaceable => JournalAnswer::Unplaceable,
         }
     }
+}
+
+/// Release every live booking `which` selects, through the term's cell
+/// session: how many it released.
+///
+/// # Errors
+///
+/// A write did not land: the session is closed, and the rest stay booked.
+pub(crate) async fn release<P: Providers>(
+    client: &Client<P>,
+    cell: &mut CellSession,
+    which: impl Fn(&Booking) -> bool,
+) -> Result<usize, Interrupted> {
+    let bookings: Vec<u64> = cell
+        .registry()
+        .bookings()
+        .filter(|(_, b)| which(b))
+        .map(|(id, _)| id)
+        .collect();
+    let mut released = 0;
+    for booking in bookings {
+        let command = SystemCommand::ReleaseCapacity { booking };
+        cell.record(client, 0, &command).await?;
+        assert!(
+            cell.registry().booking(booking).is_none(),
+            "a released booking is no longer live"
+        );
+        released += 1;
+    }
+    Ok(released)
 }

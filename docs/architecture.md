@@ -376,7 +376,7 @@ list and no rendezvous name. The same rule holds at two levels:
   `RegisterNode` unless the registry holds the machine, then sends `Admit`. Each step is decided
   from what the journal and the machine hold, so a re-run resumes. The snapshot is the founding
   members and every registered machine, by id and address. An admitted machine serves `Identify`
-  and a node-only `Inspect` with its cell, and no journal until placement (#212). A machine that
+  and a node-only `Inspect` with its cell, and no journal until journals move onto admitted machines (#474). A machine that
   promised in a `cell init` and has no vote refuses `Admit` (`in_cell_init`): that `cell init`
   can still form a cell over it, and a stalled `cell init` is safer than a machine in two cells.
   An admitted machine refuses every `cell init` that lists it (`cell_exists`).
@@ -490,7 +490,7 @@ Rules:
 - **A lane dials the reference the registry fold holds** for its peer (the peer book), and the
   well-known `Deliver` while the fold holds none: a static deployment (plain Multi-Paxos without
   a registry is permanent), a member not registered yet, an admitted machine (it serves no
-  journal until #212). A delivery the reference refuses for good marks it stale, and the lane
+  journal until #474). A delivery the reference refuses for good marks it stale, and the lane
   dials the well-known `Deliver` until the fold names another reference. Amended on 2026-10-11:
   the issue's "never fall back while the fold names a reference" is dropped, because a
   restarted founding member's new reference is written into a registry that may need that
@@ -592,7 +592,7 @@ watch writes only while its term's session holds the cell control journal; its f
 does not land ends the watch for the term. `RegisterNode` and `IdentifyAck` carry the machine's RPC
 incarnation and, since #404, its machine interface. Capacity bookings are keyed `(node, journal or matchmaker set, role)`,
 the role names the class, and a booking id is never booked twice, across checkpoints (the
-registry keeps the spent ids). The re-placement bound and the re-placement itself are #212.
+registry keeps the spent ids). The re-placement bound and the re-placement itself are #475.
 
 Landed in #211 (2026-10-10): the **durable cached registry fold**
 (`paros::machine::CachedRegistry`). Every machine of a cell keeps the cell's address book
@@ -794,6 +794,42 @@ registry itself, which holds the address once the request is done.
 between quorum systems. The tenant coordinator sends it to the journal's own leader, and
 retirements wait for the GC watermark (`may_retire`).
 
+*Landed* (#212 (placement), 2026-10-11): the placement function and the acceptor bookings of a
+create.
+
+- **The function.** `paros::placement::plan` maps the desired count, the machines the registry
+  offers and the target's live bookings to steps: slots to book and bookings to release. It is
+  pure, so a new coordinator that folds the same registry computes the same steps. Its rules are
+  section 3.4's: class and free slot, no machine with two storage instances of one target, zone
+  by zone in round robin, least-loaded inside a zone, zones that tie in the order of their
+  machines' mean load, ties broken by a draw seeded with the tenant id, and a machine marked
+  `Down` only after every machine that is up. A release takes a down machine first, then the
+  most loaded.
+- **Booking before the create.** The tenant coordinator plans a create's acceptors over the
+  founding members (the only machines that serve journals until #474) and books one acceptor slot
+  on each in the cell control journal, through the term's cell session, before it writes the
+  create. The elected cell coordinator is still every tenant's coordinator (#476 adds the request
+  RPC), so the request for capacity is a call into its own session.
+- **A refusal is recorded.** A create the cell has no slot for, or too wide for the founding
+  members, is written `Unplaceable` under its request id, so a retry reads the refusal back; the
+  caller asks again under a new id. A create whose founding members are not all registered yet
+  answers `unavailable`.
+- **Releases.** A delete releases its journal's slots after the tombstone. A slot booked for a
+  journal its tenant does not hold live (an abandoned create, a release that did not land) is
+  released by the next create in that tenant, once the claim on the tenant control journal
+  fenced every earlier term. The watch releases the slots of a tenant the cell dropped.
+- **Capacity.** `PAROS_CAPACITY` defaults to 32 slots; one live journal takes one slot on each of
+  its members.
+- **The simulation.** The machines' capacity is a knob (default 8, extreme 1 to 3, floor 1). A
+  term's first create may stop right after its bookings (a BUGGIFY decision), and a `hint!`
+  sits between the bookings and the create. After chaos, every live journal of a hosted tenant
+  holds one acceptor booking per member. Gates: a create refused for capacity is asked again and
+  placed, a slot no journal holds is released, and a journal's members span two zones.
+- **Still to do.** Journals on admitted machines and moves (#474), re-placement after a `Down`
+  bound (#475), the tenant birth footprint, the capacity request RPC and tenant coordinators on
+  `stateless` machines (#476), the operators' retire coordination in the control journals
+  (#477).
+
 ### 3.4 Tenant modes
 
 A tenant's desired state is FDB's `configure` (decided on 2026-10-04): per journal or as a tenant
@@ -863,7 +899,7 @@ each hosting many tenants' sets keyed by `JournalIdentifier`, the way every role
 store for each set it hosts, and the registries of that set's journals, keyed by `JournalId`, are
 inside it. Every journal of the set, the control and election journals included, has the set from
 its first entry; there is no bootstrap exception. A storage fault in one registry closes the whole
-set, and the set opens again at its next request. **Until placement (#212), every tenant's
+set, and the set opens again at its next request. **Until matchmaker sets move off the founding members (#474), every tenant's
 matchmaker set runs on the cell's founding members** (decided on 2026-10-10, #190): each founding
 member hosts the matchmaker named by its node id, on the address it serves its journals at, and
 provisions a tenant's set at the first request that names that tenant. A matchmaker request names
@@ -997,9 +1033,9 @@ token, the tenant name and the journal name). The frontend does these steps for 
    to the next server after any failure.
 
 An entry with an empty tenant name names an internal journal by the call's ids, and only an
-`admin` token reaches it. Until placement (#212 (placement)), a frontend fronts the cell's
+`admin` token reaches it. Until placement books frontends (#476), a frontend fronts the cell's
 founding members, which it learns from a majority of their addresses. `Resolve` (#216 (finish bootstrap))
-names no frontend until frontends are booked slots (#212 (placement)), so a client gets its
+names no frontend until frontends are booked slots (#476), so a client gets its
 frontends' addresses from its configuration (`parosctl --frontends`, `PAROS_TOKEN`). The simulation runs zero to two frontends per seed, the
 same code, with root keys drawn per seed and a second key rotated in. The workload calls the
 tenants' journals through them by name, with the tenant's own token, and with tokens that must
@@ -1915,15 +1951,15 @@ AGENTS.md.
   `HostTenant` (with the tenant's name and `survives`), and it is born on the founding members,
   plain Multi-Paxos, majority. It holds the tenant's description (no rendezvous name) and every
   journal create and delete, each a request with an idempotency id judged at apply
-  (`paros::tenant`). Until #212 and #225 the elected cell coordinator is the tenant coordinator
+  (`paros::tenant`). Until #476 and #225 the elected cell coordinator is the tenant coordinator
   of every hosted tenant: it fences each tenant control journal with its term uuid, answers
   `JournalRequest` at its published interface, and places journals on the founding members.
   Every machine follows the cell control journal and every hosted tenant's control journal
   (`ControlPlan`), and provisions a created journal at its first open (the machine record's
   `created` line is the commit point). `init` creates no hidden journal. Still to change: the
   acceptors' harness registry in the simulation (a `ControlPlan` over the genesis pool) becomes
-  the machines' when placement lands (#211, #212), and capacity becomes the cell coordinator's
-  alone.
+  the machines' when journals move onto admitted machines (#474). Capacity is the cell
+  coordinator's alone: it books a created journal's acceptors (#212 (placement)).
 - `parosd` no longer runs the plain deployment (#190, landed): every journal is born with its
   tenant's matchmaker set on the founding members, and the matchmaker wire names its journal, so
   every journal of a process may name matchmakers. Proxy leaders and replicas still serve only a
@@ -1941,7 +1977,7 @@ toy is the end of M9. The epic is #184, the backlog pointer #69, the verificatio
 |---|---|---|
 | M7 | Journal API (#204, #205) | the four calls, the journal state machine in core, the wire and the driver, the chain workload's alphabet, the linearizability checker, the race knobs and BUGGIFY sites, the cut-over |
 | M8 | parosd deployable (#206 to #209, #221, #220, #196, #201) | Tokio providers linked, the stores on a real filesystem for the first time, the `JournalStores` opener, `Config` durable at `format`, `parosd provision` (replaced by `init` in M9), the uniform binary with class and capacity, Compose, `paros::client` (#221) and the `parosctl` CLI (#220), a tracing subscriber, exit codes |
-| M9 | The universe with one cell (#225, #226, #227 first; landed: #216 (PR #408), #239 (PR #464), #228, #235, #229, #230, #211's core, and #176, #261, #263, #264 (PR #266), #267; sim first: #202, #213, #246, #247, #248; then #241, #243, #244, #240, #210, #190, #212, #192, #245, #191, #211, #213, #252, #257) | the control hierarchy and its decisions, the fenced `Truncate` on the wire, random ids and the `(TenantId, JournalId)` `JournalIdentifier`, the leader-uuid API and its two writer modes, `init` creating the universe with its matchmaker sets, the cell tenant and its machine registry with role slots and liveness, the universe tenant with its directory and tenant creation state machine, the election library and the coordinators it runs, requests to a leader, placement inside capacity granted by the cell, the checkpoint-and-truncate library, names at the frontend, the frontend with Biscuit `Authz` routing through the universe tenant, per-tenant matchmaker sets, `parosctl status` |
+| M9 | The universe with one cell (#225, #226, #227 first; landed: #216 (PR #408), #239 (PR #464), #228, #235, #229, #230, #211's core, and #176, #261, #263, #264 (PR #266), #267; sim first: #202, #213, #246, #247, #248; then #241, #243, #244, #240, #210, #190, #212 (placement function and bookings landed; #474, #475, #476, #477 follow), #192, #245, #191, #211, #213, #252, #257) | the control hierarchy and its decisions, the fenced `Truncate` on the wire, random ids and the `(TenantId, JournalId)` `JournalIdentifier`, the leader-uuid API and its two writer modes, `init` creating the universe with its matchmaker sets, the cell tenant and its machine registry with role slots and liveness, the universe tenant with its directory and tenant creation state machine, the election library and the coordinators it runs, requests to a leader, placement inside capacity granted by the cell, the checkpoint-and-truncate library, names at the frontend, the frontend with Biscuit `Authz` routing through the universe tenant, per-tenant matchmaker sets, `parosctl status` |
 | M10 | Roles per tenant (#193, #214, #194, #145, #195) | journal-tagged proxy leaders and replicas, batchers and unbatchers for multi-writer journals, tenant modes (redundancy, grid, role counts) applied by the tenant coordinator, quotas, the benchmark, then scale work |
 | M11 | Zones (#215) | `(region, az)` `FailureDomain`s in `AcceptorConfig` with its `cell_id` (one format bump), the two-predicate zone rule, zone round-robin placement, the `single` exemption, the leader following its writer's zone, zone-kill attrition and a zone-aware budget in the simulation, zone-spread matchmaker sets |
 | M12 | Multiple cells (#232, #233, then #253) | adding and removing cells with tombstones, placement across cells by `kind` and `survives` (both carried since M9 with the cell's entry endpoint), tenant locks, moving tenants and the universe tenant between cells, splitting the universe tenant by range, the resolver beside the frontend (section 3.5); last, multi-region cells: the `MultiRegion` cell kind with its witness region, the two-level zone rule, pools per `(tenant, region)`, the universe tenant hosted in a multi-region cell, the partition through the witness in the simulation, moving tenants between cell kinds |

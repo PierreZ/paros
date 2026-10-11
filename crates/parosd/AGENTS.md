@@ -71,7 +71,7 @@ image and the Compose toy are `Dockerfile` and `docker-compose.yml` at the repos
 - **Interim (M8 → M9)**: the cell's journals are the cell control journal, the fleet tenant's,
   the election journal, every hosted tenant's control journal and the journals tenants create
   (#210), plain Multi-Paxos or a grid over the founding members; any other
-  machine idles until `parosctl cell add-machine` admits it, and then, like every `stateless` one, waits for placement (#211, #212). The founding members
+  machine idles until `parosctl cell add-machine` admits it, and then, like every `stateless` one, waits for placement (#211, #474). The founding members
   elect the cell coordinator over the cell's election journal (#240); admin sessions still claim the cell control journal until
   admin calls become requests to it (#212, #225). Do not build on these as final; the machine record, the boot rule and
   `init`'s resumability stay.

@@ -17,7 +17,9 @@
 //! - **spread**: a tenant view names only the machines its journals use
 //!   (and the coordinator);
 //! - **founders**: an admin cell view marks exactly the founding members;
-//! - **forward**: a member's registry position never goes back.
+//! - **forward**: a member's registry position never goes back, in the
+//!   order one operator saw its answers (two operators' replies may cross
+//!   on the wire: an answer folded earlier can arrive later).
 
 use std::collections::BTreeMap;
 use std::sync::{Mutex, PoisonError};
@@ -73,7 +75,13 @@ impl FleetOps {
         .await;
         match outcome {
             ViewOutcome::Answered(reply) => {
-                judge_answer(ctx, &scope, &query, &reply, &cell.journals, &cell.members);
+                judge_answer(
+                    ctx,
+                    (&scope, &query, &reply),
+                    &cell.journals,
+                    &cell.members,
+                    self.client_id,
+                );
             }
             ViewOutcome::Refused(reply) => judge_refusal(&scope, &query, &reply),
             ViewOutcome::Unreachable => {
@@ -86,11 +94,10 @@ impl FleetOps {
 /// Judge an answered view against the scope that asked it.
 fn judge_answer(
     ctx: &SimContext,
-    scope: &Scope,
-    query: &Query,
-    reply: &ViewReply,
+    (scope, query, reply): (&Scope, &Query, &ViewReply),
     journals: &paros::machine::ControlJournals,
     members: &[u64],
+    client: u64,
 ) {
     let member = members.contains(&reply.answered_by);
     if member {
@@ -99,7 +106,7 @@ fn judge_answer(
             "view: an answer from a member names its cell",
             { "cell" => journals.cell_id, "named" => reply.cell_id }
         );
-        forward(ctx, reply);
+        forward(ctx, reply, client);
     } else {
         // A founding member's address that now serves another cell (#216).
         assert_reachable!("view: a view answered by another cell's machine");
@@ -180,15 +187,18 @@ fn judge_refusal(scope: &Scope, query: &Query, reply: &ViewReply) {
 }
 
 /// A member's registry position never goes back: its fold only moves on.
-fn forward(ctx: &SimContext, reply: &ViewReply) {
+/// Judged per operator, whose views are sequential, so its answers arrive
+/// in the order the member gave them (witness seed 13981928377280924207:
+/// one operator's answer at 3 arrived after another's at 4).
+fn forward(ctx: &SimContext, reply: &ViewReply, client: u64) {
     if reply.registry_at == 0 {
         return;
     }
     let positions = crate::state::published_arc(ctx.state(), POSITIONS_KEY, || {
-        Mutex::new(BTreeMap::<u64, u64>::new())
+        Mutex::new(BTreeMap::<(u64, u64), u64>::new())
     });
     let mut positions = positions.lock().unwrap_or_else(PoisonError::into_inner);
-    let seen = positions.entry(reply.answered_by).or_insert(0);
+    let seen = positions.entry((client, reply.answered_by)).or_insert(0);
     assert_always!(
         reply.registry_at >= *seen,
         "view: a member's registry position never goes back",

@@ -263,7 +263,7 @@ configuration, not a transitional state. Before touching `on_check_leader`, `Ele
   half: retire no node a reconfiguration it asked for above the floor names.
 - **One matchmaker set per tenant** (#190): a set keeps one registry per journal of its tenant,
   in one store, and every message names its journal. A machine's journals are born with their
-  tenant's set on the founding members until placement (#212).
+  tenant's set on the founding members until they move onto admitted machines (#474).
 - **Matchmaker sets are generations**: every matchmaking message is fenced by generation;
   matchmaker quorums are **majorities only**; the handover's decree is the shared `Proposer` +
   `Acceptor` over a one-slot log (no second Paxos kernel) and opens strictly above the stop
@@ -296,8 +296,10 @@ Depth: module docs of `matchmaking.rs`, `node/matchmaking.rs`, `node/reconfigure
   (`paros::tenant::TenantControl`): its description and every journal it created, each create or
   delete a request with an idempotency id judged at apply, its outcome recorded under that id. A
   node follows them through a `ControlPlan` (`None` is the static deployment). The tenant
-  coordinator (the elected cell coordinator until #212, #225) draws a created journal's id; the
-  fold refuses a used one (`IdTaken`: the coordinator redraws), and an id is never reused.
+  coordinator (the elected cell coordinator until #476, #225) draws a created journal's id, books
+  one acceptor slot per member in the registry with `paros::placement` before the create, and
+  records a create it has no slot for as `Unplaceable` (#212 (placement)); the
+  fold refuses a used id (`IdTaken`: the coordinator redraws), and an id is never reused.
   Clients send requests with `paros::client::journals`. The core's pool grows, never shrinks
   (`extend_pool`), and only with matchmakers. The registry is keyed by `node_id` with each
   machine's class and capacity, judges capacity bookings at apply (#211), and is checkpointed
