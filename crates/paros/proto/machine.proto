@@ -197,6 +197,11 @@ message Admit {
   repeated Member members = 4;
   // The cell's election journal (#240), when the caller knows it.
   JournalIdentifier election = 5;
+  // The cell's founding members, by id (#474): the registry's genesis pool,
+  // the machines that serve the control journals, and the cell's
+  // matchmakers. An admitted machine follows the control journals from them
+  // and serves the journals placed on it with their matchmaker sets.
+  repeated uint64 founders = 6;
 }
 
 message AdmitAck {

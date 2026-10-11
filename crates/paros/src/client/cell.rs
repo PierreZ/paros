@@ -113,6 +113,12 @@ impl CellSession {
         Ok(())
     }
 
+    /// The cell's control journals this session writes.
+    #[must_use]
+    pub fn journals(&self) -> ControlJournals {
+        self.journals
+    }
+
     /// The founding members this session knows, with their addresses.
     #[must_use]
     pub fn founders(&self) -> &[(NodeId, Address)] {
@@ -157,9 +163,13 @@ impl CellSession {
             by_addr.into_iter().map(|(addr, id)| (id, addr)).collect();
         members.sort_unstable();
         members.dedup_by_key(|(id, _)| *id);
+        let mut founders: Vec<NodeId> = self.founders.iter().map(|(id, _)| *id).collect();
+        founders.sort_unstable();
+        founders.dedup();
         Admission {
             cell: self.journals,
             members,
+            founders,
         }
     }
 
@@ -308,6 +318,49 @@ impl CellSession {
                 Err(stop)
             }
         }
+    }
+
+    /// `cell drain-machine` (#474 (journals on admitted machines)): mark the
+    /// registered machine `node` draining in the cell control journal,
+    /// unless it already is. The cell coordinator then moves every journal
+    /// off it. Whether this call drained it: the registry refuses to drain
+    /// a founding member.
+    ///
+    /// # Errors
+    ///
+    /// The session did not open, or the write did not land (see
+    /// [`Interrupted`]).
+    pub async fn drain<P: Providers>(
+        &mut self,
+        client: &Client<P>,
+        first: usize,
+        node: NodeId,
+    ) -> Result<bool, Interrupted> {
+        self.open(client, first).await?;
+        let registered = |session: &Self| {
+            session
+                .registry()
+                .get(node)
+                .is_some_and(|n| n.standing == NodeStanding::Registered)
+        };
+        if !registered(self) {
+            return Ok(false);
+        }
+        self.record(client, first, &SystemCommand::DrainNode { id: node })
+            .await?;
+        Ok(!registered(self))
+    }
+
+    /// Fold the cell control journal to its tail again, while the session
+    /// holds it: another writer, an operator's `cell drain-machine`, appends
+    /// to it between this session's own writes (#474 (journals on admitted
+    /// machines)). Whether the fold reached the tail.
+    pub async fn refresh<P: Providers>(&mut self, client: &Client<P>, first: usize) -> bool {
+        self.cell_open
+            && matches!(
+                self.cell.load(client, first, 0).await,
+                super::checkpoint::LoadOutcome::Loaded { .. }
+            )
     }
 
     /// Whether the session holds the cell control journal open.

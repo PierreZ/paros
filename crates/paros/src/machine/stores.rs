@@ -1,11 +1,13 @@
-//! A formed machine's journal stores (#246, #294): one [`JournalStorage`]
-//! per journal of its plan on its [`ProviderDisk`], every one an existing
-//! member's (the formation formatted them). `parosd` and the simulation
-//! open the same stores; only the provider and the audit port differ.
+//! A machine's journal stores (#246, #294): one [`JournalStorage`] per
+//! journal of a founding member's plan on its [`ProviderDisk`], every one an
+//! existing member's (the formation formatted them). `parosd` and the
+//! simulation open the same stores; only the provider and the audit port
+//! differ. An admitted machine has no plan journal (#474).
 //!
-//! A founding member also serves the journals its cell's control journals
-//! create at run time (#210): every hosted tenant's control journal, and
-//! every journal a tenant creates naming it. Such a store is
+//! Every machine of a cell also serves the journals its cell's control
+//! journals place on it at run time (#210, #474): a founding member every
+//! hosted tenant's control journal, and any storage machine every journal
+//! a tenant created and the registry booked on it. Such a store is
 //! **provisioned** at its first open, as the operator's own act (#208):
 //! formatted durably, then recorded in the machine record (`created`), and
 //! only then booted, as an existing member's. A restart opens it as an
@@ -54,6 +56,10 @@ pub(crate) struct MachineStores<S, F> {
     /// The matchmaker this machine is, when it hosts its cell's sets: a
     /// founding member's (#190).
     matchmaker: Option<MatchmakerConfig>,
+    /// The journal the node's own facts are reported beside: the plan's
+    /// first journal on a founding member, the cell control journal on an
+    /// admitted machine (#474), which serves no journal at its first start.
+    home: JournalIdentifier,
 }
 
 impl<S, F> MachineStores<S, F> {
@@ -70,6 +76,10 @@ impl<S, F> MachineStores<S, F> {
     ) -> Self {
         let node = record.node_id;
         assert!(!genesis.is_empty(), "a formed machine serves journals");
+        let home = *genesis
+            .keys()
+            .next()
+            .expect("a formed machine serves journals");
         assert!(
             genesis.values().all(|config| config.id == node),
             "a machine's stores are opened as that machine"
@@ -87,6 +97,36 @@ impl<S, F> MachineStores<S, F> {
             audits: Arc::new(audits),
             cache: None,
             matchmaker: None,
+            home,
+        }
+    }
+
+    /// The stores of the admitted machine `record` names (#474): no journal
+    /// of a plan, only the journals placed on it, each provisioned at its
+    /// first open. Its own facts are reported beside the cell control
+    /// journal `cell`.
+    ///
+    /// # Panics
+    ///
+    /// When `record` holds no admission, or `cell` is unset.
+    pub(crate) fn admitted(
+        disk: ProviderDisk<S>,
+        record: MachineRecord,
+        cell: JournalIdentifier,
+        audits: F,
+    ) -> Self {
+        assert!(record.admitted.is_some(), "an admitted machine's record");
+        assert!(cell.is_set(), "a cell names its control journal");
+        Self {
+            disk,
+            node: record.node_id,
+            genesis: BTreeMap::new(),
+            created: BTreeMap::new(),
+            record,
+            audits: Arc::new(audits),
+            cache: None,
+            matchmaker: None,
+            home: cell,
         }
     }
 
@@ -259,11 +299,6 @@ where
     }
 
     fn node_audit(&self) -> A {
-        let first = *self
-            .genesis
-            .keys()
-            .next()
-            .expect("a formed machine serves journals");
-        (self.audits)(AuditScope::Node(first))
+        (self.audits)(AuditScope::Node(self.home))
     }
 }

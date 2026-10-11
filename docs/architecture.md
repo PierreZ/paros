@@ -376,7 +376,7 @@ list and no rendezvous name. The same rule holds at two levels:
   `RegisterNode` unless the registry holds the machine, then sends `Admit`. Each step is decided
   from what the journal and the machine hold, so a re-run resumes. The snapshot is the founding
   members and every registered machine, by id and address. An admitted machine serves `Identify`
-  and a node-only `Inspect` with its cell, and no journal until journals move onto admitted machines (#474). A machine that
+  and a node-only `Inspect` with its cell, and it serves the journals placed on it (#474). A machine that
   promised in a `cell init` and has no vote refuses `Admit` (`in_cell_init`): that `cell init`
   can still form a cell over it, and a stalled `cell init` is safer than a machine in two cells.
   An admitted machine refuses every `cell init` that lists it (`cell_exists`).
@@ -489,8 +489,7 @@ Rules:
   by `node_id`.
 - **A lane dials the reference the registry fold holds** for its peer (the peer book), and the
   well-known `Deliver` while the fold holds none: a static deployment (plain Multi-Paxos without
-  a registry is permanent), a member not registered yet, an admitted machine (it serves no
-  journal until #474). A delivery the reference refuses for good marks it stale, and the lane
+  a registry is permanent), or a member not registered yet. A delivery the reference refuses for good marks it stale, and the lane
   dials the well-known `Deliver` until the fold names another reference. Amended on 2026-10-11:
   the issue's "never fall back while the fold names a reference" is dropped, because a
   restarted founding member's new reference is written into a registry that may need that
@@ -806,7 +805,7 @@ create.
   `Down` only after every machine that is up. A release takes a down machine first, then the
   most loaded.
 - **Booking before the create.** The tenant coordinator plans a create's acceptors over the
-  founding members (the only machines that serve journals until #474) and books one acceptor slot
+  cell's storage machines, founding or admitted (#474), and books one acceptor slot
   on each in the cell control journal, through the term's cell session, before it writes the
   create. The elected cell coordinator is still every tenant's coordinator (#476 adds the request
   RPC), so the request for capacity is a call into its own session.
@@ -825,7 +824,31 @@ create.
   sits between the bookings and the create. After chaos, every live journal of a hosted tenant
   holds one acceptor booking per member. Gates: a create refused for capacity is asked again and
   placed, a slot no journal holds is released, and a journal's members span two zones.
-- **Still to do.** Journals on admitted machines and moves (#474), re-placement after a `Down`
+- **Journals on admitted machines** (#474 (journals on admitted machines), landed on
+  2026-10-11). Every machine of a cell runs the node loop. An admitted machine follows the
+  control journals through the founding members its admission names. A machine serves a
+  journal while the registry books an acceptor slot of it there and its tenant holds it live. It
+  stops the journal when the slot is released, and it keeps the store. A journal starts as a
+  member of its create's configuration, or else as a spare beside it. The configuration depends
+  only on the create, so every start opens the store under the same one. `Reconfigure` and
+  `Retire` name their journal, because a machine serves many.
+- **Moves.** `cell drain-machine` (`CellSession::drain`) marks a machine draining. At each watch
+  round, the tenant coordinator takes one step of one move, in turn over the journals with a
+  slot on a draining machine. A step books a slot on another storage machine, or asks the
+  journal's leader to reconfigure onto the machines that stay, or retires the old member and
+  releases its slot. The retirement waits until the leader's GC watermark reaches the
+  configuration in force. Only a member that the leader's floor names retirable is retired: a
+  floor that rose past an earlier floor names none, and the released slot stops the journal on
+  that machine all the same. The release does not wait for the old member's answer: the
+  watermark proves that no leader asks it again. The coordinator reads the cell control journal
+  to its tail before each step, because an operator drains through a session of its own. Each step starts from what the registry and the journal
+  hold, so a later term finishes a move that an earlier term started. No step names the
+  draining machine in a configuration. The simulation drains an admitted machine on a BUGGIFY
+  location of `ADMIT`, and the first term that advances a move resigns on a BUGGIFY decision.
+  Oracles: a live journal holds at least as many slots as its create named, and only a member
+  that left the registered machines loses its slot. After chaos, a journal that has a machine to
+  go to holds no slot on a draining machine.
+- **Still to do.** Matchmaker sets off the founding members, re-placement after a `Down`
   bound (#475), the tenant birth footprint, the capacity request RPC and tenant coordinators on
   `stateless` machines (#476), the operators' retire coordination in the control journals
   (#477).
