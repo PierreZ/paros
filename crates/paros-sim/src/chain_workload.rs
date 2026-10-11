@@ -1621,11 +1621,11 @@ impl Workload for ChainWorkload {
         // faults stopped, so the joiner boots the main journal as a spare
         // with the run nearly over and the settle tail must wait for it to
         // catch up. Without it a joiner mostly registers inside the chaos
-        // window, and a spare that boots in the tail is rare (1 witness in
-        // 2,000 hunt seeds, 6567501942112636280 on PR #465 (short catch-up
-        // fix)).
-        // It names a joiner with no spare yet: one in the pool already
-        // would only register again.
+        // window, and a spare that boots in the tail is rare (witness
+        // 6567501942112636280 on PR #465 (short catch-up fix)). It names a
+        // joiner with no spare yet: one in the pool already would only
+        // register again. Gate "the settle tail waits for a spare that
+        // joined in the tail": 6 in 2,000 hunt seeds without it, 12 with it.
         let joiners = deployment.joiners().len() as u64;
         let late = (0..deployment.joiners().len()).find(|rank| !spares_at_cutoff.contains(rank));
         if journal == crate::shape::identifiers(ctx.state()).main
