@@ -16,12 +16,11 @@
 //!   holds with the CPU model on (#424 (busyness metrics)): the CPU counters
 //!   are then real, and still exact.
 //!
-//! The gates show the gray failures reach the metric: a slow machine
-//! answers, and in one round a slow machine is busier than every healthy
-//! machine of its cell. No gate asks for a CPU or a disk over 90 % busy: a
-//! gray failure ends with the chaos window, and no cell has formed by then,
-//! so a slow machine has no work to be busy with (#424 (busyness
-//! metrics)).
+//! The gates show the slowness reaches the metric: a disk and a CPU over
+//! 90 % busy, a slow machine answering, and in one round a slow machine
+//! busier than every healthy machine of its cell. They need a slow machine
+//! with real work, which the slow-machine scenario
+//! (`crate::world::slow_machine`) lines up.
 
 use std::net::IpAddr;
 use std::time::Duration;
@@ -165,6 +164,10 @@ fn judge(ctx: &SimContext, ack: &LoadAck, ip: Option<IpAddr>) -> Option<(Slownes
         "load: a machine is never busier than its cores",
         { "node" => ack.node_id, "cores" => busyness.cores }
     );
+    assert_sometimes!(
+        busyness.cpu_cores > 0.9,
+        "load: a machine's CPU is busy over 90%"
+    );
     assert_always!(
         busyness.elapsed >= paros::LOAD_INTERVAL_FLOOR,
         "load: a window is never shorter than the floor",
@@ -176,6 +179,7 @@ fn judge(ctx: &SimContext, ack: &LoadAck, ip: Option<IpAddr>) -> Option<(Slownes
     );
     if let Some(disk) = &busyness.disk {
         assert_sometimes!(disk.busy > 0.0, "load: a disk is busy in a window");
+        assert_sometimes!(disk.busy > 0.9, "load: a disk is busy over 90%");
     }
     let ip = ip?;
     let samples = ctx.system_samples(ip);

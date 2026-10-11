@@ -345,7 +345,10 @@ Three layers, and nothing crosses them:
   scenario, the one acceptor it holds down may stay down at most `LATE_WINDOW` into the tail
   (`paros_sim::world::lagging_acceptor`, #340). Likewise on a seed that draws the
   replaced-founder scenario, its wipe of a founder may strike at most `LATE_WINDOW` into the
-  tail, once every founder formed (`paros_sim::world::replaced_founder`, #423).
+  tail, once every founder formed (`paros_sim::world::replaced_founder`, #423). Likewise on a
+  seed that draws the slow-machine scenario, its slowing of a founder may strike at most
+  `LATE_WINDOW` into the tail, once the cell formed, and lasts 4–6 s
+  (`paros_sim::world::slow_machine`, #424 (busyness metrics)).
 - **`paros-core` is never buggified**: no RNG, knob or conditional compilation. A rare-but-valid
   decision is exposed as a method with an honest contract (`resend_pending`, `step_down`) and
   perturbed only by a caller that stops calling.
