@@ -49,7 +49,7 @@ pub struct Asker<'a> {
 
 impl Asker<'_> {
     /// Ask `query`; the answer, or how the command ends.
-    async fn ask(&self, query: Query) -> Result<wire::ViewReply, Ending> {
+    pub(crate) async fn ask(&self, query: Query) -> Result<wire::ViewReply, Ending> {
         let request = request(&self.scope, query);
         match ask(
             self.providers,
@@ -94,7 +94,7 @@ impl Asker<'_> {
     }
 
     /// The cell view, checked to be cell `cell` when one is named.
-    async fn cell(&self, cell: Option<&str>) -> Result<wire::ViewReply, Ending> {
+    pub(crate) async fn cell(&self, cell: Option<&str>) -> Result<wire::ViewReply, Ending> {
         let reply = self.ask(Query::Cell(CellQuery {})).await?;
         if let Some(cell) = cell
             && reply.cell_name != cell.as_bytes()
@@ -127,7 +127,7 @@ fn refusal_text(reply: &wire::ViewReply) -> String {
 }
 
 /// A name as text, `-` when empty.
-fn text(name: &[u8]) -> String {
+pub(crate) fn text(name: &[u8]) -> String {
     if name.is_empty() {
         "-".to_string()
     } else {
@@ -175,7 +175,7 @@ pub struct RolesArgs {
 
 /// The machines of an answer, by id: their names (the address when a
 /// machine has none, `-` when nothing names it).
-fn machine_names(reply: &wire::ViewReply) -> BTreeMap<u64, String> {
+pub(crate) fn machine_names(reply: &wire::ViewReply) -> BTreeMap<u64, String> {
     reply
         .machines
         .iter()
@@ -229,7 +229,7 @@ fn find_machine<'a>(
 }
 
 /// `up` or `down`.
-fn state(up: bool) -> &'static str {
+pub(crate) fn state(up: bool) -> &'static str {
     if up { "up" } else { "down" }
 }
 
@@ -453,7 +453,7 @@ fn attach_loads(doc: &mut Value, reply: &wire::ViewReply, loads: &BTreeMap<u64, 
 }
 
 /// Every line of `text`, indented two spaces.
-fn indent(text: &str) -> String {
+pub(crate) fn indent(text: &str) -> String {
     text.lines()
         .map(|line| format!("  {line}"))
         .collect::<Vec<_>>()
@@ -580,7 +580,7 @@ pub async fn cell_show(asker: &Asker<'_>, out: &Printer, cell: Option<&str>) -> 
 }
 
 /// The coordinator in words.
-fn coordinator_text(reply: &wire::ViewReply, names: &BTreeMap<u64, String>) -> String {
+pub(crate) fn coordinator_text(reply: &wire::ViewReply, names: &BTreeMap<u64, String>) -> String {
     if reply.coordinator == 0 {
         return "none".to_string();
     }
@@ -675,7 +675,7 @@ pub async fn tenant_show(asker: &Asker<'_>, out: &Printer, name: &str) -> Ending
 }
 
 /// A journal's label: its name, or its kind for one the cell made.
-fn journal_label(journal: &wire::JournalView) -> String {
+pub(crate) fn journal_label(journal: &wire::JournalView) -> String {
     if journal.name.is_empty() {
         format!("({})", journal.kind)
     } else {
@@ -846,7 +846,7 @@ fn machine_json(m: &wire::MachineView) -> Value {
 }
 
 /// A whole answer as one JSON document: ids and names both.
-fn reply_json(reply: &wire::ViewReply) -> Value {
+pub(crate) fn reply_json(reply: &wire::ViewReply) -> Value {
     json!({
         "cell": { "id": reply.cell_id, "name": record_text(&reply.cell_name), "state": reply.cell_state },
         "universe": record_text(&reply.universe_name),
@@ -871,6 +871,9 @@ fn reply_json(reply: &wire::ViewReply) -> Value {
                 "desired": j.desired,
                 "acceptors": j.acceptors,
                 "matchmakers": j.matchmakers,
+                "desired_acceptors": j.desired_acceptors,
+                "observed": j.observed,
+                "word": j.word,
             })).collect::<Vec<_>>(),
         })).collect::<Vec<_>>(),
         "cells": reply.cells.iter().map(|c| json!({

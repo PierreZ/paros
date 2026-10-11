@@ -19,7 +19,14 @@
 //! - **founders**: an admin cell view marks exactly the founding members;
 //! - **forward**: a member's registry position never goes back, in the
 //!   order one operator saw its answers (two operators' replies may cross
-//!   on the wire: an answer folded earlier can arrive later).
+//!   on the wire: an answer folded earlier can arrive later);
+//! - **status** (#191 (status)): every journal shows a word, and the word
+//!   an admin answer judged is the one its own triple gives (the desired
+//!   acceptor count, the placed configuration and the machines it names),
+//!   re-derived here through the configuration's quorum predicates; the
+//!   slots per class `parosctl status` prints are the bookings the answer
+//!   lists. Gates: a journal shows degraded, and one an operator saw
+//!   degraded shows healthy again from the same member.
 
 use std::collections::BTreeMap;
 use std::sync::{Mutex, PoisonError};
@@ -28,12 +35,14 @@ use moonpool_sim::{
     SimContext, assert_always, assert_reachable, assert_sometimes, buggify_with_prob,
 };
 use paros::client::views::{ViewOutcome, ask, request};
+use paros::status::{Word, placed, summarize};
 use paros::view::{Scope, within_tenant_scope};
 use paros::wire::view::{CellQuery, TenantQuery, UniverseQuery, ViewReply, view_request::Query};
 
 use super::{FleetOps, NAMES};
 
 const POSITIONS_KEY: &str = "paros-view-positions";
+const WORDS_KEY: &str = "paros-view-words";
 
 impl FleetOps {
     /// `VIEW`: ask the cell this operator knows for one view.
@@ -111,6 +120,7 @@ fn judge_answer(
         // A founding member's address that now serves another cell (#216).
         assert_reachable!("view: a view answered by another cell's machine");
     }
+    judge_status(ctx, reply, matches!(scope, Scope::Admin), client);
     if let Scope::Tenant(own) = scope {
         assert_always!(
             within_tenant_scope(reply, own),
@@ -205,4 +215,84 @@ fn forward(ctx: &SimContext, reply: &ViewReply, client: u64) {
         { "member" => reply.answered_by, "seen" => *seen, "now" => reply.registry_at }
     );
     *seen = reply.registry_at;
+}
+
+/// The status words of an answer (#191 (status)). Every journal shows a
+/// word. An admin answer names every detail of the machines its journals
+/// use, so its judged word is re-derived from its own triple; a tenant
+/// scope's machines are narrowed, so only its words are checked.
+fn judge_status(ctx: &SimContext, reply: &ViewReply, admin: bool, client: u64) {
+    let words = crate::state::published_arc(ctx.state(), WORDS_KEY, || {
+        Mutex::new(BTreeMap::<(u64, u64, u64, u64), Word>::new())
+    });
+    let mut words = words.lock().unwrap_or_else(PoisonError::into_inner);
+    for tenant in &reply.tenants {
+        for journal in &tenant.journals {
+            let shown = Word::parse(&journal.word);
+            assert_always!(
+                shown.is_some() && Word::parse(&journal.observed).is_some(),
+                "status: every journal shows a word",
+                { "word" => journal.word.clone(), "kind" => journal.kind.clone() }
+            );
+            let Some(shown) = shown else { continue };
+            assert_sometimes!(shown == Word::Degraded, "status: a journal shows degraded");
+            let key = (client, reply.answered_by, tenant.tenant, journal.journal);
+            if let Some(before) = words.insert(key, shown) {
+                assert_sometimes!(
+                    before == Word::Degraded && shown == Word::Healthy,
+                    "status: a degraded journal shows healthy again"
+                );
+            }
+            if admin {
+                assert_always!(
+                    Word::parse(&journal.observed) == expected_word(reply, journal),
+                    "status: a word matches the triple it was judged from",
+                    { "observed" => journal.observed.clone(), "kind" => journal.kind.clone() }
+                );
+            }
+        }
+    }
+    if admin {
+        // `parosctl status`'s slots per class are the bookings listed.
+        let mut listed: BTreeMap<String, u64> = BTreeMap::new();
+        for m in reply.machines.iter().filter(|m| m.standing != "retired") {
+            *listed.entry(m.class.clone()).or_default() += m.bookings.len() as u64;
+        }
+        let summary = summarize(reply);
+        assert_always!(
+            summary.slots.iter().all(|(class, (booked, _))| listed
+                .get(class)
+                .copied()
+                .unwrap_or(0)
+                == *booked),
+            "status: the slots per class are the bookings listed"
+        );
+    }
+}
+
+/// The word `journal`'s own triple gives, derived independently of
+/// `paros::status::judge`: the members up and not retired are live, and of
+/// those the ones not draining stay.
+fn expected_word(reply: &ViewReply, journal: &paros::wire::view::JournalView) -> Option<Word> {
+    let placed = placed(journal)?;
+    let machine = |id: u64| reply.machines.iter().find(|m| m.node_id == id);
+    let live: std::collections::BTreeSet<paros::NodeId> = placed
+        .members()
+        .iter()
+        .copied()
+        .filter(|id| machine(id.0).is_some_and(|m| m.up && m.standing != "retired"))
+        .collect();
+    if !placed.has_phase1_quorum(&live) || !placed.has_phase2_quorum(&live) {
+        return Some(Word::Unavailable);
+    }
+    let staying = live
+        .iter()
+        .filter(|id| machine(id.0).is_some_and(|m| m.standing != "draining"))
+        .count();
+    let desired = usize::try_from(journal.desired_acceptors).unwrap_or(usize::MAX);
+    Some(if staying == placed.members().len() && desired == staying {
+        Word::Healthy
+    } else {
+        Word::Degraded
+    })
 }

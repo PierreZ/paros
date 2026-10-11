@@ -29,6 +29,7 @@ mod names;
 mod output;
 #[path = "../../resolve.rs"]
 mod resolve;
+mod status;
 mod token;
 mod views;
 
@@ -160,6 +161,10 @@ enum Command {
     /// acceptors and matchmakers, and the bookings; of the cell, a tenant
     /// or a machine.
     Roles(views::RolesArgs),
+    /// How the universe, the cell or a tenant stands (#191 (status)):
+    /// desired, available and current, each journal's word (healthy,
+    /// degraded, unavailable) and the slots per class.
+    Status(status::StatusArgs),
     /// A call to a formed cell.
     #[command(flatten)]
     Cell(CellCommand),
@@ -389,7 +394,7 @@ async fn connect(
 /// no node ids.
 fn is_view(command: &Command) -> bool {
     match command {
-        Command::Machine(_) | Command::Roles(_) => true,
+        Command::Machine(_) | Command::Roles(_) | Command::Status(_) => true,
         Command::CellAdmin(args) => {
             !matches!(args.command, cell::CellAdminCommand::AddMachine { .. })
         }
@@ -419,6 +424,7 @@ async fn run_view(asker: &views::Asker<'_>, out: &Printer, command: Command) -> 
     match command {
         Command::Machine(args) => views::machine(asker, out, args).await,
         Command::Roles(args) => views::roles_cmd(asker, out, args).await,
+        Command::Status(args) => status::run(asker, out, args).await,
         Command::CellAdmin(args) => match args.command {
             cell::CellAdminCommand::List => views::cell_list(asker, out).await,
             cell::CellAdminCommand::Show { cell } => {
@@ -521,7 +527,9 @@ async fn online(global: Global, command: Command) -> ExitCode {
         Command::Resolve(args) => return resolve_tenant(&runtime, &cli.global, &out, args).await,
         Command::Cell(command) => command,
         Command::Key(_) | Command::Token(_) => unreachable!("offline, handled in main"),
-        Command::Machine(_) | Command::Roles(_) => unreachable!("views, handled above"),
+        Command::Machine(_) | Command::Roles(_) | Command::Status(_) => {
+            unreachable!("views, handled above")
+        }
     };
     let (servers, client) = match connect(&runtime, &cli.global, fronted).await {
         Ok(connected) => connected,

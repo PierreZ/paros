@@ -18,11 +18,17 @@
 //! Every entity carries its name: what `parosctl` prints (hex ids are for
 //! local debugging only). Pure and provider-free: no I/O, no randomness.
 
-use paros_core::{JournalIdentifier, NodeId, TenantId, WriterMode};
+use paros_core::{
+    AcceptorConfig, JournalId, JournalIdentifier, NodeId, QuorumSystem, TenantId, WriterMode,
+};
+
+use std::time::Duration;
 
 use crate::Address;
 use crate::fleet::{FleetDirectory, Group};
+use crate::rpc::config_to_proto;
 use crate::rpc::view as wire;
+use crate::status::{Hysteresis, fill};
 use crate::system::{NodeStanding, Registry};
 use crate::tenant::TenantControl;
 
@@ -188,15 +194,8 @@ impl CellFacts<'_> {
     /// (the universe directory). Their journals live on the founding
     /// members.
     fn internal_tenants(&self) -> Vec<wire::TenantView> {
-        let founders = self.founder_ids();
-        let journal = |id: JournalIdentifier, kind: &str, writer: WriterMode| wire::JournalView {
-            journal: id.journal.0,
-            name: Vec::new(),
-            kind: kind.to_string(),
-            writer: writer_label(writer).to_string(),
-            desired: "founders".to_string(),
-            acceptors: founders.clone(),
-            matchmakers: Vec::new(),
+        let journal = |id: JournalIdentifier, kind: &str, writer: WriterMode| {
+            self.founders_journal(id.journal, kind, writer)
         };
         let directory = self.directory;
         let mut cell = wire::TenantView {
@@ -234,15 +233,8 @@ impl CellFacts<'_> {
     fn hosted(&self, tenant: TenantId) -> Option<wire::TenantView> {
         let hosted = self.registry.hosted_tenant(tenant)?;
         let entry = self.directory.and_then(|d| d.tenant(tenant));
-        let mut journals = vec![wire::JournalView {
-            journal: hosted.control.0,
-            name: Vec::new(),
-            kind: "control".to_string(),
-            writer: writer_label(WriterMode::Single).to_string(),
-            desired: "founders".to_string(),
-            acceptors: self.founder_ids(),
-            matchmakers: Vec::new(),
-        }];
+        let mut journals =
+            vec![self.founders_journal(hosted.control, "control", WriterMode::Single)];
         if let Some(control) = self.tenants.iter().find(|c| c.tenant() == tenant) {
             journals.extend(control.live().map(|(id, journal)| wire::JournalView {
                 journal: id.0,
@@ -252,6 +244,9 @@ impl CellFacts<'_> {
                 desired: journal.desired.label(),
                 acceptors: journal.config.members().iter().map(|n| n.0).collect(),
                 matchmakers: Vec::new(),
+                desired_acceptors: journal.desired.acceptors() as u64,
+                placed: Some(config_to_proto(&journal.config)),
+                ..wire::JournalView::default()
             }));
         }
         Some(wire::TenantView {
@@ -264,6 +259,34 @@ impl CellFacts<'_> {
             cell_id: self.cell_id,
             journals,
         })
+    }
+
+    /// A journal the cell made on its founding members (a control journal,
+    /// the election journal, the universe directory): desired on every
+    /// founding member, a majority (`crate::machine::journal_config`).
+    fn founders_journal(
+        &self,
+        journal: JournalId,
+        kind: &str,
+        writer: WriterMode,
+    ) -> wire::JournalView {
+        let founders = self.founder_ids();
+        let placed = AcceptorConfig::new(
+            founders.iter().map(|id| NodeId(*id)).collect(),
+            QuorumSystem::Majority,
+        );
+        wire::JournalView {
+            journal: journal.0,
+            name: Vec::new(),
+            kind: kind.to_string(),
+            writer: writer_label(writer).to_string(),
+            desired: "founders".to_string(),
+            desired_acceptors: founders.len() as u64,
+            acceptors: founders,
+            matchmakers: Vec::new(),
+            placed: Some(config_to_proto(&placed)),
+            ..wire::JournalView::default()
+        }
     }
 
     /// The hosted tenant named `name`, if this cell hosts one.
@@ -303,10 +326,15 @@ pub fn refusal(why: &str) -> wire::ViewReply {
 }
 
 /// The cell view (`machine list`, `machine show`, `cell show`, `roles
-/// --cell`, `roles --machine`): every machine, every tenant this cell holds
-/// and every role holder. Admin only.
+/// --cell`, `roles --machine`, `status`): every machine, every tenant this
+/// cell holds, every role holder and every journal's status word, shown
+/// through `status` at `now`. Admin only.
 #[must_use]
-pub fn cell_view(scope: &Scope, facts: &CellFacts<'_>) -> wire::ViewReply {
+pub fn cell_view(
+    scope: &Scope,
+    facts: &CellFacts<'_>,
+    (status, now): (&mut Hysteresis, Duration),
+) -> wire::ViewReply {
     if *scope != Scope::Admin {
         moonpool_assertions::reachable!("view: a tenant scope is refused the cell view");
         return refusal("forbidden");
@@ -317,15 +345,30 @@ pub fn cell_view(scope: &Scope, facts: &CellFacts<'_>) -> wire::ViewReply {
     reply
         .tenants
         .extend(facts.registry.hosted().filter_map(|t| facts.hosted(t)));
+    fill(&mut reply, status, now);
+    // The cell view names every journal the cell holds: the rest are gone.
+    status.retain(
+        &reply
+            .tenants
+            .iter()
+            .flat_map(|t| t.journals.iter().map(|j| (t.tenant, j.journal)))
+            .collect(),
+    );
     reply
 }
 
-/// The tenant view (`tenant show`, `roles --tenant`): tenant `name`'s
-/// journals, their acceptors and the machines they use. An admin sees every
-/// detail of those machines; the tenant itself sees only their names,
-/// failure domains and up/down state, and no other tenant's view.
+/// The tenant view (`tenant show`, `roles --tenant`, `status --tenant`):
+/// tenant `name`'s journals with their status words (shown through
+/// `status` at `now`), their acceptors and the machines they use. An admin
+/// sees every detail of those machines; the tenant itself sees only their
+/// names, failure domains and up/down state, and no other tenant's view.
 #[must_use]
-pub fn tenant_view(scope: &Scope, facts: &CellFacts<'_>, name: &[u8]) -> wire::ViewReply {
+pub fn tenant_view(
+    scope: &Scope,
+    facts: &CellFacts<'_>,
+    name: &[u8],
+    (status, now): (&mut Hysteresis, Duration),
+) -> wire::ViewReply {
     if let Scope::Tenant(own) = scope
         && own.as_slice() != name
     {
@@ -368,6 +411,8 @@ pub fn tenant_view(scope: &Scope, facts: &CellFacts<'_>, name: &[u8]) -> wire::V
         .map(|id| facts.machine(NodeId(id)))
         .collect();
     reply.tenants = vec![view];
+    // Judged from every detail, before a tenant scope narrows the machines.
+    fill(&mut reply, status, now);
     if let Scope::Tenant(_) = scope {
         moonpool_assertions::reachable!("view: a tenant scope sees its own spread");
         narrow(&mut reply);

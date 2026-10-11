@@ -45,6 +45,7 @@ mod proxy;
 mod replica_tier;
 mod rpc;
 pub mod scenario;
+pub mod status;
 mod storage;
 pub mod system;
 pub mod tenant;
