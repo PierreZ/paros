@@ -496,6 +496,9 @@ impl Writer {
                     }
                     Resolution::NotWritten { state } => {
                         if self.learn(&state) == Learned::Superseded {
+                            moonpool_assertions::reachable!(
+                                "client: a writer's ambiguous write resolves superseded"
+                            );
                             WriterOutcome::Superseded { state }
                         } else {
                             WriterOutcome::NotWritten { state }

@@ -6,6 +6,7 @@
 //! acts on (its token is only handed back), draws no randomness, and
 //! removing it changes no call. Production passes [`NoObserver`].
 
+use super::ResolveReport;
 use super::outcome::{ReadOutcome, SetLeaderOutcome, TruncateOutcome, WriteOutcome};
 use crate::rpc::{Read, SetLeader, Truncate, Write};
 use paros_core::{JournalId, JournalIdentifier, TenantId};
@@ -64,6 +65,20 @@ pub trait CallObserver: Send + Sync + 'static {
 
     /// The attempt `token` came back with `answer`.
     fn answered(&self, token: u64, answer: Answered<'_>);
+
+    /// [`Client::resolve`](super::Client::resolve) starts to settle the
+    /// ambiguous `write` (#444): returns a token, like
+    /// [`CallObserver::invoked`]. Its read-back and re-sends are reported
+    /// as attempts of their own.
+    fn resolving(&self, write: &Write) -> Option<u64>;
+
+    /// The settlement `token` came to `report`. A write resolved
+    /// [`NotWritten`](super::Resolution::NotWritten) is not in the journal
+    /// at a point after the settlement started, and the leader its uuid
+    /// named then had lost the journal or its position was taken: it lands
+    /// later only if that uuid leads again. A settlement whose future is
+    /// dropped is never reported.
+    fn resolved(&self, token: u64, report: &ResolveReport);
 }
 
 /// The production observer: reports nothing.
@@ -76,4 +91,10 @@ impl CallObserver for NoObserver {
     }
 
     fn answered(&self, _token: u64, _answer: Answered<'_>) {}
+
+    fn resolving(&self, _write: &Write) -> Option<u64> {
+        None
+    }
+
+    fn resolved(&self, _token: u64, _report: &ResolveReport) {}
 }
