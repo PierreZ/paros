@@ -84,6 +84,26 @@ pub const STALL_PROXY: &str = "paros: a proxy leader stalls";
 /// higher-ballot delegation meets a superseded leadership's rounds".
 pub const RESIGN_DELEGATING: &str = "paros: a leader resigns while it holds delegated rounds";
 
+/// A transferable leadership hands itself off on about a third of its beats
+/// in the chaos window (#484 (silent driver fault sites)), on top of the
+/// driver's own per-shape rates (0.2 to 3 %). A handoff then runs while the
+/// network, attrition and the other sites still strike: a handoff is lost at
+/// the send seam, and leadership moves several times in one run. Always
+/// safe: a failed handoff costs availability, never safety. The simulation
+/// couples it to the handoff-storm scenario. Recovery gate: "leadership is
+/// handed over more than once in a run".
+pub const HAND_OFF: &str = "paros: a leader hands off in a handoff storm";
+
+/// Whether this transferable leadership hands itself off on this beat
+/// ([`HAND_OFF`]).
+pub(crate) fn hand_off() -> bool {
+    let handed = moonpool_buggify::buggify_named!(HAND_OFF, 0.30);
+    if handed {
+        moonpool_assertions::reachable!("handoff: a handoff-storm seed hands leadership on");
+    }
+    handed
+}
+
 /// Whether this leader, which holds delegated rounds, resigns on this beat
 /// ([`RESIGN_DELEGATING`]).
 pub(crate) fn resign_delegating() -> bool {
@@ -234,5 +254,6 @@ mod tests {
         assert!(!stall_proxy());
         assert!(!resign_delegating());
         assert!(!late_admitter());
+        assert!(!hand_off());
     }
 }

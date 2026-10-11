@@ -635,6 +635,9 @@ struct Registry {
     /// Run-level: whether the run draws the stalled-proxy scenario (see
     /// [`stalled_proxy`]), fixed by the first caller.
     stalled_proxy: Option<bool>,
+    /// Run-level: whether the run draws the handoff-storm scenario (see
+    /// [`handoff_storm`]), fixed by the first caller.
+    handoff_storm: Option<bool>,
     /// Run-level: whether the run draws the moved-founder scenario (see
     /// [`moved_founder`]), fixed by the first caller.
     moved_founder: Option<bool>,
@@ -1096,16 +1099,18 @@ pub(crate) fn slow_machine(state: &StateHandle) -> bool {
 /// with matchmakers, the main journal's client 0 asks for a handover before
 /// its claim, inside the chaos window: in 600 hunt seeds a handover reply
 /// was then folded twice on 136 checks and dropped at the reply seam on
-/// 142, and a stalled handover was abandoned 8 to 10 times. Each
-/// ingredient keeps its own coin on the other seeds. Rare-but-valid: an operator may move a matchmaker set at
-/// any time.
+/// 142, and a stalled handover was abandoned 8 to 10 times. Drawn on half
+/// the seeds since #484 (silent driver fault sites): a handover reaches its
+/// freeze inside the window on few of them. Each ingredient keeps its own
+/// coin on the other seeds. Rare-but-valid: an operator may move a
+/// matchmaker set at any time.
 #[tracing::instrument(level = "debug", skip_all)]
 pub(crate) fn early_handover(state: &StateHandle) -> bool {
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     *guard
         .early_handover
-        .get_or_insert_with(|| moonpool_sim::buggify_with_prob!(0.5))
+        .get_or_insert_with(|| moonpool_sim::buggify_with_prob!(1.0))
 }
 
 /// Whether the run draws the **stalled-proxy scenario** (#341): drawn once
@@ -1136,6 +1141,30 @@ pub(crate) fn stalled_proxy(state: &StateHandle) -> bool {
         moonpool_sim::set_activation(paros::scenario::STALL_PROXY, stall);
         moonpool_sim::set_activation(paros::scenario::RESIGN_DELEGATING, stall);
         stall
+    })
+}
+
+/// Whether the run draws the **handoff-storm scenario** (#484 (silent driver
+/// fault sites)): drawn once per seed, its own BUGGIFY location. A
+/// cooperative handoff fires on 0.2 to 3 % of a leader's beats, silent in
+/// the recovery tail, and the swarm's network faults hold up every election
+/// of the chaos window on about half the seeds, so in 810 hunt seeds a
+/// second handoff in one run fired on none and a handoff lost at the send
+/// seam on 7. On a scenario seed a transferable leader also hands off on
+/// about a third of its beats in the window (`paros::scenario::HAND_OFF`):
+/// in 1,000 hunt seeds a second handoff then fired on 35 and a lost one on
+/// 25. Rare-but-valid: any leader may hand off at any time.
+#[tracing::instrument(level = "debug", skip_all)]
+pub(crate) fn handoff_storm(state: &StateHandle) -> bool {
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    *guard.handoff_storm.get_or_insert_with(|| {
+        let storm = moonpool_sim::buggify_with_prob!(0.5);
+        moonpool_sim::set_activation(paros::scenario::HAND_OFF, storm);
+        if storm {
+            assert_reachable!("a run draws the handoff-storm scenario");
+        }
+        storm
     })
 }
 

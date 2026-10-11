@@ -795,14 +795,18 @@ fn trace_received(self_id: u64, msg: &Message) {
 /// Always safe: the reconfigurer holds no durable state, and the freeze, the
 /// bootstrap and the votes are idempotent or durable elsewhere. It puts a
 /// second reconfigurer on a half-replaced generation. Silent in the recovery
-/// tail.
+/// tail. The freeze and the decree last a few ticks each, so their rates are
+/// far above the bootstrap's (#484 (silent driver fault sites)): at 0.02 the
+/// freeze's fired on 5 of 810 hunt seeds and the decree's on none; at 0.25,
+/// with the early-handover scenario on twice as many seeds, on 15 and 6 of
+/// 1,000.
 fn abandon_early(phase: &ReconfigurerPhase) -> bool {
     let fired = match phase {
-        ReconfigurerPhase::Stopping { .. } => moonpool_buggify::buggify_fault_with_prob!(0.02),
+        ReconfigurerPhase::Stopping { .. } => moonpool_buggify::buggify_fault_with_prob!(0.25),
         ReconfigurerPhase::Bootstrapping { .. } => {
             moonpool_buggify::buggify_fault_with_prob!(0.02)
         }
-        ReconfigurerPhase::Deciding { .. } => moonpool_buggify::buggify_fault_with_prob!(0.02),
+        ReconfigurerPhase::Deciding { .. } => moonpool_buggify::buggify_fault_with_prob!(0.25),
         ReconfigurerPhase::Idle | ReconfigurerPhase::Publishing { .. } => false,
     };
     if fired {
@@ -845,6 +849,9 @@ fn initiate_handoff(ctx: &HandoffContext) -> bool {
     } else {
         moonpool_buggify::buggify_fault_with_prob!(0.002)
     };
+    // The handoff-storm scenario's location (#484 (silent driver fault
+    // sites)): drawn after the shape's own, so the shape keeps its gate.
+    let fired = fired || crate::scenario::hand_off();
     if fired {
         // BUGGIFY pairing: each shape fires on some seed, split so that
         // saturation cannot hide one shape behind another's samples.
