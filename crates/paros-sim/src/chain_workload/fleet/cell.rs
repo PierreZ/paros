@@ -185,7 +185,10 @@ impl FleetOps {
     /// operators drive two decrees at once; with a second `cell init` sent
     /// to another founder alongside it on another; or, on a third, sent to
     /// a machine outside the founders, which must refuse it. Whether it
-    /// ended.
+    /// ended: a misdirected `cell init` ends nothing, so the `init` an
+    /// operator stopped in stays pending (witness 8900646803663139915: a
+    /// resumption drawn misdirected dropped an `init` interrupted at the
+    /// fleet half, and the cell stayed `REGISTERING`).
     #[tracing::instrument(level = "debug", skip_all, fields(client = self.client_id))]
     pub(super) async fn initialize(&mut self, ctx: &SimContext, draw: u64) -> bool {
         let founders = self.layout.founders;
@@ -197,7 +200,8 @@ impl FleetOps {
             let span = (outside.end - outside.start) as u64;
             let target =
                 self.machines[outside.start + usize::try_from(draw % span).unwrap_or(0)].clone();
-            return self.misdirected(ctx, target, &members).await;
+            self.misdirected(ctx, target, &members).await;
+            return false;
         }
         if founders > 1 && buggify_with_prob!(0.25) {
             assert_reachable!("init: an operator starts cell init at another founder");
@@ -315,8 +319,8 @@ impl FleetOps {
 
     /// A `cell init` sent to a machine outside the founders: refused as not a
     /// member, or as `cell_exists` once `cell add-machine` admitted it (#216),
-    /// and nothing forms. Whether it ended.
-    async fn misdirected(&self, ctx: &SimContext, target: Address, members: &[Address]) -> bool {
+    /// and nothing forms.
+    async fn misdirected(&self, ctx: &SimContext, target: Address, members: &[Address]) {
         let outcome = bootstrap::cell_init(
             self.connector.providers(),
             self.connector.rpc(),
@@ -334,7 +338,6 @@ impl FleetOps {
                     "init: a machine outside the seeds refuses init as not a seed",
                     { "refusal" => label.as_str() }
                 );
-                true
             }
             InitOutcome::Refused(label) => {
                 assert_always!(
@@ -343,7 +346,6 @@ impl FleetOps {
                     { "refusal" => label.as_str() }
                 );
                 assert_reachable!("init: a machine outside the seeds refuses init");
-                true
             }
             InitOutcome::Formed(plan) => {
                 assert_always!(
@@ -351,9 +353,8 @@ impl FleetOps {
                     "init: a machine outside the seeds never initializes the cell",
                     { "cell" => plan.cell_id }
                 );
-                true
             }
-            InitOutcome::NotWaiting | InitOutcome::Malformed | InitOutcome::Unreachable => false,
+            InitOutcome::NotWaiting | InitOutcome::Malformed | InitOutcome::Unreachable => {}
         }
     }
 }
