@@ -71,6 +71,7 @@ mod moves;
 mod record;
 pub(crate) mod register;
 mod resolve;
+mod sets;
 mod stores;
 mod tenants;
 pub(crate) mod views;
@@ -89,6 +90,7 @@ pub use disk::ProviderDisk;
 pub use formed::FormedCell;
 pub use lifecycle::{MachineAddresses, MachineError, MachineSettings, run_machine};
 pub use record::{MachineRecord, journal_config};
+pub use sets::{SET, set_of};
 pub use stores::AuditScope;
 pub use wait::{CellLedger, Joined, wait_for_cell};
 

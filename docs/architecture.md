@@ -848,7 +848,27 @@ create.
   Oracles: a live journal holds at least as many slots as its create named, and only a member
   that left the registered machines loses its slot. After chaos, a journal that has a machine to
   go to holds no slot on a draining machine.
-- **Still to do.** Matchmaker sets off the founding members, re-placement after a `Down`
+- **Matchmaker sets** (decided on 2026-10-11, #501 (matchmaker sets off the founders)). Every
+  tenant's set is born on the founding members, the bootstrap generation, without a booking. At
+  each watch round, after the journal move step, the tenant coordinator takes one step of one
+  set, in turn over the hosted tenants (never the cell tenant: its set serves the elections
+  that choose the coordinator). A step books the slots the set lacks with `paros::placement`
+  (`Role::Matchmaker`, target `BookingTarget::Set { tenant, set: 1 }`, the bootstrap
+  generation's size, the slots on machines that stay as the current ones), or asks a founding
+  member to hand the set over onto the booked machines that stay (`ReconfigureMatchmakers`,
+  which names its tenant), or, once the set in force is those machines, releases every slot on
+  a draining machine. The set in force is the latest generation that the founding members
+  believe for the tenant's control journal (`Inspect`). So a set is placed the first time a
+  coordinator sees it, and a drain moves it like a journal. Each step starts from what the
+  registry and the founding members hold, so a later term finishes a move that an earlier term
+  started. A machine that is not a founding member hosts a set only when the registry books
+  it there; every node links to each registered machine's matchmaker and admits it to its
+  matchmaker pool (`ColocatedNode::extend_matchmaker_pool`), so a journal learns a set that
+  names it. A released member keeps its frozen store: it answers a late proposer with its
+  successor, the chain that a journal booting at generation 0 walks to the set in force.
+  Oracle: after chaos, every booked set in force is its booked machines, and a set that has
+  a machine to go to holds no slot on a draining machine.
+- **Still to do.** Re-placement after a `Down`
   bound (#475), the tenant birth footprint, the capacity request RPC and tenant coordinators on
   `stateless` machines (#476), the operators' retire coordination in the control journals
   (#477).
@@ -922,10 +942,14 @@ each hosting many tenants' sets keyed by `JournalIdentifier`, the way every role
 store for each set it hosts, and the registries of that set's journals, keyed by `JournalId`, are
 inside it. Every journal of the set, the control and election journals included, has the set from
 its first entry; there is no bootstrap exception. A storage fault in one registry closes the whole
-set, and the set opens again at its next request. **Until matchmaker sets move off the founding members (#501), every tenant's
-matchmaker set runs on the cell's founding members** (decided on 2026-10-10, #190): each founding
-member hosts the matchmaker named by its node id, on the address it serves its journals at, and
-provisions a tenant's set at the first request that names that tenant. A matchmaker request names
+set, and the set opens again at its next request. **Every tenant's matchmaker set is born on
+the cell's founding members** (decided on 2026-10-10, #190): each founding member hosts the
+matchmaker named by its node id, on the address it serves its journals at, and provisions a
+tenant's set at the first request that names that tenant. The tenant coordinator then places
+the set on the cell's storage machines and moves it off a draining machine by generation
+handover (decided on 2026-10-11, #501 (matchmaker sets off the founders), section 3.3); every
+storage machine hosts the matchmaker named by its node id, and a machine that is not a founding
+member provisions only a set the registry books on it. A matchmaker request names
 the matchmaker it addresses, and a process that is another one drops it, so a machine that took
 over an address never answers for a set it does not hold.
 Reconfiguration is the operational primitive for everything, so no tenant opts out of it.
@@ -2023,7 +2047,7 @@ toy is the end of M9. The epic is #184, the backlog pointer #69, the verificatio
 |---|---|---|
 | M7 | Journal API (#204, #205) | the four calls, the journal state machine in core, the wire and the driver, the chain workload's alphabet, the linearizability checker, the race knobs and BUGGIFY sites, the cut-over |
 | M8 | parosd deployable (#206 to #209, #221, #220, #196, #201) | Tokio providers linked, the stores on a real filesystem for the first time, the `JournalStores` opener, `Config` durable at `format`, `parosd provision` (replaced by `init` in M9), the uniform binary with class and capacity, Compose, `paros::client` (#221) and the `parosctl` CLI (#220), a tracing subscriber, exit codes |
-| M9 | The universe with one cell (#225, #226, #227 first; landed: #216 (PR #408), #192 (PR #412), #210 (PR #347), #211 (PR #352, PR #388), #239 (PR #464), #191, #390, #404, #228, #235, #229, #230, #176, #261, #263, #264 (PR #266), #267, #202, #213, #246, #247, #241, #243, #244, #240, #190, #212 (placement function and bookings), #474 (PR #499), #257; still to do: #248, #501, #475, #476, #477, #245, #252) | the control hierarchy and its decisions, the fenced `Truncate` on the wire, random ids and the `(TenantId, JournalId)` `JournalIdentifier`, the leader-uuid API and its two writer modes, `init` creating the universe with its matchmaker sets, the cell tenant and its machine registry with role slots and liveness, the universe tenant with its directory and tenant creation state machine, the election library and the coordinators it runs, requests to a leader, placement inside capacity granted by the cell, the checkpoint-and-truncate library, names at the frontend, the frontend with Biscuit `Authz` routing through the universe tenant, per-tenant matchmaker sets, `parosctl status` |
+| M9 | The universe with one cell (#225, #226, #227 first; landed: #216 (PR #408), #192 (PR #412), #210 (PR #347), #211 (PR #352, PR #388), #239 (PR #464), #191, #390, #404, #228, #235, #229, #230, #176, #261, #263, #264 (PR #266), #267, #202, #213, #246, #247, #241, #243, #244, #240, #190, #212 (placement function and bookings), #474 (PR #499), #501, #257; still to do: #248, #475, #476, #477, #245, #252) | the control hierarchy and its decisions, the fenced `Truncate` on the wire, random ids and the `(TenantId, JournalId)` `JournalIdentifier`, the leader-uuid API and its two writer modes, `init` creating the universe with its matchmaker sets, the cell tenant and its machine registry with role slots and liveness, the universe tenant with its directory and tenant creation state machine, the election library and the coordinators it runs, requests to a leader, placement inside capacity granted by the cell, the checkpoint-and-truncate library, names at the frontend, the frontend with Biscuit `Authz` routing through the universe tenant, per-tenant matchmaker sets, `parosctl status` |
 | M10 | Roles per tenant (#193, #214, #194, #145, #195) | journal-tagged proxy leaders and replicas, batchers and unbatchers for multi-writer journals, tenant modes (redundancy, grid, role counts) applied by the tenant coordinator, quotas, the benchmark, then scale work |
 | M11 | Zones (#215) | `(region, az)` `FailureDomain`s in `AcceptorConfig` with its `cell_id` (one format bump), the two-predicate zone rule, zone round-robin placement, the `single` exemption, the leader following its writer's zone, zone-kill attrition and a zone-aware budget in the simulation, zone-spread matchmaker sets |
 | M12 | Multiple cells (#232, #233, then #253) | adding and removing cells with tombstones, placement across cells by `kind` and `survives` (both carried since M9 with the cell's entry endpoint), tenant locks, moving tenants and the universe tenant between cells, splitting the universe tenant by range, the resolver beside the frontend (section 3.5); last, multi-region cells: the `MultiRegion` cell kind with its witness region, the two-level zone rule, pools per `(tenant, region)`, the universe tenant hosted in a multi-region cell, the partition through the witness in the simulation, moving tenants between cell kinds |

@@ -83,6 +83,7 @@ mod other_cell;
 mod placement;
 mod replaced;
 mod resolve;
+mod sets;
 mod view;
 
 use cell::Cell;
@@ -1022,6 +1023,7 @@ impl FleetOps {
                 .await;
             let learn = |journal| self.note_journals([journal]);
             placement::placements_booked(ctx, &cell, ctx.time().now() + FLEET_SETTLE, learn).await;
+            sets::sets_booked(ctx, &cell, ctx.time().now() + FLEET_SETTLE).await;
         }
         // Every quiet journal world converges (#447 (model checks for every
         // journal world)), on its own deadline.

@@ -104,6 +104,15 @@ pub trait JournalStores {
         Ok(())
     }
 
+    /// The tenants whose matchmaker set the registry books on this node, as
+    /// its fold reads now (#501 (matchmaker sets off the founders)): an
+    /// opener that hosts sets beside the journals opens a set outside the
+    /// bootstrap generation only when it is booked here. The default does
+    /// nothing.
+    fn book_sets(&mut self, tenants: std::collections::BTreeSet<paros_core::TenantId>) {
+        let _ = tenants;
+    }
+
     /// `journal`'s store passed its boot: scanned, and its format marker
     /// judged against the claim [`JournalStores::open`] returned — on a
     /// first boot, written and synced. From here on the store is

@@ -73,6 +73,7 @@ use paros_core::{LeaderUuid, NodeId};
 use tokio_util::sync::CancellationToken;
 
 use super::moves::Moves;
+use super::sets::{SetStep, Sets};
 use super::tenants::TenantDesk;
 use super::{CellPlan, Class, ControlJournals, FormedCell, incarnation_from_halves};
 use crate::client::cell::CellSession;
@@ -475,8 +476,9 @@ struct Candidacy {
     /// term's leader, and the term must not come back.
     lose_resign: bool,
     /// The first term that advances a move resigns right after that step
-    /// (a BUGGIFY decision, #474 (journals on admitted machines)): a later
-    /// term must finish the move.
+    /// (a BUGGIFY decision, #474 (journals on admitted machines)), a
+    /// journal's or a matchmaker set's (#501 (matchmaker sets off the
+    /// founders)): a later term must finish the move.
     quit_mid_move: bool,
     /// The first ended term's group outlives the term by one step (a
     /// BUGGIFY decision, #404): a request that reaches it is refused by the
@@ -630,8 +632,11 @@ async fn campaign<P: Providers>(
     let mut resigned: Option<u64> = None;
     // The served term's session and its watch over the cell's machines.
     let mut watching: Option<(CellSession, Watch)> = None;
-    // The served term's moves off draining machines (#474).
+    // The served term's moves off draining machines (#474), and its
+    // matchmaker sets' placements and moves (#501 (matchmaker sets off the
+    // founders)).
     let mut moves = Moves::default();
+    let mut sets = Sets::default();
     // The served term's dynamic endpoint (#404).
     let mut group: Option<TermGroup> = None;
     let mut steps = 0_u64;
@@ -659,6 +664,7 @@ async fn campaign<P: Providers>(
                     (session, watch)
                 });
                 moves = Moves::default();
+                sets = Sets::default();
                 match duty {
                     TermDuty::Served { .. } => {
                         served = Some(leader.term);
@@ -733,11 +739,24 @@ async fn campaign<P: Providers>(
                         // watch: never fight the session that fenced it.
                         Err(_) => watching = None,
                         // A round ran: the tenant coordinator takes one step
-                        // of a move off a draining machine (#474).
+                        // of a move off a draining machine (#474), then one
+                        // step of a matchmaker set's placement or move (#501
+                        // (matchmaker sets off the founders)).
                         Ok(_) if watch.ran() => {
                             if let Some((_, desk)) = desk.as_mut() {
                                 let ctx = (&providers, &rpc, &names, &client);
-                                stepped = Some(moves.step(ctx, session, desk).await);
+                                stepped = Some(match moves.step(ctx, session, desk).await {
+                                    None => None,
+                                    Some(step) => {
+                                        let set = sets.step(ctx, session, desk).await;
+                                        // A set's move is left mid-way once its
+                                        // handover started, so the next term
+                                        // finds it running.
+                                        set.map(|set| {
+                                            step.in_flight() || set == SetStep::HandedOver
+                                        })
+                                    }
+                                });
                             }
                         }
                         Ok(_) => {}
@@ -745,7 +764,7 @@ async fn campaign<P: Providers>(
                 }
                 match stepped {
                     Some(None) => watching = None,
-                    Some(Some(step)) if step.in_flight() && quit_mid_move => {
+                    Some(Some(true)) if quit_mid_move => {
                         // A term that stops in the middle of a move: the
                         // next term finds the move where this one left it.
                         quit_mid_move = false;

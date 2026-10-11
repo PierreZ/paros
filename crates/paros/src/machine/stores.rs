@@ -15,7 +15,7 @@
 //! is refused as amnesia.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, PoisonError};
 
 use moonpool_buggify::hint::Strike;
 use moonpool_core::{Providers, SimulationResult, StorageProvider};
@@ -23,6 +23,7 @@ use moonpool_rpc::RpcHandle;
 use paros_core::{Config, JournalIdentifier, MatchmakerConfig, NodeId};
 use tokio_util::sync::CancellationToken;
 
+use super::matchmakers::SetBookings;
 use super::record::MachineRecord;
 use super::{CacheSink, CachedRegistry, ProviderDisk};
 use crate::{Audit, BootKind, DriverTunables, JournalStorage, JournalStores};
@@ -54,8 +55,12 @@ pub(crate) struct MachineStores<S, F> {
     /// Where the node's registry fold offers each new book (#211).
     cache: Option<CacheSink>,
     /// The matchmaker this machine is, when it hosts its cell's sets: a
-    /// founding member's (#190).
+    /// founding member's (#190), or a storage machine's that the registry
+    /// books a set on (#501 (matchmaker sets off the founders)).
     matchmaker: Option<MatchmakerConfig>,
+    /// The tenants whose set the registry books here, shared with the
+    /// matchmaker host.
+    sets: SetBookings,
     /// The journal the node's own facts are reported beside: the plan's
     /// first journal on a founding member, the cell control journal on an
     /// admitted machine (#474), which serves no journal at its first start.
@@ -97,6 +102,7 @@ impl<S, F> MachineStores<S, F> {
             audits: Arc::new(audits),
             cache: None,
             matchmaker: None,
+            sets: SetBookings::default(),
             home,
         }
     }
@@ -126,12 +132,14 @@ impl<S, F> MachineStores<S, F> {
             audits: Arc::new(audits),
             cache: None,
             matchmaker: None,
+            sets: SetBookings::default(),
             home: cell,
         }
     }
 
     /// These stores, hosting the matchmaker sets of `config` on the node's
-    /// edge (#190): a founding member's.
+    /// edge (#190): every set on a founding member, and the sets booked
+    /// here on any other machine (#501 (matchmaker sets off the founders)).
     #[must_use]
     pub(crate) fn with_matchmakers(mut self, config: MatchmakerConfig) -> Self {
         assert!(self.matchmaker.is_none(), "a machine is one matchmaker");
@@ -284,11 +292,23 @@ where
             rpc,
             machine,
             self.disk.clone(),
-            config,
+            (config, Arc::clone(&self.sets)),
             tunables,
             Arc::new(move |journal| audits(AuditScope::Journal(journal))),
             shutdown,
         )
+    }
+
+    fn book_sets(&mut self, tenants: std::collections::BTreeSet<paros_core::TenantId>) {
+        let mut sets = self.sets.lock().unwrap_or_else(PoisonError::into_inner);
+        if *sets != tenants {
+            tracing::info!(
+                node = self.node.0,
+                sets = tenants.len(),
+                "matchmaker_sets_booked"
+            );
+            *sets = tenants;
+        }
     }
 
     fn cache_registry(&self, cache: CachedRegistry) {

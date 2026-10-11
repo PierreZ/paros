@@ -66,6 +66,17 @@ impl ColocatedNode {
     /// public mutating entry point: the maps are small, and crash beats
     /// corruption.
     pub(super) fn assert_invariants(&self) {
+        // The believed matchmaker set is drawn from the matchmaker pool
+        // (#501 (matchmaker sets off the founders)): a set outside it is
+        // never learned.
+        if let Some(set) = self.matchmakers.as_ref() {
+            assert!(
+                set.members()
+                    .iter()
+                    .all(|m| self.matchmaker_pool.binary_search(m).is_ok()),
+                "the believed matchmaker set is drawn from the matchmaker pool"
+            );
+        }
         // Ordering chain: only chosen slots are ever dropped, so the compaction
         // floor never passes the first unchosen slot.
         assert!(

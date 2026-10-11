@@ -87,7 +87,7 @@ use std::time::Duration;
 
 use moonpool_core::{Providers, TimeProvider};
 use moonpool_rpc::RpcHandle;
-use paros_core::{JournalIdentifier, JournalView, LeaderUuid, QuorumSystem};
+use paros_core::{JournalIdentifier, JournalView, LeaderUuid, QuorumSystem, TenantId};
 use tokio_util::sync::CancellationToken;
 
 pub use observer::{Answered, Attempted, CallObserver, NoObserver};
@@ -1166,10 +1166,25 @@ impl<P: Providers> Client<P> {
         members: &[u64],
         target: usize,
     ) -> ReconfigureMatchmakersOutcome {
+        self.reconfigure_matchmakers_of(TenantId(0), members, target)
+            .await
+    }
+
+    /// [`Client::reconfigure_matchmakers`] of `tenant`'s set (#501
+    /// (matchmaker sets off the founders)): a node hosts many tenants'
+    /// journals, so the request names the set it hands over. The unset
+    /// tenant asks for the set of the server's first journal's tenant.
+    pub async fn reconfigure_matchmakers_of(
+        &self,
+        tenant: TenantId,
+        members: &[u64],
+        target: usize,
+    ) -> ReconfigureMatchmakersOutcome {
         let node = self.node(target).clone();
         for _ in 0..self.tunables.retry_budget.max(1) {
             let request = ReconfigureMatchmakers {
                 members: members.to_vec(),
+                tenant: tenant.0,
             };
             let node = node.clone();
             let attempt = async move {
