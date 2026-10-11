@@ -11,6 +11,13 @@
 //! the directory folds are kept between requests and caught up at each one;
 //! the answer names the positions it was folded at.
 //!
+//! Each journal's status word (#191 (status)) is judged at every answer
+//! from the folds it read, and shown through the member's own
+//! [`Hysteresis`], kept in memory between requests and never written.
+//! When the universe directory cannot be read, the member still answers
+//! from the registry (static stability): the answer then names no
+//! directory position.
+//!
 //! An admitted machine serves no journal and no view: it does not register
 //! the endpoint, so a call to it is refused before any handler runs, and the
 //! caller asks the next server.
@@ -19,7 +26,7 @@
 //! member that answers from a fold it did not catch up, as a lagging member
 //! would) is drawn on the node loop before the task starts.
 
-use moonpool_core::{Detach, Providers, SimulationResult, TaskProvider};
+use moonpool_core::{Detach, Providers, SimulationResult, TaskProvider, TimeProvider};
 use moonpool_rpc::RpcHandle;
 use paros_core::{NodeId, TenantId};
 use tokio_util::sync::CancellationToken;
@@ -34,6 +41,7 @@ use crate::fleet::FleetDirectory;
 use crate::rpc::methods::ViewRpc;
 use crate::rpc::view as wire;
 use crate::rpc::{Inbound, serve_well_known};
+use crate::status::Hysteresis;
 use crate::system::Registry;
 use crate::tenant::TenantControl;
 use crate::view::{CellFacts, Scope, authorize, cell_view, refusal, tenant_view, universe_view};
@@ -44,6 +52,7 @@ type Requests = Inbound<ViewRpc, wire::ViewRequest, wire::ViewReply>;
 /// What one founding member keeps between views: its folds of the
 /// registry and the universe directory.
 struct Desk<P: Providers> {
+    providers: P,
     client: Client<P>,
     me: NodeId,
     plan: CellPlan,
@@ -53,6 +62,8 @@ struct Desk<P: Providers> {
     /// Answer from the folds as they stand, without catching up (a BUGGIFY
     /// decision of the node loop): a lagging member.
     lag: bool,
+    /// The status words this member shows.
+    status: Hysteresis,
 }
 
 /// Start serving the views of the founding member `formed`, in a task that
@@ -66,6 +77,7 @@ pub(crate) fn spawn<P: Providers>(
     providers: &P,
     rpc: &RpcHandle<P>,
     formed: &FormedCell,
+    tunables: &crate::DriverTunables,
     shutdown: CancellationToken,
 ) -> SimulationResult<()> {
     if formed.plan.members.is_empty() {
@@ -74,6 +86,7 @@ pub(crate) fn spawn<P: Providers>(
     let requests = Inbound::plain(serve_well_known::<P, ViewRpc>(rpc)?);
     let founders = formed.plan.members.clone();
     let desk = Desk {
+        providers: providers.clone(),
         client: super::coordinator::cell_client(providers, rpc, formed)
             .with_shutdown(shutdown.clone()),
         me: formed.facts.node_id,
@@ -82,6 +95,7 @@ pub(crate) fn spawn<P: Providers>(
         directory: Folder::new(FleetDirectory::default()),
         founders,
         lag: moonpool_buggify::buggify_with_prob!(0.2),
+        status: Hysteresis::new(tunables.status_hold),
     };
     providers
         .task()
@@ -148,9 +162,14 @@ impl<P: Providers> Desk<P> {
             tenants: &tenants,
             coordinator,
         };
+        let now = self.providers.time().now();
         match query {
-            wire::view_request::Query::Cell(_) => cell_view(&scope, &facts),
-            wire::view_request::Query::Tenant(t) => tenant_view(&scope, &facts, &t.name),
+            wire::view_request::Query::Cell(_) => {
+                cell_view(&scope, &facts, (&mut self.status, now))
+            }
+            wire::view_request::Query::Tenant(t) => {
+                tenant_view(&scope, &facts, &t.name, (&mut self.status, now))
+            }
             wire::view_request::Query::Universe(_) => match directory.as_ref() {
                 Some(directory) => universe_view(&scope, &facts, directory),
                 None if scope != Scope::Admin => refusal("forbidden"),
@@ -181,6 +200,10 @@ impl<P: Providers> Desk<P> {
                 LoadOutcome::Loaded { .. }
             )
         {
+            // Static stability: the registry still answers.
+            moonpool_assertions::reachable!(
+                "view: answered while the universe directory is unreadable"
+            );
             self.directory = Folder::new(FleetDirectory::default());
         }
         true

@@ -1,6 +1,12 @@
 use paros_core::JournalId;
 
 use super::*;
+use crate::status::Word;
+
+/// Status words shown at once, at the instant zero.
+fn words(status: &mut Hysteresis) -> (&mut Hysteresis, Duration) {
+    (status, Duration::ZERO)
+}
 use crate::system::{Class, HostedTenant, SystemCommand};
 use crate::tenant::Survives;
 
@@ -91,7 +97,12 @@ fn facts<'a>(founders: &'a [(NodeId, Address)], registry: &'a Registry) -> CellF
 #[test]
 fn an_admin_sees_every_machine_and_every_tenant_of_the_cell() {
     let (founders, registry) = (founders(), registry());
-    let reply = cell_view(&Scope::Admin, &facts(&founders, &registry));
+    let mut status = Hysteresis::new(Duration::ZERO);
+    let reply = cell_view(
+        &Scope::Admin,
+        &facts(&founders, &registry),
+        words(&mut status),
+    );
     assert!(reply.refusal.is_empty());
     let names: Vec<&str> = reply.machines.iter().map(|m| m.name.as_str()).collect();
     assert_eq!(names, ["alpha", "", "gamma"]);
@@ -106,10 +117,17 @@ fn an_admin_sees_every_machine_and_every_tenant_of_the_cell() {
 fn a_tenant_scope_sees_only_its_own_spread() {
     let (founders, registry) = (founders(), registry());
     let facts = facts(&founders, &registry);
+    let mut status = Hysteresis::new(Duration::ZERO);
     let scope = Scope::Tenant(b"acme".to_vec());
-    assert_eq!(cell_view(&scope, &facts).refusal, "forbidden");
-    assert_eq!(tenant_view(&scope, &facts, b"globex").refusal, "forbidden");
-    let reply = tenant_view(&scope, &facts, b"acme");
+    assert_eq!(
+        cell_view(&scope, &facts, words(&mut status)).refusal,
+        "forbidden"
+    );
+    assert_eq!(
+        tenant_view(&scope, &facts, b"globex", words(&mut status)).refusal,
+        "forbidden"
+    );
+    let reply = tenant_view(&scope, &facts, b"acme", words(&mut status));
     assert!(reply.refusal.is_empty());
     assert!(within_tenant_scope(&reply, b"acme"));
     assert_eq!(reply.tenants.len(), 1);
@@ -119,10 +137,10 @@ fn a_tenant_scope_sees_only_its_own_spread() {
     assert_eq!(reply.machines[0].name, "alpha");
     assert_eq!(reply.machines[0].failure_domain, "zone-a");
     // An admin asking the same view sees the addresses.
-    let admin = tenant_view(&Scope::Admin, &facts, b"acme");
+    let admin = tenant_view(&Scope::Admin, &facts, b"acme", words(&mut status));
     assert!(!within_tenant_scope(&admin, b"acme"));
     assert_eq!(
-        tenant_view(&Scope::Admin, &facts, b"initech").refusal,
+        tenant_view(&Scope::Admin, &facts, b"initech", words(&mut status)).refusal,
         "unknown_tenant"
     );
 }
@@ -134,4 +152,53 @@ fn a_claim_is_the_scope_until_tokens() {
     assert_eq!(authorize(Some(&tenant.to_wire())), Ok(tenant));
     assert!(authorize(None).is_err());
     assert!(authorize(Some(&Scope::Tenant(Vec::new()).to_wire())).is_err());
+}
+
+#[test]
+fn every_journal_carries_its_status_word() {
+    let (founders, mut registry) = (founders(), registry());
+    let mut status = Hysteresis::new(Duration::ZERO);
+    let reply = cell_view(
+        &Scope::Admin,
+        &facts(&founders, &registry),
+        words(&mut status),
+    );
+    let journals: Vec<&wire::JournalView> =
+        reply.tenants.iter().flat_map(|t| &t.journals).collect();
+    assert!(!journals.is_empty());
+    for journal in &journals {
+        assert_eq!(journal.desired_acceptors, 2);
+        assert_eq!(journal.observed, "healthy");
+        assert_eq!(journal.word, "healthy");
+        assert_eq!(
+            crate::status::observe(journal, &reply.machines),
+            Some(Word::Healthy)
+        );
+    }
+    // A founder down: a majority of two is two, so no quorum is left.
+    registry.fold(
+        registry.next_seq(),
+        &SystemCommand::MachineDown {
+            id: NodeId(2),
+            incarnation: 0,
+        }
+        .encode(),
+    );
+    let reply = cell_view(
+        &Scope::Admin,
+        &facts(&founders, &registry),
+        words(&mut status),
+    );
+    for journal in reply.tenants.iter().flat_map(|t| &t.journals) {
+        assert_eq!(journal.observed, "unavailable");
+        assert_eq!(journal.word, "unavailable");
+    }
+    // The tenant scope sees the word, judged before its machines narrowed.
+    let reply = tenant_view(
+        &Scope::Tenant(b"acme".to_vec()),
+        &facts(&founders, &registry),
+        b"acme",
+        words(&mut status),
+    );
+    assert_eq!(reply.tenants[0].journals[0].word, "unavailable");
 }

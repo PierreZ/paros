@@ -12,6 +12,7 @@ use super::state::AuditState;
 
 /// The published key of a tenant's matchmaker generations (#190).
 const TENANT_SETS_KEY: &str = "paros-audit-tenant-sets";
+const TENANT_STOPS_KEY: &str = "paros-audit-tenant-stops";
 
 /// Well-known [`StateHandle`] key under which the single per-iteration
 /// [`AuditWorld`] is published (shared by every node and every workload).
@@ -88,6 +89,15 @@ fn published_world(state: &StateHandle, journal: paros::JournalIdentifier) -> Ar
                             paros::JournalIdentifier::new(journal.tenant, paros::JournalId::UNSET),
                         ),
                         super::matchmaker::TenantSets::default,
+                    ))
+                    .clone();
+                    state.matchmaker.stop_acks = (*crate::state::published_arc(
+                        state_handle,
+                        &crate::state::journal_key(
+                            TENANT_STOPS_KEY,
+                            paros::JournalIdentifier::new(journal.tenant, paros::JournalId::UNSET),
+                        ),
+                        super::matchmaker::TenantStops::default,
                     ))
                     .clone();
                     state
