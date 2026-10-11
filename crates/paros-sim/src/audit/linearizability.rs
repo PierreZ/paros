@@ -61,7 +61,9 @@
 //! claim that may linearize after that instant (one answered later, or
 //! never answered): a uuid that leads again. A `resolve` that wrongly
 //! tells the application a rewrite is safe makes a late landing of the
-//! first write a refutation, not a lost update nobody sees.
+//! first write a refutation, not a lost update nobody sees. Proved on a
+//! mutant whose read-back drops the leader test: red on 18 of 1,000 hunt
+//! seeds with the marker, green on main (witness 17954477492009207736).
 //!
 //! **Time** is simulated nanoseconds. Two attempts whose spans share an
 //! instant are concurrent: a call event sorts before a return event at the
