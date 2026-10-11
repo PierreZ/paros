@@ -49,6 +49,10 @@ pub const RARE: &[Rare] = &[
         reason: "marginal: fired on 0 of 1,100 hunt seeds, missed by the sweep on main (#486)",
     },
     Rare {
+        msg: "static: the held seed freezes a grid column",
+        reason: "marginal: fired on 16 of 1,000 hunt seeds on main, missed by a sweep of 257 (#486)",
+    },
+    Rare {
         msg: "journals: a create the cell has no slot for is unplaceable",
         reason: "marginal: fired on 0 of 1,100 hunt seeds, missed by the sweep on main (#486)",
     },
