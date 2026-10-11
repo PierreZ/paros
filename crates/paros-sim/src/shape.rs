@@ -905,6 +905,14 @@ pub(crate) fn lost_verdict(state: &StateHandle) -> bool {
 /// with matchmakers, no proxy and no replica. Rare-but-valid: a slow
 /// follower is, and each ingredient keeps its own coin on the other
 /// seeds.
+///
+/// The scenario also turns on `paros::scenario::ADMIT_LATE` (#387
+/// (unpooled joiner in a configuration)): half the nodes, drawn at boot,
+/// admit the registry's pool 2 s after their fold owes it. A leader that
+/// admitted a joiner then sends a configuration naming it to members whose
+/// pool lacks it, and they must ignore it. The gate "learning: a
+/// configuration outside the pool is ignored" fired 6 times in 1,000 hunt
+/// seeds before and 30 times in 2,000 after.
 #[tracing::instrument(level = "debug", skip_all)]
 pub(crate) fn lagging_fold(state: &StateHandle) -> bool {
     let registry = registry(state);

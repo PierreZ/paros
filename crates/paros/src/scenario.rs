@@ -53,8 +53,8 @@ pub const LAG_FOLLOW: &str = "paros: a node follows its control journals late";
 
 /// The node admits the registry's pool late (#387): a node that draws it
 /// at boot folds the registry as usual, but its journals admit a node the
-/// registry registered (`ColocatedNode::extend_pool`) only once the chaos
-/// window is over. A leader that admitted a joiner then reconfigures onto
+/// registry registered (`ColocatedNode::extend_pool`) only
+/// [`ADMIT_LATE_FOR`] after the fold owed it. A leader that admitted a joiner then reconfigures onto
 /// it while this node's pool still lacks it, so a `Prepare`, a beat or a
 /// matchmaker's answer names a configuration outside its pool, which every
 /// learning path must ignore whole. Always safe: an admission is a fold
@@ -121,11 +121,23 @@ pub(crate) fn late_admitter() -> bool {
     moonpool_buggify::buggify_named!(ADMIT_LATE, 0.5)
 }
 
-/// Whether `late`, this node's boot draw ([`late_admitter`]), still holds
-/// its admission now ([`ADMIT_LATE`]): for the whole chaos window, never in
-/// the recovery tail.
-pub(crate) fn admit_late(late: bool) -> bool {
-    let held = late && moonpool_buggify::buggify_named!(ADMIT_LATE, 1.0);
+/// How long a late admitter ([`late_admitter`]) holds an admission it owes
+/// ([`ADMIT_LATE`]): longer than a reconfiguration request, its matchmaking
+/// and its first `Prepare`. A bound in time, not in ticks (a node whose
+/// ticks stretch would hold far longer), and not a window: the hold also
+/// runs in the recovery tail, so a joiner registered late is still met by a
+/// member that lags, and every node admits at last.
+pub(crate) const ADMIT_LATE_FOR: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Whether a late admitter holds, at `now`, the admission it has owed since
+/// `owed_since` ([`ADMIT_LATE`]).
+pub(crate) fn admit_held(
+    late: bool,
+    owed_since: std::time::Duration,
+    now: std::time::Duration,
+) -> bool {
+    assert!(owed_since <= now, "an admission is owed from the past");
+    let held = late && now.saturating_sub(owed_since) < ADMIT_LATE_FOR;
     if held {
         moonpool_assertions::reachable!("system: a node admits the registry's pool late");
     }
@@ -222,6 +234,5 @@ mod tests {
         assert!(!stall_proxy());
         assert!(!resign_delegating());
         assert!(!late_admitter());
-        assert!(!admit_late(true));
     }
 }

@@ -1244,10 +1244,10 @@ where
     // leader's: the cell control journal that would register it stalls.
     // Held, it still answers every message that reaches it.
     let mut unregistered: Option<watch::Receiver<bool>> = None;
-    // The registry's pool owed to the live journals (#189), and whether this
-    // incarnation holds it through the chaos window (#387,
+    // The instant since which the registry's pool is owed to the live journals
+    // (#189), and whether this incarnation holds it a while (#387,
     // `crate::scenario::ADMIT_LATE`; drawn only where a registry is followed).
-    let mut admission_owed = false;
+    let mut admission_owed: Option<std::time::Duration> = None;
     let late_admitter = system.is_some() && crate::scenario::late_admitter();
     if let Some(formed) = formed {
         // Every founding member campaigns for the cell coordinator (#240).
@@ -1760,8 +1760,10 @@ where
                 let events = f.fold_remote(answer);
                 let checkpoints = if journal == f.registry_key() { f.take_checkpoints() } else { Vec::new() };
                 let mut sys = SystemCtx { stores: &mut stores, journals: &mut journals, now: ticks, tunables: &tunables, out: &out, lanes: &lanes, rpc: &rpc_handle, audit: &node_audit };
-                admission_owed |= sys.apply(f, journal, events, checkpoints).await;
-                admit_owed(&mut journals, f, &mut admission_owed, late_admitter);
+                if sys.apply(f, journal, events, checkpoints).await {
+                    admission_owed.get_or_insert(time.now());
+                }
+                admit_owed(&mut journals, f, &mut admission_owed, late_admitter, time.now());
             }
             _ = time.sleep(next_tick.saturating_sub(time.now())) => {
                 // Pacing, not a protocol bound: every timeout the core owns is
@@ -1860,11 +1862,12 @@ where
                     for (journal, events) in follow_local(f, &journals) {
                         let checkpoints = if journal == f.registry_key() { f.take_checkpoints() } else { Vec::new() };
                         let mut sys = SystemCtx { stores: &mut stores, journals: &mut journals, now: ticks, tunables: &tunables, out: &out, lanes: &lanes, rpc: &rpc_handle, audit: &node_audit };
-                        admission_owed |= sys.apply(f, journal, events, checkpoints).await;
+                        if sys.apply(f, journal, events, checkpoints).await {
+                            admission_owed.get_or_insert(time.now());
+                        }
                     }
-                    // An admission held through the chaos window lands on
-                    // the first tick of the recovery tail (#387).
-                    admit_owed(&mut journals, f, &mut admission_owed, late_admitter);
+                    // A held admission lands once its hold is over (#387).
+                    admit_owed(&mut journals, f, &mut admission_owed, late_admitter, time.now());
                     if !crate::scenario::lag_follow() {
                         f.poll_remote(&providers, |journal| journals.live.contains_key(&journal));
                     }
@@ -2266,19 +2269,21 @@ impl<P: Providers, J: JournalStores> SystemCtx<'_, '_, P, J> {
 
 /// Admit the registry's pool into every live journal when an admission is
 /// owed, unless this node holds it late ([`crate::scenario::ADMIT_LATE`],
-/// #387): then it stays owed, and the next call admits it.
+/// #387): then it stays owed, and a later call admits it.
 fn admit_owed<P: Providers, S, A>(
     journals: &mut Journals<S, A>,
     follower: &ControlFollower<P>,
-    owed: &mut bool,
+    owed: &mut Option<std::time::Duration>,
     late: bool,
+    now: std::time::Duration,
 ) {
-    if !*owed || crate::scenario::admit_late(late) {
+    let Some(since) = *owed else { return };
+    if crate::scenario::admit_held(late, since, now) {
         return;
     }
     admit_pool(journals, follower);
-    *owed = false;
-    assert!(!*owed, "an admission made is no longer owed");
+    *owed = None;
+    assert!(owed.is_none(), "an admission made is no longer owed");
 }
 
 /// Every live journal admits the registry's pool (#189): a registered node
