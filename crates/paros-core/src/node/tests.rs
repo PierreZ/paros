@@ -390,3 +390,4 @@ mod quorum_reads;
 mod reconfigure;
 mod recovery;
 mod replication;
+mod wire_hygiene;

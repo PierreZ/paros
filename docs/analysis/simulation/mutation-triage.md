@@ -23,7 +23,7 @@ The 198 survivors split into the four classes of #269:
 | Equivalent | about 70 | Excluded in `.cargo/mutants.toml` with a reason, or listed below when a regex cannot isolate the edit. |
 | Missing oracle | about 45 | An assertion or an audit check added in PR #334 (next section). |
 | Unreachable state | about 65 | Issues #338 to #343: the oracle exists, but no seed reaches the shape. |
-| Wire hygiene | about 15 | Issue #344: malformed input that honest peers never send; a unit test pins it. |
+| Wire hygiene | about 15 | Issue #344: malformed input that honest peers never send; a unit test pins it (`node/tests/wire_hygiene.rs`) and `.cargo/mutants.toml` excludes the edit. |
 
 ## Oracles added
 
@@ -200,6 +200,27 @@ seeds:
   `&&` to `||` and `>` to `>=` edits on the page shape. Each one only
   accepts a page that an honest matchmaker never sends: a matchmaker
   asserts the shape of its own page. They are wire hygiene, #344.
+
+## Wire hygiene (#344)
+
+`paros-core/src/node/tests/wire_hygiene.rs` feeds each malformed shape to
+the check that refuses it, beside the well-formed twin the check takes:
+
+- `Matchmaking::accepts`: a page longer than `REGISTRY_PAGE`, an entry below
+  the page's start, a cursor with no entry, a cursor at the last entry, a
+  later page that starts neither at its cursor nor at a raised watermark,
+  and a page from a matchmaker already counted.
+- `ProxyId::is_in` and `rank_is_in`: an `Accept` that replies to a proxy the
+  deployment does not have.
+- `MatchmakerSet::contains -> true`: a matchmaking reply from a matchmaker
+  outside the set.
+
+A `cargo mutants` run over these four functions, with only these tests as
+the test, catches 32 of the 34 mutants. The two others are equivalent:
+`>` to `>=` in the cursor leg of `accepts` (`at_cursor` takes a page at the
+cursor already), and in its `next > from_ballot` leg (the key bound and
+`next > last` imply it). `.cargo/mutants.toml` excludes the four
+functions' edits from the hunt, with the test file named as the reason.
 
 ## Trim-point jumps (#340)
 
