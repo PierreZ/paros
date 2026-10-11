@@ -333,7 +333,7 @@ Depth: `crates/paros/AGENTS.md`; module docs of `driver/journals.rs`, `driver/sy
 Three layers, and nothing crosses them:
 
 - **Environmental faults belong to moonpool** (drop, delay, duplicate, reorder, partitions,
-  close, attrition, scheduling), swarm-masked per seed, on **one combined campaign axis**
+  close, attrition, scheduling, CPU time, gray failures), swarm-masked per seed, on **one combined campaign axis**
   (`chaos_surfaces()`); after `CHAOS_DURATION_MS` moonpool enters recovery mode, so the tail is
   a genuine recovery and liveness oracles apply. Never re-implement one in paros or re-split
   the axis. One exception (decided on 2026-10-09): on a seed that draws the departed-straggler
@@ -349,7 +349,10 @@ Three layers, and nothing crosses them:
   seed that draws the split-floor scenario (decided on 2026-10-11, #409), the acceptors whose
   floor passed a slot the others hold go down at most `SPLIT_WINDOW` (16 s) into the tail, for
   at most `HOLD`, then the outage strikes the others (`paros_sim::world::split_floor`): a split
-  floor shows mostly 5 to 20 s into a run.
+  floor shows mostly 5 to 20 s into a run. Likewise on a
+  seed that draws the slow-machine scenario, its slowing of a founder may strike at most
+  `LATE_WINDOW` into the tail, once the cell formed, and lasts 4–6 s
+  (`paros_sim::world::slow_machine`, #424 (busyness metrics)).
 - **`paros-core` is never buggified**: no RNG, knob or conditional compilation. A rare-but-valid
   decision is exposed as a method with an honest contract (`resend_pending`, `step_down`) and
   perturbed only by a caller that stops calling.

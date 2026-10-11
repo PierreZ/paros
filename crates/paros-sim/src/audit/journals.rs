@@ -83,11 +83,6 @@ impl JournalBoard {
         self.parent_held_ever = true;
     }
 
-    /// The parent hold is over.
-    pub(crate) fn release_parent(&mut self) {
-        self.parent_held = None;
-    }
-
     /// `node` applied a slot of `journal`: a tenant commit while the
     /// parent is held, when another node applies a tenant journal's slot.
     pub(crate) fn applied_under_parent(&mut self, node: u64, journal: JournalIdentifier) {
@@ -114,8 +109,9 @@ impl JournalBoard {
     /// `journal` booted on `node` (at a process boot or a re-open).
     pub(crate) fn reopened(&mut self, node: u64, journal: JournalIdentifier) {
         self.quarantined.remove(&(node, journal));
-        // A held parent that boots again (attrition restarted it early) is
-        // no longer held.
+        // A held parent that boots again is no longer held: the lifecycle
+        // injector restarted it at the hold's deadline (#426
+        // (static-stability hold)), or attrition restarted it early.
         if self.parent_held == Some(node) {
             self.parent_held = None;
         }

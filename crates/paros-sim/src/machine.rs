@@ -534,6 +534,26 @@ pub(crate) fn silent_target(state: &StateHandle, dead: impl Fn(&str) -> bool) ->
     formed.into_iter().rev().find_map(ip)
 }
 
+/// The machine the slow-machine scenario slows now
+/// (`crate::world::slow_machine`, #424 (busyness metrics)), once the cell
+/// formed: the first live founding member that formed. It hosts the cell's
+/// journals, so it has real disk and CPU work to be slow at. `None` before
+/// that.
+pub(crate) fn slow_target(state: &StateHandle, dead: impl Fn(&str) -> bool) -> Option<String> {
+    let board = machine_board(state);
+    let board = lock(&board);
+    board
+        .founders
+        .iter()
+        .filter(|addr| {
+            board
+                .nodes
+                .get(*addr)
+                .is_some_and(|n| board.formed.contains(n))
+        })
+        .find_map(|addr| board.ips.get(addr).filter(|ip| !dead(ip)).cloned())
+}
+
 /// A machine in the simulation.
 pub(crate) struct MachineProcess;
 

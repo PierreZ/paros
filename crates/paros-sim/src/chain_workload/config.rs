@@ -135,7 +135,8 @@ pub(super) const OP_COUNT: u8 = 31;
 
 /// The highest weight an operation's knob draws (`ChainConfig`'s
 /// `weights`, each `0..41`). The lagging-acceptor scenario (#340) sets
-/// `TRUNCATE` to it, the lagging-fold scenario (#189) `REGISTER_NODE`.
+/// `TRUNCATE` to it, the lagging-fold scenario (#189) `REGISTER_NODE`, the
+/// slow-machine scenario (#424 (busyness metrics)) `LOAD`.
 pub(super) const OP_WEIGHT_CEILING: u64 = 40;
 
 /// The most records one write carries (`ChainConfig::batch_records`'s
