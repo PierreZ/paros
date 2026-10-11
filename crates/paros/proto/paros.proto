@@ -95,6 +95,9 @@ message WriteAck {
   // Too large: the answering node's batch limits.
   uint64 max_records = 7;
   uint64 max_bytes = 8;
+  // Set only by a frontend (#192 (the frontend)): why it answered the call
+  // itself. A node never sets it.
+  FrontendVerdict frontend = 9;
 }
 
 message Read {
@@ -121,6 +124,9 @@ message ReadAck {
   // The view the page was served from: `first_seq`, `next_seq` (the
   // committed end) and the current leader uuid.
   .paros.common.v1.JournalView state = 6;
+  // Set only by a frontend (#192 (the frontend)): why it answered the call
+  // itself. A node never sets it.
+  FrontendVerdict frontend = 7;
 }
 
 message Truncate {
@@ -151,6 +157,9 @@ message TruncateAck {
   // writer mode (a leader uuid on a multi-writer journal, none on a
   // single-writer one). Nothing moved.
   bool wrong_mode = 6;
+  // Set only by a frontend (#192 (the frontend)): why it answered the call
+  // itself. A node never sets it.
+  FrontendVerdict frontend = 7;
 }
 
 message SetLeader {
@@ -176,6 +185,9 @@ message SetLeaderAck {
   // Judged and refused (#241): the journal is multi-writer and has no
   // leader. Nothing moved.
   bool wrong_mode = 6;
+  // Set only by a frontend (#192 (the frontend)): why it answered the call
+  // itself. A node never sets it.
+  FrontendVerdict frontend = 7;
 }
 
 message Reconfigure {
@@ -218,4 +230,66 @@ message ReconfigureAck {
   string refusal = 3;
   // The ballot round the reconfiguration campaigns at, when accepted.
   optional uint64 round = 4;
+}
+
+// The frontend's calls (#192 (the frontend), `docs/architecture.md` §3.5):
+// a public call with the caller's entry, served by a frontend only. The
+// frontend checks the token, resolves the names, and forwards the call to
+// the machines; the answer is the call's own ack.
+service Frontend {
+  rpc FrontWrite(.paros.v1.FrontWrite) returns (.paros.v1.WriteAck);
+  rpc FrontRead(.paros.v1.FrontRead) returns (.paros.v1.ReadAck);
+  rpc FrontTruncate(.paros.v1.FrontTruncate) returns (.paros.v1.TruncateAck);
+  rpc FrontSetLeader(.paros.v1.FrontSetLeader) returns (.paros.v1.SetLeaderAck);
+}
+
+// Who calls, and which journal the call names.
+message Entry {
+  // The caller's token, opaque to paros: the frontend's `Authz` reads it.
+  bytes token = 1;
+  // The tenant's name. Empty: the call names its journal by the ids it
+  // carries, which only an internal-tenant call does (an admin token).
+  string tenant = 2;
+  // The journal's name inside the tenant. Empty when `tenant` is.
+  string journal = 3;
+}
+
+message FrontWrite {
+  Entry entry = 1;
+  // The ids in it are ignored when the entry names the journal.
+  .paros.v1.Write call = 2;
+}
+
+message FrontRead {
+  Entry entry = 1;
+  .paros.v1.Read call = 2;
+}
+
+message FrontTruncate {
+  Entry entry = 1;
+  .paros.v1.Truncate call = 2;
+}
+
+message FrontSetLeader {
+  Entry entry = 1;
+  .paros.v1.SetLeader call = 2;
+}
+
+// Why a frontend answered a call itself. Every value but `NONE` and
+// `UNANSWERED` means the call reached no machine: nothing moved.
+enum FrontendVerdict {
+  // The answer is the machines'.
+  FRONTEND_VERDICT_NONE = 0;
+  // The token does not parse, or no trusted root key signed it.
+  FRONTEND_VERDICT_INVALID_TOKEN = 1;
+  // The token expired.
+  FRONTEND_VERDICT_EXPIRED = 2;
+  // The token does not allow this call on this journal.
+  FRONTEND_VERDICT_FORBIDDEN = 3;
+  // The call reached the machines and no answer came back: it may have
+  // run. Ambiguous for a write.
+  FRONTEND_VERDICT_UNANSWERED = 4;
+  // The entry is malformed: a journal name without a tenant name, or a
+  // name that is not a valid name.
+  FRONTEND_VERDICT_MALFORMED = 5;
 }

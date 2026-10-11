@@ -55,7 +55,7 @@ mod world;
 pub(crate) use client::{ClientHistory, check_control_history};
 pub(crate) use linearizability::{Attempt, Call, Seen};
 pub(crate) use matchmaker::RegistryOp;
-pub(crate) use world::{AuditWorld, audit_world, audit_world_for, check_run};
+pub(crate) use world::{AuditWorld, audit_world, audit_world_for, audit_world_named, check_run};
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard};

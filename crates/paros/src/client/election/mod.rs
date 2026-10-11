@@ -346,6 +346,7 @@ impl<P: Providers> Election<P> {
                     );
                 }
                 ReadOutcome::UnknownJournal
+                | ReadOutcome::Denied(_)
                 | ReadOutcome::Unserved
                 | ReadOutcome::Malformed
                 | ReadOutcome::Ambiguous => return false,

@@ -21,7 +21,9 @@ use paros::client::fleet::read_directory;
 use paros::client::names::{
     JournalResolution, NameResolution, TenantResolution, Unreadable, read_tenant_control, resolve,
 };
-use paros::name::{Abbreviations, JournalName, PrefixMatch, match_prefix, parse_prefix};
+use paros::name::{
+    Abbreviations, JournalName, PrefixMatch, match_prefix, parse_full, parse_prefix,
+};
 use paros::{JournalId, JournalIdentifier, TenantId};
 
 use crate::Ending;
@@ -84,9 +86,39 @@ pub struct Resolved {
 
 /// The journal `reference` names, or how the command ends.
 pub async fn journal(client: &ParosClient, reference: &JournalRef) -> Result<Resolved, Ending> {
+    if let Some(pass) = client.node(0).pass() {
+        return through_frontend(pass, reference);
+    }
     match reference {
         JournalRef::Name(name) => by_name(client, name).await,
         JournalRef::Id { tenant, journal } => by_ids(client, tenant, journal).await,
+    }
+}
+
+/// The journal `reference` names, called through a frontend (#192 (the
+/// frontend)): a name is sent as it is, bound to a local identifier the
+/// frontend never reads; ids name an internal journal (an `admin` token)
+/// and must be whole, since `parosctl` lists nothing through a frontend.
+fn through_frontend(pass: &paros::Pass, reference: &JournalRef) -> Result<Resolved, Ending> {
+    match reference {
+        JournalRef::Name(name) => {
+            let local = JournalIdentifier::new(TenantId(1), JournalId(1));
+            pass.bind(local, name.clone());
+            Ok(Resolved {
+                journal: local,
+                label: name.short(),
+            })
+        }
+        JournalRef::Id { tenant, journal } => {
+            if let (Some(tenant), Some(journal)) = (parse_full(tenant), parse_full(journal)) {
+                return Ok(Resolved {
+                    journal: JournalIdentifier::new(TenantId(tenant), JournalId(journal)),
+                    label: reference.to_string(),
+                });
+            }
+            note("through a frontend, ids are whole: 16 hex digits each");
+            Err(Ending::Refused)
+        }
     }
 }
 

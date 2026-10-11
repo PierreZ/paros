@@ -423,6 +423,11 @@ impl<P: Providers> Client<P> {
         self
     }
 
+    /// The observer every attempt is reported to.
+    pub(crate) fn observer(&self) -> &Arc<dyn CallObserver> {
+        &self.observer
+    }
+
     /// Report every attempt to `observer`.
     #[must_use]
     pub fn with_observer(mut self, observer: Arc<dyn CallObserver>) -> Self {
@@ -837,7 +842,10 @@ impl<P: Providers> Client<P> {
                 {
                     Resolution::NotWritten { state }
                 }
-                WriteOutcome::Refused { .. } => Resolution::Unresolved,
+                // Refused under the leader in force, ahead of the tail: it
+                // may still land. A frontend that refused the re-send (an
+                // expired token, say) says nothing about the first attempt.
+                WriteOutcome::Refused { .. } | WriteOutcome::Denied(_) => Resolution::Unresolved,
                 // A node whose limits refuse the re-send proposed nothing:
                 // it says nothing about the first attempt, so ask another.
                 WriteOutcome::Redirect { .. }
@@ -893,7 +901,7 @@ impl<P: Providers> Client<P> {
             attempts += 1;
             let attempt = self.read_attempt(server, *request);
             let outcome = self.bounded(bound, ReadOutcome::Ambiguous, attempt).await;
-            if outcome.is_served() {
+            if outcome.is_served() || matches!(outcome, ReadOutcome::Denied(_)) {
                 return ReadReport {
                     outcome,
                     server,
@@ -958,6 +966,7 @@ impl<P: Providers> Client<P> {
         let state = match report.outcome {
             ReadOutcome::Page { state, .. } | ReadOutcome::Truncated { state } => state,
             ReadOutcome::UnknownJournal => return ClaimOutcome::UnknownJournal,
+            ReadOutcome::Denied(denial) => return ClaimOutcome::Denied(denial),
             ReadOutcome::Malformed => return ClaimOutcome::Malformed,
             ReadOutcome::Unserved | ReadOutcome::Ambiguous => return ClaimOutcome::Unread,
         };
