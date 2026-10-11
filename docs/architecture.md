@@ -903,7 +903,7 @@ its ids, `id:<tenant>/<journal>` in hex, each half a unique prefix of an id that
 list, or all 16 digits. Since #210 (tenant control journal), the machines serve every tenant's
 control journal, so a name resolves both hops on `parosd`, and `init` creates no user journal.
 
-**Where the frontend stands** (#192 (the frontend), landed on 2026-10-10). `paros::frontend`
+**Where the frontend stands** (#192 (the frontend), landed on 2026-10-11 in PR #412). `paros::frontend`
 runs the frontend, and the `paros-frontend` binary ships it with `BiscuitAuthz`. The contract
 is the `Frontend` service in `proto/paros.proto`: each of the four calls with an `Entry` (the
 token, the tenant name and the journal name). The frontend does these steps for each call:
@@ -1045,7 +1045,8 @@ nothing. The RPC is `View` (`paros.view.View`, method `0x5041_0309`), with three
 **The server filters by scope; the caller never filters.** An `admin` sees every detail. A
 `tenant` caller sees only its own tenant, and of each machine that the tenant uses only its name,
 its failure domain and whether it is up. Any other query from a `tenant` caller is refused
-`forbidden`. Until the frontend checks tokens (#192), the caller states its scope and
+`forbidden`. The frontend checks tokens on the four data-plane calls since #192 (the frontend),
+but a `View` does not go through it yet: the caller states its scope and
 `paros::view::authorize` takes it as given. That function is the seam where the Biscuit roles of
 section 3.5 (`admin`, `tenant`, `view.detail`) will decide the scope.
 
@@ -1073,7 +1074,7 @@ uses FDB's key names.
   phase, from that window. Nothing is pushed and nothing is written into a journal.
   `paros::client::load::ask_all` asks every machine of a cell view at once. A machine that does
   not answer in time shows `no metrics`, the fdbcli wording; a field with no value shows `-`.
-  `Load` is for the admin scope; the token check comes with #192.
+  `Load` is for the admin scope. It does not go through the frontend yet, so no token is checked.
 - **Simulation.** The same code runs there. moonpool's simulated disk counts its own activity
   per process, and the operator's `LOAD` operation checks that every answer is exactly
   `Busyness::between` of two samples the simulator handed to that machine.
@@ -1847,7 +1848,7 @@ toy is the end of M9. The epic is #184, the backlog pointer #69, the verificatio
 |---|---|---|
 | M7 | Journal API (#204, #205) | the four calls, the journal state machine in core, the wire and the driver, the chain workload's alphabet, the linearizability checker, the race knobs and BUGGIFY sites, the cut-over |
 | M8 | parosd deployable (#206 to #209, #221, #220, #196, #201) | Tokio providers linked, the stores on a real filesystem for the first time, the `JournalStores` opener, `Config` durable at `format`, `parosd provision` (replaced by `init` in M9), the uniform binary with class and capacity, Compose, `paros::client` (#221) and the `parosctl` CLI (#220), a tracing subscriber, exit codes |
-| M9 | The universe with one cell (#225, #226, #227 first; landed: #216 (PR #408), #228, #235, #229, #230, #211's core, and #176, #261, #263, #264 (PR #266), #267; sim first: #202, #213, #246, #247, #248; then #241, #243, #244, #240, #210, #239, #190, #212, #192, #245, #191, #211, #213, #252, #257) | the control hierarchy and its decisions, the fenced `Truncate` on the wire, random ids and the `(TenantId, JournalId)` `JournalIdentifier`, the leader-uuid API and its two writer modes, `init` creating the universe with its matchmaker sets, the cell tenant and its machine registry with role slots and liveness, the universe tenant with its directory and tenant creation state machine, the election library and the coordinators it runs, requests to a leader, placement inside capacity granted by the cell, the checkpoint-and-truncate library, names at the frontend, the frontend with Biscuit `Authz` routing through the universe tenant, per-tenant matchmaker sets, `parosctl status` |
+| M9 | The universe with one cell (#225, #226, #227 first; landed: #216 (PR #408), #192 (PR #412), #228, #235, #229, #230, #211's core, and #176, #261, #263, #264 (PR #266), #267; sim first: #202, #213, #246, #247, #248; then #241, #243, #244, #240, #210, #239, #190, #212, #245, #191, #211, #213, #252, #257) | the control hierarchy and its decisions, the fenced `Truncate` on the wire, random ids and the `(TenantId, JournalId)` `JournalIdentifier`, the leader-uuid API and its two writer modes, `init` creating the universe with its matchmaker sets, the cell tenant and its machine registry with role slots and liveness, the universe tenant with its directory and tenant creation state machine, the election library and the coordinators it runs, requests to a leader, placement inside capacity granted by the cell, the checkpoint-and-truncate library, names at the frontend, the frontend with Biscuit `Authz` routing through the universe tenant, per-tenant matchmaker sets, `parosctl status` |
 | M10 | Roles per tenant (#193, #214, #194, #145, #195) | journal-tagged proxy leaders and replicas, batchers and unbatchers for multi-writer journals, tenant modes (redundancy, grid, role counts) applied by the tenant coordinator, quotas, the benchmark, then scale work |
 | M11 | Zones (#215) | `(region, az)` `FailureDomain`s in `AcceptorConfig` with its `cell_id` (one format bump), the two-predicate zone rule, zone round-robin placement, the `single` exemption, the leader following its writer's zone, zone-kill attrition and a zone-aware budget in the simulation, zone-spread matchmaker sets |
 | M12 | Multiple cells (#232, #233, then #253) | adding and removing cells with tombstones, placement across cells by `kind` and `survives` (both carried since M9 with the cell's entry endpoint), tenant locks, moving tenants and the universe tenant between cells, splitting the universe tenant by range, the resolver beside the frontend (section 3.5); last, multi-region cells: the `MultiRegion` cell kind with its witness region, the two-level zone rule, pools per `(tenant, region)`, the universe tenant hosted in a multi-region cell, the partition through the witness in the simulation, moving tenants between cell kinds |
