@@ -397,10 +397,6 @@ impl StorageWorld {
                 .is_some_and(|members| !members.contains(node))
                 && deciders.is_some_and(|members| members.contains(node))
         };
-        // A quiet holder (#471) keeps its copy: its boot applies nothing.
-        if holders.iter().any(|(key, _, _)| self.quiet.contains(key)) {
-            assert_reachable!("storage: an outage's loss passes over a quiet holder");
-        }
         let mut damageable: Vec<(String, u64)> = holders
             .iter()
             .filter(|(key, _, settled)| {
@@ -530,7 +526,8 @@ impl StorageWorld {
     /// (CTRL Case 3) jumps past it to an ahead acceptor's trim point.
     /// `None` while no split shows, or while a holder of the slot is
     /// unsettled (its layout is not known, so its copy would stay clean and
-    /// decide the slot) or quiet (#471: its boot applies no loss).
+    /// decide the slot). A quiet holder's copy is kept (#471: its boot
+    /// applies no loss).
     #[tracing::instrument(level = "debug", skip_all)]
     pub(crate) fn plan_split_floor_loss(
         &mut self,
@@ -553,17 +550,19 @@ impl StorageWorld {
         if holders.iter().any(|(_, _, settled)| !settled) {
             return None;
         }
-        // A quiet holder (#471, a joiner's seat) is like an unsettled one:
-        // its boot applies no loss, so its copy would stay clean and decide
-        // the slot, and its mark would never clear.
+        // A quiet holder (#471, a joiner's seat) keeps its copy: its boot
+        // applies no loss, so a mark there would never clear. Waiting for it
+        // instead, as for an unsettled holder, waits forever: it cost the
+        // scenario 17 of 39 strikes in 2,000 hunt seeds. Its clean copy
+        // decides the slot only where a Phase 1 asks it.
         if holders.iter().any(|(key, _, _)| self.quiet.contains(key)) {
-            assert_reachable!("storage: a split-floor loss waits on a quiet holder");
-            return None;
+            assert_reachable!("storage: a split-floor loss keeps a quiet holder's copy");
         }
         let damaged: Vec<(String, u64)> = holders
             .iter()
             .filter(|(key, _, _)| {
-                !self.marks.get(key).is_some_and(|m| m.contains(&slot))
+                !self.quiet.contains(key)
+                    && !self.marks.get(key).is_some_and(|m| m.contains(&slot))
                     && !self.rotted.get(key).is_some_and(|m| m.contains(&slot))
             })
             .map(|(key, node, _)| (key.clone(), *node))
