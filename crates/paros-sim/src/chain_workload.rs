@@ -366,6 +366,11 @@ impl Workload for ChainWorkload {
             // its gates wait on a tenant step while a founder is down, so
             // every client runs one as often as the weight family allows.
             config.weights[usize::from(TENANT)] = OP_WEIGHT_CEILING;
+            // Its founder down, then back, degrades every journal on the
+            // founding members and heals it: the status gate "a degraded
+            // journal shows healthy again" (#191 (status)) waits on views
+            // on both sides, so every client asks as often as it can.
+            config.weights[usize::from(VIEW)] = OP_WEIGHT_CEILING;
         }
         let lagging_fold = crate::shape::lagging_fold(ctx.state());
         if lagging_fold {
@@ -490,6 +495,10 @@ impl Workload for ChainWorkload {
         // members)).
         if crate::shape::downed_founder(ctx.state()) && !operations.contains(&TENANT) {
             operations.push(TENANT);
+        }
+        // And `VIEW` on a downed-founder seed (#191 (status)).
+        if crate::shape::downed_founder(ctx.state()) && !operations.contains(&VIEW) {
+            operations.push(VIEW);
         }
         tracing::info!(?config, "chain_config");
         let time = ctx.time().clone();
