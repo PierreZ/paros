@@ -43,14 +43,17 @@
 //! unanswered create left behind (a crash between the bookings and the
 //! create, or an abandoned create) names a journal the tenant never
 //! created: the next create in that tenant releases it, after the claim on
-//! the tenant control journal fenced every earlier term.
+//! the tenant control journal fenced every earlier term, and only while the
+//! desk's fold is settled: an unanswered write of the term itself may still
+//! land, so its fold may lack a live journal until a later write lands at
+//! the tail.
 //!
 //! The desk draws no randomness of its own: its journal and booking ids
 //! derive from the seed the node loop drew for the candidacy, and its
 //! BUGGIFY decisions (reuse a taken id once, an impatient term, a create
 //! abandoned after its bookings) were drawn there too.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use moonpool_core::Providers;
@@ -107,6 +110,10 @@ pub(crate) struct TenantDesk {
     registry: Folder<Registry>,
     /// Each tenant's control journal, claimed under the term's uuid.
     tenants: BTreeMap<TenantId, Checkpointer<TenantControl>>,
+    /// The tenants whose last write is not known written: an unanswered
+    /// write may still land past the desk's fold, so the fold may lack a
+    /// live journal. A write that lands at the tail settles the fold again.
+    unsettled: BTreeSet<TenantId>,
     /// The seed ids derive from, and how many were drawn.
     seed: u128,
     draws: u64,
@@ -151,6 +158,7 @@ impl TenantDesk {
             registry: Folder::new(Registry::new(founders.iter().copied())),
             founders,
             tenants: BTreeMap::new(),
+            unsettled: BTreeSet::new(),
             seed,
             draws: 0,
             reuse,
@@ -310,9 +318,14 @@ impl TenantDesk {
             // The term's cell session ended: no slot can be booked.
             return JournalAnswer::Unavailable;
         };
-        // A live name answers `NameTaken` at apply: it books nothing.
+        // A live name answers `NameTaken` at apply: it books nothing. An
+        // unsettled fold may lack a live journal whose create landed
+        // unanswered: its orphans wait for a settled one.
         let named = self.desk(tenant).state().named(name).is_some();
-        if !named && self.release_orphans(client, tenant, cell).await.is_err() {
+        if !named
+            && !self.unsettled.contains(&tenant)
+            && self.release_orphans(client, tenant, cell).await.is_err()
+        {
             return JournalAnswer::Unavailable;
         }
         for attempt in 0..ID_DRAWS {
@@ -395,7 +408,8 @@ impl TenantDesk {
     /// (a crash between its bookings and its write, or an abandoned create),
     /// or a delete whose release did not land. Only after the desk claimed
     /// the tenant control journal, so no earlier term can still write the
-    /// create those slots were booked for.
+    /// create those slots were booked for, and only on a settled fold, so no
+    /// write of this term can either.
     async fn release_orphans<P: Providers>(
         &self,
         client: &Client<P>,
@@ -635,6 +649,8 @@ impl TenantDesk {
             moonpool_assertions::reachable!("tenant coordinator: an impatient create");
         }
         let writer = impatient(client, impatient_write);
+        // Unsettled until the write is known written and folded.
+        self.unsettled.insert(tenant);
         match desk.append(&writer, command.encode(), 0).await {
             AppendOutcome::Written(WriterOutcome::Written { .. }) => {
                 let tail = desk.writer().next_seq();
@@ -675,6 +691,9 @@ impl TenantDesk {
             desk.folder().next_seq() > before,
             "a written entry moves the fold"
         );
+        // The write landed at the tail and the fold reached it: every
+        // earlier write of the term is folded, or never lands.
+        self.unsettled.remove(&tenant);
         Ok(())
     }
 
