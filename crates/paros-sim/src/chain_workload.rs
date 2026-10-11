@@ -23,7 +23,9 @@ use paros::client::{
     ClaimOutcome, ReadOutcome, Retarget, SetLeaderOutcome, TruncateOutcome, WriteOutcome, Writer,
     WriterOutcome,
 };
-use paros::{Entry, JournalIdentifier, LeaderUuid, TenantId, Truncate, leader_uuid_to_proto};
+use paros::{
+    Entry, JournalIdentifier, LeaderUuid, QuorumSystem, TenantId, Truncate, leader_uuid_to_proto,
+};
 
 use crate::audit::{AuditWorld, ClientHistory, audit_world_for, check_run};
 use crate::chain::{hash_text, trace_truncate};
@@ -695,32 +697,41 @@ impl Workload for ChainWorkload {
         // system-journal run holds the seed — the one node hosting the
         // registry — down for
         // `parent_hold_ms` of the chaos window, while every tenant journal
-        // keeps committing without it (the journal board's gate).
+        // keeps committing without it (the journal board's gate). The
+        // lifecycle injector restarts it at the deadline (#426
+        // (static-stability hold)): under a grid, the column that holds the
+        // seed decides none of its slots, so this client's next write can
+        // block until the seed is back, and a restart at the top of its next
+        // step would never run. The board releases the hold when the seed's
+        // journals boot again.
         let parent_seed = (client_id == 0 && crate::shape::system_journals(ctx.state()))
             .then(|| servers[0].clone());
-        let mut parent_until: Option<Duration> = None;
+        // Under a grid the hold is the column-freezing state of #426: hold
+        // there more often, so the restart at the deadline is exercised.
+        let grid = matches!(
+            crate::shape::quorum_policy(ctx.state(), servers.len()).system(servers.len()),
+            QuorumSystem::Grid { .. }
+        );
         let mut parent_held_once = false;
         let journal_board = crate::audit::journals::journal_board(ctx.state());
         for _step in 0..config.steps {
             if shutdown.is_cancelled() {
                 break;
             }
-            if let Some(ip) = &parent_seed {
-                if parent_until.is_some_and(|until| time.now() >= until) {
-                    crate::lifecycle::restart(ctx, ip).await;
-                    crate::audit::journals::lock(&journal_board).release_parent();
-                    parent_until = None;
-                } else if parent_until.is_none()
-                    && !parent_held_once
-                    && time.now() < Duration::from_millis(CHAOS_DURATION_MS)
-                    && buggify_with_prob!(0.1)
-                {
-                    assert_reachable!("static: the seed hosting the control journals is held down");
-                    crate::lifecycle::crash(ctx, ip).await;
-                    crate::audit::journals::lock(&journal_board).hold_parent(0);
-                    parent_until = Some(time.now() + Duration::from_millis(config.parent_hold_ms));
-                    parent_held_once = true;
+            if let Some(ip) = &parent_seed
+                && !parent_held_once
+                && time.now() < Duration::from_millis(CHAOS_DURATION_MS)
+                && (buggify_with_prob!(0.1) || (grid && buggify_with_prob!(0.4)))
+            {
+                assert_reachable!("static: the seed hosting the control journals is held down");
+                if grid {
+                    assert_reachable!("static: the held seed freezes a grid column");
                 }
+                crate::lifecycle::crash(ctx, ip).await;
+                crate::audit::journals::lock(&journal_board).hold_parent(0);
+                let until = time.now() + Duration::from_millis(config.parent_hold_ms);
+                crate::lifecycle::restart_at(ctx, ip, until).await;
+                parent_held_once = true;
             }
 
             // Exactly six provider draws per logical step, independent of the
@@ -1408,10 +1419,6 @@ impl Workload for ChainWorkload {
             }
         }
 
-        if let (Some(ip), Some(_)) = (&parent_seed, parent_until.take()) {
-            crate::lifecycle::restart(ctx, ip).await;
-            crate::audit::journals::lock(&journal_board).release_parent();
-        }
         assert_sometimes!(
             successful_after_ambiguity,
             "chain: ambiguous proposal is reconciled as committed"
