@@ -94,6 +94,10 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
 - **Simulation before features** (decided on 2026-10-04): when the harness cannot exercise what
   `parosd` ships, or an oracle the doc lists is missing, harness work ranks ahead of new features
   in #69. A feature lands only on a harness that can prove it.
+- **Keep the docs in step with the code** (decided on 2026-10-11): a PR that adds a feature or
+  changes behaviour also updates the site (`web/site/`, the `update-the-site` skill), the
+  `README.md` and `docs/architecture.md` where they describe it. A feature PR without its
+  docs is not done.
 - **Organize as you grow**: a module holds one concern; split a file the moment it holds a
   second. Deleting is part of every change: a superseded axis, type, flag or gate goes in the
   PR that supersedes it.

@@ -653,6 +653,18 @@ pub const RARE: &[Rare] = &[
         reason: "marginal: fired on 5 of 810 hunt seeds (#486)",
     },
     Rare {
+        msg: "chain: the settle tail waits for a spare that joined in the tail",
+        reason: "marginal: fired in the sweep of PR #499 (journals on admitted machines), missed by the sweep of PR #503 (matchmaker sets off the founders) (#486)",
+    },
+    Rare {
+        msg: "outage: a split-floor outage strikes in the recovery tail",
+        reason: "marginal: fired in the sweep of PR #499 (journals on admitted machines), missed by the sweep of PR #503 (matchmaker sets off the founders) (#486)",
+    },
+    Rare {
+        msg: "storage: a split-floor outage loses a slot below a peer's floor",
+        reason: "marginal: fired in the sweep of PR #499 (journals on admitted machines), missed by the sweep of PR #503 (matchmaker sets off the founders) (#486)",
+    },
+    Rare {
         msg: "storage: a split-floor loss keeps a quiet holder's copy",
         reason: "marginal: fired on none of 810 hunt seeds (#486)",
     },
