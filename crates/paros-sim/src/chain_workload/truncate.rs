@@ -181,6 +181,7 @@ impl ChainWorkload {
                     // learns it from its next write.
                     TruncateOutcome::WrongMode { .. } => owner_never_of_wrong_mode(),
                     TruncateOutcome::Refused { .. }
+                    | TruncateOutcome::Denied(_)
                     | TruncateOutcome::UnknownJournal
                     | TruncateOutcome::Malformed
                     | TruncateOutcome::Ambiguous => {}

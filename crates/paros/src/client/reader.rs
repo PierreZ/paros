@@ -10,6 +10,7 @@ use paros_core::{JournalIdentifier, JournalView};
 
 use super::Client;
 use super::outcome::ReadOutcome;
+use crate::frontend::Denial;
 use crate::rpc::Read;
 
 /// What one step of a [`Reader`] came back with.
@@ -40,6 +41,9 @@ pub enum ReaderOutcome {
     Unavailable,
     /// The server asked does not serve the journal.
     UnknownJournal,
+    /// Refused by a frontend (#192 (the frontend)): the cursor did not
+    /// move.
+    Denied(Denial),
 }
 
 /// A cursor into one journal.
@@ -114,6 +118,7 @@ impl Reader {
                 }
             }
             ReadOutcome::UnknownJournal => ReaderOutcome::UnknownJournal,
+            ReadOutcome::Denied(denial) => ReaderOutcome::Denied(denial),
             ReadOutcome::Unserved | ReadOutcome::Malformed | ReadOutcome::Ambiguous => {
                 ReaderOutcome::Unavailable
             }

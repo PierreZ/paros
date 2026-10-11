@@ -18,6 +18,8 @@
 //! already naming it is adopted, never claimed twice.
 
 use moonpool_core::Providers;
+
+use crate::frontend::Denial;
 use paros_core::{Entry, JournalIdentifier, JournalView, LeaderUuid, Seq, Value};
 
 use super::outcome::{ClaimOutcome, TruncateOutcome, WriteOutcome};
@@ -97,6 +99,10 @@ pub enum WriterOutcome {
         /// The most record bytes the node accepts in one write.
         max_bytes: u64,
     },
+    /// Refused by a frontend before it reached any machine (#192 (the
+    /// frontend)): nothing was written, and the writer's position is
+    /// unchanged.
+    Denied(Denial),
     /// Still unknown after the resolution budget: the write may land.
     Ambiguous,
 }
@@ -473,6 +479,7 @@ impl Writer {
                 max_bytes,
             },
             WriteOutcome::Malformed => WriterOutcome::Unavailable { leader: None },
+            WriteOutcome::Denied(denial) => WriterOutcome::Denied(denial),
             WriteOutcome::Ambiguous => {
                 let resolved = client
                     .resolve(&request, report.server, super::Retarget::FollowHint)

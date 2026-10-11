@@ -77,6 +77,8 @@ pub enum Unreadable {
     /// The journal was truncated below the fold's cursor, and no
     /// checkpoint healed the gap.
     Truncated,
+    /// A frontend refused the read (#192 (the frontend)).
+    Denied,
 }
 
 /// What resolving a journal's name inside its tenant came to.
@@ -177,6 +179,7 @@ pub async fn read_tenant_control<P: Providers>(
         LoadOutcome::Loaded { .. } => Ok(folder.state().clone()),
         LoadOutcome::Unavailable => Err(Unreadable::Unavailable),
         LoadOutcome::UnknownJournal => Err(Unreadable::UnknownJournal),
+        LoadOutcome::Denied(_) => Err(Unreadable::Denied),
         LoadOutcome::Unhealed { .. } => Err(Unreadable::Truncated),
     }
 }

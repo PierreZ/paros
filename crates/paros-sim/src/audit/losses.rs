@@ -159,8 +159,12 @@ impl AuditState {
             .into_iter()
             .filter(|node| !planned.lost.contains(node) && !down.contains(node))
             .collect();
-        // The escapes `loss_recoverable` takes: a clean holder serving the
-        // slot from its chosen prefix, or a ballot the tally never heard.
+        // The escapes `loss_recoverable` takes: a peer's trim point past the
+        // slot, a clean holder serving the slot from its chosen prefix, or
+        // a ballot the tally never heard.
+        if self.trimmed_past(slot, &down) {
+            return false;
+        }
         if clean.iter().any(|node| {
             self.decided_prefix
                 .get(node)
@@ -255,7 +259,7 @@ impl AuditState {
                         .get(node)
                         .is_none_or(|prefix| *prefix <= slot)
             });
-        if !out_of_reach {
+        if !out_of_reach || self.trimmed_past(slot, &down) {
             return false;
         }
         let holding_nothing: BTreeSet<NodeId> = config
@@ -546,6 +550,12 @@ impl AuditState {
             .into_iter()
             .filter(|node| !planned.lost.contains(node) && !down.contains(node))
             .collect();
+        // A peer whose floor passed the slot answers a catch-up below it
+        // with its trim point, and every node whose copy is lost jumps past
+        // it (#409 (repair probe blocked below a trim point)).
+        if self.trimmed_past(slot, &down) {
+            return true;
+        }
         // A clean holder that durably knows the slot decided (its chosen
         // index covers it) serves the record from its chosen prefix to any
         // peer whose own faulty chosen record left a hole (catch-up), and
@@ -567,6 +577,24 @@ impl AuditState {
             return true;
         };
         config.has_phase1_quorum(&self.qualifying(config, slot, planned, &down, threshold))
+    }
+
+    /// Whether a node not down for good, named by a configuration the
+    /// latest campaign asked, durably truncated past `slot`: it serves its
+    /// trim point (`Message::TrimmedTo`) to any node that asks below it, so
+    /// no copy of the slot is needed again (#409 (repair probe blocked below
+    /// a trim point), the split-floor outage, `crate::world::split_floor`).
+    /// A replica serves no catch-up.
+    fn trimmed_past(&self, slot: u64, down: &BTreeSet<u64>) -> bool {
+        let asked = self.asked_configurations();
+        self.truncate_watermark.iter().any(|(node, floor)| {
+            *floor > slot
+                && !down.contains(node)
+                && !self.replicas.contains(node)
+                && asked
+                    .iter()
+                    .any(|config| config.members().contains(&NodeId(*node)))
+        })
     }
 
     /// The best ballot among `slot`'s `clean` copies, the CTRL threshold a

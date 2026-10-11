@@ -112,7 +112,8 @@ impl ChainWorkload {
                     super::owner_never_of_wrong_mode();
                     self.history.record_write_failed(submission.op);
                 }
-                WriteOutcome::UnknownJournal
+                WriteOutcome::Denied(_)
+                | WriteOutcome::UnknownJournal
                 | WriteOutcome::Malformed
                 | WriteOutcome::Ambiguous => {
                     self.history.record_write_failed(submission.op);
@@ -192,6 +193,7 @@ impl ChainWorkload {
                 false
             }
             ClaimOutcome::Redirect { .. }
+            | ClaimOutcome::Denied(_)
             | ClaimOutcome::UnknownJournal
             | ClaimOutcome::Malformed
             | ClaimOutcome::Unread

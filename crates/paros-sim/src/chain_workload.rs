@@ -342,11 +342,13 @@ impl Workload for ChainWorkload {
         }
 
         let mut config = ChainConfig::for_timeline();
-        if crate::shape::lagging_acceptor(ctx.state()) {
+        if crate::shape::lagging_acceptor(ctx.state()) || crate::shape::split_floor(ctx.state()) {
             // The lagging-acceptor scenario (#340): the peers' floors must
             // pass what the held acceptor holds, so every client compacts
             // at every truncation step, and truncates as often as the
-            // weight family allows.
+            // weight family allows. The split-floor scenario (#409) needs
+            // the same floors: one acceptor's passes a slot its peers
+            // still hold.
             config.compaction = true;
             config.compact_every = 1;
             config.weights[usize::from(TRUNCATE)] = OP_WEIGHT_CEILING;
@@ -622,6 +624,7 @@ impl Workload for ChainWorkload {
                     }
                     ClaimOutcome::Lost { .. }
                     | ClaimOutcome::Owned { .. }
+                    | ClaimOutcome::Denied(_)
                     | ClaimOutcome::UnknownJournal
                     | ClaimOutcome::Malformed => break,
                     ClaimOutcome::Redirect { leader } => {
@@ -1073,6 +1076,7 @@ impl Workload for ChainWorkload {
                                 WriteOutcome::Redirect { leader } => nodes.observe_leader(leader),
                                 WriteOutcome::WrongMode { .. } => owner_never_of_wrong_mode(),
                                 WriteOutcome::TooLarge { .. }
+                                | WriteOutcome::Denied(_)
                                 | WriteOutcome::UnknownJournal
                                 | WriteOutcome::Malformed
                                 | WriteOutcome::Ambiguous => {}
@@ -1725,7 +1729,8 @@ impl Workload for ChainWorkload {
                                 .unwrap_or((target + 1) % server_count);
                         }
                         ClaimOutcome::WrongMode { .. } => owner_never_of_wrong_mode(),
-                        ClaimOutcome::UnknownJournal
+                        ClaimOutcome::Denied(_)
+                        | ClaimOutcome::UnknownJournal
                         | ClaimOutcome::Malformed
                         | ClaimOutcome::Unread
                         | ClaimOutcome::Ambiguous => {
@@ -1818,7 +1823,7 @@ impl Workload for ChainWorkload {
                             .and_then(|id| nodes.index_of(id))
                             .unwrap_or((target + 1) % server_count);
                     }
-                    WriterOutcome::UnknownJournal => {
+                    WriterOutcome::Denied(_) | WriterOutcome::UnknownJournal => {
                         self.history.record_write_failed(submission.op);
                         let journal = writer.journal();
                         assert_always!(

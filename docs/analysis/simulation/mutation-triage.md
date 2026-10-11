@@ -214,8 +214,10 @@ the weekly 300 seeds:
 - `Proposer::raise_next_slot -> ()`: caught in seeds 1..=20 ("a trim-point
   jump carries the allocator past the dropped prefix"). Without the scenario
   below, the catch hung on one of only 4 jumps in the 300 seeds.
-- `Proposer::probe_retain_from -> ()`: survives. No seed meets a leader whose
-  probe is blocked below a trim point. Follow-up: #409.
+- `Proposer::probe_retain_from -> ()`: survived the first run. No seed met a
+  leader whose probe is blocked below a trim point. Since #409, the
+  split-floor scenario (below) catches it in seeds 81..=100 ("a repair probe
+  surviving a trim-point jump keeps only retained slots").
 
 The lagging-acceptor scenario (`shape::lagging_acceptor`) amplifies the
 jumps. It holds one acceptor down until a peer's floor passes the chosen
@@ -225,6 +227,14 @@ compacts at every truncation step. The jumps in the 300 seeds went from 4 to
 nothing in the chaos window, and most truncations land after the window. With
 the scenario on every seed, 600 seeds met 91 jumps, 4 of them at a leader,
 none with an open probe.
+
+The split-floor scenario (`shape::split_floor`, #409) reaches the probe. The
+moment the acceptors with the highest floor passed a decided slot the others
+hold, it holds them down. Once the others are quiet, an outage takes every
+acceptor down and loses every copy of that slot. The ahead acceptors come
+back last. A leader among the others blocks on the slot, opens a repair
+probe, and jumps to an ahead acceptor's trim point. The probe's jumps went
+from 0 in 900 hunt seeds to 4 in 1,000 (67 scenario seeds, 23 outages).
 
 ## Equivalent edits a regex cannot isolate
 

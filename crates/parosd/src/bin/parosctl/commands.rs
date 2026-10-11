@@ -12,6 +12,7 @@ use paros::client::{
     ClaimOutcome, Client, ReaderOutcome, ReconfigureOutcome, RetireOutcome, TruncateOutcome,
     WriteOptions, WriteOutcome, Writer, WriterOutcome,
 };
+use paros::frontend::Denial;
 use paros::wire::common::Ballot;
 use paros::{
     InspectReply, JournalIdentifier, JournalView, LeaderUuid, QuorumSystem, RetireRequest, Seq,
@@ -135,6 +136,7 @@ async fn become_writer(
             return Err(refused(out, "multi-writer journal", &state));
         }
         ClaimOutcome::UnknownJournal => return Err(unknown_journal(label)),
+        ClaimOutcome::Denied(denial) => return Err(denied(denial)),
         ClaimOutcome::Unread => {
             note("no server served the journal's state");
             return Err(Ending::Unreachable);
@@ -232,6 +234,7 @@ pub async fn write(
                 return refused(out, "multi-writer journal", &state);
             }
             WriterOutcome::NotWritten { state } => return refused(out, "not written", &state),
+            WriterOutcome::Denied(denial) => return denied(denial),
             WriterOutcome::NotOwner => {
                 note("this writer leads no term of the journal");
                 return Ending::Refused;
@@ -288,6 +291,7 @@ async fn append(
             max_bytes,
         } => too_large(out, max_records, max_bytes),
         WriteOutcome::UnknownJournal => unknown_journal(&journal.label),
+        WriteOutcome::Denied(denial) => denied(denial),
         WriteOutcome::Redirect { .. } => {
             note("no leader took the write");
             Ending::Unreachable
@@ -319,6 +323,14 @@ fn refused(out: &Printer, what: &str, state: &JournalView) -> Ending {
         || format!("{what} {}", state_text(state)),
         || json!({ "outcome": what, "state": state_json(state) }),
     );
+    Ending::Refused
+}
+
+fn denied(denial: Denial) -> Ending {
+    note(&format!(
+        "the frontend denied the call: {}",
+        denial.as_str()
+    ));
     Ending::Refused
 }
 
@@ -389,6 +401,7 @@ pub async fn read(client: &ParosClient, out: &Printer, args: ReadArgs) -> Ending
                 return Ending::Unreachable;
             }
             ReaderOutcome::UnknownJournal => return unknown_journal(&resolved.label),
+            ReaderOutcome::Denied(denial) => return denied(denial),
         }
     };
     out.emit(
@@ -473,6 +486,7 @@ pub async fn tail(client: &ParosClient, out: &Printer, args: TailArgs) -> Ending
                     tokio::time::sleep(backoff.max(Duration::from_millis(100))).await;
                 }
                 ReaderOutcome::UnknownJournal => return unknown_journal(&resolved.label),
+                ReaderOutcome::Denied(denial) => return denied(denial),
             }
         }
     };
@@ -550,6 +564,7 @@ pub async fn truncate(
         TruncateOutcome::Refused { state } => refused(out, "refused", &state),
         TruncateOutcome::WrongMode { state } => refused(out, "wrong mode", &state),
         TruncateOutcome::UnknownJournal => unknown_journal(&resolved.label),
+        TruncateOutcome::Denied(denial) => denied(denial),
         TruncateOutcome::Redirect { .. } => {
             note("no leader decided the truncation");
             Ending::Unreachable
@@ -627,6 +642,7 @@ pub async fn set_leader(
         ClaimOutcome::Lost { state } => refused(out, "lost", &state),
         ClaimOutcome::WrongMode { state } => refused(out, "multi-writer journal", &state),
         ClaimOutcome::UnknownJournal => unknown_journal(&resolved.label),
+        ClaimOutcome::Denied(denial) => denied(denial),
         ClaimOutcome::Unread | ClaimOutcome::Redirect { .. } => {
             note("no leader decided the swap");
             Ending::Unreachable
