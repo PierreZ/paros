@@ -1518,7 +1518,7 @@ where
     let (reconfigure_reply_tx, mut reconfigure_replies) =
         mpsc::channel::<(TenantId, ReconfigureReply)>(tunables.peer_inbox_capacity);
     let links = MatchmakerLinks {
-        clients: matchmaker_clients,
+        clients: std::sync::Mutex::new(matchmaker_clients),
         replies: match_reply_tx,
         gc_acks: gc_ack_tx,
         reconfigure_replies: reconfigure_reply_tx,
@@ -1875,17 +1875,30 @@ where
                 // A matchmaker-set reconfiguration (#125): any node may drive
                 // it. Refusable like every operator request; a started
                 // handover runs to completion on this node's own cadence.
-                // It hands over the set of the node's first journal's
-                // tenant (the request names no tenant yet).
-                let Some((&journal, _)) = journals.first() else { continue };
+                // It hands over the set of the tenant the request names
+                // (#501 (matchmaker sets off the founders)), through a
+                // journal of that tenant this node serves, or the set of
+                // the node's first journal's tenant when it names none.
+                let asked = TenantId(req.tenant);
+                let journal = if asked.0 == 0 {
+                    journals.first().map(|(journal, _)| *journal)
+                } else {
+                    journals
+                        .live
+                        .iter()
+                        .find(|(journal, rt)| journal.tenant == asked && rt.node.config().has_matchmakers())
+                        .map(|(journal, _)| *journal)
+                };
+                let Some(journal) = journal else { continue };
                 let tenant = journal.tenant;
+                assert!(asked.0 == 0 || tenant == asked, "a handover runs for the tenant asked");
                 let audits = tenant_audits(&journals, &stores, tenant);
-                let Some((_, rt)) = journals.first() else { continue };
+                let Some(rt) = journals.live.get(&journal) else { continue };
                 let lp = shared.with(&audits);
                 let handover = handovers.entry(tenant).or_insert_with(|| HandoverDriver::new(NodeId(self_id)));
                 let target: Vec<MatchmakerId> = req.members.iter().copied().map(MatchmakerId).collect();
                 let refusal = operator::reconfigure_matchmakers(&rt.node, handover, &target, |m| {
-                    links.clients.contains_key(m)
+                    links.knows(*m)
                 })
                 .err();
                 let accepted = refusal.is_none();
@@ -1962,7 +1975,7 @@ where
                 let journal = answer.journal();
                 let events = f.fold_remote(answer);
                 let checkpoints = if journal == f.registry_key() { f.take_checkpoints() } else { Vec::new() };
-                let mut sys = SystemCtx { stores: &mut stores, journals: &mut journals, now: ticks, tunables: &tunables, out: &out, lanes: &lanes, rpc: &rpc_handle, audit: &node_audit };
+                let mut sys = SystemCtx { stores: &mut stores, journals: &mut journals, now: ticks, tunables: &tunables, out: &out, lanes: &lanes, links: &links, rpc: &rpc_handle, audit: &node_audit };
                 let (mut admit, owed) = sys.apply(f, journal, events, checkpoints).await;
                 if owed && sys.place(f).await {
                     admit = true;
@@ -2067,7 +2080,7 @@ where
                         assert!(moved, "every founding member but this one has a lane");
                         // A founding member hosts its cell's matchmaker sets
                         // (#190): dialed at its new address too.
-                        if let Some(link) = links.clients.get(&MatchmakerId(peer.0)) {
+                        if let Some(link) = links.client(MatchmakerId(peer.0)) {
                             link.readdress(addr.clone(), &interface);
                         }
                         tracing::info!(node = self_id, peer = peer.0, %addr, "peer_book_moved");
@@ -2087,7 +2100,7 @@ where
                     let mut placing = false;
                     for (journal, events) in follow_local(f, &journals) {
                         let checkpoints = if journal == f.registry_key() { f.take_checkpoints() } else { Vec::new() };
-                        let mut sys = SystemCtx { stores: &mut stores, journals: &mut journals, now: ticks, tunables: &tunables, out: &out, lanes: &lanes, rpc: &rpc_handle, audit: &node_audit };
+                        let mut sys = SystemCtx { stores: &mut stores, journals: &mut journals, now: ticks, tunables: &tunables, out: &out, lanes: &lanes, links: &links, rpc: &rpc_handle, audit: &node_audit };
                         let (admit, owed) = sys.apply(f, journal, events, checkpoints).await;
                         placing |= owed;
                         if admit {
@@ -2095,7 +2108,7 @@ where
                         }
                     }
                     if placing {
-                        let mut sys = SystemCtx { stores: &mut stores, journals: &mut journals, now: ticks, tunables: &tunables, out: &out, lanes: &lanes, rpc: &rpc_handle, audit: &node_audit };
+                        let mut sys = SystemCtx { stores: &mut stores, journals: &mut journals, now: ticks, tunables: &tunables, out: &out, lanes: &lanes, links: &links, rpc: &rpc_handle, audit: &node_audit };
                         if sys.place(f).await {
                             admission_owed.get_or_insert(time.now());
                         }
@@ -2125,6 +2138,7 @@ struct SystemCtx<'a, 'l, P: Providers, J: JournalStores> {
     tunables: &'a DriverTunables,
     out: &'a Outbound,
     lanes: &'a LaneOpener<'l, P, J::Audit>,
+    links: &'a MatchmakerLinks<P>,
     rpc: &'a moonpool_rpc::RpcHandle<P>,
     audit: &'a J::Audit,
 }
@@ -2415,6 +2429,15 @@ impl<P: Providers, J: JournalStores> SystemCtx<'_, '_, P, J> {
                 crate::system::BookingTarget::Set { .. } => None,
             })
             .collect();
+        // The matchmaker sets booked here (#501 (matchmaker sets off the
+        // founders)): the host opens a set of a later generation only then.
+        let sets: BTreeSet<TenantId> = follower
+            .registry()
+            .bookings()
+            .filter(|(_, b)| b.node == me && b.role == crate::system::Role::Matchmaker)
+            .map(|(_, b)| b.target.tenant())
+            .collect();
+        self.stores.book_sets(sets);
         // A journal its tenant created (live or deleted) that is no longer
         // booked here stops: its booking was released.
         let unbooked: Vec<JournalIdentifier> = self
@@ -2520,6 +2543,13 @@ impl<P: Providers, J: JournalStores> SystemCtx<'_, '_, P, J> {
         if !self.out.has_peer(id) {
             match peer_target(addr) {
                 Ok(addr) => {
+                    // A machine the registry admits may host a matchmaker
+                    // set of a later generation (#501 (matchmaker sets off
+                    // the founders)): this node links to it too.
+                    self.links.add(
+                        MatchmakerId(id.0),
+                        MatchmakerClient::named(self.rpc, self.lanes.names.clone(), addr.clone()),
+                    );
                     let lane =
                         self.lanes
                             .open(self.rpc, "paros-peer-delivery", addr, Party::Node(id));
@@ -2625,8 +2655,13 @@ fn admit_owed<P: Providers, S, A>(
 /// grow-only) and are kept out at the edge instead.
 fn admit_pool<P: Providers, S, A>(journals: &mut Journals<S, A>, follower: &ControlFollower<P>) {
     let pool = follower.pool();
+    // In a cell, a machine's matchmaker is named by its node id: every
+    // registered machine may host a set of a later generation (#501
+    // (matchmaker sets off the founders)).
+    let matchmakers: Vec<MatchmakerId> = pool.iter().map(|n| MatchmakerId(n.0)).collect();
     for rt in journals.live.values_mut() {
         rt.node.extend_pool(&pool);
+        rt.node.extend_matchmaker_pool(&matchmakers);
         // A journal that can reconfigure now admits the whole registry pool.
         if rt.node.config().has_matchmakers() {
             assert!(

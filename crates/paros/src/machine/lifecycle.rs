@@ -629,7 +629,9 @@ where
 /// shutdown (#474): the node loop of every machine of a cell, with no plan
 /// journal, following the control journals from the founding members its
 /// admission names. Its journals are born with their tenant's matchmaker
-/// set on the founding members, as every journal of the cell is (#190).
+/// set on the founding members, as every journal of the cell is (#190); a
+/// storage machine hosts the later generations of the sets booked on it
+/// (#501 (matchmaker sets off the founders)).
 async fn serve_admitted<P, S, A, F>(
     providers: P,
     disk: ProviderDisk<S>,
@@ -693,11 +695,29 @@ where
         admitted.cached.clone(),
         shutdown.clone(),
     );
-    let stores = MachineStores::admitted(disk, record, admission.cell.cell, audits);
-    let matchmakers: Vec<(MatchmakerId, String)> = founders
+    let mut stores = MachineStores::admitted(disk, record, admission.cell.cell, audits);
+    // A storage machine hosts the matchmaker sets the registry books on it
+    // (#501 (matchmaker sets off the founders)): never a member of a
+    // bootstrap generation, it opens only those.
+    if admitted.facts.class == Class::Storage {
+        stores = stores.with_matchmakers(MatchmakerConfig {
+            id: MatchmakerId(node_id.0),
+            bootstrap: control.matchmakers.clone(),
+        });
+    }
+    let mut matchmakers: Vec<(MatchmakerId, String)> = founders
         .iter()
         .map(|(id, addr)| (MatchmakerId(id.0), addr.clone()))
         .collect();
+    // Its own journals register with the sets it hosts like with any
+    // member: at the address it advertises, as a founding member does.
+    if admitted.facts.class == Class::Storage {
+        assert!(
+            matchmakers.iter().all(|(id, _)| id.0 != node_id.0),
+            "an admitted machine is not a founding member"
+        );
+        matchmakers.push((MatchmakerId(node_id.0), admitted.facts.addr.to_string()));
+    }
     let listen = admitted.facts.listen;
     tracing::info!(machine = %admitted.facts.name, addr = %admitted.facts.addr, %listen, "machine_serving_admitted_journals");
     crate::run_journals(

@@ -38,6 +38,7 @@ impl ColocatedNode {
         let matchmakers = config
             .has_matchmakers()
             .then(|| MatchmakerSet::new(MatchmakerGeneration(0), config.matchmakers.clone()));
+        let matchmaker_pool = config.matchmaker_pool().to_vec();
         let ballot = hard_state.max_promised_ballot;
 
         let (first_slot, accepted, faulty) = read_back_log(storage, hard_state.max_promised_ballot);
@@ -133,6 +134,7 @@ impl ColocatedNode {
             pending_match_requests: Vec::new(),
             pending_gc_requests: Vec::new(),
             matchmakers,
+            matchmaker_pool,
             gc: None,
             round_floor: 0,
             leadership_origin: LeadershipOrigin::Elected,

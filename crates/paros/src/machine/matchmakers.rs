@@ -1,20 +1,30 @@
-//! A founding member's matchmaker host (#190, `docs/architecture.md` §3.4):
-//! every tenant's matchmaker set runs on the cell's founding members until
-//! placement (#212), so every journal a machine serves is born with its
-//! tenant's set.
+//! A machine's matchmaker host (#190, `docs/architecture.md` §3.4): every
+//! tenant's matchmaker set is born on the cell's founding members, the
+//! bootstrap generation, so every journal a machine serves is born with its
+//! tenant's set. The cell coordinator then places each set with
+//! `crate::placement` and hands it over onto the machines it booked (#501
+//! (matchmaker sets off the founders)): any storage machine of the cell,
+//! founding or admitted, hosts a later generation of a set the registry
+//! books on it.
 //!
 //! The host is the shipped matchmaker loop ([`crate::matchmaker`]) in a task
-//! beside the node loop, on the node's own RPC edge: a founding member
-//! answers the matchmaker contract at the address it serves its journals
-//! at. A set's store is provisioned at the first request that names its
-//! tenant: formatted, then named in the disk's `sets` file, the commit point
-//! (as a created journal's record line is, #210). A set the file names is
-//! an existing member's from then on, so a lost store is refused as
-//! amnesia, never formatted again. A storage fault closes its set only; the
-//! set re-opens at its next request.
+//! beside the node loop, on the node's own RPC edge: a machine answers the
+//! matchmaker contract at the address it serves its journals at. A set's
+//! store is provisioned at the first request that names its tenant:
+//! formatted, then named in the disk's `sets` file, the commit point (as a
+//! created journal's record line is, #210). A founding member provisions
+//! any tenant's set, since it is a member of every bootstrap generation;
+//! any other machine only a set the registry books on it, as the node loop
+//! last folded it (`JournalStores::book_sets`). A set the file names is an
+//! existing member's from then on, so a lost store is refused as amnesia,
+//! never formatted again. A provisioned set stays open after its booking is
+//! released: the handover froze it, and it answers a late proposer with its
+//! successor, the chain a journal that boots at generation 0 walks to the
+//! set in force. A storage fault closes its set only; the set re-opens at
+//! its next request.
 
 use std::collections::BTreeSet;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use moonpool_buggify::hint::Strike;
 use moonpool_core::{Detach, Providers, SimulationResult, StorageProvider, TaskProvider};
@@ -67,13 +77,20 @@ fn parse(text: &str) -> Result<BTreeSet<TenantId>, String> {
     Ok(sets)
 }
 
-/// The opener of a founding member's sets: provisions a tenant's set at its
-/// first request, then opens it as an existing member's.
+/// The tenants whose matchmaker set the registry books on a machine, as its
+/// node loop last folded them (#501 (matchmaker sets off the founders)):
+/// written by the loop, read by the host's task.
+pub(crate) type SetBookings = Arc<Mutex<BTreeSet<TenantId>>>;
+
+/// The opener of a machine's sets: provisions a tenant's set at its first
+/// request, then opens it as an existing member's.
 struct MachineSets<S> {
     disk: ProviderDisk<S>,
     config: MatchmakerConfig,
     /// The sets the disk's `sets` file names: provisioned here.
     provisioned: BTreeSet<TenantId>,
+    /// The sets the registry books here.
+    booked: SetBookings,
 }
 
 impl<S: StorageProvider + Clone + 'static> MachineSets<S> {
@@ -147,8 +164,26 @@ impl<S: StorageProvider + Clone + 'static> SetOpener for MachineSets<S> {
         if tenant.0 == 0 {
             return None;
         }
-        if !self.provisioned.contains(&tenant) && !self.provision(tenant).await {
-            return None;
+        if !self.provisioned.contains(&tenant) {
+            // A founding member is a member of every set's bootstrap
+            // generation; another machine hosts only a set booked on it
+            // (#501 (matchmaker sets off the founders)).
+            let founder = self.config.bootstrap.contains(&self.config.id);
+            let booked = self
+                .booked
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .contains(&tenant);
+            if !founder && !booked {
+                tracing::debug!(tenant = tenant.0, "matchmaker_set_not_booked");
+                return None;
+            }
+            if !self.provision(tenant).await {
+                return None;
+            }
+            if !founder {
+                moonpool_assertions::reachable!("machine: an admitted machine hosts a set");
+            }
         }
         assert!(
             self.provisioned.contains(&tenant),
@@ -166,7 +201,9 @@ impl<S: StorageProvider + Clone + 'static> SetOpener for MachineSets<S> {
 /// Start member `config.id`'s matchmaker host on the node's edge `rpc`
 /// (#190), served in the machine's `machine` group too (#404 (static vs
 /// dynamic endpoints)): its sets on `disk`, each journal's facts reported
-/// to the port `audits` makes for it.
+/// to the port `audits` makes for it. A machine outside the bootstrap set
+/// opens only the sets `booked` names (#501 (matchmaker sets off the
+/// founders)).
 ///
 /// # Errors
 ///
@@ -178,7 +215,7 @@ pub(crate) fn spawn<P, S, A, F>(
     rpc: &RpcHandle<P>,
     machine: Option<&moonpool_rpc::ServiceGroup<crate::rpc::methods::MachineInterface>>,
     disk: ProviderDisk<S>,
-    config: MatchmakerConfig,
+    (config, booked): (MatchmakerConfig, SetBookings),
     tunables: &DriverTunables,
     audits: Arc<F>,
     shutdown: CancellationToken,
@@ -190,8 +227,8 @@ where
     F: Fn(JournalIdentifier) -> A + Send + Sync + 'static,
 {
     assert!(
-        config.bootstrap.contains(&config.id),
-        "a founding member hosts the sets it is a member of"
+        !config.bootstrap.is_empty(),
+        "every set has a bootstrap generation"
     );
     let inbox = MatchmakerInbox::serve(rpc, machine)?;
     let page = tunables.registry_page.clamp(1, paros_core::REGISTRY_PAGE);
@@ -220,6 +257,7 @@ where
                 disk,
                 config,
                 provisioned,
+                booked,
             };
             let factory = |journal: JournalIdentifier| audits(journal);
             let config = sets.config.clone();

@@ -1077,7 +1077,7 @@ impl ColocatedNode {
         if !set
             .members()
             .iter()
-            .all(|m| self.config.matchmaker_pool().binary_search(m).is_ok())
+            .all(|m| self.matchmaker_pool.binary_search(m).is_ok())
         {
             return false;
         }
