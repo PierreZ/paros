@@ -51,6 +51,19 @@ pub const LOSE_VERDICTS: &str = "paros: a node loses write verdicts";
 /// and later accepted".
 pub const LAG_FOLLOW: &str = "paros: a node follows its control journals late";
 
+/// The node admits the registry's pool late (#387): a node that draws it
+/// at boot folds the registry as usual, but its journals admit a node the
+/// registry registered (`ColocatedNode::extend_pool`) only once the chaos
+/// window is over. A leader that admitted a joiner then reconfigures onto
+/// it while this node's pool still lacks it, so a `Prepare`, a beat or a
+/// matchmaker's answer names a configuration outside its pool, which every
+/// learning path must ignore whole. Always safe: an admission is a fold
+/// applied late, and a slow follower is within the model. The simulation
+/// couples it to the lagging-fold scenario. Recovery gates: "matchmaking: a
+/// membership probe meets a configuration outside the pool", "learning: a
+/// configuration outside the pool is ignored".
+pub const ADMIT_LATE: &str = "paros: a node admits the registry's pool late";
+
 /// The proxy leader stalls (#341): it drops the `Accepted`s and `Nack`s it
 /// hears, so none of its rounds closes. Its leader then takes each delegated round back
 /// on its own budget, the proxy evicts each round on its retention budget,
@@ -99,6 +112,24 @@ pub(crate) fn lag_follow() -> bool {
         moonpool_assertions::reachable!("system: a node follows its control journals late");
     }
     lagging
+}
+
+/// Whether this node, at boot, is one that admits the registry's pool
+/// late ([`ADMIT_LATE`]): half the nodes of a scenario seed, so a leader
+/// that admitted a joiner meets members that did not.
+pub(crate) fn late_admitter() -> bool {
+    moonpool_buggify::buggify_named!(ADMIT_LATE, 0.5)
+}
+
+/// Whether `late`, this node's boot draw ([`late_admitter`]), still holds
+/// its admission now ([`ADMIT_LATE`]): for the whole chaos window, never in
+/// the recovery tail.
+pub(crate) fn admit_late(late: bool) -> bool {
+    let held = late && moonpool_buggify::buggify_named!(ADMIT_LATE, 1.0);
+    if held {
+        moonpool_assertions::reachable!("system: a node admits the registry's pool late");
+    }
+    held
 }
 
 /// Whether this node withholds its garbage-collection requests now
@@ -190,5 +221,7 @@ mod tests {
         assert!(!lose_verdict());
         assert!(!stall_proxy());
         assert!(!resign_delegating());
+        assert!(!late_admitter());
+        assert!(!admit_late(true));
     }
 }

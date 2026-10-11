@@ -912,6 +912,7 @@ pub(crate) fn lagging_fold(state: &StateHandle) -> bool {
     *guard.lagging_fold.get_or_insert_with(|| {
         let lag = moonpool_sim::buggify_with_prob!(1.0);
         moonpool_sim::set_activation(paros::scenario::LAG_FOLLOW, lag);
+        moonpool_sim::set_activation(paros::scenario::ADMIT_LATE, lag);
         lag
     })
 }

@@ -123,6 +123,10 @@ impl ColocatedNode {
         // Wire hygiene: a configuration naming a node outside the pool is not
         // one this deployment can run; ignore it whole.
         if !config.is_drawn_from(&self.pool) {
+            probe!(
+                reachable,
+                "learning: a configuration outside the pool is ignored"
+            );
             return;
         }
         let since = self.acceptors_since;
