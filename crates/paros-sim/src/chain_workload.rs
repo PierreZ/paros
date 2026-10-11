@@ -1536,6 +1536,12 @@ impl Workload for ChainWorkload {
                 .await
                 .ok();
         }
+        // The joiners whose spare already booted this journal as the faults
+        // stop (#466 (late joiner spare)): a spare outside this set joined in
+        // the tail, the rare case the settle tail must wait for.
+        let spares_at_cutoff: Vec<usize> = (0..deployment.joiners().len())
+            .filter(|rank| audit.judged_at_end(crate::roles::joiner_node_id(*rank).0))
+            .collect();
         // The fleet's control plane in the recovery tail (#247): this
         // operator finishes the operation it stopped in, and the last one to
         // do so — every fleet writer is quiet then — judges the final folds
@@ -1618,11 +1624,22 @@ impl Workload for ChainWorkload {
         // window, and a spare that boots in the tail is rare (1 witness in
         // 2,000 hunt seeds, 6567501942112636280 on PR #465 (short catch-up
         // fix)).
+        // It names a joiner with no spare yet: one in the pool already
+        // would only register again.
+        let joiners = deployment.joiners().len() as u64;
+        let late = (0..deployment.joiners().len()).find(|rank| !spares_at_cutoff.contains(rank));
         if journal == crate::shape::identifiers(ctx.state()).main
             && client_id == 0
-            && buggify_with_prob!(0.25)
+            && let Some(rank) = late
+            && buggify_with_prob!(1.0)
             && system_ops
-                .registry_step(ctx, &nodes, None, ctx.random().random::<u64>())
+                .registry_step(
+                    ctx,
+                    &nodes,
+                    None,
+                    // `registry_step` names the joiner at `draw % joiners`.
+                    (ctx.random().random::<u64>() >> 8) * joiners + rank as u64,
+                )
                 .await
         {
             assert_reachable!("system: a client registers a joiner in the recovery tail");
@@ -2024,6 +2041,14 @@ impl Workload for ChainWorkload {
                 .any(|(node, _)| *node >= server_count + replica_count)
         {
             assert_reachable!("chain: the settle tail waits for a joiner's spare");
+        }
+        if converged
+            && last_probe.iter().any(|(node, _)| {
+                node.checked_sub(server_count + replica_count)
+                    .is_some_and(|rank| !spares_at_cutoff.contains(&rank))
+            })
+        {
+            assert_reachable!("chain: the settle tail waits for a spare that joined in the tail");
         }
         // #188: this journal converged; the run ends only once every journal
         // a client appends to has, so wait (to the same deadline) for the
