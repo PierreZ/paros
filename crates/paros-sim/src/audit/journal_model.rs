@@ -78,6 +78,13 @@ pub(super) struct JournalModel {
     records: BTreeMap<u64, u64>,
     /// The highest `next_seq` any verdict revealed.
     next_seq: u64,
+    /// The highest `first_seq` any verdict revealed (#448): what the decided
+    /// `Truncate`s released, the bound on what a compaction may drop.
+    first_seq: u64,
+    /// Per slot of an accepted batch: one past its last position (#448).
+    /// Positions are dense in slot order, so the last batch below a floor
+    /// ends highest.
+    ends: BTreeMap<u64, u64>,
     accepted_any: bool,
     duplicate_any: bool,
     fenced_any: bool,
@@ -164,6 +171,7 @@ impl JournalModel {
     fn first_verdict(&mut self, slot: u64, command: &Command, fact: &SlotFact) {
         if let Some(state) = revealed(&fact.outcome) {
             self.next_seq = self.next_seq.max(state.next_seq.0);
+            self.first_seq = self.first_seq.max(state.first_seq.0);
         }
         // The mode check's other half (#339): a call shaped for the other
         // mode is refused as such, never judged as a call of this one.
@@ -298,6 +306,7 @@ impl JournalModel {
             { "slot" => slot, "seq" => seq, "count" => count }
         );
         self.batches.insert(seq, (slot, write));
+        self.ends.insert(slot, seq + count);
         self.next_seq = self.next_seq.max(seq + count);
         if let Command::Write(entry) = command {
             for (position, record) in (seq..).zip(&entry.records) {
@@ -381,6 +390,30 @@ impl JournalModel {
     /// The highest `next_seq` any verdict revealed.
     pub(super) fn next_seq(&self) -> u64 {
         self.next_seq
+    }
+
+    /// The highest `first_seq` any verdict revealed (#448): every position
+    /// below it was released by a decided `Truncate`.
+    pub(super) fn released(&self) -> u64 {
+        self.first_seq
+    }
+
+    /// One past the last position of the accepted batches in slots below
+    /// `floor`, `None` when the model knows none (#448). Positions are dense
+    /// in slot order (checked in [`JournalModel::check`]), so this is the
+    /// end of the last such batch.
+    pub(super) fn end_below(&self, floor: u64) -> Option<u64> {
+        self.ends.range(..floor).next_back().map(|(_, end)| *end)
+    }
+
+    /// The slot of the accepted batch that holds `position`, if the model
+    /// saw it (#448).
+    pub(super) fn slot_holding(&self, position: u64) -> Option<u64> {
+        self.batches
+            .range(..=position)
+            .next_back()
+            .filter(|(start, (_, write))| position < *start + write.count)
+            .map(|(_, (slot, _))| *slot)
     }
 
     /// The slot-ordered checks, over everything folded so far: positions
