@@ -396,6 +396,20 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             { "node" => node.0, "was" => was, "reported" => first.0 }
         );
         st.truncate_watermark.insert(node.0, first.0.max(was));
+        // A floor moves only inside the node's walked chosen prefix (#448):
+        // the walk staged its `SetChosenIndex` writes ahead of the
+        // `Truncate`, and a trim-point landing raised the prefix with the
+        // jump, so the floor never passes the slots the node knows decided.
+        let decided = st.decided_prefix.get(&node.0).copied().unwrap_or(0);
+        assert_always!(
+            first.0 <= decided,
+            "a compaction floor never passes the quorum-decided frontier",
+            { "node" => node.0, "first" => first.0, "decided_prefix" => decided }
+        );
+        // What the floor drops is judged once the node reported the walk
+        // that decided it (the batch reports its floor first): see
+        // `judge_floor`.
+        st.floor_claims.insert(node.0, (first.0, decided));
         st.floor.entry(node.0).or_default().raise(first.0, now);
         if first.0 > 0 {
             reach_once!(
@@ -468,6 +482,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         // The journal state machine's oracles (#204): every node's verdict
         // at this slot is the same, and the verdicts obey section 6.
         st.journal.applied(node.0, slot.0, command, vhash, outcome);
+        judge_floor(&mut st, node.0, slot.0);
         // The quorum-decided oracle's apply leg: a slot applied where the
         // durable-accept tally already decided it must apply the decided
         // value (no apply substitutes a command since #204: the #94
@@ -1139,6 +1154,22 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         st.journal_read_on_replica |= st.replicas.contains(&node.0);
     }
 
+    fn log_read_not_held(&self, node: NodeId, from: paros::Seq) {
+        let st = self.state();
+        // `LogRead::NotHeld` (#448): the record exists in the journal, but
+        // in a slot below this node's floor, which rose ahead of its fold
+        // (a trim-point jump, or a reboot's refold stopped at a hole). A
+        // position the node's floor does not cover is one it should hold.
+        if let Some(slot) = st.journal.slot_holding(from.0) {
+            let floor = st.floor.get(&node.0).map_or(0, |f| f.now);
+            assert_always!(
+                slot < floor,
+                "journal read: a read is answered not held only below the node's floor",
+                { "node" => node.0, "from" => from.0, "slot" => slot, "floor" => floor }
+            );
+        }
+    }
+
     fn journal_refused(&self, _node: NodeId, _journal: JournalIdentifier, _call: &'static str) {
         assert_reachable!("journal: a call naming an unserved journal is refused");
     }
@@ -1359,6 +1390,9 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         st.decided_prefix
             .insert(node.0, chosen_index.map_or(0, |s| s.0 + 1));
         st.read_watermark.remove(&node.0);
+        // A floor the previous incarnation reported but never walked past
+        // dies with it (#448): its walk's verdicts were never reported.
+        st.floor_claims.remove(&node.0);
         let boot_floor = st
             .floor
             .get(&node.0)
@@ -1442,7 +1476,8 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
                 // A floor the node staged and a crash inside its commit
                 // left durable unreported: the slot was legally compacted
                 // (a floor only moves inside a walked chosen prefix, which
-                // the truncation and trim-point oracles judge).
+                // the truncation and trim-point oracles judge: `truncated`
+                // and `judge_floor`, #448).
                 || st
                     .requested_floor
                     .get(&node.0)
@@ -2259,6 +2294,39 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         decision: StorageFaultDecision,
     ) {
         self.state().matchmaker.storage_fault(matchmaker, decision);
+    }
+}
+
+/// Judge `node`'s pending compaction floor once its walk reported `slot`
+/// (#448): every record batch in a slot below the floor ends at or below
+/// the highest `first_seq` a decided `Truncate` revealed. A floor that drops
+/// a record no truncation released loses acknowledged data, and the client
+/// sees it only if a read asks for exactly those records.
+fn judge_floor(st: &mut AuditState, node: u64, slot: u64) {
+    let Some(&(first, due)) = st.floor_claims.get(&node) else {
+        return;
+    };
+    if slot + 1 < due {
+        return;
+    }
+    st.floor_claims.remove(&node);
+    let released = st.journal.released();
+    let end = st.journal.end_below(first);
+    assert_always!(
+        end.is_none_or(|end| end <= released),
+        "journal: compaction drops only records a Truncate released",
+        {
+            "node" => node,
+            "first" => first,
+            "end" => end.unwrap_or(0),
+            "released" => released
+        }
+    );
+    if end.is_some() {
+        reach_once!(
+            st.floor_judged,
+            "journal: a compaction floor is judged against the released records"
+        );
     }
 }
 

@@ -233,6 +233,14 @@ pub(super) struct AuditState {
     /// durable unreported; only a slot below it may be missing from a
     /// recovered log without a corruption crash to explain it.
     pub(super) requested_floor: BTreeMap<u64, u64>,
+    /// Per node: a reported compaction floor not yet judged against what
+    /// the decided `Truncate`s released (#448), with the walk's head when it
+    /// was reported. The batch reports its floor before the slots it walked,
+    /// so the floor is judged once the node reported the walk up to that
+    /// head; a boot drops an unjudged floor with the incarnation.
+    pub(super) floor_claims: BTreeMap<u64, (u64, u64)>,
+    /// A compaction floor was judged against the released positions (#448).
+    pub(super) floor_judged: bool,
 
     // --- applied prefix -----------------------------------------------------
     /// Per node: the next slot expected to be newly applied.
