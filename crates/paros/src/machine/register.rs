@@ -19,6 +19,15 @@
 //!    again after one renewal period: the coordinator may change, or not be
 //!    elected yet.
 //!
+//! The machine reads the election journal from its peers, never from its
+//! own node while it has one: a moved founding member's node is the one the
+//! cell cannot reach until the registry holds its new address, so a read it
+//! serves never confirms, and each round would wait out the read timeout
+//! (#479 (renamed founder not registered): 5 s a round, past the final
+//! check). A read that finds no coordinator starts from the next peer, so a
+//! peer that is down costs one round in two, not every round. The first
+//! peer asked is a BUGGIFY decision of the node loop, carried in.
+//!
 //! The coordinator writes `RegisterNode` only when the address, the name or
 //! the machine interface changed. A founding member serves a new machine
 //! interface at every start (#404), so each of its starts registers once. The request draws no
@@ -78,8 +87,31 @@ pub(crate) fn spawn<P: Providers>(
         return receiver;
     }
     assert!(facts.node_id.0 != 0, "a machine of a cell has an identity");
-    let servers = book
-        .iter()
+    // Its peers, not itself (see the module doc); a lone founding member
+    // has only itself, and is its own quorum.
+    let peers: Vec<&(NodeId, Address)> =
+        book.iter().filter(|(id, _)| *id != facts.node_id).collect();
+    let asked: Vec<&(NodeId, Address)> = if peers.is_empty() {
+        book.iter().collect()
+    } else {
+        peers
+    };
+    assert!(!asked.is_empty(), "a registration asks some machine");
+    assert!(
+        asked.len() == 1 || asked.iter().all(|(id, _)| *id != facts.node_id),
+        "a machine with peers never reads the election from itself"
+    );
+    // Which peer it asks first (#479): on a BUGGIFY decision, another than
+    // the book's first, so a first peer that is down or slow is common.
+    let count = asked.len();
+    let first = moonpool_buggify::buggify_range!(0.5, 0..count as u64)
+        .and_then(|first| usize::try_from(first).ok())
+        .unwrap_or(0);
+    if first != 0 {
+        moonpool_assertions::reachable!("machine: a registration asks another peer first");
+    }
+    let servers = asked
+        .into_iter()
         .map(|(id, addr)| Server {
             id: id.0,
             node: NodeClient::named(rpc, facts.names.clone(), addr.clone()),
@@ -99,7 +131,7 @@ pub(crate) fn spawn<P: Providers>(
                 rpc,
                 client,
                 (facts, cell_id, election),
-                (every, ended),
+                (every, (first, count), ended),
                 shutdown,
             ),
         )
@@ -116,17 +148,23 @@ async fn run<P: Providers>(
     rpc: RpcHandle<P>,
     client: Client<P>,
     (facts, cell_id, election): (MachineFacts, u64, JournalIdentifier),
-    (every, ended): (Duration, watch::Sender<bool>),
+    (every, (first, servers), ended): (Duration, (usize, usize), watch::Sender<bool>),
     shutdown: CancellationToken,
 ) {
     let identity = facts.identify_ack(cell_id);
     assert_eq!(identity.cell_id, cell_id, "a machine registers in its cell");
     let timeout = client.tunables().request_timeout;
+    assert!(servers > 0, "a registration asks some machine");
+    let mut first = first % servers;
     while !shutdown.is_cancelled() {
-        let coordinator = read_election(&client, election, 0)
+        let coordinator = read_election(&client, election, first)
             .await
             .and_then(|fold| fold.leader().cloned())
             .and_then(|leader| Coordinator::of(&leader.candidate));
+        if coordinator.is_none() {
+            // The next round starts from the next peer (see the module doc).
+            first = (first + 1) % servers;
+        }
         if let Some(target) = coordinator {
             match bootstrap::register(
                 &providers,
