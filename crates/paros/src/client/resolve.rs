@@ -37,6 +37,11 @@ pub struct Resolved {
     pub machines: Vec<(NodeId, Address)>,
     /// The universe directory's position the answer was read at.
     pub at: u64,
+    /// The universe's name, for people (#239 (names at the edge)); empty
+    /// when the directory names none.
+    pub universe_name: Vec<u8>,
+    /// The cell's name, for people; empty when the directory names none.
+    pub cell_name: Vec<u8>,
 }
 
 /// What resolving a tenant through the entry endpoint came to.
@@ -54,6 +59,11 @@ pub enum Resolution {
         cell_id: u64,
         /// The tenant's cell, on `other_cell`; else 0.
         tenant_cell: u64,
+        /// The answering machine's cell's name, for people (#239 (names at
+        /// the edge)); empty when the machine knows none.
+        cell_name: Vec<u8>,
+        /// The tenant's cell's name, on `other_cell`; else empty.
+        tenant_cell_name: Vec<u8>,
     },
     /// No machine of the entry endpoint gave a verdict.
     Unavailable,
@@ -94,6 +104,8 @@ pub fn from_wire(ack: &wire::ResolveAck) -> Resolution {
             refusal: ack.refusal.clone(),
             cell_id: ack.cell_id,
             tenant_cell: ack.tenant_cell,
+            cell_name: ack.cell_name.clone(),
+            tenant_cell_name: ack.tenant_cell_name.clone(),
         };
     }
     let control = ack
@@ -123,6 +135,8 @@ pub fn from_wire(ack: &wire::ResolveAck) -> Resolution {
             control,
             machines,
             at: ack.at,
+            universe_name: ack.universe_name.clone(),
+            cell_name: ack.cell_name.clone(),
         }),
         _ => Resolution::Malformed,
     }
