@@ -95,6 +95,7 @@ mod tests {
             failure_domain: String::new(),
             name: format!("m{id}"),
             incarnation: 1,
+            machine_interface: Vec::new(),
         }
         .encode();
         registry.fold(seq, &record);

@@ -5,7 +5,9 @@
 //! A create or a delete is a request with an idempotency id the caller
 //! draws. The library sends it to the tenant coordinator — until #212 and
 //! #225, the elected cell coordinator, found at the interface the election
-//! journal's leader publishes — and re-sends the same id when the answer
+//! journal's leader publishes: its address and the reference of its term's
+//! group, a dynamic endpoint ([`Coordinator`], #404 (static vs dynamic
+//! endpoints)) — and re-sends the same id when the answer
 //! does not decide it (no coordinator, a coordinator change, a timeout). The
 //! coordinator writes the request to the tenant's control journal, and the
 //! fold judges it at apply and records its outcome under the id
@@ -17,15 +19,15 @@
 use std::time::Duration;
 
 use moonpool_core::{Providers, TimeProvider};
-use moonpool_rpc::RpcHandle;
+use moonpool_rpc::{InterfaceMethod, InterfaceRef, RpcError, RpcHandle};
 use paros_core::{AcceptorConfig, JournalId, JournalIdentifier, TenantId, WriterMode};
 
 use super::Client;
 use super::checkpoint::{Folder, LoadOutcome, load};
-use super::election::read_election;
+use super::election::{Candidate, read_election};
+use crate::rpc::in_group;
 use crate::rpc::machine as wire;
-use crate::rpc::methods::JournalRequestRpc;
-use crate::rpc::well_known;
+use crate::rpc::methods::{CoordinatorInterface, JournalRequestRpc};
 use crate::rpc::{
     config_from_proto, config_to_proto, writer_mode_from_proto, writer_mode_to_proto,
 };
@@ -239,37 +241,87 @@ impl JournalAnswer {
 /// The pause between two attempts of one request.
 const RETRY_PAUSE: Duration = Duration::from_millis(200);
 
-/// The tenant coordinator's address: the interface the election journal's
-/// leader publishes, a literal or a name (#257). `None` while no leader
-/// published one.
+/// The cell coordinator of one term, as the election journal's leader
+/// publishes it (#404 (static vs dynamic endpoints)): the address it
+/// advertises, a literal or a name (#257), and the reference of its term's
+/// group. The address says *where*; the reference says *which instance*,
+/// so a request to a term that ended fails at the transport.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Coordinator {
+    /// The address the coordinator advertises.
+    pub address: Address,
+    /// Its term's group.
+    pub reference: InterfaceRef<CoordinatorInterface>,
+}
+
+impl Coordinator {
+    /// The coordinator `candidate` publishes: `None` while it published no
+    /// address or no reference, or one that does not decode as the
+    /// coordinator's interface.
+    #[must_use]
+    pub fn of(candidate: &Candidate) -> Option<Self> {
+        let address = Address::parse(&candidate.interface).ok()?;
+        let reference = InterfaceRef::from_bytes(&candidate.reference).ok()?;
+        Some(Self { address, reference })
+    }
+
+    /// One attempt of `M` at this term's group, the address resolved now
+    /// through `names`, within `timeout`: `None` when the name does not
+    /// resolve or nothing came back.
+    pub(crate) async fn call<P: Providers, M: InterfaceMethod<CoordinatorInterface>>(
+        &self,
+        providers: &P,
+        rpc: &RpcHandle<P>,
+        names: &Names,
+        request: &M::Request,
+        timeout: Duration,
+    ) -> Option<Result<M::Reply, RpcError>>
+    where
+        M::Request: Sync,
+    {
+        let call = async {
+            let addr = names.resolve(&self.address).await.ok()?;
+            let client = in_group::<P, CoordinatorInterface, M>(rpc, &self.reference, addr)?;
+            let reply = client.try_get_reply(request).await;
+            if reply
+                .as_ref()
+                .is_err_and(moonpool_rpc::RpcError::is_terminal_for_reference)
+            {
+                moonpool_assertions::reachable!(
+                    "coordinator: a request to an ended term fails at the transport"
+                );
+            }
+            Some(reply)
+        };
+        providers.time().timeout(timeout, call).await.ok().flatten()
+    }
+}
+
+/// The tenant coordinator: the interface the election journal's leader
+/// publishes. `None` while no leader published one.
 pub async fn coordinator<P: Providers>(
     client: &Client<P>,
     election: JournalIdentifier,
-) -> Option<Address> {
+) -> Option<Coordinator> {
     let fold = read_election(client, election, 0).await?;
-    Address::parse(&fold.leader()?.candidate.interface).ok()
+    Coordinator::of(&fold.leader()?.candidate)
 }
 
-/// Send `request` to the machine at `target`, its address resolved through
-/// `names` now, once, within `timeout`.
+/// Send `request` to the coordinator `target`, once, within `timeout`. A
+/// term that ended answers nothing: [`JournalAnswer::Unavailable`], retried.
 pub async fn send<P: Providers>(
     providers: &P,
     rpc: &RpcHandle<P>,
     names: &Names,
-    target: &Address,
+    target: &Coordinator,
     request: &JournalRequest,
     timeout: Duration,
 ) -> JournalAnswer {
-    let Ok(addr) = names.resolve(target).await else {
-        return JournalAnswer::Unavailable;
-    };
-    let client = well_known::<P, JournalRequestRpc>(rpc, addr);
-    match providers
-        .time()
-        .timeout(timeout, client.try_get_reply(&request.to_wire()))
+    match target
+        .call::<P, JournalRequestRpc>(providers, rpc, names, &request.to_wire(), timeout)
         .await
     {
-        Ok(Ok(ack)) => JournalAnswer::from_wire(ack),
+        Some(Ok(ack)) => JournalAnswer::from_wire(ack),
         _ => JournalAnswer::Unavailable,
     }
 }
@@ -349,6 +401,55 @@ mod tests {
             op: JournalOp::Delete { name: Vec::new() },
         };
         assert!(JournalRequest::from_wire(&delete.to_wire()).is_err());
+    }
+
+    #[test]
+    fn a_coordinator_needs_an_address_and_its_own_interface() {
+        use moonpool_rpc::{AccessClass, Endpoint, EndpointToken, Incarnation};
+
+        use crate::rpc::methods::MachineInterface;
+
+        let endpoint = Endpoint::new(
+            "0.0.0.0:4500".parse().expect("an address"),
+            Incarnation::from_raw(7),
+            EndpointToken::from_parts(3, 1),
+        );
+        let reference = InterfaceRef::<CoordinatorInterface>::new(endpoint, AccessClass::Public);
+        let candidate = Candidate {
+            id: 1,
+            interface: "node1:4500".into(),
+            reference: crate::rpc::published(&reference),
+        };
+        let coordinator = Coordinator::of(&candidate).expect("a published coordinator");
+        // A wildcard-bound reference is published at the loopback.
+        assert_eq!(coordinator.reference.endpoint().token(), endpoint.token());
+        assert!(
+            !coordinator
+                .reference
+                .endpoint()
+                .address()
+                .ip()
+                .is_unspecified()
+        );
+        assert_eq!(coordinator.address.to_string(), "node1:4500");
+        // Aimed at the resolved address, the reference keeps its instance.
+        let resolved = "10.0.0.1:4500".parse().expect("an address");
+        let aimed = crate::rpc::client::aimed(&reference, resolved);
+        assert_eq!(aimed.endpoint().address(), resolved);
+        assert_eq!(aimed.endpoint().incarnation(), endpoint.incarnation());
+        assert_eq!(aimed.endpoint().token(), endpoint.token());
+        // Nothing published yet, or another interface's reference: none.
+        let unpublished = Candidate {
+            reference: Vec::new(),
+            ..candidate.clone()
+        };
+        assert_eq!(Coordinator::of(&unpublished), None);
+        let machine = InterfaceRef::<MachineInterface>::new(endpoint, AccessClass::Public);
+        let other = Candidate {
+            reference: crate::rpc::published(&machine),
+            ..candidate
+        };
+        assert_eq!(Coordinator::of(&other), None);
     }
 
     #[test]

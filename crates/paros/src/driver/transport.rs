@@ -1,7 +1,8 @@
 //! The driver's outbound peer transport: the bounded, lossy, keep-newest
 //! per-peer mailboxes, the [`Outbound`] handle the rest of the driver sends
 //! through, and the detached delivery task that feeds bounded batches to each
-//! peer's well-known `Deliver` endpoint.
+//! peer's `Deliver` endpoint: its machine interface when the registry holds
+//! one (#404 (static vs dynamic endpoints)), else its well-known one.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::net::SocketAddr;
@@ -11,14 +12,14 @@ use std::sync::{Arc, Mutex, PoisonError};
 use moonpool_core::{
     Detach, Providers, SimulationError, SimulationResult, TaskProvider, TimeProvider,
 };
-use moonpool_rpc::{RpcHandle, ServiceClient};
+use moonpool_rpc::{InterfaceRef, RpcError, RpcHandle, ServiceClient};
 use paros_core::{Audience, JournalIdentifier, Message, NodeId, Party, ProxyId};
 use prost::Message as ProstMessage;
 use tokio_util::sync::CancellationToken;
 
 use crate::audit::Audit;
-use crate::rpc::methods::DeliverRpc;
-use crate::rpc::{internal, message_to_proto, well_known};
+use crate::rpc::methods::{DeliverRpc, MachineInterface};
+use crate::rpc::{in_group, internal, message_to_proto, well_known};
 use crate::{Address, Names};
 
 use super::config::{DELIVERY_BATCH, DELIVERY_BATCH_BYTES, DriverTunables};
@@ -91,9 +92,14 @@ pub(crate) struct PeerMailbox {
     /// in reverse order. Read-and-cleared by the delivery task.
     reverse_next: Arc<AtomicBool>,
     /// Set by the node loop when the cell's address book moved this peer
-    /// (#349): the delivery task dials it there from its next batch on.
-    readdress: Arc<Mutex<Option<Address>>>,
+    /// (#349) or named another machine interface for it (#404): the
+    /// delivery task dials it there from its next batch on.
+    readdress: Arc<Mutex<Option<PeerTarget>>>,
 }
+
+/// Where a lane dials its peer (#349, #404): the address, and the encoded
+/// machine interface it dials there (empty: the well-known `Deliver`).
+pub(crate) type PeerTarget = (Address, Vec<u8>);
 
 /// A mailbox's journal lanes and the round-robin cursor over them.
 #[derive(Default)]
@@ -225,17 +231,19 @@ impl PeerMailbox {
         }
     }
 
-    /// Dial this lane's peer at `addr` from the next batch on (#349): the
-    /// queued messages stay, and go there.
-    pub(crate) fn readdress(&self, addr: Address) {
+    /// Dial this lane's peer at `addr`, through the machine `interface`
+    /// (#404; empty: the well-known `Deliver`), from the next batch on
+    /// (#349): the queued messages stay, and go there.
+    pub(crate) fn readdress(&self, addr: Address, interface: Vec<u8>) {
         *self
             .readdress
             .lock()
-            .unwrap_or_else(PoisonError::into_inner) = Some(addr);
+            .unwrap_or_else(PoisonError::into_inner) = Some((addr, interface));
     }
 
-    /// The address the node loop moved this peer to since the last call.
-    fn take_address(&self) -> Option<Address> {
+    /// The address and interface the node loop moved this peer to since
+    /// the last call.
+    fn take_address(&self) -> Option<PeerTarget> {
         self.readdress
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -461,12 +469,13 @@ impl Outbound {
         self.peers().contains_key(&node)
     }
 
-    /// Dial `node`'s lane at `addr` from its next batch on (#349): the
+    /// Dial `node`'s lane at `addr`, through the machine `interface` (#404;
+    /// empty: the well-known `Deliver`), from its next batch on (#349): the
     /// cell's address book moved it. `false` when no lane to `node` exists.
-    pub(crate) fn readdress(&self, node: NodeId, addr: Address) -> bool {
+    pub(crate) fn readdress(&self, node: NodeId, addr: Address, interface: Vec<u8>) -> bool {
         match self.peers().get(&node) {
             Some(lane) => {
-                lane.readdress(addr);
+                lane.readdress(addr, interface);
                 true
             }
             None => false,
@@ -717,10 +726,24 @@ pub(crate) fn peer_target(addr: &str) -> SimulationResult<Address> {
 /// resolved to. A failed delivery to a name forgets that address, so the
 /// next batch resolves the name again (FDB's `removeCachedDNS`): a peer
 /// whose IP changed behind its name is reached again with no write.
+///
+/// **Which endpoint** (#404 (static vs dynamic endpoints)): the peer's
+/// machine interface, when the registry holds one, aimed at the resolved
+/// address; else its well-known `Deliver`. A delivery the interface refuses
+/// for good (`StaleIncarnation`, `EndpointNotFound`: the peer restarted
+/// since it registered) marks it stale, and the lane dials the well-known
+/// `Deliver` until the book names another interface. Falling back keeps
+/// the cell live: when a founding member restarts, the registry that would
+/// record its new interface may need its own vote.
 struct Dialer<P: Providers> {
     rpc: RpcHandle<P>,
     names: Names,
     address: Address,
+    /// The peer's machine interface, from the registry.
+    interface: Option<InterfaceRef<MachineInterface>>,
+    /// The interface refused a delivery for good: the lane dials the
+    /// well-known `Deliver` until the book names another one.
+    stale: bool,
     /// The address the name resolved to last, and its client.
     resolved: Option<(SocketAddr, ServiceClient<P, DeliverRpc>)>,
     /// The last address the name resolved to, kept across a forget: a
@@ -737,10 +760,17 @@ impl<P: Providers> Dialer<P> {
             rpc: rpc.clone(),
             names,
             address,
+            interface: None,
+            stale: false,
             resolved: None,
             last: None,
             moved: false,
         }
+    }
+
+    /// Whether the next delivery goes through the peer's machine interface.
+    fn dynamic(&self) -> bool {
+        self.interface.is_some() && !self.stale
     }
 
     /// The client of the peer's current address: the one resolved last, or
@@ -764,7 +794,15 @@ impl<P: Providers> Dialer<P> {
             self.moved = true;
         }
         self.last = Some(addr);
-        let client: ServiceClient<P, DeliverRpc> = well_known(&self.rpc, addr);
+        let dynamic = self
+            .interface
+            .as_ref()
+            .filter(|_| !self.stale)
+            .and_then(|reference| {
+                in_group::<P, MachineInterface, DeliverRpc>(&self.rpc, reference, addr)
+            });
+        let client: ServiceClient<P, DeliverRpc> =
+            dynamic.unwrap_or_else(|| well_known(&self.rpc, addr));
         self.resolved = Some((addr, client.clone()));
         Some(client)
     }
@@ -782,11 +820,27 @@ impl<P: Providers> Dialer<P> {
                 "transport: a peer reached a moved peer at its new address"
             );
         }
+        if self.dynamic() {
+            moonpool_assertions::reachable!(
+                "transport: a lane delivers through a machine interface"
+            );
+        }
     }
 
-    /// The peer is dialed at `address` from now on (#349): the cell's
-    /// address book moved it. Nothing resolved for the old one is kept.
-    fn readdress(&mut self, address: Address) {
+    /// The peer is dialed at `address`, through the machine `interface`
+    /// (#404; one that does not decode is none), from now on (#349): the
+    /// cell's address book moved it. Nothing resolved for the old one is
+    /// kept.
+    fn readdress(&mut self, address: Address, interface: &[u8]) {
+        let interface = InterfaceRef::<MachineInterface>::from_bytes(interface).ok();
+        if interface != self.interface {
+            moonpool_assertions::reachable!(
+                "transport: a peer lane follows a registered interface"
+            );
+            self.interface = interface;
+            self.stale = false;
+            self.resolved = None;
+        }
         if address == self.address {
             return;
         }
@@ -799,9 +853,18 @@ impl<P: Providers> Dialer<P> {
         assert!(self.resolved.is_none(), "a new address is resolved afresh");
     }
 
-    /// A delivery failed: a name is resolved again before the next batch;
-    /// a literal address stays as it is.
-    fn failed(&mut self) {
+    /// A delivery failed with `error`: a name is resolved again before the
+    /// next batch, a literal address stays as it is, and a machine
+    /// interface that refused it for good is stale (#404).
+    fn failed(&mut self, error: &RpcError) {
+        if self.dynamic() && error.is_terminal_for_reference() {
+            moonpool_assertions::reachable!("transport: a stale machine interface falls back");
+            tracing::debug!(address = %self.address, %error, "peer_interface_stale");
+            self.stale = true;
+            self.resolved = None;
+            assert!(!self.dynamic(), "a stale interface is not dialed");
+            return;
+        }
         if self.address.literal().is_none() {
             self.resolved = None;
         }
@@ -948,8 +1011,8 @@ async fn run_peer_delivery<P: Providers, A: Audit>(
         carried = next;
         assert_eq!(batch.cell_id, 0, "a batch is stamped once, here");
         batch.cell_id = cell_id;
-        if let Some(address) = messages.take_address() {
-            dialer.readdress(address);
+        if let Some((address, interface)) = messages.take_address() {
+            dialer.readdress(address, &interface);
         }
         let client = moonpool_core::select! {
             biased;
@@ -971,7 +1034,7 @@ async fn run_peer_delivery<P: Providers, A: Audit>(
             Ok(_) => dialer.delivered(),
             Err(error) => {
                 audit.delivery_failed(from, to);
-                dialer.failed();
+                dialer.failed(&error);
                 tracing::debug!(%error, "peer delivery failed");
             }
         }

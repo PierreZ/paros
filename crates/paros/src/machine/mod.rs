@@ -175,6 +175,14 @@ pub struct MachineFacts {
     /// ([`MachineFacts::serving`]). The registry records it, and the cell
     /// coordinator tells a reboot by it (#211).
     pub incarnation: u128,
+    /// The encoded `InterfaceRef` of the [`MachineInterface`] group the
+    /// runtime that serves it now registered (#404 (static vs dynamic
+    /// endpoints)): empty while it serves none (idle, admitted, or before
+    /// [`MachineFacts::with_interface`]). The registry records it, and the
+    /// founding members' lanes dial `Deliver` through it.
+    ///
+    /// [`MachineInterface`]: crate::wire::methods::MachineInterface
+    pub machine_interface: Vec<u8>,
     /// Its last full busyness window (#424), which every phase's `Load`
     /// answers from.
     pub load: load::LoadBoard,
@@ -208,12 +216,45 @@ impl MachineFacts {
         &self,
         rpc: &moonpool_rpc::RpcHandle<P>,
     ) -> Self {
+        let incarnation = incarnation_of(rpc);
+        // A group belongs to one runtime: another runtime serves none yet.
+        let machine_interface = if incarnation == self.incarnation {
+            self.machine_interface.clone()
+        } else {
+            Vec::new()
+        };
         let facts = Self {
-            incarnation: incarnation_of(rpc),
+            incarnation,
+            machine_interface,
             ..self.clone()
         };
         assert_eq!(facts.node_id, self.node_id, "serving keeps the identity");
         facts
+    }
+
+    /// These facts with `group` as the machine interface of the runtime
+    /// that serves them (#404 (static vs dynamic endpoints)).
+    ///
+    /// # Panics
+    ///
+    /// If `group` belongs to another runtime than the one these facts name
+    /// (a programmer error: call [`MachineFacts::serving`] first).
+    #[must_use]
+    pub(crate) fn with_interface(
+        &self,
+        group: &moonpool_rpc::ServiceGroup<crate::rpc::methods::MachineInterface>,
+    ) -> Self {
+        let reference = group.interface_ref();
+        assert_eq!(
+            reference.endpoint().incarnation().get(),
+            self.incarnation,
+            "a machine interface is the serving runtime's"
+        );
+        assert!(self.incarnation != 0, "a served machine has an incarnation");
+        Self {
+            machine_interface: crate::rpc::published(&reference),
+            ..self.clone()
+        }
     }
 
     /// Who this machine is, in cell `cell_id` (0 while it is idle).
@@ -228,6 +269,7 @@ impl MachineFacts {
             cell_id,
             incarnation_high: incarnation_halves(self.incarnation).0,
             incarnation_low: incarnation_halves(self.incarnation).1,
+            machine_interface: self.machine_interface.clone(),
         }
     }
 }

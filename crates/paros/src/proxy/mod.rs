@@ -299,6 +299,7 @@ where
         0,
         edge_reporter(audit, me),
         incarnation_shutdown.clone(),
+        None,
     )?;
 
     // The sans-IO core: empty, over the bootstrap configuration. Every boot

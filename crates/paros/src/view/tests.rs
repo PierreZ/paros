@@ -31,6 +31,7 @@ fn registry() -> Registry {
             failure_domain: "zone-a".into(),
             name: "alpha".into(),
             incarnation: 7,
+            machine_interface: Vec::new(),
         },
         SystemCommand::RegisterNode {
             id: NodeId(3),
@@ -40,6 +41,7 @@ fn registry() -> Registry {
             failure_domain: "zone-b".into(),
             name: "gamma".into(),
             incarnation: 9,
+            machine_interface: Vec::new(),
         },
         SystemCommand::JoinFleet {
             fleet_id: FLEET,

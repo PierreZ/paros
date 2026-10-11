@@ -185,20 +185,25 @@ pub enum RegisterOutcome {
     Unreachable,
 }
 
-/// Ask the cell coordinator at `target` to register the machine `identity`
-/// names at the address it advertises (#349), once, within `timeout`.
+/// Ask the cell coordinator `target` to register the machine `identity`
+/// names at the address it advertises, with its machine interface (#349,
+/// #404), once, within `timeout`. A term that ended answers nothing:
+/// [`RegisterOutcome::Unreachable`].
 pub async fn register<P: Providers>(
     providers: &P,
     rpc: &RpcHandle<P>,
     names: &Names,
-    target: &Address,
+    target: &super::journals::Coordinator,
     identity: wire::IdentifyAck,
     timeout: Duration,
 ) -> RegisterOutcome {
     let request = wire::Register {
         identity: Some(identity),
     };
-    match call_once::<P, RegisterRpc>(providers, rpc, names, target, &request, timeout).await {
+    match target
+        .call::<P, RegisterRpc>(providers, rpc, names, &request, timeout)
+        .await
+    {
         Some(Ok(ack)) if ack.registered => RegisterOutcome::Registered,
         Some(Ok(ack)) => RegisterOutcome::Refused(ack.refusal),
         _ => RegisterOutcome::Unreachable,

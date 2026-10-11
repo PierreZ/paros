@@ -91,7 +91,7 @@ impl FleetOps {
         // Far from every minted machine id: a candidate of its own.
         let me = Candidate {
             id: u64::MAX - self.client_id,
-            interface: String::new(),
+            ..Candidate::default()
         };
         let mut election = Election::new(
             cell.client.clone(),
@@ -197,7 +197,7 @@ async fn leave(
         };
         let successor = Candidate {
             id: next.0,
-            interface: String::new(),
+            ..Candidate::default()
         };
         if let Some(uuid) = election.resign(Some(successor)).await {
             assert_reachable!("election: a harness candidate hands its term on");

@@ -1195,6 +1195,30 @@ where
     // selects on, so the loop remains the sole owner of every journal's core.
     let me = Party::Node(NodeId(self_id));
     let mut edge = RpcEdge::listen(&providers, &local_addr, "node", &tunables).await?;
+    // A founding member's machine interface (#404 (static vs dynamic
+    // endpoints)): a dynamic group serving `Deliver` for this incarnation,
+    // published in its `IdentifyAck` and kept in the registry by `node_id`.
+    // It lives as long as this loop; a static deployment serves none.
+    let machine_group = formed
+        .as_ref()
+        .map(|_| {
+            edge.handle()
+                .register_group::<crate::rpc::methods::MachineInterface>(
+                    moonpool_rpc::AccessClass::Public,
+                )
+                .map_err(|e| {
+                    RunError::Infra(SimulationError::InvalidState(format!(
+                        "register the machine interface: {e}"
+                    )))
+                })
+        })
+        .transpose()?;
+    let formed = formed.map(|mut formed| {
+        if let Some(group) = &machine_group {
+            formed.facts = formed.facts.serving(edge.handle()).with_interface(group);
+        }
+        formed
+    });
     let mut rpc = NodeInbox::serve(
         &providers,
         &edge,
@@ -1203,6 +1227,7 @@ where
         cell_id,
         edge_reporter(&node_audit, me),
         incarnation_shutdown.clone(),
+        machine_group.as_ref(),
     )?;
 
     // The system journals' follower (#189), and the inbox its remote reads
@@ -1258,7 +1283,7 @@ where
             &tunables,
             node_audit.call_observer(),
             incarnation_shutdown.clone(),
-        )?;
+        );
         // Every founding member answers the cell's views (#399).
         crate::machine::views::spawn(
             &providers,
@@ -1844,8 +1869,8 @@ where
                 // at its registered address from its lane's next batch on.
                 if let Some(book) = peer_book.as_mut() {
                     let (moved, cache) = book.follow(&journals);
-                    for (peer, addr) in moved {
-                        let moved = out.readdress(peer, addr.clone());
+                    for (peer, (addr, interface)) in moved {
+                        let moved = out.readdress(peer, addr.clone(), interface);
                         assert!(moved, "every founding member but this one has a lane");
                         tracing::info!(node = self_id, peer = peer.0, %addr, "peer_book_moved");
                     }

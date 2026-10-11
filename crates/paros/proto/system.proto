@@ -57,6 +57,9 @@ message RegisterNode {
   fixed64 incarnation_low = 7;
   // The machine's name, for people (#399): a label, never its identity.
   string name = 8;
+  // The machine's dynamic interface for this incarnation (#404), as its
+  // `IdentifyAck` carries it; empty when it serves none.
+  bytes machine_interface = 9;
 }
 
 // Stop placing new work on node `id` (it stays in the pool).
@@ -193,6 +196,8 @@ message RegisteredNodeState {
   fixed64 incarnation_low = 9;
   // The machine's name (#399).
   string name = 10;
+  // The machine's dynamic interface (#404).
+  bytes machine_interface = 11;
 }
 
 message BookingState {

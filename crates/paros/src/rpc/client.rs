@@ -7,7 +7,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use moonpool_core::Providers;
 use moonpool_rpc::{
-    AccessClass, BootstrapAddress, ErrorReason, RpcError, RpcHandle, ServiceClient, WellKnownRef,
+    AccessClass, BootstrapAddress, Endpoint, ErrorReason, InterfaceMethod, InterfaceRef, RpcError,
+    RpcHandle, RpcInterface, ServiceClient, WellKnownRef,
 };
 
 use super::methods::{
@@ -33,6 +34,70 @@ pub(crate) fn well_known<P: Providers, M: WellKnownMethod>(
     WellKnownRef::<M>::new(BootstrapAddress::Resolved(addr), M::ID, AccessClass::Public)
         .at(addr)
         .bind(rpc)
+}
+
+/// `reference` aimed at `addr` (#404 (static vs dynamic endpoints)): the
+/// same incarnation and token, at the address its holder resolved now.
+///
+/// paros keeps the advertised [`Address`] (a literal or a name, #257) as
+/// the source of truth for *where* a group is, and the reference only for
+/// *which instance*: the address inside a reference is the one the
+/// runtime bound, which may be a wildcard.
+#[must_use]
+pub(crate) fn aimed<I: RpcInterface>(
+    reference: &InterfaceRef<I>,
+    addr: SocketAddr,
+) -> InterfaceRef<I> {
+    let endpoint = reference.endpoint();
+    let aimed = InterfaceRef::new(
+        Endpoint::new(addr, endpoint.incarnation(), endpoint.token()),
+        reference.access(),
+    );
+    assert_eq!(
+        aimed.endpoint().token(),
+        endpoint.token(),
+        "aiming keeps the instance"
+    );
+    aimed
+}
+
+/// `reference`'s bytes as paros publishes them (#404 (static vs dynamic
+/// endpoints)). A runtime bound to a wildcard (`PAROS_LISTEN=0.0.0.0:…`,
+/// #257) puts that wildcard in its references, and moonpool refuses to
+/// decode a reference with no address: the published form names the
+/// loopback at the same port instead. Every holder aims it at the
+/// advertised address before it dials ([`aimed`]), so only the incarnation
+/// and the token of the published form are ever used.
+#[must_use]
+pub(crate) fn published<I: RpcInterface>(reference: &InterfaceRef<I>) -> Vec<u8> {
+    let addr = reference.endpoint().address();
+    let reference = if addr.ip().is_unspecified() {
+        let loopback: std::net::IpAddr = if addr.is_ipv4() {
+            std::net::Ipv4Addr::LOCALHOST.into()
+        } else {
+            std::net::Ipv6Addr::LOCALHOST.into()
+        };
+        aimed(reference, SocketAddr::new(loopback, addr.port()))
+    } else {
+        reference.clone()
+    };
+    let bytes = reference.to_bytes();
+    assert!(
+        InterfaceRef::<I>::from_bytes(&bytes).is_ok(),
+        "a published reference decodes"
+    );
+    bytes
+}
+
+/// Method `M` of the group `reference` names, at `addr`, bound to `rpc`:
+/// `None` when the reference does not name `I`.
+pub(crate) fn in_group<P: Providers, I: RpcInterface, M: InterfaceMethod<I>>(
+    rpc: &RpcHandle<P>,
+    reference: &InterfaceRef<I>,
+    addr: SocketAddr,
+) -> Option<ServiceClient<P, M>> {
+    let method = aimed(reference, addr).method::<M>().ok()?;
+    Some(method.bind(rpc))
 }
 
 /// A client of one paros node (or replica) at one address, over the

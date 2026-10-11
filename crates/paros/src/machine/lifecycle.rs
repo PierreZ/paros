@@ -523,6 +523,7 @@ fn facts_of(
         listen,
         names,
         incarnation: 0,
+        machine_interface: Vec::new(),
         load,
     }
 }

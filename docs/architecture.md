@@ -441,8 +441,8 @@ restart, lease renewals flooded the cluster until liveness heartbeats timed out)
 identity for exactly this reason.
 
 At start a machine registers in the cell control journal with
-`RegisterNode { node_id, addr, interface, class, capacity, failure_domain }`, publishing its RPC
-interface reference (moonpool-rpc's incarnation-bearing `InterfaceRef`), and it starts the driver
+`RegisterNode { node_id, addr, machine_interface, class, capacity, failure_domain }`, publishing
+its machine interface (moonpool-rpc's incarnation-bearing `InterfaceRef`, #404), and it starts the driver
 for every `(tenant, journal, role)` assigned to it. A `RegisterNode` for an existing `node_id`
 with a new incarnation is the reboot signal: the cell coordinator learns at publication time, not
 after a heartbeat window (Akka identifies nodes by `host:port:uid`, and a new incarnation joining
@@ -452,13 +452,59 @@ their cached view only when an append fails on a sealed loglet. No push detectio
 moonpool.
 
 `StaleIncarnation` needs dynamic references (amended on 2026-10-10, #216). moonpool-rpc refuses a
-stale reference only on a dynamic endpoint. A well-known endpoint answers every incarnation. Today
-every paros method is well known, so no call can be refused as stale. A restart at the same
-address rejoins in place, and that is the decided behaviour. A machine that moved is found
-through the registry fold (#349, #211). So `StaleIncarnation` and the `InterfaceRef` in
-`RegisterNode` move to #404 (static endpoints for bootstrap only), which makes the machine,
-coordinator and data-plane interfaces dynamic. #216 does not add an application-level copy of
-the check.
+stale reference only on a dynamic endpoint. A well-known endpoint answers every incarnation. A
+restart at the same address rejoins in place, and that is the decided behaviour. A machine that
+moved is found through the registry fold (#349, #211). #216 does not add an application-level
+copy of the check.
+
+**Static and dynamic endpoints** (decided on 2026-10-10, landed on 2026-10-11, #404 (static vs
+dynamic endpoints)), after FDB's `WellKnownEndpoints.h`. A static (well-known) endpoint is what an
+operator or a new client reaches with an address alone. Everything found through one is a moonpool
+dynamic group (`RpcInterface`), whose reference names one instance: a request to another instance
+fails at the transport (`StaleIncarnation`, `EndpointNotFound`).
+
+| Static (well-known) | Why |
+|---|---|
+| `Identify` | bootstrap; the coordinator's liveness probe |
+| `PrepareCell`, `FormCell`, `CellInit` | the `cell init` decree, before a registry exists |
+| `Admit` | `cell add-machine` reaches an idle machine by address |
+| `Inspect`, `View`, `Load` | operator and simulation calls by address (FDB `WLTOKEN_PROCESS`) |
+| `Retire` | operator call by address |
+| `Resolve` | the client entry (FDB `OPENDATABASE`) |
+| the matchmaker calls | until #190 (matchmakers everywhere) lands: then they join the machine group |
+| the data plane | until it moves behind `Resolve` (#404 step 5) |
+
+| Dynamic group | One per | Published in |
+|---|---|---|
+| `MachineInterface` (`0x5041_1001`): `Deliver` | incarnation of a founding member | `IdentifyAck.machine_interface`, kept by `RegisterNode` in the registry fold by `node_id` |
+| `CoordinatorInterface` (`0x5041_1002`): `Register`, `JournalRequest` | coordinator term | the election record's `reference`, beside its `interface` address |
+
+Rules:
+
+- **An address says where, a reference says which instance.** A machine keeps its advertised
+  `Address` (#257) as the source of truth for where it is. The reference keeps its incarnation
+  and token. A caller resolves the address and aims the reference at it (`aimed`), because the
+  address inside a reference is the bound one, which may be a wildcard.
+- **`Deliver` stays one endpoint per machine**, not one per journal: the `(TenantId,
+  JournalId)` demux does not change. A founding member serves it in its machine group and at
+  its well-known id, and both feed one lane. Acceptor and matchmaker configurations stay keyed
+  by `node_id`.
+- **A lane dials the reference the registry fold holds** for its peer (the peer book), and the
+  well-known `Deliver` while the fold holds none: a static deployment (plain Multi-Paxos without
+  a registry is permanent), a member not registered yet, an admitted machine (it serves no
+  journal until #212). A delivery the reference refuses for good marks it stale, and the lane
+  dials the well-known `Deliver` until the fold names another reference. Amended on 2026-10-11:
+  the issue's "never fall back while the fold names a reference" is dropped, because a
+  restarted founding member's new reference is written into a registry that may need that
+  member's own vote (a cell of two), so a lane without the fallback could never heal.
+- **Every start registers once.** A restarted founding member serves a new machine interface.
+  Its `Register` carries it, and the coordinator writes `RegisterNode` when the address, the name
+  or the machine interface changed; the watch writes it for a new incarnation too.
+- **A coordinator registers its group when it serves a term** and publishes its reference with
+  the address. It drops the group when the term ends (resign, deposed, fenced, hand-off), so a
+  request to an old term fails at the transport. `Register` and `JournalRequest` have no
+  well-known endpoint. A group may outlive its term by one step (a BUGGIFY decision): a request
+  that reaches it is refused `not_coordinator` by the application.
 
 **Listen and advertised addresses** (decided on 2026-10-07, #257). A machine's configuration
 carries two addresses, as FDB's `listen_address` / `public_address` and CockroachDB's
@@ -492,11 +538,12 @@ restart is supported:
   addresses, else at the plan's; `cell_book` adds every registered machine not retired.
 - **The request path.** On every start, a formed or admitted machine reads the election
   journal, finds the coordinator's published interface, and sends it `Register` (machine
-  method `0x5041_0307`) with its identity and the address it advertises now. The coordinator
-  calls `Identify` at that address. When the machine answers there as the same incarnation, and
-  the cell's address book holds another address, the coordinator writes `RegisterNode`. A
-  member that serves no term refuses (`not_coordinator`); the machine asks again after one
-  renewal period. A restart at the same address writes nothing.
+  method `0x5041_0307`, in the coordinator's term group since #404) with its identity, the
+  address it advertises now and its machine interface. The coordinator calls `Identify` at
+  that address. When the machine answers there as the same incarnation, and the registry holds
+  another address, name or machine interface, the coordinator writes `RegisterNode`. A term
+  that ended refuses at the transport, or `not_coordinator` while its group lingers; the
+  machine asks again after one renewal period.
 - **The peer book.** A founding member folds its own copy of the cell control journal after
   each tick. When the address book moves a peer, that peer's lane dials the new address from
   its next batch on. The coordinator's watch also dials each machine where the book says.
@@ -525,8 +572,7 @@ incarnation of a registered machine registers again. The registry refuses a live
 changes nothing (`LivenessUnchanged`), and the simulation asserts that none is ever written. The
 watch writes only while its term's session holds the cell control journal; its first write that
 does not land ends the watch for the term. `RegisterNode` and `IdentifyAck` carry the machine's RPC
-incarnation: with the address, it is the machine's `InterfaceRef` identity, since a machine serves
-well-known endpoints only. Capacity bookings are keyed `(node, journal or matchmaker set, role)`,
+incarnation and, since #404, its machine interface. Capacity bookings are keyed `(node, journal or matchmaker set, role)`,
 the role names the class, and a booking id is never booked twice, across checkpoints (the
 registry keeps the spent ids). The re-placement bound and the re-placement itself are #212.
 
@@ -607,10 +653,11 @@ there it calls `Resolve` (below).
   `universe_id` rides the `Resolve` answer, and it joins the peer batch with the first call
   that crosses cells (M12). It is minted at `universe init`, after the cell plan, so the cell
   holds it in its registry fold (`JoinFleet`), not in the plan.
-- **Well-known endpoints** are the bootstrap set — `Identify`, `FormCell`, `Admit`, `Inspect` —
-  and **`Resolve`**, keyed by tenant: "which references serve tenant T" (named on 2026-10-09).
-  Everything else is a dynamic reference (amended on 2026-10-04:
-  the bootstrap calls were well known already). One call, two answerers (decided on 2026-10-07,
+- **Well-known endpoints** are the bootstrap set — `Identify`, `PrepareCell`, `FormCell`,
+  `CellInit`, `Admit`, `Inspect`, `Retire` — and **`Resolve`**, keyed by tenant: "which
+  references serve tenant T" (named on 2026-10-09). Everything else is a dynamic reference
+  (amended on 2026-10-04: the bootstrap calls were well known already). The tables and rules
+  are in "Static and dynamic endpoints" above (#404). One call, two answerers (decided on 2026-10-07,
   #233): a resolver answers the cell half (the tenant's cell and that cell's entry references),
   any machine of that cell the frontend half (the tenant's frontends, from its registry fold),
   section 3.5. `Resolve` landed on 2026-10-10 (#216, `0x5041_030A`), section 3.5.
@@ -676,9 +723,10 @@ coordinator is `paros::machine::coordinator`:
   election journal to its own latest renewal once `compact_after` records lie below it. A
   renewal is its own checkpoint. A reader that starts at the floor anchors on the leader's
   record there. Nothing else may truncate an election journal.
-- **The interface.** Records carry the candidate's `InterfaceRef` (its address). The
-  coordinator publishes it with its first renewal after its term's duties; until then the
-  interface is empty.
+- **The interface.** Records carry the candidate's interface: its address, and the encoded
+  `InterfaceRef` of its term's group (`reference`, #404), opaque to the election. The
+  coordinator publishes them with its first renewal after its term's duties; until then both
+  are empty.
 - **The coordinator.** Every founding member runs a candidate in a task beside its node loop.
   When it wins a term, it installs the term's uuid on the cell control journal with
   `SetLeader(uuid, current)`, folds that journal to its tail, and admits again every registered

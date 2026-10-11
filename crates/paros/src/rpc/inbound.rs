@@ -8,6 +8,7 @@ use std::sync::Arc;
 use moonpool_core::{Detach, Providers, SimulationError, SimulationResult, TaskProvider};
 use moonpool_rpc::{
     AccessClass, IncomingRequest, ReplyHandle, RequestStream, RpcConfig, RpcHandle, RpcMethod,
+    ServiceGroup,
 };
 use paros_core::{JournalId, JournalIdentifier, Message, Party, TenantId};
 use tokio::sync::mpsc;
@@ -15,7 +16,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::internal;
 use super::message_from_proto;
-use super::methods::{DeliverRpc, WellKnownMethod};
+use super::methods::{DeliverRpc, MachineInterface, WellKnownMethod};
 use crate::driver::DriverTunables;
 
 /// Largest frame a paros runtime accepts or produces: a full delivery batch
@@ -151,10 +152,18 @@ pub(crate) type OnReject = Arc<dyn Fn(EdgeRejection) + Send + Sync>;
 /// another cell than `cell_id` is refused whole, before any of its messages
 /// is decoded (#216): a machine never steps a peer of another cell.
 ///
-/// The task draws no randomness and consults no hook (a hook answer is a
+/// A machine also serves `Deliver` in its `group` (#404 (static vs dynamic
+/// endpoints)), the dynamic endpoint its peers dial through the reference
+/// the registry holds: both endpoints feed the same queue, each from a
+/// task of its own, under the same rules.
+///
+/// The tasks draw no randomness and consult no hook (a hook answer is a
 /// randomness draw, and a detached task is not where the simulation steps
 /// deterministically).
 #[tracing::instrument(level = "debug", skip_all, fields(at = %me, capacity))]
+// One lane's wiring: the runtime, its shape, the receiver's identity, its
+// observer, its lifetime and the machine's group.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn serve_deliveries<P: Providers>(
     providers: &P,
     rpc: &RpcHandle<P>,
@@ -163,6 +172,7 @@ pub(crate) fn serve_deliveries<P: Providers>(
     cell_id: u64,
     on_reject: OnReject,
     shutdown: CancellationToken,
+    group: Option<&ServiceGroup<MachineInterface>>,
 ) -> SimulationResult<mpsc::Receiver<(JournalIdentifier, Message)>> {
     // The lane's own endpoint queue (moonpool-rpc's per-endpoint queues):
     // `capacity` batches, never the client inbox's depth. While this task
@@ -173,36 +183,70 @@ pub(crate) fn serve_deliveries<P: Providers>(
         .endpoint_queue()
         .ok_or_else(|| SimulationError::InvalidState("default endpoint queue is empty".into()))?
         .with_requests(NonZeroUsize::new(capacity).unwrap_or(NonZeroUsize::MIN));
-    let mut stream = rpc
+    let stream = rpc
         .register_well_known_with::<DeliverRpc>(DeliverRpc::ID, AccessClass::Public, queue)
         .map(|(_, stream)| stream)
         .map_err(|e| {
             SimulationError::InvalidState(format!("register {}: {e}", DeliverRpc::NAME))
         })?;
+    let dynamic = group
+        .map(|group| group.serve_with::<DeliverRpc>(queue))
+        .transpose()
+        .map_err(|e| {
+            SimulationError::InvalidState(format!("serve {} in its group: {e}", DeliverRpc::NAME))
+        })?;
     let (inbox, messages) = mpsc::channel(capacity);
+    let lane = |mut stream: RequestStream<DeliverRpc>,
+                inbox: mpsc::Sender<(JournalIdentifier, Message)>,
+                on_reject: OnReject,
+                shutdown: CancellationToken,
+                dynamic: bool| async move {
+        moonpool_core::select! {
+            biased;
+            () = shutdown.cancelled() => {}
+            () = deliver_all(&mut stream, &inbox, (me, cell_id, dynamic), &on_reject) => {}
+        }
+    };
+    if let Some(stream) = dynamic {
+        providers
+            .task()
+            .spawn_task(
+                "paros-deliver-edge-group",
+                lane(
+                    stream,
+                    inbox.clone(),
+                    on_reject.clone(),
+                    shutdown.clone(),
+                    true,
+                ),
+            )
+            .detach();
+    }
     providers
         .task()
-        .spawn_task("paros-deliver-edge", async move {
-            moonpool_core::select! {
-                biased;
-                () = shutdown.cancelled() => {}
-                () = deliver_all(&mut stream, &inbox, me, cell_id, &on_reject) => {}
-            }
-        })
+        .spawn_task(
+            "paros-deliver-edge",
+            lane(stream, inbox, on_reject, shutdown, false),
+        )
         .detach();
     Ok(messages)
 }
 
 /// The `Deliver` edge task's body: one batch at a time, acked on enqueue.
-#[tracing::instrument(level = "debug", skip_all, fields(at = %me, cell = cell_id))]
+/// `dynamic` says the stream is the machine group's (#404).
+#[tracing::instrument(level = "debug", skip_all, fields(at = %me, cell = cell_id, dynamic))]
 async fn deliver_all(
     stream: &mut RequestStream<DeliverRpc>,
     inbox: &mpsc::Sender<(JournalIdentifier, Message)>,
-    me: Party,
-    cell_id: u64,
+    (me, cell_id, dynamic): (Party, u64, bool),
     on_reject: &OnReject,
 ) {
     while let Some(IncomingRequest { request, reply }) = stream.recv().await {
+        if dynamic {
+            moonpool_assertions::reachable!(
+                "edge: a peer batch arrives through a machine interface"
+            );
+        }
         if request.cell_id != cell_id {
             // Another cell's peer (#216, ScyllaDB's cluster id in gossip):
             // after a bad configuration, or at an address a wiped machine

@@ -1,5 +1,6 @@
 //! The method set: one moonpool-rpc [`RpcMethod`] marker per call paros
-//! speaks, each served as a **well-known endpoint** ([`WellKnownMethod`]).
+//! speaks, most served as a **well-known endpoint** ([`WellKnownMethod`]),
+//! some in a dynamic group (below).
 //!
 //! Ids are explicit and permanent, never derived from Rust names: a method's
 //! [`MethodId`] and its [`WellKnownId`] are the same number, and neither is
@@ -21,8 +22,28 @@
 //!
 //! A role that does not serve a method simply does not register it, and a
 //! call to it is refused `EndpointNotFound` before any handler runs.
+//!
+//! **Static and dynamic endpoints** (#404 (static vs dynamic endpoints),
+//! `docs/architecture.md` §3.2), after FDB's well-known and
+//! dynamic endpoints. A well-known endpoint is what an operator or a new
+//! client reaches with an address alone. Two interfaces are also served as
+//! moonpool dynamic groups ([`RpcInterface`]), each reference naming one
+//! instance:
+//!
+//! - [`MachineInterface`]: `Deliver`, one group per incarnation of a
+//!   founding member, published in its `IdentifyAck` and kept in the
+//!   registry fold by `node_id`. A peer dials it through the reference the
+//!   fold holds, and through the well-known `Deliver` while the fold holds
+//!   none (a static deployment, a member not registered yet) or after the
+//!   reference went stale.
+//! - [`CoordinatorInterface`]: `Register` and `JournalRequest`, one group
+//!   per coordinator term, published in the election journal. A request to
+//!   an ended term fails at the transport. These two methods have no
+//!   well-known endpoint.
 
-use moonpool_rpc::{MethodId, RpcMethod, SchemaVersion, WellKnownId};
+use moonpool_rpc::{
+    InterfaceId, InterfaceMethod, MethodId, RpcInterface, RpcMethod, SchemaVersion, WellKnownId,
+};
 
 use super::{internal, machine, matchmaker, public, view};
 
@@ -32,6 +53,53 @@ use super::{internal, machine, matchmaker, public, view};
 pub trait WellKnownMethod: RpcMethod {
     /// The endpoint's well-known id (equal to the method id).
     const ID: WellKnownId;
+}
+
+/// A machine's dynamic interface (#404 (static vs dynamic endpoints)): one
+/// group per incarnation of a founding member.
+#[derive(Debug, Clone, Copy)]
+pub struct MachineInterface;
+
+impl RpcInterface for MachineInterface {
+    const INTERFACE: InterfaceId = InterfaceId::new(0x5041_1001);
+    const VERSION: SchemaVersion = SchemaVersion::new(1);
+    const NAME: &'static str = "paros.machine";
+}
+
+/// The cell coordinator's dynamic interface (#404 (static vs dynamic
+/// endpoints)): one group per term the coordinator serves.
+#[derive(Debug, Clone, Copy)]
+pub struct CoordinatorInterface;
+
+impl RpcInterface for CoordinatorInterface {
+    const INTERFACE: InterfaceId = InterfaceId::new(0x5041_1002);
+    const VERSION: SchemaVersion = SchemaVersion::new(1);
+    const NAME: &'static str = "paros.coordinator";
+}
+
+// Two interfaces never share an id.
+const _: () = assert!(MachineInterface::INTERFACE.get() != CoordinatorInterface::INTERFACE.get());
+
+impl InterfaceMethod<MachineInterface> for DeliverRpc {}
+impl InterfaceMethod<CoordinatorInterface> for RegisterRpc {}
+impl InterfaceMethod<CoordinatorInterface> for JournalRequestRpc {}
+
+/// A method served only in a dynamic group: it has a method id, and no
+/// well-known endpoint.
+macro_rules! dynamic_method {
+    ($(#[$doc:meta])* $marker:ident, $id:literal, $request:ty => $reply:ty, $name:literal) => {
+        $(#[$doc])*
+        #[derive(Debug, Clone, Copy)]
+        pub struct $marker;
+
+        impl RpcMethod for $marker {
+            type Request = $request;
+            type Reply = $reply;
+            const METHOD: MethodId = MethodId::new($id);
+            const SCHEMA: SchemaVersion = SchemaVersion::new(1);
+            const NAME: &'static str = $name;
+        }
+    };
 }
 
 macro_rules! well_known_method {
@@ -153,13 +221,16 @@ well_known_method!(
     AdmitRpc, 0x5041_0306, machine::Admit => machine::AdmitAck,
     "paros.machine.Admit"
 );
-well_known_method!(
+// `Register` and `JournalRequest` were well-known at 0x5041_0307 and
+// 0x5041_0308 until #404 (static vs dynamic endpoints): their method ids
+// stand, and they are served only in the coordinator's term group.
+dynamic_method!(
     /// A machine of a cell asks the cell coordinator to register its
-    /// advertised address (#349).
+    /// advertised address and its machine interface (#349, #404).
     RegisterRpc, 0x5041_0307, machine::Register => machine::RegisterAck,
     "paros.machine.Register"
 );
-well_known_method!(
+dynamic_method!(
     /// A tenant's journal create or delete, sent to the tenant coordinator
     /// (#210).
     JournalRequestRpc, 0x5041_0308, machine::JournalRequest => machine::JournalRequestAck,

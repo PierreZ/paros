@@ -11,12 +11,18 @@
 //! own log holds, starting from the machine's **cached registry fold**
 //! (#211): the lanes dial where the cache says until the fold passes the
 //! cache's position, and every later book is offered to the cache.
+//!
+//! The book also carries each peer's **machine interface** (#404 (static vs
+//! dynamic endpoints)): the registry's reference for the peer's current
+//! incarnation, which its lane dials `Deliver` through. A peer the registry
+//! holds no reference for is dialed at its well-known `Deliver`.
 
 use std::collections::BTreeMap;
 
 use paros_core::{JournalIdentifier, LogRead, NodeId, Seq};
 
 use super::journals::Journals;
+use super::transport::PeerTarget;
 use crate::Address;
 use crate::client::checkpoint::Folder;
 use crate::machine::{CachedRegistry, FormedCell, address_book, cell_book};
@@ -44,8 +50,9 @@ pub(crate) struct PeerBook {
     /// The cached registry fold's position: below it, the cache's book is
     /// newer than the fold's, so the fold moves no lane.
     floor: u64,
-    /// The address each peer's lane dials now.
-    dialed: BTreeMap<NodeId, Address>,
+    /// The address each peer's lane dials now, and the machine interface it
+    /// dials there (empty: the well-known `Deliver`).
+    dialed: BTreeMap<NodeId, PeerTarget>,
 }
 
 impl PeerBook {
@@ -55,10 +62,11 @@ impl PeerBook {
     pub(crate) fn new(formed: &FormedCell) -> Self {
         let me = formed.facts.node_id;
         let founders = formed.plan.members.clone();
-        let dialed: BTreeMap<NodeId, Address> = formed
+        let dialed: BTreeMap<NodeId, PeerTarget> = formed
             .founders()
             .into_iter()
             .filter(|(id, _)| *id != me)
+            .map(|(id, addr)| (id, (addr, Vec::new())))
             .collect();
         assert!(
             founders.iter().any(|(id, _)| *id == me),
@@ -76,13 +84,17 @@ impl PeerBook {
     }
 
     /// Fold what this node's own registry log chose since the last call, and
-    /// return every peer the book moved, with its new address, and the
-    /// cell's book when the fold reached a new one at or past the cache's
-    /// position (#211).
+    /// return every peer the book moved, with its new address and machine
+    /// interface (#404), and the cell's book when the fold reached a new one
+    /// at or past the cache's position (#211).
+    ///
+    /// Draws one BUGGIFY decision per peer whose interface alone changed,
+    /// on the node loop: the book holds the fresh interface back for one
+    /// fold, so the lane meets its stale one (#404).
     pub(crate) fn follow<S, A>(
         &mut self,
         journals: &Journals<S, A>,
-    ) -> (Vec<(NodeId, Address)>, Option<CachedRegistry>) {
+    ) -> (Vec<(NodeId, PeerTarget)>, Option<CachedRegistry>) {
         let Some(rt) = journals.live.get(&self.registry) else {
             return (Vec::new(), None);
         };
@@ -123,12 +135,27 @@ impl PeerBook {
             if id == self.me {
                 continue;
             }
+            let interface = self
+                .fold
+                .state()
+                .get(id)
+                .map(|node| node.machine_interface.clone())
+                .unwrap_or_default();
             let dialed = self.dialed.get_mut(&id);
             let Some(dialed) = dialed else { continue };
-            if *dialed != addr {
-                dialed.clone_from(&addr);
-                moved.push((id, addr));
+            if dialed.0 == addr && dialed.1 == interface {
+                continue;
             }
+            // A fresh interface at the same address, held back one fold
+            // (#404): the lane dials the stale one and falls back.
+            if dialed.0 == addr && moonpool_buggify::buggify_fault_with_prob!(0.2) {
+                moonpool_assertions::reachable!(
+                    "machine: a peer book holds a fresh machine interface back"
+                );
+                continue;
+            }
+            *dialed = (addr.clone(), interface.clone());
+            moved.push((id, (addr, interface)));
         }
         assert!(
             moved.iter().all(|(id, _)| *id != self.me),
