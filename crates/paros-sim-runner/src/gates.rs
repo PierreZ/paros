@@ -654,7 +654,7 @@ pub const RARE: &[Rare] = &[
     },
     Rare {
         msg: "chain: the settle tail waits for a spare that joined in the tail",
-        reason: "marginal: fired in the sweep of PR #499 (journals on admitted machines), missed by the sweep of PR #503 (matchmaker sets off the founders) (#486)",
+        reason: "marginal: missed by the sweep of PR #503 (matchmaker sets off the founders), by one of three 200-seed hunt shards and by the sweep on #500 (two red hunt seeds) (#486)",
     },
     Rare {
         msg: "outage: a split-floor outage strikes in the recovery tail",
@@ -763,10 +763,6 @@ pub const RARE: &[Rare] = &[
     Rare {
         msg: "an acceptor declines a repeat contest of one overwrite",
         reason: "marginal: fired on 10 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "generation: a handover is abandoned while freezing",
-        reason: "no work in the chaos window: fired on 15 of 1,000 hunt seeds (#495)",
     },
     Rare {
         msg: "generation: a handover is abandoned while bootstrapping",
@@ -1035,10 +1031,6 @@ pub const RARE: &[Rare] = &[
     Rare {
         msg: "storage: a boot recovers a floor its node never reported",
         reason: "fired on 0 of 600 hunt seeds: a truncation lands in the recovery tail, where a driver hint cannot strike (#496 (two red hunt seeds), #484)",
-    },
-    Rare {
-        msg: "chain: the settle tail waits for a spare that joined in the tail",
-        reason: "marginal: missed by one of three 200-seed hunt shards and by the sweep on #500 (two red hunt seeds) (#486)",
     },
     Rare {
         msg: "machine: a machine no cell init lists restarts and waits",
