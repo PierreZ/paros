@@ -330,6 +330,25 @@ impl CallObserver for Announce {
             log.answered(token & ((1 << TOKEN_JOURNAL_SHIFT) - 1), answer);
         }
     }
+
+    fn resolving(&self, write: &paros::Write) -> Option<u64> {
+        let (index, _, log) = self.entry(Attempted::Write(write).journal())?;
+        let token = log.resolving(write)?;
+        Some((index as u64) << TOKEN_JOURNAL_SHIFT | token)
+    }
+
+    fn resolved(&self, token: u64, report: &paros::client::ResolveReport) {
+        let index = usize::try_from(token >> TOKEN_JOURNAL_SHIFT).unwrap_or(usize::MAX);
+        let log = self
+            .journals
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(index)
+            .map(|(_, _, log)| log.clone());
+        if let Some(log) = log {
+            log.resolved(token & ((1 << TOKEN_JOURNAL_SHIFT) - 1), report);
+        }
+    }
 }
 
 impl SystemOps {

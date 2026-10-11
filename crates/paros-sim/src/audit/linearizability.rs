@@ -51,6 +51,18 @@
 //! be reordered so, since an earlier invocation stands wherever a later one
 //! could.
 //!
+//! **A write resolved not written** (#444) is held to it. When the
+//! client's `resolve` settles an ambiguous write as `NotWritten`, the
+//! history records a marker ([`Seen::NotWritten`]) whose invocation is when
+//! the settlement started. It is no attempt: the search judges none. It
+//! says the write was not in the journal at some point after that instant,
+//! and its uuid did not lead there or its position was taken. So the write
+//! lands, in any linearization, only under a leadership installed by a
+//! claim that may linearize after that instant (one answered later, or
+//! never answered): a uuid that leads again. A `resolve` that wrongly
+//! tells the application a rewrite is safe makes a late landing of the
+//! first write a refutation, not a lost update nobody sees.
+//!
 //! **Time** is simulated nanoseconds. Two attempts whose spans share an
 //! instant are concurrent: a call event sorts before a return event at the
 //! same time, which can only drop a precedence edge, never invent one.
@@ -123,6 +135,10 @@ pub(crate) enum Seen {
     /// The call is shaped for the other writer mode (#241), refused against
     /// `state`.
     WrongMode(JournalView),
+    /// Not an answer: the client resolved the write not written (#444). An
+    /// attempt with this verdict is a marker, never judged; its `inv` is
+    /// when the settlement started.
+    NotWritten,
 }
 
 /// One attempt: who made it, when, what it asked and — when it was
@@ -135,6 +151,18 @@ pub(crate) struct Attempt {
     pub(crate) seen: Option<(u64, Seen)>,
 }
 
+impl Attempt {
+    /// Whether this is a resolution's marker (#444), not an attempt.
+    fn is_marker(&self) -> bool {
+        matches!(self.seen, Some((_, Seen::NotWritten)))
+    }
+
+    /// When the answer came; `u64::MAX` for an unknown attempt.
+    fn resp(&self) -> u64 {
+        self.seen.as_ref().map_or(u64::MAX, |(resp, _)| *resp)
+    }
+}
+
 /// The model's journal state: who may write, and where the dense positions
 /// stand. Plain scalars, compared field by field with what a node answered.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -142,6 +170,10 @@ struct Scalars {
     leader: Option<LeaderUuid>,
     next_seq: u64,
     first_seq: u64,
+    /// The claim that installed `leader` (#444): a write resolved not
+    /// written lands only under a claim that may follow its settlement.
+    /// No node reports it, so [`Scalars::is`] leaves it out.
+    installed_by: Option<usize>,
 }
 
 impl Scalars {
@@ -174,6 +206,9 @@ struct Model<'a> {
     landed: Vec<bool>,
     /// Per unknown attempt, the state past which it can never take effect.
     deadline: Vec<Deadline>,
+    /// The writes a resolution proved not written (#444), each with the
+    /// latest instant a settlement of it started.
+    never: BTreeMap<&'a Call, u64>,
     scalars: Scalars,
     /// The accepted writes, as attempt indices, in position order (each
     /// accepted at its own `seq`, so their starts are strictly increasing).
@@ -197,6 +232,7 @@ impl<'a> Model<'a> {
             after,
             landed: vec![false; attempts.len()],
             deadline,
+            never: resolved_not_written(attempts, mode),
             scalars: Scalars::default(),
             writes: Vec::new(),
             records: Vec::new(),
@@ -246,7 +282,24 @@ impl<'a> Model<'a> {
         for word in [s.next_seq, s.first_seq] {
             h = mix128(h ^ u128::from(word));
         }
+        // Which claim installed the leader matters only to a write a
+        // resolution proved not written.
+        if !self.never.is_empty() {
+            h = mix128(h ^ s.installed_by.map_or(u128::MAX, |k| k as u128));
+        }
         h
+    }
+
+    /// Whether `call` may land under the leader in force (#444): a write a
+    /// resolution proved not written lands only under a claim that may
+    /// linearize after that settlement started.
+    fn may_land(&self, call: &Call) -> bool {
+        let Some(&settled) = self.never.get(call) else {
+            return true;
+        };
+        self.scalars
+            .installed_by
+            .is_none_or(|claim| self.attempts[claim].resp() > settled)
     }
 
     /// The write accepted with its first record at `seq`, if any.
@@ -296,15 +349,16 @@ impl<'a> Model<'a> {
                         _ => false,
                     }
                 } else if s.leader == Some(*leader) && *seq == s.next_seq && count > 0 {
-                    let answered = match seen {
-                        None => true,
-                        Some(Seen::Written {
-                            seq: at,
-                            count: n,
-                            duplicate: false,
-                        }) => at == seq && *n == count,
-                        Some(_) => false,
-                    };
+                    let answered = self.may_land(&attempt.call)
+                        && match seen {
+                            None => true,
+                            Some(Seen::Written {
+                                seq: at,
+                                count: n,
+                                duplicate: false,
+                            }) => at == seq && *n == count,
+                            Some(_) => false,
+                        };
                     if answered {
                         self.land(i, records);
                     }
@@ -321,6 +375,7 @@ impl<'a> Model<'a> {
                 if *old == s.leader && new.is_set() && s.leader != Some(*new) {
                     let after = Scalars {
                         leader: Some(*new),
+                        installed_by: Some(i),
                         ..s
                     };
                     let answered = match seen {
@@ -736,7 +791,8 @@ impl Pending {
             } => Some(*seq),
             Seen::Written {
                 duplicate: true, ..
-            } => None,
+            }
+            | Seen::NotWritten => None,
             Seen::Refused(state)
             | Seen::WriteTruncated(state)
             | Seen::Page { state, .. }
@@ -841,7 +897,8 @@ fn twins(attempts: &[Attempt], keep: &[usize]) -> Vec<Option<usize>> {
 ///   differ only in bytes. When no answered attempt can tell those bytes
 ///   apart — no page shows one of their records, and no answered write is
 ///   the same call (whose verdict, duplicate or refused, would depend on
-///   them) — accepting one or the other is observed by nobody, so one
+///   them), nor a resolution's marker (#444: where the write may land
+///   depends on them) — accepting one or the other is observed by nobody, so one
 ///   representative per group stands for all. Without this, an owner's
 ///   recovery loop (a fresh write per try at one position, hundreds over a
 ///   long tail) made every unknown write a branch at the one state where
@@ -902,7 +959,7 @@ fn judged(attempts: &[Attempt], mode: WriterMode) -> Vec<usize> {
         .filter(|&i| {
             let attempt = &attempts[i];
             if attempt.seen.is_some() {
-                return true;
+                return !attempt.is_marker();
             }
             match &attempt.call {
                 Call::Read { .. } => false,
@@ -1000,7 +1057,7 @@ fn relevant_leaders(attempts: &[Attempt]) -> BTreeSet<LeaderUuid> {
 /// The state an answer carries, if any (a write's acceptance carries none).
 fn view(seen: &Seen) -> Option<&JournalView> {
     match seen {
-        Seen::Written { .. } => None,
+        Seen::Written { .. } | Seen::NotWritten => None,
         Seen::Page { state, .. }
         | Seen::Refused(state)
         | Seen::WriteTruncated(state)
@@ -1029,7 +1086,7 @@ fn judged_multi(attempts: &[Attempt]) -> Vec<usize> {
         .filter(|&i| {
             let attempt = &attempts[i];
             if attempt.seen.is_some() {
-                return true;
+                return !attempt.is_marker();
             }
             match &attempt.call {
                 Call::Write {
@@ -1087,6 +1144,22 @@ fn interchangeable(attempts: &[Attempt], keep: &[usize], mode: WriterMode) -> Ve
         after[i] = last.insert(key, i);
     }
     after
+}
+
+/// The writes a resolution proved not written (#444), from the history's
+/// markers ([`Seen::NotWritten`]): each call with the latest instant a
+/// settlement of it started. None on a multi-writer journal, whose
+/// unfenced writes are never settled.
+fn resolved_not_written(attempts: &[Attempt], mode: WriterMode) -> BTreeMap<&Call, u64> {
+    let mut never: BTreeMap<&Call, u64> = BTreeMap::new();
+    if mode == WriterMode::Multi {
+        return never;
+    }
+    for attempt in attempts.iter().filter(|a| a.is_marker()) {
+        let settled = never.entry(&attempt.call).or_insert(attempt.inv);
+        *settled = (*settled).max(attempt.inv);
+    }
+    never
 }
 
 /// When an unknown attempt can no longer take effect, in terms of the
@@ -1173,6 +1246,7 @@ impl Landings {
                 | Seen::Trimmed(state)
                 | Seen::TruncateRefused(state)
                 | Seen::WrongMode(state) => end = end.max(state.next_seq.0),
+                Seen::NotWritten => {}
             }
         }
         let mut shown_at: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
@@ -1925,5 +1999,101 @@ mod tests {
         let verdict = check(&claim_families(2), WriterMode::Single, 1_000_000);
         assert!(!verdict.exhausted, "steps: {}", verdict.steps);
         assert!(!verdict.linearizable);
+    }
+
+    /// A page that shows `records` at `next`, under `leader`.
+    fn page(records: &[u64], leader: u64, next: u64) -> Seen {
+        Seen::Page {
+            records: records.to_vec(),
+            state: state(Some(leader), next, 0),
+        }
+    }
+
+    /// #444: a write the client resolved not written while its uuid still
+    /// led (a `resolve` that compares wrongly) is refuted once a read shows
+    /// it landed; without the resolution's marker the late landing is an
+    /// unknown write, linearizable.
+    #[test]
+    fn a_write_resolved_not_written_never_lands_under_its_leadership() {
+        let mut history = vec![
+            at(
+                0,
+                0,
+                claim(0, None),
+                Some((1, Seen::Won(state(Some(0), 0, 0)))),
+            ),
+            at(0, 2, write(0, 0, &[7]), None),
+            at(
+                1,
+                10,
+                Call::Read { from: 0, limit: 0 },
+                Some((11, page(&[7], 0, 1))),
+            ),
+        ];
+        assert!(linearizable(&history));
+        history.push(at(0, 3, write(0, 0, &[7]), Some((4, Seen::NotWritten))));
+        assert!(!linearizable(&history));
+    }
+
+    /// #444: a uuid that leads again after the settlement lets the write
+    /// land (§2.3: a reinstated uuid is the caller's misbehaviour), and so
+    /// does a claim of it still unanswered when the settlement started.
+    #[test]
+    fn a_write_resolved_not_written_lands_when_its_uuid_leads_again() {
+        let history = [
+            at(
+                0,
+                0,
+                claim(0, None),
+                Some((1, Seen::Won(state(Some(0), 0, 0)))),
+            ),
+            at(0, 2, write(0, 0, &[7]), None),
+            at(
+                1,
+                3,
+                claim(1, Some(0)),
+                Some((4, Seen::Won(state(Some(1), 0, 0)))),
+            ),
+            at(0, 5, write(0, 0, &[7]), Some((6, Seen::NotWritten))),
+            at(
+                1,
+                7,
+                claim(0, Some(1)),
+                Some((8, Seen::Won(state(Some(0), 0, 0)))),
+            ),
+            at(
+                1,
+                10,
+                Call::Read { from: 0, limit: 0 },
+                Some((11, page(&[7], 0, 1))),
+            ),
+        ];
+        assert!(linearizable(&history));
+        // The reinstating claim answered before the settlement started:
+        // the write was proved out of that leadership too.
+        let mut early = history.to_vec();
+        early[3].inv = 9;
+        early[3].seen = Some((9, Seen::NotWritten));
+        assert!(!linearizable(&early));
+    }
+
+    /// #444: a resolution's marker is never judged as an attempt, and it
+    /// keeps its write out of the unobserved-bytes collapse: the marked
+    /// write and an unmarked one at the same position both stay.
+    #[test]
+    fn a_resolution_marker_is_not_an_attempt() {
+        let history = [
+            at(
+                0,
+                0,
+                claim(0, None),
+                Some((1, Seen::Won(state(Some(0), 0, 0)))),
+            ),
+            at(0, 2, write(0, 0, &[7]), None),
+            at(0, 3, write(0, 0, &[8]), None),
+            at(0, 4, write(0, 0, &[7]), Some((5, Seen::NotWritten))),
+        ];
+        assert_eq!(judged(&history, WriterMode::Single), vec![0, 1, 2]);
+        assert!(linearizable(&history));
     }
 }

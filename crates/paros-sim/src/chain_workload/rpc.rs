@@ -17,11 +17,11 @@ use std::time::Duration;
 
 use moonpool_sim::{SimContext, SimTimeProvider, TimeProvider, assert_always, assert_reachable};
 use paros::client::{
-    Answered, Attempted, CallObserver, ReadOutcome, SetLeaderOutcome, TruncateOutcome,
-    WriteOutcome, write_request,
+    Answered, Attempted, CallObserver, ReadOutcome, Resolution, ResolveReport, SetLeaderOutcome,
+    TruncateOutcome, WriteOutcome, write_request,
 };
 use paros::{
-    Entry, JournalIdentifier, LeaderUuid, Read, leader_from_proto, leader_uuid_from_proto,
+    Entry, JournalIdentifier, LeaderUuid, Read, Write, leader_from_proto, leader_uuid_from_proto,
 };
 
 use crate::audit::{Attempt, Call, Seen};
@@ -45,6 +45,10 @@ use crate::client::ChainClient;
 /// that re-sent a write at a fresh position would write it twice; the
 /// journal model cannot tell two such attempts from two writes, so this is
 /// where it is caught.
+///
+/// And it records every write the library's `resolve` settled as not
+/// written (#444): a marker in the history ([`Seen::NotWritten`]) the
+/// search holds the write to.
 #[derive(Clone)]
 pub(crate) struct CallLog {
     journal: JournalIdentifier,
@@ -52,6 +56,8 @@ pub(crate) struct CallLog {
     time: SimTimeProvider,
     attempts: Arc<Mutex<Vec<Attempt>>>,
     retries: Arc<Mutex<Retries>>,
+    /// Each settlement started, by token: the write and when it started.
+    settling: Arc<Mutex<Vec<(Call, u64)>>>,
 }
 
 /// The write operation open now, and the request each operation first sent.
@@ -81,6 +87,7 @@ impl CallLog {
             time,
             attempts,
             retries: Arc::default(),
+            settling: Arc::default(),
         }
     }
 
@@ -132,11 +139,7 @@ impl CallObserver for CallLog {
             return None;
         }
         let call = match attempt {
-            Attempted::Write(w) => Call::Write {
-                leader: leader_uuid_from_proto(w.leader),
-                seq: w.seq,
-                records: w.records.iter().map(|r| user_command_hash(r)).collect(),
-            },
+            Attempted::Write(w) => write_call(w),
             Attempted::SetLeader(s) => Call::SetLeader {
                 new: leader_uuid_from_proto(s.new),
                 old: leader_from_proto(s.old),
@@ -182,6 +185,55 @@ impl CallObserver for CallLog {
             return;
         };
         attempt.seen = Some((now.max(attempt.inv), seen));
+    }
+
+    fn resolving(&self, write: &Write) -> Option<u64> {
+        let journal = Attempted::Write(write).journal();
+        if journal != self.journal {
+            return None;
+        }
+        let mut settling = self.settling.lock().unwrap_or_else(PoisonError::into_inner);
+        settling.push((write_call(write), self.now()));
+        Some(settling.len() as u64 - 1)
+    }
+
+    fn resolved(&self, token: u64, report: &ResolveReport) {
+        if !matches!(report.resolution, Resolution::NotWritten { .. }) {
+            return;
+        }
+        let Some((call, started)) = usize::try_from(token).ok().and_then(|id| {
+            self.settling
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(id)
+                .cloned()
+        }) else {
+            return;
+        };
+        assert_reachable!("client: resolve proves a write not written");
+        if !report.by_read_back {
+            assert_reachable!("client: a re-send proves a write not written");
+        }
+        let now = self.now();
+        self.attempts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(Attempt {
+                client: self.client,
+                inv: started,
+                call,
+                seen: Some((now.max(started), Seen::NotWritten)),
+            });
+    }
+}
+
+/// A `Write` as the history records it: its fence, its position and one
+/// hash per record.
+fn write_call(write: &Write) -> Call {
+    Call::Write {
+        leader: leader_uuid_from_proto(write.leader),
+        seq: write.seq,
+        records: write.records.iter().map(|r| user_command_hash(r)).collect(),
     }
 }
 
