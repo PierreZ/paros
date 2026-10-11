@@ -240,15 +240,19 @@ impl<P: Providers> Election<P> {
         vacant || silent > self.tunables.lease + jitter
     }
 
-    /// Publish `interface` as this candidate's: the next renewal carries it
-    /// at once. The actor publishes once its term's duties are done (§3.3);
-    /// until then its records name the empty interface.
+    /// Publish `interface` as this candidate's, with the encoded
+    /// `reference` of the dynamic endpoint its term is served at (#404
+    /// (static vs dynamic endpoints); empty when it serves none): the next
+    /// renewal carries them at once. The actor publishes once its term's
+    /// duties are done (§3.3); until then its records name the empty
+    /// interface.
     ///
     /// # Panics
     ///
     /// If its postcondition fails (a programmer error).
-    pub fn publish(&mut self, interface: String) {
+    pub fn publish(&mut self, interface: String, reference: Vec<u8>) {
         self.me.interface = interface;
+        self.me.reference = reference;
         self.renewed = None;
         assert!(
             self.renewed.is_none(),

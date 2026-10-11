@@ -234,6 +234,7 @@ impl CellSession {
                         identity.incarnation_high,
                         identity.incarnation_low,
                     ),
+                    machine_interface: identity.machine_interface,
                 };
                 return match append(&mut self.cell, client, first, register.encode()).await {
                     Ok(_) => {

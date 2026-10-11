@@ -29,7 +29,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use moonpool_core::{Providers, SimulationError, SimulationResult};
-use moonpool_rpc::{RpcDriver, RpcHandle};
+use moonpool_rpc::{RpcDriver, RpcHandle, ServiceGroup};
 use paros_core::{
     GcAck, GcRequest, JournalIdentifier, MatchReply, MatchRequest, Message, Party,
     ReconfigureReply, ReconfigureRequest,
@@ -40,8 +40,9 @@ use tokio_util::sync::CancellationToken;
 use super::config::DriverTunables;
 use crate::audit::Audit;
 use crate::rpc::methods::{
-    GarbageCollectRpc, InspectRpc, MatchmakeRpc, MatchmakerReconfigureRpc, ReadRpc,
-    ReconfigureMatchmakersRpc, ReconfigureRpc, RetireRpc, SetLeaderRpc, TruncateRpc, WriteRpc,
+    GarbageCollectRpc, InspectRpc, MachineInterface, MatchmakeRpc, MatchmakerReconfigureRpc,
+    ReadRpc, ReconfigureMatchmakersRpc, ReconfigureRpc, RetireRpc, SetLeaderRpc, TruncateRpc,
+    WriteRpc,
 };
 use crate::rpc::{
     Inbound, OnReject, garbage_collect_from_wire, match_request_from_wire,
@@ -129,12 +130,16 @@ pub(crate) struct NodeInbox {
 impl NodeInbox {
     /// Register a node's endpoints on `edge`; the peer lane holds
     /// `peer_inbox_capacity` messages of cell `cell_id` and ends with
-    /// `shutdown`.
+    /// `shutdown`. A machine's lane is also served in its `machine` group
+    /// (#404 (static vs dynamic endpoints)).
     ///
     /// # Errors
     ///
     /// A registration the runtime refuses.
     #[tracing::instrument(level = "debug", skip_all)]
+    // The node's edge, its shape, its identity, its observer, its lifetime
+    // and the machine's group.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn serve<P: Providers>(
         providers: &P,
         edge: &RpcEdge<P>,
@@ -143,6 +148,7 @@ impl NodeInbox {
         cell_id: u64,
         on_reject: OnReject,
         shutdown: CancellationToken,
+        machine: Option<&ServiceGroup<MachineInterface>>,
     ) -> SimulationResult<Self> {
         let rpc = edge.handle();
         Ok(Self {
@@ -162,6 +168,7 @@ impl NodeInbox {
                 cell_id,
                 on_reject,
                 shutdown,
+                machine,
             )?,
         })
     }
@@ -206,6 +213,7 @@ impl ReplicaInbox {
                 cell_id,
                 on_reject,
                 shutdown,
+                None,
             )?,
         })
     }

@@ -10,16 +10,18 @@
 //!
 //! 1. reads the cell's election journal, through a client over the cell's
 //!    machines it knows, and finds the coordinator's interface (the address
-//!    the coordinator publishes with its first renewal of a served term);
-//! 2. sends it `Register` with its identity and the address it advertises
-//!    now;
+//!    and the term group's reference the coordinator publishes with its
+//!    first renewal of a served term, #404);
+//! 2. sends it `Register` with its identity, the address it advertises now
+//!    and its machine interface;
 //! 3. stops once the coordinator answers that the registry holds that
 //!    address, or refuses for good. Any other answer, or none, is asked
 //!    again after one renewal period: the coordinator may change, or not be
 //!    elected yet.
 //!
-//! The coordinator writes `RegisterNode` only when the address changed, so
-//! a restart at the same address writes nothing. The request draws no
+//! The coordinator writes `RegisterNode` only when the address, the name or
+//! the machine interface changed. A founding member serves a new machine
+//! interface at every start (#404), so each of its starts registers once. The request draws no
 //! randomness: it runs in a task of its own beside the machine. It tells
 //! the machine when it ends ([`spawn`]'s receiver): a moved founding member
 //! holds its journals' clocks until then (#390, `crate::driver`).
@@ -35,6 +37,7 @@ use tokio_util::sync::CancellationToken;
 use super::MachineFacts;
 use crate::client::bootstrap::{self, RegisterOutcome};
 use crate::client::election::read_election;
+use crate::client::journals::Coordinator;
 use crate::client::{Client, ClientTunables, Server};
 use crate::rpc::NodeClient;
 use crate::{Address, DriverTunables};
@@ -123,7 +126,7 @@ async fn run<P: Providers>(
         let coordinator = read_election(&client, election, 0)
             .await
             .and_then(|fold| fold.leader().cloned())
-            .and_then(|leader| Address::parse(&leader.candidate.interface).ok());
+            .and_then(|leader| Coordinator::of(&leader.candidate));
         if let Some(target) = coordinator {
             match bootstrap::register(
                 &providers,

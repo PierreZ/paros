@@ -95,6 +95,10 @@ pub enum SystemCommand {
         /// Its RPC incarnation (`0` unknown): with `addr`, its
         /// `InterfaceRef` identity.
         incarnation: u128,
+        /// Its machine interface for that incarnation (#404 (static vs
+        /// dynamic endpoints)): the encoded `InterfaceRef` its peers dial
+        /// `Deliver` through, empty when it serves none. Opaque here.
+        machine_interface: Vec<u8>,
     },
     /// Stop placing new work on node `id`.
     DrainNode {
@@ -183,6 +187,7 @@ impl SystemCommand {
                 failure_domain,
                 name,
                 incarnation,
+                machine_interface,
             } => Kind::RegisterNode(wire::RegisterNode {
                 id: id.0,
                 addr: addr.clone(),
@@ -192,6 +197,7 @@ impl SystemCommand {
                 capacity: *capacity,
                 incarnation_high: incarnation_halves(*incarnation).0,
                 incarnation_low: incarnation_halves(*incarnation).1,
+                machine_interface: machine_interface.clone(),
             }),
             SystemCommand::DrainNode { id } => Kind::DrainNode(wire::DrainNode { id: id.0 }),
             SystemCommand::RetireNode { id } => Kind::RetireNode(wire::RetireNode { id: id.0 }),
@@ -279,6 +285,7 @@ impl SystemCommand {
                     register.incarnation_high,
                     register.incarnation_low,
                 ),
+                machine_interface: register.machine_interface,
             },
             Kind::DrainNode(drain) => SystemCommand::DrainNode {
                 id: NodeId(drain.id),
@@ -515,6 +522,10 @@ pub struct RegisteredNode {
     pub registrations: u64,
     /// Its RPC incarnation (the latest registration's; `0` unknown).
     pub incarnation: u128,
+    /// Its machine interface (#404 (static vs dynamic endpoints); the latest
+    /// registration's, empty when it serves none): the encoded
+    /// `InterfaceRef` a peer dials `Deliver` through.
+    pub machine_interface: Vec<u8>,
 }
 
 /// What the cell coordinator last wrote of one machine's liveness (#211,
@@ -834,11 +845,12 @@ impl Registry {
                 failure_domain,
                 name,
                 incarnation,
+                machine_interface,
             }) => self.register(
                 id,
                 addr,
                 class,
-                (capacity, incarnation),
+                (capacity, incarnation, machine_interface),
                 (failure_domain, name),
             ),
             Some(SystemCommand::DrainNode { id }) => match self.nodes.get_mut(&id) {
@@ -903,7 +915,7 @@ impl Registry {
         id: NodeId,
         addr: String,
         class: Class,
-        (capacity, incarnation): (u64, u128),
+        (capacity, incarnation, machine_interface): (u64, u128, Vec<u8>),
         (failure_domain, name): (String, String),
     ) -> RegistryEvent {
         // A genesis node (a founding member) registers too (#349): its
@@ -923,6 +935,7 @@ impl Registry {
                 node.name = name;
                 node.registrations += 1;
                 node.incarnation = incarnation;
+                node.machine_interface = machine_interface;
                 // A registration is a machine that answered: up, as the
                 // incarnation it names.
                 self.liveness.insert(
@@ -946,6 +959,7 @@ impl Registry {
                         standing: NodeStanding::Registered,
                         registrations: 1,
                         incarnation,
+                        machine_interface,
                     },
                 );
                 self.liveness.insert(
@@ -1278,6 +1292,7 @@ impl Registry {
                     registrations: n.registrations,
                     incarnation_high: incarnation_halves(n.incarnation).0,
                     incarnation_low: incarnation_halves(n.incarnation).1,
+                    machine_interface: n.machine_interface.clone(),
                 })
                 .collect(),
             bookings: self
@@ -1354,6 +1369,7 @@ impl Checkpointable for Registry {
                     standing: NodeStanding::from_wire(n.standing)?,
                     registrations: n.registrations,
                     incarnation: incarnation_from_halves(n.incarnation_high, n.incarnation_low),
+                    machine_interface: n.machine_interface,
                 },
             );
         }
@@ -1474,6 +1490,7 @@ mod tests {
                 failure_domain: "rack-a".into(),
                 name: "storage-7".into(),
                 incarnation: (7_u128 << 64) | 9,
+                machine_interface: vec![1, 2, 3],
             },
             SystemCommand::DrainNode { id: NodeId(100) },
             SystemCommand::RetireNode { id: NodeId(100) },
@@ -1583,6 +1600,7 @@ mod tests {
             failure_domain: String::new(),
             name: format!("m{id}"),
             incarnation: u128::from(id),
+            machine_interface: Vec::new(),
         })
     }
 

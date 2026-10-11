@@ -45,12 +45,17 @@ pub const MAGIC: &[u8; 8] = b"\x00PRSELE\x01";
 /// One candidate of an election: its id (unique among the candidates, never
 /// zero) and its interface — where a request to it goes once it leads (the
 /// `InterfaceRef` of §3.3).
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Candidate {
     /// Its id.
     pub id: u64,
     /// Its interface (an address).
     pub interface: String,
+    /// The reference of the dynamic endpoint it serves its term at (#404
+    /// (static vs dynamic endpoints)), encoded, opaque to the election: a
+    /// caller aims it at `interface`. Empty until the leader publishes, and
+    /// for an election whose leader serves no dynamic endpoint.
+    pub reference: Vec<u8>,
 }
 
 /// An election record, decoded.
@@ -111,6 +116,7 @@ impl ElectionRecord {
             wire::Leadership {
                 uuid: Some(leader_uuid_to_proto(uuid)),
                 interface: candidate.interface.clone(),
+                reference: candidate.reference.clone(),
             }
         };
         let (candidate, kind) = match self {
@@ -139,6 +145,7 @@ impl ElectionRecord {
                             successor: next.id,
                             uuid: lead.uuid,
                             interface: lead.interface,
+                            reference: lead.reference,
                         }
                     }
                     None => wire::Resign::default(),
@@ -181,6 +188,7 @@ impl ElectionRecord {
                     Candidate {
                         id: record.candidate,
                         interface: lead.interface,
+                        reference: lead.reference,
                     },
                     uuid,
                 ))
@@ -217,6 +225,7 @@ impl ElectionRecord {
                         Candidate {
                             id: resign.successor,
                             interface: resign.interface,
+                            reference: resign.reference,
                         },
                         uuid,
                     ))
@@ -415,6 +424,7 @@ impl ElectionFold {
                     // A renewal republishes the interface: the leader names
                     // it once it serves (§3.3).
                     leader.candidate.interface = candidate.interface;
+                    leader.candidate.reference = candidate.reference;
                     return Change::Renewed;
                 }
                 if term > self.term {
@@ -500,6 +510,7 @@ mod tests {
         Candidate {
             id,
             interface: format!("10.0.0.{id}:4500"),
+            reference: vec![u8::try_from(id % 256).unwrap_or(0)],
         }
     }
 

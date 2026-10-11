@@ -37,15 +37,17 @@ service Machine {
   // refused by a machine of another cell, or one promised in a `cell init`.
   rpc Admit(.paros.machine.v1.Admit) returns (.paros.machine.v1.AdmitAck);
   // A machine of a cell asks the cell coordinator to register the address it
-  // advertises now (#349): a request to a leader (`docs/architecture.md`
-  // §3.3), sent to the coordinator the election journal names. The
+  // advertises now (#349) and its machine interface (#404): a request to a
+  // leader (`docs/architecture.md` §3.3), sent to the coordinator's term
+  // group the election journal names (a dynamic endpoint, #404). The
   // coordinator checks the machine answers there as itself, then writes
-  // `RegisterNode` into the cell control journal when the address changed.
-  // Idempotent: the registry holding the address is the answer.
+  // `RegisterNode` into the cell control journal when the address, the name
+  // or the interface changed. Idempotent: the registry holding them is the
+  // answer.
   rpc Register(.paros.machine.v1.Register) returns (.paros.machine.v1.RegisterAck);
   // A tenant's journal create or delete (#210), sent to the tenant
   // coordinator: until #212 and #225, the elected cell coordinator, at the
-  // interface its election renewals publish. The coordinator writes the
+  // term group its election renewals publish (a dynamic endpoint, #404). The coordinator writes the
   // request to the tenant's control journal; the fold judges it at apply and
   // records its outcome under `request`. A retry with the same `request`
   // reads that outcome back, so it acts once, across a coordinator change
@@ -87,6 +89,12 @@ message IdentifyAck {
   fixed64 incarnation_low = 9;
   // The machine's name, for people (#399): a label, never its identity.
   string name = 10;
+  // The machine's dynamic interface (#404 (static vs dynamic endpoints)):
+  // the encoded `InterfaceRef` of its `MachineInterface` group, which serves
+  // `Deliver` for this incarnation. Empty when the machine serves no group
+  // (idle, admitted). The address inside it is the bound one: a caller aims
+  // it at `addr`, resolved, and keeps only its incarnation and token.
+  bytes machine_interface = 11;
 }
 
 // One member of a cell's bootstrap: its identity and address.

@@ -683,6 +683,7 @@ impl SystemOps {
                     // A joiner's registration names a fresh incarnation:
                     // each one is a (re)boot.
                     incarnation: u128::from(crate::chain::splitmix(draw)) | 1,
+                    machine_interface: Vec::new(),
                 }
             }
             Some(standing) => {

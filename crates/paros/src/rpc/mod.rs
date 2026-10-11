@@ -84,7 +84,7 @@ pub mod view {
     include!(concat!(env!("OUT_DIR"), "/paros.view.v1.rs"));
 }
 
-mod client;
+pub(crate) mod client;
 mod codec;
 mod consensus;
 pub(crate) mod inbound;
@@ -95,7 +95,7 @@ mod refusal;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use client::{MatchmakerClient, well_known};
+pub(crate) use client::{MatchmakerClient, in_group, published, well_known};
 pub use client::{NodeClient, Pass};
 pub use inbound::{EdgeRejection, MAX_FRAME_BYTES};
 pub(crate) use inbound::{

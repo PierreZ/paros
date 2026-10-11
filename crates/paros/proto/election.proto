@@ -13,7 +13,7 @@ import "common.proto";
 // Every record names the term it is about and the candidate that wrote it.
 // A campaign and a renewal also carry the leader uuid the candidate leads
 // that term under and its interface (the address a request to the leader
-// goes to), so each one describes the whole leadership: a watcher that
+// goes to, and the reference of its term group, #404), so each one describes the whole leadership: a watcher that
 // starts at a renewal (the journal truncated below it) knows who leads.
 message ElectionRecord {
   uint64 term = 1;
@@ -29,6 +29,10 @@ message ElectionRecord {
 message Leadership {
   paros.common.v1.LeaderUuid uuid = 1;
   string interface = 2;
+  // The leader's term group (#404 (static vs dynamic endpoints)): an encoded
+  // `InterfaceRef`, opaque to the election, aimed by a caller at `interface`.
+  // Empty until the leader publishes.
+  bytes reference = 3;
 }
 
 // The leader of `term` steps down. With a successor, the successor leads the
@@ -38,4 +42,5 @@ message Resign {
   uint64 successor = 1;
   paros.common.v1.LeaderUuid uuid = 2;
   string interface = 3;
+  bytes reference = 4;
 }
