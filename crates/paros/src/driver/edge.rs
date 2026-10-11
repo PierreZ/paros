@@ -130,8 +130,8 @@ pub(crate) struct NodeInbox {
 impl NodeInbox {
     /// Register a node's endpoints on `edge`; the peer lane holds
     /// `peer_inbox_capacity` messages of cell `cell_id` and ends with
-    /// `shutdown`. A machine's lane is also served in its `machine` group
-    /// (#404 (static vs dynamic endpoints)).
+    /// `shutdown`. A machine's lane and its data plane are also served in
+    /// its `machine` group (#404 (static vs dynamic endpoints)).
     ///
     /// # Errors
     ///
@@ -152,12 +152,12 @@ impl NodeInbox {
     ) -> SimulationResult<Self> {
         let rpc = edge.handle();
         Ok(Self {
-            write: Inbound::plain(serve_well_known(rpc)?),
-            log_read: Inbound::plain(serve_well_known(rpc)?),
-            truncate: Inbound::plain(serve_well_known(rpc)?),
-            set_leader: Inbound::plain(serve_well_known(rpc)?),
-            reconfigure: Inbound::plain(serve_well_known(rpc)?),
-            reconfigure_matchmakers: Inbound::plain(serve_well_known(rpc)?),
+            write: Inbound::plain(serve_well_known(rpc)?).in_group(machine)?,
+            log_read: Inbound::plain(serve_well_known(rpc)?).in_group(machine)?,
+            truncate: Inbound::plain(serve_well_known(rpc)?).in_group(machine)?,
+            set_leader: Inbound::plain(serve_well_known(rpc)?).in_group(machine)?,
+            reconfigure: Inbound::plain(serve_well_known(rpc)?).in_group(machine)?,
+            reconfigure_matchmakers: Inbound::plain(serve_well_known(rpc)?).in_group(machine)?,
             inspect: Inbound::plain(serve_well_known(rpc)?),
             retire: Inbound::plain(serve_well_known(rpc)?),
             deliver: serve_deliveries(
@@ -233,25 +233,33 @@ pub(crate) struct MatchmakerInbox {
 
 impl MatchmakerInbox {
     /// Register a matchmaker's endpoints on the runtime `rpc` (its own
-    /// edge, or a machine's shared one, #190).
+    /// edge, or a machine's shared one, #190), and in the `machine` group
+    /// of a founding member that hosts it (#404 (static vs dynamic
+    /// endpoints)).
     ///
     /// # Errors
     ///
     /// A registration the runtime refuses.
     #[tracing::instrument(level = "debug", skip_all)]
-    pub(crate) fn serve<P: Providers>(rpc: &RpcHandle<P>) -> SimulationResult<Self> {
+    pub(crate) fn serve<P: Providers>(
+        rpc: &RpcHandle<P>,
+        machine: Option<&ServiceGroup<MachineInterface>>,
+    ) -> SimulationResult<Self> {
         Ok(Self {
             requests: Inbound::new(serve_well_known(rpc)?, match_request_from_wire, |reply| {
                 wire_match_reply(&reply)
-            }),
+            })
+            .in_group(machine)?,
             collects: Inbound::new(serve_well_known(rpc)?, garbage_collect_from_wire, |ack| {
                 wire_garbage_collect_ack(&ack)
-            }),
+            })
+            .in_group(machine)?,
             reconfigures: Inbound::new(
                 serve_well_known(rpc)?,
                 reconfigure_request_from_wire,
                 |reply| wire_reconfigure_reply(&reply),
-            ),
+            )
+            .in_group(machine)?,
         })
     }
 }

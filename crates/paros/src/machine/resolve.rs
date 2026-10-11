@@ -11,8 +11,10 @@
 //!    serves it. Only a `READY` `users` tenant resolves
 //!    ([`crate::client::names::tenant_in`]);
 //! 2. the cell's machines, at the addresses its registry holds
-//!    ([`super::cell_book`]). The client calls them until the frontend
-//!    exists; then the answer names the tenant's frontends.
+//!    ([`super::cell_book`]), each with the machine interface the registry
+//!    holds for it (#404 (static vs dynamic endpoints)). The client sends
+//!    its data plane through those references until the frontend exists;
+//!    then the answer names the tenant's frontends.
 //!
 //! The machine reads both journals as any client does, through the cell's
 //! machines it knows, and keeps both folds between requests, so an answer
@@ -225,14 +227,27 @@ impl Folds {
                         tenant: control.tenant.0,
                         journal: control.journal.0,
                     });
+                    // Each machine's interface as the registry holds it
+                    // (#404 (static vs dynamic endpoints)): the client
+                    // sends its data plane through it.
+                    let registry = self.registry.as_ref().map(|(_, folder)| folder.state());
                     ack.machines = self
                         .book
                         .iter()
                         .map(|(id, addr)| wire::Member {
                             node_id: id.0,
                             addr: addr.to_string(),
+                            machine_interface: registry
+                                .and_then(|registry| registry.get(*id))
+                                .map(|node| node.machine_interface.clone())
+                                .unwrap_or_default(),
                         })
                         .collect();
+                    assert_eq!(
+                        ack.machines.len(),
+                        self.book.len(),
+                        "every machine of the book is answered"
+                    );
                 } else {
                     ack.refusal = "other_cell".into();
                 }

@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use moonpool_core::{Detach, Providers, SimulationError, SimulationResult, TaskProvider};
 use moonpool_rpc::{
-    AccessClass, IncomingRequest, ReplyHandle, RequestStream, RpcConfig, RpcHandle, RpcMethod,
-    ServiceGroup,
+    AccessClass, IncomingRequest, InterfaceMethod, ReplyHandle, RequestStream, RpcConfig,
+    RpcHandle, RpcMethod, ServiceGroup,
 };
 use paros_core::{JournalId, JournalIdentifier, Message, Party, TenantId};
 use tokio::sync::mpsc;
@@ -80,10 +80,25 @@ impl<U> ReplySender<U> {
 /// (`T`) with a reply seam for what it answers (`U`). A request that does
 /// not decode is refused by dropping its reply handle (the caller sees a
 /// broken promise) and never reaches the loop.
+///
+/// A machine also serves the method in its machine group (#404 (static vs
+/// dynamic endpoints), [`Inbound::in_group`]): both streams feed the same
+/// queue, under the same rules.
 pub(crate) struct Inbound<M: RpcMethod, T, U> {
     stream: RequestStream<M>,
+    /// The same method in the machine's group, while the group serves it.
+    group: Option<RequestStream<M>>,
     decode: fn(M::Request) -> Result<T, &'static str>,
     encode: fn(U) -> M::Reply,
+}
+
+/// Which stream one [`Inbound::recv`] heard.
+enum Heard<M: RpcMethod> {
+    Request(IncomingRequest<M>, bool),
+    /// The well-known endpoint ended: the runtime is gone.
+    Gone,
+    /// The group ended: it was dropped, the well-known endpoint stays.
+    GroupGone,
 }
 
 impl<M: RpcMethod, T, U: 'static> Inbound<M, T, U> {
@@ -95,22 +110,72 @@ impl<M: RpcMethod, T, U: 'static> Inbound<M, T, U> {
     ) -> Self {
         Self {
             stream,
+            group: None,
             decode,
             encode,
         }
     }
 
     /// The next decodable request, `None` once the runtime is gone.
-    /// Cancel-safe: the only await is the stream's.
+    /// Cancel-safe: the only awaits are the streams'.
     #[tracing::instrument(level = "trace", skip_all, fields(method = M::NAME))]
     pub(crate) async fn recv(&mut self) -> Option<(T, ReplySender<U>)> {
         loop {
-            let IncomingRequest { request, reply } = self.stream.recv().await?;
+            let heard = match self.group.as_mut() {
+                None => self
+                    .stream
+                    .recv()
+                    .await
+                    .map_or(Heard::Gone, |r| Heard::Request(r, false)),
+                Some(group) => moonpool_core::select! {
+                    biased;
+                    r = self.stream.recv() => r.map_or(Heard::Gone, |r| Heard::Request(r, false)),
+                    r = group.recv() => r.map_or(Heard::GroupGone, |r| Heard::Request(r, true)),
+                },
+            };
+            let IncomingRequest { request, reply } = match heard {
+                Heard::Request(incoming, dynamic) => {
+                    if dynamic {
+                        moonpool_assertions::reachable!(
+                            "edge: a call arrives through a machine interface"
+                        );
+                    }
+                    incoming
+                }
+                Heard::Gone => return None,
+                Heard::GroupGone => {
+                    self.group = None;
+                    continue;
+                }
+            };
             match (self.decode)(request) {
                 Ok(request) => return Some((request, ReplySender::new(reply, self.encode))),
                 Err(error) => tracing::warn!(method = M::NAME, error, "undecodable request"),
             }
         }
+    }
+}
+
+impl<M: InterfaceMethod<MachineInterface>, T, U> Inbound<M, T, U> {
+    /// Serve the method in the machine's `group` too (#404 (static vs
+    /// dynamic endpoints)); unchanged without one (a static deployment, a
+    /// matchmaker or a replica process).
+    ///
+    /// # Errors
+    ///
+    /// A registration the group refuses.
+    pub(crate) fn in_group(
+        mut self,
+        group: Option<&ServiceGroup<MachineInterface>>,
+    ) -> SimulationResult<Self> {
+        assert!(self.group.is_none(), "a method is served once per group");
+        self.group = group
+            .map(ServiceGroup::serve::<M>)
+            .transpose()
+            .map_err(|e| {
+                SimulationError::InvalidState(format!("serve {} in its group: {e}", M::NAME))
+            })?;
+        Ok(self)
     }
 }
 

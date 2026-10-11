@@ -11,13 +11,16 @@
 //! Draws no randomness and decides no retry beyond one pass over the entry
 //! endpoint: every other choice is the caller's.
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use moonpool_core::Providers;
 use moonpool_rpc::RpcHandle;
 use paros_core::{JournalId, JournalIdentifier, NodeId, TenantId};
 
+use super::Server;
 use super::bootstrap::call_once;
+use crate::rpc::NodeClient;
 use crate::rpc::machine as wire;
 use crate::rpc::methods::ResolveRpc;
 use crate::{Address, Names};
@@ -35,6 +38,10 @@ pub struct Resolved {
     pub control: JournalIdentifier,
     /// The cell's machines, where its registry places them.
     pub machines: Vec<(NodeId, Address)>,
+    /// Each machine's interface as the registry holds it (#404 (static vs
+    /// dynamic endpoints)): the encoded reference its data plane is served
+    /// in. A machine with none is absent.
+    pub interfaces: BTreeMap<NodeId, Vec<u8>>,
     /// The universe directory's position the answer was read at.
     pub at: u64,
     /// The universe's name, for people (#239 (names at the edge)); empty
@@ -96,6 +103,33 @@ pub async fn resolve<P: Providers>(
     Resolution::Unavailable
 }
 
+impl Resolved {
+    /// A client's servers for the cell's machines, through `rpc` and
+    /// `names`: each machine's data plane through the interface the answer
+    /// holds for it, else through its well-known endpoints.
+    ///
+    /// # Panics
+    ///
+    /// Never: the assertion checks one server per machine.
+    #[must_use]
+    pub fn servers<P: Providers>(&self, rpc: &RpcHandle<P>, names: &Names) -> Vec<Server<P>> {
+        let servers: Vec<Server<P>> = self
+            .machines
+            .iter()
+            .map(|(id, addr)| {
+                let node = NodeClient::named(rpc, names.clone(), addr.clone());
+                let node = match self.interfaces.get(id) {
+                    Some(interface) => node.with_interface(interface),
+                    None => node,
+                };
+                Server { id: id.0, node }
+            })
+            .collect();
+        assert_eq!(servers.len(), self.machines.len(), "one server per machine");
+        servers
+    }
+}
+
 /// A machine's answer, judged.
 #[must_use]
 pub fn from_wire(ack: &wire::ResolveAck) -> Resolution {
@@ -134,6 +168,12 @@ pub fn from_wire(ack: &wire::ResolveAck) -> Resolution {
             tenant: TenantId(ack.tenant),
             control,
             machines,
+            interfaces: ack
+                .machines
+                .iter()
+                .filter(|m| !m.machine_interface.is_empty())
+                .map(|m| (NodeId(m.node_id), m.machine_interface.clone()))
+                .collect(),
             at: ack.at,
             universe_name: ack.universe_name.clone(),
             cell_name: ack.cell_name.clone(),

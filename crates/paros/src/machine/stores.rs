@@ -219,6 +219,7 @@ where
         &mut self,
         providers: &P,
         rpc: &RpcHandle<P>,
+        machine: Option<&moonpool_rpc::ServiceGroup<crate::rpc::methods::MachineInterface>>,
         tunables: &DriverTunables,
         shutdown: CancellationToken,
     ) -> SimulationResult<()> {
@@ -229,6 +230,7 @@ where
         super::matchmakers::spawn(
             providers,
             rpc,
+            machine,
             self.disk.clone(),
             config,
             tunables,

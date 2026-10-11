@@ -17,14 +17,15 @@ use paros_core::{JournalIdentifier, TenantId};
 
 use super::{Shared, lock};
 use crate::audit::Audit;
-use crate::client::Client;
 use crate::client::bootstrap::majority_cell;
 use crate::client::fleet::read_directory;
 use crate::client::names::{
     JournalNames, JournalResolution, TenantResolution, Unreadable, resolve_journal, tenant_in,
 };
+use crate::client::{Client, Server};
 use crate::fleet::FleetDirectory;
 use crate::name::JournalName;
+use crate::rpc::NodeClient;
 
 /// What resolving a name came to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -84,6 +85,20 @@ impl<P: Providers> Routes<P> {
         assert!(self.tenants.is_empty() && self.journals.is_empty());
     }
 
+    /// A server refused a call through a machine interface it no longer
+    /// serves (#404 (static vs dynamic endpoints)): it restarted since the
+    /// frontend learned the cell. Forget the cell and its clients, so the
+    /// next call learns the cell, and every server's reference, again.
+    pub(super) fn stale_cell(&mut self) {
+        if self.cell.take().is_some() {
+            moonpool_assertions::reachable!(
+                "frontend: a stale machine interface sends the frontend back to its cell"
+            );
+        }
+        self.leaders.clear();
+        assert!(self.cell.is_none() && self.leaders.is_empty());
+    }
+
     /// A machine refused `journal`, resolved from `name`, as unknown: drop
     /// the journal's resolution, and the tenant's (the tenant may be gone).
     pub(super) fn stale(&mut self, name: &JournalName, journal: JournalIdentifier) {
@@ -128,14 +143,19 @@ where
     };
     assert!(!servers.is_empty(), "a majority holds at least one server");
     let count = servers.len();
-    let mut client = Client::connect_named(
-        &shared.providers,
-        &rpc,
-        &settings.names,
-        &servers,
-        settings.client,
-    )
-    .rotating_over(count);
+    // Each server through the machine interface its incarnation published
+    // (#404 (static vs dynamic endpoints)): a server that restarted since
+    // refuses the call unrun, and the frontend learns the cell again.
+    let servers: Vec<Server<P>> = servers
+        .iter()
+        .map(|server| Server {
+            id: server.id,
+            node: NodeClient::named(&rpc, settings.names.clone(), server.address.clone())
+                .with_interface(&server.interface),
+        })
+        .collect();
+    assert_eq!(servers.len(), count, "every server that answered is called");
+    let mut client = Client::new(&shared.providers, servers, settings.client).rotating_over(count);
     // A harness observes the calls the frontend forwards, as it observes
     // its own clients' (`Audit::call_observer`); production observes none.
     if let Some(observer) = shared.audit.call_observer() {

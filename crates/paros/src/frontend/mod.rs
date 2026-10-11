@@ -94,6 +94,9 @@ struct Draws {
     stale: bool,
     /// Start at this server (modulo the count) instead of the known leader.
     stray: Option<u64>,
+    /// Keep the cell after a server refused a stale machine interface
+    /// (#404 (static vs dynamic endpoints)).
+    keep_stale: bool,
 }
 
 impl Draws {
@@ -102,7 +105,13 @@ impl Draws {
         let stale = moonpool_buggify::buggify_with_prob!(0.1);
         let stray = moonpool_buggify::buggify_with_prob!(0.2)
             .then(|| providers.random().random_range(0..u64::from(u32::MAX)));
-        Self { cold, stale, stray }
+        let keep_stale = moonpool_buggify::buggify_with_prob!(0.25);
+        Self {
+            cold,
+            stale,
+            stray,
+            keep_stale,
+        }
     }
 }
 

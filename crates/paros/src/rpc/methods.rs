@@ -30,12 +30,19 @@
 //! moonpool dynamic groups ([`RpcInterface`]), each reference naming one
 //! instance:
 //!
-//! - [`MachineInterface`]: `Deliver`, one group per incarnation of a
-//!   founding member, published in its `IdentifyAck` and kept in the
-//!   registry fold by `node_id`. A peer dials it through the reference the
-//!   fold holds, and through the well-known `Deliver` while the fold holds
-//!   none (a static deployment, a member not registered yet) or after the
-//!   reference went stale.
+//! - [`MachineInterface`]: `Deliver`, the matchmaker calls (`Matchmake`,
+//!   `GarbageCollect`, `MatchmakerReconfigure`) and the data plane (`Write`,
+//!   `Read`, `Truncate`, `SetLeader`, `Reconfigure`,
+//!   `ReconfigureMatchmakers`), one group per incarnation of a founding
+//!   member, published in its `IdentifyAck` and its node-only `Inspect`
+//!   and kept in the registry fold by `node_id`. A peer dials `Deliver`
+//!   and the matchmaker calls through the reference the fold holds, and
+//!   through the well-known endpoint while the fold holds none (a static
+//!   deployment, a member not registered yet) or after the reference went
+//!   stale. A frontend sends the data plane through the references its
+//!   cell's founding members gave it, and `Resolve` answers them. Each of
+//!   these methods keeps its well-known endpoint: plain Multi-Paxos, with no
+//!   registry, reaches its peers by address alone.
 //! - [`CoordinatorInterface`]: `Register` and `JournalRequest`, one group
 //!   per coordinator term, published in the election journal. A request to
 //!   an ended term fails at the transport. These two methods have no
@@ -56,7 +63,8 @@ pub trait WellKnownMethod: RpcMethod {
 }
 
 /// A machine's dynamic interface (#404 (static vs dynamic endpoints)): one
-/// group per incarnation of a founding member.
+/// group per incarnation of a founding member, serving `Deliver`, the
+/// matchmaker calls and the data plane.
 #[derive(Debug, Clone, Copy)]
 pub struct MachineInterface;
 
@@ -81,6 +89,15 @@ impl RpcInterface for CoordinatorInterface {
 const _: () = assert!(MachineInterface::INTERFACE.get() != CoordinatorInterface::INTERFACE.get());
 
 impl InterfaceMethod<MachineInterface> for DeliverRpc {}
+impl InterfaceMethod<MachineInterface> for MatchmakeRpc {}
+impl InterfaceMethod<MachineInterface> for GarbageCollectRpc {}
+impl InterfaceMethod<MachineInterface> for MatchmakerReconfigureRpc {}
+impl InterfaceMethod<MachineInterface> for WriteRpc {}
+impl InterfaceMethod<MachineInterface> for ReadRpc {}
+impl InterfaceMethod<MachineInterface> for TruncateRpc {}
+impl InterfaceMethod<MachineInterface> for SetLeaderRpc {}
+impl InterfaceMethod<MachineInterface> for ReconfigureRpc {}
+impl InterfaceMethod<MachineInterface> for ReconfigureMatchmakersRpc {}
 impl InterfaceMethod<CoordinatorInterface> for RegisterRpc {}
 impl InterfaceMethod<CoordinatorInterface> for JournalRequestRpc {}
 

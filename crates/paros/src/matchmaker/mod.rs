@@ -1001,7 +1001,7 @@ where
     );
 
     let mut edge = RpcEdge::listen(&providers, &local_addr, "matchmaker", &tunables).await?;
-    let inbox = MatchmakerInbox::serve(edge.handle())?;
+    let inbox = MatchmakerInbox::serve(edge.handle(), None)?;
     let host = Host {
         config: &config,
         page,

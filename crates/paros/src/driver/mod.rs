@@ -1260,6 +1260,17 @@ where
                 })
         })
         .transpose()?;
+    // The group's reference as `Inspect` hands it out (#404): a frontend
+    // learns the reference of each server it inspects.
+    let machine_interface: Vec<u8> = machine_group
+        .as_ref()
+        .map(|group| crate::rpc::published(&group.interface_ref()))
+        .unwrap_or_default();
+    assert_eq!(
+        machine_interface.is_empty(),
+        machine_group.is_none(),
+        "only a machine publishes an interface"
+    );
     let formed = formed.map(|mut formed| {
         if let Some(group) = &machine_group {
             formed.facts = formed.facts.serving(edge.handle()).with_interface(group);
@@ -1310,6 +1321,7 @@ where
     stores.host_on_edge(
         &providers,
         &rpc_handle,
+        machine_group.as_ref(),
         &tunables,
         incarnation_shutdown.clone(),
     )?;
@@ -1845,7 +1857,7 @@ where
                 // one is refused, and so is a journal not live here — the
                 // node's own facts are answered either way.
                 let facts = operator::node_facts(self_id, cell.as_ref());
-                let answer = match req.target() {
+                let mut answer = match req.target() {
                     Ok(InspectTarget::Node) => facts,
                     Ok(InspectTarget::Journal(journal)) => journals.live.get(&journal).map_or_else(
                         || facts.refused(InspectRefusal::UnknownJournal),
@@ -1853,6 +1865,7 @@ where
                     ),
                     Err(refusal) => facts.refused(refusal),
                 };
+                answer.machine_interface.clone_from(&machine_interface);
                 let _ = reply.send(answer);
             }
             Some(answer) = follow_answers.recv() => {
@@ -1960,12 +1973,12 @@ where
                 if let Some(book) = peer_book.as_mut() {
                     let (moved, cache) = book.follow(&journals);
                     for (peer, (addr, interface)) in moved {
-                        let moved = out.readdress(peer, addr.clone(), interface);
+                        let moved = out.readdress(peer, addr.clone(), interface.clone());
                         assert!(moved, "every founding member but this one has a lane");
                         // A founding member hosts its cell's matchmaker sets
                         // (#190): dialed at its new address too.
                         if let Some(link) = links.clients.get(&MatchmakerId(peer.0)) {
-                            link.readdress(addr.clone());
+                            link.readdress(addr.clone(), &interface);
                         }
                         tracing::info!(node = self_id, peer = peer.0, %addr, "peer_book_moved");
                     }
