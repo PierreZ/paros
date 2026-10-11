@@ -129,6 +129,30 @@ pkill parosd
 rm -rf /tmp/paros-demo
 ```
 
+## With mutual TLS
+
+The same three machines, with every session encrypted and every caller proving its
+certificate. One command makes every file:
+
+```sh
+parosctl tls init --out /tmp/paros-demo/tls --machines 127.0.0.1 --universe demo
+# Prints the files and the variables to set. Then each machine:
+export PAROS_TLS_CERT=/tmp/paros-demo/tls/127.0.0.1.crt
+export PAROS_TLS_KEY=/tmp/paros-demo/tls/127.0.0.1.key
+export PAROS_TLS_CA=/tmp/paros-demo/tls/ca.crt
+# ...start the three parosd as above, then talk to them as the admin:
+export PAROSCTL_TLS_CA=/tmp/paros-demo/tls/ca.crt
+export PAROSCTL_TLS_CERT=/tmp/paros-demo/tls/admin.crt
+export PAROSCTL_TLS_KEY=/tmp/paros-demo/tls/admin.key
+parosctl init --members "$PAROSCTL_SERVERS"
+parosctl tls show /tmp/paros-demo/tls/admin.crt
+```
+
+The three local machines share one certificate here because they share one host. On real
+hosts, name each machine (`--machines parosd-1,parosd-2,parosd-3`) and give each its own
+files. A `parosctl` without a certificate is refused at the handshake; set
+`PAROS_TLS_CLIENT_AUTH=optional` on the machines to admit it.
+
 ## If something goes wrong
 
 - `init` says a member is not up yet: run it again; it resumes, and on a formed fleet it is refused

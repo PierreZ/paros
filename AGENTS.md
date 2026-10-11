@@ -491,7 +491,8 @@ Cargo workspace, every package under `crates/`. Dependency stack: `paros-core` �
   `default-features = false`, wasm-safe; sancov crate-under-test. Its optional, default-on
   `assertions` feature (#317) adds `moonpool-assertions` for coverage probes only.
 - `paros` — the library: provider-generic drivers, RPC contract (`proto/`, built by
-  `prost-build`), stores, `paros::client`; wasm-safe and provider-free.
+  `prost-build`), stores, `paros::client`; wasm-safe and provider-free. Its `tls` feature
+  (`paros::tls`, on in `parosd` and `paros-sim`) adds TLS and mutual TLS (PR #509 (mutual TLS)).
 - `parosd` — the uniform `parosd` daemon over Tokio (one binary per machine: `PAROS_*` config,
   `node_id` minted at format, waits for `parosctl init`, #196), `paros-frontend` (#192 (the
   frontend)) and `parosctl`
