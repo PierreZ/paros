@@ -100,6 +100,7 @@ fn published_world(state: &StateHandle, journal: paros::JournalIdentifier) -> Ar
                         super::matchmaker::TenantStops::default,
                     ))
                     .clone();
+                    state.matchmaker.thin = crate::world::thin_sets::thin_sets(state_handle);
                     state
                 }),
                 main: Some(main),

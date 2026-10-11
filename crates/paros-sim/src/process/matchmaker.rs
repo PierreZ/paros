@@ -99,6 +99,7 @@ pub(super) async fn run_matchmaker_role(
     if incarnation.is_restart()
         && ctx.time().now() < crate::CHAOS_DURATION
         && moonpool_sim::buggify_with_prob!(f64::from(shape.matchmaker_loss_pct) / 100.0)
+        && spared(ctx.state(), id)
         && world
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -186,6 +187,7 @@ pub(super) async fn run_matchmaker_role(
                     ctx.state().clone(),
                     (layout.durability == paros::journal::Durability::Batched)
                         .then_some(bootstrap.len()),
+                    id.0,
                 ),
                 boot: boots[tenant],
             })
@@ -282,4 +284,16 @@ pub(super) async fn run_matchmaker_role(
             Ok(()) => return Ok(()),
         }
     }
+}
+
+/// Whether the run may lose matchmaker `id` (#496): no set too small to
+/// spare a member names it. A finish proposes the members that answered its
+/// freeze, so a handover can leave a set of two, and the loss of either
+/// member would leave a set no node can ever reach.
+fn spared(state: &moonpool_sim::StateHandle, id: MatchmakerId) -> bool {
+    let spared = crate::world::thin_sets::thin_sets(state).spares(id.0);
+    if !spared {
+        assert_reachable!("matchmaker: a thin set holds a matchmaker loss back");
+    }
+    spared
 }

@@ -354,7 +354,17 @@ impl<P: Providers, A: Audit> NodeLoop<'_, P, A> {
             audit.reconfigurer_aborted(NodeId(self_id));
             tracing::info!(node = self_id, early = true, "reconfigurer_aborted");
         }
-        if !handover.resend_due(self.tunables.reconfigurer_resend_ticks) {
+        // BUGGIFY (#496): close a freeze the tick its quorum answered, with
+        // no round left for the stragglers. Valid (the quorum is all a
+        // reconstruction rests on), and a `finish` then proposes exactly the
+        // quorum: a thinner successor set, which tolerates fewer losses.
+        // Silent in the recovery tail.
+        let hasty =
+            handover.stop_quorum_reached() && moonpool_buggify::buggify_fault_with_prob!(0.1);
+        if hasty {
+            moonpool_assertions::reachable!("generation: a freeze closes on its first quorum");
+        }
+        if !hasty && !handover.resend_due(self.tunables.reconfigurer_resend_ticks) {
             return;
         }
         // The freeze closes here, not on the ack that completed its quorum: a
@@ -384,6 +394,10 @@ impl<P: Providers, A: Audit> NodeLoop<'_, P, A> {
                 "reconfigurer_reconstructed"
             );
             self.send_reconfigure(tenant, handover.take_requests());
+        }
+        if hasty {
+            // No re-send was due: the bootstrap just went out.
+            return;
         }
         // Skipping a due re-send is always safe: it stretches the
         // stop-the-world window and delays a preempted decree's reopening.

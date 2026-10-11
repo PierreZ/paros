@@ -325,6 +325,8 @@ pub(super) struct AuditState {
     pub(super) any_leader: bool,
     pub(super) leader_promise_checked: bool,
     pub(super) compacted: bool,
+    /// A boot read back a floor its node never reported (#496).
+    pub(super) boot_floor_unreported: bool,
     pub(super) prepare_below_floor: bool,
     pub(super) gap_filled: bool,
     /// A node below the floor jumped to a peer's trim point (#186).

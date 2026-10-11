@@ -34,6 +34,7 @@ use std::sync::{Arc, Mutex, PoisonError, Weak};
 use moonpool_sim::{HintVeto, OutageVeto, StateHandle, assert_always, assert_reachable};
 
 use super::StorageWorld;
+use super::thin_sets::ThinSets;
 
 /// The [`StateHandle`] key of the run's [`Commits`].
 const COMMITS_KEY: &str = "paros-commits-in-flight";
@@ -59,10 +60,13 @@ pub(crate) enum Budget {
     /// A matchmaker's commit: on a `Batched` registry, over a bootstrap set
     /// of `bootstrap` members (`None` on an `Ordered` one, spending
     /// nothing); `held` is whether the registry held a registration, which
-    /// its next boot then judges.
+    /// its next boot then judges. `thin` names the matchmaker among the
+    /// run's thin sets, read when the kill is decided (#496): a member of a
+    /// set that cannot spare it is never cut.
     Matchmaker {
         bootstrap: Option<usize>,
         held: bool,
+        thin: (ThinSets, u64),
     },
 }
 
@@ -72,7 +76,9 @@ impl Budget {
         match self {
             Budget::Free => false,
             Budget::Node { .. } => true,
-            Budget::Matchmaker { bootstrap, held } => bootstrap.is_some() || *held,
+            Budget::Matchmaker {
+                bootstrap, held, ..
+            } => bootstrap.is_some() || *held,
         }
     }
 }
@@ -168,9 +174,17 @@ impl Commits {
             match &commit.budget {
                 Budget::Free => true,
                 Budget::Node { tolerated, slots } => world.may_cut_node(ip, *tolerated, slots),
-                Budget::Matchmaker { bootstrap, .. } => {
-                    bootstrap.is_none_or(|bootstrap| world.may_cut_matchmaker(ip, bootstrap))
-                }
+                Budget::Matchmaker {
+                    bootstrap,
+                    thin: (thin, matchmaker),
+                    ..
+                } => bootstrap.is_none_or(|bootstrap| {
+                    let spared = thin.spares(*matchmaker);
+                    if !spared {
+                        assert_reachable!("matchmaker: a thin set holds a matchmaker loss back");
+                    }
+                    spared && world.may_cut_matchmaker(ip, bootstrap)
+                }),
             }
         });
         if !fits {
@@ -185,7 +199,9 @@ impl Commits {
                     let spent = world.permit_power_cut(ip, *tolerated, slots);
                     assert!(spent, "a cut that fits the budget spends it");
                 }
-                Budget::Matchmaker { bootstrap, held } => {
+                Budget::Matchmaker {
+                    bootstrap, held, ..
+                } => {
                     if let Some(bootstrap) = *bootstrap {
                         let spent = world.permit_matchmaker_power_cut(ip, bootstrap);
                         assert!(spent, "a cut that fits the budget spends it");

@@ -430,12 +430,15 @@ pub trait Audit {
     /// bootstrap acceptor configuration, the addressable node pool, and the
     /// matchmaker set (empty on plain Multi-Paxos) — so a checker can do
     /// quorum arithmetic without guessing the topology, plus every
-    /// `(slot, ballot, vhash)` accepted record it read back.
+    /// `(slot, ballot, vhash)` accepted record it read back and the
+    /// compaction floor it read back (#496): a batch that raised the floor
+    /// can land durably with the node crashing before it reported it.
     fn recovered(
         &self,
         node: NodeId,
         promised: Ballot,
         chosen_index: Option<Slot>,
+        floor: Slot,
         deployment: &Deployment,
         accepted: &[(Slot, Ballot, u64)],
     ) {

@@ -152,10 +152,18 @@ pub(crate) fn report_boot_state<A: Audit>(node: &ColocatedNode, self_id: u64, au
         matchmaker_pool: node.config().matchmaker_pool().to_vec(),
         replica_count: node.config().replica_count,
     };
+    // The floor the boot read back, paired with the floors the batches
+    // reported: it never lies past the recovered chosen prefix.
+    let floor = node.acceptor().first_slot();
+    assert!(
+        floor.0 <= node.hard_state().chosen_index.map_or(0, |c| c.0 + 1),
+        "a recovered floor lies inside the recovered chosen prefix"
+    );
     audit.recovered(
         NodeId(self_id),
         promised,
         node.hard_state().chosen_index,
+        floor,
         &deployment,
         &records,
     );
