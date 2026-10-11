@@ -404,6 +404,13 @@ answering Phase 1 for the ballots it took part in, because *removed* is not
 On a cluster with no matchmakers a reconfiguration request is **refused**, and it
 is never quietly honored.
 
+One matchmaker set serves **every journal of a tenant**. The set keeps one
+registry per journal, in one store, and every matchmaking message names its
+journal. So each journal has its own watermark, its own history and its own
+effective configuration. A storage fault in the store closes the whole set.
+A handover moves the registries of all its journals to the next generation
+together.
+
 **In the code.** `Matchmaking`, `Registration`, `RegistrationKind`,
 `MatchStep::StaleConfiguration` (`matchmaking.rs`, `matchmaker/state.rs`,
 `node/matchmaking.rs`); `Matchmaker` (`matchmaker.rs`);
