@@ -57,6 +57,10 @@ pub const RARE: &[Rare] = &[
         reason: "marginal: fired on 3 of 1,100 hunt seeds (#486)",
     },
     Rare {
+        msg: "tenant coordinator: a create the cell has no slot for is refused",
+        reason: "marginal: the server side of an unplaceable create, missed by the sweep on main (#486)",
+    },
+    Rare {
         msg: "phase1: a full promise page mixes readable and faulty entries",
         reason: "marginal: fired on 8 of 810 hunt seeds (#486)",
     },
@@ -855,6 +859,14 @@ pub const RARE: &[Rare] = &[
     Rare {
         msg: "frontend: a stale machine interface sends the frontend back to its cell",
         reason: "marginal: fired on none of 810 hunt seeds (#486)",
+    },
+    Rare {
+        msg: "a matchmaker crashes between its registrations and its metainfo",
+        reason: "a fault site silent in the recovery tail: 39 kills in 2,000 hunt seeds (#484, #488 (matchmaker boot drop))",
+    },
+    Rare {
+        msg: "a matchmaker crashes between its boot drops and its registrations",
+        reason: "a fault site silent in the recovery tail: 1 kill in 2,000 hunt seeds (#484, #488 (matchmaker boot drop))",
     },
     Rare {
         msg: "a matchmaker crashes between its registrations and its clears",
