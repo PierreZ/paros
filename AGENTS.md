@@ -333,7 +333,7 @@ Depth: `crates/paros/AGENTS.md`; module docs of `driver/journals.rs`, `driver/sy
 Three layers, and nothing crosses them:
 
 - **Environmental faults belong to moonpool** (drop, delay, duplicate, reorder, partitions,
-  close, attrition, scheduling), swarm-masked per seed, on **one combined campaign axis**
+  close, attrition, scheduling, CPU time, gray failures), swarm-masked per seed, on **one combined campaign axis**
   (`chaos_surfaces()`); after `CHAOS_DURATION_MS` moonpool enters recovery mode, so the tail is
   a genuine recovery and liveness oracles apply. Never re-implement one in paros or re-split
   the axis. One exception (decided on 2026-10-09): on a seed that draws the departed-straggler

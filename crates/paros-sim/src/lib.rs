@@ -36,7 +36,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use moonpool_sim::{
-    Attrition, AttritionScope, AttritionVictims, Chaos, ChaosMode, ExplorationConfig,
+    Attrition, AttritionScope, AttritionVictims, Chaos, ChaosMode, ExplorationConfig, GrayFailure,
     LinkLatencyConfig, LocalityConfig, NetworkFault, NetworkFaultMask, SimulationBuilder,
     StorageFault, StorageFaultMask, WorkloadCount,
 };
@@ -247,7 +247,21 @@ pub(crate) const CHAOS_DURATION: Duration = Duration::from_millis(CHAOS_DURATION
 /// transfers; lost unsynced directory entries), swarm-masked per seed by
 /// moonpool. A world-store seed has no files and is untouched. See
 /// [`storage_fault_mask`] for what is masked.
-fn chaos_surfaces() -> [Chaos; 9] {
+///
+/// `Chaos::Cpu` is moonpool's CPU model (#424 (busyness metrics)), drawn on
+/// about half the seeds: every poll of a process's task costs time on the
+/// process's one core, and so does every byte it sends or writes. A busy
+/// process answers late, and its `Load` reports real CPU numbers.
+///
+/// `Chaos::GrayFailure` keeps a process alive and slow for 30 % to 100 % of
+/// the chaos window: its CPU (on a CPU-model seed), its disk and its network
+/// are each slowed or not by the seed's swarm mask. Two regimes, each with a
+/// budget of one slow process: the acceptor group, so a quorum of healthy
+/// acceptors stays possible beside the one acceptor the attrition may kill,
+/// and the machine group, so `LOAD` meets a slow machine. A slow process is
+/// not a dead one: no liveness budget changes. Recovery mode makes every
+/// process healthy again, so the tail is still a genuine recovery.
+fn chaos_surfaces() -> [Chaos; 12] {
     let regime = |victims: AttritionVictims| Attrition {
         max_dead: 1,
         prob_graceful: 0.0,
@@ -286,6 +300,15 @@ fn chaos_surfaces() -> [Chaos; 9] {
         crate::world::outage::regime(),
         Chaos::BuggifyKnobs,
         Chaos::Storage(ChaosMode::Swarm),
+        Chaos::Cpu(ChaosMode::Swarm),
+        Chaos::GrayFailure {
+            config: GrayFailure::new(1).victims(AttritionVictims::group(ACCEPTOR_GROUP)),
+            mode: ChaosMode::Swarm,
+        },
+        Chaos::GrayFailure {
+            config: GrayFailure::new(1).victims(AttritionVictims::group(MACHINE_GROUP)),
+            mode: ChaosMode::Swarm,
+        },
     ]
 }
 
