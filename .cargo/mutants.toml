@@ -71,6 +71,20 @@ exclude_re = [
   "replace QuorumSystem::admits_read_row -> bool with true",
   "replace < with <= in QuorumSystem::admits_read_row$",
   "replace match guard self.admits_read_row\\(Some\\(row\\)\\) with true in QuorumSystem::read_row$",
+  # Wire hygiene (#344): a refusal of input no honest peer sends. The hunt
+  # runs honest peers only and has no bit flips, so it never reaches the
+  # refusal; `paros-core/src/node/tests/wire_hygiene.rs` pins every edit
+  # (a registry page's shape and cursor, an `Accept` replying to a proxy
+  # the deployment lacks, a reply from a stranger matchmaker); a
+  # `cargo mutants` run with those tests as the test catches 32 of the 34.
+  # The other two are equivalent: `>` to `>=` in the cursor leg (a page at
+  # the cursor is taken by `at_cursor` already) and in `next > from_ballot`
+  # (a non-empty page whose keys sit at or above its start and whose cursor
+  # sits above its last key has a cursor above its start).
+  "Matchmaking::accepts\\b",
+  "rank_is_in\\b",
+  "ProxyId::is_in\\b",
+  "replace MatchmakerSet::contains -> bool with true",
 ]
 
 # The hunt is the test: only `paros-sim-runner`'s `mutants` target runs, in
