@@ -11,6 +11,7 @@
 
 pub(crate) mod bare_outage;
 pub(crate) mod cut;
+pub(crate) mod downed_founder;
 pub(crate) mod injector;
 pub(crate) mod lagging_acceptor;
 pub(crate) mod late_outage;
