@@ -20,7 +20,7 @@ fn rotated_registries() -> Vec<Matchmaker> {
         .map(|m| {
             (
                 MatchmakerId(m),
-                MatchRequest::reconfigure(NodeId(2), ballot(2, 2), cfg(&[3, 4, 5]), G0),
+                MatchRequest::reconfigure(J, NodeId(2), ballot(2, 2), cfg(&[3, 4, 5]), G0),
             )
         })
         .collect();
@@ -29,6 +29,7 @@ fn rotated_registries() -> Vec<Matchmaker> {
 }
 
 const G0: MatchmakerGeneration = MatchmakerGeneration(0);
+const J: crate::JournalId = crate::JournalId::UNSET;
 
 /// A fresh incarnation of node 3 on the six-node pool whose bootstrap is
 /// `{0, 1, 2}`: what every member of the rotated set boots as.
@@ -84,6 +85,7 @@ fn a_probe_registers_nothing_at_the_matchmakers() {
         // The next campaign's history does not name the probe: a fresh
         // registration above it sees only the rotation.
         mm.step(MatchRequest::new(
+            J,
             NodeId(4),
             ballot(90, 4),
             cfg(&[3, 4, 5]),
@@ -236,7 +238,7 @@ fn a_member_of_its_default_probes_and_registers_only_what_it_heard() {
         .map(|m| {
             (
                 MatchmakerId(m),
-                MatchRequest::reconfigure(NodeId(3), ballot(16, 3), cfg(&[0, 2, 4]), G0),
+                MatchRequest::reconfigure(J, NodeId(3), ballot(16, 3), cfg(&[0, 2, 4]), G0),
             )
         })
         .collect();
@@ -276,7 +278,7 @@ fn a_late_probe_answer_moves_an_outside_node() {
         &mut mms,
         vec![(
             MatchmakerId(2),
-            MatchRequest::reconfigure(NodeId(2), ballot(2, 2), cfg(&[3, 4, 5]), G0),
+            MatchRequest::reconfigure(J, NodeId(2), ballot(2, 2), cfg(&[3, 4, 5]), G0),
         )],
     );
     let mut n = rebooted_member();

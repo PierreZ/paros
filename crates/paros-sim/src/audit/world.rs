@@ -56,7 +56,13 @@ fn published_world(state: &StateHandle, journal: paros::JournalIdentifier) -> Ar
         state,
         &crate::state::journal_key(AUDIT_WORLD_KEY, journal),
         || AuditWorld {
-            state: Mutex::new(AuditState::default()),
+            state: Mutex::new({
+                let mut state = AuditState::default();
+                // The matchmaker audit judges this journal's registry
+                // (#190).
+                state.matchmaker.journal = Some(journal.journal);
+                state
+            }),
             main: Some(main),
             mode: OnceLock::new(),
         },
@@ -415,11 +421,12 @@ impl AuditWorld {
                 super::matchmaker::RegistryOp::Install(installed, registrations) => {
                     let set =
                         paros::MatchmakerSet::new(installed.generation, installed.members.clone());
+                    let journal = st.matchmaker.journal();
                     st.matchmaker.activated(
                         matchmaker,
                         &set,
-                        installed.gc_watermark,
-                        installed.effective.as_ref(),
+                        installed.gc_watermark(journal),
+                        installed.effective(journal),
                         &registrations,
                     );
                 }
@@ -427,8 +434,9 @@ impl AuditWorld {
         }
         // The boot raised the effective scalar over the reconfigurations it
         // keeps (`paros::journal::matchmaker`).
-        if let Some((ballot, _)) = &scalars.effective {
-            st.matchmaker.raise_effective(matchmaker, *ballot);
+        if let Some((ballot, _)) = scalars.effective(st.matchmaker.journal()) {
+            let ballot = *ballot;
+            st.matchmaker.raise_effective(matchmaker, ballot);
         }
     }
 

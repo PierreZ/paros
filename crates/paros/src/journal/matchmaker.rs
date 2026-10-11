@@ -2,10 +2,12 @@
 //! [`MatchmakerStorage`](crate::MatchmakerStorage) on `moonpool-journal`.
 //!
 //! Each registration is an entry at a registration number of its own, its
-//! ballot and its generation in the entry's identity; the scalars
-//! (generation, freeze, decree, watermark) and the format marker are the
-//! journal's metainfo. A raised watermark clears the registrations below it;
-//! an install clears them all and writes the successor's.
+//! ballot and its generation in the entry's identity, its journal in the
+//! payload (#190: one store holds every journal of its tenant's set); the
+//! scalars (generation, freeze, decree, each journal's watermark) and the
+//! format marker are the journal's metainfo. A raised watermark clears its
+//! journal's registrations below it; an install clears them all and writes
+//! the successor's.
 //!
 //! **A sync is up to two commits, in an order every crash point survives**
 //! (#176): the new registrations with the metainfo, then the clears. The
@@ -26,13 +28,17 @@
 //! **A damaged live registration is a crash verdict**: a registry is never
 //! repaired in place, a matchmaker whose durable state is unusable is
 //! replaced through a matchmaker-set reconfiguration (#125), so detection is
-//! the whole job. One the watermark already collected is dropped. Damage
+//! the whole job. One the watermark already collected is dropped: a damaged
+//! entry's journal is unknown, so it is dropped only below every journal the
+//! metainfo names (the store names a journal there with its first
+//! registration, so an acknowledged registration's journal is always named;
+//! one whose journal is not named was never acknowledged). Damage
 //! the journal reports ambiguous (the last batch of a one-sync commit, where
 //! a crash and rot look alike) is
 //! [`Undecidable`](crate::CorruptionVerdict::Undecidable); anywhere else
 //! [`Corrupted`](crate::CorruptionVerdict::Corrupted).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use moonpool_core::StorageProvider;
 use std::ops::Range;
@@ -40,8 +46,8 @@ use std::ops::Range;
 use moonpool_buggify::hint::Strike;
 use moonpool_journal::{Batch, ID_SIZE, Id, Journal, ReadError, State};
 use paros_core::{
-    Ballot, JournalIdentifier, MatchmakerConfig, MatchmakerGeneration, MatchmakerHardState,
-    Registration, RegistryStorage,
+    Ballot, JournalId, JournalIdentifier, MatchmakerConfig, MatchmakerGeneration,
+    MatchmakerHardState, Registration, RegistryStorage,
 };
 use serde::{Deserialize, Serialize};
 
@@ -50,7 +56,7 @@ use super::{
     undecodable,
 };
 use crate::corruption::{CorruptionVerdict, IntegrityFault};
-use crate::matchmaker::MatchmakerStorage;
+use crate::matchmaker::{MatchmakerStorage, Registrations};
 use crate::storage::{StorageError, StorageRecord, WriteOutcome};
 
 /// The kind byte of a registration's identity.
@@ -95,6 +101,30 @@ struct MatchMeta {
     /// Set once by `format`, never cleared or edited.
     formatted: Option<MatchmakerConfig>,
     scalars: MatchmakerHardState,
+    /// Every journal a registration of this store was staged in (#190),
+    /// named with the metainfo that vouches for its first registration: the
+    /// floor a damaged entry, whose journal is unknown, is judged against.
+    #[serde(default)]
+    journals: BTreeSet<JournalId>,
+}
+
+impl MatchMeta {
+    /// The lowest watermark of every journal this store names: a damaged
+    /// entry below it is collected whatever journal it belongs to.
+    fn lowest_watermark(&self) -> Ballot {
+        self.journals
+            .iter()
+            .map(|journal| self.scalars.gc_watermark(*journal))
+            .min()
+            .unwrap_or_else(Ballot::zero)
+    }
+}
+
+/// A registration's payload: its journal and the registration itself.
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct Stored {
+    journal: JournalId,
+    registration: Registration,
 }
 
 /// The matchmaker's durable store on `moonpool-journal`, over any moonpool
@@ -112,9 +142,9 @@ pub struct JournalMatchmakerStorage<P: StorageProvider> {
     /// read it).
     durable_meta: MatchMeta,
     meta_dirty: bool,
-    registry: BTreeMap<Ballot, Registration>,
+    registry: BTreeMap<(JournalId, Ballot), Registration>,
     /// Where each registration lives.
-    positions: BTreeMap<Ballot, u64>,
+    positions: BTreeMap<(JournalId, Ballot), u64>,
     next_position: u64,
     /// Registrations staged since the last sync, by position: the first
     /// commit.
@@ -201,6 +231,50 @@ impl<P: StorageProvider> JournalMatchmakerStorage<P> {
         Ok(meta.formatted.is_some())
     }
 
+    /// Each journal's effective configuration covers every
+    /// reconfiguration this registry keeps: a sync commits a
+    /// reconfiguration's registration before the metainfo that raises the
+    /// scalar over it, so a crash between the two leaves the scalar
+    /// behind, and the boot raises it as that commit would have
+    /// (persisted with the next metainfo write).
+    fn raise_effective(&mut self) {
+        assert!(
+            self.positions.len() == self.registry.len(),
+            "every live registration has its position"
+        );
+        let mut newest: BTreeMap<JournalId, (Ballot, &Registration)> = BTreeMap::new();
+        for ((journal, ballot), registration) in &self.registry {
+            if registration.kind.is_reconfiguration() {
+                newest.insert(*journal, (*ballot, registration));
+            }
+        }
+        for (journal, (ballot, registration)) in newest {
+            if self
+                .meta
+                .scalars
+                .effective(journal)
+                .is_none_or(|(held, _)| *held < ballot)
+            {
+                self.meta.scalars.journal_mut(journal).effective =
+                    Some((ballot, registration.config.clone()));
+                self.meta_dirty = true;
+            }
+        }
+        assert!(
+            self.registry
+                .iter()
+                .all(|((journal, ballot), registration)| {
+                    !registration.kind.is_reconfiguration()
+                        || self
+                            .meta
+                            .scalars
+                            .effective(*journal)
+                            .is_some_and(|(held, _)| held >= ballot)
+                }),
+            "every kept reconfiguration is covered by its journal's effective configuration"
+        );
+    }
+
     #[tracing::instrument(level = "debug", skip_all, fields(dir = %self.dir))]
     async fn load(&mut self) -> Result<(), StorageError> {
         let opened = Journal::open(
@@ -217,7 +291,7 @@ impl<P: StorageProvider> JournalMatchmakerStorage<P> {
         };
         self.meta = decode(journal.meta()).ok_or(undecodable(StorageRecord::MatchmakerScalars))?;
         self.durable_meta = self.meta.clone();
-        let watermark = self.meta.scalars.gc_watermark;
+        let lowest = self.meta.lowest_watermark();
         let generation = self.meta.scalars.generation;
         let replay = journal.replay(..).await.map_err(|_| StorageError::Io {
             record: StorageRecord::Store,
@@ -225,9 +299,9 @@ impl<P: StorageProvider> JournalMatchmakerStorage<P> {
         })?;
         for (position, read) in replay {
             self.next_position = self.next_position.max(position + 1);
-            // What the durable metainfo does not vouch for: below its
-            // watermark, or of another generation (an install whose
-            // metainfo never landed, or whose clears did not). Dropped, and
+            // What the durable metainfo does not vouch for: of another
+            // generation (an install whose metainfo never landed, or whose
+            // clears did not), or below its journal's watermark. Dropped, and
             // its clear staged, damaged or not: nothing it said still
             // matters.
             let id = match &read {
@@ -241,7 +315,7 @@ impl<P: StorageProvider> JournalMatchmakerStorage<P> {
                 }
             };
             let (ballot, _) = id_ballot(&id);
-            if ballot < watermark || id_generation(&id) != generation {
+            if ballot < lowest || id_generation(&id) != generation {
                 self.clears.push(position..position + 1);
                 continue;
             }
@@ -257,35 +331,28 @@ impl<P: StorageProvider> JournalMatchmakerStorage<P> {
                     verdict,
                 });
             };
-            let registration: Registration =
+            let stored: Stored =
                 decode(&entry.payload).ok_or(undecodable(StorageRecord::Registration(ballot)))?;
-            self.registry.insert(ballot, registration);
-            self.positions.insert(ballot, position);
+            if ballot < self.meta.scalars.gc_watermark(stored.journal) {
+                self.clears.push(position..position + 1);
+                continue;
+            }
+            // A journal the metainfo does not name yet: a register whose
+            // metainfo never landed, kept like any other and named with the
+            // next metainfo write.
+            if self.meta.journals.insert(stored.journal) {
+                self.meta_dirty = true;
+            }
+            self.registry
+                .insert((stored.journal, ballot), stored.registration);
+            self.positions.insert((stored.journal, ballot), position);
         }
-        // The effective configuration covers every reconfiguration this
-        // registry keeps: a sync commits a reconfiguration's registration
-        // before the metainfo that raises the scalar over it, so a crash
-        // between the two leaves the scalar behind, and the boot raises it as
-        // that commit would have (persisted with the next metainfo write).
-        let newest = self
-            .registry
-            .iter()
-            .rev()
-            .find(|(_, registration)| registration.kind.is_reconfiguration());
-        if let Some((ballot, registration)) = newest
-            && self
-                .meta
-                .scalars
-                .effective
-                .as_ref()
-                .is_none_or(|(held, _)| held < ballot)
-        {
-            self.meta.scalars.effective = Some((*ballot, registration.config.clone()));
-            self.meta_dirty = true;
-        }
-        // Boot side of the watermark pair: nothing live below it.
+        self.raise_effective();
+        // Boot side of the watermark pair: nothing live below its journal's.
         assert!(
-            self.registry.keys().next().is_none_or(|b| *b >= watermark),
+            self.registry
+                .keys()
+                .all(|(journal, b)| *b >= self.meta.scalars.gc_watermark(*journal)),
             "no registration survives below the watermark"
         );
         assert!(
@@ -294,13 +361,18 @@ impl<P: StorageProvider> JournalMatchmakerStorage<P> {
         );
         assert!(
             self.registry
+                .keys()
+                .all(|(journal, _)| self.meta.journals.contains(journal)),
+            "the metainfo names every live journal"
+        );
+        assert!(
+            self.registry
                 .iter()
                 .filter(|(_, registration)| registration.kind.is_reconfiguration())
-                .all(|(ballot, _)| self
+                .all(|((journal, ballot), _)| self
                     .meta
                     .scalars
-                    .effective
-                    .as_ref()
+                    .effective(*journal)
                     .is_some_and(|(held, _)| held >= ballot)),
             "the effective configuration covers every kept reconfiguration"
         );
@@ -308,35 +380,60 @@ impl<P: StorageProvider> JournalMatchmakerStorage<P> {
         Ok(())
     }
 
-    /// Stage `registration` under `ballot` at its own position.
-    fn stage_registration(&mut self, ballot: Ballot, registration: &Registration) {
-        let position = *self.positions.entry(ballot).or_insert_with(|| {
+    /// Stage `registration` under `ballot` in `journal` at its own
+    /// position, naming the journal in the metainfo on its first one.
+    fn stage_registration(
+        &mut self,
+        journal: JournalId,
+        ballot: Ballot,
+        registration: &Registration,
+    ) {
+        if self.meta.journals.insert(journal) {
+            self.meta_dirty = true;
+        }
+        let position = *self.positions.entry((journal, ballot)).or_insert_with(|| {
             let position = self.next_position;
             self.next_position += 1;
             position
         });
+        let stored = Stored {
+            journal,
+            registration: registration.clone(),
+        };
         self.puts.insert(
             position,
             (
                 registration_id(ballot, self.meta.scalars.generation),
-                encode(registration),
+                encode(&stored),
             ),
         );
-        self.registry.insert(ballot, registration.clone());
+        self.registry
+            .insert((journal, ballot), registration.clone());
+        assert!(
+            self.meta.journals.contains(&journal),
+            "a staged registration's journal is named"
+        );
     }
 
-    /// Drop every registration below the durable watermark.
+    /// Drop every registration below its journal's durable watermark.
     fn collect(&mut self) {
-        let watermark = self.meta.scalars.gc_watermark;
-        let kept = self.registry.split_off(&watermark);
-        for ballot in std::mem::replace(&mut self.registry, kept).into_keys() {
-            if let Some(position) = self.positions.remove(&ballot) {
+        let collected: Vec<(JournalId, Ballot)> = self
+            .registry
+            .keys()
+            .filter(|(journal, b)| *b < self.meta.scalars.gc_watermark(*journal))
+            .copied()
+            .collect();
+        for key in collected {
+            self.registry.remove(&key);
+            if let Some(position) = self.positions.remove(&key) {
                 self.puts.remove(&position);
                 self.clears.push(position..position + 1);
             }
         }
         assert!(
-            self.registry.keys().next().is_none_or(|b| *b >= watermark),
+            self.registry
+                .keys()
+                .all(|(journal, b)| *b >= self.meta.scalars.gc_watermark(*journal)),
             "no registration survives below the watermark"
         );
     }
@@ -347,11 +444,11 @@ impl<P: StorageProvider> RegistryStorage for JournalMatchmakerStorage<P> {
         self.meta.scalars.clone()
     }
 
-    fn registration(&self, ballot: Ballot) -> Option<Registration> {
-        self.registry.get(&ballot).cloned()
+    fn registration(&self, journal: JournalId, ballot: Ballot) -> Option<Registration> {
+        self.registry.get(&(journal, ballot)).cloned()
     }
 
-    fn registered_ballots(&self) -> Vec<Ballot> {
+    fn registered(&self) -> Vec<(JournalId, Ballot)> {
         self.registry.keys().copied().collect()
     }
 }
@@ -377,28 +474,33 @@ impl<P: StorageProvider> MatchmakerStorage for JournalMatchmakerStorage<P> {
     #[tracing::instrument(level = "trace", skip_all, fields(round = ballot.round))]
     async fn register(
         &mut self,
+        journal: JournalId,
         ballot: Ballot,
         registration: &Registration,
     ) -> Result<(), StorageError> {
-        self.stage_registration(ballot, registration);
+        self.stage_registration(journal, ballot, registration);
         Ok(())
     }
 
     #[tracing::instrument(level = "trace", skip_all, fields(round = watermark.round))]
-    async fn set_gc_watermark(&mut self, watermark: Ballot) -> Result<(), StorageError> {
-        let before = self.meta.scalars.gc_watermark;
+    async fn set_gc_watermark(
+        &mut self,
+        journal: JournalId,
+        watermark: Ballot,
+    ) -> Result<(), StorageError> {
+        let before = self.meta.scalars.gc_watermark(journal);
         if watermark > before {
-            self.meta.scalars.gc_watermark = watermark;
+            self.meta.scalars.journal_mut(journal).gc_watermark = watermark;
             self.meta_dirty = true;
             self.collect();
         }
         // The durable watermark only rises, and reaches what was asked.
         assert!(
-            self.meta.scalars.gc_watermark >= before,
+            self.meta.scalars.gc_watermark(journal) >= before,
             "a watermark never falls"
         );
         assert!(
-            self.meta.scalars.gc_watermark >= watermark,
+            self.meta.scalars.gc_watermark(journal) >= watermark,
             "a raised watermark is held"
         );
         Ok(())
@@ -406,11 +508,22 @@ impl<P: StorageProvider> MatchmakerStorage for JournalMatchmakerStorage<P> {
 
     #[tracing::instrument(level = "trace", skip_all, fields(generation = scalars.generation.0))]
     async fn set_scalars(&mut self, scalars: &MatchmakerHardState) -> Result<(), StorageError> {
-        let watermark = scalars.gc_watermark.max(self.meta.scalars.gc_watermark);
-        self.meta.scalars = scalars.clone();
-        self.meta.scalars.gc_watermark = watermark;
+        let held = std::mem::replace(&mut self.meta.scalars, scalars.clone());
+        // Every journal keeps the higher of the two watermarks.
+        for (journal, kept) in held.journals {
+            let watermark = self
+                .meta
+                .scalars
+                .gc_watermark(journal)
+                .max(kept.gc_watermark);
+            self.meta.scalars.journal_mut(journal).gc_watermark = watermark;
+        }
         self.meta_dirty = true;
         self.collect();
+        assert!(
+            self.meta.scalars.generation == scalars.generation,
+            "the scalars hold the written generation"
+        );
         Ok(())
     }
 
@@ -418,7 +531,7 @@ impl<P: StorageProvider> MatchmakerStorage for JournalMatchmakerStorage<P> {
     async fn install_registry(
         &mut self,
         scalars: &MatchmakerHardState,
-        registrations: &BTreeMap<Ballot, Registration>,
+        registrations: &Registrations,
     ) -> Result<(), StorageError> {
         // Replaced whole, in the same commit: every registration goes, the
         // successor's arrive at fresh positions.
@@ -429,9 +542,12 @@ impl<P: StorageProvider> MatchmakerStorage for JournalMatchmakerStorage<P> {
         self.registry.clear();
         self.positions.clear();
         self.meta.scalars = scalars.clone();
+        self.meta.journals.clear();
         self.meta_dirty = true;
-        for (ballot, registration) in registrations.range(scalars.gc_watermark..) {
-            self.stage_registration(*ballot, registration);
+        for (journal, ledger) in registrations {
+            for (ballot, registration) in ledger.range(scalars.gc_watermark(*journal)..) {
+                self.stage_registration(*journal, *ballot, registration);
+            }
         }
         assert!(
             self.meta.scalars.generation == scalars.generation,

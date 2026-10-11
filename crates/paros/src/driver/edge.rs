@@ -32,7 +32,7 @@ use moonpool_core::{Providers, SimulationError, SimulationResult};
 use moonpool_rpc::{RpcDriver, RpcHandle};
 use paros_core::{
     GcAck, GcRequest, JournalIdentifier, MatchReply, MatchRequest, Message, Party,
-    ReconfigureReply, ReconfigureRequest,
+    ReconfigureReply, ReconfigureRequest, TenantId,
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -214,10 +214,10 @@ impl ReplicaInbox {
 /// A matchmaker's inbound queues: the contract's three methods, decoded
 /// into the core's types (a malformed request never reaches the loop).
 pub(crate) struct MatchmakerInbox {
-    pub(crate) requests: Inbound<MatchmakeRpc, MatchRequest, MatchReply>,
-    pub(crate) collects: Inbound<GarbageCollectRpc, GcRequest, GcAck>,
+    pub(crate) requests: Inbound<MatchmakeRpc, (TenantId, MatchRequest), MatchReply>,
+    pub(crate) collects: Inbound<GarbageCollectRpc, (TenantId, GcRequest), GcAck>,
     pub(crate) reconfigures:
-        Inbound<MatchmakerReconfigureRpc, ReconfigureRequest, ReconfigureReply>,
+        Inbound<MatchmakerReconfigureRpc, (TenantId, ReconfigureRequest), ReconfigureReply>,
 }
 
 impl MatchmakerInbox {

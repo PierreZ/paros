@@ -17,6 +17,9 @@ use crate::message::{Message, Party};
 use crate::ready::Ready;
 use crate::state::{Config, HardState};
 use crate::storage::Storage;
+
+/// The journal every test node serves.
+const J: crate::JournalId = crate::JournalId::UNSET;
 use crate::types::{
     Ballot, Command, Control, Entry, LeaderUuid, NodeId, Seq, Slot, Value, command_fingerprint,
 };
@@ -146,6 +149,7 @@ fn campaign(n: &mut ColocatedNode) {
     let _ = drain_match_requests(n);
     for matchmaker in set.members() {
         n.on_match_reply(MatchReply {
+            journal: J,
             matchmaker: *matchmaker,
             to: n.config().id,
             ballot: tag,

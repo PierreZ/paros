@@ -16,13 +16,13 @@
 use std::collections::BTreeMap;
 
 use super::{
-    DecreeRecord, Matchmaker, MatchmakerPhase, MatchmakerWriteOp, PendingBootstrap,
+    DecreeRecord, JournalScalars, Matchmaker, MatchmakerPhase, MatchmakerWriteOp, PendingBootstrap,
     ReconfigureReply, ReconfigureRequest, Registration, raise_effective,
 };
 use crate::acceptor::{AcceptOutcome, Acceptor, PrepareOutcome};
 use crate::membership::{MatchmakerGeneration, MatchmakerId, MatchmakerSet};
 use crate::retained::RetainedWindow;
-use crate::types::{Ballot, Slot};
+use crate::types::{Ballot, JournalId, Slot};
 use crate::write::AcceptorWrite;
 
 /// The one slot a successor decree runs over: a matchmaker set is a single
@@ -41,7 +41,12 @@ impl Matchmaker {
     pub fn step_reconfigure(&mut self, request: ReconfigureRequest) {
         self.assert_invariants();
         let replies = self.pending_reconfigure_replies.len();
-        let watermark = self.hard_state.gc_watermark;
+        let floors: Vec<(JournalId, Ballot)> = self
+            .hard_state
+            .journals
+            .iter()
+            .map(|(journal, scalars)| (*journal, scalars.gc_watermark))
+            .collect();
         let generation = self.hard_state.generation;
         let reply = match request {
             ReconfigureRequest::Stop { generation, .. } => self.on_stop(generation),
@@ -73,8 +78,10 @@ impl Matchmaker {
             "every handover request is answered once"
         );
         assert!(
-            self.hard_state.gc_watermark >= watermark,
-            "a handover never lowers the watermark"
+            floors
+                .iter()
+                .all(|(journal, floor)| self.hard_state.gc_watermark(*journal) >= *floor),
+            "a handover never lowers a watermark"
         );
         assert!(
             self.hard_state.generation >= generation,
@@ -137,9 +144,7 @@ impl Matchmaker {
         ReconfigureReply::Stopped {
             matchmaker: self.config.id,
             generation,
-            gc_watermark: self.hard_state.gc_watermark,
-            history: self.history_from_watermark(),
-            effective: self.hard_state.effective.clone(),
+            registries: self.frozen_registries(),
             successor: self.hard_state.successor.clone(),
             decree_promised: self.hard_state.decree.promised,
         }
@@ -508,9 +513,10 @@ impl Matchmaker {
 
     /// Activate `successor` if this matchmaker is one of its members holding
     /// its pending bootstrap and stands strictly below it: the reconstructed
-    /// registry replaces the current one whole, the watermark becomes the
-    /// reconstructed one (never lower than the one held — the maximum over a
-    /// frozen quorum that this matchmaker, if it was in it, contributed to),
+    /// registries replace the current ones whole, each journal's watermark
+    /// becomes the reconstructed one (never lower than the one held — the
+    /// maximum over a frozen quorum that this matchmaker, if it was in it,
+    /// contributed to),
     /// the decree record resets for the new generation, and every pending
     /// bootstrap at or below the new generation is dropped.
     fn activate(&mut self, successor: &MatchmakerSet) -> bool {
@@ -537,52 +543,74 @@ impl Matchmaker {
         // Phase 1 can need. What the local floor can never do is *add*
         // knowledge: the registry installed is exactly the reconstructed
         // history at or above the higher floor, and nothing else.
-        let local = self.hard_state.gc_watermark;
-        let watermark = bootstrap.gc_watermark.max(local);
-        // The effective configuration crosses the generation the same way,
-        // and by the same argument: it is monotone in its ballot, and both
-        // candidates are durable facts (this matchmaker accepted one; the
-        // reconstruction's is the maximum over a frozen quorum). Taking the
-        // maximum is what keeps the acceptor set in force across a handover
-        // even when the record it came from was collected generations ago.
-        if let Some((theirs, other)) = &bootstrap.effective {
-            raise_effective(&mut self.hard_state.effective, *theirs, other);
+        let mut journals: BTreeMap<JournalId, JournalScalars> =
+            std::mem::take(&mut self.hard_state.journals);
+        let mut registries: BTreeMap<JournalId, BTreeMap<Ballot, Registration>> = BTreeMap::new();
+        for (journal, reconstructed) in bootstrap.registries {
+            let held = journals.entry(journal).or_default();
+            let local = held.gc_watermark;
+            let watermark = reconstructed.gc_watermark.max(local);
+            // The effective configuration crosses the generation the same
+            // way, and by the same argument: it is monotone in its ballot,
+            // and both candidates are durable facts (this matchmaker
+            // accepted one; the reconstruction's is the maximum over a
+            // frozen quorum). Taking the maximum is what keeps the acceptor
+            // set in force across a handover even when the record it came
+            // from was collected generations ago.
+            if let Some((theirs, other)) = &reconstructed.effective {
+                raise_effective(&mut held.effective, *theirs, other);
+            }
+            let registry: BTreeMap<Ballot, Registration> = reconstructed
+                .history
+                .into_iter()
+                .filter(|(b, _)| *b >= watermark)
+                .collect();
+            assert!(
+                watermark >= reconstructed.gc_watermark,
+                "an activation never lowers the reconstructed watermark"
+            );
+            assert!(
+                watermark >= local,
+                "an activation never lowers its own watermark"
+            );
+            assert!(
+                registry.keys().all(|b| *b >= watermark),
+                "an activated registry holds nothing below the activated watermark"
+            );
+            held.gc_watermark = watermark;
+            if !registry.is_empty() {
+                registries.insert(journal, registry);
+            }
         }
-        let registry: BTreeMap<Ballot, Registration> = bootstrap
-            .history
-            .into_iter()
-            .filter(|(b, _)| *b >= watermark)
-            .collect();
-        assert!(
-            watermark >= bootstrap.gc_watermark,
-            "an activation never lowers the reconstructed watermark"
-        );
-        assert!(
-            watermark >= local,
-            "an activation never lowers its own watermark"
-        );
-        assert!(
-            registry.keys().all(|b| *b >= watermark),
-            "an activated registry holds nothing below the activated watermark"
-        );
+        // A journal the reconstruction does not name keeps its own floor and
+        // effective configuration, and no record: the registries are
+        // replaced whole, as one registry always was.
+        self.hard_state.journals = journals;
         self.hard_state.generation = successor.generation;
         self.hard_state.members = successor.members().to_vec();
         self.hard_state.phase = MatchmakerPhase::Active;
         self.hard_state.successor = None;
         self.hard_state.decree = DecreeRecord::default();
-        self.hard_state.gc_watermark = watermark;
         self.hard_state
             .pending
             .retain(|p| p.set.generation > successor.generation);
         self.refresh_set();
-        self.registry = RetainedWindow::new(registry.clone(), watermark);
-        // One write for the whole activation: a crash between "registry
+        self.registries = self
+            .hard_state
+            .journals
+            .iter()
+            .map(|(journal, scalars)| {
+                let ledger = registries.get(journal).cloned().unwrap_or_default();
+                (*journal, RetainedWindow::new(ledger, scalars.gc_watermark))
+            })
+            .collect();
+        // One write for the whole activation: a crash between "registries
         // replaced" and "scalars advanced" would boot a matchmaker answering
-        // the wrong generation from the wrong registry.
+        // the wrong generation from the wrong registries.
         self.pending_writes
             .push(MatchmakerWriteOp::InstallRegistry {
                 scalars: self.hard_state.clone(),
-                registrations: registry,
+                registrations: registries,
             });
         // The successor is active here, at its own generation, with no
         // successor of its own yet and a fresh decree.
