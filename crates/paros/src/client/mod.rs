@@ -780,12 +780,27 @@ impl<P: Providers> Client<P> {
     /// identical write — the journal answers a write it holds from the log
     /// (`Duplicate`) and refuses one whose position another write took —
     /// up to `retry_budget` times, `retry_backoff` apart.
+    ///
+    /// The observer hears the settlement ([`CallObserver::resolving`],
+    /// [`CallObserver::resolved`]): a write resolved not written is one a
+    /// history checker holds to never landing in the leadership it was
+    /// sent under (#444).
     pub async fn resolve(
         &self,
         request: &Write,
         first: usize,
         retarget: Retarget,
     ) -> ResolveReport {
+        let token = self.observer.resolving(request);
+        let report = self.settle(request, first, retarget).await;
+        if let Some(token) = token {
+            self.observer.resolved(token, &report);
+        }
+        report
+    }
+
+    /// [`Client::resolve`]'s read-back and re-sends.
+    async fn settle(&self, request: &Write, first: usize, retarget: Retarget) -> ResolveReport {
         let count = request.records.len() as u64;
         let leader = leader_uuid_from_proto(request.leader);
         let back = self
