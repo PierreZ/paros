@@ -601,6 +601,9 @@ struct Registry {
     /// Run-level: whether the run draws the bare-quorum scenario (see
     /// [`bare_quorum`]), fixed by the first caller.
     bare_quorum: Option<bool>,
+    /// Run-level: whether the run draws the reused-name scenario (see
+    /// [`reused_name`]), fixed by the first caller.
+    reused_name: Option<bool>,
     /// Run-level: whether the run draws the lost-verdict scenario (see
     /// [`lost_verdict`]), fixed by the first caller.
     lost_verdict: Option<bool>,
@@ -795,6 +798,23 @@ pub(crate) fn departed_straggler(state: &StateHandle) -> bool {
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     *guard
         .departed_straggler
+        .get_or_insert_with(|| moonpool_sim::buggify_with_prob!(1.0))
+}
+
+/// Whether the run draws the **reused-name scenario** (#239, #192 (the
+/// frontend)): drawn once per seed, its own BUGGIFY location. A name is
+/// reused only after a create, a completed delete and a second create all
+/// name it, three steps that each draw one of three names: the gate fired
+/// on 9 of 155 checks (1,000 hunt seeds) and missed CI's sweep once. On a
+/// scenario seed, every journal create and delete names the same journal.
+/// Each step keeps its own name draw on the other seeds. Rare-but-valid:
+/// a tenant may delete a name and create it again.
+#[tracing::instrument(level = "debug", skip_all)]
+pub(crate) fn reused_name(state: &StateHandle) -> bool {
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    *guard
+        .reused_name
         .get_or_insert_with(|| moonpool_sim::buggify_with_prob!(1.0))
 }
 

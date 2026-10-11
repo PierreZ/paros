@@ -57,6 +57,44 @@ const LOCAL: JournalIdentifier = JournalIdentifier::new(TenantId(1), paros::Jour
 const JOURNAL_NAMES: [&[u8]; 3] = [b"orders", b"events", b"audit"];
 
 impl FleetOps {
+    /// The journal name `draw` picks: always the first on a reused-name
+    /// seed ([`crate::shape::reused_name`]).
+    fn journal_name(&self, draw: u64) -> &'static [u8] {
+        if crate::shape::reused_name(&self.state) {
+            return JOURNAL_NAMES[0];
+        }
+        JOURNAL_NAMES[usize::try_from(draw % JOURNAL_NAMES.len() as u64).unwrap_or(0)]
+    }
+
+    /// On a reused-name seed ([`crate::shape::reused_name`]), a decided
+    /// request leaves its opposite pending on the same name: a create a
+    /// delete, a delete a create. The next journal steps send them, so a
+    /// name is created, deleted and created again.
+    fn reuse_name(&mut self, request: &JournalRequest, answer: &JournalAnswer, draw: u64) {
+        if self.journal_pending.is_some() || !crate::shape::reused_name(&self.state) {
+            return;
+        }
+        let op = match (answer, &request.op) {
+            (JournalAnswer::Created { .. }, JournalOp::Create { name, .. }) => {
+                JournalOp::Delete { name: name.clone() }
+            }
+            (JournalAnswer::Deleted { .. }, JournalOp::Delete { name }) => {
+                assert_reachable!("journals: a reused-name seed creates a deleted name again");
+                JournalOp::Create {
+                    name: name.clone(),
+                    writer: drawn_mode(),
+                    desired: drawn_desired(draw),
+                }
+            }
+            _ => return,
+        };
+        self.journal_pending = Some(JournalRequest {
+            request: moonpool_sim::sim_random_range(1..u64::MAX),
+            tenant: request.tenant,
+            op,
+        });
+    }
+
     /// `CREATE_JOURNAL`: create a journal in a `READY` tenant, or send the
     /// pending request again.
     #[tracing::instrument(level = "debug", skip_all, fields(client = self.client_id))]
@@ -73,9 +111,7 @@ impl FleetOps {
         let request = if let Some(request) = self.journal_pending.take() {
             request
         } else {
-            let name = JOURNAL_NAMES
-                [usize::try_from(class % JOURNAL_NAMES.len() as u64).unwrap_or(0)]
-            .to_vec();
+            let name = self.journal_name(class).to_vec();
             // A name this client resolved on an earlier step is read through
             // its cached resolution first: the journal may be gone since.
             if self.cached_name(tenant, &name).is_some() && buggify_with_prob!(0.5) {
@@ -114,9 +150,7 @@ impl FleetOps {
                 request: ctx.random().random_range(1..u64::MAX),
                 tenant,
                 op: JournalOp::Delete {
-                    name: JOURNAL_NAMES
-                        [usize::try_from((payload >> 8) % JOURNAL_NAMES.len() as u64).unwrap_or(0)]
-                    .to_vec(),
+                    name: self.journal_name(payload >> 8).to_vec(),
                 },
             },
         };
@@ -192,6 +226,7 @@ impl FleetOps {
         }
         self.judge_answer(cell, control, &request, &answer, draw)
             .await;
+        self.reuse_name(&request, &answer, draw);
         if buggify_with_prob!(0.2) {
             // A retry of a decided request: the client lost the answer. On
             // its own location an operator removes the request's tenant
@@ -470,8 +505,7 @@ impl FleetOps {
         if self.frontends.is_empty() {
             return;
         }
-        let name =
-            JOURNAL_NAMES[usize::try_from((draw >> 40) % JOURNAL_NAMES.len() as u64).unwrap_or(0)];
+        let name = self.journal_name(draw >> 40);
         let Ok(named) = JournalName::new(tenant, &String::from_utf8_lossy(name)) else {
             return;
         };
