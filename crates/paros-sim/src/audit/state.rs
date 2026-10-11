@@ -455,7 +455,6 @@ pub(super) struct AuditState {
     pub(super) edge_rejections: u64,
     pub(super) delivery_failed: bool,
     pub(super) waiters_cleared: bool,
-    pub(super) edge_rejected: bool,
     /// A `Retire` refused because no effective GC floor sat above the target's
     /// membership fence (#123's `not_collected` leg).
     pub(super) retire_not_collected: bool,

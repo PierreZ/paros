@@ -13,17 +13,27 @@ the `mutants` test reads `PAROS_MUTANT_SEEDS`.
 - `tests/mutants.rs` → the mutation hunt (#269), cargo-mutants' test command: `chain_mutants`
   over seeds `1..=PAROS_MUTANT_SEEDS` (default `MUTANT_SEEDS`) in batches of `MUTANT_BATCH`,
   exit 1 at the first batch with a violation or failed run. Built only with the `mutants` feature, so nextest never runs it.
+- `build.rs` + `src/scan.rs` → the declared-gate scan (#446 (a gate that never fires cannot fail
+  the sweep)): every `assert_reachable!`, `reachable!`, `reach_once!`, `assert_sometimes!`,
+  `sometimes!` and `probe!` with a literal message in `paros-core`, `paros` and `paros-sim`
+  (`#[cfg(test)]` items and comments skipped), compiled in as `gates::DECLARED`.
+- `src/gates.rs` → `DECLARED`, `RARE` (declared gates the sweep is known to miss, each with its
+  reason), `judge`, `print_rarest` → the declared-gate check: moonpool judges only gates that
+  have a slot, and a gate gets its slot the first time it runs, so this check names every
+  declared gate that never ran. Slots are named by their first 63 bytes (`slot_name`); no two
+  gates may share them (a unit test).
 - `src/common.rs` → `arg`, `is_clean`, `print_seed_counts`, `print_failed_runs` (a panicked process is a failed run with no violation), `print_never_fired` → shared parsing and printing.
 
 ## Entry points
 
 - `sim-paros-chain [iterations]` (default `COVERAGE_ITERATIONS`): runs `explore`, prints
   saturated-vs-cap, saturation signal, exploration stats and bug recipes, guidance watermarks
-  and the gates that never fired. Exits 1 on any assertion violation, failed run, coverage violation or
-  convergence timeout.
+  and the gates that never fired, the declared gates that never ran, and the ten rarest
+  declared gates that fired. Exits 1 on any assertion violation, failed run, coverage violation,
+  declared gate that never ran (unless listed in `gates::RARE`) or convergence timeout.
 - `sim-paros-hunt [main|canary] [iterations] [gate-filter]` (default 2000, the normal evidence
   budget; root *Simulation rules*): prints seed counts, assertion slots used and dropped, gates
-  that never fired, and with a filter every gate whose name contains it, with its successes and
+  that never fired, the declared gates that never ran, the 25 rarest declared gates, and with a filter every gate whose name contains it, with its successes and
   checks (a gate's rate before and after a change); exits 1 on a violation, 2 on an unknown
   axis. Coverage never decides it.
 - `sim-paros-hunt <replay> <seed>` with `replay-main`, `replay-canary`, `explore-main`

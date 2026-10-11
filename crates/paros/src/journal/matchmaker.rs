@@ -591,8 +591,10 @@ impl<P: StorageProvider> MatchmakerStorage for JournalMatchmakerStorage<P> {
         // The clears, last: until they land a boot drops what they clear.
         if !clears.is_empty() {
             // The registrations are durable and the clears are not: a boot
-            // must drop what the clears would have cleared.
-            let hinted = moonpool_buggify::hint!("registrations durable, clears staged");
+            // must drop what the clears would have cleared. Clears are rare
+            // (a raised GC floor, an install): the rate matches the other
+            // matchmaker hints (#446).
+            let hinted = moonpool_buggify::hint!("registrations durable, clears staged", 0.15);
             if hinted.strike() == Strike::Killed {
                 moonpool_assertions::reachable!(
                     "a matchmaker crashes between its registrations and its clears"

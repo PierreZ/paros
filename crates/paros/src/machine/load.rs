@@ -147,9 +147,10 @@ async fn monitor<P: Providers>(
                     end_at: after.at,
                     ended: providers.time().now(),
                 }),
-                None => {
-                    moonpool_assertions::reachable!("load: a sample went back, no window");
-                }
+                // A counter that went back (a wrap, a cgroup change): a
+                // production defence. The simulator's counters are
+                // monotone, so it has no gate (#446).
+                None => {}
             }
         }
         prev = now;
