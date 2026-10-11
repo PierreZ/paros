@@ -6,8 +6,9 @@
 //! started a move often resigns, and a later term must finish it. A
 //! journal may have no machine to move to: its move waits. On a
 //! drained-machine seed (`crate::shape::drained_machine`), the operator
-//! drains one machine at a time, only one that holds a journal's slot
-//! another storage machine could take, at an `ADMIT` or right after a
+//! drains one machine at a time, only one that holds a journal's or a
+//! matchmaker set's slot another storage machine could take (#501
+//! (matchmaker sets off the founders)), at an `ADMIT` or right after a
 //! journal create, and admits machines until then.
 
 use std::collections::BTreeSet;
@@ -73,19 +74,21 @@ impl FleetOps {
                     .map(|(id, _)| id),
             )
             .collect();
-        // Whether `node` holds a journal's slot that another storage machine
+        // Whether `node` holds a journal's slot, or a matchmaker set's (#501
+        // (matchmaker sets off the founders)), that another storage machine
         // could take.
         let movable = |node: NodeId| {
             registry.bookings().any(|(_, b)| {
                 let holders: BTreeSet<NodeId> = registry
                     .bookings()
-                    .filter(|(_, o)| o.target == b.target && o.role == Role::Acceptor)
+                    .filter(|(_, o)| o.target == b.target && o.role.class() == Class::Storage)
                     .map(|(_, o)| o.node)
                     .collect();
-                b.node == node
-                    && b.role == Role::Acceptor
-                    && matches!(b.target, BookingTarget::Journal(_))
-                    && storage.iter().any(|m| !holders.contains(m))
+                let moves = match b.target {
+                    BookingTarget::Journal(_) => b.role == Role::Acceptor,
+                    BookingTarget::Set { .. } => b.role == Role::Matchmaker,
+                };
+                b.node == node && moves && storage.iter().any(|m| !holders.contains(m))
             })
         };
         // The scenario drains one machine at a time, so a journal keeps

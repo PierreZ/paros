@@ -34,7 +34,11 @@ use super::ready::Outbox;
 /// its answer comes back tagged with the tenant it was sent for (the node
 /// loop routes a reply on the tenant and the journal it echoes).
 pub(crate) struct MatchmakerLinks<P: Providers> {
-    pub(crate) clients: BTreeMap<MatchmakerId, MatchmakerClient<P>>,
+    /// One client per matchmaker. Behind a lock only so a link can be added
+    /// while the loop holds the links shared (#501 (matchmaker sets off the
+    /// founders): a machine the registry admits may host a set); the loop
+    /// is the only writer and never holds it across an await.
+    pub(crate) clients: std::sync::Mutex<BTreeMap<MatchmakerId, MatchmakerClient<P>>>,
     pub(crate) replies: mpsc::Sender<(TenantId, MatchReply)>,
     pub(crate) gc_acks: mpsc::Sender<(TenantId, GcAck)>,
     pub(crate) reconfigure_replies: mpsc::Sender<(TenantId, ReconfigureReply)>,
@@ -52,7 +56,7 @@ fn link_to<P: Providers>(
     self_id: u64,
     matchmaker: MatchmakerId,
 ) -> Option<MatchmakerClient<P>> {
-    let client = links.clients.get(&matchmaker);
+    let client = links.client(matchmaker);
     if client.is_none() {
         tracing::warn!(
             node = self_id,
@@ -60,7 +64,33 @@ fn link_to<P: Providers>(
             "unknown matchmaker"
         );
     }
-    client.cloned()
+    client
+}
+
+impl<P: Providers> MatchmakerLinks<P> {
+    fn clients(&self) -> std::sync::MutexGuard<'_, BTreeMap<MatchmakerId, MatchmakerClient<P>>> {
+        self.clients
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The link to `matchmaker`, if this driver has one.
+    pub(crate) fn client(&self, matchmaker: MatchmakerId) -> Option<MatchmakerClient<P>> {
+        self.clients().get(&matchmaker).cloned()
+    }
+
+    /// Whether this driver has a link to `matchmaker`.
+    pub(crate) fn knows(&self, matchmaker: MatchmakerId) -> bool {
+        self.clients().contains_key(&matchmaker)
+    }
+
+    /// Add a link to `matchmaker` (#501 (matchmaker sets off the
+    /// founders)): a machine the registry admitted may host a set of a later
+    /// generation. A link already held is kept: the peer book readdresses it.
+    pub(crate) fn add(&self, matchmaker: MatchmakerId, client: MatchmakerClient<P>) {
+        self.clients().entry(matchmaker).or_insert(client);
+        assert!(self.knows(matchmaker), "an added link is held");
+    }
 }
 
 /// Carry one matchmaker RPC on its own detached task and feed its decoded

@@ -373,6 +373,14 @@ pub struct ColocatedNode {
     /// `None` on plain Multi-Paxos, always — the static-membership case is
     /// the `None` arm of the same state machine, never an empty set.
     matchmakers: Option<MatchmakerSet>,
+    /// The **matchmaker pool** in force (#501 (matchmaker sets off the
+    /// founders)): `Config::matchmaker_pool` at boot, grown at runtime by
+    /// [`ColocatedNode::extend_matchmaker_pool`] as the deployment's node
+    /// registry admits machines that may host a matchmaker. Grow-only,
+    /// sorted and deduplicated, a superset of every set this node learned.
+    /// Volatile: a restart boots from `Config::matchmaker_pool` again and
+    /// the driver extends it anew.
+    matchmaker_pool: Vec<MatchmakerId>,
     /// The leader's open garbage-collection campaign (#123, `node/gc.rs`).
     /// Leader-only, volatile, `None` on plain Multi-Paxos.
     gc: Option<Collector>,
@@ -1630,6 +1638,69 @@ impl ColocatedNode {
                 .iter()
                 .all(|n| self.pool.binary_search(n).is_ok()),
             "the pool always holds the boot pool"
+        );
+        self.assert_invariants();
+        grew
+    }
+
+    /// The matchmaker pool in force (#501 (matchmaker sets off the
+    /// founders)): `Config::matchmaker_pool`, plus every matchmaker
+    /// [`ColocatedNode::extend_matchmaker_pool`] admitted since this
+    /// incarnation booted.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants fails: a programmer error.
+    #[must_use]
+    pub fn matchmaker_pool(&self) -> &[MatchmakerId] {
+        assert!(
+            self.matchmaker_pool.windows(2).all(|w| w[0] < w[1]),
+            "the matchmaker pool is sorted and deduplicated"
+        );
+        assert!(
+            self.matchmaker_pool.len() >= self.config.matchmaker_pool().len(),
+            "the matchmaker pool only grows from boot"
+        );
+        &self.matchmaker_pool
+    }
+
+    /// Admit `matchmakers` to the matchmaker pool (#501 (matchmaker sets
+    /// off the founders)): a machine registered with the deployment at
+    /// runtime may host a matchmaker of a later generation, so a set that
+    /// names it is one this node can learn. **Grow-only**, like
+    /// [`ColocatedNode::extend_pool`]. Refused (`false`, nothing moves) on
+    /// a deployment without matchmakers: plain Multi-Paxos has no set to
+    /// learn. Pure hygiene: it emits nothing. Returns whether the pool
+    /// grew.
+    ///
+    /// # Panics
+    ///
+    /// If an internal invariant is broken (a programmer error).
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, matchmakers = matchmakers.len())))]
+    pub fn extend_matchmaker_pool(&mut self, matchmakers: &[MatchmakerId]) -> bool {
+        if !self.config.has_matchmakers() {
+            assert!(
+                self.matchmakers.is_none(),
+                "a plain deployment believes no matchmaker set"
+            );
+            return false;
+        }
+        let before = self.matchmaker_pool.len();
+        self.matchmaker_pool.extend_from_slice(matchmakers);
+        self.matchmaker_pool.sort_unstable();
+        self.matchmaker_pool.dedup();
+        let grew = self.matchmaker_pool.len() > before;
+        // Postconditions: the pool only grew, and still holds the boot pool.
+        assert!(
+            self.matchmaker_pool.len() >= before,
+            "the matchmaker pool never shrinks"
+        );
+        assert!(
+            self.config
+                .matchmaker_pool()
+                .iter()
+                .all(|m| self.matchmaker_pool.binary_search(m).is_ok()),
+            "the matchmaker pool always holds the boot pool"
         );
         self.assert_invariants();
         grew

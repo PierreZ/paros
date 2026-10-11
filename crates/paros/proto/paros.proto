@@ -212,6 +212,9 @@ message Reconfigure {
 message ReconfigureMatchmakers {
   // The new matchmaker set (matchmaker ids drawn from the deployment's pool).
   repeated uint64 members = 1;
+  // The tenant whose set hands over (#501): a node hosts many tenants'
+  // journals. 0 names the tenant of the node's first journal.
+  uint64 tenant = 2;
 }
 
 message ReconfigureMatchmakersAck {
