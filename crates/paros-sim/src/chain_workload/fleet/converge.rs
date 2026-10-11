@@ -1,7 +1,7 @@
 //! Every quiet journal world converges (#447 (model checks for every
 //! journal world)): the machines' journals report to their own audit worlds,
 //! and the plan's final check judges only the plan's. Once every operator
-//! settled, the fleet journal, every tenant control journal and every live
+//! settled, the universe journal, every tenant control journal and every live
 //! created journal take no more writes; each must end with every node it
 //! does not excuse on its applied frontier, every acked and every decided
 //! slot applied. The cell control journal and the election journal are not
@@ -15,7 +15,7 @@ use moonpool_sim::{SimContext, TimeProvider, assert_reachable};
 use paros::JournalIdentifier;
 
 /// The journals no writer touches once every operator settled: the formed
-/// cell's fleet journal, every tenant control journal a machine folded, and
+/// cell's universe journal, every tenant control journal a machine folded, and
 /// every created journal no machine folded a tombstone of.
 fn quiet_journals(ctx: &SimContext) -> BTreeSet<JournalIdentifier> {
     let board = crate::audit::tenants::tenant_board(ctx.state());
@@ -24,8 +24,8 @@ fn quiet_journals(ctx: &SimContext) -> BTreeSet<JournalIdentifier> {
         .created_modes()
         .into_keys()
         .filter(|journal| !board.tombstoned(*journal));
-    let fleet = crate::machine::formed_cell(ctx.state()).and_then(|cell| cell.fleet);
-    fleet
+    let universe = crate::machine::formed_cell(ctx.state()).and_then(|cell| cell.fleet);
+    universe
         .into_iter()
         .chain(board.controls())
         .chain(created)

@@ -841,7 +841,7 @@ pub(crate) fn check_run(
 
 /// The final judgement of every journal world `judged` leaves out (#447
 /// (model checks for every journal world)): the registry, the cell's
-/// control, fleet and election journals, every tenant control journal and
+/// control, universe and election journals, every tenant control journal and
 /// every created journal report to their own worlds, and [`check_run`]
 /// runs only for the plan's journals. The journal model's slot-order checks
 /// ([`JournalModel::check`](super::journal_model::JournalModel::check))
