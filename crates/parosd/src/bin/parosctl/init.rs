@@ -140,7 +140,7 @@ pub async fn run(
             Ending::Refused
         }
         InitRun::Refused(InitRefusal::Fleet(refusal)) => {
-            let text = refusal_text(&refusal, &Labels::default());
+            let text = refusal_text(&refusal, &Labels::fetch(asker).await);
             out.emit(
                 || format!("init refused: {text}"),
                 || json!({ "outcome": "refused", "refusal": text }),
