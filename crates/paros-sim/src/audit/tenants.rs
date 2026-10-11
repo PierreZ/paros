@@ -78,6 +78,10 @@ pub(crate) struct TenantBoard {
     freed: BTreeSet<(JournalIdentifier, Vec<u8>)>,
     /// A name was created again after a completed delete freed it (#239).
     name_reused: bool,
+    /// `(machine, journal)`: the machine stopped serving the journal for
+    /// good, a delete or its tenant's drop (#447 (model checks for every
+    /// journal world)).
+    stopped: BTreeSet<(u64, JournalIdentifier)>,
 }
 
 /// The run's [`TenantBoard`] (`crate::state::published`).
@@ -248,6 +252,20 @@ impl TenantBoard {
     /// in.
     pub(crate) fn created_modes(&self) -> BTreeMap<JournalIdentifier, WriterMode> {
         self.modes.clone()
+    }
+
+    /// `node` stopped serving `journal` for good.
+    pub(crate) fn stopped(&mut self, node: NodeId, journal: JournalIdentifier) {
+        self.stopped.insert((node.0, journal));
+    }
+
+    /// Every machine that stopped serving `journal` for good.
+    pub(crate) fn stopped_on(&self, journal: JournalIdentifier) -> BTreeSet<u64> {
+        self.stopped
+            .iter()
+            .filter(|(_, j)| *j == journal)
+            .map(|(node, _)| *node)
+            .collect()
     }
 
     /// Whether any machine folded `journal`'s tombstone: its nodes stop it.

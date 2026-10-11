@@ -2,8 +2,8 @@
 //! journal world)): the machines' journals report to their own audit worlds,
 //! and the plan's final check judges only the plan's. Once every operator
 //! settled, the universe journal, every tenant control journal and every live
-//! created journal take no more writes; each must end with every node it
-//! does not excuse on its applied frontier, every acked and every decided
+//! created journal take no more writes; each a machine still serves must
+//! end with every node it does not excuse on its applied frontier, every acked and every decided
 //! slot applied. The cell control journal and the election journal are not
 //! quiet (the coordinator's liveness writes and renewals go on), so their
 //! own oracles judge them (`final_registry`, `election_settles`).
@@ -41,13 +41,30 @@ pub(super) async fn worlds_converge(ctx: &SimContext, deadline: Duration) {
         return;
     }
     let wiped = crate::machine::wiped_ids(ctx.state());
-    let worlds: Vec<_> = quiet_journals(ctx)
-        .into_iter()
-        .map(|journal| crate::audit::audit_world_for(ctx.state(), journal))
-        .collect();
-    for world in &worlds {
+    let board = crate::audit::tenants::tenant_board(ctx.state());
+    let quiet = quiet_journals(ctx);
+    let stops: Vec<_> = {
+        let board = crate::audit::tenants::lock(&board);
+        quiet
+            .into_iter()
+            .map(|journal| (journal, board.stopped_on(journal)))
+            .collect()
+    };
+    let mut worlds = Vec::new();
+    for (journal, stopped) in stops {
+        let world = crate::audit::audit_world_for(ctx.state(), journal);
         for node in &wiped {
             world.note_wiped(*node);
+        }
+        // A machine that stopped the journal (a delete, or its tenant's
+        // drop) owes it nothing; a journal no machine serves any more owes
+        // no slot (seed 10237668095788132297: a tenant dropped while its
+        // created journal's last append was decided and not yet applied).
+        for node in stopped {
+            world.note_stopped(node);
+        }
+        if world.served() {
+            worlds.push(world);
         }
     }
     while !worlds.iter().all(|world| world.converged())

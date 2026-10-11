@@ -93,7 +93,6 @@ fn published_world(state: &StateHandle, journal: paros::JournalIdentifier) -> Ar
                     state
                 }),
                 main: Some(main),
-                journal: Some(journal),
                 mode: OnceLock::new(),
             }
         },
@@ -125,8 +124,6 @@ pub(crate) struct AuditWorld {
     /// The run's deployment journal ([`crate::shape::Identifiers::main`]); `None`
     /// for a private checker outside any run.
     main: Option<paros::JournalIdentifier>,
-    /// The journal this checker judges; `None` for a private checker.
-    journal: Option<paros::JournalIdentifier>,
     /// This journal's writer mode (#241), set once it is known: a call
     /// can name a created journal before any machine folded its creation.
     mode: OnceLock<paros::WriterMode>,
@@ -136,11 +133,6 @@ impl AuditWorld {
     /// The run's deployment journal, when this checker belongs to a run.
     pub(crate) fn main(&self) -> Option<paros::JournalIdentifier> {
         self.main
-    }
-
-    /// The journal this checker judges, when it belongs to a run.
-    pub(crate) fn journal(&self) -> Option<paros::JournalIdentifier> {
-        self.journal
     }
 
     /// This journal's writer mode (#241). A machine and a workload reach a
@@ -620,6 +612,20 @@ impl AuditWorld {
     /// convergence excuses it, as it does an amnesiac member.
     pub(crate) fn note_wiped(&self, node: u64) {
         self.lock().wiped.insert(node);
+    }
+
+    /// A node stopped serving this journal for good (#447 (model checks
+    /// for every journal world)): convergence excuses it.
+    pub(crate) fn note_stopped(&self, node: u64) {
+        self.lock().left_pool.insert(node);
+    }
+
+    /// Whether a node still serves this journal: one booted that did not
+    /// leave it. A journal every node stopped (deleted, or its tenant
+    /// dropped) owes no slot to anyone.
+    pub(crate) fn served(&self) -> bool {
+        let st = self.lock();
+        st.booted.is_empty() || st.booted.iter().any(|node| !st.left_pool.contains(node))
     }
 
     /// Whether [`check_final_convergence`](Self::check_final_convergence)'s

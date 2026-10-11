@@ -1197,10 +1197,15 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         // A joiner the registry retired leaves the deployment's journal for
         // good (#189): convergence excuses it, exactly like an operator
         // retirement (#123).
-        // So does a machine that stops a journal a tenant deleted (#447
-        // (model checks for every journal world)), in that journal's world.
-        if self.world.main() == Some(journal) || self.world.journal() == Some(journal) {
+        if self.world.main() == Some(journal) {
             self.world.note_left_pool(node.0);
+        }
+        // A machine reports every stop through its node port, whose world
+        // is its home journal's (#447 (model checks for every journal
+        // world)): the tenant board keeps the stop for the stopped
+        // journal's convergence.
+        if let Some(board) = &self.tenants {
+            tenants::lock(board).stopped(node, journal);
         }
     }
 
