@@ -308,6 +308,12 @@ pub struct DriverTunables {
     /// is 5 s. Floor 1 s: a shorter window measures the sampler's own
     /// jitter, not the machine.
     pub load_interval: Duration,
+    /// How long a journal's new status word must hold before a founding
+    /// member shows it (#191 (status), `crate::status::Hysteresis`).
+    /// Floor 0: every answer shows its own word. A hold shorter than the
+    /// cell coordinator's failure detector (`machine_down_after`) hides
+    /// little, since the registry's liveness moves no faster than that.
+    pub status_hold: Duration,
 }
 
 impl Default for DriverTunables {
@@ -349,6 +355,7 @@ impl Default for DriverTunables {
             apply_page: paros_core::APPLY_BATCH,
             registry_page: paros_core::REGISTRY_PAGE,
             load_interval: LOAD_INTERVAL,
+            status_hold: STATUS_HOLD,
         };
         // The simulation's baseline is itself a winnable profile.
         assert!(
@@ -420,6 +427,11 @@ const LOAD_INTERVAL: Duration = Duration::from_secs(5);
 pub const LOAD_INTERVAL_FLOOR: Duration = Duration::from_secs(1);
 
 const _: () = assert!(LOAD_INTERVAL.as_millis() >= LOAD_INTERVAL_FLOOR.as_millis());
+
+/// Default [`DriverTunables::status_hold`]: two failure-detector periods.
+const STATUS_HOLD: Duration = Duration::from_millis(3000);
+
+const _: () = assert!(STATUS_HOLD.as_millis() >= MACHINE_DOWN_AFTER.as_millis());
 
 /// Default [`DriverTunables::election_compact_after`].
 const ELECTION_COMPACT_AFTER: u64 = 16;

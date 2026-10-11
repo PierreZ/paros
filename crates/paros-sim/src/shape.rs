@@ -342,6 +342,11 @@ impl NodeShape {
             // short end gives a run many windows, so `LOAD` meets a full
             // one early and often.
             load_interval: ms(buggify_knob!(5000_u64, 1000_u64..5001_u64)),
+            // How long a new status word must hold before a member shows it
+            // (#191 (status)). Floor 0 (no hold). The default is below the
+            // chaos window, so a word changes inside a run; the extremes
+            // show every word at once or hold past a machine's reboot.
+            status_hold: ms(buggify_knob!(1000_u64, 0_u64..4001_u64)),
         };
         // The production profile `parosd` ships (#209), whole: every field
         // at once, which the per-field locations above would draw together

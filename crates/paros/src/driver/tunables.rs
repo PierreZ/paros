@@ -87,6 +87,7 @@ impl DriverTunables {
     /// | `election_compact_after` | 64 | the election journal's log stays a few kilobytes |
     /// | `machine_down_after` | 10 s | a machine silent for ten renewal periods is down; a reboot is shorter (#211) |
     /// | `load_interval` | the default (5 s) | FDB's `WORKER_LOGGING_INTERVAL` (#424) |
+    /// | `status_hold` | 20 s | two `machine_down_after`: a machine that reboots inside it never changes a word (#191 (status)) |
     ///
     /// # Panics
     ///
@@ -117,6 +118,7 @@ impl DriverTunables {
             election_renew: Duration::from_secs(1),
             election_compact_after: 64,
             machine_down_after: Duration::from_secs(10),
+            status_hold: Duration::from_secs(20),
             ..defaults
         };
         // What `parosd` ships is a profile the simulation could have drawn:
@@ -152,7 +154,7 @@ impl DriverTunables {
     pub fn check_floors(&self) -> Result<(), BelowFloor> {
         let ms = |d: Duration| u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
         let count = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
-        let fields: [(&'static str, u64, u64); 36] = [
+        let fields: [(&'static str, u64, u64); 37] = [
             ("tick_interval", ms(self.tick_interval), 1),
             (
                 "election_timeout_base",
@@ -229,6 +231,7 @@ impl DriverTunables {
                 ms(self.load_interval),
                 ms(super::config::LOAD_INTERVAL_FLOOR),
             ),
+            ("status_hold", ms(self.status_hold), 0),
         ];
         assert!(
             fields.iter().all(|(field, _, _)| !field.is_empty()),

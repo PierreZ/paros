@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package paros.view.v1;
 
+import "common.proto";
+
 // The administrative views (#399): read-only answers about one cell, its
 // machines, its tenants and who holds which role. Every view is a request to
 // one cell: a founding member of that cell answers it from the cell's own
@@ -137,6 +139,20 @@ message JournalView {
   repeated uint64 acceptors = 6;
   // The matchmaker set's members (empty: plain Multi-Paxos).
   repeated uint64 matchmakers = 7;
+  // The status (#191 (status), `docs/architecture.md` §3.6), computed live
+  // from the registry fold the answer names, never written back.
+  //
+  // The acceptors the desired shape asks for (the founding members for a
+  // journal the cell made).
+  uint64 desired_acceptors = 8;
+  // The placed configuration: `acceptors` with its quorum system.
+  .paros.common.v1.AcceptorConfig placed = 9;
+  // The word this answer judged from the machines it names: "healthy",
+  // "degraded" or "unavailable" (`paros::status::Word`).
+  string observed = 10;
+  // The word the cell shows: `observed` once it held for the cell's
+  // `status_hold`, else the word shown before (hysteresis).
+  string word = 11;
 }
 
 // One cell of the universe directory.

@@ -258,7 +258,13 @@ pub(super) struct MatchmakerAudit {
     /// still collecting its quorum for this one (the hunt found exactly that
     /// on seed 17432266949812866995 — a stale reconfigurer, judged against a
     /// snapshot overwritten since, reported more than the audit expected).
-    stop_acks: BTreeMap<(u64, u64), BTreeMap<u64, FrozenRegistry>>,
+    /// Shared by every journal of the tenant (#190): a `Stopped` reply
+    /// carries every journal's frozen registry, and a journal that boots on
+    /// the node mid-freeze (out of a quarantine at its first open) joins the
+    /// handover's fan-out at its close without having heard the acks
+    /// (witness: seed 16429444661763635071, recipe
+    /// 42754:15486895044628287776, found by #191 (status)'s sweep).
+    pub(super) stop_acks: TenantStops,
     /// Refusals folded, by kind (diagnostics only).
     refusal_counts: BTreeMap<&'static str, u64>,
     /// Per node: handovers started, abandoned, and the last step folded
@@ -629,6 +635,59 @@ impl TenantSets {
     /// Every generation known.
     fn generations(&self) -> Vec<u64> {
         self.lock().keys().copied().collect()
+    }
+}
+
+/// Per `(node, generation)`, per matchmaker, per journal: the frozen
+/// registries one tenant's handovers folded (#190): shared by the audits of
+/// every journal of that tenant.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct TenantStops(Arc<Mutex<StopAcks>>);
+
+/// What [`TenantStops`] holds.
+type StopAcks = BTreeMap<(u64, u64), BTreeMap<u64, BTreeMap<JournalId, FrozenRegistry>>>;
+
+impl TenantStops {
+    fn lock(&self) -> std::sync::MutexGuard<'_, StopAcks> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Forget what `node`'s handover of `generation` folded.
+    fn clear(&self, node: u64, generation: u64) {
+        self.lock().remove(&(node, generation));
+    }
+
+    /// `matchmaker`'s frozen registries, as `node`'s handover of
+    /// `generation` folded them (every journal's port folds the same reply).
+    fn insert(
+        &self,
+        (node, generation, matchmaker): (u64, u64, u64),
+        frozen: BTreeMap<JournalId, FrozenRegistry>,
+    ) {
+        self.lock()
+            .entry((node, generation))
+            .or_default()
+            .insert(matchmaker, frozen);
+    }
+
+    /// `journal`'s piece of every ack `node`'s handover of `generation`
+    /// folded (a matchmaker that held nothing for it reads blank).
+    fn folded(
+        &self,
+        node: u64,
+        generation: u64,
+        journal: JournalId,
+    ) -> BTreeMap<u64, FrozenRegistry> {
+        self.lock()
+            .get(&(node, generation))
+            .map(|acks| {
+                acks.iter()
+                    .map(|(m, frozen)| (*m, frozen.get(&journal).cloned().unwrap_or_default()))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 }
 
@@ -2015,7 +2074,7 @@ impl MatchmakerAudit {
         // this node (one its incarnation lost, or one abandoned) may have
         // folded a different subset, and the reconstruction is judged
         // against exactly the quorum this attempt reconstructs from.
-        self.stop_acks.remove(&(node.0, old.generation.0));
+        self.stop_acks.clear(node.0, old.generation.0);
         let members: Vec<u64> = old.members().iter().map(|m| m.0).collect();
         if target.iter().map(|m| m.0).collect::<Vec<_>>() == members {
             reach_once!(
@@ -2074,12 +2133,16 @@ impl MatchmakerAudit {
         } = reply
             && matches!(step, ReconfigurerStep::Stopped { .. })
         {
-            let mine = registries.get(&self.journal()).cloned().unwrap_or_default();
-            let snapshot: Vec<(Ballot, Registration)> = mine.history.into_iter().collect();
+            let frozen = registries
+                .iter()
+                .map(|(journal, registry)| {
+                    let snapshot: Vec<(Ballot, Registration)> =
+                        registry.history.clone().into_iter().collect();
+                    (*journal, (registry.gc_watermark, snapshot))
+                })
+                .collect();
             self.stop_acks
-                .entry((node.0, generation.0))
-                .or_default()
-                .insert(matchmaker.0, (mine.gc_watermark, snapshot));
+                .insert((node.0, generation.0, matchmaker.0), frozen);
         }
         match step {
             // The counted-but-short folds: progress the driver's stall
@@ -2255,11 +2318,7 @@ impl MatchmakerAudit {
         // quorum's durable registries above their maximum watermark
         // — and every completed registration of the replaced
         // generation above that watermark is in it.
-        let folded = self
-            .stop_acks
-            .get(&(node.0, old))
-            .cloned()
-            .unwrap_or_default();
+        let folded = self.stop_acks.folded(node.0, old, self.journal());
         let quorum = self.quorum(old);
         assert_always!(
             folded.len() >= quorum,
