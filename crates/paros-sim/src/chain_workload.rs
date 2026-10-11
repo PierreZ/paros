@@ -2224,6 +2224,17 @@ impl Workload for ChainWorkload {
                 digest ^= check_run(ctx.state(), *idle, &ClientHistory::default(), 0);
             }
         }
+        // Every other journal world (#447 (model checks for every journal
+        // world)): the system, control and created journals' models.
+        if self.client_id == 0 {
+            let judged: BTreeSet<_> = self
+                .plan
+                .iter()
+                .flat_map(|plan| plan.ids.iter().copied())
+                .chain([self.journal])
+                .collect();
+            digest ^= crate::audit::check_every_world(ctx.state(), &judged);
+        }
         // The histories `Announce` logged (#247): every client's library
         // calls at the registry, at the control journals of the cell the
         // machines formed (#246), at every tenant control journal a machine

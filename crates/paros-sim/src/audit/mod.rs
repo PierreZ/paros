@@ -54,7 +54,9 @@ mod world;
 
 pub(crate) use client::{ClientHistory, check_control_history};
 pub(crate) use linearizability::{Attempt, Call, Seen};
-pub(crate) use world::{AuditWorld, audit_world, audit_world_for, audit_world_named, check_run};
+pub(crate) use world::{
+    AuditWorld, audit_world, audit_world_for, audit_world_named, check_every_world, check_run,
+};
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -1195,7 +1197,9 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         // A joiner the registry retired leaves the deployment's journal for
         // good (#189): convergence excuses it, exactly like an operator
         // retirement (#123).
-        if self.world.main() == Some(journal) {
+        // So does a machine that stops a journal a tenant deleted (#447
+        // (model checks for every journal world)), in that journal's world.
+        if self.world.main() == Some(journal) || self.world.journal() == Some(journal) {
             self.world.note_left_pool(node.0);
         }
     }

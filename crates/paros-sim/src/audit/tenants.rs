@@ -250,6 +250,11 @@ impl TenantBoard {
         self.modes.clone()
     }
 
+    /// Whether any machine folded `journal`'s tombstone: its nodes stop it.
+    pub(crate) fn tombstoned(&self, journal: JournalIdentifier) -> bool {
+        self.tombstoned.iter().any(|(_, j)| *j == journal)
+    }
+
     /// Every tenant control journal a machine folded, in identifier order.
     pub(crate) fn controls(&self) -> BTreeSet<JournalIdentifier> {
         self.folded.keys().map(|(journal, _)| *journal).collect()

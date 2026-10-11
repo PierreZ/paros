@@ -236,6 +236,17 @@ pub(crate) fn was_wiped(state: &StateHandle, addr: &Address) -> bool {
         .any(|(wiped, _)| wiped == addr)
 }
 
+/// The node id every wiped machine had before its wipe (#447 (model checks
+/// for every journal world)): gone for good, so no journal it hosted waits
+/// on it.
+pub(crate) fn wiped_ids(state: &StateHandle) -> BTreeSet<u64> {
+    lock(&machine_board(state))
+        .wiped
+        .iter()
+        .map(|(_, old)| *old)
+        .collect()
+}
+
 /// Whether the machine at `addr` is a founding member `init` lists.
 pub(crate) fn is_founder(state: &StateHandle, addr: &Address) -> bool {
     lock(&machine_board(state)).founders.contains(addr)

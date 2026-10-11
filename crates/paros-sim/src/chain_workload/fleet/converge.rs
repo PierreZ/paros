@@ -1,0 +1,70 @@
+//! Every quiet journal world converges (#447 (model checks for every
+//! journal world)): the machines' journals report to their own audit worlds,
+//! and the plan's final check judges only the plan's. Once every operator
+//! settled, the fleet journal, every tenant control journal and every live
+//! created journal take no more writes; each must end with every node it
+//! does not excuse on its applied frontier, every acked and every decided
+//! slot applied. The cell control journal and the election journal are not
+//! quiet (the coordinator's liveness writes and renewals go on), so their
+//! own oracles judge them (`final_registry`, `election_settles`).
+
+use std::collections::BTreeSet;
+use std::time::Duration;
+
+use moonpool_sim::{SimContext, TimeProvider, assert_reachable};
+use paros::JournalIdentifier;
+
+/// The journals no writer touches once every operator settled: the formed
+/// cell's fleet journal, every tenant control journal a machine folded, and
+/// every created journal no machine folded a tombstone of.
+fn quiet_journals(ctx: &SimContext) -> BTreeSet<JournalIdentifier> {
+    let board = crate::audit::tenants::tenant_board(ctx.state());
+    let board = crate::audit::tenants::lock(&board);
+    let created = board
+        .created_modes()
+        .into_keys()
+        .filter(|journal| !board.tombstoned(*journal));
+    let fleet = crate::machine::formed_cell(ctx.state()).and_then(|cell| cell.fleet);
+    fleet
+        .into_iter()
+        .chain(board.controls())
+        .chain(created)
+        .collect()
+}
+
+/// Wait until every quiet journal world converged, or until `deadline`,
+/// then judge each with the final convergence claim. A lost cell owes
+/// nothing, and a run shut down by a sibling is not judged.
+pub(super) async fn worlds_converge(ctx: &SimContext, deadline: Duration) {
+    if crate::machine::formed_cell(ctx.state()).is_none() || crate::machine::cell_lost(ctx.state())
+    {
+        return;
+    }
+    let wiped = crate::machine::wiped_ids(ctx.state());
+    let worlds: Vec<_> = quiet_journals(ctx)
+        .into_iter()
+        .map(|journal| crate::audit::audit_world_for(ctx.state(), journal))
+        .collect();
+    for world in &worlds {
+        for node in &wiped {
+            world.note_wiped(*node);
+        }
+    }
+    while !worlds.iter().all(|world| world.converged())
+        && ctx.time().now() < deadline
+        && !ctx.shutdown().is_cancelled()
+    {
+        if ctx.time().sleep(Duration::from_millis(50)).await.is_err() {
+            break;
+        }
+    }
+    if ctx.shutdown().is_cancelled() {
+        return;
+    }
+    for world in &worlds {
+        world.check_final_convergence(world.answered_max());
+    }
+    if !worlds.is_empty() {
+        assert_reachable!("audit: every quiet journal world converges after chaos");
+    }
+}
