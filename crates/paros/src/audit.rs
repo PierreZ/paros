@@ -946,16 +946,31 @@ pub trait Audit {
     // ---- the matchmaker (`run_matchmaker`), a distinct role and namespace ----
 
     /// This matchmaker (re)booted from its durable registry: the set it is
-    /// active or frozen for and its phase, every `(ballot, configuration)` it
-    /// read back, and its watermark. Fires on the first boot (an empty
-    /// registry) and on every restart.
+    /// active or frozen for and its phase, the durable scalars it read back
+    /// (#190: what a commit in flight at its last death may have landed is
+    /// judged against them), every `(ballot, configuration)` it read back,
+    /// and its watermark. Fires on the first boot (an empty registry) and on
+    /// every restart.
+    #[allow(clippy::too_many_arguments)]
     fn matchmaker_recovered(
         &self,
         matchmaker: MatchmakerId,
         set: &MatchmakerSet,
         phase: MatchmakerPhase,
+        scalars: &paros_core::MatchmakerHardState,
         registry: &BTreeMap<Ballot, Registration>,
         gc_watermark: Ballot,
+    ) {
+    }
+
+    /// This matchmaker is about to commit `writes`, or (`None`) its sync
+    /// returned and each write is reported next (#190). A crash between the
+    /// two may land any of them unreported: a store's own mid-commit
+    /// `hint!`s, or an ordered store's torn-or-whole commit.
+    fn matchmaker_in_flight(
+        &self,
+        matchmaker: MatchmakerId,
+        writes: Option<&[paros_core::MatchmakerWriteOp]>,
     ) {
     }
 

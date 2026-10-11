@@ -25,7 +25,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use moonpool_core::Providers;
-use paros_core::{ColocatedNode, JournalIdentifier, NodeId, Slot};
+use paros_core::{ColocatedNode, JournalIdentifier, NodeId, Slot, TenantId};
 
 use crate::audit::Audit;
 use crate::storage::LogStorage;
@@ -82,6 +82,24 @@ pub trait JournalStores {
     fn create(&mut self, journal: JournalIdentifier, config: paros_core::Config) -> bool {
         let _ = (journal, config);
         false
+    }
+
+    /// Start what this node hosts beside its journals on its own RPC edge
+    /// `rpc`, until `shutdown`: a founding member's matchmaker sets (#190).
+    /// The default hosts nothing.
+    ///
+    /// # Errors
+    ///
+    /// A registration the RPC runtime refuses.
+    fn host_on_edge<P: Providers>(
+        &mut self,
+        providers: &P,
+        rpc: &moonpool_rpc::RpcHandle<P>,
+        tunables: &DriverTunables,
+        shutdown: tokio_util::sync::CancellationToken,
+    ) -> moonpool_core::SimulationResult<()> {
+        let _ = (providers, rpc, tunables, shutdown);
+        Ok(())
     }
 
     /// `journal`'s store passed its boot: scanned, and its format marker
@@ -284,9 +302,16 @@ pub(crate) struct Journals<S, A> {
     /// proxy leaders, replicas), once one booted here: the plane, whether it
     /// is live now or not.
     deployed: Option<JournalIdentifier>,
+    /// The node's first journal in its static list: the plane whenever it
+    /// names matchmakers, proxies or replicas (#190: every journal may name
+    /// matchmakers, so the first one booted is not the plane by itself).
+    preferred: Option<JournalIdentifier>,
     /// Every journal that booted in this incarnation: the ones whose
     /// configuration this node has read.
     booted: BTreeSet<JournalIdentifier>,
+    /// The booted journals that name matchmakers (#190), live or not: every
+    /// one hears its tenant's handover.
+    matchmade: BTreeSet<JournalIdentifier>,
 }
 
 impl<S, A> Journals<S, A> {
@@ -303,8 +328,21 @@ impl<S, A> Journals<S, A> {
             newly_quarantined: Vec::new(),
             last_fault: None,
             deployed: None,
+            preferred: None,
             booted: BTreeSet::new(),
+            matchmade: BTreeSet::new(),
         }
+    }
+
+    /// Prefer `first`, the node's first journal in its static list, as the
+    /// plane.
+    pub(crate) fn preferring(mut self, first: Option<JournalIdentifier>) -> Self {
+        assert!(
+            self.live.is_empty(),
+            "the plane is preferred before any boot"
+        );
+        self.preferred = first;
+        self
     }
 
     /// `journal` booted: it is live, and its configuration is known.
@@ -328,8 +366,16 @@ impl<S, A> Journals<S, A> {
             "a runtime serves the journal it is filed under"
         );
         let config = rt.node.config();
-        if config.has_matchmakers() || config.proxy_count > 0 || config.replica_count > 0 {
-            self.deployed.get_or_insert(journal);
+        // A control journal is never the plane, even born with its
+        // tenant's matchmaker set (#190).
+        if (config.has_matchmakers() || config.proxy_count > 0 || config.replica_count > 0)
+            && !self.control.contains(&journal)
+            && (self.deployed.is_none() || self.preferred == Some(journal))
+        {
+            self.deployed = Some(journal);
+        }
+        if config.has_matchmakers() {
+            self.matchmade.insert(journal);
         }
         self.booted.insert(journal);
         self.live.insert(journal, rt);
@@ -420,6 +466,22 @@ impl<S, A> Journals<S, A> {
         self.live
             .iter()
             .find(|(journal, _)| !self.control.contains(journal))
+    }
+
+    /// The booted journals of `tenant` that name matchmakers (#190), live,
+    /// quarantined or held: the ones its set's handover reports to.
+    pub(crate) fn matchmade(
+        &self,
+        tenant: TenantId,
+    ) -> impl Iterator<Item = JournalIdentifier> + '_ {
+        assert!(
+            self.matchmade.is_subset(&self.booted),
+            "a matchmade journal booted here"
+        );
+        self.matchmade
+            .iter()
+            .copied()
+            .filter(move |journal| journal.tenant == tenant)
     }
 
     /// Whether `journal` is one of the deployment's control journals.

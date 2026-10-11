@@ -13,13 +13,16 @@
 //! is refused as amnesia.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
-use moonpool_core::StorageProvider;
-use paros_core::{Config, JournalIdentifier, NodeId};
+use moonpool_core::{Providers, SimulationResult, StorageProvider};
+use moonpool_rpc::RpcHandle;
+use paros_core::{Config, JournalIdentifier, MatchmakerConfig, NodeId};
+use tokio_util::sync::CancellationToken;
 
 use super::record::MachineRecord;
 use super::{CacheSink, CachedRegistry, ProviderDisk};
-use crate::{Audit, BootKind, JournalStorage, JournalStores};
+use crate::{Audit, BootKind, DriverTunables, JournalStorage, JournalStores};
 
 /// Which audit port a machine's facts report to, named by the caller of
 /// [`super::run_machine`] (`parosd` passes `NoAudit` for all three).
@@ -44,9 +47,12 @@ pub(crate) struct MachineStores<S, F> {
     created: BTreeMap<JournalIdentifier, Config>,
     /// The machine record, rewritten whole when a store is provisioned.
     record: MachineRecord,
-    audits: F,
+    audits: Arc<F>,
     /// Where the node's registry fold offers each new book (#211).
     cache: Option<CacheSink>,
+    /// The matchmaker this machine is, when it hosts its cell's sets: a
+    /// founding member's (#190).
+    matchmaker: Option<MatchmakerConfig>,
 }
 
 impl<S, F> MachineStores<S, F> {
@@ -77,9 +83,23 @@ impl<S, F> MachineStores<S, F> {
             genesis,
             created: BTreeMap::new(),
             record,
-            audits,
+            audits: Arc::new(audits),
             cache: None,
+            matchmaker: None,
         }
+    }
+
+    /// These stores, hosting the matchmaker sets of `config` on the node's
+    /// edge (#190): a founding member's.
+    #[must_use]
+    pub(crate) fn with_matchmakers(mut self, config: MatchmakerConfig) -> Self {
+        assert!(self.matchmaker.is_none(), "a machine is one matchmaker");
+        assert_eq!(
+            config.id.0, self.node.0,
+            "a machine's matchmaker is named by its node id"
+        );
+        self.matchmaker = Some(config);
+        self
     }
 
     /// These stores, offering each book the registry fold reaches to
@@ -146,7 +166,7 @@ impl<S, A, F> JournalStores for MachineStores<S, F>
 where
     S: StorageProvider + Clone + 'static,
     A: Audit + Clone + Send + Sync + 'static,
-    F: Fn(AuditScope) -> A,
+    F: Fn(AuditScope) -> A + Send + Sync + 'static,
 {
     type Store = JournalStorage<S>;
     type Audit = A;
@@ -193,6 +213,28 @@ where
         }
         self.created.entry(journal).or_insert(config);
         true
+    }
+
+    fn host_on_edge<P: Providers>(
+        &mut self,
+        providers: &P,
+        rpc: &RpcHandle<P>,
+        tunables: &DriverTunables,
+        shutdown: CancellationToken,
+    ) -> SimulationResult<()> {
+        let Some(config) = self.matchmaker.clone() else {
+            return Ok(());
+        };
+        let audits = Arc::clone(&self.audits);
+        super::matchmakers::spawn(
+            providers,
+            rpc,
+            self.disk.clone(),
+            config,
+            tunables,
+            Arc::new(move |journal| audits(AuditScope::Journal(journal))),
+            shutdown,
+        )
     }
 
     fn cache_registry(&self, cache: CachedRegistry) {

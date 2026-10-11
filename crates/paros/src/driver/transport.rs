@@ -871,16 +871,6 @@ impl<P: Providers> Dialer<P> {
     }
 }
 
-/// The resolved address of a deployment-map entry (`ip:port`).
-///
-/// # Errors
-///
-/// An entry that is not a numeric socket address.
-pub(crate) fn peer_address(addr: &str) -> SimulationResult<SocketAddr> {
-    addr.parse()
-        .map_err(|e| SimulationError::InvalidState(format!("bad peer address {addr}: {e}")))
-}
-
 /// What every outbound lane a driver opens shares: the providers it spawns
 /// on, the tunables that shape it, the incarnation's shutdown, the audit the
 /// delivery task reports drops to, and who is sending. Shared by the node

@@ -427,30 +427,77 @@ impl<P: Providers> NodeClient<P> {
 }
 
 /// The node driver's link to one matchmaker: the contract's three methods at
-/// its address.
+/// its address. The address is a literal or a name, resolved through the
+/// node's [`Names`] at each call (#257), and a machine's address book may
+/// move it (#349, #190: a founding member hosts its cell's matchmaker sets).
 pub(crate) struct MatchmakerClient<P: Providers> {
-    pub(crate) matchmake: ServiceClient<P, MatchmakeRpc>,
-    pub(crate) collect: ServiceClient<P, GarbageCollectRpc>,
-    pub(crate) reconfigure: ServiceClient<P, MatchmakerReconfigureRpc>,
+    rpc: RpcHandle<P>,
+    names: Names,
+    address: Arc<Mutex<Address>>,
 }
 
 impl<P: Providers> Clone for MatchmakerClient<P> {
     fn clone(&self) -> Self {
         Self {
-            matchmake: self.matchmake.clone(),
-            collect: self.collect.clone(),
-            reconfigure: self.reconfigure.clone(),
+            rpc: self.rpc.clone(),
+            names: self.names.clone(),
+            address: Arc::clone(&self.address),
         }
     }
 }
 
 impl<P: Providers> MatchmakerClient<P> {
-    /// The matchmaker serving at `addr`, called through `rpc`.
-    pub(crate) fn new(rpc: &RpcHandle<P>, addr: SocketAddr) -> Self {
+    /// The matchmaker serving at `address`, resolved through `names` at
+    /// each call, called through `rpc`.
+    pub(crate) fn named(rpc: &RpcHandle<P>, names: Names, address: Address) -> Self {
         Self {
-            matchmake: well_known(rpc, addr),
-            collect: well_known(rpc, addr),
-            reconfigure: well_known(rpc, addr),
+            rpc: rpc.clone(),
+            names,
+            address: Arc::new(Mutex::new(address)),
         }
+    }
+
+    /// Dial this matchmaker at `address` from the next call on (#349).
+    pub(crate) fn readdress(&self, address: Address) {
+        *self.address.lock().unwrap_or_else(PoisonError::into_inner) = address;
+    }
+
+    /// One attempt of `M` at the matchmaker's current address.
+    async fn call<M: WellKnownMethod>(&self, request: &M::Request) -> Result<M::Reply, RpcError> {
+        let address = self
+            .address
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        let addr = self.names.resolve(&address).await.map_err(|error| {
+            RpcError::not_admitted(ErrorReason::LookupFailed(error.to_string()))
+        })?;
+        well_known::<P, M>(&self.rpc, addr)
+            .try_get_reply(request)
+            .await
+    }
+
+    /// Register or probe (#120, #173).
+    pub(crate) async fn matchmake(
+        &self,
+        request: &crate::wire::matchmaker::MatchRequest,
+    ) -> Result<crate::wire::matchmaker::MatchReply, RpcError> {
+        self.call::<MatchmakeRpc>(request).await
+    }
+
+    /// Raise a journal's GC watermark (#123).
+    pub(crate) async fn collect(
+        &self,
+        request: &crate::wire::matchmaker::GarbageCollect,
+    ) -> Result<crate::wire::matchmaker::GarbageCollectAck, RpcError> {
+        self.call::<GarbageCollectRpc>(request).await
+    }
+
+    /// One step of a matchmaker-set handover (#125).
+    pub(crate) async fn reconfigure(
+        &self,
+        request: &crate::wire::matchmaker::ReconfigureRequest,
+    ) -> Result<crate::wire::matchmaker::ReconfigureReply, RpcError> {
+        self.call::<MatchmakerReconfigureRpc>(request).await
     }
 }

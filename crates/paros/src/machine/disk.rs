@@ -8,6 +8,8 @@
 //!   machine                       the machine record ([`super::MachineRecord`])
 //!   registry                      the cached registry fold ([`super::CachedRegistry`], #211)
 //!   journals/<tenant>/<journal>/  one journal store per journal of the plan
+//!   sets                          the matchmaker sets provisioned here (#190)
+//!   matchmakers/<tenant>/         one matchmaker store per tenant's set
 //! ```
 //!
 //! The record is rewritten whole and atomically: a temporary file, synced,
@@ -36,6 +38,12 @@ const CACHE: &str = "registry";
 
 /// The staged cache a rewrite renames into place.
 const CACHE_STAGED: &str = "registry.tmp";
+
+/// The provisioned matchmaker sets' file name under the root (#190).
+const SETS: &str = "sets";
+
+/// The staged sets file a rewrite renames into place.
+const SETS_STAGED: &str = "sets.tmp";
 
 /// A machine's disk: the record and the journal stores under `root`, on
 /// `provider`.
@@ -97,6 +105,49 @@ impl<S: StorageProvider + Clone> ProviderDisk<S> {
             "{}/journals/{}/{}",
             self.root, journal.tenant.0, journal.journal.0
         )
+    }
+
+    /// The directory of `tenant`'s matchmaker set's store (#190): one store
+    /// per set.
+    ///
+    /// # Panics
+    ///
+    /// When `tenant` is unset: a set is named by its tenant.
+    #[must_use]
+    pub fn matchmaker_dir(&self, tenant: paros_core::TenantId) -> String {
+        assert!(tenant.0 != 0, "a matchmaker set is named by a set tenant");
+        format!("{}/matchmakers/{}", self.root, tenant.0)
+    }
+
+    /// The text of the matchmaker sets provisioned here (#190), or `None`
+    /// when there is none.
+    ///
+    /// # Errors
+    ///
+    /// The file exists and the disk failed to read it.
+    #[tracing::instrument(level = "debug", skip_all, fields(root = %self.root))]
+    pub async fn read_sets(&self) -> Result<Option<String>, String> {
+        self.read(SETS).await
+    }
+
+    /// Replace the provisioned matchmaker sets with `text` (#190), whole
+    /// and durably, as the record is: the commit point of a set's
+    /// provisioning.
+    ///
+    /// # Errors
+    ///
+    /// Any storage failure; the old file (or none) is then what a crash
+    /// leaves.
+    ///
+    /// # Panics
+    ///
+    /// When `text` is empty: a rewrite names at least one set.
+    #[tracing::instrument(level = "debug", skip_all, fields(root = %self.root, len = text.len()))]
+    pub async fn write_sets(&self, text: &str) -> Result<(), String> {
+        assert!(!text.is_empty(), "a sets file names a set");
+        self.write(text, SETS_STAGED, SETS)
+            .await
+            .map_err(|e| e.to_string())
     }
 
     fn path(&self, name: &str) -> String {

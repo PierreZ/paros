@@ -171,7 +171,10 @@ impl World {
             ));
         }
         let held = self.matchmakers[index].disk().registrations().len();
-        let watermark = self.matchmakers[index].disk().hard_state().gc_watermark;
+        let watermark = self.matchmakers[index]
+            .disk()
+            .hard_state()
+            .gc_watermark(super::process::JOURNAL);
         self.matchmakers[index].crash();
         self.narrate(
             NarrationKind::Crash,

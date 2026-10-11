@@ -15,7 +15,7 @@ use crate::view::{
     show_role,
 };
 use crate::world::history::Client;
-use crate::world::matchmakers::MatchmakerProcess;
+use crate::world::matchmakers::{self, MatchmakerProcess};
 use crate::world::{NO_CHECK_QUORUM, World, quorum_name};
 
 impl World {
@@ -219,7 +219,7 @@ fn matchmaker_view(process: &MatchmakerProcess) -> MatchmakerView {
         alive: process.alive(),
         generation,
         phase,
-        gc_watermark: show_ballot(scalars.gc_watermark),
+        gc_watermark: show_ballot(scalars.gc_watermark(matchmakers::JOURNAL)),
         registrations: disk
             .registrations()
             .iter()
