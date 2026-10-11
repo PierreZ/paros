@@ -384,7 +384,8 @@ impl StorageWorld {
             .map(|(key, c)| ((*key).clone(), c.node, c.settled))
             .collect();
         // The holders the plan may damage: settled ones (an unsettled
-        // custody's layout is not known), not already lost. The departed
+        // custody's layout is not known), not quiet (#471), not already
+        // lost. The departed
         // ones go last, so a kept copy lands on them: a member of the
         // configuration that decided the slot, outside the one the operator
         // last installed. A spare no configuration named holds a copy no
@@ -400,6 +401,7 @@ impl StorageWorld {
             .iter()
             .filter(|(key, _, settled)| {
                 *settled
+                    && !self.quiet.contains(key)
                     && !self.marks.get(key).is_some_and(|m| m.contains(&slot))
                     && !self.rotted.get(key).is_some_and(|m| m.contains(&slot))
             })
@@ -446,6 +448,11 @@ impl StorageWorld {
         }
         let damaged: Vec<(String, u64)> = damageable.drain(..count).collect();
         for (key, _) in &damaged {
+            assert_always!(
+                !self.quiet.contains(key),
+                "storage: a planned loss marks only a store whose boot applies it",
+                { "slot" => slot }
+            );
             self.marks.entry(key.clone()).or_default().insert(slot);
             self.pending.insert(key.clone(), slot);
         }
@@ -519,7 +526,8 @@ impl StorageWorld {
     /// (CTRL Case 3) jumps past it to an ahead acceptor's trim point.
     /// `None` while no split shows, or while a holder of the slot is
     /// unsettled (its layout is not known, so its copy would stay clean and
-    /// decide the slot).
+    /// decide the slot). A quiet holder's copy is kept (#471: its boot
+    /// applies no loss).
     #[tracing::instrument(level = "debug", skip_all)]
     pub(crate) fn plan_split_floor_loss(
         &mut self,
@@ -542,10 +550,19 @@ impl StorageWorld {
         if holders.iter().any(|(_, _, settled)| !settled) {
             return None;
         }
+        // A quiet holder (#471, a joiner's seat) keeps its copy: its boot
+        // applies no loss, so a mark there would never clear. Waiting for it
+        // instead, as for an unsettled holder, waits forever: it cost the
+        // scenario 17 of 39 strikes in 2,000 hunt seeds. Its clean copy
+        // decides the slot only where a Phase 1 asks it.
+        if holders.iter().any(|(key, _, _)| self.quiet.contains(key)) {
+            assert_reachable!("storage: a split-floor loss keeps a quiet holder's copy");
+        }
         let damaged: Vec<(String, u64)> = holders
             .iter()
             .filter(|(key, _, _)| {
-                !self.marks.get(key).is_some_and(|m| m.contains(&slot))
+                !self.quiet.contains(key)
+                    && !self.marks.get(key).is_some_and(|m| m.contains(&slot))
                     && !self.rotted.get(key).is_some_and(|m| m.contains(&slot))
             })
             .map(|(key, node, _)| (key.clone(), *node))
@@ -560,6 +577,11 @@ impl StorageWorld {
             { "slot" => slot }
         );
         for (key, _) in &damaged {
+            assert_always!(
+                !self.quiet.contains(key),
+                "storage: a planned loss marks only a store whose boot applies it",
+                { "slot" => slot }
+            );
             self.marks.entry(key.clone()).or_default().insert(slot);
             self.pending.insert(key.clone(), slot);
         }

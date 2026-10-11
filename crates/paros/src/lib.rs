@@ -39,6 +39,7 @@ pub mod load;
 pub mod machine;
 mod matchmaker;
 pub mod name;
+pub mod placement;
 mod provision;
 mod proxy;
 mod replica_tier;

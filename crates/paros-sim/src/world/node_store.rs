@@ -148,6 +148,14 @@ impl LedgeredJournal {
         provider: SimStorageProvider,
     ) -> Self {
         let node = inner.initial_state().1.id.0;
+        if !damage.inject
+            && let Some(world) = world.upgrade()
+        {
+            world
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .note_quiet(&ip);
+        }
         Self {
             node,
             state,

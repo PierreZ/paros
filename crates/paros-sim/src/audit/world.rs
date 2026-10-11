@@ -547,6 +547,17 @@ impl AuditWorld {
             .collect()
     }
 
+    /// Whether the final convergence claim judges `node` on this journal
+    /// (#466 (late joiner spare)): it booted the journal here, and nothing
+    /// excuses it (storage death, a wipe, a retirement, a joiner that left
+    /// the pool). The settle tail waits for every such node, so a joiner's
+    /// spare is waited for exactly when `check_final_convergence` judges it.
+    pub(crate) fn judged_at_end(&self, node: u64) -> bool {
+        let st = self.lock();
+        (st.booted.contains(&node) || st.applied_max.contains_key(&node))
+            && !excused_from_convergence(&st, node)
+    }
+
     /// Whether an outage's losses excuse the journal's liveness (#263): a
     /// slot no leader can decide again, or one whose every clean copy is out
     /// of reach. Its safety is never excused.
@@ -643,10 +654,7 @@ impl AuditWorld {
         st.answered_max.is_none_or(|acked| acked <= cluster_max)
             && st.decided_max.is_none_or(|decided| decided <= cluster_max)
             && st.booted.iter().chain(st.applied_max.keys()).all(|node| {
-                st.storage_dead.contains(node)
-                    || st.wiped.contains(node)
-                    || st.retired.contains(node)
-                    || st.left_pool.contains(node)
+                excused_from_convergence(&st, *node)
                     || st.applied_max.get(node) == Some(&cluster_max)
             })
     }
@@ -775,12 +783,7 @@ impl AuditWorld {
             );
         }
         for node in cluster {
-            if excused
-                || st.storage_dead.contains(&node)
-                || st.wiped.contains(&node)
-                || st.retired.contains(&node)
-                || st.left_pool.contains(&node)
-            {
+            if excused || excused_from_convergence(&st, node) {
                 continue;
             }
             let prefix = st.applied_max.get(&node).copied();
@@ -875,4 +878,15 @@ pub(crate) fn check_every_world(
         digest ^= world.digest();
     }
     digest
+}
+
+/// Whether `node` is excused from the per-node convergence leg: down for
+/// good from a storage fault, wiped, retired, or a joiner that left the
+/// pool. One predicate for the oracle and the settle tail (#466 (late
+/// joiner spare)), so the tail waits for exactly the nodes it judges.
+fn excused_from_convergence(st: &AuditState, node: u64) -> bool {
+    st.storage_dead.contains(&node)
+        || st.wiped.contains(&node)
+        || st.retired.contains(&node)
+        || st.left_pool.contains(&node)
 }

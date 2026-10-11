@@ -556,6 +556,11 @@ fn system_rig(
         seat.audit = seat.audit.clone().with_system(board.clone());
     }
     if seeds.contains(&self_rank) {
+        if seeds.len() > 1 {
+            // #213 (three founding members): the registry is a majority
+            // journal over three founding members.
+            assert_reachable!("system: the registry runs on three founding members");
+        }
         let identifiers = crate::shape::identifiers(ctx.state());
         let journal = identifiers.registry;
         let config = Config {
@@ -577,7 +582,7 @@ pub(super) fn system_plan(
     self_id: NodeId,
 ) -> (ControlPlan, Vec<NodeId>) {
     let identifiers = crate::shape::identifiers(ctx.state());
-    let seeds: Vec<NodeId> = crate::shape::seed_ranks(members.len())
+    let seeds: Vec<NodeId> = crate::shape::founder_ranks(ctx.state(), members.len())
         .into_iter()
         .map(NodeId)
         .collect();

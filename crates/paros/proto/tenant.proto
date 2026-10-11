@@ -23,6 +23,7 @@ message TenantEntry {
     Describe describe = 1;
     CreateJournal create_journal = 2;
     DeleteJournal delete_journal = 3;
+    Unplaceable unplaceable = 4;
   }
 }
 
@@ -78,6 +79,15 @@ message DeleteJournal {
   uint64 id = 2;
 }
 
+// Request `request`: a create of `name` the cell cannot place (#212
+// (placement)): too few machines for its desired mode, or no free slot for
+// one of its acceptors. Recorded so a retry reads the refusal back; the
+// caller asks again under a new id. A live name answers `name_taken` instead.
+message Unplaceable {
+  uint64 request = 1;
+  bytes name = 2;
+}
+
 // The checkpoint state (#230): the description, every journal ever created
 // (tombstones included) and every request's outcome, each in id order so
 // equal states encode to equal bytes.
@@ -99,7 +109,7 @@ message JournalState {
 
 message OutcomeState {
   uint64 request = 1;
-  // 1 created, 2 deleted, 3 name taken, 4 unknown journal.
+  // 1 created, 2 deleted, 3 name taken, 4 unknown journal, 5 unplaceable.
   uint32 kind = 2;
   uint64 id = 3;
 }

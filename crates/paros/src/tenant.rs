@@ -388,6 +388,15 @@ pub enum TenantCommand {
         /// The journal.
         id: JournalId,
     },
+    /// Request `request`: a create of `name` the cell cannot place (#212
+    /// (placement)), recorded so a retry reads the refusal back. A live
+    /// `name` answers `NameTaken` instead.
+    Unplaceable {
+        /// The caller's idempotency id.
+        request: u64,
+        /// The name the create asked for.
+        name: Vec<u8>,
+    },
 }
 
 impl TenantCommand {
@@ -418,6 +427,10 @@ impl TenantCommand {
                     id: id.0,
                 })
             }
+            TenantCommand::Unplaceable { request, name } => Kind::Unplaceable(wire::Unplaceable {
+                request: *request,
+                name: name.clone(),
+            }),
         };
         wire::TenantEntry { kind: Some(kind) }.encode_to_vec()
     }
@@ -445,6 +458,10 @@ impl TenantCommand {
             Kind::DeleteJournal(delete) => TenantCommand::DeleteJournal {
                 request: delete.request,
                 id: JournalId(delete.id),
+            },
+            Kind::Unplaceable(refused) => TenantCommand::Unplaceable {
+                request: refused.request,
+                name: refused.name,
             },
         })
     }
@@ -476,6 +493,8 @@ pub enum RequestOutcome {
     NameTaken(JournalId),
     /// The delete named no live journal.
     UnknownJournal,
+    /// The cell could not place the create (#212 (placement)).
+    Unplaceable,
 }
 
 impl RequestOutcome {
@@ -485,6 +504,7 @@ impl RequestOutcome {
             RequestOutcome::Deleted(id) => (2, id.0),
             RequestOutcome::NameTaken(id) => (3, id.0),
             RequestOutcome::UnknownJournal => (4, 0),
+            RequestOutcome::Unplaceable => (5, 0),
         };
         wire::OutcomeState { request, kind, id }
     }
@@ -495,6 +515,7 @@ impl RequestOutcome {
             (2, id) if id != 0 => RequestOutcome::Deleted(JournalId(id)),
             (3, id) if id != 0 => RequestOutcome::NameTaken(JournalId(id)),
             (4, 0) => RequestOutcome::UnknownJournal,
+            (5, 0) => RequestOutcome::Unplaceable,
             _ => return Err("an outcome state is out of range"),
         })
     }
@@ -704,6 +725,7 @@ impl TenantControl {
                 config,
             }) => self.create(request, id, name, writer, desired, config),
             Ok(TenantCommand::DeleteJournal { request, id }) => self.delete(seq, request, id),
+            Ok(TenantCommand::Unplaceable { request, name }) => self.refuse(request, &name),
             Err(_) => TenantEvent::Refused(TenantRefusal::Malformed),
         };
         self.assert_invariants();
@@ -790,6 +812,24 @@ impl TenantControl {
         self.names.remove(&name);
         self.outcomes.insert(request, RequestOutcome::Deleted(id));
         TenantEvent::Deleted { request, id }
+    }
+
+    /// A create the cell could not place: recorded `Unplaceable`, or
+    /// `NameTaken` when a live journal holds the name (the fold judges the
+    /// name as a create would).
+    fn refuse(&mut self, request: u64, name: &[u8]) -> TenantEvent {
+        if request == 0 {
+            return TenantEvent::Refused(TenantRefusal::Malformed);
+        }
+        if let Some(outcome) = self.outcome(request) {
+            return TenantEvent::Repeated { request, outcome };
+        }
+        let outcome = match self.named(name) {
+            Some(holder) => RequestOutcome::NameTaken(holder),
+            None => RequestOutcome::Unplaceable,
+        };
+        self.outcomes.insert(request, outcome);
+        TenantEvent::Answered { request, outcome }
     }
 
     /// The fold's invariants: every live name maps to a live journal of that
@@ -968,6 +1008,10 @@ mod tests {
                 request: 10,
                 id: JournalId(0x9e37),
             },
+            TenantCommand::Unplaceable {
+                request: 11,
+                name: b"orders".to_vec(),
+            },
         ];
         for command in commands {
             assert_eq!(TenantCommand::decode(&command.encode()), Ok(command));
@@ -1015,6 +1059,46 @@ mod tests {
                 outcome: RequestOutcome::NameTaken(JournalId(11))
             }
         );
+    }
+
+    #[test]
+    fn an_unplaceable_create_is_recorded_and_a_live_name_answers_name_taken() {
+        let mut t = fold();
+        let refuse = |request: u64, name: &[u8]| {
+            TenantCommand::Unplaceable {
+                request,
+                name: name.to_vec(),
+            }
+            .encode()
+        };
+        assert_eq!(
+            t.fold(0, &refuse(1, b"a")),
+            TenantEvent::Answered {
+                request: 1,
+                outcome: RequestOutcome::Unplaceable
+            }
+        );
+        // A retry reads the refusal back, even as a create.
+        assert_eq!(
+            t.fold(1, &create(1, 11, b"a")),
+            TenantEvent::Repeated {
+                request: 1,
+                outcome: RequestOutcome::Unplaceable
+            }
+        );
+        t.fold(2, &create(2, 11, b"a"));
+        assert_eq!(
+            t.fold(3, &refuse(3, b"a")),
+            TenantEvent::Answered {
+                request: 3,
+                outcome: RequestOutcome::NameTaken(JournalId(11))
+            }
+        );
+        let mut restored = fold();
+        restored
+            .restore(3, &t.checkpoint())
+            .expect("a checkpoint restores");
+        assert_eq!(restored.outcome(1), Some(RequestOutcome::Unplaceable));
     }
 
     #[test]

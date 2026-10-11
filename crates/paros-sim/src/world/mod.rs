@@ -11,6 +11,7 @@
 
 pub(crate) mod bare_outage;
 pub(crate) mod cut;
+pub(crate) mod downed_founder;
 pub(crate) mod injector;
 pub(crate) mod lagging_acceptor;
 pub(crate) mod late_outage;
@@ -171,6 +172,12 @@ pub(crate) struct StorageWorld {
     /// acceptors. Their records are never a *copy* the budget defends — a
     /// replica answers no Phase 1 — so nothing is injected into them.
     replicas: BTreeSet<String>,
+    /// Quiet seats' disks (#189, #471), by IP: a store the injector never
+    /// aims at (`DamagePolicy::inject` off: a joiner's seat on a journal
+    /// created naming it, a system journal's). Its copies count, but no
+    /// planned loss marks one: its boot never applies the damage, so the
+    /// mark would never clear.
+    quiet: BTreeSet<String>,
     /// Matchmakers whose registry was wiped (#125, #183): the library
     /// refuses to boot them again, and the replacement is a matchmaker-set
     /// reconfiguration reconstructed from the surviving quorum.
@@ -697,6 +704,12 @@ impl StorageWorld {
     /// Register `key` as a replica's disk (#144): outside the copy count.
     pub(crate) fn note_replica(&mut self, key: &str) {
         self.replicas.insert(key.to_string());
+    }
+
+    /// Register `key` as a quiet seat's disk (#471): a store whose boot
+    /// applies no planned loss (see `quiet`).
+    pub(crate) fn note_quiet(&mut self, key: &str) {
+        self.quiet.insert(key.to_string());
     }
 
     /// The addressable node pool, set once at boot (first caller wins, like

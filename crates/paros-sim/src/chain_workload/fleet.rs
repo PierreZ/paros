@@ -56,8 +56,8 @@ use std::future::Future;
 use std::time::Duration;
 
 use moonpool_sim::{
-    RandomProvider, SimContext, StateHandle, TimeProvider, assert_always, assert_reachable,
-    assert_sometimes, buggify_with_prob,
+    RandomProvider, SimContext, SimTimeProvider, StateHandle, TimeProvider, assert_always,
+    assert_reachable, assert_sometimes, buggify_with_prob,
 };
 use paros::client::checkpoint::{CheckpointPolicy, Checkpointer, Folder, LoadOutcome, OpenOutcome};
 use paros::client::fleet::{FleetRefusal, FleetSession, Interrupted, Run, Stage, Step};
@@ -79,6 +79,7 @@ mod election;
 mod journals;
 mod load;
 mod other_cell;
+mod placement;
 mod replaced;
 mod resolve;
 mod view;
@@ -174,10 +175,16 @@ pub(super) struct FleetOps {
     /// the library (#239 (names at the edge)): a cached resolution goes
     /// stale when its journal is deleted and the name created again.
     journal_names: BTreeMap<TenantId, paros::client::names::JournalNames>,
+    /// The tenants where a create the cell had no slot for was refused
+    /// (#212 (placement)), until this client's next create there is placed.
+    refused: BTreeSet<TenantId>,
     /// The replaced-founder scenario's steps this operator took (#423).
     replaced: replaced::Steps,
     /// The run's shared state: the completed removals (#239).
     state: StateHandle,
+    /// The simulated clock: when an operation ran (#213 (three founding
+    /// members)).
+    time: SimTimeProvider,
 }
 
 impl FleetOps {
@@ -219,8 +226,10 @@ impl FleetOps {
             admitting: None,
             journal_pending: None,
             journal_names: BTreeMap::new(),
+            refused: BTreeSet::new(),
             replaced: replaced::Steps::default(),
             state: ctx.state().clone(),
+            time: ctx.time().clone(),
         })
     }
 
@@ -629,10 +638,29 @@ impl FleetOps {
                 assert_reachable!("fleet: a duplicate tenant id is refused");
             }
         }
+        let started = self.time.now();
         let run = session
             .create_tenant(client, first, &name, draws.clone(), Duration::ZERO)
             .await;
         run.steps.iter().copied().for_each(reach);
+        if !run.steps.is_empty()
+            && crate::machine::founder_down_through(&self.state, started, self.time.now())
+        {
+            // #213 (three founding members): the cell control journal and
+            // the fleet tenant chose this run's writes without that member.
+            assert_reachable!(
+                "fleet: a control-journal write is chosen with a founding member down"
+            );
+            if matches!(
+                run.outcome,
+                Step::Done {
+                    last: Some(Stage::TenantReady),
+                    ..
+                }
+            ) {
+                assert_reachable!("fleet: a tenant is created with a founding member down");
+            }
+        }
         self.created(session, &name, &run);
         match run.outcome {
             Step::Done { result, .. } => {
@@ -987,6 +1015,8 @@ impl FleetOps {
             election::election_settles(ctx, &cell, ctx.time().now() + FLEET_SETTLE).await;
             self.renamed_registered(ctx, &cell, ctx.time().now() + FLEET_SETTLE)
                 .await;
+            let learn = |journal| self.note_journals([journal]);
+            placement::placements_booked(ctx, &cell, ctx.time().now() + FLEET_SETTLE, learn).await;
         }
         // Every quiet journal world converges (#447 (model checks for every
         // journal world)), on its own deadline.

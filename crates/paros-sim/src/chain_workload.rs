@@ -361,6 +361,12 @@ impl Workload for ChainWorkload {
             // client asks as often as the weight family allows.
             config.weights[usize::from(LOAD)] = OP_WEIGHT_CEILING;
         }
+        if crate::shape::downed_founder(ctx.state()) {
+            // The downed-founder scenario (#213 (three founding members)):
+            // its gates wait on a tenant step while a founder is down, so
+            // every client runs one as often as the weight family allows.
+            config.weights[usize::from(TENANT)] = OP_WEIGHT_CEILING;
+        }
         let lagging_fold = crate::shape::lagging_fold(ctx.state());
         if lagging_fold {
             // The lagging-fold scenario (#189): its gate waits on a joiner
@@ -480,6 +486,11 @@ impl Workload for ChainWorkload {
         if crate::shape::slow_machine(ctx.state()) && !operations.contains(&LOAD) {
             operations.push(LOAD);
         }
+        // Likewise `TENANT` on a downed-founder seed (#213 (three founding
+        // members)).
+        if crate::shape::downed_founder(ctx.state()) && !operations.contains(&TENANT) {
+            operations.push(TENANT);
+        }
         tracing::info!(?config, "chain_config");
         let time = ctx.time().clone();
         let shutdown = ctx.shutdown().clone();
@@ -495,13 +506,15 @@ impl Workload for ChainWorkload {
         // A joiner this client just registered: the next step grows a
         // configuration onto it (the `REGISTER_NODE` arm).
         let mut reconfigure_next = false;
-        // The wiped-founder (#246), replaced-founder (#423) and
-        // slow-machine (#424) scenarios: client 0 runs `init` first, so the
-        // cell decree runs inside the chaos window.
+        // The wiped-founder (#246), replaced-founder (#423), slow-machine
+        // (#424) and downed-founder (#213 (three founding members))
+        // scenarios: client 0 runs `init` first, so the cell decree runs
+        // inside the chaos window.
         let mut init_first = self.client_id == 0
             && (crate::shape::wiped_founder(ctx.state())
                 || crate::shape::replaced_founder(ctx.state())
-                || crate::shape::slow_machine(ctx.state()));
+                || crate::shape::slow_machine(ctx.state())
+                || crate::shape::downed_founder(ctx.state()));
         let mut successful_after_ambiguity = false;
         // The library's decisions as outcomes (#221): a write redirected
         // and written at the leader, an ambiguous write the session settled,
@@ -551,6 +564,7 @@ impl Workload for ChainWorkload {
             &deployment,
             crate::shape::identifiers(ctx.state()),
             crate::shape::system_journals(ctx.state()),
+            crate::shape::founder_ranks(ctx.state(), deployment.acceptors().len()).len(),
             &crate::shape::joiner_machines(ctx.state(), deployment.joiners().len()),
             (client_id, LeaderSeeds::new(ctx.random().random::<u128>())),
             request_timeout,
@@ -1536,6 +1550,12 @@ impl Workload for ChainWorkload {
                 .await
                 .ok();
         }
+        // The joiners whose spare already booted this journal as the faults
+        // stop (#466 (late joiner spare)): a spare outside this set joined in
+        // the tail, the rare case the settle tail must wait for.
+        let spares_at_cutoff: Vec<usize> = (0..deployment.joiners().len())
+            .filter(|rank| audit.judged_at_end(crate::roles::joiner_node_id(*rank).0))
+            .collect();
         // The fleet's control plane in the recovery tail (#247): this
         // operator finishes the operation it stopped in, and the last one to
         // do so — every fleet writer is quiet then — judges the final folds
@@ -1609,6 +1629,34 @@ impl Workload for ChainWorkload {
         if let Some(ip) = &held_replica {
             assert_reachable!("chain: a replica is held down across the tail truncation");
             crate::lifecycle::crash(ctx, ip).await;
+        }
+        // A joiner registered late, in the recovery tail (#466 (late joiner
+        // spare)), its own location: an operator adds a machine after the
+        // faults stopped, so the joiner boots the main journal as a spare
+        // with the run nearly over and the settle tail must wait for it to
+        // catch up. Without it a joiner mostly registers inside the chaos
+        // window, and a spare that boots in the tail is rare (witness
+        // 6567501942112636280 on PR #465 (short catch-up fix)). It names a
+        // joiner with no spare yet: one in the pool already would only
+        // register again. Gate "the settle tail waits for a spare that
+        // joined in the tail": 6 in 2,000 hunt seeds without it, 12 with it.
+        let joiners = deployment.joiners().len() as u64;
+        let late = (0..deployment.joiners().len()).find(|rank| !spares_at_cutoff.contains(rank));
+        if journal == crate::shape::identifiers(ctx.state()).main
+            && client_id == 0
+            && let Some(rank) = late
+            && buggify_with_prob!(1.0)
+            && system_ops
+                .registry_step(
+                    ctx,
+                    &nodes,
+                    None,
+                    // `registry_step` names the joiner at `draw % joiners`.
+                    (ctx.random().random::<u64>() >> 8) * joiners + rank as u64,
+                )
+                .await
+        {
+            assert_reachable!("system: a client registers a joiner in the recovery tail");
         }
         // The applied count the tail must move past (the audit tracks the
         // applied *slot*; the count is one past it).
@@ -1901,6 +1949,15 @@ impl Workload for ChainWorkload {
                 .map(|at| (at + budget).max(recovery_deadline))
         };
         let in_budget = || convergence_deadline().is_none_or(|deadline| time.now() < deadline);
+        // The joiners (by rank) whose spare the final claim judges on this
+        // journal (#466 (late joiner spare)): the settle tail waits for each,
+        // asked anew at every probe, as a joiner may join in the tail.
+        let joiner_count = deployment.joiners().len();
+        let spares = |audit: &crate::audit::AuditWorld| -> Vec<usize> {
+            (0..joiner_count)
+                .filter(|rank| audit.judged_at_end(crate::roles::joiner_node_id(*rank).0))
+                .collect()
+        };
 
         let mut converged = false;
         // The last probe, `(node, answer)` per live node in node order — the
@@ -1922,18 +1979,28 @@ impl Workload for ChainWorkload {
             let parked = crate::world::parked_nodes(ctx.state(), journal);
             // A replica is probed after the acceptors, numbered past them
             // (`server_count + rank`); its disk is never parked.
+            // A joiner's spare (#466 (late joiner spare)) is probed last,
+            // numbered past the replicas, whenever the final claim judges
+            // it: it booted the journal and has not left the pool.
             let live: Vec<usize> = (0..server_count)
                 .filter(|i| !parked.contains(&servers[*i]))
                 .chain(server_count..server_count + replica_count)
+                .chain(
+                    spares(&audit)
+                        .into_iter()
+                        .map(|rank| server_count + replica_count + rank),
+                )
                 .collect();
             let mut observed: Vec<(usize, u64)> = Vec::with_capacity(live.len());
             let mut unanswered = false;
             for &node in &live {
-                // `readers` holds the nodes, then the replicas: index `node`.
-                let end = readers
-                    .inspect(node, journal)
-                    .await
-                    .map(|reply| reply.chosen_index.map_or(0, |c| c + 1));
+                // `readers` holds the nodes, then the replicas: index `node`;
+                // `nodes` holds the nodes, then the joiners.
+                let reply = match node.checked_sub(server_count + replica_count) {
+                    None => readers.inspect(node, journal).await,
+                    Some(rank) => nodes.inspect(server_count + rank, journal).await,
+                };
+                let end = reply.map(|reply| reply.chosen_index.map_or(0, |c| c + 1));
                 let Some(end) = end else {
                     unanswered = true;
                     break;
@@ -1981,6 +2048,21 @@ impl Workload for ChainWorkload {
             time.sleep(Duration::from_millis(config.probe_interval_ms))
                 .await
                 .ok();
+        }
+        if converged
+            && last_probe
+                .iter()
+                .any(|(node, _)| *node >= server_count + replica_count)
+        {
+            assert_reachable!("chain: the settle tail waits for a joiner's spare");
+        }
+        if converged
+            && last_probe.iter().any(|(node, _)| {
+                node.checked_sub(server_count + replica_count)
+                    .is_some_and(|rank| !spares_at_cutoff.contains(&rank))
+            })
+        {
+            assert_reachable!("chain: the settle tail waits for a spare that joined in the tail");
         }
         // #188: this journal converged; the run ends only once every journal
         // a client appends to has, so wait (to the same deadline) for the
@@ -2063,7 +2145,11 @@ impl Workload for ChainWorkload {
         // The converged cluster, read the way a journal client reads it: one
         // last fold from this client's cursor to the tail, so every client's
         // fold meets every other's on the entries they share.
-        if converged && let Some(&(node, _)) = last_probe.first() {
+        if converged
+            && let Some(&(node, _)) = last_probe
+                .iter()
+                .find(|(node, _)| *node < server_count + replica_count)
+        {
             fold.read_to_tail(ctx, &audit, &readers, node, client_id, config.read_limit)
                 .await;
             tracing::info!(
@@ -2088,6 +2174,17 @@ impl Workload for ChainWorkload {
                     .chain(server_count..server_count + replica_count)
                 {
                     let Some(reply) = readers.inspect(node, journal).await else {
+                        unanswered = true;
+                        break;
+                    };
+                    ends.push(reply.chosen_index.map_or(0, |c| c + 1));
+                }
+                // The joiners' spares too (#466 (late joiner spare)).
+                for rank in spares(&audit) {
+                    if unanswered {
+                        break;
+                    }
+                    let Some(reply) = nodes.inspect(server_count + rank, journal).await else {
                         unanswered = true;
                         break;
                     };

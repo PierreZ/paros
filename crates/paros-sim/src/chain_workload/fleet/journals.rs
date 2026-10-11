@@ -199,7 +199,7 @@ impl FleetOps {
 
     /// Record `journals` as learned by this operator: from the fleet
     /// directory, or from the coordinator's answer.
-    fn note_journals(&self, journals: impl IntoIterator<Item = JournalIdentifier>) {
+    pub(super) fn note_journals(&self, journals: impl IntoIterator<Item = JournalIdentifier>) {
         self.learned
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -350,6 +350,16 @@ impl FleetOps {
                     true,
                     "journals: a journal is created through the coordinator"
                 );
+                if self.refused.remove(&request.tenant) {
+                    // #212 (placement): the cell refused a create for want of
+                    // a slot, and a later one fitted (a delete released
+                    // slots, or the coordinator released an abandoned
+                    // create's).
+                    assert_sometimes!(
+                        true,
+                        "journals: a create refused for capacity is asked again and placed"
+                    );
+                }
                 assert_always!(
                     config.members().len() <= desired.acceptors().max(1)
                         && config
@@ -382,8 +392,16 @@ impl FleetOps {
             (JournalAnswer::UnknownJournal, JournalOp::Delete { .. }) => {
                 assert_reachable!("journals: a delete of an unknown name is answered");
             }
-            (JournalAnswer::Unplaceable, JournalOp::Create { .. }) => {
-                assert_reachable!("journals: a create too wide for the cell is unplaceable");
+            (JournalAnswer::Unplaceable, JournalOp::Create { desired, .. }) => {
+                if desired_fits(desired, cell.members.len()) {
+                    // Enough founding members, no free slot (#212
+                    // (placement)): the refusal is recorded, and the client
+                    // asks again under a new id on a later step.
+                    assert_reachable!("journals: a create the cell has no slot for is unplaceable");
+                    self.refused.insert(request.tenant);
+                } else {
+                    assert_reachable!("journals: a create too wide for the cell is unplaceable");
+                }
             }
             (JournalAnswer::UnknownTenant, _) => {
                 assert_reachable!("journals: a request for a tenant the cell dropped is refused");
@@ -654,4 +672,14 @@ fn drawn_desired(draw: u64) -> Desired {
         _ => "double",
     };
     mode.parse().unwrap_or(Desired::DOUBLE)
+}
+
+/// Whether a create under `desired` fits a cell of `members` founding
+/// members, slots aside: a redundancy mode takes at most all of them, a grid
+/// needs all its cells.
+fn desired_fits(desired: &Desired, members: usize) -> bool {
+    match desired.mode {
+        paros::tenant::DesiredMode::Redundancy(_) => true,
+        paros::tenant::DesiredMode::Grid { .. } => desired.acceptors() <= members,
+    }
 }

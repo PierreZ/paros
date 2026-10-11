@@ -353,11 +353,12 @@ impl CallObserver for Announce {
 
 impl SystemOps {
     /// The operations of client `client_id` on `deployment`: `active` when
-    /// the run runs the system journals.
+    /// the run runs the system journals on `seeds` genesis ranks.
     pub(super) fn new(
         deployment: &crate::roles::Deployment,
         identifiers: crate::shape::Identifiers,
         active: bool,
+        seeds: usize,
         machines: &[JoinerMachine],
         (client_id, leader_seeds): (u64, super::LeaderSeeds),
         timeout: Duration,
@@ -368,7 +369,7 @@ impl SystemOps {
             active,
             registry: identifiers.registry,
             main: identifiers.main,
-            seeds: crate::shape::seed_ranks(pool).len().max(1),
+            seeds: seeds.max(1),
             pool,
             joiners: deployment
                 .joiners()

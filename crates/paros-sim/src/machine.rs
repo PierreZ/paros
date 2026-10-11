@@ -42,6 +42,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use moonpool_sim::{
@@ -123,6 +124,10 @@ pub(crate) struct MachineBoard {
     /// The rank the moved-founder scenario crashed (#211): its next reboot
     /// comes back under a new name.
     rename_next: Option<usize>,
+    /// When the downed-founder scenario held a founding member down (#213
+    /// (three founding members)): from its crash to its restart, in
+    /// simulated time.
+    downed: Option<(Duration, Duration)>,
 }
 
 impl MachineBoard {
@@ -516,8 +521,13 @@ pub(crate) fn cached_mover(state: &StateHandle, dead: impl Fn(&str) -> bool) -> 
 /// (`crate::world::silent_machine`), once the cell formed: a live machine
 /// the cell admitted, else, on a cell of at least three founding members, a
 /// live founder that formed (the others keep a majority and one of them
-/// leads). `None` before that.
+/// leads), unless the downed-founder scenario takes one down (#213 (three
+/// founding members)). `None` before that.
 pub(crate) fn silent_target(state: &StateHandle, dead: impl Fn(&str) -> bool) -> Option<String> {
+    // Drawn before the board's lock: the downed-founder scenario takes a
+    // founder down itself, and two founders down leave a cell of three no
+    // majority.
+    let downed = crate::shape::downed_founder(state);
     let board = machine_board(state);
     let board = lock(&board);
     let ip = |addr: &Address| board.ips.get(addr).filter(|ip| !dead(ip)).cloned();
@@ -539,10 +549,65 @@ pub(crate) fn silent_target(state: &StateHandle, dead: impl Fn(&str) -> bool) ->
                 .is_some_and(|n| board.formed.contains(n))
         })
         .collect();
-    if board.founders.len() < 3 || formed.len() < board.founders.len() {
+    if downed || board.founders.len() < 3 || formed.len() < board.founders.len() {
         return None;
     }
     formed.into_iter().rev().find_map(ip)
+}
+
+/// The founding member the downed-founder scenario holds down now
+/// (`crate::world::downed_founder`, #213 (three founding members)): on a
+/// cell of at least three founders, none wiped and every one alive, the
+/// highest-ranked founder, once an operator sent `init`. With `formed`, only
+/// once every founder formed; else only while the cell is not formed yet.
+/// `None` before that.
+pub(crate) fn downed_target(
+    state: &StateHandle,
+    formed: bool,
+    dead: impl Fn(&str) -> bool,
+) -> Option<String> {
+    let board = machine_board(state);
+    let board = lock(&board);
+    if !board.init_sent || board.founders.len() < 3 || !board.wiped.is_empty() {
+        return None;
+    }
+    let ips: Vec<&String> = board
+        .founders
+        .iter()
+        .filter_map(|addr| board.ips.get(addr))
+        .collect();
+    if ips.len() < board.founders.len() || ips.iter().any(|ip| dead(ip)) {
+        return None;
+    }
+    let all_formed = board.founders.iter().all(|addr| {
+        board
+            .nodes
+            .get(addr)
+            .is_some_and(|n| board.formed.contains(n))
+    });
+    if all_formed != formed {
+        return None;
+    }
+    ips.last().map(|ip| (*ip).clone())
+}
+
+/// The downed-founder scenario holds a founding member down from `from` to
+/// `until` (#213 (three founding members)).
+pub(crate) fn note_downed(state: &StateHandle, from: Duration, until: Duration) {
+    assert_always!(
+        from < until,
+        "machine: a downed founder comes back after it went down"
+    );
+    lock(&machine_board(state)).downed = Some((from, until));
+}
+
+/// Whether the downed-founder scenario held a founding member down for the
+/// whole of `from..=until` (#213 (three founding members)): every control
+/// write an operation chose inside it was chosen without that member.
+pub(crate) fn founder_down_through(state: &StateHandle, from: Duration, until: Duration) -> bool {
+    lock(&machine_board(state))
+        .downed
+        .is_some_and(|(down, up)| down <= from && until < up)
 }
 
 /// The machine the slow-machine scenario slows now
