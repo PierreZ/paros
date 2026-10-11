@@ -9,7 +9,7 @@
 use std::collections::BTreeSet;
 
 use paros_core::{
-    Ballot, Command, Config, Control, MatchmakerId, Message, NodeId, NodeRole, Outcome,
+    Ballot, Command, Config, Control, JournalId, MatchmakerId, Message, NodeId, NodeRole, Outcome,
     QuorumSystem, Slot,
 };
 use paros_play::action::Seam;
@@ -1699,7 +1699,7 @@ fn a_matchmaker_rebooted_from_its_registry_keeps_what_it_answered() {
         .expect("matchmaker 0")
         .role()
         .expect("running")
-        .registry()
+        .registry(JournalId::UNSET)
         .clone();
     assert_eq!(
         after, before,
@@ -2088,7 +2088,10 @@ fn a_rebooted_matchmaker_keeps_its_watermark_and_its_generation() {
         .disk()
         .hard_state()
         .clone();
-    assert!(before.gc_watermark > Ballot::zero(), "the floor rose");
+    assert!(
+        before.gc_watermark(JournalId::UNSET) > Ballot::zero(),
+        "the floor rose"
+    );
     world.crash_matchmaker(MatchmakerId(0)).expect("running");
     world.restart_matchmaker(MatchmakerId(0)).expect("crashed");
     let role = world
@@ -2096,7 +2099,10 @@ fn a_rebooted_matchmaker_keeps_its_watermark_and_its_generation() {
         .expect("deployed")
         .role()
         .expect("running");
-    assert_eq!(role.hard_state().gc_watermark, before.gc_watermark);
+    assert_eq!(
+        role.hard_state().gc_watermark(JournalId::UNSET),
+        before.gc_watermark(JournalId::UNSET)
+    );
     assert_eq!(role.set().generation, before.generation);
 }
 

@@ -93,9 +93,10 @@ impl moonpool_sim::Workload for ContractSuiteWorkload {
         // the driver's persist-before-reply ordering.
         {
             use paros::{
-                AcceptorConfig, Ballot, JournalMatchmakerStorage, JournalStoreConfig,
+                AcceptorConfig, Ballot, JournalId, JournalMatchmakerStorage, JournalStoreConfig,
                 MatchmakerStorage, NodeId, Registration, RegistryStorage,
             };
+            let j = JournalId(1);
             let config = Registration::belief(AcceptorConfig::new(
                 vec![NodeId(0)],
                 paros::QuorumSystem::Majority,
@@ -115,28 +116,28 @@ impl moonpool_sim::Workload for ContractSuiteWorkload {
             let mut store = open();
             store.boot_scan().await.expect("a fresh registry boots");
             store
-                .register(ballot(1), &config)
+                .register(j, ballot(1), &config)
                 .await
                 .expect("register 1");
             store.sync().await.expect("sync 1");
             store
-                .register(ballot(2), &config)
+                .register(j, ballot(2), &config)
                 .await
                 .expect("register 2 (never synced)");
             store
-                .set_gc_watermark(ballot(1))
+                .set_gc_watermark(j, ballot(1))
                 .await
                 .expect("raise (never synced)");
             drop(store);
             let mut rebooted = open();
             rebooted.boot_scan().await.expect("the registry reopens");
             assert_always!(
-                rebooted.registered_ballots() == vec![ballot(1)]
-                    && rebooted.registration(ballot(2)).is_none(),
+                rebooted.registered() == vec![(j, ballot(1))]
+                    && rebooted.registration(j, ballot(2)).is_none(),
                 "matchmaker: an un-synced registration does not survive a crash"
             );
             assert_always!(
-                rebooted.initial_state().gc_watermark == Ballot::zero(),
+                rebooted.initial_state().gc_watermark(j) == Ballot::zero(),
                 "matchmaker: an un-synced watermark raise does not survive a crash"
             );
         }

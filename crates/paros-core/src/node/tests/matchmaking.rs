@@ -6,6 +6,10 @@
 
 use super::*;
 
+/// The journal every node of these tests serves (`Config::new` with
+/// `JournalIdentifier::UNSET`).
+const J: crate::JournalId = crate::JournalId::UNSET;
+
 /// Reply to `n`'s open matchmaking from `mms`, folding every answer.
 fn run_matchmaking(n: &mut ColocatedNode, mms: &mut [Matchmaker]) -> Vec<MatchStep> {
     let requests = drain_match_requests(n);
@@ -97,6 +101,7 @@ fn registered_page(
 /// `outcome`.
 fn registered_reply(mm: u64, ballot: Ballot, outcome: MatchOutcome) -> MatchReply {
     MatchReply {
+        journal: J,
         matchmaker: MatchmakerId(mm),
         to: ballot.node,
         ballot,
@@ -200,6 +205,7 @@ fn a_refused_registration_never_becomes_a_leadership() {
     let mut mms = registries(3);
     // Another proposer is already registered above us everywhere.
     let above = MatchRequest::new(
+        J,
         NodeId(1),
         ballot(7, 1),
         cfg(&[0, 1, 2]),
@@ -924,7 +930,7 @@ fn an_ordinary_registration_never_raises_the_effective_configuration() {
             MatchOutcome::Probed { .. } => panic!("expected a registration, got a probe answer"),
         }
     }
-    assert_eq!(mms[0].hard_state().effective, None);
+    assert_eq!(mms[0].effective(J), None);
 }
 
 /// A full page of beliefs at rounds `1..=REGISTRY_PAGE`, all naming
@@ -1001,6 +1007,7 @@ fn a_registry_larger_than_a_page_answers_a_prefix_and_a_cursor() {
     let page = crate::matchmaker::REGISTRY_PAGE;
     for round in 1..=page + 1 {
         mm.step(MatchRequest::new(
+            J,
             NodeId(1),
             ballot(round as u64, 1),
             cfg(&[0, 1, 2]),
@@ -1010,6 +1017,7 @@ fn a_registry_larger_than_a_page_answers_a_prefix_and_a_cursor() {
     }
     let top = ballot(page as u64 + 5, 1);
     mm.step(MatchRequest::new(
+        J,
         NodeId(1),
         top,
         cfg(&[0, 1, 2]),
@@ -1033,7 +1041,7 @@ fn a_registry_larger_than_a_page_answers_a_prefix_and_a_cursor() {
     // The cursor request re-answers idempotently, from where the first page
     // stopped, and registers nothing.
     mm.step(
-        MatchRequest::new(NodeId(1), top, cfg(&[0, 1, 2]), MatchmakerGeneration(0))
+        MatchRequest::new(J, NodeId(1), top, cfg(&[0, 1, 2]), MatchmakerGeneration(0))
             .from_page(next_from_ballot.expect("a cursor")),
     );
     let ready = mm.ready();
@@ -1123,6 +1131,7 @@ fn a_floor_raised_over_the_cursor_between_two_pages_still_completes_the_campaign
     let mut mms = registries(1);
     for round in 1..=page + 1 {
         mms[0].step(MatchRequest::new(
+            J,
             NodeId(1),
             ballot(round, 1),
             cfg(&[0, 1, 2]),
@@ -1151,7 +1160,7 @@ fn a_floor_raised_over_the_cursor_between_two_pages_still_completes_the_campaign
     let raised = ballot(page + 1, 5);
     assert!(raised > cursor && raised < b);
     assert_eq!(
-        mms[0].advance_gc_watermark(MatchmakerGeneration(0), raised),
+        mms[0].advance_gc_watermark(J, MatchmakerGeneration(0), raised),
         crate::matchmaker::GcOutcome::Raised
     );
     mms[0].ready().advance();

@@ -94,12 +94,12 @@ mod write;
 pub use decree::Decree;
 pub use journal_state::{JournalState, JournalView, Outcome, WriterMode};
 pub use matchmaker::{
-    DecreeRecord, GcAck, GcOutcome, GcRequest, MatchOutcome, MatchPurpose, MatchRefusal,
-    MatchReply, MatchRequest, Matchmaker, MatchmakerConfig, MatchmakerHardState, MatchmakerPhase,
-    MatchmakerReady, MatchmakerReconfigurer, MatchmakerWriteOp, MemRegistry, PendingBootstrap,
-    REGISTRY_PAGE, ReconfigureReply, ReconfigureRequest, ReconfigurerPhase, ReconfigurerReady,
-    ReconfigurerStep, Reconstruction, Registration, RegistrationKind, RegistryStorage,
-    StartRefusal, SuccessorDecree,
+    DecreeRecord, GcAck, GcOutcome, GcRequest, JournalRegistry, JournalScalars, MatchOutcome,
+    MatchPurpose, MatchRefusal, MatchReply, MatchRequest, Matchmaker, MatchmakerConfig,
+    MatchmakerHardState, MatchmakerPhase, MatchmakerReady, MatchmakerReconfigurer,
+    MatchmakerWriteOp, MemRegistry, PendingBootstrap, REGISTRY_PAGE, ReconfigureReply,
+    ReconfigureRequest, ReconfigurerPhase, ReconfigurerReady, ReconfigurerStep, Reconstruction,
+    Registration, RegistrationKind, RegistryStorage, StartRefusal, SuccessorDecree,
 };
 pub use membership::{
     AcceptorConfig, MatchmakerGeneration, MatchmakerId, MatchmakerSet, ProxyId, QuorumSystem,

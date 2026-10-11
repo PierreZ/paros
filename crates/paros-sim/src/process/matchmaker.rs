@@ -1,5 +1,6 @@
 //! The matchmaker role: the registry driver inside its recovery loop.
 
+use std::collections::BTreeMap;
 use std::sync::{Arc, PoisonError};
 
 use moonpool_sim::{
@@ -11,10 +12,12 @@ use super::RoleRig;
 use super::acceptor::OperatorEdit;
 use super::arm_role;
 use super::stay_down;
+use crate::audit::{AuditWorld, NodeAudit, audit_world_for};
 use crate::world::registry_store::LedgeredRegistry;
 use crate::world::storage_world;
 use paros::{
-    BootKind, BootRefusal, MatchmakerConfig, MatchmakerId, RunError, parse_addr, run_matchmaker,
+    BootKind, BootRefusal, HostedSet, JournalId, JournalIdentifier, MatchmakerConfig, MatchmakerId,
+    RunError, TenantId, parse_addr, run_matchmaker,
 };
 
 /// A matchmaker: the provider-generic registry driver inside the same
@@ -44,13 +47,47 @@ pub(super) async fn run_matchmaker_role(
     };
     // A matchmaker has a shape too: its transport tunables and its
     // write-window crash bias, drawn once per seed like a node's.
-    let RoleRig {
-        incarnation,
-        checker,
-        audit,
-        ..
-    } = arm_role(ctx, my_ip);
+    let RoleRig { incarnation, .. } = arm_role(ctx, my_ip);
     let shape = incarnation.shape;
+    // One set per tenant of the run's journals (#190): every journal of a
+    // matchmaker seed names the matchmakers, so each tenant's set keeps a
+    // registry per journal of that tenant, and each journal's audit world
+    // judges its own registry.
+    let plan = crate::shape::journals(ctx.state());
+    let mut tenants: BTreeMap<TenantId, Vec<JournalId>> = BTreeMap::new();
+    for journal in &plan.ids {
+        tenants
+            .entry(journal.tenant)
+            .or_default()
+            .push(journal.journal);
+    }
+    if tenants.values().any(|journals| journals.len() > 1) {
+        // BUGGIFY pairing: the plan's draw put two journals of one tenant
+        // on a matchmaker seed.
+        assert_reachable!("matchmaker: a set serves several journals");
+    }
+    if tenants.len() > 1 {
+        assert_reachable!("matchmaker: a process hosts the sets of several tenants");
+    }
+    let checkers = |tenant: TenantId| -> BTreeMap<JournalId, Arc<AuditWorld>> {
+        tenants[&tenant]
+            .iter()
+            .map(|journal| {
+                (
+                    *journal,
+                    audit_world_for(ctx.state(), JournalIdentifier::new(tenant, *journal)),
+                )
+            })
+            .collect()
+    };
+    let every_checker: Vec<Arc<AuditWorld>> = tenants
+        .keys()
+        .flat_map(|tenant| checkers(*tenant).into_values())
+        .collect();
+    let time = ctx.time().clone();
+    let audit = |journal: JournalIdentifier| {
+        NodeAudit::new(time.clone(), audit_world_for(ctx.state(), journal))
+    };
     // The store (#176): the library's `JournalMatchmakerStorage` on the
     // simulated disk, with the seed's commit protocol and the library's
     // small geometry (a registry's installs carry every live registration
@@ -59,7 +96,6 @@ pub(super) async fn run_matchmaker_role(
         geometry: paros::journal::Geometry::small(),
         ..crate::shape::journal_layout(ctx.state())
     };
-    let registry_id = crate::shape::identifiers(ctx.state()).main;
     if incarnation.is_restart()
         && ctx.time().now() < crate::CHAOS_DURATION
         && moonpool_sim::buggify_with_prob!(f64::from(shape.matchmaker_loss_pct) / 100.0)
@@ -68,9 +104,15 @@ pub(super) async fn run_matchmaker_role(
             .unwrap_or_else(PoisonError::into_inner)
             .wipe_matchmaker(my_ip, bootstrap.len())
     {
-        // The disk is genuinely emptied: the registry's files go, durably.
-        crate::world::wipe::wipe_dir(ctx.storage(), crate::world::registry_store::REGISTRY_DIR)
+        // The disk is genuinely emptied: every set's registry files go,
+        // durably.
+        for tenant in tenants.keys() {
+            crate::world::wipe::wipe_dir(
+                ctx.storage(),
+                &crate::world::registry_store::registry_dir(*tenant),
+            )
             .await;
+        }
         assert_reachable!("journal store: a wiped matchmaker's registry is deleted");
         // The registry's wipe coin (#125, #183): a restart that comes back
         // on an empty disk. What happens next is the **library's** call: the
@@ -94,53 +136,70 @@ pub(super) async fn run_matchmaker_role(
     );
     loop {
         // An interrupted provisioning is resolved from the disk before the
-        // claim is read (#176).
-        crate::world::registry_store::resolve_registry_provisioning(
-            ctx.storage(),
-            &world,
-            registry_id,
-            my_ip,
-        )
-        .await;
+        // claim is read (#176), set by set.
+        for tenant in tenants.keys() {
+            crate::world::registry_store::resolve_registry_provisioning(
+                ctx.storage(),
+                &world,
+                *tenant,
+                my_ip,
+            )
+            .await;
+        }
         // The operator's claim is the provisioning ledger (#183), kept
         // outside the disks: a wipe erases the marker, never the memory of
-        // having provisioned the matchmaker.
-        let boot = if world
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .provisioned(my_ip)
-        {
-            BootKind::ExistingMember
-        } else {
-            BootKind::FirstBoot
-        };
-        if edit.apply(boot == BootKind::ExistingMember, &mut config, |config| {
+        // having provisioned the matchmaker's set.
+        let boots: BTreeMap<TenantId, BootKind> = tenants
+            .keys()
+            .map(|tenant| {
+                let provisioned = world
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .provisioned(&crate::world::registry_store::set_key(my_ip, *tenant));
+                let boot = if provisioned {
+                    BootKind::ExistingMember
+                } else {
+                    BootKind::FirstBoot
+                };
+                (*tenant, boot)
+            })
+            .collect();
+        let existing = boots.values().any(|boot| *boot == BootKind::ExistingMember);
+        if edit.apply(existing, &mut config, |config| {
             config.bootstrap.pop();
         }) {
             // BUGGIFY pairing: the operator's edit genuinely reaches a boot.
             assert_reachable!("operator: a matchmaker restarts under an edited configuration");
             tracing::info!(matchmaker = id.0, "matchmaker_config_edited");
         }
-        let storage = LedgeredRegistry::new(
-            ctx.storage().clone(),
-            registry_id,
-            layout,
-            Arc::downgrade(&world),
-            my_ip.to_string(),
-            ctx.state().clone(),
-            checker.clone(),
-            id.0,
-            (layout.durability == paros::journal::Durability::Batched).then_some(bootstrap.len()),
-        );
+        let sets: Vec<HostedSet<LedgeredRegistry>> = tenants
+            .iter()
+            .map(|(tenant, journals)| HostedSet {
+                tenant: *tenant,
+                journals: journals.clone(),
+                storage: LedgeredRegistry::new(
+                    ctx.storage().clone(),
+                    *tenant,
+                    layout,
+                    Arc::downgrade(&world),
+                    my_ip.to_string(),
+                    ctx.state().clone(),
+                    checkers(*tenant),
+                    id.0,
+                    (layout.durability == paros::journal::Durability::Batched)
+                        .then_some(bootstrap.len()),
+                ),
+                boot: boots[tenant],
+            })
+            .collect();
         match run_matchmaker(
             ctx.providers().clone(),
-            storage,
-            boot,
+            sets,
             parse_addr(my_ip)?,
             config.clone(),
             shape.tunables,
             ctx.shutdown().clone(),
-            &audit,
+            audit,
         )
         .await
         {
@@ -164,7 +223,9 @@ pub(super) async fn run_matchmaker_role(
                     assert_reachable!(
                         "journal store: a cut matchmaker's registry is lost for good"
                     );
-                    stay_down(&checker, Down::MatchmakerLost(id.0));
+                    for checker in &every_checker {
+                        stay_down(checker, Down::MatchmakerLost(id.0));
+                    }
                     return Ok(());
                 }
             }
@@ -183,7 +244,9 @@ pub(super) async fn run_matchmaker_role(
                     "matchmaker: an amnesia refusal names a wiped registry",
                     { "matchmaker" => id.0 }
                 );
-                stay_down(&checker, Down::MatchmakerLost(id.0));
+                for checker in &every_checker {
+                    stay_down(checker, Down::MatchmakerLost(id.0));
+                }
                 return Ok(());
             }
             // #207: the library refused a registry formatted under another
