@@ -434,6 +434,21 @@ impl AuditWorld {
         self.lock().departure_effective
     }
 
+    /// Whether a peer's durable floor passed `node`'s chosen prefix (#340):
+    /// `node` holds nothing a peer still serves, so its next catch-up meets
+    /// a trim point. The lagging-acceptor scenario holds `node` down until
+    /// then (`crate::world::lagging_acceptor`).
+    pub(crate) fn floor_passed(&self, node: u64) -> bool {
+        let st = self.lock();
+        let held = st.decided_prefix.get(&node).copied().unwrap_or(0);
+        // A replica serves no catch-up: only an acceptor's floor is a trim
+        // point the node can meet.
+        st.truncate_watermark
+            .iter()
+            .filter(|(peer, _)| **peer != node && !st.replicas.contains(*peer))
+            .any(|(_, floor)| *floor > held)
+    }
+
     /// The slots a durable accept quorum decided (#263: what an outage
     /// aims at), above the pruned prefix, each with the members of the
     /// configuration its deciding ballot was bound to (the departed

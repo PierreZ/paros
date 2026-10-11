@@ -133,6 +133,11 @@ pub(super) const VIEW: u8 = 29;
 pub(super) const LOAD: u8 = 30;
 pub(super) const OP_COUNT: u8 = 31;
 
+/// The highest weight an operation's knob draws (`ChainConfig`'s
+/// `weights`, each `0..41`). The lagging-acceptor scenario (#340) sets
+/// `TRUNCATE` to it, the lagging-fold scenario (#189) `REGISTER_NODE`.
+pub(super) const OP_WEIGHT_CEILING: u64 = 40;
+
 /// The most records one write carries (`ChainConfig::batch_records`'s
 /// ceiling): with [`MAX_LARGE_COMMAND_BYTES`], the largest entry a node's
 /// journal store must hold (`crate::shape::ENTRY_BLOCKS_FLOOR`).

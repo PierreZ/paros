@@ -207,12 +207,14 @@ pub(super) fn live_candidates(
 impl ChainWorkload {
     /// One `RECONFIGURE` step (#122): compose a successor configuration from
     /// the set in force and ask the leader for it, filed in the operators'
-    /// ledger. `remove_next` is the owner's removal, cleared once it leaves.
+    /// ledger. `remove_next` is the owner's removal, cleared once it leaves;
+    /// `ask_again` is set when the client's next step asks for it again.
     #[allow(clippy::too_many_lines)]
     pub(super) async fn reconfigure_step(
         &mut self,
         step: &Step<'_>,
         remove_next: &mut bool,
+        ask_again: &mut bool,
         system_ops: &mut SystemOps,
     ) {
         let Step {
@@ -468,6 +470,26 @@ impl ChainWorkload {
             let outcome = reconfigurer.reconfigure(&next, system, probe_target).await;
             tracing::info!(shape = name, outcome = ?outcome, "chain_reconfigure_outcome");
             ledger_answer(ctx.state(), ledger_id, &outcome);
+            // On a lagging-fold seed a reconfiguration onto a joiner just
+            // registered is asked again until a leader takes it: it then
+            // starts as soon as the leader's fold admits the joiner, while
+            // the other members' folds may still lag
+            // (`crate::shape::lagging_fold`).
+            let lagging_join = after_register
+                && crate::shape::lagging_fold(ctx.state())
+                && next.iter().any(|m| joinable.contains(m));
+            if lagging_join
+                && matches!(
+                    outcome,
+                    ReconfigureOutcome::NotLeader { .. }
+                        | ReconfigureOutcome::Refused {
+                            refusal: ReconfigureRefusal::UnknownMember,
+                            ..
+                        }
+                )
+            {
+                *ask_again = true;
+            }
             match outcome {
                 ReconfigureOutcome::Started { leader, .. } => {
                     // The AGENTS.md rule, client-visible: a
@@ -497,8 +519,12 @@ impl ChainWorkload {
                     // successor sharing no member with its
                     // predecessor is the shape that leaves no
                     // rebooted member inside the default, so it
-                    // is the one the location leans on.
-                    if buggify_with_prob!(if disjoint { 0.9 } else { 0.25 }) {
+                    // is the one the location leans on. On a
+                    // lagging-fold seed every configuration that
+                    // takes in a joiner just registered is
+                    // rebooted: each member's registry fold
+                    // restarts behind the joiner it must admit.
+                    if lagging_join || buggify_with_prob!(if disjoint { 0.9 } else { 0.25 }) {
                         let _ = time
                             .sleep(Duration::from_millis(config.reboot_successor_delay_ms))
                             .await;
