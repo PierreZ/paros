@@ -2,9 +2,12 @@
 //! grow-only and refused on plain Multi-Paxos, a reconfiguration may name a
 //! node only once the pool admits it, and a candidate whose matchmakers name
 //! a node its pool has not admitted abandons the campaign instead of acting
-//! on it — then completes once the pool catches up.
+//! on it — then completes once the pool catches up. The matchmaker pool
+//! grows the same way (#501 (matchmaker sets off the founders)): a set
+//! naming a matchmaker outside it is ignored until the pool admits it.
 
 use super::*;
+use crate::MatchmakerSet;
 
 /// Plain Multi-Paxos: the pool is the membership, and it never moves.
 #[test]
@@ -12,6 +15,37 @@ fn a_plain_pool_never_moves() {
     let mut n = node(0, &[0, 1, 2]);
     assert!(!n.extend_pool(&[NodeId(7)]));
     assert_eq!(n.pool(), &[NodeId(0), NodeId(1), NodeId(2)]);
+}
+
+/// Plain Multi-Paxos has no matchmaker pool to grow.
+#[test]
+fn a_plain_matchmaker_pool_never_moves() {
+    let mut n = node(0, &[0, 1, 2]);
+    assert!(!n.extend_matchmaker_pool(&[MatchmakerId(7)]));
+    assert!(n.matchmaker_pool().is_empty());
+    assert!(n.matchmaker_set().is_none());
+}
+
+/// A set naming a matchmaker outside the pool is ignored whole; once the
+/// pool admits it, idempotently, the node learns the set.
+#[test]
+fn a_set_is_learned_only_once_the_matchmaker_pool_admits_its_members() {
+    let mut n = deployed_node(0, &[0, 1, 2], &[0, 1, 2], 1);
+    let boot: Vec<MatchmakerId> = n.matchmaker_pool().to_vec();
+    let moved = MatchmakerSet::new(MatchmakerGeneration(1), vec![MatchmakerId(7)]);
+    assert!(
+        !n.learn_matchmakers(&moved),
+        "a set outside the pool is ignored"
+    );
+    assert_eq!(n.matchmaker_set().map(|s| s.generation.0), Some(0));
+    assert!(n.extend_matchmaker_pool(&[MatchmakerId(7)]));
+    assert!(
+        !n.extend_matchmaker_pool(&[MatchmakerId(7)]),
+        "admitting twice is a no-op"
+    );
+    assert!(boot.iter().all(|m| n.matchmaker_pool().contains(m)));
+    assert!(n.learn_matchmakers(&moved));
+    assert_eq!(n.matchmaker_set(), Some(&moved));
 }
 
 /// A matchmaker deployment's pool grows, idempotently, and a reconfiguration

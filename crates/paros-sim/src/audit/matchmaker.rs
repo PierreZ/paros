@@ -277,8 +277,12 @@ pub(super) struct MatchmakerAudit {
     decree_checked: bool,
     activation_checked: bool,
     /// Per proposed `(generation, members)`: the matchmakers that durably
-    /// hold its bootstrap.
-    bootstrapped: BTreeMap<(u64, Vec<u64>), BTreeSet<u64>>,
+    /// hold its bootstrap. Shared by every journal of the tenant (#501
+    /// (matchmaker sets off the founders)): a matchmaker reports its
+    /// scalars to the journals its set holds a registry of, and a fresh
+    /// member of a later generation may hold none of the journal the
+    /// reconfigurer reports to.
+    pub(super) bootstrapped: TenantBootstraps,
     /// The successor decree, folded from the wire (#125): per
     /// `(generation, decree ballot)`, the members proposed. Keyed by the
     /// generation too, because a reconfigurer holds no durable state and its
@@ -635,6 +639,40 @@ impl TenantSets {
     /// Every generation known.
     fn generations(&self) -> Vec<u64> {
         self.lock().keys().copied().collect()
+    }
+}
+
+/// Per proposed `(generation, members)`: the matchmakers that durably hold
+/// its bootstrap (#501 (matchmaker sets off the founders)): shared by the
+/// audits of every journal of one tenant, since a bootstrap is set-wide.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct TenantBootstraps(Arc<Mutex<Holders>>);
+
+/// What [`TenantBootstraps`] holds.
+type Holders = BTreeMap<(u64, Vec<u64>), BTreeSet<u64>>;
+
+impl TenantBootstraps {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Holders> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// `matchmaker` durably holds the bootstrap of `(generation, members)`.
+    fn hold(&self, proposed: (u64, Vec<u64>), matchmaker: u64) {
+        self.lock().entry(proposed).or_default().insert(matchmaker);
+    }
+
+    /// How many matchmakers durably hold the bootstrap of `proposed`.
+    fn holders(&self, proposed: &(u64, Vec<u64>)) -> usize {
+        self.lock().get(proposed).map_or(0, BTreeSet::len)
+    }
+
+    /// Whether `matchmaker` durably holds the bootstrap of `proposed`.
+    fn holds(&self, proposed: &(u64, Vec<u64>), matchmaker: u64) -> bool {
+        self.lock()
+            .get(proposed)
+            .is_some_and(|h| h.contains(&matchmaker))
     }
 }
 
@@ -2160,8 +2198,7 @@ impl MatchmakerAudit {
                     let members: Vec<u64> = set.members().iter().map(|m| m.0).collect();
                     let holders = self
                         .bootstrapped
-                        .get(&(set.generation.0, members.clone()))
-                        .map_or(0, BTreeSet::len);
+                        .holders(&(set.generation.0, members.clone()));
                     assert_always!(
                         holders == members.len(),
                         "generation: the decree opens only once every proposed member holds the bootstrap",
@@ -2518,9 +2555,7 @@ impl MatchmakerAudit {
         for pending in &scalars.pending {
             let members: Vec<u64> = pending.set.members().iter().map(|m| m.0).collect();
             self.bootstrapped
-                .entry((pending.set.generation.0, members))
-                .or_default()
-                .insert(matchmaker.0);
+                .hold((pending.set.generation.0, members), matchmaker.0);
         }
         let journal = self.journal();
         let entry = self.registries.entry(matchmaker.0).or_default();
@@ -2711,8 +2746,7 @@ impl MatchmakerAudit {
                 let members: Vec<u64> = set.members().iter().map(|m| m.0).collect();
                 let held = self
                     .bootstrapped
-                    .get(&(set.generation.0, members))
-                    .is_some_and(|h| h.contains(&matchmaker.0));
+                    .holds(&(set.generation.0, members), matchmaker.0);
                 assert_always!(
                     held,
                     "generation: a bootstrap is acknowledged only once durably pending",

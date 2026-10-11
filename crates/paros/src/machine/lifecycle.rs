@@ -629,7 +629,9 @@ where
 /// shutdown (#474): the node loop of every machine of a cell, with no plan
 /// journal, following the control journals from the founding members its
 /// admission names. Its journals are born with their tenant's matchmaker
-/// set on the founding members, as every journal of the cell is (#190).
+/// set on the founding members, as every journal of the cell is (#190); a
+/// storage machine hosts the later generations of the sets booked on it
+/// (#501 (matchmaker sets off the founders)).
 async fn serve_admitted<P, S, A, F>(
     providers: P,
     disk: ProviderDisk<S>,
@@ -693,7 +695,16 @@ where
         admitted.cached.clone(),
         shutdown.clone(),
     );
-    let stores = MachineStores::admitted(disk, record, admission.cell.cell, audits);
+    let mut stores = MachineStores::admitted(disk, record, admission.cell.cell, audits);
+    // A storage machine hosts the matchmaker sets the registry books on it
+    // (#501 (matchmaker sets off the founders)): never a member of a
+    // bootstrap generation, it opens only those.
+    if admitted.facts.class == Class::Storage {
+        stores = stores.with_matchmakers(MatchmakerConfig {
+            id: MatchmakerId(node_id.0),
+            bootstrap: control.matchmakers.clone(),
+        });
+    }
     let matchmakers: Vec<(MatchmakerId, String)> = founders
         .iter()
         .map(|(id, addr)| (MatchmakerId(id.0), addr.clone()))
