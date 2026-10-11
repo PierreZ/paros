@@ -197,8 +197,27 @@ pub(crate) fn control_attempts(
     crate::state::published_arc(
         state,
         &crate::state::journal_key(CONTROL_LOG_KEY, journal),
-        || Mutex::new(Vec::new()),
+        || {
+            logged_journals(state)
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(journal);
+            Mutex::new(Vec::new())
+        },
     )
+}
+
+const LOGGED_JOURNALS_KEY: &str = "paros-control-logged";
+
+/// Every journal [`control_attempts`] holds a history for, in identifier
+/// order (#442 (search every journal's history)): `check()` searches each
+/// one, so no logged history is dropped unjudged.
+pub(crate) fn logged_journals(
+    state: &moonpool_sim::StateHandle,
+) -> Arc<Mutex<std::collections::BTreeSet<JournalIdentifier>>> {
+    crate::state::published_arc(state, LOGGED_JOURNALS_KEY, || {
+        Mutex::new(std::collections::BTreeSet::new())
+    })
 }
 
 /// Whether `answer` is a frontend's denial.
