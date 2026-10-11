@@ -21,6 +21,7 @@ pub(crate) mod registry_store;
 pub(crate) mod replaced_founder;
 pub(crate) mod settle;
 pub(crate) mod silent_machine;
+pub(crate) mod split_floor;
 pub(crate) mod wipe;
 pub(crate) mod wiped_founder;
 

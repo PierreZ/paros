@@ -354,6 +354,7 @@ fn chain_builder(digest: Option<DigestSink>) -> SimulationBuilder {
         .fault_factory(|| Box::new(crate::world::moved_founder::MovedFounder))
         .fault_factory(|| Box::new(crate::world::replaced_founder::ReplacedFounder))
         .fault_factory(|| Box::new(crate::world::lagging_acceptor::LaggingAcceptor))
+        .fault_factory(|| Box::new(crate::world::split_floor::SplitFloor))
         .chaos_duration(CHAOS_DURATION)
         .swarm_operations()
 }

@@ -380,6 +380,12 @@ impl<Id: Copy + Ord, V: Clone + PartialEq> Proposer<Id, V> {
     /// below the boundary is resolved by the fold as well, and the probe
     /// closes when nothing stays blocked.
     ///
+    /// **Proved by mutation** (#409): emptied, it survived the mutation
+    /// hunt's 300 seeds until the split-floor scenario
+    /// (`paros_sim::world::split_floor`) made a leader jump with its probe
+    /// blocked below the point; it is now caught in seeds 81..=100 by "a
+    /// repair probe surviving a trim-point jump keeps only retained slots".
+    ///
     /// # Panics
     ///
     /// If an assertion on its own invariants, preconditions or postconditions

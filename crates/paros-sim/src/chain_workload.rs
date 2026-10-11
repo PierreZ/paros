@@ -342,11 +342,13 @@ impl Workload for ChainWorkload {
         }
 
         let mut config = ChainConfig::for_timeline();
-        if crate::shape::lagging_acceptor(ctx.state()) {
+        if crate::shape::lagging_acceptor(ctx.state()) || crate::shape::split_floor(ctx.state()) {
             // The lagging-acceptor scenario (#340): the peers' floors must
             // pass what the held acceptor holds, so every client compacts
             // at every truncation step, and truncates as often as the
-            // weight family allows.
+            // weight family allows. The split-floor scenario (#409) needs
+            // the same floors: one acceptor's passes a slot its peers
+            // still hold.
             config.compaction = true;
             config.compact_every = 1;
             config.weights[usize::from(TRUNCATE)] = OP_WEIGHT_CEILING;
