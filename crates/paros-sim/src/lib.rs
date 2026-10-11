@@ -147,10 +147,11 @@ pub(crate) const JOINER_POOL_RANGE: std::ops::RangeInclusive<usize> = 0..=2;
 /// Per-seed **machine pool** draw (inclusive, #246): the machine process
 /// group (`crate::roles::MACHINE_GROUP`), each a `parosd` running the shipped
 /// lifecycle from an empty disk until the workload's `init` forms the cell
-/// over the seeds the layout draws (`crate::shape::machine_layout`). One is
-/// the one-seed cell (#213's three seeds are not yet the rule); two is a
-/// cell whose majority is both seeds, or a seed and a waiting machine; three
-/// a cell that keeps a quorum through one seed's loss.
+/// over the founding members the layout draws
+/// (`crate::shape::machine_layout`). One is the one-founder cell; two is a
+/// cell whose majority is both founders, or a founder and a waiting machine;
+/// three a cell that keeps a quorum through one founder's loss (#213 (three
+/// founding members), `crate::world::downed_founder`).
 pub(crate) const MACHINE_POOL_RANGE: std::ops::RangeInclusive<usize> = 1..=3;
 /// Per-seed **frontend pool** draw (inclusive, #192 (the frontend)): the
 /// frontend process group (`crate::roles::FRONTEND_GROUP`), each the shipped
@@ -391,6 +392,7 @@ fn chain_builder(digest: Option<DigestSink>) -> SimulationBuilder {
         .fault_factory(|| Box::new(crate::world::wiped_founder::WipedFounder))
         .fault_factory(|| Box::new(crate::world::silent_machine::SilentMachine))
         .fault_factory(|| Box::new(crate::world::slow_machine::SlowMachine))
+        .fault_factory(|| Box::new(crate::world::downed_founder::DownedFounder))
         .fault_factory(|| Box::new(crate::world::moved_founder::MovedFounder))
         .fault_factory(|| Box::new(crate::world::replaced_founder::ReplacedFounder))
         .fault_factory(|| Box::new(crate::world::lagging_acceptor::LaggingAcceptor))

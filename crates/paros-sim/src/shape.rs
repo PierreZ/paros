@@ -638,6 +638,9 @@ struct Registry {
     /// Run-level: whether the run draws the replaced-founder scenario (see
     /// [`replaced_founder`]), fixed by the first caller.
     replaced_founder: Option<bool>,
+    /// Run-level: whether the run draws the downed-founder scenario (see
+    /// [`downed_founder`]), fixed by the first caller.
+    downed_founder: Option<bool>,
     /// Run-level: whether the run draws the slow-link scenario (see
     /// [`slow_link`]), fixed by the first caller.
     slow_link: Option<bool>,
@@ -650,6 +653,9 @@ struct Registry {
     /// Run-level: whether the run runs the system journals (see
     /// [`system_journals`]), fixed by the first caller.
     system: Option<bool>,
+    /// Run-level: how many genesis ranks host the system journals (see
+    /// [`founder_count`]), fixed by the first caller.
+    founder_count: Option<usize>,
     /// Run-level: each joiner's class and capacity (see
     /// [`joiner_machines`]), fixed by the first caller.
     machines: Option<Vec<JoinerMachine>>,
@@ -996,6 +1002,33 @@ pub(crate) fn replaced_founder(state: &StateHandle) -> bool {
         .get_or_insert_with(|| !other && moonpool_sim::buggify_with_prob!(1.0))
 }
 
+/// Whether the run draws the **downed-founder scenario** (#213 (three
+/// founding members)): drawn once per seed, its own BUGGIFY location, never
+/// on a wiped-founder, moved-founder or replaced-founder seed (each takes a
+/// founder away too, and two founders down leave a cell of three no
+/// majority; on a silent-machine seed that scenario holds down only an
+/// admitted machine, `crate::machine::silent_target`). The control plane must keep choosing with one
+/// founding member down: `init`'s steps, a tenant's creation and every
+/// control-journal write. The machines' attrition seldom kills a founder of
+/// a cell of three while an operator writes, and never for long. On a
+/// scenario seed the layout lists three founders or more where the
+/// machines allow it ([`machine_layout`]), client 0 runs `init` first and
+/// every client creates tenants as often as the weight family allows
+/// (`crate::chain_workload`), and `crate::world::downed_founder` holds one
+/// founder down for 6–10 s, during `init` or once the cell formed.
+/// Each ingredient keeps its own coin on the other seeds. Rare-but-valid: a
+/// founder down for a few seconds is.
+#[tracing::instrument(level = "debug", skip_all)]
+pub(crate) fn downed_founder(state: &StateHandle) -> bool {
+    // Drawn before the lock: the scenarios take the registry's lock too.
+    let other = wiped_founder(state) || moved_founder(state) || replaced_founder(state);
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    *guard
+        .downed_founder
+        .get_or_insert_with(|| !other && moonpool_sim::buggify_with_prob!(1.0))
+}
+
 /// Whether the run draws the **silent-machine scenario** (#211): drawn once
 /// per seed, its own BUGGIFY location. The cell coordinator marks a machine
 /// down only when it is silent past `machine_down_after`, while a
@@ -1194,23 +1227,48 @@ fn journal_geometry() -> paros::journal::Geometry {
     geometry
 }
 
-/// How many genesis nodes host the system journals (#189) — the seeds,
-/// the lowest ranks of the pool: one. A one-member plain journal sends
-/// nothing to anyone, and the system journals' beats among three seeds are
-/// load a small cluster cannot always carry: two more journals on every link
-/// livelocked a matchmaker deployment's two-round-trip campaigns (witness
-/// 17972338006788767545 on this branch: 3 nodes, 240 campaigns) and, with
-/// one node parked, the two survivors of a plain 3-node pool (witness
-/// 16999966542771974935: 267 dueling rounds, nothing chosen) — the load
-/// [`journals`] already keeps off those seeds. Not a tunable: its extreme is
-/// a run that cannot win. The driver's `SystemPlan` takes any seed list; a
-/// one-member journal's only liveness cost is its one seed's downtime.
-pub(crate) const SEED_COUNT: usize = 1;
+/// How many genesis nodes host the system journals (#189, #213 (three
+/// founding members)) — the registry's founding members, the lowest ranks
+/// of the pool: one or three, drawn once per run (decided on 2026-10-09:
+/// the founding member count is a draw, 1 or 3). One keeps the one-member
+/// plain journal, which sends nothing to anyone and whose only liveness
+/// cost is its one member's downtime; three is the production shape, a
+/// majority journal that keeps choosing through one member's loss. Three
+/// were once forced to one: two more journals' beats on every link
+/// livelocked a matchmaker deployment's two-round-trip campaigns, and the
+/// two survivors of a plain 3-node pool duelled without choosing. The
+/// driver's election backoff (`DriverTunables::election_backoff_doublings`,
+/// #201) ended both duels: a round that loses doubles its timeout base, so
+/// one candidate outlasts the other. Not a knob: the draw is a deployment
+/// shape, never an extreme.
+pub(crate) const FOUNDER_COUNTS: [usize; 2] = [1, 3];
 
-/// The seeds of a pool of `pool` nodes (#189): its [`SEED_COUNT`] lowest
-/// ranks.
-pub(crate) fn seed_ranks(pool: usize) -> Vec<u64> {
-    (0..pool.min(SEED_COUNT) as u64).collect()
+/// The run's registry founding member count (#213 (three founding
+/// members)): one of [`FOUNDER_COUNTS`], drawn once per run by whoever asks
+/// first.
+#[tracing::instrument(level = "debug", skip(state))]
+pub(crate) fn founder_count(state: &StateHandle) -> usize {
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    *guard.founder_count.get_or_insert_with(|| {
+        let count = if moonpool_sim::sim_random_bool(0.5) {
+            FOUNDER_COUNTS[1]
+        } else {
+            FOUNDER_COUNTS[0]
+        };
+        assert_always!(
+            FOUNDER_COUNTS.contains(&count),
+            "system: a run's founding member count is one of the drawn counts",
+            { "count" => count }
+        );
+        count
+    })
+}
+
+/// The registry's founding members in a pool of `pool` nodes (#189): its
+/// [`founder_count`] lowest ranks.
+pub(crate) fn founder_ranks(state: &StateHandle, pool: usize) -> Vec<u64> {
+    (0..pool.min(founder_count(state)) as u64).collect()
 }
 
 /// Whether the run runs the **system journals** (#189) — the node registry
@@ -1315,8 +1373,9 @@ pub(crate) struct MachineLayout {
 
 /// The run's machine layout (#246), drawn once per seed by whoever asks
 /// first, for `count` machines in rank order. The founder count is uniform
-/// over `1..=count` (`3..=count` on a replaced-founder or moved-founder seed
-/// with three machines or more, [`replaced_founder`], [`moved_founder`]); every founder is a `storage` machine (`cell init`
+/// over `1..=count` (`3..=count` on a replaced-founder, moved-founder or
+/// downed-founder seed with three machines or more, [`replaced_founder`],
+/// [`moved_founder`], [`downed_founder`]); every founder is a `storage` machine (`cell init`
 /// refuses a `stateless` member) and every other machine is `storage` or
 /// `stateless` on a coin, idle, waiting for a placement that is #212's. The
 /// capacity is one `buggify_knob!` for the run (default 2, extreme 1..=4;
@@ -1332,6 +1391,7 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
     // Drawn before the lock: the scenario takes the registry's lock too.
     let moved = moved_founder(state);
     let replaced = replaced_founder(state);
+    let downed = downed_founder(state);
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     guard
@@ -1342,8 +1402,10 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
             // the moved-founder scenario: a rename never takes a cell of
             // two, and another founder must cache the move. One founder or
             // two moved a founder on 25 of 900 hunt seeds, three or more on
-            // 58.
-            let least = if (replaced || moved) && count >= 3 {
+            // 58. The downed-founder scenario (#213 (three founding
+            // members)) holds one founder down: the others keep a majority
+            // only in a cell of three or more.
+            let least = if (replaced || moved || downed) && count >= 3 {
                 3
             } else {
                 1

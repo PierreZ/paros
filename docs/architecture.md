@@ -1479,8 +1479,9 @@ from `first_seq`.
 
 ### 3.10 Recovery (deferred)
 
-**Deferred out of M9** (decided on 2026-10-04, #231): nothing of it is built, and the simulation
-cannot reach a lost control quorum while it runs one founding member (#213). The design below stays the
+**Deferred out of M9** (decided on 2026-10-04, #231): nothing of it is built. The simulation runs
+one to three founding members (#213 (three founding members)); a cell that loses a majority of them is
+`cell_lost`, excused by the oracles and never recovered. The design below stays the
 direction and is taken up as its own later issue. Two questions it must answer then: with the universe
 tenant's and the cell's control journals on the same founding members, recovery reads the machines' own stores
 (`journals/<tenant>/<journal>/`, their `JournalIdentifier`s and assignments) to rebuild both, tombstones
@@ -1869,7 +1870,12 @@ Simulation is the investment. Every milestone lands with its share of:
   it, the founding members that kept their disks choose that plan (`q1 = n`, `q2 = majority`,
   section 3.1), and the cell forms with the old id as a dead member. Only when a majority of the
   plan's members are wiped is the cell lost (`cell_lost`) until an operator acts outside paros;
-  the control-plane liveness oracles do not apply to a lost cell. The "no
+  the control-plane liveness oracles do not apply to a lost cell. With three founding members, one of
+  them may go down for 6 to 10 s during `init` or once the cell formed (the downed-founder
+  scenario, #213 (three founding members)): every tenant creation and every control-journal
+  write still complete over the other two. A strike during `init` delays the cell decree until
+  the founder is back, because its Phase 1 needs every founding member (`q1 = n`). The acceptors' node registry runs on
+  one or three founding members, a per-run draw (#213 (three founding members)). The "no
   unlearned id" oracle holds on every run: an operator's call to the cell names only a
   `JournalIdentifier` that it learned from `init`'s reply or through `Inspect`.
 - Faults in the shipped code (decided on 2026-10-09, #294): the simulation runs the same machine

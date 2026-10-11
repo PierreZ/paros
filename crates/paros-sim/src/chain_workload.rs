@@ -361,6 +361,12 @@ impl Workload for ChainWorkload {
             // client asks as often as the weight family allows.
             config.weights[usize::from(LOAD)] = OP_WEIGHT_CEILING;
         }
+        if crate::shape::downed_founder(ctx.state()) {
+            // The downed-founder scenario (#213 (three founding members)):
+            // its gates wait on a tenant step while a founder is down, so
+            // every client runs one as often as the weight family allows.
+            config.weights[usize::from(TENANT)] = OP_WEIGHT_CEILING;
+        }
         let lagging_fold = crate::shape::lagging_fold(ctx.state());
         if lagging_fold {
             // The lagging-fold scenario (#189): its gate waits on a joiner
@@ -480,6 +486,11 @@ impl Workload for ChainWorkload {
         if crate::shape::slow_machine(ctx.state()) && !operations.contains(&LOAD) {
             operations.push(LOAD);
         }
+        // Likewise `TENANT` on a downed-founder seed (#213 (three founding
+        // members)).
+        if crate::shape::downed_founder(ctx.state()) && !operations.contains(&TENANT) {
+            operations.push(TENANT);
+        }
         tracing::info!(?config, "chain_config");
         let time = ctx.time().clone();
         let shutdown = ctx.shutdown().clone();
@@ -495,13 +506,15 @@ impl Workload for ChainWorkload {
         // A joiner this client just registered: the next step grows a
         // configuration onto it (the `REGISTER_NODE` arm).
         let mut reconfigure_next = false;
-        // The wiped-founder (#246), replaced-founder (#423) and
-        // slow-machine (#424) scenarios: client 0 runs `init` first, so the
-        // cell decree runs inside the chaos window.
+        // The wiped-founder (#246), replaced-founder (#423), slow-machine
+        // (#424) and downed-founder (#213 (three founding members))
+        // scenarios: client 0 runs `init` first, so the cell decree runs
+        // inside the chaos window.
         let mut init_first = self.client_id == 0
             && (crate::shape::wiped_founder(ctx.state())
                 || crate::shape::replaced_founder(ctx.state())
-                || crate::shape::slow_machine(ctx.state()));
+                || crate::shape::slow_machine(ctx.state())
+                || crate::shape::downed_founder(ctx.state()));
         let mut successful_after_ambiguity = false;
         // The library's decisions as outcomes (#221): a write redirected
         // and written at the leader, an ambiguous write the session settled,
@@ -551,6 +564,7 @@ impl Workload for ChainWorkload {
             &deployment,
             crate::shape::identifiers(ctx.state()),
             crate::shape::system_journals(ctx.state()),
+            crate::shape::founder_ranks(ctx.state(), deployment.acceptors().len()).len(),
             &crate::shape::joiner_machines(ctx.state(), deployment.joiners().len()),
             (client_id, LeaderSeeds::new(ctx.random().random::<u128>())),
             request_timeout,

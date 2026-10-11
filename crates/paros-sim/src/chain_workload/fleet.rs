@@ -56,8 +56,8 @@ use std::future::Future;
 use std::time::Duration;
 
 use moonpool_sim::{
-    RandomProvider, SimContext, StateHandle, TimeProvider, assert_always, assert_reachable,
-    assert_sometimes, buggify_with_prob,
+    RandomProvider, SimContext, SimTimeProvider, StateHandle, TimeProvider, assert_always,
+    assert_reachable, assert_sometimes, buggify_with_prob,
 };
 use paros::client::checkpoint::{CheckpointPolicy, Checkpointer, Folder, LoadOutcome, OpenOutcome};
 use paros::client::fleet::{FleetRefusal, FleetSession, Interrupted, Run, Stage, Step};
@@ -177,6 +177,9 @@ pub(super) struct FleetOps {
     replaced: replaced::Steps,
     /// The run's shared state: the completed removals (#239).
     state: StateHandle,
+    /// The simulated clock: when an operation ran (#213 (three founding
+    /// members)).
+    time: SimTimeProvider,
 }
 
 impl FleetOps {
@@ -220,6 +223,7 @@ impl FleetOps {
             journal_names: BTreeMap::new(),
             replaced: replaced::Steps::default(),
             state: ctx.state().clone(),
+            time: ctx.time().clone(),
         })
     }
 
@@ -628,10 +632,29 @@ impl FleetOps {
                 assert_reachable!("fleet: a duplicate tenant id is refused");
             }
         }
+        let started = self.time.now();
         let run = session
             .create_tenant(client, first, &name, draws.clone(), Duration::ZERO)
             .await;
         run.steps.iter().copied().for_each(reach);
+        if !run.steps.is_empty()
+            && crate::machine::founder_down_through(&self.state, started, self.time.now())
+        {
+            // #213 (three founding members): the cell control journal and
+            // the fleet tenant chose this run's writes without that member.
+            assert_reachable!(
+                "fleet: a control-journal write is chosen with a founding member down"
+            );
+            if matches!(
+                run.outcome,
+                Step::Done {
+                    last: Some(Stage::TenantReady),
+                    ..
+                }
+            ) {
+                assert_reachable!("fleet: a tenant is created with a founding member down");
+            }
+        }
         self.created(session, &name, &run);
         match run.outcome {
             Step::Done { result, .. } => {
