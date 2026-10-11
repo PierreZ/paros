@@ -151,8 +151,10 @@ pub(crate) const JOINER_POOL_RANGE: std::ops::RangeInclusive<usize> = 0..=2;
 /// (`crate::shape::machine_layout`). One is the one-founder cell; two is a
 /// cell whose majority is both founders, or a founder and a waiting machine;
 /// three a cell that keeps a quorum through one founder's loss (#213 (three
-/// founding members), `crate::world::downed_founder`).
-pub(crate) const MACHINE_POOL_RANGE: std::ops::RangeInclusive<usize> = 1..=3;
+/// founding members), `crate::world::downed_founder`); four leaves room for
+/// admitted storage machines a journal moves between (#474 (journals on
+/// admitted machines)).
+pub(crate) const MACHINE_POOL_RANGE: std::ops::RangeInclusive<usize> = 1..=4;
 /// Per-seed **frontend pool** draw (inclusive, #192 (the frontend)): the
 /// frontend process group (`crate::roles::FRONTEND_GROUP`), each the shipped
 /// `run_frontend` in front of the machines' founding members. Zero is a seed

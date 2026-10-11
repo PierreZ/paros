@@ -75,6 +75,7 @@ use crate::shape::MachineLayout;
 mod admit;
 mod cell;
 mod converge;
+mod drain;
 mod election;
 mod journals;
 mod load;

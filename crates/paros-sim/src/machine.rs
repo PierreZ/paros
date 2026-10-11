@@ -222,6 +222,21 @@ pub(crate) fn admitted_into(state: &StateHandle, cell_id: u64) -> Vec<u64> {
         .collect()
 }
 
+/// Every node id a machine minted this run (#474 (journals on admitted
+/// machines)): the record on each disk now, and every wiped machine's old
+/// id. The cell may place a journal on any it registered, an admission in
+/// flight included.
+pub(crate) fn minted_ids(state: &StateHandle) -> BTreeSet<u64> {
+    let board = machine_board(state);
+    let board = lock(&board);
+    board
+        .nodes
+        .values()
+        .copied()
+        .chain(board.wiped.iter().map(|(_, old)| *old))
+        .collect()
+}
+
 /// Whether the machine at `addr` holds an admission on its disk now (#216).
 pub(crate) fn is_admitted(state: &StateHandle, addr: &Address) -> bool {
     let board = machine_board(state);

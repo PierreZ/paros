@@ -72,6 +72,7 @@ use moonpool_rpc::{AccessClass, RpcHandle, ServiceGroup};
 use paros_core::{LeaderUuid, NodeId};
 use tokio_util::sync::CancellationToken;
 
+use super::moves::Moves;
 use super::tenants::TenantDesk;
 use super::{CellPlan, Class, ControlJournals, FormedCell, incarnation_from_halves};
 use crate::client::cell::CellSession;
@@ -249,6 +250,8 @@ pub struct Watch {
     next: Duration,
     /// When each machine last answered as itself.
     heard: BTreeMap<NodeId, Duration>,
+    /// Whether the last call ran a round.
+    ran: bool,
 }
 
 impl Watch {
@@ -272,7 +275,14 @@ impl Watch {
             started: now,
             next: now,
             heard: BTreeMap::new(),
+            ran: false,
         }
+    }
+
+    /// Whether the last [`Watch::round`] call ran a round.
+    #[must_use]
+    pub fn ran(&self) -> bool {
+        self.ran
     }
 
     /// Run one round if one is due at `now`, writing each change through
@@ -290,7 +300,8 @@ impl Watch {
         names: &Names,
         session: &mut CellSession,
     ) -> Result<usize, Interrupted> {
-        if client.now() < self.next {
+        self.ran = client.now() >= self.next;
+        if !self.ran {
             return Ok(0);
         }
         self.next = client.now() + self.every;
@@ -463,6 +474,10 @@ struct Candidacy {
     /// the record were lost (a BUGGIFY decision): the fold still names the
     /// term's leader, and the term must not come back.
     lose_resign: bool,
+    /// The first term that advances a move resigns right after that step
+    /// (a BUGGIFY decision, #474 (journals on admitted machines)): a later
+    /// term must finish the move.
+    quit_mid_move: bool,
     /// The first ended term's group outlives the term by one step (a
     /// BUGGIFY decision, #404): a request that reaches it is refused by the
     /// application (`not_coordinator`), then the group drops and the next
@@ -503,6 +518,7 @@ pub(crate) fn spawn<P: Providers>(
         abandon: moonpool_buggify::buggify_with_prob!(0.3),
         lose_resign: moonpool_buggify::buggify_with_prob!(0.5),
         linger: moonpool_buggify::buggify_with_prob!(0.5),
+        quit_mid_move: moonpool_buggify::buggify_with_prob!(0.5),
     };
     let mut client = cell_client(providers, rpc, formed).with_shutdown(shutdown.clone());
     if let Some(observer) = observer {
@@ -578,6 +594,7 @@ async fn campaign<P: Providers>(
         abandon,
         mut lose_resign,
         mut linger,
+        mut quit_mid_move,
     } = candidacy;
     let founder_ids: Vec<NodeId> = plan.members.iter().map(|(id, _)| *id).collect();
     let journals = plan.control_journals();
@@ -613,6 +630,8 @@ async fn campaign<P: Providers>(
     let mut resigned: Option<u64> = None;
     // The served term's session and its watch over the cell's machines.
     let mut watching: Option<(CellSession, Watch)> = None;
+    // The served term's moves off draining machines (#474).
+    let mut moves = Moves::default();
     // The served term's dynamic endpoint (#404).
     let mut group: Option<TermGroup> = None;
     let mut steps = 0_u64;
@@ -639,6 +658,7 @@ async fn campaign<P: Providers>(
                     let watch = Watch::new(client.now(), tunables.renew_every, down_after);
                     (session, watch)
                 });
+                moves = Moves::default();
                 match duty {
                     TermDuty::Served { .. } => {
                         served = Some(leader.term);
@@ -703,15 +723,39 @@ async fn campaign<P: Providers>(
                 continue;
             }
             Step::Leading { .. } if watching.is_some() => {
-                if let Some((session, watch)) = watching.as_mut()
-                    && watch
+                let mut stepped = None;
+                if let Some((session, watch)) = watching.as_mut() {
+                    match watch
                         .round(&providers, &rpc, &client, &names, session)
                         .await
-                        .is_err()
-                {
-                    // The term's first write that did not land ends its
-                    // watch: never fight the session that fenced it.
-                    watching = None;
+                    {
+                        // The term's first write that did not land ends its
+                        // watch: never fight the session that fenced it.
+                        Err(_) => watching = None,
+                        // A round ran: the tenant coordinator takes one step
+                        // of a move off a draining machine (#474).
+                        Ok(_) if watch.ran() => {
+                            if let Some((_, desk)) = desk.as_mut() {
+                                let ctx = (&providers, &rpc, &names, &client);
+                                stepped = Some(moves.step(ctx, session, desk).await);
+                            }
+                        }
+                        Ok(_) => {}
+                    }
+                }
+                match stepped {
+                    Some(None) => watching = None,
+                    Some(Some(step)) if step.in_flight() && quit_mid_move => {
+                        // A term that stops in the middle of a move: the
+                        // next term finds the move where this one left it.
+                        quit_mid_move = false;
+                        moonpool_assertions::reachable!("coordinator: a term resigned mid-move");
+                        desk = None;
+                        watching = None;
+                        served = None;
+                        election.resign(None).await;
+                    }
+                    _ => {}
                 }
             }
             Step::Deposed { .. } => {

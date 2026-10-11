@@ -67,7 +67,7 @@ use crate::client::fleet::Interrupted;
 use crate::client::journals::{JournalAnswer, JournalOp, JournalRequest};
 use crate::client::{ClaimOutcome, Client, ClientTunables, WriterOutcome};
 use crate::placement::{self, Shortfall, Step, Want};
-use crate::system::{Booking, BookingTarget, Registry, Role, SystemCommand};
+use crate::system::{Booking, BookingTarget, NodeStanding, Registry, Role, SystemCommand};
 use crate::tenant::{
     CellKind, Description, Desired, DesiredMode, RequestOutcome, TenantCommand, TenantControl,
 };
@@ -293,10 +293,10 @@ impl TenantDesk {
         }
     }
 
-    /// A create: place it inside the founding members' free slots, book
-    /// them, then write it. A create the cell has no slot for is recorded
-    /// `Unplaceable`; one whose founding members are not all registered yet
-    /// answers unavailable.
+    /// A create: place it inside the free slots of the cell's storage
+    /// machines, founding or admitted (#474), book them, then write it. A
+    /// create the cell has no slot for is recorded `Unplaceable`; one whose
+    /// machines are not all registered yet answers unavailable.
     async fn create<P: Providers>(
         &mut self,
         client: &Client<P>,
@@ -305,19 +305,24 @@ impl TenantDesk {
         cell: Option<&mut CellSession>,
     ) -> JournalAnswer {
         let tenant = request.tenant;
-        let wanted = desired.acceptors();
-        let count = match desired.mode {
-            DesiredMode::Redundancy(_) => wanted.max(1).min(self.founders.len()),
-            DesiredMode::Grid { .. } => wanted,
-        };
-        if count > self.founders.len() {
-            moonpool_assertions::reachable!("tenant coordinator: a create is unplaceable");
-            return self.refuse(client, request, name).await;
-        }
         let Some(cell) = cell else {
             // The term's cell session ended: no slot can be booked.
             return JournalAnswer::Unavailable;
         };
+        let storage = self.storage(cell.registry());
+        assert!(
+            storage.len() >= self.founders.len(),
+            "every founding member stores"
+        );
+        let wanted = desired.acceptors();
+        let count = match desired.mode {
+            DesiredMode::Redundancy(_) => wanted.max(1).min(storage.len()),
+            DesiredMode::Grid { .. } => wanted,
+        };
+        if count > storage.len() {
+            moonpool_assertions::reachable!("tenant coordinator: a create is unplaceable");
+            return self.refuse(client, request, name).await;
+        }
         // A live name answers `NameTaken` at apply: it books nothing. An
         // unsettled fold may lack a live journal whose create landed
         // unanswered: its orphans wait for a settled one.
@@ -338,9 +343,9 @@ impl TenantDesk {
             };
             let members = if named || self.desk(tenant).state().is_taken(id) {
                 // Refused at apply (`NameTaken` or `IdTaken`): any members do.
-                self.founders.iter().copied().take(count).collect()
+                storage.iter().copied().take(count).collect()
             } else {
-                let machines = placement::machines(cell.registry(), self.founders.iter().copied());
+                let machines = placement::machines(cell.registry(), storage.iter().copied());
                 let current: Vec<(u64, Booking)> = cell
                     .registry()
                     .bookings()
@@ -401,6 +406,28 @@ impl TenantDesk {
             moonpool_assertions::reachable!("tenant coordinator: an id taken is drawn again");
         }
         JournalAnswer::Unavailable
+    }
+
+    /// The cell's storage machines a create may be placed on (#474): the
+    /// founding members, registered or not, and every registered machine
+    /// whose class stores. A draining or retired machine takes no new
+    /// journal.
+    pub(super) fn storage(&self, registry: &Registry) -> BTreeSet<NodeId> {
+        let mut storage: BTreeSet<NodeId> = self.founders.iter().copied().collect();
+        storage.extend(
+            registry
+                .nodes()
+                .filter(|(_, n)| {
+                    n.standing == NodeStanding::Registered && n.class == Role::Acceptor.class()
+                })
+                .map(|(id, _)| id),
+        );
+        if storage.len() > self.founders.len() {
+            moonpool_assertions::reachable!(
+                "tenant coordinator: an admitted machine may take a create"
+            );
+        }
+        storage
     }
 
     /// Release every slot booked for a journal of `tenant` that is not a
@@ -470,7 +497,7 @@ impl TenantDesk {
     /// If the registry refuses a booking the placement computed from its own
     /// fold for another reason than a spent id: the session is the cell
     /// control journal's one writer, so its fold is the registry at its tail.
-    async fn book<P: Providers>(
+    pub(super) async fn book<P: Providers>(
         &mut self,
         client: &Client<P>,
         cell: &mut CellSession,

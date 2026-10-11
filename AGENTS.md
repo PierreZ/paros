@@ -266,7 +266,7 @@ configuration, not a transitional state. Before touching `on_check_leader`, `Ele
   half: retire no node a reconfiguration it asked for above the floor names.
 - **One matchmaker set per tenant** (#190): a set keeps one registry per journal of its tenant,
   in one store, and every message names its journal. A machine's journals are born with their
-  tenant's set on the founding members until they move onto admitted machines (#474).
+  tenant's set on the founding members, on admitted machines too (#474); #501 moves the sets.
 - **Matchmaker sets are generations**: every matchmaking message is fenced by generation;
   matchmaker quorums are **majorities only**; the handover's decree is the shared `Proposer` +
   `Acceptor` over a one-slot log (no second Paxos kernel) and opens strictly above the stop

@@ -837,6 +837,7 @@ impl ChainWorkload {
                         victim,
                         RetireRequest {
                             gc_watermark: evidence,
+                            ..RetireRequest::default()
                         },
                     )
                     .await;

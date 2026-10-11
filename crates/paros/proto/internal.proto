@@ -34,6 +34,10 @@ message RetireRequest {
   // belief a reboot resets. Absent, or at or below the node's own membership
   // fence, the request is refused with "not_collected".
   .paros.common.v1.Ballot gc_watermark = 1;
+  // The journal this node leaves (#474): a machine serves many. Unset on a
+  // node that serves one journal: then its first journal.
+  uint64 tenant = 2;
+  uint64 journal = 3;
 }
 
 message RetireAck {

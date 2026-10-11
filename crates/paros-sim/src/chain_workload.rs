@@ -361,6 +361,18 @@ impl Workload for ChainWorkload {
             // client asks as often as the weight family allows.
             config.weights[usize::from(LOAD)] = OP_WEIGHT_CEILING;
         }
+        if crate::shape::drained_machine(ctx.state()) {
+            // The drained-machine scenario (#474 (journals on admitted
+            // machines)): a move needs admitted machines, tenants, journals
+            // and a drain, so every client runs each as often as the weight
+            // family allows.
+            for op in [ADMIT, TENANT, CREATE_JOURNAL] {
+                config.weights[usize::from(op)] = OP_WEIGHT_CEILING;
+            }
+            // Journals exist only late in a run: every client runs the
+            // steps knob's top, so a drain still finds ops after them.
+            config.steps = config.steps.max(64);
+        }
         if crate::shape::downed_founder(ctx.state()) {
             // The downed-founder scenario (#213 (three founding members)):
             // its gates wait on a tenant step while a founder is down, so
@@ -491,6 +503,15 @@ impl Workload for ChainWorkload {
         if crate::shape::slow_machine(ctx.state()) && !operations.contains(&LOAD) {
             operations.push(LOAD);
         }
+        // Likewise the drained-machine scenario's ops (#474 (journals on
+        // admitted machines)).
+        if crate::shape::drained_machine(ctx.state()) {
+            for op in [ADMIT, TENANT, CREATE_JOURNAL] {
+                if !operations.contains(&op) {
+                    operations.push(op);
+                }
+            }
+        }
         // Likewise `TENANT` on a downed-founder seed (#213 (three founding
         // members)).
         if crate::shape::downed_founder(ctx.state()) && !operations.contains(&TENANT) {
@@ -523,7 +544,8 @@ impl Workload for ChainWorkload {
             && (crate::shape::wiped_founder(ctx.state())
                 || crate::shape::replaced_founder(ctx.state())
                 || crate::shape::slow_machine(ctx.state())
-                || crate::shape::downed_founder(ctx.state()));
+                || crate::shape::downed_founder(ctx.state())
+                || crate::shape::drained_machine(ctx.state()));
         let mut successful_after_ambiguity = false;
         // The library's decisions as outcomes (#221): a write redirected
         // and written at the leader, an ambiguous write the session settled,

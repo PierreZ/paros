@@ -1003,6 +1003,7 @@ pub async fn retire(
     };
     let request = RetireRequest {
         gc_watermark: Some(watermark),
+        ..RetireRequest::default()
     };
     match client.retire(target, request).await {
         RetireOutcome::Retired => {

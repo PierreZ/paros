@@ -877,10 +877,6 @@ pub const RARE: &[Rare] = &[
         reason: "no work in the chaos window: fired on none of 1,000 hunt seeds (#495)",
     },
     Rare {
-        msg: "machine: an admitted machine names its cell to Inspect",
-        reason: "marginal: fired on 12 of 810 hunt seeds (#486)",
-    },
-    Rare {
         msg: "machine: an admitted machine acks its admission again",
         reason: "marginal: fired on none of 810 hunt seeds (#486)",
     },
@@ -1007,6 +1003,22 @@ pub const RARE: &[Rare] = &[
     Rare {
         msg: "view: a tenant scope sees its own spread",
         reason: "marginal: fired on 9 of 810 hunt seeds (#486)",
+    },
+    Rare {
+        msg: "coordinator: a move retires its old member",
+        reason: "a move off a drained machine: 4 hits on 2 of 4 runs over 400 hunt seeds (#498 (moves in the sweep))",
+    },
+    Rare {
+        msg: "coordinator: a term resigned mid-move",
+        reason: "a move off a drained machine: 4 hits over 400 hunt seeds (#498 (moves in the sweep))",
+    },
+    Rare {
+        msg: "coordinator: a move has no machine to go to",
+        reason: "a move off a drained machine: 13 hits on 3 of 4 runs over 400 hunt seeds (#498 (moves in the sweep))",
+    },
+    Rare {
+        msg: "placement: a journal moved off a draining machine",
+        reason: "a move off a drained machine: 4 hits on 1 of 4 runs over 400 hunt seeds (#498 (moves in the sweep))",
     },
 ];
 

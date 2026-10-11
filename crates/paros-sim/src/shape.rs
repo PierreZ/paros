@@ -652,6 +652,9 @@ struct Registry {
     /// Run-level: whether the run draws the downed-founder scenario (see
     /// [`downed_founder`]), fixed by the first caller.
     downed_founder: Option<bool>,
+    /// Run-level: whether the run draws the drained-machine scenario (see
+    /// [`drained_machine`]), fixed by the first caller.
+    drained_machine: Option<bool>,
     /// Run-level: whether the run draws the slow-link scenario (see
     /// [`slow_link`]), fixed by the first caller.
     slow_link: Option<bool>,
@@ -1049,6 +1052,36 @@ pub(crate) fn downed_founder(state: &StateHandle) -> bool {
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     *guard
         .downed_founder
+        .get_or_insert_with(|| !other && moonpool_sim::buggify_with_prob!(1.0))
+}
+
+/// Whether the run draws the **drained-machine scenario** (#474 (journals
+/// on admitted machines)): drawn once per seed, its own BUGGIFY location,
+/// never with a scenario that needs three founding members. A move needs a
+/// journal on an admitted storage machine, that machine drained, and
+/// another storage machine to go to. Each is a coin on its own: a machine
+/// outside the founding members is stateless on some seeds, an admission
+/// is one op among many, and a drain is a coin of `ADMIT`. In 300 hunt
+/// seeds without the scenario, an admitted machine served a journal on 4
+/// checks and no operator drained one. On a scenario seed the layout lists
+/// one founding member and every other machine stores, client 0 runs
+/// `init` first, the clients admit machines, create tenants and journals
+/// as often as the weight family allows, and an `ADMIT` drains an admitted
+/// machine that holds a journal's slot another storage machine could take,
+/// one at a time, at an `ADMIT` or right after a create, with every client
+/// at the steps knob's top (`crate::chain_workload`). Draining at `ADMIT`
+/// alone, 8 moves finished in 800 hunt seeds: most drains came before any
+/// journal. With the drain after a create, 11 finished in 400. Four move
+/// gates stay in `gates::RARE` until #498 (moves in the sweep).
+/// Rare-but-valid: an operator may drain a machine at any time.
+#[tracing::instrument(level = "debug", skip_all)]
+pub(crate) fn drained_machine(state: &StateHandle) -> bool {
+    // Drawn before the lock: the scenarios take the registry's lock too.
+    let other = moved_founder(state) || replaced_founder(state) || downed_founder(state);
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    *guard
+        .drained_machine
         .get_or_insert_with(|| !other && moonpool_sim::buggify_with_prob!(1.0))
 }
 
@@ -1468,6 +1501,7 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
     let moved = moved_founder(state);
     let replaced = replaced_founder(state);
     let downed = downed_founder(state);
+    let drained = drained_machine(state);
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     guard
@@ -1488,6 +1522,10 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
             };
             let founders = if count == 0 {
                 0
+            } else if drained {
+                // The drained-machine scenario: one founding member, and
+                // every other machine admitted.
+                1
             } else {
                 moonpool_sim::sim_random_range(least..count + 1)
             };
@@ -1500,12 +1538,13 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
             let rename_pct = buggify_knob!(0_u32, 20_u32..61_u32);
             let machines = (0..count)
                 .map(|rank| {
-                    let class = if rank >= founders && moonpool_sim::sim_random_bool(0.5) {
-                        assert_reachable!("machine: a machine outside the seeds is stateless");
-                        paros::machine::Class::Stateless
-                    } else {
-                        paros::machine::Class::Storage
-                    };
+                    let class =
+                        if rank >= founders && !drained && moonpool_sim::sim_random_bool(0.3) {
+                            assert_reachable!("machine: a machine outside the seeds is stateless");
+                            paros::machine::Class::Stateless
+                        } else {
+                            paros::machine::Class::Storage
+                        };
                     MachineDraw {
                         class,
                         capacity,
