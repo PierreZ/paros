@@ -495,13 +495,14 @@ impl Workload for ChainWorkload {
         // A joiner this client just registered: the next step grows a
         // configuration onto it (the `REGISTER_NODE` arm).
         let mut reconfigure_next = false;
-        // The wiped-founder (#246), replaced-founder (#423) and
-        // slow-machine (#424) scenarios: client 0 runs `init` first, so the
-        // cell decree runs inside the chaos window.
+        // The wiped-founder (#246), replaced-founder (#423), slow-machine
+        // (#424) and moved-founder (#211) scenarios: client 0 runs `init`
+        // first, so the cell decree runs inside the chaos window.
         let mut init_first = self.client_id == 0
             && (crate::shape::wiped_founder(ctx.state())
                 || crate::shape::replaced_founder(ctx.state())
-                || crate::shape::slow_machine(ctx.state()));
+                || crate::shape::slow_machine(ctx.state())
+                || crate::shape::moved_founder(ctx.state()));
         let mut successful_after_ambiguity = false;
         // The library's decisions as outcomes (#221): a write redirected
         // and written at the leader, an ambiguous write the session settled,

@@ -962,7 +962,11 @@ pub(crate) fn wiped_founder(state: &StateHandle) -> bool {
 /// `crate::world::moved_founder` crashes a founding member that comes back
 /// under a new name, then a machine
 /// whose cache names the founder's new name. Rare-but-valid: a machine that
-/// comes back under a new name is (#349).
+/// comes back under a new name is (#349). On a scenario seed the layout
+/// founds every machine of three, and one machine of two (a cell of two never
+/// renames), and client 0 runs `init` first: the gate went from 2 to 11
+/// hits in 1,000 hunt seeds, and moves from 29 to 113 (#465 (short catch-up
+/// fix), after a sweep missed it in 1,024 seeds).
 #[tracing::instrument(level = "debug", skip_all)]
 pub(crate) fn moved_founder(state: &StateHandle) -> bool {
     let registry = registry(state);
@@ -1338,10 +1342,19 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
         .machine_layout
         .get_or_insert_with(|| {
             // The replaced-founder scenario needs a cell that keeps a
-            // majority through one wipe: three founders or more.
-            let least = if replaced && count >= 3 { 3 } else { 1 };
+            // majority through one wipe: three founders or more. So does
+            // the moved-founder scenario, whose rename spares a cell of two:
+            // every machine a founder, so every machine caches the registry.
+            let least = if (replaced || moved) && count >= 3 {
+                3
+            } else {
+                1
+            };
             let founders = if count == 0 {
                 0
+            } else if moved && count == 2 {
+                // A cell of two never renames: found a cell of one.
+                1
             } else {
                 moonpool_sim::sim_random_range(least..count + 1)
             };
