@@ -218,6 +218,18 @@ impl<T: TimeProvider> NodeAudit<T> {
         board.applied(*journal, in_chaos);
     }
 
+    /// The chaos window must hold a working cell, or every write,
+    /// reconfiguration and crash-hint site stays silent (#495).
+    fn elected_in_chaos(&self) {
+        if self.time.now() < crate::CHAOS_DURATION {
+            let mut st = self.state();
+            reach_once!(
+                st.elected_in_chaos,
+                "a leader is elected inside the chaos window"
+            );
+        }
+    }
+
     fn now_ms(&self) -> u64 {
         u64::try_from(self.time.now().as_millis()).unwrap_or(u64::MAX)
     }
@@ -765,6 +777,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             board.elected_under(&members);
         }
         let now = self.now_ms();
+        self.elected_in_chaos();
         let mut st = self.state();
         // Matchmaking invariants 4 and 5 (#120): a leadership on a matchmaker
         // deployment stands on a campaign that closed with a quorum and was

@@ -654,7 +654,7 @@ pub const RARE: &[Rare] = &[
     },
     Rare {
         msg: "chain: the settle tail waits for a spare that joined in the tail",
-        reason: "marginal: fired in the sweep of PR #499 (journals on admitted machines), missed by the sweep of PR #503 (matchmaker sets off the founders) (#486)",
+        reason: "marginal: missed by the sweep of PR #503 (matchmaker sets off the founders), by one of three 200-seed hunt shards and by the sweep on #500 (two red hunt seeds) (#486)",
     },
     Rare {
         msg: "outage: a split-floor outage strikes in the recovery tail",
@@ -763,10 +763,6 @@ pub const RARE: &[Rare] = &[
     Rare {
         msg: "an acceptor declines a repeat contest of one overwrite",
         reason: "marginal: fired on 10 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "generation: a handover is abandoned while freezing",
-        reason: "no work in the chaos window: fired on 15 of 1,000 hunt seeds (#495)",
     },
     Rare {
         msg: "generation: a handover is abandoned while bootstrapping",
@@ -1037,10 +1033,6 @@ pub const RARE: &[Rare] = &[
         reason: "fired on 0 of 600 hunt seeds: a truncation lands in the recovery tail, where a driver hint cannot strike (#496 (two red hunt seeds), #484)",
     },
     Rare {
-        msg: "chain: the settle tail waits for a spare that joined in the tail",
-        reason: "marginal: missed by one of three 200-seed hunt shards and by the sweep on #500 (two red hunt seeds) (#486)",
-    },
-    Rare {
         msg: "machine: a machine no cell init lists restarts and waits",
         reason: "marginal: missed by the sweep on #500 (two red hunt seeds) (#486)",
     },
@@ -1059,7 +1051,8 @@ pub struct Verdict {
     /// Rare gates with no slot, as expected: `(message, reason)`.
     pub rare_missing: Vec<(&'static str, &'static str)>,
     /// Rare gates that fired anyway: candidates to delist.
-    pub rare_fired: Vec<&'static str>,
+    /// Each with its successes, so the next delisting has a number to read.
+    pub rare_fired: Vec<(&'static str, usize)>,
 }
 
 /// Judge the sweep's slots against [`DECLARED`] and [`RARE`].
@@ -1072,7 +1065,9 @@ pub fn judge(slots: &BTreeMap<String, AssertionStats>) -> Verdict {
         match (slot, rare.get(msg)) {
             (None, None) => verdict.missing.push((msg, site)),
             (None, Some(&reason)) => verdict.rare_missing.push((msg, reason)),
-            (Some(stats), Some(_)) if stats.successes > 0 => verdict.rare_fired.push(msg),
+            (Some(stats), Some(_)) if stats.successes > 0 => {
+                verdict.rare_fired.push((msg, stats.successes));
+            }
             (Some(_), _) => {}
         }
     }
@@ -1099,6 +1094,11 @@ pub fn print(verdict: &Verdict, indent: &str) {
         "{indent}known-rare gates that fired: {}",
         verdict.rare_fired.len()
     );
+    let mut fired = verdict.rare_fired.clone();
+    fired.sort_by_key(|&(msg, successes)| (successes, msg));
+    for (msg, successes) in fired {
+        println!("{indent}  - {msg}: {successes}");
+    }
 }
 
 /// The `n` declared gates that fired least often, rarest first: the
