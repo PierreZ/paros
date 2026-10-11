@@ -39,14 +39,18 @@ pub struct Rare {
 /// The declared gates the sweep may miss. A sweep runs 300 to 700 seeds
 /// before its coverage plateaus, so a gate that fires on fewer than about
 /// 1.5 % of seeds can miss one. Each rate is the number of seeds, of 810
-/// single-seed hunts (`sim-paros-hunt main 1`), on which the gate fired;
-/// a hit count is no measure, because one seed can fire a gate hundreds of
-/// times. #484 owns the recovery-tail sites, #485 the double fault, #486
-/// the rest.
+/// single-seed hunts (`sim-paros-hunt main 1`, or 1,000 where the reason
+/// says so), on which the gate fired; a hit count is no measure, because
+/// one seed can fire a gate hundreds of times. #495 owns the sites the chaos
+/// window seldom reaches, #485 the double fault, #486 the rest.
 pub const RARE: &[Rare] = &[
     Rare {
         msg: "journals: a create refused for capacity is asked again and placed",
         reason: "marginal: fired on 0 of 1,100 hunt seeds, missed by the sweep on main (#486)",
+    },
+    Rare {
+        msg: "static: the held seed freezes a grid column",
+        reason: "marginal: fired on 16 of 1,000 hunt seeds on main, missed by a sweep of 257 (#486)",
     },
     Rare {
         msg: "journals: a create the cell has no slot for is unplaceable",
@@ -206,19 +210,15 @@ pub const RARE: &[Rare] = &[
     },
     Rare {
         msg: "a handoff onto a node needing Phase-1 repair is refused",
-        reason: "a fault site silent in the recovery tail: fired on none of 810 hunt seeds (#484)",
+        reason: "no work in the chaos window: fired on none of 1,000 hunt seeds (#495)",
     },
     Rare {
         msg: "an uncovered inherited fence resigns back to an ordinary election",
-        reason: "a fault site silent in the recovery tail: fired on none of 810 hunt seeds (#484)",
+        reason: "no work in the chaos window: fired on none of 1,000 hunt seeds (#495)",
     },
     Rare {
         msg: "storage: a detected corruption crashes the node",
         reason: "the copy budget never plans a double fault: fired on none of 810 hunt seeds (#485)",
-    },
-    Rare {
-        msg: "the driver drops a relinquishment at the send seam",
-        reason: "a fault site silent in the recovery tail: fired on 7 of 810 hunt seeds (#484)",
     },
     Rare {
         msg: "the driver duplicates a relinquishment at the send seam",
@@ -241,10 +241,6 @@ pub const RARE: &[Rare] = &[
         reason: "marginal: fired on 1 of 810 hunt seeds (#486)",
     },
     Rare {
-        msg: "leadership is handed over more than once in a run",
-        reason: "a fault site silent in the recovery tail: fired on 3 of 810 hunt seeds (#484)",
-    },
-    Rare {
         msg: "a handoff addressed elsewhere is refused",
         reason: "a path the workload never takes: fired on none of 810 hunt seeds (#486)",
     },
@@ -262,7 +258,7 @@ pub const RARE: &[Rare] = &[
     },
     Rare {
         msg: "proxy: a delegated round survives a leader handoff",
-        reason: "a fault site silent in the recovery tail: fired on none of 810 hunt seeds (#484)",
+        reason: "no work in the chaos window: fired on 1 of 1,000 hunt seeds (#495)",
     },
     Rare {
         msg: "grid: a slot is decided on a column other than its own",
@@ -734,15 +730,15 @@ pub const RARE: &[Rare] = &[
     },
     Rare {
         msg: "machine: a peer book holds a fresh machine interface back",
-        reason: "a fault site silent in the recovery tail: fired on none of 810 hunt seeds (#484)",
+        reason: "no work in the chaos window: fired on none of 1,000 hunt seeds (#495)",
     },
     Rare {
         msg: "the driver crashes right after a journal re-opens",
-        reason: "a fault site silent in the recovery tail: fired on none of 810 hunt seeds (#484)",
+        reason: "no work in the chaos window: fired on 6 of 1,000 hunt seeds (#495)",
     },
     Rare {
         msg: "generation: the stall budget abandons a handover",
-        reason: "a fault site silent in the recovery tail: fired on none of 810 hunt seeds (#484)",
+        reason: "no work in the chaos window: fired on 1 of 1,000 hunt seeds (#495)",
     },
     Rare {
         msg: "generation: the driver skips a due handover re-send",
@@ -758,7 +754,7 @@ pub const RARE: &[Rare] = &[
     },
     Rare {
         msg: "generation: a handover is abandoned while freezing",
-        reason: "a fault site silent in the recovery tail: fired on 5 of 810 hunt seeds (#484)",
+        reason: "no work in the chaos window: fired on 15 of 1,000 hunt seeds (#495)",
     },
     Rare {
         msg: "generation: a handover is abandoned while bootstrapping",
@@ -766,11 +762,11 @@ pub const RARE: &[Rare] = &[
     },
     Rare {
         msg: "generation: a handover is abandoned mid-decree",
-        reason: "a fault site silent in the recovery tail: fired on none of 810 hunt seeds (#484)",
+        reason: "no work in the chaos window: fired on 6 of 1,000 hunt seeds (#495)",
     },
     Rare {
         msg: "a handoff leaves a leader that is still healing a hole",
-        reason: "a fault site silent in the recovery tail: fired on none of 810 hunt seeds (#484)",
+        reason: "no work in the chaos window: fired on none of 1,000 hunt seeds (#495)",
     },
     Rare {
         msg: "proxy: the driver runs a round colocated on a proxied deployment",
@@ -782,7 +778,7 @@ pub const RARE: &[Rare] = &[
     },
     Rare {
         msg: "grid: the driver overrides a round's column",
-        reason: "a fault site silent in the recovery tail: fired on none of 810 hunt seeds (#484)",
+        reason: "no work in the chaos window: fired on none of 1,000 hunt seeds (#495)",
     },
     Rare {
         msg: "recovery: a leader's recovery spans more than one bounded page",
@@ -790,7 +786,7 @@ pub const RARE: &[Rare] = &[
     },
     Rare {
         msg: "the driver crashes with a campaign's Prepares in flight",
-        reason: "a fault site silent in the recovery tail: fired on none of 810 hunt seeds (#484)",
+        reason: "no work in the chaos window: fired on none of 1,000 hunt seeds (#495)",
     },
     Rare {
         msg: "grid: a leader tears one slot's column and resigns",
@@ -806,7 +802,7 @@ pub const RARE: &[Rare] = &[
     },
     Rare {
         msg: "mailbox: overflow evicts across kinds",
-        reason: "a fault site silent in the recovery tail: fired on 6 of 810 hunt seeds (#484)",
+        reason: "no work in the chaos window: fired on 3 of 1,000 hunt seeds (#495)",
     },
     Rare {
         msg: "transport: a peer re-resolved a name to a new address",
@@ -870,15 +866,15 @@ pub const RARE: &[Rare] = &[
     },
     Rare {
         msg: "a matchmaker crashes between its registrations and its clears",
-        reason: "a fault site silent in the recovery tail: fired on 1 of 810 hunt seeds (#484)",
+        reason: "no work in the chaos window: fired on none of 1,000 hunt seeds (#495)",
     },
     Rare {
         msg: "a node crashes between its promise and its entries",
-        reason: "a fault site silent in the recovery tail: fired on 2 of 810 hunt seeds (#484)",
+        reason: "no work in the chaos window: fired on 1 of 1,000 hunt seeds (#495)",
     },
     Rare {
         msg: "a node crashes between its entry batches and its metainfo",
-        reason: "a fault site silent in the recovery tail: fired on none of 810 hunt seeds (#484)",
+        reason: "no work in the chaos window: fired on none of 1,000 hunt seeds (#495)",
     },
     Rare {
         msg: "machine: an admitted machine acks its admission again",
@@ -922,7 +918,7 @@ pub const RARE: &[Rare] = &[
     },
     Rare {
         msg: "machine: a machine dies between a set's format and its record",
-        reason: "a fault site silent in the recovery tail: fired on none of 810 hunt seeds (#484)",
+        reason: "no work in the chaos window: fired on none of 1,000 hunt seeds (#495)",
     },
     Rare {
         msg: "resolve: a machine knows no tenant by the name",
@@ -934,7 +930,7 @@ pub const RARE: &[Rare] = &[
     },
     Rare {
         msg: "machine: a machine dies between a journal's format and record",
-        reason: "a fault site silent in the recovery tail: fired on none of 810 hunt seeds (#484)",
+        reason: "no work in the chaos window: fired on none of 1,000 hunt seeds (#495)",
     },
     Rare {
         msg: "tenant coordinator: a desk superseded",
@@ -990,7 +986,7 @@ pub const RARE: &[Rare] = &[
     },
     Rare {
         msg: "a replica crashes after sync and before sending",
-        reason: "a fault site silent in the recovery tail: fired on 2 of 810 hunt seeds (#484)",
+        reason: "no work in the chaos window: fired on 1 of 1,000 hunt seeds (#495)",
     },
     Rare {
         msg: "edge: a peer batch from another cell is refused",

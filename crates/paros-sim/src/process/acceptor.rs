@@ -111,6 +111,7 @@ pub(super) async fn run_acceptor(
     crate::shape::withhold_gc(ctx.state());
     crate::shape::lost_verdict(ctx.state());
     crate::shape::lagging_fold(ctx.state());
+    crate::shape::handoff_storm(ctx.state());
     let shape = incarnation.shape;
     // The copy budget is sized by the run's configuration floor
     // (`crate::shape::config_floor`): the whole pool on a plain seed, the
