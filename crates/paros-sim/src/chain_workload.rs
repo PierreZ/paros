@@ -355,6 +355,12 @@ impl Workload for ChainWorkload {
             config.compact_every = 1;
             config.weights[usize::from(TRUNCATE)] = OP_WEIGHT_CEILING;
         }
+        if crate::shape::slow_machine(ctx.state()) {
+            // The slow-machine scenario (#424 (busyness metrics)): its
+            // gates wait on a `LOAD` while a machine is slow, so every
+            // client asks as often as the weight family allows.
+            config.weights[usize::from(LOAD)] = OP_WEIGHT_CEILING;
+        }
         let lagging_fold = crate::shape::lagging_fold(ctx.state());
         if lagging_fold {
             // The lagging-fold scenario (#189): its gate waits on a joiner
@@ -470,6 +476,10 @@ impl Workload for ChainWorkload {
         if lagging_fold && !operations.contains(&REGISTER_NODE) {
             operations.push(REGISTER_NODE);
         }
+        // Likewise `LOAD` on a slow-machine seed (#424 (busyness metrics)).
+        if crate::shape::slow_machine(ctx.state()) && !operations.contains(&LOAD) {
+            operations.push(LOAD);
+        }
         tracing::info!(?config, "chain_config");
         let time = ctx.time().clone();
         let shutdown = ctx.shutdown().clone();
@@ -485,12 +495,13 @@ impl Workload for ChainWorkload {
         // A joiner this client just registered: the next step grows a
         // configuration onto it (the `REGISTER_NODE` arm).
         let mut reconfigure_next = false;
-        // The wiped-founder (#246) and replaced-founder (#423) scenarios:
-        // client 0 runs `init` first, so the cell decree runs inside the
-        // chaos window.
+        // The wiped-founder (#246), replaced-founder (#423) and
+        // slow-machine (#424) scenarios: client 0 runs `init` first, so the
+        // cell decree runs inside the chaos window.
         let mut init_first = self.client_id == 0
             && (crate::shape::wiped_founder(ctx.state())
-                || crate::shape::replaced_founder(ctx.state()));
+                || crate::shape::replaced_founder(ctx.state())
+                || crate::shape::slow_machine(ctx.state()));
         let mut successful_after_ambiguity = false;
         // The library's decisions as outcomes (#221): a write redirected
         // and written at the leader, an ambiguous write the session settled,

@@ -626,6 +626,9 @@ struct Registry {
     /// Run-level: whether the run draws the silent-machine scenario (see
     /// [`silent_machine`]), fixed by the first caller.
     silent_machine: Option<bool>,
+    /// Run-level: whether the run draws the slow-machine scenario (see
+    /// [`slow_machine`]), fixed by the first caller.
+    slow_machine: Option<bool>,
     /// Run-level: whether the run draws the stalled-proxy scenario (see
     /// [`stalled_proxy`]), fixed by the first caller.
     stalled_proxy: Option<bool>,
@@ -1001,6 +1004,28 @@ pub(crate) fn silent_machine(state: &StateHandle) -> bool {
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     *guard
         .silent_machine
+        .get_or_insert_with(|| moonpool_sim::buggify_with_prob!(1.0))
+}
+
+/// Whether the run draws the **slow-machine scenario** (#424 (busyness
+/// metrics)): drawn once per seed, its own BUGGIFY location. A machine
+/// reports a CPU or a disk over 90 % busy only when it is slow, has real
+/// work, and a full `Load` window falls inside its slow time. The gray
+/// failures end with the chaos window, and no cell has formed by then, so
+/// a slow machine is idle: in 2,000 hunt seeds without the scenario, the
+/// disk and the CPU gates fired on 0 of 3,354 checks each; with it, on
+/// 1,761 and 162 of 24,635. On a scenario seed client 0 runs `init`
+/// first (`crate::chain_workload`), every machine samples at the 1 s floor
+/// of `load_interval` ([`boot`]), the clients ask `LOAD` as often as its
+/// weight family allows, and `crate::world::slow_machine` slows a founding
+/// member of the formed cell for a few seconds. Each ingredient keeps its
+/// own coin on the other seeds. Rare-but-valid: a slow machine is.
+#[tracing::instrument(level = "debug", skip_all)]
+pub(crate) fn slow_machine(state: &StateHandle) -> bool {
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    *guard
+        .slow_machine
         .get_or_insert_with(|| moonpool_sim::buggify_with_prob!(1.0))
 }
 
@@ -1447,11 +1472,21 @@ fn registry(state: &StateHandle) -> Arc<Mutex<Registry>> {
 #[tracing::instrument(level = "debug", skip(state), fields(ip = %ip))]
 pub(crate) fn boot(state: &StateHandle, ip: &str) -> Incarnation {
     let slow = slow_link(state);
+    // Drawn before the lock: the scenarios take the registry's lock too.
+    let slow_machine = slow_machine(state);
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
-    let entry = guard.nodes.entry(ip.to_string()).or_insert_with(|| Entry {
-        shape: NodeShape::draw(slow),
-        incarnations: 0,
+    let entry = guard.nodes.entry(ip.to_string()).or_insert_with(|| {
+        let mut shape = NodeShape::draw(slow);
+        if slow_machine {
+            // The slow-machine scenario: a full window every second, so
+            // one falls inside the slow time.
+            shape.tunables.load_interval = paros::LOAD_INTERVAL_FLOOR;
+        }
+        Entry {
+            shape,
+            incarnations: 0,
+        }
     });
     entry.incarnations += 1;
     let incarnation = Incarnation {

@@ -1077,6 +1077,16 @@ uses FDB's key names.
 - **Simulation.** The same code runs there. moonpool's simulated disk counts its own activity
   per process, and the operator's `LOAD` operation checks that every answer is exactly
   `Busyness::between` of two samples the simulator handed to that machine.
+  On about half of the seeds, moonpool's CPU model gives each process one core: every poll,
+  every byte sent and every byte written costs time on it, so a busy machine answers late and
+  its CPU counters are real (#424 (busyness metrics), 2026-10-11). Gray failures keep one
+  acceptor and one machine alive and slow (CPU, disk or network, by the seed's mask) for a long
+  part of the chaos window. Before a cell forms, `LOAD` asks the machines the operator was
+  given, so the chaos window sees answers too. A cell forms only after the chaos window on most
+  seeds, so a slow-machine scenario slows a founding member of the formed cell for a few
+  seconds, at most `LATE_WINDOW` into the tail. The gates show a disk and a CPU over 90 % busy,
+  and a slow machine that reports more busyness than every healthy machine of its cell. paros adds no `cpu_charge` yet: the byte
+  costs already charge sends and writes, and a charge goes only where a profile shows real work.
 
 ### 3.7 The universe
 
