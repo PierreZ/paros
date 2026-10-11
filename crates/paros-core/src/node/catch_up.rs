@@ -176,7 +176,19 @@ impl ColocatedNode {
         let sealed = self.replica.trim_to(point, state);
         self.acceptor
             .trim_to(point, sealed, &mut self.pending_writes);
-        // A probe blocked below the point is resolved by the jump as well.
+        // A probe blocked below the point is resolved by the jump as well:
+        // the slot is chosen and gone cluster-wide (#409, the split-floor
+        // outage reaches it).
+        if self
+            .proposer
+            .probe()
+            .is_some_and(|probe| probe.blocked().first().is_some_and(|s| *s < point))
+        {
+            probe!(
+                reachable,
+                "catch-up: a trim-point jump resolves a repair probe's blocked slot"
+            );
+        }
         self.proposer.probe_retain_from(point);
         self.proposer.retain_rounds_from(point);
         self.proposer.raise_next_slot(point);

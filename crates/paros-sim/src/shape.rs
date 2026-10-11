@@ -641,6 +641,9 @@ struct Registry {
     /// Run-level: whether the run draws the lagging-acceptor scenario (see
     /// [`lagging_acceptor`]), fixed by the first caller.
     lagging_acceptor: Option<bool>,
+    /// Run-level: whether the run draws the split-floor scenario (see
+    /// [`split_floor`]), fixed by the first caller.
+    split_floor: Option<bool>,
     /// Run-level: whether the run runs the system journals (see
     /// [`system_journals`]), fixed by the first caller.
     system: Option<bool>,
@@ -1076,6 +1079,35 @@ pub(crate) fn lagging_acceptor(state: &StateHandle) -> bool {
     *guard
         .lagging_acceptor
         .get_or_insert_with(|| !straggler && !bare && moonpool_sim::buggify_with_prob!(1.0))
+}
+
+/// Whether the run draws the **split-floor scenario** (#409 (repair probe
+/// blocked below a trim point)): drawn once per seed, its own BUGGIFY
+/// location, never on a departed-straggler, bare-quorum or
+/// lagging-acceptor seed (each of those owns the run's outage or its held
+/// acceptor). A leader jumps with its repair probe open only when one
+/// acceptor's floor passed a slot its peers still hold, every peer's copy
+/// of that slot is lost, and the ahead acceptor is out of the winning
+/// quorum: 0 such jumps in 900 hunt seeds without it. On a scenario seed
+/// `crate::world::split_floor` strikes the outage at that split and holds
+/// the ahead acceptor down last, and every client compacts at every
+/// truncation step (`ChainWorkload`). Each ingredient keeps its own coin on
+/// the other seeds. Rare-but-valid: a correlated outage is, and so is a
+/// client that compacts often.
+#[tracing::instrument(level = "debug", skip_all)]
+pub(crate) fn split_floor(state: &StateHandle) -> bool {
+    let straggler = departed_straggler(state);
+    let bare = bare_quorum(state);
+    let lagging = lagging_acceptor(state);
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    *guard.split_floor.get_or_insert_with(|| {
+        let split = !straggler && !bare && !lagging && moonpool_sim::buggify_with_prob!(1.0);
+        if split {
+            assert_reachable!("a run draws the split-floor scenario");
+        }
+        split
+    })
 }
 
 /// The fewest blocks a segment's entry log may have (floor of

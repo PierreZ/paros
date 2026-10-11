@@ -440,6 +440,91 @@ impl StorageWorld {
             .any(|(slot, _)| Self::short_of_a_member(&live, *slot, decided))
     }
 
+    /// The split floor (#409, `super::split_floor`), if one shows: the
+    /// acceptors whose floor is the highest (the ahead ones), and the
+    /// lowest decided slot below it that an acceptor behind them still
+    /// holds, at or above every behind acceptor's floor. Settled or not.
+    pub(crate) fn split_floor(&self, decided: &BTreeMap<u64, Vec<u64>>) -> Option<(Vec<u64>, u64)> {
+        let live: Vec<&Custody> = self
+            .custody
+            .iter()
+            .filter(|(key, _)| !self.replicas.contains(*key) && !self.parked.contains_key(*key))
+            .map(|(_, c)| c)
+            .collect();
+        let ahead_floor = live.iter().map(|c| c.first).max()?;
+        let behind: Vec<&&Custody> = live.iter().filter(|c| c.first < ahead_floor).collect();
+        let behind_floor = behind.iter().map(|c| c.first).max()?;
+        let slot = decided
+            .range(behind_floor..ahead_floor)
+            .map(|(slot, _)| *slot)
+            .find(|slot| behind.iter().any(|c| c.records.contains_key(slot)))?;
+        let ahead = live
+            .iter()
+            .filter(|c| c.first == ahead_floor)
+            .map(|c| c.node)
+            .collect();
+        Some((ahead, slot))
+    }
+
+    /// Plan the split-floor outage's loss (#409, `super::split_floor`):
+    /// at the split floor ([`Self::split_floor`]), lose every copy of the
+    /// slot the acceptors behind it hold. The slot is chosen and truncated
+    /// on the ahead acceptors, so nothing is lost: a leader blocked on it
+    /// (CTRL Case 3) jumps past it to an ahead acceptor's trim point.
+    /// `None` while no split shows, or while a holder of the slot is
+    /// unsettled (its layout is not known, so its copy would stay clean and
+    /// decide the slot).
+    #[tracing::instrument(level = "debug", skip_all)]
+    pub(crate) fn plan_split_floor_loss(
+        &mut self,
+        decided: &BTreeMap<u64, Vec<u64>>,
+    ) -> Option<PlannedLoss> {
+        if self.cluster_size == 0 {
+            return None;
+        }
+        let (ahead, slot) = self.split_floor(decided)?;
+        let holders: Vec<(String, u64, bool)> = self
+            .custody
+            .iter()
+            .filter(|(key, c)| {
+                !self.replicas.contains(*key)
+                    && !self.parked.contains_key(*key)
+                    && c.records.contains_key(&slot)
+            })
+            .map(|(key, c)| (key.clone(), c.node, c.settled))
+            .collect();
+        if holders.iter().any(|(_, _, settled)| !settled) {
+            return None;
+        }
+        let damaged: Vec<(String, u64)> = holders
+            .iter()
+            .filter(|(key, _, _)| {
+                !self.marks.get(key).is_some_and(|m| m.contains(&slot))
+                    && !self.rotted.get(key).is_some_and(|m| m.contains(&slot))
+            })
+            .map(|(key, node, _)| (key.clone(), *node))
+            .collect();
+        if damaged.is_empty() {
+            return None;
+        }
+        // An ahead acceptor truncated the slot: it holds no copy to lose.
+        assert_always!(
+            damaged.iter().all(|(_, node)| !ahead.contains(node)),
+            "storage: a split-floor loss never damages the ahead acceptor",
+            { "slot" => slot }
+        );
+        for (key, _) in &damaged {
+            self.marks.entry(key.clone()).or_default().insert(slot);
+            self.pending.insert(key.clone(), slot);
+        }
+        assert_reachable!("storage: a split-floor outage loses a slot below a peer's floor");
+        Some(PlannedLoss {
+            slot,
+            holders: holders.iter().map(|(_, node, _)| *node).collect(),
+            damaged: damaged.iter().map(|(_, node)| *node).collect(),
+        })
+    }
+
     /// The slot an outage's loss aims at (see [`Self::plan_outage_loss`]):
     /// a decided slot above every holder's floor, the most recent or a
     /// uniform one.

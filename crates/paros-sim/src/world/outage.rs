@@ -308,6 +308,17 @@ pub(super) fn strike(ctx: &FaultContext, kept: &[u64]) -> SimulationResult<()> {
     let straggler = clean.unwrap_or_else(|| {
         usize::try_from(sim_random_range(0..acceptors.len().max(1) as u64)).unwrap_or(0)
     });
+    strike_with_straggler(ctx, &acceptors, &proxies, straggler)
+}
+
+/// Take `acceptors` and `proxies` down now, each back after its own delay
+/// in [`DOWN`], the acceptor of rank `straggler` in [`STRAGGLER`].
+fn strike_with_straggler(
+    ctx: &FaultContext,
+    acceptors: &[String],
+    proxies: &[String],
+    straggler: usize,
+) -> SimulationResult<()> {
     let millis = |range: &std::ops::Range<Duration>| {
         Duration::from_millis(sim_random_range(
             u64::try_from(range.start.as_millis()).unwrap_or(0)
@@ -322,7 +333,7 @@ pub(super) fn strike(ctx: &FaultContext, kept: &[u64]) -> SimulationResult<()> {
         };
         ctx.crash_for(ip, down)?;
     }
-    for ip in &proxies {
+    for ip in proxies {
         ctx.crash_for(ip, millis(&DOWN))?;
     }
     Ok(())

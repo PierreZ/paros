@@ -345,7 +345,11 @@ Three layers, and nothing crosses them:
   scenario, the one acceptor it holds down may stay down at most `LATE_WINDOW` into the tail
   (`paros_sim::world::lagging_acceptor`, #340). Likewise on a seed that draws the
   replaced-founder scenario, its wipe of a founder may strike at most `LATE_WINDOW` into the
-  tail, once every founder formed (`paros_sim::world::replaced_founder`, #423).
+  tail, once every founder formed (`paros_sim::world::replaced_founder`, #423). Likewise on a
+  seed that draws the split-floor scenario (decided on 2026-10-11, #409), the acceptors whose
+  floor passed a slot the others hold go down at most `SPLIT_WINDOW` (16 s) into the tail, for
+  at most `HOLD`, then the outage strikes the others (`paros_sim::world::split_floor`): a split
+  floor shows mostly 5 to 20 s into a run.
 - **`paros-core` is never buggified**: no RNG, knob or conditional compilation. A rare-but-valid
   decision is exposed as a method with an honest contract (`resend_pending`, `step_down`) and
   perturbed only by a caller that stops calling.
