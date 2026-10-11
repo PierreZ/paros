@@ -2183,37 +2183,58 @@ impl Workload for ChainWorkload {
                 digest ^= check_run(ctx.state(), *idle, &ClientHistory::default(), 0);
             }
         }
-        // The control journals' histories (#247): every client's library
+        // The histories `Announce` logged (#247): every client's library
         // calls at the registry, at the control journals of the cell the
-        // machines formed (#246) and at every tenant control journal a
-        // machine folded (#210), searched once (by client 0, after every
-        // run) against the journal model.
+        // machines formed (#246), at every tenant control journal a machine
+        // folded (#210), and at every journal a tenant created or a
+        // frontend forwarded to (#442 (search every journal's history)),
+        // each searched once (by client 0, after every run) against the
+        // journal model in its writer mode.
         if self.client_id == 0 {
             let identifiers = crate::shape::identifiers(ctx.state());
             let system = crate::shape::system_journals(ctx.state()).then_some(identifiers.registry);
-            let tenants =
-                crate::audit::tenants::lock(&crate::audit::tenants::tenant_board(ctx.state()))
-                    .controls();
+            let board = crate::audit::tenants::tenant_board(ctx.state());
+            let (tenants, created) = {
+                let board = crate::audit::tenants::lock(&board);
+                (board.controls(), board.created_modes())
+            };
             let formed = crate::machine::formed_cell(ctx.state());
             let cell = formed
-                .map(|cell| [Some(cell.cell), cell.fleet])
+                .map(|cell| [Some(cell.cell), cell.fleet, cell.election])
                 .into_iter()
                 .flatten()
                 .flatten();
-            let take = |journal| {
-                std::mem::take(
+            let logged = rpc::logged_journals(ctx.state())
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone();
+            let journals: BTreeSet<_> = system
+                .into_iter()
+                .chain(cell)
+                .chain(tenants)
+                .chain(logged)
+                .collect();
+            for journal in journals {
+                let attempts = std::mem::take(
                     &mut *rpc::control_attempts(ctx.state(), journal)
                         .lock()
                         .unwrap_or_else(PoisonError::into_inner),
-                )
-            };
-            for journal in system.into_iter().chain(cell).chain(tenants) {
-                crate::audit::check_control_history(take(journal), paros::WriterMode::Single);
-            }
-            // The cell's election journal (#240): every candidate's
-            // campaigns, renewals, resignations and truncations, unfenced.
-            if let Some(election) = formed.and_then(|cell| cell.election) {
-                crate::audit::check_control_history(take(election), paros::WriterMode::Multi);
+                );
+                // The cell's election journal (#240) is unfenced: every
+                // candidate's campaigns, renewals, resignations and
+                // truncations. A created journal runs in the mode its
+                // create drew (#241).
+                let mode = if crate::machine::is_election(ctx.state(), journal) {
+                    paros::WriterMode::Multi
+                } else if let Some(mode) = created.get(&journal) {
+                    if !attempts.is_empty() {
+                        assert_reachable!("journal: a created journal's history is searched");
+                    }
+                    *mode
+                } else {
+                    paros::WriterMode::Single
+                };
+                crate::audit::check_control_history(attempts, mode);
             }
         }
         if let Some(sink) = &self.digest {

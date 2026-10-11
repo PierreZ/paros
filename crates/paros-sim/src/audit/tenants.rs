@@ -244,6 +244,12 @@ impl TenantBoard {
         self.modes.get(&journal).copied()
     }
 
+    /// Every journal a tenant created, with the writer mode it was created
+    /// in.
+    pub(crate) fn created_modes(&self) -> BTreeMap<JournalIdentifier, WriterMode> {
+        self.modes.clone()
+    }
+
     /// Every tenant control journal a machine folded, in identifier order.
     pub(crate) fn controls(&self) -> BTreeSet<JournalIdentifier> {
         self.folded.keys().map(|(journal, _)| *journal).collect()

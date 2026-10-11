@@ -221,7 +221,7 @@ pub(crate) fn check_control_history(attempts: Vec<Attempt>, mode: paros::WriterM
 /// 37 histories of 4,500 hunt seeds that took 200k to 1.2M steps before
 /// take 4,120 at most, on 3,668 attempts); the
 /// budget only bounds a pathological one — the memo grows with the steps,
-/// so it bounds memory too — and running out of it is reported, never
+/// so it bounds memory too — and running out of it is a violation, never
 /// mistaken for a verdict.
 const LIN_SEARCH_BUDGET: u64 = 5_000_000;
 
@@ -244,6 +244,14 @@ pub(super) fn check_linearizable(h: &LinHistory, mode: paros::WriterMode) {
             eprintln!("  {attempt:?}");
         }
     }
+    // A budget a history used up is no verdict (#443 (an undecided search
+    // passed)): #392 measured 4,120 steps at most against the 5,000,000 the
+    // budget allows, so a pass never needs it.
+    assert_always!(
+        !verdict.exhausted,
+        "journal: the linearizability search decides every history",
+        { "steps" => verdict.steps, "attempts" => h.attempts.len() }
+    );
     if !verdict.linearizable {
         let stuck = verdict
             .stuck
