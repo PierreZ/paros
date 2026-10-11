@@ -57,6 +57,10 @@ struct Ports<'f, A, F> {
     tenant: TenantId,
     factory: &'f F,
     by_journal: BTreeMap<JournalId, A>,
+    /// The tenant's own port (the unset journal, as the set's store is
+    /// stamped): a set-wide fact's only reader while the set knows no
+    /// journal yet.
+    unjournaled: Option<A>,
 }
 
 impl<'f, A, F: Fn(JournalIdentifier) -> A> Ports<'f, A, F> {
@@ -66,6 +70,7 @@ impl<'f, A, F: Fn(JournalIdentifier) -> A> Ports<'f, A, F> {
             tenant,
             factory,
             by_journal: BTreeMap::new(),
+            unjournaled: None,
         };
         for journal in journals {
             ports.port(*journal);
@@ -90,6 +95,25 @@ impl<'f, A, F: Fn(JournalIdentifier) -> A> Ports<'f, A, F> {
         self.by_journal
             .entry(journal)
             .or_insert_with(|| factory(JournalIdentifier::new(tenant, journal)))
+    }
+}
+
+impl<A, F: Fn(JournalIdentifier) -> A> Ports<'_, A, F> {
+    /// The ports a set-wide fact reaches: every journal's, or the tenant's
+    /// own while the set knows no journal yet.
+    fn set_wide(&mut self) -> impl Iterator<Item = &A> {
+        if self.by_journal.is_empty() && self.unjournaled.is_none() {
+            self.unjournaled = Some((self.factory)(JournalIdentifier::new(
+                self.tenant,
+                JournalId::UNSET,
+            )));
+        }
+        let tenant = if self.by_journal.is_empty() {
+            self.unjournaled.as_ref()
+        } else {
+            None
+        };
+        self.by_journal.values().chain(tenant)
     }
 }
 
@@ -236,7 +260,7 @@ where
                 ports.port(*journal);
             }
         }
-        for audit in ports.all() {
+        for audit in ports.set_wide() {
             audit.matchmaker_in_flight(id, Some(&writes));
         }
     }
@@ -275,7 +299,7 @@ where
             .sync()
             .await
             .map_err(|e| storage_fault_crash(ports, id, e))?;
-        for audit in ports.all() {
+        for audit in ports.set_wide() {
             audit.matchmaker_in_flight(id, None);
         }
         surface_registry_writes(&writes, id, ports);
@@ -344,7 +368,7 @@ fn surface_registry_writes<A: Audit, F: Fn(JournalIdentifier) -> A>(
                 );
             }
             MatchmakerWriteOp::SetScalars(scalars) => {
-                for audit in ports.all() {
+                for audit in ports.set_wide() {
                     audit.matchmaker_scalars_persisted(id, scalars);
                 }
                 tracing::info!(
@@ -371,6 +395,18 @@ fn surface_registry_writes<A: Audit, F: Fn(JournalIdentifier) -> A>(
                 let empty = BTreeMap::new();
                 for journal in registrations.keys().chain(scalars.journals.keys()) {
                     ports.port(*journal);
+                }
+                if ports.by_journal.is_empty() {
+                    let unset = JournalId::UNSET;
+                    for audit in ports.set_wide() {
+                        audit.matchmaker_activated(
+                            id,
+                            &set,
+                            scalars.gc_watermark(unset),
+                            scalars.effective(unset),
+                            &empty,
+                        );
+                    }
                 }
                 for (journal, audit) in &ports.by_journal {
                     let registry = registrations.get(journal).unwrap_or(&empty);
@@ -769,7 +805,7 @@ impl<'f, F> Host<'f, F> {
                         "one reconfigure request yields exactly one reply"
                     );
                     if let Some(answer) = answer {
-                        for audit in seat.ports.all() {
+                        for audit in seat.ports.set_wide() {
                             audit.matchmaker_reconfigure_replied(id, &request, &answer);
                         }
                         tracing::info!(
@@ -898,6 +934,19 @@ where
             matchmaker.registry(*journal),
             matchmaker.gc_watermark(*journal),
         );
+    }
+    if ports.by_journal.is_empty() {
+        let unset = JournalId::UNSET;
+        for audit in ports.set_wide() {
+            audit.matchmaker_recovered(
+                id,
+                matchmaker.set(),
+                phase,
+                &scalars,
+                matchmaker.registry(unset),
+                matchmaker.gc_watermark(unset),
+            );
+        }
     }
     tracing::info!(
         matchmaker = id.0,
