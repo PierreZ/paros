@@ -17,6 +17,16 @@ const TENANT_SETS_KEY: &str = "paros-audit-tenant-sets";
 /// [`AuditWorld`] is published (shared by every node and every workload).
 const AUDIT_WORLD_KEY: &str = "paros-audit-world";
 
+/// Well-known [`StateHandle`] key of the set of journals that have an
+/// [`AuditWorld`] this iteration (#447 (model checks for every journal
+/// world)): the final check judges each of them, not only the plan's.
+const AUDIT_WORLDS_KEY: &str = "paros-audit-worlds";
+
+/// Every journal that has an [`AuditWorld`] this iteration, in id order.
+fn audit_worlds(state: &StateHandle) -> Arc<Mutex<BTreeSet<paros::JournalIdentifier>>> {
+    crate::state::published(state, AUDIT_WORLDS_KEY, BTreeSet::new)
+}
+
 /// Get-or-create the singleton [`AuditWorld`] for this iteration
 /// (`crate::state::published_arc`).
 pub(crate) fn audit_world(state: &StateHandle) -> Arc<AuditWorld> {
@@ -59,26 +69,32 @@ fn published_world(state: &StateHandle, journal: paros::JournalIdentifier) -> Ar
     crate::state::published_arc(
         state,
         &crate::state::journal_key(AUDIT_WORLD_KEY, journal),
-        || AuditWorld {
-            state: Mutex::new({
-                let mut state = AuditState::default();
-                // The matchmaker audit judges this journal's registry
-                // (#190), and shares its set's generations with every
-                // journal of its tenant.
-                state.matchmaker.journal = Some(journal.journal);
-                state.matchmaker.sets = (*crate::state::published_arc(
-                    state_handle,
-                    &crate::state::journal_key(
-                        TENANT_SETS_KEY,
-                        paros::JournalIdentifier::new(journal.tenant, paros::JournalId::UNSET),
-                    ),
-                    super::matchmaker::TenantSets::default,
-                ))
-                .clone();
-                state
-            }),
-            main: Some(main),
-            mode: OnceLock::new(),
+        || {
+            audit_worlds(state_handle)
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(journal);
+            AuditWorld {
+                state: Mutex::new({
+                    let mut state = AuditState::default();
+                    // The matchmaker audit judges this journal's registry
+                    // (#190), and shares its set's generations with every
+                    // journal of its tenant.
+                    state.matchmaker.journal = Some(journal.journal);
+                    state.matchmaker.sets = (*crate::state::published_arc(
+                        state_handle,
+                        &crate::state::journal_key(
+                            TENANT_SETS_KEY,
+                            paros::JournalIdentifier::new(journal.tenant, paros::JournalId::UNSET),
+                        ),
+                        super::matchmaker::TenantSets::default,
+                    ))
+                    .clone();
+                    state
+                }),
+                main: Some(main),
+                mode: OnceLock::new(),
+            }
         },
     )
 }
@@ -602,6 +618,53 @@ impl AuditWorld {
         h
     }
 
+    /// A machine this journal's nodes ran on was wiped (#447 (model checks
+    /// for every journal world)): its old identity never boots again, so
+    /// convergence excuses it, as it does an amnesiac member.
+    pub(crate) fn note_wiped(&self, node: u64) {
+        self.lock().wiped.insert(node);
+    }
+
+    /// A node stopped serving this journal for good (#447 (model checks
+    /// for every journal world)): convergence excuses it.
+    pub(crate) fn note_stopped(&self, node: u64) {
+        self.lock().left_pool.insert(node);
+    }
+
+    /// Whether a node still serves this journal: one booted that did not
+    /// leave it. A journal every node stopped (deleted, or its tenant
+    /// dropped) owes no slot to anyone.
+    pub(crate) fn served(&self) -> bool {
+        let st = self.lock();
+        st.booted.is_empty() || st.booted.iter().any(|node| !st.left_pool.contains(node))
+    }
+
+    /// Whether [`check_final_convergence`](Self::check_final_convergence)'s
+    /// liveness legs hold now: every acked and every decided slot applied,
+    /// and every node it does not excuse on the applied frontier. A caller
+    /// waits on it before it asks for the claim.
+    pub(crate) fn converged(&self) -> bool {
+        let st = self.lock();
+        if st.loss_excuses_liveness() {
+            return true;
+        }
+        let Some(cluster_max) = st.applied_max.values().copied().max() else {
+            return st.answered_max.is_none() && st.decided_max.is_none();
+        };
+        st.answered_max.is_none_or(|acked| acked <= cluster_max)
+            && st.decided_max.is_none_or(|decided| decided <= cluster_max)
+            && st.booted.iter().chain(st.applied_max.keys()).all(|node| {
+                excused_from_convergence(&st, *node)
+                    || st.applied_max.get(node) == Some(&cluster_max)
+            })
+    }
+
+    /// Every slot a call was answered at, its highest: what the final
+    /// convergence claim requires applied.
+    pub(crate) fn answered_max(&self) -> Option<u64> {
+        self.lock().answered_max
+    }
+
     /// The convergence deliverable, judged at the end of the recovery tail
     /// when no future leader change can invalidate a provisional quiescence
     /// decision. It ties the run's four frontiers together:
@@ -780,9 +843,41 @@ pub(crate) fn check_run(
     // Every slot a call was answered at is inside what every live node
     // walked by the end (#204: answers name positions to the client, slots
     // to the audit).
-    let acked_max = audit.lock().answered_max;
+    let acked_max = audit.answered_max();
     audit.check_final_convergence(acked_max);
     audit.digest()
+}
+
+/// The final judgement of every journal world `judged` leaves out (#447
+/// (model checks for every journal world)): the registry, the cell's
+/// control, universe and election journals, every tenant control journal and
+/// every created journal report to their own worlds, and [`check_run`]
+/// runs only for the plan's journals. The journal model's slot-order checks
+/// ([`JournalModel::check`](super::journal_model::JournalModel::check))
+/// run over each of them here, once, by client 0 after every run. Returns
+/// their digests folded together.
+#[tracing::instrument(level = "debug", skip_all)]
+pub(crate) fn check_every_world(
+    state: &StateHandle,
+    judged: &BTreeSet<paros::JournalIdentifier>,
+) -> u64 {
+    let worlds = audit_worlds(state)
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone();
+    let mut digest = 0;
+    for journal in worlds.difference(judged) {
+        let world = published_world(state, *journal);
+        {
+            let st = world.lock();
+            if st.journal.judged_any() {
+                assert_reachable!("audit: a journal outside the plan is judged by its model");
+            }
+            st.journal.check();
+        }
+        digest ^= world.digest();
+    }
+    digest
 }
 
 /// Whether `node` is excused from the per-node convergence leg: down for

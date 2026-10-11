@@ -54,7 +54,9 @@ mod world;
 
 pub(crate) use client::{ClientHistory, check_control_history};
 pub(crate) use linearizability::{Attempt, Call, Seen};
-pub(crate) use world::{AuditWorld, audit_world, audit_world_for, audit_world_named, check_run};
+pub(crate) use world::{
+    AuditWorld, audit_world, audit_world_for, audit_world_named, check_every_world, check_run,
+};
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -1197,6 +1199,13 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         // retirement (#123).
         if self.world.main() == Some(journal) {
             self.world.note_left_pool(node.0);
+        }
+        // A machine reports every stop through its node port, whose world
+        // is its home journal's (#447 (model checks for every journal
+        // world)): the tenant board keeps the stop for the stopped
+        // journal's convergence.
+        if let Some(board) = &self.tenants {
+            tenants::lock(board).stopped(node, journal);
         }
     }
 
