@@ -384,7 +384,8 @@ impl StorageWorld {
             .map(|(key, c)| ((*key).clone(), c.node, c.settled))
             .collect();
         // The holders the plan may damage: settled ones (an unsettled
-        // custody's layout is not known), not already lost. The departed
+        // custody's layout is not known), not quiet (#471), not already
+        // lost. The departed
         // ones go last, so a kept copy lands on them: a member of the
         // configuration that decided the slot, outside the one the operator
         // last installed. A spare no configuration named holds a copy no
@@ -396,10 +397,15 @@ impl StorageWorld {
                 .is_some_and(|members| !members.contains(node))
                 && deciders.is_some_and(|members| members.contains(node))
         };
+        // A quiet holder (#471) keeps its copy: its boot applies nothing.
+        if holders.iter().any(|(key, _, _)| self.quiet.contains(key)) {
+            assert_reachable!("storage: an outage's loss passes over a quiet holder");
+        }
         let mut damageable: Vec<(String, u64)> = holders
             .iter()
             .filter(|(key, _, settled)| {
                 *settled
+                    && !self.quiet.contains(key)
                     && !self.marks.get(key).is_some_and(|m| m.contains(&slot))
                     && !self.rotted.get(key).is_some_and(|m| m.contains(&slot))
             })
@@ -446,6 +452,11 @@ impl StorageWorld {
         }
         let damaged: Vec<(String, u64)> = damageable.drain(..count).collect();
         for (key, _) in &damaged {
+            assert_always!(
+                !self.quiet.contains(key),
+                "storage: a planned loss marks only a store whose boot applies it",
+                { "slot" => slot }
+            );
             self.marks.entry(key.clone()).or_default().insert(slot);
             self.pending.insert(key.clone(), slot);
         }
@@ -519,7 +530,7 @@ impl StorageWorld {
     /// (CTRL Case 3) jumps past it to an ahead acceptor's trim point.
     /// `None` while no split shows, or while a holder of the slot is
     /// unsettled (its layout is not known, so its copy would stay clean and
-    /// decide the slot).
+    /// decide the slot) or quiet (#471: its boot applies no loss).
     #[tracing::instrument(level = "debug", skip_all)]
     pub(crate) fn plan_split_floor_loss(
         &mut self,
@@ -542,6 +553,13 @@ impl StorageWorld {
         if holders.iter().any(|(_, _, settled)| !settled) {
             return None;
         }
+        // A quiet holder (#471, a joiner's seat) is like an unsettled one:
+        // its boot applies no loss, so its copy would stay clean and decide
+        // the slot, and its mark would never clear.
+        if holders.iter().any(|(key, _, _)| self.quiet.contains(key)) {
+            assert_reachable!("storage: a split-floor loss waits on a quiet holder");
+            return None;
+        }
         let damaged: Vec<(String, u64)> = holders
             .iter()
             .filter(|(key, _, _)| {
@@ -560,6 +578,11 @@ impl StorageWorld {
             { "slot" => slot }
         );
         for (key, _) in &damaged {
+            assert_always!(
+                !self.quiet.contains(key),
+                "storage: a planned loss marks only a store whose boot applies it",
+                { "slot" => slot }
+            );
             self.marks.entry(key.clone()).or_default().insert(slot);
             self.pending.insert(key.clone(), slot);
         }
