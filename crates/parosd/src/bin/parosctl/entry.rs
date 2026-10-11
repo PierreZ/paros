@@ -13,7 +13,7 @@ use paros::{Address, Names};
 use serde_json::json;
 
 use crate::Ending;
-use crate::output::{Printer, note, short};
+use crate::output::{Printer, note, record_text, short};
 
 /// `parosctl resolve`.
 #[derive(Args, Debug)]
@@ -43,8 +43,9 @@ pub async fn run(
             out.emit(
                 || {
                     format!(
-                        "tenant={tenant} cell={} machines={}",
-                        short(resolved.cell_id),
+                        "tenant={tenant} universe={} cell={} machines={}",
+                        named(&resolved.universe_name, resolved.universe_id),
+                        named(&resolved.cell_name, resolved.cell_id),
                         machines.join(",")
                     )
                 },
@@ -54,7 +55,9 @@ pub async fn run(
                         "tenant_id": resolved.tenant.0,
                         "control_journal": resolved.control.journal.0,
                         "cell": resolved.cell_id,
+                        "cell_name": record_text(&resolved.cell_name),
                         "universe": resolved.universe_id,
+                        "universe_name": record_text(&resolved.universe_name),
                         "machines": resolved
                             .machines
                             .iter()
@@ -70,6 +73,8 @@ pub async fn run(
             refusal,
             cell_id,
             tenant_cell,
+            cell_name,
+            tenant_cell_name,
         } => {
             let detail = match refusal.as_str() {
                 "unknown_tenant" => format!("no tenant is named {tenant:?}"),
@@ -77,12 +82,12 @@ pub async fn run(
                 "internal" => format!("{tenant:?} is not a user's tenant"),
                 "other_cell" => format!(
                     "tenant {tenant:?} is served by cell {}, not by cell {}",
-                    short(tenant_cell),
-                    short(cell_id)
+                    named(&tenant_cell_name, tenant_cell),
+                    named(&cell_name, cell_id)
                 ),
                 "no_universe" => format!(
                     "cell {} serves no universe directory: is the universe initialized?",
-                    short(cell_id)
+                    named(&cell_name, cell_id)
                 ),
                 other => format!("refused: {other}"),
             };
@@ -97,5 +102,15 @@ pub async fn run(
             note("a machine answered with a resolution that does not decode");
             Ending::Refused
         }
+    }
+}
+
+/// An entity's name, or its short hex id when the answer names none (#239
+/// (names at the edge)): hex ids are for debugging only.
+fn named(name: &[u8], id: u64) -> String {
+    if name.is_empty() {
+        short(id)
+    } else {
+        record_text(name)
     }
 }

@@ -131,7 +131,7 @@ pub async fn wait_for_cell<P: Providers, L: CellLedger>(
     // Every machine answers `Load`, an idle one too (#424).
     super::load::serve(&providers, &rpc, facts, shutdown.clone()).map_err(RunError::Infra)?;
     tracing::info!(
-        node = facts.node_id.0,
+        machine = %facts.name,
         class = facts.class.as_str(),
         "machine_waiting"
     );
