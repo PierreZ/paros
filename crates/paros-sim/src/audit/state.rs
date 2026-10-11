@@ -538,6 +538,8 @@ pub(super) struct AuditState {
     /// handoff, a skipped re-fan-out beat, an unanswered round evicted.
     pub(super) proxied_round_survived_handoff: bool,
     pub(super) proxy_round_expired: bool,
+    /// A leader won an election inside the chaos window (#495).
+    pub(super) elected_in_chaos: bool,
 
     // --- the replica tier (#144) --------------------------------------------
     /// Every replica that booted: learners outside the pool that hold no

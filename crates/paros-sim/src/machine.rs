@@ -507,13 +507,7 @@ pub(crate) fn replacement(state: &StateHandle) -> Option<Replacement> {
 pub(crate) fn founder_to_move(state: &StateHandle, dead: impl Fn(&str) -> bool) -> Option<String> {
     let board = machine_board(state);
     let mut board = lock(&board);
-    let formed = board.founders.iter().all(|addr| {
-        board
-            .nodes
-            .get(addr)
-            .is_some_and(|n| board.formed.contains(n))
-    });
-    if board.founders.is_empty() || !formed {
+    if board.founders.is_empty() || !all_founders_formed(&board) {
         return None;
     }
     // The cell formed, so the machines drew the layout already.
@@ -849,9 +843,11 @@ async fn on_disk<S: moonpool_sim::StorageProvider + Clone>(
 /// Whether the machine of rank `rank` may come back under a new name
 /// (#349). Until the registry holds the new name, nobody can send to it, so
 /// a founding member renamed is a member its peers cannot reach, and the
-/// registry's write needs a majority of the others. So: no founding member
-/// was wiped, no other one was renamed, and the cell is not of two (each
-/// member is the other's majority). A machine outside the founders is in
+/// registry's write needs a majority of the others. So: every founding
+/// member formed (one still waiting to form needs every member at its listed
+/// address for its `cell init` Phase 1, so it never joins), no founding
+/// member was wiped, no other one was renamed, and the cell is not of two
+/// (each member is the other's majority). A machine outside the founders is in
 /// no quorum; it is renamed only while every founding member keeps its
 /// name, so the founders its admission names still answer.
 fn may_rename(board: &MachineBoard, layout: &crate::shape::MachineLayout, rank: usize) -> bool {
@@ -860,11 +856,22 @@ fn may_rename(board: &MachineBoard, layout: &crate::shape::MachineLayout, rank: 
         return !founder_renamed;
     }
     layout.founders != 2
+        && all_founders_formed(board)
         && board.wiped.is_empty()
         && board
             .renamed
             .keys()
             .all(|r| *r == rank || *r >= layout.founders)
+}
+
+/// Whether every founding member formed its cell.
+fn all_founders_formed(board: &MachineBoard) -> bool {
+    board.founders.iter().all(|addr| {
+        board
+            .nodes
+            .get(addr)
+            .is_some_and(|n| board.formed.contains(n))
+    })
 }
 
 /// The founding members renamed this run and still on their disks (#349):

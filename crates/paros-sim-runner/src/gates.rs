@@ -1059,7 +1059,8 @@ pub struct Verdict {
     /// Rare gates with no slot, as expected: `(message, reason)`.
     pub rare_missing: Vec<(&'static str, &'static str)>,
     /// Rare gates that fired anyway: candidates to delist.
-    pub rare_fired: Vec<&'static str>,
+    /// Each with its successes, so the next delisting has a number to read.
+    pub rare_fired: Vec<(&'static str, usize)>,
 }
 
 /// Judge the sweep's slots against [`DECLARED`] and [`RARE`].
@@ -1072,7 +1073,9 @@ pub fn judge(slots: &BTreeMap<String, AssertionStats>) -> Verdict {
         match (slot, rare.get(msg)) {
             (None, None) => verdict.missing.push((msg, site)),
             (None, Some(&reason)) => verdict.rare_missing.push((msg, reason)),
-            (Some(stats), Some(_)) if stats.successes > 0 => verdict.rare_fired.push(msg),
+            (Some(stats), Some(_)) if stats.successes > 0 => {
+                verdict.rare_fired.push((msg, stats.successes));
+            }
             (Some(_), _) => {}
         }
     }
@@ -1099,6 +1102,11 @@ pub fn print(verdict: &Verdict, indent: &str) {
         "{indent}known-rare gates that fired: {}",
         verdict.rare_fired.len()
     );
+    let mut fired = verdict.rare_fired.clone();
+    fired.sort_by_key(|&(msg, successes)| (successes, msg));
+    for (msg, successes) in fired {
+        println!("{indent}  - {msg}: {successes}");
+    }
 }
 
 /// The `n` declared gates that fired least often, rarest first: the
