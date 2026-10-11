@@ -34,7 +34,11 @@ enum Unsettled {
 /// be read: the folds' liveness is `final_fleet`'s.
 pub(super) async fn sets_booked(ctx: &SimContext, known: &Cell, deadline: Duration) {
     let mut attempt = 0_u64;
-    let wiped = crate::machine::wiped_ids(ctx.state());
+    // A machine cut off from the control journals for good is judged like a
+    // wiped one: nothing booked on it can start (§3.2's static-stability
+    // limit; a lone founder renamed after admissions).
+    let mut wiped = crate::machine::wiped_ids(ctx.state());
+    wiped.extend(crate::machine::stranded_ids(ctx.state()));
     while ctx.time().now() < deadline && !ctx.shutdown().is_cancelled() {
         let first = known.first(attempt);
         attempt += 1;
