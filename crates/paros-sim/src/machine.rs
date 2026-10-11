@@ -938,7 +938,7 @@ async fn run_machine_role(
         let ran = Box::pin(paros::machine::run_machine(
             ctx.providers().clone(),
             disk(),
-            &audits,
+            audits.clone(),
             &settings,
             addresses.clone(),
             names.clone(),

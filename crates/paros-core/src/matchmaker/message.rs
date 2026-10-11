@@ -10,9 +10,9 @@
 
 use std::collections::BTreeMap;
 
-use super::{MatchmakerPhase, PendingBootstrap, Registration, RegistrationKind};
+use super::{JournalRegistry, MatchmakerPhase, PendingBootstrap, Registration, RegistrationKind};
 use crate::membership::{AcceptorConfig, MatchmakerGeneration, MatchmakerId, MatchmakerSet};
-use crate::types::{Ballot, NodeId};
+use crate::types::{Ballot, JournalId, NodeId};
 
 /// A proposer's matchmaking request: "register `config` for `ballot`, and tell
 /// me every configuration registered below it" (the paper's `MatchA`), fenced
@@ -22,6 +22,9 @@ use crate::types::{Ballot, NodeId};
 pub struct MatchRequest {
     /// The requesting proposer.
     pub from: NodeId,
+    /// The journal whose registry the request addresses, inside the set's
+    /// tenant (#190): a set holds one registry per journal.
+    pub journal: JournalId,
     /// The ballot to register under. One ballot has exactly one proposer, so
     /// `ballot.node` is the identity that keeps matchmakers from disagreeing.
     pub ballot: Ballot,
@@ -57,6 +60,7 @@ impl MatchRequest {
     /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn new(
+        journal: JournalId,
         from: NodeId,
         ballot: Ballot,
         config: AcceptorConfig,
@@ -64,6 +68,7 @@ impl MatchRequest {
     ) -> Self {
         let request = Self {
             from,
+            journal,
             ballot,
             config,
             purpose: MatchPurpose::Register(RegistrationKind::Belief),
@@ -90,6 +95,7 @@ impl MatchRequest {
     /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn reconfigure(
+        journal: JournalId,
         from: NodeId,
         ballot: Ballot,
         config: AcceptorConfig,
@@ -97,6 +103,7 @@ impl MatchRequest {
     ) -> Self {
         let request = Self {
             from,
+            journal,
             ballot,
             config,
             purpose: MatchPurpose::Register(RegistrationKind::Reconfiguration),
@@ -127,15 +134,16 @@ impl MatchRequest {
     #[must_use]
     pub fn for_kind(
         kind: RegistrationKind,
+        journal: JournalId,
         from: NodeId,
         ballot: Ballot,
         config: AcceptorConfig,
         generation: MatchmakerGeneration,
     ) -> Self {
         let request = match kind {
-            RegistrationKind::Belief => Self::new(from, ballot, config, generation),
+            RegistrationKind::Belief => Self::new(journal, from, ballot, config, generation),
             RegistrationKind::Reconfiguration => {
-                Self::reconfigure(from, ballot, config, generation)
+                Self::reconfigure(journal, from, ballot, config, generation)
             }
         };
         assert!(
@@ -158,6 +166,7 @@ impl MatchRequest {
     /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn probe(
+        journal: JournalId,
         from: NodeId,
         ballot: Ballot,
         believed: AcceptorConfig,
@@ -165,6 +174,7 @@ impl MatchRequest {
     ) -> Self {
         let request = Self {
             from,
+            journal,
             ballot,
             config: believed,
             purpose: MatchPurpose::Probe,
@@ -286,7 +296,7 @@ pub enum MatchOutcome {
         /// The watermark in force when the history was computed.
         gc_watermark: Ballot,
         /// The **effective configuration** this matchmaker durably holds
-        /// (see [`super::MatchmakerHardState::effective`]), whether or not
+        /// (see [`super::JournalScalars::effective`]), whether or not
         /// its record is still in `history`: GC drops the record, never the
         /// scalar, so this is what tells a candidate which acceptor set is
         /// in force after a floor rose over the last reconfiguration.
@@ -299,7 +309,7 @@ pub enum MatchOutcome {
     /// reconfiguration its successor registered.
     Probed {
         /// The effective configuration (see
-        /// [`super::MatchmakerHardState::effective`]), `None` when no
+        /// [`super::JournalScalars::effective`]), `None` when no
         /// reconfiguration was ever registered here.
         effective: Option<(Ballot, AcceptorConfig)>,
     },
@@ -313,6 +323,8 @@ pub enum MatchOutcome {
 pub struct MatchReply {
     /// The answering matchmaker.
     pub matchmaker: MatchmakerId,
+    /// The request's journal, echoed (#190).
+    pub journal: JournalId,
     /// The requester the reply is addressed to.
     pub to: NodeId,
     /// The request's ballot, echoed.
@@ -330,6 +342,9 @@ pub struct MatchReply {
 pub struct GcRequest {
     /// The requesting leader.
     pub from: NodeId,
+    /// The journal whose watermark rises (#190): the leader of each journal
+    /// raises its own, never a sibling's.
+    pub journal: JournalId,
     /// The generation addressed.
     pub generation: MatchmakerGeneration,
     /// The floor to raise to — the leader's own ballot.
@@ -342,12 +357,14 @@ pub struct GcRequest {
 pub struct GcAck {
     /// The answering matchmaker.
     pub matchmaker: MatchmakerId,
+    /// The request's journal, echoed (#190).
+    pub journal: JournalId,
     /// The request's generation, echoed.
     pub generation: MatchmakerGeneration,
     /// Whether the request was applied at that generation (a matchmaker not
     /// active for it refuses, and `watermark` then names its own floor).
     pub applied: bool,
-    /// The durable watermark after the request.
+    /// The journal's durable watermark after the request.
     pub watermark: Ballot,
 }
 
@@ -367,7 +384,7 @@ pub enum ReconfigureRequest {
     Bootstrap {
         /// The requesting node.
         from: NodeId,
-        /// The proposed set, its reconstructed watermark and registry.
+        /// The proposed set and every journal's reconstructed registry.
         bootstrap: PendingBootstrap,
     },
     /// Phase 1a of the successor decree over `generation`'s matchmakers.
@@ -439,24 +456,21 @@ impl ReconfigureRequest {
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ReconfigureReply {
-    /// `generation` is frozen here (`StopB`): its durable registry, watermark,
-    /// and the successor if already learned.
+    /// `generation` is frozen here (`StopB`): every journal's durable
+    /// registry, and the successor if already learned.
     Stopped {
         /// The answering matchmaker.
         matchmaker: MatchmakerId,
         /// The frozen generation.
         generation: MatchmakerGeneration,
-        /// The durable watermark.
-        gc_watermark: Ballot,
-        /// The durable registry at or above the watermark.
-        history: BTreeMap<Ballot, Registration>,
-        /// The **effective configuration** this matchmaker durably holds
-        /// (see [`super::MatchmakerHardState::effective`]). The
-        /// reconstruction takes the maximum over its stop quorum, exactly as
-        /// it takes the maximum watermark, so a successor generation
-        /// inherits the acceptor set in force even when the record it came
-        /// from was collected long ago.
-        effective: Option<(Ballot, AcceptorConfig)>,
+        /// Every journal's durable registry (#190): its watermark, its
+        /// registrations at or above it, and its **effective configuration**
+        /// (see [`super::JournalScalars::effective`]). The reconstruction
+        /// takes, per journal, the maximum watermark, the union above it and
+        /// the maximum effective configuration over its stop quorum, so a
+        /// successor generation inherits each journal's acceptor set in
+        /// force even when the record it came from was collected long ago.
+        registries: BTreeMap<JournalId, JournalRegistry>,
         /// The chosen successor, if learned.
         successor: Option<MatchmakerSet>,
         /// The highest decree ballot this matchmaker has promised for the

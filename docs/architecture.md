@@ -844,7 +844,13 @@ each hosting many tenants' sets keyed by `JournalIdentifier`, the way every role
 **One store per matchmaker set** (decided on 2026-10-09, #190): a matchmaker process keeps one
 store for each set it hosts, and the registries of that set's journals, keyed by `JournalId`, are
 inside it. Every journal of the set, the control and election journals included, has the set from
-its first entry; there is no bootstrap exception.
+its first entry; there is no bootstrap exception. A storage fault in one registry closes the whole
+set, and the set opens again at its next request. **Until placement (#212), every tenant's
+matchmaker set runs on the cell's founding members** (decided on 2026-10-10, #190): each founding
+member hosts the matchmaker named by its node id, on the address it serves its journals at, and
+provisions a tenant's set at the first request that names that tenant. A matchmaker request names
+the matchmaker it addresses, and a process that is another one drops it, so a machine that took
+over an address never answers for a set it does not hold.
 Reconfiguration is the operational primitive for everything, so no tenant opts out of it.
 
 Every tenant has a **minimum footprint**, booked in slots against its cell's capacity when the
@@ -1894,9 +1900,10 @@ AGENTS.md.
   acceptors' harness registry in the simulation (a `ControlPlan` over the genesis pool) becomes
   the machines' when placement lands (#211, #212), and capacity becomes the cell coordinator's
   alone.
-- `parosd` stops running the plain deployment: every journal is born with its matchmaker set, and
-  journal-tagged matchmaker planes replace "only the first journal of a process" (#190); proxy leaders
-  and replicas follow (#193).
+- `parosd` no longer runs the plain deployment (#190, landed): every journal is born with its
+  tenant's matchmaker set on the founding members, and the matchmaker wire names its journal, so
+  every journal of a process may name matchmakers. Proxy leaders and replicas still serve only a
+  node's first journal; they follow (#193).
 - The coordinators replace the operator's client (#212): admin calls become requests to the
   elected coordinator. Since #240, `parosctl init` no longer claims the cell control journal: the
   elected cell coordinator installs its uuid there.

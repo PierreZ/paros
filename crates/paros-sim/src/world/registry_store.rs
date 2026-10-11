@@ -12,21 +12,37 @@
 //! through, at the store's own `hint!`s, budgeted by [`super::cut`].
 //! moonpool's storage chaos fails syncs on the simulated disk itself.
 
-use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex, PoisonError, Weak};
+use std::sync::{Mutex, PoisonError, Weak};
 
 use moonpool_sim::{SimStorageProvider, StateHandle, assert_reachable, assert_sometimes};
 use paros::{
-    Ballot, JournalIdentifier, JournalMatchmakerStorage, MatchmakerConfig, MatchmakerHardState,
-    MatchmakerStorage, Registration, RegistryStorage, StorageError,
+    Ballot, JournalId, JournalIdentifier, JournalMatchmakerStorage, MatchmakerConfig,
+    MatchmakerHardState, MatchmakerStorage, Registration, Registrations, RegistryStorage,
+    StorageError, TenantId,
 };
 
 use super::StorageWorld;
 use super::cut::{Budget, InFlight, Owner};
-use crate::audit::{AuditWorld, RegistryOp};
 
-/// The directory a matchmaker's registry lives in on its simulated disk.
+/// The directory a matchmaker's registries live in on its simulated disk.
 pub(crate) const REGISTRY_DIR: &str = "paros/matchmaker";
+
+/// The directory of `tenant`'s set's registry (#190): one store per set.
+pub(crate) fn registry_dir(tenant: TenantId) -> String {
+    format!("{REGISTRY_DIR}/{:016x}", tenant.0)
+}
+
+/// The identity `tenant`'s set's store is stamped with: the tenant and the
+/// unset journal (a set's store is no journal's).
+pub(crate) fn registry_id(tenant: TenantId) -> JournalIdentifier {
+    JournalIdentifier::new(tenant, JournalId::UNSET)
+}
+
+/// The provisioning ledger's key of `tenant`'s set at `ip` (#190): each set
+/// is formatted on its own, so each is provisioned on its own.
+pub(crate) fn set_key(ip: &str, tenant: TenantId) -> String {
+    format!("{ip}#{:016x}", tenant.0)
+}
 
 /// The journal registry, keeping the world's provisioning ledger in step
 /// with its format marker (see the module doc).
@@ -34,18 +50,13 @@ pub(crate) struct LedgeredRegistry {
     inner: JournalMatchmakerStorage<SimStorageProvider>,
     world: Weak<Mutex<StorageWorld>>,
     ip: String,
+    /// The provisioning ledger's key of this set ([`set_key`]).
+    key: String,
     /// A format was staged and its sync has not returned yet.
     format_pending: bool,
     /// The run's state: where a commit in flight registers for the cut's
     /// budget ([`super::cut`]).
     state: StateHandle,
-    /// The shared checker, told what each commit has in flight.
-    checker: Arc<AuditWorld>,
-    /// This matchmaker's id, the checker's key.
-    matchmaker: u64,
-    /// The writes staged since the last sync, in order: what the next
-    /// commit may land without a report.
-    staged: Vec<RegistryOp>,
     /// On a `Batched` registry, the bootstrap set's size: a cut may leave an
     /// ambiguous registration, a crash verdict, so it is the run's one
     /// matchmaker loss ([`StorageWorld::permit_matchmaker_power_cut`]).
@@ -54,27 +65,29 @@ pub(crate) struct LedgeredRegistry {
 }
 
 impl LedgeredRegistry {
-    #[allow(clippy::too_many_arguments)]
+    /// The registry of `tenant`'s set at `ip`. What a commit has in flight
+    /// is the driver's to report (`Audit::matchmaker_in_flight`, #190).
     pub(crate) fn new(
         provider: SimStorageProvider,
-        id: JournalIdentifier,
+        tenant: TenantId,
         layout: paros::JournalStoreConfig,
         world: Weak<Mutex<StorageWorld>>,
         ip: String,
         state: StateHandle,
-        checker: Arc<AuditWorld>,
-        matchmaker: u64,
         cut_budget: Option<usize>,
     ) -> Self {
         Self {
-            inner: JournalMatchmakerStorage::new(provider, REGISTRY_DIR, id, layout),
+            inner: JournalMatchmakerStorage::new(
+                provider,
+                registry_dir(tenant),
+                registry_id(tenant),
+                layout,
+            ),
             world,
+            key: set_key(&ip, tenant),
             ip,
             format_pending: false,
             state,
-            checker,
-            matchmaker,
-            staged: Vec::new(),
             cut_budget,
         }
     }
@@ -93,28 +106,30 @@ impl LedgeredRegistry {
 pub(crate) async fn resolve_registry_provisioning(
     provider: &SimStorageProvider,
     world: &Mutex<StorageWorld>,
-    id: JournalIdentifier,
+    tenant: TenantId,
     ip: &str,
 ) {
+    let key = set_key(ip, tenant);
+    let dir = registry_dir(tenant);
     let ambiguous = world
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
-        .provisioning_ambiguous(ip);
+        .provisioning_ambiguous(&key);
     if !ambiguous {
         return;
     }
     // Durable as it stands first: a readable marker may be staged (#348).
-    if !super::settle::settle_store(provider, REGISTRY_DIR).await {
+    if !super::settle::settle_store(provider, &dir).await {
         return;
     }
-    let formatted = JournalMatchmakerStorage::peek_formatted(provider, REGISTRY_DIR, id)
+    let formatted = JournalMatchmakerStorage::peek_formatted(provider, &dir, registry_id(tenant))
         .await
         .unwrap_or(false);
     let mut guard = world.lock().unwrap_or_else(PoisonError::into_inner);
     if formatted {
-        guard.note_provisioned(ip);
+        guard.note_provisioned(&key);
     } else {
-        guard.abandon_provisioning(ip);
+        guard.abandon_provisioning(&key);
     }
     assert_reachable!(
         "journal store: an interrupted matchmaker provisioning is resolved from the disk"
@@ -126,12 +141,12 @@ impl RegistryStorage for LedgeredRegistry {
         self.inner.initial_state()
     }
 
-    fn registration(&self, ballot: Ballot) -> Option<Registration> {
-        self.inner.registration(ballot)
+    fn registration(&self, journal: JournalId, ballot: Ballot) -> Option<Registration> {
+        self.inner.registration(journal, ballot)
     }
 
-    fn registered_ballots(&self) -> Vec<Ballot> {
-        self.inner.registered_ballots()
+    fn registered(&self) -> Vec<(JournalId, Ballot)> {
+        self.inner.registered()
     }
 }
 
@@ -139,25 +154,12 @@ impl MatchmakerStorage for LedgeredRegistry {
     #[tracing::instrument(level = "debug", skip_all, fields(ip = %self.ip))]
     async fn boot_scan(&mut self) -> Result<(), StorageError> {
         self.inner.boot_scan().await?;
-        // What the last sync had in flight and this boot shows landed is
-        // folded before the driver reports the boot.
-        let registry: BTreeMap<Ballot, Registration> = self
-            .inner
-            .registered_ballots()
-            .into_iter()
-            .filter_map(|ballot| self.inner.registration(ballot).map(|r| (ballot, r)))
-            .collect();
-        self.checker.note_registry_recovered(
-            paros::MatchmakerId(self.matchmaker),
-            &self.inner.initial_state(),
-            &registry,
-        );
         // The outcome a cut registry must reach: what it held before the
         // cut is still there after it.
         let ip = self.ip.clone();
         if self.with_world(|w| w.take_registry_cut(&ip)) == Some(true) {
             assert_sometimes!(
-                !self.inner.registered_ballots().is_empty(),
+                !self.inner.registered().is_empty(),
                 "journal store: a matchmaker registration survives a power cut"
             );
         }
@@ -170,8 +172,8 @@ impl MatchmakerStorage for LedgeredRegistry {
 
     #[tracing::instrument(level = "trace", skip_all)]
     async fn format(&mut self, config: &MatchmakerConfig) -> Result<(), StorageError> {
-        let ip = self.ip.clone();
-        self.with_world(|w| w.note_provisioning(&ip));
+        let key = self.key.clone();
+        self.with_world(|w| w.note_provisioning(&key));
         self.inner.format(config).await?;
         self.format_pending = true;
         Ok(())
@@ -180,22 +182,24 @@ impl MatchmakerStorage for LedgeredRegistry {
     #[tracing::instrument(level = "trace", skip_all, fields(round = ballot.round))]
     async fn register(
         &mut self,
+        journal: JournalId,
         ballot: Ballot,
         registration: &Registration,
     ) -> Result<(), StorageError> {
-        self.staged
-            .push(RegistryOp::Register(ballot, registration.clone()));
-        self.inner.register(ballot, registration).await
+        self.inner.register(journal, ballot, registration).await
     }
 
     #[tracing::instrument(level = "trace", skip_all, fields(round = watermark.round))]
-    async fn set_gc_watermark(&mut self, watermark: Ballot) -> Result<(), StorageError> {
-        self.inner.set_gc_watermark(watermark).await
+    async fn set_gc_watermark(
+        &mut self,
+        journal: JournalId,
+        watermark: Ballot,
+    ) -> Result<(), StorageError> {
+        self.inner.set_gc_watermark(journal, watermark).await
     }
 
     #[tracing::instrument(level = "trace", skip_all, fields(generation = scalars.generation.0))]
     async fn set_scalars(&mut self, scalars: &MatchmakerHardState) -> Result<(), StorageError> {
-        self.staged.push(RegistryOp::Scalars(scalars.clone()));
         self.inner.set_scalars(scalars).await
     }
 
@@ -203,23 +207,15 @@ impl MatchmakerStorage for LedgeredRegistry {
     async fn install_registry(
         &mut self,
         scalars: &MatchmakerHardState,
-        registrations: &BTreeMap<Ballot, Registration>,
+        registrations: &Registrations,
     ) -> Result<(), StorageError> {
-        self.staged
-            .push(RegistryOp::Install(scalars.clone(), registrations.clone()));
         self.inner.install_registry(scalars, registrations).await
     }
 
     #[tracing::instrument(level = "trace", skip_all)]
     async fn sync(&mut self) -> Result<(), StorageError> {
         let writes = self.inner.has_staged();
-        let held = !self.inner.registered_ballots().is_empty();
-        // What a crash from here to the driver's report may land unreported.
-        let ops = std::mem::take(&mut self.staged);
-        if !ops.is_empty() {
-            self.checker
-                .note_registry_in_flight(self.matchmaker, Some(ops));
-        }
+        let held = !self.inner.registered().is_empty();
         // A commit that writes is in flight until the sync returns: a hint
         // that kills the process now spends the matchmaker loss budget.
         let in_flight = writes.then(|| {
@@ -238,12 +234,10 @@ impl MatchmakerStorage for LedgeredRegistry {
         let synced = self.inner.sync().await;
         drop(in_flight);
         synced?;
-        // Synced: the driver reports the commit next, with nothing between.
-        self.checker.note_registry_in_flight(self.matchmaker, None);
         if std::mem::take(&mut self.format_pending) {
             // The marker is durable: the provisioning landed.
-            let ip = self.ip.clone();
-            self.with_world(|w| w.note_provisioned(&ip));
+            let key = self.key.clone();
+            self.with_world(|w| w.note_provisioned(&key));
         }
         Ok(())
     }

@@ -66,6 +66,7 @@ mod follow;
 mod formed;
 mod lifecycle;
 pub mod load;
+mod matchmakers;
 mod record;
 pub(crate) mod register;
 mod resolve;
@@ -411,6 +412,27 @@ pub struct CellPlan {
 }
 
 impl CellPlan {
+    /// The cell's matchmakers (#190): every founding member hosts every
+    /// tenant's matchmaker set until placement (#212), named by its node id.
+    ///
+    /// # Panics
+    ///
+    /// Never: one matchmaker per member, by construction.
+    #[must_use]
+    pub fn matchmakers(&self) -> Vec<paros_core::MatchmakerId> {
+        let matchmakers: Vec<paros_core::MatchmakerId> = self
+            .members
+            .iter()
+            .map(|(id, _)| paros_core::MatchmakerId(id.0))
+            .collect();
+        assert_eq!(
+            matchmakers.len(),
+            self.members.len(),
+            "one matchmaker per founding member"
+        );
+        matchmakers
+    }
+
     /// Whether the plan is one a machine may form: a set cell id, at least
     /// one member, member ids and addresses unique, every journal identifier set
     /// and unique, the cell control journal among them.

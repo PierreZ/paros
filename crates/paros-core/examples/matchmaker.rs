@@ -225,11 +225,12 @@ use paros_core::acceptor::{AcceptOutcome, Acceptor, PrepareOutcome};
 use paros_core::matchmaking::{MatchFold, Matchmaking, RegisteredPage};
 use paros_core::proposer::{Campaign, PromiseFold, Proposer};
 use paros_core::{
-    AcceptorConfig, AcceptorWrite, Ballot, Command, Entry, Fingerprint, LeaderUuid, MatchOutcome,
-    MatchPurpose, MatchRefusal, MatchReply, MatchRequest, Matchmaker, MatchmakerConfig,
-    MatchmakerGeneration, MatchmakerId, MatchmakerPhase, MatchmakerReconfigurer, MatchmakerSet,
-    MemRegistry, NodeId, QuorumSystem, ReconfigureReply, ReconfigureRequest, ReconfigurerPhase,
-    ReconfigurerStep, Registration, RegistrationKind, RegistryStorage, Seq, Slot, Value,
+    AcceptorConfig, AcceptorWrite, Ballot, Command, Entry, Fingerprint, JournalId, LeaderUuid,
+    MatchOutcome, MatchPurpose, MatchRefusal, MatchReply, MatchRequest, Matchmaker,
+    MatchmakerConfig, MatchmakerGeneration, MatchmakerId, MatchmakerPhase, MatchmakerReconfigurer,
+    MatchmakerSet, MemRegistry, NodeId, QuorumSystem, ReconfigureReply, ReconfigureRequest,
+    ReconfigurerPhase, ReconfigurerStep, Registration, RegistrationKind, RegistryStorage, Seq,
+    Slot, Value,
 };
 
 const N1: NodeId = NodeId(1);
@@ -244,6 +245,9 @@ const M2: MatchmakerId = MatchmakerId(2);
 const M3: MatchmakerId = MatchmakerId(3);
 
 const G0: MatchmakerGeneration = MatchmakerGeneration(0);
+/// The journal every request here addresses: a set holds one registry per
+/// journal of its tenant (#190), and this walkthrough uses one.
+const J: JournalId = JournalId(1);
 const G1: MatchmakerGeneration = MatchmakerGeneration(1);
 
 /// The one slot a decree runs over. A matchmaker set is a single value
@@ -714,7 +718,7 @@ fn phase2(
 fn part_first_leader(acceptors: &mut [AcceptorNode], matchmakers: &mut [MatchmakerNode]) {
     println!("== 1. the first leader: the matchmakers say nothing came before ==");
     let b1 = ballot(1, N1);
-    let phase = matchmake(matchmakers, &m_0(), &MatchRequest::new(N1, b1, c0(), G0))
+    let phase = matchmake(matchmakers, &m_0(), &MatchRequest::new(J, N1, b1, c0(), G0))
         .expect("nothing refuses a first registration");
     assert!(
         phase.prior().is_empty(),
@@ -757,12 +761,12 @@ fn part_first_leader(acceptors: &mut [AcceptorNode], matchmakers: &mut [Matchmak
 fn part_reboot(matchmakers: &mut [MatchmakerNode]) {
     println!("== 2. a reboot: the registration survives because the disk holds it ==");
     let b1 = ballot(1, N1);
-    let request = MatchRequest::new(N1, b1, c0(), G0);
+    let request = MatchRequest::new(J, N1, b1, c0(), G0);
     // The record is on m0's disk *now*, before any reboot, because the
     // reply that acknowledged it in part 1 left only after the write.
     let m0 = matchmaker(matchmakers, M0);
     assert_eq!(
-        m0.disk.store.registration(b1),
+        m0.disk.store.registration(J, b1),
         Some(Registration::belief(c0())),
         "the disk holds what the reply promised"
     );
@@ -773,8 +777,8 @@ fn part_reboot(matchmakers: &mut [MatchmakerNode]) {
     }
     let m0 = matchmaker(matchmakers, M0);
     assert_eq!(
-        m0.role.registry(),
-        m0.disk.store.registrations(),
+        m0.role.registry(J),
+        &m0.disk.store.registrations()[&J],
         "the rebooted role is exactly what the disk described"
     );
     // The same request again is answered from the durable record with no
@@ -784,7 +788,7 @@ fn part_reboot(matchmakers: &mut [MatchmakerNode]) {
     let (reply, writes) = m0.deliver_match(request.clone());
     assert!(matches!(reply.outcome, MatchOutcome::Registered { .. }));
     assert_eq!(writes, 0, "a re-answer registers nothing");
-    assert_eq!(m0.role.highest(), Some(b1));
+    assert_eq!(m0.role.highest(J), Some(b1));
     println!(
         "  every matchmaker crashed and rebooted from its disk; m0 still holds ballot 1.1 -> C0, and answers the same request again without a new write"
     );
@@ -793,7 +797,7 @@ fn part_reboot(matchmakers: &mut [MatchmakerNode]) {
     // if it had never been seen — a disk that lost the write is a matchmaker
     // that breaks its word.
     let mut amnesiac = MatchmakerNode::new(M0);
-    assert!(amnesiac.role.registry().is_empty());
+    assert!(amnesiac.role.registry(J).is_empty());
     let (_, writes) = amnesiac.deliver_match(request);
     assert_eq!(writes, 1, "an empty disk registers the ballot as new");
     println!(
@@ -817,7 +821,7 @@ fn part_reconfigure(acceptors: &mut [AcceptorNode], matchmakers: &mut [Matchmake
     let phase = matchmake(
         matchmakers,
         &m_0(),
-        &MatchRequest::reconfigure(N1, b2, c1(), G0),
+        &MatchRequest::reconfigure(J, N1, b2, c1(), G0),
     )
     .expect("registered");
     // The matchmakers answering here were all rebooted in part 2: the
@@ -889,8 +893,8 @@ fn part_cover_every_configuration(
     // reconfiguration at 2.1 and a real node would abandon the campaign and
     // adopt `C1` (`MatchStep::StaleConfiguration`).
     let b3 = ballot(3, N3);
-    let phase =
-        matchmake(matchmakers, &m_0(), &MatchRequest::new(N3, b3, c1(), G0)).expect("registered");
+    let phase = matchmake(matchmakers, &m_0(), &MatchRequest::new(J, N3, b3, c1(), G0))
+        .expect("registered");
     assert_eq!(phase.prior(), vec![c0(), c1()]);
     assert_eq!(phase.effective(), Some(&(ballot(2, N1), c1())));
     assert_eq!(
@@ -1117,7 +1121,11 @@ fn describe_request(request: &ReconfigureRequest) -> String {
             "Bootstrap(g{} = {}, {} registrations)",
             bootstrap.set.generation.0,
             show_set(bootstrap.set.members()),
-            bootstrap.history.len()
+            bootstrap
+                .registries
+                .values()
+                .map(|r| r.history.len())
+                .sum::<usize>()
         ),
         ReconfigureRequest::DecreePrepare { ballot, .. } => {
             format!("DecreePrepare(ballot {})", show_ballot(*ballot))
@@ -1140,12 +1148,12 @@ fn describe_request(request: &ReconfigureRequest) -> String {
 fn describe_reply(reply: &ReconfigureReply) -> String {
     match reply {
         ReconfigureReply::Stopped {
-            history,
+            registries,
             decree_promised,
             ..
         } => format!(
             "Stopped: frozen for good, handing over its {} registration(s); its decree promise so far is {}",
-            history.len(),
+            registries.values().map(|r| r.history.len()).sum::<usize>(),
             show_ballot(*decree_promised)
         ),
         ReconfigureReply::Bootstrapped { .. } => "Bootstrapped: held pending, not live".to_string(),
@@ -1252,8 +1260,18 @@ fn beat(
     if let Some(reconstruction) = reconfigurer.close_stop() {
         println!(
             "  freeze closed: the successor will be bootstrapped from the union of the frozen registries — {} registrations above watermark {}",
-            reconstruction.bootstrap.history.len(),
-            show_ballot(reconstruction.bootstrap.gc_watermark)
+            reconstruction
+                .bootstrap
+                .registries
+                .get(&J)
+                .map_or(0, |r| r.history.len()),
+            show_ballot(
+                reconstruction
+                    .bootstrap
+                    .registries
+                    .get(&J)
+                    .map_or(Ballot::zero(), |r| r.gc_watermark)
+            )
         );
     }
     if let ReconfigurerPhase::Deciding { decree, .. } = reconfigurer.phase() {
@@ -1423,7 +1441,7 @@ fn part_handover(matchmakers: &mut [MatchmakerNode]) {
 fn part_after_handover(matchmakers: &mut [MatchmakerNode]) {
     println!("== 7. a late proposer discovers the new generation and loses nothing ==");
     let b4 = ballot(4, N4);
-    let request = MatchRequest::new(N4, b4, c1(), G0);
+    let request = MatchRequest::new(J, N4, b4, c1(), G0);
     // Every member of the replaced generation answers a stale proposer with
     // the chosen successor — in one of two shapes. A member that moved on
     // into `M_1` is *active* for generation 1 and says so; a member left
@@ -1443,7 +1461,7 @@ fn part_after_handover(matchmakers: &mut [MatchmakerNode]) {
         }
     );
     println!("  both refusals name M_1: the proposer adopts it and asks again");
-    let phase = matchmake(matchmakers, &m_1(), &MatchRequest::new(N4, b4, c1(), G1))
+    let phase = matchmake(matchmakers, &m_1(), &MatchRequest::new(J, N4, b4, c1(), G1))
         .expect("generation 1 serves");
     // The reconstruction carried every registration of generation 0 — the
     // spare m3 answers from a registry it was bootstrapped with — so `H_b`

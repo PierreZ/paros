@@ -16,9 +16,12 @@
 //!    every live and every durable state;
 //! 2. **a chosen successor of `g` is what a majority of `M_g` durably voted**
 //!    at one ballot, judged whenever a matchmaker records or activates it;
-//! 3. **every activated registry carries the complete reconstruction** —
-//!    every registration of `g` durably held by a majority of `M_g`, at or
-//!    above the activated watermark, is in it verbatim.
+//! 3. **every activated registry carries the complete reconstruction**, per
+//!    journal of the set (#190) — every registration of a journal at `g`
+//!    durably held by a majority of `M_g`, at or above that journal's
+//!    activated watermark, is in that journal's registry verbatim, so after
+//!    any handover every journal's registry in the successor equals the
+//!    complete reconstruction for that journal.
 //!
 //! The matchmaker interaction verification (`docs/analysis/consensus/
 //! matchmaker-interaction-verification.md`) added the claims the nodes'
@@ -46,7 +49,18 @@
 //!    idempotently by a member that already activated it;
 //! 9. **every reply is backed by the disk that answered it** — the freeze,
 //!    the pending bootstrap, the promise, the vote, the activation and the
-//!    registration are durable at the seam the reply leaves through.
+//!    registration are durable at the seam the reply leaves through;
+//! 10. **a journal's GC watermark never moves because of a sibling journal**
+//!     (#190) — a raise writes one journal's floor, and every other
+//!     journal's floor on that disk is what it was.
+//!
+//! The set holds [`JOURNALS`] journals (#190): every registration, campaign
+//! and GC raise names one, and every claim above is judged per journal.
+//! Mutation proof of claim 3 (#190): with `close_stop` dropping one
+//! journal's reconstructed registry (`registries.pop_last()` before the
+//! bootstrap is built), `HANDOVER_MODEL_SEEDS=400` goes red at its first
+//! multi-journal activation with "an activated registry carries the complete
+//! reconstruction"; with the line removed it is green.
 //!
 //! Then the faults stop, every matchmaker is restarted alive, and the model
 //! asserts the liveness claim behind `MatchmakerReconfigurer::finish`: with
@@ -73,11 +87,17 @@ use super::{
 use crate::matchmaking::{MatchFold, Matchmaking, RegisteredPage};
 use crate::membership::{AcceptorConfig, QuorumSystem};
 use crate::model_support::{Mailbox, Rng, env_or};
-use crate::types::{Ballot, NodeId};
+use crate::types::{Ballot, JournalId, NodeId};
 
 /// Seeds per campaign (`HANDOVER_MODEL_SEEDS` overrides; a long run is
 /// `HANDOVER_MODEL_SEEDS=5000 cargo nextest run -p paros-core handover_model`).
 const SEEDS: u64 = 400;
+
+/// The journals of the set (`1..=JOURNALS`, #190): every registration,
+/// campaign and GC raise names one of them.
+const JOURNALS: u64 = 3;
+/// The journal the directed cases address.
+const J: JournalId = JournalId(1);
 /// Chaotic steps per seed.
 const CHAOS_STEPS: usize = 700;
 /// Quiet steps per seed after the faults stop (run twice: once to settle,
@@ -126,6 +146,7 @@ impl Site {
 /// matchmaker set it believes authoritative, and the request it re-asks
 /// with. What `ColocatedNode` holds in `matchmaking`, without the node.
 struct Campaign {
+    journal: JournalId,
     tally: Matchmaking,
     generation: MatchmakerGeneration,
     request: MatchRequest,
@@ -167,7 +188,6 @@ enum PhaseShape {
         generation: MatchmakerGeneration,
         acks: Vec<MatchmakerId>,
         decree_floor: Ballot,
-        effective: Option<Ballot>,
     },
     Bootstrapping {
         set: MatchmakerSet,
@@ -193,13 +213,11 @@ impl PhaseShape {
                 old,
                 acks,
                 decree_floor,
-                effective,
                 ..
             } => Self::Stopping {
                 generation: old.generation,
                 acks: acks.keys().copied().collect(),
                 decree_floor: *decree_floor,
-                effective: effective.as_ref().map(|(b, _)| *b),
             },
             ReconfigurerPhase::Bootstrapping {
                 bootstrap, acks, ..
@@ -245,6 +263,7 @@ enum Envelope {
     /// A leader's GC request, modelled as a direct call.
     Gc {
         to: MatchmakerId,
+        journal: JournalId,
         generation: MatchmakerGeneration,
         watermark: Ballot,
     },
@@ -327,6 +346,11 @@ struct Reach {
     /// A member that had already activated a successor was told `Chosen`
     /// again and answered `Learned` again.
     chosen_resent_to_activated: u64,
+    /// A set handover carried more than one journal's registry (#190).
+    multi_journal_handover: u64,
+    /// A journal raised its GC watermark while a sibling journal's floor on
+    /// the same disk stayed elsewhere (#190).
+    independent_gc: u64,
 }
 
 impl Reach {
@@ -370,6 +394,8 @@ impl Reach {
                 "chosen_resent_to_activated",
                 self.chosen_resent_to_activated,
             ),
+            ("multi_journal_handover", self.multi_journal_handover),
+            ("independent_gc", self.independent_gc),
         ];
         for (name, count) in counters {
             assert!(
@@ -380,20 +406,24 @@ impl Reach {
     }
 }
 
+/// Every registration of one journal at one generation, and who holds it.
+type Holders = BTreeMap<Ballot, (Registration, BTreeSet<MatchmakerId>)>;
+
 /// The durable facts the model collects, from the disks alone.
 #[derive(Default)]
 struct Ledger {
     /// Per generation: the set observed authoritative for it.
     authoritative: BTreeMap<MatchmakerGeneration, MatchmakerSet>,
-    /// Per generation: every registration durably held, and by whom.
-    registrations:
-        BTreeMap<MatchmakerGeneration, BTreeMap<Ballot, (Registration, BTreeSet<MatchmakerId>)>>,
+    /// Per generation and journal: every registration durably held, and by
+    /// whom.
+    registrations: BTreeMap<(MatchmakerGeneration, JournalId), Holders>,
     /// Per generation: every durable decree vote `(matchmaker, ballot, members)`.
     votes: BTreeMap<MatchmakerGeneration, BTreeSet<(MatchmakerId, Ballot, Vec<MatchmakerId>)>>,
-    /// Per generation: every effective configuration durably held as that
-    /// generation's, and by whom (the scalar the GC watermark never
-    /// collects).
-    effectives: BTreeMap<MatchmakerGeneration, BTreeMap<Ballot, BTreeSet<MatchmakerId>>>,
+    /// Per generation and journal: every effective configuration durably
+    /// held as that generation's, and by whom (the scalar the GC watermark
+    /// never collects).
+    effectives:
+        BTreeMap<(MatchmakerGeneration, JournalId), BTreeMap<Ballot, BTreeSet<MatchmakerId>>>,
 }
 
 impl Ledger {
@@ -437,10 +467,14 @@ impl Ledger {
     fn majority_held_below(
         &self,
         generation: MatchmakerGeneration,
+        journal: JournalId,
         below: Ballot,
     ) -> Vec<(MatchmakerGeneration, Ballot, Registration)> {
         let mut held = Vec::new();
-        for (registered_at, registrations) in self.registrations.range(..=generation) {
+        for ((registered_at, of), registrations) in &self.registrations {
+            if *registered_at > generation || *of != journal {
+                continue;
+            }
             let Some(members) = self.members_of(*registered_at) else {
                 continue;
             };
@@ -489,12 +523,13 @@ impl Ledger {
     fn assert_effective_preserved(
         &self,
         generation: MatchmakerGeneration,
+        journal: JournalId,
         activated: Option<&(Ballot, AcceptorConfig)>,
     ) {
         let old = self
             .members_of(generation)
             .expect("a succeeded generation was authoritative");
-        let Some(held) = self.effectives.get(&generation) else {
+        let Some(held) = self.effectives.get(&(generation, journal)) else {
             return;
         };
         for (ballot, holders) in held {
@@ -504,8 +539,9 @@ impl Ledger {
             }
             assert!(
                 activated.is_some_and(|(activated, _)| *activated >= *ballot),
-                "an activated generation inherits the effective configuration: generation {} held {:?} by {:?}, activated {:?}",
+                "an activated generation inherits the effective configuration: generation {} journal {} held {:?} by {:?}, activated {:?}",
                 generation.0,
+                journal.0,
                 ballot,
                 holders,
                 activated.map(|(b, _)| *b)
@@ -519,13 +555,14 @@ impl Ledger {
     fn assert_reconstruction_complete(
         &self,
         generation: MatchmakerGeneration,
+        journal: JournalId,
         watermark: Ballot,
         activated: &BTreeMap<Ballot, Registration>,
     ) {
         let old = self
             .members_of(generation)
             .expect("a succeeded generation was authoritative");
-        let Some(registered) = self.registrations.get(&generation) else {
+        let Some(registered) = self.registrations.get(&(generation, journal)) else {
             return;
         };
         for (ballot, (registration, holders)) in registered.range(watermark..) {
@@ -535,8 +572,9 @@ impl Ledger {
             }
             assert!(
                 activated.get(ballot) == Some(registration),
-                "an activated registry carries the complete reconstruction: generation {} ballot {:?} held by {:?} missing from {:?}",
+                "an activated registry carries the complete reconstruction: generation {} journal {} ballot {:?} held by {:?} missing from {:?}",
                 generation.0,
+                journal.0,
                 ballot,
                 holders,
                 activated.keys().collect::<Vec<_>>()
@@ -615,14 +653,29 @@ impl World {
         (Ballot { round, node }, n.believed.clone())
     }
 
-    /// The ballot of the effective configuration `id`'s disk holds.
-    fn effective_ballot_on_disk(&mut self, id: MatchmakerId) -> Option<Ballot> {
+    /// The ballot of every journal's effective configuration `id`'s disk
+    /// holds.
+    fn effective_ballots_on_disk(&mut self, id: MatchmakerId) -> BTreeMap<JournalId, Ballot> {
         self.site(id)
             .disk
             .hard_state()
-            .effective
-            .as_ref()
-            .map(|(b, _)| *b)
+            .journals
+            .iter()
+            .filter_map(|(journal, scalars)| {
+                scalars.effective.as_ref().map(|(b, _)| (*journal, *b))
+            })
+            .collect()
+    }
+
+    /// Every journal's watermark on `id`'s disk.
+    fn floors_on_disk(&mut self, id: MatchmakerId) -> BTreeMap<JournalId, Ballot> {
+        self.site(id)
+            .disk
+            .hard_state()
+            .journals
+            .iter()
+            .map(|(journal, scalars)| (*journal, scalars.gc_watermark))
+            .collect()
     }
 
     fn node(&mut self, id: NodeId) -> &mut Node {
@@ -679,37 +732,51 @@ impl World {
                     disk.pending
                         .iter()
                         .find(|p| p.set.generation == scalars.generation)
-                        .is_some_and(|p| p.gc_watermark < scalars.gc_watermark)
+                        .is_some_and(|p| {
+                            p.registries.iter().any(|(journal, reconstructed)| {
+                                reconstructed.gc_watermark < scalars.gc_watermark(*journal)
+                            })
+                        })
                 }
                 _ => false,
             };
-            let effective_before = self.effective_ballot_on_disk(id);
+            let effective_before = self.effective_ballots_on_disk(id);
+            let floors_before = self.floors_on_disk(id);
             self.site(id).disk.apply(op);
-            // Claim 5, the disk half: the effective configuration is a
-            // monotone scalar — a GC raise, a freeze, a vote, an activation
-            // (which takes the maximum of the local and the reconstructed
-            // one) may raise it, and nothing ever lowers or clears it.
-            let effective_after = self.effective_ballot_on_disk(id);
-            assert!(
-                effective_after >= effective_before,
-                "the effective configuration never regresses on a disk: mm{} held {effective_before:?}, {op:?} left {effective_after:?}",
-                id.0
-            );
+            // Claim 5, the disk half: every journal's effective
+            // configuration is a monotone scalar — a GC raise, a freeze, a
+            // vote, an activation (which takes the maximum of the local and
+            // the reconstructed one) may raise it, and nothing ever lowers
+            // or clears it.
+            let effective_after = self.effective_ballots_on_disk(id);
+            for (journal, before) in &effective_before {
+                assert!(
+                    effective_after.get(journal) >= Some(before),
+                    "the effective configuration never regresses on a disk: mm{} journal {} held {before:?}, {op:?} left {:?}",
+                    id.0,
+                    journal.0,
+                    effective_after.get(journal)
+                );
+            }
+            if let MatchmakerWriteOp::SetGcWatermark { journal, .. } = op {
+                self.check_sibling_floors(id, *journal, &floors_before);
+            }
             match op {
                 MatchmakerWriteOp::Register {
+                    journal,
                     ballot,
                     registration,
                 } => {
                     self.ledger
                         .registrations
-                        .entry(generation_before)
+                        .entry((generation_before, *journal))
                         .or_default()
                         .entry(*ballot)
                         .or_insert_with(|| (registration.clone(), BTreeSet::new()))
                         .1
                         .insert(id);
                 }
-                MatchmakerWriteOp::SetGcWatermark(_) => {}
+                MatchmakerWriteOp::SetGcWatermark { .. } => {}
                 MatchmakerWriteOp::SetScalars(scalars) => {
                     if let Some((ballot, members)) = &scalars.decree.vote {
                         self.ledger
@@ -730,15 +797,25 @@ impl World {
                     let succeeded = MatchmakerGeneration(scalars.generation.0 - 1);
                     self.ledger.observe_authoritative(&set, "activation");
                     self.ledger.assert_majority_voted(succeeded, &set);
-                    self.ledger.assert_reconstruction_complete(
-                        succeeded,
-                        scalars.gc_watermark,
-                        registrations,
-                    );
-                    self.ledger
-                        .assert_effective_preserved(succeeded, scalars.effective.as_ref());
-                    if scalars.effective.is_some() {
+                    let empty = BTreeMap::new();
+                    for journal in (1..=JOURNALS).map(JournalId) {
+                        self.ledger.assert_reconstruction_complete(
+                            succeeded,
+                            journal,
+                            scalars.gc_watermark(journal),
+                            registrations.get(&journal).unwrap_or(&empty),
+                        );
+                        self.ledger.assert_effective_preserved(
+                            succeeded,
+                            journal,
+                            scalars.effective(journal),
+                        );
+                    }
+                    if scalars.journals.values().any(|j| j.effective.is_some()) {
                         self.reach.inherited_effective += 1;
+                    }
+                    if registrations.len() > 1 {
+                        self.reach.multi_journal_handover += 1;
                     }
                     if self.site(id).restarted {
                         self.reach.activated_after_restart += 1;
@@ -749,17 +826,54 @@ impl World {
         self.check_disk(id);
     }
 
+    /// Claim 10 after one raise of `journal` at `id`: its own floor moved,
+    /// and every sibling journal's floor is what it was before.
+    fn check_sibling_floors(
+        &mut self,
+        id: MatchmakerId,
+        journal: JournalId,
+        floors_before: &BTreeMap<JournalId, Ballot>,
+    ) {
+        let floors_after = self.floors_on_disk(id);
+        for (sibling, floor) in &floors_after {
+            if *sibling != journal {
+                assert!(
+                    floors_before.get(sibling).copied().unwrap_or_default() == *floor,
+                    "a journal's GC watermark never moves because of a sibling journal: mm{} raised journal {} and journal {} moved",
+                    id.0,
+                    journal.0,
+                    sibling.0
+                );
+            }
+        }
+        let own = floors_after.get(&journal).copied().unwrap_or_default();
+        if floors_after
+            .iter()
+            .any(|(sibling, floor)| *sibling != journal && *floor != own)
+        {
+            self.reach.independent_gc += 1;
+        }
+    }
+
     /// Invariants 1 and 2 over one disk as it stands.
     fn check_disk(&mut self, id: MatchmakerId) {
         let site = self.site(id);
         let set = site.disk_set();
         let phase = site.disk_phase();
         let successor = site.disk.hard_state().successor.clone();
-        let effective = site.disk.hard_state().effective.clone();
-        if let Some((ballot, _)) = effective {
+        let effectives: Vec<(JournalId, Ballot)> = site
+            .disk
+            .hard_state()
+            .journals
+            .iter()
+            .filter_map(|(journal, scalars)| {
+                scalars.effective.as_ref().map(|(b, _)| (*journal, *b))
+            })
+            .collect();
+        for (journal, ballot) in effectives {
             self.ledger
                 .effectives
-                .entry(set.generation)
+                .entry((set.generation, journal))
                 .or_default()
                 .entry(ballot)
                 .or_default()
@@ -866,13 +980,14 @@ impl World {
             }
             Envelope::Gc {
                 to,
+                journal,
                 generation,
                 watermark,
             } => {
                 self.at_matchmaker(
                     to,
                     |mm| {
-                        mm.advance_gc_watermark(generation, watermark);
+                        mm.advance_gc_watermark(journal, generation, watermark);
                     },
                     |_| Vec::new(),
                 );
@@ -965,13 +1080,16 @@ impl World {
                 } = &reply.outcome
                 {
                     assert!(
-                        site.disk.registrations().contains_key(&reply.ballot),
+                        site.disk
+                            .registrations()
+                            .get(&reply.journal)
+                            .is_some_and(|ledger| ledger.contains_key(&reply.ballot)),
                         "a Registered reply names a durable registration: mm{} answered {:?}",
                         from.0,
                         reply.ballot
                     );
                     assert!(
-                        *gc_watermark == disk.gc_watermark,
+                        *gc_watermark == disk.gc_watermark(reply.journal),
                         "a Registered reply reports the durable watermark"
                     );
                     // The scalar reported is the one held *below* the
@@ -980,7 +1098,7 @@ impl World {
                     // raised — the disk may hold exactly that ballot above
                     // what the reply says, and nothing else.
                     let reported = effective.as_ref().map(|(b, _)| *b);
-                    let durable = disk.effective.as_ref().map(|(b, _)| *b);
+                    let durable = disk.effective(reply.journal).map(|(b, _)| *b);
                     assert!(
                         reported == durable
                             || (reported < durable && durable == Some(reply.ballot)),
@@ -993,8 +1111,7 @@ impl World {
             Envelope::ReconfigureReply { reply, .. } => match reply {
                 ReconfigureReply::Stopped {
                     generation,
-                    gc_watermark,
-                    effective,
+                    registries,
                     decree_promised,
                     ..
                 } => {
@@ -1005,8 +1122,11 @@ impl World {
                         set.generation
                     );
                     assert!(
-                        *gc_watermark == disk.gc_watermark
-                            && *effective == disk.effective
+                        registries
+                            .iter()
+                            .all(|(journal, registry)| registry.gc_watermark
+                                == disk.gc_watermark(*journal)
+                                && registry.effective.as_ref() == disk.effective(*journal))
                             && *decree_promised == disk.decree.promised,
                         "a Stopped reply reports the durable scalars"
                     );
@@ -1155,7 +1275,9 @@ impl World {
             && believed.contains(reply.matchmaker)
             && reply.generation == believed.generation
             && self.node(to).campaign.as_ref().is_some_and(|c| {
-                c.tally.ballot() == reply.ballot && c.generation == reply.generation
+                c.tally.ballot() == reply.ballot
+                    && c.generation == reply.generation
+                    && c.journal == reply.journal
             });
         if for_campaign {
             self.fold_campaign(to, &reply);
@@ -1296,7 +1418,9 @@ impl World {
         let ballot = campaign.tally.ballot();
         let watermark = campaign.tally.watermark();
         let history = campaign.tally.history();
-        let held = self.ledger.majority_held_below(campaign.generation, ballot);
+        let held = self
+            .ledger
+            .majority_held_below(campaign.generation, campaign.journal, ballot);
         let mut highest_reconfiguration: Option<Ballot> = None;
         for (registered_at, registered, registration) in &held {
             if registration.kind.is_reconfiguration() {
@@ -1439,8 +1563,11 @@ impl World {
         } else {
             RegistrationKind::Belief
         };
-        let request = MatchRequest::for_kind(kind, node, ballot, config, believed.generation);
+        let journal = JournalId(1 + self.rng.below(JOURNALS));
+        let request =
+            MatchRequest::for_kind(kind, journal, node, ballot, config, believed.generation);
         self.node(node).campaign = Some(Campaign {
+            journal,
             tally: Matchmaking::new(ballot, request.config.clone(), kind),
             generation: believed.generation,
             request: request.clone(),
@@ -1466,7 +1593,8 @@ impl World {
             vec![NodeId(0), NodeId(1), NodeId(2)],
             QuorumSystem::Majority,
         );
-        let request = MatchRequest::new(node, ballot, config, believed.generation);
+        let journal = JournalId(1 + self.rng.below(JOURNALS));
+        let request = MatchRequest::new(journal, node, ballot, config, believed.generation);
         for m in (0..POOL).map(MatchmakerId) {
             if believed.contains(m) {
                 continue;
@@ -1497,9 +1625,12 @@ impl World {
             round: frontier / 2 + self.rng.below(frontier - frontier / 2),
             node,
         };
+        // One journal's leader raises its own floor, never the set's.
+        let journal = JournalId(1 + self.rng.below(JOURNALS));
         for m in members.iter().copied() {
             self.send(Envelope::Gc {
                 to: m,
+                journal,
                 generation,
                 watermark,
             });
@@ -1682,8 +1813,15 @@ impl World {
                     .iter()
                     .map(|p| (p.set.generation.0, p.set.members().to_vec()))
                     .collect::<Vec<_>>(),
-                hs.gc_watermark,
-                site.disk.registrations().len(),
+                hs.journals
+                    .iter()
+                    .map(|(j, s)| (j.0, s.gc_watermark))
+                    .collect::<Vec<_>>(),
+                site.disk
+                    .registrations()
+                    .values()
+                    .map(BTreeMap::len)
+                    .sum::<usize>(),
             );
         }
         for (i, node) in self.nodes.iter().enumerate() {
@@ -1964,6 +2102,8 @@ fn handover_holds_under_seeded_chaos_and_converges() {
         total.effective_outlived_its_record += reach.effective_outlived_its_record;
         total.reply_ignored += reach.reply_ignored;
         total.chosen_resent_to_activated += reach.chosen_resent_to_activated;
+        total.multi_journal_handover += reach.multi_journal_handover;
+        total.independent_gc += reach.independent_gc;
     }
     eprintln!("handover model: {seeds} seeds x {chaos_steps} chaos steps: {total:?}");
     total.assert_all();
@@ -2124,11 +2264,11 @@ fn finish_with_a_partial_quorum_and_a_late_straggler() {
     let g0 = MatchmakerGeneration(0);
     world.deliver(Envelope::Register {
         to: a,
-        request: MatchRequest::new(node, Ballot { round: 1, node }, cfg(0), g0),
+        request: MatchRequest::new(J, node, Ballot { round: 1, node }, cfg(0), g0),
     });
     world.deliver(Envelope::Register {
         to: b,
-        request: MatchRequest::new(node, Ballot { round: 2, node }, cfg(1), g0),
+        request: MatchRequest::new(J, node, Ballot { round: 2, node }, cfg(1), g0),
     });
     world.network.clear();
     // The original reconfigurer freezes A and B, then dies.
@@ -2190,7 +2330,7 @@ fn finish_with_a_partial_quorum_and_a_late_straggler() {
         vec![a, b],
         "finish proposes the members that answered the freeze"
     );
-    let activated = world.sites[0].disk.registrations();
+    let activated = &world.sites[0].disk.registrations()[&J];
     assert!(
         activated.contains_key(&Ballot { round: 1, node })
             && activated.contains_key(&Ballot { round: 2, node }),
@@ -2336,6 +2476,15 @@ fn a_second_handover_runs_on_the_activated_generation() {
     }
 }
 
+/// The configuration `bootstrap` carries for `J` at `ballot`, if any.
+fn carried(bootstrap: &super::PendingBootstrap, ballot: Ballot) -> Option<&AcceptorConfig> {
+    bootstrap
+        .registries
+        .get(&J)
+        .and_then(|r| r.history.get(&ballot))
+        .map(|r| &r.config)
+}
+
 /// Review 4 of #133: reconstruction completeness at the boundary. A
 /// registration reaches a quorum `Q1` of `M_0 = {0, 1, 2}`, a freeze reaches a
 /// quorum `Q2`, and `Q1 ∩ Q2 ≠ ∅` by majority intersection — so the
@@ -2360,6 +2509,7 @@ fn every_quorum_registration_survives_every_stop_quorum() {
                         let mut world = World::new(0);
                         world.chaos = false;
                         let request = MatchRequest::new(
+                            J,
                             node,
                             registered,
                             cfg.clone(),
@@ -2440,7 +2590,7 @@ fn every_quorum_registration_survives_every_stop_quorum() {
                             );
                         };
                         assert_eq!(
-                            bootstrap.history.get(&registered).map(|r| &r.config),
+                            carried(&bootstrap, registered),
                             Some(&cfg),
                             "q1={q1:?} q2={q2:?} restart={restart:?} dup={duplicate_stop} first={stop_non_holders_first}: the reconstruction carries the quorum registration"
                         );

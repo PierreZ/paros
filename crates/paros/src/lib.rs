@@ -80,7 +80,8 @@ pub mod wire {
 }
 pub use journal::{JournalBootFacts, JournalMatchmakerStorage, JournalStorage, JournalStoreConfig};
 pub use matchmaker::{
-    MatchmakerStorage, MemMatchmakerStorage, matchmaker_storage_contract_suite, run_matchmaker,
+    HostedSet, MatchmakerStorage, MemMatchmakerStorage, Registrations,
+    matchmaker_storage_contract_suite, run_matchmaker,
 };
 pub use provision::{Provisioned, provision_matchmaker_store, provision_store};
 pub use proxy::{ProxyConfig, run_proxy};
