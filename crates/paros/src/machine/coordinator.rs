@@ -300,7 +300,22 @@ impl Watch {
             super::cell_book(session.founders(), session.registry())
                 .into_iter()
                 .collect();
+        // The slots of the tenants the cell dropped go back to it (#212
+        // (placement)): no request for such a tenant is answered again, so
+        // nothing else would release them.
+        let dropped: std::collections::BTreeSet<_> = session
+            .registry()
+            .bookings()
+            .map(|(_, b)| b.target.tenant())
+            .filter(|tenant| session.registry().dropped(*tenant))
+            .collect();
         let mut wrote = 0;
+        if !dropped.is_empty() {
+            wrote +=
+                super::tenants::release(client, session, |b| dropped.contains(&b.target.tenant()))
+                    .await?;
+            moonpool_assertions::reachable!("coordinator: a dropped tenant's slots are released");
+        }
         for (id, addr) in machines {
             let answer = bootstrap::identify(providers, rpc, names, &addr, timeout)
                 .await
@@ -440,6 +455,10 @@ struct Candidacy {
     /// create and its first catch-up (a BUGGIFY decision, #445 (ignored load
     /// result)): the desk must answer unavailable, never panic.
     impatient: bool,
+    /// Each term's tenant coordinator abandons its first create right after
+    /// booking its slots (a BUGGIFY decision, #212 (placement)): the next
+    /// create in that tenant must release them.
+    abandon: bool,
     /// The first fenced term steps down without a `Resign` record, as if
     /// the record were lost (a BUGGIFY decision): the fold still names the
     /// term's leader, and the term must not come back.
@@ -481,6 +500,7 @@ pub(crate) fn spawn<P: Providers>(
         hand_off: formed.plan.members.len() > 1 && moonpool_buggify::buggify_with_prob!(0.25),
         reuse: moonpool_buggify::buggify_with_prob!(0.3),
         impatient: moonpool_buggify::buggify_with_prob!(0.3),
+        abandon: moonpool_buggify::buggify_with_prob!(0.3),
         lose_resign: moonpool_buggify::buggify_with_prob!(0.5),
         linger: moonpool_buggify::buggify_with_prob!(0.5),
     };
@@ -555,6 +575,7 @@ async fn campaign<P: Providers>(
         hand_off: mut handing,
         reuse,
         impatient,
+        abandon,
         mut lose_resign,
         mut linger,
     } = candidacy;
@@ -582,7 +603,7 @@ async fn campaign<P: Providers>(
             uuid,
             journals.cell,
             &founder_ids,
-            (seed ^ u128::from(term), reuse, impatient),
+            (seed ^ u128::from(term), reuse, impatient, abandon),
             policy,
         );
         (term, desk)
@@ -788,7 +809,13 @@ async fn answer_until<P: Providers>(
                 let answer = match (JournalRequest::from_wire(&request), desk.as_mut()) {
                     (Err(_), _) => JournalAnswer::Malformed,
                     (Ok(request), Some((_, desk))) => {
-                        let answer = desk.answer(client, &request).await;
+                        let session = watching.as_mut().map(|(session, _)| session);
+                        let answer = desk.answer(client, &request, session).await;
+                        if watching.as_ref().is_some_and(|(session, _)| !session.is_open()) {
+                            // The term's first write that did not land ends
+                            // its watch, as in `Watch::round`.
+                            *watching = None;
+                        }
                         reply.send(answer.to_wire());
                         if desk.superseded() {
                             return;

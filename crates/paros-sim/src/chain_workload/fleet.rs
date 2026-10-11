@@ -78,6 +78,7 @@ mod election;
 mod journals;
 mod load;
 mod other_cell;
+mod placement;
 mod replaced;
 mod resolve;
 mod view;
@@ -173,6 +174,9 @@ pub(super) struct FleetOps {
     /// the library (#239 (names at the edge)): a cached resolution goes
     /// stale when its journal is deleted and the name created again.
     journal_names: BTreeMap<TenantId, paros::client::names::JournalNames>,
+    /// The tenants where a create the cell had no slot for was refused
+    /// (#212 (placement)), until this client's next create there is placed.
+    refused: BTreeSet<TenantId>,
     /// The replaced-founder scenario's steps this operator took (#423).
     replaced: replaced::Steps,
     /// The run's shared state: the completed removals (#239).
@@ -218,6 +222,7 @@ impl FleetOps {
             admitting: None,
             journal_pending: None,
             journal_names: BTreeMap::new(),
+            refused: BTreeSet::new(),
             replaced: replaced::Steps::default(),
             state: ctx.state().clone(),
         })
@@ -986,6 +991,8 @@ impl FleetOps {
             election::election_settles(ctx, &cell, ctx.time().now() + FLEET_SETTLE).await;
             self.renamed_registered(ctx, &cell, ctx.time().now() + FLEET_SETTLE)
                 .await;
+            let learn = |journal| self.note_journals([journal]);
+            placement::placements_booked(ctx, &cell, ctx.time().now() + FLEET_SETTLE, learn).await;
         }
         // Its own deadline (#304): a fleet half that took all of its time
         // must not leave the registry half none.

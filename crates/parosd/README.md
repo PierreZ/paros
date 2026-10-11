@@ -191,7 +191,7 @@ error (exit 2), so a typo never silently keeps a default.
 | `PAROS_ADVERTISE` | `HOST:PORT` its peers and clients dial; may be a name (default: `PAROS_LISTEN`, which must then not be a wildcard) |
 | `PAROS_DATA_DIR` | its identity (`machine`) and its stores |
 | `PAROS_CLASS` | `storage` (default) or `stateless`; fixed at format |
-| `PAROS_CAPACITY` | its capacity, in placement units (default 1) |
+| `PAROS_CAPACITY` | its capacity, in role slots (default 32): one slot holds one acceptor of one journal |
 | `PAROS_FAILURE_DOMAIN` | its failure domain label |
 | `PAROS_STORE_LAYOUT` | `default` (64 MiB segments) or `small` (laptops, tests) |
 | `PAROS_<FIELD>[_MS]` | one override per driver tunable (below) |

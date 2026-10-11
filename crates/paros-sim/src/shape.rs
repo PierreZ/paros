@@ -1318,9 +1318,10 @@ pub(crate) struct MachineLayout {
 /// over `1..=count` (`3..=count` on a replaced-founder or moved-founder seed
 /// with three machines or more, [`replaced_founder`], [`moved_founder`]); every founder is a `storage` machine (`cell init`
 /// refuses a `stateless` member) and every other machine is `storage` or
-/// `stateless` on a coin, idle, waiting for a placement that is #212's. The
-/// capacity is one `buggify_knob!` for the run (default 2, extreme 1..=4;
-/// floor 1, as a joiner's). A formed cell serves its control journals and
+/// `stateless` on a coin, idle, waiting until journals move onto admitted
+/// machines. The capacity is one `buggify_knob!` for the run (default 8,
+/// extreme 1..=3, where creates are refused for want of a slot, #212
+/// (placement); floor 1: one journal's acceptor). A formed cell serves its control journals and
 /// whatever its tenants create (#210). The machines advertise names on a
 /// coin (#257); on such a seed a reboot lands at a new address with the
 /// `move_pct` knob (default 0; extreme 20..=80, floor 0: a machine that
@@ -1353,7 +1354,10 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
             } else {
                 moonpool_sim::sim_random_range(least..count + 1)
             };
-            let capacity = buggify_knob!(2_u64, 1_u64..5_u64);
+            // Every live journal holds one slot on each of its members
+            // (#212 (placement)), so the default fits the run's few tenants
+            // of three journal names each, and the extreme fills the cell.
+            let capacity = buggify_knob!(8_u64, 1_u64..4_u64);
             let named = moonpool_sim::sim_random_bool(0.5) || moved;
             let move_pct = buggify_knob!(0_u32, 20_u32..81_u32);
             let rename_pct = buggify_knob!(0_u32, 20_u32..61_u32);

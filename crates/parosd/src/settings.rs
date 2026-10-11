@@ -8,7 +8,7 @@
 //! | `PAROS_ADVERTISE` | `HOST:PORT` its peers and clients dial; `PAROS_LISTEN` by default, required when that is a wildcard (#257) |
 //! | `PAROS_DATA_DIR` | where its identity and its stores live |
 //! | `PAROS_CLASS` | `storage` or `stateless` (fixed at format) |
-//! | `PAROS_CAPACITY` | its capacity, in placement units (default 1) |
+//! | `PAROS_CAPACITY` | its capacity, in role slots (default 32): one slot holds one acceptor of one journal |
 //! | `PAROS_FAILURE_DOMAIN` | its failure domain label (default empty) |
 //! | `PAROS_STORE_LAYOUT` | `default` (64 MiB segments) or `small` (laptops, tests) |
 //! | `PAROS_<FIELD>[_MS]` | one override per `DriverTunables` field ([`crate::tunables`]) |
@@ -74,7 +74,7 @@ pub struct Settings {
     #[arg(long, env = "PAROS_CLASS", default_value = "storage", value_parser = parse_class)]
     pub class: Class,
     /// Its capacity, in placement units.
-    #[arg(long, env = "PAROS_CAPACITY", default_value = "1")]
+    #[arg(long, env = "PAROS_CAPACITY", default_value = "32")]
     pub capacity: u64,
     /// Its failure domain label.
     #[arg(long, env = "PAROS_FAILURE_DOMAIN", default_value = "")]
