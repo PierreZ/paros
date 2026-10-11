@@ -49,6 +49,9 @@ pub mod status;
 mod storage;
 pub mod system;
 pub mod tenant;
+#[cfg(feature = "tls")]
+pub mod tls;
+pub mod transport;
 pub mod view;
 
 pub use address::{Address, Names};
@@ -92,6 +95,7 @@ pub use storage::{
     LogStorage, MemStorage, MetadataFault, StorageError, StorageRecord, WriteOutcome,
     storage_contract_suite,
 };
+pub use transport::Transport;
 
 // The whole sans-IO core, re-exported: the roles (`acceptor`, `proposer`,
 // `replica`, `matchmaking`, `membership`, `retained`), `ColocatedNode`, the

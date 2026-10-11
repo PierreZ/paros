@@ -40,7 +40,7 @@ const FRONTEND_PORT: u16 = 4600;
 
 /// The wall clock at the simulation's zero, since the Unix epoch: a fixed
 /// instant, so a token's expiry depends on the simulated time alone.
-const EPOCH: Duration = Duration::from_secs(1_790_000_000);
+pub(crate) const EPOCH: Duration = Duration::from_secs(1_790_000_000);
 
 /// How long a token the workload mints stays valid.
 const TOKEN_LIFE: Duration = Duration::from_secs(3_600);
@@ -226,6 +226,7 @@ async fn run_frontend_role(
         names: crate::machine::names(ctx.state()),
         epoch: EPOCH,
         tunables: DriverTunables::default(),
+        transport: crate::tls::serving(ctx, paros::tls::Role::Frontend, my_ip)?,
         client: ClientTunables {
             request_timeout: FORWARD_TIMEOUT,
             read_timeout: FORWARD_TIMEOUT,

@@ -30,6 +30,7 @@ mod process;
 mod roles;
 mod shape;
 mod state;
+mod tls;
 mod world;
 
 pub use moonpool_sim::{AssertKind, AssertionStats, SimulationReport};

@@ -45,6 +45,7 @@ use crate::driver::reply::Reply;
 use crate::driver::reply::match_answer;
 use crate::driver::{BootKind, BootRefusal, DriverTunables, RunError};
 use crate::storage::StorageError;
+use crate::transport::Transport;
 
 pub use storage::{
     MatchmakerStorage, MemMatchmakerStorage, Registrations, matchmaker_storage_contract_suite,
@@ -1018,6 +1019,7 @@ pub async fn run_matchmaker<P, S, A, F>(
     local_addr: String,
     config: MatchmakerConfig,
     tunables: DriverTunables,
+    transport: Transport,
     shutdown: CancellationToken,
     audit: F,
 ) -> Result<(), RunError>
@@ -1049,7 +1051,8 @@ where
         "every hosted set speaks for this matchmaker"
     );
 
-    let mut edge = RpcEdge::listen(&providers, &local_addr, "matchmaker", &tunables).await?;
+    let mut edge =
+        RpcEdge::listen(&providers, &local_addr, "matchmaker", &tunables, &transport).await?;
     let inbox = MatchmakerInbox::serve(edge.handle(), None)?;
     let host = Host {
         config: &config,

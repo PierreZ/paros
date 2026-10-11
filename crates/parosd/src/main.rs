@@ -99,6 +99,15 @@ async fn run(settings: Settings) -> ExitCode {
         Ok(tunables) => tunables,
         Err(error) => return invalid(&error),
     };
+    let transport = match settings.transport() {
+        Ok(transport) => transport,
+        Err(error) => return invalid(&error),
+    };
+    tracing::info!(
+        transport = transport.name(),
+        client_auth = %settings.tls_client_auth,
+        "parosd_transport"
+    );
     let addresses = match addresses(&settings) {
         Ok(addresses) => addresses,
         Err(error) => return invalid(&error),
@@ -129,6 +138,7 @@ async fn run(settings: Settings) -> ExitCode {
         addresses,
         Names::new(TokioResolver::new()),
         tunables,
+        transport,
         shutdown_on_signal(),
     ))
     .await;

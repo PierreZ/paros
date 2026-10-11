@@ -16,6 +16,13 @@
 //! | `PAROS_FRONTEND_CELL` | the cell's founding members, `HOST:PORT,…` (a Compose alias stands for each machine behind it) |
 //! | `PAROS_FRONTEND_ROOT_PUBLIC_KEY` | the root public key files it trusts, comma-separated (`parosctl key generate`) |
 //! | `PAROS_FRONTEND_TIMEOUT_MS` | one forwarded attempt's timeout (default 5000) |
+//! | `PAROS_FRONTEND_TLS_CERT` | its certificate chain, PEM (`parosctl tls`, role `frontend`); with the next two, every session is TLS, to its clients and to the machines |
+//! | `PAROS_FRONTEND_TLS_KEY` | the certificate's private key, PEM |
+//! | `PAROS_FRONTEND_TLS_CA` | the universe's authority, PEM |
+//! | `PAROS_FRONTEND_TLS_CLIENT_AUTH` | `required` (the default), `optional` or `off`: what it asks of a client |
+//!
+//! The machines and the frontend make the same choice: a frontend with
+//! TLS dials TLS machines, and presents its own certificate to them.
 //!
 //! Until placement (#212) a frontend fronts the founding members, which
 //! serve every journal; until `Resolve` (#216) a client is configured with
@@ -38,6 +45,7 @@ use clap::Parser;
 use moonpool_core::{TokioProviders, TokioResolver};
 use paros::client::ClientTunables;
 use paros::frontend::{FrontendSettings, run_frontend};
+use paros::tls::{ClientCertificates, Files};
 use paros::{Address, DriverTunables, Names, NoAudit};
 use paros_authz_biscuit::{BiscuitAuthz, KeyRing, RootPublicKey, since_epoch};
 use tokio_util::sync::CancellationToken;
@@ -59,6 +67,24 @@ struct Settings {
     /// One forwarded attempt's timeout, in milliseconds.
     #[arg(long, env = "PAROS_FRONTEND_TIMEOUT_MS", default_value = "5000")]
     timeout_ms: u64,
+    /// Its certificate chain, PEM, leaf first. With the key and the
+    /// authority, every session is TLS.
+    #[arg(long, env = "PAROS_FRONTEND_TLS_CERT")]
+    tls_cert: Option<std::path::PathBuf>,
+    /// The certificate's private key, PEM.
+    #[arg(long, env = "PAROS_FRONTEND_TLS_KEY")]
+    tls_key: Option<std::path::PathBuf>,
+    /// The universe's authority, PEM.
+    #[arg(long, env = "PAROS_FRONTEND_TLS_CA")]
+    tls_ca: Option<std::path::PathBuf>,
+    /// What it asks of a client: `required` (mutual TLS), `optional` or
+    /// `off`.
+    #[arg(long, env = "PAROS_FRONTEND_TLS_CLIENT_AUTH", default_value = "required", value_parser = parse_client_auth)]
+    tls_client_auth: ClientCertificates,
+}
+
+fn parse_client_auth(text: &str) -> Result<ClientCertificates, String> {
+    text.parse()
 }
 
 fn main() -> ExitCode {
@@ -117,6 +143,12 @@ fn configure(settings: &Settings) -> Result<(FrontendSettings, KeyRing), String>
         );
     }
     let ring = KeyRing::new(keys).map_err(|error| error.to_string())?;
+    let transport = Files {
+        cert: ("PAROS_FRONTEND_TLS_CERT", settings.tls_cert.as_deref()),
+        key: ("PAROS_FRONTEND_TLS_KEY", settings.tls_key.as_deref()),
+        ca: ("PAROS_FRONTEND_TLS_CA", settings.tls_ca.as_deref()),
+    }
+    .serving(settings.tls_client_auth)?;
     let client = ClientTunables {
         request_timeout: Duration::from_millis(settings.timeout_ms.max(1)),
         read_timeout: Duration::from_millis(settings.timeout_ms.max(1)),
@@ -129,6 +161,7 @@ fn configure(settings: &Settings) -> Result<(FrontendSettings, KeyRing), String>
             names: Names::new(TokioResolver::new()),
             epoch: since_epoch(SystemTime::now()),
             tunables: DriverTunables::production(),
+            transport,
             client,
         },
         ring,

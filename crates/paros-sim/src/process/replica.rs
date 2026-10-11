@@ -126,6 +126,7 @@ pub(super) async fn run_replica_role(
             members.clone(),
             boot,
             incarnation.shape.tunables,
+            crate::tls::serving(ctx, paros::tls::Role::Machine, my_ip)?,
             ctx.shutdown().clone(),
             &audit,
         )

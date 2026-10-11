@@ -50,6 +50,7 @@ use paros_core::{
 };
 
 use crate::driver::log_reads::{JournalReads, ReadLimits, refuse_journal};
+use crate::transport::Transport;
 use tokio_util::sync::CancellationToken;
 
 use crate::audit::Audit;
@@ -220,6 +221,22 @@ fn open_read<A: Audit>(
     reads.park(req, reply, ReadLimits::of(tunables), row, opened);
 }
 
+/// Scan the replica's store and check its format marker against `boot`;
+/// the replica's id.
+async fn boot_store<S, A>(storage: &mut S, boot: BootKind, audit: &A) -> Result<u64, RunError>
+where
+    S: LogStorage,
+    A: Audit + Clone + Send + Sync + 'static,
+{
+    let self_id = storage.initial_state().1.id.0;
+    storage
+        .boot_scan()
+        .await
+        .map_err(|e| storage_fault_crash(audit, self_id, e))?;
+    check_format_marker(storage, boot, self_id, audit).await?;
+    Ok(self_id)
+}
+
 /// Drive a paros replica to completion over the given providers.
 ///
 /// Generic over `P: Providers` (production *or* simulation) and
@@ -259,6 +276,7 @@ pub async fn run_replica<P, S, A>(
     members: Vec<(NodeId, String)>,
     boot: BootKind,
     tunables: DriverTunables,
+    transport: Transport,
     shutdown: CancellationToken,
     audit: &A,
 ) -> Result<(), RunError>
@@ -269,19 +287,15 @@ where
     // loop and never from a spawned task.
     A: Audit + Clone + Send + Sync + 'static,
 {
-    let self_id = storage.initial_state().1.id.0;
-    storage
-        .boot_scan()
-        .await
-        .map_err(|e| storage_fault_crash(audit, self_id, e))?;
-    check_format_marker(&mut storage, boot, self_id, audit).await?;
+    let self_id = boot_store(&mut storage, boot, audit).await?;
 
     let incarnation_shutdown = CancellationToken::new();
     let _incarnation_guard = incarnation_shutdown.clone().drop_guard();
 
     let me_id = NodeId(self_id);
     let me = Party::Node(me_id);
-    let mut edge = RpcEdge::listen(&providers, &local_addr, "replica", &tunables).await?;
+    let mut edge =
+        RpcEdge::listen(&providers, &local_addr, "replica", &tunables, &transport).await?;
     let ReplicaInbox {
         inspect: mut inspects,
         log_read: mut log_reads,

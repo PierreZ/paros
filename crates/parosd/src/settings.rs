@@ -11,6 +11,10 @@
 //! | `PAROS_CAPACITY` | its capacity, in role slots (default 32): one slot holds one acceptor of one journal |
 //! | `PAROS_FAILURE_DOMAIN` | its failure domain label (default empty) |
 //! | `PAROS_STORE_LAYOUT` | `default` (64 MiB segments) or `small` (laptops, tests) |
+//! | `PAROS_TLS_CERT` | its certificate chain, PEM (`parosctl tls`); with the next two, every session is TLS |
+//! | `PAROS_TLS_KEY` | the certificate's private key, PEM |
+//! | `PAROS_TLS_CA` | the universe's authority, PEM: the peers and callers it trusts |
+//! | `PAROS_TLS_CLIENT_AUTH` | `required` (mutual TLS, the default), `optional` or `off`: what it asks of a caller |
 //! | `PAROS_<FIELD>[_MS]` | one override per `DriverTunables` field ([`crate::tunables`]) |
 //!
 //! Each variable has the matching `--flag`. An unknown `PAROS_*` variable
@@ -19,11 +23,12 @@
 use std::path::PathBuf;
 
 use clap::{Parser, ValueEnum};
-use paros::JournalStoreConfig;
 use paros::machine::Class;
+use paros::tls::{ClientCertificates, Files};
+use paros::{JournalStoreConfig, Transport};
 
 /// The variables this module reads.
-const VARIABLES: [&str; 8] = [
+const VARIABLES: [&str; 12] = [
     "PAROS_NAME",
     "PAROS_LISTEN",
     "PAROS_ADVERTISE",
@@ -32,6 +37,10 @@ const VARIABLES: [&str; 8] = [
     "PAROS_CAPACITY",
     "PAROS_FAILURE_DOMAIN",
     "PAROS_STORE_LAYOUT",
+    "PAROS_TLS_CERT",
+    "PAROS_TLS_KEY",
+    "PAROS_TLS_CA",
+    "PAROS_TLS_CLIENT_AUTH",
 ];
 
 /// The store layout a machine runs.
@@ -92,6 +101,40 @@ pub struct Settings {
         default_value = "default"
     )]
     pub layout: Layout,
+    /// Its certificate chain, PEM, leaf first (`parosctl tls`). With the
+    /// key and the authority, every session it serves and dials is TLS.
+    #[arg(long, env = "PAROS_TLS_CERT")]
+    pub tls_cert: Option<PathBuf>,
+    /// The certificate's private key, PEM.
+    #[arg(long, env = "PAROS_TLS_KEY")]
+    pub tls_key: Option<PathBuf>,
+    /// The universe's authority, PEM: the peers and callers it trusts.
+    #[arg(long, env = "PAROS_TLS_CA")]
+    pub tls_ca: Option<PathBuf>,
+    /// What it asks of a caller: `required` (mutual TLS), `optional` or
+    /// `off` (server-authenticated TLS).
+    #[arg(long, env = "PAROS_TLS_CLIENT_AUTH", default_value = "required", value_parser = parse_client_auth)]
+    pub tls_client_auth: ClientCertificates,
+}
+
+impl Settings {
+    /// Its transport: TLS with the three files, plaintext with none.
+    ///
+    /// # Errors
+    ///
+    /// Only some of the files, or a file TLS cannot use.
+    pub fn transport(&self) -> Result<Transport, String> {
+        Files {
+            cert: ("PAROS_TLS_CERT", self.tls_cert.as_deref()),
+            key: ("PAROS_TLS_KEY", self.tls_key.as_deref()),
+            ca: ("PAROS_TLS_CA", self.tls_ca.as_deref()),
+        }
+        .serving(self.tls_client_auth)
+    }
+}
+
+fn parse_client_auth(text: &str) -> Result<ClientCertificates, String> {
+    text.parse()
 }
 
 fn parse_class(text: &str) -> Result<Class, String> {

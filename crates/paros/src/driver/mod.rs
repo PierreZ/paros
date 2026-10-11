@@ -91,6 +91,7 @@ use crate::rpc::{
 use crate::storage::LogStorage;
 use crate::system::{NodeStanding, RegistryEvent, SystemEvent};
 use crate::tenant::TenantEvent;
+use crate::transport::Transport;
 use reply::Reply;
 
 use calls::Call;
@@ -1108,6 +1109,7 @@ pub async fn run_node<P, S, A>(
     replicas: Vec<(NodeId, String)>,
     boot: BootKind,
     tunables: DriverTunables,
+    transport: Transport,
     shutdown: CancellationToken,
     audit: &A,
 ) -> Result<(), RunError>
@@ -1139,6 +1141,7 @@ where
         None,
         None,
         tunables,
+        transport,
         shutdown,
     ))
     .await
@@ -1210,6 +1213,7 @@ pub async fn run_journals<P, J>(
     system: Option<ControlPlan>,
     machine: Option<CellMachine>,
     tunables: DriverTunables,
+    transport: Transport,
     shutdown: CancellationToken,
 ) -> Result<(), RunError>
 where
@@ -1312,7 +1316,7 @@ where
     // polled by the loop below. Its handlers are the typed queues the loop
     // selects on, so the loop remains the sole owner of every journal's core.
     let me = Party::Node(NodeId(self_id));
-    let mut edge = RpcEdge::listen(&providers, &local_addr, "node", &tunables).await?;
+    let mut edge = RpcEdge::listen(&providers, &local_addr, "node", &tunables, &transport).await?;
     // A founding member's machine interface (#404 (static vs dynamic
     // endpoints)): a dynamic group serving `Deliver` for this incarnation,
     // published in its `IdentifyAck` and kept in the registry by `node_id`.

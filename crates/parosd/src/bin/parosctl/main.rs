@@ -30,6 +30,7 @@ mod output;
 #[path = "../../resolve.rs"]
 mod resolve;
 mod status;
+mod tls;
 mod token;
 mod views;
 
@@ -39,8 +40,9 @@ use std::time::Duration;
 
 use clap::{Args, Parser, Subcommand};
 use moonpool_core::{TokioProviders, TokioResolver};
-use moonpool_rpc::{RpcConfig, RpcDriver, RpcHandle};
+use moonpool_rpc::{RpcConfig, RpcHandle};
 use paros::client::{Client, ClientTunables, bootstrap};
+use paros::tls::Files;
 use paros::{Address, Names};
 
 use crate::output::Printer;
@@ -84,6 +86,17 @@ struct Global {
     /// an admin and may narrow itself so.
     #[arg(long, value_name = "NAME", global = true)]
     as_tenant: Option<String>,
+    /// The universe's authority, PEM (`parosctl tls`): every session is
+    /// TLS, and a server must prove a certificate it signed.
+    #[arg(long, env = "PAROSCTL_TLS_CA", global = true)]
+    tls_ca: Option<std::path::PathBuf>,
+    /// The certificate to present to the servers, PEM (mutual TLS): an
+    /// `admin` one from `parosctl tls init`.
+    #[arg(long, env = "PAROSCTL_TLS_CERT", global = true)]
+    tls_cert: Option<std::path::PathBuf>,
+    /// The certificate's private key, PEM.
+    #[arg(long, env = "PAROSCTL_TLS_KEY", global = true)]
+    tls_key: Option<std::path::PathBuf>,
 }
 
 /// One server entry: an explicit node id, or the addresses a name stands
@@ -155,6 +168,10 @@ enum Command {
     /// Biscuit tokens, offline (#400): `token mint` with a root key,
     /// `token derive` (narrower, macaroon style, no key), `token inspect`.
     Token(token::TokenArgs),
+    /// TLS certificates, offline: `tls init` writes the authority and a
+    /// certificate per machine, frontend and admin in one step; `tls ca`,
+    /// `tls issue`, `tls show`, `tls verify`.
+    Tls(tls::TlsArgs),
     /// The cell's machines (#399): `machine list`, `machine show <name>`.
     Machine(views::MachineArgs),
     /// Who holds which role now (#399): the coordinators, every journal's
@@ -232,16 +249,23 @@ struct Runtime {
     names: Names,
 }
 
-fn runtime() -> Result<Runtime, String> {
+fn runtime(global: &Global) -> Result<Runtime, String> {
     let config = RpcConfig {
         max_frame_bytes: paros::MAX_FRAME_BYTES,
         ..RpcConfig::default()
     };
+    let transport = Files {
+        cert: ("PAROSCTL_TLS_CERT", global.tls_cert.as_deref()),
+        key: ("PAROSCTL_TLS_KEY", global.tls_key.as_deref()),
+        ca: ("PAROSCTL_TLS_CA", global.tls_ca.as_deref()),
+    }
+    .dialing()?;
     let providers = TokioProviders::new();
-    let (driver, rpc) = RpcDriver::client_only(providers.clone(), config)
+    let (run, rpc) = transport
+        .client_only(providers.clone(), config)
         .map_err(|e| format!("client RPC runtime: {e}"))?;
     tokio::spawn(async move {
-        let error = driver.run().await;
+        let error = run.await;
         tracing::warn!(%error, "client RPC runtime failed");
     });
     Ok(Runtime {
@@ -353,6 +377,7 @@ fn main() -> ExitCode {
     match cli.command {
         Command::Key(args) => key::run(&out, args).into(),
         Command::Token(args) => token::run(&out, args).into(),
+        Command::Tls(args) => tls::run(&out, args).into(),
         command => match tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -487,7 +512,7 @@ async fn online(global: Global, command: Command) -> ExitCode {
         eprintln!("parosctl: no servers: pass --servers or set PAROSCTL_SERVERS");
         return ExitCode::FAILURE;
     }
-    let runtime = match runtime() {
+    let runtime = match runtime(&cli.global) {
         Ok(runtime) => runtime,
         Err(error) => {
             eprintln!("parosctl: {error}");
@@ -528,7 +553,9 @@ async fn online(global: Global, command: Command) -> ExitCode {
         }
         Command::Resolve(args) => return resolve_tenant(&runtime, &cli.global, &out, args).await,
         Command::Cell(command) => command,
-        Command::Key(_) | Command::Token(_) => unreachable!("offline, handled in main"),
+        Command::Key(_) | Command::Token(_) | Command::Tls(_) => {
+            unreachable!("offline, handled in main")
+        }
         Command::Machine(_) | Command::Roles(_) | Command::Status(_) => {
             unreachable!("views, handled above")
         }

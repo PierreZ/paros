@@ -7,7 +7,7 @@
 
 use std::time::Duration;
 
-use moonpool_rpc::{RpcConfig, RpcDriver, RpcHandle};
+use moonpool_rpc::{RpcConfig, RpcHandle};
 use moonpool_sim::{SimContext, SimProviders, SimulationError, SimulationResult, TaskProvider};
 use paros::client::{ClientTunables, Server};
 use paros::{NodeClient, parse_addr};
@@ -42,7 +42,9 @@ impl ClientRuntime {
     /// Start a runtime under `config`.
     #[tracing::instrument(level = "debug", skip_all)]
     pub(crate) fn start(ctx: &SimContext, config: RpcConfig) -> SimulationResult<Self> {
-        let (driver, rpc) = RpcDriver::client_only(ctx.providers().clone(), config)
+        let name = format!("client-{}", ctx.client_id());
+        let (run, rpc) = crate::tls::dialing(ctx, &name)?
+            .client_only(ctx.providers().clone(), config)
             .map_err(|e| SimulationError::InvalidState(format!("client RPC runtime: {e}")))?;
         let stop = CancellationToken::new();
         let cancelled = stop.clone();
@@ -51,7 +53,7 @@ impl ClientRuntime {
                 moonpool_sim::select! {
                     biased;
                     () = cancelled.cancelled() => {}
-                    error = driver.run() => {
+                    error = run => {
                         tracing::warn!(%error, "client RPC runtime failed");
                     }
                 }

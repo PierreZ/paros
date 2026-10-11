@@ -44,7 +44,7 @@ enum KeyCommand {
 }
 
 /// A key label: it names files, so letters, digits, `.`, `_` and `-` only.
-fn parse_label(text: &str) -> Result<String, String> {
+pub fn parse_label(text: &str) -> Result<String, String> {
     let valid = !text.is_empty()
         && !text.starts_with('.')
         && text

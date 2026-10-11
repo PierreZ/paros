@@ -22,6 +22,7 @@ use crate::driver::{DriverTunables, RunError};
 use crate::rpc::machine as wire;
 use crate::rpc::methods::{AdmitRpc, CellInitRpc, FormCellRpc, IdentifyRpc, PrepareCellRpc};
 use crate::rpc::{Inbound, ReplySender, serve_well_known};
+use crate::transport::Transport;
 
 /// How long a waiting machine keeps its listener up after the answer that
 /// ends its wait, so the answer leaves before the listener closes.
@@ -110,11 +111,12 @@ pub async fn wait_for_cell<P: Providers, L: CellLedger>(
     facts: &MachineFacts,
     ledger: &mut L,
     tunables: &DriverTunables,
+    transport: &Transport,
     shutdown: CancellationToken,
 ) -> Result<Option<Joined>, RunError> {
     assert!(ledger.vote().is_none(), "a formed machine does not wait");
     let addr = facts.listen.to_string();
-    let mut edge = RpcEdge::listen(&providers, &addr, "machine", tunables)
+    let mut edge = RpcEdge::listen(&providers, &addr, "machine", tunables, transport)
         .await
         .map_err(RunError::Infra)?;
     let rpc = edge.handle().clone();
