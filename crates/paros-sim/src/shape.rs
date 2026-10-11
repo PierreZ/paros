@@ -1483,6 +1483,7 @@ pub(crate) fn boot(state: &StateHandle, ip: &str) -> Incarnation {
     let slow = slow_link(state);
     // Drawn before the lock: the scenarios take the registry's lock too.
     let slow_machine = slow_machine(state);
+    let moved_founder = moved_founder(state);
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     let entry = guard.nodes.entry(ip.to_string()).or_insert_with(|| {
@@ -1491,6 +1492,14 @@ pub(crate) fn boot(state: &StateHandle, ip: &str) -> Incarnation {
             // The slow-machine scenario: a full window every second, so
             // one falls inside the slow time.
             shape.tunables.load_interval = paros::LOAD_INTERVAL_FLOOR;
+        }
+        if moved_founder {
+            // The moved-founder scenario: a renamed founder registers its
+            // new name, and an admitted machine follows the registry, once
+            // per renewal period. At the floor the second crash finds a
+            // cache that follows the move inside its window: at the drawn
+            // period it struck on 1 of 22 moves in 1,000 hunt seeds.
+            renew_at_floor(&mut shape.tunables);
         }
         Entry {
             shape,
@@ -1846,4 +1855,17 @@ mod tests {
             }
         }
     }
+}
+
+/// The renewal period's floor (see [`NodeShape::draw`]).
+const ELECTION_RENEW_FLOOR: Duration = Duration::from_millis(100);
+
+/// Run `tunables`' cell election at its renewal floor, the lease and the
+/// failure detector moved down with it, so each keeps its margin past the
+/// renewal period.
+fn renew_at_floor(tunables: &mut DriverTunables) {
+    let cut = tunables.election_renew.saturating_sub(ELECTION_RENEW_FLOOR);
+    tunables.election_renew -= cut;
+    tunables.election_lease -= cut;
+    tunables.machine_down_after -= cut;
 }
