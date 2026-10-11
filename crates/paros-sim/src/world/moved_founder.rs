@@ -10,8 +10,12 @@
 //! second strikes once a machine's cache holds the new name
 //! (`crate::machine::cached_mover`). Both are short crashes through
 //! moonpool's own `Crash`. Like the silent machine (`super::silent_machine`)
-//! the injector may strike up to `LATE_WINDOW` into the recovery tail, and
-//! `may_rename` keeps the cell's majority.
+//! the move may strike up to `LATE_WINDOW` into the recovery tail, and
+//! `may_rename` keeps the cell's majority. A cache follows the move 1 to
+//! 25 s after it, so the second crash may strike up to [`FOLLOW`] after the
+//! move; the rest of the tail is still the recovery the oracles judge.
+
+use std::time::Duration;
 
 use async_trait::async_trait;
 use moonpool_sim::{
@@ -24,6 +28,22 @@ use super::outage::POLL;
 /// How long each crashed machine stays down, in milliseconds: a usual
 /// reboot.
 const DOWN_MS: std::ops::Range<usize> = 100..601;
+
+/// How long after the move the second crash may still strike: a cache
+/// followed the move within 8 s on half the scenario seeds and within 12 s
+/// on four in five (900 hunt seeds), so a bound of `LATE_WINDOW` left the
+/// gate silent on most of them (#441 (metainfo twin) met it in CI). Far
+/// below the workload's recovery budget (45 s at its floor) with the move
+/// window before it.
+const FOLLOW: Duration = Duration::from_secs(12);
+
+const _: () = assert!(
+    (crate::CHAOS_DURATION_MS as u128)
+        + LATE_WINDOW.as_millis()
+        + FOLLOW.as_millis()
+        + (DOWN_MS.end as u128)
+        < 45_000
+);
 
 /// The moved-founder injector (see the module doc): a fresh one per
 /// timeline.
@@ -41,7 +61,8 @@ impl FaultInjector for MovedFounder {
             return Ok(());
         }
         let time = ctx.time();
-        let deadline = crate::CHAOS_DURATION + LATE_WINDOW;
+        // The move's deadline; once it struck, the second crash's.
+        let mut deadline = crate::CHAOS_DURATION + LATE_WINDOW;
         let mut moved = false;
         loop {
             if time.now() >= deadline {
@@ -55,6 +76,7 @@ impl FaultInjector for MovedFounder {
                 tracing::info!(%founder, "moved_founder_strikes");
                 ctx.reboot_with_delays(&founder, RebootKind::Crash, &DOWN_MS, &(0..1))?;
                 moved = true;
+                deadline = time.now() + FOLLOW;
             } else if moved
                 && let Some(target) =
                     crate::machine::cached_mover(ctx.state(), |ip| ctx.is_dead(ip))

@@ -1315,8 +1315,8 @@ pub(crate) struct MachineLayout {
 
 /// The run's machine layout (#246), drawn once per seed by whoever asks
 /// first, for `count` machines in rank order. The founder count is uniform
-/// over `1..=count` (`3..=count` on a replaced-founder seed with three
-/// machines or more, [`replaced_founder`]); every founder is a `storage` machine (`cell init`
+/// over `1..=count` (`3..=count` on a replaced-founder or moved-founder seed
+/// with three machines or more, [`replaced_founder`], [`moved_founder`]); every founder is a `storage` machine (`cell init`
 /// refuses a `stateless` member) and every other machine is `storage` or
 /// `stateless` on a coin, idle, waiting for a placement that is #212's. The
 /// capacity is one `buggify_knob!` for the run (default 2, extreme 1..=4;
@@ -1338,8 +1338,16 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
         .machine_layout
         .get_or_insert_with(|| {
             // The replaced-founder scenario needs a cell that keeps a
-            // majority through one wipe: three founders or more.
-            let least = if replaced && count >= 3 { 3 } else { 1 };
+            // majority through one wipe: three founders or more. So does
+            // the moved-founder scenario: a rename never takes a cell of
+            // two, and another founder must cache the move. One founder or
+            // two moved a founder on 25 of 900 hunt seeds, three or more on
+            // 58.
+            let least = if (replaced || moved) && count >= 3 {
+                3
+            } else {
+                1
+            };
             let founders = if count == 0 {
                 0
             } else {
