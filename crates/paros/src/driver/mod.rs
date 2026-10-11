@@ -257,7 +257,6 @@ impl<P: Providers, A: Audit> NodeLoop<'_, P, A> {
         step: &MatchStep,
     ) {
         let tenant = node.config().journal.tenant;
-        let (audit, self_id) = (self.audit, self.self_id);
         match step {
             // Sound to finish *this* node's believed set: a matchmaker
             // answers `Stopped { successor: None }` only when the generation
@@ -297,23 +296,72 @@ impl<P: Providers, A: Audit> NodeLoop<'_, P, A> {
                         node.config().has_matchmakers(),
                         "only a matchmaker deployment republishes a successor"
                     );
-                    audit.successor_republished(NodeId(self_id), matchmaker, &set);
-                    tracing::info!(
-                        node = self_id,
-                        matchmaker = matchmaker.0,
-                        generation = set.generation.0,
-                        "successor_republished"
-                    );
-                    let request = ReconfigureRequest::Chosen {
-                        from: NodeId(self_id),
-                        generation: MatchmakerGeneration(set.generation.0 - 1),
-                        successor: set,
-                    };
-                    self.send_reconfigure(tenant, vec![(matchmaker, request)]);
+                    self.republish(tenant, matchmaker, set);
                 }
             }
             _ => {}
         }
+    }
+
+    /// Tell `matchmaker`, a straggler, the chosen `set` this node knows: the
+    /// `Chosen` link from the generation before it.
+    fn republish(&self, tenant: TenantId, matchmaker: MatchmakerId, set: MatchmakerSet) {
+        // Generation 0 is the bootstrap: no decree chose it.
+        assert!(
+            set.generation.0 > 0,
+            "only a chosen successor is republished"
+        );
+        let (audit, self_id) = (self.audit, self.self_id);
+        audit.successor_republished(NodeId(self_id), matchmaker, &set);
+        tracing::info!(
+            node = self_id,
+            matchmaker = matchmaker.0,
+            generation = set.generation.0,
+            "successor_republished"
+        );
+        let request = ReconfigureRequest::Chosen {
+            from: NodeId(self_id),
+            generation: MatchmakerGeneration(set.generation.0 - 1),
+            successor: set,
+        };
+        self.send_reconfigure(tenant, vec![(matchmaker, request)]);
+    }
+
+    /// A member of the generation this node's handover replaces answered
+    /// from an earlier generation (#496): it never learned that the set
+    /// being replaced was chosen. Its freeze can then never count, so a
+    /// handover that needs it waits for good, and no other path tells it:
+    /// a campaign meets it only when its refusal comes first. Witness
+    /// 16692607731545838330 of #496: generation 1 was `{1, 2, 3, 4}`, only
+    /// matchmakers 3 and 4 learned it, and every finish of it was refused
+    /// by 1 and 2 from generation 0.
+    fn on_handover_straggler(
+        &self,
+        tenant: TenantId,
+        handover: &HandoverDriver,
+        reply: &ReconfigureReply,
+    ) {
+        let ReconfigureReply::Refused {
+            matchmaker,
+            current,
+            ..
+        } = reply
+        else {
+            return;
+        };
+        let Some(old) = handover.old() else { return };
+        if current.generation >= old.generation || !old.contains(*matchmaker) {
+            return;
+        }
+        // A handover replaces the set its node believes in force: the
+        // bootstrap, or a set a decree chose. Only the second has a link.
+        if old.generation.0 == 0 {
+            return;
+        }
+        moonpool_assertions::reachable!(
+            "generation: a handover tells a behind member the set it replaces"
+        );
+        self.republish(tenant, *matchmaker, old.clone());
     }
 
     /// One tick of the running matchmaker-set handover (#125): its stall
@@ -354,7 +402,17 @@ impl<P: Providers, A: Audit> NodeLoop<'_, P, A> {
             audit.reconfigurer_aborted(NodeId(self_id));
             tracing::info!(node = self_id, early = true, "reconfigurer_aborted");
         }
-        if !handover.resend_due(self.tunables.reconfigurer_resend_ticks) {
+        // BUGGIFY (#496): close a freeze the tick its quorum answered, with
+        // no round left for the stragglers. Valid (the quorum is all a
+        // reconstruction rests on), and a `finish` then proposes exactly the
+        // quorum: a thinner successor set, which tolerates fewer losses.
+        // Silent in the recovery tail.
+        let hasty =
+            handover.stop_quorum_reached() && moonpool_buggify::buggify_fault_with_prob!(0.5);
+        if hasty {
+            moonpool_assertions::reachable!("generation: a freeze closes on its first quorum");
+        }
+        if !hasty && !handover.resend_due(self.tunables.reconfigurer_resend_ticks) {
             return;
         }
         // The freeze closes here, not on the ack that completed its quorum: a
@@ -384,6 +442,10 @@ impl<P: Providers, A: Audit> NodeLoop<'_, P, A> {
                 "reconfigurer_reconstructed"
             );
             self.send_reconfigure(tenant, handover.take_requests());
+        }
+        if hasty {
+            // No re-send was due: the bootstrap just went out.
+            return;
         }
         // Skipping a due re-send is always safe: it stretches the
         // stop-the-world window and delays a preempted decree's reopening.
@@ -1773,6 +1835,7 @@ where
                     &links.reconfigure_replies,
                     &(tenant, reply.clone()),
                 );
+                shared.with(&audits).on_handover_straggler(tenant, handover, &reply);
                 let step = handover.on_reply(reply.clone());
                 audits.reconfigurer_step(NodeId(self_id), matchmaker, &reply, &step);
                 tracing::info!(

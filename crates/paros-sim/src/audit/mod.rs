@@ -1331,12 +1331,15 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             st.replicas.contains(&node.0) && st.matchmaker.has_matchmakers();
     }
 
+    // One boot report, judged leg by leg in order (#496 added the floor).
+    #[allow(clippy::too_many_lines)]
     #[tracing::instrument(level = "trace", skip_all)]
     fn recovered(
         &self,
         node: NodeId,
         promised: Ballot,
         chosen_index: Option<Slot>,
+        floor: Slot,
         deployment: &Deployment,
         accepted: &[(Slot, Ballot, u64)],
     ) {
@@ -1496,6 +1499,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
                 { "node" => node.0, "slot" => slot }
             );
         }
+        recover_floor(&mut st, node.0, floor.0, chosen_index, now);
     }
 
     #[tracing::instrument(level = "trace", skip_all, fields(node = node.0, decision = ?decision))]
@@ -2295,6 +2299,47 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
     ) {
         self.state().matchmaker.storage_fault(matchmaker, decision);
     }
+}
+
+/// Fold the compaction floor `node`'s boot read back (#496). A batch that
+/// raised the floor can land durably and the node crash before it reported
+/// the batch (an ambiguous sync): the boot then holds a floor the audit
+/// never saw, and every oracle that reads `floor` (the GC licence among
+/// them: a slot below a member's floor is held as chosen) must see it. The
+/// floor is one the node staged, and it lies inside the chosen prefix the
+/// boot recovered. Witness 4373183430197841510: a leader whose own floor
+/// had passed the fence asked for GC, and the audit, still at the floor
+/// before the crash, found no member holding the fence slot.
+fn recover_floor(st: &mut AuditState, node: u64, floor: u64, chosen: Option<Slot>, now: u64) {
+    let staged = st.requested_floor.get(&node).copied().unwrap_or(0);
+    let reported = st.truncate_watermark.get(&node).copied().unwrap_or(0);
+    assert_always!(
+        floor <= staged.max(reported),
+        "storage: a recovered floor is one its node staged",
+        { "node" => node, "floor" => floor, "staged" => staged, "reported" => reported }
+    );
+    assert_always!(
+        floor <= chosen.map_or(0, |c| c.0 + 1),
+        "storage: a recovered floor lies inside the recovered chosen prefix",
+        { "node" => node, "floor" => floor, "chosen" => crate::signed_watermark(chosen.map(|c| c.0)) }
+    );
+    let known = st.floor.get(&node).map_or(0, |f| f.now);
+    if floor <= known {
+        return;
+    }
+    reach_once!(
+        st.boot_floor_unreported,
+        "storage: a boot recovers a floor its node never reported"
+    );
+    st.floor.entry(node).or_default().raise(floor, now);
+    st.truncate_watermark.insert(node, floor.max(reported));
+    // The fold now knows the higher floor: what every node truncated may
+    // be reclaimed, as at a reported truncation.
+    st.prune_below_floor();
+    assert_always!(
+        st.floor.get(&node).is_some_and(|f| f.now == floor),
+        "storage: a recovered floor is folded"
+    );
 }
 
 /// Judge `node`'s pending compaction floor once its walk reported `slot`

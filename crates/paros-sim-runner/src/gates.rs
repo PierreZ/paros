@@ -1032,6 +1032,22 @@ pub const RARE: &[Rare] = &[
         msg: "placement: a journal moved off a draining machine",
         reason: "a move off a drained machine: 4 hits on 1 of 4 runs over 400 hunt seeds (#498 (moves in the sweep))",
     },
+    Rare {
+        msg: "storage: a boot recovers a floor its node never reported",
+        reason: "fired on 0 of 600 hunt seeds: a truncation lands in the recovery tail, where a driver hint cannot strike (#496 (two red hunt seeds), #484)",
+    },
+    Rare {
+        msg: "chain: the settle tail waits for a spare that joined in the tail",
+        reason: "marginal: missed by one of three 200-seed hunt shards and by the sweep on #500 (two red hunt seeds) (#486)",
+    },
+    Rare {
+        msg: "machine: a machine no cell init lists restarts and waits",
+        reason: "marginal: missed by the sweep on #500 (two red hunt seeds) (#486)",
+    },
+    Rare {
+        msg: "generation: a handover tells a behind member the set it replaces",
+        reason: "fired on 0 of 3,100 hunt seeds, and once on a witness: it needs a publication cut short in the chaos window, and handovers mostly run in the recovery tail; a Publishing abandon site at 0.05 fired on 0 of 600 (#496 (two red hunt seeds), #484)",
+    },
 ];
 
 /// What the sweep ran of the declared gates.

@@ -62,11 +62,17 @@ pub(crate) struct LedgeredRegistry {
     /// matchmaker loss ([`StorageWorld::permit_matchmaker_power_cut`]).
     /// `None` on an `Ordered` registry, never ambiguous.
     cut_budget: Option<usize>,
+    /// The run's thin matchmaker sets and this matchmaker's id: a cut never
+    /// takes a member of a set that cannot spare it (#496).
+    thin: (super::thin_sets::ThinSets, u64),
 }
 
 impl LedgeredRegistry {
     /// The registry of `tenant`'s set at `ip`. What a commit has in flight
     /// is the driver's to report (`Audit::matchmaker_in_flight`, #190).
+    // The store's own arguments, then the budget's (#496: the matchmaker's
+    // id, which the thin sets name).
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         provider: SimStorageProvider,
         tenant: TenantId,
@@ -75,7 +81,9 @@ impl LedgeredRegistry {
         ip: String,
         state: StateHandle,
         cut_budget: Option<usize>,
+        matchmaker: u64,
     ) -> Self {
+        let thin = (super::thin_sets::thin_sets(&state), matchmaker);
         Self {
             inner: JournalMatchmakerStorage::new(
                 provider,
@@ -89,6 +97,7 @@ impl LedgeredRegistry {
             format_pending: false,
             state,
             cut_budget,
+            thin,
         }
     }
 
@@ -222,6 +231,7 @@ impl MatchmakerStorage for LedgeredRegistry {
             let budget = Budget::Matchmaker {
                 bootstrap: self.cut_budget,
                 held,
+                thin: self.thin.clone(),
             };
             InFlight::open(
                 &self.state,

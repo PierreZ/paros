@@ -24,6 +24,7 @@ pub(crate) mod settle;
 pub(crate) mod silent_machine;
 pub(crate) mod slow_machine;
 pub(crate) mod split_floor;
+pub(crate) mod thin_sets;
 pub(crate) mod wipe;
 pub(crate) mod wiped_founder;
 

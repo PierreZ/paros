@@ -265,6 +265,11 @@ pub(super) struct MatchmakerAudit {
     /// (witness: seed 16429444661763635071, recipe
     /// 42754:15486895044628287776, found by #191 (status)'s sweep).
     pub(super) stop_acks: TenantStops,
+    /// The run's thin matchmaker sets (#496): every set a reconstruction
+    /// proposes or a matchmaker activates is recorded, so the
+    /// matchmaker-loss budget never takes a member of a set that cannot
+    /// spare it.
+    pub(super) thin: crate::world::thin_sets::ThinSets,
     /// Refusals folded, by kind (diagnostics only).
     refusal_counts: BTreeMap<&'static str, u64>,
     /// Per node: handovers started, abandoned, and the last step folded
@@ -820,6 +825,7 @@ impl MatchmakerAudit {
     /// Invariant 1 of #125: record `members` as `generation`'s authoritative
     /// set, or check it against the one already known.
     fn bind_set(&mut self, generation: u64, members: &[u64], source: &'static str) {
+        self.thin.note(members);
         let known = self.sets.bind_first(generation, members.to_vec());
         assert_always!(
             known.as_slice() == members,
@@ -2333,6 +2339,10 @@ impl MatchmakerAudit {
         bootstrap: &PendingBootstrap,
         disagreements: u64,
     ) {
+        // A finish proposes the members that answered its freeze: the set
+        // may be thinner than the one it replaces (#496).
+        let proposed: Vec<u64> = bootstrap.set.members().iter().map(|m| m.0).collect();
+        self.thin.note(&proposed);
         // This journal's piece of the reconstruction (#190): a journal the
         // frozen quorum held nothing for is absent, and reads as blank.
         let mine = bootstrap
