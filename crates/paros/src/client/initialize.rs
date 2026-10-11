@@ -5,7 +5,8 @@
 //! The cell step is `cell init` over the founding members: sent to the
 //! first listed machine still idle, which drives the cell decree over every
 //! listed machine ([`crate::machine`]); a formed one has no `CellInit` and
-//! the next is asked. Then `init` waits for the cell's first coordinator:
+//! the next is asked, and so is one `cell add-machine` admitted (#423), which
+//! refuses it as `cell_exists`. Then `init` waits for the cell's first coordinator:
 //! the founding members campaign in the cell's election journal, and the
 //! winner installs its uuid on the cell control journal with
 //! `SetLeader(uuid, unset)` (#240, [`crate::machine`]'s coordinator). `init`
@@ -150,12 +151,23 @@ async fn found<P: Providers>(
     }
     let client = connect(&servers);
     // The genesis pool is the cell's members, never only the servers that
-    // answered: one of them may be down.
-    let mut members = client
-        .inspect(0, journals.cell)
-        .await
-        .map(|view| view.members)
-        .unwrap_or_default();
+    // answered: one of them may be down. A server that answered may also
+    // be a machine `cell add-machine` admitted (#423), which serves no
+    // journal yet and refuses the `Inspect`: the next server is asked.
+    let mut members = Vec::new();
+    for target in 0..servers.len() {
+        if let Some(view) = client.inspect(target, journals.cell).await
+            && !view.members.is_empty()
+        {
+            if target > 0 {
+                moonpool_assertions::reachable!(
+                    "init: a found cell's members come from a server past the first"
+                );
+            }
+            members = view.members;
+            break;
+        }
+    }
     members.sort_unstable();
     members.dedup();
     if members.is_empty() {
@@ -223,6 +235,15 @@ pub async fn initialize<P: Providers>(
             InitOutcome::Formed(plan) => {
                 formation = Some(plan);
                 break;
+            }
+            // A machine `cell add-machine` admitted (#216) at a listed
+            // address: a wiped member's replacement, in a cell already, like
+            // a formed one (#423). The next listed machine may still be idle,
+            // and `found` names the cell a majority of the members serve.
+            InitOutcome::Refused(refusal) if refusal == "cell_exists" => {
+                moonpool_assertions::reachable!(
+                    "init: a re-run passes an admitted machine at a listed address"
+                );
             }
             InitOutcome::Refused(refusal) => {
                 return InitRun::Refused(InitRefusal::Formation(refusal));

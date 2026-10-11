@@ -60,7 +60,10 @@ mod system;
 pub(crate) mod transport;
 mod tunables;
 
-pub use config::{BootKind, BootRefusal, DriverTunables, MAX_READ_RECORDS, RunError, parse_addr};
+pub use config::{
+    BootKind, BootRefusal, DriverTunables, LOAD_INTERVAL_FLOOR, MAX_READ_RECORDS, RunError,
+    parse_addr,
+};
 pub use events::{command_hash, message_kind, registration_history_hash};
 pub use journals::JournalStores;
 pub use system::ControlPlan;

@@ -296,7 +296,18 @@ where
     let MachineAddresses { listen, advertise } = addresses;
     let record = identity(&providers, &disk, &audit, &advertise, settings).await?;
     assert_eq!(record.class, settings.class, "the class is fixed at format");
-    let facts = facts_of(&record, (advertise.clone(), listen), names);
+    // The machine samples its own busyness from its first start on (#424):
+    // every phase answers `Load` from this board.
+    let load = super::load::LoadBoard::default();
+    super::load::spawn_monitor(
+        &providers,
+        disk.root().to_string(),
+        tunables.load_interval,
+        load.clone(),
+        moonpool_buggify::buggify_with_prob!(0.2),
+        shutdown.clone(),
+    );
+    let facts = facts_of(&record, (advertise.clone(), listen), names, load);
     tracing::info!(
         node = facts.node_id.0,
         addr = %advertise,
@@ -500,6 +511,7 @@ fn facts_of(
     record: &MachineRecord,
     (addr, listen): (Address, SocketAddr),
     names: Names,
+    load: super::load::LoadBoard,
 ) -> MachineFacts {
     MachineFacts {
         node_id: record.node_id,
@@ -511,6 +523,7 @@ fn facts_of(
         listen,
         names,
         incarnation: 0,
+        load,
     }
 }
 

@@ -177,6 +177,12 @@ well_known_method!(
     ResolveRpc, 0x5041_030A, machine::Resolve => machine::ResolveAck,
     "paros.machine.Resolve"
 );
+well_known_method!(
+    /// How busy a machine was over its last full window (#424): answered
+    /// by every machine from memory.
+    LoadRpc, 0x5041_030B, machine::Load => machine::LoadAck,
+    "paros.machine.Load"
+);
 // 0x5041_04xx: the frontend contract (#192 (the frontend)), served by a
 // frontend only: a public call with the caller's entry.
 well_known_method!(

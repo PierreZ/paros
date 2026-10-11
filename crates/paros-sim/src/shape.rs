@@ -263,6 +263,11 @@ impl NodeShape {
             // wraps, an apply walk that yields mid-burst, a matchmaker
             // history over several pages. Floor 1 for each: a one-entry page
             // still makes progress, one round trip or one `Ready` per entry.
+            // A one-entry promise page makes a long suffix take more round
+            // trips than an election timeout; it stays winnable because a
+            // paging candidate re-sends its `Prepare` to the peers that
+            // answered on every tick, which keeps their election clocks
+            // quiet (#428 (paging livelock)).
             promise_page: buggify_knob!(paros::PROMISE_BATCH, 1_usize..5_usize),
             resend_page: buggify_knob!(paros::RESEND_BATCH, 1_usize..5_usize),
             apply_page: buggify_knob!(paros::APPLY_BATCH, 1_usize..5_usize),
@@ -332,6 +337,11 @@ impl NodeShape {
             machine_down_after: ms(
                 election_renew_ms + buggify_knob!(1000_u64, ROUND_TRIP_FLOOR_MS..3001_u64)
             ),
+            // A machine's busyness window (#424). Floor 1 s (the shipped
+            // floor): shorter measures the sampler, not the machine. The
+            // short end gives a run many windows, so `LOAD` meets a full
+            // one early and often.
+            load_interval: ms(buggify_knob!(5000_u64, 1000_u64..5001_u64)),
         };
         // The production profile `parosd` ships (#209), whole: every field
         // at once, which the per-field locations above would draw together
@@ -622,9 +632,15 @@ struct Registry {
     /// Run-level: whether the run draws the moved-founder scenario (see
     /// [`moved_founder`]), fixed by the first caller.
     moved_founder: Option<bool>,
+    /// Run-level: whether the run draws the replaced-founder scenario (see
+    /// [`replaced_founder`]), fixed by the first caller.
+    replaced_founder: Option<bool>,
     /// Run-level: whether the run draws the slow-link scenario (see
     /// [`slow_link`]), fixed by the first caller.
     slow_link: Option<bool>,
+    /// Run-level: whether the run draws the lagging-acceptor scenario (see
+    /// [`lagging_acceptor`]), fixed by the first caller.
+    lagging_acceptor: Option<bool>,
     /// Run-level: whether the run runs the system journals (see
     /// [`system_journals`]), fixed by the first caller.
     system: Option<bool>,
@@ -872,8 +888,19 @@ pub(crate) fn lost_verdict(state: &StateHandle) -> bool {
 /// journals ([`system_journals`]), and a client that registers a joiner
 /// reconfigures onto it next whatever the swarm mask (`ChainWorkload`):
 /// the gate fired on 0 of 417 checks (600 hunt seeds) before these
-/// ingredients came together and 7 of 637 (600) after. Rare-but-valid: a
-/// slow follower is, and each ingredient keeps its own coin on the other
+/// ingredients came together and 7 of 637 (600) after. Those were checks:
+/// the gate fired on 3 to 4 seeds in 1,000, too few for the sweep's 1,024
+/// to saturate. A refusal needs a member whose fold is behind a joiner
+/// that speaks to it, and the joiner speaks once a configuration takes it
+/// in. So on a scenario seed a client also registers at the ceiling weight
+/// whatever the swarm mask, asks again a reconfiguration onto the joiner
+/// that no leader took (`NotLeader`, `UnknownMember`), and reboots every
+/// member of one that started, so each member's fold restarts behind the
+/// joiner (`ChainWorkload`). The gate then fired on 35 of 3,000 hunt seeds
+/// (51 of 2,126 checks on 1,800), from 5 of 1,600 (12 of 1,859) before.
+/// Most seeds stay out of reach: a joiner joins the default journal only
+/// with matchmakers, no proxy and no replica. Rare-but-valid: a slow
+/// follower is, and each ingredient keeps its own coin on the other
 /// seeds.
 #[tracing::instrument(level = "debug", skip_all)]
 pub(crate) fn lagging_fold(state: &StateHandle) -> bool {
@@ -928,6 +955,30 @@ pub(crate) fn moved_founder(state: &StateHandle) -> bool {
     *guard
         .moved_founder
         .get_or_insert_with(|| moonpool_sim::buggify_with_prob!(1.0))
+}
+
+/// Whether the run draws the **replaced-founder scenario** (#423): drawn
+/// once per seed, its own BUGGIFY location, never on a wiped-founder or a
+/// moved-founder seed. A re-run `init` meets a machine `cell add-machine`
+/// admitted at a founder's address only when a founder of a cell of three
+/// or more is wiped after formation, an operator admits the machine that
+/// replaced it, and an operator that knows the cell runs `init` again: a
+/// 2,000-seed hunt never lined the three up. On a scenario seed the layout
+/// lists three founders or more where the machines allow it
+/// ([`machine_layout`]), client 0 runs `init` first (`crate::chain_workload`),
+/// `crate::world::replaced_founder` wipes a founder once every founder
+/// formed, and client 0 admits the replacement, then runs `init` again
+/// (`crate::chain_workload::fleet`). Each ingredient keeps its own coin on
+/// the other seeds. Rare-but-valid: each ingredient is.
+#[tracing::instrument(level = "debug", skip_all)]
+pub(crate) fn replaced_founder(state: &StateHandle) -> bool {
+    // Drawn before the lock: the scenarios take the registry's lock too.
+    let other = wiped_founder(state) || moved_founder(state);
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    *guard
+        .replaced_founder
+        .get_or_insert_with(|| !other && moonpool_sim::buggify_with_prob!(1.0))
 }
 
 /// Whether the run draws the **silent-machine scenario** (#211): drawn once
@@ -1000,6 +1051,31 @@ pub(crate) fn slow_link(state: &StateHandle) -> bool {
         }
         slow
     })
+}
+
+/// Whether the run draws the **lagging-acceptor scenario** (#340): drawn
+/// once per seed, its own BUGGIFY location, never on a departed-straggler
+/// or bare-quorum seed (their outages need every acceptor up when they
+/// strike). A trim-point jump (`Message::TrimmedTo`) needs a node behind
+/// its peers' floors: a node down while the others truncate past what it
+/// holds. The journal truncates little in the chaos window and the
+/// attrition brings a node back fast: the mutation hunt's 300 seeds met 4
+/// jumps. On a scenario seed `crate::world::lagging_acceptor` holds one
+/// acceptor down until a peer's floor passes its chosen prefix, and every
+/// client compacts at every truncation step (`ChainWorkload`): 7 jumps in
+/// the same 300 seeds (35 scenario seeds). The node comes back below the
+/// floor and jumps, its allocator frontier far below the point. Each
+/// ingredient keeps its own coin on the other seeds. Rare-but-valid: a
+/// slow node is, and so is a client that compacts often.
+#[tracing::instrument(level = "debug", skip_all)]
+pub(crate) fn lagging_acceptor(state: &StateHandle) -> bool {
+    let straggler = departed_straggler(state);
+    let bare = bare_quorum(state);
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    *guard
+        .lagging_acceptor
+        .get_or_insert_with(|| !straggler && !bare && moonpool_sim::buggify_with_prob!(1.0))
 }
 
 /// The fewest blocks a segment's entry log may have (floor of
@@ -1173,7 +1249,8 @@ pub(crate) struct MachineLayout {
 
 /// The run's machine layout (#246), drawn once per seed by whoever asks
 /// first, for `count` machines in rank order. The founder count is uniform
-/// over `1..=count`; every founder is a `storage` machine (`cell init`
+/// over `1..=count` (`3..=count` on a replaced-founder seed with three
+/// machines or more, [`replaced_founder`]); every founder is a `storage` machine (`cell init`
 /// refuses a `stateless` member) and every other machine is `storage` or
 /// `stateless` on a coin, idle, waiting for a placement that is #212's. The
 /// capacity is one `buggify_knob!` for the run (default 2, extreme 1..=4;
@@ -1188,15 +1265,19 @@ pub(crate) struct MachineLayout {
 pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout {
     // Drawn before the lock: the scenario takes the registry's lock too.
     let moved = moved_founder(state);
+    let replaced = replaced_founder(state);
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     guard
         .machine_layout
         .get_or_insert_with(|| {
+            // The replaced-founder scenario needs a cell that keeps a
+            // majority through one wipe: three founders or more.
+            let least = if replaced && count >= 3 { 3 } else { 1 };
             let founders = if count == 0 {
                 0
             } else {
-                moonpool_sim::sim_random_range(1..count + 1)
+                moonpool_sim::sim_random_range(least..count + 1)
             };
             let capacity = buggify_knob!(2_u64, 1_u64..5_u64);
             let named = moonpool_sim::sim_random_bool(0.5) || moved;

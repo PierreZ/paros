@@ -12,11 +12,13 @@
 pub(crate) mod bare_outage;
 pub(crate) mod cut;
 pub(crate) mod injector;
+pub(crate) mod lagging_acceptor;
 pub(crate) mod late_outage;
 pub(crate) mod moved_founder;
 pub(crate) mod node_store;
 pub(crate) mod outage;
 pub(crate) mod registry_store;
+pub(crate) mod replaced_founder;
 pub(crate) mod settle;
 pub(crate) mod silent_machine;
 pub(crate) mod wipe;

@@ -20,7 +20,7 @@ paros-authz-biscuit = { path = "../paros-authz-biscuit" }
 # moonpool is pinned to a commit on `main` (not the crates.io release): it evolves
 # fast and we track it deliberately, bumping `rev` by hand. The sim needs only the
 # simulated providers plus the fork-free timeline explorer.
-moonpool-sim = { git = "https://github.com/PierreZ/moonpool", rev = "389125e9227cd48ea572784f93f26cb24c3e9ba1", default-features = false, features = ["exploration"] }
+moonpool-sim = { git = "https://github.com/PierreZ/moonpool", rev = "50ec6b1a3b6b0e68cbac92419bd6cf5c5be47462", default-features = false, features = ["exploration"] }
 
 async-trait = "0.1"
 # `join_all`, so the chain workload can fan concurrent proposals out (the
@@ -29,7 +29,7 @@ async-trait = "0.1"
 futures = "0.3"
 # The workloads' own RPC runtime (a client-only moonpool-rpc driver per
 # workload), same rev as every other moonpool line.
-moonpool-rpc = { git = "https://github.com/PierreZ/moonpool", rev = "389125e9227cd48ea572784f93f26cb24c3e9ba1", default-features = false, features = ["prost"] }
+moonpool-rpc = { git = "https://github.com/PierreZ/moonpool", rev = "50ec6b1a3b6b0e68cbac92419bd6cf5c5be47462", default-features = false, features = ["prost"] }
 # `CancellationToken`, to stop a workload's client runtime when it drops.
 tokio-util = "0.7"
 tracing = "0.1"
