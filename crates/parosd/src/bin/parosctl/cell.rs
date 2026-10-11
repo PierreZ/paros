@@ -4,6 +4,10 @@
 //! `Admit`. A machine never joins a cell on its own: this call is the
 //! authority. A re-run resumes, and a machine already in the cell is left
 //! unchanged.
+//!
+//! `parosctl cell drain-machine <machine>` (#474 (journals on admitted
+//! machines)): mark a registered machine draining in the cell control
+//! journal. The cell coordinator then moves every journal off it.
 
 use std::time::Duration;
 
@@ -43,6 +47,12 @@ pub enum CellAdminCommand {
         /// machine advertises (#257).
         addr: String,
     },
+    /// Drain a registered machine: the cell coordinator moves every journal
+    /// off it (#474). Send it to any member (`--servers`).
+    DrainMachine {
+        /// The machine's name, or its node id in full (16 hex digits).
+        machine: String,
+    },
     /// List the universe's cells and their state (#399).
     List,
     /// Show a cell: its state, its coordinator, its slots per class and
@@ -64,8 +74,12 @@ pub async fn run(
     out: &Printer,
     args: CellArgs,
 ) -> Ending {
-    let CellAdminCommand::AddMachine { addr } = args.command else {
-        unreachable!("the views are answered in crate::views");
+    let addr = match args.command {
+        CellAdminCommand::AddMachine { addr } => addr,
+        CellAdminCommand::DrainMachine { machine } => {
+            return drain(asker, client, servers, labels, out, &machine).await;
+        }
+        _ => unreachable!("the views are answered in crate::views"),
     };
     let target = match Address::parse(&addr) {
         Ok(target) => target,
@@ -74,27 +88,11 @@ pub async fn run(
             return Ending::Refused;
         }
     };
-    let Some(journals) = control_journals(client).await else {
-        note("no server named its cell's control journals: is the cell initialized?");
-        return Ending::Unreachable;
+    let mut session = match session(asker, client, servers).await {
+        Ok(session) => session,
+        Err(ending) => return ending,
     };
-    // The founding members: the cell control journal's members, with the
-    // addresses of the servers named among them.
-    let Some(members) = cell_members(client, journals.cell).await else {
-        note("no server served the cell control journal");
-        return Ending::Unreachable;
-    };
-    let founders: Vec<(NodeId, Address)> = servers
-        .iter()
-        .filter(|(id, _)| members.contains(id))
-        .map(|(id, addr)| (NodeId(*id), addr.clone()))
-        .collect();
-    let mut session = CellSession::new(
-        journals,
-        founders,
-        leader_seed(asker.providers),
-        client.tunables().checkpoint_policy(),
-    );
+    let journals = session.journals();
     let patience = Duration::from_millis(args.patience_ms);
     let run = session
         .add_machine(
@@ -141,5 +139,76 @@ pub async fn run(
         Step::Refused(refusal) => refused(out, &refusal, labels),
         Step::Interrupted(stop) => interrupted(&stop),
         Step::Advanced(_) => unreachable!("a run never ends advanced"),
+    }
+}
+
+/// A session over the cell the servers belong to: its control journals, and
+/// its founding members among the servers.
+async fn session(
+    asker: &Asker<'_>,
+    client: &Client<TokioProviders>,
+    servers: &[(u64, Address)],
+) -> Result<CellSession, Ending> {
+    let Some(journals) = control_journals(client).await else {
+        note("no server named its cell's control journals: is the cell initialized?");
+        return Err(Ending::Unreachable);
+    };
+    // The founding members: the cell control journal's members, with the
+    // addresses of the servers named among them.
+    let Some(members) = cell_members(client, journals.cell).await else {
+        note("no server served the cell control journal");
+        return Err(Ending::Unreachable);
+    };
+    let founders: Vec<(NodeId, Address)> = servers
+        .iter()
+        .filter(|(id, _)| members.contains(id))
+        .map(|(id, addr)| (NodeId(*id), addr.clone()))
+        .collect();
+    Ok(CellSession::new(
+        journals,
+        founders,
+        leader_seed(asker.providers),
+        client.tunables().checkpoint_policy(),
+    ))
+}
+
+/// `parosctl cell drain-machine <machine>` (#474): `DrainNode` for the
+/// registered machine `machine` names, unless it is draining already.
+async fn drain(
+    asker: &Asker<'_>,
+    client: &Client<TokioProviders>,
+    servers: &[(u64, Address)],
+    labels: &Labels,
+    out: &Printer,
+    machine: &str,
+) -> Ending {
+    let mut session = match session(asker, client, servers).await {
+        Ok(session) => session,
+        Err(ending) => return ending,
+    };
+    if let Err(stop) = session.open(client, 0).await {
+        return interrupted(&stop);
+    }
+    let registered: Vec<u64> = session.registry().nodes().map(|(id, _)| id.0).collect();
+    let node = match labels.machine_named(machine, &registered) {
+        Some(id) => NodeId(id),
+        None => match paros::name::parse_full(machine) {
+            Some(id) if registered.contains(&id) => NodeId(id),
+            _ => {
+                note(&format!("no registered machine is named {machine}"));
+                return Ending::Refused;
+            }
+        },
+    };
+    match session.drain(client, 0, node).await {
+        Ok(wrote) => {
+            let outcome = if wrote { "draining" } else { "unchanged" };
+            out.emit(
+                || format!("{outcome} machine={}", labels.machine(node.0)),
+                || json!({ "outcome": outcome, "node": node.0 }),
+            );
+            Ending::Success
+        }
+        Err(stop) => interrupted(&stop),
     }
 }

@@ -82,7 +82,7 @@ use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
 use crate::audit::Audit;
-use crate::machine::{ControlJournals, FormedCell};
+use crate::machine::{CellMachine, ControlJournals};
 use crate::rpc::{
     InspectRefusal, InspectTarget, MatchmakerClient, MatchmakersRefusal, ReadAck,
     ReconfigureMatchmakersAck, ReplySender, SetLeaderAck, TruncateAck, WriteAck, leader_from_proto,
@@ -1171,9 +1171,11 @@ where
 /// at all (a joiner boots with none) and exits only on a fault. `None` is
 /// the static deployment: a fixed list over a fixed pool.
 ///
-/// `formed` is a machine's cell (#246, #277), `None` off a machine: its
-/// control journals, which `Inspect` reports, and its vote in the cell
-/// decree, which the node keeps answering ([`FormedCell`]).
+/// `machine` is a machine of a cell (#246, #277, #474), `None` off a
+/// machine: its control journals, which `Inspect` reports, and what it
+/// answers beside its journals — a founding member its vote in the cell
+/// decree ([`crate::machine::FormedCell`]), an admitted machine its admission
+/// ([`crate::machine::AdmittedMachine`]).
 ///
 /// # Errors
 ///
@@ -1182,8 +1184,8 @@ where
 ///
 /// # Panics
 ///
-/// When `formed`'s plan names a founding member `members` has no lane to (a
-/// programmer error: a machine passes its plan's members).
+/// When a founding member's plan names a founding member `members` has no
+/// lane to (a programmer error: a machine passes its plan's members).
 #[tracing::instrument(level = "debug", skip_all, fields(local_addr = %local_addr, members = members.len(), matchmakers = matchmakers.len(), proxies = proxies.len(), replicas = replicas.len()))]
 // One cohesive select loop: every arm is a thin feed into the core plus the
 // same drain/maintain tail; splitting arms out would only scatter the loop's
@@ -1199,7 +1201,7 @@ pub async fn run_journals<P, J>(
     proxies: Vec<(ProxyId, String)>,
     replicas: Vec<(NodeId, String)>,
     system: Option<ControlPlan>,
-    formed: Option<FormedCell>,
+    machine: Option<CellMachine>,
     tunables: DriverTunables,
     shutdown: CancellationToken,
 ) -> Result<(), RunError>
@@ -1218,7 +1220,7 @@ where
             "the system plan names another node".into(),
         )));
     }
-    let cell: Option<ControlJournals> = formed.as_ref().map(FormedCell::control_journals);
+    let cell: Option<ControlJournals> = machine.as_ref().map(CellMachine::control_journals);
     // The cell every peer batch carries and every inbound one must name
     // (#216): `0` on a deployment without a cell plan.
     let cell_id = cell.map_or(0, |cell| cell.cell_id);
@@ -1308,7 +1310,7 @@ where
     // endpoints)): a dynamic group serving `Deliver` for this incarnation,
     // published in its `IdentifyAck` and kept in the registry by `node_id`.
     // It lives as long as this loop; a static deployment serves none.
-    let machine_group = formed
+    let machine_group = machine
         .as_ref()
         .map(|_| {
             edge.handle()
@@ -1333,11 +1335,12 @@ where
         machine_group.is_none(),
         "only a machine publishes an interface"
     );
-    let formed = formed.map(|mut formed| {
+    let machine = machine.map(|mut machine| {
         if let Some(group) = &machine_group {
-            formed.facts = formed.facts.serving(edge.handle()).with_interface(group);
+            let facts = machine.facts().serving(edge.handle()).with_interface(group);
+            *machine.facts_mut() = facts;
         }
-        formed
+        machine
     });
     let mut rpc = NodeInbox::serve(
         &providers,
@@ -1360,9 +1363,11 @@ where
         .collect();
     // A machine dials its peers by their advertised addresses, names
     // resolved at dial time (#257): its control-journal seeds too.
-    let names = formed
+    let names = machine
         .as_ref()
-        .map_or_else(crate::Names::literal, |formed| formed.facts.names.clone());
+        .map_or_else(crate::Names::literal, |machine| {
+            machine.facts().names.clone()
+        });
     let (mut follower, mut follow_answers, _follow_open) = if let Some(plan) = &system {
         let (follower, inbox) = ControlFollower::new(
             plan,
@@ -1390,7 +1395,10 @@ where
     // A machine's vote is final: it answers the cell decree from its record
     // while it serves its cell (#277). A founding member's peers are dialed
     // where the registry fold says (#349), from the plan's addresses on.
-    let mut peer_book = formed.as_ref().map(book::PeerBook::new);
+    let mut peer_book = match &machine {
+        Some(CellMachine::Founded(formed)) => Some(book::PeerBook::new(formed)),
+        _ => None,
+    };
     // A founding member that came back at another address than the one its
     // cell knows (#390) holds its journals' clocks until its registration
     // ends. Its peers send to the address they know, so it hears none of
@@ -1403,7 +1411,19 @@ where
     // `crate::scenario::ADMIT_LATE`; drawn only where a registry is followed).
     let mut admission_owed: Option<std::time::Duration> = None;
     let late_admitter = system.is_some() && crate::scenario::late_admitter();
-    if let Some(formed) = formed {
+    if let Some(CellMachine::Admitted { machine, cache }) = machine.clone() {
+        // An admitted machine answers its admission beside the journals
+        // placed on it (#474), follows the registry for its cache (#211)
+        // and registers the address it advertises now (#349).
+        machine.serve_beside(
+            &providers,
+            &rpc_handle,
+            &tunables,
+            cache,
+            incarnation_shutdown.clone(),
+        )?;
+    }
+    if let Some(CellMachine::Founded(formed)) = machine {
         // Every founding member campaigns for the cell coordinator (#240).
         crate::machine::coordinator::spawn(
             &providers,
@@ -1891,10 +1911,11 @@ where
             Some((req, reply)) = rpc.retire.recv() => {
                 // No settle tail: this arm only reads the core and arms a flag
                 // the tick arm acts on, so it produces no `Ready` batch. A
-                // retirement is a matchmaker-plane act, so the node's first
-                // journal's: it leaves that journal, and keeps serving the
-                // others (#188).
-                let Some((&journal, rt)) = journals.first() else { continue };
+                // retirement names the journal it leaves (#474), or the
+                // node's first journal on a node that serves one: it leaves
+                // that journal, and keeps serving the others (#188).
+                let asked = JournalIdentifier::new(TenantId(req.tenant), paros_core::JournalId(req.journal));
+                let Some((&journal, rt)) = journals.named_or_first(asked) else { continue };
                 let ack = operator::retire(&rt.node, &rt.audit, self_id, &req);
                 if ack.accepted {
                     retiring = Some(journal);
@@ -1903,9 +1924,10 @@ where
             }
             Some((req, reply)) = rpc.reconfigure.recv() => {
                 // An acceptor reconfiguration (#122): a matchmaker-deployment
-                // act, so the node's one journal; a plain deployment's first
-                // journal refuses it (`no_matchmakers`).
-                let Some((&journal, rt)) = journals.first() else { continue };
+                // act on the journal it names (#474), or the node's one
+                // journal; a plain journal refuses it (`no_matchmakers`).
+                let asked = JournalIdentifier::new(TenantId(req.tenant), paros_core::JournalId(req.journal));
+                let Some((&journal, rt)) = journals.named_or_first(asked) else { continue };
                 let ack = operator::reconfigure(&mut rt.node, &rt.audit, self_id, &req);
                 let outcome = shared.settle(rt).await;
                 // A lost reconfiguration ack is ambiguous to the client, which
@@ -1941,7 +1963,11 @@ where
                 let events = f.fold_remote(answer);
                 let checkpoints = if journal == f.registry_key() { f.take_checkpoints() } else { Vec::new() };
                 let mut sys = SystemCtx { stores: &mut stores, journals: &mut journals, now: ticks, tunables: &tunables, out: &out, lanes: &lanes, rpc: &rpc_handle, audit: &node_audit };
-                if sys.apply(f, journal, events, checkpoints).await {
+                let (mut admit, owed) = sys.apply(f, journal, events, checkpoints).await;
+                if owed && sys.place(f).await {
+                    admit = true;
+                }
+                if admit {
                     admission_owed.get_or_insert(time.now());
                 }
                 admit_owed(&mut journals, f, &mut admission_owed, late_admitter, time.now());
@@ -2056,10 +2082,21 @@ where
                 // the system journals chose, apply it, and keep a follow read
                 // open against a seed for the ones it does not run.
                 if let Some(f) = follower.as_mut() {
+                    // Every fold this tick reports its events before any
+                    // journal is placed (#474): a placement reads them all.
+                    let mut placing = false;
                     for (journal, events) in follow_local(f, &journals) {
                         let checkpoints = if journal == f.registry_key() { f.take_checkpoints() } else { Vec::new() };
                         let mut sys = SystemCtx { stores: &mut stores, journals: &mut journals, now: ticks, tunables: &tunables, out: &out, lanes: &lanes, rpc: &rpc_handle, audit: &node_audit };
-                        if sys.apply(f, journal, events, checkpoints).await {
+                        let (admit, owed) = sys.apply(f, journal, events, checkpoints).await;
+                        placing |= owed;
+                        if admit {
+                            admission_owed.get_or_insert(time.now());
+                        }
+                    }
+                    if placing {
+                        let mut sys = SystemCtx { stores: &mut stores, journals: &mut journals, now: ticks, tunables: &tunables, out: &out, lanes: &lanes, rpc: &rpc_handle, audit: &node_audit };
+                        if sys.place(f).await {
                             admission_owed.get_or_insert(time.now());
                         }
                     }
@@ -2090,6 +2127,16 @@ struct SystemCtx<'a, 'l, P: Providers, J: JournalStores> {
     lanes: &'a LaneOpener<'l, P, J::Audit>,
     rpc: &'a moonpool_rpc::RpcHandle<P>,
     audit: &'a J::Audit,
+}
+
+/// Whether a node outside a journal's bootstrap membership starts it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Seat {
+    /// Only a member does: a tenant control journal, served by the founding
+    /// members.
+    Member,
+    /// Any node does, as a spare: a journal placed on it (#474).
+    Spare,
 }
 
 /// An event is tagged by the journal whose fold produced it: a registry
@@ -2124,7 +2171,10 @@ impl<P: Providers, J: JournalStores> SystemCtx<'_, '_, P, J> {
     /// journal naming this node, stop a tombstoned one, open a lane to an
     /// admitted node, and stop every user journal on this node's own
     /// retirement. Each event is reported first, once. Whether the
-    /// registry's pool is owed to the live journals ([`admit_owed`]).
+    /// registry's pool is owed to the live journals ([`admit_owed`]), and
+    /// whether the journals placed here are owed a [`SystemCtx::place`]
+    /// (#474), which the caller runs once every fold of the round reported
+    /// its events.
     #[allow(clippy::too_many_lines)]
     #[tracing::instrument(level = "debug", skip_all, fields(node = follower.self_id().0, journal = %journal, events = events.len()))]
     async fn apply(
@@ -2133,21 +2183,25 @@ impl<P: Providers, J: JournalStores> SystemCtx<'_, '_, P, J> {
         journal: JournalIdentifier,
         events: Vec<(u64, SystemEvent)>,
         checkpoints: Vec<system::FoldedCheckpoint>,
-    ) -> bool {
+    ) -> (bool, bool) {
         let me = follower.self_id();
         self.report_checkpoints(follower, journal, checkpoints);
         // Whether the pool moved or a journal opened: every live journal
         // then admits the registry's pool (`ColocatedNode::extend_pool`,
         // refused on a journal that cannot reconfigure).
         let mut admit = false;
+        // Whether a booking or a created journal moved: the journals placed
+        // here are started and stopped after the events (#474).
+        let mut place = false;
         for (seq, event) in events {
             assert_event_source(follower.registry_key(), journal, &event);
             self.audit.system_folded(me, journal, seq, &event);
             tracing::info!(node = me.0, journal = %journal, seq, event = ?event, "system_folded");
             match event {
-                SystemEvent::Tenant(TenantEvent::Created {
-                    id, config, writer, ..
-                }) => {
+                // A created journal starts where the registry books its
+                // acceptor slots (#474): placed below, once both folds hold
+                // it, whichever comes first.
+                SystemEvent::Tenant(TenantEvent::Created { id, .. }) => {
                     // A created journal lives in the tenant whose control
                     // journal created it (#210): never in another one.
                     let id = JournalIdentifier::new(journal.tenant, id);
@@ -2155,48 +2209,33 @@ impl<P: Providers, J: JournalStores> SystemCtx<'_, '_, P, J> {
                         id.tenant == journal.tenant,
                         "a journal is created inside its own tenant"
                     );
-                    if self
-                        .start(
-                            follower,
-                            id,
-                            config.members(),
-                            config.quorum_system(),
-                            writer,
-                        )
-                        .await
-                    {
-                        admit = true;
-                    }
+                    place = true;
                 }
                 SystemEvent::Tenant(TenantEvent::Deleted { id, .. }) => {
                     let id = JournalIdentifier::new(journal.tenant, id);
                     self.stop(me, id);
                 }
-                // A checkpoint of a tenant control journal: start every live
-                // journal naming this node, stop every deleted one.
+                // A checkpoint of a tenant control journal: stop every
+                // deleted journal; the live ones are placed below.
                 SystemEvent::Tenant(TenantEvent::Checkpoint { .. }) => {
-                    let journals: Vec<_> = follower
+                    let deleted: Vec<JournalId> = follower
                         .tenant(journal.tenant)
-                        .map(|t| t.journals().map(|(id, j)| (id, j.clone())).collect())
+                        .map(|t| {
+                            t.journals()
+                                .filter(|(_, j)| j.deleted_at.is_some())
+                                .map(|(id, _)| id)
+                                .collect()
+                        })
                         .unwrap_or_default();
-                    for (id, created) in journals {
-                        let id = JournalIdentifier::new(journal.tenant, id);
-                        if created.deleted_at.is_some() {
-                            self.stop(me, id);
-                        } else if self
-                            .start(
-                                follower,
-                                id,
-                                created.config.members(),
-                                created.config.quorum_system(),
-                                created.writer,
-                            )
-                            .await
-                        {
-                            admit = true;
-                        }
+                    for id in deleted {
+                        self.stop(me, JournalIdentifier::new(journal.tenant, id));
                     }
+                    place = true;
                 }
+                // A slot booked or released here (#474): placed below.
+                SystemEvent::Registry(
+                    RegistryEvent::Booked { node, .. } | RegistryEvent::Released { node, .. },
+                ) if node == me => place = true,
                 // The cell hosts a tenant (#210): every founding member
                 // serves its control journal (the placement until #212).
                 SystemEvent::Registry(RegistryEvent::TenantHosted { tenant, control }) => {
@@ -2207,8 +2246,11 @@ impl<P: Providers, J: JournalStores> SystemCtx<'_, '_, P, J> {
                             follower,
                             id,
                             &founders,
-                            paros_core::QuorumSystem::Majority,
-                            paros_core::WriterMode::Single,
+                            (
+                                paros_core::QuorumSystem::Majority,
+                                paros_core::WriterMode::Single,
+                            ),
+                            Seat::Member,
                         )
                         .await
                     {
@@ -2250,8 +2292,11 @@ impl<P: Providers, J: JournalStores> SystemCtx<'_, '_, P, J> {
                             follower,
                             id,
                             &founders,
-                            paros_core::QuorumSystem::Majority,
-                            paros_core::WriterMode::Single,
+                            (
+                                paros_core::QuorumSystem::Majority,
+                                paros_core::WriterMode::Single,
+                            ),
+                            Seat::Member,
                         )
                         .await;
                     }
@@ -2273,44 +2318,67 @@ impl<P: Providers, J: JournalStores> SystemCtx<'_, '_, P, J> {
                         }
                     }
                     admit = true;
+                    place = true;
                 }
                 _ => {}
             }
         }
-        admit
+        (admit, place)
     }
 }
 
 impl<P: Providers, J: JournalStores> SystemCtx<'_, '_, P, J> {
-    /// Start journal `id` on this node, a member of `members` under
-    /// `quorum_system`, written in `writer` mode — unless this node is no
-    /// member, the journal is gone for good, already served here, or this
-    /// machine takes no storage work (a `stateless` machine never serves a
-    /// journal, #211). Whether it started.
+    /// Start journal `id` on this node, bootstrapped over `members` under
+    /// `quorum_system`, written in `writer` mode — unless the journal is
+    /// gone for good, already served here, this machine takes no storage
+    /// work (a `stateless` machine never serves a journal, #211), or this
+    /// node is no member and `seat` takes members only. A node outside
+    /// `members` joins as a spare (#474): its own id beside the bootstrap
+    /// membership, which a reconfiguration then names; only a journal with
+    /// matchmakers can. The configuration depends on the arguments alone, so
+    /// every start of the journal here opens its store under the same one.
+    /// Whether it started.
     async fn start(
         &mut self,
         follower: &ControlFollower<P>,
         id: JournalIdentifier,
         members: &[NodeId],
-        quorum_system: paros_core::QuorumSystem,
-        writer: paros_core::WriterMode,
+        (quorum_system, writer): (paros_core::QuorumSystem, paros_core::WriterMode),
+        seat: Seat,
     ) -> bool {
         let me = follower.self_id();
-        if !members.contains(&me)
+        let member = members.contains(&me);
+        let spare = !member && seat == Seat::Spare && !follower.matchmakers().is_empty();
+        if !(member || spare)
             || follower.is_tombstoned(id)
             || self.journals.serves(id)
             || !follower.takes_storage_work()
         {
             return false;
         }
+        let nodes = if spare {
+            moonpool_assertions::reachable!("machine: a placed journal starts as a spare");
+            let mut nodes = members.to_vec();
+            nodes.push(me);
+            nodes.sort_unstable();
+            nodes.dedup();
+            nodes
+        } else {
+            Vec::new()
+        };
         let journal_config = paros_core::Config {
             peers: members.to_vec(),
             quorum_system,
+            nodes,
             writer_mode: writer,
             // Born with its tenant's matchmaker set (#190).
             matchmakers: follower.matchmakers().to_vec(),
             ..paros_core::Config::new(me, id)
         };
+        assert!(
+            journal_config.pool().contains(&me),
+            "a started journal's pool holds this node"
+        );
         if !self.stores.create(id, journal_config) {
             return false;
         }
@@ -2327,6 +2395,72 @@ impl<P: Providers, J: JournalStores> SystemCtx<'_, '_, P, J> {
         if started {
             self.audit.journal_started(me, id);
             tracing::info!(node = me.0, journal = %id, "journal_started");
+        }
+        started
+    }
+
+    /// Start and stop the journals placed on this node (#474): every live
+    /// journal of a hosted tenant the registry books an acceptor slot of
+    /// here runs here, and every other journal such a tenant created stops
+    /// here, its store kept: a later booking starts it again from there.
+    /// Whether a journal started.
+    async fn place(&mut self, follower: &ControlFollower<P>) -> bool {
+        let me = follower.self_id();
+        let booked: BTreeSet<JournalIdentifier> = follower
+            .registry()
+            .bookings()
+            .filter(|(_, b)| b.node == me && b.role == crate::system::Role::Acceptor)
+            .filter_map(|(_, b)| match b.target {
+                crate::system::BookingTarget::Journal(journal) => Some(journal),
+                crate::system::BookingTarget::Set { .. } => None,
+            })
+            .collect();
+        // A journal its tenant created (live or deleted) that is no longer
+        // booked here stops: its booking was released.
+        let unbooked: Vec<JournalIdentifier> = self
+            .journals
+            .known()
+            .filter(|journal| !self.journals.is_control(*journal) && !booked.contains(journal))
+            .filter(|journal| {
+                follower
+                    .tenant(journal.tenant)
+                    .is_some_and(|t| t.get(journal.journal).is_some())
+            })
+            .collect();
+        for journal in unbooked {
+            moonpool_assertions::reachable!("machine: a released booking stops its journal");
+            self.journals.forget(journal);
+            self.audit.journal_stopped(me, journal);
+            tracing::info!(node = me.0, journal = %journal, "journal_released");
+        }
+        let mut started = false;
+        for journal in booked {
+            let Some(created) = follower
+                .tenant(journal.tenant)
+                .and_then(|t| t.get(journal.journal))
+                .filter(|j| j.deleted_at.is_none())
+                .cloned()
+            else {
+                continue;
+            };
+            let systems = (created.config.quorum_system(), created.writer);
+            if self
+                .start(
+                    follower,
+                    journal,
+                    created.config.members(),
+                    systems,
+                    Seat::Spare,
+                )
+                .await
+            {
+                if !follower.founders().contains(&me) {
+                    moonpool_assertions::reachable!(
+                        "machine: an admitted machine serves a journal"
+                    );
+                }
+                started = true;
+            }
         }
         started
     }

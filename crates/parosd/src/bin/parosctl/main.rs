@@ -395,9 +395,10 @@ async fn connect(
 fn is_view(command: &Command) -> bool {
     match command {
         Command::Machine(_) | Command::Roles(_) | Command::Status(_) => true,
-        Command::CellAdmin(args) => {
-            !matches!(args.command, cell::CellAdminCommand::AddMachine { .. })
-        }
+        Command::CellAdmin(args) => !matches!(
+            args.command,
+            cell::CellAdminCommand::AddMachine { .. } | cell::CellAdminCommand::DrainMachine { .. }
+        ),
         Command::Cell(CellCommand::Tenant(args)) => matches!(
             args.command,
             fleet::TenantCommand::List | fleet::TenantCommand::Show { .. }
@@ -430,7 +431,8 @@ async fn run_view(asker: &views::Asker<'_>, out: &Printer, command: Command) -> 
             cell::CellAdminCommand::Show { cell } => {
                 views::cell_show(asker, out, cell.as_deref()).await
             }
-            cell::CellAdminCommand::AddMachine { .. } => unreachable!("not a view"),
+            cell::CellAdminCommand::AddMachine { .. }
+            | cell::CellAdminCommand::DrainMachine { .. } => unreachable!("not a view"),
         },
         Command::Cell(CellCommand::Tenant(args)) => match args.command {
             fleet::TenantCommand::Show { name } => views::tenant_show(asker, out, &name).await,

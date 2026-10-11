@@ -18,10 +18,11 @@
 //! A machine that `cell add-machine` admitted (#216) has no vote: its record
 //! holds the **admission** instead — the cell, its control journals and the
 //! cell's machines it knew then (`admitted`, `control`, `fleet`, `election`,
-//! `peer`).
+//! `peer`), and its founding members (`founder`, #474), which serve the
+//! control journals it follows.
 //! A record holds a vote or an admission, never both.
 //!
-//! A formed machine also records every journal it **provisioned** at run
+//! A formed or admitted machine also records every journal it **provisioned** at run
 //! time (`created`, #210): a journal a tenant's control journal created
 //! naming it, or a hosted tenant's control journal. The store is formatted
 //! first, then the line is written, both before the journal's first boot,
@@ -74,10 +75,10 @@ fn admission(
     admitted: Option<u64>,
     control: Option<JournalIdentifier>,
     (fleet, election): (Option<JournalIdentifier>, Option<JournalIdentifier>),
-    peers: Vec<(NodeId, Address)>,
+    (peers, founders): (Vec<(NodeId, Address)>, Vec<NodeId>),
 ) -> Result<Option<Admission>, String> {
     let Some(cell_id) = admitted else {
-        if !peers.is_empty() {
+        if !peers.is_empty() || !founders.is_empty() {
             return Err("the machine record names peers and no admission".into());
         }
         return Ok(None);
@@ -90,6 +91,7 @@ fn admission(
             election,
         },
         members: peers,
+        founders,
     };
     admission.check()?;
     Ok(Some(admission))
@@ -198,6 +200,9 @@ impl MachineRecord {
             for (id, addr) in &admission.members {
                 let _ = writeln!(text, "peer {} {addr}", id.0);
             }
+            for id in &admission.founders {
+                let _ = writeln!(text, "founder {}", id.0);
+            }
         }
         for journal in &self.created {
             let _ = writeln!(text, "created {journal}");
@@ -211,12 +216,14 @@ impl MachineRecord {
     ///
     /// The text is not a record: a damaged record is an error, never an
     /// absence.
+    #[allow(clippy::too_many_lines)]
     pub fn parse(text: &str) -> Result<Self, String> {
         let mut fields: BTreeMap<&str, &str> = BTreeMap::new();
         let mut plan: Option<(Ballot, u64)> = None;
         let mut promised = Ballot::default();
         let mut members = Vec::new();
         let mut peers = Vec::new();
+        let mut founders = Vec::new();
         let mut admitted: Option<u64> = None;
         let mut journals = Vec::new();
         let mut control = None;
@@ -253,6 +260,9 @@ impl MachineRecord {
                 }
                 "member" => members.push(parse_member(value)?),
                 "peer" => peers.push(parse_member(value)?),
+                "founder" => founders.push(NodeId(
+                    value.parse().map_err(|e| format!("bad founder id: {e}"))?,
+                )),
                 "journal" => journals.push(identifier()?),
                 "control" => control = Some(identifier()?),
                 "fleet" => fleet = Some(identifier()?),
@@ -267,13 +277,13 @@ impl MachineRecord {
                 .copied()
                 .ok_or_else(|| format!("the machine record names no {name}"))
         };
-        if plan.is_none() && !created.is_empty() {
+        if plan.is_none() && admitted.is_none() && !created.is_empty() {
             return Err("the machine record provisioned journals outside a cell".into());
         }
         if plan.is_some() && admitted.is_some() {
             return Err("the machine record holds a vote and an admission".into());
         }
-        let admitted = admission(admitted, control, (fleet, election), peers)?;
+        let admitted = admission(admitted, control, (fleet, election), (peers, founders))?;
         let plan = match plan {
             Some((ballot, cell_id)) => {
                 let plan = CellPlan {
@@ -410,6 +420,7 @@ mod tests {
                 (NodeId(5), "10.0.0.2:4500".parse().expect("an address")),
                 (NodeId(8), "10.0.0.3:4500".parse().expect("an address")),
             ],
+            founders: vec![NodeId(5)],
         };
         let admitted = MachineRecord {
             admitted: Some(admission.clone()),

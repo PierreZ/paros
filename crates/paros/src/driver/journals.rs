@@ -441,6 +441,52 @@ impl<S, A> Journals<S, A> {
         first
     }
 
+    /// The journal an operator call names (#474: a machine serves many), or
+    /// the plane ([`Journals::first`]) when it names none. `None` when the
+    /// named journal is not live here.
+    pub(crate) fn named_or_first(
+        &mut self,
+        journal: JournalIdentifier,
+    ) -> Option<(&JournalIdentifier, &mut JournalRt<S, A>)> {
+        if !journal.is_set() {
+            return self.first();
+        }
+        let named = self.live.range_mut(journal..=journal).next();
+        assert!(
+            named.as_ref().is_none_or(|(id, _)| **id == journal),
+            "a named journal answers as itself"
+        );
+        named
+    }
+
+    /// Every journal this node serves (live, quarantined or down), in id
+    /// order.
+    pub(crate) fn known(&self) -> impl Iterator<Item = JournalIdentifier> + '_ {
+        let mut all: BTreeSet<JournalIdentifier> = self.live.keys().copied().collect();
+        all.extend(self.quarantined.keys().copied());
+        all.extend(self.down.iter().copied());
+        all.into_iter()
+    }
+
+    /// Forget `journal` here, live, quarantined or down (#474): its booking
+    /// was released, so the node no longer serves it. Its store stays on
+    /// disk, and a later booking starts it again from there.
+    pub(crate) fn forget(&mut self, journal: JournalIdentifier) {
+        assert!(
+            !self.control.contains(&journal),
+            "a control journal is never forgotten"
+        );
+        self.live.remove(&journal);
+        self.quarantined.remove(&journal);
+        self.down.remove(&journal);
+        self.newly_quarantined.retain(|j| *j != journal);
+        if self.deployed == Some(journal) {
+            self.deployed = None;
+        }
+        assert!(!self.serves(journal), "a forgotten journal is not served");
+        self.assert_invariants();
+    }
+
     /// [`Journals::first`], read-only: the journal that carries the
     /// deployment, or, on a node with none, its first user journal. `None`
     /// while the plane is not live here, or while a journal that never

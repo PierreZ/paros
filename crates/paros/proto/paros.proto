@@ -203,6 +203,10 @@ message Reconfigure {
   uint64 phase2_quorum = 4;
   uint64 rows = 5;
   uint64 cols = 6;
+  // The journal to reconfigure (#474): a machine serves many. Unset on a
+  // node that serves one journal: then its first journal.
+  uint64 tenant = 7;
+  uint64 journal = 8;
 }
 
 message ReconfigureMatchmakers {

@@ -35,6 +35,7 @@ use paros::fleet::{Groups, TenantState};
 use paros::tenant::Desired;
 use paros::{JournalIdentifier, TenantId, Value, WriterMode};
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use moonpool_sim::{Providers, TimeProvider};
@@ -128,8 +129,14 @@ impl FleetOps {
                 },
             }
         };
-        self.send_journal_request(&cell, control, request, (payload, policy))
+        self.send_journal_request(ctx, &cell, control, request, (payload, policy))
             .await;
+        // The drained-machine scenario (#474 (journals on admitted
+        // machines)) drains right after a create, when a journal may sit on
+        // an admitted machine.
+        if crate::shape::drained_machine(ctx.state()) {
+            self.drain(ctx, policy, payload, true).await;
+        }
     }
 
     /// `DELETE_JOURNAL`: delete a journal of a `READY` tenant by name, or
@@ -156,7 +163,7 @@ impl FleetOps {
                 },
             },
         };
-        self.send_journal_request(&cell, control, request, (payload, policy))
+        self.send_journal_request(ctx, &cell, control, request, (payload, policy))
             .await;
     }
 
@@ -212,6 +219,7 @@ impl FleetOps {
     /// or patience runs out (then it stays pending), and judge the answer.
     async fn send_journal_request(
         &mut self,
+        ctx: &SimContext,
         cell: &Cell,
         control: JournalIdentifier,
         request: JournalRequest,
@@ -226,7 +234,12 @@ impl FleetOps {
             self.journal_pending = Some(request);
             return;
         }
-        self.judge_answer(cell, control, &request, &answer, draw)
+        // The machines a create may be placed on (#474 (journals on admitted
+        // machines)): the founding members and every machine of the run, an
+        // admission in flight and a wiped machine's old id included.
+        let mut machines: BTreeSet<u64> = cell.members.iter().copied().collect();
+        machines.extend(crate::machine::minted_ids(ctx.state()));
+        self.judge_answer(cell, &machines, control, &request, &answer, draw)
             .await;
         self.reuse_name(&request, &answer, draw);
         if buggify_with_prob!(0.2) {
@@ -334,6 +347,7 @@ impl FleetOps {
     async fn judge_answer(
         &mut self,
         cell: &Cell,
+        machines: &BTreeSet<u64>,
         control: JournalIdentifier,
         request: &JournalRequest,
         answer: &JournalAnswer,
@@ -367,7 +381,7 @@ impl FleetOps {
                         && config
                             .members()
                             .iter()
-                            .all(|m| cell.members.contains(&m.0)),
+                            .all(|m| machines.contains(&m.0)),
                     "journals: a created journal is placed on the cell's members",
                     { "tenant" => request.tenant.0, "members" => config.members().len() }
                 );
