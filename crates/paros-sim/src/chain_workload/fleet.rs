@@ -144,6 +144,10 @@ pub(super) struct FleetOps {
     /// reaches its tail after chaos.
     registry: Option<(JournalIdentifier, usize)>,
     client_id: u64,
+    /// The universe's and the cell's names this operator's `init` writes,
+    /// whole or its fleet half alone: `parosctl init` always names both
+    /// (#239 (names at the edge)).
+    init_names: (String, String),
     /// A fresh seed per session and checkpointer (#241).
     leader_seeds: super::LeaderSeeds,
     /// This client saw an `init` end.
@@ -203,6 +207,7 @@ impl FleetOps {
             patience,
             registry,
             client_id,
+            init_names: ("universe".into(), format!("cell-{}", client_id % 4)),
             leader_seeds,
             initialized: false,
             ever_created: Vec::new(),
@@ -233,6 +238,9 @@ impl FleetOps {
             Registry::new(cell.members.iter().copied().map(NodeId)),
             policy,
         )
+        .map(|session| {
+            session.with_names(self.init_names.0.as_bytes(), self.init_names.1.as_bytes())
+        })
     }
 
     /// `FLEET_INIT`: run `init` whole while this operator knows no cell, or
