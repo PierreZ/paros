@@ -380,6 +380,7 @@ impl Admission {
                 .map(|(id, addr)| wire::Member {
                     node_id: id.0,
                     addr: addr.to_string(),
+                    machine_interface: Vec::new(),
                 })
                 .collect(),
         }
@@ -491,6 +492,7 @@ impl CellPlan {
             .map(|(id, addr)| wire::Member {
                 node_id: id.0,
                 addr: addr.to_string(),
+                machine_interface: Vec::new(),
             })
             .collect()
     }

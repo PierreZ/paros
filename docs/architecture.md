@@ -471,12 +471,10 @@ fails at the transport (`StaleIncarnation`, `EndpointNotFound`).
 | `Inspect`, `View`, `Load` | operator and simulation calls by address (FDB `WLTOKEN_PROCESS`) |
 | `Retire` | operator call by address |
 | `Resolve` | the client entry (FDB `OPENDATABASE`) |
-| the matchmaker calls | until #190 (matchmakers everywhere) lands: then they join the machine group |
-| the data plane | until it moves behind `Resolve` (#404 step 5) |
 
 | Dynamic group | One per | Published in |
 |---|---|---|
-| `MachineInterface` (`0x5041_1001`): `Deliver` | incarnation of a founding member | `IdentifyAck.machine_interface`, kept by `RegisterNode` in the registry fold by `node_id` |
+| `MachineInterface` (`0x5041_1001`): `Deliver`; the matchmaker calls `Matchmake`, `GarbageCollect`, `MatchmakerReconfigure`; the data plane `Write`, `Read`, `Truncate`, `SetLeader`, `Reconfigure`, `ReconfigureMatchmakers` | incarnation of a founding member | `IdentifyAck.machine_interface` and the node-only `InspectReply.machine_interface`, kept by `RegisterNode` in the registry fold by `node_id`; a `Resolve` answer gives each machine's (`Member.machine_interface`) |
 | `CoordinatorInterface` (`0x5041_1002`): `Register`, `JournalRequest` | coordinator term | the election record's `reference`, beside its `interface` address |
 
 Rules:
@@ -497,6 +495,26 @@ Rules:
   the issue's "never fall back while the fold names a reference" is dropped, because a
   restarted founding member's new reference is written into a registry that may need that
   member's own vote (a cell of two), so a lane without the fallback could never heal.
+- **Every method of the machine group keeps its well-known endpoint** (landed on 2026-10-11,
+  #404 steps 4 and 5). Plain Multi-Paxos, a matchmaker process, a proxy and a replica have no
+  registry, so their peers and clients reach them by address alone; a founding member serves
+  both, and both feed one queue (`Inbound::in_group`). The reference is the fence for every
+  caller that holds one: a peer lane, a matchmaker link, a frontend, a client of a `Resolve`
+  answer.
+- **A matchmaker link dials as a lane does.** A founding member hosts its tenant's matchmaker
+  sets (#190), so a node's link to that matchmaker follows the peer book: the member's
+  reference when the fold holds one, else the well-known endpoint, and the well-known endpoint
+  after the reference went stale until the fold names another.
+- **The data plane goes through the reference its caller learned.** A frontend learns each
+  founding member's reference from its node-only `Inspect` (`majority_cell`) and sends the four
+  calls through it (`NodeClient::with_interface`). A server that restarted since refuses the
+  call unrun: the frontend moves to the next server and forgets the cell, so its next call
+  learns every reference again (a BUGGIFY decision keeps the stale cell one more call). A client
+  of a `Resolve` answer sends through the references the registry holds (`Resolved::servers`).
+  A `NodeClient` with a reference never falls back to the well-known endpoint on its own: its
+  caller learns the new reference. The control plane's own clients (the follower, the
+  coordinator, the resolver, `init`) dial by address: they bootstrap from the plan, before a
+  registry exists.
 - **Every start registers once.** A restarted founding member serves a new machine interface.
   Its `Register` carries it, and the coordinator writes `RegisterNode` when the address, the name
   or the machine interface changed; the watch writes it for a new incarnation too.

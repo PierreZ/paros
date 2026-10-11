@@ -183,6 +183,19 @@ impl Connector {
             .with_shutdown(self.shutdown.clone())
     }
 
+    /// The library client of the machines a `Resolve` answered (#404
+    /// (static vs dynamic endpoints)): each machine's data plane through the
+    /// machine interface the answer holds for it.
+    pub(crate) fn resolved(&self, resolved: &paros::client::resolve::Resolved) -> ChainClient {
+        let servers = resolved.servers(&self.rpc, &self.names);
+        moonpool_sim::assert_always!(
+            !servers.is_empty(),
+            "client: a client over learned servers names at least one"
+        );
+        paros::client::Client::new(&self.providers, servers, self.tunables)
+            .with_shutdown(self.shutdown.clone())
+    }
+
     /// The library client over the frontends at `frontends` (#192 (the
     /// frontend)), in the order the client indexes them: every call carries
     /// `pass`. A frontend never names a node, so the ids are ranks.

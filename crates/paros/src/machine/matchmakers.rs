@@ -164,15 +164,19 @@ impl<S: StorageProvider + Clone + 'static> SetOpener for MachineSets<S> {
 }
 
 /// Start member `config.id`'s matchmaker host on the node's edge `rpc`
-/// (#190): its sets on `disk`, each journal's facts reported to the port
-/// `audits` makes for it.
+/// (#190), served in the machine's `machine` group too (#404 (static vs
+/// dynamic endpoints)): its sets on `disk`, each journal's facts reported
+/// to the port `audits` makes for it.
 ///
 /// # Errors
 ///
 /// A registration the RPC runtime refuses.
+// The edge and its group, the disk, the shape, the observer and the lifetime.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn<P, S, A, F>(
     providers: &P,
     rpc: &RpcHandle<P>,
+    machine: Option<&moonpool_rpc::ServiceGroup<crate::rpc::methods::MachineInterface>>,
     disk: ProviderDisk<S>,
     config: MatchmakerConfig,
     tunables: &DriverTunables,
@@ -189,7 +193,7 @@ where
         config.bootstrap.contains(&config.id),
         "a founding member hosts the sets it is a member of"
     );
-    let inbox = MatchmakerInbox::serve(rpc)?;
+    let inbox = MatchmakerInbox::serve(rpc, machine)?;
     let page = tunables.registry_page.clamp(1, paros_core::REGISTRY_PAGE);
     assert!(page >= 1, "a registry page holds a registration");
     providers

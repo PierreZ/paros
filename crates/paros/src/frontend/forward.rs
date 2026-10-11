@@ -401,6 +401,22 @@ where
             C::answered(observer.as_ref(), token, ack);
         }
         let next = (target + 1) % count;
+        if let Ok(Err(error)) = &attempt
+            && error.is_terminal_for_reference()
+        {
+            // The server restarted since the frontend learned the cell
+            // (#404 (static vs dynamic endpoints)): the attempt was refused
+            // unrun. The rest of this call keeps its client; the next call
+            // learns the cell again, unless a BUGGIFY decision keeps it one
+            // more call, so the stale path runs again.
+            if draws.keep_stale {
+                moonpool_assertions::reachable!(
+                    "frontend: a stale machine interface is kept one more call"
+                );
+            } else {
+                super::lock(&shared.routes).stale_cell();
+            }
+        }
         match attempt {
             Ok(Ok(ack)) => match C::route(&ack) {
                 Route::Answer => {

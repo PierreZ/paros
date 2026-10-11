@@ -91,7 +91,7 @@ message IdentifyAck {
   string name = 10;
   // The machine's dynamic interface (#404 (static vs dynamic endpoints)):
   // the encoded `InterfaceRef` of its `MachineInterface` group, which serves
-  // `Deliver` for this incarnation. Empty when the machine serves no group
+  // `Deliver`, the matchmaker calls and the data plane for this incarnation. Empty when the machine serves no group
   // (idle, admitted). The address inside it is the bound one: a caller aims
   // it at `addr`, resolved, and keeps only its incarnation and token.
   bytes machine_interface = 11;
@@ -101,6 +101,11 @@ message IdentifyAck {
 message Member {
   uint64 node_id = 1;
   string addr = 2;
+  // The machine's machine interface as the registry holds it (#404 (static
+  // vs dynamic endpoints)), in a `Resolve` answer: the encoded
+  // `InterfaceRef` of the group that serves its data plane. Empty when the
+  // registry holds none; the client then calls the well-known endpoints.
+  bytes machine_interface = 3;
 }
 
 // A journal's identifier: its tenant and the journal inside it (#235).
@@ -286,9 +291,10 @@ message ResolveAck {
   JournalIdentifier control = 5;
   // The cell that hosts the tenant, on "" and "other_cell".
   uint64 tenant_cell = 6;
-  // The cell's machines, at the addresses its registry holds, on "". A
-  // client sends its calls to them until the frontend exists (#192); then
-  // this answer carries the tenant's frontends too.
+  // The cell's machines, at the addresses its registry holds, with the
+  // machine interface it holds for each (#404), on "". A client sends its
+  // calls to them through those references until the frontend exists
+  // (#192); then this answer carries the tenant's frontends too.
   repeated Member machines = 7;
   // The universe directory's position the answer was read at.
   uint64 at = 8;

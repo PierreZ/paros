@@ -146,6 +146,10 @@ async fn found<P: Providers>(
     let (journals, servers) = bootstrap::majority_cell(providers, rpc, names, addrs, patience)
         .await
         .ok_or(Unreachable::NothingAnswered)?;
+    let servers: Vec<(u64, Address)> = servers
+        .into_iter()
+        .map(|server| (server.id, server.address))
+        .collect();
     if journals.fleet.is_none() {
         return Err(Unreachable::NoControlJournals);
     }

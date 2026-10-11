@@ -13,8 +13,9 @@ use moonpool_rpc::{
 
 use super::methods::{
     FrontReadRpc, FrontSetLeaderRpc, FrontTruncateRpc, FrontWriteRpc, GarbageCollectRpc,
-    InspectRpc, MatchmakeRpc, MatchmakerReconfigureRpc, ReadRpc, ReconfigureMatchmakersRpc,
-    ReconfigureRpc, RetireRpc, SetLeaderRpc, TruncateRpc, WellKnownMethod, WriteRpc,
+    InspectRpc, MachineInterface, MatchmakeRpc, MatchmakerReconfigureRpc, ReadRpc,
+    ReconfigureMatchmakersRpc, ReconfigureRpc, RetireRpc, SetLeaderRpc, TruncateRpc,
+    WellKnownMethod, WriteRpc,
 };
 use super::{
     Entry, FrontRead, FrontSetLeader, FrontTruncate, FrontWrite, InspectReply, InspectRequest,
@@ -117,11 +118,20 @@ pub(crate) fn in_group<P: Providers, I: RpcInterface, M: InterfaceMethod<I>>(
 /// frontend)) sends the four journal calls through the frontend contract,
 /// each with its [`Pass`]: the token, and the journal's name in place of
 /// its ids.
+///
+/// A client of a **machine** given its machine interface
+/// ([`NodeClient::with_interface`], #404 (static vs dynamic endpoints))
+/// sends the data plane through that reference, aimed at the resolved
+/// address: a call reaches only the incarnation the reference names. A
+/// machine that restarted since refuses it unrun (`StaleIncarnation`,
+/// `EndpointNotFound`): the caller learns the machine's new reference, and
+/// this client never falls back to the well-known endpoint on its own.
 pub struct NodeClient<P: Providers> {
     rpc: RpcHandle<P>,
     address: Address,
     names: Names,
     pass: Option<Arc<Pass>>,
+    interface: Option<InterfaceRef<MachineInterface>>,
 }
 
 impl<P: Providers> Clone for NodeClient<P> {
@@ -131,6 +141,7 @@ impl<P: Providers> Clone for NodeClient<P> {
             address: self.address.clone(),
             names: self.names.clone(),
             pass: self.pass.clone(),
+            interface: self.interface.clone(),
         }
     }
 }
@@ -231,7 +242,29 @@ impl<P: Providers> NodeClient<P> {
             address,
             names,
             pass: None,
+            interface: None,
         }
+    }
+
+    /// This client, sending the data plane through the machine interface
+    /// `interface` (#404 (static vs dynamic endpoints)): the encoded
+    /// reference a machine published. Empty bytes, or bytes that do not
+    /// decode to a [`MachineInterface`], leave the well-known endpoints.
+    ///
+    /// # Panics
+    ///
+    /// On a client of a frontend: a frontend serves no machine interface.
+    #[must_use]
+    pub fn with_interface(mut self, interface: &[u8]) -> Self {
+        assert!(self.pass.is_none(), "a frontend has no machine interface");
+        self.interface = InterfaceRef::<MachineInterface>::from_bytes(interface).ok();
+        self
+    }
+
+    /// Whether the data plane goes through a machine interface.
+    #[must_use]
+    pub fn dynamic(&self) -> bool {
+        self.interface.is_some()
     }
 
     /// The frontend serving at `address` (#192 (the frontend)), resolved
@@ -244,6 +277,7 @@ impl<P: Providers> NodeClient<P> {
             address,
             names,
             pass: Some(pass),
+            interface: None,
         }
     }
 
@@ -269,6 +303,30 @@ impl<P: Providers> NodeClient<P> {
             .await
     }
 
+    /// One attempt of the data-plane method `M` at the node: through its
+    /// machine interface when this client holds one (#404), else at the
+    /// well-known endpoint.
+    async fn data<M>(&self, request: &M::Request) -> Result<M::Reply, RpcError>
+    where
+        M: WellKnownMethod + InterfaceMethod<MachineInterface>,
+    {
+        let Some(reference) = &self.interface else {
+            return self.call::<M>(request).await;
+        };
+        let addr = self.names.resolve(&self.address).await.map_err(|error| {
+            RpcError::not_admitted(ErrorReason::LookupFailed(error.to_string()))
+        })?;
+        let client = in_group::<P, MachineInterface, M>(&self.rpc, reference, addr)
+            .ok_or_else(|| RpcError::not_admitted(ErrorReason::EndpointNotFound))?;
+        let reply = client.try_get_reply(request).await;
+        if reply.is_ok() {
+            moonpool_assertions::reachable!(
+                "client: a journal call goes through a machine interface"
+            );
+        }
+        reply
+    }
+
     /// Write a batch to a journal (#204); answered with the journal state
     /// machine's verdict once the deciding slot applies, or with a redirect.
     ///
@@ -277,7 +335,7 @@ impl<P: Providers> NodeClient<P> {
     /// The attempt's [`RpcError`].
     pub async fn write(&self, request: &Write) -> Result<WriteAck, RpcError> {
         let Some(pass) = &self.pass else {
-            return self.call::<WriteRpc>(request).await;
+            return self.data::<WriteRpc>(request).await;
         };
         let (entry, named) = pass.entry(JournalIdentifier::new(
             TenantId(request.tenant),
@@ -302,7 +360,7 @@ impl<P: Providers> NodeClient<P> {
     /// The attempt's [`RpcError`].
     pub async fn read(&self, request: &Read) -> Result<ReadAck, RpcError> {
         let Some(pass) = &self.pass else {
-            return self.call::<ReadRpc>(request).await;
+            return self.data::<ReadRpc>(request).await;
         };
         let (entry, named) = pass.entry(JournalIdentifier::new(
             TenantId(request.tenant),
@@ -326,7 +384,7 @@ impl<P: Providers> NodeClient<P> {
     /// The attempt's [`RpcError`].
     pub async fn truncate(&self, request: &Truncate) -> Result<TruncateAck, RpcError> {
         let Some(pass) = &self.pass else {
-            return self.call::<TruncateRpc>(request).await;
+            return self.data::<TruncateRpc>(request).await;
         };
         let (entry, named) = pass.entry(JournalIdentifier::new(
             TenantId(request.tenant),
@@ -350,7 +408,7 @@ impl<P: Providers> NodeClient<P> {
     /// The attempt's [`RpcError`].
     pub async fn set_leader(&self, request: &SetLeader) -> Result<SetLeaderAck, RpcError> {
         let Some(pass) = &self.pass else {
-            return self.call::<SetLeaderRpc>(request).await;
+            return self.data::<SetLeaderRpc>(request).await;
         };
         let (entry, named) = pass.entry(JournalIdentifier::new(
             TenantId(request.tenant),
@@ -373,7 +431,7 @@ impl<P: Providers> NodeClient<P> {
     ///
     /// The attempt's [`RpcError`].
     pub async fn reconfigure(&self, request: &Reconfigure) -> Result<ReconfigureAck, RpcError> {
-        self.call::<ReconfigureRpc>(request).await
+        self.data::<ReconfigureRpc>(request).await
     }
 
     /// Ask this node to drive a matchmaker-set handover (#125).
@@ -385,7 +443,7 @@ impl<P: Providers> NodeClient<P> {
         &self,
         request: &ReconfigureMatchmakers,
     ) -> Result<ReconfigureMatchmakersAck, RpcError> {
-        self.call::<ReconfigureMatchmakersRpc>(request).await
+        self.data::<ReconfigureMatchmakersRpc>(request).await
     }
 
     /// Inspect the node alone (#243): its id, its cell and the control
@@ -430,10 +488,26 @@ impl<P: Providers> NodeClient<P> {
 /// its address. The address is a literal or a name, resolved through the
 /// node's [`Names`] at each call (#257), and a machine's address book may
 /// move it (#349, #190: a founding member hosts its cell's matchmaker sets).
+///
+/// **Which endpoint** (#404 (static vs dynamic endpoints)), as a peer lane
+/// chooses: the hosting member's machine interface, when the registry holds
+/// one, aimed at the resolved address; else the well-known endpoint. A call
+/// the interface refuses for good (the member restarted since it
+/// registered) marks it stale, and the link calls the well-known endpoint
+/// until the book names another interface.
 pub(crate) struct MatchmakerClient<P: Providers> {
     rpc: RpcHandle<P>,
     names: Names,
-    address: Arc<Mutex<Address>>,
+    target: Arc<Mutex<MatchmakerTarget>>,
+}
+
+/// Where a [`MatchmakerClient`] calls now.
+struct MatchmakerTarget {
+    address: Address,
+    /// The hosting member's machine interface, from the registry.
+    interface: Option<InterfaceRef<MachineInterface>>,
+    /// The interface refused a call for good.
+    stale: bool,
 }
 
 impl<P: Providers> Clone for MatchmakerClient<P> {
@@ -441,7 +515,7 @@ impl<P: Providers> Clone for MatchmakerClient<P> {
         Self {
             rpc: self.rpc.clone(),
             names: self.names.clone(),
-            address: Arc::clone(&self.address),
+            target: Arc::clone(&self.target),
         }
     }
 }
@@ -453,28 +527,70 @@ impl<P: Providers> MatchmakerClient<P> {
         Self {
             rpc: rpc.clone(),
             names,
-            address: Arc::new(Mutex::new(address)),
+            target: Arc::new(Mutex::new(MatchmakerTarget {
+                address,
+                interface: None,
+                stale: false,
+            })),
         }
     }
 
-    /// Dial this matchmaker at `address` from the next call on (#349).
-    pub(crate) fn readdress(&self, address: Address) {
-        *self.address.lock().unwrap_or_else(PoisonError::into_inner) = address;
+    /// Dial this matchmaker at `address`, through the hosting member's
+    /// machine `interface` (#404; one that does not decode is none), from
+    /// the next call on (#349).
+    pub(crate) fn readdress(&self, address: Address, interface: &[u8]) {
+        let interface = InterfaceRef::<MachineInterface>::from_bytes(interface).ok();
+        let mut target = self.target.lock().unwrap_or_else(PoisonError::into_inner);
+        if interface != target.interface {
+            moonpool_assertions::reachable!(
+                "transport: a matchmaker link follows a registered interface"
+            );
+            target.interface = interface;
+            target.stale = false;
+        }
+        target.address = address;
     }
 
     /// One attempt of `M` at the matchmaker's current address.
-    async fn call<M: WellKnownMethod>(&self, request: &M::Request) -> Result<M::Reply, RpcError> {
-        let address = self
-            .address
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone();
+    async fn call<M>(&self, request: &M::Request) -> Result<M::Reply, RpcError>
+    where
+        M: WellKnownMethod + InterfaceMethod<MachineInterface>,
+    {
+        let (address, interface) = {
+            let target = self.target.lock().unwrap_or_else(PoisonError::into_inner);
+            let interface = target.interface.clone().filter(|_| !target.stale);
+            (target.address.clone(), interface)
+        };
         let addr = self.names.resolve(&address).await.map_err(|error| {
             RpcError::not_admitted(ErrorReason::LookupFailed(error.to_string()))
         })?;
-        well_known::<P, M>(&self.rpc, addr)
-            .try_get_reply(request)
-            .await
+        let Some(client) = interface
+            .as_ref()
+            .and_then(|reference| in_group::<P, MachineInterface, M>(&self.rpc, reference, addr))
+        else {
+            return well_known::<P, M>(&self.rpc, addr)
+                .try_get_reply(request)
+                .await;
+        };
+        let reply = client.try_get_reply(request).await;
+        match &reply {
+            Ok(_) => moonpool_assertions::reachable!(
+                "transport: a matchmaker call goes through a machine interface"
+            ),
+            Err(error) if error.is_terminal_for_reference() => {
+                let mut target = self.target.lock().unwrap_or_else(PoisonError::into_inner);
+                // Only the interface this call used: the book may have
+                // named a fresher one meanwhile.
+                if target.interface == interface {
+                    moonpool_assertions::reachable!(
+                        "transport: a stale machine interface sends a matchmaker call back to the well-known endpoint"
+                    );
+                    target.stale = true;
+                }
+            }
+            Err(_) => {}
+        }
+        reply
     }
 
     /// Register or probe (#120, #173).

@@ -84,6 +84,20 @@ impl FleetOps {
                     "resolve: a resolution gives its universe's name"
                 );
                 assert_reachable!("resolve: an entry machine resolves a tenant");
+                // The answer's references serve the data plane (#404
+                // (static vs dynamic endpoints)): the tenant's control
+                // journal, read through the machines it names.
+                if self
+                    .connector
+                    .resolved(resolved)
+                    .journal_state(resolved.control, first)
+                    .await
+                    .is_some()
+                {
+                    assert_reachable!(
+                        "resolve: a client reads its tenant through the answered machines"
+                    );
+                }
             }
             Resolution::Refused {
                 refusal,

@@ -398,4 +398,10 @@ message InspectReply {
   // The cell's election journal (#240), unset when unknown.
   uint64 election_tenant = 25;
   uint64 election_journal = 26;
+  // The answering incarnation's machine interface (#404 (static vs dynamic
+  // endpoints)): the encoded `InterfaceRef` of the group that serves its
+  // data plane, its `Deliver` and its matchmaker calls. Empty on a process
+  // that is not a formed machine. A frontend learns its servers' references
+  // here.
+  bytes machine_interface = 27;
 }

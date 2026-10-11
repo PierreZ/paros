@@ -252,8 +252,8 @@ pub async fn majority_cell<P: Providers>(
     names: &Names,
     addrs: &[Address],
     timeout: Duration,
-) -> Option<(ControlJournals, Vec<(u64, Address)>)> {
-    let mut cells: BTreeMap<u64, (ControlJournals, Vec<(u64, Address)>)> = BTreeMap::new();
+) -> Option<(ControlJournals, Vec<CellServer>)> {
+    let mut cells: BTreeMap<u64, (ControlJournals, Vec<CellServer>)> = BTreeMap::new();
     let request = InspectRequest::node_only();
     for addr in addrs {
         if let Some(Ok(reply)) =
@@ -267,7 +267,11 @@ pub async fn majority_cell<P: Providers>(
             // One cell names one set of control journals: another answer is
             // wire input from a broken server, never this cell's.
             if *held == journals {
-                servers.push((reply.node, addr.clone()));
+                servers.push(CellServer {
+                    id: reply.node,
+                    address: addr.clone(),
+                    interface: reply.machine_interface,
+                });
             }
         }
     }
@@ -281,6 +285,20 @@ pub async fn majority_cell<P: Providers>(
         "two majorities of one list name one cell"
     );
     Some(cell)
+}
+
+/// One server of a cell, as its node-only `Inspect` answered
+/// ([`majority_cell`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CellServer {
+    /// The server's node id.
+    pub id: u64,
+    /// The address it answered at.
+    pub address: Address,
+    /// The machine interface of the incarnation that answered (#404
+    /// (static vs dynamic endpoints)): the encoded reference its data
+    /// plane is served in. Empty when it published none.
+    pub interface: Vec<u8>,
 }
 
 /// The control journals a server's `Inspect` reports for its cell (§3.2):
