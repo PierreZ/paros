@@ -49,6 +49,14 @@ pub const RARE: &[Rare] = &[
         reason: "marginal: 7 hits in 1,800 hunt seeds, on lost-verdict seeds (#486)",
     },
     Rare {
+        msg: "grid: a slot is decided on a column other than its own",
+        reason: "marginal: 3 hits in 1,800 hunt seeds, missed by a CI sweep (#486)",
+    },
+    Rare {
+        msg: "storage: a split-floor loss keeps a quiet holder's copy",
+        reason: "marginal: needs a split-floor seed with a quiet seat, missed by a CI sweep (#486)",
+    },
+    Rare {
         msg: "phase1: a covered campaign is refused because its own promise moved past it",
         reason: "never fired in 1,800 hunt seeds (#486)",
     },
