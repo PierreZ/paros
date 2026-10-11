@@ -612,6 +612,9 @@ pub(super) fn system_plan(
                 .collect(),
             cell: identifiers.registry,
             founders: members.iter().map(|(id, _)| *id).collect(),
+            // The acceptors' harness registry creates plain journals: a
+            // machine's are born with matchmakers (#190).
+            matchmakers: Vec::new(),
             spares: spares.into_iter().collect(),
         },
         seeds,

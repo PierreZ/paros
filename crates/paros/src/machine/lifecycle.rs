@@ -37,7 +37,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use moonpool_core::{Providers, RandomProvider, StorageProvider, TimeProvider};
-use paros_core::{Ballot, Config, JournalIdentifier, NodeId};
+use paros_core::{Ballot, Config, JournalIdentifier, MatchmakerConfig, MatchmakerId, NodeId};
 use tokio_util::sync::CancellationToken;
 
 use super::record::{MachineRecord, journal_config};
@@ -276,7 +276,7 @@ where
     P: Providers,
     S: StorageProvider + Clone + 'static,
     A: Audit + Clone + Send + Sync + 'static,
-    F: Fn(AuditScope) -> A,
+    F: Fn(AuditScope) -> A + Send + Sync + 'static,
 {
     // A machine that starts late (#246), so a `cell init` meets a founding
     // member that is not up yet. Always safe: a late machine is a slow one.
@@ -541,7 +541,7 @@ where
     P: Providers,
     S: StorageProvider + Clone + 'static,
     A: Audit + Clone + Send + Sync + 'static,
-    F: Fn(AuditScope) -> A,
+    F: Fn(AuditScope) -> A + Send + Sync + 'static,
 {
     let node_id = cell.facts.node_id;
     let plan = &cell.plan;
@@ -581,6 +581,9 @@ where
             .collect(),
         cell: plan.control,
         founders: plan.members.iter().map(|(id, _)| *id).collect(),
+        // Every journal is born with its tenant's set on the founding
+        // members (#190), until placement (#212).
+        matchmakers: plan.matchmakers(),
         spares: Vec::new(),
     };
     let cache = super::spawn_writer(
@@ -591,7 +594,14 @@ where
         cell.cached.clone(),
         shutdown.clone(),
     );
-    let stores = MachineStores::new(disk, record, genesis, audits).with_cache(cache);
+    // A founding member hosts every tenant's matchmaker set (#190).
+    let matchmaker = MatchmakerConfig {
+        id: MatchmakerId(node_id.0),
+        bootstrap: plan.matchmakers(),
+    };
+    let stores = MachineStores::new(disk, record, genesis, audits)
+        .with_cache(cache)
+        .with_matchmakers(matchmaker);
     // Bind where the machine is (#257), never at the address the plan
     // froze: a machine whose address changed across a restart still serves.
     let listen = cell.facts.listen;
@@ -599,6 +609,25 @@ where
         .iter()
         .map(|(id, addr)| (*id, addr.to_string()))
         .collect();
+    // The founding members' matchmakers, where the cell's address book
+    // dials them; this machine's own at the address it advertises now (a
+    // renamed member's old name points nowhere, #349).
+    let matchmakers: Vec<(MatchmakerId, String)> = book
+        .iter()
+        .map(|(id, addr)| {
+            let addr = if *id == node_id {
+                cell.facts.addr.to_string()
+            } else {
+                addr.clone()
+            };
+            (MatchmakerId(id.0), addr)
+        })
+        .collect();
+    assert_eq!(
+        matchmakers.len(),
+        plan.members.len(),
+        "one matchmaker per founding member"
+    );
     tracing::info!(node = node_id.0, cell = plan.cell_id, addr = %cell.facts.addr, %listen, "machine_serving");
     crate::run_journals(
         providers,
@@ -606,7 +635,7 @@ where
         node_id,
         listen.to_string(),
         book,
-        Vec::new(),
+        matchmakers,
         Vec::new(),
         Vec::new(),
         Some(control),

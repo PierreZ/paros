@@ -90,9 +90,13 @@ fn registrations_from_proto(
 
 /// Encode a matchmaking request of `tenant`'s set for the wire.
 #[must_use]
-pub(crate) fn wire_match_request(tenant: TenantId, request: &MatchRequest) -> WireMatchRequest {
+pub(crate) fn wire_match_request(
+    (tenant, to): (TenantId, MatchmakerId),
+    request: &MatchRequest,
+) -> WireMatchRequest {
     WireMatchRequest {
         tenant: tenant.0,
+        to: to.0,
         journal: request.journal.0,
         from: request.from.0,
         ballot: Some(ballot_to_proto(request.ballot)),
@@ -110,8 +114,9 @@ pub(crate) fn wire_match_request(tenant: TenantId, request: &MatchRequest) -> Wi
 /// Returns a static description of the first malformed field.
 pub(crate) fn match_request_from_wire(
     request: WireMatchRequest,
-) -> Result<(TenantId, MatchRequest), &'static str> {
+) -> Result<(TenantId, MatchmakerId, MatchRequest), &'static str> {
     let tenant = TenantId(request.tenant);
+    let to = MatchmakerId(request.to);
     let journal = JournalId(request.journal);
     let from = NodeId(request.from);
     let ballot = ballot_from_proto(request.ballot)?;
@@ -127,7 +132,7 @@ pub(crate) fn match_request_from_wire(
         Some(cursor) => base.from_page(cursor.into()),
         None => base,
     };
-    Ok((tenant, request))
+    Ok((tenant, to, request))
 }
 
 /// Encode a matchmaker's reply for the wire.
@@ -235,9 +240,13 @@ pub(crate) fn match_reply_from_wire(reply: WireMatchReply) -> Result<MatchReply,
 
 /// Encode a garbage-collection request of `tenant`'s set for the wire.
 #[must_use]
-pub(crate) fn wire_garbage_collect(tenant: TenantId, request: &GcRequest) -> WireGarbageCollect {
+pub(crate) fn wire_garbage_collect(
+    (tenant, to): (TenantId, MatchmakerId),
+    request: &GcRequest,
+) -> WireGarbageCollect {
     WireGarbageCollect {
         tenant: tenant.0,
+        to: to.0,
         journal: request.journal.0,
         from: request.from.0,
         watermark: Some(ballot_to_proto(request.watermark)),
@@ -251,9 +260,10 @@ pub(crate) fn wire_garbage_collect(tenant: TenantId, request: &GcRequest) -> Wir
 /// Returns a static description of the first malformed field.
 pub(crate) fn garbage_collect_from_wire(
     request: WireGarbageCollect,
-) -> Result<(TenantId, GcRequest), &'static str> {
+) -> Result<(TenantId, MatchmakerId, GcRequest), &'static str> {
     Ok((
         TenantId(request.tenant),
+        MatchmakerId(request.to),
         GcRequest {
             from: NodeId(request.from),
             journal: JournalId(request.journal),
@@ -391,7 +401,7 @@ fn phase_from_proto(phase: i32) -> Result<MatchmakerPhase, &'static str> {
 /// wire.
 #[must_use]
 pub(crate) fn wire_reconfigure_request(
-    tenant: TenantId,
+    (tenant, to): (TenantId, MatchmakerId),
     request: &ReconfigureRequest,
 ) -> WireReconfigureRequest {
     use matchmaker::reconfigure_request::Kind;
@@ -431,6 +441,7 @@ pub(crate) fn wire_reconfigure_request(
         from: request.from().0,
         kind: Some(kind),
         tenant: tenant.0,
+        to: to.0,
     }
 }
 
@@ -440,10 +451,11 @@ pub(crate) fn wire_reconfigure_request(
 /// Returns a static description of the first malformed field.
 pub(crate) fn reconfigure_request_from_wire(
     request: WireReconfigureRequest,
-) -> Result<(TenantId, ReconfigureRequest), &'static str> {
+) -> Result<(TenantId, MatchmakerId, ReconfigureRequest), &'static str> {
     use matchmaker::reconfigure_request::Kind;
     let from = NodeId(request.from);
     let tenant = TenantId(request.tenant);
+    let to = MatchmakerId(request.to);
     let decoded = match request.kind.ok_or("missing reconfigure request kind")? {
         Kind::Stop(stop) => ReconfigureRequest::Stop {
             from,
@@ -475,7 +487,7 @@ pub(crate) fn reconfigure_request_from_wire(
             successor: mm_set_from_proto(chosen.successor)?,
         },
     };
-    Ok((tenant, decoded))
+    Ok((tenant, to, decoded))
 }
 
 /// Encode a matchmaker's reconfiguration reply for the wire.

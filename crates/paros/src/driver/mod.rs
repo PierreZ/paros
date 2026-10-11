@@ -106,7 +106,7 @@ use ready::{ClientWaiters, drain_ready, fold_head};
 use reply::maybe_duplicate;
 use report::{Deltas, HandoffContext, handoff_context, maintain};
 use system::{ControlFollower, Followed, follow_local};
-use transport::{LaneOpener, Outbound, peer_address, peer_target};
+use transport::{LaneOpener, Outbound, peer_target};
 
 /// The node loop's fixed context: the handles every arm's **settle tail** needs
 /// and none of them change across an incarnation. Bundled so the tail is one
@@ -473,20 +473,24 @@ impl<P: Providers, A: Audit> NodeLoop<'_, P, A> {
     }
 }
 
-/// The audit ports of every live journal of `tenant` that names
-/// matchmakers (#190): the ports its set's handover reports to.
-fn tenant_audits<S, A: Clone>(journals: &Journals<S, A>, tenant: TenantId) -> TenantAudits<A> {
+/// The audit ports of every journal of `tenant` that booted here naming
+/// matchmakers (#190), live or not: the ports its set's handover reports to.
+/// A quarantined or held journal still hears its tenant's handover, since
+/// its matchmakers' registries move with it.
+fn tenant_audits<S, J: JournalStores>(
+    journals: &Journals<S, J::Audit>,
+    stores: &J,
+    tenant: TenantId,
+) -> TenantAudits<J::Audit> {
     let audits = TenantAudits(
         journals
-            .live
-            .iter()
-            .filter(|(journal, rt)| journal.tenant == tenant && rt.node.config().has_matchmakers())
-            .map(|(_, rt)| rt.audit.clone())
+            .matchmade(tenant)
+            .map(|journal| stores.audit(journal))
             .collect(),
     );
     assert!(
-        audits.0.len() <= journals.live.len(),
-        "a tenant's ports are among the live journals'"
+        audits.0.len() <= journals.matchmade(tenant).count(),
+        "a tenant's ports are its matchmade journals'"
     );
     audits
 }
@@ -1301,6 +1305,14 @@ where
         (None, inbox, Some(open))
     };
     let rpc_handle = edge.handle().clone();
+    // What the stores host beside the journals on this edge: a founding
+    // member's matchmaker sets (#190).
+    stores.host_on_edge(
+        &providers,
+        &rpc_handle,
+        &tunables,
+        incarnation_shutdown.clone(),
+    )?;
     // A machine's vote is final: it answers the cell decree from its record
     // while it serves its cell (#277). A founding member's peers are dialed
     // where the registry fold says (#349), from the plan's addresses on.
@@ -1403,7 +1415,7 @@ where
         .map(|(id, addr)| {
             Ok((
                 id,
-                MatchmakerClient::new(edge.handle(), peer_address(&addr)?),
+                MatchmakerClient::named(edge.handle(), names.clone(), peer_target(&addr)?),
             ))
         })
         .collect::<SimulationResult<BTreeMap<_, _>>>()?;
@@ -1664,7 +1676,7 @@ where
                 // echoes (#190); a quorum closes the phase and opens Phase 1
                 // in the same step.
                 let journal = JournalIdentifier::new(tenant, reply.journal);
-                let audits = tenant_audits(&journals, tenant);
+                let audits = tenant_audits(&journals, &stores, tenant);
                 let Some(rt) = journals.live.get_mut(&journal) else { continue };
                 let (matchmaker, ballot) = (reply.matchmaker, reply.ballot);
                 // The duplicate seam (the mirror of the matchmaker driver's
@@ -1713,7 +1725,7 @@ where
                 // A matchmaker's answer to this node's handover step of
                 // `tenant`'s set (#125, #190).
                 let Some(handover) = handovers.get_mut(&tenant) else { continue };
-                let audits = tenant_audits(&journals, tenant);
+                let audits = tenant_audits(&journals, &stores, tenant);
                 let matchmaker = reply.matchmaker();
                 maybe_duplicate(
                     NodeId(self_id),
@@ -1771,7 +1783,7 @@ where
                 // tenant (the request names no tenant yet).
                 let Some((&journal, _)) = journals.first() else { continue };
                 let tenant = journal.tenant;
-                let audits = tenant_audits(&journals, tenant);
+                let audits = tenant_audits(&journals, &stores, tenant);
                 let Some((_, rt)) = journals.first() else { continue };
                 let lp = shared.with(&audits);
                 let handover = handovers.entry(tenant).or_insert_with(|| HandoverDriver::new(NodeId(self_id)));
@@ -1926,7 +1938,7 @@ where
                 // first of its matchmaker journals that beats (#190).
                 let mut paced: BTreeSet<TenantId> = BTreeSet::new();
                 for journal in live {
-                    let audits = tenant_audits(&journals, journal.tenant);
+                    let audits = tenant_audits(&journals, &stores, journal.tenant);
                     let Some(rt) = journals.live.get_mut(&journal) else { continue };
                     if crate::scenario::hold_journal(hold_candidate, journal) {
                         rt.audit.journal_held(NodeId(self_id));
@@ -1950,6 +1962,11 @@ where
                     for (peer, (addr, interface)) in moved {
                         let moved = out.readdress(peer, addr.clone(), interface);
                         assert!(moved, "every founding member but this one has a lane");
+                        // A founding member hosts its cell's matchmaker sets
+                        // (#190): dialed at its new address too.
+                        if let Some(link) = links.clients.get(&MatchmakerId(peer.0)) {
+                            link.readdress(addr.clone());
+                        }
                         tracing::info!(node = self_id, peer = peer.0, %addr, "peer_book_moved");
                     }
                     // The durable cached registry fold (#211), written off
@@ -2213,6 +2230,8 @@ impl<P: Providers, J: JournalStores> SystemCtx<'_, '_, P, J> {
             peers: members.to_vec(),
             quorum_system,
             writer_mode: writer,
+            // Born with its tenant's matchmaker set (#190).
+            matchmakers: follower.matchmakers().to_vec(),
             ..paros_core::Config::new(me, id)
         };
         if !self.stores.create(id, journal_config) {

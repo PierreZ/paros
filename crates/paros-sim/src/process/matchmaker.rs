@@ -184,8 +184,6 @@ pub(super) async fn run_matchmaker_role(
                     Arc::downgrade(&world),
                     my_ip.to_string(),
                     ctx.state().clone(),
-                    checkers(*tenant),
-                    id.0,
                     (layout.durability == paros::journal::Durability::Batched)
                         .then_some(bootstrap.len()),
                 ),

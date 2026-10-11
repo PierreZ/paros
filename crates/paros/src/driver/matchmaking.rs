@@ -180,7 +180,7 @@ fn send_gc_requests<P: Providers, A: Audit>(
             fence = fence.map_or(-1_i64, |s| i64::try_from(s.0).unwrap_or(i64::MAX)),
             "gc_request_sent"
         );
-        let wire = wire_garbage_collect(tenant, &request);
+        let wire = wire_garbage_collect((tenant, matchmaker), &request);
         spawn_matchmaker_rpc(
             providers,
             links,
@@ -190,8 +190,7 @@ fn send_gc_requests<P: Providers, A: Audit>(
             links.gc_acks.clone(),
             async move {
                 client
-                    .collect
-                    .try_get_reply(&wire)
+                    .collect(&wire)
                     .await
                     .map(|ack| garbage_collect_ack_from_wire(ack).map(|ack| (tenant, ack)))
             },
@@ -224,7 +223,7 @@ pub(crate) fn send_reconfigure_requests<P: Providers, A: Audit>(
             kind = reconfigure_kind(&request),
             "reconfigure_request_sent"
         );
-        let wire = wire_reconfigure_request(tenant, &request);
+        let wire = wire_reconfigure_request((tenant, matchmaker), &request);
         spawn_matchmaker_rpc(
             providers,
             links,
@@ -234,8 +233,7 @@ pub(crate) fn send_reconfigure_requests<P: Providers, A: Audit>(
             links.reconfigure_replies.clone(),
             async move {
                 client
-                    .reconfigure
-                    .try_get_reply(&wire)
+                    .reconfigure(&wire)
                     .await
                     .map(|reply| reconfigure_reply_from_wire(reply).map(|reply| (tenant, reply)))
             },
@@ -334,7 +332,7 @@ fn send_match_requests<P: Providers, A: Audit>(
                 "match_request_sent"
             );
         }
-        let wire = wire_match_request(tenant, &request);
+        let wire = wire_match_request((tenant, matchmaker), &request);
         spawn_matchmaker_rpc(
             providers,
             links,
@@ -344,8 +342,7 @@ fn send_match_requests<P: Providers, A: Audit>(
             links.replies.clone(),
             async move {
                 client
-                    .matchmake
-                    .try_get_reply(&wire)
+                    .matchmake(&wire)
                     .await
                     .map(|reply| match_reply_from_wire(reply).map(|reply| (tenant, reply)))
             },

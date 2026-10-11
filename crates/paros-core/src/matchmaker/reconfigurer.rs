@@ -712,6 +712,10 @@ impl MatchmakerReconfigurer {
         );
         // #190: every journal a frozen member reported is carried, so no
         // journal of the set loses its registry across the handover.
+        // Mutation proof: a reconstruction that drops one journal trips this
+        // assertion; with it off, the handover model checker fails on its
+        // first seed ("an activated registry carries the complete
+        // reconstruction").
         assert!(
             acks.values()
                 .flat_map(BTreeMap::iter)

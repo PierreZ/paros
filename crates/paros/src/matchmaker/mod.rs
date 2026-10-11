@@ -228,6 +228,18 @@ where
     let reconfigure_replies = ready.reconfigure_replies().to_vec();
     ready.advance();
 
+    // What this batch commits is in flight until its sync returns: every
+    // journal it writes has its port first.
+    if !writes.is_empty() {
+        for op in &writes {
+            if let MatchmakerWriteOp::Register { journal, .. } = op {
+                ports.port(*journal);
+            }
+        }
+        for audit in ports.all() {
+            audit.matchmaker_in_flight(id, Some(&writes));
+        }
+    }
     // 1. Persist every write, in order.
     for op in &writes {
         let staged = match op {
@@ -263,6 +275,9 @@ where
             .sync()
             .await
             .map_err(|e| storage_fault_crash(ports, id, e))?;
+        for audit in ports.all() {
+            audit.matchmaker_in_flight(id, None);
+        }
         surface_registry_writes(&writes, id, ports);
     }
     // 2. Hint: durable, but the reply has not left. Only meaningful when
@@ -457,6 +472,324 @@ fn report_reply<A: Audit>(audit: &A, reply: &MatchReply, page_limit: usize) {
     }
 }
 
+/// Where a matchmaker host finds a set it does not host yet (#190): a
+/// static deployment hosts only what it booted ([`NoOpener`]); a machine
+/// provisions a tenant's set at the first request that names it.
+pub(crate) trait SetOpener {
+    /// The store a set opens on.
+    type Storage: MatchmakerStorage;
+
+    /// The set of `tenant`, provisioned, with the claim about its store; or
+    /// `None` when this host does not serve `tenant` (its request is
+    /// dropped, and the requester re-asks).
+    fn open(
+        &mut self,
+        tenant: TenantId,
+    ) -> impl std::future::Future<Output = Option<HostedSet<Self::Storage>>> + Send;
+}
+
+/// The opener of a static deployment: it hosts what it booted, nothing more.
+struct NoOpener<S>(std::marker::PhantomData<fn() -> S>);
+
+impl<S: MatchmakerStorage> SetOpener for NoOpener<S> {
+    type Storage = S;
+
+    async fn open(&mut self, _tenant: TenantId) -> Option<HostedSet<Self::Storage>> {
+        None
+    }
+}
+
+/// The edge's run, or nothing on a shared edge another loop polls.
+async fn run_edge<P: Providers>(
+    edge: &mut Option<&mut RpcEdge<P>>,
+) -> moonpool_core::SimulationError {
+    match edge {
+        Some(edge) => edge.run().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// A matchmaker host's fixed wiring: who it is, its page size, its audit
+/// factory, and what a storage fault does.
+pub(crate) struct Host<'f, F> {
+    pub(crate) config: &'f MatchmakerConfig,
+    pub(crate) page: usize,
+    pub(crate) factory: &'f F,
+    /// A storage fault ends the host (a matchmaker process, fail-stop), or
+    /// only its set, which re-opens at its next request (a machine, where a
+    /// storage fault quarantines its store, not the process).
+    pub(crate) fail_stop: bool,
+}
+
+impl<'f, F> Host<'f, F> {
+    /// The seat of `tenant`: hosted, or opened now through `opener`.
+    /// `None` when no set serves `tenant` here.
+    async fn seat<'h, S, A, O>(
+        &self,
+        hosted: &'h mut BTreeMap<TenantId, Seat<'f, S, A, F>>,
+        opener: &mut O,
+        tenant: TenantId,
+    ) -> Result<Option<&'h mut Seat<'f, S, A, F>>, RunError>
+    where
+        S: MatchmakerStorage,
+        A: Audit,
+        F: Fn(JournalIdentifier) -> A,
+        O: SetOpener<Storage = S>,
+    {
+        let vacant = match hosted.entry(tenant) {
+            std::collections::btree_map::Entry::Occupied(hosted) => {
+                return Ok(Some(hosted.into_mut()));
+            }
+            std::collections::btree_map::Entry::Vacant(vacant) => vacant,
+        };
+        let Some(set) = opener.open(tenant).await else {
+            tracing::warn!(
+                matchmaker = self.config.id.0,
+                tenant = tenant.0,
+                "matchmaker_unknown_tenant"
+            );
+            return Ok(None);
+        };
+        assert!(
+            set.tenant == tenant,
+            "an opener opens the set it was asked for"
+        );
+        match boot_set(set, self.config, self.page, self.factory).await {
+            Ok(booted) => {
+                let booted_seat = vacant.insert(booted);
+                assert!(
+                    booted_seat.matchmaker.id() == self.config.id,
+                    "an booted_seat set speaks for this matchmaker"
+                );
+                Ok(Some(booted_seat))
+            }
+            Err(error) => {
+                self.closed(tenant, error)?;
+                Ok(None)
+            }
+        }
+    }
+
+    /// Whether a request addressed to `to` is this matchmaker's (#190): a
+    /// request for another one is dropped unanswered, so a machine that took
+    /// over an address never answers, or provisions a set, as a matchmaker
+    /// it is not.
+    fn addressed(&self, to: MatchmakerId) -> bool {
+        let mine = to == self.config.id;
+        if !mine {
+            moonpool_assertions::reachable!(
+                "matchmaker: a request addressed to another matchmaker is dropped"
+            );
+            tracing::warn!(
+                matchmaker = self.config.id.0,
+                to = to.0,
+                "matchmaker_misaddressed"
+            );
+        }
+        assert!(
+            mine == (to.0 == self.config.id.0),
+            "an address names one matchmaker"
+        );
+        mine
+    }
+
+    /// A storage fault in `tenant`'s set: the host's end when it is
+    /// fail-stop, else the set's (it re-opens at its next request).
+    fn fail<S, A>(
+        &self,
+        hosted: &mut BTreeMap<TenantId, Seat<'f, S, A, F>>,
+        tenant: TenantId,
+        error: RunError,
+    ) -> Result<(), RunError> {
+        if !self.fail_stop {
+            hosted.remove(&tenant);
+            assert!(!hosted.contains_key(&tenant), "a failed set is closed");
+        }
+        self.closed(tenant, error)
+    }
+
+    /// `tenant`'s set closed on `error`: the host's end when it is
+    /// fail-stop.
+    fn closed(&self, tenant: TenantId, error: RunError) -> Result<(), RunError> {
+        if self.fail_stop {
+            return Err(error);
+        }
+        moonpool_assertions::reachable!("matchmaker: a host closes one set on a storage fault");
+        tracing::warn!(matchmaker = self.config.id.0, tenant = tenant.0, %error, "matchmaker_set_closed");
+        Ok(())
+    }
+
+    /// Serve the matchmaker contract on `inbox` until `shutdown`: route
+    /// each request to its tenant's set, open a set `opener` provisions on
+    /// its first request, and answer each request once its write is
+    /// durable. `edge` is the RPC runtime to poll, `None` on a shared edge.
+    // One select over the contract's three inboxes.
+    #[allow(clippy::too_many_lines)]
+    pub(crate) async fn serve<P, S, A, O>(
+        &self,
+        mut edge: Option<&mut RpcEdge<P>>,
+        mut inbox: MatchmakerInbox,
+        mut hosted: BTreeMap<TenantId, Seat<'f, S, A, F>>,
+        opener: &mut O,
+        shutdown: CancellationToken,
+    ) -> Result<(), RunError>
+    where
+        P: Providers,
+        S: MatchmakerStorage,
+        A: Audit,
+        F: Fn(JournalIdentifier) -> A,
+        O: SetOpener<Storage = S>,
+    {
+        let id = self.config.id;
+        assert!(
+            hosted.values().all(|seat| seat.matchmaker.id() == id),
+            "every hosted set speaks for this matchmaker"
+        );
+        loop {
+            moonpool_core::select! {
+                error = run_edge(&mut edge) => return Err(error.into()),
+                Some(((tenant, to, request), reply)) = inbox.requests.recv() => {
+                    // One request, one batch, one reply: the core answers every
+                    // request it is stepped, and the drain hands the reply out
+                    // only once the batch is durable.
+                    if !self.addressed(to) {
+                        continue;
+                    }
+                    let Some(seat) = self.seat(&mut hosted, opener, tenant).await? else {
+                        continue;
+                    };
+                    let journal = request.journal;
+                    seat.port(journal);
+                    seat.matchmaker.step(request);
+                    let mut drained = match drain(seat).await {
+                        Ok(drained) => drained,
+                        Err(error) => {
+                            self.fail(&mut hosted, tenant, error)?;
+                            continue;
+                        }
+                    };
+                    let answer = drained.replies.pop();
+                    assert!(
+                        answer.is_some() && drained.replies.is_empty() && drained.reconfigure_replies.is_empty(),
+                        "one matchmaking request yields exactly one reply"
+                    );
+                    if let Some(answer) = answer {
+                        assert!(answer.journal == journal, "a reply echoes its request's journal");
+                        let page_limit = seat.matchmaker.registry_page();
+                        report_reply(seat.ports.port(journal), &answer, page_limit);
+                        // A lost reply is a legal outcome: the registration stands
+                        // and the requester's retry is the same request again,
+                        // answered from the retained history.
+                        match_answer(id, Reply::Match, reply, answer);
+                    }
+                }
+                Some(((tenant, to, request), reply)) = inbox.collects.recv() => {
+                    // The GC *primitive*, not the GC protocol: raise one
+                    // journal's floor (a no-op at or below the current one,
+                    // refused for a generation this matchmaker is not active
+                    // for), persist it, and only then acknowledge with the floor
+                    // in force. The leader owns the paper's §3.5 preconditions
+                    // (`paros_core` `node/gc.rs`).
+                    if !self.addressed(to) {
+                        continue;
+                    }
+                    let Some(seat) = self.seat(&mut hosted, opener, tenant).await? else {
+                        continue;
+                    };
+                    let GcRequest { from, journal, generation, watermark } = request;
+                    seat.port(journal);
+                    let outcome = seat.matchmaker.advance_gc_watermark(journal, generation, watermark);
+                    tracing::info!(
+                        matchmaker = id.0,
+                        from = from.0,
+                        tenant = tenant.0,
+                        journal = journal.0,
+                        generation = generation.0,
+                        round = watermark.round,
+                        outcome = ?outcome,
+                        "garbage_collect_requested"
+                    );
+                    let drained = match drain(seat).await {
+                        Ok(drained) => drained,
+                        Err(error) => {
+                            self.fail(&mut hosted, tenant, error)?;
+                            continue;
+                        }
+                    };
+                    assert!(
+                        drained.replies.is_empty() && drained.reconfigure_replies.is_empty(),
+                        "a garbage-collect request yields no match reply"
+                    );
+                    let ack = GcAck {
+                        matchmaker: id,
+                        journal,
+                        generation,
+                        applied: outcome != GcOutcome::Refused,
+                        watermark: seat.matchmaker.gc_watermark(journal),
+                    };
+                    seat.port(journal).matchmaker_gc_replied(id, &ack);
+                    match_answer(id, Reply::GcAck, reply, ack);
+                }
+                Some(((tenant, to, request), reply)) = inbox.reconfigures.recv() => {
+                    // One step of a matchmaker-set handover (#125): the core
+                    // answers it, and the reply leaves only once its write (a
+                    // freeze, a pending bootstrap, a promise, a vote, an
+                    // activation) is durable.
+                    if !self.addressed(to) {
+                        continue;
+                    }
+                    let Some(seat) = self.seat(&mut hosted, opener, tenant).await? else {
+                        continue;
+                    };
+                    tracing::info!(
+                        matchmaker = id.0,
+                        from = request.from().0,
+                        tenant = tenant.0,
+                        kind = reconfigure_kind(&request),
+                        "reconfigure_requested"
+                    );
+                    // A bootstrap names the journals the successor inherits:
+                    // each gets its audit port before the activation reports.
+                    if let paros_core::ReconfigureRequest::Bootstrap { bootstrap, .. } = &request {
+                        for journal in bootstrap.registries.keys() {
+                            seat.port(*journal);
+                        }
+                    }
+                    seat.matchmaker.step_reconfigure(request.clone());
+                    let mut drained = match drain(seat).await {
+                        Ok(drained) => drained,
+                        Err(error) => {
+                            self.fail(&mut hosted, tenant, error)?;
+                            continue;
+                        }
+                    };
+                    let answer = drained.reconfigure_replies.pop();
+                    assert!(
+                        answer.is_some() && drained.reconfigure_replies.is_empty() && drained.replies.is_empty(),
+                        "one reconfigure request yields exactly one reply"
+                    );
+                    if let Some(answer) = answer {
+                        for audit in seat.ports.all() {
+                            audit.matchmaker_reconfigure_replied(id, &request, &answer);
+                        }
+                        tracing::info!(
+                            matchmaker = id.0,
+                            tenant = tenant.0,
+                            kind = reconfigure_kind(&request),
+                            reply = reconfigure_reply_kind(&answer),
+                            generation = seat.matchmaker.set().generation.0,
+                            phase = ?seat.matchmaker.phase(),
+                            "reconfigure_replied"
+                        );
+                        match_answer(id, Reply::MatchmakerReconfigure, reply, answer);
+                    }
+                }
+                () = shutdown.cancelled() => return Ok(()),
+            }
+        }
+    }
+}
+
 /// One matchmaker set a process hosts (#190): its tenant, the journals of
 /// that tenant whose audit ports exist from boot, its own store and the
 /// operator's claim about that store.
@@ -475,10 +808,42 @@ pub struct HostedSet<S> {
 }
 
 /// One hosted set at run time: its core, its store and its audit ports.
-struct Seat<'f, S, A, F> {
+pub(crate) struct Seat<'f, S, A, F> {
     matchmaker: Matchmaker,
     storage: S,
     ports: Ports<'f, A, F>,
+}
+
+impl<S, A, F> Seat<'_, S, A, F>
+where
+    S: MatchmakerStorage,
+    A: Audit,
+    F: Fn(JournalIdentifier) -> A,
+{
+    /// `journal`'s audit port. A journal this set meets after its boot (a
+    /// machine's set learns its journals from their requests, #190) is
+    /// introduced to its port as a boot would: the set, its phase and that
+    /// journal's registry as they stand.
+    fn port(&mut self, journal: JournalId) -> &A {
+        let fresh = !self.ports.by_journal.contains_key(&journal);
+        assert!(
+            !fresh || self.matchmaker.registry(journal).is_empty(),
+            "a journal met after boot holds no registration yet"
+        );
+        let id = self.matchmaker.id();
+        let audit = self.ports.port(journal);
+        if fresh {
+            audit.matchmaker_recovered(
+                id,
+                self.matchmaker.set(),
+                self.matchmaker.phase(),
+                self.matchmaker.hard_state(),
+                self.matchmaker.registry(journal),
+                self.matchmaker.gc_watermark(journal),
+            );
+        }
+        audit
+    }
 }
 
 /// Boot one hosted set: verify its store, judge the operator's claim
@@ -523,11 +888,13 @@ where
         ports.port(journal);
     }
     let phase = matchmaker.phase();
+    let scalars = storage.initial_state();
     for (journal, audit) in &ports.by_journal {
         audit.matchmaker_recovered(
             id,
             matchmaker.set(),
             phase,
+            &scalars,
             matchmaker.registry(*journal),
             matchmaker.gc_watermark(*journal),
         );
@@ -634,123 +1001,19 @@ where
     );
 
     let mut edge = RpcEdge::listen(&providers, &local_addr, "matchmaker", &tunables).await?;
-    let mut inbox = MatchmakerInbox::serve(&edge)?;
-
-    loop {
-        moonpool_core::select! {
-            error = edge.run() => return Err(error.into()),
-            Some(((tenant, request), reply)) = inbox.requests.recv() => {
-                // One request, one batch, one reply: the core answers every
-                // request it is stepped, and the drain hands the reply out
-                // only once the batch is durable.
-                let Some(seat) = hosted.get_mut(&tenant) else {
-                    tracing::warn!(matchmaker = id.0, tenant = tenant.0, "matchmaker_unknown_tenant");
-                    continue;
-                };
-                let journal = request.journal;
-                seat.ports.port(journal);
-                seat.matchmaker.step(request);
-                let mut drained = drain(seat).await?;
-                let answer = drained.replies.pop();
-                assert!(
-                    answer.is_some() && drained.replies.is_empty() && drained.reconfigure_replies.is_empty(),
-                    "one matchmaking request yields exactly one reply"
-                );
-                if let Some(answer) = answer {
-                    assert!(answer.journal == journal, "a reply echoes its request's journal");
-                    let page_limit = seat.matchmaker.registry_page();
-                    report_reply(seat.ports.port(journal), &answer, page_limit);
-                    // A lost reply is a legal outcome: the registration stands
-                    // and the requester's retry is the same request again,
-                    // answered from the retained history.
-                    match_answer(id, Reply::Match, reply, answer);
-                }
-            }
-            Some(((tenant, request), reply)) = inbox.collects.recv() => {
-                // The GC *primitive*, not the GC protocol: raise one
-                // journal's floor (a no-op at or below the current one,
-                // refused for a generation this matchmaker is not active
-                // for), persist it, and only then acknowledge with the floor
-                // in force. The leader owns the paper's §3.5 preconditions
-                // (`paros_core` `node/gc.rs`).
-                let Some(seat) = hosted.get_mut(&tenant) else {
-                    tracing::warn!(matchmaker = id.0, tenant = tenant.0, "matchmaker_unknown_tenant");
-                    continue;
-                };
-                let GcRequest { from, journal, generation, watermark } = request;
-                let outcome = seat.matchmaker.advance_gc_watermark(journal, generation, watermark);
-                tracing::info!(
-                    matchmaker = id.0,
-                    from = from.0,
-                    tenant = tenant.0,
-                    journal = journal.0,
-                    generation = generation.0,
-                    round = watermark.round,
-                    outcome = ?outcome,
-                    "garbage_collect_requested"
-                );
-                let drained = drain(seat).await?;
-                assert!(
-                    drained.replies.is_empty() && drained.reconfigure_replies.is_empty(),
-                    "a garbage-collect request yields no match reply"
-                );
-                let ack = GcAck {
-                    matchmaker: id,
-                    journal,
-                    generation,
-                    applied: outcome != GcOutcome::Refused,
-                    watermark: seat.matchmaker.gc_watermark(journal),
-                };
-                seat.ports.port(journal).matchmaker_gc_replied(id, &ack);
-                match_answer(id, Reply::GcAck, reply, ack);
-            }
-            Some(((tenant, request), reply)) = inbox.reconfigures.recv() => {
-                // One step of a matchmaker-set handover (#125): the core
-                // answers it, and the reply leaves only once its write (a
-                // freeze, a pending bootstrap, a promise, a vote, an
-                // activation) is durable.
-                let Some(seat) = hosted.get_mut(&tenant) else {
-                    tracing::warn!(matchmaker = id.0, tenant = tenant.0, "matchmaker_unknown_tenant");
-                    continue;
-                };
-                tracing::info!(
-                    matchmaker = id.0,
-                    from = request.from().0,
-                    tenant = tenant.0,
-                    kind = reconfigure_kind(&request),
-                    "reconfigure_requested"
-                );
-                // A bootstrap names the journals the successor inherits:
-                // each gets its audit port before the activation reports.
-                if let paros_core::ReconfigureRequest::Bootstrap { bootstrap, .. } = &request {
-                    for journal in bootstrap.registries.keys() {
-                        seat.ports.port(*journal);
-                    }
-                }
-                seat.matchmaker.step_reconfigure(request.clone());
-                let mut drained = drain(seat).await?;
-                let answer = drained.reconfigure_replies.pop();
-                assert!(
-                    answer.is_some() && drained.reconfigure_replies.is_empty() && drained.replies.is_empty(),
-                    "one reconfigure request yields exactly one reply"
-                );
-                if let Some(answer) = answer {
-                    for audit in seat.ports.all() {
-                        audit.matchmaker_reconfigure_replied(id, &request, &answer);
-                    }
-                    tracing::info!(
-                        matchmaker = id.0,
-                        tenant = tenant.0,
-                        kind = reconfigure_kind(&request),
-                        reply = reconfigure_reply_kind(&answer),
-                        generation = seat.matchmaker.set().generation.0,
-                        phase = ?seat.matchmaker.phase(),
-                        "reconfigure_replied"
-                    );
-                    match_answer(id, Reply::MatchmakerReconfigure, reply, answer);
-                }
-            }
-            () = shutdown.cancelled() => return Ok(()),
-        }
-    }
+    let inbox = MatchmakerInbox::serve(edge.handle())?;
+    let host = Host {
+        config: &config,
+        page,
+        factory: &audit,
+        fail_stop: true,
+    };
+    host.serve(
+        Some(&mut edge),
+        inbox,
+        hosted,
+        &mut NoOpener(std::marker::PhantomData),
+        shutdown,
+    )
+    .await
 }

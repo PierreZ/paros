@@ -54,6 +54,9 @@ message MatchRequest {
   // that tenant. The host routes on the tenant, the set on the journal.
   uint64 tenant = 8;
   uint64 journal = 9;
+  // The matchmaker addressed (#190): a process that is another drops the
+  // request (a machine that took over an address answers for no set).
+  uint64 to = 10;
 }
 
 message Registration {
@@ -135,6 +138,8 @@ message GarbageCollect {
   // The journal whose watermark this raises (#190), and its tenant.
   uint64 tenant = 4;
   uint64 journal = 5;
+  // The matchmaker addressed (#190).
+  uint64 to = 6;
 }
 
 message GarbageCollectAck {
@@ -194,6 +199,8 @@ message ReconfigureRequest {
   uint64 from = 1;
   // The tenant whose matchmaker set this step hands over (#190).
   uint64 tenant = 7;
+  // The matchmaker addressed (#190).
+  uint64 to = 8;
   oneof kind {
     Stop stop = 2;
     Bootstrap bootstrap = 3;

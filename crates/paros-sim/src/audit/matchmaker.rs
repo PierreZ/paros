@@ -86,6 +86,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound;
+use std::sync::{Arc, Mutex};
 
 use moonpool_sim::{assert_always, assert_reachable, assert_sometimes};
 
@@ -243,8 +244,10 @@ pub(super) struct MatchmakerAudit {
     bootstrap_set: Option<Vec<u64>>,
     /// The authoritative members of every generation seen (#125,
     /// invariant 1): generation 0 is the bootstrap set, each later one the
-    /// value the successor decree chose.
-    sets: BTreeMap<u64, Vec<u64>>,
+    /// value the successor decree chose. Shared by every journal of the
+    /// tenant (#190): a set's generations are its tenant's, and the node
+    /// that chooses one may serve only some of its journals.
+    pub(super) sets: TenantSets,
     /// Matchmakers the library refused to boot on a wiped registry (#183):
     /// each stays down for the run, and a handover replaces it.
     refused: BTreeSet<u64>,
@@ -599,6 +602,36 @@ fn union_above<'a>(
     (expected, histories)
 }
 
+/// The authoritative members of every generation of one tenant's
+/// matchmaker set (#125 invariant 1, #190): shared by the audits of every
+/// journal of that tenant.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct TenantSets(Arc<Mutex<BTreeMap<u64, Vec<u64>>>>);
+
+impl TenantSets {
+    fn lock(&self) -> std::sync::MutexGuard<'_, BTreeMap<u64, Vec<u64>>> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// `generation`'s members, when known.
+    fn get(&self, generation: u64) -> Option<Vec<u64>> {
+        self.lock().get(&generation).cloned()
+    }
+
+    /// Bind `generation` to `members` unless it is bound: the members it
+    /// is bound to.
+    fn bind_first(&self, generation: u64, members: Vec<u64>) -> Vec<u64> {
+        self.lock().entry(generation).or_insert(members).clone()
+    }
+
+    /// Every generation known.
+    fn generations(&self) -> Vec<u64> {
+        self.lock().keys().copied().collect()
+    }
+}
+
 impl MatchmakerAudit {
     /// The journal this audit judges.
     pub(super) fn journal(&self) -> JournalId {
@@ -617,7 +650,7 @@ impl MatchmakerAudit {
         );
         if !ids.is_empty() {
             self.deployed = true;
-            self.sets.entry(0).or_insert(ids);
+            self.sets.bind_first(0, ids);
         }
     }
 
@@ -630,7 +663,8 @@ impl MatchmakerAudit {
     /// a generation is known).
     fn quorum(&self, generation: u64) -> usize {
         self.sets
-            .get(&generation)
+            .get(generation)
+            .as_ref()
             .or(self.bootstrap_set.as_ref())
             .map_or(0, Vec::len)
             / 2
@@ -641,7 +675,7 @@ impl MatchmakerAudit {
     /// generations count nobody).
     fn member_of(&self, generation: u64, matchmaker: u64) -> bool {
         self.sets
-            .get(&generation)
+            .get(generation)
             .is_some_and(|m| m.contains(&matchmaker))
     }
 
@@ -689,10 +723,7 @@ impl MatchmakerAudit {
     /// Invariant 1 of #125: record `members` as `generation`'s authoritative
     /// set, or check it against the one already known.
     fn bind_set(&mut self, generation: u64, members: &[u64], source: &'static str) {
-        let known = self
-            .sets
-            .entry(generation)
-            .or_insert_with(|| members.to_vec());
+        let known = self.sets.bind_first(generation, members.to_vec());
         assert_always!(
             known.as_slice() == members,
             "generation: at most one matchmaker set is authoritative per generation",
@@ -708,7 +739,7 @@ impl MatchmakerAudit {
     /// Whether `set` is the chosen (authoritative) set of its generation.
     fn is_chosen(&self, set: &MatchmakerSet) -> bool {
         let members: Vec<u64> = set.members().iter().map(|m| m.0).collect();
-        self.sets.get(&set.generation.0) == Some(&members)
+        self.sets.get(set.generation.0) == Some(members)
     }
 
     /// Whether an effective floor named `node` retirable.
@@ -2480,7 +2511,7 @@ impl MatchmakerAudit {
             .generation
             .0
             .checked_sub(1)
-            .and_then(|g| self.sets.get(&g));
+            .and_then(|g| self.sets.get(g));
         if let Some(previous) = predecessor
             && !self.refused.is_empty()
         {
@@ -2739,7 +2770,7 @@ impl MatchmakerAudit {
             self.refusal_counts,
             self.reconfigurer_trace,
             self.scalars_note,
-            self.sets.keys().collect::<Vec<_>>(),
+            self.sets.generations(),
             self.effective_floor.round,
             self.effective_floor.node.0
         )

@@ -31,7 +31,7 @@ use std::sync::Arc;
 use moonpool_core::{Providers, SimulationError, SimulationResult};
 use moonpool_rpc::{RpcDriver, RpcHandle, ServiceGroup};
 use paros_core::{
-    GcAck, GcRequest, JournalIdentifier, MatchReply, MatchRequest, Message, Party,
+    GcAck, GcRequest, JournalIdentifier, MatchReply, MatchRequest, MatchmakerId, Message, Party,
     ReconfigureReply, ReconfigureRequest, TenantId,
 };
 use tokio::sync::mpsc;
@@ -222,21 +222,24 @@ impl ReplicaInbox {
 /// A matchmaker's inbound queues: the contract's three methods, decoded
 /// into the core's types (a malformed request never reaches the loop).
 pub(crate) struct MatchmakerInbox {
-    pub(crate) requests: Inbound<MatchmakeRpc, (TenantId, MatchRequest), MatchReply>,
-    pub(crate) collects: Inbound<GarbageCollectRpc, (TenantId, GcRequest), GcAck>,
-    pub(crate) reconfigures:
-        Inbound<MatchmakerReconfigureRpc, (TenantId, ReconfigureRequest), ReconfigureReply>,
+    pub(crate) requests: Inbound<MatchmakeRpc, (TenantId, MatchmakerId, MatchRequest), MatchReply>,
+    pub(crate) collects: Inbound<GarbageCollectRpc, (TenantId, MatchmakerId, GcRequest), GcAck>,
+    pub(crate) reconfigures: Inbound<
+        MatchmakerReconfigureRpc,
+        (TenantId, MatchmakerId, ReconfigureRequest),
+        ReconfigureReply,
+    >,
 }
 
 impl MatchmakerInbox {
-    /// Register a matchmaker's endpoints on `edge`.
+    /// Register a matchmaker's endpoints on the runtime `rpc` (its own
+    /// edge, or a machine's shared one, #190).
     ///
     /// # Errors
     ///
     /// A registration the runtime refuses.
     #[tracing::instrument(level = "debug", skip_all)]
-    pub(crate) fn serve<P: Providers>(edge: &RpcEdge<P>) -> SimulationResult<Self> {
-        let rpc = edge.handle();
+    pub(crate) fn serve<P: Providers>(rpc: &RpcHandle<P>) -> SimulationResult<Self> {
         Ok(Self {
             requests: Inbound::new(serve_well_known(rpc)?, match_request_from_wire, |reply| {
                 wire_match_reply(&reply)

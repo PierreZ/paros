@@ -10,6 +10,9 @@ use moonpool_sim::{StateHandle, assert_always, assert_reachable, assert_sometime
 use super::ClientHistory;
 use super::state::AuditState;
 
+/// The published key of a tenant's matchmaker generations (#190).
+const TENANT_SETS_KEY: &str = "paros-audit-tenant-sets";
+
 /// Well-known [`StateHandle`] key under which the single per-iteration
 /// [`AuditWorld`] is published (shared by every node and every workload).
 const AUDIT_WORLD_KEY: &str = "paros-audit-world";
@@ -51,6 +54,7 @@ pub(crate) fn audit_world_named(
 
 /// The published [`AuditWorld`] of `journal`, its mode not settled.
 fn published_world(state: &StateHandle, journal: paros::JournalIdentifier) -> Arc<AuditWorld> {
+    let state_handle = state;
     let main = crate::shape::identifiers(state).main;
     crate::state::published_arc(
         state,
@@ -59,8 +63,18 @@ fn published_world(state: &StateHandle, journal: paros::JournalIdentifier) -> Ar
             state: Mutex::new({
                 let mut state = AuditState::default();
                 // The matchmaker audit judges this journal's registry
-                // (#190).
+                // (#190), and shares its set's generations with every
+                // journal of its tenant.
                 state.matchmaker.journal = Some(journal.journal);
+                state.matchmaker.sets = (*crate::state::published_arc(
+                    state_handle,
+                    &crate::state::journal_key(
+                        TENANT_SETS_KEY,
+                        paros::JournalIdentifier::new(journal.tenant, paros::JournalId::UNSET),
+                    ),
+                    super::matchmaker::TenantSets::default,
+                ))
+                .clone();
                 state
             }),
             main: Some(main),
