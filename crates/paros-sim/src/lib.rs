@@ -32,7 +32,7 @@ mod shape;
 mod state;
 mod world;
 
-pub use moonpool_sim::{AssertKind, SimulationReport};
+pub use moonpool_sim::{AssertKind, AssertionStats, SimulationReport};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 

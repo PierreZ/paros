@@ -16,6 +16,9 @@
 //!        explored timeline, from a bug recipe the sweep printed.
 
 mod common;
+mod gates;
+#[cfg(test)]
+mod scan;
 
 use common::{arg, is_clean, print_failed_runs, print_never_fired, print_seed_counts};
 use paros_sim::{
@@ -108,6 +111,10 @@ fn main() {
     // a starved `sometimes` looks like in the CI sweep, and finding it here is
     // far cheaper than re-running the full coverage campaign to see it.
     print_never_fired(&report, "");
+    // The declared gates the hunt never ran, and the marginal ones (#446 (a
+    // gate that never fires cannot fail the sweep)).
+    gates::print(&gates::judge(&report.assertion_results), "");
+    gates::print_rarest(&report.assertion_results, RAREST);
     if let Some(filter) = arg::<String>(3) {
         print_gates(&report, &filter);
     }
@@ -120,6 +127,9 @@ fn main() {
     println!("FAILING SEEDS: {:?}", report.seeds_failing);
     std::process::exit(1);
 }
+
+/// How many of the rarest declared gates a hunt prints.
+const RAREST: usize = 25;
 
 /// Every gate whose name contains `filter`, with its successes and checks: a
 /// gate's rate, measured before and after a change (AGENTS.md, *Amplify the

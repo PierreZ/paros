@@ -3,6 +3,9 @@
 //! no scripted side axis).
 
 mod common;
+mod gates;
+#[cfg(test)]
+mod scan;
 
 use common::{arg, is_clean, print_failed_runs, print_never_fired, print_seed_counts};
 use paros_sim::{AssertKind, COVERAGE_ITERATIONS, SimulationReport, explore};
@@ -48,12 +51,25 @@ fn main() {
     // sweep's real exit criterion, and "did not saturate" is useless without
     // knowing *which* gate is starving — that is the knob to tune.
     print_never_fired(&report, "  ");
-    if is_clean(&report) && report.coverage_violations.is_empty() && !report.convergence_timeout {
+    // A declared gate that never ran has no slot, so moonpool never judges it
+    // (#446 (a gate that never fires cannot fail the sweep)).
+    let declared = gates::judge(&report.assertion_results);
+    gates::print(&declared, "  ");
+    gates::print_rarest(&report.assertion_results, RAREST);
+    if is_clean(&report)
+        && report.coverage_violations.is_empty()
+        && declared.missing.is_empty()
+        && !report.convergence_timeout
+    {
         println!("  Chain safety, recovery, coverage, and saturation gates are green");
     } else {
         print_failed_runs(&report);
         println!("  SAFETY VIOLATIONS: {:?}", report.assertion_violations);
         println!("  COVERAGE VIOLATIONS: {:?}", report.coverage_violations);
+        println!(
+            "  DECLARED GATES THAT NEVER RAN: {}",
+            declared.missing.len()
+        );
         println!("  CONVERGENCE TIMEOUT: {}", report.convergence_timeout);
         println!(
             "  FAILING SEEDS (replay with sim-paros-hunt replay-main): {:?}",
@@ -64,6 +80,10 @@ fn main() {
         std::process::exit(1);
     }
 }
+
+/// How many of the rarest declared gates the sweep prints: its marginal
+/// gates, one plateau away from never firing.
+const RAREST: usize = 10;
 
 fn print_guidance(report: &SimulationReport) {
     for detail in &report.assertion_details {
