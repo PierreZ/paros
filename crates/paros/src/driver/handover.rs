@@ -4,11 +4,13 @@
 
 use paros_core::{
     MatchmakerGeneration, MatchmakerId, MatchmakerReconfigurer, MatchmakerSet, NodeId,
-    ReconfigureReply, ReconfigureRequest, ReconfigurerPhase, ReconfigurerStep, Reconstruction,
-    StartRefusal,
+    PendingBootstrap, ReconfigureReply, ReconfigureRequest, ReconfigurerPhase, ReconfigurerStep,
+    Reconstruction, StartRefusal,
 };
 
 use super::report::Cadence;
+use crate::audit::Audit;
+use crate::rpc::MatchmakersRefusal;
 
 /// The node driver's handover state: the sans-IO
 /// [`MatchmakerReconfigurer`] plus the two clocks the core deliberately does
@@ -224,5 +226,84 @@ impl HandoverDriver {
     fn clear_pacing(&mut self) {
         self.resend.reset();
         self.backoff = 0;
+    }
+}
+
+/// The audit ports of every journal a tenant's matchmaker set serves on this
+/// node (#190): a set's handover belongs to the tenant, not to one journal,
+/// so each of its facts reaches every journal's port. Only the handover's
+/// callbacks fan out; nothing else is ever reported through it.
+#[derive(Clone)]
+pub(crate) struct TenantAudits<A>(pub(crate) Vec<A>);
+
+impl<A: Audit> Audit for TenantAudits<A> {
+    fn reconfigurer_started(&self, node: NodeId, old: &MatchmakerSet, target: &[MatchmakerId]) {
+        for audit in &self.0 {
+            audit.reconfigurer_started(node, old, target);
+        }
+    }
+
+    fn reconfigure_request_sent(
+        &self,
+        node: NodeId,
+        matchmaker: MatchmakerId,
+        request: &ReconfigureRequest,
+    ) {
+        for audit in &self.0 {
+            audit.reconfigure_request_sent(node, matchmaker, request);
+        }
+    }
+
+    fn reconfigurer_aborted(&self, node: NodeId) {
+        for audit in &self.0 {
+            audit.reconfigurer_aborted(node);
+        }
+    }
+
+    fn reconfigurer_backoff(&self, node: NodeId, ticks: u64) {
+        for audit in &self.0 {
+            audit.reconfigurer_backoff(node, ticks);
+        }
+    }
+
+    fn reconfigurer_step(
+        &self,
+        node: NodeId,
+        matchmaker: MatchmakerId,
+        reply: &ReconfigureReply,
+        step: &ReconfigurerStep,
+    ) {
+        for audit in &self.0 {
+            audit.reconfigurer_step(node, matchmaker, reply, step);
+        }
+    }
+
+    fn successor_republished(
+        &self,
+        node: NodeId,
+        matchmaker: MatchmakerId,
+        successor: &MatchmakerSet,
+    ) {
+        for audit in &self.0 {
+            audit.successor_republished(node, matchmaker, successor);
+        }
+    }
+
+    fn reconfigurer_reconstructed(
+        &self,
+        node: NodeId,
+        generation: u64,
+        bootstrap: &PendingBootstrap,
+        disagreements: u64,
+    ) {
+        for audit in &self.0 {
+            audit.reconfigurer_reconstructed(node, generation, bootstrap, disagreements);
+        }
+    }
+
+    fn reconfigure_matchmakers_acked(&self, node: NodeId, refusal: Option<MatchmakersRefusal>) {
+        for audit in &self.0 {
+            audit.reconfigure_matchmakers_acked(node, refusal);
+        }
     }
 }

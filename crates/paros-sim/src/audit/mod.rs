@@ -54,7 +54,6 @@ mod world;
 
 pub(crate) use client::{ClientHistory, check_control_history};
 pub(crate) use linearizability::{Attempt, Call, Seen};
-pub(crate) use matchmaker::RegistryOp;
 pub(crate) use world::{AuditWorld, audit_world, audit_world_for, audit_world_named, check_run};
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -1898,12 +1897,54 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         matchmaker: MatchmakerId,
         set: &MatchmakerSet,
         phase: MatchmakerPhase,
+        scalars: &paros::MatchmakerHardState,
         registry: &BTreeMap<Ballot, Registration>,
         gc_watermark: Ballot,
     ) {
+        // What the last commit had in flight and this boot shows landed is
+        // folded before the boot is judged (#190).
+        self.world
+            .note_registry_recovered(matchmaker, scalars, registry);
         self.state()
             .matchmaker
             .recovered(matchmaker, set, phase, registry, gc_watermark);
+    }
+
+    fn matchmaker_in_flight(
+        &self,
+        matchmaker: MatchmakerId,
+        writes: Option<&[paros::MatchmakerWriteOp]>,
+    ) {
+        let Some(writes) = writes else {
+            self.world.note_registry_in_flight(matchmaker.0, None);
+            return;
+        };
+        let journal = self.state().matchmaker.journal();
+        let ops: Vec<matchmaker::RegistryOp> = writes
+            .iter()
+            .filter_map(|op| match op {
+                paros::MatchmakerWriteOp::Register {
+                    journal: written,
+                    ballot,
+                    registration,
+                } => (*written == journal)
+                    .then(|| matchmaker::RegistryOp::Register(*ballot, registration.clone())),
+                paros::MatchmakerWriteOp::SetGcWatermark { .. } => None,
+                paros::MatchmakerWriteOp::SetScalars(scalars) => {
+                    Some(matchmaker::RegistryOp::Scalars(scalars.clone()))
+                }
+                paros::MatchmakerWriteOp::InstallRegistry {
+                    scalars,
+                    registrations,
+                } => Some(matchmaker::RegistryOp::Install(
+                    scalars.clone(),
+                    registrations.get(&journal).cloned().unwrap_or_default(),
+                )),
+            })
+            .collect();
+        if !ops.is_empty() {
+            self.world.note_registry_in_flight(matchmaker.0, Some(ops));
+        }
     }
 
     fn matchmaker_scalars_persisted(

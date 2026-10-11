@@ -50,6 +50,7 @@ mod verbs;
 
 use paros_core::{MatchmakerId, NodeId};
 
+pub(crate) use process::JOURNAL;
 pub use process::{MatchmakerProcess, RegistryDisk};
 pub(crate) use render::{plane_view, why};
 

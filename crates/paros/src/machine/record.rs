@@ -313,9 +313,10 @@ impl MachineRecord {
     }
 }
 
-/// The core configuration of `journal` on member `node_id` of `plan`: plain
-/// Multi-Paxos over every member, under a majority (a cell's bootstrap is
-/// the matchmaker-free exception, `docs/architecture.md` §3.1).
+/// The core configuration of `journal` on member `node_id` of `plan`:
+/// Multi-Paxos over every member, under a majority, born with its tenant's
+/// matchmaker set on the founding members (#190, `docs/architecture.md`
+/// §3.1: there is no bootstrap exception).
 #[must_use]
 pub fn journal_config(plan: &CellPlan, node_id: NodeId, journal: JournalIdentifier) -> Config {
     let members: Vec<NodeId> = plan.members.iter().map(|(id, _)| *id).collect();
@@ -323,6 +324,7 @@ pub fn journal_config(plan: &CellPlan, node_id: NodeId, journal: JournalIdentifi
         peers: members.clone(),
         nodes: members,
         quorum_system: QuorumSystem::Majority,
+        matchmakers: plan.matchmakers(),
         // The election journal takes campaigns from every candidate (#240).
         writer_mode: if journal == plan.election {
             WriterMode::Multi

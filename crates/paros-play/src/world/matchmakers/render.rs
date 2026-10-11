@@ -86,7 +86,10 @@ pub(crate) fn plane_view(entry: &InFlight) -> Option<MessageView> {
                         "Hold generation {} = {} pending, with {}",
                         bootstrap.set.generation.0,
                         show_set(bootstrap.set.members()),
-                        many(bootstrap.history.len(), "registration")
+                        many(
+                            bootstrap.registries.values().map(|r| r.history.len()).sum(),
+                            "registration"
+                        )
                     ),
                 ),
                 ReconfigureRequest::DecreePrepare { ballot, .. } => (
@@ -118,14 +121,17 @@ pub(crate) fn plane_view(entry: &InFlight) -> Option<MessageView> {
             let (kind, summary) = match answer {
                 ReconfigureReply::Stopped {
                     generation,
-                    history,
+                    registries,
                     ..
                 } => (
                     "Stopped",
                     format!(
                         "Frozen for generation {}, handing over {}",
                         generation.0,
-                        many(history.len(), "registration")
+                        many(
+                            registries.values().map(|r| r.history.len()).sum(),
+                            "registration"
+                        )
                     ),
                 ),
                 ReconfigureReply::Bootstrapped { set, .. } => (

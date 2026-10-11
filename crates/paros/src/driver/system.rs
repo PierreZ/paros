@@ -98,6 +98,11 @@ pub struct ControlPlan {
     /// through the registry, and the members of every tenant control journal
     /// the cell hosts until placement (#212).
     pub founders: Vec<NodeId>,
+    /// The matchmaker set every journal the control journals create here
+    /// is born with (#190): on a machine, the founding members, which host
+    /// every tenant's set until placement (#212). Empty on a deployment
+    /// without matchmakers.
+    pub matchmakers: Vec<paros_core::MatchmakerId>,
     /// The journals a node outside the founding members joins **as a
     /// spare** once the registry admits it: each a configuration template
     /// (its journal, bootstrap membership, quorum system, matchmakers) whose
@@ -123,6 +128,8 @@ pub(crate) struct ControlFollower<P: Providers> {
     /// members and the deployment's static address book (replicas included).
     fixed: BTreeSet<NodeId>,
     founders: Vec<NodeId>,
+    /// The matchmaker set a created journal is born with (#190).
+    matchmakers: Vec<paros_core::MatchmakerId>,
     registry: Folder<Registry>,
     /// The registry's identifier.
     registry_key: JournalIdentifier,
@@ -187,6 +194,7 @@ impl<P: Providers> ControlFollower<P> {
                 seeds,
                 fixed,
                 founders: plan.founders.clone(),
+                matchmakers: plan.matchmakers.clone(),
                 registry: Folder::new(Registry::new(plan.founders.iter().copied())),
                 registry_key: plan.cell,
                 tenants: BTreeMap::new(),
@@ -207,6 +215,11 @@ impl<P: Providers> ControlFollower<P> {
     /// This node's identity.
     pub(crate) fn self_id(&self) -> NodeId {
         self.self_id
+    }
+
+    /// The matchmaker set a journal created here is born with (#190).
+    pub(crate) fn matchmakers(&self) -> &[paros_core::MatchmakerId] {
+        &self.matchmakers
     }
 
     /// The founding members: the members of every tenant control journal

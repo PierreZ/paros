@@ -250,6 +250,7 @@ fn a_match_reply_from_a_stranger_matchmaker_is_ignored() {
     let reply = |mm| MatchReply {
         matchmaker: MatchmakerId(mm),
         to: NodeId(0),
+        journal: crate::JournalId::UNSET,
         ballot: b,
         generation: MatchmakerGeneration(0),
         outcome: MatchOutcome::Registered {

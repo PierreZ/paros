@@ -15,8 +15,8 @@ use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
 use moonpool_journal::Durability;
 use moonpool_sim::{SimStorageProvider, SimWorld, StorageConfiguration};
 use paros_core::{
-    AcceptorConfig, Ballot, Command, Config, Entry, JournalState, LeaderUuid, MustSync, NodeId,
-    QuorumSystem, Registration, RegistryStorage, Seq, Slot, Storage, Value,
+    AcceptorConfig, Ballot, Command, Config, Entry, JournalId, JournalState, LeaderUuid, MustSync,
+    NodeId, QuorumSystem, Registration, RegistryStorage, Seq, Slot, Storage, Value,
 };
 
 use super::{JournalMatchmakerStorage, JournalStorage, JournalStoreConfig, encode};
@@ -470,9 +470,15 @@ fn belief(first: u64) -> Registration {
     ))
 }
 
-/// The payload bytes of a registration, to find it on disk.
+/// The journal the registry tests register in.
+const J: JournalId = JournalId(1);
+
+/// The payload bytes of a registration, to find it on disk: its
+/// registration bytes, which follow its journal in the payload.
 fn needle(registration: &Registration) -> Vec<u8> {
-    encode(registration)
+    // Past the format byte: inside the payload the registration follows the
+    // journal, with no format byte of its own.
+    encode(registration)[1..].to_vec()
 }
 
 #[test]
@@ -483,7 +489,7 @@ fn a_damaged_registration_is_a_crash_and_a_collected_one_is_not() {
             let mut registry = open_registry(provider.clone(), "m").await.expect("open");
             for (round, first) in [(1, 0xC100), (2, 0xD200), (3, 0xE300)] {
                 registry
-                    .register(ballot(round), &belief(first))
+                    .register(J, ballot(round), &belief(first))
                     .await
                     .expect("register");
                 registry.sync().await.expect("sync");
@@ -503,7 +509,7 @@ fn a_damaged_registration_is_a_crash_and_a_collected_one_is_not() {
             let mut other = open_registry(provider.clone(), "m2").await.expect("open");
             for (round, first) in [(1, 0xC100), (2, 0xD200)] {
                 other
-                    .register(ballot(round), &belief(first))
+                    .register(J, ballot(round), &belief(first))
                     .await
                     .expect("register");
                 other.sync().await.expect("sync");
@@ -527,20 +533,23 @@ fn a_registration_below_the_watermark_is_collected_even_when_damaged() {
             let mut registry = open_registry(provider.clone(), "w").await.expect("open");
             for (round, first) in [(1, 0xC100), (2, 0xD200), (4, 0xF400)] {
                 registry
-                    .register(ballot(round), &belief(first))
+                    .register(J, ballot(round), &belief(first))
                     .await
                     .expect("register");
                 registry.sync().await.expect("sync");
             }
-            registry.set_gc_watermark(ballot(3)).await.expect("raise");
+            registry
+                .set_gc_watermark(J, ballot(3))
+                .await
+                .expect("raise");
             registry.sync().await.expect("sync");
             drop(registry);
             // The cleared registration's bytes may still be on disk; rot is
             // harmless there, and the live one reads back.
             let _ = rot(&provider, "w", &needle(&belief(0xD200))).await;
             let registry = open_registry(provider, "w").await.expect("boots");
-            assert_eq!(registry.registered_ballots(), vec![ballot(4)]);
-            assert_eq!(registry.initial_state().gc_watermark, ballot(3));
+            assert_eq!(registry.registered(), vec![(J, ballot(4))]);
+            assert_eq!(registry.initial_state().gc_watermark(J), ballot(3));
         })
         .await;
     });
