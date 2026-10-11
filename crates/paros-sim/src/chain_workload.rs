@@ -609,6 +609,52 @@ impl Workload for ChainWorkload {
         };
         let reconfigurer = nodes.with_tunables(config.reconfigure_tunables());
         let matchmaker_reconfigurer = nodes.with_tunables(config.matchmakers_tunables());
+        // The early-handover scenario (#446 (a gate that never fires cannot
+        // fail the sweep)): the main journal's client 0 asks for a matchmaker
+        // handover before its claim, so the handover runs inside the chaos
+        // window, where the driver's handover sites can strike.
+        if has_matchmakers
+            && journal == main
+            && client_id == 0
+            && crate::shape::early_handover(ctx.state())
+        {
+            assert_reachable!("generation: an operator asks for a handover before its claim");
+            let raw_class = ctx.random().random::<u64>();
+            let raw_payload = ctx.random().random::<u64>();
+            let step = Step {
+                ctx,
+                servers: &servers,
+                nodes: &nodes,
+                readers: &readers,
+                log: &log,
+                audit: &audit,
+                config: &config,
+                time: &time,
+                journal,
+                client_id,
+                server_count,
+                request_timeout,
+                has_matchmakers,
+                config_floor,
+                policy: &policy,
+                matchmaker_ips: &matchmaker_ips,
+                matchmaker_floor,
+                reconfigurer: &reconfigurer,
+                matchmaker_reconfigurer: &matchmaker_reconfigurer,
+                op: RECONFIGURE_MATCHMAKERS,
+                target: usize::try_from(raw_payload).unwrap_or(0) % server_count,
+                retarget: retarget_from_draw(0),
+                ignore_hint: false,
+                after_claim: false,
+                after_register: false,
+                raw_target: 0,
+                raw_class,
+                raw_payload,
+                raw_pause: 0,
+                raw_policy: 0,
+            };
+            self.reconfigure_matchmakers_step(&step).await;
+        }
 
         // An owner claims the journal first (#204): read where it stands and
         // `SetLeader` against it. Losing is a valid start — another owner

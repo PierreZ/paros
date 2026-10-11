@@ -1746,13 +1746,11 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             // is the edge's own inline reachable.
             return;
         }
+        // A corrupted request needs a damaged frame, and the campaign masks
+        // `BitFlip` (wire integrity is the transport's): no gate, the count
+        // stays for the run's diagnostics (#446 (a gate that never fires
+        // cannot fail the sweep)).
         st.edge_rejections += 1;
-        // The message predates the move to moonpool-rpc; it stays verbatim
-        // because a message's hash is its assertion slot.
-        reach_once!(
-            st.edge_rejected,
-            "the gRPC edge rejects a corrupted request"
-        );
     }
 
     fn election_timeout_set(&self, node: NodeId, ticks: u64) {

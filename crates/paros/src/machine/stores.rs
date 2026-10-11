@@ -15,6 +15,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use moonpool_buggify::hint::Strike;
 use moonpool_core::{Providers, SimulationResult, StorageProvider};
 use moonpool_rpc::RpcHandle;
 use paros_core::{Config, JournalIdentifier, MatchmakerConfig, NodeId};
@@ -149,6 +150,17 @@ impl<S: StorageProvider + Clone + 'static, F> MachineStores<S, F> {
                 return false;
             }
         }
+        // Hint: formatted, not recorded. A machine killed here formats the
+        // journal again at its next request, and resumes from the marker
+        // (#446 (a gate that never fires cannot fail the sweep): without
+        // this moment the resume above never ran in the sweep).
+        let hinted = moonpool_buggify::hint!("created journal formatted, not recorded", 0.25);
+        if hinted.strike() == Strike::Killed {
+            moonpool_assertions::reachable!(
+                "machine: a machine dies between a journal's format and record"
+            );
+        }
+        hinted.await;
         // The record is the commit point: the line is written after the
         // format, before the first boot.
         let mut record = self.record.clone();

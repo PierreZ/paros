@@ -629,6 +629,9 @@ struct Registry {
     /// Run-level: whether the run draws the slow-machine scenario (see
     /// [`slow_machine`]), fixed by the first caller.
     slow_machine: Option<bool>,
+    /// Run-level: whether the run draws the early-handover scenario (see
+    /// [`early_handover`]), fixed by the first caller.
+    early_handover: Option<bool>,
     /// Run-level: whether the run draws the stalled-proxy scenario (see
     /// [`stalled_proxy`]), fixed by the first caller.
     stalled_proxy: Option<bool>,
@@ -819,7 +822,11 @@ pub(crate) fn withhold_gc(state: &StateHandle) -> bool {
 /// then decide the slot with a no-op, so only the cross-configuration
 /// Phase 1 keeps it (#267). Each ingredient keeps its own coin on the
 /// other seeds. Its fired gate sits where the outage's loss takes the
-/// shape. Rare-but-valid: each ingredient is.
+/// shape. Rates in 600 hunt seeds (#446 (a gate that never fires cannot
+/// fail the sweep), three hunts): the outage lands on 138 to 156 seeds,
+/// the straggler's slot is recovered through the prior configuration on
+/// 109 to 138 checks, and the clean holder is back last 61 to 69 times.
+/// Rare-but-valid: each ingredient is.
 #[tracing::instrument(level = "debug", skip_all)]
 pub(crate) fn departed_straggler(state: &StateHandle) -> bool {
     let registry = registry(state);
@@ -876,7 +883,11 @@ pub(crate) fn bare_quorum(state: &StateHandle) -> bool {
 /// every node drops write replies at the location's rate
 /// (`paros::scenario::LOSE_VERDICTS`) and every ambiguous write is re-sent
 /// at once (`ChainWorkload`). Each ingredient keeps its own coin on the
-/// other seeds. Rare-but-valid: each ingredient is.
+/// other seeds. Rates in 600 hunt seeds (#446 (a gate that never fires
+/// cannot fail the sweep), three hunts): a scenario seed loses a write's
+/// verdict 6 to 11 times, and the gate fired 0, 1 and 6 times: still
+/// marginal, so it is in `gates::RARE` (#486).
+/// Rare-but-valid: each ingredient is.
 #[tracing::instrument(level = "debug", skip_all)]
 pub(crate) fn lost_verdict(state: &StateHandle) -> bool {
     let registry = registry(state);
@@ -990,7 +1001,11 @@ pub(crate) fn moved_founder(state: &StateHandle) -> bool {
 /// `crate::world::replaced_founder` wipes a founder once every founder
 /// formed, and client 0 admits the replacement, then runs `init` again
 /// (`crate::chain_workload::fleet`). Each ingredient keeps its own coin on
-/// the other seeds. Rare-but-valid: each ingredient is.
+/// the other seeds. Rates in 600 hunt seeds (#446 (a gate that never fires
+/// cannot fail the sweep), three hunts): the cell forms over the replacing
+/// machine 48 to 62 times, client 0 runs `init` again 6 to 8 times, and
+/// that `init` passes the admitted machine 9 to 11 times.
+/// Rare-but-valid: each ingredient is.
 #[tracing::instrument(level = "debug", skip_all)]
 pub(crate) fn replaced_founder(state: &StateHandle) -> bool {
     // Drawn before the lock: the scenarios take the registry's lock too.
@@ -1071,6 +1086,28 @@ pub(crate) fn slow_machine(state: &StateHandle) -> bool {
         .get_or_insert_with(|| moonpool_sim::buggify_with_prob!(1.0))
 }
 
+/// Whether the run draws the **early-handover scenario** (#446 (a gate that
+/// never fires cannot fail the sweep)): drawn once per seed, its own BUGGIFY
+/// location. Op 12 (`RECONFIGURE_MATCHMAKERS`) almost always lands in the
+/// recovery tail, after the owner's claim, where every driver handover site
+/// (`buggify_fault_with_prob!`: a dropped or duplicated handover reply, a
+/// skipped re-send, an abandon, the stall budget) is silent: in 600 hunt
+/// seeds 82 handovers ran and none of those sites fired. On a scenario seed
+/// with matchmakers, the main journal's client 0 asks for a handover before
+/// its claim, inside the chaos window: in 600 hunt seeds a handover reply
+/// was then folded twice on 136 checks and dropped at the reply seam on
+/// 142, and a stalled handover was abandoned 8 to 10 times. Each
+/// ingredient keeps its own coin on the other seeds. Rare-but-valid: an operator may move a matchmaker set at
+/// any time.
+#[tracing::instrument(level = "debug", skip_all)]
+pub(crate) fn early_handover(state: &StateHandle) -> bool {
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    *guard
+        .early_handover
+        .get_or_insert_with(|| moonpool_sim::buggify_with_prob!(0.5))
+}
+
 /// Whether the run draws the **stalled-proxy scenario** (#341): drawn once
 /// per seed, its own BUGGIFY location. Three mutation survivors of #269
 /// need a proxy whose rounds stay open: a leader that takes a delegated
@@ -1084,8 +1121,12 @@ pub(crate) fn slow_machine(state: &StateHandle) -> bool {
 /// resigns now and then (`paros::scenario::RESIGN_DELEGATING`), and the run
 /// runs an acceptor grid
 /// where the pool tiles one ([`quorum_policy`]). Each ingredient keeps its
-/// own coin on the other seeds. Rare-but-valid: a lost vote is, and so is a
-/// grid.
+/// own coin on the other seeds. Rates in 600 hunt seeds (#446 (a gate that
+/// never fires cannot fail the sweep), three hunts): a leader takes a
+/// delegated round back on a grid column 30 to 65 times, a proxy evicts a
+/// round nobody answers 15 to 26 times, and a new delegation meets a
+/// superseded leadership's rounds 0 to 2 times (in `gates::RARE`, #486).
+/// Rare-but-valid: a lost vote is, and so is a grid.
 #[tracing::instrument(level = "debug", skip_all)]
 pub(crate) fn stalled_proxy(state: &StateHandle) -> bool {
     let registry = registry(state);

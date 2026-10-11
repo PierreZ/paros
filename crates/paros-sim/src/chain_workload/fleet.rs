@@ -175,6 +175,9 @@ pub(super) struct FleetOps {
     journal_names: BTreeMap<TenantId, paros::client::names::JournalNames>,
     /// The replaced-founder scenario's steps this operator took (#423).
     replaced: replaced::Steps,
+    /// This client made its one frontend call before a tenant was `READY`
+    /// (#446 (a gate that never fires cannot fail the sweep)).
+    frontend_cold: bool,
     /// The run's shared state: the completed removals (#239).
     state: StateHandle,
     /// The simulated clock: when an operation ran (#213 (three founding
@@ -222,6 +225,7 @@ impl FleetOps {
             journal_pending: None,
             journal_names: BTreeMap::new(),
             replaced: replaced::Steps::default(),
+            frontend_cold: false,
             state: ctx.state().clone(),
             time: ctx.time().clone(),
         })
