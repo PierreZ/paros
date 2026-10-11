@@ -2071,6 +2071,47 @@ impl Workload for ChainWorkload {
                 state = %hash_text(fold.state().chain_hash),
                 "chain_state_read"
             );
+            // That read is a quorum read: a vote stranded above the chosen
+            // prefix (a deposed leader's lone `Accept`) makes the leader fill
+            // it with a `Noop`, a slot decided after the settle. Settle again,
+            // so the run ends only once every live node applied it
+            // (witness: sweep recipe 2025224528875980004
+            // [(63078, 9807539191096893651)], node 0 at 47 against 48, red
+            // before, green after).
+            let mut stable: Option<(Duration, u64)> = None;
+            while in_budget() && !shutdown.is_cancelled() {
+                let parked = crate::world::parked_nodes(ctx.state(), journal);
+                let mut ends: Vec<u64> = Vec::with_capacity(server_count + replica_count);
+                let mut unanswered = false;
+                for node in (0..server_count)
+                    .filter(|i| !parked.contains(&servers[*i]))
+                    .chain(server_count..server_count + replica_count)
+                {
+                    let Some(reply) = readers.inspect(node, journal).await else {
+                        unanswered = true;
+                        break;
+                    };
+                    ends.push(reply.chosen_index.map_or(0, |c| c + 1));
+                }
+                let agreed = !unanswered && ends.windows(2).all(|w| w[0] == w[1]);
+                match (agreed, ends.first().copied(), stable) {
+                    (true, Some(end), Some((since, held))) if held == end => {
+                        if time.now().saturating_sub(since) >= SETTLE {
+                            if Some(end) != last_probe.first().and_then(|(_, end)| *end) {
+                                assert_reachable!(
+                                    "chain: the final read decides a slot and the cluster settles again"
+                                );
+                            }
+                            break;
+                        }
+                    }
+                    (true, Some(end), _) => stable = Some((time.now(), end)),
+                    _ => stable = None,
+                }
+                time.sleep(Duration::from_millis(config.probe_interval_ms))
+                    .await
+                    .ok();
+            }
         }
         fold.leave(ctx.state(), client_id);
 

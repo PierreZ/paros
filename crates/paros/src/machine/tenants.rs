@@ -30,20 +30,20 @@
 //! as many as it asks for, at most all of them; a grid needs all its cells.
 //!
 //! The desk draws no randomness of its own: its ids derive from the seed the
-//! node loop drew for the candidacy, and its one BUGGIFY decision (reuse a
-//! taken id once) was drawn there too.
+//! node loop drew for the candidacy, and its BUGGIFY decisions (reuse a
+//! taken id once, an impatient term) were drawn there too.
 
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use moonpool_core::Providers;
 use paros_core::{AcceptorConfig, JournalId, JournalIdentifier, LeaderUuid, NodeId, TenantId};
 
-use crate::client::Client;
 use crate::client::checkpoint::{
     AppendOutcome, CheckpointPolicy, Checkpointer, Folder, LoadOutcome, OpenOutcome, load,
 };
 use crate::client::journals::{JournalAnswer, JournalOp, JournalRequest};
-use crate::client::{ClaimOutcome, WriterOutcome};
+use crate::client::{ClaimOutcome, Client, ClientTunables, WriterOutcome};
 use crate::system::Registry;
 use crate::tenant::{
     CellKind, Description, Desired, DesiredMode, RequestOutcome, TenantCommand, TenantControl,
@@ -56,6 +56,22 @@ type Hosted = (JournalId, Vec<u8>, crate::tenant::Survives);
 /// How many ids one create draws before it answers unavailable: an
 /// `IdTaken` costs one, and a random 64-bit id is taken almost never.
 const ID_DRAWS: u64 = 4;
+
+/// `client`, or, when `impatient`, a copy of it that stops listening at
+/// once: every call and read it makes is abandoned unanswered (the floors of
+/// [`ClientTunables`] broken on purpose, for one call).
+fn impatient<P: Providers>(client: &Client<P>, impatient: bool) -> Client<P> {
+    if !impatient {
+        return client.clone();
+    }
+    client.with_tunables(ClientTunables {
+        request_timeout: Duration::from_millis(1),
+        read_timeout: Duration::from_millis(1),
+        retry_budget: 1,
+        wait_ms: 0,
+        ..*client.tunables()
+    })
+}
 
 /// The tenant coordinator's state for one term.
 pub(crate) struct TenantDesk {
@@ -77,6 +93,11 @@ pub(crate) struct TenantDesk {
     /// has one (a BUGGIFY decision of the node loop): the `IdTaken`
     /// redraw's way in.
     reuse: bool,
+    /// The term's first create write and its first catch-up after a write
+    /// stop listening at once (a BUGGIFY decision of the node loop, #445
+    /// (ignored load result)): an unanswered create, then an unavailable
+    /// catch-up. Each is cleared once used.
+    impatient: (bool, bool),
     policy: CheckpointPolicy,
     /// A tenant control journal refused the term's uuid: a later term
     /// fenced it. The term is over for the desk, which claims nothing again
@@ -91,7 +112,7 @@ impl TenantDesk {
         uuid: LeaderUuid,
         cell: JournalIdentifier,
         founders: &[NodeId],
-        (seed, reuse): (u128, bool),
+        (seed, reuse, impatient): (u128, bool, bool),
         policy: CheckpointPolicy,
     ) -> Self {
         assert!(uuid.is_set(), "a term's uuid is set");
@@ -107,6 +128,7 @@ impl TenantDesk {
             seed,
             draws: 0,
             reuse,
+            impatient: (impatient, impatient),
             policy,
             superseded: false,
         }
@@ -343,8 +365,16 @@ impl TenantDesk {
             .expect("a tenant's desk is open before it is read")
     }
 
-    /// Write `command` to `tenant`'s control journal, and fold it. An
-    /// ambiguous write is settled by reading the journal to its tail.
+    /// Write `command` to `tenant`'s control journal, and fold it. A write
+    /// that lands past the fold (an earlier, unanswered write landed first)
+    /// is settled by reading the journal to its tail.
+    ///
+    /// # Errors
+    ///
+    /// `NotCoordinator` when a later term fenced the journal; `Unavailable`
+    /// when the write is not known written, or the catch-up read falls short
+    /// of it (#445 (ignored load result): once a panic, red on the main
+    /// campaign's seed 14738496120122066363, green since).
     async fn append<P: Providers>(
         &mut self,
         client: &Client<P>,
@@ -356,13 +386,38 @@ impl TenantDesk {
             .get_mut(&tenant)
             .expect("a tenant's desk is open before it is written");
         let before = desk.folder().next_seq();
-        match desk.append(client, command.encode(), 0).await {
+        // The impatient term's first create stops listening at once: its
+        // write may land unanswered, and the retry's fresh id finds its
+        // position taken (the way to a write past the fold).
+        let impatient_write = matches!(command, TenantCommand::CreateJournal { .. })
+            && std::mem::take(&mut self.impatient.0);
+        if impatient_write {
+            moonpool_assertions::reachable!("tenant coordinator: an impatient create");
+        }
+        let writer = impatient(client, impatient_write);
+        match desk.append(&writer, command.encode(), 0).await {
             AppendOutcome::Written(WriterOutcome::Written { .. }) => {
                 let tail = desk.writer().next_seq();
                 if desk.folder().next_seq() < tail {
                     // Another entry landed first (a lost answer's retry):
                     // fold up to this one.
-                    let _ = desk.load(client, 0, tail).await;
+                    moonpool_assertions::reachable!(
+                        "tenant coordinator: a write lands behind an entry the desk had not folded"
+                    );
+                    let impatient_load = std::mem::take(&mut self.impatient.1);
+                    let reader = impatient(client, impatient_load);
+                    match desk.load(&reader, 0, tail).await {
+                        LoadOutcome::Loaded { up_to, .. } if up_to >= tail => {}
+                        _ => {
+                            // The entry is written but not folded: answer
+                            // unavailable, and the next request's catch-up
+                            // folds it (#445 (ignored load result)).
+                            moonpool_assertions::reachable!(
+                                "tenant coordinator: a catch-up after a write falls short"
+                            );
+                            return Err(JournalAnswer::Unavailable);
+                        }
+                    }
                 }
             }
             AppendOutcome::Written(WriterOutcome::Superseded { .. } | WriterOutcome::NotOwner) => {

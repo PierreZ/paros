@@ -58,10 +58,10 @@
 //! resigns, and the next term claims the journal again.
 //!
 //! The candidate draws no randomness of its own: its seed and its BUGGIFY
-//! decisions (a stalled leader, a hand-off, a reused journal id, a lost
-//! resignation, a group that outlives its term by one step) are drawn on the
-//! node loop before the task starts, and the backoff jitter and the journal
-//! ids derive from the seed.
+//! decisions (a stalled leader, a hand-off, a reused journal id, an
+//! impatient term, a lost resignation, a group that outlives its term by one
+//! step) are drawn on the node loop before the task starts, and the backoff
+//! jitter and the journal ids derive from the seed.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -436,6 +436,10 @@ struct Candidacy {
     /// The tenant coordinator reuses a taken journal id at the first draw of
     /// every create (a BUGGIFY decision): the fold must refuse it.
     reuse: bool,
+    /// Each term's tenant coordinator stops listening at once on its first
+    /// create and its first catch-up (a BUGGIFY decision, #445 (ignored load
+    /// result)): the desk must answer unavailable, never panic.
+    impatient: bool,
     /// The first fenced term steps down without a `Resign` record, as if
     /// the record were lost (a BUGGIFY decision): the fold still names the
     /// term's leader, and the term must not come back.
@@ -476,6 +480,7 @@ pub(crate) fn spawn<P: Providers>(
         stall: moonpool_buggify::buggify_with_prob!(0.3),
         hand_off: formed.plan.members.len() > 1 && moonpool_buggify::buggify_with_prob!(0.25),
         reuse: moonpool_buggify::buggify_with_prob!(0.3),
+        impatient: moonpool_buggify::buggify_with_prob!(0.3),
         lose_resign: moonpool_buggify::buggify_with_prob!(0.5),
         linger: moonpool_buggify::buggify_with_prob!(0.5),
     };
@@ -549,6 +554,7 @@ async fn campaign<P: Providers>(
         mut stall,
         hand_off: mut handing,
         reuse,
+        impatient,
         mut lose_resign,
         mut linger,
     } = candidacy;
@@ -576,7 +582,7 @@ async fn campaign<P: Providers>(
             uuid,
             journals.cell,
             &founder_ids,
-            (seed ^ u128::from(term), reuse),
+            (seed ^ u128::from(term), reuse, impatient),
             policy,
         );
         (term, desk)
