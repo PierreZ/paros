@@ -9,8 +9,9 @@
 //! journal's registrations below it; an install clears them all and writes
 //! the successor's.
 //!
-//! **A sync is up to two commits, in an order every crash point survives**
-//! (#176): the new registrations with the metainfo, then the clears. The
+//! **A sync is up to three commits, in an order every crash point survives**
+//! (#176): the boot's own clears, the new registrations with the metainfo,
+//! then the clears. The
 //! journal writes a batch's metainfo only once the batch is durable
 //! (moonpool#309), so a durable metainfo vouches for its registrations; the
 //! reverse does not hold, so a boot keeps only the registrations the durable
@@ -20,7 +21,9 @@
 //! the driver never acknowledged it, and it stands like any other; an
 //! install's, of the successor generation, dropped); a crash after the
 //! metainfo leaves the clears undone, and the boot drops what they would
-//! have cleared. The one scalar that must cover a registration, the
+//! have cleared. The registrations may land in a commit of their own before
+//! the metainfo's (an inline BUGGIFY decision): that is the crash point
+//! between them, made likely. The one scalar that must cover a registration, the
 //! effective configuration (at or above every reconfiguration the registry
 //! keeps), is rebuilt by the boot from the registrations it keeps, as the
 //! cut metainfo commit would have raised it.
@@ -32,7 +35,19 @@
 //! entry's journal is unknown, so it is dropped only below every journal the
 //! metainfo names (the store names a journal there with its first
 //! registration, so an acknowledged registration's journal is always named;
-//! one whose journal is not named was never acknowledged). Damage
+//! one whose journal is not named was never acknowledged). An undamaged
+//! entry is judged by its own journal's watermark alone, never by that
+//! cross-journal floor (#488 (matchmaker boot drop)).
+//!
+//! **What a boot drops stays dropped**: the floor falls when a later
+//! metainfo names a new journal (its watermark is zero), so the boot's
+//! clears commit first, alone, before any later metainfo. Before #488 a
+//! boot dropped an unacknowledged register of an unnamed journal below
+//! another journal's watermark and only staged its clear; a later sync
+//! named a new journal, a crash came before the clear, and the next boot
+//! brought the registration back (witness 4532891387820985116 on the #212
+//! (placement) branch, PR #478: "a restart never invents or alters a
+//! registration"). Damage
 //! the journal reports ambiguous (the last batch of a one-sync commit, where
 //! a crash and rot look alike) is
 //! [`Undecidable`](crate::CorruptionVerdict::Undecidable); anywhere else
@@ -151,6 +166,9 @@ pub struct JournalMatchmakerStorage<P: StorageProvider> {
     puts: BTreeMap<u64, (Id, Vec<u8>)>,
     /// Positions staged for clearing since the last sync: the last commit.
     clears: Vec<Range<u64>>,
+    /// Positions the boot dropped: the first commit of the next sync, so no
+    /// later metainfo (whose floor may be lower) meets them again.
+    boot_clears: Vec<Range<u64>>,
 }
 
 impl<P: StorageProvider> std::fmt::Debug for JournalMatchmakerStorage<P> {
@@ -187,6 +205,7 @@ impl<P: StorageProvider> JournalMatchmakerStorage<P> {
             next_position: 0,
             puts: BTreeMap::new(),
             clears: Vec::new(),
+            boot_clears: Vec::new(),
         }
     }
 
@@ -200,7 +219,10 @@ impl<P: StorageProvider> JournalMatchmakerStorage<P> {
     /// a power cut at a commit that writes).
     #[must_use]
     pub fn has_staged(&self) -> bool {
-        self.meta_dirty || !self.puts.is_empty() || !self.clears.is_empty()
+        self.meta_dirty
+            || !self.puts.is_empty()
+            || !self.clears.is_empty()
+            || !self.boot_clears.is_empty()
     }
 
     /// Whether the store of the matchmaker plane `id` under `dir` carries
@@ -302,8 +324,10 @@ impl<P: StorageProvider> JournalMatchmakerStorage<P> {
             // What the durable metainfo does not vouch for: of another
             // generation (an install whose metainfo never landed, or whose
             // clears did not), or below its journal's watermark. Dropped, and
-            // its clear staged, damaged or not: nothing it said still
-            // matters.
+            // its clear staged for the next sync's first commit, damaged or
+            // not: nothing it said still matters. A damaged entry's journal
+            // is unknown, so it is judged by the lowest watermark; an
+            // undamaged one only by its own journal's, below (#488).
             let id = match &read {
                 Ok(entry) => entry.id,
                 Err(ReadError::Damaged { id, .. }) => *id,
@@ -315,8 +339,8 @@ impl<P: StorageProvider> JournalMatchmakerStorage<P> {
                 }
             };
             let (ballot, _) = id_ballot(&id);
-            if ballot < lowest || id_generation(&id) != generation {
-                self.clears.push(position..position + 1);
+            if (read.is_err() && ballot < lowest) || id_generation(&id) != generation {
+                self.boot_clears.push(position..position + 1);
                 continue;
             }
             let Ok(entry) = read else {
@@ -334,7 +358,7 @@ impl<P: StorageProvider> JournalMatchmakerStorage<P> {
             let stored: Stored =
                 decode(&entry.payload).ok_or(undecodable(StorageRecord::Registration(ballot)))?;
             if ballot < self.meta.scalars.gc_watermark(stored.journal) {
-                self.clears.push(position..position + 1);
+                self.boot_clears.push(position..position + 1);
                 continue;
             }
             // A journal the metainfo does not name yet: a register whose
@@ -347,6 +371,7 @@ impl<P: StorageProvider> JournalMatchmakerStorage<P> {
                 .insert((stored.journal, ballot), stored.registration);
             self.positions.insert((stored.journal, ballot), position);
         }
+        self.check_boot_drops();
         self.raise_effective();
         // Boot side of the watermark pair: nothing live below its journal's.
         assert!(
@@ -378,6 +403,22 @@ impl<P: StorageProvider> JournalMatchmakerStorage<P> {
         );
         self.journal = Some(journal);
         Ok(())
+    }
+
+    /// Boot side of the boot-drop pair (#488 (matchmaker boot drop)): a
+    /// boot stages only its own clears, never over a registration it keeps;
+    /// `sync` commits them first.
+    fn check_boot_drops(&self) {
+        assert!(
+            self.clears.is_empty() && self.puts.is_empty(),
+            "a boot stages only its own clears"
+        );
+        assert!(
+            self.boot_clears
+                .iter()
+                .all(|cleared| self.positions.values().all(|p| !cleared.contains(p))),
+            "a boot never clears a registration it keeps"
+        );
     }
 
     /// Stage `registration` under `ballot` in `journal` at its own
@@ -556,16 +597,41 @@ impl<P: StorageProvider> MatchmakerStorage for JournalMatchmakerStorage<P> {
         Ok(())
     }
 
-    /// Up to two commits, in the order the [module docs](self) argue: the
-    /// new registrations with the metainfo, then the clears. Each is durable
-    /// before the next starts.
+    /// Up to three commits, in the order the [module docs](self) argue: the
+    /// boot's own clears, the new registrations with the metainfo, then the
+    /// clears. Each is durable before the next starts.
     #[tracing::instrument(level = "trace", skip_all, fields(dir = %self.dir))]
     async fn sync(&mut self) -> Result<(), StorageError> {
         if !self.has_staged() {
             return Ok(());
         }
+        let boot_clears = std::mem::take(&mut self.boot_clears);
         let puts = std::mem::take(&mut self.puts);
         let clears = std::mem::take(&mut self.clears);
+        // The boot's drops, first and alone: they hold under the durable
+        // metainfo's floor, and the metainfo below may name a new journal
+        // and lower it, so a drop left staged past it could come back
+        // (#488 (matchmaker boot drop)).
+        if !boot_clears.is_empty() {
+            let mut batch = Batch::new();
+            for range in boot_clears {
+                batch.clear(range);
+            }
+            self.commit(batch).await?;
+            // The boot's drops are durable and nothing else of the sync is.
+            let hinted = moonpool_buggify::hint!("boot drops durable, registrations staged");
+            if hinted.strike() == Strike::Killed {
+                moonpool_assertions::reachable!(
+                    "a matchmaker crashes between its boot drops and its registrations"
+                );
+            }
+            hinted.await;
+        }
+        // On a BUGGIFY decision the registrations land in a commit of their
+        // own, ahead of the metainfo: the crash point between them, a
+        // register the metainfo does not name yet, made likely (#488).
+        let split =
+            !puts.is_empty() && self.meta_dirty && moonpool_buggify::buggify_fault_with_prob!(0.25);
         // The registrations, packed into batches that each fit one segment.
         let geometry = self.store.geometry;
         let mut batch = Batch::new();
@@ -578,6 +644,21 @@ impl<P: StorageProvider> MatchmakerStorage for JournalMatchmakerStorage<P> {
         // The metainfo rides the last registrations batch: the journal
         // writes it only once that batch is durable (moonpool#309), and the
         // earlier batches were synced before it.
+        if split {
+            moonpool_assertions::reachable!(
+                "a matchmaker commits its registrations before its metainfo"
+            );
+            self.commit(std::mem::take(&mut batch)).await?;
+            // The registrations are durable and the metainfo is not: a boot
+            // keeps a register's and drops an install's.
+            let hinted = moonpool_buggify::hint!("registrations durable, metainfo staged");
+            if hinted.strike() == Strike::Killed {
+                moonpool_assertions::reachable!(
+                    "a matchmaker crashes between its registrations and its metainfo"
+                );
+            }
+            hinted.await;
+        }
         if self.meta_dirty {
             batch.set_meta(encode(&self.meta));
         }
