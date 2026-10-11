@@ -4,9 +4,10 @@
 use std::collections::BTreeMap;
 
 use paros_core::{
-    AcceptorConfig, Ballot, GcAck, GcRequest, MatchOutcome, MatchRefusal, MatchReply, MatchRequest,
-    MatchmakerGeneration, MatchmakerId, MatchmakerPhase, MatchmakerSet, NodeId, PendingBootstrap,
-    ReconfigureReply, ReconfigureRequest, Registration, RegistrationKind,
+    AcceptorConfig, Ballot, GcAck, GcRequest, JournalId, JournalRegistry, MatchOutcome,
+    MatchRefusal, MatchReply, MatchRequest, MatchmakerGeneration, MatchmakerId, MatchmakerPhase,
+    MatchmakerSet, NodeId, PendingBootstrap, ReconfigureReply, ReconfigureRequest, Registration,
+    RegistrationKind, TenantId,
 };
 
 use super::codec::{
@@ -87,10 +88,12 @@ fn registrations_from_proto(
     )
 }
 
-/// Encode a matchmaking request for the wire.
+/// Encode a matchmaking request of `tenant`'s set for the wire.
 #[must_use]
-pub(crate) fn wire_match_request(request: &MatchRequest) -> WireMatchRequest {
+pub(crate) fn wire_match_request(tenant: TenantId, request: &MatchRequest) -> WireMatchRequest {
     WireMatchRequest {
+        tenant: tenant.0,
+        journal: request.journal.0,
         from: request.from.0,
         ballot: Some(ballot_to_proto(request.ballot)),
         config: Some(config_to_proto(&request.config)),
@@ -107,21 +110,24 @@ pub(crate) fn wire_match_request(request: &MatchRequest) -> WireMatchRequest {
 /// Returns a static description of the first malformed field.
 pub(crate) fn match_request_from_wire(
     request: WireMatchRequest,
-) -> Result<MatchRequest, &'static str> {
+) -> Result<(TenantId, MatchRequest), &'static str> {
+    let tenant = TenantId(request.tenant);
+    let journal = JournalId(request.journal);
     let from = NodeId(request.from);
     let ballot = ballot_from_proto(request.ballot)?;
     let config = acceptor_config_from_proto(request.config)?;
     let generation = MatchmakerGeneration(request.generation);
     let base = match (request.probe, request.reconfiguration) {
         (true, true) => return Err("a probe registers no reconfiguration"),
-        (true, false) => MatchRequest::probe(from, ballot, config, generation),
-        (false, true) => MatchRequest::reconfigure(from, ballot, config, generation),
-        (false, false) => MatchRequest::new(from, ballot, config, generation),
+        (true, false) => MatchRequest::probe(journal, from, ballot, config, generation),
+        (false, true) => MatchRequest::reconfigure(journal, from, ballot, config, generation),
+        (false, false) => MatchRequest::new(journal, from, ballot, config, generation),
     };
-    Ok(match request.from_ballot {
+    let request = match request.from_ballot {
         Some(cursor) => base.from_page(cursor.into()),
         None => base,
-    })
+    };
+    Ok((tenant, request))
 }
 
 /// Encode a matchmaker's reply for the wire.
@@ -177,6 +183,7 @@ pub(crate) fn wire_match_reply(reply: &MatchReply) -> WireMatchReply {
         ballot: Some(ballot_to_proto(reply.ballot)),
         outcome: Some(outcome),
         generation: reply.generation.0,
+        journal: reply.journal.0,
     }
 }
 
@@ -218,6 +225,7 @@ pub(crate) fn match_reply_from_wire(reply: WireMatchReply) -> Result<MatchReply,
     };
     Ok(MatchReply {
         matchmaker: MatchmakerId(reply.matchmaker),
+        journal: JournalId(reply.journal),
         to: NodeId(reply.to),
         ballot: ballot_from_proto(reply.ballot)?,
         generation: MatchmakerGeneration(reply.generation),
@@ -225,10 +233,12 @@ pub(crate) fn match_reply_from_wire(reply: WireMatchReply) -> Result<MatchReply,
     })
 }
 
-/// Encode a garbage-collection request for the wire.
+/// Encode a garbage-collection request of `tenant`'s set for the wire.
 #[must_use]
-pub(crate) fn wire_garbage_collect(request: &GcRequest) -> WireGarbageCollect {
+pub(crate) fn wire_garbage_collect(tenant: TenantId, request: &GcRequest) -> WireGarbageCollect {
     WireGarbageCollect {
+        tenant: tenant.0,
+        journal: request.journal.0,
         from: request.from.0,
         watermark: Some(ballot_to_proto(request.watermark)),
         generation: request.generation.0,
@@ -241,12 +251,16 @@ pub(crate) fn wire_garbage_collect(request: &GcRequest) -> WireGarbageCollect {
 /// Returns a static description of the first malformed field.
 pub(crate) fn garbage_collect_from_wire(
     request: WireGarbageCollect,
-) -> Result<GcRequest, &'static str> {
-    Ok(GcRequest {
-        from: NodeId(request.from),
-        generation: MatchmakerGeneration(request.generation),
-        watermark: ballot_from_proto(request.watermark)?,
-    })
+) -> Result<(TenantId, GcRequest), &'static str> {
+    Ok((
+        TenantId(request.tenant),
+        GcRequest {
+            from: NodeId(request.from),
+            journal: JournalId(request.journal),
+            generation: MatchmakerGeneration(request.generation),
+            watermark: ballot_from_proto(request.watermark)?,
+        },
+    ))
 }
 
 /// Encode a garbage-collection acknowledgement for the wire.
@@ -257,6 +271,7 @@ pub(crate) fn wire_garbage_collect_ack(ack: &GcAck) -> WireGarbageCollectAck {
         watermark: Some(ballot_to_proto(ack.watermark)),
         generation: ack.generation.0,
         applied: ack.applied,
+        journal: ack.journal.0,
     }
 }
 
@@ -269,6 +284,7 @@ pub(crate) fn garbage_collect_ack_from_wire(
 ) -> Result<GcAck, &'static str> {
     Ok(GcAck {
         matchmaker: MatchmakerId(ack.matchmaker),
+        journal: JournalId(ack.journal),
         generation: MatchmakerGeneration(ack.generation),
         applied: ack.applied,
         watermark: ballot_from_proto(ack.watermark)?,
@@ -300,12 +316,45 @@ fn effective_from_proto(
         .transpose()
 }
 
+/// Encode every journal's registry a handover carries (#190).
+fn journal_registries_to_proto(
+    registries: &BTreeMap<JournalId, JournalRegistry>,
+) -> Vec<matchmaker::JournalRegistry> {
+    registries
+        .iter()
+        .map(|(journal, registry)| matchmaker::JournalRegistry {
+            journal: journal.0,
+            gc_watermark: Some(ballot_to_proto(registry.gc_watermark)),
+            history: registrations_to_proto(&registry.history),
+            effective: effective_to_proto(registry.effective.as_ref()),
+        })
+        .collect()
+}
+
+/// Decode every journal's registry a handover carries: a journal named
+/// twice is malformed.
+fn journal_registries_from_proto(
+    entries: Vec<matchmaker::JournalRegistry>,
+) -> Result<BTreeMap<JournalId, JournalRegistry>, &'static str> {
+    unique_map(
+        entries.into_iter().map(|entry| {
+            Ok((
+                JournalId(entry.journal),
+                JournalRegistry {
+                    gc_watermark: ballot_from_proto(entry.gc_watermark)?,
+                    history: registrations_from_proto(entry.history)?,
+                    effective: effective_from_proto(entry.effective)?,
+                },
+            ))
+        }),
+        "duplicate journal in a handover",
+    )
+}
+
 fn bootstrap_to_proto(bootstrap: &PendingBootstrap) -> matchmaker::Bootstrap {
     matchmaker::Bootstrap {
         set: Some(mm_set_to_proto(&bootstrap.set)),
-        gc_watermark: Some(ballot_to_proto(bootstrap.gc_watermark)),
-        history: registrations_to_proto(&bootstrap.history),
-        effective: effective_to_proto(bootstrap.effective.as_ref()),
+        registries: journal_registries_to_proto(&bootstrap.registries),
     }
 }
 
@@ -314,9 +363,7 @@ fn bootstrap_from_proto(
 ) -> Result<PendingBootstrap, &'static str> {
     Ok(PendingBootstrap {
         set: mm_set_from_proto(bootstrap.set)?,
-        gc_watermark: ballot_from_proto(bootstrap.gc_watermark)?,
-        history: registrations_from_proto(bootstrap.history)?,
-        effective: effective_from_proto(bootstrap.effective)?,
+        registries: journal_registries_from_proto(bootstrap.registries)?,
     })
 }
 
@@ -340,9 +387,13 @@ fn phase_from_proto(phase: i32) -> Result<MatchmakerPhase, &'static str> {
     }
 }
 
-/// Encode a reconfigurer's request for the wire.
+/// Encode a reconfigurer's request, handing over `tenant`'s set, for the
+/// wire.
 #[must_use]
-pub(crate) fn wire_reconfigure_request(request: &ReconfigureRequest) -> WireReconfigureRequest {
+pub(crate) fn wire_reconfigure_request(
+    tenant: TenantId,
+    request: &ReconfigureRequest,
+) -> WireReconfigureRequest {
     use matchmaker::reconfigure_request::Kind;
     let kind = match request {
         ReconfigureRequest::Stop { generation, .. } => Kind::Stop(matchmaker::Stop {
@@ -379,6 +430,7 @@ pub(crate) fn wire_reconfigure_request(request: &ReconfigureRequest) -> WireReco
     WireReconfigureRequest {
         from: request.from().0,
         kind: Some(kind),
+        tenant: tenant.0,
     }
 }
 
@@ -388,42 +440,42 @@ pub(crate) fn wire_reconfigure_request(request: &ReconfigureRequest) -> WireReco
 /// Returns a static description of the first malformed field.
 pub(crate) fn reconfigure_request_from_wire(
     request: WireReconfigureRequest,
-) -> Result<ReconfigureRequest, &'static str> {
+) -> Result<(TenantId, ReconfigureRequest), &'static str> {
     use matchmaker::reconfigure_request::Kind;
     let from = NodeId(request.from);
-    Ok(
-        match request.kind.ok_or("missing reconfigure request kind")? {
-            Kind::Stop(stop) => ReconfigureRequest::Stop {
-                from,
-                generation: MatchmakerGeneration(stop.generation),
-            },
-            Kind::Bootstrap(bootstrap) => ReconfigureRequest::Bootstrap {
-                from,
-                bootstrap: bootstrap_from_proto(bootstrap)?,
-            },
-            Kind::DecreePrepare(prepare) => ReconfigureRequest::DecreePrepare {
-                from,
-                generation: MatchmakerGeneration(prepare.generation),
-                ballot: ballot_from_proto(prepare.ballot)?,
-            },
-            Kind::DecreeAccept(accept) => {
-                if accept.members.is_empty() {
-                    return Err("empty decree proposal");
-                }
-                ReconfigureRequest::DecreeAccept {
-                    from,
-                    generation: MatchmakerGeneration(accept.generation),
-                    ballot: ballot_from_proto(accept.ballot)?,
-                    members: accept.members.into_iter().map(MatchmakerId).collect(),
-                }
-            }
-            Kind::Chosen(chosen) => ReconfigureRequest::Chosen {
-                from,
-                generation: MatchmakerGeneration(chosen.generation),
-                successor: mm_set_from_proto(chosen.successor)?,
-            },
+    let tenant = TenantId(request.tenant);
+    let decoded = match request.kind.ok_or("missing reconfigure request kind")? {
+        Kind::Stop(stop) => ReconfigureRequest::Stop {
+            from,
+            generation: MatchmakerGeneration(stop.generation),
         },
-    )
+        Kind::Bootstrap(bootstrap) => ReconfigureRequest::Bootstrap {
+            from,
+            bootstrap: bootstrap_from_proto(bootstrap)?,
+        },
+        Kind::DecreePrepare(prepare) => ReconfigureRequest::DecreePrepare {
+            from,
+            generation: MatchmakerGeneration(prepare.generation),
+            ballot: ballot_from_proto(prepare.ballot)?,
+        },
+        Kind::DecreeAccept(accept) => {
+            if accept.members.is_empty() {
+                return Err("empty decree proposal");
+            }
+            ReconfigureRequest::DecreeAccept {
+                from,
+                generation: MatchmakerGeneration(accept.generation),
+                ballot: ballot_from_proto(accept.ballot)?,
+                members: accept.members.into_iter().map(MatchmakerId).collect(),
+            }
+        }
+        Kind::Chosen(chosen) => ReconfigureRequest::Chosen {
+            from,
+            generation: MatchmakerGeneration(chosen.generation),
+            successor: mm_set_from_proto(chosen.successor)?,
+        },
+    };
+    Ok((tenant, decoded))
 }
 
 /// Encode a matchmaker's reconfiguration reply for the wire.
@@ -433,19 +485,15 @@ pub(crate) fn wire_reconfigure_reply(reply: &ReconfigureReply) -> WireReconfigur
     let kind = match reply {
         ReconfigureReply::Stopped {
             generation,
-            gc_watermark,
-            history,
-            effective,
+            registries,
             successor,
             decree_promised,
             ..
         } => Kind::Stopped(matchmaker::StopAck {
             generation: generation.0,
-            gc_watermark: Some(ballot_to_proto(*gc_watermark)),
-            history: registrations_to_proto(history),
             successor: successor.as_ref().map(mm_set_to_proto),
             decree_promised: Some(ballot_to_proto(*decree_promised)),
-            effective: effective_to_proto(effective.as_ref()),
+            registries: journal_registries_to_proto(registries),
         }),
         ReconfigureReply::Bootstrapped { set, .. } => {
             Kind::Bootstrapped(matchmaker::BootstrapAck {
@@ -521,9 +569,7 @@ pub(crate) fn reconfigure_reply_from_wire(
         Kind::Stopped(ack) => ReconfigureReply::Stopped {
             matchmaker,
             generation: MatchmakerGeneration(ack.generation),
-            gc_watermark: ballot_from_proto(ack.gc_watermark)?,
-            history: registrations_from_proto(ack.history)?,
-            effective: effective_from_proto(ack.effective)?,
+            registries: journal_registries_from_proto(ack.registries)?,
             successor: ack.successor.map(mm_set_value).transpose()?,
             decree_promised: ballot_from_proto(ack.decree_promised)?,
         },

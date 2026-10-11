@@ -203,6 +203,7 @@ impl ColocatedNode {
         let matchmakers = self.deployment_matchmakers();
         let request = GcRequest {
             from: self.config.id,
+            journal: self.config.journal.journal,
             generation: matchmakers.generation,
             watermark: self.ballot,
         };
@@ -380,7 +381,10 @@ impl ColocatedNode {
         let Some(matchmakers) = self.matchmakers.as_ref() else {
             return GcStep::Ignored;
         };
-        if self.role != NodeRole::Leader || !matchmakers.contains(ack.matchmaker) {
+        if self.role != NodeRole::Leader
+            || !matchmakers.contains(ack.matchmaker)
+            || ack.journal != self.config.journal.journal
+        {
             return GcStep::Ignored;
         }
         let me = self.config.id;

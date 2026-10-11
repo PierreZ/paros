@@ -11,7 +11,7 @@ use moonpool_core::{Detach, Providers, TaskProvider, TimeProvider};
 use moonpool_rpc::RpcError;
 use paros_core::{
     Ballot, ColocatedNode, GcAck, GcRequest, MatchOutcome, MatchReply, MatchRequest, MatchStep,
-    MatchmakerId, NodeId, ReconfigureReply, ReconfigureRequest, Slot,
+    MatchmakerId, NodeId, ReconfigureReply, ReconfigureRequest, Slot, TenantId,
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -29,12 +29,15 @@ use super::ready::Outbox;
 /// The driver's **matchmaker links** (#120): one client per matchmaker of the
 /// deployment (riding the node's RPC runtime), and the inbox the answers come back through.
 /// Empty on plain Multi-Paxos, whose driver never speaks the matchmaker
-/// contract.
+/// contract. One matchmaker process hosts a set per tenant (#190), so one
+/// link serves every tenant: a request names its tenant on the wire, and
+/// its answer comes back tagged with the tenant it was sent for (the node
+/// loop routes a reply on the tenant and the journal it echoes).
 pub(crate) struct MatchmakerLinks<P: Providers> {
     pub(crate) clients: BTreeMap<MatchmakerId, MatchmakerClient<P>>,
-    pub(crate) replies: mpsc::Sender<MatchReply>,
-    pub(crate) gc_acks: mpsc::Sender<GcAck>,
-    pub(crate) reconfigure_replies: mpsc::Sender<ReconfigureReply>,
+    pub(crate) replies: mpsc::Sender<(TenantId, MatchReply)>,
+    pub(crate) gc_acks: mpsc::Sender<(TenantId, GcAck)>,
+    pub(crate) reconfigure_replies: mpsc::Sender<(TenantId, ReconfigureReply)>,
     pub(crate) timeout: Duration,
     pub(crate) shutdown: CancellationToken,
 }
@@ -110,12 +113,12 @@ fn spawn_matchmaker_rpc<P, R, Fut>(
         .detach();
 }
 
-/// Send one batch's matchmaker-wire requests.
+/// Send one batch's matchmaker-wire requests, of a journal of `tenant`.
 pub(crate) fn send_outbox<P: Providers, A: Audit>(
     providers: &P,
     links: &MatchmakerLinks<P>,
     audit: &A,
-    self_id: u64,
+    (self_id, tenant): (u64, TenantId),
     outbox: Outbox,
 ) {
     // Every matchmaker-wire request a batch hands back speaks for this node.
@@ -130,12 +133,18 @@ pub(crate) fn send_outbox<P: Providers, A: Audit>(
         outbox.gc_requests.iter().all(|(_, r)| r.from.0 == self_id),
         "a GC request leaves in this node's name"
     );
-    send_match_requests(providers, links, audit, self_id, outbox.match_requests);
+    send_match_requests(
+        providers,
+        links,
+        audit,
+        (self_id, tenant),
+        outbox.match_requests,
+    );
     send_gc_requests(
         providers,
         links,
         audit,
-        self_id,
+        (self_id, tenant),
         outbox.gc_requests,
         outbox.gc_fence,
     );
@@ -148,7 +157,7 @@ fn send_gc_requests<P: Providers, A: Audit>(
     providers: &P,
     links: &MatchmakerLinks<P>,
     audit: &A,
-    self_id: u64,
+    (self_id, tenant): (u64, TenantId),
     requests: Vec<(MatchmakerId, GcRequest)>,
     fence: Option<Slot>,
 ) {
@@ -171,7 +180,7 @@ fn send_gc_requests<P: Providers, A: Audit>(
             fence = fence.map_or(-1_i64, |s| i64::try_from(s.0).unwrap_or(i64::MAX)),
             "gc_request_sent"
         );
-        let wire = wire_garbage_collect(&request);
+        let wire = wire_garbage_collect(tenant, &request);
         spawn_matchmaker_rpc(
             providers,
             links,
@@ -184,7 +193,7 @@ fn send_gc_requests<P: Providers, A: Audit>(
                     .collect
                     .try_get_reply(&wire)
                     .await
-                    .map(garbage_collect_ack_from_wire)
+                    .map(|ack| garbage_collect_ack_from_wire(ack).map(|ack| (tenant, ack)))
             },
         );
     }
@@ -197,7 +206,7 @@ pub(crate) fn send_reconfigure_requests<P: Providers, A: Audit>(
     providers: &P,
     links: &MatchmakerLinks<P>,
     audit: &A,
-    self_id: u64,
+    (self_id, tenant): (u64, TenantId),
     requests: Vec<(MatchmakerId, ReconfigureRequest)>,
 ) {
     assert!(
@@ -215,7 +224,7 @@ pub(crate) fn send_reconfigure_requests<P: Providers, A: Audit>(
             kind = reconfigure_kind(&request),
             "reconfigure_request_sent"
         );
-        let wire = wire_reconfigure_request(&request);
+        let wire = wire_reconfigure_request(tenant, &request);
         spawn_matchmaker_rpc(
             providers,
             links,
@@ -228,7 +237,7 @@ pub(crate) fn send_reconfigure_requests<P: Providers, A: Audit>(
                     .reconfigure
                     .try_get_reply(&wire)
                     .await
-                    .map(reconfigure_reply_from_wire)
+                    .map(|reply| reconfigure_reply_from_wire(reply).map(|reply| (tenant, reply)))
             },
         );
     }
@@ -297,7 +306,7 @@ fn send_match_requests<P: Providers, A: Audit>(
     providers: &P,
     links: &MatchmakerLinks<P>,
     audit: &A,
-    self_id: u64,
+    (self_id, tenant): (u64, TenantId),
     requests: Vec<(MatchmakerId, MatchRequest)>,
 ) {
     assert!(
@@ -325,7 +334,7 @@ fn send_match_requests<P: Providers, A: Audit>(
                 "match_request_sent"
             );
         }
-        let wire = wire_match_request(&request);
+        let wire = wire_match_request(tenant, &request);
         spawn_matchmaker_rpc(
             providers,
             links,
@@ -338,7 +347,7 @@ fn send_match_requests<P: Providers, A: Audit>(
                     .matchmake
                     .try_get_reply(&wire)
                     .await
-                    .map(match_reply_from_wire)
+                    .map(|reply| match_reply_from_wire(reply).map(|reply| (tenant, reply)))
             },
         );
     }

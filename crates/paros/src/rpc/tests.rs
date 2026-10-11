@@ -275,10 +275,14 @@ fn every_variant() -> Vec<Message> {
 #[allow(clippy::too_many_lines)]
 fn matchmaker_contract_round_trips() {
     use paros_core::{
-        AcceptorConfig, GcAck, GcRequest, MatchOutcome, MatchRefusal, MatchReply, MatchRequest,
-        MatchmakerGeneration, MatchmakerId, MatchmakerPhase, MatchmakerSet, PendingBootstrap,
-        QuorumSystem, ReconfigureReply, ReconfigureRequest, Registration,
+        AcceptorConfig, GcAck, GcRequest, JournalId, JournalRegistry, MatchOutcome, MatchRefusal,
+        MatchReply, MatchRequest, MatchmakerGeneration, MatchmakerId, MatchmakerPhase,
+        MatchmakerSet, PendingBootstrap, QuorumSystem, ReconfigureReply, ReconfigureRequest,
+        Registration, TenantId,
     };
+    // #190: every request names its tenant and journal, and both survive.
+    let tenant = TenantId(0xA1);
+    let j = JournalId(0xB2);
     let ballot = |round: u64, node: u64| Ballot {
         round,
         node: NodeId(node),
@@ -297,21 +301,22 @@ fn matchmaker_contract_round_trips() {
         )
     };
     for request in [
-        MatchRequest::new(NodeId(4), ballot(7, 4), config(&[0, 1, 2]), g(0)),
-        MatchRequest::reconfigure(NodeId(4), ballot(8, 4), config(&[1, 2, 3]), g(3)),
-        MatchRequest::probe(NodeId(5), ballot(9, 5), config(&[0, 1, 2]), g(1)),
+        MatchRequest::new(j, NodeId(4), ballot(7, 4), config(&[0, 1, 2]), g(0)),
+        MatchRequest::reconfigure(j, NodeId(4), ballot(8, 4), config(&[1, 2, 3]), g(3)),
+        MatchRequest::probe(j, NodeId(5), ballot(9, 5), config(&[0, 1, 2]), g(1)),
     ] {
-        let wire = super::matchmaker_codec::wire_match_request(&request);
+        let wire = super::matchmaker_codec::wire_match_request(tenant, &request);
         let bytes = wire.encode_to_vec();
         let decoded = super::WireMatchRequest::decode(bytes.as_slice()).expect("decode");
         assert_eq!(
             super::matchmaker_codec::match_request_from_wire(decoded).expect("request"),
-            request
+            (tenant, request)
         );
     }
 
     let reply = |matchmaker: u64, ballot: Ballot, outcome: MatchOutcome| MatchReply {
         matchmaker: MatchmakerId(matchmaker),
+        journal: j,
         to: NodeId(4),
         ballot,
         generation: g(2),
@@ -406,6 +411,7 @@ fn matchmaker_contract_round_trips() {
 
     let ack = GcAck {
         matchmaker: MatchmakerId(2),
+        journal: j,
         generation: g(1),
         applied: true,
         watermark: ballot(3, 1),
@@ -419,23 +425,41 @@ fn matchmaker_contract_round_trips() {
     );
     let gc = GcRequest {
         from: NodeId(4),
+        journal: j,
         generation: g(1),
         watermark: ballot(3, 1),
     };
-    let wire = super::matchmaker_codec::wire_garbage_collect(&gc);
+    let wire = super::matchmaker_codec::wire_garbage_collect(tenant, &gc);
     let decoded =
         super::WireGarbageCollect::decode(wire.encode_to_vec().as_slice()).expect("decode");
     assert_eq!(
         super::matchmaker_codec::garbage_collect_from_wire(decoded).expect("gc"),
-        gc
+        (tenant, gc)
     );
 
     // The handover contract (#125): every request and reply kind.
+    // Two journals' registries, one of them blank but for its watermark.
+    let registries = BTreeMap::from([
+        (
+            j,
+            JournalRegistry {
+                gc_watermark: ballot(2, 1),
+                history: BTreeMap::from([(ballot(5, 3), Registration::belief(config(&[1, 2])))]),
+                effective: Some((ballot(4, 2), config(&[0, 1, 2]))),
+            },
+        ),
+        (
+            JournalId(0xB3),
+            JournalRegistry {
+                gc_watermark: ballot(6, 2),
+                history: BTreeMap::new(),
+                effective: None,
+            },
+        ),
+    ]);
     let bootstrap = PendingBootstrap {
         set: set(1, &[0, 1, 3]),
-        gc_watermark: ballot(2, 1),
-        history: BTreeMap::from([(ballot(5, 3), Registration::belief(config(&[1, 2])))]),
-        effective: Some((ballot(4, 2), config(&[0, 1, 2]))),
+        registries: registries.clone(),
     };
     for request in [
         ReconfigureRequest::Stop {
@@ -463,21 +487,19 @@ fn matchmaker_contract_round_trips() {
             successor: set(1, &[0, 1, 3]),
         },
     ] {
-        let wire = super::matchmaker_codec::wire_reconfigure_request(&request);
+        let wire = super::matchmaker_codec::wire_reconfigure_request(tenant, &request);
         let decoded =
             super::WireReconfigureRequest::decode(wire.encode_to_vec().as_slice()).expect("decode");
         assert_eq!(
             super::matchmaker_codec::reconfigure_request_from_wire(decoded).expect("request"),
-            request
+            (tenant, request)
         );
     }
     for reply in [
         ReconfigureReply::Stopped {
             matchmaker: MatchmakerId(1),
             generation: g(0),
-            gc_watermark: ballot(2, 1),
-            history: bootstrap.history.clone(),
-            effective: bootstrap.effective.clone(),
+            registries,
             successor: Some(set(1, &[0, 1, 3])),
             decree_promised: ballot(3, 2),
         },

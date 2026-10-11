@@ -49,6 +49,11 @@ message MatchRequest {
   // A membership probe (#173): register nothing, answer with the effective
   // configuration alone. `reconfiguration` is false on a probe.
   bool probe = 7;
+  // The journal whose registry this request addresses (#190): a
+  // matchmaker set serves one tenant, and keeps one registry per journal of
+  // that tenant. The host routes on the tenant, the set on the journal.
+  uint64 tenant = 8;
+  uint64 journal = 9;
 }
 
 message Registration {
@@ -119,12 +124,17 @@ message MatchReply {
   }
   // The request's generation, echoed.
   uint64 generation = 6;
+  // The request's journal, echoed (#190).
+  uint64 journal = 8;
 }
 
 message GarbageCollect {
   uint64 from = 1;
   .paros.common.v1.Ballot watermark = 2;
   uint64 generation = 3;
+  // The journal whose watermark this raises (#190), and its tenant.
+  uint64 tenant = 4;
+  uint64 journal = 5;
 }
 
 message GarbageCollectAck {
@@ -135,6 +145,8 @@ message GarbageCollectAck {
   uint64 generation = 3;
   // Whether the request was applied at that generation.
   bool applied = 4;
+  // The request's journal, echoed (#190).
+  uint64 journal = 5;
 }
 
 // ---- matchmaker-set reconfiguration (#125) ----------------------------------
@@ -143,14 +155,23 @@ message Stop {
   uint64 generation = 1;
 }
 
-message Bootstrap {
-  MatchmakerSet set = 1;
+// One journal's registry as a set's handover carries it (#190): its GC
+// watermark, its history at or above it, and its effective configuration
+// (the scalar the watermark never collects).
+message JournalRegistry {
+  uint64 journal = 1;
   .paros.common.v1.Ballot gc_watermark = 2;
   repeated Registration history = 3;
-  // The reconstructed effective configuration (the maximum over the stop
-  // quorum), carried beside the registry the GC watermark may have collected
-  // it from.
   optional EffectiveConfiguration effective = 4;
+}
+
+message Bootstrap {
+  // was one registry (`gc_watermark` 2, `history` 3, `effective` 4): a set
+  // keeps one registry per journal since #190.
+  reserved 2, 3, 4;
+  MatchmakerSet set = 1;
+  // The reconstructed registry of every journal the stop quorum reported.
+  repeated JournalRegistry registries = 5;
 }
 
 message DecreePrepare {
@@ -171,6 +192,8 @@ message Chosen {
 
 message ReconfigureRequest {
   uint64 from = 1;
+  // The tenant whose matchmaker set this step hands over (#190).
+  uint64 tenant = 7;
   oneof kind {
     Stop stop = 2;
     Bootstrap bootstrap = 3;
@@ -181,17 +204,18 @@ message ReconfigureRequest {
 }
 
 message StopAck {
+  // was one registry (`gc_watermark` 2, `history` 3, `effective` 6): a set
+  // keeps one registry per journal since #190.
+  reserved 2, 3, 6;
   uint64 generation = 1;
-  .paros.common.v1.Ballot gc_watermark = 2;
-  repeated Registration history = 3;
   optional MatchmakerSet successor = 4;
   // The highest decree ballot promised for the frozen generation: the
   // reconfigurer opens its decree strictly above the maximum over its stop
   // quorum, so a rebooted node never reuses a ballot of its earlier
   // incarnation.
   .paros.common.v1.Ballot decree_promised = 5;
-  // The effective configuration this matchmaker durably holds.
-  optional EffectiveConfiguration effective = 6;
+  // The frozen registry of every journal this matchmaker holds.
+  repeated JournalRegistry registries = 7;
 }
 
 message BootstrapAck {

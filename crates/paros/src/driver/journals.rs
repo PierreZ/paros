@@ -284,6 +284,10 @@ pub(crate) struct Journals<S, A> {
     /// proxy leaders, replicas), once one booted here: the plane, whether it
     /// is live now or not.
     deployed: Option<JournalIdentifier>,
+    /// The node's first journal in its static list: the plane whenever it
+    /// names matchmakers, proxies or replicas (#190: every journal may name
+    /// matchmakers, so the first one booted is not the plane by itself).
+    preferred: Option<JournalIdentifier>,
     /// Every journal that booted in this incarnation: the ones whose
     /// configuration this node has read.
     booted: BTreeSet<JournalIdentifier>,
@@ -303,8 +307,20 @@ impl<S, A> Journals<S, A> {
             newly_quarantined: Vec::new(),
             last_fault: None,
             deployed: None,
+            preferred: None,
             booted: BTreeSet::new(),
         }
+    }
+
+    /// Prefer `first`, the node's first journal in its static list, as the
+    /// plane.
+    pub(crate) fn preferring(mut self, first: Option<JournalIdentifier>) -> Self {
+        assert!(
+            self.live.is_empty(),
+            "the plane is preferred before any boot"
+        );
+        self.preferred = first;
+        self
     }
 
     /// `journal` booted: it is live, and its configuration is known.
@@ -328,8 +344,10 @@ impl<S, A> Journals<S, A> {
             "a runtime serves the journal it is filed under"
         );
         let config = rt.node.config();
-        if config.has_matchmakers() || config.proxy_count > 0 || config.replica_count > 0 {
-            self.deployed.get_or_insert(journal);
+        if (config.has_matchmakers() || config.proxy_count > 0 || config.replica_count > 0)
+            && (self.deployed.is_none() || self.preferred == Some(journal))
+        {
+            self.deployed = Some(journal);
         }
         self.booted.insert(journal);
         self.live.insert(journal, rt);

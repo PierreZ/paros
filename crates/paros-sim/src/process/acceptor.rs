@@ -85,9 +85,9 @@ pub(super) async fn run_acceptor(
         replica_count: deployment.replica_count(),
         writer_mode: paros::WriterMode::Single,
     };
-    // The run's journals (#188): the static list every node serves — the
-    // default journal alone unless the deployment is plain and the seed drew
-    // more — and the one held on every node for the chaos window, if any.
+    // The run's journals (#188): the static list every node serves (1–3,
+    // matchmaker seeds included, #190) and the one held on every node for
+    // the chaos window, if any.
     let plan = crate::shape::journals(ctx.state());
     // The store: the library's `JournalStorage` on the simulated disk
     // (#187, #176, #261), its layout drawn once per seed.
@@ -126,15 +126,28 @@ pub(super) async fn run_acceptor(
     // upgraded per op), its own audit world and audit port. Nothing crosses:
     // a journal's budget, fault ledger, parked identities and oracles are
     // its own. The default journal is the seed's deployment (its
-    // matchmakers, proxies, replicas and bootstrap); every other journal is
-    // plain Multi-Paxos over the whole pool — the matchmaker plane, the
-    // proxy leaders and the replica tier each serve one journal.
+    // matchmakers, proxies, replicas and bootstrap); on a matchmaker seed
+    // every other journal names the matchmakers too (#190), on a plain seed
+    // it is plain Multi-Paxos over the whole pool — the proxy leaders and
+    // the replica tier each serve one journal.
     let mut seats: Vec<Seat> = plan
         .ids
         .iter()
         .map(|&journal| {
             let config = if journal == plan.main {
                 config.clone()
+            } else if config.has_matchmakers() {
+                // A matchmaker seed (#190): every journal names the
+                // matchmakers, one set per tenant and one registry per
+                // journal; the proxy leaders and the replica tier still
+                // serve the main journal alone.
+                Config {
+                    journal,
+                    proxy_count: 0,
+                    replica_count: 0,
+                    writer_mode: plan.mode(journal),
+                    ..config.clone()
+                }
             } else {
                 Config {
                     journal,
@@ -175,6 +188,10 @@ pub(super) async fn run_acceptor(
             }
         })
         .collect();
+    // The main journal leads the node's static list: the driver takes its
+    // first journal as the plane its operator calls address (#190: every
+    // journal of a matchmaker seed names the matchmakers).
+    seats.sort_by_key(|seat| seat.journal != plan.main);
     // The system journals (#189), on a seed that drew them: every node
     // follows the registry, and the seeds — the lowest
     // ranks — host them, a static configuration of plain Multi-Paxos on a

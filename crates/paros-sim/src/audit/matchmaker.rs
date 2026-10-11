@@ -92,7 +92,7 @@ use moonpool_sim::{assert_always, assert_reachable, assert_sometimes};
 use super::state::AuditState;
 use paros::client::{MatchmakersRefusal, RetireRefusal};
 use paros::{
-    AcceptorConfig, Ballot, BootRefusal, GcAck, GcStep, HistoryPage, MatchRefusal,
+    AcceptorConfig, Ballot, BootRefusal, GcAck, GcStep, HistoryPage, JournalId, MatchRefusal,
     MatchmakerHardState, MatchmakerId, MatchmakerPhase, MatchmakerSet, NodeId, PendingBootstrap,
     REGISTRY_PAGE, ReconfigureReply, ReconfigureResult, ReconfigurerStep, Registration,
     RegistrationKind, Slot, StorageFaultDecision,
@@ -207,6 +207,13 @@ struct OpenProbe {
 #[derive(Default)]
 #[allow(clippy::struct_excessive_bools)]
 pub(super) struct MatchmakerAudit {
+    /// The journal this audit judges (#190): a matchmaker set keeps one
+    /// registry per journal of its tenant, and each journal's audit folds
+    /// its own registry, its own watermark and its own effective
+    /// configuration out of every set-wide fact.
+    /// `None` only on an audit built outside a world (a unit test), which
+    /// judges the unset journal.
+    pub(super) journal: Option<JournalId>,
     registries: BTreeMap<u64, Registry>,
     /// Every `(matchmaker, ballot) -> configuration` ever folded, **never**
     /// pruned: the write-once ledger a GC'd-then-reused ballot would trip.
@@ -593,6 +600,11 @@ fn union_above<'a>(
 }
 
 impl MatchmakerAudit {
+    /// The journal this audit judges.
+    pub(super) fn journal(&self) -> JournalId {
+        self.journal.unwrap_or(JournalId::UNSET)
+    }
+
     /// The deployment's bootstrap matchmaker set, as the boot reports
     /// declared it.
     pub(super) fn note_deployment(&mut self, matchmakers: &[MatchmakerId]) {
@@ -2026,18 +2038,17 @@ impl MatchmakerAudit {
         }
         if let ReconfigureReply::Stopped {
             generation,
-            gc_watermark,
-            history,
+            registries,
             ..
         } = reply
             && matches!(step, ReconfigurerStep::Stopped { .. })
         {
-            let snapshot: Vec<(Ballot, Registration)> =
-                history.iter().map(|(b, r)| (*b, r.clone())).collect();
+            let mine = registries.get(&self.journal()).cloned().unwrap_or_default();
+            let snapshot: Vec<(Ballot, Registration)> = mine.history.into_iter().collect();
             self.stop_acks
                 .entry((node.0, generation.0))
                 .or_default()
-                .insert(matchmaker.0, (*gc_watermark, snapshot));
+                .insert(matchmaker.0, (mine.gc_watermark, snapshot));
         }
         match step {
             // The counted-but-short folds: progress the driver's stall
@@ -2191,6 +2202,13 @@ impl MatchmakerAudit {
         bootstrap: &PendingBootstrap,
         disagreements: u64,
     ) {
+        // This journal's piece of the reconstruction (#190): a journal the
+        // frozen quorum held nothing for is absent, and reads as blank.
+        let mine = bootstrap
+            .registries
+            .get(&self.journal())
+            .cloned()
+            .unwrap_or_default();
         // The write-once ledger says no two matchmakers ever register one
         // ballot with different bytes, so a union over frozen registries
         // must never have to *choose* — and if it did, the choice would
@@ -2228,14 +2246,14 @@ impl MatchmakerAudit {
         }
         let folded_ids: Vec<String> = folded.keys().map(ToString::to_string).collect();
         assert_always!(
-            bootstrap.gc_watermark == max_watermark && bootstrap.history == expected,
+            mine.gc_watermark == max_watermark && mine.history == expected,
             "generation: a reconstruction is the union of the frozen quorum above its maximum watermark",
             {
                 "node" => node.0,
                 "generation" => old,
-                "reported" => bootstrap.history.len(),
+                "reported" => mine.history.len(),
                 "expected" => expected.len(),
-                "reported_round" => bootstrap.gc_watermark.round,
+                "reported_round" => mine.gc_watermark.round,
                 "max_round" => max_watermark.round,
                 "folded" => folded_ids.join(",")
             }
@@ -2245,10 +2263,8 @@ impl MatchmakerAudit {
             .get(&old)
             .and_then(|completed| {
                 completed
-                    .range(bootstrap.gc_watermark..)
-                    .find(|(b, config)| {
-                        bootstrap.history.get(b).map(|r| &r.config) != config.as_ref()
-                    })
+                    .range(mine.gc_watermark..)
+                    .find(|(b, config)| mine.history.get(b).map(|r| &r.config) != config.as_ref())
                     .map(|(b, _)| b.round)
             });
         assert_always!(
@@ -2267,11 +2283,11 @@ impl MatchmakerAudit {
             .bootstrap_histories
             .entry((bootstrap.set.generation.0, proposed))
             .or_default();
-        let candidate = (bootstrap.gc_watermark, bootstrap.history.clone());
+        let candidate = (mine.gc_watermark, mine.history.clone());
         if !candidates.contains(&candidate) {
             candidates.push(candidate);
         }
-        if !bootstrap.history.is_empty() {
+        if !mine.history.is_empty() {
             reach_once!(
                 self.handover_with_prior_registrations,
                 "generation: a handover carries prior registrations forward"
@@ -2339,7 +2355,17 @@ impl MatchmakerAudit {
         }
         let same_scalars = |written: &MatchmakerHardState| {
             let mut written = written.clone();
-            written.effective.clone_from(&scalars.effective);
+            // The boot raises every journal's effective scalar over the
+            // reconfigurations it keeps: compare everything else.
+            for (journal, kept) in &mut written.journals {
+                kept.effective = scalars.effective(*journal).cloned();
+            }
+            for (journal, held) in &scalars.journals {
+                written
+                    .journal_mut(*journal)
+                    .effective
+                    .clone_from(&held.effective);
+            }
             written == *scalars
         };
         let last_scalars = ops
@@ -2406,6 +2432,7 @@ impl MatchmakerAudit {
                 .or_default()
                 .insert(matchmaker.0);
         }
+        let journal = self.journal();
         let entry = self.registries.entry(matchmaker.0).or_default();
         if let Some((generation_no, MatchmakerPhase::Stopped)) = entry.generation {
             // Invariant 2: frozen stays frozen at its generation.
@@ -2426,7 +2453,7 @@ impl MatchmakerAudit {
             );
         }
         entry.generation = Some((generation, scalars.phase));
-        entry.effective = scalars.effective.as_ref().map(|(ballot, _)| *ballot);
+        entry.effective = scalars.effective(journal).map(|(ballot, _)| *ballot);
         check_effective_survives(matchmaker, entry);
         if !scalars.pending.is_empty() {
             reach_once!(
@@ -2560,14 +2587,16 @@ impl MatchmakerAudit {
         matchmaker: MatchmakerId,
         reply: &ReconfigureReply,
     ) {
+        let journal = self.journal();
         let entry = self.registries.entry(matchmaker.0).or_default();
         match reply {
             ReconfigureReply::Stopped {
                 generation,
-                gc_watermark,
-                history,
+                registries,
                 ..
             } => {
+                let mine = registries.get(&journal).cloned().unwrap_or_default();
+                let (gc_watermark, history) = (&mine.gc_watermark, &mine.history);
                 // The freeze is durable before the answer, and the answer is
                 // the durable registry above the durable watermark.
                 assert_always!(
