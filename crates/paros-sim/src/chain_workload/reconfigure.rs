@@ -819,7 +819,27 @@ impl ChainWorkload {
             };
             if reserved {
                 tracing::info!(node = victim as u64, "chain_retire_request");
-                let outcome = nodes.retire(victim, RetireRequest { gc_watermark }).await;
+                // The evidence-less operator, its own location (#446 (a gate
+                // that never fires cannot fail the sweep)): a retirement of a
+                // non-member sent without the floor that proves it. The node
+                // must refuse it (`not_collected`), and the refusal releases
+                // the park reserved above.
+                let evidence = if !aim_at_member && buggify_with_prob!(0.25) {
+                    assert_reachable!(
+                        "gc: an operator retires a node without the floor's evidence"
+                    );
+                    None
+                } else {
+                    gc_watermark
+                };
+                let outcome = nodes
+                    .retire(
+                        victim,
+                        RetireRequest {
+                            gc_watermark: evidence,
+                        },
+                    )
+                    .await;
                 tracing::info!(node = victim as u64, outcome = ?outcome, "chain_retire_outcome");
                 match outcome {
                     RetireOutcome::Retired => self.adversarial.retired = true,

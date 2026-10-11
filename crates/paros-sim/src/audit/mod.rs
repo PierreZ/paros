@@ -54,7 +54,9 @@ mod world;
 
 pub(crate) use client::{ClientHistory, check_control_history};
 pub(crate) use linearizability::{Attempt, Call, Seen};
-pub(crate) use world::{AuditWorld, audit_world, audit_world_for, audit_world_named, check_run};
+pub(crate) use world::{
+    AuditWorld, audit_world, audit_world_for, audit_world_named, check_every_world, check_run,
+};
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -1198,6 +1200,13 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         if self.world.main() == Some(journal) {
             self.world.note_left_pool(node.0);
         }
+        // A machine reports every stop through its node port, whose world
+        // is its home journal's (#447 (model checks for every journal
+        // world)): the tenant board keeps the stop for the stopped
+        // journal's convergence.
+        if let Some(board) = &self.tenants {
+            tenants::lock(board).stopped(node, journal);
+        }
     }
 
     fn unpooled_message(&self, node: NodeId, _journal: JournalIdentifier, from: NodeId) {
@@ -1746,13 +1755,11 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             // is the edge's own inline reachable.
             return;
         }
+        // A corrupted request needs a damaged frame, and the campaign masks
+        // `BitFlip` (wire integrity is the transport's): no gate, the count
+        // stays for the run's diagnostics (#446 (a gate that never fires
+        // cannot fail the sweep)).
         st.edge_rejections += 1;
-        // The message predates the move to moonpool-rpc; it stays verbatim
-        // because a message's hash is its assertion slot.
-        reach_once!(
-            st.edge_rejected,
-            "the gRPC edge rejects a corrupted request"
-        );
     }
 
     fn election_timeout_set(&self, node: NodeId, ticks: u64) {

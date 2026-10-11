@@ -51,15 +51,10 @@ impl FormedCell {
     /// address.
     #[must_use]
     pub fn founders(&self) -> Vec<(NodeId, Address)> {
-        let founders: Vec<(NodeId, Address)> = self
-            .plan
-            .members
-            .iter()
-            .map(|(id, planned)| {
-                let cached = self.cached.as_ref().and_then(|c| c.address(*id));
-                (*id, cached.unwrap_or(planned).clone())
-            })
-            .collect();
+        // The starting book lists the founding members first, then the
+        // cache's others: the founders are its head.
+        let mut founders = super::starting_book(&self.plan.members, self.cached.as_ref());
+        founders.truncate(self.plan.members.len());
         assert_eq!(
             founders.len(),
             self.plan.members.len(),

@@ -25,11 +25,11 @@ use moonpool_sim::{
     RandomProvider, SimContext, assert_always, assert_reachable, assert_sometimes,
     buggify_with_prob,
 };
-use paros::client::ReadOutcome;
 use paros::client::checkpoint::CheckpointPolicy;
 use paros::client::fleet::read_directory;
 use paros::client::journals::{self, JournalAnswer, JournalOp, JournalRequest};
 use paros::client::names::{JournalNames, JournalResolution};
+use paros::client::{ClaimOutcome, ReadOutcome};
 use paros::client::{Writer, WriterOutcome};
 use paros::fleet::{Groups, TenantState};
 use paros::tenant::Desired;
@@ -105,6 +105,7 @@ impl FleetOps {
         (class, payload): (u64, u64),
     ) {
         let Some((cell, tenant, control, label)) = self.journal_tenant(ctx, payload).await else {
+            self.frontend_before_ready(payload).await;
             return;
         };
         self.through_frontend(&label, control, payload).await;
@@ -141,6 +142,7 @@ impl FleetOps {
         payload: u64,
     ) {
         let Some((cell, tenant, control, label)) = self.journal_tenant(ctx, payload).await else {
+            self.frontend_before_ready(payload).await;
             return;
         };
         self.through_frontend(&label, control, payload).await;
@@ -383,8 +385,12 @@ impl FleetOps {
                     self.append_to_created(cell, journal, draw).await;
                 }
             }
-            (JournalAnswer::Deleted { .. }, JournalOp::Delete { .. }) => {
+            (JournalAnswer::Deleted { .. }, JournalOp::Delete { name }) => {
                 assert_reachable!("journals: a journal is deleted through the coordinator");
+                // The name this client may have cached now names nothing:
+                // its read-through must find it gone (#446 (a gate that
+                // never fires cannot fail the sweep)).
+                self.read_through_name(cell, control, name, draw).await;
             }
             (JournalAnswer::NameTaken { .. }, JournalOp::Create { .. }) => {
                 assert_reachable!("journals: a create is answered name_taken");
@@ -592,6 +598,23 @@ impl FleetOps {
         }
     }
 
+    /// On a seed with frontends, one call while no tenant is `READY` (#446
+    /// (a gate that never fires cannot fail the sweep)): the frontend meets
+    /// a cell with no universe tenant yet, or a name no `READY` tenant
+    /// holds. A frontend otherwise sees about one call a run, after the
+    /// fleet formed, so its cold-cell and stale-cache paths never ran. One
+    /// call per client: each such call may wait out its timeouts, and more
+    /// of them take the run's steps from the journal gates.
+    async fn frontend_before_ready(&mut self, draw: u64) {
+        if std::mem::replace(&mut self.frontend_cold, true) {
+            return;
+        }
+        let tenant =
+            super::NAMES[usize::try_from((draw >> 32) % super::NAMES.len() as u64).unwrap_or(0)];
+        self.through_frontend(&String::from_utf8_lossy(tenant), LOCAL, draw)
+            .await;
+    }
+
     /// A claim and one write through `client`, a frontend's: a tenant's
     /// fenced writes by name (#192 (the frontend)).
     async fn write_through_frontend(
@@ -603,10 +626,17 @@ impl FleetOps {
         draw: u64,
     ) {
         let mut writer = Writer::new(journal, self.leader_seeds.next());
-        let _ = writer.claim(client, first, false).await;
-        let outcome = writer
-            .write(client, vec![Value(draw.to_le_bytes().to_vec())], first)
-            .await;
+        // A denied call is denied at the claim's state read: the write then
+        // sends nothing (`NotOwner`), so the claim is where the denial is
+        // judged (#446 (a gate that never fires cannot fail the sweep)).
+        let outcome = match writer.claim(client, first, false).await {
+            ClaimOutcome::Denied(denial) => WriterOutcome::Denied(denial),
+            _ => {
+                writer
+                    .write(client, vec![Value(draw.to_le_bytes().to_vec())], first)
+                    .await
+            }
+        };
         match (expected, outcome) {
             (None, WriterOutcome::Written { .. }) => {
                 assert_reachable!("frontend: a tenant writes its journal by name");

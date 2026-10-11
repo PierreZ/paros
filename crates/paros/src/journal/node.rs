@@ -520,7 +520,10 @@ impl<P: StorageProvider> LogStorage for JournalStorage<P> {
             self.durable_meta = early;
             // The promise is durable and no entry under it is: a crash here
             // is the #264 shape, which the order of the commits makes safe.
-            let hinted = moonpool_buggify::hint!("promise durable, entries staged");
+            // Only a flush that raises the promise and stages entries reaches
+            // here, a few per run: the rate is far above the default (#446
+            // (a gate that never fires cannot fail the sweep)).
+            let hinted = moonpool_buggify::hint!("promise durable, entries staged", 0.5);
             if hinted.strike() == Strike::Killed {
                 moonpool_assertions::reachable!(
                     "a node crashes between its promise and its entries"
@@ -539,8 +542,10 @@ impl<P: StorageProvider> LogStorage for JournalStorage<P> {
                 assert!(staged.fits(geometry), "a packed batch fits one segment");
                 self.commit(std::mem::take(&mut staged)).await?;
                 // A packed batch is durable and the metainfo still covers
-                // only the batches before it.
-                let hinted = moonpool_buggify::hint!("entries durable, metainfo staged");
+                // only the batches before it. Only a sync of more than one
+                // segment reaches here, rarely: the rate is far above the
+                // default (#446).
+                let hinted = moonpool_buggify::hint!("entries durable, metainfo staged", 0.5);
                 if hinted.strike() == Strike::Killed {
                     moonpool_assertions::reachable!(
                         "a node crashes between its entry batches and its metainfo"

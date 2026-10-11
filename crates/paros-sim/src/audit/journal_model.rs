@@ -386,6 +386,12 @@ impl JournalModel {
     /// The slot-ordered checks, over everything folded so far: positions
     /// dense, the leader chain in the log, truncation monotone. Then the
     /// journal's coverage gates.
+    /// Whether any node reported a verdict of this journal: the model has
+    /// something to judge.
+    pub(super) fn judged_any(&self) -> bool {
+        !self.slots.is_empty()
+    }
+
     pub(super) fn check(&self) {
         let mut next: Option<u64> = None;
         let mut first = 0_u64;

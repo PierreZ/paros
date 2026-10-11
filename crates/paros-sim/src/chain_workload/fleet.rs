@@ -74,6 +74,7 @@ use crate::shape::MachineLayout;
 
 mod admit;
 mod cell;
+mod converge;
 mod election;
 mod journals;
 mod load;
@@ -179,6 +180,9 @@ pub(super) struct FleetOps {
     refused: BTreeSet<TenantId>,
     /// The replaced-founder scenario's steps this operator took (#423).
     replaced: replaced::Steps,
+    /// This client made its one frontend call before a tenant was `READY`
+    /// (#446 (a gate that never fires cannot fail the sweep)).
+    frontend_cold: bool,
     /// The run's shared state: the completed removals (#239).
     state: StateHandle,
     /// The simulated clock: when an operation ran (#213 (three founding
@@ -227,6 +231,7 @@ impl FleetOps {
             journal_names: BTreeMap::new(),
             refused: BTreeSet::new(),
             replaced: replaced::Steps::default(),
+            frontend_cold: false,
             state: ctx.state().clone(),
             time: ctx.time().clone(),
         })
@@ -1017,6 +1022,9 @@ impl FleetOps {
             let learn = |journal| self.note_journals([journal]);
             placement::placements_booked(ctx, &cell, ctx.time().now() + FLEET_SETTLE, learn).await;
         }
+        // Every quiet journal world converges (#447 (model checks for every
+        // journal world)), on its own deadline.
+        converge::worlds_converge(ctx, ctx.time().now() + FLEET_SETTLE).await;
         // Its own deadline (#304): a fleet half that took all of its time
         // must not leave the registry half none.
         self.final_registry(ctx, nodes, expected, ctx.time().now() + FLEET_SETTLE)
