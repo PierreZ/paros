@@ -619,7 +619,7 @@ impl<P: StorageProvider> MatchmakerStorage for JournalMatchmakerStorage<P> {
             }
             self.commit(batch).await?;
             // The boot's drops are durable and nothing else of the sync is.
-            let hinted = moonpool_buggify::hint!("boot drops durable, registrations staged");
+            let hinted = moonpool_buggify::hint!("boot drops durable, registrations staged", 0.5);
             if hinted.strike() == Strike::Killed {
                 moonpool_assertions::reachable!(
                     "a matchmaker crashes between its boot drops and its registrations"
@@ -631,7 +631,7 @@ impl<P: StorageProvider> MatchmakerStorage for JournalMatchmakerStorage<P> {
         // own, ahead of the metainfo: the crash point between them, a
         // register the metainfo does not name yet, made likely (#488).
         let split =
-            !puts.is_empty() && self.meta_dirty && moonpool_buggify::buggify_fault_with_prob!(0.25);
+            !puts.is_empty() && self.meta_dirty && moonpool_buggify::buggify_fault_with_prob!(0.5);
         // The registrations, packed into batches that each fit one segment.
         let geometry = self.store.geometry;
         let mut batch = Batch::new();
@@ -651,7 +651,7 @@ impl<P: StorageProvider> MatchmakerStorage for JournalMatchmakerStorage<P> {
             self.commit(std::mem::take(&mut batch)).await?;
             // The registrations are durable and the metainfo is not: a boot
             // keeps a register's and drops an install's.
-            let hinted = moonpool_buggify::hint!("registrations durable, metainfo staged");
+            let hinted = moonpool_buggify::hint!("registrations durable, metainfo staged", 1.0);
             if hinted.strike() == Strike::Killed {
                 moonpool_assertions::reachable!(
                     "a matchmaker crashes between its registrations and its metainfo"
@@ -673,7 +673,7 @@ impl<P: StorageProvider> MatchmakerStorage for JournalMatchmakerStorage<P> {
         if !clears.is_empty() {
             // The registrations are durable and the clears are not: a boot
             // must drop what the clears would have cleared.
-            let hinted = moonpool_buggify::hint!("registrations durable, clears staged");
+            let hinted = moonpool_buggify::hint!("registrations durable, clears staged", 0.25);
             if hinted.strike() == Strike::Killed {
                 moonpool_assertions::reachable!(
                     "a matchmaker crashes between its registrations and its clears"
