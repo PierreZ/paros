@@ -1036,6 +1036,10 @@ pub const RARE: &[Rare] = &[
         msg: "machine: a machine no cell init lists restarts and waits",
         reason: "marginal: missed by the sweep on #500 (two red hunt seeds) (#486)",
     },
+    Rare {
+        msg: "generation: a handover tells a behind member the set it replaces",
+        reason: "fired on 0 of 3,100 hunt seeds, and once on a witness: it needs a publication cut short in the chaos window, and handovers mostly run in the recovery tail; a Publishing abandon site at 0.05 fired on 0 of 600 (#496 (two red hunt seeds), #484)",
+    },
 ];
 
 /// What the sweep ran of the declared gates.
