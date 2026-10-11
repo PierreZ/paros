@@ -238,7 +238,7 @@ impl FleetOps {
                 self.patience,
             );
             let (run, second) = futures::future::join(whole, second).await;
-            judge_second(ctx, &second);
+            judge_second(ctx, &other, &second);
             run
         } else {
             whole.await
@@ -359,8 +359,10 @@ impl FleetOps {
 }
 
 /// The second `cell init` of a run that sent two at once: it forms the
-/// one cell the machines formed, or decides nothing — never another.
-fn judge_second(ctx: &SimContext, second: &InitOutcome) {
+/// one cell the machines formed, or decides nothing — never another. Sent
+/// to a machine `cell add-machine` admitted at `other` (#423), it is refused
+/// as `cell_exists`: that machine is in the cell already.
+fn judge_second(ctx: &SimContext, other: &Address, second: &InitOutcome) {
     match second {
         InitOutcome::Formed(plan) => {
             assert_always!(
@@ -375,7 +377,8 @@ fn judge_second(ctx: &SimContext, second: &InitOutcome) {
                 label == "storage"
                     || (label == "cell_lost" && crate::machine::cell_lost(ctx.state()))
                     || (label == "other_cell_init"
-                        && crate::machine::founder_in_other_cell(ctx.state())),
+                        && crate::machine::founder_in_other_cell(ctx.state()))
+                    || (label == "cell_exists" && crate::machine::is_admitted(ctx.state(), other)),
                 "init: a second concurrent cell init is refused only for a failed write",
                 { "refusal" => label.as_str() }
             );

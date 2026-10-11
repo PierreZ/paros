@@ -78,6 +78,7 @@ mod election;
 mod journals;
 mod load;
 mod other_cell;
+mod replaced;
 mod resolve;
 mod view;
 
@@ -163,6 +164,8 @@ pub(super) struct FleetOps {
     /// the library (#239 (names at the edge)): a cached resolution goes
     /// stale when its journal is deleted and the name created again.
     journal_names: BTreeMap<TenantId, paros::client::names::JournalNames>,
+    /// The replaced-founder scenario's steps this operator took (#423).
+    replaced: replaced::Steps,
     /// The run's shared state: the completed removals (#239).
     state: StateHandle,
 }
@@ -204,6 +207,7 @@ impl FleetOps {
             admitting: None,
             journal_pending: None,
             journal_names: BTreeMap::new(),
+            replaced: replaced::Steps::default(),
             state: ctx.state().clone(),
         })
     }
@@ -234,8 +238,10 @@ impl FleetOps {
             let _ = self.resume(ctx, policy, draw).await;
             return;
         }
+        // On a replaced-founder seed, the re-run the scenario asked for.
+        let rerun = std::mem::take(&mut self.replaced.rerun_next);
         let cell = match &self.cell {
-            Some(_) if buggify_with_prob!(0.1) => {
+            Some(_) if rerun || buggify_with_prob!(0.1) => {
                 assert_reachable!("init: an operator that knows the cell runs init again");
                 None
             }

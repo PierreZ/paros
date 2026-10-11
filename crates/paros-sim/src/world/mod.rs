@@ -18,6 +18,7 @@ pub(crate) mod moved_founder;
 pub(crate) mod node_store;
 pub(crate) mod outage;
 pub(crate) mod registry_store;
+pub(crate) mod replaced_founder;
 pub(crate) mod settle;
 pub(crate) mod silent_machine;
 pub(crate) mod wipe;

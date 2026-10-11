@@ -481,9 +481,12 @@ impl Workload for ChainWorkload {
         // A joiner this client just registered: the next step grows a
         // configuration onto it (the `REGISTER_NODE` arm).
         let mut reconfigure_next = false;
-        // The wiped-founder scenario (#246): client 0 runs `init` first, so
-        // the cell decree runs inside the chaos window.
-        let mut init_first = self.client_id == 0 && crate::shape::wiped_founder(ctx.state());
+        // The wiped-founder (#246) and replaced-founder (#423) scenarios:
+        // client 0 runs `init` first, so the cell decree runs inside the
+        // chaos window.
+        let mut init_first = self.client_id == 0
+            && (crate::shape::wiped_founder(ctx.state())
+                || crate::shape::replaced_founder(ctx.state()));
         let mut successful_after_ambiguity = false;
         // The library's decisions as outcomes (#221): a write redirected
         // and written at the leader, an ambiguous write the session settled,
@@ -751,6 +754,8 @@ impl Workload for ChainWorkload {
             } else if std::mem::take(&mut init_first) {
                 assert_reachable!("init: an operator runs init first on a wiped-founder seed");
                 FLEET_INIT
+            } else if let Some(op) = fleet_ops.replaced_founder_op(ctx) {
+                op
             } else {
                 Self::choose_operation(&config, &operations, raw_op)
             };

@@ -629,6 +629,9 @@ struct Registry {
     /// Run-level: whether the run draws the moved-founder scenario (see
     /// [`moved_founder`]), fixed by the first caller.
     moved_founder: Option<bool>,
+    /// Run-level: whether the run draws the replaced-founder scenario (see
+    /// [`replaced_founder`]), fixed by the first caller.
+    replaced_founder: Option<bool>,
     /// Run-level: whether the run draws the slow-link scenario (see
     /// [`slow_link`]), fixed by the first caller.
     slow_link: Option<bool>,
@@ -934,6 +937,30 @@ pub(crate) fn moved_founder(state: &StateHandle) -> bool {
         .get_or_insert_with(|| moonpool_sim::buggify_with_prob!(1.0))
 }
 
+/// Whether the run draws the **replaced-founder scenario** (#423): drawn
+/// once per seed, its own BUGGIFY location, never on a wiped-founder or a
+/// moved-founder seed. A re-run `init` meets a machine `cell add-machine`
+/// admitted at a founder's address only when a founder of a cell of three
+/// or more is wiped after formation, an operator admits the machine that
+/// replaced it, and an operator that knows the cell runs `init` again: a
+/// 2,000-seed hunt never lined the three up. On a scenario seed the layout
+/// lists three founders or more where the machines allow it
+/// ([`machine_layout`]), client 0 runs `init` first (`crate::chain_workload`),
+/// `crate::world::replaced_founder` wipes a founder once every founder
+/// formed, and client 0 admits the replacement, then runs `init` again
+/// (`crate::chain_workload::fleet`). Each ingredient keeps its own coin on
+/// the other seeds. Rare-but-valid: each ingredient is.
+#[tracing::instrument(level = "debug", skip_all)]
+pub(crate) fn replaced_founder(state: &StateHandle) -> bool {
+    // Drawn before the lock: the scenarios take the registry's lock too.
+    let other = wiped_founder(state) || moved_founder(state);
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    *guard
+        .replaced_founder
+        .get_or_insert_with(|| !other && moonpool_sim::buggify_with_prob!(1.0))
+}
+
 /// Whether the run draws the **silent-machine scenario** (#211): drawn once
 /// per seed, its own BUGGIFY location. The cell coordinator marks a machine
 /// down only when it is silent past `machine_down_after`, while a
@@ -1202,7 +1229,8 @@ pub(crate) struct MachineLayout {
 
 /// The run's machine layout (#246), drawn once per seed by whoever asks
 /// first, for `count` machines in rank order. The founder count is uniform
-/// over `1..=count`; every founder is a `storage` machine (`cell init`
+/// over `1..=count` (`3..=count` on a replaced-founder seed with three
+/// machines or more, [`replaced_founder`]); every founder is a `storage` machine (`cell init`
 /// refuses a `stateless` member) and every other machine is `storage` or
 /// `stateless` on a coin, idle, waiting for a placement that is #212's. The
 /// capacity is one `buggify_knob!` for the run (default 2, extreme 1..=4;
@@ -1217,15 +1245,19 @@ pub(crate) struct MachineLayout {
 pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout {
     // Drawn before the lock: the scenario takes the registry's lock too.
     let moved = moved_founder(state);
+    let replaced = replaced_founder(state);
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     guard
         .machine_layout
         .get_or_insert_with(|| {
+            // The replaced-founder scenario needs a cell that keeps a
+            // majority through one wipe: three founders or more.
+            let least = if replaced && count >= 3 { 3 } else { 1 };
             let founders = if count == 0 {
                 0
             } else {
-                moonpool_sim::sim_random_range(1..count + 1)
+                moonpool_sim::sim_random_range(least..count + 1)
             };
             let capacity = buggify_knob!(2_u64, 1_u64..5_u64);
             let named = moonpool_sim::sim_random_bool(0.5) || moved;
