@@ -705,10 +705,19 @@ where
             bootstrap: control.matchmakers.clone(),
         });
     }
-    let matchmakers: Vec<(MatchmakerId, String)> = founders
+    let mut matchmakers: Vec<(MatchmakerId, String)> = founders
         .iter()
         .map(|(id, addr)| (MatchmakerId(id.0), addr.clone()))
         .collect();
+    // Its own journals register with the sets it hosts like with any
+    // member: at the address it advertises, as a founding member does.
+    if admitted.facts.class == Class::Storage {
+        assert!(
+            matchmakers.iter().all(|(id, _)| id.0 != node_id.0),
+            "an admitted machine is not a founding member"
+        );
+        matchmakers.push((MatchmakerId(node_id.0), admitted.facts.addr.to_string()));
+    }
     let listen = admitted.facts.listen;
     tracing::info!(machine = %admitted.facts.name, addr = %admitted.facts.addr, %listen, "machine_serving_admitted_journals");
     crate::run_journals(
