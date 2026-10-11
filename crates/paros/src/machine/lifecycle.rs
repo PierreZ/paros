@@ -11,7 +11,8 @@
 //!    on its own (#216).
 //! 3. **Serve.** A machine that `cell add-machine` admitted (#216) serves
 //!    the machine contract and a node-only `Inspect` with its cell
-//!    ([`super::AdmittedMachine`]), and no journal until placement (#212).
+//!    ([`super::AdmittedMachine`]), and runs [`crate::run_journals`] over
+//!    no plan journal: it serves the journals placed on it (#474).
 //!    A formed machine runs [`crate::run_journals`] over its
 //!    cell's plan, every journal plain Multi-Paxos over the founding members
 //!    ([`journal_config`]), and keeps answering the decree from its record
@@ -43,8 +44,8 @@ use tokio_util::sync::CancellationToken;
 use super::record::{MachineRecord, journal_config};
 use super::stores::{AuditScope, MachineStores};
 use super::{
-    Admission, AdmittedMachine, CachedRegistry, CellLedger, CellPlan, Class, FormedCell, Joined,
-    MachineFacts, ProviderDisk,
+    Admission, AdmittedMachine, CachedRegistry, CellLedger, CellMachine, CellPlan, Class,
+    FormedCell, Joined, MachineFacts, ProviderDisk,
 };
 use crate::ControlPlan;
 use crate::{Address, Audit, DriverTunables, Names, RunError};
@@ -366,18 +367,7 @@ where
     match joined {
         Joined::Founded(cell) => serve(providers, disk, audits, cell, &tunables, shutdown).await,
         Joined::Admitted(admitted) => {
-            let cache = super::spawn_writer(
-                &providers,
-                disk,
-                audit.clone(),
-                admitted.facts.node_id,
-                admitted.cached.clone(),
-                shutdown.clone(),
-            );
-            admitted
-                .serve(&providers, &tunables, cache, shutdown)
-                .await
-                .map_err(MachineError::Run)
+            serve_admitted(providers, disk, audits, admitted, &tunables, shutdown).await
         }
     }
 }
@@ -556,19 +546,7 @@ where
         .collect();
     // The record as the formation left it: the stores rewrite it when they
     // provision a created journal (#210).
-    let record = disk
-        .read_record()
-        .await
-        .map_err(|e| MachineError::Storage(format!("machine record: {e}")))?
-        .ok_or_else(|| MachineError::Storage("machine record: gone after formation".into()))
-        .and_then(|text| {
-            MachineRecord::parse(&text)
-                .map_err(|e| MachineError::Refused(format!("machine record: {e}")))
-        })?;
-    assert_eq!(
-        record.node_id, node_id,
-        "the record names the serving machine"
-    );
+    let record = read_record(&disk, node_id).await?;
     // The founding members where the cached registry fold dials them, else
     // at the plan's addresses (#211).
     let founders = cell.founders();
@@ -639,10 +617,124 @@ where
         Vec::new(),
         Vec::new(),
         Some(control),
-        Some(cell.clone()),
+        Some(CellMachine::Founded(cell.clone())),
         *tunables,
         shutdown,
     )
     .await
     .map_err(MachineError::Run)
+}
+
+/// Serve the journals placed on the admitted machine `admitted` until
+/// shutdown (#474): the node loop of every machine of a cell, with no plan
+/// journal, following the control journals from the founding members its
+/// admission names. Its journals are born with their tenant's matchmaker
+/// set on the founding members, as every journal of the cell is (#190).
+async fn serve_admitted<P, S, A, F>(
+    providers: P,
+    disk: ProviderDisk<S>,
+    audits: F,
+    admitted: AdmittedMachine,
+    tunables: &DriverTunables,
+    shutdown: CancellationToken,
+) -> Result<(), MachineError>
+where
+    P: Providers,
+    S: StorageProvider + Clone + 'static,
+    A: Audit + Clone + Send + Sync + 'static,
+    F: Fn(AuditScope) -> A + Send + Sync + 'static,
+{
+    let node_id = admitted.facts.node_id;
+    let admission = admitted.admission.clone();
+    assert!(admission.check().is_ok(), "an admission is checked");
+    assert!(
+        !admission.founders.contains(&node_id),
+        "an admitted machine is no founding member"
+    );
+    let record = read_record(&disk, node_id).await?;
+    // The cell's machines where the cached registry fold dials them, else
+    // where the admission does (#211); the founding members among them
+    // serve the control journals and host the matchmaker sets.
+    let book = admitted.book();
+    let mut founders: Vec<(NodeId, String)> = book
+        .iter()
+        .filter(|(id, _)| admission.founders.contains(id))
+        .map(|(id, addr)| (*id, addr.to_string()))
+        .collect();
+    founders.sort_unstable();
+    // A founding member at no known address is dialed nowhere: the seeds
+    // fall back on every machine the admission knows.
+    let seeds: Vec<(NodeId, String)> = if founders.is_empty() {
+        book.iter()
+            .filter(|(id, _)| *id != node_id)
+            .map(|(id, addr)| (*id, addr.to_string()))
+            .collect()
+    } else {
+        founders.clone()
+    };
+    let control = ControlPlan {
+        self_id: node_id,
+        class: admitted.facts.class,
+        seeds,
+        cell: admission.cell.cell,
+        founders: admission.founders.clone(),
+        matchmakers: admission
+            .founders
+            .iter()
+            .map(|id| MatchmakerId(id.0))
+            .collect(),
+        spares: Vec::new(),
+    };
+    let cache = super::spawn_writer(
+        &providers,
+        disk.clone(),
+        audits(AuditScope::Machine),
+        node_id,
+        admitted.cached.clone(),
+        shutdown.clone(),
+    );
+    let stores = MachineStores::admitted(disk, record, admission.cell.cell, audits);
+    let matchmakers: Vec<(MatchmakerId, String)> = founders
+        .iter()
+        .map(|(id, addr)| (MatchmakerId(id.0), addr.clone()))
+        .collect();
+    let listen = admitted.facts.listen;
+    tracing::info!(machine = %admitted.facts.name, addr = %admitted.facts.addr, %listen, "machine_serving_admitted_journals");
+    crate::run_journals(
+        providers,
+        stores,
+        node_id,
+        listen.to_string(),
+        founders,
+        matchmakers,
+        Vec::new(),
+        Vec::new(),
+        Some(control),
+        Some(CellMachine::Admitted {
+            machine: admitted,
+            cache,
+        }),
+        *tunables,
+        shutdown,
+    )
+    .await
+    .map_err(MachineError::Run)
+}
+
+/// The record on `disk` of machine `node`, as it stands now.
+async fn read_record<S: StorageProvider + Clone>(
+    disk: &ProviderDisk<S>,
+    node: NodeId,
+) -> Result<MachineRecord, MachineError> {
+    let record = disk
+        .read_record()
+        .await
+        .map_err(|e| MachineError::Storage(format!("machine record: {e}")))?
+        .ok_or_else(|| MachineError::Storage("machine record: gone after its first write".into()))
+        .and_then(|text| {
+            MachineRecord::parse(&text)
+                .map_err(|e| MachineError::Refused(format!("machine record: {e}")))
+        })?;
+    assert_eq!(record.node_id, node, "the record names the serving machine");
+    Ok(record)
 }

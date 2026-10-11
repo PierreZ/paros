@@ -1095,6 +1095,21 @@ impl<P: Providers> Client<P> {
         quorum_system: QuorumSystem,
         target: usize,
     ) -> ReconfigureOutcome {
+        self.reconfigure_journal(JournalIdentifier::UNSET, members, quorum_system, target)
+            .await
+    }
+
+    /// [`Client::reconfigure`] of the journal `journal` (#474): a machine
+    /// serves many, so the request names the one it changes. The unset
+    /// identifier asks for the server's first journal, as
+    /// [`Client::reconfigure`] does.
+    pub async fn reconfigure_journal(
+        &self,
+        journal: JournalIdentifier,
+        members: &[u64],
+        quorum_system: QuorumSystem,
+        target: usize,
+    ) -> ReconfigureOutcome {
         let mut server = target % self.servers.len();
         let wire = quorum_system_to_proto(quorum_system);
         for _ in 0..self.tunables.retry_budget.max(1) {
@@ -1105,6 +1120,8 @@ impl<P: Providers> Client<P> {
                 phase2_quorum: wire.phase2_quorum,
                 rows: wire.rows,
                 cols: wire.cols,
+                tenant: journal.tenant.0,
+                journal: journal.journal.0,
             };
             let node = self.node(server).clone();
             let attempt =

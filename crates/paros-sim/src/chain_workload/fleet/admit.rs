@@ -41,6 +41,16 @@ impl FleetOps {
         {
             return;
         }
+        // On its own location, the operator drains an admitted machine
+        // instead (#474 (journals on admitted machines)).
+        let drained = crate::shape::drained_machine(ctx.state());
+        if self.admitting.is_none()
+            && replaced.is_none()
+            && (drained || buggify_with_prob!(0.25))
+            && self.drain(ctx, policy, draw, drained).await
+        {
+            return;
+        }
         let founders = self.layout.founders;
         let outside = founders..self.machines.len();
         let target = match self.admitting.take().or(replaced) {

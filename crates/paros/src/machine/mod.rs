@@ -67,6 +67,7 @@ mod formed;
 mod lifecycle;
 pub mod load;
 mod matchmakers;
+mod moves;
 mod record;
 pub(crate) mod register;
 mod resolve;
@@ -94,6 +95,52 @@ pub use wait::{CellLedger, Joined, wait_for_cell};
 use crate::Address;
 use crate::Names;
 use crate::rpc::machine as wire;
+
+/// A machine of a cell as its node loop serves it (#474): a founding
+/// member, or a machine `cell add-machine` admitted, with the cache its
+/// follow of the registry writes (#211). Both serve journals: a founding
+/// member its plan's and every journal placed on it, an admitted one every
+/// journal placed on it.
+#[derive(Clone, Debug)]
+pub enum CellMachine {
+    /// A founding member.
+    Founded(FormedCell),
+    /// An admitted machine.
+    Admitted {
+        /// The machine.
+        machine: AdmittedMachine,
+        /// Its cached registry fold's writer.
+        cache: CacheSink,
+    },
+}
+
+impl CellMachine {
+    /// The cell's control journals, as this machine knows them.
+    #[must_use]
+    pub fn control_journals(&self) -> ControlJournals {
+        match self {
+            CellMachine::Founded(formed) => formed.control_journals(),
+            CellMachine::Admitted { machine, .. } => machine.admission.cell,
+        }
+    }
+
+    /// What the machine knows of itself.
+    #[must_use]
+    pub fn facts(&self) -> &MachineFacts {
+        match self {
+            CellMachine::Founded(formed) => &formed.facts,
+            CellMachine::Admitted { machine, .. } => &machine.facts,
+        }
+    }
+
+    /// What the machine knows of itself, to update once it serves.
+    pub(crate) fn facts_mut(&mut self) -> &mut MachineFacts {
+        match self {
+            CellMachine::Founded(formed) => &mut formed.facts,
+            CellMachine::Admitted { machine, .. } => &mut machine.facts,
+        }
+    }
+}
 
 /// The fleet's **control journals** as one cell knows them (§3.2, §3.8):
 /// the cell's id, the cell tenant's control journal and, on the cell that
@@ -288,6 +335,10 @@ pub struct Admission {
     /// The cell's machines known at admission, by advertised address, in
     /// id order.
     pub members: Vec<(NodeId, Address)>,
+    /// The cell's founding members, by id, in id order (#474): the
+    /// registry's genesis pool, the machines that serve the control
+    /// journals, and the cell's matchmakers ([`CellPlan::matchmakers`]).
+    pub founders: Vec<NodeId>,
 }
 
 impl Admission {
@@ -319,6 +370,12 @@ impl Admission {
         if !self.members.is_sorted() {
             return Err("an admission's machines are in id order");
         }
+        if self.founders.is_empty() {
+            return Err("an admission names the cell's founding members");
+        }
+        if !self.founders.windows(2).all(|w| w[0] < w[1]) {
+            return Err("an admission's founding members are unique, in id order");
+        }
         Ok(())
     }
 
@@ -342,6 +399,9 @@ impl Admission {
             })
             .collect::<Result<Vec<_>, _>>()?;
         members.sort_unstable();
+        let mut founders: Vec<NodeId> = admit.founders.iter().copied().map(NodeId).collect();
+        founders.sort_unstable();
+        founders.dedup();
         let admission = Self {
             cell: ControlJournals {
                 cell_id: admit.cell_id,
@@ -361,6 +421,7 @@ impl Admission {
                     .filter(|election| election.is_set()),
             },
             members,
+            founders,
         };
         admission.check()?;
         Ok(admission)
@@ -383,6 +444,7 @@ impl Admission {
                     machine_interface: Vec::new(),
                 })
                 .collect(),
+            founders: self.founders.iter().map(|id| id.0).collect(),
         }
     }
 }
@@ -739,6 +801,7 @@ mod tests {
         let admission = Admission {
             cell: plan().control_journals(),
             members: vec![(NodeId(3), addr(2)), (NodeId(9), addr(1))],
+            founders: vec![NodeId(3)],
         };
         assert_eq!(admission.check(), Ok(()));
         let mut wire = admission.to_wire();
@@ -759,9 +822,12 @@ mod tests {
         let mut twice = admission.clone();
         twice.members.push((NodeId(11), addr(1)));
         assert!(twice.check().is_err());
-        let mut unordered = admission;
+        let mut unordered = admission.clone();
         unordered.members.reverse();
         assert!(unordered.check().is_err());
+        let mut founderless = admission;
+        founderless.founders.clear();
+        assert!(founderless.check().is_err());
     }
 
     #[test]
