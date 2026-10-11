@@ -1244,6 +1244,11 @@ where
     // leader's: the cell control journal that would register it stalls.
     // Held, it still answers every message that reaches it.
     let mut unregistered: Option<watch::Receiver<bool>> = None;
+    // The instant since which the registry's pool is owed to the live journals
+    // (#189), and whether this incarnation holds it a while (#387,
+    // `crate::scenario::ADMIT_LATE`; drawn only where a registry is followed).
+    let mut admission_owed: Option<std::time::Duration> = None;
+    let late_admitter = system.is_some() && crate::scenario::late_admitter();
     if let Some(formed) = formed {
         // Every founding member campaigns for the cell coordinator (#240).
         crate::machine::coordinator::spawn(
@@ -1755,7 +1760,10 @@ where
                 let events = f.fold_remote(answer);
                 let checkpoints = if journal == f.registry_key() { f.take_checkpoints() } else { Vec::new() };
                 let mut sys = SystemCtx { stores: &mut stores, journals: &mut journals, now: ticks, tunables: &tunables, out: &out, lanes: &lanes, rpc: &rpc_handle, audit: &node_audit };
-                sys.apply(f, journal, events, checkpoints).await;
+                if sys.apply(f, journal, events, checkpoints).await {
+                    admission_owed.get_or_insert(time.now());
+                }
+                admit_owed(&mut journals, f, &mut admission_owed, late_admitter, time.now());
             }
             _ = time.sleep(next_tick.saturating_sub(time.now())) => {
                 // Pacing, not a protocol bound: every timeout the core owns is
@@ -1854,8 +1862,12 @@ where
                     for (journal, events) in follow_local(f, &journals) {
                         let checkpoints = if journal == f.registry_key() { f.take_checkpoints() } else { Vec::new() };
                         let mut sys = SystemCtx { stores: &mut stores, journals: &mut journals, now: ticks, tunables: &tunables, out: &out, lanes: &lanes, rpc: &rpc_handle, audit: &node_audit };
-                        sys.apply(f, journal, events, checkpoints).await;
+                        if sys.apply(f, journal, events, checkpoints).await {
+                            admission_owed.get_or_insert(time.now());
+                        }
                     }
+                    // A held admission lands once its hold is over (#387).
+                    admit_owed(&mut journals, f, &mut admission_owed, late_admitter, time.now());
                     if !crate::scenario::lag_follow() {
                         f.poll_remote(&providers, |journal| journals.live.contains_key(&journal));
                     }
@@ -1914,7 +1926,8 @@ impl<P: Providers, J: JournalStores> SystemCtx<'_, '_, P, J> {
     /// Apply what `journal`'s fold moved, in position order: start a created
     /// journal naming this node, stop a tombstoned one, open a lane to an
     /// admitted node, and stop every user journal on this node's own
-    /// retirement. Each event is reported first, once.
+    /// retirement. Each event is reported first, once. Whether the
+    /// registry's pool is owed to the live journals ([`admit_owed`]).
     #[allow(clippy::too_many_lines)]
     #[tracing::instrument(level = "debug", skip_all, fields(node = follower.self_id().0, journal = %journal, events = events.len()))]
     async fn apply(
@@ -1923,7 +1936,7 @@ impl<P: Providers, J: JournalStores> SystemCtx<'_, '_, P, J> {
         journal: JournalIdentifier,
         events: Vec<(u64, SystemEvent)>,
         checkpoints: Vec<system::FoldedCheckpoint>,
-    ) {
+    ) -> bool {
         let me = follower.self_id();
         self.report_checkpoints(follower, journal, checkpoints);
         // Whether the pool moved or a journal opened: every live journal
@@ -2067,9 +2080,7 @@ impl<P: Providers, J: JournalStores> SystemCtx<'_, '_, P, J> {
                 _ => {}
             }
         }
-        if admit {
-            admit_pool(self.journals, follower);
-        }
+        admit
     }
 }
 
@@ -2254,6 +2265,25 @@ impl<P: Providers, J: JournalStores> SystemCtx<'_, '_, P, J> {
             }
         }
     }
+}
+
+/// Admit the registry's pool into every live journal when an admission is
+/// owed, unless this node holds it late ([`crate::scenario::ADMIT_LATE`],
+/// #387): then it stays owed, and a later call admits it.
+fn admit_owed<P: Providers, S, A>(
+    journals: &mut Journals<S, A>,
+    follower: &ControlFollower<P>,
+    owed: &mut Option<std::time::Duration>,
+    late: bool,
+    now: std::time::Duration,
+) {
+    let Some(since) = *owed else { return };
+    if crate::scenario::admit_held(late, since, now) {
+        return;
+    }
+    admit_pool(journals, follower);
+    *owed = None;
+    assert!(owed.is_none(), "an admission made is no longer owed");
 }
 
 /// Every live journal admits the registry's pool (#189): a registered node
