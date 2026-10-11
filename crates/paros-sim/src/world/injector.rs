@@ -30,6 +30,10 @@
 //! store (both copies written by a completed commit), and a double fault
 //! never touches the last batch, where the journal reads a doubly damaged
 //! slot as a torn, unacknowledged write and would drop an acknowledged vote.
+//! A planned injection unsettles its custody until the journal opens again
+//! (#441 (metainfo twin)): a boot that dies inside the apply leaves bytes the
+//! ledger can no longer vouch for, and a `hint!` between the flip's write
+//! and its sync makes that kill common.
 //!
 //! **A double fault's park is reserved, then judged** (#351). The plan
 //! reserves the park against the dead-node budget before any byte changes.
@@ -279,12 +283,38 @@ impl StorageWorld {
     /// budget allows (see the module doc). A permitted entry rot marks the
     /// copy lost; a permitted double fault parks the node, before the
     /// journal ever opens.
+    ///
+    /// A planned injection unsettles the custody (#441 (metainfo twin)):
+    /// its apply changes bytes the ledger vouches for, and a process that
+    /// dies inside it leaves them flipped, in part or not at all. Until
+    /// the journal's next open reports what the disk holds
+    /// ([`Self::note_opened`]), no family aims at that layout again.
+    /// Witness: a boot died while it flipped one metainfo copy, and the
+    /// next boot flipped the other, so the journal refused to open
+    /// (seed 16594478988965922038 on #434 (matchmakers everywhere)).
     pub(crate) fn plan_boot_damage(
         &mut self,
         key: &str,
         node: u64,
         in_chaos: bool,
     ) -> Option<Injection> {
+        let injection = self.plan_injection(key, node, in_chaos)?;
+        let custody = self.custody.get_mut(key);
+        // Pair of `plan_one`'s and the outage plans' guard: every family
+        // aims only at a settled custody.
+        assert_always!(
+            custody.as_ref().is_some_and(|c| c.settled),
+            "journal store: an injection is planned on a settled custody",
+            { "node" => node }
+        );
+        if let Some(custody) = custody {
+            custody.settled = false;
+        }
+        Some(injection)
+    }
+
+    /// [`Self::plan_boot_damage`]'s choice, before it unsettles the custody.
+    fn plan_injection(&mut self, key: &str, node: u64, in_chaos: bool) -> Option<Injection> {
         if let Some(slot) = self.pending.remove(key) {
             // The plan's own claim: it was made on a settled custody, and
             // nothing since (the node was down) moved it.
@@ -903,6 +933,14 @@ async fn flip(provider: &SimStorageProvider, region: &LayoutRegion) -> bool {
     if written != bytes.len() {
         return false;
     }
+    // Written, not synced (#441 (metainfo twin)): a kill here leaves the
+    // flip whole, torn or gone, and the custody unsettled until the next
+    // open reports what the disk holds.
+    let hinted = moonpool_sim::hint!("injection written, not synced", 0.25);
+    if hinted.strike() == moonpool_sim::hint::Strike::Killed {
+        assert_reachable!("journal store: a kill lands before an injection is synced");
+    }
+    hinted.await;
     for _ in 0..WRITE_ATTEMPTS {
         if file.sync_all().await.is_ok() {
             return true;
