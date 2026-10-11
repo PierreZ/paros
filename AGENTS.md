@@ -352,7 +352,10 @@ Three layers, and nothing crosses them:
   floor shows mostly 5 to 20 s into a run. Likewise on a
   seed that draws the slow-machine scenario, its slowing of a founder may strike at most
   `LATE_WINDOW` into the tail, once the cell formed, and lasts 4–6 s
-  (`paros_sim::world::slow_machine`, #424 (busyness metrics)).
+  (`paros_sim::world::slow_machine`, #424 (busyness metrics)). Likewise on a seed that draws
+  the lagging-fold scenario, half the nodes admit the registry's pool 2 s late
+  (`paros::scenario::ADMIT_LATE`, #387 (unpooled joiner)), in the tail too: the hold is a bound,
+  not a window, because most joiners register in the tail.
 - **`paros-core` is never buggified**: no RNG, knob or conditional compilation. A rare-but-valid
   decision is exposed as a method with an honest contract (`resend_pending`, `step_down`) and
   perturbed only by a caller that stops calling.
