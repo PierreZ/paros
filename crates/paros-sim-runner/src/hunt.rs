@@ -12,13 +12,15 @@
 //!        deliverable is an entropy leak, named by the first diverging draw.
 //!        `sim-paros-hunt explore-main <seed>` — root + explored continuation
 //!        timelines, for failures that live only on explorer branches.
+//!        `sim-paros-hunt replay-recipe <seed> <count>:<reseed>,..` — one
+//!        explored timeline, from a bug recipe the sweep printed.
 
 mod common;
 
 use common::{arg, is_clean, print_failed_runs, print_never_fired, print_seed_counts};
 use paros_sim::{
     EXPLORATION_TIMELINES_PER_SEED, SimulationReport, chain_canary_hunt, chain_seed_canary,
-    chain_smoke, explore_chain_seed, run_chain_seed,
+    chain_smoke, explore_chain_seed, replay_chain_timeline, run_chain_seed,
 };
 
 /// The single-seed replay a `replay-*` / `explore-main` axis names, if any.
@@ -33,6 +35,32 @@ fn replay_for(axis: &str) -> Option<fn(u64) -> SimulationReport> {
 
 fn main() {
     let axis = std::env::args().nth(1).unwrap_or_else(|| "main".into());
+
+    if axis == "replay-recipe" {
+        let seed: u64 = arg(2).expect("replay-recipe needs a seed");
+        let recipe: Vec<(u64, u64)> = std::env::args()
+            .nth(3)
+            .expect("replay-recipe needs a recipe: count:reseed,..")
+            .split(',')
+            .map(|step| {
+                let (count, reseed) = step.split_once(':').expect("count:reseed");
+                (
+                    count.parse().expect("a count"),
+                    reseed.parse().expect("a reseed"),
+                )
+            })
+            .collect();
+        println!("--- replay: recipe {recipe:?} on seed {seed} ---");
+        let report = replay_chain_timeline(seed, recipe);
+        if is_clean(&report) {
+            println!("seed {seed}: GREEN");
+            return;
+        }
+        println!("seed {seed}: RED");
+        print_failed_runs(&report);
+        println!("VIOLATIONS: {:#?}", report.assertion_violations);
+        std::process::exit(1);
+    }
 
     if let Some(replay) = replay_for(&axis) {
         let seed: u64 = arg(2).expect("replay needs a seed");

@@ -58,6 +58,11 @@ service Machine {
   // registry. Until the resolver (M12) and the frontend (#192) exist, a
   // machine answers both hops in one answer.
   rpc Resolve(.paros.machine.v1.Resolve) returns (.paros.machine.v1.ResolveAck);
+  // How busy this machine was over its last full window (#424): FDB's
+  // busyness numbers, computed from two samples of the machine's own
+  // counters. Answered by every machine, idle, admitted or founding, from
+  // memory; nothing is stored. Pulled when an operator asks, never pushed.
+  rpc Load(.paros.machine.v1.Load) returns (.paros.machine.v1.LoadAck);
 }
 
 message Identify {}
@@ -279,4 +284,52 @@ message ResolveAck {
   repeated Member machines = 7;
   // The universe directory's position the answer was read at.
   uint64 at = 8;
+}
+
+message Load {}
+
+message LoadAck {
+  // The answering machine.
+  uint64 node_id = 1;
+  string name = 2;
+  // False until the machine has sampled one full window: every field below
+  // is then unset.
+  bool windowed = 3;
+  // The window's length.
+  uint64 elapsed_ns = 4;
+  // How long ago the window ended. A large age on a slow machine is a
+  // signal of its own.
+  uint64 window_age_ns = 5;
+  // The two samples' instants, on the machine's own monotonic clock: for
+  // debugging and for the simulation's oracle, never for a decision.
+  uint64 window_start_ns = 6;
+  uint64 window_end_ns = 7;
+  // CPU cores the process used on average; can be above 1
+  // (`cpu.usage_cores`).
+  double cpu_cores = 8;
+  // Logical cores the process may use.
+  uint32 cores = 9;
+  // The whole machine's CPU use, in [0, 1]
+  // (`machine.cpu.logical_core_utilization`).
+  double machine_cpu = 10;
+  // The share of the window the run loop was busy, in [0, 1], when
+  // `has_run_loop`.
+  bool has_run_loop = 11;
+  double run_loop_busy = 12;
+  // The data disk; absent when its device is not known.
+  DiskLoad disk = 13;
+}
+
+message DiskLoad {
+  // The device's name.
+  string device = 1;
+  // The share of the window with at least one I/O in flight, in [0, 1]
+  // (`disk.busy`, iostat's %util).
+  double busy = 2;
+  // I/Os in flight at the window's end.
+  uint64 queue_depth = 3;
+  double reads_hz = 4;
+  double writes_hz = 5;
+  double read_bps = 6;
+  double write_bps = 7;
 }

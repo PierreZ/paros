@@ -14,13 +14,20 @@
 //!
 //! Everything printed names an entity by its name (tables for people);
 //! `--json` prints the answer as one document, ids included, for scripts.
+//!
+//! `machine list|show` also ask every machine of the answer for its `Load`
+//! (#424), all at once: the busyness columns (FDB's `cpu`, `machine` and
+//! `disk IO` of `status details`). A machine that does not answer in time
+//! shows `no metrics`; one that answers without a value shows `-`.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
+use std::time::Duration;
 
 use clap::{Args, Subcommand};
 use moonpool_core::TokioProviders;
 use moonpool_rpc::RpcHandle;
+use paros::client::load::{LoadOutcome, ask_all};
 use paros::client::views::{ViewOutcome, ask, request};
 use paros::view::Scope;
 use paros::wire::view::{self as wire, CellQuery, TenantQuery, UniverseQuery, view_request::Query};
@@ -67,6 +74,23 @@ impl Asker<'_> {
                 Err(Ending::Unreachable)
             }
         }
+    }
+
+    /// Every machine of `reply` that has an address, asked for its `Load`.
+    async fn loads(&self, reply: &wire::ViewReply) -> BTreeMap<u64, LoadOutcome> {
+        let machines: Vec<(u64, Address)> = reply
+            .machines
+            .iter()
+            .filter_map(|m| Address::parse(&m.addr).ok().map(|addr| (m.node_id, addr)))
+            .collect();
+        ask_all(
+            self.providers,
+            self.rpc,
+            self.names,
+            &machines,
+            self.timeout,
+        )
+        .await
     }
 
     /// The cell view, checked to be cell `cell` when one is named.
@@ -212,43 +236,7 @@ fn state(up: bool) -> &'static str {
 /// `parosctl machine …`.
 pub async fn machine(asker: &Asker<'_>, out: &Printer, args: MachineArgs) -> Ending {
     match args.command {
-        MachineCommand::List { cell } => {
-            let reply = match asker.cell(cell.as_deref()).await {
-                Ok(reply) => reply,
-                Err(ending) => return ending,
-            };
-            let rows: Vec<[String; 7]> = reply
-                .machines
-                .iter()
-                .map(|m| {
-                    [
-                        machine_names(&reply)[&m.node_id].clone(),
-                        m.addr.clone(),
-                        m.class.clone(),
-                        format!("{}/{}", m.booked, m.capacity),
-                        if m.failure_domain.is_empty() {
-                            "-".to_string()
-                        } else {
-                            m.failure_domain.clone()
-                        },
-                        m.standing.clone(),
-                        state(m.up).to_string(),
-                    ]
-                })
-                .collect();
-            out.emit(
-                || {
-                    table(
-                        [
-                            "NAME", "ADDRESS", "CLASS", "SLOTS", "DOMAIN", "STANDING", "STATE",
-                        ],
-                        &rows,
-                    )
-                },
-                || reply_json(&reply),
-            );
-            Ending::Success
-        }
+        MachineCommand::List { cell } => machine_list(asker, out, cell.as_deref()).await,
         MachineCommand::Show { machine } => {
             let reply = match asker.cell(None).await {
                 Ok(reply) => reply,
@@ -258,6 +246,13 @@ pub async fn machine(asker: &Asker<'_>, out: &Printer, args: MachineArgs) -> End
                 Ok(m) => m,
                 Err(ending) => return ending,
             };
+            let load = asker
+                .loads(&wire::ViewReply {
+                    machines: vec![m.clone()],
+                    ..wire::ViewReply::default()
+                })
+                .await
+                .remove(&m.node_id);
             let roles: Vec<[String; 4]> = roles(&reply)
                 .into_iter()
                 .filter(|r| r.holder == m.node_id)
@@ -278,6 +273,7 @@ pub async fn machine(asker: &Asker<'_>, out: &Printer, args: MachineArgs) -> End
                         if m.founder { "yes" } else { "no" },
                         self::text(&reply.cell_name),
                     );
+                    let _ = write!(text, "\n{}", load_block(load.as_ref()));
                     let _ = write!(
                         text,
                         "\nroles:\n{}",
@@ -288,11 +284,171 @@ pub async fn machine(asker: &Asker<'_>, out: &Printer, args: MachineArgs) -> End
                 || {
                     let mut doc = reply_json(&reply);
                     doc["machine"] = machine_json(m);
+                    doc["machine"]["load"] = load_json(load.as_ref());
                     doc
                 },
             );
             Ending::Success
         }
+    }
+}
+
+/// `parosctl machine list`: the cell's machines, with how busy each is.
+async fn machine_list(asker: &Asker<'_>, out: &Printer, cell: Option<&str>) -> Ending {
+    let reply = match asker.cell(cell).await {
+        Ok(reply) => reply,
+        Err(ending) => return ending,
+    };
+    let loads = asker.loads(&reply).await;
+    let rows: Vec<[String; 10]> = reply
+        .machines
+        .iter()
+        .map(|m| {
+            let [cpu, machine, disk] = load_columns(loads.get(&m.node_id));
+            [
+                machine_names(&reply)[&m.node_id].clone(),
+                m.addr.clone(),
+                m.class.clone(),
+                format!("{}/{}", m.booked, m.capacity),
+                if m.failure_domain.is_empty() {
+                    "-".to_string()
+                } else {
+                    m.failure_domain.clone()
+                },
+                m.standing.clone(),
+                state(m.up).to_string(),
+                cpu,
+                machine,
+                disk,
+            ]
+        })
+        .collect();
+    out.emit(
+        || {
+            table(
+                [
+                    "NAME", "ADDRESS", "CLASS", "SLOTS", "DOMAIN", "STANDING", "STATE", "CPU",
+                    "MACHINE", "DISK",
+                ],
+                &rows,
+            )
+        },
+        || {
+            let mut doc = reply_json(&reply);
+            attach_loads(&mut doc, &reply, &loads);
+            doc
+        },
+    );
+    Ending::Success
+}
+
+/// A share as a whole percent.
+fn percent(share: f64) -> String {
+    format!("{:.0}%", share * 100.0)
+}
+
+/// The `CPU`, `MACHINE` and `DISK` columns of one machine: `no metrics`
+/// when it did not answer, `-` for a value it does not have.
+fn load_columns(load: Option<&LoadOutcome>) -> [String; 3] {
+    let Some(LoadOutcome::Answered(ack)) = load else {
+        return ["no metrics".to_string(), String::new(), String::new()];
+    };
+    if !ack.windowed {
+        return ["-".to_string(), "-".to_string(), "-".to_string()];
+    }
+    [
+        percent(ack.cpu_cores),
+        percent(ack.machine_cpu),
+        ack.disk
+            .as_ref()
+            .map_or_else(|| "-".to_string(), |disk| percent(disk.busy)),
+    ]
+}
+
+/// A duration in seconds, one decimal.
+fn seconds(nanos: u64) -> String {
+    format!("{:.1} s", Duration::from_nanos(nanos).as_secs_f64())
+}
+
+/// A rate in bytes per second, in MB/s.
+fn megabytes(bps: f64) -> String {
+    format!("{:.1} MB/s", bps / 1_000_000.0)
+}
+
+/// `machine show`'s `load` block.
+fn load_block(load: Option<&LoadOutcome>) -> String {
+    let Some(LoadOutcome::Answered(ack)) = load else {
+        return "load:            no metrics".to_string();
+    };
+    if !ack.windowed {
+        return "load:            - (no full window yet)".to_string();
+    }
+    let mut text = format!(
+        "load ({} window, ended {} ago)\n  cpu          {:.2} cores (of {})\n  machine cpu  {}",
+        seconds(ack.elapsed_ns),
+        seconds(ack.window_age_ns),
+        ack.cpu_cores,
+        ack.cores,
+        percent(ack.machine_cpu),
+    );
+    if ack.has_run_loop {
+        let _ = write!(text, "\n  run loop     {} busy", percent(ack.run_loop_busy));
+    }
+    match &ack.disk {
+        Some(disk) => {
+            let _ = write!(
+                text,
+                "\n  disk         {} busy ({}), queue {}\n  disk reads   {:.0}/s  {}\n  disk writes  {:.0}/s  {}",
+                percent(disk.busy),
+                disk.device,
+                disk.queue_depth,
+                disk.reads_hz,
+                megabytes(disk.read_bps),
+                disk.writes_hz,
+                megabytes(disk.write_bps),
+            );
+        }
+        None => text.push_str("\n  disk         - (device not known)"),
+    }
+    text
+}
+
+/// One machine's load as JSON, with FDB's key names where they exist;
+/// `null` when it did not answer.
+fn load_json(load: Option<&LoadOutcome>) -> Value {
+    let Some(LoadOutcome::Answered(ack)) = load else {
+        return Value::Null;
+    };
+    if !ack.windowed {
+        return json!({ "windowed": false });
+    }
+    let secs = |nanos: u64| Duration::from_nanos(nanos).as_secs_f64();
+    json!({
+        "windowed": true,
+        "elapsed_seconds": secs(ack.elapsed_ns),
+        "window_age_seconds": secs(ack.window_age_ns),
+        "cpu": { "usage_cores": ack.cpu_cores, "cores": ack.cores },
+        "machine": { "cpu": { "logical_core_utilization": ack.machine_cpu } },
+        "run_loop_busy": ack.has_run_loop.then_some(ack.run_loop_busy),
+        "disk": ack.disk.as_ref().map(|disk| json!({
+            "device": disk.device,
+            "busy": disk.busy,
+            "queue_depth": disk.queue_depth,
+            "reads": { "hz": disk.reads_hz },
+            "writes": { "hz": disk.writes_hz },
+            "read_bytes": { "hz": disk.read_bps },
+            "written_bytes": { "hz": disk.write_bps },
+        })),
+    })
+}
+
+/// Put each machine's load into the `machines` of a JSON answer.
+fn attach_loads(doc: &mut Value, reply: &wire::ViewReply, loads: &BTreeMap<u64, LoadOutcome>) {
+    let Some(machines) = doc.get_mut("machines").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for (entry, machine) in machines.iter_mut().zip(&reply.machines) {
+        entry["load"] = load_json(loads.get(&machine.node_id));
     }
 }
 

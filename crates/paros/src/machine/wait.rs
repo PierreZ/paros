@@ -128,6 +128,8 @@ pub async fn wait_for_cell<P: Providers, L: CellLedger>(
     let mut init =
         Inbound::plain(serve_well_known::<P, CellInitRpc>(&rpc).map_err(RunError::Infra)?);
     let mut admit = Inbound::plain(serve_well_known::<P, AdmitRpc>(&rpc).map_err(RunError::Infra)?);
+    // Every machine answers `Load`, an idle one too (#424).
+    super::load::serve(&providers, &rpc, facts, shutdown.clone()).map_err(RunError::Infra)?;
     tracing::info!(
         node = facts.node_id.0,
         class = facts.class.as_str(),

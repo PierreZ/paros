@@ -181,6 +181,8 @@ impl AdmittedMachine {
         let mut admit = Inbound::plain(serve_well_known::<P, AdmitRpc>(&rpc).map_err(served)?);
         let mut inspect = Inbound::plain(serve_well_known::<P, InspectRpc>(&rpc).map_err(served)?);
         let cell = self.admission.cell;
+        // Every machine answers `Load` (#424).
+        super::load::serve(providers, &rpc, &self.facts, shutdown.clone()).map_err(served)?;
         self.follow_and_register(providers, &rpc, cache, tunables, &shutdown);
         // Any machine of the cell answers `Resolve` (#216): an admitted one
         // learns the genesis pool from the control journal's membership.

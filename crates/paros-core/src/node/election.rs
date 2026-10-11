@@ -363,6 +363,81 @@ impl ColocatedNode {
         self.send_prepare([from], ballot, next, config);
     }
 
+    /// Keep a paging campaign's promisers quiet (#428 (paging livelock)): on
+    /// every tick a candidate still pages a `Promise` suffix, re-send the
+    /// campaign's own `Prepare` (same ballot, same first slot, same `C_b`)
+    /// to every peer that already answered completely. That is the leader's
+    /// beat cadence ([`super::HEARTBEAT_TICKS`]).
+    ///
+    /// A promiser resets its election clock only when a `Prepare` reaches
+    /// it. Before this rule, the peers that answered at once heard nothing
+    /// more while the candidate paged a long suffix from one peer, one round
+    /// trip per page; their clocks fired first, a rival campaigned one round
+    /// higher, and the next candidate met the same suffix (the sweep went red
+    /// on "cluster converged after chaos": a flexible `q1` of five over five
+    /// nodes, one node alone holding an 18-slot suffix, a one-entry promise
+    /// page; green with this rule). The acceptor re-affirms the same ballot (no durable write) and
+    /// resets its clock; its repeated `Promise` folds as `Ignored`, because
+    /// the tally refuses a second answer from a sender that answered
+    /// completely. A campaign that does not page sends nothing here, so the
+    /// plain path's message set is unchanged, and so does a campaign whose
+    /// ballot fell below this node's own promise (it can no longer win, and
+    /// a keep-alive would only delay the next campaign).
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0)))]
+    pub(super) fn keep_paging_promisers(&mut self) {
+        if self.role != NodeRole::Candidate {
+            return;
+        }
+        let me = self.config.id;
+        let Some(election) = self.proposer.election() else {
+            return;
+        };
+        if !election.paging() || election.ballot() != self.acceptor.promised() {
+            return;
+        }
+        let ballot = election.ballot();
+        let from_slot = election.from_slot();
+        let answered: Vec<NodeId> = election
+            .promised()
+            .iter()
+            .copied()
+            .filter(|peer| *peer != me)
+            .collect();
+        if answered.is_empty() {
+            return;
+        }
+        // The campaign is this node's own, at the ballot it minted.
+        assert!(
+            ballot == self.ballot,
+            "a keep-alive Prepare runs this node's own campaign"
+        );
+        assert!(
+            ballot.node == me,
+            "a keep-alive Prepare runs at a ballot this node minted"
+        );
+        probe!(
+            reachable,
+            "phase1: a paging candidate re-sends its Prepare to the peers that answered"
+        );
+        let writes = self.pending_writes.len();
+        let config = self.phase1_wire_config();
+        self.send_prepare(answered, ballot, from_slot, config);
+        // Negative space: a keep-alive is a pure re-send. It moves no
+        // durable state and leaves the campaign where it was.
+        assert!(
+            self.pending_writes.len() == writes,
+            "a keep-alive Prepare queues no durable write"
+        );
+        assert!(
+            self.role == NodeRole::Candidate,
+            "a keep-alive Prepare leaves the campaign open"
+        );
+        assert!(
+            self.ballot == ballot,
+            "a keep-alive Prepare leaves the campaign at its ballot"
+        );
+    }
+
     /// Merge one straggler `Promise` page into the leader's open repair probe
     /// and resolve any blocked slot the refreshed tally now decides.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0)))]

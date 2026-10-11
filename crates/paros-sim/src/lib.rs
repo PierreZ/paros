@@ -353,6 +353,7 @@ fn chain_builder(digest: Option<DigestSink>) -> SimulationBuilder {
         .fault_factory(|| Box::new(crate::world::silent_machine::SilentMachine))
         .fault_factory(|| Box::new(crate::world::moved_founder::MovedFounder))
         .fault_factory(|| Box::new(crate::world::replaced_founder::ReplacedFounder))
+        .fault_factory(|| Box::new(crate::world::lagging_acceptor::LaggingAcceptor))
         .chaos_duration(CHAOS_DURATION)
         .swarm_operations()
 }
@@ -403,6 +404,17 @@ pub fn run_chain_seed(seed: u64) -> SimulationReport {
     chain_builder(None)
         .set_iterations(1)
         .set_debug_seeds(vec![seed])
+        .run_configured()
+}
+
+/// Replay one explored timeline: `seed` with an exploration bug recipe's
+/// RNG breakpoints (`[(count, reseed), ..]`, as the sweep prints it), so a
+/// failure the sweep found on an explorer branch replays alone.
+#[must_use]
+#[tracing::instrument(level = "debug", skip(recipe))]
+pub fn replay_chain_timeline(seed: u64, recipe: Vec<(u64, u64)>) -> SimulationReport {
+    chain_builder(None)
+        .replay_timeline(seed, recipe)
         .run_configured()
 }
 
