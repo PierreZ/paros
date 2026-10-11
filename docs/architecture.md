@@ -1875,7 +1875,7 @@ Simulation is the investment. Every milestone lands with its share of:
   scenario, #213 (three founding members)): every tenant creation and every control-journal
   write still complete over the other two. A strike during `init` delays the cell decree until
   the founder is back, because its Phase 1 needs every founding member (`q1 = n`). The acceptors' node registry runs on
-  one or three seeds, a per-seed draw (#213 (three founding members)). The "no
+  one or three founding members, a per-run draw (#213 (three founding members)). The "no
   unlearned id" oracle holds on every run: an operator's call to the cell names only a
   `JournalIdentifier` that it learned from `init`'s reply or through `Inspect`.
 - Faults in the shipped code (decided on 2026-10-09, #294): the simulation runs the same machine

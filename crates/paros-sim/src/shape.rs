@@ -654,8 +654,8 @@ struct Registry {
     /// [`system_journals`]), fixed by the first caller.
     system: Option<bool>,
     /// Run-level: how many genesis ranks host the system journals (see
-    /// [`seed_count`]), fixed by the first caller.
-    seed_count: Option<usize>,
+    /// [`founder_count`]), fixed by the first caller.
+    founder_count: Option<usize>,
     /// Run-level: each joiner's class and capacity (see
     /// [`joiner_machines`]), fixed by the first caller.
     machines: Option<Vec<JoinerMachine>>,
@@ -1228,45 +1228,47 @@ fn journal_geometry() -> paros::journal::Geometry {
 }
 
 /// How many genesis nodes host the system journals (#189, #213 (three
-/// founding members)) — the seeds, the lowest ranks of the pool: one or
-/// three, drawn once per seed (decided on 2026-10-09: the founding member
-/// count is a draw, 1 or 3). One keeps the one-member plain journal, which
-/// sends nothing to anyone and whose only liveness cost is its one seed's
-/// downtime; three is the production shape, a majority journal that keeps
-/// choosing through one seed's loss. Three seeds were once forced to one:
-/// two more journals' beats on every link livelocked a matchmaker
-/// deployment's two-round-trip campaigns, and the two survivors of a plain
-/// 3-node pool duelled without choosing. The driver's election backoff
-/// (`DriverTunables::election_backoff_doublings`, #201) ended both duels: a
-/// round that loses doubles its timeout base, so one candidate outlasts the
-/// other. Not a knob: the draw is a deployment shape, never an extreme.
-pub(crate) const SEED_COUNTS: [usize; 2] = [1, 3];
+/// founding members)) — the registry's founding members, the lowest ranks
+/// of the pool: one or three, drawn once per run (decided on 2026-10-09:
+/// the founding member count is a draw, 1 or 3). One keeps the one-member
+/// plain journal, which sends nothing to anyone and whose only liveness
+/// cost is its one member's downtime; three is the production shape, a
+/// majority journal that keeps choosing through one member's loss. Three
+/// were once forced to one: two more journals' beats on every link
+/// livelocked a matchmaker deployment's two-round-trip campaigns, and the
+/// two survivors of a plain 3-node pool duelled without choosing. The
+/// driver's election backoff (`DriverTunables::election_backoff_doublings`,
+/// #201) ended both duels: a round that loses doubles its timeout base, so
+/// one candidate outlasts the other. Not a knob: the draw is a deployment
+/// shape, never an extreme.
+pub(crate) const FOUNDER_COUNTS: [usize; 2] = [1, 3];
 
-/// The run's seed count (#213 (three founding members)): one of
-/// [`SEED_COUNTS`], drawn once per seed by whoever asks first.
+/// The run's registry founding member count (#213 (three founding
+/// members)): one of [`FOUNDER_COUNTS`], drawn once per run by whoever asks
+/// first.
 #[tracing::instrument(level = "debug", skip(state))]
-pub(crate) fn seed_count(state: &StateHandle) -> usize {
+pub(crate) fn founder_count(state: &StateHandle) -> usize {
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
-    *guard.seed_count.get_or_insert_with(|| {
+    *guard.founder_count.get_or_insert_with(|| {
         let count = if moonpool_sim::sim_random_bool(0.5) {
-            SEED_COUNTS[1]
+            FOUNDER_COUNTS[1]
         } else {
-            SEED_COUNTS[0]
+            FOUNDER_COUNTS[0]
         };
         assert_always!(
-            SEED_COUNTS.contains(&count),
-            "system: a run's seed count is one of the drawn counts",
+            FOUNDER_COUNTS.contains(&count),
+            "system: a run's founding member count is one of the drawn counts",
             { "count" => count }
         );
         count
     })
 }
 
-/// The seeds of a pool of `pool` nodes (#189): its [`seed_count`] lowest
-/// ranks.
-pub(crate) fn seed_ranks(state: &StateHandle, pool: usize) -> Vec<u64> {
-    (0..pool.min(seed_count(state)) as u64).collect()
+/// The registry's founding members in a pool of `pool` nodes (#189): its
+/// [`founder_count`] lowest ranks.
+pub(crate) fn founder_ranks(state: &StateHandle, pool: usize) -> Vec<u64> {
+    (0..pool.min(founder_count(state)) as u64).collect()
 }
 
 /// Whether the run runs the **system journals** (#189) — the node registry

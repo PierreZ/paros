@@ -564,7 +564,7 @@ impl Workload for ChainWorkload {
             &deployment,
             crate::shape::identifiers(ctx.state()),
             crate::shape::system_journals(ctx.state()),
-            crate::shape::seed_ranks(ctx.state(), deployment.acceptors().len()).len(),
+            crate::shape::founder_ranks(ctx.state(), deployment.acceptors().len()).len(),
             &crate::shape::joiner_machines(ctx.state(), deployment.joiners().len()),
             (client_id, LeaderSeeds::new(ctx.random().random::<u128>())),
             request_timeout,

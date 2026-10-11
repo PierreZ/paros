@@ -46,7 +46,7 @@ impl FaultInjector for DownedFounder {
         // half, or the tenant creations of a formed cell. The decree needs
         // every founder's promise (`q1 = n`), so a strike during `init`
         // mostly delays the cell until the founder is back; the gates
-        // wait on a formed cell, so it gets three seeds in four.
+        // wait on a formed cell, so it gets three strikes in four.
         let formed = !moonpool_sim::sim_random_bool(0.25);
         let time = ctx.time();
         let target = loop {
