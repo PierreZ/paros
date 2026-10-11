@@ -164,6 +164,12 @@ impl CallObserver for CallLog {
     }
 
     fn answered(&self, token: u64, answer: Answered<'_>) {
+        // Every call this log sees goes to a node directly: only a
+        // frontend denies a call (#192 (the frontend)).
+        assert_always!(
+            !denied(answer),
+            "client: a node never denies a call, only a frontend does"
+        );
         let Some(seen) = seen(answer) else {
             return;
         };
@@ -192,6 +198,17 @@ pub(crate) fn control_attempts(
         state,
         &crate::state::journal_key(CONTROL_LOG_KEY, journal),
         || Mutex::new(Vec::new()),
+    )
+}
+
+/// Whether `answer` is a frontend's denial.
+fn denied(answer: Answered<'_>) -> bool {
+    matches!(
+        answer,
+        Answered::Write(WriteOutcome::Denied(_))
+            | Answered::SetLeader(SetLeaderOutcome::Denied(_))
+            | Answered::Read(ReadOutcome::Denied(_))
+            | Answered::Truncate(TruncateOutcome::Denied(_))
     )
 }
 

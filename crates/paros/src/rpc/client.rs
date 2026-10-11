@@ -1,7 +1,9 @@
 //! Outbound clients: a well-known method bound to one address, the public
 //! [`NodeClient`], and the driver's per-matchmaker link.
 
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use moonpool_core::Providers;
 use moonpool_rpc::{
@@ -9,17 +11,18 @@ use moonpool_rpc::{
 };
 
 use super::methods::{
-    GarbageCollectRpc, InspectRpc, MatchmakeRpc, MatchmakerReconfigureRpc, ReadRpc,
-    ReconfigureMatchmakersRpc, ReconfigureRpc, RetireRpc, SetLeaderRpc, TruncateRpc,
-    WellKnownMethod, WriteRpc,
+    FrontReadRpc, FrontSetLeaderRpc, FrontTruncateRpc, FrontWriteRpc, GarbageCollectRpc,
+    InspectRpc, MatchmakeRpc, MatchmakerReconfigureRpc, ReadRpc, ReconfigureMatchmakersRpc,
+    ReconfigureRpc, RetireRpc, SetLeaderRpc, TruncateRpc, WellKnownMethod, WriteRpc,
 };
 use super::{
-    InspectReply, InspectRequest, Read, ReadAck, Reconfigure, ReconfigureAck,
-    ReconfigureMatchmakers, ReconfigureMatchmakersAck, RetireAck, RetireRequest, SetLeader,
-    SetLeaderAck, Truncate, TruncateAck, Write, WriteAck,
+    Entry, FrontRead, FrontSetLeader, FrontTruncate, FrontWrite, InspectReply, InspectRequest,
+    Read, ReadAck, Reconfigure, ReconfigureAck, ReconfigureMatchmakers, ReconfigureMatchmakersAck,
+    RetireAck, RetireRequest, SetLeader, SetLeaderAck, Truncate, TruncateAck, Write, WriteAck,
 };
+use crate::name::JournalName;
 use crate::{Address, Names};
-use paros_core::JournalIdentifier;
+use paros_core::{JournalId, JournalIdentifier, TenantId};
 
 /// `M`'s well-known endpoint at `addr`, bound to the runtime `rpc`: calls
 /// reach whichever incarnation is serving that address.
@@ -44,10 +47,16 @@ pub(crate) fn well_known<P: Providers, M: WellKnownMethod>(
 /// resolve fails the call unexecuted (`LookupFailed`). Cancelling a call —
 /// dropping its future — releases the reply route; the node may still run
 /// it.
+///
+/// A client of a **frontend** ([`NodeClient::frontend`], #192 (the
+/// frontend)) sends the four journal calls through the frontend contract,
+/// each with its [`Pass`]: the token, and the journal's name in place of
+/// its ids.
 pub struct NodeClient<P: Providers> {
     rpc: RpcHandle<P>,
     address: Address,
     names: Names,
+    pass: Option<Arc<Pass>>,
 }
 
 impl<P: Providers> Clone for NodeClient<P> {
@@ -56,9 +65,90 @@ impl<P: Providers> Clone for NodeClient<P> {
             rpc: self.rpc.clone(),
             address: self.address.clone(),
             names: self.names.clone(),
+            pass: self.pass.clone(),
         }
     }
 }
+
+/// What a client of a frontend presents with every call (#192 (the
+/// frontend)): its token, and the name of each journal it calls by name.
+///
+/// The client's library is written over [`JournalIdentifier`]s; a client of
+/// a frontend knows names, not ids. Its caller picks an identifier for each
+/// name it calls (any set identifier: the frontend never reads it) and
+/// binds the two here. A call on an identifier with no name bound names its
+/// journal by the ids it carries: only an internal journal is reached so,
+/// with an `admin` token.
+#[derive(Debug, Default)]
+pub struct Pass {
+    token: Vec<u8>,
+    names: Mutex<BTreeMap<JournalIdentifier, JournalName>>,
+}
+
+impl Pass {
+    /// A pass that presents `token`.
+    #[must_use]
+    pub fn new(token: Vec<u8>) -> Self {
+        Self {
+            token,
+            names: Mutex::default(),
+        }
+    }
+
+    /// The token this pass presents.
+    #[must_use]
+    pub fn token(&self) -> &[u8] {
+        &self.token
+    }
+
+    /// Call `journal` by `name` from now on.
+    ///
+    /// # Panics
+    ///
+    /// If `journal` is unset: a call never names the unset identifier.
+    pub fn bind(&self, journal: JournalIdentifier, name: JournalName) {
+        assert!(journal.is_set(), "a bound identifier is set");
+        self.names
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(journal, name);
+    }
+
+    /// The name `journal` is called by, if one is bound.
+    #[must_use]
+    pub fn name_of(&self, journal: JournalIdentifier) -> Option<JournalName> {
+        self.names
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&journal)
+            .cloned()
+    }
+
+    /// The entry a call on `journal` carries, and whether it names the
+    /// journal (the call's ids are then cleared: a name is sent, not ids).
+    fn entry(&self, journal: JournalIdentifier) -> (Entry, bool) {
+        let name = self.name_of(journal);
+        let named = name.is_some();
+        let (tenant, journal) = name
+            .map(|name| (name.tenant().to_string(), name.journal().to_string()))
+            .unwrap_or_default();
+        (
+            Entry {
+                token: self.token.clone(),
+                tenant,
+                journal,
+            },
+            named,
+        )
+    }
+}
+
+/// The ids a named call carries: unset, since a client of a frontend sends
+/// names (§3.5).
+const UNSET: JournalIdentifier = JournalIdentifier {
+    tenant: TenantId(0),
+    journal: JournalId(0),
+};
 
 impl<P: Providers> NodeClient<P> {
     /// The node serving at the literal `addr`, called through `rpc`.
@@ -75,7 +165,27 @@ impl<P: Providers> NodeClient<P> {
             rpc: rpc.clone(),
             address,
             names,
+            pass: None,
         }
+    }
+
+    /// The frontend serving at `address` (#192 (the frontend)), resolved
+    /// through `names` at each call, called through `rpc`: every journal
+    /// call carries `pass`.
+    #[must_use]
+    pub fn frontend(rpc: &RpcHandle<P>, names: Names, address: Address, pass: Arc<Pass>) -> Self {
+        Self {
+            rpc: rpc.clone(),
+            address,
+            names,
+            pass: Some(pass),
+        }
+    }
+
+    /// The pass this client presents, when it calls a frontend.
+    #[must_use]
+    pub fn pass(&self) -> Option<&Arc<Pass>> {
+        self.pass.as_ref()
     }
 
     /// The address this client dials.
@@ -101,7 +211,22 @@ impl<P: Providers> NodeClient<P> {
     ///
     /// The attempt's [`RpcError`].
     pub async fn write(&self, request: &Write) -> Result<WriteAck, RpcError> {
-        self.call::<WriteRpc>(request).await
+        let Some(pass) = &self.pass else {
+            return self.call::<WriteRpc>(request).await;
+        };
+        let (entry, named) = pass.entry(JournalIdentifier::new(
+            TenantId(request.tenant),
+            JournalId(request.journal),
+        ));
+        let mut call = request.clone();
+        if named {
+            (call.tenant, call.journal) = (UNSET.tenant.0, UNSET.journal.0);
+        }
+        self.call::<FrontWriteRpc>(&FrontWrite {
+            entry: Some(entry),
+            call: Some(call),
+        })
+        .await
     }
 
     /// Read a journal's records from a position up (#204): a leaderless
@@ -111,7 +236,22 @@ impl<P: Providers> NodeClient<P> {
     ///
     /// The attempt's [`RpcError`].
     pub async fn read(&self, request: &Read) -> Result<ReadAck, RpcError> {
-        self.call::<ReadRpc>(request).await
+        let Some(pass) = &self.pass else {
+            return self.call::<ReadRpc>(request).await;
+        };
+        let (entry, named) = pass.entry(JournalIdentifier::new(
+            TenantId(request.tenant),
+            JournalId(request.journal),
+        ));
+        let mut call = *request;
+        if named {
+            (call.tenant, call.journal) = (UNSET.tenant.0, UNSET.journal.0);
+        }
+        self.call::<FrontReadRpc>(&FrontRead {
+            entry: Some(entry),
+            call: Some(call),
+        })
+        .await
     }
 
     /// Ask the leader to truncate a journal below a position (#204).
@@ -120,7 +260,22 @@ impl<P: Providers> NodeClient<P> {
     ///
     /// The attempt's [`RpcError`].
     pub async fn truncate(&self, request: &Truncate) -> Result<TruncateAck, RpcError> {
-        self.call::<TruncateRpc>(request).await
+        let Some(pass) = &self.pass else {
+            return self.call::<TruncateRpc>(request).await;
+        };
+        let (entry, named) = pass.entry(JournalIdentifier::new(
+            TenantId(request.tenant),
+            JournalId(request.journal),
+        ));
+        let mut call = *request;
+        if named {
+            (call.tenant, call.journal) = (UNSET.tenant.0, UNSET.journal.0);
+        }
+        self.call::<FrontTruncateRpc>(&FrontTruncate {
+            entry: Some(entry),
+            call: Some(call),
+        })
+        .await
     }
 
     /// Compare-and-swap a journal's writer (#204).
@@ -129,7 +284,22 @@ impl<P: Providers> NodeClient<P> {
     ///
     /// The attempt's [`RpcError`].
     pub async fn set_leader(&self, request: &SetLeader) -> Result<SetLeaderAck, RpcError> {
-        self.call::<SetLeaderRpc>(request).await
+        let Some(pass) = &self.pass else {
+            return self.call::<SetLeaderRpc>(request).await;
+        };
+        let (entry, named) = pass.entry(JournalIdentifier::new(
+            TenantId(request.tenant),
+            JournalId(request.journal),
+        ));
+        let mut call = *request;
+        if named {
+            (call.tenant, call.journal) = (UNSET.tenant.0, UNSET.journal.0);
+        }
+        self.call::<FrontSetLeaderRpc>(&FrontSetLeader {
+            entry: Some(entry),
+            call: Some(call),
+        })
+        .await
     }
 
     /// Ask the leader to reconfigure the acceptor set.

@@ -277,7 +277,10 @@ impl ChainWorkload {
                 self.history.record_write_failed(submission.op);
                 false
             }
-            WriteOutcome::UnknownJournal | WriteOutcome::Malformed | WriteOutcome::Ambiguous => {
+            WriteOutcome::Denied(_)
+            | WriteOutcome::UnknownJournal
+            | WriteOutcome::Malformed
+            | WriteOutcome::Ambiguous => {
                 self.history.record_write_failed(submission.op);
                 false
             }
@@ -340,6 +343,7 @@ async fn truncate_open(step: &Step<'_>) {
             );
         }
         TruncateOutcome::Redirect { .. }
+        | TruncateOutcome::Denied(_)
         | TruncateOutcome::UnknownJournal
         | TruncateOutcome::Malformed
         | TruncateOutcome::Ambiguous => {}

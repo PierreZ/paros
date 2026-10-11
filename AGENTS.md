@@ -170,7 +170,7 @@ writes, duplicates, dual submits) are explicit calls, never the library's defaul
 judged by the client's own history (`ClientHistory`, searched for a linearization against the
 journal's model) and the shared `AuditWorld`. Roles come from moonpool process groups
 (`paros-node`, `paros-matchmaker`, `paros-proxy`, `paros-replica`, `paros-joiner`,
-`paros-machine`) through the deployment/role map `paros_sim::roles`. The machines are `parosd`s
+`paros-machine`, `paros-frontend`) through the deployment/role map `paros_sim::roles`. The machines are `parosd`s
 running the shipped `run_machine` from an empty disk, formed into a cell by the workload's
 `init` (`paros::client::initialize`) over a per-seed layout (#246). No third workload, no per-scenario process type, no
 check that reads a trace. Depth: `crates/paros-sim/AGENTS.md` (the op-id table, the role map,
@@ -458,7 +458,8 @@ Procedure: the `simulation-driven-fix` skill.
 ## Layout
 
 Cargo workspace, every package under `crates/`. Dependency stack: `paros-core` ← `paros` ←
-`paros-sim` ← `paros-sim-runner`, and `paros` ← `parosd`; `paros-authz-biscuit` ← `parosd`. Each crate's `AGENTS.md` is its map.
+`paros-sim` ← `paros-sim-runner`, and `paros` ← `parosd`; `paros` ← `paros-authz-biscuit` ←
+`parosd`, `paros-sim`. Each crate's `AGENTS.md` is its map.
 
 - `paros-core` — the sans-IO roles and `ColocatedNode`; dependency-free with
   `default-features = false`, wasm-safe; sancov crate-under-test. Its optional, default-on
@@ -466,11 +467,13 @@ Cargo workspace, every package under `crates/`. Dependency stack: `paros-core` �
 - `paros` — the library: provider-generic drivers, RPC contract (`proto/`, built by
   `prost-build`), stores, `paros::client`; wasm-safe and provider-free.
 - `parosd` — the uniform `parosd` daemon over Tokio (one binary per machine: `PAROS_*` config,
-  `node_id` minted at format, waits for `parosctl init`, #196) and `parosctl`
+  `node_id` minted at format, waits for `parosctl init`, #196), `paros-frontend` (#192 (the
+  frontend)) and `parosctl`
   (`src/bin/parosctl/`), the CLI over `paros::client` (`publish = false`). The image and the
   Compose toy are `Dockerfile` and `docker-compose.yml` at the root; `DEMO.md` is how to run it.
 - `paros-authz-biscuit` — Biscuit tokens (#245, #400): root keys, offline mint, derive and
-  seal, the verifier and its one policy. No `paros` dependency; Biscuit never enters `paros` or
+  seal, the verifier and its one policy, and `BiscuitAuthz`, the frontend's `Authz` (#192 (the
+  frontend)). It depends on `paros` for that trait; Biscuit never enters `paros` or
   `paros-core`. `biscuit-auth` is pinned by git rev, so the crate is `publish = false`.
 - `paros-sim` — the DST harness: processes, role map, storage ledger and injector, workload, audit.
 - `paros-sim-runner` — `sim-paros-chain` and `sim-paros-hunt` (`publish = false`).

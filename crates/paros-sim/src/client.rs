@@ -182,4 +182,32 @@ impl Connector {
         paros::client::Client::new(&self.providers, servers, self.tunables)
             .with_shutdown(self.shutdown.clone())
     }
+
+    /// The library client over the frontends at `frontends` (#192 (the
+    /// frontend)), in the order the client indexes them: every call carries
+    /// `pass`. A frontend never names a node, so the ids are ranks.
+    pub(crate) fn through(
+        &self,
+        frontends: &[paros::Address],
+        pass: &std::sync::Arc<paros::Pass>,
+    ) -> ChainClient {
+        moonpool_sim::assert_always!(
+            !frontends.is_empty(),
+            "client: a client through frontends names at least one"
+        );
+        let servers = (1_u64..)
+            .zip(frontends)
+            .map(|(id, addr)| Server {
+                id,
+                node: NodeClient::frontend(
+                    &self.rpc,
+                    self.names.clone(),
+                    addr.clone(),
+                    pass.clone(),
+                ),
+            })
+            .collect();
+        paros::client::Client::new(&self.providers, servers, self.tunables)
+            .with_shutdown(self.shutdown.clone())
+    }
 }

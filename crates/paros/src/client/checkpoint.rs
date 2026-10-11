@@ -526,6 +526,8 @@ pub enum LoadOutcome {
     Unavailable,
     /// The server asked does not serve the journal.
     UnknownJournal,
+    /// A frontend refused the read (#192 (the frontend)).
+    Denied(crate::frontend::Denial),
     /// The fold jumped a gap and no checkpoint healed it before the tail:
     /// the floor is not a checkpoint's.
     Unhealed {
@@ -924,6 +926,7 @@ pub async fn load<P: Providers, S: Checkpointable>(
             }
             ReaderOutcome::Unavailable => return LoadOutcome::Unavailable,
             ReaderOutcome::UnknownJournal => return LoadOutcome::UnknownJournal,
+            ReaderOutcome::Denied(denial) => return LoadOutcome::Denied(denial),
         }
     }
 }

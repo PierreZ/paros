@@ -9,8 +9,9 @@
 //! role lives here, not in the token.
 //!
 //! Biscuit stays out of `paros` and `paros-core` (its wasm32 clock needs
-//! JavaScript's `performance`); this crate is used by `parosctl`, and later
-//! by `parosd` and `paros-sim`.
+//! JavaScript's `performance`): `paros` defines the frontend's `Authz`
+//! trait, and this crate implements it ([`BiscuitAuthz`], #192 (the
+//! frontend)). It is used by `parosctl`, `parosd` and `paros-sim`.
 //!
 //! **Deterministic first** (#245 rules 1 to 4):
 //!
@@ -29,6 +30,7 @@
 
 mod entropy;
 mod error;
+mod frontend;
 mod keys;
 mod operation;
 mod token;
@@ -36,6 +38,7 @@ mod verify;
 
 pub use entropy::Entropy;
 pub use error::Error;
+pub use frontend::{BiscuitAuthz, operation, since_epoch};
 pub use keys::{KeyRing, RootKey, RootPublicKey};
 pub use operation::{Access, Class, Operation};
 pub use token::{Grant, Restriction, Role, Token, derive, inspect, mint, seal};

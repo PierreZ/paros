@@ -35,15 +35,66 @@ use paros::fleet::{Groups, TenantState};
 use paros::tenant::Desired;
 use paros::{JournalIdentifier, TenantId, Value, WriterMode};
 
+use std::sync::Arc;
+
+use moonpool_sim::{Providers, TimeProvider};
+use paros::Pass;
+use paros::frontend::Denial;
+use paros::name::JournalName;
+
 use super::FleetOps;
 use super::cell::Cell;
 use crate::audit::tenants;
+use crate::client::ChainClient;
+use crate::frontend::{self, Presented};
+
+/// The identifier a call by name is bound to on the client: the frontend
+/// never reads it (#192 (the frontend)).
+const LOCAL: JournalIdentifier = JournalIdentifier::new(TenantId(1), paros::JournalId(1));
 
 /// The journal names a request is drawn from: few, so two requests race for
 /// one often.
 const JOURNAL_NAMES: [&[u8]; 3] = [b"orders", b"events", b"audit"];
 
 impl FleetOps {
+    /// The journal name `draw` picks: always the first on a reused-name
+    /// seed ([`crate::shape::reused_name`]).
+    fn journal_name(&self, draw: u64) -> &'static [u8] {
+        if crate::shape::reused_name(&self.state) {
+            return JOURNAL_NAMES[0];
+        }
+        JOURNAL_NAMES[usize::try_from(draw % JOURNAL_NAMES.len() as u64).unwrap_or(0)]
+    }
+
+    /// On a reused-name seed ([`crate::shape::reused_name`]), a decided
+    /// request leaves its opposite pending on the same name: a create a
+    /// delete, a delete a create. The next journal steps send them, so a
+    /// name is created, deleted and created again.
+    fn reuse_name(&mut self, request: &JournalRequest, answer: &JournalAnswer, draw: u64) {
+        if self.journal_pending.is_some() || !crate::shape::reused_name(&self.state) {
+            return;
+        }
+        let op = match (answer, &request.op) {
+            (JournalAnswer::Created { .. }, JournalOp::Create { name, .. }) => {
+                JournalOp::Delete { name: name.clone() }
+            }
+            (JournalAnswer::Deleted { .. }, JournalOp::Delete { name }) => {
+                assert_reachable!("journals: a reused-name seed creates a deleted name again");
+                JournalOp::Create {
+                    name: name.clone(),
+                    writer: drawn_mode(),
+                    desired: drawn_desired(draw),
+                }
+            }
+            _ => return,
+        };
+        self.journal_pending = Some(JournalRequest {
+            request: moonpool_sim::sim_random_range(1..u64::MAX),
+            tenant: request.tenant,
+            op,
+        });
+    }
+
     /// `CREATE_JOURNAL`: create a journal in a `READY` tenant, or send the
     /// pending request again.
     #[tracing::instrument(level = "debug", skip_all, fields(client = self.client_id))]
@@ -53,15 +104,14 @@ impl FleetOps {
         policy: CheckpointPolicy,
         (class, payload): (u64, u64),
     ) {
-        let Some((cell, tenant, control)) = self.journal_tenant(ctx, payload).await else {
+        let Some((cell, tenant, control, label)) = self.journal_tenant(ctx, payload).await else {
             return;
         };
+        self.through_frontend(&label, control, payload).await;
         let request = if let Some(request) = self.journal_pending.take() {
             request
         } else {
-            let name = JOURNAL_NAMES
-                [usize::try_from(class % JOURNAL_NAMES.len() as u64).unwrap_or(0)]
-            .to_vec();
+            let name = self.journal_name(class).to_vec();
             // A name this client resolved on an earlier step is read through
             // its cached resolution first: the journal may be gone since.
             if self.cached_name(tenant, &name).is_some() && buggify_with_prob!(0.5) {
@@ -90,18 +140,17 @@ impl FleetOps {
         policy: CheckpointPolicy,
         payload: u64,
     ) {
-        let Some((cell, tenant, control)) = self.journal_tenant(ctx, payload).await else {
+        let Some((cell, tenant, control, label)) = self.journal_tenant(ctx, payload).await else {
             return;
         };
+        self.through_frontend(&label, control, payload).await;
         let request = match self.journal_pending.take() {
             Some(request) => request,
             None => JournalRequest {
                 request: ctx.random().random_range(1..u64::MAX),
                 tenant,
                 op: JournalOp::Delete {
-                    name: JOURNAL_NAMES
-                        [usize::try_from((payload >> 8) % JOURNAL_NAMES.len() as u64).unwrap_or(0)]
-                    .to_vec(),
+                    name: self.journal_name(payload >> 8).to_vec(),
                 },
             },
         };
@@ -116,7 +165,7 @@ impl FleetOps {
         &mut self,
         ctx: &SimContext,
         draw: u64,
-    ) -> Option<(Cell, TenantId, JournalIdentifier)> {
+    ) -> Option<(Cell, TenantId, JournalIdentifier, String)> {
         let Some(cell) = self.learn(ctx).await else {
             assert_reachable!("journals: a journal request finds no cell formed yet");
             return None;
@@ -124,24 +173,28 @@ impl FleetOps {
         let directory = read_directory(&cell.client, cell.first(draw), cell.fleet)
             .await
             .ok()?;
-        let ready: Vec<(TenantId, JournalIdentifier)> = directory
+        let ready: Vec<(TenantId, JournalIdentifier, String)> = directory
             .tenants()
             .filter(|(_, t)| t.state == TenantState::Ready && t.groups == Groups::SERVED)
-            .map(|(id, t)| (id, JournalIdentifier::new(id, t.control)))
+            .map(|(id, t)| {
+                let name = String::from_utf8_lossy(&t.name).into_owned();
+                (id, JournalIdentifier::new(id, t.control), name)
+            })
             .collect();
         if let Some(pending) = &self.journal_pending
-            && let Some(held) = ready.iter().find(|(id, _)| *id == pending.tenant)
+            && let Some(held) = ready.iter().find(|(id, ..)| *id == pending.tenant)
         {
             self.note_journals([held.1]);
-            return Some((cell, held.0, held.1));
+            return Some((cell, held.0, held.1, held.2.clone()));
         }
         if ready.is_empty() {
             assert_reachable!("journals: a journal request finds no tenant ready");
             return None;
         }
-        let (tenant, control) = ready[usize::try_from(draw % ready.len() as u64).unwrap_or(0)];
+        let (tenant, control, name) =
+            ready[usize::try_from(draw % ready.len() as u64).unwrap_or(0)].clone();
         self.note_journals([control]);
-        Some((cell, tenant, control))
+        Some((cell, tenant, control, name))
     }
 
     /// Record `journals` as learned by this operator: from the fleet
@@ -173,6 +226,7 @@ impl FleetOps {
         }
         self.judge_answer(cell, control, &request, &answer, draw)
             .await;
+        self.reuse_name(&request, &answer, draw);
         if buggify_with_prob!(0.2) {
             // A retry of a decided request: the client lost the answer. On
             // its own location an operator removes the request's tenant
@@ -438,6 +492,125 @@ impl FleetOps {
             JournalResolution::Unknown { .. } => {
                 assert_reachable!("names: a stale resolution is refused and the name is gone");
             }
+            _ => {}
+        }
+    }
+
+    /// On a seed that runs frontends, one call to a journal of the tenant
+    /// `tenant` (its control journal `control`) through a frontend (#192
+    /// (the frontend)): a name from [`JOURNAL_NAMES`] and a token of the
+    /// kind `draw` picks. A call in the token's rights is never denied; any
+    /// other is denied for its cause and never served.
+    async fn through_frontend(&mut self, tenant: &str, control: JournalIdentifier, draw: u64) {
+        if self.frontends.is_empty() {
+            return;
+        }
+        let name = self.journal_name(draw >> 40);
+        let Ok(named) = JournalName::new(tenant, &String::from_utf8_lossy(name)) else {
+            return;
+        };
+        let presented = Presented::drawn(draw >> 24);
+        // On one draw in three the call names a journal by its ids instead:
+        // the tenant's control journal, an internal journal only `admin`
+        // reaches.
+        let internal = (draw >> 48).is_multiple_of(3);
+        let now = self.connector.providers().time().now();
+        let pass = Arc::new(Pass::new(frontend::token(
+            &self.state,
+            tenant,
+            presented,
+            now,
+        )));
+        let journal = if internal {
+            control
+        } else {
+            pass.bind(LOCAL, named);
+            LOCAL
+        };
+        let expected = match presented {
+            Presented::Admin => None,
+            Presented::Own | Presented::Rotated if !internal => None,
+            Presented::Own | Presented::Rotated | Presented::OtherTenant => Some(Denial::Forbidden),
+            Presented::Expired => Some(Denial::Expired),
+            Presented::UnknownKey | Presented::Garbage => Some(Denial::InvalidToken),
+        };
+        let client = self.connector.through(&self.frontends, &pass);
+        let first = usize::try_from(draw % self.frontends.len() as u64).unwrap_or(0);
+        if !internal && (draw >> 52).is_multiple_of(2) {
+            self.write_through_frontend(&client, journal, expected, first, draw)
+                .await;
+            return;
+        }
+        let request = paros::client::Reader::new(journal, 0).request(1, 0);
+        let outcome = client.read_any(&request, first).await.outcome;
+        match (expected, outcome) {
+            (None, ReadOutcome::Denied(denial)) => assert_always!(
+                false,
+                "frontend: a call in its token's rights is never denied",
+                { "denial" => denial.as_str() }
+            ),
+            (None, ReadOutcome::Page { .. }) if internal => {
+                assert_reachable!("frontend: an admin reads an internal journal by its ids");
+            }
+            (None, ReadOutcome::Page { .. }) => {
+                assert_reachable!("frontend: a tenant reads its journal by name");
+            }
+            (Some(want), ReadOutcome::Denied(denial)) => {
+                assert_always!(
+                    denial == want,
+                    "frontend: a denial names its cause",
+                    { "want" => want.as_str(), "denial" => denial.as_str() }
+                );
+                assert_reachable!("frontend: a call outside its token's rights is denied");
+            }
+            (Some(want), ReadOutcome::Page { .. } | ReadOutcome::Truncated { .. }) => {
+                assert_always!(
+                    false,
+                    "frontend: a call outside its token's rights is never served",
+                    { "want" => want.as_str() }
+                );
+            }
+            _ => {}
+        }
+    }
+
+    /// A claim and one write through `client`, a frontend's: a tenant's
+    /// fenced writes by name (#192 (the frontend)).
+    async fn write_through_frontend(
+        &mut self,
+        client: &ChainClient,
+        journal: JournalIdentifier,
+        expected: Option<Denial>,
+        first: usize,
+        draw: u64,
+    ) {
+        let mut writer = Writer::new(journal, self.leader_seeds.next());
+        let _ = writer.claim(client, first, false).await;
+        let outcome = writer
+            .write(client, vec![Value(draw.to_le_bytes().to_vec())], first)
+            .await;
+        match (expected, outcome) {
+            (None, WriterOutcome::Written { .. }) => {
+                assert_reachable!("frontend: a tenant writes its journal by name");
+            }
+            (None, WriterOutcome::Denied(denial)) => assert_always!(
+                false,
+                "frontend: a call in its token's rights is never denied",
+                { "denial" => denial.as_str() }
+            ),
+            (Some(want), WriterOutcome::Denied(denial)) => {
+                assert_always!(
+                    denial == want,
+                    "frontend: a denial names its cause",
+                    { "want" => want.as_str(), "denial" => denial.as_str() }
+                );
+                assert_reachable!("frontend: a write outside its token's rights is denied");
+            }
+            (Some(want), WriterOutcome::Written { .. }) => assert_always!(
+                false,
+                "frontend: a call outside its token's rights is never served",
+                { "want" => want.as_str() }
+            ),
             _ => {}
         }
     }

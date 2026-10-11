@@ -12,6 +12,9 @@ authors.workspace = true
 publish = false
 
 [dependencies]
+# The frontend's `Authz` trait (#192 (the frontend)): this crate implements
+# it; `paros` never depends on Biscuit.
+paros = { path = "../paros", version = "0.2.0" }
 # Default features off: no PEM loaders and no compile-time Datalog macro.
 # Every key and every block key comes from a caller's `Entropy`, never from
 # the crate's thread RNG (`clippy.toml` bans the defaults).

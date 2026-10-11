@@ -445,7 +445,10 @@ impl ChainWorkload {
                 owner_never_of_wrong_mode();
                 self.history.record_write_failed(submission.op);
             }
-            WriteOutcome::UnknownJournal | WriteOutcome::Malformed | WriteOutcome::Ambiguous => {
+            WriteOutcome::Denied(_)
+            | WriteOutcome::UnknownJournal
+            | WriteOutcome::Malformed
+            | WriteOutcome::Ambiguous => {
                 self.history.record_write_failed(submission.op);
             }
         }
@@ -542,6 +545,7 @@ impl ChainWorkload {
                 WriteOutcome::WrongMode { .. } => owner_never_of_wrong_mode(),
                 WriteOutcome::TooLarge { .. }
                 | WriteOutcome::Truncated { .. }
+                | WriteOutcome::Denied(_)
                 | WriteOutcome::UnknownJournal
                 | WriteOutcome::Malformed
                 | WriteOutcome::Ambiguous => {}

@@ -2,8 +2,9 @@
 
 Biscuit tokens for paros (#245 Biscuit tokens, #400 keygen and offline tokens), `publish = false`
 because `biscuit-auth` is pinned by git rev until 6.1. The design is `docs/architecture.md` §3.5
-"Tokens are Biscuits". Used by `parosctl` (`key`, `token`); `parosd` and `paros-sim` join with
-#245. No `paros` dependency, and Biscuit never enters `paros` or `paros-core`.
+"Tokens are Biscuits". Used by `parosctl` (`key`, `token`, `--frontends`), the `paros-frontend`
+binary and `paros-sim` (#192 (the frontend)); `parosd` joins with #245. It depends on `paros` for
+the `Authz` trait only; Biscuit never enters `paros` or `paros-core`.
 
 ## Map
 
@@ -18,6 +19,11 @@ because `biscuit-auth` is pinned by git rev until 6.1. The design is `docs/archi
   offline. Every caller value enters Datalog as a parameter, never as source text.
 - `src/verify.rs` → `POLICY`, `Request`, `TargetKind`, `Refusal`, `authorize`: the request facts,
   the one policy, the limits, the refusal kinds.
+- `src/frontend.rs` → `BiscuitAuthz`, `operation`, `since_epoch`: `paros::frontend::Authz` over
+  a `KeyRing` (#192 (the frontend)); a call's names and its frontend's clock become a `Request`,
+  a `Refusal` becomes a `Denial`.
+- `tests/frontend.rs` → `BiscuitAuthz` through the `Authz` trait: a tenant's rights, `admin` on an
+  internal journal, the rotated-in key, expiry on the frontend's clock.
 - `tests/policy.rs` → the policy role by role and restriction by restriction, determinism (same
   entropy, same bytes), sealing, a foreign key, a name with quotes.
 
