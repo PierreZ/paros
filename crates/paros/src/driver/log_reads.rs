@@ -235,6 +235,7 @@ fn send<A: Audit>(
         // is in the journal but not here, so the read is answered unserved
         // and the client asks elsewhere (`LogRead::NotHeld`).
         tracing::info!(node = node.0, from = from.0, answer = ?how, "log_read_not_held");
+        audit.log_read_not_held(node, from);
         let ack = read_ack(read);
         assert!(!ack.served, "a read this process does not hold is unserved");
         answer(audit, node, Reply::ReadUnserved, reply, ack);

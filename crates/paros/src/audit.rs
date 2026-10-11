@@ -213,6 +213,11 @@ pub trait Audit {
     /// then drops was still served).
     fn log_read_served(&self, node: NodeId, report: &LogReadReport<'_>) {}
 
+    /// This node (or replica) answered a journal `Read` from `from`
+    /// unserved, as not held here ([`LogRead::NotHeld`], #448): the record
+    /// is in the journal, in a slot below this node's floor.
+    fn log_read_not_held(&self, node: NodeId, from: Seq) {}
+
     /// This node refused a client call naming a journal it does not serve
     /// (`0`, or any other id than its own, #185). `call` names the RPC.
     fn journal_refused(&self, node: NodeId, journal: JournalIdentifier, call: &'static str) {}
