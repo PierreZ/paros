@@ -1734,6 +1734,19 @@ pub(crate) fn matchmaker_floor(bootstrap: usize) -> usize {
     bootstrap.min(MATCHMAKER_LOSS_FLOOR)
 }
 
+/// The renewal period's floor (see [`NodeShape::draw`]).
+const ELECTION_RENEW_FLOOR: Duration = Duration::from_millis(100);
+
+/// Run `tunables`' cell election at its renewal floor, the lease and the
+/// failure detector moved down with it, so each keeps its margin past the
+/// renewal period.
+fn renew_at_floor(tunables: &mut DriverTunables) {
+    let cut = tunables.election_renew.saturating_sub(ELECTION_RENEW_FLOOR);
+    tunables.election_renew -= cut;
+    tunables.election_lease -= cut;
+    tunables.machine_down_after -= cut;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1855,17 +1868,4 @@ mod tests {
             }
         }
     }
-}
-
-/// The renewal period's floor (see [`NodeShape::draw`]).
-const ELECTION_RENEW_FLOOR: Duration = Duration::from_millis(100);
-
-/// Run `tunables`' cell election at its renewal floor, the lease and the
-/// failure detector moved down with it, so each keeps its margin past the
-/// renewal period.
-fn renew_at_floor(tunables: &mut DriverTunables) {
-    let cut = tunables.election_renew.saturating_sub(ELECTION_RENEW_FLOOR);
-    tunables.election_renew -= cut;
-    tunables.election_lease -= cut;
-    tunables.machine_down_after -= cut;
 }
