@@ -115,6 +115,16 @@ impl HandoverDriver {
         requests
     }
 
+    /// The generation the running phase replaces; `None` when idle.
+    pub(crate) fn old(&self) -> Option<&MatchmakerSet> {
+        let old = self.reconfigurer.old();
+        assert!(
+            old.is_some() == self.is_busy(),
+            "a running handover replaces a set"
+        );
+        old
+    }
+
     /// Whether the running freeze has the quorum it needs to be closed.
     pub(crate) fn stop_quorum_reached(&self) -> bool {
         let reached = self.reconfigurer.stop_quorum_reached();

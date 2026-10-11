@@ -1012,6 +1012,18 @@ pub const RARE: &[Rare] = &[
         msg: "view: a tenant scope sees its own spread",
         reason: "marginal: fired on 9 of 810 hunt seeds (#486)",
     },
+    Rare {
+        msg: "storage: a boot recovers a floor its node never reported",
+        reason: "fired on 0 of 600 hunt seeds: a truncation lands in the recovery tail, where a driver hint cannot strike (#496 (two red hunt seeds), #484)",
+    },
+    Rare {
+        msg: "chain: the settle tail waits for a spare that joined in the tail",
+        reason: "marginal: missed by one of three 200-seed hunt shards and by the sweep on #500 (two red hunt seeds) (#486)",
+    },
+    Rare {
+        msg: "machine: a machine no cell init lists restarts and waits",
+        reason: "marginal: missed by the sweep on #500 (two red hunt seeds) (#486)",
+    },
 ];
 
 /// What the sweep ran of the declared gates.

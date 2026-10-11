@@ -484,8 +484,6 @@ pub(crate) async fn persist_writes<S: LogStorage, A: Audit>(
         );
     }
 
-    floor_durable_hint(writes).await;
-
     assert!(
         promise_changed
             == writes
@@ -495,26 +493,6 @@ pub(crate) async fn persist_writes<S: LogStorage, A: Audit>(
     );
     surface_persisted(writes, promised, promise_changed, self_id, audit);
     Ok(())
-}
-
-/// Hint (#496): a raised floor is durable and the driver has not logged the
-/// batch yet. A crash here leaves a floor on disk that no log line (and no
-/// audit report) names, which the next boot reads back. A failed sync whose
-/// writes landed leaves the same state, far more rarely.
-async fn floor_durable_hint(writes: &[WriteOp]) {
-    let raises_floor = writes
-        .iter()
-        .any(|op| matches!(op, WriteOp::Truncate { .. } | WriteOp::TrimmedTo { .. }));
-    if !raises_floor {
-        return;
-    }
-    let hinted = moonpool_buggify::hint!("floor durable, not logged", 1.0);
-    if hinted.strike() == Strike::Killed {
-        moonpool_assertions::reachable!(
-            "the driver crashes after a floor's sync and before logging it"
-        );
-    }
-    hinted.await;
 }
 
 /// Report a flushed batch's durable state — one audit callback and one tracing
