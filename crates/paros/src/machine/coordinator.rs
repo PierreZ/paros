@@ -73,7 +73,7 @@ use paros_core::{LeaderUuid, NodeId};
 use tokio_util::sync::CancellationToken;
 
 use super::moves::Moves;
-use super::sets::Sets;
+use super::sets::{SetStep, Sets};
 use super::tenants::TenantDesk;
 use super::{CellPlan, Class, ControlJournals, FormedCell, incarnation_from_halves};
 use crate::client::cell::CellSession;
@@ -749,7 +749,12 @@ async fn campaign<P: Providers>(
                                     None => None,
                                     Some(step) => {
                                         let set = sets.step(ctx, session, desk).await;
-                                        set.map(|set| step.in_flight() || set.in_flight())
+                                        // A set's move is left mid-way once its
+                                        // handover started, so the next term
+                                        // finds it running.
+                                        set.map(|set| {
+                                            step.in_flight() || set == SetStep::HandedOver
+                                        })
                                     }
                                 });
                             }

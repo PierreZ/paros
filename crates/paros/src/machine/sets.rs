@@ -70,18 +70,15 @@ pub(super) enum SetStep {
     },
 }
 
-impl SetStep {
-    /// Whether the step started or advanced a move that is not done.
-    pub(super) fn in_flight(self) -> bool {
-        matches!(self, Self::Booked | Self::HandedOver)
-    }
-}
-
 /// The set moves of one coordinator term.
 #[derive(Debug, Default)]
 pub(super) struct Sets {
     /// The tenants whose set this term booked or handed over.
     started: BTreeSet<TenantId>,
+    /// The tenants whose set this term found booked but not yet in force on
+    /// its booked machines, before it took any step of its own: an earlier
+    /// term's move, whose handover gets one round to finish first.
+    inherited: BTreeSet<TenantId>,
     /// The tenants this term saw settled: their set in force is their
     /// booked machines, none of them draining.
     settled: BTreeSet<TenantId>,
@@ -213,6 +210,14 @@ impl Sets {
         let mut members = reply.matchmakers.clone();
         members.sort_unstable();
         if members != target {
+            // An earlier term's handover may still run: give it a round
+            // before asking for another, so two handovers rarely duel.
+            if !self.started.contains(&tenant) && self.inherited.insert(tenant) {
+                moonpool_assertions::reachable!(
+                    "coordinator: a term finds a set's move an earlier term started"
+                );
+                return Some(SetStep::Waiting);
+            }
             return Some(
                 match nodes.reconfigure_matchmakers_of(tenant, &target, at).await {
                     ReconfigureMatchmakersOutcome::Started { .. } => {
@@ -256,7 +261,8 @@ impl Sets {
         }
         self.settled.insert(tenant);
         let started = self.started.remove(&tenant);
-        if leaving.is_empty() && !started {
+        let inherited = self.inherited.remove(&tenant);
+        if leaving.is_empty() && !started && !inherited {
             return Some(SetStep::Waiting);
         }
         let successor = !started;

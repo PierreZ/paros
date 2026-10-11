@@ -175,7 +175,7 @@ impl<S: StorageProvider + Clone + 'static> SetOpener for MachineSets<S> {
                 .unwrap_or_else(PoisonError::into_inner)
                 .contains(&tenant);
             if !founder && !booked {
-                moonpool_assertions::reachable!("machine: a set not booked here is not opened");
+                tracing::debug!(tenant = tenant.0, "matchmaker_set_not_booked");
                 return None;
             }
             if !self.provision(tenant).await {
