@@ -94,6 +94,9 @@ const NAMES: [&[u8]; 3] = [b"acme", b"globex", b"initech"];
 struct TenantNames {
     /// Each removed tenant, to the name it held.
     removed: BTreeMap<TenantId, Vec<u8>>,
+    /// Each cell, to the name the first resolution through it gave
+    /// (#239 (names at the edge)).
+    cells: BTreeMap<u64, Vec<u8>>,
 }
 
 /// Run `f` over the run's [`TenantNames`].

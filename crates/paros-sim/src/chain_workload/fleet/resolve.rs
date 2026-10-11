@@ -78,9 +78,22 @@ impl FleetOps {
                     resolved.universe_id != 0,
                     "resolve: a resolution names its universe"
                 );
+                self.judge_cell_name(resolved.cell_id, &resolved.cell_name);
+                assert_always!(
+                    !resolved.universe_name.is_empty(),
+                    "resolve: a resolution gives its universe's name"
+                );
                 assert_reachable!("resolve: an entry machine resolves a tenant");
             }
-            Resolution::Refused { refusal, .. } => {
+            Resolution::Refused {
+                refusal,
+                cell_id,
+                cell_name,
+                ..
+            } => {
+                if !cell_name.is_empty() {
+                    self.judge_cell_name(*cell_id, cell_name);
+                }
                 assert_always!(
                     refusal != "other_cell",
                     "resolve: one universe of one cell never names another cell"
@@ -102,5 +115,29 @@ impl FleetOps {
                 "resolve: an entry machine resolves the tenant its creation made"
             );
         }
+    }
+
+    /// Judge the name a resolution gave cell `cell_id` (#239 (names at the
+    /// edge)): every resolution names the cell, and always by the name the
+    /// first one gave: a cell's name never changes.
+    fn judge_cell_name(&self, cell_id: u64, name: &[u8]) {
+        assert_always!(
+            !name.is_empty(),
+            "resolve: a resolution gives its cell's name",
+            { "cell" => cell_id }
+        );
+        let first = with_names(&self.state, |names| {
+            names
+                .cells
+                .entry(cell_id)
+                .or_insert_with(|| name.to_vec())
+                .clone()
+        });
+        assert_always!(
+            first == name,
+            "resolve: a cell's name never changes",
+            { "cell" => cell_id }
+        );
+        assert_reachable!("resolve: a resolution names its cell by name");
     }
 }

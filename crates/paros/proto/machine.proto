@@ -292,6 +292,11 @@ message ResolveAck {
   repeated Member machines = 7;
   // The universe directory's position the answer was read at.
   uint64 at = 8;
+  // The names of `universe_id`, `cell_id` and `tenant_cell`, for people
+  // (#239 (names at the edge)): empty when the directory names none.
+  bytes universe_name = 9;
+  bytes cell_name = 10;
+  bytes tenant_cell_name = 11;
 }
 
 message Load {}

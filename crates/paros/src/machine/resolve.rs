@@ -205,6 +205,8 @@ impl Folds {
         let mut ack = wire::ResolveAck {
             universe_id,
             at,
+            universe_name: directory.universe_name().to_vec(),
+            cell_name: directory.cell_name(resolver.cell.cell_id).to_vec(),
             ..refused(resolver, "")
         };
         match tenant_in(directory, &request.tenant, at) {
@@ -216,6 +218,7 @@ impl Folds {
                     .expect("a resolved tenant has an entry");
                 ack.tenant = tenant.0;
                 ack.tenant_cell = entry.cell_id;
+                ack.tenant_cell_name = directory.cell_name(entry.cell_id).to_vec();
                 if entry.cell_id == resolver.cell.cell_id {
                     moonpool_assertions::reachable!("resolve: a machine resolves a tenant");
                     ack.control = Some(wire::JournalIdentifier {

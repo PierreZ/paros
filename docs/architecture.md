@@ -934,9 +934,14 @@ scope covers, and the frontend the journal name). Without `--frontends`, `parosc
 with operator rights; with it, `parosctl` sends names to a frontend (#192 (the frontend)). A name is free again once its delete completes; a recreated
 tenant or journal draws a fresh id, so an old id never aliases a new name.
 
-**Display** (decided on 2026-10-07, #239). Human output prints an id as short hex, git-style
-(e.g. `cell=2c94f1`), widened when a prefix is ambiguous within the listing; `--json` keeps the
-full id, and a command that takes an id accepts a unique prefix. An internal tenant (section 3.7)
+**Display** (decided on 2026-10-07, #239; amended on 2026-10-10 by Pierre's names rule).
+Everything a person sees or types names an entity by its string name: the universe, a cell, a
+machine, a tenant and a journal, in CLI input and output, in operator logs and in the docs. Hex
+ids are for local debugging. Human output prints an id only when no name is known, as short hex,
+git-style (e.g. `cell=2c94f1`), widened when a prefix is ambiguous within the listing; `--json`
+keeps the full id beside the name, and a command that takes an id accepts a unique prefix.
+`Resolve` gives the universe's and the cell's names with their ids (#239), and the machine
+lifecycle logs name the machine (`machine=<name>`). An internal tenant (section 3.7)
 shows a display label derived from its groups (`universe`, `cell` with its cell), display only,
 never a resolvable name or an id: section 3.8's no-well-known-id rule stands.
 

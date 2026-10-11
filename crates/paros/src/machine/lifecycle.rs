@@ -309,7 +309,7 @@ where
     );
     let facts = facts_of(&record, (advertise.clone(), listen), names, load);
     tracing::info!(
-        node = facts.node_id.0,
+        machine = %facts.name,
         addr = %advertise,
         %listen,
         class = facts.class.as_str(),
@@ -467,7 +467,7 @@ async fn identity<P: Providers, S: StorageProvider + Clone, A: Audit>(
         };
         disk.write_record(&record.render()).await.map_err(failed)?;
         audit.machine_recorded(&record);
-        tracing::info!(node = node_id.0, "machine_formatted");
+        tracing::info!(machine = %record.name, "machine_formatted");
         return Ok(record);
     };
     let mut record = MachineRecord::parse(&text).map_err(refused)?;
@@ -599,7 +599,7 @@ where
         .iter()
         .map(|(id, addr)| (*id, addr.to_string()))
         .collect();
-    tracing::info!(node = node_id.0, cell = plan.cell_id, addr = %cell.facts.addr, %listen, "machine_serving");
+    tracing::info!(machine = %cell.facts.name, addr = %cell.facts.addr, %listen, "machine_serving");
     crate::run_journals(
         providers,
         stores,

@@ -200,8 +200,7 @@ impl AdmittedMachine {
         )
         .map_err(served)?;
         tracing::info!(
-            node = self.facts.node_id.0,
-            cell = cell.cell_id,
+            machine = %self.facts.name,
             known = self.admission.members.len(),
             "machine_serving_admitted"
         );

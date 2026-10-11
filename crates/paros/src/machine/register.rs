@@ -139,12 +139,12 @@ async fn run<P: Providers>(
             .await
             {
                 RegisterOutcome::Registered => {
-                    tracing::info!(node = facts.node_id.0, addr = %facts.addr, "machine_registered");
+                    tracing::info!(machine = %facts.name, addr = %facts.addr, "machine_registered");
                     ended.send_replace(true);
                     return;
                 }
                 RegisterOutcome::Refused(refusal) if final_refusal(&refusal) => {
-                    tracing::warn!(node = facts.node_id.0, %refusal, "machine_register_refused");
+                    tracing::warn!(machine = %facts.name, %refusal, "machine_register_refused");
                     ended.send_replace(true);
                     return;
                 }
