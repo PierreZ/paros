@@ -51,6 +51,19 @@ pub const LOSE_VERDICTS: &str = "paros: a node loses write verdicts";
 /// and later accepted".
 pub const LAG_FOLLOW: &str = "paros: a node follows its control journals late";
 
+/// The node admits the registry's pool late (#387): a node that draws it
+/// at boot folds the registry as usual, but its journals admit a node the
+/// registry registered (`ColocatedNode::extend_pool`) only
+/// [`ADMIT_LATE_FOR`] after the fold owed it. A leader that admitted a joiner then reconfigures onto
+/// it while this node's pool still lacks it, so a `Prepare`, a beat or a
+/// matchmaker's answer names a configuration outside its pool, which every
+/// learning path must ignore whole. Always safe: an admission is a fold
+/// applied late, and a slow follower is within the model. The simulation
+/// couples it to the lagging-fold scenario. Recovery gates: "matchmaking: a
+/// membership probe meets a configuration outside the pool", "learning: a
+/// configuration outside the pool is ignored".
+pub const ADMIT_LATE: &str = "paros: a node admits the registry's pool late";
+
 /// The proxy leader stalls (#341): it drops the `Accepted`s and `Nack`s it
 /// hears, so none of its rounds closes. Its leader then takes each delegated round back
 /// on its own budget, the proxy evicts each round on its retention budget,
@@ -99,6 +112,36 @@ pub(crate) fn lag_follow() -> bool {
         moonpool_assertions::reachable!("system: a node follows its control journals late");
     }
     lagging
+}
+
+/// Whether this node, at boot, is one that admits the registry's pool
+/// late ([`ADMIT_LATE`]): half the nodes of a scenario seed, so a leader
+/// that admitted a joiner meets members that did not.
+pub(crate) fn late_admitter() -> bool {
+    moonpool_buggify::buggify_named!(ADMIT_LATE, 0.5)
+}
+
+/// How long a late admitter ([`late_admitter`]) holds an admission it owes
+/// ([`ADMIT_LATE`]): longer than a reconfiguration request, its matchmaking
+/// and its first `Prepare`. A bound in time, not in ticks (a node whose
+/// ticks stretch would hold far longer), and not a window: the hold also
+/// runs in the recovery tail, so a joiner registered late is still met by a
+/// member that lags, and every node admits at last.
+pub(crate) const ADMIT_LATE_FOR: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Whether a late admitter holds, at `now`, the admission it has owed since
+/// `owed_since` ([`ADMIT_LATE`]).
+pub(crate) fn admit_held(
+    late: bool,
+    owed_since: std::time::Duration,
+    now: std::time::Duration,
+) -> bool {
+    assert!(owed_since <= now, "an admission is owed from the past");
+    let held = late && now.saturating_sub(owed_since) < ADMIT_LATE_FOR;
+    if held {
+        moonpool_assertions::reachable!("system: a node admits the registry's pool late");
+    }
+    held
 }
 
 /// Whether this node withholds its garbage-collection requests now
@@ -190,5 +233,6 @@ mod tests {
         assert!(!lose_verdict());
         assert!(!stall_proxy());
         assert!(!resign_delegating());
+        assert!(!late_admitter());
     }
 }
