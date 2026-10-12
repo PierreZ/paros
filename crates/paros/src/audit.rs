@@ -25,7 +25,7 @@ use paros_core::{
     LogRead, MatchRefusal, MatchmakerHardState, MatchmakerId, MatchmakerPhase, MatchmakerSet,
     Message, NodeId, Outcome, Party, PendingBootstrap, ProxyId, ReconfigureReply,
     ReconfigureRequest, ReconfigureResult, ReconfigurerStep, Registration, RegistrationKind, Seq,
-    Slot, Value,
+    Slot, Value, WriteOp,
 };
 
 use crate::Address;
@@ -197,6 +197,14 @@ pub trait Audit {
     /// recovered log may lack records below a floor that was only
     /// requested, never reported [`truncated`](Audit::truncated).
     fn floor_requested(&self, node: NodeId, first: Slot) {}
+
+    /// This node is about to sync `writes`, one staged batch. A crash inside
+    /// the commit lands it whole, torn or not at all, and the driver reports
+    /// none of it, so a harness that judges a recovered log needs the
+    /// batch's accepts here. Every store reports it, the ones a harness
+    /// cannot wrap too: a machine's journals (#454 (control plane meets
+    /// chaos)).
+    fn commit_started(&self, node: NodeId, writes: &[WriteOp]) {}
 
     /// This node durably truncated its log prefix; `first` is the new
     /// compaction floor (the first slot still retained).

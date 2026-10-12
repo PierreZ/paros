@@ -12,7 +12,6 @@
 //! honestly unsure, which the next boot resolves by reading the disk
 //! (`crate::process`).
 
-use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 use moonpool_sim::{SimStorageProvider, StateHandle, assert_reachable};
@@ -39,7 +38,7 @@ pub(crate) struct LedgeredJournal {
     /// Whether the injector's damage may land on this store while the
     /// run's chaos lasts (a quiet store never takes it).
     chaotic: bool,
-    /// The shared checker, told what each commit has in flight (#264).
+    /// The shared checker, told the copies a boot finds lost or faulty.
     checker: Arc<AuditWorld>,
     /// The node's id, the checker's key.
     node: u64,
@@ -53,10 +52,6 @@ pub(crate) struct LedgeredJournal {
     /// whose cut commit is torn or whole, never ambiguous; else the
     /// distinct acceptors the journal's quorum system tolerates losing.
     cut_budget: Option<usize>,
-    /// The accepts staged for the next sync, `slot -> (ballot, vhash)`:
-    /// the ones its own floor drops are reported apart (see
-    /// [`AuditWorld::note_dropped_in_flight`]).
-    staged_accepts: BTreeMap<u64, (Ballot, u64)>,
 }
 
 /// How a boot's injection is judged against the journal's verdict.
@@ -166,39 +161,6 @@ impl LedgeredJournal {
             ip,
             format_pending: false,
             checker,
-            staged_accepts: BTreeMap::new(),
-        }
-    }
-
-    /// Tell the checker what the next commit may land (see
-    /// [`AuditWorld::note_in_flight`]): a crash anywhere from here to the
-    /// driver's report leaves these accepts durable or not, unreported.
-    fn note_in_flight(&self) {
-        let accepted: Vec<(u64, u64)> = self
-            .inner
-            .staged_slots()
-            .filter_map(|slot| {
-                self.inner
-                    .accepted(slot)
-                    .map(|(_, command)| (slot.0, paros::command_hash(&command)))
-            })
-            .collect();
-        // An accept the flush's own floor drops (the core staged a slot and
-        // a truncation past it in one flush) is never written, yet the
-        // landed metainfo makes it count: the floor and chosen index it
-        // carries say the slot was decided, and on a quorum of one that
-        // accept was the decision.
-        let dropped: Vec<(u64, Ballot, u64)> = self
-            .staged_accepts
-            .iter()
-            .filter(|(slot, _)| self.inner.accepted(Slot(**slot)).is_none())
-            .map(|(slot, (ballot, vhash))| (*slot, *ballot, *vhash))
-            .collect();
-        if !dropped.is_empty() {
-            self.checker.note_dropped_in_flight(self.node, &dropped);
-        }
-        if !accepted.is_empty() {
-            self.checker.note_in_flight(self.node, &accepted);
         }
     }
 
@@ -387,11 +349,7 @@ impl LogStorage for LedgeredJournal {
         ballot: Ballot,
         command: Command,
     ) -> Result<(), StorageError> {
-        let vhash = paros::command_hash(&command);
         let result = self.inner.append_accepted(slot, ballot, command).await;
-        if result.is_ok() {
-            self.staged_accepts.insert(slot.0, (ballot, vhash));
-        }
         self.ledger(result)
     }
 
@@ -401,7 +359,6 @@ impl LogStorage for LedgeredJournal {
     }
 
     async fn sync(&mut self, must_sync: MustSync) -> Result<(), StorageError> {
-        self.note_in_flight();
         let writes = self.inner.staged_entries() > 0;
         let slots: Vec<Slot> = self.inner.staged_slots().collect();
         let ip = self.ip.clone();
@@ -425,8 +382,6 @@ impl LogStorage for LedgeredJournal {
         });
         let synced = self.inner.sync(must_sync).await;
         drop(in_flight);
-        // The sync consumed what was staged, landed or not.
-        self.staged_accepts.clear();
         self.ledger(synced)?;
         // The custody ledger (#261): where what this sync wrote now
         // lives, the floor, the metainfo and header copies.

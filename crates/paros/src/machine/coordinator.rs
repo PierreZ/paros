@@ -64,7 +64,7 @@
 //! jitter and the journal ids derive from the seed.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, PoisonError};
 use std::time::Duration;
 
 use moonpool_core::{Detach, Providers, RandomProvider, TaskProvider, TimeProvider};
@@ -255,6 +255,19 @@ pub struct Watch {
     heard: BTreeMap<NodeId, Duration>,
     /// Whether the last call ran a round.
     ran: bool,
+    /// The `Identify` checks a `Register` left running, by machine (#454
+    /// (control plane meets chaos)): see [`register`].
+    probes: BTreeMap<NodeId, Probe>,
+}
+
+/// One `Identify` check of a machine's new address, run off the renewal
+/// path with the client's request timeout. `answered` is `None` while it
+/// runs, then whether the machine answered there as that incarnation.
+#[derive(Debug)]
+struct Probe {
+    addr: Address,
+    incarnation: u128,
+    answered: Arc<std::sync::Mutex<Option<bool>>>,
 }
 
 impl Watch {
@@ -279,6 +292,7 @@ impl Watch {
             next: now,
             heard: BTreeMap::new(),
             ran: false,
+            probes: BTreeMap::new(),
         }
     }
 
@@ -907,7 +921,13 @@ async fn answer_until<P: Providers>(
 /// serves no term. A write that does not land ends the term's watch, as in
 /// [`Watch::round`]. The machine's `Identify` waits at most `patience`, one
 /// renewal period, so a request to an address nobody answers at does not
-/// cost the term its renewals.
+/// cost the term its renewals. An `Identify` that does not answer in time
+/// goes on in a task with the client's request timeout, and the machine's
+/// next `Register` reads its answer: a link slower than one renewal period
+/// stays slow for the whole run, and the inline check alone refused such a
+/// machine forever (#454 (control plane meets chaos): witness
+/// 3556034011252864713, a founding member renamed onto a link with 81 ms
+/// of extra latency, under a 100 ms renewal period).
 #[tracing::instrument(level = "debug", skip_all, fields(cell = cell_id))]
 async fn register<P: Providers>(
     providers: &P,
@@ -938,7 +958,7 @@ async fn register<P: Providers>(
     if identity.cell_id != cell_id {
         return refuse("other_cell");
     }
-    let Some((session, _)) = watching.as_mut() else {
+    let Some((session, watch)) = watching.as_mut() else {
         return refuse("not_coordinator");
     };
     let book = super::cell_book(session.founders(), session.registry());
@@ -963,21 +983,40 @@ async fn register<P: Providers>(
     // asked: a late request from an earlier start names an address the
     // machine left.
     let incarnation = incarnation_from_halves(identity.incarnation_high, identity.incarnation_low);
-    let answer = bootstrap::identify(
-        providers,
-        rpc,
-        names,
-        &addr,
-        patience.min(client.tunables().request_timeout),
-    )
-    .await
-    .filter(|ack| {
-        ack.node_id == id.0
-            && incarnation_from_halves(ack.incarnation_high, ack.incarnation_low) == incarnation
+    let timeout = client.tunables().request_timeout;
+    let probed = watch.probes.get(&id).and_then(|probe| {
+        (probe.addr == addr && probe.incarnation == incarnation).then(|| {
+            *probe
+                .answered
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+        })
     });
-    if answer.is_none() {
-        return refuse("unreachable");
+    match probed {
+        Some(Some(true)) => {
+            moonpool_assertions::reachable!(
+                "coordinator: a slow machine registers through its probe"
+            );
+        }
+        // A probe of this address still runs: its answer is read next time.
+        Some(None) => return refuse("unreachable"),
+        Some(Some(false)) | None => {
+            let answered = identified(
+                bootstrap::identify(providers, rpc, names, &addr, patience.min(timeout)).await,
+                id,
+                incarnation,
+            );
+            if !answered {
+                if timeout > patience {
+                    let probe =
+                        spawn_probe(providers, rpc, names, &addr, (id, incarnation), timeout);
+                    watch.probes.insert(id, probe);
+                }
+                return refuse("unreachable");
+            }
+        }
     }
+    watch.probes.remove(&id);
     let command = SystemCommand::RegisterNode {
         id,
         addr: addr.to_string(),
@@ -1001,6 +1040,48 @@ async fn register<P: Providers>(
     moonpool_assertions::reachable!("coordinator: a moved machine registers its new address");
     tracing::info!(cell = cell_id, node = id.0, %addr, "machine_address_registered");
     registered
+}
+
+/// Whether `answer` is `id`'s incarnation `incarnation` answering
+/// `Identify` (see [`register`]).
+fn identified(answer: Option<wire::IdentifyAck>, id: NodeId, incarnation: u128) -> bool {
+    answer.is_some_and(|ack| {
+        ack.node_id == id.0
+            && incarnation_from_halves(ack.incarnation_high, ack.incarnation_low) == incarnation
+    })
+}
+
+/// Start an `Identify` of `addr` that waits up to `timeout`, off the
+/// renewal path (see [`register`]).
+fn spawn_probe<P: Providers>(
+    providers: &P,
+    rpc: &RpcHandle<P>,
+    names: &Names,
+    addr: &Address,
+    (id, incarnation): (NodeId, u128),
+    timeout: Duration,
+) -> Probe {
+    let answered = Arc::new(std::sync::Mutex::new(None));
+    let (slot, task_providers, rpc, names, target) = (
+        answered.clone(),
+        providers.clone(),
+        rpc.clone(),
+        names.clone(),
+        addr.clone(),
+    );
+    providers
+        .task()
+        .spawn_task("paros-register-probe", async move {
+            let answer = bootstrap::identify(&task_providers, &rpc, &names, &target, timeout).await;
+            *slot.lock().unwrap_or_else(PoisonError::into_inner) =
+                Some(identified(answer, id, incarnation));
+        })
+        .detach();
+    Probe {
+        addr: addr.clone(),
+        incarnation,
+        answered,
+    }
 }
 
 #[cfg(test)]

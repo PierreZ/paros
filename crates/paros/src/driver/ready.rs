@@ -469,6 +469,7 @@ pub(crate) async fn persist_writes<S: LogStorage, A: Audit>(
     }
 
     if !writes.is_empty() {
+        audit.commit_started(NodeId(self_id), writes);
         storage
             .sync(must_sync)
             .await
