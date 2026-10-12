@@ -2292,10 +2292,23 @@ impl<P: Providers, J: JournalStores> SystemCtx<'_, '_, P, J> {
                     self.join_spares(follower).await;
                     admit = true;
                 }
-                SystemEvent::Registry(
-                    RegistryEvent::Registered { id, addr, .. }
-                    | RegistryEvent::Reregistered { id, addr, .. },
-                ) => {
+                // A registered machine registered again, maybe at another
+                // address (a rename, #349): a lane opened at the old one
+                // follows it, matchmaker link included (#454 (control plane
+                // meets chaos): witness 17483207099981818289, an admitted
+                // machine renamed in chaos whose set handover never reached
+                // it).
+                SystemEvent::Registry(RegistryEvent::Reregistered { id, addr, .. }) => {
+                    let interface = follower
+                        .registry()
+                        .get(id)
+                        .map(|node| node.machine_interface.clone())
+                        .unwrap_or_default();
+                    self.readdress_peer(me, id, &addr, &interface);
+                    self.admit_peer(me, id, &addr);
+                    admit = true;
+                }
+                SystemEvent::Registry(RegistryEvent::Registered { id, addr, .. }) => {
                     self.admit_peer(me, id, &addr);
                     admit = true;
                 }
@@ -2543,6 +2556,28 @@ impl<P: Providers, J: JournalStores> SystemCtx<'_, '_, P, J> {
             self.audit
                 .checkpoint_folded(me, journal, seq, verified, &state);
             tracing::info!(node = me.0, journal = %journal, seq, ?verified, "checkpoint_folded");
+        }
+    }
+
+    /// Node `id` registered again at `addr`: its lane, if this node has
+    /// one, and its matchmaker link dial `addr` from their next batch on.
+    fn readdress_peer(&mut self, me: NodeId, id: NodeId, addr: &str, interface: &[u8]) {
+        assert!(id != me, "a node never readdresses itself");
+        if !self.out.has_peer(id) {
+            return;
+        }
+        match peer_target(addr) {
+            Ok(target) => {
+                let moved = self.out.readdress(id, target.clone(), interface.to_vec());
+                assert!(moved, "a peer this node holds has a lane");
+                if let Some(link) = self.links.client(MatchmakerId(id.0)) {
+                    link.readdress(target, interface);
+                }
+                moonpool_assertions::reachable!("driver: a registered peer is readdressed");
+            }
+            Err(error) => {
+                tracing::warn!(node = me.0, peer = id.0, %error, "registered_address_unusable");
+            }
         }
     }
 

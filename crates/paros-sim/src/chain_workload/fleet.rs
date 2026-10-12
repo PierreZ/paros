@@ -154,7 +154,7 @@ pub(super) struct FleetOps {
     init_names: (String, String),
     /// A fresh seed per session and checkpointer (#241).
     leader_seeds: super::LeaderSeeds,
-    /// This client saw an `init` end.
+    /// This client saw an `init` end on the cell it knows.
     initialized: bool,
     /// Tenant identifiers this client had created: a deliberate reuse names one.
     ever_created: Vec<JournalIdentifier>,
@@ -874,6 +874,11 @@ impl FleetOps {
         {
             assert_reachable!("fleet: an operator forgets a cell its machines do not know");
             self.cell = None;
+            // The init this client saw end was that cell's: the cell it
+            // learns next may still be initializing (#454 (control plane
+            // meets chaos): witness 2649599687404826405, a cell lost after
+            // its init ended and another one formed).
+            self.initialized = false;
         }
     }
 

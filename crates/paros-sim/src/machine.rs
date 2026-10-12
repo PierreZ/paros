@@ -270,6 +270,16 @@ pub(crate) fn wiped_ids(state: &StateHandle) -> BTreeSet<u64> {
         .collect()
 }
 
+/// The machines `cell add-machine` admitted into their cell (#216): with the
+/// founding members, the only ones that ever serve its journals.
+pub(crate) fn admitted_ids(state: &StateHandle) -> BTreeSet<u64> {
+    lock(&machine_board(state))
+        .admitted
+        .keys()
+        .copied()
+        .collect()
+}
+
 /// The admitted machines cut off from the cell's control journals (#501):
 /// every founding member their durable book names (the cache, else the
 /// admission) is wiped, or renamed since under a name the book does not
