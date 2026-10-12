@@ -53,7 +53,6 @@ impl FaultInjector for LaggingAcceptor {
             return Ok(());
         }
         let time = ctx.time();
-        let deadline = crate::CHAOS_DURATION + LATE_WINDOW;
         if time
             .sleep(Duration::from_millis(sim_random_range(START)))
             .await
@@ -72,7 +71,7 @@ impl FaultInjector for LaggingAcceptor {
             return Ok(());
         };
         loop {
-            if time.now() >= deadline || ctx.chaos_shutdown().is_cancelled() {
+            if crate::past_cutoff(time.now(), LATE_WINDOW) || ctx.chaos_shutdown().is_cancelled() {
                 return Ok(());
             }
             if !ctx.is_dead(&target)
@@ -94,7 +93,7 @@ impl FaultInjector for LaggingAcceptor {
             if audit.floor_passed(rank) {
                 break true;
             }
-            if time.now() >= deadline || time.sleep(WATCH).await.is_err() {
+            if crate::past_cutoff(time.now(), LATE_WINDOW) || time.sleep(WATCH).await.is_err() {
                 break false;
             }
         };

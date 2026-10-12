@@ -30,11 +30,11 @@ use super::outage::{LossShape, POLL, STRAGGLER, may_strike, plan_losses, strike}
 /// back last still leaves the tail most of its budget to converge in.
 pub(crate) const LATE_WINDOW: Duration = Duration::from_secs(4);
 
-/// The last instant the late outage may strike, and the owner's
-/// after-claim removal stays armed on a scenario seed
+/// Whether the last instant the late outage may strike passed, and with
+/// it the owner's after-claim removal stops being armed on a scenario seed
 /// (`ChainWorkload`'s `remove_next`).
-pub(crate) fn late_deadline() -> Duration {
-    Duration::from_millis(crate::CHAOS_DURATION_MS) + LATE_WINDOW
+pub(crate) fn past_late_deadline(now: Duration) -> bool {
+    crate::past_cutoff(now, LATE_WINDOW)
 }
 
 const _: () = assert!(LATE_WINDOW.as_millis() + STRAGGLER.end.as_millis() < 45_000);
@@ -56,7 +56,7 @@ impl FaultInjector for LateOutage {
         let time = ctx.time();
         let main = crate::shape::journals(ctx.state()).main;
         loop {
-            if time.now() >= late_deadline() {
+            if past_late_deadline(time.now()) {
                 return Ok(());
             }
             if crate::audit::audit_world_for(ctx.state(), main).has_departure() {
@@ -69,7 +69,7 @@ impl FaultInjector for LateOutage {
                 return Ok(());
             }
         }
-        if time.now() >= Duration::from_millis(crate::CHAOS_DURATION_MS) {
+        if !crate::in_chaos() {
             assert_reachable!("outage: a departed straggler's outage strikes in the recovery tail");
         }
         // The loss is planned at the instant of the strike, with no await

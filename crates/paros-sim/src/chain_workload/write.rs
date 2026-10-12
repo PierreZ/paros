@@ -4,11 +4,10 @@
 use std::future::Future;
 use std::time::Duration;
 
-use moonpool_sim::{TimeProvider, assert_always, assert_reachable, buggify_with_prob};
+use moonpool_sim::{assert_always, assert_reachable, buggify_with_prob};
 use paros::client::{Resolution, TruncateOutcome, WriteOptions, WriteOutcome, Writer};
 use paros::{Command, Entry, LeaderUuid, Value, command_hash};
 
-use crate::CHAOS_DURATION_MS;
 use crate::audit::AuditWorld;
 use crate::chain::{hash_text, user_command_hash};
 
@@ -206,7 +205,6 @@ impl ChainWorkload {
             retarget,
             server_count,
             target,
-            time,
             ..
         } = *step;
         // Race 1 (#205), mid-run: an owner pipelines a burst at
@@ -279,9 +277,8 @@ impl ChainWorkload {
         // on a write that may still land.
         let ack_race = op == WRITE && writer.owned().is_some() && buggify_with_prob!(0.25);
         #[allow(clippy::cast_precision_loss)]
-        let abandon = !ack_race
-            && time.now() < Duration::from_millis(CHAOS_DURATION_MS)
-            && buggify_with_prob!(config.abandon_pct as f64 / 100.0);
+        let abandon =
+            !ack_race && crate::in_chaos() && buggify_with_prob!(config.abandon_pct as f64 / 100.0);
         if abandon {
             // BUGGIFY pairing: the deliberate mid-flight
             // abandonment (the honest-ambiguity generator) fires.

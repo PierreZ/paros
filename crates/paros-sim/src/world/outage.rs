@@ -47,10 +47,11 @@ use moonpool_sim::{
 /// because the cluster decides little early in the window (over a thousand
 /// seeds, a tenth of the first decisions land before 3.5 s and half after
 /// 5 s; the departed-straggler shape needs a claim, a reconfiguration and
-/// its election first, 2 to 3.5 s on a kind seed), and inside it, as every
-/// new fault is.
+/// its election first, 2 to 3.5 s on a kind seed), and inside the
+/// shortest run, as every new fault is (#454 (the control plane meets
+/// chaos): chaos lasts the clients' whole run, `shape::run_end`).
 const START: std::ops::Range<Duration> =
-    Duration::from_millis(2_500)..Duration::from_millis(crate::CHAOS_DURATION_MS - 100);
+    Duration::from_millis(2_500)..crate::RUN_FLOOR.saturating_sub(Duration::from_millis(100));
 
 /// How long each victim stays down. Floor 20 ms: a reboot, and longer than
 /// [`POLL`], so the losses are planned while every victim is still down.

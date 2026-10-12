@@ -13,8 +13,6 @@
 //! gone, and a leader must refuse the no-op fill a `none` majority would
 //! otherwise license. Every other seed keeps moonpool's outage alone.
 
-use std::time::Duration;
-
 use async_trait::async_trait;
 use moonpool_sim::{FaultContext, FaultInjector, SimulationResult, TimeProvider, assert_reachable};
 
@@ -36,9 +34,8 @@ impl FaultInjector for BareOutage {
         }
         let time = ctx.time();
         let main = crate::shape::journals(ctx.state()).main;
-        let chaos = Duration::from_millis(crate::CHAOS_DURATION_MS);
         loop {
-            if time.now() >= chaos || ctx.chaos_shutdown().is_cancelled() {
+            if !crate::in_chaos() || ctx.chaos_shutdown().is_cancelled() {
                 return Ok(());
             }
             let decided = crate::audit::audit_world_for(ctx.state(), main).decided_slots();

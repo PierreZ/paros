@@ -214,14 +214,14 @@ impl<T: TimeProvider> NodeAudit<T> {
                 { "node" => node.0, "journal" => journal.to_string(), "command" => vhash }
             );
         }
-        let in_chaos = self.time.now() < crate::CHAOS_DURATION;
+        let in_chaos = crate::in_chaos();
         board.applied(*journal, in_chaos);
     }
 
     /// The chaos window must hold a working cell, or every write,
     /// reconfiguration and crash-hint site stays silent (#495).
     fn elected_in_chaos(&self) {
-        if self.time.now() < crate::CHAOS_DURATION {
+        if crate::in_chaos() {
             let mut st = self.state();
             reach_once!(
                 st.elected_in_chaos,

@@ -49,7 +49,7 @@ impl FaultInjector for WipedFounder {
         let after_vote = moonpool_sim::sim_random_bool(0.5);
         let time = ctx.time();
         let target = loop {
-            if time.now() >= crate::CHAOS_DURATION || ctx.chaos_shutdown().is_cancelled() {
+            if !crate::in_chaos() || ctx.chaos_shutdown().is_cancelled() {
                 return Ok(());
             }
             let target = crate::machine::wipe_target(ctx.state(), after_vote, |ip| ctx.is_dead(ip));

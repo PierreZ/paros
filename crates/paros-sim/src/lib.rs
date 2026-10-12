@@ -194,33 +194,51 @@ pub const MUTANT_SEEDS: u64 = 300;
 /// A schedule parameter, never buggified.
 pub const MUTANT_BATCH: u64 = 20;
 
-/// Simulated window (ms) over which chaos fires — network faults, attrition
-/// reboots, and the paros-side driver/storage perturbations. It ends well
-/// before the workload does, so what follows is a recovery tail:
+/// The chaos phase lasts the clients' whole run (#454 (the control plane
+/// meets chaos), moonpool's `chaos_until_run_ends`), as `FoundationDB`'s
+/// fault workloads last a test's whole duration:
 ///
 /// ```text
-/// t = 0 .. CHAOS_DURATION_MS      workload + chaos (network, attrition, BUGGIFY)
-/// t = CHAOS_DURATION_MS           chaos_duration expires
-///                                   → Moonpool enters recovery mode:
-///                                       no new simulator faults,
-///                                       partitions in force are healed,
-///                                       persistent damage is kept
-///                                   → paros stops its own driver-hook and
-///                                     storage-fault injection at the same cutoff
-/// t = CHAOS_DURATION_MS ..        the quiet tail: election, `Accept` re-sends,
-///     recovery budget               gap fill, catch-up, snapshot transfer,
-///                                   chunk repair — real protocol recovery
-/// end of the tail                 the client-side and audit-side checks
+/// t = 0 .. run end                 setup, `init`, every client operation
+///                                    under chaos (network, storage, attrition,
+///                                    gray failure, BUGGIFY, `hint!` strikes)
+/// the last client's run() returns  moonpool enters recovery mode:
+///                                    no new simulator fault, partitions in
+///                                    force healed, persistent damage kept;
+///                                    paros's own fault coins stop with it
+///                                    (`in_chaos`)
+/// check()                          the quiet tail on the live cluster:
+///                                    election, re-sends, catch-up, the
+///                                    recovery batch, the control plane's
+///                                    settle, the full read-back and every
+///                                    convergence oracle
 /// ```
 ///
-/// The tail is the workload's own lifetime (its buggified `recovery_budget_ms`,
-/// an order of magnitude longer than this window). Convergence is judged only
-/// at the end of that tail. **Never buggified**: it is the clock the verdict is
-/// measured against, not a shape the run takes.
-pub(crate) const CHAOS_DURATION_MS: u64 = 4_000;
-/// [`CHAOS_DURATION_MS`] as a `Duration`: the cutoff every role's hooks and
-/// fault coins share (`crate::process`).
-pub(crate) const CHAOS_DURATION: Duration = Duration::from_millis(CHAOS_DURATION_MS);
+/// The run's end is a per-seed knob (`shape::run_end`, 30–120 s); the tail
+/// is the workload's `recovery_budget_ms`. This cap only bounds a run whose
+/// last step overruns its end. It is also the reference length of a gray
+/// failure's window ([`chaos_surfaces`]). **Never buggified.**
+pub(crate) const CHAOS_CAP: Duration = Duration::from_secs(150);
+
+/// A gray failure's slow window, as a fraction of [`CHAOS_CAP`].
+const GRAY_WINDOW: std::ops::RangeInclusive<f64> = 0.05..=0.4;
+
+/// The shortest run `shape::run_end` draws: a fault timed from the start
+/// of the run strikes before it (`world::outage`).
+pub(crate) const RUN_FLOOR: Duration = Duration::from_secs(30);
+
+/// Whether the run is still in its chaos phase: until the last client's
+/// `run()` returned. Every paros fault coin and scenario window asks it.
+pub(crate) fn in_chaos() -> bool {
+    moonpool_sim::in_chaos()
+}
+
+/// Whether `now` is at least `after` past the chaos cutoff; false while
+/// chaos lasts. A scenario that may strike a bounded time into the quiet
+/// tail (`world::late_outage::LATE_WINDOW`) times itself with it.
+pub(crate) fn past_cutoff(now: Duration, after: Duration) -> bool {
+    moonpool_sim::chaos_ended_at().is_some_and(|at| now >= at + after)
+}
 
 /// The main campaign's chaos surfaces: swarm network turbulence, one
 /// crash/restart attrition regime **per process group**, and buggified
@@ -266,8 +284,10 @@ pub(crate) const CHAOS_DURATION: Duration = Duration::from_millis(CHAOS_DURATION
 /// process's one core, and so does every byte it sends or writes. A busy
 /// process answers late, and its `Load` reports real CPU numbers.
 ///
-/// `Chaos::GrayFailure` keeps a process alive and slow for 30 % to 100 % of
-/// the chaos window: its CPU (on a CPU-model seed), its disk and its network
+/// `Chaos::GrayFailure` keeps a process alive and slow for 5 % to 40 % of
+/// [`CHAOS_CAP`] (7.5 to 60 s, [`GRAY_WINDOW`]), starting anywhere in it, so
+/// on a short run part of it falls in the run and the rest is cleared by the
+/// cutoff: its CPU (on a CPU-model seed), its disk and its network
 /// are each slowed or not by the seed's swarm mask. Two regimes, each with a
 /// budget of one slow process: the acceptor group, so a quorum of healthy
 /// acceptors stays possible beside the one acceptor the attrition may kill,
@@ -319,11 +339,17 @@ fn chaos_surfaces() -> [Chaos; 13] {
         Chaos::Storage(ChaosMode::Swarm),
         Chaos::Cpu(ChaosMode::Swarm),
         Chaos::GrayFailure {
-            config: GrayFailure::new(1).victims(AttritionVictims::group(ACCEPTOR_GROUP)),
+            config: GrayFailure {
+                window: GRAY_WINDOW,
+                ..GrayFailure::new(1).victims(AttritionVictims::group(ACCEPTOR_GROUP))
+            },
             mode: ChaosMode::Swarm,
         },
         Chaos::GrayFailure {
-            config: GrayFailure::new(1).victims(AttritionVictims::group(MACHINE_GROUP)),
+            config: GrayFailure {
+                window: GRAY_WINDOW,
+                ..GrayFailure::new(1).victims(AttritionVictims::group(MACHINE_GROUP))
+            },
             mode: ChaosMode::Swarm,
         },
     ]
@@ -400,7 +426,8 @@ fn chain_builder(digest: Option<DigestSink>) -> SimulationBuilder {
         .fault_factory(|| Box::new(crate::world::replaced_founder::ReplacedFounder))
         .fault_factory(|| Box::new(crate::world::lagging_acceptor::LaggingAcceptor))
         .fault_factory(|| Box::new(crate::world::split_floor::SplitFloor))
-        .chaos_duration(CHAOS_DURATION)
+        .chaos_duration(CHAOS_CAP)
+        .chaos_until_run_ends()
         .swarm_operations()
 }
 

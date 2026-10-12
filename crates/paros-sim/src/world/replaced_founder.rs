@@ -38,7 +38,7 @@ impl FaultInjector for ReplacedFounder {
         }
         let time = ctx.time();
         let target = loop {
-            if time.now() >= crate::CHAOS_DURATION + LATE_WINDOW {
+            if crate::past_cutoff(time.now(), LATE_WINDOW) {
                 return Ok(());
             }
             if let Some(target) = crate::machine::replace_target(ctx.state(), |ip| ctx.is_dead(ip))

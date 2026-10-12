@@ -51,7 +51,7 @@ impl FaultInjector for SilentMachine {
         }
         let time = ctx.time();
         let target = loop {
-            if time.now() >= crate::CHAOS_DURATION + LATE_WINDOW {
+            if crate::past_cutoff(time.now(), LATE_WINDOW) {
                 return Ok(());
             }
             if time.now() >= EARLIEST

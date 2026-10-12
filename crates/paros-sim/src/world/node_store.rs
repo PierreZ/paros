@@ -15,9 +15,7 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 
-use moonpool_sim::{
-    SimStorageProvider, SimTimeProvider, StateHandle, TimeProvider, assert_reachable,
-};
+use moonpool_sim::{SimStorageProvider, StateHandle, assert_reachable};
 use paros::{
     Ballot, Command, Config, HardState, JournalState, JournalStorage, LogStorage, MustSync, Slot,
     Storage, StorageError,
@@ -38,10 +36,9 @@ pub(crate) struct LedgeredJournal {
     /// The run's state: where a commit in flight registers for the cut's
     /// budget ([`super::cut`]).
     state: StateHandle,
-    /// The clock and the end of this store's chaos window: the injector's
-    /// damage lands only inside it.
-    time: SimTimeProvider,
-    chaos_until: std::time::Duration,
+    /// Whether the injector's damage may land on this store while the
+    /// run's chaos lasts (a quiet store never takes it).
+    chaotic: bool,
     /// The shared checker, told what each commit has in flight (#264).
     checker: Arc<AuditWorld>,
     /// The node's id, the checker's key.
@@ -78,8 +75,9 @@ enum Judging {
 /// whether the ledgered injector aims at it, and until when.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct DamagePolicy {
-    /// The end of the injector's chaos window: zero for a quiet store.
-    pub(crate) chaos_until: std::time::Duration,
+    /// Whether the injector may damage the store while the run's chaos
+    /// lasts: false for a quiet store.
+    pub(crate) chaotic: bool,
     /// See [`LedgeredJournal`]'s `cut_budget`.
     pub(crate) cut_budget: Option<usize>,
     /// See [`LedgeredJournal`]'s `inject`.
@@ -111,7 +109,7 @@ impl LedgeredJournal {
             let (ip, node, in_chaos) = (
                 self.ip.clone(),
                 self.node,
-                self.time.now() < self.chaos_until,
+                self.chaotic && crate::in_chaos(),
             );
             self.world.upgrade().and_then(|w| {
                 w.lock()
@@ -142,7 +140,7 @@ impl LedgeredJournal {
         inner: JournalStorage<SimStorageProvider>,
         world: Weak<Mutex<StorageWorld>>,
         ip: String,
-        (state, time): (StateHandle, SimTimeProvider),
+        state: StateHandle,
         checker: Arc<AuditWorld>,
         damage: DamagePolicy,
         provider: SimStorageProvider,
@@ -159,8 +157,7 @@ impl LedgeredJournal {
         Self {
             node,
             state,
-            time,
-            chaos_until: damage.chaos_until,
+            chaotic: damage.chaotic,
             cut_budget: damage.cut_budget,
             inject: damage.inject,
             provider,
