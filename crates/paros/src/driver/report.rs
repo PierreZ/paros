@@ -259,13 +259,17 @@ pub(crate) fn maintain<P: Providers, A: Audit>(
     if node.leader().is_some_and(|leader| leader.0 != self_id) {
         *failed_campaigns = 0;
     }
-    // A leader alone in its pool has no rival to duel: its leadership is
-    // the settlement. Without this, a sole node never hears another lead,
-    // so each resignation of the whole run adds to one streak, and the
-    // recovery tail waits out the capped backoff with no leader (#454
-    // (control plane meets chaos): witness seed 7347777281636261941, an
-    // explored timeline, a one-member cell leaderless for 29 s in its tail).
-    if *failed_campaigns > 0 && node.is_leader() && node.pool() == [NodeId(self_id)] {
+    // A leader that is the only acceptor of its configuration has no
+    // rival to duel: no other node's promise can depose it, so its
+    // leadership is the settlement. Without this, such a node never hears
+    // another lead, so each resignation of the whole run adds to one
+    // streak, and the recovery tail waits out the capped backoff with no
+    // leader (#454 (control plane meets chaos): witness seed
+    // 7347777281636261941, an explored timeline, and hunt seed
+    // 11256698287555884936, a one-member cell leaderless for 29 s and
+    // 33 s of its tail).
+    if *failed_campaigns > 0 && node.is_leader() && node.acceptors().members() == [NodeId(self_id)]
+    {
         moonpool_assertions::reachable!(
             "driver: a sole node's leadership ends its election backoff"
         );
