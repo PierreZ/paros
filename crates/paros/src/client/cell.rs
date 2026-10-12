@@ -64,12 +64,8 @@ impl CellSession {
     /// under leader uuids drawn from `seed`, folding it over the genesis
     /// pool of `members` — every founding member, as the cell control
     /// journal names them. `founders` are the founding members the caller
-    /// reached, with their addresses: a founder it did not reach is still a
-    /// founder. The control journal is never checkpointed here.
-    ///
-    /// # Panics
-    ///
-    /// `members` is empty, or `founders` names a machine outside it.
+    /// reached, with their addresses (a machine outside `members` is
+    /// dropped): a founder it did not reach is still a founder. The control journal is never checkpointed here.
     #[must_use]
     pub fn new(
         journals: ControlJournals,
@@ -78,7 +74,7 @@ impl CellSession {
         seed: u128,
         policy: CheckpointPolicy,
     ) -> Self {
-        let members = founding(members, &founders);
+        let (members, founders) = founding(members, founders);
         let genesis = Registry::new(members.iter().copied());
         Self {
             journals,
@@ -92,10 +88,6 @@ impl CellSession {
     /// A session like [`CellSession::new`] that writes the cell control
     /// journal under the one leader uuid `uuid`: the cell coordinator's term
     /// uuid (#240), installed by its first claim.
-    ///
-    /// # Panics
-    ///
-    /// As [`CellSession::new`].
     #[must_use]
     pub fn with_leader(
         journals: ControlJournals,
@@ -104,7 +96,7 @@ impl CellSession {
         uuid: LeaderUuid,
         policy: CheckpointPolicy,
     ) -> Self {
-        let members = founding(members, &founders);
+        let (members, founders) = founding(members, founders);
         let genesis = Registry::new(members.iter().copied());
         Self {
             journals,
@@ -438,16 +430,15 @@ impl CellSession {
     }
 }
 
-/// `members` in id order, once each, checked against the reached
-/// `founders`: every one of them is a founding member.
-fn founding(members: &[NodeId], founders: &[(NodeId, Address)]) -> Vec<NodeId> {
+/// `members` in id order, once each, and the reached `founders` among
+/// them: a reached machine outside the founding members is no founder.
+fn founding(
+    members: &[NodeId],
+    mut founders: Vec<(NodeId, Address)>,
+) -> (Vec<NodeId>, Vec<(NodeId, Address)>) {
     let mut members = members.to_vec();
     members.sort_unstable();
     members.dedup();
-    assert!(!members.is_empty(), "a cell has founding members");
-    assert!(
-        founders.iter().all(|(id, _)| members.contains(id)),
-        "a session's reached founders are founding members"
-    );
-    members
+    founders.retain(|(id, _)| members.contains(id));
+    (members, founders)
 }
