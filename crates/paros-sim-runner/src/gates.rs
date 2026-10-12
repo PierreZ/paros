@@ -1048,6 +1048,10 @@ pub const RARE: &[Rare] = &[
         msg: "outage: a departed straggler's outage strikes in the recovery tail",
         reason: "marginal under whole-run chaos: the departure lands inside the chaos window on most seeds, so the outage strikes there; missed by the sweep of PR #510 (whole-run chaos) (#454 (control plane meets chaos), #486)",
     },
+    Rare {
+        msg: "gc: an operator probes the members' beliefs before a retirement",
+        reason: "missed by the sweep of PR #510 (whole-run chaos): it needs an effective GC floor at a retirement step, rarer under whole-run chaos (#454 (control plane meets chaos), #486)",
+    },
 ];
 
 /// What the sweep ran of the declared gates.

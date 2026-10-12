@@ -15,7 +15,11 @@
 //! A store registers each commit that writes while it is in flight
 //! ([`InFlight`]). A hint kills the whole process, so the veto permits a
 //! kill only if every commit the process has in flight fits its budget,
-//! and then spends each budget: a yes is a kill.
+//! and then spends each budget: a yes is a kill. Moonpool asks the same
+//! veto before an attrition regime's timed reboot (moonpool#332): a timed
+//! reboot lands inside a commit too, and under whole-run chaos one tore a
+//! matchmaker's one-sync registry commit outside its budget (#454 (control
+//! plane meets chaos), witness seed 6698767524067190541).
 //!
 //! A correlated outage kills every acceptor and proxy leader at one instant
 //! (#332): moonpool's `Chaos::Outage` asks the published [`OutageVeto`],
