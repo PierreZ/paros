@@ -211,8 +211,7 @@ pub(super) struct ChainConfig {
     /// superseded one does. Either extreme is valid: the journal's
     /// guarantees hold under any client.
     pub(super) reinstate_pct: u64,
-    /// The recovery tail, an order of magnitude past the 4 s chaos window and
-    /// past the longest attrition restart (5 s after swarm rescaling) plus
+    /// The recovery tail in `check()`, past the longest attrition restart (5 s after swarm rescaling) plus
     /// the below-floor snapshot recovery it forces. **Never below 45 s**.
     pub(super) recovery_budget_ms: u64,
     /// Proposals in the post-chaos recovery batch. Floor 1: convergence
@@ -347,8 +346,8 @@ pub(super) struct ChainConfig {
     pub(super) init_patience_ms: u64,
     /// How long client 0 holds the control journals' seed down for the
     /// static-stability shape (#247). Floor 200 ms: a blip a tenant journal
-    /// may commit through or not; ceiling 3 s, inside the 4 s chaos window,
-    /// so the seed is back for the recovery tail.
+    /// may commit through or not; ceiling 3 s, inside the chaos window (at least
+    /// `RUN_FLOOR`), so the seed is back for the recovery tail.
     pub(super) parent_hold_ms: u64,
     /// How long an owner keeps re-asking its opening claim while the
     /// cluster leaves it unresolved (unread, ambiguous, a redirect to
