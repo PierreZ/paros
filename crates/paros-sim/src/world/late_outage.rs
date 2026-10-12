@@ -4,10 +4,11 @@
 //! once the owner's member-removing reconfiguration took effect, early in
 //! the recovery tail.
 //!
-//! The scenario needs a claim, a removal and then the outage, but an owner
-//! wins its claim around 5.4 s into a run on the median, after the 4 s
-//! chaos window moonpool's own outage (`super::outage::regime`) must strike
-//! inside. So this injector waits for a configuration that removed a member
+//! The scenario needs a claim, a removal and then the outage. An owner
+//! wins its claim around 5.4 s into a run on the median, so since chaos
+//! lasts the whole run (#454 (control plane meets chaos)) the outage
+//! mostly strikes inside the chaos window; a late removal still strikes
+//! in the tail. So this injector waits for a configuration that removed a member
 //! of the bootstrap one ([`crate::audit::AuditWorld::has_departure`]), at most
 //! [`LATE_WINDOW`] into the tail, then takes every acceptor and proxy leader
 //! down at one instant, each back after its own delay and one straggler

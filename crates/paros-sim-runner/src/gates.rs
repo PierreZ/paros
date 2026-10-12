@@ -1040,6 +1040,14 @@ pub const RARE: &[Rare] = &[
         msg: "generation: a handover tells a behind member the set it replaces",
         reason: "fired on 0 of 3,100 hunt seeds, and once on a witness: it needs a publication cut short in the chaos window, and handovers mostly run in the recovery tail; a Publishing abandon site at 0.05 fired on 0 of 600 (#496 (two red hunt seeds), #484)",
     },
+    Rare {
+        msg: "gc: the client retires an acceptor the effective floor released",
+        reason: "fired on 0 of 400 hunt seeds under whole-run chaos: the node accepts its retirement (1 of 400), but chaos mostly loses the answer (#454 (control plane meets chaos), #486)",
+    },
+    Rare {
+        msg: "outage: a departed straggler's outage strikes in the recovery tail",
+        reason: "marginal under whole-run chaos: the departure lands inside the chaos window on most seeds, so the outage strikes there; missed by the sweep of PR #510 (whole-run chaos) (#454 (control plane meets chaos), #486)",
+    },
 ];
 
 /// What the sweep ran of the declared gates.

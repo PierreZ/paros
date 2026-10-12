@@ -138,7 +138,8 @@ pub struct DriverTunables {
     /// known: a failed campaign, or a leadership a rival deposed): the
     /// `k`-th consecutive one draws from `[T·2^j, 2·T·2^j)` with
     /// `j = min(k - 1, election_backoff_doublings)`, and hearing another
-    /// node lead resets it (leading does not). A fixed timeout below a Phase-1 round trip
+    /// node lead resets it (leading does not, except for a node alone in
+    /// its pool, which has no rival). A fixed timeout below a Phase-1 round trip
     /// livelocks for good: a sole candidate whose slowest promise always
     /// lands one round late abandons every round it opens (witness
     /// 2881076808784637484: `q1 = n` over a degraded link, 180 rounds in
