@@ -319,7 +319,11 @@ fn seen(answer: Answered<'_>) -> Option<Seen> {
 /// Judge a `Write` outcome against the oracles every answer passes: a node
 /// serves the journal the client names, and names a well-formed state. On
 /// a journal `created` at runtime (#189) an unknown answer is no verdict:
-/// a member that has not folded the create yet does not serve it. `node`
+/// a member that has not folded the create yet does not serve it. Nor is it
+/// from a joiner (#189): a joiner restarted by a storage fault serves its
+/// journals again only once its registry follower admits it (#454 (control
+/// plane meets chaos): hunt seed 5583448763827591485, a joiner that led the
+/// default journal refused it for 2 s after a failed sync). `node`
 /// is the node that answered and `journal` the one the client named, for
 /// the violation's detail (#265).
 pub(super) fn judged_write(
@@ -332,7 +336,7 @@ pub(super) fn judged_write(
         outcome != WriteOutcome::Malformed,
         "chain: a node answers a well-formed journal state"
     );
-    if created && outcome == WriteOutcome::UnknownJournal {
+    if (created || crate::roles::is_joiner(node)) && outcome == WriteOutcome::UnknownJournal {
         assert_reachable!("system: a member that has not folded a create refuses its journal");
         return WriteOutcome::Redirect { leader: None };
     }
@@ -359,7 +363,7 @@ pub(super) fn judged_set_leader(
         outcome != SetLeaderOutcome::Malformed,
         "chain: a node answers a well-formed journal state"
     );
-    if created && outcome == SetLeaderOutcome::UnknownJournal {
+    if (created || crate::roles::is_joiner(node)) && outcome == SetLeaderOutcome::UnknownJournal {
         assert_reachable!("system: a member that has not folded a create refuses its journal");
         return SetLeaderOutcome::Redirect { leader: None };
     }
