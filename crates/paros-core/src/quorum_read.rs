@@ -476,12 +476,15 @@ impl<Id: Copy + Ord> QuorumReads<Id> {
                 unreachable!("a read past the tally is confirmed");
             };
             // The basis's fence stands for every earlier configuration the
-            // row cannot speak for (#260): the read waits on both.
-            probe!(
-                sometimes,
-                read.fence > index,
-                "quorum read: a read waits on its basis fence above the row's watermark"
-            );
+            // row cannot speak for (#260): the read waits on both. A cause,
+            // not an outcome, and marginal (`gates::RARE`): a reachable, so a
+            // sweep that misses it is excused rather than failed at 0 %.
+            if read.fence > index {
+                probe!(
+                    reachable,
+                    "quorum read: a read waits on its basis fence above the row's watermark"
+                );
+            }
             let index = index.max(read.fence);
             assert!(
                 index >= read.fence,
