@@ -67,13 +67,19 @@ impl FleetOps {
             assert_reachable!("admit: an admission finds no cell formed yet");
             return;
         };
+        let members: Vec<NodeId> = cell.members.iter().copied().map(NodeId).collect();
         let founders: Vec<(NodeId, Address)> = cell
             .servers
             .iter()
             .map(|(id, addr)| (NodeId(*id), addr.clone()))
             .collect();
-        let mut session =
-            CellSession::new(cell.journals, founders, self.leader_seeds.next(), policy);
+        let mut session = CellSession::new(
+            cell.journals,
+            &members,
+            founders,
+            self.leader_seeds.next(),
+            policy,
+        );
         let client = cell.client.clone();
         let first = cell.first(draw);
         let providers = self.connector.providers().clone();
@@ -124,13 +130,19 @@ impl FleetOps {
         let Some(cell) = self.learn(ctx).await else {
             return false;
         };
+        let members: Vec<NodeId> = cell.members.iter().copied().map(NodeId).collect();
         let founders: Vec<(NodeId, Address)> = cell
             .servers
             .iter()
             .map(|(id, addr)| (NodeId(*id), addr.clone()))
             .collect();
-        let mut session =
-            CellSession::new(cell.journals, founders, self.leader_seeds.next(), policy);
+        let mut session = CellSession::new(
+            cell.journals,
+            &members,
+            founders,
+            self.leader_seeds.next(),
+            policy,
+        );
         let providers = self.connector.providers().clone();
         let rpc = self.connector.rpc().clone();
         let names = self.connector.names().clone();
@@ -180,6 +192,15 @@ impl FleetOps {
                     );
                     if run.steps == [Stage::Admit] {
                         assert_reachable!("admit: an admission resumes after its registration");
+                    }
+                    if session.founders().len() < session.members().len() {
+                        // The admission still names every founder: the
+                        // admitted machine's journals derive the same
+                        // matchmaker set as the founders' (the matchmaker
+                        // audit judges it at their boot).
+                        assert_reachable!(
+                            "admit: an admission names a founder the operator did not reach"
+                        );
                     }
                 }
                 assert_sometimes!(

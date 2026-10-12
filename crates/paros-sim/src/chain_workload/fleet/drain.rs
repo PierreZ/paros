@@ -37,13 +37,19 @@ impl FleetOps {
         let Some(cell) = self.learn(ctx).await else {
             return false;
         };
+        let members: Vec<NodeId> = cell.members.iter().copied().map(NodeId).collect();
         let founders: Vec<(NodeId, paros::Address)> = cell
             .servers
             .iter()
             .map(|(id, addr)| (NodeId(*id), addr.clone()))
             .collect();
-        let mut session =
-            CellSession::new(cell.journals, founders, self.leader_seeds.next(), policy);
+        let mut session = CellSession::new(
+            cell.journals,
+            &members,
+            founders,
+            self.leader_seeds.next(),
+            policy,
+        );
         let first = cell.first(draw);
         if session.open(&cell.client, first).await.is_err() {
             return false;

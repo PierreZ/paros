@@ -50,6 +50,9 @@ docker compose run --rm parosctl write T/J hello world --leader 7
 docker compose run --rm parosctl read T/J
 ```
 
+Every session can run over TLS, mutual by default: `parosctl tls init` writes the
+authority and every certificate in one step.
+
 The copy-paste demo, with Docker Compose or three local processes, is
 [`DEMO.md`](DEMO.md). The walkthrough — init, write and read, kill and restart a
 machine, supersede a writer, lose a disk — is

@@ -1606,6 +1606,35 @@ touched: the tenants' journals have their own quorums.
   and takes a **recovery id** recorded in the journal so two recoveries cannot run at once. Both
   come from FDB's metacluster restore.
 
+### 3.11 Transport security
+
+**Every session can be TLS 1.3, and mutual TLS by default** (decided on 2026-10-11, PR #509
+(mutual TLS), over moonpool #330 (mutual TLS)). A process makes one choice at its start, a
+`paros::Transport`: plaintext, or TLS from three PEM files. A listening process serves and
+dials with the same choice, so every process of a cell must make the same one.
+
+- **One authority per universe.** Every leaf names its holder
+  `spiffe://<universe>/<role>/<name>`, with the roles `machine`, `frontend`, `admin` and
+  `client`. A machine's or a frontend's leaf also proves the DNS name `paros`, the one name
+  every client expects: a client dials an address, and an address changes (#257), so the
+  client checks the authority and the shared name, never the address.
+- **Mutual TLS decides who may open a session, not what it may do.** The servers ask every
+  caller for a certificate (`PAROS_TLS_CLIENT_AUTH=required`, the default; `optional` and
+  `off` are the other modes). Every endpoint stays public. Authorization from the certificate
+  identity is a later step.
+- **Classic TLS stays.** `off` is server-authenticated TLS: any caller that trusts the
+  authority opens a session.
+- **Operators never write a certificate by hand.** `parosctl tls init` writes the authority
+  and a certificate per machine, frontend and admin, and prints the variables each process
+  reads; `tls issue`, `tls show` and `tls verify` handle one file at a time.
+- **The simulation runs TLS on about half the seeds** (decided on 2026-10-11): a dice
+  rolled at the start of a seed turns TLS on for every runtime, with one mode per seed. Every
+  process issues its leaf at its boot with the shipped issuer, from seeded keys. The issuer's
+  BUGGIFY site can flaw a leaf; the harness reissues it. Flawed handshakes are moonpool's own
+  campaign (`sim-rpc-tls`).
+- **Deferred:** byte-identical handshakes under simulation (moonpool's phase 4), certificate
+  rotation without a restart, and identity-based authorization.
+
 ## 4. Roles
 
 All six roles of Compartmentalized Paxos, plus the matchmakers of Matchmaker Paxos, each

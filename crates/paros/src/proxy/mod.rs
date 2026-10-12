@@ -44,6 +44,7 @@ use crate::driver::events::{command_hash, message_kind, message_route};
 use crate::driver::transport::{LaneOpener, Outbound, send_messages};
 use crate::driver::{DriverTunables, RunError};
 use crate::rpc::serve_deliveries;
+use crate::transport::Transport;
 
 /// A proxy leader's deployment data: its identity in the proxy namespace and
 /// the bootstrap acceptor configuration it fans out to until a delegation
@@ -272,6 +273,7 @@ pub async fn run_proxy<P, A>(
     members: Vec<(NodeId, String)>,
     replicas: Vec<(NodeId, String)>,
     tunables: DriverTunables,
+    transport: Transport,
     shutdown: CancellationToken,
     audit: &A,
 ) -> Result<(), RunError>
@@ -289,7 +291,7 @@ where
 
     // The edge serves the `Deliver` lane alone: nothing else a node serves
     // is a proxy leader's, and a call to it is refused `EndpointNotFound`.
-    let mut edge = RpcEdge::listen(&providers, &local_addr, "proxy", &tunables).await?;
+    let mut edge = RpcEdge::listen(&providers, &local_addr, "proxy", &tunables, &transport).await?;
     let mut inbox = serve_deliveries(
         &providers,
         edge.handle(),

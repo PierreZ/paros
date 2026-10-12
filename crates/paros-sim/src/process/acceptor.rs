@@ -320,6 +320,7 @@ pub(super) async fn run_acceptor(
             system.as_ref().map(|(plan, _)| plan.clone()),
             None,
             tunables,
+            crate::tls::serving(ctx, paros::tls::Role::Machine, my_ip)?,
             ctx.shutdown().clone(),
         ))
         .await

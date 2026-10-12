@@ -994,6 +994,42 @@ fn operator_slip() {
 /// journals' histories (#240): far above the workload's clients.
 const MACHINE_CLIENT_BASE: u64 = 1 << 32;
 
+/// The audit port of machine `rank`, advertised at `audit_addr`: each
+/// scope's `NodeAudit` (#294).
+fn machine_audits(
+    ctx: &SimContext,
+    audit_addr: Address,
+    rank: usize,
+) -> impl Fn(AuditScope) -> NodeAudit<SimTimeProvider> + Clone + Send + Sync + 'static {
+    let time = ctx.time().clone();
+    let state = ctx.state().clone();
+    move |scope: AuditScope| -> NodeAudit<SimTimeProvider> {
+        match scope {
+            AuditScope::Machine => NodeAudit::new(time.clone(), crate::audit::audit_world(&state))
+                .on_machines(machine_board(&state), audit_addr.clone()),
+            // The coordinator's calls join the control journals' histories
+            // (#240), as client `MACHINE_CLIENT_BASE + rank`.
+            AuditScope::Node(home) => {
+                NodeAudit::new(time.clone(), crate::audit::audit_world_for(&state, home))
+                    .on_machines(machine_board(&state), audit_addr.clone())
+                    .with_tenants(crate::audit::tenants::tenant_board(&state))
+                    .with_calls(Arc::new(
+                        crate::chain_workload::system::Announce::of_machine(
+                            &state,
+                            time.clone(),
+                            MACHINE_CLIENT_BASE + rank as u64,
+                        ),
+                    ))
+            }
+            AuditScope::Journal(journal) => {
+                NodeAudit::new(time.clone(), crate::audit::audit_world_for(&state, journal))
+                    .in_journal(journal, journal_board(&state))
+                    .with_tenants(crate::audit::tenants::tenant_board(&state))
+            }
+        }
+    }
+}
+
 /// One machine: the shipped lifecycle on this process's simulated disk. A
 /// process kill aborts it; the next incarnation reads its record back. The
 /// one loop here is `parosd`'s supervisor: a run that ended on a storage
@@ -1036,34 +1072,7 @@ async fn run_machine_role(
     let (listen, advertise) = boot_listen(ctx.state(), &layout, rank, my_ip, held)?;
     let RoleRig { incarnation, .. } = arm_role(ctx, my_ip);
     let tunables = incarnation.shape.tunables;
-    let time = ctx.time().clone();
-    let state = ctx.state().clone();
-    let audit_addr = addrs[rank].clone();
-    let audits = move |scope: AuditScope| -> NodeAudit<SimTimeProvider> {
-        match scope {
-            AuditScope::Machine => NodeAudit::new(time.clone(), crate::audit::audit_world(&state))
-                .on_machines(machine_board(&state), audit_addr.clone()),
-            // The coordinator's calls join the control journals' histories
-            // (#240), as client `MACHINE_CLIENT_BASE + rank`.
-            AuditScope::Node(home) => {
-                NodeAudit::new(time.clone(), crate::audit::audit_world_for(&state, home))
-                    .on_machines(machine_board(&state), audit_addr.clone())
-                    .with_tenants(crate::audit::tenants::tenant_board(&state))
-                    .with_calls(Arc::new(
-                        crate::chain_workload::system::Announce::of_machine(
-                            &state,
-                            time.clone(),
-                            MACHINE_CLIENT_BASE + rank as u64,
-                        ),
-                    ))
-            }
-            AuditScope::Journal(journal) => {
-                NodeAudit::new(time.clone(), crate::audit::audit_world_for(&state, journal))
-                    .in_journal(journal, journal_board(&state))
-                    .with_tenants(crate::audit::tenants::tenant_board(&state))
-            }
-        }
-    };
+    let audits = machine_audits(ctx, addrs[rank].clone(), rank);
     operator_slip();
     let addresses =
         MachineAddresses::new(listen, Some(advertise)).map_err(SimulationError::InvalidState)?;
@@ -1077,6 +1086,7 @@ async fn run_machine_role(
             addresses.clone(),
             names.clone(),
             tunables,
+            crate::tls::serving(ctx, paros::tls::Role::Machine, ctx.my_ip())?,
             ctx.shutdown().clone(),
         ))
         .await;

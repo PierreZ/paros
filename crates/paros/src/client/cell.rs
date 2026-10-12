@@ -48,8 +48,12 @@ const MAX_STEPS: usize = 4;
 #[derive(Clone, Debug)]
 pub struct CellSession {
     journals: ControlJournals,
-    /// The founding members the caller knows, with their addresses: the
-    /// registry's genesis pool holds their ids only.
+    /// Every founding member, by id, in id order: the registry's genesis
+    /// pool and an admission's founders, whether or not the caller reached
+    /// it.
+    members: Vec<NodeId>,
+    /// The founding members the caller knows, with their addresses: some
+    /// of `members`, never another machine.
     founders: Vec<(NodeId, Address)>,
     cell: Checkpointer<Registry>,
     cell_open: bool,
@@ -58,18 +62,23 @@ pub struct CellSession {
 impl CellSession {
     /// A session over the cell `journals` names, writing its control journal
     /// under leader uuids drawn from `seed`, folding it over the genesis
-    /// pool of `founders` — the cell's founding members with their
-    /// addresses. The control journal is never checkpointed here.
+    /// pool of `members` — every founding member, as the cell control
+    /// journal names them. `founders` are the founding members the caller
+    /// reached, with their addresses (a machine outside `members` is
+    /// dropped): a founder it did not reach is still a founder. The control journal is never checkpointed here.
     #[must_use]
     pub fn new(
         journals: ControlJournals,
+        members: &[NodeId],
         founders: Vec<(NodeId, Address)>,
         seed: u128,
         policy: CheckpointPolicy,
     ) -> Self {
-        let genesis = Registry::new(founders.iter().map(|(id, _)| *id));
+        let (members, founders) = founding(members, founders);
+        let genesis = Registry::new(members.iter().copied());
         Self {
             journals,
+            members,
             founders,
             cell: Checkpointer::new(journals.cell, seed, genesis, policy),
             cell_open: false,
@@ -82,13 +91,16 @@ impl CellSession {
     #[must_use]
     pub fn with_leader(
         journals: ControlJournals,
+        members: &[NodeId],
         founders: Vec<(NodeId, Address)>,
         uuid: LeaderUuid,
         policy: CheckpointPolicy,
     ) -> Self {
-        let genesis = Registry::new(founders.iter().map(|(id, _)| *id));
+        let (members, founders) = founding(members, founders);
+        let genesis = Registry::new(members.iter().copied());
         Self {
             journals,
+            members,
             founders,
             cell: Checkpointer::with_uuid(journals.cell, uuid, genesis, policy),
             cell_open: false,
@@ -125,6 +137,12 @@ impl CellSession {
         &self.founders
     }
 
+    /// Every founding member, by id, in id order.
+    #[must_use]
+    pub fn members(&self) -> &[NodeId] {
+        &self.members
+    }
+
     /// The cell's control journal as this session last folded it.
     #[must_use]
     pub fn registry(&self) -> &Registry {
@@ -132,17 +150,24 @@ impl CellSession {
     }
 
     /// The admission this session hands machine `node`: the cell, its
-    /// control journals, and every machine of the cell it knows — the
-    /// founding members and every registered machine not retired — by id
-    /// and address. Two ids at one address are a wiped machine's old id
+    /// control journals, every founding member by id (reached or not: the
+    /// admitted machine's journals derive their matchmaker set from them),
+    /// and every machine of the cell it knows — the founding members it
+    /// reached and every registered machine not retired — by id and
+    /// address. Two ids at one address are a wiped machine's old id
     /// beside its new one: `node`, the machine this admits, then a founder,
     /// then the lowest id keeps the address, so every address names one
     /// machine. `node` answered at its address just now, so it wins even
     /// over the wiped founding member it replaced (#323: the cell heals
     /// around that dead member).
+    ///
+    /// # Panics
+    ///
+    /// The founding members are out of id order, which construction rules
+    /// out.
     #[must_use]
     pub fn admission(&self, node: NodeId) -> Admission {
-        let founder = |id: NodeId| self.founders.iter().any(|(f, _)| *f == id);
+        let founder = |id: NodeId| self.members.contains(&id);
         let rank = |id: NodeId| (id != node, !founder(id), id);
         let mut by_addr: BTreeMap<Address, NodeId> = BTreeMap::new();
         let registry = self.cell.state();
@@ -163,14 +188,16 @@ impl CellSession {
             by_addr.into_iter().map(|(addr, id)| (id, addr)).collect();
         members.sort_unstable();
         members.dedup_by_key(|(id, _)| *id);
-        let mut founders: Vec<NodeId> = self.founders.iter().map(|(id, _)| *id).collect();
-        founders.sort_unstable();
-        founders.dedup();
-        Admission {
+        let admission = Admission {
             cell: self.journals,
             members,
-            founders,
-        }
+            founders: self.members.clone(),
+        };
+        assert!(
+            admission.founders.windows(2).all(|w| w[0] < w[1]),
+            "an admission's founders are in id order"
+        );
+        admission
     }
 
     /// One step of admitting the machine at `target` (#216), dialed through
@@ -401,4 +428,17 @@ impl CellSession {
         }
         going_round(steps)
     }
+}
+
+/// `members` in id order, once each, and the reached `founders` among
+/// them: a reached machine outside the founding members is no founder.
+fn founding(
+    members: &[NodeId],
+    mut founders: Vec<(NodeId, Address)>,
+) -> (Vec<NodeId>, Vec<(NodeId, Address)>) {
+    let mut members = members.to_vec();
+    members.sort_unstable();
+    members.dedup();
+    founders.retain(|(id, _)| members.contains(id));
+    (members, founders)
 }

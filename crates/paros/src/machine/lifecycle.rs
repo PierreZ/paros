@@ -48,6 +48,7 @@ use super::{
     FormedCell, Joined, MachineFacts, ProviderDisk,
 };
 use crate::ControlPlan;
+use crate::transport::Transport;
 use crate::{Address, Audit, DriverTunables, Names, RunError};
 
 /// What a machine is configured with: the operator's half of its record.
@@ -271,6 +272,7 @@ pub async fn run_machine<P, S, A, F>(
     addresses: MachineAddresses,
     names: Names,
     tunables: DriverTunables,
+    transport: Transport,
     shutdown: CancellationToken,
 ) -> Result<(), MachineError>
 where
@@ -343,6 +345,7 @@ where
             &facts,
             &mut ledger,
             &tunables,
+            &transport,
             shutdown.clone(),
         )
         .await
@@ -365,9 +368,17 @@ where
         joined
     };
     match joined {
-        Joined::Founded(cell) => serve(providers, disk, audits, cell, &tunables, shutdown).await,
+        Joined::Founded(cell) => {
+            serve(
+                providers, disk, audits, cell, &tunables, transport, shutdown,
+            )
+            .await
+        }
         Joined::Admitted(admitted) => {
-            serve_admitted(providers, disk, audits, admitted, &tunables, shutdown).await
+            serve_admitted(
+                providers, disk, audits, admitted, &tunables, transport, shutdown,
+            )
+            .await
         }
     }
 }
@@ -525,6 +536,7 @@ async fn serve<P, S, A, F>(
     audits: F,
     cell: FormedCell,
     tunables: &DriverTunables,
+    transport: Transport,
     shutdown: CancellationToken,
 ) -> Result<(), MachineError>
 where
@@ -619,6 +631,7 @@ where
         Some(control),
         Some(CellMachine::Founded(cell.clone())),
         *tunables,
+        transport,
         shutdown,
     )
     .await
@@ -638,6 +651,7 @@ async fn serve_admitted<P, S, A, F>(
     audits: F,
     admitted: AdmittedMachine,
     tunables: &DriverTunables,
+    transport: Transport,
     shutdown: CancellationToken,
 ) -> Result<(), MachineError>
 where
@@ -735,6 +749,7 @@ where
             cache,
         }),
         *tunables,
+        transport,
         shutdown,
     )
     .await

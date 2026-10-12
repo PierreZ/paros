@@ -195,6 +195,8 @@ error (exit 2), so a typo never silently keeps a default.
 | `PAROS_FAILURE_DOMAIN` | its failure domain label |
 | `PAROS_STORE_LAYOUT` | `default` (64 MiB segments) or `small` (laptops, tests) |
 | `PAROS_<FIELD>[_MS]` | one override per driver tunable (below) |
+| `PAROS_TLS_CERT`, `PAROS_TLS_KEY`, `PAROS_TLS_CA` | its certificate chain, its key and the universe's authority, PEM (`parosctl tls init`): all three turn TLS on for every session it serves and dials; only some is an error |
+| `PAROS_TLS_CLIENT_AUTH` | `required` (mutual TLS, the default), `optional` or `off` (server-authenticated TLS): what it asks of a caller |
 | `RUST_LOG` | the log filter (default `warn,parosd=info`) |
 
 Every address is `HOST:PORT` with an explicit port; the host is an IP or a
@@ -305,6 +307,13 @@ required, with no default tenant and no fixed id (#235, #239, `docs/architecture
 | `parosctl inspect [--journal J]` | every server's view of journal `J`: leader, ballot, members and quorum system, chosen index, floor, fold, GC watermark, retirable nodes, matchmakers; without `--journal`, every server's own facts (node id, cell, control journals): no journal is inspected by default (#243) |
 | `parosctl reconfigure --members 0,1,2 [--quorum majority\|flexible:Q1:Q2\|grid:RxC]` | asks the leader for a new acceptor set |
 | `parosctl retire --node N [--gc-watermark ROUND.NODE \| --journal J]` | retires a node, carrying the GC watermark (read from the `inspect` of `J`'s leader when absent) |
+| `parosctl tls init --out DIR --machines a,b,c [--frontends f] [--admins admin] [--universe U] [--days N]` | offline: writes the authority (`ca.crt`, `ca.key`) and a certificate per machine, frontend and admin (`<name>.crt`, `<name>.key`, mode 0600), and prints the variables each process reads; never overwrites a file |
+| `parosctl tls ca`, `parosctl tls issue <name> --role machine\|frontend\|admin\|client --ca-dir DIR [--host h] [--ip a]` | one authority, or one more certificate from it (a new machine, a renewal) |
+| `parosctl tls show <file>…`, `parosctl tls verify <file> --ca ca.crt` | what a file holds (identity, names, use, validity, days left); checks a certificate as a handshake would |
+
+With TLS, every command takes `--tls-ca ca.crt` (`PAROSCTL_TLS_CA`) and, against servers
+that require a client certificate, `--tls-cert admin.crt --tls-key admin.key`
+(`PAROSCTL_TLS_CERT`, `PAROSCTL_TLS_KEY`).
 
 Output is text — one line per record or answer, `key=value` details — or, with
 `--json`, one JSON document per answer. Diagnostics (a claim made on the way, a

@@ -23,13 +23,10 @@
 //! incarnation, and the crash-cleanliness this buys has to be re-earned
 //! (the listener must be released before a restart binds the address).
 
-use std::future::Future;
-use std::io;
-use std::pin::Pin;
 use std::sync::Arc;
 
 use moonpool_core::{Providers, SimulationError, SimulationResult};
-use moonpool_rpc::{RpcDriver, RpcHandle, ServiceGroup};
+use moonpool_rpc::{RpcHandle, ServiceGroup};
 use paros_core::{
     GcAck, GcRequest, JournalIdentifier, MatchReply, MatchRequest, MatchmakerId, Message, Party,
     ReconfigureReply, ReconfigureRequest, TenantId,
@@ -49,6 +46,7 @@ use crate::rpc::{
     reconfigure_request_from_wire, rpc_config, serve_deliveries, serve_well_known,
     wire_garbage_collect_ack, wire_match_reply, wire_reconfigure_reply,
 };
+use crate::transport::{RuntimeFuture, Transport};
 
 /// The edge's rejection callback for the driver serving as `me`: each
 /// rejection is reported to `audit` as [`Audit::edge_rejected`], stamped with
@@ -68,34 +66,32 @@ pub(crate) type Plain<M> =
 /// A driver's inbound edge: the listening runtime and its driving future.
 pub(crate) struct RpcEdge<P: Providers> {
     handle: RpcHandle<P>,
-    run: Pin<Box<dyn Future<Output = io::Error> + Send>>,
+    run: RuntimeFuture,
     role: &'static str,
 }
 
 impl<P: Providers> RpcEdge<P> {
-    /// Bind `local_addr` and start a runtime shaped by `tunables`. Nothing
-    /// is served until the loop polls [`RpcEdge::run`].
+    /// Bind `local_addr` and start a runtime shaped by `tunables`, its
+    /// sessions protected by `transport` (it dials its peers the same way).
+    /// Nothing is served until the loop polls [`RpcEdge::run`].
     ///
     /// # Errors
     ///
     /// A configuration the runtime refuses or a failed bind, as
     /// [`RunError::Infra`](super::RunError::Infra).
-    #[tracing::instrument(level = "debug", skip_all, fields(role, local_addr = %local_addr))]
+    #[tracing::instrument(level = "debug", skip_all, fields(role, local_addr = %local_addr, transport = transport.name()))]
     pub(crate) async fn listen(
         providers: &P,
         local_addr: &str,
         role: &'static str,
         tunables: &DriverTunables,
+        transport: &Transport,
     ) -> SimulationResult<Self> {
-        let (driver, handle) =
-            RpcDriver::listen(providers.clone(), local_addr, rpc_config(tunables))
-                .await
-                .map_err(|e| SimulationError::InvalidState(format!("{role} RPC listener: {e}")))?;
-        Ok(Self {
-            handle,
-            run: Box::pin(driver.run()),
-            role,
-        })
+        let (run, handle) = transport
+            .listen(providers.clone(), local_addr, rpc_config(tunables))
+            .await
+            .map_err(|e| SimulationError::InvalidState(format!("{role} RPC listener: {e}")))?;
+        Ok(Self { handle, run, role })
     }
 
     /// The runtime every endpoint of this incarnation registers on, and

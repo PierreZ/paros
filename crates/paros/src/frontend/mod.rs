@@ -61,6 +61,7 @@ use crate::name::JournalName;
 use crate::rpc::inbound::{Inbound, ReplySender, serve_well_known};
 use crate::rpc::methods::{FrontReadRpc, FrontSetLeaderRpc, FrontTruncateRpc, FrontWriteRpc};
 use crate::rpc::{Entry, FrontRead, FrontSetLeader, FrontTruncate, FrontWrite};
+use crate::transport::Transport;
 use crate::{Address, Names};
 use forward::Forwarded;
 use routes::{Resolved, Routes};
@@ -79,6 +80,9 @@ pub struct FrontendSettings {
     pub epoch: Duration,
     /// Its RPC edge's shape (queue, connect budget, keep-alive).
     pub tunables: DriverTunables,
+    /// How its sessions travel, served and dialed alike: the cell's
+    /// machines must make the same choice.
+    pub transport: Transport,
     /// How it calls the machines: each attempt's timeout, the redirects it
     /// follows, how long it waits for the cell to answer an `Inspect`.
     pub client: ClientTunables,
@@ -166,6 +170,7 @@ where
         &settings.listen.to_string(),
         "frontend",
         &settings.tunables,
+        &settings.transport,
     )
     .await?;
     let rpc = edge.handle().clone();

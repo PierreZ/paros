@@ -198,6 +198,7 @@ pub(super) async fn run_matchmaker_role(
             parse_addr(my_ip)?,
             config.clone(),
             shape.tunables,
+            crate::tls::serving(ctx, paros::tls::Role::Machine, my_ip)?,
             ctx.shutdown().clone(),
             audit,
         )

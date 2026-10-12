@@ -47,6 +47,7 @@ pub(super) async fn run_proxy_role(
         members,
         replica_book(deployment)?,
         incarnation.shape.tunables,
+        crate::tls::serving(ctx, paros::tls::Role::Machine, my_ip)?,
         ctx.shutdown().clone(),
         &audit,
     )
