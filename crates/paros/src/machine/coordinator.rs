@@ -192,7 +192,9 @@ async fn open_term<P: Providers>(
     policy: CheckpointPolicy,
 ) -> (TermDuty, Option<CellSession>) {
     assert!(leader.uuid.is_set(), "a term's uuid is set");
-    let mut session = CellSession::with_leader(journals, founders, leader.uuid, policy);
+    // The coordinator is a founding member: its book names every founder.
+    let members: Vec<NodeId> = founders.iter().map(|(id, _)| *id).collect();
+    let mut session = CellSession::with_leader(journals, &members, founders, leader.uuid, policy);
     match session.open(client, 0).await {
         Ok(()) => {}
         Err(Interrupted::NotClaimed {

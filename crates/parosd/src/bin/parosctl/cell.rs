@@ -164,8 +164,10 @@ async fn session(
         .filter(|(id, _)| members.contains(id))
         .map(|(id, addr)| (NodeId(*id), addr.clone()))
         .collect();
+    let members: Vec<NodeId> = members.into_iter().map(NodeId).collect();
     Ok(CellSession::new(
         journals,
+        &members,
         founders,
         leader_seed(asker.providers),
         client.tunables().checkpoint_policy(),
