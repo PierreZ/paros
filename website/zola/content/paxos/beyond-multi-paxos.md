@@ -80,7 +80,7 @@ tally changed when it landed.
 
 **In the code.** `QuorumSystem::Flexible`, `QuorumSystem::cross_intersects`,
 `AcceptorConfig::has_phase1_quorum`, `AcceptorConfig::has_phase2_quorum`
-(`crates/paros-core/src/membership.rs`); the example
+(`crates/paros-core/src/membership/`); the example
 `paros-core/examples/flexible_quorums.rs`. Paper: Howard, Malkhi and Spiegelman,
 *Flexible Paxos* (`docs/references/papers/flexible-paxos/`). Play it:
 [`act4/flexible-quorums`](../../play/#act4/flexible-quorums).
@@ -104,7 +104,7 @@ stray copy, honestly and safely, and its vote still counts for nothing.
 
 **In the code.** `QuorumSystem::Grid { rows, cols }`, `QuorumSystem::column_of`,
 `QuorumSystem::row_of`, `AcceptorConfig::has_phase2_quorum_in`
-(`membership.rs`); `ColocatedNode::propose_in` (`node.rs`); the example
+(`membership/`); `ColocatedNode::propose_in` (`node.rs`); the example
 `paros-core/examples/acceptor_grid.rs`. Paper: Whittaker et al.,
 *Scaling Replicated State Machines with Compartmentalization* §3.2
 (`docs/references/papers/scaling-rsm-compartmentalization/`). Play it:
@@ -314,7 +314,7 @@ Phase 1 reads.
 **In the code.** `ReplicaNode`, `ReplicaReady`, `ReplicaCounters`
 (`replica_node.rs`, whose module doc holds the coupling analysis);
 `Config::replica_count`, `Config::reply_owner` (`state.rs`);
-`ReplicaId` (`membership.rs`); `WriteOp::Learned` (`write.rs`); the example
+`ReplicaId` (`membership/ids.rs`); `WriteOp::Learned` (`write.rs`); the example
 `paros-core/examples/replica_tier.rs`; the driver `paros::run_replica`
 (`paros/src/replica_tier/mod.rs`), the harness's `ReplicaProcess` and
 `REPLICA_GROUP` (`paros-sim/src/process/`, `roles.rs`); the replica's quorum
@@ -511,7 +511,7 @@ the matchmaker's decree promise, and why the decree opens strictly above the
 maximum over the stop quorum.
 
 **In the code.** `MatchmakerSet { generation, members }`,
-`MatchmakerSet::has_quorum` (`membership.rs`); `MatchmakerReconfigurer`
+`MatchmakerSet::has_quorum` (`membership/matchmaker_set.rs`); `MatchmakerReconfigurer`
 (`matchmaker/reconfigurer.rs`); the decree (`decree.rs`, generic since #277); the checker
 (`matchmaker/handover_model.rs`). Design notes:
 `docs/analysis/consensus/matchmaker-gc-and-generations.md` and

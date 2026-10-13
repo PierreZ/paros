@@ -22,7 +22,7 @@
 //!   listed founding members, every one of them in both quorums.
 //!
 //! The caller names the acceptors and their quorum system; every quorum
-//! question still crosses `membership.rs`.
+//! question still crosses `membership`.
 //!
 //! What stays here rather than moving into the role is the one place a
 //! decree differs from a log: a `Nack`. The log side *discards* the refusing
