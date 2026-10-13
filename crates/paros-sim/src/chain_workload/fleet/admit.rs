@@ -53,9 +53,11 @@ impl FleetOps {
         }
         let founders = self.layout.founders;
         let outside = founders..self.machines.len();
-        let target = match self.admitting.take().or(replaced) {
+        let mut at_founder = false;
+        let mut target = match self.admitting.take().or(replaced) {
             Some(target) => target,
             None if outside.is_empty() || buggify_with_prob!(0.1) => {
+                at_founder = true;
                 self.machines[usize::try_from(draw % founders.max(1) as u64).unwrap_or(0)].clone()
             }
             None => {
@@ -67,6 +69,19 @@ impl FleetOps {
             assert_reachable!("admit: an admission finds no cell formed yet");
             return;
         };
+        // On its own location, a founding member the operator did not reach
+        // (one that does not serve its cell yet, mid `cell init`): the
+        // admission names it in no book the session holds. The library
+        // asserted on it once (hunt seed 7921884428541148436).
+        if at_founder
+            && buggify_with_prob!(0.5)
+            && let Some(unreached) = self.machines[..founders.min(self.machines.len())]
+                .iter()
+                .find(|addr| cell.servers.iter().all(|(_, served)| served != *addr))
+        {
+            assert_reachable!("admit: an operator admits a founding member it did not reach");
+            target = unreached.clone();
+        }
         let members: Vec<NodeId> = cell.members.iter().copied().map(NodeId).collect();
         let founders: Vec<(NodeId, Address)> = cell
             .servers

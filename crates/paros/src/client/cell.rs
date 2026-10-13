@@ -157,16 +157,18 @@ impl CellSession {
     /// address. Two ids at one address are a wiped machine's old id
     /// beside its new one: `node`, the machine this admits, then a founder,
     /// then the lowest id keeps the address, so every address names one
-    /// machine. `node` answered at its address just now, so it wins even
-    /// over the wiped founding member it replaced (#323: the cell heals
-    /// around that dead member).
+    /// machine. `node` answered at `at` just now, so it is listed there,
+    /// and it wins that address even over the wiped founding member it
+    /// replaced (#323: the cell heals around that dead member). This holds
+    /// for a founding member the session did not reach too: it is in no
+    /// book the session holds, but it is still the machine admitted.
     ///
     /// # Panics
     ///
     /// The founding members are out of id order, which construction rules
     /// out.
     #[must_use]
-    pub fn admission(&self, node: NodeId) -> Admission {
+    pub fn admission(&self, node: NodeId, at: &Address) -> Admission {
         let founder = |id: NodeId| self.members.contains(&id);
         let rank = |id: NodeId| (id != node, !founder(id), id);
         let mut by_addr: BTreeMap<Address, NodeId> = BTreeMap::new();
@@ -178,7 +180,13 @@ impl CellSession {
             .nodes()
             .filter(|(id, n)| n.standing != NodeStanding::Retired && !founder(*id))
             .filter_map(|(id, n)| Address::parse(&n.addr).ok().map(|addr| (id, addr)));
-        for (id, addr) in founders.into_iter().chain(registered) {
+        // `node` is listed once, where it answered: a founding member the
+        // session did not reach is in neither book above.
+        let others = founders
+            .into_iter()
+            .chain(registered)
+            .filter(|(id, _)| *id != node);
+        for (id, addr) in std::iter::once((node, at.clone())).chain(others) {
             let held = by_addr.entry(addr).or_insert(id);
             if rank(id) < rank(*held) {
                 *held = id;
@@ -288,7 +296,7 @@ impl CellSession {
                 };
             }
         }
-        let admission = self.admission(node);
+        let admission = self.admission(node, &advertised);
         assert!(
             admission.members.iter().any(|(id, _)| *id == node),
             "an admission names the machine it admits"
