@@ -9,7 +9,7 @@
 <body>
 <header>
   <h1>paros sandbox</h1>
-  <div>Run a paros universe in your browser. Every machine runs the same code as <code>parosd</code>,
+  <div>Watch a paros cell run in your browser. Every machine runs the same code as <code>parosd</code>,
     and the operator uses the same calls as <code>parosctl</code>.
     <a href="../">How the sandbox works</a> · <a href="../../">paros</a></div>
   <div class="notice">The network, the disks and the clock are simulated. Times are simulated
@@ -17,61 +17,87 @@
     action log, so the link to this page replays it exactly.</div>
 </header>
 <main>
-  <div>
+  <section class="stage-section">
+    <div class="acts" id="acts"></div>
+    <div class="stage-wrap">
+      <div class="stage" id="stage">
+        <canvas id="wires"></canvas>
+        <div class="cell" id="cell"></div>
+        <div class="outside" id="outside">
+          <div class="client" id="client" hidden>client</div>
+        </div>
+      </div>
+      <aside class="rail" id="rail"></aside>
+    </div>
+    <p class="caption" id="caption"></p>
+    <div class="controls">
+      <button id="play" title="Play or pause (space)">▶</button>
+      <button id="prev-msg" title="Previous message ([)">◀ msg</button>
+      <button id="next-msg" title="Next message (])">msg ▶</button>
+      <label class="inline">Speed <select id="speed">
+        <option value="0.02">0.02×</option>
+        <option value="0.05" selected>0.05×</option>
+        <option value="0.2">0.2×</option>
+        <option value="1">1×</option>
+      </select></label>
+      <label class="inline"><input id="show-beats" type="checkbox" checked /> heartbeats</label>
+      <span class="time" id="time"></span>
+      <span class="legend" id="legend"></span>
+    </div>
+    <canvas id="timeline" class="timeline" title="Drag to move in time"></canvas>
+  </section>
+  <div class="lower">
+    <div>
+      <section>
+        <h2>Universe</h2>
+        <div class="row">
+          <label>Seed <input id="seed" type="number" min="0" /></label>
+          <label>Machines <input id="machines" type="number" min="1" max="7" /></label>
+          <label>Run length (s) <input id="run" type="number" min="1" max="300" /></label>
+        </div>
+        <p class="muted">One cell, <code>cell-1</code>, over three zones: machine <i>i</i> is in
+          zone <i>i</i> mod 3. A second cell in one universe comes with paros milestone M12.</p>
+        <div class="row">
+          <label>Example <select id="preset"></select></label>
+          <button id="load-preset">Load</button>
+        </div>
+      </section>
+      <section>
+        <h2>Action log</h2>
+        <ol class="actions" id="actions" start="0"></ol>
+        <div class="row">
+          <label>At (ms) <input id="at" type="number" min="1" step="100" /></label>
+          <label>Action <select id="op">
+            <option value="create_tenant">create a tenant</option>
+            <option value="create_journal">create a journal</option>
+            <option value="write">write N records</option>
+            <option value="read">read N records</option>
+          </select></label>
+          <label id="tenant-name-field">Tenant <input id="tenant-name" value="acme" size="10" /></label>
+          <label id="tenant-pick-field">Tenant <select id="tenant-pick"></select></label>
+          <label id="journal-name-field">Journal <input id="journal-name" value="orders" size="10" /></label>
+          <label id="mode-field">Mode <select id="mode">
+            <option value="single">single (1 acceptor)</option>
+            <option value="double" selected>double (3 acceptors)</option>
+            <option value="triple">triple (5 acceptors)</option>
+            <option value="grid:2x2">grid 2×2</option>
+            <option value="grid:2x3">grid 2×3</option>
+            <option value="grid:3x2">grid 3×2</option>
+          </select></label>
+          <label id="journal-pick-field">Journal <select id="journal-pick"></select></label>
+          <label id="count-field">N <input id="count" type="number" min="1" max="100" value="5" /></label>
+        </div>
+        <div class="row">
+          <button id="add" class="primary">Add and run</button>
+          <button id="undo">Undo</button>
+          <button id="clear">Clear</button>
+        </div>
+        <p class="muted" id="status">Loading…</p>
+      </section>
+    </div>
     <section>
-      <h2>Universe</h2>
-      <div class="row">
-        <label>Seed <input id="seed" type="number" min="0" /></label>
-        <label>Machines <input id="machines" type="number" min="1" max="7" /></label>
-        <label>Run length (s) <input id="run" type="number" min="1" max="300" /></label>
-      </div>
-      <p class="muted">One cell, <code>cell-1</code>. The machines <code>init</code> does not list stay
-        idle. A second cell in one universe comes with paros milestone M12.</p>
-      <div class="row">
-        <label>Example <select id="preset"></select></label>
-        <button id="load-preset">Load</button>
-      </div>
-    </section>
-    <section>
-      <h2>Action log</h2>
-      <ol class="actions" id="actions" start="0"></ol>
-      <div class="row">
-        <label>At (ms) <input id="at" type="number" min="1" step="100" /></label>
-        <label>Action <select id="op">
-          <option value="create_tenant">create a tenant</option>
-          <option value="create_journal">create a journal</option>
-          <option value="write">write N records</option>
-          <option value="read">read N records</option>
-        </select></label>
-        <label id="tenant-name-field">Tenant <input id="tenant-name" value="acme" size="10" /></label>
-        <label id="tenant-pick-field">Tenant <select id="tenant-pick"></select></label>
-        <label id="journal-name-field">Journal <input id="journal-name" value="orders" size="10" /></label>
-        <label id="journal-pick-field">Journal <select id="journal-pick"></select></label>
-        <label id="count-field">N <input id="count" type="number" min="1" max="100" value="3" /></label>
-      </div>
-      <div class="row">
-        <button id="add" class="primary">Add and run</button>
-        <button id="undo">Undo</button>
-        <button id="clear">Clear</button>
-      </div>
-      <p class="muted" id="status">Loading…</p>
-    </section>
-  </div>
-  <div>
-    <section>
-      <h2>Where the tenants and journals live</h2>
-      <div class="scrub">
-        <button id="prev">◀</button>
-        <input id="step" type="range" min="0" value="0" step="1" />
-        <button id="next">▶</button>
-      </div>
-      <p id="after" class="muted"></p>
-      <div class="table-wrap"><table id="spread" class="spread"></table></div>
-      <div class="legend" id="legend"></div>
-    </section>
-    <section>
-      <h2>Events up to this step</h2>
-      <label><span><input id="show-msgs" type="checkbox" /> show every message sent</span></label>
+      <h2>Events up to now</h2>
+      <label class="inline"><input id="show-msgs" type="checkbox" /> show every message sent</label>
       <div class="log" id="log"></div>
     </section>
   </div>

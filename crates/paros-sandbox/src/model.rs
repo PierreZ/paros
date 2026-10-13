@@ -59,6 +59,10 @@ pub enum Op {
         tenant: String,
         /// The journal's name, inside the tenant.
         journal: String,
+        /// Its desired mode, as `parosctl` names it: `single`, `double`,
+        /// `triple` or `grid:RxC`.
+        #[serde(default = "double")]
+        mode: String,
     },
     /// Append `count` records to `journal` of `tenant`, as its one writer.
     Write {
@@ -79,6 +83,10 @@ pub enum Op {
         /// How many records.
         count: u32,
     },
+}
+
+fn double() -> String {
+    "double".into()
 }
 
 /// What a step came to.
@@ -108,6 +116,11 @@ pub struct Topology {
     /// Each machine's node id (its first six hex digits), by index; `None`
     /// for a machine outside the cell.
     pub machines: Vec<Option<String>>,
+    /// Each machine's full node id, in decimal, as `msg_sent` names it
+    /// (`node:<id>`); `None` outside the cell.
+    pub nodes: Vec<Option<String>>,
+    /// Each machine's zone (its failure domain), by index.
+    pub zones: Vec<String>,
     /// The tenants, the internal ones first.
     pub tenants: Vec<TenantPlace>,
 }
@@ -130,8 +143,14 @@ pub struct TenantPlace {
 pub struct JournalPlace {
     /// Its name.
     pub name: String,
-    /// Its acceptors (the configuration in force), by machine index.
+    /// Its identifier, `<tenant>:<journal>` in decimal, as `msg_sent` and
+    /// `client_call` events name it.
+    pub key: String,
+    /// Its acceptors (the configuration in force), by machine index, in
+    /// membership order: under a grid, row by row.
     pub members: Vec<usize>,
+    /// The quorum system over them.
+    pub quorum: Quorum,
     /// The machine that leads it, when one does.
     pub leader: Option<usize>,
     /// Its matchmaker set, by machine index (empty without matchmakers).
@@ -140,6 +159,22 @@ pub struct JournalPlace {
     pub hosts: Vec<usize>,
     /// The highest position its leader knows chosen.
     pub chosen: Option<u64>,
+}
+
+/// The quorum system of a journal's configuration, as `Inspect` reports it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Quorum {
+    /// `majority`, `flexible` or `grid`.
+    pub system: String,
+    /// How many acceptors a Phase-1 quorum holds (elections and reads).
+    pub phase1: u64,
+    /// How many acceptors a Phase-2 quorum holds (writes).
+    pub phase2: u64,
+    /// Rows of a grid: each row is a Phase-1 quorum. 0 otherwise.
+    pub rows: u64,
+    /// Columns of a grid: each column is a Phase-2 quorum, and slot `s`
+    /// goes to column `s % cols`. 0 otherwise.
+    pub cols: u64,
 }
 
 /// One event a machine or the simulator reported, in simulated time.

@@ -34,6 +34,12 @@ pub fn machine_addr(index: usize) -> Address {
         .expect("a literal socket address parses")
 }
 
+/// The zone (failure domain) of machine `index`: three zones, round robin.
+#[must_use]
+pub fn zone_of(index: usize) -> String {
+    format!("zone-{}", index % 3)
+}
+
 /// The index of the machine at `ip`, when it is one.
 #[must_use]
 pub fn machine_index(ip: &str) -> Option<usize> {
@@ -52,13 +58,16 @@ impl Process for MachineProcess {
 
     #[tracing::instrument(level = "debug", skip_all)]
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
+        // No fault injection: the shipped BUGGIFY sites and crash hints are
+        // inert, as in production.
+        moonpool_sim::buggify_reset();
         let index = machine_index(ctx.my_ip()).ok_or_else(|| {
             SimulationError::InvalidState(format!("{} is no machine IP", ctx.my_ip()))
         })?;
         let settings = MachineSettings {
             class: Class::Storage,
             capacity: 8,
-            failure_domain: format!("zone-{}", index % 3),
+            failure_domain: zone_of(index),
             name: format!("machine-{index}"),
         };
         let listen = machine_addr(index)

@@ -34,8 +34,9 @@ use paros::{
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::machine::machine_addr;
-use crate::model::{Action, Config, JournalPlace, Op, StepResult, TenantPlace, Topology};
+use crate::calls::CallTrace;
+use crate::machine::{machine_addr, zone_of};
+use crate::model::{Action, Config, JournalPlace, Op, Quorum, StepResult, TenantPlace, Topology};
 
 /// How long one operator step may take before it gives up.
 const PATIENCE: Duration = Duration::from_secs(20);
@@ -89,6 +90,9 @@ impl moonpool_sim::Workload for Operator {
 
     #[tracing::instrument(level = "debug", skip_all)]
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
+        // No fault injection: the shipped BUGGIFY sites are inert, as in
+        // production (the machines turn them off too).
+        moonpool_sim::buggify_reset();
         let (run, rpc) = Transport::Plaintext
             .client_only(ctx.providers().clone(), rpc_config())
             .map_err(|e| SimulationError::InvalidState(format!("client RPC runtime: {e}")))?;
@@ -129,11 +133,13 @@ impl moonpool_sim::Workload for Operator {
                     ok,
                     detail,
                 });
-            if let Some((machines, tenants)) = desk.survey(&self.config, &known).await {
+            if let Some((machines, nodes, tenants)) = desk.survey(&self.config, &known).await {
                 let topology = Topology {
                     step: index,
                     time_ms: now_ms(ctx),
                     machines,
+                    nodes,
+                    zones: (0..self.config.machines).map(zone_of).collect(),
                     tenants,
                 };
                 self.topology
@@ -146,6 +152,10 @@ impl moonpool_sim::Workload for Operator {
         Ok(())
     }
 }
+
+/// What a survey reads: each machine's short and full node id, by index,
+/// and the tenants.
+type Survey = (Vec<Option<String>>, Vec<Option<String>>, Vec<TenantPlace>);
 
 /// The simulated time, in milliseconds.
 fn now_ms(ctx: &SimContext) -> u64 {
@@ -214,9 +224,11 @@ impl Desk {
         match op {
             Op::Init { machines } => self.init(*machines, known).await,
             Op::CreateTenant { tenant } => self.create_tenant(known, tenant).await,
-            Op::CreateJournal { tenant, journal } => {
-                self.create_journal(known, tenant, journal).await
-            }
+            Op::CreateJournal {
+                tenant,
+                journal,
+                mode,
+            } => self.create_journal(known, tenant, journal, mode).await,
             Op::Write {
                 tenant,
                 journal,
@@ -301,7 +313,19 @@ impl Desk {
     }
 
     /// `parosctl journal create`: the tenant coordinator places it.
-    async fn create_journal(&self, known: &mut Known, tenant: &str, name: &str) -> (bool, String) {
+    async fn create_journal(
+        &self,
+        known: &mut Known,
+        tenant: &str,
+        name: &str,
+        mode: &str,
+    ) -> (bool, String) {
+        let Ok(desired) = mode.parse::<Desired>() else {
+            return (
+                false,
+                format!("no mode {mode}: single, double, triple or grid:RxC"),
+            );
+        };
         let Some(cell) = known.cell.as_ref() else {
             return (false, "no cell: init failed".into());
         };
@@ -322,7 +346,7 @@ impl Desk {
             op: JournalOp::Create {
                 name: name.as_bytes().to_vec(),
                 writer: WriterMode::Single,
-                desired: Desired::DOUBLE,
+                desired,
             },
         };
         let answer = journals::request(
@@ -340,8 +364,9 @@ impl Desk {
                 let id = JournalIdentifier::new(tenant_id, id);
                 let members: Vec<u64> = config.members().iter().map(|m| m.0).collect();
                 let detail = format!(
-                    "journal {tenant}/{name} placed on {} acceptors",
-                    members.len()
+                    "journal {tenant}/{name} placed on {} acceptors, {}",
+                    members.len(),
+                    desired.label()
                 );
                 let writer = Writer::new(id, u128::from(self.nonzero()));
                 known.journals.insert(
@@ -372,6 +397,7 @@ impl Desk {
         } else {
             &servers
         })
+        .with_observer(Arc::new(CallTrace::default()))
     }
 
     /// Append `count` records to `tenant`/`journal`, as its one writer.
@@ -405,7 +431,12 @@ impl Desk {
             if opened.writer.owned().is_none() {
                 match opened.writer.claim(&client, 0, false).await {
                     ClaimOutcome::Won { .. } | ClaimOutcome::Owned { .. } => {}
-                    ClaimOutcome::Unread | ClaimOutcome::UnknownJournal
+                    // A claim whose answer was lost is asked again: the
+                    // read before it adopts a claim that already won.
+                    ClaimOutcome::Unread
+                    | ClaimOutcome::UnknownJournal
+                    | ClaimOutcome::Ambiguous
+                    | ClaimOutcome::Redirect { .. }
                         if client.now() < deadline =>
                     {
                         let pause = client.tunables().retry_backoff;
@@ -523,11 +554,7 @@ impl Desk {
     }
 
     /// Where every tenant and journal lives, through the admin API.
-    async fn survey(
-        &self,
-        config: &Config,
-        known: &Known,
-    ) -> Option<(Vec<Option<String>>, Vec<TenantPlace>)> {
+    async fn survey(&self, config: &Config, known: &Known) -> Option<Survey> {
         let cell = known.cell.as_ref()?;
         // Server `i` of the client is machine `index[i]`.
         let index: Vec<usize> = cell
@@ -540,10 +567,12 @@ impl Desk {
             })
             .collect();
         let mut machines = vec![None; config.machines];
+        let mut nodes = vec![None; config.machines];
         let mut by_node = BTreeMap::new();
         for ((id, _), m) in cell.servers.iter().zip(&index) {
-            if let Some(slot) = machines.get_mut(*m) {
+            if let (Some(slot), Some(node)) = (machines.get_mut(*m), nodes.get_mut(*m)) {
                 *slot = Some(short(*id));
+                *node = Some(id.to_string());
                 by_node.insert(*id, *m);
             }
         }
@@ -591,7 +620,7 @@ impl Desk {
             });
         }
         tenants.sort_by_key(|t| (!t.groups.contains("internal"), t.name.clone()));
-        Some((machines, tenants))
+        Some((machines, nodes, tenants))
     }
 
     /// One journal, as every machine's `Inspect` answers for it.
@@ -613,7 +642,9 @@ impl Desk {
         };
         let mut place = JournalPlace {
             name,
+            key: format!("{}:{}", journal.tenant.0, journal.journal.0),
             members: Vec::new(),
+            quorum: Quorum::default(),
             leader: None,
             matchmakers: Vec::new(),
             hosts: Vec::new(),
@@ -625,7 +656,25 @@ impl Desk {
             };
             place.hosts.push(*machine);
             if reply.leader || place.members.is_empty() {
-                place.members = machines(&reply.members);
+                // Membership order, not machine order: a grid's rows are
+                // consecutive runs of it.
+                place.members = reply
+                    .members
+                    .iter()
+                    .filter_map(|n| by_node.get(n).copied())
+                    .collect();
+                place.quorum = Quorum {
+                    system: match reply.quorum_system {
+                        1 => "flexible",
+                        2 => "grid",
+                        _ => "majority",
+                    }
+                    .into(),
+                    phase1: reply.phase1_quorum,
+                    phase2: reply.phase2_quorum,
+                    rows: reply.rows,
+                    cols: reply.cols,
+                };
                 place.matchmakers = machines(&reply.matchmakers);
             }
             if reply.leader {

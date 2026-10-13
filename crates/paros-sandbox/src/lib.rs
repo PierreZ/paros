@@ -8,7 +8,8 @@
 //! `journal create`, `write`, `read`), and after each step reads where
 //! every tenant and journal lives ([`Topology`]). Nothing here wraps or
 //! changes the shipped code; the timeline only observes the events the
-//! machines log. There is no fault injection yet.
+//! machines log. There is no fault injection: the shipped BUGGIFY sites and
+//! crash hints are turned off, as in production.
 //!
 //! A run is a pure function of its [`Config`] and its action log: the same
 //! seed and actions give the same [`RunView`], byte for byte. The browser
@@ -18,6 +19,7 @@
 //! The network, the disks and the time are simulated: a time in a run is
 //! not a production number.
 
+mod calls;
 pub mod machine;
 pub mod model;
 mod operator;
@@ -30,7 +32,7 @@ use moonpool_sim::SimulationBuilder;
 use moonpool_sim::runner::builder::ProcessCount;
 
 pub use model::{
-    Action, Config, Event, JournalPlace, Op, RunView, StepResult, TenantPlace, Topology,
+    Action, Config, Event, JournalPlace, Op, Quorum, RunView, StepResult, TenantPlace, Topology,
 };
 
 /// The most machines a universe holds.
@@ -112,6 +114,11 @@ fn check(config: &Config, actions: &[Action]) -> Result<(), String> {
     for action in &actions[1..] {
         match &action.op {
             Op::Init { .. } => return Err("init runs once, as the first step".into()),
+            Op::CreateJournal { mode, .. } if mode.parse::<paros::tenant::Desired>().is_err() => {
+                return Err(format!(
+                    "no mode {mode}: single, double, triple or grid:RxC"
+                ));
+            }
             Op::Write { count, .. } | Op::Read { count, .. }
                 if *count == 0 || *count > MAX_COUNT =>
             {

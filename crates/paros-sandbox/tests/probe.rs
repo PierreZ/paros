@@ -1,6 +1,7 @@
 //! #518 (Paxos visualization sandbox): `init` forms one cell over four of
 //! five machines; two tenants create, write and read their journals, and
-//! the topology shows where each tenant's journals live.
+//! the topology shows where each tenant's journals live, and the quorum
+//! shape of a grid journal.
 
 use paros_sandbox::{Action, Config, Op, run};
 
@@ -28,12 +29,13 @@ fn tenant(at_ms: u64, tenant: &str) -> Action {
     )
 }
 
-fn journal(at_ms: u64, tenant: &str, journal: &str) -> Action {
+fn journal(at_ms: u64, tenant: &str, journal: &str, mode: &str) -> Action {
     at(
         at_ms,
         Op::CreateJournal {
             tenant: tenant.into(),
             journal: journal.into(),
+            mode: mode.into(),
         },
     )
 }
@@ -55,7 +57,7 @@ fn tenants_write_read_and_show_their_topology() {
     let base = vec![
         at(0, Op::Init { machines: 4 }),
         tenant(100, "acme"),
-        journal(200, "acme", "orders"),
+        journal(200, "acme", "orders", "double"),
         write(300, "acme", "orders", 3),
     ];
     let first = run(&config, &base);
@@ -64,7 +66,7 @@ fn tenants_write_read_and_show_their_topology() {
 
     let mut actions = base.clone();
     actions.push(tenant(400, "globex"));
-    actions.push(journal(500, "globex", "events"));
+    actions.push(journal(500, "globex", "events", "grid:2x2"));
     actions.push(write(600, "globex", "events", 2));
     actions.push(read(700, "acme", "orders", 3));
     let second = run(&config, &actions);
@@ -106,6 +108,24 @@ fn tenants_write_read_and_show_their_topology() {
         .expect("acme/orders");
     assert!(!orders.members.is_empty(), "{orders:#?}");
     assert!(orders.leader.is_some(), "{orders:#?}");
+    assert_eq!(orders.quorum.system, "majority", "{orders:#?}");
+
+    // A grid journal: four acceptors, two rows of two. A row is a Phase-1
+    // quorum and a column a Phase-2 quorum, two acceptors each.
+    let events = last
+        .tenants
+        .iter()
+        .find(|t| t.name == "globex")
+        .and_then(|t| t.journals.iter().find(|j| j.name == "events"))
+        .expect("globex/events");
+    assert_eq!(events.members.len(), 4, "{events:#?}");
+    assert_eq!(events.quorum.system, "grid", "{events:#?}");
+    assert_eq!(
+        (events.quorum.rows, events.quorum.cols),
+        (2, 2),
+        "{events:#?}"
+    );
+    assert!(events.leader.is_some(), "{events:#?}");
 
     // Replay: the same config and log give the same run.
     assert_eq!(run(&config, &actions), second);

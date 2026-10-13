@@ -26,6 +26,8 @@ pub(crate) const NAMES: &[&str] = &[
     "value_chosen",
     "msg_sent",
     "journal_started",
+    "client_call",
+    "client_answer",
 ];
 
 /// The recorded events, shared with the run's caller.
