@@ -23,8 +23,14 @@
 //! call, and the client resolves again.
 //!
 //! The answer is served in a task of its own beside the machine, one request
-//! at a time, each bounded by [`ANSWER_WITHIN`]: nothing here touches the
-//! node loop, and nothing here writes. The task draws no randomness: its one
+//! at a time, each bounded by `DriverTunables::resolve_answer_within`:
+//! nothing here touches the node loop, and nothing here writes. An answer
+//! cut short keeps what its folds read (#457 (hard-coded tunables)): a fold
+//! is a consistent prefix at every await, so the next request goes on from
+//! there. Before, a cut answer reset both folds to position 0, so once a
+//! fold took longer than the bound no answer ever came back again, a
+//! metastable loop the simulation's drawn bound and the final resolve check
+//! (`paros_sim`'s `resolve_answers`) now exercise. The task draws no randomness: its one
 //! BUGGIFY decision (answer every request from fresh folds, the path a
 //! restarted machine takes) is drawn where the task is started.
 
@@ -47,10 +53,6 @@ use crate::rpc::methods::ResolveRpc;
 use crate::rpc::{Inbound, NodeClient, serve_well_known};
 use crate::system::Registry;
 
-/// How long one answer may take: past it the answer is `unavailable`, and
-/// the next request starts from fresh folds.
-pub(crate) const ANSWER_WITHIN: Duration = Duration::from_secs(2);
-
 /// What a machine answers `Resolve` from.
 pub(crate) struct Resolver {
     /// The machine, serving its cell.
@@ -67,6 +69,11 @@ pub(crate) struct Resolver {
     /// The machine serves the cell's journals (a founding member), so its
     /// own reads may go to itself.
     pub(crate) serves: bool,
+    /// The tunables of its clients (`DriverTunables::internal_client`).
+    pub(crate) client: ClientTunables,
+    /// How long one answer may take: past it the answer is `unavailable`
+    /// (`DriverTunables::resolve_answer_within`).
+    pub(crate) answer_within: Duration,
 }
 
 /// Serve `Resolve` on `rpc` until `shutdown`, in a task of its own.
@@ -84,6 +91,10 @@ pub(crate) fn spawn<P: Providers>(
     assert!(
         resolver.cell.cell.is_set(),
         "a cell names its control journal"
+    );
+    assert!(
+        !resolver.answer_within.is_zero(),
+        "an answer has time to read"
     );
     let mut requests = Inbound::plain(serve_well_known::<P, ResolveRpc>(rpc)?);
     // Fold both journals again from position 0 for every answer: the path a
@@ -108,11 +119,18 @@ pub(crate) fn spawn<P: Providers>(
                             folds = Folds::new(&resolver);
                         }
                         let answer = folds.answer(&providers, &rpc, &resolver, &request, &shutdown);
-                        let answer = providers.time().timeout(ANSWER_WITHIN, answer).await;
+                        let answer = providers
+                            .time()
+                            .timeout(resolver.answer_within, answer)
+                            .await;
+                        // A fold is a consistent prefix at every await
+                        // (each page folds whole before the next read):
+                        // an answer cut short keeps what it read, and the
+                        // next one goes on from there (#457).
                         let ack = answer.unwrap_or_else(|_| {
-                            // A read cut short may leave a fold mid-page:
-                            // start the next answer from fresh folds.
-                            folds = Folds::new(&resolver);
+                            moonpool_assertions::reachable!(
+                                "resolve: an answer is cut short and its folds are kept"
+                            );
                             refused(&resolver, "unavailable")
                         });
                         reply.send(ack);
@@ -170,7 +188,7 @@ impl Folds {
                 node: NodeClient::named(rpc, resolver.facts.names.clone(), addr.clone()),
             })
             .collect();
-        Client::new(providers, servers, ClientTunables::default()).with_shutdown(shutdown.clone())
+        Client::new(providers, servers, resolver.client).with_shutdown(shutdown.clone())
     }
 
     /// The answer to `request`, read from the folds brought to their tails.
@@ -196,7 +214,11 @@ impl Folds {
         let LoadOutcome::Loaded { .. } =
             load(&mut self.directory, universe, &client, self.first, 0).await
         else {
-            self.directory = Folder::new(FleetDirectory::default());
+            // Kept (#457): a fold that stopped is a prefix the next answer
+            // goes on from; only a fold with a hole starts again.
+            if !self.directory.is_whole() {
+                self.directory = Folder::new(FleetDirectory::default());
+            }
             return refused(resolver, "unavailable");
         };
         let directory = self.directory.state();
@@ -289,7 +311,11 @@ impl Folds {
             LoadOutcome::Loaded { .. }
         ) || !folder.is_whole()
         {
-            self.registry = None;
+            // Kept (#457), as the directory: only a fold with a hole starts
+            // again.
+            if !folder.is_whole() {
+                self.registry = None;
+            }
             return false;
         }
         // The founding members at the addresses this machine knows: the
@@ -305,7 +331,14 @@ impl Folds {
             .collect();
         let machines = cell_book(&known, folder.state());
         if !machines.is_empty() {
-            self.book = machines;
+            // Itself at the address it advertises now, which the registry
+            // may not hold yet (#349): a founding member that moved and
+            // serves its cell alone otherwise reads only from its old
+            // address, so its fold never learns the move and it never
+            // answers again (#457: found by the final resolve check, seed
+            // 13674945314749361170, a one-member cell after the
+            // moved-founder scenario).
+            self.book = super::with_own(&machines, resolver.facts.node_id, &resolver.facts.addr);
         }
         true
     }

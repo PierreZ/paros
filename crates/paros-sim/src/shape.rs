@@ -347,6 +347,26 @@ impl NodeShape {
             // chaos window, so a word changes inside a run; the extremes
             // show every word at once or hold past a machine's reboot.
             status_hold: ms(buggify_knob!(1000_u64, 0_u64..4001_u64)),
+            // A machine's own clients (#457 (hard-coded tunables)): the
+            // coordinator's duties, the registry follow, the registration
+            // and the `Resolve` folds. Floor one round trip: shorter, every
+            // internal call is ambiguous. The range crosses the lease both
+            // ways on purpose: above `election_lease - election_renew`, one
+            // slow duty under chaos outlasts the lease and the members take
+            // over, again and again (the metastable plan's coordinator
+            // loop); the tail must still settle the election.
+            internal_request_timeout: ms(buggify_knob!(5000_u64, ROUND_TRIP_FLOOR_MS..8001_u64)),
+            // Floor 1: one re-send per resolution, so an ambiguous internal
+            // write is more often left unresolved.
+            internal_retry_budget: buggify_knob!(4_u32, 1_u32..9_u32),
+            // Floor 0: re-sends back to back, a retry storm on the internal
+            // journals; the ceiling spreads them over a second.
+            internal_retry_backoff: ms(buggify_knob!(100_u64, 0_u64..1001_u64)),
+            // How long one `Resolve` answer may take. Floor one round trip:
+            // a fold from position 0 then takes several answers, each going
+            // on from where the last one stopped (#457). The final resolve
+            // check holds every founding member to an answer after chaos.
+            resolve_answer_within: ms(buggify_knob!(2000_u64, ROUND_TRIP_FLOOR_MS..2001_u64)),
         };
         // The production profile `parosd` ships (#209), whole: every field
         // at once, which the per-field locations above would draw together
@@ -379,6 +399,21 @@ impl NodeShape {
 /// node genuinely runs (never under the production profile, which runs none
 /// of them) reaches its gate.
 fn pair_extremes(drawn: &DriverTunables, defaults: &DriverTunables) {
+    if drawn.internal_request_timeout + drawn.election_renew > drawn.election_lease {
+        // BUGGIFY pairing: a machine's internal call outlasts what is left
+        // of its coordinator's lease after a renewal (#457).
+        assert_reachable!("a node runs internal calls longer than its lease allows");
+    }
+    if drawn.internal_retry_budget != defaults.internal_retry_budget
+        || drawn.internal_retry_backoff != defaults.internal_retry_backoff
+    {
+        // BUGGIFY pairing: the internal re-send extreme genuinely runs.
+        assert_reachable!("a node runs an extreme internal re-send policy");
+    }
+    if drawn.resolve_answer_within < defaults.resolve_answer_within {
+        // BUGGIFY pairing: a short `Resolve` answer bound genuinely runs.
+        assert_reachable!("a node runs a short resolve answer bound");
+    }
     if drawn.peer_queue_capacity != defaults.peer_queue_capacity {
         // BUGGIFY pairing: the capacity extreme genuinely runs.
         assert_reachable!("a node runs with an extreme peer-queue capacity");

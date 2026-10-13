@@ -155,3 +155,65 @@ impl FleetOps {
         assert_reachable!("resolve: a resolution names its cell by name");
     }
 }
+
+impl FleetOps {
+    /// Every founding member of `cell` that was never wiped answers
+    /// `Resolve` after chaos, by `deadline` (#457 (hard-coded tunables)): a
+    /// verdict or a refusal, never `unavailable` for good. The machines'
+    /// `Resolve` folds are internal readers of the registry and the universe
+    /// directory; under chaos an answer is often cut short
+    /// (`resolve_answer_within`), and a cut answer once reset both folds to
+    /// position 0, so a fold longer than the bound never answered again.
+    /// This is the escape check of that loop: the cause is gone, the
+    /// machine must answer by itself.
+    #[tracing::instrument(level = "debug", skip_all, fields(client = self.client_id))]
+    pub(super) async fn resolve_answers(
+        &self,
+        ctx: &moonpool_sim::SimContext,
+        cell: &super::Cell,
+        deadline: std::time::Duration,
+    ) {
+        use moonpool_sim::TimeProvider;
+        let wiped = crate::machine::wiped_ids(ctx.state());
+        let mut silent: Vec<u64> = Vec::new();
+        for (id, addr) in &cell.servers {
+            if wiped.contains(id) {
+                continue;
+            }
+            let mut answered = false;
+            while !answered && ctx.time().now() < deadline && !ctx.shutdown().is_cancelled() {
+                let resolution = resolve(
+                    self.connector.providers(),
+                    self.connector.rpc(),
+                    self.connector.names(),
+                    std::slice::from_ref(addr),
+                    NEVER_CREATED,
+                    self.patience,
+                )
+                .await;
+                answered = resolution != Resolution::Unavailable;
+                if !answered
+                    && ctx
+                        .time()
+                        .sleep(std::time::Duration::from_millis(100))
+                        .await
+                        .is_err()
+                {
+                    break;
+                }
+            }
+            if !answered {
+                silent.push(*id);
+            }
+        }
+        if ctx.shutdown().is_cancelled() {
+            return;
+        }
+        assert_always!(
+            silent.is_empty(),
+            "resolve: every founding member answers after chaos",
+            { "cell" => cell.journals.cell_id, "silent" => format!("{silent:?}") }
+        );
+        assert_reachable!("resolve: every founding member's answer is judged after chaos");
+    }
+}

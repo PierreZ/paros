@@ -1484,7 +1484,12 @@ where
             );
             unregistered = moved.then_some(ended);
         }
-        formed.serve(&providers, &rpc_handle, incarnation_shutdown.clone())?;
+        formed.serve(
+            &providers,
+            &rpc_handle,
+            &tunables,
+            incarnation_shutdown.clone(),
+        )?;
     }
 
     // The replicas (#144) get a node's lane, as any peer. One lane per peer,

@@ -315,6 +315,27 @@ pub struct DriverTunables {
     /// cell coordinator's failure detector (`machine_down_after`) hides
     /// little, since the registry's liveness moves no faster than that.
     pub status_hold: Duration,
+    /// The request and read timeout of a machine's own clients (#457
+    /// (hard-coded tunables)): the cell coordinator's, the registry follow,
+    /// the registration, and the `Resolve` folds. Floor 1 ms; below one
+    /// round trip every internal call is ambiguous, a liveness cost the
+    /// operator keeps, never a wrong answer. Above `election_lease` minus
+    /// `election_renew`, one slow call of a coordinator's duties outlasts
+    /// its lease and the members take over: the production profile stays
+    /// under that bound; the simulation also draws above it, so the control
+    /// plane meets the takeovers it causes.
+    pub internal_request_timeout: Duration,
+    /// How often a machine's own client re-sends an ambiguous write while it
+    /// resolves it (#457). Floor 1: one re-send.
+    pub internal_retry_budget: u32,
+    /// The pause between those re-sends (#457). Floor 0: back to back.
+    pub internal_retry_backoff: Duration,
+    /// How long a machine takes to answer one `Resolve` (#216) before it
+    /// answers `unavailable` (#457). The folds keep what they read, so a
+    /// later request goes on from there. Floor 1 ms; it should outlast one
+    /// read's round trip, a wall-clock floor the operator keeps: below it,
+    /// no answer ever comes back.
+    pub resolve_answer_within: Duration,
 }
 
 impl Default for DriverTunables {
@@ -357,6 +378,10 @@ impl Default for DriverTunables {
             registry_page: paros_core::REGISTRY_PAGE,
             load_interval: LOAD_INTERVAL,
             status_hold: STATUS_HOLD,
+            internal_request_timeout: INTERNAL_REQUEST_TIMEOUT,
+            internal_retry_budget: INTERNAL_RETRY_BUDGET,
+            internal_retry_backoff: INTERNAL_RETRY_BACKOFF,
+            resolve_answer_within: RESOLVE_ANSWER_WITHIN,
         };
         // The simulation's baseline is itself a winnable profile.
         assert!(
@@ -433,6 +458,53 @@ const _: () = assert!(LOAD_INTERVAL.as_millis() >= LOAD_INTERVAL_FLOOR.as_millis
 const STATUS_HOLD: Duration = Duration::from_millis(3000);
 
 const _: () = assert!(STATUS_HOLD.as_millis() >= MACHINE_DOWN_AFTER.as_millis());
+
+/// Default [`DriverTunables::internal_request_timeout`]: the library
+/// client's own default.
+const INTERNAL_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Default [`DriverTunables::internal_retry_budget`]: the library client's.
+const INTERNAL_RETRY_BUDGET: u32 = 4;
+
+/// Default [`DriverTunables::internal_retry_backoff`]: the library client's.
+const INTERNAL_RETRY_BACKOFF: Duration = Duration::from_millis(100);
+
+/// Default [`DriverTunables::resolve_answer_within`].
+const RESOLVE_ANSWER_WITHIN: Duration = Duration::from_secs(2);
+
+const _: () = assert!(INTERNAL_REQUEST_TIMEOUT.as_millis() > 0);
+const _: () = assert!(INTERNAL_RETRY_BUDGET > 0);
+const _: () = assert!(RESOLVE_ANSWER_WITHIN.as_millis() > 0);
+
+impl DriverTunables {
+    /// The library client tunables of a machine's own clients (#457): the
+    /// client's defaults, with the request and read timeouts and the
+    /// re-send budget and pause these tunables name.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own postconditions fails: a programmer error,
+    /// never an operating condition.
+    #[must_use]
+    pub fn internal_client(&self) -> crate::client::ClientTunables {
+        let client = crate::client::ClientTunables {
+            request_timeout: self.internal_request_timeout,
+            read_timeout: self.internal_request_timeout,
+            retry_budget: self.internal_retry_budget,
+            retry_backoff: self.internal_retry_backoff,
+            ..crate::client::ClientTunables::default()
+        };
+        assert_eq!(
+            client.request_timeout, client.read_timeout,
+            "an internal client waits as long for a read as for a write"
+        );
+        assert!(
+            client.retry_budget >= 1,
+            "an internal client re-sends an ambiguous write at least once"
+        );
+        client
+    }
+}
 
 /// Default [`DriverTunables::election_compact_after`].
 const ELECTION_COMPACT_AFTER: u64 = 16;

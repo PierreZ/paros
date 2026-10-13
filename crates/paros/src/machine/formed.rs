@@ -14,10 +14,10 @@ use paros_core::{Ballot, NodeId};
 use tokio_util::sync::CancellationToken;
 
 use super::{Admission, CachedRegistry, CellPlan, Class, ControlJournals, MachineFacts};
-use crate::Address;
 use crate::rpc::machine as wire;
 use crate::rpc::methods::{AdmitRpc, FormCellRpc, IdentifyRpc, PrepareCellRpc};
 use crate::rpc::{Inbound, serve_well_known};
+use crate::{Address, DriverTunables};
 
 /// A machine of a cell: what it knows of itself, the plan it accepted and
 /// the decree ballot it accepted it at — the record's commit point.
@@ -145,6 +145,7 @@ impl FormedCell {
         mut self,
         providers: &P,
         rpc: &RpcHandle<P>,
+        tunables: &DriverTunables,
         shutdown: CancellationToken,
     ) -> SimulationResult<()> {
         self.facts = self.facts.serving(rpc);
@@ -164,6 +165,8 @@ impl FormedCell {
                 founders: Some(self.plan.members.iter().map(|(id, _)| *id).collect()),
                 book: super::with_own(&self.founders(), self.facts.node_id, &self.facts.addr),
                 serves: true,
+                client: tunables.internal_client(),
+                answer_within: tunables.resolve_answer_within,
             },
             shutdown.clone(),
         )?;

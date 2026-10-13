@@ -88,6 +88,9 @@ impl DriverTunables {
     /// | `machine_down_after` | 10 s | a machine silent for ten renewal periods is down; a reboot is shorter (#211) |
     /// | `load_interval` | the default (5 s) | FDB's `WORKER_LOGGING_INTERVAL` (#424) |
     /// | `status_hold` | 20 s | two `machine_down_after`: a machine that reboots inside it never changes a word (#191 (status)) |
+    /// | `internal_request_timeout` | 2 s | a coordinator's slow call ends before its lease runs out, so it renews in time (#457) |
+    /// | `internal_retry_budget`, `internal_retry_backoff` | the defaults (4, 100 ms) | the library client's |
+    /// | `resolve_answer_within` | the default (2 s) | a `Resolve` is a hint read from folds that go on from where they stopped |
     ///
     /// # Panics
     ///
@@ -119,6 +122,7 @@ impl DriverTunables {
             election_compact_after: 64,
             machine_down_after: Duration::from_secs(10),
             status_hold: Duration::from_secs(20),
+            internal_request_timeout: Duration::from_secs(2),
             ..defaults
         };
         // What `parosd` ships is a profile the simulation could have drawn:
@@ -126,6 +130,13 @@ impl DriverTunables {
         assert!(
             production.check_floors().is_ok(),
             "the production profile clears every floor"
+        );
+        // A coordinator's call that times out still leaves it a renewal
+        // inside its lease (#457): a slow duty never costs the term.
+        assert!(
+            production.internal_request_timeout + production.election_renew
+                <= production.election_lease,
+            "an internal call times out before the coordinator's lease runs out"
         );
         assert!(
             production.proxy_round_resends > production.proxy_take_back_resends,
@@ -138,23 +149,11 @@ impl DriverTunables {
         production
     }
 
-    /// Check every field against the floor its documentation names. The
-    /// wall-clock floors (an election base, in time, above a Phase-1 round
-    /// trip) depend on the network and are the operator's to respect; the
-    /// floors below are the ones no network makes valid.
-    ///
-    /// # Errors
-    ///
-    /// The first field below its floor.
-    ///
-    /// # Panics
-    ///
-    /// If an assertion on its own invariants, preconditions or postconditions
-    /// fails: a programmer error, never an operating condition.
-    pub fn check_floors(&self) -> Result<(), BelowFloor> {
+    /// Every checked field: its name, its value and its floor.
+    fn floor_table(&self) -> [(&'static str, u64, u64); 41] {
         let ms = |d: Duration| u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
         let count = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
-        let fields: [(&'static str, u64, u64); 37] = [
+        [
             ("tick_interval", ms(self.tick_interval), 1),
             (
                 "election_timeout_base",
@@ -232,7 +231,36 @@ impl DriverTunables {
                 ms(super::config::LOAD_INTERVAL_FLOOR),
             ),
             ("status_hold", ms(self.status_hold), 0),
-        ];
+            (
+                "internal_request_timeout",
+                ms(self.internal_request_timeout),
+                1,
+            ),
+            (
+                "internal_retry_budget",
+                u64::from(self.internal_retry_budget),
+                1,
+            ),
+            ("internal_retry_backoff", ms(self.internal_retry_backoff), 0),
+            ("resolve_answer_within", ms(self.resolve_answer_within), 1),
+        ]
+    }
+
+    /// Check every field against the floor its documentation names. The
+    /// wall-clock floors (an election base, in time, above a Phase-1 round
+    /// trip) depend on the network and are the operator's to respect; the
+    /// floors below are the ones no network makes valid.
+    ///
+    /// # Errors
+    ///
+    /// The first field below its floor.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
+    pub fn check_floors(&self) -> Result<(), BelowFloor> {
+        let fields = self.floor_table();
         assert!(
             fields.iter().all(|(field, _, _)| !field.is_empty()),
             "every checked field is named"

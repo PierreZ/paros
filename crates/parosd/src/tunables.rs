@@ -19,7 +19,7 @@ enum Field {
 }
 
 /// Every field of [`DriverTunables`], each overridable.
-const FIELDS: [Field; 37] = [
+const FIELDS: [Field; 41] = [
     Field::Millis("tick_interval", |t, v| t.tick_interval = v),
     Field::Count("election_timeout_base", |t, v| t.election_timeout_base = v),
     Field::Millis("keep_alive_interval", |t, v| t.keep_alive_interval = v),
@@ -87,6 +87,18 @@ const FIELDS: [Field; 37] = [
     }),
     Field::Millis("load_interval", |t, v| t.load_interval = v),
     Field::Millis("status_hold", |t, v| t.status_hold = v),
+    Field::Millis("internal_request_timeout", |t, v| {
+        t.internal_request_timeout = v;
+    }),
+    Field::Count("internal_retry_budget", |t, v| {
+        t.internal_retry_budget = u32::try_from(v).unwrap_or(u32::MAX);
+    }),
+    Field::Millis("internal_retry_backoff", |t, v| {
+        t.internal_retry_backoff = v;
+    }),
+    Field::Millis("resolve_answer_within", |t, v| {
+        t.resolve_answer_within = v;
+    }),
 ];
 
 /// The environment variable that overrides `field`.
@@ -243,6 +255,10 @@ mod tests {
             registry_page: _,
             load_interval: _,
             status_hold: _,
+            internal_request_timeout: _,
+            internal_retry_budget: _,
+            internal_retry_backoff: _,
+            resolve_answer_within: _,
         } = DriverTunables::production();
         let mut names: Vec<String> = FIELDS
             .iter()
