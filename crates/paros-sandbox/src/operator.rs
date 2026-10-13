@@ -35,7 +35,7 @@ use paros::{
 use tokio_util::sync::CancellationToken;
 
 use crate::machine::machine_addr;
-use crate::model::{Action, Config, JournalPlace, Op, StepResult, TenantPlace, Topology};
+use crate::model::{Action, Config, JournalPlace, Op, Quorum, StepResult, TenantPlace, Topology};
 
 /// How long one operator step may take before it gives up.
 const PATIENCE: Duration = Duration::from_secs(20);
@@ -214,9 +214,11 @@ impl Desk {
         match op {
             Op::Init { machines } => self.init(*machines, known).await,
             Op::CreateTenant { tenant } => self.create_tenant(known, tenant).await,
-            Op::CreateJournal { tenant, journal } => {
-                self.create_journal(known, tenant, journal).await
-            }
+            Op::CreateJournal {
+                tenant,
+                journal,
+                mode,
+            } => self.create_journal(known, tenant, journal, mode).await,
             Op::Write {
                 tenant,
                 journal,
@@ -301,7 +303,19 @@ impl Desk {
     }
 
     /// `parosctl journal create`: the tenant coordinator places it.
-    async fn create_journal(&self, known: &mut Known, tenant: &str, name: &str) -> (bool, String) {
+    async fn create_journal(
+        &self,
+        known: &mut Known,
+        tenant: &str,
+        name: &str,
+        mode: &str,
+    ) -> (bool, String) {
+        let Ok(desired) = mode.parse::<Desired>() else {
+            return (
+                false,
+                format!("no mode {mode}: single, double, triple or grid:RxC"),
+            );
+        };
         let Some(cell) = known.cell.as_ref() else {
             return (false, "no cell: init failed".into());
         };
@@ -322,7 +336,7 @@ impl Desk {
             op: JournalOp::Create {
                 name: name.as_bytes().to_vec(),
                 writer: WriterMode::Single,
-                desired: Desired::DOUBLE,
+                desired,
             },
         };
         let answer = journals::request(
@@ -340,8 +354,9 @@ impl Desk {
                 let id = JournalIdentifier::new(tenant_id, id);
                 let members: Vec<u64> = config.members().iter().map(|m| m.0).collect();
                 let detail = format!(
-                    "journal {tenant}/{name} placed on {} acceptors",
-                    members.len()
+                    "journal {tenant}/{name} placed on {} acceptors, {}",
+                    members.len(),
+                    desired.label()
                 );
                 let writer = Writer::new(id, u128::from(self.nonzero()));
                 known.journals.insert(
@@ -614,6 +629,7 @@ impl Desk {
         let mut place = JournalPlace {
             name,
             members: Vec::new(),
+            quorum: Quorum::default(),
             leader: None,
             matchmakers: Vec::new(),
             hosts: Vec::new(),
@@ -625,7 +641,25 @@ impl Desk {
             };
             place.hosts.push(*machine);
             if reply.leader || place.members.is_empty() {
-                place.members = machines(&reply.members);
+                // Membership order, not machine order: a grid's rows are
+                // consecutive runs of it.
+                place.members = reply
+                    .members
+                    .iter()
+                    .filter_map(|n| by_node.get(n).copied())
+                    .collect();
+                place.quorum = Quorum {
+                    system: match reply.quorum_system {
+                        1 => "flexible",
+                        2 => "grid",
+                        _ => "majority",
+                    }
+                    .into(),
+                    phase1: reply.phase1_quorum,
+                    phase2: reply.phase2_quorum,
+                    rows: reply.rows,
+                    cols: reply.cols,
+                };
                 place.matchmakers = machines(&reply.matchmakers);
             }
             if reply.leader {

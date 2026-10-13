@@ -30,7 +30,7 @@ use moonpool_sim::SimulationBuilder;
 use moonpool_sim::runner::builder::ProcessCount;
 
 pub use model::{
-    Action, Config, Event, JournalPlace, Op, RunView, StepResult, TenantPlace, Topology,
+    Action, Config, Event, JournalPlace, Op, Quorum, RunView, StepResult, TenantPlace, Topology,
 };
 
 /// The most machines a universe holds.
@@ -112,6 +112,11 @@ fn check(config: &Config, actions: &[Action]) -> Result<(), String> {
     for action in &actions[1..] {
         match &action.op {
             Op::Init { .. } => return Err("init runs once, as the first step".into()),
+            Op::CreateJournal { mode, .. } if mode.parse::<paros::tenant::Desired>().is_err() => {
+                return Err(format!(
+                    "no mode {mode}: single, double, triple or grid:RxC"
+                ));
+            }
             Op::Write { count, .. } | Op::Read { count, .. }
                 if *count == 0 || *count > MAX_COUNT =>
             {
