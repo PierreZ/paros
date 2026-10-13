@@ -43,21 +43,16 @@ pub(super) async fn sets_booked(ctx: &SimContext, known: &Cell, deadline: Durati
         let first = known.first(attempt);
         attempt += 1;
         if let Some(registry) = registry(known, first).await {
-            // A registered machine that was never admitted and is no
-            // founding member never serves (a wiped founder's replacement
-            // that an admission registered, then stuck in another cell
-            // decree), yet placement may book it: nothing booked on it can
-            // start (#454 (control plane meets chaos): witness
-            // 5246499979768460566; #511 (placement books machines that never
-            // served)).
+            // The coordinator records only an admission that landed (#511
+            // (placement books machines that never served)).
             let admitted = crate::machine::admitted_ids(ctx.state());
-            let mut wiped = wiped.clone();
-            wiped.extend(
-                registry
-                    .bookings()
-                    .map(|(_, b)| b.node.0)
-                    .filter(|n| !admitted.contains(n) && !known.members.contains(n)),
-            );
+            for (node, _) in registry.nodes().filter(|(_, n)| n.admitted) {
+                assert_always!(
+                    admitted.contains(&node.0),
+                    "sets: the registry holds as admitted only a machine admitted",
+                    { "node" => node.0 }
+                );
+            }
             let mut stuck = None;
             for tenant in registry.hosted().filter(|t| !registry.dropped(*t)) {
                 let Some(control) = registry.hosted_tenant(tenant).map(|h| h.control) else {
@@ -171,6 +166,7 @@ fn unsettled(
             .filter(|(node, n)| {
                 n.standing == NodeStanding::Registered
                     && n.class == Class::Storage
+                    && registry.serves(*node)
                     && registry.liveness(*node).up
                     && registry.available(*node) > 0
                     && !slots.contains(node)

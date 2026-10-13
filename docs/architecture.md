@@ -804,6 +804,13 @@ create.
   machines' mean load, ties broken by a draw seeded with the tenant id, and a machine marked
   `Down` only after every machine that is up. A release takes a down machine first, then the
   most loaded.
+- **Only a machine that serves the cell is offered** (decided on 2026-10-13, #511 (placement
+  books machines that never served)). `cell add-machine` writes `RegisterNode` before its
+  `Admit`, and an `Admit` may never win: a wiped founder's replacement that promised in a
+  `cell init` refuses every admission (`in_cell_init`, by design: a stalled `cell init` is
+  safer than a machine in two cells). The cell coordinator's watch writes `MachineAdmitted`
+  once a registered machine answers `Identify` with this cell's id (`Registry::serves`), and
+  `paros::placement::machines` offers a founding member or such a machine only.
 - **Booking before the create.** The tenant coordinator plans a create's acceptors over the
   cell's storage machines, founding or admitted (#474), and books one acceptor slot
   on each in the cell control journal, through the term's cell session, before it writes the

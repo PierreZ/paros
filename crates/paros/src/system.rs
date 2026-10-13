@@ -138,6 +138,13 @@ pub enum SystemCommand {
         /// The incarnation that answered.
         incarnation: u128,
     },
+    /// The cell coordinator saw registered machine `id` answer `Identify`
+    /// as a machine of this cell (#511 (placement books machines that never
+    /// served)): its admission landed, and placement may book it.
+    MachineAdmitted {
+        /// The machine.
+        id: NodeId,
+    },
     /// Release a booking.
     ReleaseCapacity {
         /// The booking.
@@ -233,6 +240,9 @@ impl SystemCommand {
                     incarnation_low,
                 })
             }
+            SystemCommand::MachineAdmitted { id } => {
+                Kind::MachineAdmitted(wire::MachineAdmitted { id: id.0 })
+            }
             SystemCommand::ReleaseCapacity { booking } => {
                 Kind::ReleaseCapacity(wire::ReleaseCapacity { booking: *booking })
             }
@@ -306,6 +316,9 @@ impl SystemCommand {
             Kind::MachineUp(up) => SystemCommand::MachineUp {
                 id: NodeId(up.id),
                 incarnation: incarnation_from_halves(up.incarnation_high, up.incarnation_low),
+            },
+            Kind::MachineAdmitted(admitted) => SystemCommand::MachineAdmitted {
+                id: NodeId(admitted.id),
             },
             Kind::ReleaseCapacity(release) => SystemCommand::ReleaseCapacity {
                 booking: release.booking,
@@ -526,6 +539,10 @@ pub struct RegisteredNode {
     /// registration's, empty when it serves none): the encoded
     /// `InterfaceRef` a peer dials `Deliver` through.
     pub machine_interface: Vec<u8>,
+    /// Whether the cell coordinator saw it answer as a machine of this cell
+    /// (`MachineAdmitted`, #511 (placement books machines that never
+    /// served)). A registration comes before the `Admit` it may never win.
+    pub admitted: bool,
 }
 
 /// What the cell coordinator last wrote of one machine's liveness (#211,
@@ -599,6 +616,11 @@ pub enum RegistryEvent {
         node: NodeId,
         /// The slot's role.
         role: Role,
+    },
+    /// The cell coordinator recorded machine `id`'s admission (#511).
+    MachineAdmitted {
+        /// The machine.
+        id: NodeId,
     },
     /// The cell coordinator marked machine `id` down (#211).
     MachineDown {
@@ -880,6 +902,7 @@ impl Registry {
             }) => self.book(booking, node, role, target),
             Some(SystemCommand::MachineDown { id, incarnation }) => self.down(id, incarnation),
             Some(SystemCommand::MachineUp { id, incarnation }) => self.up(id, incarnation),
+            Some(SystemCommand::MachineAdmitted { id }) => self.admitted(id),
             Some(SystemCommand::ReleaseCapacity { booking }) => {
                 match self.bookings.remove(&booking) {
                     Some(held) => RegistryEvent::Released {
@@ -960,6 +983,7 @@ impl Registry {
                         registrations: 1,
                         incarnation,
                         machine_interface,
+                        admitted: false,
                     },
                 );
                 self.liveness.insert(
@@ -1152,6 +1176,28 @@ impl Registry {
         RegistryEvent::MachineDown { id }
     }
 
+    /// `MachineAdmitted` (#511 (placement books machines that never
+    /// served)): refused for a node not registered, retired, or a genesis
+    /// node (in the cell from its start); a repeat changes nothing.
+    fn admitted(&mut self, id: NodeId) -> RegistryEvent {
+        if self.genesis.contains(&id) {
+            return RegistryEvent::Refused(RegistryRefusal::NotRegistered { id });
+        }
+        let Some(node) = self
+            .nodes
+            .get_mut(&id)
+            .filter(|n| n.standing != NodeStanding::Retired)
+        else {
+            return RegistryEvent::Refused(RegistryRefusal::NotRegistered { id });
+        };
+        if node.admitted {
+            return RegistryEvent::Unchanged;
+        }
+        node.admitted = true;
+        assert!(self.serves(id), "an admitted machine serves the cell");
+        RegistryEvent::MachineAdmitted { id }
+    }
+
     /// `MachineUp` (#211, D6): a change only. Refused for a machine outside
     /// the pool and for the incarnation held up.
     fn up(&mut self, id: NodeId, incarnation: u128) -> RegistryEvent {
@@ -1188,6 +1234,21 @@ impl Registry {
             incarnation: self.nodes.get(&id).map_or(0, |n| n.incarnation),
             up: true,
         })
+    }
+
+    /// Whether `id` serves the cell (#511 (placement books machines that
+    /// never served)): a genesis node, or a registered machine not retired
+    /// that the cell coordinator saw in the cell (`MachineAdmitted`). Only
+    /// such a machine is offered to placement: a registration comes before
+    /// the `Admit` it may never win (a wiped founder's replacement stuck in
+    /// another cell decree).
+    #[must_use]
+    pub fn serves(&self, id: NodeId) -> bool {
+        self.genesis.contains(&id)
+            || self
+                .nodes
+                .get(&id)
+                .is_some_and(|n| n.admitted && n.standing != NodeStanding::Retired)
     }
 
     /// Whether `id` was seen alive: in the pool, and not marked down.
@@ -1293,6 +1354,7 @@ impl Registry {
                     incarnation_high: incarnation_halves(n.incarnation).0,
                     incarnation_low: incarnation_halves(n.incarnation).1,
                     machine_interface: n.machine_interface.clone(),
+                    admitted: n.admitted,
                 })
                 .collect(),
             bookings: self
@@ -1370,6 +1432,7 @@ impl Checkpointable for Registry {
                     registrations: n.registrations,
                     incarnation: incarnation_from_halves(n.incarnation_high, n.incarnation_low),
                     machine_interface: n.machine_interface,
+                    admitted: n.admitted,
                 },
             );
         }
@@ -1494,6 +1557,7 @@ mod tests {
             },
             SystemCommand::DrainNode { id: NodeId(100) },
             SystemCommand::RetireNode { id: NodeId(100) },
+            SystemCommand::MachineAdmitted { id: NodeId(100) },
             SystemCommand::BookCapacity {
                 booking: 7,
                 node: NodeId(100),
@@ -1738,6 +1802,48 @@ mod tests {
             RegistryEvent::Refused(RegistryRefusal::NotInPool { id: NodeId(7) })
         );
         assert!(reg.seen_alive(NodeId(0)) && reg.seen_alive(NodeId(100)));
+    }
+
+    #[test]
+    fn a_machine_serves_once_its_admission_is_recorded() {
+        let mut reg = Registry::new([NodeId(0)]);
+        reg.fold(0, &register(100, Class::Storage, 2));
+        // A genesis node serves from its start; a registration alone does
+        // not (#511 (placement books machines that never served)).
+        assert!(reg.serves(NodeId(0)));
+        assert!(!reg.serves(NodeId(100)));
+        let admitted = |id| one(&SystemCommand::MachineAdmitted { id: NodeId(id) });
+        assert_eq!(
+            reg.fold(1, &admitted(0)),
+            RegistryEvent::Refused(RegistryRefusal::NotRegistered { id: NodeId(0) })
+        );
+        assert_eq!(
+            reg.fold(2, &admitted(7)),
+            RegistryEvent::Refused(RegistryRefusal::NotRegistered { id: NodeId(7) })
+        );
+        assert_eq!(
+            reg.fold(3, &admitted(100)),
+            RegistryEvent::MachineAdmitted { id: NodeId(100) }
+        );
+        assert!(reg.serves(NodeId(100)));
+        assert_eq!(reg.fold(4, &admitted(100)), RegistryEvent::Unchanged);
+        // A reboot keeps the admission; a checkpoint carries it.
+        reg.fold(5, &register(100, Class::Storage, 3));
+        assert!(reg.serves(NodeId(100)));
+        let mut restored = Registry::new([NodeId(0)]);
+        restored
+            .restore(6, &reg.checkpoint())
+            .expect("a checkpoint restores");
+        assert!(restored.serves(NodeId(100)));
+        // A retired machine serves no more.
+        reg.fold(6, &one(&SystemCommand::DrainNode { id: NodeId(100) }));
+        assert!(reg.serves(NodeId(100)));
+        reg.fold(7, &one(&SystemCommand::RetireNode { id: NodeId(100) }));
+        assert!(!reg.serves(NodeId(100)));
+        assert_eq!(
+            reg.fold(8, &admitted(100)),
+            RegistryEvent::Refused(RegistryRefusal::NotRegistered { id: NodeId(100) })
+        );
     }
 
     #[test]

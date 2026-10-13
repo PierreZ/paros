@@ -4,6 +4,14 @@
 //! replaced it with `cell add-machine`, then runs `init` again over the
 //! founders. The re-run meets formed founders and an admitted machine at a
 //! listed address, and must find the cell.
+//!
+//! On a BUGGIFY decision the operator runs `init` again first, while the
+//! replacement is still idle (#511 (placement books machines that never
+//! served)): its `cell init` may leave the replacement promised in the cell
+//! decree, so every later `Admit` is refused `in_cell_init` after the
+//! admission registered it. Such a machine never serves, and placement must
+//! pass it over (witness 5246499979768460566 of #454 (control plane meets
+//! chaos), where it took a matchmaker set's slot for good).
 
 use moonpool_sim::{SimContext, assert_reachable};
 use paros::Address;
@@ -22,6 +30,9 @@ pub(super) struct Steps {
     admits: u8,
     /// The re-run `init` was forced.
     reran: bool,
+    /// Whether the re-run comes before the admission (a BUGGIFY decision,
+    /// drawn once).
+    early: Option<bool>,
     /// The next `FLEET_INIT` runs `init` again, even on a cell this
     /// operator knows.
     pub(super) rerun_next: bool,
@@ -41,7 +52,22 @@ impl FleetOps {
         {
             return None;
         }
-        match crate::machine::replacement(ctx.state())? {
+        let replacement = crate::machine::replacement(ctx.state())?;
+        if matches!(replacement, Replacement::Idle(_)) && !self.replaced.reran {
+            let early = *self
+                .replaced
+                .early
+                .get_or_insert_with(|| moonpool_sim::buggify_with_prob!(0.5));
+            if early {
+                assert_reachable!(
+                    "init: an operator runs init again before admitting a founder's replacement"
+                );
+                self.replaced.reran = true;
+                self.replaced.rerun_next = true;
+                return Some(super::super::FLEET_INIT);
+            }
+        }
+        match replacement {
             Replacement::Idle(_) if self.replaced.admits < MAX_ADMITS => {
                 self.replaced.admits += 1;
                 Some(super::super::ADMIT)
