@@ -4,7 +4,7 @@
     {
       "name": "play-dev",
       "runtimeExecutable": "nix",
-      "runtimeArgs": ["develop", "--command", "bash", "-c", "cd web/play && npm run dev -- --port 5173 --strictPort"],
+      "runtimeArgs": ["develop", "--command", "bash", "-c", "cd website/play && npm run dev -- --port 5173 --strictPort"],
       "port": 5173
     }
   ]

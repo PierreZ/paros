@@ -1,4 +1,4 @@
-//! Write `web/play/src/generated/` from the `ts_rs::TS` derives.
+//! Write `website/play/src/generated/` from the `ts_rs::TS` derives.
 //!
 //! The generated files are committed and CI diffs them, so this test is the
 //! only way they are produced: change a view type, run
@@ -12,9 +12,9 @@ use ts_rs::TS;
 
 fn out_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../web/play/src/generated")
+        .join("../../website/play/src/generated")
         .canonicalize()
-        .expect("web/play/src/generated exists and is committed")
+        .expect("website/play/src/generated exists and is committed")
 }
 
 #[test]
