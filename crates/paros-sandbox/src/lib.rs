@@ -5,9 +5,10 @@
 //! Every machine is a `parosd`: the shipped
 //! [`paros::machine::run_machine`] from an empty disk. The operator calls
 //! the same client and admin API as `parosctl` (`init`, `tenant create`,
-//! `journal create`, `write`, `cell add-machine`). Faults are moonpool's
-//! (crash, restart, partition, heal). Nothing here wraps or changes the
-//! shipped code; the timeline only observes the events the machines log.
+//! `journal create`, `write`, `read`), and after each step reads where
+//! every tenant and journal lives ([`Topology`]). Nothing here wraps or
+//! changes the shipped code; the timeline only observes the events the
+//! machines log. There is no fault injection yet.
 //!
 //! A run is a pure function of its [`Config`] and its action log: the same
 //! seed and actions give the same [`RunView`], byte for byte. The browser
@@ -17,7 +18,6 @@
 //! The network, the disks and the time are simulated: a time in a run is
 //! not a production number.
 
-mod faults;
 pub mod machine;
 pub mod model;
 mod operator;
@@ -29,7 +29,9 @@ use std::time::Duration;
 use moonpool_sim::SimulationBuilder;
 use moonpool_sim::runner::builder::ProcessCount;
 
-pub use model::{Action, Config, Event, Op, RunView, StepResult};
+pub use model::{
+    Action, Config, Event, JournalPlace, Op, RunView, StepResult, TenantPlace, Topology,
+};
 
 /// The most machines a universe holds.
 pub const MAX_MACHINES: usize = 7;
@@ -37,17 +39,22 @@ pub const MAX_MACHINES: usize = 7;
 /// The longest run, in simulated milliseconds.
 pub const MAX_RUN_MS: u64 = 300_000;
 
+/// The most records one step writes or reads.
+pub const MAX_COUNT: u32 = 100;
+
 /// Run `actions` on the universe `config` describes.
 ///
-/// A config outside its bounds (no founder, more founders than machines,
-/// more than [`MAX_MACHINES`], a run longer than [`MAX_RUN_MS`]) is
-/// reported in [`RunView::error`] and runs nothing.
+/// A config or a log outside its bounds is reported in [`RunView::error`]
+/// and runs nothing: the log starts with `init` at 0 ms and holds no other
+/// `init`, a count is between 1 and [`MAX_COUNT`], and the config holds 1
+/// to [`MAX_MACHINES`] machines and a run of at most [`MAX_RUN_MS`].
 #[must_use]
 pub fn run(config: &Config, actions: &[Action]) -> RunView {
     let mut view = RunView {
         config: config.clone(),
         actions: actions.to_vec(),
         steps: Vec::new(),
+        topology: Vec::new(),
         events: Vec::new(),
         error: None,
     };
@@ -56,8 +63,8 @@ pub fn run(config: &Config, actions: &[Action]) -> RunView {
         return view;
     }
     let results = Arc::new(Mutex::new(Vec::new()));
+    let topology = Arc::new(Mutex::new(Vec::new()));
     let recorded: timeline::Recorded = Arc::new(Mutex::new(Vec::new()));
-    let fault_actions = actions.to_vec();
     let report = SimulationBuilder::new()
         .processes(ProcessCount::Fixed(config.machines), || {
             Box::new(machine::MachineProcess)
@@ -66,8 +73,8 @@ pub fn run(config: &Config, actions: &[Action]) -> RunView {
             config.clone(),
             actions.to_vec(),
             results.clone(),
+            topology.clone(),
         ))
-        .fault_factory(move || Box::new(faults::Faults::new(&fault_actions)))
         .invariant(timeline::Timeline::new(recorded.clone()))
         .chaos_duration(Duration::from_millis(config.run_ms + 1))
         .chaos_until_run_ends()
@@ -79,31 +86,35 @@ pub fn run(config: &Config, actions: &[Action]) -> RunView {
         view.error = Some(error.to_string());
     }
     view.steps = std::mem::take(&mut *results.lock().unwrap_or_else(PoisonError::into_inner));
+    view.topology = std::mem::take(&mut *topology.lock().unwrap_or_else(PoisonError::into_inner));
     view.events = std::mem::take(&mut *recorded.lock().unwrap_or_else(PoisonError::into_inner));
     view
 }
 
 /// Check a config and its actions against their bounds.
 fn check(config: &Config, actions: &[Action]) -> Result<(), String> {
-    if config.founders == 0 || config.founders > config.machines {
-        return Err("founders must be between 1 and the machine count".into());
-    }
-    if config.machines > MAX_MACHINES {
-        return Err(format!("at most {MAX_MACHINES} machines"));
+    if config.machines == 0 || config.machines > MAX_MACHINES {
+        return Err(format!("a universe holds 1 to {MAX_MACHINES} machines"));
     }
     if config.run_ms == 0 || config.run_ms > MAX_RUN_MS {
         return Err(format!("a run lasts between 1 ms and {MAX_RUN_MS} ms"));
     }
-    for action in actions {
-        let machines: &[usize] = match &action.op {
-            Op::Admit { machine } | Op::Crash { machine } | Op::Restart { machine } => {
-                &[*machine][..]
+    match actions.first() {
+        Some(Action {
+            at_ms: 0,
+            op: Op::Init,
+        }) => {}
+        _ => return Err("the log starts with init at 0 ms".into()),
+    }
+    for action in &actions[1..] {
+        match &action.op {
+            Op::Init => return Err("init runs once, as the first step".into()),
+            Op::Write { count, .. } | Op::Read { count, .. }
+                if *count == 0 || *count > MAX_COUNT =>
+            {
+                return Err(format!("a step writes or reads 1 to {MAX_COUNT} records"));
             }
-            Op::Partition { a, b } | Op::Heal { a, b } => &[*a, *b][..],
-            Op::Init | Op::Write { .. } => &[],
-        };
-        if machines.iter().any(|m| *m >= config.machines) {
-            return Err(format!("{:?} names no machine of this universe", action.op));
+            Op::Write { .. } | Op::Read { .. } => {}
         }
         if action.at_ms > config.run_ms {
             return Err(format!(

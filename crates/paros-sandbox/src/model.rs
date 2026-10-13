@@ -10,11 +10,9 @@ pub struct Config {
     /// The seed of every simulated draw: network latency, disk timing and
     /// every random choice paros makes.
     pub seed: u64,
-    /// How many machines run `parosd` (each starts idle, with an empty disk).
+    /// How many machines run `parosd`. Each starts idle, with an empty
+    /// disk, and `init` forms the cell over all of them.
     pub machines: usize,
-    /// How many of them `init` lists as founding members: machines
-    /// `0..founders`.
-    pub founders: usize,
     /// How long the run lasts, in simulated milliseconds.
     pub run_ms: u64,
 }
@@ -23,8 +21,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             seed: 1,
-            machines: 4,
-            founders: 3,
+            machines: 5,
             run_ms: 30_000,
         }
     }
@@ -33,73 +30,49 @@ impl Default for Config {
 /// One step of the action log, at a simulated time.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Action {
-    /// When the step starts, in simulated milliseconds. An operator step
-    /// starts no earlier than the previous operator step ends.
+    /// When the step starts, in simulated milliseconds. A step starts no
+    /// earlier than the previous step ends.
     pub at_ms: u64,
     /// What it does.
     pub op: Op,
 }
 
-/// What a step does. The operator steps call the same client and admin API
-/// as `parosctl`; the fault steps act on the simulated world.
+/// What a step does: the same client and admin API as `parosctl`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Op {
-    /// `parosctl init` over the founding members: `cell init` (a
-    /// single-decree Paxos over the members), then the fleet steps.
+    /// `parosctl init` over every machine: `cell init` (a single-decree
+    /// Paxos over the members), then the fleet steps.
     Init,
-    /// Append `value` to the sandbox's journal (created on first use, with
-    /// its tenant): a Multi-Paxos write.
+    /// Append `count` records to `journal` of `tenant`, as its one writer.
+    /// The tenant and the journal are created on first use
+    /// (`parosctl tenant create`, `parosctl journal create`).
     Write {
-        /// The record.
-        value: String,
+        /// The tenant's name.
+        tenant: String,
+        /// The journal's name, inside the tenant.
+        journal: String,
+        /// How many records.
+        count: u32,
     },
-    /// `parosctl cell add-machine` for an idle machine.
-    Admit {
-        /// The machine's index.
-        machine: usize,
-    },
-    /// Crash a machine: its process stops, and its disk keeps only what it
-    /// synced.
-    Crash {
-        /// The machine's index.
-        machine: usize,
-    },
-    /// Start a crashed machine again on its disk.
-    Restart {
-        /// The machine's index.
-        machine: usize,
-    },
-    /// Cut the network between two machines, both ways.
-    Partition {
-        /// One machine's index.
-        a: usize,
-        /// The other machine's index.
-        b: usize,
-    },
-    /// Join two machines cut by a partition again.
-    Heal {
-        /// One machine's index.
-        a: usize,
-        /// The other machine's index.
-        b: usize,
+    /// Read `count` records of `journal` of `tenant` from its first
+    /// position.
+    Read {
+        /// The tenant's name.
+        tenant: String,
+        /// The journal's name, inside the tenant.
+        journal: String,
+        /// How many records.
+        count: u32,
     },
 }
 
-impl Op {
-    /// Whether the operator runs this step (the others are faults).
-    #[must_use]
-    pub fn is_operator(&self) -> bool {
-        matches!(self, Op::Init | Op::Write { .. } | Op::Admit { .. })
-    }
-}
-
-/// What an operator step came to.
+/// What a step came to.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StepResult {
     /// The step's index in the action log.
     pub index: usize,
-    /// When it started and ended, in simulated milliseconds.
+    /// When it started, in simulated milliseconds.
     pub start_ms: u64,
     /// When it ended.
     pub end_ms: u64,
@@ -107,6 +80,52 @@ pub struct StepResult {
     pub ok: bool,
     /// What happened, for people.
     pub detail: String,
+}
+
+/// Where the universe's tenants and journals live after a step, as the
+/// admin API reports it: the fleet directory, each tenant's control
+/// journal, and an `Inspect` of every journal on every machine.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Topology {
+    /// The step it follows, by its index in the action log.
+    pub step: usize,
+    /// When it was read, in simulated milliseconds.
+    pub time_ms: u64,
+    /// Each machine's node id (its first six hex digits), by index; `None`
+    /// for a machine outside the cell.
+    pub machines: Vec<Option<String>>,
+    /// The tenants, the internal ones first.
+    pub tenants: Vec<TenantPlace>,
+}
+
+/// One tenant and its journals.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TenantPlace {
+    /// Its name.
+    pub name: String,
+    /// Its groups, as `paros` labels them (`internal,fleet`, `users`, …).
+    pub groups: String,
+    /// The cell it lives in (the cell's name).
+    pub cell: String,
+    /// Its journals, its control journal first.
+    pub journals: Vec<JournalPlace>,
+}
+
+/// One journal and the machines that serve it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JournalPlace {
+    /// Its name.
+    pub name: String,
+    /// Its acceptors (the configuration in force), by machine index.
+    pub members: Vec<usize>,
+    /// The machine that leads it, when one does.
+    pub leader: Option<usize>,
+    /// Its matchmaker set, by machine index (empty without matchmakers).
+    pub matchmakers: Vec<usize>,
+    /// The machines that serve it (answered `Inspect` for it).
+    pub hosts: Vec<usize>,
+    /// The highest position its leader knows chosen.
+    pub chosen: Option<u64>,
 }
 
 /// One event a machine or the simulator reported, in simulated time.
@@ -130,8 +149,10 @@ pub struct RunView {
     pub config: Config,
     /// The action log it ran.
     pub actions: Vec<Action>,
-    /// What each operator step came to, in log order.
+    /// What each step came to, in log order.
     pub steps: Vec<StepResult>,
+    /// Where the tenants and journals live, after each step.
+    pub topology: Vec<Topology>,
     /// The events, in the order they happened.
     pub events: Vec<Event>,
     /// Why the run stopped early, when it did.

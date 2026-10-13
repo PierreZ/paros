@@ -1,66 +1,83 @@
-//! Milestone 1 of #518 (Paxos visualization sandbox): three founding
-//! machines form a cell and choose a value, survive their leader's crash,
-//! and admit a fourth machine.
+//! #518 (Paxos visualization sandbox): a universe of five machines forms
+//! one cell; two tenants write and read their journals, and the topology
+//! shows where each tenant's journals live.
 
 use paros_sandbox::{Action, Config, Op, run};
 
-fn at(at_ms: u64, op: Op) -> Action {
-    Action { at_ms, op }
+fn write(at_ms: u64, tenant: &str, journal: &str, count: u32) -> Action {
+    Action {
+        at_ms,
+        op: Op::Write {
+            tenant: tenant.into(),
+            journal: journal.into(),
+            count,
+        },
+    }
 }
 
-fn write(at_ms: u64, value: &str) -> Action {
-    at(
+fn read(at_ms: u64, tenant: &str, journal: &str, count: u32) -> Action {
+    Action {
         at_ms,
-        Op::Write {
-            value: value.into(),
+        op: Op::Read {
+            tenant: tenant.into(),
+            journal: journal.into(),
+            count,
         },
-    )
+    }
 }
 
 #[test]
-fn a_cell_forms_survives_a_crash_and_admits_a_machine() {
+fn tenants_write_read_and_show_their_topology() {
     let config = Config::default();
-    let base = vec![at(0, Op::Init), write(1_000, "a")];
+    let init = Action {
+        at_ms: 0,
+        op: Op::Init,
+    };
+    let base = vec![init, write(1_000, "acme", "orders", 3)];
     let first = run(&config, &base);
     assert_eq!(first.error, None, "{first:#?}");
     assert!(first.steps.iter().all(|s| s.ok), "{:#?}", first.steps);
-    // The machine that leads the journal: the source of its last chosen value.
-    let leader = first
-        .events
-        .iter()
-        .rev()
-        .find(|e| e.name == "leader_elected")
-        .and_then(|e| e.machine)
-        .expect("a leader was elected");
 
     let mut actions = base.clone();
-    let crash_at = first.steps.last().map_or(5_000, |s| s.end_ms + 100);
-    actions.push(at(crash_at, Op::Crash { machine: leader }));
-    actions.push(write(crash_at + 1_000, "b"));
-    actions.push(at(crash_at + 2_000, Op::Admit { machine: 3 }));
+    actions.push(write(2_000, "globex", "events", 2));
+    actions.push(read(3_000, "acme", "orders", 3));
     let second = run(&config, &actions);
     assert_eq!(second.error, None, "{second:#?}");
     for step in &second.steps {
         assert!(step.ok, "step failed: {step:#?}");
     }
-    assert_eq!(second.steps.len(), 4);
+    assert!(
+        second.steps[3].detail.starts_with("3 records"),
+        "{:?}",
+        second.steps[3]
+    );
     // Adding steps to the log never changes what came before them.
     assert_eq!(second.steps[..2], first.steps[..]);
-    // Another machine took the lead after the crash.
+
+    // After the last step: the internal tenants and both served tenants,
+    // each journal on its acceptors, with a leader.
+    let last = second
+        .topology
+        .last()
+        .expect("a topology after the last step");
+    assert_eq!(last.step, 3);
+    let names: Vec<&str> = last.tenants.iter().map(|t| t.name.as_str()).collect();
     assert!(
-        second.events.iter().any(|e| e.name == "leader_elected"
-            && e.time_ms > crash_at
-            && e.machine != Some(leader)),
-        "no machine took the lead after the crash"
+        names.contains(&"acme") && names.contains(&"globex"),
+        "{names:?}"
     );
-    // The fourth machine serves the cell.
-    assert!(
-        second
-            .events
-            .iter()
-            .any(|e| e.name == "machine_admitted" && e.machine == Some(3)),
-        "machine 3 was not admitted"
-    );
+    let acme = last
+        .tenants
+        .iter()
+        .find(|t| t.name == "acme")
+        .expect("acme");
+    let orders = acme
+        .journals
+        .iter()
+        .find(|j| j.name == "orders")
+        .expect("acme/orders");
+    assert!(!orders.members.is_empty(), "{orders:#?}");
+    assert!(orders.leader.is_some(), "{orders:#?}");
 
     // Replay: the same config and log give the same run.
     assert_eq!(run(&config, &actions), second);
