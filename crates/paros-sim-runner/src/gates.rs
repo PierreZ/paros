@@ -1025,6 +1025,14 @@ pub const RARE: &[Rare] = &[
         reason: "a move off a drained machine: 13 hits on 3 of 4 runs over 400 hunt seeds (#498 (moves in the sweep))",
     },
     Rare {
+        msg: "coordinator: a move finished",
+        reason: "a move off a drained machine: 1 to 2 checks a sweep on main, none in a 324-seed sweep (#498 (moves in the sweep))",
+    },
+    Rare {
+        msg: "coordinator: a successor term finished a move",
+        reason: "a move off a drained machine: 1 to 2 checks a sweep on main, none in a 324-seed sweep (#498 (moves in the sweep))",
+    },
+    Rare {
         msg: "placement: a journal moved off a draining machine",
         reason: "a move off a drained machine: 4 hits on 1 of 4 runs over 400 hunt seeds (#498 (moves in the sweep))",
     },
