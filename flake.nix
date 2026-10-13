@@ -45,57 +45,58 @@
       {
         devShells.default = pkgs.mkShell {
           buildInputs = with pkgs; [
- in crates/paros-play/Cargo.toml (a mismatch fails bindgen with an# Rust toolchain from oxalica
- in crates/paros-play/Cargo.toml (a mismatch fails bindgen with anrust-toolchain
+            # Rust toolchain from oxalica
+            rust-toolchain
 
- in crates/paros-play/Cargo.toml (a mismatch fails bindgen with an# Build tools
- in crates/paros-play/Cargo.toml (a mismatch fails bindgen with angcc
+            # Build tools
+            gcc
 
- in crates/paros-play/Cargo.toml (a mismatch fails bindgen with an# Development tools
- in crates/paros-play/Cargo.toml (a mismatch fails bindgen with ancargo-nextest
- in crates/paros-play/Cargo.toml (a mismatch fails bindgen with ancargo-edit
- in crates/paros-play/Cargo.toml (a mismatch fails bindgen with an# Mutation testing of paros-core with the simulation as the test
- in crates/paros-play/Cargo.toml (a mismatch fails bindgen with an# (`cargo xtask mutants`, the weekly `mutants` workflow, #269).
- in crates/paros-play/Cargo.toml (a mismatch fails bindgen with ancargo-mutants
- in crates/paros-play/Cargo.toml (a mismatch fails bindgen with anprotobuf
+            # Development tools
+            cargo-nextest
+            cargo-edit
+            # Mutation testing of paros-core with the simulation as the test
+            # (`cargo xtask mutants`, the weekly `mutants` workflow, #269).
+            cargo-mutants
+            protobuf
 
- in crates/paros-play/Cargo.toml (a mismatch fails bindgen with an# The site (website/zola/, Zola + Goyo, #254): website/zola/build.sh.
- in crates/paros-play/Cargo.toml (a mismatch fails bindgen with anzola
+            # The site (website/zola/, Zola + Goyo, #254): website/zola/build.sh.
+            zola
 
- in crates/paros-play/Cargo.toml (a mismatch fails bindgen with an# paros play: the interactive game (crates/paros-play + website/play).
- in crates/paros-play/Cargo.toml (a mismatch fails bindgen with an# wasm-bindgen-cli's version MUST equal the `wasm-bindgen` crate pin
- in crates/paros-play/Cargo.toml (a mismatch fails bindgen with an# in crates/paros-play/Cargo.toml (a mismatch fails bindgen with an
- in crates/paros-play/Cargo.toml (a mismatch fails bindgen with an# opaque schema-version error); bump both together.
- in crates/paros-play/Cargo.toml (a mismatch fails bindgen with anwasm-bindgen-cli
- in crates/paros-play/Cargo.toml (a mismatch fails bindgen with anbinaryen
- in crates/paros-play/Cargo.toml (a mismatch fails bindgen with annodejs_22
+            # paros play: the interactive game (crates/paros-play + website/play).
+            # wasm-bindgen-cli's version MUST equal the `wasm-bindgen` crate pin
+            # in crates/paros-play/Cargo.toml and crates/paros-sandbox/Cargo.toml
+            # (a mismatch fails bindgen with an opaque schema-version error);
+            # bump all three together.
+            wasm-bindgen-cli
+            binaryen
+            nodejs_22
           ];
 
           shellHook = ''
- in crates/paros-play/Cargo.toml (a mismatch fails bindgen with anecho "🏛️  Paros development environment loaded"
- in crates/paros-play/Cargo.toml (a mismatch fails bindgen with anecho "Rust version: $(rustc --version)"
- in crates/paros-play/Cargo.toml (a mismatch fails bindgen with anecho "Cargo version: $(cargo --version)"
+            echo "🏛️  Paros development environment loaded"
+            echo "Rust version: $(rustc --version)"
+            echo "Cargo version: $(cargo --version)"
 
- in crates/paros-play/Cargo.toml (a mismatch fails bindgen with an# Set environment variables
- in crates/paros-play/Cargo.toml (a mismatch fails bindgen with anexport RUST_BACKTRACE=1
- in crates/paros-play/Cargo.toml (a mismatch fails bindgen with an# The pinned Goyo theme; website/zola/build.sh copies it into website/zola/themes/goyo.
- in crates/paros-play/Cargo.toml (a mismatch fails bindgen with anexport PAROS_GOYO="${goyo}"
- in crates/paros-play/Cargo.toml (a mismatch fails bindgen with anexport RUST_LOG=debug
- in crates/paros-play/Cargo.toml (a mismatch fails bindgen with an# RUSTC_WRAPPER for selective LLVM SanitizerCoverage instrumentation,
- in crates/paros-play/Cargo.toml (a mismatch fails bindgen with an# gated by SANCOV_CRATES (see scripts/sancov-rustc.sh). No-op unless
- in crates/paros-play/Cargo.toml (a mismatch fails bindgen with an# SANCOV_CRATES is set (e.g. by `cargo xtask sim run`).
- in crates/paros-play/Cargo.toml (a mismatch fails bindgen with anexport RUSTC_WRAPPER="$PWD/scripts/sancov-rustc.sh"
+            # Set environment variables
+            export RUST_BACKTRACE=1
+            # The pinned Goyo theme; website/zola/build.sh copies it into website/zola/themes/goyo.
+            export PAROS_GOYO="${goyo}"
+            export RUST_LOG=debug
+            # RUSTC_WRAPPER for selective LLVM SanitizerCoverage instrumentation,
+            # gated by SANCOV_CRATES (see scripts/sancov-rustc.sh). No-op unless
+            # SANCOV_CRATES is set (e.g. by `cargo xtask sim run`).
+            export RUSTC_WRAPPER="$PWD/scripts/sancov-rustc.sh"
 
- in crates/paros-play/Cargo.toml (a mismatch fails bindgen with an# Inform about available tools
- in crates/paros-play/Cargo.toml (a mismatch fails bindgen with anecho "Available tools:"
- in crates/paros-play/Cargo.toml (a mismatch fails bindgen with anecho "  • rustc, cargo, rustfmt, clippy, rust-analyzer"
- in crates/paros-play/Cargo.toml (a mismatch fails bindgen with anecho "  • cargo-nextest for better test management"
- in crates/paros-play/Cargo.toml (a mismatch fails bindgen with anecho "  • Use 'cargo build' to build the project"
- in crates/paros-play/Cargo.toml (a mismatch fails bindgen with anecho "  • Use 'cargo test' to run tests"
- in crates/paros-play/Cargo.toml (a mismatch fails bindgen with anecho "  • Use 'cargo nextest run' for better test output with timeouts"
- in crates/paros-play/Cargo.toml (a mismatch fails bindgen with anecho "  • Use 'cargo fmt' to format code"
- in crates/paros-play/Cargo.toml (a mismatch fails bindgen with anecho "  • wasm-bindgen $(wasm-bindgen --version | cut -d' ' -f2), node $(node --version): scripts/build-play.sh builds the game"
- in crates/paros-play/Cargo.toml (a mismatch fails bindgen with anecho "  • zola $(zola --version | cut -d' ' -f2): website/zola/build.sh builds the site"
+            # Inform about available tools
+            echo "Available tools:"
+            echo "  • rustc, cargo, rustfmt, clippy, rust-analyzer"
+            echo "  • cargo-nextest for better test management"
+            echo "  • Use 'cargo build' to build the project"
+            echo "  • Use 'cargo test' to run tests"
+            echo "  • Use 'cargo nextest run' for better test output with timeouts"
+            echo "  • Use 'cargo fmt' to format code"
+            echo "  • wasm-bindgen $(wasm-bindgen --version | cut -d' ' -f2), node $(node --version): scripts/build-play.sh builds the game"
+            echo "  • zola $(zola --version | cut -d' ' -f2): website/zola/build.sh builds the site"
           '';
 
           # Environment variables
