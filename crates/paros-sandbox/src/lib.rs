@@ -45,9 +45,10 @@ pub const MAX_COUNT: u32 = 100;
 /// Run `actions` on the universe `config` describes.
 ///
 /// A config or a log outside its bounds is reported in [`RunView::error`]
-/// and runs nothing: the log starts with `init` at 0 ms and holds no other
-/// `init`, a count is between 1 and [`MAX_COUNT`], and the config holds 1
-/// to [`MAX_MACHINES`] machines and a run of at most [`MAX_RUN_MS`].
+/// and runs nothing: the log starts with `init` at 0 ms over 1 to all the
+/// machines and holds no other `init`, a count is between 1 and
+/// [`MAX_COUNT`], and the config holds 1 to [`MAX_MACHINES`] machines and a
+/// run of at most [`MAX_RUN_MS`].
 #[must_use]
 pub fn run(config: &Config, actions: &[Action]) -> RunView {
     let mut view = RunView {
@@ -102,19 +103,21 @@ fn check(config: &Config, actions: &[Action]) -> Result<(), String> {
     match actions.first() {
         Some(Action {
             at_ms: 0,
-            op: Op::Init,
-        }) => {}
-        _ => return Err("the log starts with init at 0 ms".into()),
+            op: Op::Init { machines },
+        }) if (1..=config.machines).contains(machines) => {}
+        _ => {
+            return Err("the log starts with init at 0 ms over 1 to all the machines".into());
+        }
     }
     for action in &actions[1..] {
         match &action.op {
-            Op::Init => return Err("init runs once, as the first step".into()),
+            Op::Init { .. } => return Err("init runs once, as the first step".into()),
             Op::Write { count, .. } | Op::Read { count, .. }
                 if *count == 0 || *count > MAX_COUNT =>
             {
                 return Err(format!("a step writes or reads 1 to {MAX_COUNT} records"));
             }
-            Op::Write { .. } | Op::Read { .. } => {}
+            _ => {}
         }
         if action.at_ms > config.run_ms {
             return Err(format!(

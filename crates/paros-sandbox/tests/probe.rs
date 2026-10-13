@@ -1,6 +1,6 @@
-//! #518 (Paxos visualization sandbox): a universe of five machines forms
-//! one cell; two tenants write and read their journals, and the topology
-//! shows where each tenant's journals live.
+//! #518 (Paxos visualization sandbox): `init` forms one cell over four of
+//! five machines; two tenants create, write and read their journals, and
+//! the topology shows where each tenant's journals live.
 
 use paros_sandbox::{Action, Config, Op, run};
 
@@ -13,6 +13,29 @@ fn write(at_ms: u64, tenant: &str, journal: &str, count: u32) -> Action {
             count,
         },
     }
+}
+
+fn at(at_ms: u64, op: Op) -> Action {
+    Action { at_ms, op }
+}
+
+fn tenant(at_ms: u64, tenant: &str) -> Action {
+    at(
+        at_ms,
+        Op::CreateTenant {
+            tenant: tenant.into(),
+        },
+    )
+}
+
+fn journal(at_ms: u64, tenant: &str, journal: &str) -> Action {
+    at(
+        at_ms,
+        Op::CreateJournal {
+            tenant: tenant.into(),
+            journal: journal.into(),
+        },
+    )
 }
 
 fn read(at_ms: u64, tenant: &str, journal: &str, count: u32) -> Action {
@@ -29,30 +52,33 @@ fn read(at_ms: u64, tenant: &str, journal: &str, count: u32) -> Action {
 #[test]
 fn tenants_write_read_and_show_their_topology() {
     let config = Config::default();
-    let init = Action {
-        at_ms: 0,
-        op: Op::Init,
-    };
-    let base = vec![init, write(1_000, "acme", "orders", 3)];
+    let base = vec![
+        at(0, Op::Init { machines: 4 }),
+        tenant(100, "acme"),
+        journal(200, "acme", "orders"),
+        write(300, "acme", "orders", 3),
+    ];
     let first = run(&config, &base);
     assert_eq!(first.error, None, "{first:#?}");
     assert!(first.steps.iter().all(|s| s.ok), "{:#?}", first.steps);
 
     let mut actions = base.clone();
-    actions.push(write(2_000, "globex", "events", 2));
-    actions.push(read(3_000, "acme", "orders", 3));
+    actions.push(tenant(400, "globex"));
+    actions.push(journal(500, "globex", "events"));
+    actions.push(write(600, "globex", "events", 2));
+    actions.push(read(700, "acme", "orders", 3));
     let second = run(&config, &actions);
     assert_eq!(second.error, None, "{second:#?}");
     for step in &second.steps {
         assert!(step.ok, "step failed: {step:#?}");
     }
     assert!(
-        second.steps[3].detail.starts_with("3 records"),
+        second.steps[7].detail.starts_with("3 records"),
         "{:?}",
-        second.steps[3]
+        second.steps[7]
     );
     // Adding steps to the log never changes what came before them.
-    assert_eq!(second.steps[..2], first.steps[..]);
+    assert_eq!(second.steps[..4], first.steps[..]);
 
     // After the last step: the internal tenants and both served tenants,
     // each journal on its acceptors, with a leader.
@@ -60,7 +86,9 @@ fn tenants_write_read_and_show_their_topology() {
         .topology
         .last()
         .expect("a topology after the last step");
-    assert_eq!(last.step, 3);
+    assert_eq!(last.step, 7);
+    // Machine 4 stayed idle: init named four machines.
+    assert_eq!(last.machines[4], None);
     let names: Vec<&str> = last.tenants.iter().map(|t| t.name.as_str()).collect();
     assert!(
         names.contains(&"acme") && names.contains(&"globex"),

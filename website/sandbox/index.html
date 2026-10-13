@@ -25,8 +25,8 @@
         <label>Machines <input id="machines" type="number" min="1" max="7" /></label>
         <label>Run length (s) <input id="run" type="number" min="1" max="300" /></label>
       </div>
-      <p class="muted">One cell, <code>cell-1</code>, over every machine. A second cell in one universe
-        comes with paros milestone M12.</p>
+      <p class="muted">One cell, <code>cell-1</code>. The machines <code>init</code> does not list stay
+        idle. A second cell in one universe comes with paros milestone M12.</p>
       <div class="row">
         <label>Example <select id="preset"></select></label>
         <button id="load-preset">Load</button>
@@ -36,15 +36,18 @@
       <h2>Action log</h2>
       <ol class="actions" id="actions" start="0"></ol>
       <div class="row">
-        <label>At (ms) <input id="at" type="number" min="0" step="100" /></label>
+        <label>At (ms) <input id="at" type="number" min="1" step="100" /></label>
         <label>Action <select id="op">
+          <option value="create_tenant">create a tenant</option>
+          <option value="create_journal">create a journal</option>
           <option value="write">write N records</option>
           <option value="read">read N records</option>
         </select></label>
-        <label>Tenant <input id="tenant" value="acme" size="8" list="tenants" /></label>
-        <label>Journal <input id="journal" value="orders" size="8" list="journals" /></label>
-        <label>N <input id="count" type="number" min="1" max="100" value="3" /></label>
-        <datalist id="tenants"></datalist><datalist id="journals"></datalist>
+        <label id="tenant-name-field">Tenant <input id="tenant-name" value="acme" size="10" /></label>
+        <label id="tenant-pick-field">Tenant <select id="tenant-pick"></select></label>
+        <label id="journal-name-field">Journal <input id="journal-name" value="orders" size="10" /></label>
+        <label id="journal-pick-field">Journal <select id="journal-pick"></select></label>
+        <label id="count-field">N <input id="count" type="number" min="1" max="100" value="3" /></label>
       </div>
       <div class="row">
         <button id="add" class="primary">Add and run</button>

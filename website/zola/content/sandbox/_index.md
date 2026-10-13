@@ -13,14 +13,16 @@ puts each tenant and each journal, and how Paxos chooses the records you write.
 Each machine runs the same code as `parosd`. It starts with an empty disk and waits for a cell.
 The operator in the page makes the same calls as `parosctl`:
 
-- `init` is always the first step, at 0 ms. It is `cell init`, then `universe init`. `cell init`
-  is a single-decree Paxos over every machine: they choose the plan of the cell `cell-1`.
-  `universe init` creates the universe tenant in that cell.
-- "Write N records" appends N records to a journal of a tenant. Multi-Paxos chooses each record
-  at a position of the journal. The first write to a name creates the tenant
-  (`parosctl tenant create`) and the journal (`parosctl journal create`). The cell's coordinator
-  places the journal on some of the machines.
-- "Read N records" reads N records of a journal from its first position.
+- `init` is always the first step, at 0 ms. You choose how many machines it lists. It is
+  `cell init`, then `universe init`. `cell init` is a single-decree Paxos over the listed
+  machines: they choose the plan of the cell `cell-1`. `universe init` creates the universe
+  tenant in that cell. The machines that `init` does not list stay idle.
+- "Create a tenant" is `parosctl tenant create`.
+- "Create a journal" is `parosctl journal create`. The cell's coordinator places the journal
+  on some of the machines.
+- "Write N records" appends N records to a journal you choose. Multi-Paxos chooses each record
+  at a position of the journal.
+- "Read N records" reads N records of a journal you choose, from its first position.
 
 The sandbox has one cell. A universe of several cells comes with milestone M12. The sandbox
 injects no faults yet.

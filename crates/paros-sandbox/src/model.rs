@@ -11,7 +11,7 @@ pub struct Config {
     /// every random choice paros makes.
     pub seed: u64,
     /// How many machines run `parosd`. Each starts idle, with an empty
-    /// disk, and `init` forms the cell over all of them.
+    /// disk; `init` forms the cell over the first ones.
     pub machines: usize,
     /// How long the run lasts, in simulated milliseconds.
     pub run_ms: u64,
@@ -41,12 +41,26 @@ pub struct Action {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Op {
-    /// `parosctl init` over every machine: `cell init` (a single-decree
-    /// Paxos over the members), then the fleet steps.
-    Init,
+    /// `parosctl init` over machines `0..machines`: `cell init` (a
+    /// single-decree Paxos over the members), then `universe init`. The
+    /// other machines stay idle.
+    Init {
+        /// How many machines found the cell.
+        machines: usize,
+    },
+    /// `parosctl tenant create`.
+    CreateTenant {
+        /// The tenant's name.
+        tenant: String,
+    },
+    /// `parosctl journal create`: the tenant coordinator places it.
+    CreateJournal {
+        /// The tenant's name.
+        tenant: String,
+        /// The journal's name, inside the tenant.
+        journal: String,
+    },
     /// Append `count` records to `journal` of `tenant`, as its one writer.
-    /// The tenant and the journal are created on first use
-    /// (`parosctl tenant create`, `parosctl journal create`).
     Write {
         /// The tenant's name.
         tenant: String,

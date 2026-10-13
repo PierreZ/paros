@@ -56,3 +56,5 @@ td, th { text-align: left; padding: 3px 6px; border-bottom: 1px solid var(--line
 .mark.mm { border: 1px dashed var(--muted); color: var(--muted); font-weight: 400; }
 .legend { margin-top: 8px; }
 .legend .mark { margin-right: 4px; }
+ol.actions input { width: 56px; padding: 0 4px; }
+[hidden] { display: none !important; }

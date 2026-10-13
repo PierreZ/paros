@@ -116,7 +116,7 @@ impl moonpool_sim::Workload for Operator {
                 return Ok(());
             }
             let start_ms = now_ms(ctx);
-            let (ok, detail) = desk.step(&self.config, &mut known, &action.op).await;
+            let (ok, detail) = desk.step(&mut known, &action.op).await;
             let end_ms = now_ms(ctx);
             tracing::info!(index, ok, %detail, "operator_step");
             self.results
@@ -210,9 +210,13 @@ impl Desk {
         }
     }
 
-    async fn step(&self, config: &Config, known: &mut Known, op: &Op) -> (bool, String) {
+    async fn step(&self, known: &mut Known, op: &Op) -> (bool, String) {
         match op {
-            Op::Init => self.init(config, known).await,
+            Op::Init { machines } => self.init(*machines, known).await,
+            Op::CreateTenant { tenant } => self.create_tenant(known, tenant).await,
+            Op::CreateJournal { tenant, journal } => {
+                self.create_journal(known, tenant, journal).await
+            }
             Op::Write {
                 tenant,
                 journal,
@@ -226,12 +230,12 @@ impl Desk {
         }
     }
 
-    /// `parosctl init` over every machine.
-    async fn init(&self, config: &Config, known: &mut Known) -> (bool, String) {
+    /// `parosctl init` over machines `0..machines`.
+    async fn init(&self, machines: usize, known: &mut Known) -> (bool, String) {
         if known.cell.is_some() {
             return (false, "the universe is already initialized".into());
         }
-        let members: Vec<Address> = (0..config.machines).map(machine_addr).collect();
+        let members: Vec<Address> = (0..machines).map(machine_addr).collect();
         let params = InitParams {
             patience: PATIENCE,
             fleet_id: self.nonzero(),
@@ -261,27 +265,26 @@ impl Desk {
         }
     }
 
-    /// `parosctl tenant create`, once per name.
-    async fn tenant(
-        &self,
-        cell: &Initialized,
-        fleet: &mut Option<FleetSession>,
-        tenants: &mut BTreeMap<String, TenantId>,
-        name: &str,
-    ) -> Result<TenantId, String> {
-        if let Some(id) = tenants.get(name) {
-            return Ok(*id);
+    /// `parosctl tenant create`.
+    async fn create_tenant(&self, known: &mut Known, name: &str) -> (bool, String) {
+        let Some(cell) = known.cell.as_ref() else {
+            return (false, "no cell: init failed".into());
+        };
+        if known.tenants.contains_key(name) {
+            return (false, format!("tenant {name} exists already"));
         }
         let client = self.client(&cell.servers);
-        if fleet.is_none() {
-            *fleet = FleetSession::new(
+        if known.fleet.is_none() {
+            known.fleet = FleetSession::new(
                 cell.journals,
                 u128::from(self.nonzero()),
                 Registry::new(cell.members.iter().copied().map(NodeId)),
                 client.tunables().checkpoint_policy(),
             );
         }
-        let session = fleet.as_mut().ok_or("the cell names no fleet journal")?;
+        let Some(session) = known.fleet.as_mut() else {
+            return (false, "the cell names no fleet journal".into());
+        };
         let draws: Vec<JournalIdentifier> = (0..4)
             .map(|_| JournalIdentifier::new(TenantId(self.nonzero()), JournalId(self.nonzero())))
             .collect();
@@ -290,28 +293,32 @@ impl Desk {
             .await;
         match run.outcome {
             Step::Done { result, .. } => {
-                tenants.insert(name.to_owned(), result);
-                Ok(result)
+                known.tenants.insert(name.to_owned(), result);
+                (true, format!("tenant {name} created in cell-1"))
             }
-            other => Err(format!("tenant create: {other:?}")),
+            other => (false, format!("tenant create: {other:?}")),
         }
     }
 
     /// `parosctl journal create`: the tenant coordinator places it.
-    async fn create_journal(
-        &self,
-        cell: &Initialized,
-        tenant: TenantId,
-        name: &str,
-    ) -> Result<(JournalIdentifier, Vec<u64>), String> {
+    async fn create_journal(&self, known: &mut Known, tenant: &str, name: &str) -> (bool, String) {
+        let Some(cell) = known.cell.as_ref() else {
+            return (false, "no cell: init failed".into());
+        };
+        let Some(tenant_id) = known.tenants.get(tenant).copied() else {
+            return (false, format!("no tenant {tenant}: create it first"));
+        };
+        let key = (tenant.to_owned(), name.to_owned());
+        if known.journals.contains_key(&key) {
+            return (false, format!("journal {tenant}/{name} exists already"));
+        }
         let client = self.client(&cell.servers);
-        let election = cell
-            .journals
-            .election
-            .ok_or("the cell names no election journal")?;
+        let Some(election) = cell.journals.election else {
+            return (false, "the cell names no election journal".into());
+        };
         let request = JournalRequest {
             request: self.nonzero(),
-            tenant,
+            tenant: tenant_id,
             op: JournalOp::Create {
                 name: name.as_bytes().to_vec(),
                 writer: WriterMode::Single,
@@ -329,43 +336,27 @@ impl Desk {
         )
         .await;
         match answer {
-            JournalAnswer::Created { id, config } => Ok((
-                JournalIdentifier::new(tenant, id),
-                config.members().iter().map(|m| m.0).collect(),
-            )),
-            other => Err(format!("journal create: {other:?}")),
+            JournalAnswer::Created { id, config } => {
+                let id = JournalIdentifier::new(tenant_id, id);
+                let members: Vec<u64> = config.members().iter().map(|m| m.0).collect();
+                let detail = format!(
+                    "journal {tenant}/{name} placed on {} acceptors",
+                    members.len()
+                );
+                let writer = Writer::new(id, u128::from(self.nonzero()));
+                known.journals.insert(
+                    key,
+                    Opened {
+                        id,
+                        members,
+                        writer,
+                        written: 0,
+                    },
+                );
+                (true, detail)
+            }
+            other => (false, format!("journal create: {other:?}")),
         }
-    }
-
-    /// The journal `tenant`/`journal`, created with its tenant on first use.
-    async fn open<'k>(
-        &self,
-        known: &'k mut Known,
-        tenant: &str,
-        journal: &str,
-    ) -> Result<&'k mut Opened, String> {
-        let cell = known.cell.as_ref().ok_or("no cell: run init first")?;
-        let key = (tenant.to_owned(), journal.to_owned());
-        if !known.journals.contains_key(&key) {
-            let tenant_id = self
-                .tenant(cell, &mut known.fleet, &mut known.tenants, tenant)
-                .await?;
-            let (id, members) = self.create_journal(cell, tenant_id, journal).await?;
-            let writer = Writer::new(id, u128::from(self.nonzero()));
-            known.journals.insert(
-                key.clone(),
-                Opened {
-                    id,
-                    members,
-                    writer,
-                    written: 0,
-                },
-            );
-        }
-        known
-            .journals
-            .get_mut(&key)
-            .ok_or_else(|| "no journal".into())
     }
 
     /// The client over a journal's members (all servers when none is known).
@@ -391,14 +382,19 @@ impl Desk {
         journal: &str,
         count: u32,
     ) -> (bool, String) {
-        let Some(cell) = known.cell.clone() else {
-            return (false, "no cell: run init first".into());
+        let Some(cell) = known.cell.as_ref() else {
+            return (false, "no cell: init failed".into());
         };
-        let opened = match self.open(known, tenant, journal).await {
-            Ok(opened) => opened,
-            Err(error) => return (false, error),
+        let Some(opened) = known
+            .journals
+            .get_mut(&(tenant.to_owned(), journal.to_owned()))
+        else {
+            return (
+                false,
+                format!("no journal {tenant}/{journal}: create it first"),
+            );
         };
-        let client = self.journal_client(&cell, &opened.members);
+        let client = self.journal_client(cell, &opened.members);
         // A journal just created opens on its members a moment later: until
         // then a claim reads nothing, and the operator asks again.
         let deadline = client.now() + PATIENCE;
@@ -421,21 +417,38 @@ impl Desk {
                     other => return (false, format!("claim: {other:?}")),
                 }
             }
+            // One entry per record: a retry after an unsettled answer is the
+            // identical write, which the journal answers as a duplicate.
             let value = format!("{journal}-{}", opened.written + 1);
-            match opened
-                .writer
-                .write(&client, vec![Value(value.into_bytes())], 0)
-                .await
-            {
-                WriterOutcome::Written { seq, .. } => {
-                    opened.written += 1;
-                    done += 1;
-                    first.get_or_insert(seq);
-                    last = seq;
+            let Some(entry) = opened.writer.entry(vec![Value(value.into_bytes())]) else {
+                return (false, "write: the writer leads no term".into());
+            };
+            loop {
+                match opened.writer.write_entry(&client, &entry, 0).await {
+                    WriterOutcome::Written { seq, .. } => {
+                        opened.written += 1;
+                        done += 1;
+                        first.get_or_insert(seq);
+                        last = seq;
+                        break;
+                    }
+                    WriterOutcome::Ambiguous | WriterOutcome::Unavailable { .. }
+                        if client.now() < deadline =>
+                    {
+                        let pause = client.tunables().retry_backoff;
+                        if self.providers.time().sleep(pause).await.is_err() {
+                            return (false, "stopped".into());
+                        }
+                    }
+                    WriterOutcome::NotOwner
+                    | WriterOutcome::NotWritten { .. }
+                    | WriterOutcome::Superseded { .. }
+                        if client.now() < deadline =>
+                    {
+                        break;
+                    }
+                    other => return (false, format!("write: {other:?}")),
                 }
-                WriterOutcome::NotOwner | WriterOutcome::Superseded { .. }
-                    if client.now() < deadline => {}
-                other => return (false, format!("write: {other:?}")),
             }
         }
         match first {
@@ -450,12 +463,12 @@ impl Desk {
     /// Read `count` records of `tenant`/`journal` from its first position.
     async fn read(&self, known: &Known, tenant: &str, journal: &str, count: u32) -> (bool, String) {
         let Some(cell) = known.cell.as_ref() else {
-            return (false, "no cell: run init first".into());
+            return (false, "no cell: init failed".into());
         };
         let Some(opened) = known.journals.get(&(tenant.to_owned(), journal.to_owned())) else {
             return (
                 false,
-                format!("no journal {tenant}/{journal}: write to it first"),
+                format!("no journal {tenant}/{journal}: create it first"),
             );
         };
         let client = self.journal_client(cell, &opened.members);
