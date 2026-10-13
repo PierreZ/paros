@@ -1,66 +1,54 @@
 // The sandbox page: edit a universe and its action log, run it in a worker,
-// then scrub through what the machines did. The page draws only what the run
-// returns; the run is the shipped paros code on moonpool's simulator.
+// then step through where its tenants and journals live. The page draws only
+// what the run returns; the run is the shipped paros code on moonpool's
+// simulator.
 
 const $ = (id) => document.getElementById(id);
 
+const init = (machines) => ({ at_ms: 0, op: { kind: "init", machines } });
+
 const PRESETS = {
-  "Form a cell and write": {
-    config: { seed: 1, machines: 3, founders: 3, run_ms: 10000 },
+  "Two tenants, three journals": {
+    config: { seed: 1, machines: 6, run_ms: 20000 },
     actions: [
-      { at_ms: 0, op: { kind: "init" } },
-      { at_ms: 1000, op: { kind: "write", value: "a" } },
-      { at_ms: 2000, op: { kind: "write", value: "b" } },
+      init(5),
+      { at_ms: 100, op: { kind: "create_tenant", tenant: "acme" } },
+      { at_ms: 200, op: { kind: "create_journal", tenant: "acme", journal: "orders" } },
+      { at_ms: 300, op: { kind: "create_journal", tenant: "acme", journal: "payments" } },
+      { at_ms: 400, op: { kind: "create_tenant", tenant: "globex" } },
+      { at_ms: 500, op: { kind: "create_journal", tenant: "globex", journal: "events" } },
+      { at_ms: 600, op: { kind: "write", tenant: "acme", journal: "orders", count: 5 } },
+      { at_ms: 700, op: { kind: "write", tenant: "globex", journal: "events", count: 3 } },
+      { at_ms: 800, op: { kind: "read", tenant: "acme", journal: "orders", count: 5 } },
     ],
   },
-  "Crash a leader, add a machine": {
-    config: { seed: 1, machines: 4, founders: 3, run_ms: 15000 },
+  "One journal": {
+    config: { seed: 1, machines: 3, run_ms: 10000 },
     actions: [
-      { at_ms: 0, op: { kind: "init" } },
-      { at_ms: 1000, op: { kind: "write", value: "a" } },
-      { at_ms: 5000, op: { kind: "crash", machine: 0 } },
-      { at_ms: 6000, op: { kind: "write", value: "b" } },
-      { at_ms: 7000, op: { kind: "admit", machine: 3 } },
-      { at_ms: 11000, op: { kind: "restart", machine: 0 } },
-    ],
-  },
-  "Cut one machine off": {
-    config: { seed: 7, machines: 3, founders: 3, run_ms: 15000 },
-    actions: [
-      { at_ms: 0, op: { kind: "init" } },
-      { at_ms: 1000, op: { kind: "write", value: "a" } },
-      { at_ms: 4000, op: { kind: "partition", a: 0, b: 1 } },
-      { at_ms: 4000, op: { kind: "partition", a: 0, b: 2 } },
-      { at_ms: 5000, op: { kind: "write", value: "b" } },
-      { at_ms: 9000, op: { kind: "heal", a: 0, b: 1 } },
-      { at_ms: 9000, op: { kind: "heal", a: 0, b: 2 } },
+      init(3),
+      { at_ms: 100, op: { kind: "create_tenant", tenant: "acme" } },
+      { at_ms: 200, op: { kind: "create_journal", tenant: "acme", journal: "orders" } },
+      { at_ms: 300, op: { kind: "write", tenant: "acme", journal: "orders", count: 3 } },
+      { at_ms: 400, op: { kind: "read", tenant: "acme", journal: "orders", count: 3 } },
     ],
   },
 };
 
-const KIND_COLOURS = {
-  prepare: "#c97a2b", promise: "#b8860b", accept: "#2f5fb3", accepted: "#3b8bd9",
-  commit: "#3b6e47", nack: "#9b3434", heartbeat: "#8a8f99",
-};
-
-let state = loadFromHash() || structuredClone(PRESETS["Crash a leader, add a machine"]);
+let state = loadFromHash() || structuredClone(PRESETS["Two tenants, three journals"]);
 let run = null;
-let model = null;
-let playing = null;
 
 const worker = new Worker(new URL("./worker.js", import.meta.url), { type: "module" });
 worker.onmessage = ({ data }) => {
   run = JSON.parse(data.json);
-  model = buildModel(run);
-  const time = $("time");
-  time.max = state.config.run_ms;
-  if (Number(time.value) > state.config.run_ms) time.value = state.config.run_ms;
+  const step = $("step");
+  step.max = Math.max(0, run.topology.length - 1);
+  step.value = step.max;
   $("status").textContent = run.error
     ? `The run stopped: ${run.error}`
     : `Ran ${state.config.run_ms / 1000} simulated seconds in ${data.wallMs} ms of your time.`;
   setBusy(false);
   renderActions();
-  renderTime();
+  renderStep();
 };
 
 function setBusy(busy) {
@@ -89,7 +77,12 @@ function loadFromHash() {
     const text = atob(location.hash.slice(1).replaceAll("-", "+").replaceAll("_", "/"));
     const bytes = Uint8Array.from(text, (c) => c.charCodeAt(0));
     const loaded = JSON.parse(new TextDecoder().decode(bytes));
-    return loaded.config && Array.isArray(loaded.actions) ? loaded : null;
+    if (!loaded.config || !Array.isArray(loaded.actions)) return null;
+    // The log always starts with init at 0 ms, and holds no other init.
+    const first = loaded.actions.find((a) => a.op.kind === "init");
+    const machines = Number(first?.op.machines) || loaded.config.machines || 3;
+    loaded.actions = [init(machines), ...loaded.actions.filter((a) => a.op.kind !== "init")];
+    return loaded;
   } catch {
     return null;
   }
@@ -99,13 +92,11 @@ function loadFromHash() {
 
 function describe(op) {
   switch (op.kind) {
-    case "init": return "init: form the cell over the founding members";
-    case "write": return `write "${op.value}"`;
-    case "admit": return `add machine-${op.machine} to the cell`;
-    case "crash": return `crash machine-${op.machine}`;
-    case "restart": return `restart machine-${op.machine}`;
-    case "partition": return `cut machine-${op.a} from machine-${op.b}`;
-    case "heal": return `heal machine-${op.a} and machine-${op.b}`;
+    case "init": return `init: cell init (cell-1 over m0–m${op.machines - 1}), then universe init`;
+    case "create_tenant": return `create tenant ${op.tenant}`;
+    case "create_journal": return `create journal ${op.tenant}/${op.journal}`;
+    case "write": return `write ${op.count} records to ${op.tenant}/${op.journal}`;
+    case "read": return `read ${op.count} records of ${op.tenant}/${op.journal}`;
     default: return op.kind;
   }
 }
@@ -113,62 +104,87 @@ function describe(op) {
 function renderConfig() {
   $("seed").value = state.config.seed;
   $("machines").value = state.config.machines;
-  $("founders").value = state.config.founders;
   $("run").value = state.config.run_ms / 1000;
-  for (const id of ["a", "b"]) {
-    const select = $(id);
-    const old = select.value;
-    select.replaceChildren(
-      ...Array.from({ length: state.config.machines }, (_, i) => new Option(`machine-${i}`, i)),
-    );
-    if (old !== "" && Number(old) < state.config.machines) select.value = old;
-  }
-  if ($("b").value === $("a").value && state.config.machines > 1) $("b").value = 1;
-  renderOpFields();
-}
-
-function renderOpFields() {
-  const kind = $("op").value;
-  $("value-field").hidden = kind !== "write";
-  $("a-field").hidden = ["init", "write"].includes(kind);
-  $("b-field").hidden = !["partition", "heal"].includes(kind);
 }
 
 function renderActions() {
   const results = new Map((run?.steps || []).map((s) => [s.index, s]));
-  const list = $("actions");
-  list.replaceChildren(
+  $("actions").replaceChildren(
     ...state.actions.map((action, index) => {
       const item = document.createElement("li");
       const result = results.get(index);
-      item.textContent = `${action.at_ms} ms: ${describe(action.op)}`;
+      if (index === 0) {
+        const count = el("input", { type: "number", min: 1, max: state.config.machines,
+          value: action.op.machines, title: "How many machines init lists" });
+        count.onchange = () => {
+          action.op.machines = clamp(Number(count.value), 1, state.config.machines);
+          start();
+        };
+        item.append("0 ms: init over ", count, " machines: cell init, then universe init");
+      } else {
+        item.textContent = `${action.at_ms} ms: ${describe(action.op)}`;
+      }
       if (result) {
         const span = document.createElement("span");
         span.className = result.ok ? "ok" : "bad";
         span.textContent = ` → ${result.detail} (${result.start_ms}–${result.end_ms} ms)`;
         item.append(span);
       }
-      const remove = document.createElement("button");
-      remove.textContent = "×";
-      remove.title = "Remove this action";
-      remove.onclick = () => { state.actions.splice(index, 1); start(); };
-      item.append(remove);
+      if (index > 0) {
+        const remove = document.createElement("button");
+        remove.textContent = "×";
+        remove.title = "Remove this action";
+        remove.onclick = () => { state.actions.splice(index, 1); start(); };
+        item.append(remove);
+      }
       return item;
     }),
   );
   const last = state.actions.at(-1);
-  $("at").value = last ? Math.min(last.at_ms + 1000, state.config.run_ms) : 0;
+  $("at").value = Math.min(last.at_ms + 100, state.config.run_ms);
+  renderPicks();
+}
+
+// The tenants and journals the log creates: what writes and reads can name.
+function created() {
+  const tenants = [], journals = [];
+  for (const a of state.actions) {
+    if (a.op.kind === "create_tenant") tenants.push(a.op.tenant);
+    if (a.op.kind === "create_journal") journals.push(`${a.op.tenant}/${a.op.journal}`);
+  }
+  return { tenants, journals };
+}
+
+function renderPicks() {
+  const { tenants, journals } = created();
+  const fill = (select, items) => {
+    const old = select.value;
+    select.replaceChildren(...items.map((x) => new Option(x, x)));
+    if (items.includes(old)) select.value = old;
+  };
+  fill($("tenant-pick"), tenants);
+  fill($("journal-pick"), journals);
+  renderOpFields();
+}
+
+function renderOpFields() {
+  const kind = $("op").value;
+  $("tenant-name-field").hidden = kind !== "create_tenant";
+  $("tenant-pick-field").hidden = kind !== "create_journal";
+  $("journal-name-field").hidden = kind !== "create_journal";
+  $("journal-pick-field").hidden = !["write", "read"].includes(kind);
+  $("count-field").hidden = !["write", "read"].includes(kind);
 }
 
 function readConfig() {
-  const machines = clamp(Number($("machines").value), 1, 7);
   state.config = {
     seed: Math.max(0, Math.floor(Number($("seed").value) || 0)),
-    machines,
-    founders: clamp(Number($("founders").value), 1, machines),
+    machines: clamp(Number($("machines").value), 1, 7),
     run_ms: clamp(Math.round(Number($("run").value) * 1000), 1000, 300000),
   };
   state.actions = state.actions.filter((a) => a.at_ms <= state.config.run_ms);
+  const first = state.actions[0].op;
+  first.machines = Math.min(first.machines, state.config.machines);
   renderConfig();
   start();
 }
@@ -179,16 +195,22 @@ function clamp(value, low, high) {
 
 function addAction() {
   const kind = $("op").value;
-  const at_ms = clamp(Number($("at").value), 0, state.config.run_ms);
-  const a = Number($("a").value);
-  const b = Number($("b").value);
+  const text = (id) => $(id).value.trim();
   let op;
-  if (kind === "write") op = { kind, value: $("value").value || "x" };
-  else if (kind === "partition" || kind === "heal") {
-    if (a === b) { $("status").textContent = "Pick two different machines."; return; }
-    op = { kind, a, b };
-  } else if (kind === "init") op = { kind };
-  else op = { kind, machine: a };
+  if (kind === "create_tenant") {
+    if (!text("tenant-name")) { $("status").textContent = "Name the tenant."; return; }
+    op = { kind, tenant: text("tenant-name") };
+  } else if (kind === "create_journal") {
+    if (!text("tenant-pick")) { $("status").textContent = "Create a tenant first."; return; }
+    if (!text("journal-name")) { $("status").textContent = "Name the journal."; return; }
+    op = { kind, tenant: text("tenant-pick"), journal: text("journal-name") };
+  } else {
+    const pick = text("journal-pick");
+    if (!pick) { $("status").textContent = "Create a journal first."; return; }
+    const [tenant, journal] = pick.split("/");
+    op = { kind, tenant, journal, count: clamp(Number($("count").value), 1, 100) };
+  }
+  const at_ms = clamp(Number($("at").value), 1, state.config.run_ms);
   state.actions.push({ at_ms, op });
   state.actions.sort((x, y) => x.at_ms - y.at_ms);
   start();
@@ -196,155 +218,67 @@ function addAction() {
 
 // ---- what the run shows ----
 
-function buildModel(run) {
-  const machines = run.config.machines;
-  const nodeToMachine = new Map();
-  for (const e of run.events) {
-    const node = field(e, "node");
-    if (node && e.machine !== null) nodeToMachine.set(node, e.machine);
+function renderStep() {
+  if (!run) return;
+  const topology = run.topology[Number($("step").value)];
+  if (!topology) {
+    $("after").textContent = "Nothing to show: the run read no topology.";
+    $("spread").replaceChildren();
+    renderLog(0);
+    return;
   }
-  const ipToMachine = (ip) => {
-    const m = /^10\.0\.1\.(\d+)$/.exec(ip || "");
-    return m ? Number(m[1]) - 1 : null;
-  };
-  const messages = [];
-  const timeline = Array.from({ length: machines }, () => []);
-  for (const e of run.events) {
-    if (e.name === "msg_sent") {
-      const to = nodeToMachine.get((field(e, "to") || "").replace(/^node:/, ""));
-      if (to !== undefined && e.machine !== null && to !== e.machine) {
-        messages.push({ t: e.time_ms, from: e.machine, to, kind: field(e, "kind") });
-      }
-      continue;
-    }
-    let m = e.machine;
-    if (e.name === "sim_fault") m = ipToMachine(field(e, "ip"));
-    if (m !== null && m !== undefined && m < machines) timeline[m].push(e);
-  }
-  return { nodeToMachine, messages, timeline };
+  const action = state.actions[topology.step];
+  $("after").textContent =
+    `After step ${topology.step}, ${action ? describe(action.op) : ""}, read at ${topology.time_ms} ms.`;
+  renderSpread(topology);
+  renderLog(topology.time_ms);
 }
 
-function field(event, key) {
-  const pair = event.fields.find(([k]) => k === key);
-  return pair ? pair[1] : undefined;
+function el(tag, attrs = {}, ...children) {
+  const node = document.createElement(tag);
+  Object.assign(node, attrs);
+  node.append(...children);
+  return node;
 }
 
-function machineAt(index, t) {
-  const s = { phase: "idle", up: true, leads: 0, chosen: 0, node: null, round: null, last: null };
-  for (const node of model.nodeToMachine.keys()) {
-    if (model.nodeToMachine.get(node) === index) s.node = node;
-  }
-  for (const e of model.timeline[index]) {
-    if (e.time_ms > t) break;
-    s.last = e;
-    switch (e.name) {
-      case "machine_serving": s.phase = "formed"; break;
-      case "machine_admitted":
-      case "machine_serving_admitted_journals": s.phase = "admitted"; break;
-      case "leader_elected": s.round = field(e, "round"); s.leads += 1; break;
-      case "leadership_resigned":
-      case "leader_quorum_lost": s.leads = Math.max(0, s.leads - 1); break;
-      case "value_chosen": s.chosen += 1; break;
-      case "sim_fault": {
-        const kind = field(e, "kind");
-        if (kind === "process_force_kill") { s.up = false; s.leads = 0; }
-        if (kind === "process_restart") s.up = true;
-        break;
-      }
+function mark(kind, text, title) {
+  return el("span", { className: `mark ${kind}`, textContent: text, title });
+}
+
+function renderSpread(topology) {
+  const machines = topology.machines;
+  const load = machines.map(() => 0);
+  const table = $("spread");
+  table.replaceChildren(el("tr", {},
+    el("th", { className: "name", textContent: "Tenant / journal" }),
+    ...machines.map((node, i) => el("th", {}, `m${i}`, el("small", { textContent: node ?? "idle" }))),
+    el("th", { textContent: "Chosen" })));
+  for (const tenant of topology.tenants) {
+    const head = el("td", { colSpan: machines.length + 2 }, tenant.name,
+      el("span", { textContent: `${tenant.groups} · ${tenant.cell}` }));
+    table.append(el("tr", { className: "tenant" }, head));
+    for (const journal of tenant.journals) {
+      const row = el("tr", {}, el("td", { className: "name", textContent: journal.name }));
+      machines.forEach((_, m) => {
+        const cell = el("td");
+        if (journal.leader === m) cell.append(mark("leader", "L", "leader and acceptor"));
+        else if (journal.members.includes(m)) cell.append(mark("member", "A", "acceptor"));
+        else if (journal.matchmakers.includes(m)) cell.append(mark("mm", "M", "matchmaker only"));
+        if (journal.members.includes(m)) load[m] += 1;
+        row.append(cell);
+      });
+      row.append(el("td", { textContent: journal.chosen ?? "–" }));
+      table.append(row);
     }
   }
-  return s;
-}
-
-function partitionsAt(t) {
-  const cut = new Set();
-  for (const a of state.actions) {
-    if (a.at_ms > t) break;
-    const key = [a.op.a, a.op.b].sort().join("-");
-    if (a.op.kind === "partition") cut.add(key);
-    if (a.op.kind === "heal") cut.delete(key);
-  }
-  return cut;
-}
-
-const SVG = "http://www.w3.org/2000/svg";
-function svg(tag, attrs, text) {
-  const el = document.createElementNS(SVG, tag);
-  for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
-  if (text !== undefined) el.textContent = text;
-  return el;
-}
-
-function colourOf(s) {
-  const css = getComputedStyle(document.documentElement);
-  if (!s.up) return css.getPropertyValue("--bad");
-  if (s.phase === "formed") return css.getPropertyValue("--ok");
-  if (s.phase === "admitted") return css.getPropertyValue("--admitted");
-  return css.getPropertyValue("--idle");
-}
-
-function renderTime() {
-  if (!model) return;
-  const t = Number($("time").value);
-  $("clock").textContent = `${t} ms`;
-  const n = run.config.machines;
-  const centre = { x: 320, y: 210 };
-  const radius = n === 1 ? 0 : 150;
-  const at = (i) => ({
-    x: centre.x + radius * Math.cos((2 * Math.PI * i) / n - Math.PI / 2),
-    y: centre.y + radius * Math.sin((2 * Math.PI * i) / n - Math.PI / 2),
-  });
-  const stage = $("stage");
-  stage.replaceChildren();
-  for (const key of partitionsAt(t)) {
-    const [a, b] = key.split("-").map(Number);
-    const p = at(a), q = at(b);
-    stage.append(svg("line", { x1: p.x, y1: p.y, x2: q.x, y2: q.y, stroke: "#c84646",
-      "stroke-dasharray": "6 5", "stroke-width": 2 }));
-  }
-  const window = 120;
-  for (const m of model.messages) {
-    if (m.t > t || m.t < t - window) continue;
-    const p = at(m.from), q = at(m.to);
-    const age = (t - m.t) / window;
-    const x = p.x + (q.x - p.x) * Math.min(1, 0.15 + age);
-    const y = p.y + (q.y - p.y) * Math.min(1, 0.15 + age);
-    stage.append(svg("line", { x1: p.x, y1: p.y, x2: x, y2: y,
-      stroke: KIND_COLOURS[m.kind] || "#8a8f99", "stroke-width": 2, opacity: 1 - age * 0.8 }));
-  }
-  const rows = [];
-  for (let i = 0; i < n; i++) {
-    const s = machineAt(i, t);
-    const p = at(i);
-    stage.append(svg("circle", { cx: p.x, cy: p.y, r: 30, fill: colourOf(s),
-      stroke: s.leads > 0 && s.up ? "#e0b030" : "none", "stroke-width": 5 }));
-    stage.append(svg("text", { x: p.x, y: p.y + 4, "text-anchor": "middle", fill: "#fff",
-      style: "fill:#fff;font-weight:600" }, `m${i}`));
-    stage.append(svg("text", { x: p.x, y: p.y + 48, "text-anchor": "middle" },
-      !s.up ? "down" : s.leads > 0 ? `leads ${s.leads}` : s.phase));
-    rows.push([`machine-${i}`, s.node ? short(s.node) : "–", s.up ? s.phase : "down",
-      s.round ?? "–", String(s.leads), String(s.chosen)]);
-  }
-  renderTable(rows);
-  renderLog(t);
+  table.append(el("tr", { className: "load" },
+    el("td", { className: "name", textContent: "acceptors per machine" }),
+    ...load.map((n) => el("td", { textContent: String(n) })),
+    el("td")));
 }
 
 function short(node) {
   return BigInt(node).toString(16).padStart(16, "0").slice(0, 6);
-}
-
-function renderTable(rows) {
-  const head = ["Machine", "Node id", "State", "Last ballot round", "Journals it leads", "Values it applied"];
-  const table = $("nodes");
-  table.replaceChildren();
-  const tr = document.createElement("tr");
-  head.forEach((h) => { const th = document.createElement("th"); th.textContent = h; tr.append(th); });
-  table.append(tr);
-  for (const row of rows) {
-    const r = document.createElement("tr");
-    row.forEach((cell) => { const td = document.createElement("td"); td.textContent = cell; r.append(td); });
-    table.append(r);
-  }
 }
 
 function renderLog(t) {
@@ -361,15 +295,10 @@ function renderLog(t) {
 }
 
 function legend() {
-  const items = [["--idle", "idle"], ["--ok", "founding member"], ["--admitted", "admitted"],
-    ["--bad", "down"]];
-  $("legend").replaceChildren(...items.map(([v, text]) => {
-    const span = document.createElement("span");
-    const dot = document.createElement("i");
-    dot.style.background = `var(${v})`;
-    span.append(dot, text);
-    return span;
-  }), Object.assign(document.createElement("span"), { textContent: "gold ring: leads a journal" }));
+  $("legend").replaceChildren(
+    mark("leader", "L"), "leads the journal (and accepts) ",
+    mark("member", "A"), "acceptor ",
+    mark("mm", "M"), "in the tenant's matchmaker set only. Chosen: the highest position its leader knows chosen.");
 }
 
 // ---- wiring ----
@@ -380,24 +309,15 @@ $("load-preset").onclick = () => {
   renderConfig();
   start();
 };
-for (const name of ["seed", "machines", "founders", "run"]) $(name).onchange = readConfig;
-$("op").onchange = renderOpFields;
+for (const name of ["seed", "machines", "run"]) $(name).onchange = readConfig;
 $("add").onclick = addAction;
-$("undo").onclick = () => { state.actions.pop(); start(); };
-$("clear").onclick = () => { state.actions = []; start(); };
-$("time").oninput = renderTime;
-$("show-msgs").onchange = renderTime;
-$("play").onclick = () => {
-  if (playing) { clearInterval(playing); playing = null; $("play").textContent = "Play"; return; }
-  $("play").textContent = "Pause";
-  playing = setInterval(() => {
-    const time = $("time");
-    const next = Number(time.value) + 20;
-    if (next > Number(time.max)) { clearInterval(playing); playing = null; $("play").textContent = "Play"; return; }
-    time.value = next;
-    renderTime();
-  }, 40);
-};
+$("undo").onclick = () => { if (state.actions.length > 1) state.actions.pop(); start(); };
+$("clear").onclick = () => { state.actions = [state.actions[0]]; start(); };
+$("op").onchange = renderOpFields;
+$("step").oninput = renderStep;
+$("prev").onclick = () => { $("step").stepDown(); renderStep(); };
+$("next").onclick = () => { $("step").stepUp(); renderStep(); };
+$("show-msgs").onchange = renderStep;
 
 legend();
 renderConfig();

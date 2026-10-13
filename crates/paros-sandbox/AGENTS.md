@@ -15,22 +15,23 @@ sim-only path, no buggify or hint here. The timeline is an `Invariant` that only
 
 ## Map
 
-- `src/lib.rs` → `run`, `run_json`, `runSandbox` (wasm) → one seed of `SimulationBuilder`: the
-  machine group, the operator workload, the fault injector, the timeline; `chaos_until_run_ends`
-  with no random fault enabled.
-- `src/model.rs` → `Config`, `Action`, `Op`, `StepResult`, `Event`, `RunView` → the JSON contract.
+- `src/lib.rs` → `run`, `run_json`, `runSandbox` (wasm), `check` → one seed of
+  `SimulationBuilder`: the machine group, the operator workload, the timeline; no fault
+  injection. A log starts with `init` at 0 ms (over the first `machines`) and holds no other
+  `init`.
+- `src/model.rs` → `Config`, `Action`, `Op` (`init`, `create_tenant`, `create_journal`, `write`, `read`), `StepResult`,
+  `Topology`, `TenantPlace`, `JournalPlace`, `Event`, `RunView` → the JSON contract.
 - `src/machine.rs` → `MachineProcess`, `MACHINE_GROUP`, `machine_ip`, `machine_addr` → machine
   `i` is `10.0.1.{i+1}:4500`, literal addresses, plaintext.
-- `src/operator.rs` → `Operator` → `init` (`paros::client::initialize`), the first write creates
-  tenant `sandbox` and journal `log` (`FleetSession::create_tenant`, `journals::request`), then
-  `Writer` claim and write; `cell add-machine` (`CellSession::add_machine`).
-- `src/faults.rs` → `Faults` → crash, restart, partition, heal on a fixed 50 ms tick: the tick is
-  the same whatever the log holds, so an added action never shifts the random stream before its
-  time.
-- `src/timeline.rs` → `Timeline`, `NAMES` → the events the page draws.
+- `src/operator.rs` → `Operator` → `init` over the first machines (`paros::client::initialize`);
+  `FleetSession::create_tenant`; `journals::request` (create); a write claims and writes as the
+  journal's one `Writer`, one entry per record, the identical entry again after an unsettled
+  answer; a read walks a `Reader` from position 0. After each step, `survey` reads the topology through the admin API
+  only: `read_directory`, `journals::list` and `Client::inspect` on every machine.
+- `src/timeline.rs` → `Timeline`, `NAMES` → the events the page lists.
 - `src/bin/paros-sandbox.rs` → the same JSON on stdin and stdout, natively.
-- `tests/probe.rs` → milestone 1: a cell forms and chooses a value, survives its leader's crash,
-  admits a fourth machine; replay is identical, and a longer log keeps the shorter one's steps.
+- `tests/probe.rs` → `init` over four of five machines; two tenants create, write and read; the topology names each journal's acceptors
+  and leader; replay is identical, and a longer log keeps the shorter one's steps.
 
 ## Gates
 

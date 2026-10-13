@@ -5,22 +5,27 @@ weight = 3
 sort_by = "weight"
 +++
 
-The **[paros sandbox](app/)** runs a paros universe in your browser. Use it to see how Paxos
-and paros behave when machines join, crash and lose the network.
+The **[paros sandbox](app/)** runs a paros universe in your browser. Use it to see where paros
+puts each tenant and each journal, and how Paxos chooses the records you write.
 
 ## What runs
 
 Each machine runs the same code as `parosd`. It starts with an empty disk and waits for a cell.
 The operator in the page makes the same calls as `parosctl`:
 
-- `init` forms the cell. `cell init` is a single-decree Paxos over the founding members: they
-  choose the plan of the cell.
-- A write appends a value to a journal. Multi-Paxos chooses it in a slot of the journal's log.
-  The first write creates a tenant and its journal through the cell's coordinator.
-- "Add a machine" is `parosctl cell add-machine`: the cell control journal registers the idle
-  machine, then the machine is admitted.
+- `init` is always the first step, at 0 ms. You choose how many machines it lists. It is
+  `cell init`, then `universe init`. `cell init` is a single-decree Paxos over the listed
+  machines: they choose the plan of the cell `cell-1`. `universe init` creates the universe
+  tenant in that cell. The machines that `init` does not list stay idle.
+- "Create a tenant" is `parosctl tenant create`.
+- "Create a journal" is `parosctl journal create`. The cell's coordinator places the journal
+  on some of the machines.
+- "Write N records" appends N records to a journal you choose. Multi-Paxos chooses each record
+  at a position of the journal.
+- "Read N records" reads N records of a journal you choose, from its first position.
 
-You can also crash a machine, restart it, cut the network between two machines and heal it.
+The sandbox has one cell. A universe of several cells comes with milestone M12. The sandbox
+injects no faults yet.
 
 ## What is simulated
 
@@ -38,15 +43,19 @@ the start. An action you add never changes what happened before its time.
 
 ## What the page shows
 
-- The machines, with their state at the time you select: idle, founding member, admitted or
-  down. A gold ring shows a machine that leads at least one journal.
-- The messages each machine sends, as lines that move from the sender to the receiver.
-- What each action of the log came to, and when it started and ended.
-- The events the machines log, up to the time you select.
+After each step, the operator reads where every tenant and journal lives. It uses the admin API
+only: the universe directory, the control journal of each tenant and an `Inspect` of each journal
+on each machine. The page shows one table for each step:
 
-The page reads what the machines log. It does not read or change their memory. A cell holds
-several journals (the cell control journal, the election journal, the universe directory, the
-tenant control journals and your journal), so the counts on the page add up all of them.
+- A row for each tenant: the internal tenants (the cell tenant and the universe tenant) and the
+  tenants you created, with their groups and their cell.
+- Under each tenant, a row for each journal, its control journal first. A column for each
+  machine shows the journal's leader (L), its acceptors (A) and the machines that are only in
+  the tenant's matchmaker set (M).
+- The last row counts the acceptors on each machine: how the cell spreads the journals.
+
+The page also shows what each action of the log came to and the events the machines log up to
+the selected step.
 
 ## How it differs from the game
 
