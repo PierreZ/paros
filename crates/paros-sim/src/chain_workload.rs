@@ -178,6 +178,13 @@ pub(crate) struct ChainWorkload {
     /// The client's program between its handoff and `check()` (#454): set
     /// by `run()`, joined by `check()`.
     program: Option<Program>,
+    /// The program ended without giving the workload back (it panicked):
+    /// this is `run()`'s placeholder, which is no client, so `check()`
+    /// fails at once. Before, the placeholder's `client_id` of 0 ran
+    /// client 0's history searches mid-run and took the logged histories,
+    /// so the real client 0 judged what was left: a history with no start,
+    /// refuted at its first answer (hunt seed 7921884428541148436).
+    lost: bool,
 }
 
 /// A client's program paused at its handoff: `check()` lets it on into
@@ -220,6 +227,7 @@ impl ChainWorkload {
             client_id: 0,
             calls: None,
             program: None,
+            lost: false,
         }
     }
 
@@ -227,10 +235,16 @@ impl ChainWorkload {
     /// the workload back with its verdict. No program: nothing to join.
     async fn join_program(&mut self) -> SimulationResult<()> {
         let Some(program) = self.program.take() else {
+            if self.lost {
+                return Err(SimulationError::InvalidState(
+                    "the chain client's program ended without a verdict".to_string(),
+                ));
+            }
             return Ok(());
         };
         let _ = program.quiet.send(());
         let Ok((me, result)) = program.done.await else {
+            self.lost = true;
             let joined = program.handle.await;
             return Err(SimulationError::InvalidState(format!(
                 "the chain client's program ended without a verdict: {joined:?}"
