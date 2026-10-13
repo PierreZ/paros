@@ -3,7 +3,7 @@
 The interactive Paxos game's engine: `paros-core` driven **by hand** (a driver with a player
 where the network and the clock would be), plus the levels, prompts and views the browser reads.
 `publish = false`; `cdylib` for the wasm bundle, `rlib` for native tests. Depends on
-`paros-core` only (beside the main stack, not on `paros`). The TypeScript app is `web/play/`.
+`paros-core` only (beside the main stack, not on `paros`). The TypeScript app is `website/play/`.
 Spec: `docs/analysis/play/game-plan.md` — read it before adding a level or a verb.
 
 ## The rule
@@ -40,7 +40,7 @@ calls the core (a core `assert!` in wasm is an abort): every player-reachable re
 - `src/level/script.rs` → `Script` → records a reference solution by driving a real `Game`.
 - `src/level/act{1,2,3,4}.rs` → 6 + 7 + 5 + 10 = 28 levels.
 - `src/view.rs` → `GameView` and friends → the one contract the browser reads.
-- `tests/bindings.rs` → writes `web/play/src/generated/` from the `ts_rs::TS` derives.
+- `tests/bindings.rs` → writes `website/play/src/generated/` from the `ts_rs::TS` derives.
 - `tests/levels.rs` → every reference reaches its goal; wrong answers refused and inert; undo/replay bit-exact; ids unique; act order; field-guide links bare; unlocks pinned manual.
 - `tests/narration.rs` → a line appears exactly when its transition happened, with its numbers, reproducibly.
 - `tests/world.rs` → the log world driven directly: election, apply, heal, restart, seams, reads, each prompt kind.
@@ -59,7 +59,7 @@ The `applied` log in `world/disk.rs` is the **game's own** application stand-in,
    `tests/levels.rs::act_four_registers_its_ten_levels_in_play_order`).
 4. A new prompt: compute the answer on a clone at raise time, author an explanation per wrong
    choice, add it to `prompt::ALL_PROMPTS` and its flag to `auto::ALL_FLAGS`.
-5. A new view field: change `src/view.rs`, rerun the bindings test, commit `web/play/src/generated/`.
+5. A new view field: change `src/view.rs`, rerun the bindings test, commit `website/play/src/generated/`.
 6. `cargo nextest run -p paros-play`; then the web gates below.
 
 ## Local rules
@@ -76,11 +76,11 @@ The `applied` log in `world/disk.rs` is the **game's own** application stand-in,
 Prefix each with `nix develop --command` (on the web, see root *Environment & Nix*):
 
 - `cargo nextest run -p paros-play`
-- `cargo test -p paros-play --test bindings` then `git diff --exit-code -- web/play/src/generated`
+- `cargo test -p paros-play --test bindings` then `git diff --exit-code -- website/play/src/generated`
 - `cargo check --target wasm32-unknown-unknown -p paros-play`
-- `scripts/build-play.sh --wasm-only` (wasm-bindgen output into `web/play/src/wasm/`, gitignored)
-- `bash -c 'cd web/play && npm ci --no-audit --no-fund && npm run check && npm test && npm run build'`
-- Full deploy build: `scripts/build-play.sh` after `web/site/build.sh` (stages into `web/site/public/play/`).
+- `scripts/build-play.sh --wasm-only` (wasm-bindgen output into `website/play/src/wasm/`, gitignored)
+- `bash -c 'cd website/play && npm ci --no-audit --no-fund && npm run check && npm test && npm run build'`
+- Full deploy build: `scripts/build-play.sh` after `website/zola/build.sh` (stages into `website/zola/public/play/`).
 
 ## Deps & pins (`Cargo.toml`)
 

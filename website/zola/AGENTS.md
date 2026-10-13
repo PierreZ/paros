@@ -7,10 +7,10 @@ reader to `docs/architecture.md`, which is the agents' map, not human documentat
 
 ## Build & preview
 
-- `web/site/build.sh` (inside `nix develop`) copies the pinned Goyo (`PAROS_GOYO`, a flake
-  input) into `web/site/themes/goyo` and runs `zola build`; output in `web/site/public/`. Zola checks
+- `website/zola/build.sh` (inside `nix develop`) copies the pinned Goyo (`PAROS_GOYO`, a flake
+  input) into `website/zola/themes/goyo` and runs `zola build`; output in `website/zola/public/`. Zola checks
   every internal link and anchor, so a broken `@/` link fails the build.
-- `web/site/build.sh serve` previews live.
+- `website/zola/build.sh serve` previews live.
 - The flake pins Zola 0.22 (`nixpkgs-zola`): Goyo's templates do not parse on Zola 0.23.
 - Internal links are `@/paxos/<page>.md#anchor`. Old mdbook URLs keep working through each
   page's `aliases` (`/safety.html` redirects to `/paxos/safety/`); keep them when you move a page.
@@ -29,7 +29,7 @@ reader to `docs/architecture.md`, which is the agents' map, not human documentat
 
 ## Diagram colours MUST survive both themes
 
-This is the rule that is easy to get wrong. `web/site/config.toml` sets the light Goyo theme as
+This is the rule that is easy to get wrong. `website/zola/config.toml` sets the light Goyo theme as
 the default, and Goyo initializes mermaid with the light theme or the `dark` theme to match
 the reader's toggle. So any hardcoded colour has to read on **both** a light (white) and a
 dark page.
@@ -69,15 +69,15 @@ config with `--no-sandbox`).
 - Keep every symbol named in a diagram real: it should exist in `paros-core` / `paros-sim`
   so the figure stays mapped to the code, like the rest of the site.
 
-## The live surface is the game, and the Paxos chapters are its field guide
+## The game is a live surface, and the Paxos chapters are its field guide
 
 The interactive half of the site is **paros play**, deployed on the same GitHub Pages site
-at `/play/` (`crates/paros-play` + `web/play`, staged into `web/site/public/play/` by
+at `/play/` (`crates/paros-play` + `website/play`, staged into `website/zola/public/play/` by
 `scripts/build-play.sh` in the Pages workflow). The one-widget rewrite (#308) replaces this
 section's rules when it lands. It drives the real `paros-core` compiled
 to wasm — the player is the network and the clock, and plays each role until the core judges
-the answer right — and it **never replays a trace**: there is no seed, no recorded run, and
-no simulation in the browser. `web/site/content/paxos/play.md` is the level map; the levels themselves are
+the answer right — and it **never replays a trace**: the game has no seed, no recorded run and
+no simulation (the sandbox, below, is the one place that simulates). `website/zola/content/paxos/play.md` is the level map; the levels themselves are
 Rust, in `crates/paros-play/src/level/`.
 
 That splits the writing between the two surfaces, and the split is the rule for every future
@@ -115,6 +115,27 @@ chapter edit:
 
 Do not add demo iframes, `runSeed` references, or wasm build steps to a chapter: the game is
 a separate page, linked, never embedded.
+
+## The sandbox is the second live surface (decided on 2026-10-13, #518)
+
+The **paros sandbox** runs a paros universe in the browser: the shipped `run_machine` on
+moonpool's simulated network, disk and clock, driven by the operator calls `parosctl` makes
+(`crates/paros-sandbox`, the page `website/sandbox/`, staged at `/sandbox/app/` by
+`scripts/build-sandbox.sh`). Its section is `content/sandbox/`. The rule that forbids seeds and
+simulation in the browser is the game's, and it does not apply to the sandbox. The game stays as
+it is (decided on 2026-10-13: keep both): the game teaches each role by hand, the sandbox shows
+the whole system.
+
+- **Same code as production.** The page drives the client and admin API a user calls. It shows
+  only what the run returns: the events the machines log and the operator's results. A fact the
+  page needs from inside paros comes from a read-only accessor in `paros` that never changes
+  behaviour, never from a sim-only path or a `Sim*` wrapper.
+- **Every run is a replay.** A run is a function of its seed, its config and its action log, and
+  the page link holds all three. An action added to the log never changes what happened before
+  its time (`crates/paros-sandbox/tests/probe.rs` pins this).
+- **Say what is simulated.** The page and the section say that the network, the disks and the
+  clock are simulated, and that its times are not production numbers.
+- **It explains Paxos and paros.** It never names a person or an audience.
 
 ## Site text follows ASD-STE100
 

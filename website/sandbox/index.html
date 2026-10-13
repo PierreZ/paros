@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>paros sandbox</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+<header>
+  <h1>paros sandbox</h1>
+  <div>Run a paros universe in your browser. Every machine runs the same code as <code>parosd</code>,
+    and the operator uses the same calls as <code>parosctl</code>.
+    <a href="../">How the sandbox works</a> · <a href="../../">paros</a></div>
+  <div class="notice">The network, the disks and the clock are simulated. Times are simulated
+    milliseconds, not production numbers. A run depends only on its seed, its configuration and its
+    action log, so the link to this page replays it exactly.</div>
+</header>
+<main>
+  <div>
+    <section>
+      <h2>Universe</h2>
+      <div class="row">
+        <label>Seed <input id="seed" type="number" min="0" /></label>
+        <label>Machines <input id="machines" type="number" min="1" max="7" /></label>
+        <label>Founding members <input id="founders" type="number" min="1" max="7" /></label>
+        <label>Run length (s) <input id="run" type="number" min="1" max="300" /></label>
+      </div>
+      <div class="row">
+        <label>Example <select id="preset"></select></label>
+        <button id="load-preset">Load</button>
+      </div>
+    </section>
+    <section>
+      <h2>Action log</h2>
+      <ol class="actions" id="actions"></ol>
+      <div class="row">
+        <label>At (ms) <input id="at" type="number" min="0" step="100" /></label>
+        <label>Action <select id="op">
+          <option value="init">init (cell init)</option>
+          <option value="write">write a value</option>
+          <option value="admit">add a machine</option>
+          <option value="crash">crash a machine</option>
+          <option value="restart">restart a machine</option>
+          <option value="partition">cut the network</option>
+          <option value="heal">heal the network</option>
+        </select></label>
+        <label id="value-field">Value <input id="value" value="x" size="6" /></label>
+        <label id="a-field">Machine <select id="a"></select></label>
+        <label id="b-field">and <select id="b"></select></label>
+      </div>
+      <div class="row">
+        <button id="add" class="primary">Add and run</button>
+        <button id="undo">Undo</button>
+        <button id="clear">Clear</button>
+      </div>
+      <p class="muted" id="status">Loading…</p>
+    </section>
+  </div>
+  <div>
+    <section>
+      <h2>Machines</h2>
+      <div class="scrub">
+        <button id="play">Play</button>
+        <input id="time" type="range" min="0" value="0" step="10" />
+        <span id="clock">0 ms</span>
+      </div>
+      <svg id="stage" viewBox="0 0 640 420" role="img" aria-label="The machines and the messages in flight"></svg>
+      <div class="legend" id="legend"></div>
+      <table id="nodes"></table>
+    </section>
+    <section>
+      <h2>Events up to this time</h2>
+      <label><span><input id="show-msgs" type="checkbox" /> show every message sent</span></label>
+      <div class="log" id="log"></div>
+    </section>
+  </div>
+</main>
+<script type="module" src="main.js"></script>
+</body>
+</html>

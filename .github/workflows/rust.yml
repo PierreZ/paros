@@ -1,13 +1,13 @@
 name: Tests
 
-# A change that touches only Markdown, docs/ or the site (web/site/) runs no Rust job.
+# A change that touches only Markdown, docs/ or the site (website/zola/) runs no Rust job.
 on:
   push:
     branches: [main]
-    paths-ignore: ['**.md', 'docs/**', 'web/site/**']
+    paths-ignore: ['**.md', 'docs/**', 'website/zola/**']
   pull_request:
     branches: [main]
-    paths-ignore: ['**.md', 'docs/**', 'web/site/**']
+    paths-ignore: ['**.md', 'docs/**', 'website/zola/**']
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -93,6 +93,8 @@ jobs:
         run: nix develop --command cargo check -p paros-core --features serde
       - name: Build paros (the library driver) for wasm32-unknown-unknown
         run: nix develop --command cargo check --target wasm32-unknown-unknown -p paros
+      - name: Build the Paxos sandbox (paros on moonpool's simulator) for wasm32-unknown-unknown
+        run: nix develop --command cargo check --target wasm32-unknown-unknown -p paros-sandbox
 
   # paros play, the interactive game: the engine crate's wasm build, the TypeScript
   # bindings ts-rs generates from its view types (committed; a stale copy fails the
@@ -107,11 +109,11 @@ jobs:
       - name: Regenerate the TypeScript bindings and check they are committed
         run: |
           nix develop --command cargo test -p paros-play --test bindings
-          git diff --exit-code -- web/play/src/generated
+          git diff --exit-code -- website/play/src/generated
       - name: Build the game's wasm and the web app
         run: nix develop --command scripts/build-play.sh --wasm-only
       - name: Type-check, test and bundle the web app
-        run: nix develop --command bash -c 'cd web/play && npm ci --no-audit --no-fund && npm run check && npm test && npm run build'
+        run: nix develop --command bash -c 'cd website/play && npm ci --no-audit --no-fund && npm run check && npm test && npm run build'
 
   # The toy (#196), the user's demo and no test: the image builds from a fresh
   # clone with Docker alone (the one build outside Nix), and its Rust version is

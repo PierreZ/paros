@@ -137,6 +137,7 @@ checkpoint, common, fleet, public, internal, matchmaker, system, machine, view}`
 - moonpool, rev `50ec6b1` (moonpool#323 (system provider): `SystemProvider` and the simulated disk's counters, after moonpool#318's `buggify_named!` and `set_activation`): `moonpool-core` (`select`, `:26`), `moonpool-rpc` (`prost`, `:28`),
   `moonpool-journal` (`:32`), `moonpool-buggify` (`:36`), `moonpool-assertions` (`:37`), dev `moonpool-sim` (`:61`).
 - Dev: `futures` executor (`:53`), `tokio` `rt`+`macros` (`:57`). Build: `prost-build` (`:60`).
-- The pin is **eleven lines**: six here, `crates/paros-core/Cargo.toml` (`moonpool-assertions`),
+- The pin is **thirteen lines**: six here, `crates/paros-core/Cargo.toml` (`moonpool-assertions`),
+  `crates/paros-sandbox/Cargo.toml` (`moonpool-sim`, `moonpool-rpc`),
   `crates/paros-sim/Cargo.toml:20,29`, `crates/parosd/Cargo.toml:22,24` — advance every line
   together.

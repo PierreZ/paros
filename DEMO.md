@@ -91,7 +91,7 @@ Add `--json` after `parosctl` for machine-readable output, e.g.
 
 The journal `orders` is single-writer: a writer must hold the current leader uuid. The
 four calls, the two writer modes and the limits are on the site's journal API page
-(`web/site/content/parosd/journal-api.md`).
+(`website/zola/content/parosd/journal-api.md`).
 
 ## Locally, without Docker
 

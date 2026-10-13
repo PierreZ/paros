@@ -13,9 +13,9 @@ target
 # Nix / direnv
 .direnv/
 
-# The site's build output and the theme copied in at build time (web/site/build.sh)
-/web/site/public/
-/web/site/themes/
+# The site's build output and the theme copied in at build time (website/zola/build.sh)
+/website/zola/public/
+/website/zola/themes/
 
 # Library crate: lockfile is not committed
 /Cargo.lock
@@ -28,9 +28,9 @@ target
 
 # paros play: installed npm packages, the vite bundle, and the wasm-bindgen output
 # (scripts/build-play.sh produces the last two; src/generated/ is committed).
-/web/play/node_modules/
-/web/play/dist/
-/web/play/src/wasm/
+/website/play/node_modules/
+/website/play/dist/
+/website/play/src/wasm/
 
 # cargo-mutants output (`cargo xtask mutants`, #269)
 mutants.out/

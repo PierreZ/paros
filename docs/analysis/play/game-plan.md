@@ -83,7 +83,7 @@ crates/paros-play/                 # the game engine + wasm glue; publish = fals
     script.rs                      # a reference solution is *recorded* by driving a real Game
   tests/levels.rs                  # every level's reference solution reaches its goal;
                                    #   every prompt's wrong answers are refused
-web/play/                          # the TypeScript app
+website/play/                          # the TypeScript app
   package.json, package-lock.json, vite.config.ts, tsconfig.json
   index.html
   src/main.ts                      # boot wasm, route level, drive the render loop
@@ -328,7 +328,7 @@ flags. `MessageView { id, kind, from, to, ballot, slot, summary, phase }` where 
 render family (`prepare`, `promise`, `accept`, `accepted`, `nack`, `commit`, `heartbeat`,
 `catchup`, `snapshot`, `read`, `handoff`, `match`, `gc`, `reconfigure`). Every view type derives
 `Serialize` + `ts_rs::TS` with `#[ts(export)]`; `cargo test -p paros-play` writes
-`web/play/src/generated/`, which is committed, and CI diffs it. Ballots render as `round.node`.
+`website/play/src/generated/`, which is committed, and CI diffs it. Ballots render as `round.node`.
 
 The wasm surface is one class: `Game::new(level_id) `, `Game::levels()`, `act(json) -> json`
 (the new view, or an error the UI shows), `undo()`, `view()`, `reset()`. Errors, not panics: the
@@ -354,8 +354,8 @@ with undo, hints, the automation toggles, the field-guide link. A level map with
 - `flake.nix` adds `nodejs_22`, `wasm-bindgen-cli` (0.2.117 in the locked nixpkgs; the crate
   pins `=0.2.117` and a comment says why), `binaryen` (`wasm-opt -Os` on the release wasm).
 - `scripts/build-play.sh`: `cargo build --release --target wasm32-unknown-unknown -p paros-play
-  --lib` → `wasm-bindgen --target web --out-dir web/play/src/wasm` → `wasm-opt` → `cd web/play
-  && npm ci && npm run build` → copy `web/play/dist/` to `book/output/play/`. Run after
+  --lib` → `wasm-bindgen --target web --out-dir website/play/src/wasm` → `wasm-opt` → `cd website/play
+  && npm ci && npm run build` → copy `website/play/dist/` to `book/output/play/`. Run after
   `mdbook build`.
 - `.github/workflows/pages.yml`: one step, `nix develop --command scripts/build-play.sh`, after
   the book build and before the upload.
@@ -390,3 +390,7 @@ by the reviewer, including one wrong prompt answer and one undo.
 
 No latency model, no random scheduling, no trace replay, no moonpool in the browser, no score
 beyond passed/mistakes, no server, no accounts. Seeds are never levels.
+
+These non-goals are the game's. The Paxos sandbox (#518, decided on 2026-10-13) is a separate
+surface that runs moonpool in the browser on purpose: `crates/paros-sandbox`,
+`website/sandbox/`, and the rules in `website/zola/AGENTS.md`.

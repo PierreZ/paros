@@ -1,4 +1,4 @@
-# web/play — the paros play frontend
+# website/play — the paros play frontend
 
 The browser half of **paros play**, the interactive Paxos game. The engine is
 `crates/paros-play`, compiled to WebAssembly; everything here renders what it
@@ -12,7 +12,7 @@ Every tool comes from Nix. Build the wasm once, then run vite:
 
 ```sh
 nix develop --command scripts/build-play.sh --wasm-only   # writes src/wasm/
-nix develop --command bash -c 'cd web/play && npm ci && npm run dev'
+nix develop --command bash -c 'cd website/play && npm ci && npm run dev'
 ```
 
 Then open <http://localhost:5173/>. Rebuild the wasm (the first command) after
@@ -21,11 +21,11 @@ any change under `crates/paros-play`; vite reloads the rest on save.
 The four gates, the same ones CI runs:
 
 ```sh
-nix develop --command bash -c 'cd web/play && npm ci && npm run check && npm test && npm run build'
+nix develop --command bash -c 'cd website/play && npm ci && npm run check && npm test && npm run build'
 ```
 
-The full deploy build — wasm, bundle, and the copy into `web/site/public/play/` —
-is `nix develop --command scripts/build-play.sh`, after `web/site/build.sh`.
+The full deploy build — wasm, bundle, and the copy into `website/zola/public/play/` —
+is `nix develop --command scripts/build-play.sh`, after `website/zola/build.sh`.
 
 ## Layout
 
@@ -156,4 +156,4 @@ All the text in this directory follows ASD-STE100: short active sentences,
 present tense, one instruction per sentence, no idioms, and `must` for an
 obligation. The `field_guide` field is a bare chapter filename (`safety.html`). The app is
 served at `/play/`, so a link to it is `../` plus that name; the site's alias for
-the old mdbook URL redirects it to the chapter (`web/site/content/paxos/`).
+the old mdbook URL redirects it to the chapter (`website/zola/content/paxos/`).
