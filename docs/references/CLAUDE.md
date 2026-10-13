@@ -39,6 +39,11 @@ we study, and analyses of external consensus codebases. This file is the map; re
   the acceptor set via per-round configuration registries (matchmakers).
 - [`papers/scaling-rsm-compartmentalization/`](papers/scaling-rsm-compartmentalization/) — Whittaker
   et al. Decouple the leader into independent roles (batchers, proxy leaders, …) for throughput.
+- [`papers/bipartisan-paxos/`](papers/bipartisan-paxos/): Whittaker et al., "SoK: A Generalized
+  Multi-Leader State Machine Replication Tutorial" (Bipartisan Paxos, BPaxos). EPaxos, Atlas and
+  Caesar explained through four BPaxos variants: conflict graphs, the consensus and dependency
+  invariants, and the tension between them during recovery. Mostly what paros is *not* (a
+  journal is a total order); read for the taxonomy, Mencius and the Fast Paxos quorum rules.
 
 ### Zones & placement
 - [`papers/wpaxos/`](papers/wpaxos/): Ailijiang, Charapko, Demirbas, Tasci. Per-zone flexible
