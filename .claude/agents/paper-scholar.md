@@ -22,7 +22,7 @@ Rules for a useful answer:
   ships no snapshots (#186), so a paper's snapshot transfer maps onto the
   trim-point jump (`Message::TrimmedTo`), not onto a state copy.
 - Map the answer onto the code: name the module and type in `paros-core`
-  (`acceptor.rs`, `proposer.rs`, `replica.rs`, `membership.rs`,
+  (`acceptor.rs`, `proposer.rs`, `replica.rs`, `membership/`,
   `matchmaking.rs`, `matchmaker/`) and the rule's doc comment when one
   exists. Grep the crate to check the symbol is real before naming it.
 - When the papers disagree with a paros rule, say so plainly and point at
