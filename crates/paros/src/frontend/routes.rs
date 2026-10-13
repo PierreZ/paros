@@ -101,16 +101,23 @@ impl<P: Providers> Routes<P> {
 
     /// A machine refused `journal`, resolved from `name`, as unknown: drop
     /// the journal's resolution, and the tenant's (the tenant may be gone).
+    /// Each call is its own task, so another call may have resolved the
+    /// tenant's name again since this one resolved it: when the name now
+    /// names another tenant (the old one removed, a new one created under
+    /// its name), that newer resolution stays (recipe seed
+    /// 200353386032078490: the frontend asserted the two tenants equal).
     pub(super) fn stale(&mut self, name: &JournalName, journal: JournalIdentifier) {
-        if let Some((tenant, control)) = self.tenants.get(name.tenant()).copied() {
-            assert_eq!(tenant, journal.tenant, "a name resolves inside its tenant");
-            if let Some(names) = self.journals.get_mut(&control) {
-                names.stale(name.journal().as_bytes(), journal);
+        match self.tenants.get(name.tenant()).copied() {
+            Some((tenant, control)) if tenant == journal.tenant => {
+                if let Some(names) = self.journals.get_mut(&control) {
+                    names.stale(name.journal().as_bytes(), journal);
+                }
+                self.tenants.remove(name.tenant());
+                assert!(!self.tenants.contains_key(name.tenant()));
             }
-            self.tenants.remove(name.tenant());
+            Some(_) | None => {}
         }
         self.directory = None;
-        assert!(!self.tenants.contains_key(name.tenant()));
     }
 }
 

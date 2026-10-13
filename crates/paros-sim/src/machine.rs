@@ -1137,8 +1137,12 @@ async fn run_machine_role(
 /// the boot facts that need the run's layout. An empty disk where a record
 /// was is a wipe (moonpool's `CrashAndWipe`): the machine there is a new
 /// one, and the old one's vote is gone with its disk.
-pub(crate) fn booted(board: &Mutex<MachineBoard>, addr: &Address, record: Option<&MachineRecord>) {
-    let mut board = lock(board);
+pub(crate) fn booted(
+    machine: &Mutex<MachineBoard>,
+    addr: &Address,
+    record: Option<&MachineRecord>,
+) {
+    let mut board = lock(machine);
     let Some(record) = record else {
         let Some(old) = board.nodes.remove(addr) else {
             return;
@@ -1171,6 +1175,21 @@ pub(crate) fn booted(board: &Mutex<MachineBoard>, addr: &Address, record: Option
     );
     if record.formed().is_none() && record.admitted.is_none() && !board.founders.contains(addr) {
         assert_reachable!("machine: a machine no cell init lists restarts and waits");
+    }
+    // A record write whose sync failed may still have landed (the rename
+    // was durable, a directory sync after it was not): the machine restarts
+    // on the error and boots on the record, so this boot is where the board
+    // learns its vote or its admission (witness 15405975583108970484: a
+    // one-founder cell formed on such a write, and `init` found a cell the
+    // board said no machine formed).
+    let unheard = record.plan.is_some()
+        && !board.voters.contains_key(&record.node_id.0)
+        && !board.others.contains_key(&record.node_id.0)
+        || record.admitted.is_some() && !board.admitted.contains_key(&record.node_id.0);
+    drop(board);
+    if unheard {
+        assert_reachable!("machine: a boot finds a record write that failed its sync landed");
+        recorded(machine, addr, record);
     }
 }
 
