@@ -34,7 +34,8 @@ use paros::{
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::machine::machine_addr;
+use crate::calls::CallTrace;
+use crate::machine::{machine_addr, zone_of};
 use crate::model::{Action, Config, JournalPlace, Op, Quorum, StepResult, TenantPlace, Topology};
 
 /// How long one operator step may take before it gives up.
@@ -89,6 +90,9 @@ impl moonpool_sim::Workload for Operator {
 
     #[tracing::instrument(level = "debug", skip_all)]
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
+        // No fault injection: the shipped BUGGIFY sites are inert, as in
+        // production (the machines turn them off too).
+        moonpool_sim::buggify_reset();
         let (run, rpc) = Transport::Plaintext
             .client_only(ctx.providers().clone(), rpc_config())
             .map_err(|e| SimulationError::InvalidState(format!("client RPC runtime: {e}")))?;
@@ -129,11 +133,13 @@ impl moonpool_sim::Workload for Operator {
                     ok,
                     detail,
                 });
-            if let Some((machines, tenants)) = desk.survey(&self.config, &known).await {
+            if let Some((machines, nodes, tenants)) = desk.survey(&self.config, &known).await {
                 let topology = Topology {
                     step: index,
                     time_ms: now_ms(ctx),
                     machines,
+                    nodes,
+                    zones: (0..self.config.machines).map(zone_of).collect(),
                     tenants,
                 };
                 self.topology
@@ -146,6 +152,10 @@ impl moonpool_sim::Workload for Operator {
         Ok(())
     }
 }
+
+/// What a survey reads: each machine's short and full node id, by index,
+/// and the tenants.
+type Survey = (Vec<Option<String>>, Vec<Option<String>>, Vec<TenantPlace>);
 
 /// The simulated time, in milliseconds.
 fn now_ms(ctx: &SimContext) -> u64 {
@@ -387,6 +397,7 @@ impl Desk {
         } else {
             &servers
         })
+        .with_observer(Arc::new(CallTrace::default()))
     }
 
     /// Append `count` records to `tenant`/`journal`, as its one writer.
@@ -420,7 +431,12 @@ impl Desk {
             if opened.writer.owned().is_none() {
                 match opened.writer.claim(&client, 0, false).await {
                     ClaimOutcome::Won { .. } | ClaimOutcome::Owned { .. } => {}
-                    ClaimOutcome::Unread | ClaimOutcome::UnknownJournal
+                    // A claim whose answer was lost is asked again: the
+                    // read before it adopts a claim that already won.
+                    ClaimOutcome::Unread
+                    | ClaimOutcome::UnknownJournal
+                    | ClaimOutcome::Ambiguous
+                    | ClaimOutcome::Redirect { .. }
                         if client.now() < deadline =>
                     {
                         let pause = client.tunables().retry_backoff;
@@ -538,11 +554,7 @@ impl Desk {
     }
 
     /// Where every tenant and journal lives, through the admin API.
-    async fn survey(
-        &self,
-        config: &Config,
-        known: &Known,
-    ) -> Option<(Vec<Option<String>>, Vec<TenantPlace>)> {
+    async fn survey(&self, config: &Config, known: &Known) -> Option<Survey> {
         let cell = known.cell.as_ref()?;
         // Server `i` of the client is machine `index[i]`.
         let index: Vec<usize> = cell
@@ -555,10 +567,12 @@ impl Desk {
             })
             .collect();
         let mut machines = vec![None; config.machines];
+        let mut nodes = vec![None; config.machines];
         let mut by_node = BTreeMap::new();
         for ((id, _), m) in cell.servers.iter().zip(&index) {
-            if let Some(slot) = machines.get_mut(*m) {
+            if let (Some(slot), Some(node)) = (machines.get_mut(*m), nodes.get_mut(*m)) {
                 *slot = Some(short(*id));
+                *node = Some(id.to_string());
                 by_node.insert(*id, *m);
             }
         }
@@ -606,7 +620,7 @@ impl Desk {
             });
         }
         tenants.sort_by_key(|t| (!t.groups.contains("internal"), t.name.clone()));
-        Some((machines, tenants))
+        Some((machines, nodes, tenants))
     }
 
     /// One journal, as every machine's `Inspect` answers for it.
@@ -628,6 +642,7 @@ impl Desk {
         };
         let mut place = JournalPlace {
             name,
+            key: format!("{}:{}", journal.tenant.0, journal.journal.0),
             members: Vec::new(),
             quorum: Quorum::default(),
             leader: None,

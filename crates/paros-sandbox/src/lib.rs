@@ -8,7 +8,8 @@
 //! `journal create`, `write`, `read`), and after each step reads where
 //! every tenant and journal lives ([`Topology`]). Nothing here wraps or
 //! changes the shipped code; the timeline only observes the events the
-//! machines log. There is no fault injection yet.
+//! machines log. There is no fault injection: the shipped BUGGIFY sites and
+//! crash hints are turned off, as in production.
 //!
 //! A run is a pure function of its [`Config`] and its action log: the same
 //! seed and actions give the same [`RunView`], byte for byte. The browser
@@ -18,6 +19,7 @@
 //! The network, the disks and the time are simulated: a time in a run is
 //! not a production number.
 
+mod calls;
 pub mod machine;
 pub mod model;
 mod operator;

@@ -18,14 +18,16 @@ The operator in the page makes the same calls as `parosctl`:
   machines: they choose the plan of the cell `cell-1`. `universe init` creates the universe
   tenant in that cell. The machines that `init` does not list stay idle.
 - "Create a tenant" is `parosctl tenant create`.
-- "Create a journal" is `parosctl journal create`. The cell's coordinator places the journal
-  on some of the machines.
+- "Create a journal" is `parosctl journal create`. You choose its mode: `single`, `double`,
+  `triple` or a grid such as `grid:2x3`. The cell's coordinator places the journal on some of
+  the machines, one zone at a time.
 - "Write N records" appends N records to a journal you choose. Multi-Paxos chooses each record
   at a position of the journal.
 - "Read N records" reads N records of a journal you choose, from its first position.
 
-The sandbox has one cell. A universe of several cells comes with milestone M12. The sandbox
-injects no faults yet.
+The sandbox has one cell over three zones: machine *i* is in zone *i* mod 3. A universe of
+several cells comes with milestone M12. The sandbox injects no faults: the fault sites that
+paros carries for its simulation tests are off, as they are in production.
 
 ## What is simulated
 
@@ -43,19 +45,39 @@ the start. An action you add never changes what happened before its time.
 
 ## What the page shows
 
-After each step, the operator reads where every tenant and journal lives. It uses the admin API
-only: the universe directory, the control journal of each tenant and an `Inspect` of each journal
-on each machine. The page shows one table for each step:
+The page plays the run in a cluster view. The cell is a dashed frame, and its machines are
+grouped by zone. Each machine shows the journals it serves: one chip per journal, coloured by
+tenant, with `L` for the leader and `A` for an acceptor. The internal tenants are grey. Each
+machine also shows the tenants whose matchmaker set it is in.
 
-- A row for each tenant: the internal tenants (the cell tenant and the universe tenant) and the
-  tenants you created, with their groups and their cell.
-- Under each tenant, a row for each journal, its control journal first. A column for each
-  machine shows the journal's leader (L), its acceptors (A) and the machines that are only in
-  the tenant's matchmaker set (M).
-- The last row counts the acceptors on each machine: how the cell spreads the journals.
+Every message between machines is a dot that moves from one chip to another. The shape of the
+dot tells the phase:
 
-The page also shows what each action of the log came to and the events the machines log up to
-the selected step.
+- a diamond is Phase 1 (`Prepare`, `Promise`) or a catch-up;
+- a disc is Phase 2 (`Accept`, `Accepted`);
+- a square is a commit: the slot is chosen;
+- a triangle is a read;
+- a small faint dot is a heartbeat.
+
+A client outside the cell sends the writes and reads. Each call is a large dot to the leader
+of the journal, and its answer comes back.
+
+The run plays in three acts, which come from the action log:
+
+1. **The cell runs itself.** Only the internal journals run: the universe directory, the
+   machine registry and the election journal.
+2. **A tenant arrives.** Its control journal and its journals appear on the machines.
+3. **Writes flow.** The client writes and reads, and the internal traffic continues.
+
+Click a chip to follow its journal. The panel on the right draws the quorum system of that
+journal. For a grid, a full row is a Phase-1 quorum and a full column is a Phase-2 quorum.
+Slot *s* goes to column *s* mod *cols*, and the panel lights that column. For a majority, the
+panel shows how many acceptors decide. The panel also shows the chosen slots of the log.
+
+Pause, then step one message at a time. The caption tells what each message is and why it is
+sent. The timeline under the view counts the messages, stacked by tenant. Drag it to move in
+time. Below the view are the action log, what each step came to and the events of the
+machines.
 
 ## How it differs from the game
 

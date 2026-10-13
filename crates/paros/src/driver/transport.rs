@@ -595,6 +595,8 @@ impl Outbound {
             } => tracing::info!(
                 from = %self.sender,
                 to = %to,
+                tenant = journal.tenant.0,
+                journal = journal.journal.0,
                 kind,
                 bround = ballot.round,
                 bnode = ballot.node.0,
@@ -606,6 +608,8 @@ impl Outbound {
                 Some((_, ballot, Some(slot))) => tracing::info!(
                     from = %self.sender,
                     to = %to,
+                    tenant = journal.tenant.0,
+                    journal = journal.journal.0,
                     kind,
                     bround = ballot.round,
                     bnode = ballot.node.0,
@@ -618,12 +622,21 @@ impl Outbound {
                 Some((_, ballot, None)) => tracing::info!(
                     from = %self.sender,
                     to = %to,
+                    tenant = journal.tenant.0,
+                    journal = journal.journal.0,
                     kind,
                     bround = ballot.round,
                     bnode = ballot.node.0,
                     "msg_sent"
                 ),
-                None => tracing::info!(from = %self.sender, to = %to, kind, "msg_sent"),
+                None => tracing::info!(
+                    from = %self.sender,
+                    to = %to,
+                    tenant = journal.tenant.0,
+                    journal = journal.journal.0,
+                    kind,
+                    "msg_sent"
+                ),
             },
         }
         if let Some(queue) = self.mailbox_for(to) {

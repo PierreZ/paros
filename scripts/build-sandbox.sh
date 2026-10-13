@@ -36,6 +36,6 @@ if [ ! -d website/zola/public/sandbox ]; then
 fi
 rm -rf website/zola/public/sandbox/app
 mkdir -p website/zola/public/sandbox/app
-cp "$WEB"/index.html "$WEB"/main.js "$WEB"/worker.js "$WEB"/style.css website/zola/public/sandbox/app/
+cp "$WEB"/index.html "$WEB"/main.js "$WEB"/stage.js "$WEB"/worker.js "$WEB"/style.css website/zola/public/sandbox/app/
 cp -r "$PKG" website/zola/public/sandbox/app/wasm
 echo "done: website/zola/public/sandbox/app/"

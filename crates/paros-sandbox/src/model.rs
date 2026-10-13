@@ -116,6 +116,11 @@ pub struct Topology {
     /// Each machine's node id (its first six hex digits), by index; `None`
     /// for a machine outside the cell.
     pub machines: Vec<Option<String>>,
+    /// Each machine's full node id, in decimal, as `msg_sent` names it
+    /// (`node:<id>`); `None` outside the cell.
+    pub nodes: Vec<Option<String>>,
+    /// Each machine's zone (its failure domain), by index.
+    pub zones: Vec<String>,
     /// The tenants, the internal ones first.
     pub tenants: Vec<TenantPlace>,
 }
@@ -138,6 +143,9 @@ pub struct TenantPlace {
 pub struct JournalPlace {
     /// Its name.
     pub name: String,
+    /// Its identifier, `<tenant>:<journal>` in decimal, as `msg_sent` and
+    /// `client_call` events name it.
+    pub key: String,
     /// Its acceptors (the configuration in force), by machine index, in
     /// membership order: under a grid, row by row.
     pub members: Vec<usize>,
