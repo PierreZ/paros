@@ -634,6 +634,9 @@ struct Registry {
     /// Run-level: whether the run draws the slow-machine scenario (see
     /// [`slow_machine`]), fixed by the first caller.
     slow_machine: Option<bool>,
+    /// Run-level: when the clients' operations end (see [`run_end`]), fixed
+    /// by the first caller.
+    run_end: Option<Duration>,
     /// Run-level: whether the run draws the early-handover scenario (see
     /// [`early_handover`]), fixed by the first caller.
     early_handover: Option<bool>,
@@ -1119,6 +1122,23 @@ pub(crate) fn silent_machine(state: &StateHandle) -> bool {
 /// member of the formed cell for a few seconds. Each ingredient keeps its
 /// own coin on the other seeds. Rare-but-valid: a slow machine is.
 #[tracing::instrument(level = "debug", skip_all)]
+/// When the run's operations end, in simulated time from the start: every
+/// client of the run steps until then and returns from `run()`, and chaos
+/// lasts until the last one returned (moonpool's `chaos_until_run_ends`,
+/// #454 (the control plane meets chaos)). Drawn once per seed, a knob:
+/// default 60 s, extreme 30–120 s, capped by [`crate::CHAOS_CAP`]. Floor
+/// 30 s: a cell forms, claims and serves inside it under every chaos
+/// surface (a 4 s window held no leader on half the seeds, #495).
+pub(crate) fn run_end(state: &StateHandle) -> Duration {
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    *guard.run_end.get_or_insert_with(|| {
+        Duration::from_millis(buggify_knob!(60_000_u64, 30_000_u64..120_001_u64))
+    })
+}
+
+const _: () = assert!(120_000 <= crate::CHAOS_CAP.as_millis());
+
 pub(crate) fn slow_machine(state: &StateHandle) -> bool {
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);

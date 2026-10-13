@@ -350,8 +350,10 @@ Three layers, and nothing crosses them:
 
 - **Environmental faults belong to moonpool** (drop, delay, duplicate, reorder, partitions,
   close, attrition, scheduling, CPU time, gray failures), swarm-masked per seed, on **one combined campaign axis**
-  (`chaos_surfaces()`); after `CHAOS_DURATION_MS` moonpool enters recovery mode, so the tail is
-  a genuine recovery and liveness oracles apply. Never re-implement one in paros or re-split
+  (`chaos_surfaces()`); chaos lasts until the client program's `run()` returns (decided on
+  2026-10-12, #454 (control plane meets chaos): a per-seed `run_end` knob, 30 to 120 s, under
+  `CHAOS_CAP`), then moonpool enters recovery mode and `check()` runs the tail on the live
+  cluster, so the tail is a genuine recovery and liveness oracles apply. Never re-implement one in paros or re-split
   the axis. One exception (decided on 2026-10-09): on a seed that draws the departed-straggler
   scenario, its outage may strike early in the tail, once the owner's removal took effect and
   at most `LATE_WINDOW` in (`paros_sim::world::late_outage`); the rest of the tail is still the
@@ -392,7 +394,7 @@ Three layers, and nothing crosses them:
   `buggify_knob!` per tunable, born that way. **Every knob documents its floor**: an extreme
   must stay a valid, winnable configuration (a queue that cannot hold one tick's traffic is a
   partition, not a knob). **Never buggified**: oracle thresholds (`DEPOSED_TICK_SLACK`,
-  `PLATEAU_SEEDS`, `CHAOS_DURATION_MS`, `SETTLE`, `WAIT_SETTLE`) and schedule ceilings
+  `PLATEAU_SEEDS`, `CHAOS_CAP`, `SETTLE`, `WAIT_SETTLE`) and schedule ceilings
   (`*_ITERATIONS`). Constants a correctness argument depends on (`MAX_TORN_TAIL`) are not tunables.
 
 Depth: the `adding-a-buggify-site` skill, `crates/paros/src/scenario.rs`.

@@ -1,7 +1,6 @@
 //! The acceptor's journal stores on the simulated disk (#188), and their provisioning.
 
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
 
 use moonpool_sim::SimStorageProvider;
 use moonpool_sim::{SimContext, SimTimeProvider, assert_reachable};
@@ -158,16 +157,16 @@ impl JournalStores for SimStores<'_> {
         // (a zero chaos window), and two syncs per commit, so a crash, a
         // cut mid-commit included, never leaves its last batch ambiguous (a
         // one-member journal could never repair it) and spends no budget.
-        let (layout, cutoff) = if seat.quiet {
+        let (layout, chaotic) = if seat.quiet {
             (
                 JournalStoreConfig {
                     durability: paros::journal::Durability::Ordered,
                     ..*layout
                 },
-                Duration::ZERO,
+                false,
             )
         } else {
-            (*layout, crate::CHAOS_DURATION)
+            (*layout, true)
         };
         let journal = JournalStorage::new(
             provider.clone(),
@@ -179,10 +178,10 @@ impl JournalStores for SimStores<'_> {
             journal,
             Arc::downgrade(&seat.world),
             self.ip.to_string(),
-            (self.ctx.state().clone(), self.ctx.time().clone()),
+            self.ctx.state().clone(),
             seat.checker.clone(),
             crate::world::node_store::DamagePolicy {
-                chaos_until: cutoff,
+                chaotic,
                 cut_budget: (layout.durability == paros::journal::Durability::Batched)
                     .then(|| seat.floor.saturating_sub(seat.clean_copies)),
                 inject: !seat.quiet,

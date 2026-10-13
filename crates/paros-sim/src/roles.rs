@@ -66,6 +66,13 @@ pub(crate) fn joiner_node_id(rank: usize) -> NodeId {
     NodeId(JOINER_ID_BASE + rank as u64)
 }
 
+/// Whether `node` is a joiner's identity (#189): a member the registry
+/// admits at runtime, so after each restart it serves its journals only once
+/// its follower admits it again.
+pub(crate) fn is_joiner(node: u64) -> bool {
+    (JOINER_ID_BASE..REPLICA_ID_BASE).contains(&node)
+}
+
 /// Where the replicas' `NodeId`s start: far above any pool the campaign
 /// draws (`PROCESS_POOL_RANGE` tops out at six), so a replica's wire
 /// identity can never collide with an acceptor's and reads apart in a trace.

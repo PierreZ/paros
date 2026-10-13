@@ -53,9 +53,9 @@ const HOLD: Duration = STRAGGLER.end;
 const _: () =
     assert!(SPLIT_WINDOW.as_millis() + HOLD.as_millis() + STRAGGLER.end.as_millis() < 45_000);
 
-/// The last instant the split may be held.
-fn deadline() -> Duration {
-    Duration::from_millis(crate::CHAOS_DURATION_MS) + SPLIT_WINDOW
+/// Whether the last instant the split may be held passed.
+fn past_deadline(now: Duration) -> bool {
+    crate::past_cutoff(now, SPLIT_WINDOW)
 }
 
 /// How often the injector looks for a split floor: a split lasts only
@@ -89,7 +89,7 @@ impl FaultInjector for SplitFloor {
         };
         // The split: the ahead acceptors go down the moment it shows.
         let ahead: Vec<String> = loop {
-            if time.now() >= deadline() {
+            if past_deadline(time.now()) {
                 return Ok(());
             }
             let decided = crate::audit::audit_world_for(ctx.state(), main).decided_slots();
@@ -135,7 +135,7 @@ impl FaultInjector for SplitFloor {
                     .plan_split_floor_loss(&decided);
                 if let Some(planned) = planned {
                     audit.note_outage_loss(planned.slot, &planned.holders, &planned.damaged);
-                    if time.now() >= Duration::from_millis(crate::CHAOS_DURATION_MS) {
+                    if !crate::in_chaos() {
                         assert_reachable!(
                             "outage: a split-floor outage strikes in the recovery tail"
                         );

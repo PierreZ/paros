@@ -214,14 +214,14 @@ impl<T: TimeProvider> NodeAudit<T> {
                 { "node" => node.0, "journal" => journal.to_string(), "command" => vhash }
             );
         }
-        let in_chaos = self.time.now() < crate::CHAOS_DURATION;
+        let in_chaos = crate::in_chaos();
         board.applied(*journal, in_chaos);
     }
 
     /// The chaos window must hold a working cell, or every write,
     /// reconfiguration and crash-hint site stays silent (#495).
     fn elected_in_chaos(&self) {
-        if self.time.now() < crate::CHAOS_DURATION {
+        if crate::in_chaos() {
             let mut st = self.state();
             reach_once!(
                 st.elected_in_chaos,
@@ -387,6 +387,57 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         let mut st = self.state();
         let requested = st.requested_floor.entry(node.0).or_insert(0);
         *requested = (*requested).max(first.0);
+    }
+
+    /// Tell the checker what the commit may land (see
+    /// [`AuditWorld::note_in_flight`]): a crash anywhere from here to the
+    /// driver's report leaves these accepts durable or not, unreported. An
+    /// accept the batch's own floor drops (the core staged a slot and a
+    /// truncation past it in one flush) is never written, yet the landed
+    /// metainfo makes it count: the floor and chosen index it carries say
+    /// the slot was decided, and on a quorum of one that accept was the
+    /// decision. Reported by the driver, so a machine's journals, which
+    /// run on a bare disk, are judged alike (#454 (control plane meets
+    /// chaos): witness 7140828428648307805, a machine killed inside a
+    /// commit that overwrote two round-4 accepts at round 5).
+    fn commit_started(&self, node: NodeId, writes: &[paros::WriteOp]) {
+        let floor = writes
+            .iter()
+            .filter_map(|op| match op {
+                paros::WriteOp::Truncate { first, .. } => Some(*first),
+                paros::WriteOp::TrimmedTo { point, .. } => Some(*point),
+                _ => None,
+            })
+            .max();
+        let mut accepted: Vec<(u64, u64)> = Vec::new();
+        let mut dropped: Vec<(u64, Ballot, u64)> = Vec::new();
+        for op in writes {
+            let (slot, ballot, command) = match op {
+                paros::WriteOp::Acceptor(paros::AcceptorWrite::AppendAccepted {
+                    slot,
+                    ballot,
+                    value,
+                }) => (slot, ballot, value),
+                paros::WriteOp::Learned {
+                    slot,
+                    ballot,
+                    command,
+                } => (slot, ballot, command),
+                _ => continue,
+            };
+            let vhash = paros::command_hash(command);
+            if floor.is_some_and(|floor| *slot < floor) {
+                dropped.push((slot.0, *ballot, vhash));
+            } else {
+                accepted.push((slot.0, vhash));
+            }
+        }
+        if !dropped.is_empty() {
+            self.world.note_dropped_in_flight(node.0, &dropped);
+        }
+        if !accepted.is_empty() {
+            self.world.note_in_flight(node.0, &accepted);
+        }
     }
 
     #[tracing::instrument(level = "trace", skip_all, fields(node = node.0, first = first.0))]

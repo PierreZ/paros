@@ -1,7 +1,6 @@
 //! The replica role (#144): its own ordered journal store, outside the copy budget.
 
 use std::sync::{Arc, PoisonError};
-use std::time::Duration;
 
 use moonpool_sim::{SimContext, SimulationError, SimulationResult, assert_always};
 
@@ -110,10 +109,10 @@ pub(super) async fn run_replica_role(
             ),
             Arc::downgrade(&world),
             my_ip.to_string(),
-            (ctx.state().clone(), ctx.time().clone()),
+            ctx.state().clone(),
             checker.clone(),
             crate::world::node_store::DamagePolicy {
-                chaos_until: Duration::ZERO,
+                chaotic: false,
                 cut_budget: None,
                 inject: false,
             },

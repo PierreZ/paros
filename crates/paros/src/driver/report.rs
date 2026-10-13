@@ -252,11 +252,27 @@ pub(crate) fn maintain<P: Providers, A: Audit>(
         matchmaker_generation: last_generation,
         failed_campaigns,
     } = last;
-    // The election backoff's streak ends only when this node hears another
-    // node lead: a cluster with a leader other nodes follow has settled.
-    // Being the leader does not end it — a leadership deposed before any
+    // The election backoff's streak ends when this node hears another node
+    // lead: a cluster with a leader other nodes follow has settled. Being
+    // the leader does not end it — a leadership deposed before any
     // peer followed it is a duel, not a settlement.
     if node.leader().is_some_and(|leader| leader.0 != self_id) {
+        *failed_campaigns = 0;
+    }
+    // A leader that is the only acceptor of its configuration has no
+    // rival to duel: no other node's promise can depose it, so its
+    // leadership is the settlement. Without this, such a node never hears
+    // another lead, so each resignation of the whole run adds to one
+    // streak, and the recovery tail waits out the capped backoff with no
+    // leader (#454 (control plane meets chaos): witness seed
+    // 7347777281636261941, an explored timeline, and hunt seed
+    // 11256698287555884936, a one-member cell leaderless for 29 s and
+    // 33 s of its tail).
+    if *failed_campaigns > 0 && node.is_leader() && node.acceptors().members() == [NodeId(self_id)]
+    {
+        moonpool_assertions::reachable!(
+            "driver: a sole node's leadership ends its election backoff"
+        );
         *failed_campaigns = 0;
     }
     if node.needs_election_timeout() {

@@ -33,17 +33,12 @@ const DOWN_MS: std::ops::Range<usize> = 100..601;
 /// followed the move within 8 s on half the scenario seeds and within 12 s
 /// on four in five (900 hunt seeds), so a bound of `LATE_WINDOW` left the
 /// gate silent on most of them (#441 (metainfo twin) met it in CI). Far
-/// below the workload's recovery budget (45 s at its floor) with the move
-/// window before it.
+/// below the workload's recovery budget (45 s at its floor, counted from
+/// the cutoff) with the move window before it.
 const FOLLOW: Duration = Duration::from_secs(12);
 
-const _: () = assert!(
-    (crate::CHAOS_DURATION_MS as u128)
-        + LATE_WINDOW.as_millis()
-        + FOLLOW.as_millis()
-        + (DOWN_MS.end as u128)
-        < 45_000
-);
+const _: () =
+    assert!(LATE_WINDOW.as_millis() + FOLLOW.as_millis() + (DOWN_MS.end as u128) < 45_000);
 
 /// The moved-founder injector (see the module doc): a fresh one per
 /// timeline.
@@ -61,11 +56,16 @@ impl FaultInjector for MovedFounder {
             return Ok(());
         }
         let time = ctx.time();
-        // The move's deadline; once it struck, the second crash's.
-        let mut deadline = crate::CHAOS_DURATION + LATE_WINDOW;
+        // The move's deadline (`LATE_WINDOW` past the cutoff); once it
+        // struck, the second crash's.
+        let mut deadline: Option<Duration> = None;
         let mut moved = false;
         loop {
-            if time.now() >= deadline {
+            let late = deadline.map_or_else(
+                || crate::past_cutoff(time.now(), LATE_WINDOW),
+                |at| time.now() >= at,
+            );
+            if late {
                 return Ok(());
             }
             if !moved
@@ -76,7 +76,7 @@ impl FaultInjector for MovedFounder {
                 tracing::info!(%founder, "moved_founder_strikes");
                 ctx.reboot_with_delays(&founder, RebootKind::Crash, &DOWN_MS, &(0..1))?;
                 moved = true;
-                deadline = time.now() + FOLLOW;
+                deadline = Some(time.now() + FOLLOW);
             } else if moved
                 && let Some(target) =
                     crate::machine::cached_mover(ctx.state(), |ip| ctx.is_dead(ip))

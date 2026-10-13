@@ -50,7 +50,7 @@ impl FaultInjector for DownedFounder {
         let formed = !moonpool_sim::sim_random_bool(0.25);
         let time = ctx.time();
         let target = loop {
-            if time.now() >= crate::CHAOS_DURATION + LATE_WINDOW {
+            if crate::past_cutoff(time.now(), LATE_WINDOW) {
                 return Ok(());
             }
             if let Some(target) =

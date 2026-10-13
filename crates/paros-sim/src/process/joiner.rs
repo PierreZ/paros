@@ -52,10 +52,12 @@ impl Process for JoinerProcess {
 }
 
 /// A joiner (#189): `run_journals` with no journal of its own and the
-/// system plan, in the same recovery loop as a node. Its disk is
-/// fault-free (every seat it gets is a created journal's), and it is not an
-/// attrition victim (so no driver `hint!` kills it either): a joiner's
-/// lifecycle is the registry's.
+/// system plan, in the same recovery loop as a node. The harness never
+/// damages its seats (every seat it gets is a created journal's), but
+/// moonpool's storage chaos, which lasts the whole run (#454 (control plane
+/// meets chaos)), may fail a call and restart it. It is not an attrition
+/// victim (so no driver `hint!` kills it either): a joiner's lifecycle is
+/// the registry's.
 #[tracing::instrument(level = "debug", skip_all, fields(node = id.0))]
 async fn run_joiner(
     ctx: &SimContext,

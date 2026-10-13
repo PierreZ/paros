@@ -132,8 +132,7 @@ impl JournalBoard {
     /// `node` applied a slot of `journal`; `in_chaos` says the chaos window
     /// (the hold) is still open. The held journal stays stalled past the
     /// window until it re-elects and commits again, so a sibling's commit
-    /// counts until then: commits inside the 4 s window alone are rare
-    /// (a run's first leaders are still being elected).
+    /// counts until then.
     pub(crate) fn applied(&mut self, journal: JournalIdentifier, in_chaos: bool) {
         if self.held.is_empty() {
             return;

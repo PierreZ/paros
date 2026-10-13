@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, PoisonError};
 
 use moonpool_sim::{
-    SimContext, SimulationError, SimulationResult, TimeProvider, assert_always, assert_reachable,
+    SimContext, SimulationError, SimulationResult, assert_always, assert_reachable,
 };
 
 use super::Down;
@@ -97,7 +97,7 @@ pub(super) async fn run_matchmaker_role(
         ..crate::shape::journal_layout(ctx.state())
     };
     if incarnation.is_restart()
-        && ctx.time().now() < crate::CHAOS_DURATION
+        && crate::in_chaos()
         && moonpool_sim::buggify_with_prob!(f64::from(shape.matchmaker_loss_pct) / 100.0)
         && spared(ctx.state(), id)
         && world
@@ -132,7 +132,7 @@ pub(super) async fn run_matchmaker_role(
     let mut edit = OperatorEdit::new(
         incarnation.is_restart()
             && config.bootstrap.len() > 1
-            && ctx.time().now() < crate::CHAOS_DURATION
+            && crate::in_chaos()
             && moonpool_sim::buggify_with_prob!(f64::from(shape.config_edit_pct) / 100.0),
     );
     loop {

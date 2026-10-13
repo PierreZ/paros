@@ -1970,7 +1970,7 @@ Simulation is the investment. Every milestone lands with its share of:
   patterns (#202).
 - Zones (decided on 2026-10-07, #215): a zone label per process and a zone-kill attrition mode
   (one zone at a time, the outage length drawn across the re-placement bound and restored inside
-  `CHAOS_DURATION_MS`); moonpool#297 gives `.processes()` groups no locality, so paros keeps its
+  the chaos window); moonpool#297 gives `.processes()` groups no locality, so paros keeps its
   own label map meanwhile, an `upstream-to-moonpool` candidate; a latency model per zone pair
   (likely moonpool work); the zone-aware copy budget, where a zone counts as one fault; a composer
   that draws failure domains per seed and applies the zone rule, with a reachable for a refused
@@ -2024,6 +2024,13 @@ Simulation is the investment. Every milestone lands with its share of:
   folds. A fact that only fires a gate is an inline `reachable!`/`sometimes!` instead, and the
   gate-only callbacks move inline site by site (decided on 2026-10-09)
   (`docs/analysis/simulation/production-fault-hints.md`).
+- Chaos for the whole run (decided on 2026-10-12, #454 (control plane meets chaos)): the faults
+  stop when the client program's `run()` returns, not after a fixed 4 s. Each seed draws its run
+  length (the `run_end` knob: default 60 s, extreme 30 to 120 s); `CHAOS_CAP` (150 s) is the
+  bound, never buggified. The quiet tail (recovery batch, fleet settle, convergence probes,
+  final read-back) runs in `check()`, on the live cluster in recovery mode
+  (moonpool's `chaos_until_run_ends`, moonpool#331). FoundationDB tests run the same way. Seeds
+  take longer: the point is to test the control plane under faults.
 - New BUGGIFY sites for every new decision the driver, the frontend, the resolver and the
   coordinators take, and the coverage-guided sweep saturating over them.
 

@@ -13,10 +13,11 @@ use std::sync::{Arc, PoisonError};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use futures::channel::oneshot;
 use futures::future::join_all;
 use moonpool_sim::{
-    RandomProvider, SimContext, SimulationError, SimulationResult, TimeProvider, Workload,
-    assert_always, assert_reachable, assert_sometimes, assert_sometimes_greater_than,
+    RandomProvider, SimContext, SimulationError, SimulationResult, TaskProvider, TimeProvider,
+    Workload, assert_always, assert_reachable, assert_sometimes, assert_sometimes_greater_than,
     buggify_with_prob, swarm_op_enabled,
 };
 use paros::client::{
@@ -45,7 +46,7 @@ pub(crate) mod system;
 mod truncate;
 mod write;
 
-use crate::{CHAOS_DURATION_MS, DigestSink};
+use crate::DigestSink;
 use config::{
     ADMIT, BOOK_CAPACITY, CHECK_TAIL, CHECKPOINT, CREATE_JOURNAL, ChainConfig, DELETE_JOURNAL,
     DRAIN_NODE, DUAL_SUBMIT, DUP_WRITE, ELECTION, FLEET_INIT, LOAD, MATCH_GC, MATCHMAKE, OP_COUNT,
@@ -56,6 +57,7 @@ use config::{
 pub(crate) use config::{MAX_BATCH_RECORDS, MAX_LARGE_COMMAND_BYTES};
 use reads::{SETTLE, judge_read, tail};
 use rpc::{CallLog, judged_truncate, read_once, within};
+use tracing::Instrument;
 use truncate::{absorb_truncate, fence};
 use write::{Submission, WrittenCommand};
 
@@ -173,6 +175,37 @@ pub(crate) struct ChainWorkload {
     /// Every attempt at this client's journal, logged at the RPC seam
     /// (set in `run`), handed to the history at `check()`.
     calls: Option<CallLog>,
+    /// The client's program between its handoff and `check()` (#454): set
+    /// by `run()`, joined by `check()`.
+    program: Option<Program>,
+}
+
+/// A client's program paused at its handoff: `check()` lets it on into
+/// its quiet tail and takes the workload back when it ends.
+struct Program {
+    /// Lets the program on past its handoff.
+    quiet: oneshot::Sender<()>,
+    /// The workload and the program's verdict, once it ended.
+    done: oneshot::Receiver<(Box<ChainWorkload>, SimulationResult<()>)>,
+    /// The program's task: awaited when it ended without its verdict.
+    handle: <moonpool_sim::SimTaskProvider as TaskProvider>::JoinHandle,
+}
+
+/// The program's side of the handoff (#454): it says its chaos part is
+/// done, then waits for `check()`.
+struct Handoff {
+    chaos_done: oneshot::Sender<()>,
+    quiet: oneshot::Receiver<()>,
+}
+
+impl Handoff {
+    /// Hand off: `run()` returns, and the program waits for the quiet
+    /// tail. Chaos ends once every client handed off.
+    async fn into_quiet(self) {
+        // A receiver gone means the run is over; the program goes on.
+        let _ = self.chaos_done.send(());
+        let _ = self.quiet.await;
+    }
 }
 
 impl ChainWorkload {
@@ -186,7 +219,25 @@ impl ChainWorkload {
             plan: None,
             client_id: 0,
             calls: None,
+            program: None,
         }
+    }
+
+    /// Let the program on past its handoff, wait for it to end, and take
+    /// the workload back with its verdict. No program: nothing to join.
+    async fn join_program(&mut self) -> SimulationResult<()> {
+        let Some(program) = self.program.take() else {
+            return Ok(());
+        };
+        let _ = program.quiet.send(());
+        let Ok((me, result)) = program.done.await else {
+            let joined = program.handle.await;
+            return Err(SimulationError::InvalidState(format!(
+                "the chain client's program ended without a verdict: {joined:?}"
+            )));
+        };
+        *self = *me;
+        result
     }
 
     fn enabled_operations() -> Vec<u8> {
@@ -330,9 +381,178 @@ impl Workload for ChainWorkload {
         Ok(())
     }
 
-    #[allow(clippy::too_many_lines)]
     #[tracing::instrument(level = "debug", skip_all)]
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
+        // The client's program is one task from here into `check()` (#454
+        // (the control plane meets chaos)): its operations run under chaos
+        // until the run's end, and it hands off there, so `run()` returns
+        // and chaos ends once every client did; `check()` lets the same
+        // program on into its quiet tail on the live cluster.
+        let me = std::mem::replace(self, Self::new(self.digest.clone()));
+        let (chaos_done, handed) = oneshot::channel();
+        let (quiet, quiet_rx) = oneshot::channel();
+        let (finished, done) = oneshot::channel();
+        let program_ctx = ctx.clone();
+        let handle = ctx.task().spawn_task(
+            "chain-program",
+            async move {
+                let mut me = me;
+                let handoff = Handoff {
+                    chaos_done,
+                    quiet: quiet_rx,
+                };
+                let result = Box::pin(me.program(&program_ctx, handoff)).await;
+                // A receiver gone means the run is over.
+                let _ = finished.send((Box::new(me), result));
+            }
+            .in_current_span(),
+        );
+        self.program = Some(Program {
+            quiet,
+            done,
+            handle,
+        });
+        if handed.await.is_ok() {
+            return Ok(());
+        }
+        // The program ended before its handoff: an early error, returned
+        // from `run()` as before.
+        self.join_program().await
+    }
+
+    #[tracing::instrument(level = "debug", skip_all)]
+    async fn check(&mut self, ctx: &SimContext) -> SimulationResult<()> {
+        // The quiet tail first: the program finishes on the live cluster.
+        self.join_program().await?;
+        // The two perspectives, and nothing else: the client's own history
+        // (linearizability over what it was told), and the audit's fold of
+        // every driver transition (safety, restart, and the one liveness claim).
+        if let Some(calls) = &self.calls {
+            self.history.set_attempts(calls.take());
+        }
+        // The linearizability search waits for every client of the journal.
+        let clients = self.plan.as_ref().map_or(1, |plan| {
+            (0..ctx.client_count())
+                .filter(|client| plan.for_client(*client) == self.journal)
+                .count()
+        });
+        let mut digest = check_run(ctx.state(), self.journal, &self.history, clients);
+        // A journal no client appends to (#188: more journals than clients)
+        // is judged by client 0, on an empty history: its audit's safety
+        // oracles ran all along, and its final claim holds too.
+        if self.client_id == 0
+            && let Some(plan) = &self.plan
+        {
+            for idle in plan.ids.iter().skip(ctx.client_count()) {
+                digest ^= check_run(ctx.state(), *idle, &ClientHistory::default(), 0);
+            }
+        }
+        // Every other journal world (#447 (model checks for every journal
+        // world)): the system, control and created journals' models.
+        if self.client_id == 0 {
+            let judged: BTreeSet<_> = self
+                .plan
+                .iter()
+                .flat_map(|plan| plan.ids.iter().copied())
+                .chain([self.journal])
+                .collect();
+            digest ^= crate::audit::check_every_world(ctx.state(), &judged);
+        }
+        // The histories `Announce` logged (#247): every client's library
+        // calls at the registry, at the control journals of the cell the
+        // machines formed (#246), at every tenant control journal a machine
+        // folded (#210), and at every journal a tenant created or a
+        // frontend forwarded to (#442 (search every journal's history)),
+        // each searched once (by client 0, after every run) against the
+        // journal model in its writer mode.
+        if self.client_id == 0 {
+            let identifiers = crate::shape::identifiers(ctx.state());
+            let system = crate::shape::system_journals(ctx.state()).then_some(identifiers.registry);
+            let board = crate::audit::tenants::tenant_board(ctx.state());
+            let (tenants, created) = {
+                let board = crate::audit::tenants::lock(&board);
+                (board.controls(), board.created_modes())
+            };
+            let formed = crate::machine::formed_cell(ctx.state());
+            let cell = formed
+                .map(|cell| [Some(cell.cell), cell.fleet, cell.election])
+                .into_iter()
+                .flatten()
+                .flatten();
+            let logged = rpc::logged_journals(ctx.state())
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone();
+            let journals: BTreeSet<_> = system
+                .into_iter()
+                .chain(cell)
+                .chain(tenants)
+                .chain(logged)
+                .collect();
+            for journal in journals {
+                let attempts = std::mem::take(
+                    &mut *rpc::control_attempts(ctx.state(), journal)
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner),
+                );
+                // The cell's election journal (#240) is unfenced: every
+                // candidate's campaigns, renewals, resignations and
+                // truncations. A created journal runs in the mode its
+                // create drew (#241).
+                let mode = if crate::machine::is_election(ctx.state(), journal) {
+                    paros::WriterMode::Multi
+                } else if let Some(mode) = created.get(&journal) {
+                    if !attempts.is_empty() {
+                        assert_reachable!("journal: a created journal's history is searched");
+                    }
+                    *mode
+                } else {
+                    paros::WriterMode::Single
+                };
+                crate::audit::check_control_history(attempts, mode);
+            }
+        }
+        if let Some(sink) = &self.digest {
+            *sink
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(digest);
+        }
+        // (Every acked slot being inside the applied prefix is the audit's
+        // final claim, judged once over every client's history.)
+        Ok(())
+    }
+}
+
+/// An owner fences every call it makes of its single-writer journal: a
+/// wrong-mode refusal (#241) there is a bug.
+fn owner_never_of_wrong_mode() {
+    assert_always!(
+        false,
+        "chain: an owner's call is never refused as of the wrong mode"
+    );
+}
+
+/// Adopt the leader a `Reconfigure` reply named as this client's journal's
+/// leader hint — only where that reply speaks for this journal. A
+/// `Reconfigure` names no journal: a node answers it from its *plane*
+/// journal (`Journals::plane`), which on a matchmaker deployment is the
+/// journal whose configuration names the matchmakers (the main one), but on
+/// a plain deployment is the node's first live user journal in id order —
+/// with system journals, possibly a journal created at runtime and led by a
+/// joiner that never serves this one. Adopting that
+/// leader sends this journal's next `Write` to a node that answers
+/// `UnknownJournal` (seed 10308963497620992383: node 4's plane was a
+/// created journal led by joiner 100).
+fn adopt_plane_leader(nodes: &ChainClient, has_matchmakers: bool, leader: Option<u64>) {
+    if has_matchmakers {
+        nodes.observe_leader(leader);
+    }
+}
+
+impl ChainWorkload {
+    #[allow(clippy::too_many_lines)]
+    #[tracing::instrument(level = "debug", skip_all)]
+    async fn program(&mut self, ctx: &SimContext, handoff: Handoff) -> SimulationResult<()> {
         // The seed's deployment map: the acceptor pool this client proposes
         // to.
         let deployment = crate::roles::deployment(ctx.topology());
@@ -816,13 +1036,19 @@ impl Workload for ChainWorkload {
         );
         let mut parent_held_once = false;
         let journal_board = crate::audit::journals::journal_board(ctx.state());
-        for _step in 0..config.steps {
+        // Chaos lasts the run (#454): a client keeps stepping until the
+        // run's end, and runs at least its drawn steps either way.
+        // A client drawn no steps keeps the primer-only boundary (#56).
+        let run_end = crate::shape::run_end(ctx.state());
+        let mut step = 0_u64;
+        while config.steps > 0 && (step < config.steps || time.now() < run_end) {
+            step += 1;
             if shutdown.is_cancelled() {
                 break;
             }
             if let Some(ip) = &parent_seed
                 && !parent_held_once
-                && time.now() < Duration::from_millis(CHAOS_DURATION_MS)
+                && crate::in_chaos()
                 && (buggify_with_prob!(0.1) || (grid && buggify_with_prob!(0.4)))
             {
                 assert_reachable!("static: the seed hosting the control journals is held down");
@@ -853,12 +1079,12 @@ impl Workload for ChainWorkload {
             // On a departed-straggler seed it stays armed into the late
             // outage's window (`crate::world::late_outage`): the owner's
             // claim usually lands after the chaos window.
-            let deadline = if crate::shape::departed_straggler(ctx.state()) {
-                crate::world::late_outage::late_deadline()
+            let expired = if crate::shape::departed_straggler(ctx.state()) {
+                crate::world::late_outage::past_late_deadline(time.now())
             } else {
-                Duration::from_millis(CHAOS_DURATION_MS)
+                !crate::in_chaos()
             };
-            if time.now() >= deadline {
+            if expired {
                 remove_next = false;
             }
             let after_claim = remove_next;
@@ -1115,7 +1341,7 @@ impl Workload for ChainWorkload {
                 }
                 DUP_WRITE => self.dup_write_step(&step, &written, &write_once).await,
                 DUAL_SUBMIT => {
-                    if server_count > 1 && time.now() < Duration::from_millis(CHAOS_DURATION_MS) {
+                    if server_count > 1 && crate::in_chaos() {
                         let submission = self.submit(
                             &audit,
                             &config,
@@ -1611,8 +1837,11 @@ impl Workload for ChainWorkload {
             assert_reachable!("chain: a large payload is acknowledged");
         }
 
-        // Everything that injects faults stops at the cutoff: paros' own driver
-        // hooks and storage-fault layer by their own clock, and Moonpool's
+        // The handoff (#454): this client's operations are done, `run()`
+        // returns, and chaos ends once every client's did. The program goes
+        // on in `check()`, on the live cluster. Everything that injects
+        // faults stops at the cutoff: paros' own driver hooks and storage
+        // coins (`in_chaos`), and Moonpool's
         // network/storage/block families plus the partitions in force through
         // recovery mode. What survives is the *damage* — closed connections,
         // degraded pair latency, accumulated clock skew, rotted records, a node
@@ -1621,12 +1850,7 @@ impl Workload for ChainWorkload {
         // replicas: election, `Accept` re-send, gap fill, catch-up, snapshot
         // transfer and chunk repair get real fault-free simulated time, and
         // convergence is judged only at its end.
-        let cutoff = Duration::from_millis(CHAOS_DURATION_MS);
-        if time.now() < cutoff {
-            time.sleep(cutoff.checked_sub(time.now()).unwrap())
-                .await
-                .ok();
-        }
+        handoff.into_quiet().await;
         // The joiners whose spare already booted this journal as the faults
         // stop (#466 (late joiner spare)): a spare outside this set joined in
         // the tail, the rare case the settle tail must wait for.
@@ -2068,7 +2292,7 @@ impl Workload for ChainWorkload {
                         .map(|rank| server_count + replica_count + rank),
                 )
                 .collect();
-            let mut observed: Vec<(usize, u64)> = Vec::with_capacity(live.len());
+            let mut answered_ends: Vec<(usize, u64)> = Vec::with_capacity(live.len());
             let mut unanswered = false;
             for &node in &live {
                 // `readers` holds the nodes, then the replicas: index `node`;
@@ -2082,12 +2306,12 @@ impl Workload for ChainWorkload {
                     unanswered = true;
                     break;
                 };
-                observed.push((node, end));
+                answered_ends.push((node, end));
             }
             last_probe = live
                 .iter()
                 .map(|&node| {
-                    let answer = observed
+                    let answer = answered_ends
                         .iter()
                         .find(|(observed_node, _)| *observed_node == node)
                         .map(|(_, end)| *end);
@@ -2098,11 +2322,14 @@ impl Workload for ChainWorkload {
                 let guard = tail.lock().unwrap_or_else(PoisonError::into_inner);
                 guard.done_proposing == guard.registered
             };
-            match (!unanswered).then(|| observed.first().copied()).flatten() {
+            match (!unanswered)
+                .then(|| answered_ends.first().copied())
+                .flatten()
+            {
                 Some((_, reference))
                     if all_quiet
                         && reference > pre_tail_count
-                        && observed.iter().all(|(_, end)| *end == reference) =>
+                        && answered_ends.iter().all(|(_, end)| *end == reference) =>
                 {
                     if !self.external_digests_compared {
                         assert_reachable!(
@@ -2371,131 +2598,5 @@ impl Workload for ChainWorkload {
             "chain: applied index watermark"
         );
         Ok(())
-    }
-
-    #[tracing::instrument(level = "debug", skip_all)]
-    async fn check(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-        // The two perspectives, and nothing else: the client's own history
-        // (linearizability over what it was told), and the audit's fold of
-        // every driver transition (safety, restart, and the one liveness claim).
-        if let Some(calls) = &self.calls {
-            self.history.set_attempts(calls.take());
-        }
-        // The linearizability search waits for every client of the journal.
-        let clients = self.plan.as_ref().map_or(1, |plan| {
-            (0..ctx.client_count())
-                .filter(|client| plan.for_client(*client) == self.journal)
-                .count()
-        });
-        let mut digest = check_run(ctx.state(), self.journal, &self.history, clients);
-        // A journal no client appends to (#188: more journals than clients)
-        // is judged by client 0, on an empty history: its audit's safety
-        // oracles ran all along, and its final claim holds too.
-        if self.client_id == 0
-            && let Some(plan) = &self.plan
-        {
-            for idle in plan.ids.iter().skip(ctx.client_count()) {
-                digest ^= check_run(ctx.state(), *idle, &ClientHistory::default(), 0);
-            }
-        }
-        // Every other journal world (#447 (model checks for every journal
-        // world)): the system, control and created journals' models.
-        if self.client_id == 0 {
-            let judged: BTreeSet<_> = self
-                .plan
-                .iter()
-                .flat_map(|plan| plan.ids.iter().copied())
-                .chain([self.journal])
-                .collect();
-            digest ^= crate::audit::check_every_world(ctx.state(), &judged);
-        }
-        // The histories `Announce` logged (#247): every client's library
-        // calls at the registry, at the control journals of the cell the
-        // machines formed (#246), at every tenant control journal a machine
-        // folded (#210), and at every journal a tenant created or a
-        // frontend forwarded to (#442 (search every journal's history)),
-        // each searched once (by client 0, after every run) against the
-        // journal model in its writer mode.
-        if self.client_id == 0 {
-            let identifiers = crate::shape::identifiers(ctx.state());
-            let system = crate::shape::system_journals(ctx.state()).then_some(identifiers.registry);
-            let board = crate::audit::tenants::tenant_board(ctx.state());
-            let (tenants, created) = {
-                let board = crate::audit::tenants::lock(&board);
-                (board.controls(), board.created_modes())
-            };
-            let formed = crate::machine::formed_cell(ctx.state());
-            let cell = formed
-                .map(|cell| [Some(cell.cell), cell.fleet, cell.election])
-                .into_iter()
-                .flatten()
-                .flatten();
-            let logged = rpc::logged_journals(ctx.state())
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .clone();
-            let journals: BTreeSet<_> = system
-                .into_iter()
-                .chain(cell)
-                .chain(tenants)
-                .chain(logged)
-                .collect();
-            for journal in journals {
-                let attempts = std::mem::take(
-                    &mut *rpc::control_attempts(ctx.state(), journal)
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner),
-                );
-                // The cell's election journal (#240) is unfenced: every
-                // candidate's campaigns, renewals, resignations and
-                // truncations. A created journal runs in the mode its
-                // create drew (#241).
-                let mode = if crate::machine::is_election(ctx.state(), journal) {
-                    paros::WriterMode::Multi
-                } else if let Some(mode) = created.get(&journal) {
-                    if !attempts.is_empty() {
-                        assert_reachable!("journal: a created journal's history is searched");
-                    }
-                    *mode
-                } else {
-                    paros::WriterMode::Single
-                };
-                crate::audit::check_control_history(attempts, mode);
-            }
-        }
-        if let Some(sink) = &self.digest {
-            *sink
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(digest);
-        }
-        // (Every acked slot being inside the applied prefix is the audit's
-        // final claim, judged once over every client's history.)
-        Ok(())
-    }
-}
-
-/// An owner fences every call it makes of its single-writer journal: a
-/// wrong-mode refusal (#241) there is a bug.
-fn owner_never_of_wrong_mode() {
-    assert_always!(
-        false,
-        "chain: an owner's call is never refused as of the wrong mode"
-    );
-}
-
-/// Adopt the leader a `Reconfigure` reply named as this client's journal's
-/// leader hint — only where that reply speaks for this journal. A
-/// `Reconfigure` names no journal: a node answers it from its *plane*
-/// journal (`Journals::plane`), which on a matchmaker deployment is the
-/// journal whose configuration names the matchmakers (the main one), but on
-/// a plain deployment is the node's first live user journal in id order —
-/// with system journals, possibly a journal created at runtime and led by a
-/// joiner that never serves this one. Adopting that
-/// leader sends this journal's next `Write` to a node that answers
-/// `UnknownJournal` (seed 10308963497620992383: node 4's plane was a
-/// created journal led by joiner 100).
-fn adopt_plane_leader(nodes: &ChainClient, has_matchmakers: bool, leader: Option<u64>) {
-    if has_matchmakers {
-        nodes.observe_leader(leader);
     }
 }

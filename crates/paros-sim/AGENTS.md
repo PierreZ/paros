@@ -20,7 +20,7 @@ fault world, the one client workload and the audit. Stack: `paros-core` ←
 - `client.rs` → `ClientRuntime`, `ChainClient = paros::client::Client<SimProviders>`, `Connector` → a workload's client-only RPC runtime; `Connector` builds clients over servers learned at runtime (the machines, #246).
 - `state.rs` → `published`, `journal_key` → get-or-publish of per-iteration singletons on the `StateHandle`.
 - `chain.rs` → `ChainState` → the Chain-of-Blocks fold a journal client computes (#186).
-- `chain_workload.rs` → `ChainWorkload`, `Step` → `setup`, the operation program in `run`, `check`. `chain_workload/config.rs` → the op alphabet, `ChainConfig` and its weights. `chain_workload/write.rs` → ops 0, 1 and 5 (`write_step`, `dup_write_step`), `Submission`. `chain_workload/truncate.rs` → ops 2 and 7. `chain_workload/reconfigure.rs` → ops 11 to 13, the reconfiguration shape rings, `compose_reconfiguration`. `chain_workload/reads.rs` → `judge_read`, `Tail`, `SETTLE` (#415).
+- `chain_workload.rs` → `ChainWorkload`, `Step` → `setup`, the operation program (a task `run` spawns: its chaos part runs in `run`, its quiet tail in `check`, #454), `check`. `shape::run_end` draws how long `run` lasts. `chain_workload/config.rs` → the op alphabet, `ChainConfig` and its weights. `chain_workload/write.rs` → ops 0, 1 and 5 (`write_step`, `dup_write_step`), `Submission`. `chain_workload/truncate.rs` → ops 2 and 7. `chain_workload/reconfigure.rs` → ops 11 to 13, the reconfiguration shape rings, `compose_reconfiguration`. `chain_workload/reads.rs` → `judge_read`, `Tail`, `SETTLE` (#415).
 - `chain_workload/rpc.rs` → `CallLog` → the library's `CallObserver` (the history), per-answer oracles, one-attempt calls, the retry-identity oracle (`open_write` / `close_write`).
 - `chain_workload/races.rs` → races 1 and 2 of #205 (`burst`, `ack_race`).
 - `chain_workload/multi.rs` → the ops on a multi-writer journal (#241): unfenced appends through `paros::client::multi`, re-sent at-least-once, open truncations, and the wrong-mode calls (a claim, a fenced write, a fenced truncate, #339) that must be refused; a single-writer journal's unfenced write and unfenced truncate are refused too.
@@ -206,7 +206,7 @@ then admitted; it may stop after the registration and is resumed by the client's
 `pub(crate)`: `PROCESS_POOL_RANGE = 3..=6` (`lib.rs:98`), `MATCHMAKER_POOL_RANGE = 0..=5`
 (`:112`), `PROXY_POOL_RANGE = 0..=3` (`:124`), `REPLICA_POOL_RANGE = 0..=2` (`:134`),
 `JOINER_POOL_RANGE = 0..=2` (`:141`), `MACHINE_POOL_RANGE = 1..=4`, `CLIENT_COUNT_RANGE = 1..4` (`:147`), `PLATEAU_SEEDS = 8`
-(`:154`), `CHAOS_DURATION_MS = 4_000` (`:188`); `pub`: `SMOKE_ITERATIONS = 50` (`:158`),
+(`:154`), `CHAOS_CAP = 150 s`, `RUN_FLOOR = 30 s`, `GRAY_WINDOW = 0.05..=0.4`; `pub`: `SMOKE_ITERATIONS = 50` (`:158`),
 `COVERAGE_ITERATIONS = 1024` (`:161`), `EXPLORATION_TIMELINES_PER_SEED = 8` (`:163`).
 `shape.rs`: `ROUND_TRIP_FLOOR_MS = 250` (`:48`), `ENTRY_BLOCKS_FLOOR = 17` (`:657`),
 `PERSIST_BLOCKS_FLOOR = 2` (`:665`), `FOUNDER_COUNTS = [1, 3]`, `MIN_BOOTSTRAP = 3` (`:939`). `chaos_surfaces()` = `Network(Swarm)` +

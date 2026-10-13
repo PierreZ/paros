@@ -3,8 +3,7 @@
 use std::sync::{Arc, Mutex, PoisonError};
 
 use moonpool_sim::{
-    SimContext, SimTimeProvider, SimulationError, SimulationResult, TimeProvider, assert_always,
-    assert_reachable,
+    SimContext, SimTimeProvider, SimulationError, SimulationResult, assert_always, assert_reachable,
 };
 
 use super::Down;
@@ -237,7 +236,7 @@ pub(super) async fn run_acceptor(
         // way.
         let wipe = config.has_matchmakers()
             && seats.len() == 1
-            && ctx.time().now() < crate::CHAOS_DURATION
+            && crate::in_chaos()
             && moonpool_sim::buggify_with_prob!(f64::from(shape.wipe_pct) / 100.0);
         if wipe
             && seats[0]
@@ -270,7 +269,7 @@ pub(super) async fn run_acceptor(
             && seats.len() == 1
             && system.is_none()
             && seats[0].config.peers.len() > 1
-            && ctx.time().now() < crate::CHAOS_DURATION
+            && crate::in_chaos()
             && moonpool_sim::buggify_with_prob!(f64::from(shape.config_edit_pct) / 100.0),
     );
 

@@ -4,10 +4,11 @@
 //! once the owner's member-removing reconfiguration took effect, early in
 //! the recovery tail.
 //!
-//! The scenario needs a claim, a removal and then the outage, but an owner
-//! wins its claim around 5.4 s into a run on the median, after the 4 s
-//! chaos window moonpool's own outage (`super::outage::regime`) must strike
-//! inside. So this injector waits for a configuration that removed a member
+//! The scenario needs a claim, a removal and then the outage. An owner
+//! wins its claim around 5.4 s into a run on the median, so since chaos
+//! lasts the whole run (#454 (control plane meets chaos)) the outage
+//! mostly strikes inside the chaos window; a late removal still strikes
+//! in the tail. So this injector waits for a configuration that removed a member
 //! of the bootstrap one ([`crate::audit::AuditWorld::has_departure`]), at most
 //! [`LATE_WINDOW`] into the tail, then takes every acceptor and proxy leader
 //! down at one instant, each back after its own delay and one straggler
@@ -30,11 +31,11 @@ use super::outage::{LossShape, POLL, STRAGGLER, may_strike, plan_losses, strike}
 /// back last still leaves the tail most of its budget to converge in.
 pub(crate) const LATE_WINDOW: Duration = Duration::from_secs(4);
 
-/// The last instant the late outage may strike, and the owner's
-/// after-claim removal stays armed on a scenario seed
+/// Whether the last instant the late outage may strike passed, and with
+/// it the owner's after-claim removal stops being armed on a scenario seed
 /// (`ChainWorkload`'s `remove_next`).
-pub(crate) fn late_deadline() -> Duration {
-    Duration::from_millis(crate::CHAOS_DURATION_MS) + LATE_WINDOW
+pub(crate) fn past_late_deadline(now: Duration) -> bool {
+    crate::past_cutoff(now, LATE_WINDOW)
 }
 
 const _: () = assert!(LATE_WINDOW.as_millis() + STRAGGLER.end.as_millis() < 45_000);
@@ -56,7 +57,7 @@ impl FaultInjector for LateOutage {
         let time = ctx.time();
         let main = crate::shape::journals(ctx.state()).main;
         loop {
-            if time.now() >= late_deadline() {
+            if past_late_deadline(time.now()) {
                 return Ok(());
             }
             if crate::audit::audit_world_for(ctx.state(), main).has_departure() {
@@ -69,7 +70,7 @@ impl FaultInjector for LateOutage {
                 return Ok(());
             }
         }
-        if time.now() >= Duration::from_millis(crate::CHAOS_DURATION_MS) {
+        if !crate::in_chaos() {
             assert_reachable!("outage: a departed straggler's outage strikes in the recovery tail");
         }
         // The loss is planned at the instant of the strike, with no await
