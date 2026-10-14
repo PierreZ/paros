@@ -5,8 +5,8 @@
 //! founders. The re-run meets formed founders and an admitted machine at a
 //! listed address, and must find the cell.
 //!
-//! On a BUGGIFY decision the operator runs `init` again first, while the
-//! replacement is still idle (#511 (placement books machines that never
+//! On a coin, drawn once per seed, the operator runs `init` again first,
+//! while the replacement is still idle (#511 (placement books machines that never
 //! served)): its `cell init` may leave the replacement promised in the cell
 //! decree, so every later `Admit` is refused `in_cell_init` after the
 //! admission registered it. Such a machine never serves, and placement must
@@ -30,8 +30,9 @@ pub(super) struct Steps {
     admits: u8,
     /// The re-run `init` was forced.
     reran: bool,
-    /// Whether the re-run comes before the admission (a BUGGIFY decision,
-    /// drawn once).
+    /// Whether the re-run comes before the admission (a coin, drawn once:
+    /// a BUGGIFY location's per-seed activation left it unfired in a
+    /// sweep of ten scenario runs).
     early: Option<bool>,
     /// The next `FLEET_INIT` runs `init` again, even on a cell this
     /// operator knows.
@@ -57,7 +58,7 @@ impl FleetOps {
             let early = *self
                 .replaced
                 .early
-                .get_or_insert_with(|| moonpool_sim::buggify_with_prob!(0.5));
+                .get_or_insert_with(|| moonpool_sim::sim_random_bool(0.5));
             if early {
                 assert_reachable!(
                     "init: an operator runs init again before admitting a founder's replacement"
