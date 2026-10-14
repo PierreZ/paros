@@ -1025,6 +1025,14 @@ pub const RARE: &[Rare] = &[
         reason: "a move off a drained machine: 13 hits on 3 of 4 runs over 400 hunt seeds (#498 (moves in the sweep))",
     },
     Rare {
+        msg: "gc: a node accepts its retirement",
+        reason: "fired on 12 of 3,072 hunt seeds, on main too, so a sweep that plateaus near 250 seeds may miss it; an operator that retires right after its reconfiguration did not raise it (4 of 600)",
+    },
+    Rare {
+        msg: "gc: a retired acceptor is genuinely shut down",
+        reason: "follows an accepted retirement: fired on 11 of 3,072 hunt seeds, on main too",
+    },
+    Rare {
         msg: "coordinator: a move finished",
         reason: "a move off a drained machine: 1 to 2 checks a sweep on main, none in a 324-seed sweep (#498 (moves in the sweep))",
     },

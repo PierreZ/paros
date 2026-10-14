@@ -108,6 +108,8 @@ pub(crate) struct MachineBoard {
     other_founder: Option<Address>,
     /// The votes for that other cell still on a disk, by minted id.
     others: BTreeMap<u64, CellPlan>,
+    /// How many of those votes a wipe took ([`founder_in_other_cell`]).
+    others_wiped: u64,
     /// The IP each machine binds now, by rank (#257): its process IP, or the
     /// address it moved to.
     listens: BTreeMap<usize, std::net::IpAddr>,
@@ -371,14 +373,26 @@ fn is_other_cell(board: &MachineBoard, addr: &Address, plan: &CellPlan) -> bool 
 /// this run's founders (#216 (another cell)): a re-run `init` over the
 /// founders is then refused `other_cell_init`, because no vote of the run's
 /// own plan survives to adopt.
-pub(crate) fn founder_in_other_cell(state: &StateHandle) -> bool {
+///
+/// `since` is [`other_cells_wiped`] when the `init` started: a vote of the
+/// other cell wiped since then held the founder while the `init` ran, so
+/// its refusal stands though the founder is idle again, or formed the run's
+/// cell, by the time it is judged (hunt seed 16513366675242790746: the other
+/// cell's machine was wiped and its successor formed the run's cell before
+/// the refused `cell init` returned).
+pub(crate) fn founder_in_other_cell(state: &StateHandle, since: u64) -> bool {
     let board = machine_board(state);
     let board = lock(&board);
     board
         .other_founder
         .as_ref()
         .is_some_and(|addr| board.founders.contains(addr))
-        && !board.others.is_empty()
+        && (!board.others.is_empty() || board.others_wiped > since)
+}
+
+/// How many votes of the other cell (#216) a wipe took so far.
+pub(crate) fn other_cells_wiped(state: &StateHandle) -> u64 {
+    lock(&machine_board(state)).others_wiped
 }
 
 /// Whether the run's cell is lost (#246): a vote named a plan that lost a
@@ -1154,6 +1168,7 @@ pub(crate) fn booted(
         // plan: a wipe of a plan's last voter loses its cell too.
         board.note_lost();
         if board.others.remove(&old).is_some() {
+            board.others_wiped += 1;
             assert_reachable!("machine: a wipe takes the other cell's vote with its disk");
         }
         if board.voters.remove(&old).is_some() {
