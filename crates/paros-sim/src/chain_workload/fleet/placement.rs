@@ -112,6 +112,17 @@ async fn read(
 
 /// The oracle itself, and the gate that a placement spread over zones.
 fn judge(tenants: &[TenantControl], registry: &Registry) {
+    // Placement books only a machine that serves the cell: a founding
+    // member, or one whose admission the coordinator saw (#511 (placement
+    // books machines that never served)). A slot on a machine that never
+    // won its `Admit` would never start.
+    for (_, booking) in registry.bookings() {
+        assert_always!(
+            registry.serves(booking.node),
+            "placement: every slot is booked on a machine that serves the cell",
+            { "node" => booking.node.0 }
+        );
+    }
     for control in tenants {
         let tenant = control.tenant();
         if registry.dropped(tenant) {
@@ -165,7 +176,7 @@ fn judge(tenants: &[TenantControl], registry: &Registry) {
 
 /// A live journal that still holds a slot on a draining machine while it
 /// has a machine to go to for each such slot, as `(tenant, node)`: a
-/// registered storage machine, never wiped, up, with a free slot, that
+/// registered storage machine that serves the cell, never wiped, up, with a free slot, that
 /// holds no slot of it,
 /// while every machine it stays on was never wiped. `None` when every such
 /// move finished.
@@ -208,6 +219,7 @@ fn unmoved(
             let free = registry.nodes().filter(|(node, n)| {
                 n.standing == NodeStanding::Registered
                     && n.class == Class::Storage
+                    && registry.serves(*node)
                     && !wiped.contains(&node.0)
                     && registry.liveness(*node).up
                     && registry.available(*node) > 0

@@ -27,7 +27,10 @@
 //!    period, `Identify` each founding member and each registered machine
 //!    not retired. A machine that answers as a new incarnation of a
 //!    registered one registers again (a reboot); one marked down, or seen
-//!    as another incarnation, is written `MachineUp`; one silent for
+//!    as another incarnation, is written `MachineUp`; a registered machine
+//!    that answers as a machine of this cell is written `MachineAdmitted`
+//!    once, and only then may placement book it (#511 (placement books
+//!    machines that never served)); one silent for
 //!    `machine_down_after` is written `MachineDown`. Only changes are
 //!    written, never a heartbeat. The watch ends with the term, or at the
 //!    term's first write that does not land: a coordinator an admin session
@@ -363,7 +366,9 @@ impl Watch {
         Ok(wrote)
     }
 
-    /// The change machine `id` answering `ack` at `addr` makes, if any.
+    /// The change machine `id` answering `ack` at `addr` makes, if any: a
+    /// reboot registers again, a registered machine seen in the cell is
+    /// admitted, then liveness.
     fn answered(
         session: &CellSession,
         id: NodeId,
@@ -375,6 +380,7 @@ impl Watch {
             return None;
         }
         let registry = session.registry();
+        let cell_id = session.journals().cell_id;
         let held = registry.liveness(id);
         match registry.get(id) {
             Some(node) if node.incarnation != incarnation => {
@@ -395,6 +401,14 @@ impl Watch {
                     incarnation,
                     machine_interface: ack.machine_interface.clone(),
                 })
+            }
+            // A registered machine that answers as a machine of this cell
+            // won its `Admit`: placement may book it from now on (#511
+            // (placement books machines that never served)). One idle, or
+            // stuck in another cell decree, never serves.
+            Some(_) if !registry.serves(id) && cell_id != 0 && ack.cell_id == cell_id => {
+                moonpool_assertions::reachable!("coordinator: a machine's admission is recorded");
+                Some(SystemCommand::MachineAdmitted { id })
             }
             _ if !held.up || held.incarnation != incarnation => {
                 if !held.up {

@@ -35,6 +35,7 @@ message SystemEntry {
     DropTenant drop_tenant = 10;
     MachineDown machine_down = 11;
     MachineUp machine_up = 12;
+    MachineAdmitted machine_admitted = 13;
   }
 }
 
@@ -107,6 +108,14 @@ message MachineUp {
   uint64 id = 1;
   fixed64 incarnation_high = 2;
   fixed64 incarnation_low = 3;
+}
+
+// The cell coordinator saw registered machine `id` answer `Identify` as a
+// machine of this cell (#511 (placement books machines that never served)):
+// its admission landed, so placement may book it. Written once, never for a
+// founding member.
+message MachineAdmitted {
+  uint64 id = 1;
 }
 
 // Release booking `booking`: its slot is free again.
@@ -198,6 +207,9 @@ message RegisteredNodeState {
   string name = 10;
   // The machine's dynamic interface (#404).
   bytes machine_interface = 11;
+  // Whether the cell coordinator saw it in the cell (`MachineAdmitted`,
+  // #511).
+  bool admitted = 12;
 }
 
 message BookingState {
