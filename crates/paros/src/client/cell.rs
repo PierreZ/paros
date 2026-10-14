@@ -302,13 +302,10 @@ impl CellSession {
             "an admission names the machine it admits"
         );
         match bootstrap::admit(providers, rpc, names, target, &admission, timeout).await {
-            AdmitOutcome::Admitted => {
-                self.record_admission(client, first, node).await;
-                Step::Done {
-                    result: node,
-                    last: Some(Stage::Admit),
-                }
-            }
+            AdmitOutcome::Admitted => Step::Done {
+                result: node,
+                last: Some(Stage::Admit),
+            },
             AdmitOutcome::Refused(label) => match label.as_str() {
                 "other_cell" => Step::Refused(FleetRefusal::OtherCell { node, cell_id: 0 }),
                 "in_cell_init" => Step::Refused(FleetRefusal::InCellInit { node }),
@@ -320,29 +317,6 @@ impl CellSession {
             AdmitOutcome::Unreachable => Step::Interrupted(Interrupted::MachineUnreachable {
                 addr: target.clone(),
             }),
-        }
-    }
-
-    /// Record that `node` took its `Admit`, at once, so placement may book
-    /// it (#511 (placement books machines that never served)). The
-    /// coordinator's watch writes it when this write does not land: the
-    /// machine is admitted either way.
-    async fn record_admission<P: Providers>(
-        &mut self,
-        client: &Client<P>,
-        first: usize,
-        node: NodeId,
-    ) {
-        assert!(self.cell_open, "an admission is recorded only once open");
-        if self.cell.state().serves(node) {
-            return;
-        }
-        let admitted = SystemCommand::MachineAdmitted { id: node };
-        if self.record(client, first, &admitted).await.is_ok() {
-            assert!(
-                self.cell.state().serves(node),
-                "a recorded admission serves the cell"
-            );
         }
     }
 

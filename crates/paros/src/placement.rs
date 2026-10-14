@@ -14,9 +14,7 @@
 //! 1. **Class and capacity.** An instance goes only to a machine of its
 //!    role's class with a free slot, as the registry judges a booking at
 //!    apply ([`crate::system::RegistryRefusal::WrongClass`],
-//!    [`crate::system::RegistryRefusal::NoCapacity`]), and only to a
-//!    machine that serves the cell: a founding member, or one the cell
-//!    coordinator saw admitted ([`Registry::serves`], #511).
+//!    [`crate::system::RegistryRefusal::NoCapacity`]).
 //! 2. **One machine, one storage instance.** A machine never holds two
 //!    storage instances (acceptor, replica, matchmaker) of one target, and
 //!    never two instances of one role of one target.
@@ -67,13 +65,9 @@ impl Machine {
     }
 }
 
-/// The machines of `nodes` the registry can book: registered, not
-/// draining, and serving the cell ([`Registry::serves`]), with their class,
-/// zone, capacity, bookings and liveness. A node the registry does not hold
-/// is left out, and so is one registered whose admission never landed: it
-/// may never serve (#511 (placement books machines that never served):
-/// a wiped founder's replacement that an admission registered, then stuck
-/// in another cell decree, took a matchmaker set's slot for good).
+/// The machines of `nodes` the registry can book: registered and not
+/// draining, with their class, zone, capacity, bookings and liveness. A node
+/// the registry does not hold is left out.
 #[must_use]
 pub fn machines(registry: &Registry, nodes: impl IntoIterator<Item = NodeId>) -> Vec<Machine> {
     let mut seen = BTreeSet::new();
@@ -84,12 +78,6 @@ pub fn machines(registry: &Registry, nodes: impl IntoIterator<Item = NodeId>) ->
             let held = registry
                 .get(node)
                 .filter(|n| n.standing == NodeStanding::Registered)?;
-            if !registry.serves(node) {
-                moonpool_assertions::reachable!(
-                    "placement: a machine not yet admitted is passed over"
-                );
-                return None;
-            }
             Some(Machine {
                 node,
                 class: held.class,
@@ -612,37 +600,5 @@ mod tests {
                 }
             }
         }
-    }
-
-    #[test]
-    fn a_registered_machine_is_offered_only_once_it_serves() {
-        use crate::system::SystemCommand;
-        let register = |id: u64| SystemCommand::RegisterNode {
-            id: NodeId(id),
-            addr: format!("n{id}"),
-            class: Class::Storage,
-            capacity: 2,
-            failure_domain: "z".into(),
-            name: format!("m{id}"),
-            incarnation: u128::from(id),
-            machine_interface: Vec::new(),
-        };
-        let mut registry = Registry::new([NodeId(1)]);
-        registry.fold(0, &register(1).encode());
-        registry.fold(1, &register(2).encode());
-        let offered = |registry: &Registry| -> Vec<NodeId> {
-            machines(registry, [NodeId(1), NodeId(2)])
-                .iter()
-                .map(|m| m.node)
-                .collect()
-        };
-        // The founding member serves; the registered machine whose
-        // admission never landed is passed over (#511).
-        assert_eq!(offered(&registry), [NodeId(1)]);
-        registry.fold(
-            2,
-            &SystemCommand::MachineAdmitted { id: NodeId(2) }.encode(),
-        );
-        assert_eq!(offered(&registry), [NodeId(1), NodeId(2)]);
     }
 }
