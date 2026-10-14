@@ -20,6 +20,7 @@
 
 use std::io;
 
+use moonpool_buggify::hint::Strike;
 use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
 use paros_core::{JournalIdentifier, NodeId};
 
@@ -247,6 +248,20 @@ impl<S: StorageProvider + Clone> ProviderDisk<S> {
             );
         }
         self.provider.rename(&staged, &self.path(name)).await?;
+        if name == RECORD {
+            // Hint: the record renamed in, its directory not synced. A
+            // machine killed here may boot on the new record, or the old,
+            // and its audit never heard of the write (witness
+            // 15405975583108970484: a failed sync here formed a cell the
+            // simulation's board never saw voted).
+            let hinted = moonpool_buggify::hint!("machine record renamed, not synced", 0.05);
+            if hinted.strike() == Strike::Killed {
+                moonpool_assertions::reachable!(
+                    "machine: a machine dies between its record's rename and its sync"
+                );
+            }
+            hinted.await;
+        }
         sync_names(&self.provider, &self.root).await
     }
 

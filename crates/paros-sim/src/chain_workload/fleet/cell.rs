@@ -207,6 +207,7 @@ impl FleetOps {
             assert_reachable!("init: an operator starts cell init at another founder");
             members.rotate_left(1 + usize::try_from(draw % (founders as u64 - 1)).unwrap_or(0));
         }
+        let wiped = crate::machine::other_cells_wiped(ctx.state());
         let connector = self.connector.clone();
         let observer: Arc<dyn paros::client::CallObserver> = Arc::new(Announce::every(ctx));
         let whole = paros::client::initialize::initialize(
@@ -242,16 +243,16 @@ impl FleetOps {
                 self.patience,
             );
             let (run, second) = futures::future::join(whole, second).await;
-            judge_second(ctx, &other, &second);
+            judge_second(ctx, &other, &second, wiped);
             run
         } else {
             whole.await
         };
-        self.judge(ctx, run, founders)
+        self.judge(ctx, run, founders, wiped)
     }
 
     /// What a whole `init` came to, judged; whether it ended.
-    fn judge(&mut self, ctx: &SimContext, run: InitRun, founders: usize) -> bool {
+    fn judge(&mut self, ctx: &SimContext, run: InitRun, founders: usize, wiped: u64) -> bool {
         match run {
             InitRun::Initialized(initialized) | InitRun::AlreadyInitialized(initialized) => {
                 initialized.steps.iter().copied().for_each(reach);
@@ -295,7 +296,7 @@ impl FleetOps {
                 // operator founded (#216), and no vote of this run's plan
                 // survives: the founders can no longer be one cell.
                 assert_always!(
-                    crate::machine::founder_in_other_cell(ctx.state()),
+                    crate::machine::founder_in_other_cell(ctx.state(), wiped),
                     "init: init is refused as other_cell_init only once another cell holds a founder",
                     { "founders" => founders }
                 );
@@ -363,7 +364,7 @@ impl FleetOps {
 /// one cell the machines formed, or decides nothing — never another. Sent
 /// to a machine `cell add-machine` admitted at `other` (#423), it is refused
 /// as `cell_exists`: that machine is in the cell already.
-fn judge_second(ctx: &SimContext, other: &Address, second: &InitOutcome) {
+fn judge_second(ctx: &SimContext, other: &Address, second: &InitOutcome, wiped: u64) {
     match second {
         InitOutcome::Formed(plan) => {
             assert_always!(
@@ -378,7 +379,7 @@ fn judge_second(ctx: &SimContext, other: &Address, second: &InitOutcome) {
                 label == "storage"
                     || (label == "cell_lost" && crate::machine::cell_lost(ctx.state()))
                     || (label == "other_cell_init"
-                        && crate::machine::founder_in_other_cell(ctx.state()))
+                        && crate::machine::founder_in_other_cell(ctx.state(), wiped))
                     || (label == "cell_exists" && crate::machine::is_admitted(ctx.state(), other)),
                 "init: a second concurrent cell init is refused only for a failed write",
                 { "refusal" => label.as_str() }

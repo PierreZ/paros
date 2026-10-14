@@ -114,6 +114,18 @@ fn with_names<R>(state: &StateHandle, f: impl FnOnce(&mut TenantNames) -> R) -> 
 
 const TENANT_NAMES_KEY: &str = "paros-tenant-names";
 
+/// Run `f` over the operator whose turn it is to finish an `init` in the
+/// recovery tail ([`FleetOps::take_init_turn`]).
+fn with_init_turn<R>(state: &StateHandle, f: impl FnOnce(&mut Option<u64>) -> R) -> R {
+    let turn = crate::state::published(state, INIT_TURN_KEY, || None::<u64>);
+    let mut turn = turn
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    f(&mut turn)
+}
+
+const INIT_TURN_KEY: &str = "paros-init-turn";
+
 /// An operation this client stopped in the middle of — the crash shape, or
 /// a run that did not end (interrupted, its target killed under it, going
 /// round) — to resume on its next fleet step, and at the latest in the
@@ -966,6 +978,10 @@ impl FleetOps {
         if self.pending.is_none() {
             return;
         }
+        let initializing = matches!(self.pending, Some(Pending::Initialize | Pending::Init));
+        if initializing && !self.take_init_turn(ctx, beat).await {
+            return;
+        }
         let deadline = ctx.time().now() + FLEET_SETTLE;
         let mut draw = self.client_id;
         let mut attempt = 0_u32;
@@ -993,6 +1009,38 @@ impl FleetOps {
             { "client" => self.client_id, "pending" => format!("{:?}", self.pending) }
         );
         assert_reachable!("fleet: a pending operation is finished in the recovery tail");
+        if initializing {
+            with_init_turn(ctx.state(), |turn| *turn = None);
+        }
+    }
+
+    /// Wait for this operator's turn to finish an `init` in the recovery
+    /// tail (#513 (fleet Init duel)): one operator at a time. Two operators
+    /// that finish one `init` at once each claim its journals, so each
+    /// supersedes the other's steps; with the tail's slow links one step
+    /// takes seconds, and neither ended in [`FLEET_SETTLE`] (witness
+    /// 14782271020639680373: client 0's whole `init` was superseded twice by
+    /// client 1's fleet half). Operators of one universe do not race their
+    /// own `init` once the incident is over; the duel itself is still run
+    /// in the chaos window, where nothing owes an end. The next operator
+    /// starts its own deadline once the first is done, and finds the
+    /// `init` ended. False when the run shut down first.
+    async fn take_init_turn(&self, ctx: &SimContext, beat: Duration) -> bool {
+        loop {
+            let mine = with_init_turn(ctx.state(), |turn| match turn {
+                Some(holder) if *holder != self.client_id => false,
+                _ => {
+                    *turn = Some(self.client_id);
+                    true
+                }
+            });
+            if mine {
+                return true;
+            }
+            if ctx.shutdown().is_cancelled() || ctx.time().sleep(beat).await.is_err() {
+                return false;
+            }
+        }
     }
 
     /// The end-of-run check over the final folds (#247), run by the last
