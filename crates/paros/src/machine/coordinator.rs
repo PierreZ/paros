@@ -80,7 +80,7 @@ use super::sets::{SetStep, Sets};
 use super::tenants::TenantDesk;
 use super::{CellPlan, Class, ControlJournals, FormedCell, incarnation_from_halves};
 use crate::client::cell::CellSession;
-use crate::client::checkpoint::CheckpointPolicy;
+use crate::client::checkpoint::{CheckpointPolicy, Folder, LoadOutcome, load};
 use crate::client::election::{Candidate, Election, ElectionTunables, Leader, Step, hand_off};
 use crate::client::fleet::{Interrupted, Stage, Step as FleetStep};
 use crate::client::journals::{JournalAnswer, JournalRequest};
@@ -88,7 +88,7 @@ use crate::client::{CallObserver, ClaimOutcome, Client, ClientTunables, Server, 
 use crate::rpc::machine as wire;
 use crate::rpc::methods::{CoordinatorInterface, JournalRequestRpc, RegisterRpc};
 use crate::rpc::{Inbound, NodeClient, ReplySender};
-use crate::system::{NodeStanding, SystemCommand};
+use crate::system::{NodeStanding, Registry, SystemCommand};
 use crate::{Address, DriverTunables, Names};
 
 /// A served term's session and its watch over the cell's machines (#211).
@@ -472,6 +472,47 @@ pub(crate) fn cell_client<P: Providers>(
     Client::new(providers, servers, ClientTunables::default())
 }
 
+/// `client` over the founding members where the cell control journal's
+/// registry holds them now, this member at the address it advertises
+/// (#349): a founder renamed while this machine ran is dialed at its new
+/// name. `None` when the registry cannot be read to its tail. A term that
+/// could not claim the cell's journal at the address this candidacy
+/// started with dialed a renamed leader at a name nobody listens on, and
+/// kept its election for the rest of the run (#529 (sets oracles after PR
+/// #515): witness 2036487808999208197, a set never moved off a drained
+/// machine).
+async fn follow_book<P: Providers>(
+    rpc: &RpcHandle<P>,
+    client: &Client<P>,
+    names: &Names,
+    plan: &CellPlan,
+    (me, own): (NodeId, &Address),
+) -> Option<Client<P>> {
+    let mut folder = Folder::new(Registry::default());
+    let loaded = load(&mut folder, plan.control, client, 0, 0).await;
+    if !matches!(loaded, LoadOutcome::Loaded { .. }) {
+        return None;
+    }
+    let book = super::with_own(&super::address_book(&plan.members, folder.state()), me, own);
+    assert_eq!(
+        book.len(),
+        plan.members.len(),
+        "a followed book names every founding member"
+    );
+    assert!(
+        book.iter().any(|(id, addr)| *id == me && addr == own),
+        "a followed book dials this member where it advertises"
+    );
+    let servers = book
+        .iter()
+        .map(|(id, addr)| Server {
+            id: id.0,
+            node: NodeClient::named(rpc, names.clone(), addr.clone()),
+        })
+        .collect();
+    Some(client.with_servers(servers))
+}
+
 /// A founding member's candidacy, as the node loop hands it to the task.
 /// Its bools are independent BUGGIFY decisions.
 #[allow(clippy::struct_excessive_bools)]
@@ -607,7 +648,7 @@ fn successor(plan: &CellPlan, me: NodeId) -> Option<Candidate> {
 async fn campaign<P: Providers>(
     providers: P,
     rpc: RpcHandle<P>,
-    client: Client<P>,
+    mut client: Client<P>,
     candidacy: Candidacy,
     shutdown: CancellationToken,
 ) {
@@ -709,7 +750,15 @@ async fn campaign<P: Providers>(
                         desk = None;
                         election.resign(None).await;
                     }
-                    TermDuty::Unavailable => {}
+                    TermDuty::Unavailable => {
+                        // The next try dials the founders where the
+                        // registry holds them now.
+                        if let Some(followed) =
+                            follow_book(&rpc, &client, &names, &plan, (me, &addr)).await
+                        {
+                            client = followed;
+                        }
+                    }
                 }
             }
             Step::Leading { .. } if served.is_some() && watching.is_none() => {

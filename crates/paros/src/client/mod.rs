@@ -443,6 +443,25 @@ impl<P: Providers> Client<P> {
         self
     }
 
+    /// This client over other servers, with its runtime, tunables, observer
+    /// and shutdown, under a leader hint of its own (a hint names a server
+    /// of the old list).
+    ///
+    /// # Panics
+    ///
+    /// If `servers` is empty.
+    #[must_use]
+    pub fn with_servers(&self, servers: Vec<Server<P>>) -> Self {
+        assert!(!servers.is_empty(), "a client needs at least one server");
+        let rotation = servers.len();
+        Self {
+            servers: servers.into(),
+            rotation,
+            hint: Arc::default(),
+            ..self.clone()
+        }
+    }
+
     /// This client under other tunables, sharing its leader hint.
     #[must_use]
     pub fn with_tunables(&self, tunables: ClientTunables) -> Self {
