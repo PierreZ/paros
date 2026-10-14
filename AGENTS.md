@@ -201,7 +201,7 @@ batch) and holds **no protocol tally of its own**:
 - `replica.rs` — chosen prefix, apply walk, journal fold · `journal_state.rs` — the one
   journal-control state machine, judged at apply
 - `quorum_read.rs` — leaderless reads · `collector.rs` — the leader-side GC tally
-- `membership.rs` — `AcceptorConfig`, `MatchmakerSet`, `QuorumSystem`
+- `membership/` — `AcceptorConfig`, `MatchmakerSet`, `QuorumSystem`
 - `matchmaking.rs` — the candidate's matchmaking phase · `matchmaker.rs` (+ `reconfigurer.rs`)
   — the registry and its generation handover · `decree.rs` — the generic single-decree
   Paxos (`Decree<Id, V>`): the handover's successor and `cell init`'s plan (#277)
@@ -210,7 +210,7 @@ batch) and holds **no protocol tally of its own**:
 The map is `crates/paros-core/AGENTS.md`. **A component must not acquire knowledge merely because
 the current deployment colocates it**: the proposer builds no message, the acceptor never reads
 the chosen prefix, the replica never sees a ballot tally; the caller hands each the data it
-needs. **Every quorum question crosses `membership.rs`**: predicates are phase-split
+needs. **Every quorum question crosses `membership/`**: predicates are phase-split
 (`has_phase1_quorum` / `has_phase2_quorum`, cross-intersecting) and no tally compares a count
 against a threshold on its own; a new quorum system is a `QuorumSystem` variant, never a tally
 rewrite. Policies are explicit types, never flags.

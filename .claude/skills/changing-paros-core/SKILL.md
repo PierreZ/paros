@@ -1,6 +1,6 @@
 ---
 name: changing-paros-core
-description: Edit paros-core, the sans-IO Paxos roles and ColocatedNode, without breaking its contracts - one role per module and no knowledge acquired by colocation, every quorum question through the membership boundary, hard assert! with Panics doc sections, assert_invariants at every mutating entry point, the plain Multi-Paxos None arm untouched, no RNG/clock/deps/features that decide anything, tracing behind cfg_attr, and the wasm and rustdoc gates. Use when touching acceptor.rs, proposer.rs, replica.rs, journal_state.rs, collector.rs, membership.rs, matchmaking.rs, matchmaker/, node.rs or node/*.rs, or when adding a Message, a WriteOp or a HardState field.
+description: Edit paros-core, the sans-IO Paxos roles and ColocatedNode, without breaking its contracts - one role per module and no knowledge acquired by colocation, every quorum question through the membership boundary, hard assert! with Panics doc sections, assert_invariants at every mutating entry point, the plain Multi-Paxos None arm untouched, no RNG/clock/deps/features that decide anything, tracing behind cfg_attr, and the wasm and rustdoc gates. Use when touching acceptor.rs, proposer.rs, replica.rs, journal_state.rs, collector.rs, membership/, matchmaking.rs, matchmaker/, node.rs or node/*.rs, or when adding a Message, a WriteOp or a HardState field.
 ---
 
 # Changing paros-core
@@ -23,7 +23,7 @@ because the perturbation is a caller that stops calling.
 | chosen prefix, contiguous walk, the journal fold (every walked slot judged by `JournalState::apply`, the state sealed at the floor), the journal read (`Replica::read`, `LogRead`), the trim-point jump (`Replica::trim_to`); `chosen_gap()` lives here (`node.replica().chosen_gap()`). No application: paros runs none (#186) | `replica.rs` (`Replica`) |
 | the per-journal state machine (#204): `JournalState { owner, generation, next_seq, first_seq }` and its pure `apply`, judged at apply in slot order on every node alike — the safety rule; a propose-time refusal is only ever an optimisation (§2.2) — a write accepted only from the current owner at `next_seq`, a `Duplicate` exactly when the log holds the same write there (the log is the at-most-once table; there is no session ledger), refused otherwise, `truncated` below `first_seq`; `SetLeader` a compare-and-swap on the generation; `Truncate` raises `first_seq` | `journal_state.rs` (`JournalState`, `Outcome`) |
 | the replica tier (#144): a `Replica` over a durable chosen log on a process with no `Acceptor` — steps `Commit` / `CatchUpResponse` / `TrimmedTo` / `Heartbeat` / `PreReadAck`, sends `CatchUpRequest` and `PreRead` (its quorum reads, §3.4), serves journal reads (`read_log`), writes `WriteOp::Learned` / `SetChosenIndex` / `Truncate` / `TrimmedTo` (never an acceptor op), never in the pool; the coupling analysis (why every acceptor stays a learner) is its module doc; `Config::reply_owner` names a slot's reply owner | `replica_node.rs` (`ReplicaNode`, `ReplicaReady`) |
-| `AcceptorConfig`, `MatchmakerSet`, `QuorumSystem` — **every** quorum question crosses here; no tally compares a count to a threshold on its own; Phase-1 vs Phase-2 predicates are split on purpose; a grid's column is chosen here (`column_of`) and nowhere else | `membership.rs` |
+| `AcceptorConfig`, `MatchmakerSet`, `QuorumSystem` — **every** quorum question crosses here; no tally compares a count to a threshold on its own; Phase-1 vs Phase-2 predicates are split on purpose; a grid's column is chosen here (`column_of`) and nowhere else | `membership/` |
 | the leaderless read tally (#143): a row's vote watermarks, the maximum, bound to one configuration, TTL-bounded; the acceptor answers `vote_watermark`, the replica answers `covers` | `quorum_read.rs` (`QuorumRead`, `QuorumReads`) |
 | the candidate's matchmaking phase (registration tally, `H_b`, effective configuration, stale belief) | `matchmaking.rs` |
 | the leader-side GC tally (#123): which configured acceptors report a chosen index past the election fence, which matchmakers acked the watermark, the effective floor and the acceptors it retires; knows nothing of leadership or re-sends (that wiring is `node/gc.rs`) | `collector.rs` |
@@ -37,7 +37,7 @@ the chosen prefix, the replica never sees a tally. If a role needs a fact,
 `ColocatedNode` hands it in (the acceptor's own records when a Phase 1 opens,
 an "is this slot chosen" predicate when a probe closes). A new quorum shape is
 a `QuorumSystem` variant, never a rewritten tally or fan-out. A grid's column
-(`column_of`) and a read's row (`row_of`) are chosen in `membership.rs` and
+(`column_of`) and a read's row (`row_of`) are chosen in `membership/` and
 nowhere else; a quorum read (`ColocatedNode::quorum_read`) runs on any node,
 touches no leader state and reads no clock.
 

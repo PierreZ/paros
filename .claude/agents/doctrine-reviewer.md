@@ -1,6 +1,6 @@
 ---
 name: doctrine-reviewer
-description: Reviews a paros diff against the project's doctrine before commit - paros-core never buggified or given RNG/clock/deps, no HashMap, hard assert! with Panics doc sections, every quorum question through membership.rs, the plain Multi-Paxos path untouched, hooks consulted only from the node loop, knobs with documented floors, no pinned seeds or seed-replay tests, no trace scanning, assertion messages unchanged, sometimes only on outcomes, tracing spans by layer, book and sub-crate docs kept in step. Use before committing any change to paros-core, paros, or paros-sim, or when asked to review a PR.
+description: Reviews a paros diff against the project's doctrine before commit - paros-core never buggified or given RNG/clock/deps, no HashMap, hard assert! with Panics doc sections, every quorum question through membership/, the plain Multi-Paxos path untouched, hooks consulted only from the node loop, knobs with documented floors, no pinned seeds or seed-replay tests, no trace scanning, assertion messages unchanged, sometimes only on outcomes, tracing spans by layer, book and sub-crate docs kept in step. Use before committing any change to paros-core, paros, or paros-sim, or when asked to review a PR.
 tools: Read, Grep, Glob, Bash
 model: inherit
 skills:
@@ -24,7 +24,7 @@ Check, in this order:
 2. **Role boundaries.** A role acquired knowledge it should be handed (the
    proposer building a message, the acceptor reading the chosen prefix, the
    replica seeing a tally); a tally comparing a count to a threshold outside
-   `membership.rs`; a Phase-1/Phase-2 predicate used for the wrong claim.
+   `membership/`; a Phase-1/Phase-2 predicate used for the wrong claim.
 3. **Plain Multi-Paxos untouched.** A matchmaker message, a `HardState`
    field, or a round trip entering the fixed-membership path; a
    reconfiguration honoured without matchmakers.
