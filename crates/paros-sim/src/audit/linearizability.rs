@@ -50,6 +50,15 @@
 //! lands one after every earlier-invoked one landed: any linearization can
 //! be reordered so, since an earlier invocation stands wherever a later one
 //! could.
+//! An unknown multi-writer write lands only at a position where it fits
+//! ([`Landings::fits`]): records never move, so a write that puts another
+//! record where a page shows one, or on a range an answered write took,
+//! is refuted by that answer in every linearization (#512 (search
+//! budget)). Without this, every unknown write was tried at every position
+//! of a gap between two answers, and only the page after the gap refuted
+//! the wrong orders (hunt seed 2216307595147519586 on PR #516 (internal
+//! clients): the election journal's 332 judged attempts, undecided past
+//! 50M steps, decided in 651).
 //!
 //! **A write resolved not written** (#444) is held to it. When the
 //! client's `resolve` settles an ambiguous write as `NotWritten`, the
@@ -208,6 +217,9 @@ struct Model<'a> {
     landed: Vec<bool>,
     /// Per unknown attempt, the state past which it can never take effect.
     deadline: Vec<Deadline>,
+    /// On a multi-writer journal, where an unknown write may land: only
+    /// where it fits (#512 (search budget)).
+    landings: Option<Landings>,
     /// The writes a resolution proved not written (#444), each with the
     /// latest instant a settlement of it started.
     never: BTreeMap<&'a Call, u64>,
@@ -234,6 +246,7 @@ impl<'a> Model<'a> {
             after,
             landed: vec![false; attempts.len()],
             deadline,
+            landings: (mode == WriterMode::Multi).then(|| Landings::new(attempts)),
             never: resolved_not_written(attempts, mode),
             scalars: Scalars::default(),
             writes: Vec::new(),
@@ -453,7 +466,10 @@ impl<'a> Model<'a> {
                     }
                     let count = records.len() as u64;
                     let answered = match seen {
-                        None => true,
+                        None => self
+                            .landings
+                            .as_ref()
+                            .is_some_and(|landings| landings.fits(s.next_seq, records)),
                         Some(Seen::Written {
                             seq,
                             count: n,
@@ -1754,6 +1770,34 @@ mod tests {
         assert!(verdict.linearizable);
         // The same history is not a single-writer one.
         assert!(!check(&history, WriterMode::Single, 1_000_000).linearizable);
+    }
+
+    /// An unknown multi-writer write lands only where it fits what the
+    /// pages show (#512 (search budget)): a long gap of unknown writes
+    /// under one page is decided in a few steps, whatever their
+    /// invocation order.
+    #[test]
+    fn unknown_multi_writer_writes_land_only_where_they_fit() {
+        const GAP: u64 = 24;
+        // Invoked in the reverse of the order the page shows them.
+        let mut history: Vec<Attempt> = (0..GAP)
+            .map(|k| at(0, GAP - k, append(&[100 + k]), None))
+            .collect();
+        history.push(at(
+            1,
+            2 * GAP,
+            Call::Read { from: 0, limit: 0 },
+            Some((
+                2 * GAP + 1,
+                Seen::Page {
+                    records: (0..GAP).map(|k| 100 + k).collect(),
+                    state: multi_state(GAP, 0),
+                },
+            )),
+        ));
+        let verdict = check(&history, WriterMode::Multi, 10_000);
+        assert!(!verdict.exhausted, "{} steps", verdict.steps);
+        assert!(verdict.linearizable);
     }
 
     #[test]
