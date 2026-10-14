@@ -332,9 +332,10 @@ pub struct DriverTunables {
     pub internal_retry_backoff: Duration,
     /// How long a machine takes to answer one `Resolve` (#216) before it
     /// answers `unavailable` (#457). The folds keep what they read, so a
-    /// later request goes on from there. Floor 1 ms; it should outlast one
-    /// read's round trip, a wall-clock floor the operator keeps: below it,
-    /// no answer ever comes back.
+    /// later request goes on from there. Floor 1 ms; it should outlast two
+    /// read round trips in sequence (the registry tail, then the directory
+    /// tail), a wall-clock floor the operator keeps: below it, no answer ever
+    /// comes back.
     pub resolve_answer_within: Duration,
 }
 

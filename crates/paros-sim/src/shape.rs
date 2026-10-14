@@ -50,6 +50,11 @@ const QUARANTINE_CEILING_MS: u64 = 8_000;
 /// for why it is a floor and not a tunable.
 const ROUND_TRIP_FLOOR_MS: u64 = 250;
 
+/// The floor of a drawn `resolve_answer_within`: two sequential tail reads,
+/// each allowed two round trips.
+const RESOLVE_FLOOR_MS: u64 = 4 * ROUND_TRIP_FLOOR_MS;
+const _: () = assert!(RESOLVE_FLOOR_MS < 2000, "the floor sits under the default");
+
 /// The default per-restart chance of a terminal storage loss — a wiped node
 /// disk (#124) or an unusable matchmaker registry (#125).
 const DEFAULT_LOSS_PCT: u32 = 35;
@@ -362,11 +367,15 @@ impl NodeShape {
             // Floor 0: re-sends back to back, a retry storm on the internal
             // journals; the ceiling spreads them over a second.
             internal_retry_backoff: ms(buggify_knob!(100_u64, 0_u64..1001_u64)),
-            // How long one `Resolve` answer may take. Floor one round trip:
-            // a fold from position 0 then takes several answers, each going
-            // on from where the last one stopped (#457). The final resolve
-            // check holds every founding member to an answer after chaos.
-            resolve_answer_within: ms(buggify_knob!(2000_u64, ROUND_TRIP_FLOOR_MS..2001_u64)),
+            // How long one `Resolve` answer may take. Floor four round trips:
+            // every answer reads two tails in sequence (the registry, then
+            // the directory), and a read served by a peer under chaos takes
+            // up to about two (witness 7489717366062895407: 259 ms fit one
+            // read and the machine never answered). A fold from position 0
+            // then takes several answers, each going on from where the last
+            // one stopped (#457). The final resolve check holds every
+            // founding member to an answer after chaos.
+            resolve_answer_within: ms(buggify_knob!(2000_u64, RESOLVE_FLOOR_MS..2001_u64)),
         };
         // The production profile `parosd` ships (#209), whole: every field
         // at once, which the per-field locations above would draw together
