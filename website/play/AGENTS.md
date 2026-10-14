@@ -1,4 +1,4 @@
-# web/play
+# website/play
 
 The browser half of paros play; the engine is `crates/paros-play` (compiled to wasm). The dev
 loop, the gates and the layout are in the README:

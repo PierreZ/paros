@@ -67,7 +67,7 @@ what the pivot remembers and two different values can never both be chosen; the 
 of the protocol exists to do exactly that. A majority is only the simplest way to
 guarantee the overlap — what safety actually needs is that every *Phase-1* quorum
 meets every *Phase-2* quorum, `q1 + q2 > n`, which is why paros asks that question
-through one boundary, `QuorumSystem` (`crates/paros-core/src/membership.rs`), and can
+through one boundary, `QuorumSystem` (`crates/paros-core/src/membership/quorum_system.rs`), and can
 answer it with flexible or grid quorums instead.
 
 ## The invariant ladder
@@ -142,8 +142,8 @@ Multi-Paxos, the leader's heartbeat resend of un-acked `Accept`s.
 | vote rule | `ballot >= promised` in `Acceptor::admit` |
 | value-selection rule (P2c) | the highest `(ballot, value)` over the promise quorum, merged by `Election::close_phase1` (`proposer/election.rs`) |
 | "inform a rejected proposer" | the explicit `Message::Nack` (`message.rs`) |
-| chosen by a majority | a Phase-2 quorum in `try_decide` (`node/phase2.rs`), judged by `AcceptorConfig::has_phase2_quorum` (`membership.rs`) |
-| any two quorums intersect | `QuorumSystem::cross_intersects` — `q1 + q2 > n` (`membership.rs`) |
+| chosen by a majority | a Phase-2 quorum in `try_decide` (`node/phase2.rs`), judged by `AcceptorConfig::has_phase2_quorum` (`membership/acceptor_config.rs`) |
+| any two quorums intersect | `QuorumSystem::cross_intersects` — `q1 + q2 > n` (`membership/quorum_system.rs`) |
 
 paros never proves this property by hand. The deterministic simulation asserts it on
 every transition of every seed — **"at most one value is ever chosen for a slot"**,

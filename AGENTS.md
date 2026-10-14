@@ -23,7 +23,7 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
   `RUSTC_WRAPPER`, gated by `SANCOV_CRATES`; the flake `shellHook` exports it). The registered
   campaign is `paros-chain` (binary `sim-paros-chain`; `cargo xtask sim run paros-chain`).
 
-CI also runs the `paros-core` examples and the `paros-play` web build. Rust 2024 edition,
+CI also runs the `paros-core` examples, the `paros-play` web build and the sandbox's wasm check. Rust 2024 edition,
 toolchain pinned in `rust-toolchain.toml` (incl. `wasm32-unknown-unknown`), clippy pedantic on
 (`[workspace.lints]`). The full local gate is the `validate` skill.
 
@@ -77,7 +77,7 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
 - **A reusable moonpool gap** (simulator infrastructure, not a paros bug) becomes a focused issue
   in `PierreZ/moonpool`; keep paros-side defense in depth meanwhile (`upstream-to-moonpool`).
   When paros needs the fix, improve moonpool autonomously (decided on 2026-10-09): open the
-  moonpool PR, merge it once its CI is green, then advance paros's pin (all eleven lines).
+  moonpool PR, merge it once its CI is green, then advance paros's pin (all thirteen lines).
 - **Name every issue and PR number** (decided on 2026-10-10): write a short name next to it,
   e.g. "#216 (finish bootstrap)", in chats, comments, PR descriptions and commit messages.
 - **Never edit a `CHANGELOG.md` by hand**: release-plz generates it; the commit message is where
@@ -95,7 +95,7 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   `parosd` ships, or an oracle the doc lists is missing, harness work ranks ahead of new features
   in #69. A feature lands only on a harness that can prove it.
 - **Keep the docs in step with the code** (decided on 2026-10-11): a PR that adds a feature or
-  changes behaviour also updates the site (`web/site/`, the `update-the-site` skill), the
+  changes behaviour also updates the site (`website/zola/`, the `update-the-site` skill), the
   `README.md` and `docs/architecture.md` where they describe it. A feature PR without its
   docs is not done.
 - **Organize as you grow**: a module holds one concern; split a file the moment it holds a
@@ -201,7 +201,7 @@ batch) and holds **no protocol tally of its own**:
 - `replica.rs` — chosen prefix, apply walk, journal fold · `journal_state.rs` — the one
   journal-control state machine, judged at apply
 - `quorum_read.rs` — leaderless reads · `collector.rs` — the leader-side GC tally
-- `membership.rs` — `AcceptorConfig`, `MatchmakerSet`, `QuorumSystem`
+- `membership/` — `AcceptorConfig`, `MatchmakerSet`, `QuorumSystem`
 - `matchmaking.rs` — the candidate's matchmaking phase · `matchmaker.rs` (+ `reconfigurer.rs`)
   — the registry and its generation handover · `decree.rs` — the generic single-decree
   Paxos (`Decree<Id, V>`): the handover's successor and `cell init`'s plan (#277)
@@ -210,7 +210,7 @@ batch) and holds **no protocol tally of its own**:
 The map is `crates/paros-core/AGENTS.md`. **A component must not acquire knowledge merely because
 the current deployment colocates it**: the proposer builds no message, the acceptor never reads
 the chosen prefix, the replica never sees a ballot tally; the caller hands each the data it
-needs. **Every quorum question crosses `membership.rs`**: predicates are phase-split
+needs. **Every quorum question crosses `membership/`**: predicates are phase-split
 (`has_phase1_quorum` / `has_phase2_quorum`, cross-intersecting) and no tally compares a count
 against a threshold on its own; a new quorum system is a `QuorumSystem` variant, never a tally
 rewrite. Policies are explicit types, never flags.
@@ -506,16 +506,19 @@ Cargo workspace, every package under `crates/`. Dependency stack: `paros-core` �
   `paros-core`. `biscuit-auth` is pinned by git rev, so the crate is `publish = false`.
 - `paros-sim` — the DST harness: processes, role map, storage ledger and injector, workload, audit.
 - `paros-sim-runner` — `sim-paros-chain` and `sim-paros-hunt` (`publish = false`).
-- `paros-play` — the interactive Paxos game's engine and wasm glue; the app is `web/play/`.
+- `paros-play` — the interactive Paxos game's engine and wasm glue; the app is `website/play/`.
+- `paros-sandbox` — the Paxos sandbox (#518 (Paxos visualization sandbox)): a paros universe on
+  moonpool's simulated providers, the shipped `run_machine` and `paros::client`, replayed from a
+  seed, a config and an action log; wasm glue; the page is `website/sandbox/`.
 - `xtask` — `cargo xtask sim` (the sancov runner) and `cargo xtask mutants` (the mutation hunt, #269).
 
-Elsewhere: `web/site/` (the website, Zola + Goyo, #254; `web/site/AGENTS.md`, the `update-the-site` skill; built by `web/site/build.sh`), `web/play/` (the game's app),
+Elsewhere: `website/` holds everything a browser loads (decided on 2026-10-13): `website/zola/` (the website, Zola + Goyo, #254; `website/zola/AGENTS.md`, the `update-the-site` skill; built by `website/zola/build.sh`), `website/play/` (the game's app), `website/sandbox/` (the sandbox page, `scripts/build-sandbox.sh`); the Rust behind them stays in `crates/`,
 `docs/architecture.md`, `docs/analysis/` (design notes), `docs/references/` (papers and source
-references), `scripts/` (`sancov-rustc.sh`, `build-play.sh`, `check-dockerfile-toolchain.sh`, `mutants-report.sh`), `.claude/skills/` and
+references), `scripts/` (`sancov-rustc.sh`, `build-play.sh`, `build-sandbox.sh`, `check-dockerfile-toolchain.sh`, `mutants-report.sh`), `.claude/skills/` and
 `.claude/agents/`.
 
 Publishing mirrors moonpool: library crates share a release-plz `version_group` with per-crate
 `CHANGELOG.md`; binaries and xtask are `publish = false`. `paros`, `paros-sim` and `parosd` pin
-moonpool by **git** rev (eleven lines across their `Cargo.toml`s, advanced together), so only
+moonpool by **git** rev (thirteen lines across their `Cargo.toml`s, `paros-sandbox` included, advanced together), so only
 `paros-core` is truly publishable: its one moonpool line (`moonpool-assertions`, optional) also
 carries a crates.io `version`, which a publish resolves instead of the git rev.

@@ -916,7 +916,7 @@ machines, each instance serving all three journals.
 **Pools per region in a multi-region cell** (decided on 2026-10-07, #253; amends the per-tenant pools
 above): proxy leaders, batchers and frontends are pooled per `(tenant, region)`, with at least one
 frontend per AZ, and a journal's leader uses its own region's pool. `ProxyId::of(slot,
-proxy_count)` (`membership.rs`) assigns `slot_rank(slot, proxy_count)`, so one pool across
+proxy_count)` (`membership/`) assigns `slot_rank(slot, proxy_count)`, so one pool across
 regions would put a cross-region hop on a share of every journal's slots. The core does not
 change: `ProxyId` is a logical rank and `proxy_count` sits in `Config` under the format marker,
 so every region's pool has the same count, and the driver resolves rank `r` to the instance of
@@ -1823,7 +1823,7 @@ so plain Multi-Paxos is unchanged. The configuration's `cell_id` rides the same 
    intersected with `d`.
 
 The rule is valid for `Majority`, `Flexible` and `Grid` alike. It is one pure function in
-`membership.rs`, shared by the tenant coordinator's placement and the simulation's composer.
+`membership/`, shared by the tenant coordinator's placement and the simulation's composer.
 
 **The shape of a regional cell.** A regional cell spans at least three zones (section 3.7). Its
 minimum production shape is two `storage` machines and one `stateless` machine per zone, nine

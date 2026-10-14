@@ -1,5 +1,5 @@
-# The paros site (#254): Zola with the Goyo theme. Build with `web/site/build.sh`
-# (through Nix); it installs the pinned Goyo into `web/site/themes/goyo` first.
+# The paros site (#254): Zola with the Goyo theme. Build with `website/zola/build.sh`
+# (through Nix); it installs the pinned Goyo into `website/zola/themes/goyo` first.
 base_url = "https://pierrez.github.io/paros"
 title = "paros"
 description = "Paxos in Rust, and parosd, a multi-tenant journal service built on it"
@@ -29,6 +29,7 @@ nav = [
     { name = "parosd", url = "/parosd/", type = "url", icon = "code" },
     { name = "Paxos", url = "/paxos/", type = "url", icon = "book" },
     { name = "Play", url = "/play/", type = "url", icon = "palette" },
+    { name = "Sandbox", url = "/sandbox/", type = "url", icon = "magnifying-glass-chart" },
     { name = "GitHub", url = "https://github.com/PierreZ/paros", type = "url", icon = "github" },
 ]
 

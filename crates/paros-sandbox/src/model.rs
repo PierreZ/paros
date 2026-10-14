@@ -1,0 +1,209 @@
+//! The sandbox's data: what a run is made of (a [`Config`] and an action
+//! log of [`Action`]s) and what it shows ([`RunView`]). Plain serde types,
+//! the one contract the browser reads.
+
+use serde::{Deserialize, Serialize};
+
+/// The shape of a universe: everything a run needs beside its actions.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Config {
+    /// The seed of every simulated draw: network latency, disk timing and
+    /// every random choice paros makes.
+    pub seed: u64,
+    /// How many machines run `parosd`. Each starts idle, with an empty
+    /// disk; `init` forms the cell over the first ones.
+    pub machines: usize,
+    /// How long the run lasts, in simulated milliseconds.
+    pub run_ms: u64,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            seed: 1,
+            machines: 5,
+            run_ms: 30_000,
+        }
+    }
+}
+
+/// One step of the action log, at a simulated time.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Action {
+    /// When the step starts, in simulated milliseconds. A step starts no
+    /// earlier than the previous step ends.
+    pub at_ms: u64,
+    /// What it does.
+    pub op: Op,
+}
+
+/// What a step does: the same client and admin API as `parosctl`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Op {
+    /// `parosctl init` over machines `0..machines`: `cell init` (a
+    /// single-decree Paxos over the members), then `universe init`. The
+    /// other machines stay idle.
+    Init {
+        /// How many machines found the cell.
+        machines: usize,
+    },
+    /// `parosctl tenant create`.
+    CreateTenant {
+        /// The tenant's name.
+        tenant: String,
+    },
+    /// `parosctl journal create`: the tenant coordinator places it.
+    CreateJournal {
+        /// The tenant's name.
+        tenant: String,
+        /// The journal's name, inside the tenant.
+        journal: String,
+        /// Its desired mode, as `parosctl` names it: `single`, `double`,
+        /// `triple` or `grid:RxC`.
+        #[serde(default = "double")]
+        mode: String,
+    },
+    /// Append `count` records to `journal` of `tenant`, as its one writer.
+    Write {
+        /// The tenant's name.
+        tenant: String,
+        /// The journal's name, inside the tenant.
+        journal: String,
+        /// How many records.
+        count: u32,
+    },
+    /// Read `count` records of `journal` of `tenant` from its first
+    /// position.
+    Read {
+        /// The tenant's name.
+        tenant: String,
+        /// The journal's name, inside the tenant.
+        journal: String,
+        /// How many records.
+        count: u32,
+    },
+}
+
+fn double() -> String {
+    "double".into()
+}
+
+/// What a step came to.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StepResult {
+    /// The step's index in the action log.
+    pub index: usize,
+    /// When it started, in simulated milliseconds.
+    pub start_ms: u64,
+    /// When it ended.
+    pub end_ms: u64,
+    /// Whether it did what it asked.
+    pub ok: bool,
+    /// What happened, for people.
+    pub detail: String,
+}
+
+/// Where the universe's tenants and journals live after a step, as the
+/// admin API reports it: the fleet directory, each tenant's control
+/// journal, and an `Inspect` of every journal on every machine.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Topology {
+    /// The step it follows, by its index in the action log.
+    pub step: usize,
+    /// When it was read, in simulated milliseconds.
+    pub time_ms: u64,
+    /// Each machine's node id (its first six hex digits), by index; `None`
+    /// for a machine outside the cell.
+    pub machines: Vec<Option<String>>,
+    /// Each machine's full node id, in decimal, as `msg_sent` names it
+    /// (`node:<id>`); `None` outside the cell.
+    pub nodes: Vec<Option<String>>,
+    /// Each machine's zone (its failure domain), by index.
+    pub zones: Vec<String>,
+    /// The tenants, the internal ones first.
+    pub tenants: Vec<TenantPlace>,
+}
+
+/// One tenant and its journals.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TenantPlace {
+    /// Its name.
+    pub name: String,
+    /// Its groups, as `paros` labels them (`internal,fleet`, `users`, …).
+    pub groups: String,
+    /// The cell it lives in (the cell's name).
+    pub cell: String,
+    /// Its journals, its control journal first.
+    pub journals: Vec<JournalPlace>,
+}
+
+/// One journal and the machines that serve it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JournalPlace {
+    /// Its name.
+    pub name: String,
+    /// Its identifier, `<tenant>:<journal>` in decimal, as `msg_sent` and
+    /// `client_call` events name it.
+    pub key: String,
+    /// Its acceptors (the configuration in force), by machine index, in
+    /// membership order: under a grid, row by row.
+    pub members: Vec<usize>,
+    /// The quorum system over them.
+    pub quorum: Quorum,
+    /// The machine that leads it, when one does.
+    pub leader: Option<usize>,
+    /// Its matchmaker set, by machine index (empty without matchmakers).
+    pub matchmakers: Vec<usize>,
+    /// The machines that serve it (answered `Inspect` for it).
+    pub hosts: Vec<usize>,
+    /// The highest position its leader knows chosen.
+    pub chosen: Option<u64>,
+}
+
+/// The quorum system of a journal's configuration, as `Inspect` reports it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Quorum {
+    /// `majority`, `flexible` or `grid`.
+    pub system: String,
+    /// How many acceptors a Phase-1 quorum holds (elections and reads).
+    pub phase1: u64,
+    /// How many acceptors a Phase-2 quorum holds (writes).
+    pub phase2: u64,
+    /// Rows of a grid: each row is a Phase-1 quorum. 0 otherwise.
+    pub rows: u64,
+    /// Columns of a grid: each column is a Phase-2 quorum, and slot `s`
+    /// goes to column `s % cols`. 0 otherwise.
+    pub cols: u64,
+}
+
+/// One event a machine or the simulator reported, in simulated time.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Event {
+    /// When it happened, in simulated milliseconds.
+    pub time_ms: u64,
+    /// The machine that reported it, or `None` for the simulator and the
+    /// operator.
+    pub machine: Option<usize>,
+    /// Its name, as `paros` logs it (`value_chosen`, `msg_sent`, …).
+    pub name: String,
+    /// Its fields, as text.
+    pub fields: Vec<(String, String)>,
+}
+
+/// Everything a run shows: replayable from its config and action log.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RunView {
+    /// The config it ran.
+    pub config: Config,
+    /// The action log it ran.
+    pub actions: Vec<Action>,
+    /// What each step came to, in log order.
+    pub steps: Vec<StepResult>,
+    /// Where the tenants and journals live, after each step.
+    pub topology: Vec<Topology>,
+    /// The events, in the order they happened.
+    pub events: Vec<Event>,
+    /// Why the run stopped early, when it did.
+    pub error: Option<String>,
+}

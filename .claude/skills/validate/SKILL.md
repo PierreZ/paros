@@ -50,15 +50,15 @@ RUN cargo check --target wasm32-unknown-unknown -p paros-core --no-default-featu
 RUN cargo check -p paros-core --features serde
 RUN cargo check --target wasm32-unknown-unknown -p paros
 RUN cargo test -p paros-play --test bindings                            # job: play
-git diff --exit-code -- web/play/src/generated   # the ts-rs bindings are committed
+git diff --exit-code -- website/play/src/generated   # the ts-rs bindings are committed
 RUN scripts/build-play.sh --wasm-only
-RUN bash -c 'cd web/play && npm ci --no-audit --no-fund && npm run check && npm test && npm run build'
+RUN bash -c 'cd website/play && npm ci --no-audit --no-fund && npm run check && npm test && npm run build'
 RUN cargo xtask sim run-all                  # job: sim — the sancov sweep; see /sim-sweep
 ```
 
 Run the `play` job whenever the change touches `crates/paros-play`, a
-`paros-core` type its views read, or `web/play/`: a stale binding in
-`web/play/src/generated` fails the diff, so commit the regenerated files.
+`paros-core` type its views read, or `website/play/`: a stale binding in
+`website/play/src/generated` fails the diff, so commit the regenerated files.
 
 Run the sim job whenever the change touches `paros-core`, the driver, the
 harness, a hook, a knob, an audit message, or the moonpool pin. It is the real
@@ -82,4 +82,4 @@ coverage gate that never fired, or convergence timeout. A docs-only change can s
   not noise; do not delete the gate (`/adding-an-audit-check`).
 
 The site is built by `pages.yml`, not by `rust.yml`; if you touched
-`web/site/`, also run `RUN web/site/build.sh` (`/update-the-site`).
+`website/zola/`, also run `RUN website/zola/build.sh` (`/update-the-site`).

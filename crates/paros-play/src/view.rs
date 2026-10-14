@@ -2,7 +2,7 @@
 //!
 //! Every type here derives `Serialize` and [`ts_rs::TS`], and
 //! `cargo test -p paros-play` writes the generated TypeScript into
-//! `web/play/src/generated/`. Nothing in the frontend reaches past these
+//! `website/play/src/generated/`. Nothing in the frontend reaches past these
 //! structs into the engine, and nothing here is stateful: a [`GameView`] is
 //! derived from the world on every read, so the renderer never has to keep
 //! animation state of its own.
