@@ -67,7 +67,14 @@ pub(crate) fn spawn<P: Providers>(
         .task()
         .spawn_task(
             "paros-machine-follow",
-            run(providers.clone(), rpc.clone(), follow, every, shutdown),
+            run(
+                providers.clone(),
+                rpc.clone(),
+                follow,
+                every,
+                tunables.internal_client(),
+                shutdown,
+            ),
         )
         .detach();
 }
@@ -78,6 +85,7 @@ fn client_over<P: Providers>(
     rpc: &RpcHandle<P>,
     facts: &MachineFacts,
     book: &[(NodeId, Address)],
+    tunables: ClientTunables,
     shutdown: &CancellationToken,
 ) -> Client<P> {
     let servers = book
@@ -88,7 +96,7 @@ fn client_over<P: Providers>(
             node: NodeClient::named(rpc, facts.names.clone(), addr.clone()),
         })
         .collect();
-    Client::new(providers, servers, ClientTunables::default()).with_shutdown(shutdown.clone())
+    Client::new(providers, servers, tunables).with_shutdown(shutdown.clone())
 }
 
 /// The follow's loop: learn the genesis pool, then fold the registry to its
@@ -99,6 +107,7 @@ async fn run<P: Providers>(
     rpc: RpcHandle<P>,
     follow: Follow,
     every: Duration,
+    tunables: ClientTunables,
     shutdown: CancellationToken,
 ) {
     let Follow {
@@ -112,7 +121,7 @@ async fn run<P: Providers>(
     let mut fold: Option<(Vec<NodeId>, Folder<Registry>)> = None;
     let mut first = 0_usize;
     while !shutdown.is_cancelled() {
-        let client = client_over(&providers, &rpc, &facts, &book, &shutdown);
+        let client = client_over(&providers, &rpc, &facts, &book, tunables, &shutdown);
         if client.server_count() > 0 {
             first = (first + 1) % client.server_count();
             if fold.is_none() {

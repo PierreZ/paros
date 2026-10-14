@@ -47,7 +47,7 @@ use super::MachineFacts;
 use crate::client::bootstrap::{self, RegisterOutcome};
 use crate::client::election::read_election;
 use crate::client::journals::Coordinator;
-use crate::client::{Client, ClientTunables, Server};
+use crate::client::{Client, Server};
 use crate::rpc::NodeClient;
 use crate::{Address, DriverTunables};
 
@@ -118,7 +118,7 @@ pub(crate) fn spawn<P: Providers>(
         })
         .collect();
     let client =
-        Client::new(providers, servers, ClientTunables::default()).with_shutdown(shutdown.clone());
+        Client::new(providers, servers, tunables.internal_client()).with_shutdown(shutdown.clone());
     let every = tunables.election_renew.max(Duration::from_millis(1));
     let providers_task = providers.clone();
     let rpc = rpc.clone();

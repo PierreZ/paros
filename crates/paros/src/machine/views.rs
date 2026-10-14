@@ -87,7 +87,7 @@ pub(crate) fn spawn<P: Providers>(
     let founders = formed.plan.members.clone();
     let desk = Desk {
         providers: providers.clone(),
-        client: super::coordinator::cell_client(providers, rpc, formed)
+        client: super::coordinator::cell_client(providers, rpc, formed, tunables)
             .with_shutdown(shutdown.clone()),
         me: formed.facts.node_id,
         plan: formed.plan.clone(),

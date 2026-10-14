@@ -1077,6 +1077,9 @@ impl FleetOps {
             let learn = |journal| self.note_journals([journal]);
             placement::placements_booked(ctx, &cell, ctx.time().now() + FLEET_SETTLE, learn).await;
             sets::sets_booked(ctx, &cell, ctx.time().now() + FLEET_SETTLE).await;
+            // The machines' own `Resolve` folds escape after chaos (#457).
+            self.resolve_answers(ctx, &cell, ctx.time().now() + FLEET_SETTLE)
+                .await;
         }
         // Every quiet journal world converges (#447 (model checks for every
         // journal world)), on its own deadline.

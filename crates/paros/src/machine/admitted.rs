@@ -191,6 +191,8 @@ impl AdmittedMachine {
                 founders: Some(self.admission.founders.clone()),
                 book: self.book(),
                 serves: false,
+                client: tunables.internal_client(),
+                answer_within: tunables.resolve_answer_within,
             },
             shutdown.clone(),
         )?;

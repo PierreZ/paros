@@ -155,3 +155,70 @@ impl FleetOps {
         assert_reachable!("resolve: a resolution names its cell by name");
     }
 }
+
+impl FleetOps {
+    /// Every founding member of `cell` that was never wiped answers
+    /// `Resolve` after chaos, by `deadline` (#457 (hard-coded tunables)): a
+    /// verdict or a refusal, never `unavailable` for good. The machines'
+    /// `Resolve` folds are internal readers of the registry and the universe
+    /// directory; under chaos an answer is often cut short
+    /// (`resolve_answer_within`), and a cut answer once reset both folds to
+    /// position 0, so a fold longer than the bound never answered again.
+    /// This is the escape check of that loop: the cause is gone, the
+    /// machine must answer by itself.
+    #[tracing::instrument(level = "debug", skip_all, fields(client = self.client_id))]
+    pub(super) async fn resolve_answers(
+        &self,
+        ctx: &moonpool_sim::SimContext,
+        cell: &super::Cell,
+        deadline: std::time::Duration,
+    ) {
+        use moonpool_sim::TimeProvider;
+        let wiped = crate::machine::wiped_ids(ctx.state());
+        // Every member is asked in each round, so one member that stays
+        // silent cannot use up the others' time.
+        let mut silent: Vec<(u64, _)> = cell
+            .servers
+            .iter()
+            .filter(|(id, _)| !wiped.contains(id))
+            .map(|(id, addr)| (*id, addr.clone()))
+            .collect();
+        while !silent.is_empty() && ctx.time().now() < deadline && !ctx.shutdown().is_cancelled() {
+            let mut still = Vec::new();
+            for (id, addr) in silent {
+                let resolution = resolve(
+                    self.connector.providers(),
+                    self.connector.rpc(),
+                    self.connector.names(),
+                    std::slice::from_ref(&addr),
+                    NEVER_CREATED,
+                    self.patience,
+                )
+                .await;
+                if resolution == Resolution::Unavailable {
+                    still.push((id, addr));
+                }
+            }
+            silent = still;
+            if !silent.is_empty()
+                && ctx
+                    .time()
+                    .sleep(std::time::Duration::from_millis(100))
+                    .await
+                    .is_err()
+            {
+                break;
+            }
+        }
+        let silent: Vec<u64> = silent.into_iter().map(|(id, _)| id).collect();
+        if ctx.shutdown().is_cancelled() {
+            return;
+        }
+        assert_always!(
+            silent.is_empty(),
+            "resolve: every founding member answers after chaos",
+            { "cell" => cell.journals.cell_id, "silent" => format!("{silent:?}") }
+        );
+        assert_reachable!("resolve: every founding member's answer is judged after chaos");
+    }
+}

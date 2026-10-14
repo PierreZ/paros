@@ -84,7 +84,7 @@ use crate::client::checkpoint::{CheckpointPolicy, Folder, LoadOutcome, load};
 use crate::client::election::{Candidate, Election, ElectionTunables, Leader, Step, hand_off};
 use crate::client::fleet::{Interrupted, Stage, Step as FleetStep};
 use crate::client::journals::{JournalAnswer, JournalRequest};
-use crate::client::{CallObserver, ClaimOutcome, Client, ClientTunables, Server, bootstrap};
+use crate::client::{CallObserver, ClaimOutcome, Client, Server, bootstrap};
 use crate::rpc::machine as wire;
 use crate::rpc::methods::{CoordinatorInterface, JournalRequestRpc, RegisterRpc};
 use crate::rpc::{Inbound, NodeClient, ReplySender};
@@ -453,11 +453,13 @@ pub fn election_tunables(tunables: &DriverTunables) -> ElectionTunables {
 }
 
 /// The library client of the cell's members, each dialed by its advertised
-/// address, resolved at each call (#257).
+/// address, resolved at each call (#257), with the machine's internal client
+/// tunables (#457 (hard-coded tunables)).
 pub(crate) fn cell_client<P: Providers>(
     providers: &P,
     rpc: &RpcHandle<P>,
     formed: &FormedCell,
+    tunables: &DriverTunables,
 ) -> Client<P> {
     // This member at the address it advertises now (#349), the others where
     // its cached registry fold dials them, else at the plan's (#211).
@@ -469,7 +471,7 @@ pub(crate) fn cell_client<P: Providers>(
             node: NodeClient::named(rpc, formed.facts.names.clone(), addr.clone()),
         })
         .collect();
-    Client::new(providers, servers, ClientTunables::default())
+    Client::new(providers, servers, tunables.internal_client())
 }
 
 /// `client` over the founding members where the cell control journal's
@@ -593,7 +595,7 @@ pub(crate) fn spawn<P: Providers>(
         linger: moonpool_buggify::buggify_with_prob!(0.5),
         quit_mid_move: moonpool_buggify::buggify_with_prob!(0.5),
     };
-    let mut client = cell_client(providers, rpc, formed).with_shutdown(shutdown.clone());
+    let mut client = cell_client(providers, rpc, formed, tunables).with_shutdown(shutdown.clone());
     if let Some(observer) = observer {
         client = client.with_observer(observer);
     }
