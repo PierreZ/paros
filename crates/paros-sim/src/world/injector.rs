@@ -257,15 +257,18 @@ impl StorageWorld {
         faulty: &[u64],
     ) {
         let custody = self.custody.entry(key.to_string()).or_default();
-        let known: BTreeSet<u64> = custody.records.keys().copied().collect();
         let mut last_batch = std::mem::take(&mut custody.last_batch);
-        // A slot only the open found came from a cut commit: it may be the
-        // journal's last batch, which a double fault never touches.
+        // A slot the open found where the ledger never saw it came from a
+        // cut commit: a new slot, or a held one re-accepted at a new place
+        // (#529 (sets oracles after PR #515): witness 12728932213442680004,
+        // a double fault aimed at a moved slot the journal then voided as
+        // its torn last batch). It may be the journal's last batch, which a
+        // double fault never touches.
         last_batch.extend(
             layouts
                 .iter()
-                .map(|(slot, _)| *slot)
-                .filter(|s| !known.contains(s)),
+                .filter(|(slot, at)| custody.records.get(slot) != Some(at))
+                .map(|(slot, _)| *slot),
         );
         custody.records.clear();
         self.ledger_custody(key, node, layouts, first, regions, false);

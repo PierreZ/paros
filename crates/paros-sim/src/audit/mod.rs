@@ -1248,6 +1248,11 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
     ) {
         match event {
             paros::system::SystemEvent::Registry(event) => {
+                if let paros::system::RegistryEvent::TenantDropped { tenant } = event
+                    && let Some(board) = &self.tenants
+                {
+                    tenants::lock(board).tenant_dropped(*tenant);
+                }
                 if let Some(mut board) = self.system_board() {
                     board.folded(node, journal, seq, event);
                 }

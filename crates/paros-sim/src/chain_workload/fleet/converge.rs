@@ -25,10 +25,13 @@ fn quiet_journals(ctx: &SimContext) -> BTreeSet<JournalIdentifier> {
         .into_keys()
         .filter(|journal| !board.tombstoned(*journal));
     let universe = crate::machine::formed_cell(ctx.state()).and_then(|cell| cell.fleet);
+    // A dropped tenant's journals owe nothing: every machine that folds the
+    // drop stops them, and one that lagged never reports a stop (#529).
     universe
         .into_iter()
         .chain(board.controls())
         .chain(created)
+        .filter(|journal| !board.dropped(journal.tenant))
         .collect()
 }
 

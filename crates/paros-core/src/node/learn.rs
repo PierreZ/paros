@@ -104,7 +104,22 @@ impl ColocatedNode {
         // it picked up from a failed earlier ballot, and `chosen` is rebuilt
         // from the accepted log on restart. Keeping the stale entry would
         // resurrect a value the cluster never chose for this slot.
-        self.record_accepted(slot, ballot, command.clone());
+        //
+        // But a held record of the chosen command at a ballot at or above
+        // the choosing one stays: an acceptor's recorded ballot for a slot
+        // never falls. Phase 1 and the CTRL thresholds read each report as
+        // the highest ballot its acceptor accepted, so a learn that lowered
+        // it hid the only clean copy's real ballot after a loss, and the
+        // slot stayed blocked forever (#529 (sets oracles after PR #515):
+        // witness 12991929581014999161, a leader's (4,0) re-proposal erased
+        // by a learn at the choosing (2,2)).
+        let keeps = self
+            .acceptor
+            .record(slot)
+            .is_some_and(|(held, recorded)| recorded == command && *held >= ballot);
+        if !keeps {
+            self.record_accepted(slot, ballot, command.clone());
+        }
         self.replica.learn(slot, command);
         // A decision at a probe-blocked slot resolves it (Case 1 arriving
         // through the commit path rather than a straggler's Promise).

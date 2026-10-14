@@ -596,6 +596,12 @@ impl<V: Clone + PartialEq> Acceptor<V> {
                 "an accept at or below the recorded ballot carries the recorded command"
             );
         }
+        assert!(
+            self.records
+                .get(slot)
+                .is_none_or(|(held, _)| ballot >= *held),
+            "an accepted record's ballot never falls"
+        );
         self.records.insert(slot, (ballot, command.clone()));
         writes.push(
             AcceptorWrite::AppendAccepted {

@@ -62,7 +62,9 @@ fn a_lower_ballot_decision_with_a_different_command_trips_the_acceptor() {
 }
 
 /// The same regression with the *same* command is legal (the P2c chain): the
-/// record's ballot may drop to the choosing ballot, the command stays.
+/// slot is learned, and the record keeps its higher ballot. An acceptor's
+/// recorded ballot never falls: Phase 1 and the CTRL thresholds read it as
+/// the highest ballot it accepted (#529 (sets oracles after PR #515)).
 #[test]
 fn a_lower_ballot_decision_with_the_same_command_is_learned() {
     let mut n = node(0, &[0, 1, 2]);
@@ -70,7 +72,7 @@ fn a_lower_ballot_decision_with_the_same_command_is_learned() {
     drain(&mut n);
     n.step(commit(2, ballot(1, 2), 0, ucmd(1, 1, 10)));
     assert_eq!(chosen_at(&n, 0), Some(val(10)));
-    assert_eq!(n.acceptor().records()[&Slot(0)].0, ballot(1, 2));
+    assert_eq!(n.acceptor().records()[&Slot(0)].0, ballot(2, 1));
 }
 
 /// A higher ballot may replace the command outright: the earlier accept was a
