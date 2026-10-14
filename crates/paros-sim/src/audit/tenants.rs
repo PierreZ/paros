@@ -28,7 +28,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use moonpool_sim::{StateHandle, assert_always, assert_reachable, assert_sometimes};
 use paros::tenant::{RequestOutcome, TenantEvent, TenantRefusal};
-use paros::{JournalId, JournalIdentifier, NodeId, WriterMode};
+use paros::{JournalId, JournalIdentifier, NodeId, TenantId, WriterMode};
 
 const TENANT_BOARD_KEY: &str = "paros-tenant-board";
 
@@ -82,6 +82,10 @@ pub(crate) struct TenantBoard {
     /// good, a delete or its tenant's drop (#447 (model checks for every
     /// journal world)).
     stopped: BTreeSet<(u64, JournalIdentifier)>,
+    /// Tenants a machine folded the cell's drop of: every machine that folds
+    /// it stops each journal of the tenant, a lagging one included, so none
+    /// owes convergence (#529 (sets oracles after PR #515)).
+    dropped: BTreeSet<TenantId>,
 }
 
 /// The run's [`TenantBoard`] (`crate::state::published`).
@@ -266,6 +270,16 @@ impl TenantBoard {
             .filter(|(_, j)| *j == journal)
             .map(|(node, _)| *node)
             .collect()
+    }
+
+    /// A machine folded the cell's drop of `tenant`.
+    pub(crate) fn tenant_dropped(&mut self, tenant: TenantId) {
+        self.dropped.insert(tenant);
+    }
+
+    /// Whether a machine folded the cell's drop of `tenant`.
+    pub(crate) fn dropped(&self, tenant: TenantId) -> bool {
+        self.dropped.contains(&tenant)
     }
 
     /// Whether any machine folded `journal`'s tombstone: its nodes stop it.

@@ -667,6 +667,24 @@ impl ColocatedNode {
             self.proposer.next_slot() == next_slot,
             "an installed authority adopts the transferred frontier verbatim"
         );
+        // A handed-on leadership is a settled leadership at `b` over `C_b`,
+        // fenced at the inherited frontier: it collects like an elected one.
+        // Without it no floor is reported until the next election, and an
+        // operator waiting on the GC watermark (a move's last step, a
+        // retirement) waits for as long as the successor leads (#529 (sets
+        // oracles after PR #515): witness 10809718814318581208, recipe
+        // 157:5903308118697919823, a drained machine's slot never released).
+        // The prior configurations stay the minter's: an empty list names
+        // no node retirable, the conservative answer.
+        if self.config.has_matchmakers() {
+            self.open_gc(&[]);
+            assert!(
+                self.gc.is_some(),
+                "a handed-on matchmaker leadership collects"
+            );
+        } else {
+            assert!(self.gc.is_none(), "a plain leadership never collects");
+        }
     }
 
     /// Per-tick upkeep for a leadership that skipped Phase 1: resign when the

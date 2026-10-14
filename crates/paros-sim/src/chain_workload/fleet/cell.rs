@@ -139,6 +139,18 @@ impl FleetOps {
         if servers.is_empty() {
             return self.cell.clone();
         }
+        if self
+            .cell
+            .as_ref()
+            .is_some_and(|known| known.journals != journals)
+        {
+            // The init this client saw end was another cell's: a lost
+            // cell's successor may still be initializing (#304's shape,
+            // learned through Inspect instead of an unknown-journal
+            // refusal; witness 9648373582943959266 of #529 (sets oracles
+            // after PR #515), recipe 188857:3339894226954213537).
+            self.initialized = false;
+        }
         self.cell = Some(Cell {
             journals,
             fleet,

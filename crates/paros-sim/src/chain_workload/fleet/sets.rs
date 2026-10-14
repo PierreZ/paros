@@ -44,9 +44,15 @@ pub(super) async fn sets_booked(ctx: &SimContext, known: &Cell, deadline: Durati
         attempt += 1;
         if let Some(registry) = registry(known, first).await {
             // The coordinator records only an admission that landed (#511
-            // (placement books machines that never served)).
+            // (placement books machines that never served)). A wipe takes
+            // the board's admission with the disk, and the registry never
+            // learns of a wipe, so a wiped id is not judged (#529 (sets
+            // oracles after PR #515)).
             let admitted = crate::machine::admitted_ids(ctx.state());
-            for (node, _) in registry.nodes().filter(|(_, n)| n.admitted) {
+            for (node, _) in registry
+                .nodes()
+                .filter(|(node, n)| n.admitted && !wiped.contains(&node.0))
+            {
                 assert_always!(
                     admitted.contains(&node.0),
                     "sets: the registry holds as admitted only a machine admitted",

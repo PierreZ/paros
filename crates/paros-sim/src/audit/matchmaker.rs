@@ -1884,14 +1884,16 @@ impl MatchmakerAudit {
         &mut self,
         node: NodeId,
         watermark: Ballot,
+        handed: bool,
         fence: Option<Slot>,
         covered: Option<bool>,
         uncovered: &str,
     ) {
         // A leader collects at its own ballot — the floor it raises is the
-        // ballot it registered above every configuration it may forget.
+        // ballot it registered above every configuration it may forget —
+        // or at the ballot its minter handed on to it (#529).
         assert_always!(
-            watermark.node == node,
+            watermark.node == node || handed,
             "gc: a leader collects at its own ballot",
             { "node" => node.0, "bnode" => watermark.node.0, "round" => watermark.round }
         );
@@ -2901,9 +2903,14 @@ impl AuditState {
         // The leader re-sends its request every beat and the licence is judged
         // once per `(node, watermark)`, so ask before deriving: everything
         // below is an O(fence x members) walk whose answer would be dropped.
+        // The minter relinquished the ballot: a successor collects at it.
+        let handed = self
+            .authorities
+            .get(&(watermark.round, watermark.node.0))
+            .is_some_and(|a| a.retired.contains(&watermark.node.0));
         if !self.matchmaker.gc_needs_licence(node, watermark) {
             self.matchmaker
-                .gc_requested(node, watermark, fence, None, "");
+                .gc_requested(node, watermark, handed, fence, None, "");
             return;
         }
         // GC invariant 1, re-derived from the audit's own durable fold: a
@@ -2952,8 +2959,14 @@ impl AuditState {
             // Phase-2 quorum question `Collector::covered` asks in the core.
             config.has_phase2_quorum(&holders)
         });
-        self.matchmaker
-            .gc_requested(node, watermark, fence, covered, &uncovered.join(","));
+        self.matchmaker.gc_requested(
+            node,
+            watermark,
+            handed,
+            fence,
+            covered,
+            &uncovered.join(","),
+        );
     }
 
     pub(super) fn gc_step(&mut self, node: NodeId, ack: &GcAck, step: &GcStep) {

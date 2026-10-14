@@ -79,6 +79,13 @@ const TAIL_KEY: &str = "paros-chain-tail";
 /// of the tail's end, not a shape the run takes.
 pub(super) const SETTLE: Duration = Duration::from_secs(1);
 
+/// How long a tailing reader's long-poll asks the server to wait, on its
+/// BUGGIFY location (#529 (sets oracles after PR #515)): inside the
+/// server's default `max_wait_ms` (400 ms), long enough for another
+/// client's write to land while it waits. The knob it overrides,
+/// `read_wait_ms`, still draws its own range on every other read.
+pub(super) const LONG_POLL_MS: u64 = 300;
+
 /// The run's shared tail bookkeeping, one per iteration: how many clients the
 /// run has and how many have finished proposing. Convergence is only called
 /// once *every* client is quiet — the first client to see it ends the run, and
