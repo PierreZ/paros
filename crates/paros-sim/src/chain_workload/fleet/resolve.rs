@@ -175,37 +175,42 @@ impl FleetOps {
     ) {
         use moonpool_sim::TimeProvider;
         let wiped = crate::machine::wiped_ids(ctx.state());
-        let mut silent: Vec<u64> = Vec::new();
-        for (id, addr) in &cell.servers {
-            if wiped.contains(id) {
-                continue;
-            }
-            let mut answered = false;
-            while !answered && ctx.time().now() < deadline && !ctx.shutdown().is_cancelled() {
+        // Every member is asked in each round, so one member that stays
+        // silent cannot use up the others' time.
+        let mut silent: Vec<(u64, _)> = cell
+            .servers
+            .iter()
+            .filter(|(id, _)| !wiped.contains(id))
+            .map(|(id, addr)| (*id, addr.clone()))
+            .collect();
+        while !silent.is_empty() && ctx.time().now() < deadline && !ctx.shutdown().is_cancelled() {
+            let mut still = Vec::new();
+            for (id, addr) in silent {
                 let resolution = resolve(
                     self.connector.providers(),
                     self.connector.rpc(),
                     self.connector.names(),
-                    std::slice::from_ref(addr),
+                    std::slice::from_ref(&addr),
                     NEVER_CREATED,
                     self.patience,
                 )
                 .await;
-                answered = resolution != Resolution::Unavailable;
-                if !answered
-                    && ctx
-                        .time()
-                        .sleep(std::time::Duration::from_millis(100))
-                        .await
-                        .is_err()
-                {
-                    break;
+                if resolution == Resolution::Unavailable {
+                    still.push((id, addr));
                 }
             }
-            if !answered {
-                silent.push(*id);
+            silent = still;
+            if !silent.is_empty()
+                && ctx
+                    .time()
+                    .sleep(std::time::Duration::from_millis(100))
+                    .await
+                    .is_err()
+            {
+                break;
             }
         }
+        let silent: Vec<u64> = silent.into_iter().map(|(id, _)| id).collect();
         if ctx.shutdown().is_cancelled() {
             return;
         }

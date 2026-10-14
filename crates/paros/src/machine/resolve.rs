@@ -97,8 +97,10 @@ pub(crate) fn spawn<P: Providers>(
         "an answer has time to read"
     );
     let mut requests = Inbound::plain(serve_well_known::<P, ResolveRpc>(rpc)?);
-    // Fold both journals again from position 0 for every answer: the path a
-    // restarted machine takes, on every request of this incarnation.
+    // Fold both journals again from position 0 for every answer that follows
+    // a completed one: the path a restarted machine takes, on every request of
+    // this incarnation. An answer cut short still keeps its folds, so a fold
+    // that costs more than `answer_within` finishes over several answers.
     let fresh = moonpool_buggify::buggify_with_prob!(0.25);
     if fresh {
         moonpool_assertions::reachable!("resolve: a machine answers from fresh folds");
@@ -110,12 +112,13 @@ pub(crate) fn spawn<P: Providers>(
         .task()
         .spawn_task("paros-machine-resolve", async move {
             let mut folds = Folds::new(&resolver);
+            let mut completed = false;
             loop {
                 moonpool_core::select! {
                     biased;
                     () = shutdown.cancelled() => return,
                     Some((request, reply)) = requests.recv() => {
-                        if fresh {
+                        if fresh && completed {
                             folds = Folds::new(&resolver);
                         }
                         let answer = folds.answer(&providers, &rpc, &resolver, &request, &shutdown);
@@ -123,6 +126,7 @@ pub(crate) fn spawn<P: Providers>(
                             .time()
                             .timeout(resolver.answer_within, answer)
                             .await;
+                        completed = answer.is_ok();
                         // A fold is a consistent prefix at every await
                         // (each page folds whole before the next read):
                         // an answer cut short keeps what it read, and the
