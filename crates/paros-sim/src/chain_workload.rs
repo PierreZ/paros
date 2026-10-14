@@ -55,7 +55,7 @@ use config::{
     TRUNCATE_STORM, VIEW, WRITE, WRITE_TO_NON_LEADER, weighted_index,
 };
 pub(crate) use config::{MAX_BATCH_RECORDS, MAX_LARGE_COMMAND_BYTES};
-use reads::{SETTLE, judge_read, tail};
+use reads::{LONG_POLL_MS, SETTLE, judge_read, tail};
 use rpc::{CallLog, judged_truncate, read_once, within};
 use tracing::Instrument;
 use truncate::{absorb_truncate, fence};
@@ -1465,6 +1465,17 @@ impl ChainWorkload {
                     // the floor the refusal names.
                     let racing = buggify_with_prob!(0.15);
                     let tailing = !racing && raw_class % 4 < 2;
+                    // A tailing reader long-polls on its own location, so a
+                    // write another client makes meanwhile wakes it: the
+                    // knob's default asks for no wait, and the gate a woken
+                    // long-poll feeds fired on 0 of 656 checks over 300 hunt
+                    // seeds without it (#529 (sets oracles after PR #515)).
+                    let wait_ms = if tailing && buggify_with_prob!(0.5) {
+                        assert_reachable!("chain: a tailing reader long-polls");
+                        config.read_wait_ms.max(LONG_POLL_MS)
+                    } else {
+                        config.read_wait_ms
+                    };
                     let from = if racing {
                         raw_payload % (fold.cursor() + 1)
                     } else {
@@ -1508,8 +1519,7 @@ impl ChainWorkload {
                     self.history.record_read_issued(op_id, now_ms());
                     // One read, retried at the next server while its
                     // quorum read goes unserved, inside one deadline.
-                    let deadline =
-                        time.now() + read_timeout + Duration::from_millis(config.read_wait_ms);
+                    let deadline = time.now() + read_timeout + Duration::from_millis(wait_ms);
                     let mut attempts = 0_u64;
                     let read = async {
                         loop {
@@ -1518,14 +1528,8 @@ impl ChainWorkload {
                                 break ReadOutcome::Ambiguous;
                             }
                             attempts += 1;
-                            let call = read_once(
-                                &readers,
-                                drawn,
-                                named,
-                                from,
-                                config.read_limit,
-                                config.read_wait_ms,
-                            );
+                            let call =
+                                read_once(&readers, drawn, named, from, config.read_limit, wait_ms);
                             let answer = within(ctx, remaining, ReadOutcome::Ambiguous, call).await;
                             if answer.is_served() || answer == ReadOutcome::UnknownJournal {
                                 break answer;
