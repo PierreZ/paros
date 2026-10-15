@@ -34,12 +34,14 @@ use paros_core::NodeId;
 
 use super::Client;
 use super::bootstrap::{self, InitOutcome};
+use super::cell::CellSession;
 use super::checkpoint::{self, Folder, LoadOutcome};
 use super::election::read_election;
 use super::fleet::{FleetRefusal, FleetSession, Interrupted, Stage, Step};
 use crate::fleet::RootKeyEntry;
 use crate::machine::ControlJournals;
 use crate::system::Registry;
+use crate::tenant::Durability;
 use crate::{Address, Names};
 
 /// What a whole `init` came to.
@@ -70,6 +72,10 @@ pub struct Initialized {
     pub members: Vec<u64>,
     /// The cell's servers this run reached: `(node id, address)`.
     pub servers: Vec<(u64, Address)>,
+    /// The listed machines past the founding members, admitted into the
+    /// cell as `cell add-machine` admits a machine: `(node id, address)`,
+    /// in listed order.
+    pub admitted: Vec<(u64, Address)>,
     /// The control journals, learned from the plan or `Inspect`.
     pub journals: ControlJournals,
     /// The fleet steps this run wrote, in order.
@@ -130,6 +136,42 @@ pub struct InitParams {
     /// The universe's first root public key, written into the universe
     /// entry while it holds none (#245).
     pub root_key: Option<RootKeyEntry>,
+    /// `F` of the cell's control journals (#523 (redundancy naming)): the
+    /// first `2F+1` listed machines are the founding members, so the cell
+    /// and tenant control journals have `2F+1` acceptors and survive `F`
+    /// failures. `init` admits every other listed machine. The default is
+    /// [`FAILURES_PER_PARTITION`].
+    pub failures_per_partition: u32,
+}
+
+/// The default `F` of the cell's control journals: three founding members,
+/// so the cell and tenant control journals have three acceptors however
+/// many machines `init` lists (decided on 2026-10-15).
+pub const FAILURES_PER_PARTITION: u32 = Durability::DEFAULT.failures_per_partition;
+
+/// How many of `listed` machines found the cell for `failures_per_partition`:
+/// `2F+1`, or every listed machine when fewer are listed.
+///
+/// # Panics
+///
+/// Never: the count is at most `listed`, and at least one of them.
+#[must_use]
+pub fn founding_members(listed: usize, failures_per_partition: u32) -> usize {
+    let wanted = Durability {
+        failures_per_partition,
+        partitions: 1,
+    }
+    .acceptors_per_partition();
+    let founding = listed.min(wanted);
+    assert!(
+        founding <= listed,
+        "the founding members are listed machines"
+    );
+    assert!(
+        listed == 0 || founding >= 1,
+        "a listed machine founds the cell"
+    );
+    founding
 }
 
 /// What a found cell is: its servers, its members and its control journals.
@@ -248,28 +290,41 @@ async fn registered<P: Providers>(
     }
 }
 
-/// Run `init` whole: form the cell over the founding `members` (or learn it,
-/// when every member already serves it), wait for its coordinator, then
-/// run the fleet steps, through a client `connect` builds over the cell's
-/// servers. `members` are the machines' advertised addresses (#257), each
-/// resolved through `names` as it is dialed.
+/// Run `init` whole: form the cell over the founding members (or learn it,
+/// when every member already serves it), wait for its coordinator, run the
+/// fleet steps, then admit the other listed machines, through a client
+/// `connect` builds over the cell's servers. `listed` are the machines'
+/// advertised addresses (#257), each resolved through `names` as it is
+/// dialed. The founding members are the first `2F+1` listed
+/// ([`founding_members`], `F` from [`InitParams::failures_per_partition`]):
+/// a re-run lists the same machines in the same order.
 ///
 /// # Panics
 ///
 /// If the fleet half ends advanced (a broken [`FleetSession::init`]
 /// contract), or `params` carries an unset fleet id.
-#[tracing::instrument(level = "debug", skip_all, fields(members = members.len()))]
+// The steps in order: formation, coordinator, fleet steps, admissions.
+#[allow(clippy::too_many_lines)]
+#[tracing::instrument(level = "debug", skip_all, fields(listed = listed.len()))]
 pub async fn initialize<P: Providers>(
     providers: &P,
     rpc: &RpcHandle<P>,
     names: &Names,
-    members: &[Address],
+    listed: &[Address],
     connect: impl Fn(&[(u64, Address)]) -> Client<P>,
     params: InitParams,
 ) -> InitRun {
     assert_ne!(params.fleet_id, 0, "a fleet id is never unset");
-    if members.is_empty() {
+    if listed.is_empty() {
         return InitRun::Unreachable(Unreachable::NoTarget);
+    }
+    let (members, others) = listed.split_at(founding_members(
+        listed.len(),
+        params.failures_per_partition,
+    ));
+    assert!(!members.is_empty(), "a listed machine founds the cell");
+    if !others.is_empty() {
+        moonpool_assertions::reachable!("init: more machines are listed than found the cell");
     }
     let patience = params.patience;
     let mut formation = None;
@@ -346,13 +401,32 @@ pub async fn initialize<P: Providers>(
         Step::Done {
             result: fleet_id, ..
         } => {
+            let mut steps = run.steps;
+            let admission = Admission {
+                journals,
+                members: &members,
+                servers: &servers,
+                seed: params.leader_seed.rotate_left(64),
+                token: params.token,
+                patience,
+            };
+            let admitted = match admission
+                .admit(providers, rpc, names, &client, others, &mut steps)
+                .await
+            {
+                Step::Done { result, .. } => result,
+                Step::Refused(refusal) => return InitRun::Refused(InitRefusal::Fleet(refusal)),
+                Step::Interrupted(stop) => return InitRun::Interrupted(stop),
+                Step::Advanced(_) => unreachable!("a run never ends advanced"),
+            };
             let initialized = Initialized {
                 fleet_id,
                 coordinator,
                 members,
                 servers,
+                admitted,
                 journals,
-                steps: run.steps,
+                steps,
             };
             assert_ne!(initialized.fleet_id, 0, "a recorded fleet id is set");
             if initialized.steps.is_empty() {
@@ -364,5 +438,80 @@ pub async fn initialize<P: Providers>(
         Step::Refused(refusal) => InitRun::Refused(InitRefusal::Fleet(refusal)),
         Step::Interrupted(stop) => InitRun::Interrupted(stop),
         Step::Advanced(_) => unreachable!("a run never ends advanced"),
+    }
+}
+
+/// `init`'s last half: the listed machines past the founding members join
+/// the formed cell as `cell add-machine` admits a machine (#216), so the
+/// cell and tenant control journals keep their `2F+1` founding acceptors
+/// however many machines are listed.
+struct Admission<'a> {
+    journals: ControlJournals,
+    members: &'a [u64],
+    servers: &'a [(u64, Address)],
+    /// The seed of the admissions' leader uuids on the cell control
+    /// journal, apart from the fleet steps' seed.
+    seed: u128,
+    token: Vec<u8>,
+    patience: Duration,
+}
+
+impl Admission<'_> {
+    /// Admit each of `others` in listed order, appending the steps written
+    /// to `steps`. An admitted machine is admitted again unchanged, so a
+    /// re-run resumes. Ends with the admitted machines, or with what
+    /// stopped an admission.
+    async fn admit<P: Providers>(
+        self,
+        providers: &P,
+        rpc: &RpcHandle<P>,
+        names: &Names,
+        client: &Client<P>,
+        others: &[Address],
+        steps: &mut Vec<Stage>,
+    ) -> Step<Vec<(u64, Address)>> {
+        if others.is_empty() {
+            return Step::Done {
+                result: Vec::new(),
+                last: None,
+            };
+        }
+        let members: Vec<NodeId> = self.members.iter().copied().map(NodeId).collect();
+        let founders = self
+            .servers
+            .iter()
+            .map(|(id, addr)| (NodeId(*id), addr.clone()))
+            .collect();
+        let mut session = CellSession::new(
+            self.journals,
+            &members,
+            founders,
+            self.seed,
+            client.tunables().checkpoint_policy(),
+        )
+        .with_token(self.token);
+        let mut admitted = Vec::with_capacity(others.len());
+        for target in others {
+            let run = session
+                .add_machine(providers, rpc, client, names, 0, target, self.patience)
+                .await;
+            steps.extend(run.steps);
+            match run.outcome {
+                Step::Done { result, .. } => admitted.push((result.0, target.clone())),
+                Step::Refused(refusal) => return Step::Refused(refusal),
+                Step::Interrupted(stop) => return Step::Interrupted(stop),
+                Step::Advanced(_) => unreachable!("a run never ends advanced"),
+            }
+        }
+        moonpool_assertions::reachable!("init: admits the listed machines past the founders");
+        assert_eq!(
+            admitted.len(),
+            others.len(),
+            "init admits every other listed machine"
+        );
+        Step::Done {
+            result: admitted,
+            last: steps.last().copied(),
+        }
     }
 }

@@ -40,13 +40,24 @@ use crate::views::Asker;
 /// `parosctl init`.
 #[derive(Args, Debug)]
 pub struct InitArgs {
-    /// The founding members, comma-separated `HOST:PORT`s: the idle
-    /// machines the cell forms on, every one of them needed, each by the
-    /// address it advertises (`PAROS_ADVERTISE`, #257: a machine refuses a
-    /// list that does not name it so). A name that resolves to several
-    /// machines stands for them all. The servers (`--servers`) by default.
+    /// The machines, comma-separated `HOST:PORT`s: idle machines, each by
+    /// the address it advertises (`PAROS_ADVERTISE`, #257: a machine
+    /// refuses a list that does not name it so). The first `2F+1` are the
+    /// founding members: the cell forms on them, every one of them needed,
+    /// and they hold the cell and tenant control journals. `init` admits
+    /// the others into the cell. A name that resolves to several machines
+    /// stands for them all. The servers (`--servers`) by default.
     #[arg(long, value_delimiter = ',')]
     members: Vec<String>,
+    /// `F` of the cell's control journals (#523 (redundancy naming)): the
+    /// first `2F+1` listed machines found the cell, so its control journals
+    /// survive `F` failures. A re-run gives the same value.
+    #[arg(
+        long,
+        default_value_t = initialize::FAILURES_PER_PARTITION,
+        value_parser = clap::value_parser!(u32).range(0..=i64::from(paros::tenant::MAX_FAILURES_PER_PARTITION))
+    )]
+    failures_per_partition: u32,
     /// How long the decree may take to form the cell, and the cell to elect
     /// its first leader, in milliseconds.
     #[arg(long, default_value = "30000")]
@@ -135,6 +146,7 @@ pub async fn run(
         names: (args.universe_name.clone(), args.cell_name.clone()),
         token,
         root_key,
+        failures_per_partition: args.failures_per_partition,
     };
     let (providers, rpc, names) = (asker.providers, asker.rpc, asker.names);
     match initialize::initialize(providers, rpc, names, members, connect, params).await {
@@ -210,12 +222,14 @@ fn print_initialized(out: &Printer, done: &Initialized, labels: &Labels) {
     out.emit(
         || {
             let members: Vec<u64> = done.servers.iter().map(|(id, _)| *id).collect();
+            let admitted: Vec<u64> = done.admitted.iter().map(|(id, _)| *id).collect();
             format!(
-                "initialized universe={} cell={} coordinator={} members={} steps={}",
+                "initialized universe={} cell={} coordinator={} members={} admitted={} steps={}",
                 labels.universe(done.fleet_id),
                 labels.cell(journals.cell_id),
                 labels.machine(done.coordinator.0),
                 labels.machines(&members),
+                labels.machines(&admitted),
                 steps(&done.steps).join(",")
             )
         },
@@ -231,6 +245,11 @@ fn print_initialized(out: &Printer, done: &Initialized, labels: &Labels) {
                 "fleet_control": fleet_control,
                 "members": done
                     .servers
+                    .iter()
+                    .map(|(id, addr)| json!({ "node": id, "addr": addr.to_string() }))
+                    .collect::<Vec<_>>(),
+                "admitted": done
+                    .admitted
                     .iter()
                     .map(|(id, addr)| json!({ "node": id, "addr": addr.to_string() }))
                     .collect::<Vec<_>>(),

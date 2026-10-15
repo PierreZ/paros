@@ -1754,6 +1754,12 @@ pub(crate) struct MachineLayout {
     /// How many machines, the lowest ranks, are the founding members:
     /// `cell init` lists them, and forms the cell over them (#277).
     pub(crate) founders: usize,
+    /// How many machines, the lowest ranks, `init` lists: the founders,
+    /// and on a coin more when the founders are `2F+1` (one or three). The
+    /// listed machines past the founders are admitted by `init` itself, so
+    /// the control journals keep `2F+1` acceptors on a cell with more
+    /// machines (decided on 2026-10-15).
+    pub(crate) listed: usize,
     /// Each machine's settings, in rank order.
     pub(crate) machines: Vec<MachineDraw>,
     /// The machines advertise names, not literal addresses (#257): every
@@ -1824,6 +1830,17 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
             } else {
                 moonpool_sim::sim_random_range(least..count + 1)
             };
+            // `init` lists more machines than found the cell only when the
+            // founders are `2F+1`: it forms the cell on the first `2F+1`.
+            let listed = if founders % 2 == 1 && founders < count && !drained {
+                if moonpool_sim::sim_random_bool(0.5) {
+                    moonpool_sim::sim_random_range(founders + 1..count + 1)
+                } else {
+                    founders
+                }
+            } else {
+                founders
+            };
             // Every live journal holds one slot on each of its members
             // (#212 (placement)), so the default fits the run's few tenants
             // of three journal names each, and the extreme fills the cell.
@@ -1871,8 +1888,14 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
                 "machine: a layout's founding members are machines of it",
                 { "count" => count, "founders" => founders }
             );
+            assert_always!(
+                founders <= listed && listed <= count,
+                "machine: init lists the founding members and machines past them",
+                { "count" => count, "founders" => founders, "listed" => listed }
+            );
             MachineLayout {
                 founders,
+                listed,
                 machines,
                 named,
                 move_pct,

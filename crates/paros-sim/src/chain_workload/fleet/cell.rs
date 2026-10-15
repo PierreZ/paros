@@ -13,7 +13,7 @@ use moonpool_sim::{
 };
 use paros::JournalIdentifier;
 use paros::client::bootstrap::{self, InitOutcome};
-use paros::client::fleet::Stage;
+use paros::client::fleet::{FleetRefusal, Stage};
 use paros::client::initialize::{InitParams, InitRefusal, InitRun, Initialized};
 use paros::machine::ControlJournals;
 
@@ -228,6 +228,18 @@ impl FleetOps {
         if crate::frontend::machines_pinned(ctx.state()) && buggify_with_prob!(0.1) {
             self.init_with_tenant_token(&members[0], &members).await;
         }
+        // The listed machines past the founders, which `init` admits: the
+        // founders are `2F+1` with `F = founders / 2`, so `init` forms the
+        // cell on them alone (#523 (redundancy naming)).
+        let failures_per_partition = u32::try_from(founders / 2).unwrap_or(u32::MAX);
+        let listed: Vec<Address> = members
+            .iter()
+            .chain(&self.machines[founders..self.layout.listed])
+            .cloned()
+            .collect();
+        if listed.len() > founders {
+            assert_reachable!("init: an operator lists more machines than found the cell");
+        }
         let wiped = crate::machine::other_cells_wiped(ctx.state());
         let connector = self.connector.clone();
         let token =
@@ -237,7 +249,7 @@ impl FleetOps {
             connector.providers(),
             connector.rpc(),
             connector.names(),
-            &members,
+            &listed,
             |servers| {
                 connector
                     .client(servers)
@@ -251,6 +263,7 @@ impl FleetOps {
                 names: self.init_names.clone(),
                 token: token.clone(),
                 root_key: Some(crate::frontend::signing_entry(ctx.state())),
+                failures_per_partition,
             },
         );
         let run = if founders > 1 && buggify_with_prob!(0.25) {
@@ -321,7 +334,17 @@ impl FleetOps {
         match run {
             InitRun::Initialized(initialized) | InitRun::AlreadyInitialized(initialized) => {
                 initialized.steps.iter().copied().for_each(reach);
-                let finished = initialized.steps.last() == Some(&Stage::CellReady);
+                // Admissions of the listed machines past the founders
+                // follow the fleet steps.
+                let finished = initialized.steps.contains(&Stage::CellReady);
+                assert_always!(
+                    initialized.members.len() == founders,
+                    "init: the cell forms on the founding members alone",
+                    { "founders" => founders, "members" => initialized.members.len() }
+                );
+                if !initialized.admitted.is_empty() {
+                    assert_reachable!("init: init admits the listed machines past the founders");
+                }
                 if finished {
                     assert_sometimes!(
                         initialized.steps.first() != Some(&Stage::FormFleet),
@@ -366,6 +389,17 @@ impl FleetOps {
                     { "founders" => founders }
                 );
                 assert_reachable!("init: a founder's address in another cell refuses init");
+                true
+            }
+            InitRun::Refused(InitRefusal::Fleet(FleetRefusal::OtherCell { cell_id, .. })) => {
+                // A listed machine past the founders serves another cell:
+                // one cell per run, unless a wiped one-founder cell formed
+                // again over it (#246), as for `cell add-machine`.
+                assert_always!(
+                    crate::machine::founder_wiped(ctx.state()),
+                    "init: a listed machine of another cell exists only after a wipe",
+                    { "cell" => cell_id }
+                );
                 true
             }
             InitRun::Refused(refusal) => {
