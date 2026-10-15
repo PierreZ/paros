@@ -78,6 +78,10 @@ pub const RARE: &[Rare] = &[
         reason: "marginal: the server side of an unplaceable create, missed by the sweep on main (#486)",
     },
     Rare {
+        msg: "tenant coordinator: a configure refused for want of slots",
+        reason: "marginal: the configure twin of an unplaceable create, needs a full machine; fired on 0 of 300 hunt seeds even with a widest-mode draw, while configures were recorded on 36 (#486)",
+    },
+    Rare {
         msg: "phase1: a full promise page mixes readable and faulty entries",
         reason: "marginal: fired on 8 of 810 hunt seeds (#486)",
     },

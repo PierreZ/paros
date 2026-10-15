@@ -124,9 +124,18 @@ impl FleetOps {
                 // for a journal of the tenant, or on a draw in four for the
                 // tenant's default. The coordinator applies a journal's by
                 // reconfiguration, under this client's load.
+                // On a coin, the widest mode of one partition: it grows the
+                // journal onto every storage machine of the cell, so one full
+                // machine refuses it for want of slots.
+                let desired = if buggify_with_prob!(0.3) {
+                    assert_reachable!("journals: a configure asks for every machine");
+                    widest_configure()
+                } else {
+                    drawn_configure(payload)
+                };
                 JournalOp::Configure {
                     name: (!(payload >> 12).is_multiple_of(4)).then_some(name),
-                    desired: drawn_configure(payload),
+                    desired,
                 }
             } else {
                 JournalOp::Create {
@@ -885,22 +894,35 @@ fn drawn_desired(draw: u64) -> Desired {
 /// no failure, two failures, or two to four acceptor partitions of one
 /// acceptor each (on the founding members, the same machines under another
 /// quorum system), or of three acceptors each, which a cell of four
-/// machines cannot place.
+/// machines cannot place, or three failures in one partition, which takes
+/// every storage machine.
 fn drawn_configure(draw: u64) -> Desired {
-    let (failures_per_partition, partitions) = match (draw >> 24) % 8 {
+    let (failures_per_partition, partitions) = match (draw >> 24) % 10 {
         0 | 1 => (1, 1),
         2 => (0, 1),
         3 => (2, 1),
         4 => (0, 2),
         5 => (0, 3),
         6 => (0, 4),
-        _ => (1, 2),
+        7 => (1, 2),
+        // The widest mode of one partition grows a journal onto every
+        // storage machine: on a full cell it is refused for want of slots.
+        _ => (3, 1),
     };
     Durability::new(failures_per_partition, partitions).map_or(Desired::DEFAULT, |durability| {
         Desired {
             durability,
             replicas: 0,
         }
+    })
+}
+
+/// The widest mode of one acceptor partition, `F = 3`: one partition takes
+/// at most every storage machine, so the cell never finds it too wide.
+fn widest_configure() -> Desired {
+    Durability::new(3, 1).map_or(Desired::DEFAULT, |durability| Desired {
+        durability,
+        replicas: 0,
     })
 }
 
