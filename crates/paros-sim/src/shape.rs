@@ -1417,16 +1417,16 @@ pub(crate) fn stalled_proxy(state: &StateHandle) -> bool {
 /// and the layout pick both line up: the gate "grid: the driver skips a
 /// column when it moves a round" fired 57 times in 500 hunt seeds and never
 /// in the CI sweep's 400. On a scenario seed `quorum_policy` runs the
-/// widest grid of three columns or more the pool tiles, and every node
-/// moves a stuck round after 1 to 3 re-sends (the `partition_move_resends`
-/// extreme). Each ingredient keeps its own coin on the other seeds.
+/// widest grid of three columns or more the pool tiles, with full columns,
+/// and every node moves a stuck round after 1 to 3 re-sends (the
+/// `partition_move_resends` extreme). Each ingredient keeps its own coin on the other seeds.
 /// Rare-but-valid: both are configurations an operator may choose.
 #[tracing::instrument(level = "debug", skip_all)]
 pub(crate) fn wide_grid(state: &StateHandle) -> bool {
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     *guard.wide_grid.get_or_insert_with(|| {
-        let wide = moonpool_sim::buggify_with_prob!(0.25);
+        let wide = moonpool_sim::buggify_with_prob!(0.5);
         if wide {
             assert_reachable!("a run draws the wide-grid scenario");
         }
@@ -2104,10 +2104,12 @@ pub(crate) fn quorum_policy(state: &StateHandle, pool: usize) -> QuorumPolicy {
             && let Some(&(rows, cols)) = widest
         {
             assert_reachable!("a run draws an acceptor grid");
+            // Full columns: a column with one acceptor down holds its
+            // rounds until they move.
             return QuorumPolicy::Grid {
                 rows,
                 cols,
-                slack: grid_slack(),
+                slack: 0,
             };
         }
         let q2 = buggify_knob!(majority, 1_usize..(pool / 2 + 1));

@@ -1049,7 +1049,7 @@ fn move_stuck_rounds(node: &mut ColocatedNode, after: u64, self_id: u64) {
         .filter_map(|(slot, round)| round.column().map(|column| (*slot, column)))
         .collect();
     for (slot, column) in stuck {
-        let step = if cols >= 3 && moonpool_buggify::buggify_fault_with_prob!(0.25) {
+        let step = if cols >= 3 && moonpool_buggify::buggify_fault_with_prob!(0.5) {
             moonpool_assertions::reachable!(
                 "grid: the driver skips a column when it moves a round"
             );
