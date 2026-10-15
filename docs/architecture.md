@@ -1587,7 +1587,12 @@ metadata version lets a reader refuse a format it does not understand.
 the universe directory's tenant entry when the tenant is registered and never changed afterwards.
 Each group carries a rule, and a tenant obeys the rules of every group it is in. The set of
 groups is fixed by paros for now; operator-defined groups (rollout waves, co-location), as labels
-without rules, may come later (decided on 2026-10-04):
+without rules, may come later (decided on 2026-10-04). **Tags will replace the groups**
+(decided on 2026-10-15, #575 (key:value tags), ranked early so that features build on it as a
+primitive): tenants, journals, machines and cells carry `key:value` tags. Reserved `paros/` keys
+are written only by the control plane and parsed into typed policies (`paros/kind`, `paros/role`,
+`paros/movable`, `paros/group`, a machine's class and zone, a cell's kind). User keys are opaque
+to paros. The table below stays in force until #575 lands:
 
 | Group | Rule | Members |
 |---|---|---|
