@@ -1481,12 +1481,15 @@ impl World {
                 continue;
             }
             // Claim 4 (§3.3): every registration below `b` that reached a
-            // majority — of this generation, or of one it replaced — is in
-            // the union some answerer contributed, pages and all.
+            // majority — of this generation, or of one it replaced — has its
+            // configuration in the union some answerer contributed, pages
+            // and all: at its own ballot, or at a later one that repeats it
+            // (a page leaves out a belief a later registration repeats,
+            // #570 (election duel outlasts the recovery tail)).
             assert!(
                 history
-                    .get(registered)
-                    .is_some_and(|configs| configs.contains(&registration.config)),
+                    .range(*registered..)
+                    .any(|(_, configs)| configs.contains(&registration.config)),
                 "a completed matchmaking is complete: node{} closed {ballot:?} at generation {} above {watermark:?} without {registered:?} (registered at generation {}, held by a majority){}",
                 to.0,
                 campaign.generation.0,
