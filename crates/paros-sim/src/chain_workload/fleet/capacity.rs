@@ -1,8 +1,9 @@
 //! Capacity requests (#476): on its own BUGGIFY location, after a journal
-//! request, the operator asks the cell coordinator for one frontend slot of
-//! its tenant through `paros::client::capacity`, as a tenant coordinator
-//! does, on a machine of the run drawn at random: a `stateless` machine
-//! that serves the cell may take it, any other is refused. On another
+//! request, the operator asks the cell coordinator for one tenant-level slot
+//! through `paros::client::capacity`, as a tenant coordinator does: mostly on
+//! a machine that serves the cell and has room (a frontend slot on a
+//! `stateless` machine, a replica slot on a `storage` one), else on any
+//! machine of the run with a frontend slot, which may be refused. On another
 //! location it sends the decided request again, which must read back the
 //! first answer: the outcome is recorded under the request's id in the cell
 //! control journal, so a retry books nothing twice, across a coordinator
@@ -19,7 +20,7 @@ use super::FleetOps;
 use super::cell::Cell;
 
 impl FleetOps {
-    /// One capacity request for a frontend slot of `tenant`, and on a
+    /// One capacity request for a slot of `tenant`, and on a
     /// BUGGIFY location its retry.
     pub(super) async fn ask_capacity(&self, ctx: &SimContext, cell: &Cell, tenant: TenantId) {
         let Some(election) = cell.journals.election else {
@@ -30,31 +31,40 @@ impl FleetOps {
         if machines.is_empty() {
             return;
         }
-        // Mostly a stateless machine that serves the cell and has room, as a
-        // tenant coordinator asks; else any machine, which may be refused.
-        let room = if ctx.random().random_bool(0.7)
+        // Mostly a machine that serves the cell and has room, with a role of
+        // its class, as a tenant coordinator asks; else any machine with a
+        // frontend slot, which may be refused.
+        let room: Vec<(u64, Role)> = if ctx.random().random_bool(0.8)
             && let Some(registry) = super::sets::registry(cell, 0).await
         {
             registry
                 .nodes()
-                .filter(|(node, n)| {
-                    n.class == Class::Stateless
-                        && registry.serves(*node)
-                        && registry.available(*node) > 0
+                .filter(|(node, _)| registry.serves(*node) && registry.available(*node) > 0)
+                .map(|(node, n)| {
+                    let role = match n.class {
+                        Class::Stateless => Role::Frontend,
+                        Class::Storage => Role::Replica,
+                    };
+                    (node.0, role)
                 })
-                .map(|(node, _)| node.0)
                 .collect()
         } else {
             Vec::new()
         };
-        let pool = if room.is_empty() { &machines } else { &room };
-        let node = NodeId(pool[ctx.random().random_range(0..pool.len())]);
+        let (node, role) = if room.is_empty() {
+            (
+                machines[ctx.random().random_range(0..machines.len())],
+                Role::Frontend,
+            )
+        } else {
+            room[ctx.random().random_range(0..room.len())]
+        };
         let request = CapacityRequest {
             request: ctx.random().random_range(1..u64::MAX),
             tenant,
             slots: vec![Wanted {
-                node,
-                role: Role::Frontend,
+                node: NodeId(node),
+                role,
                 target: BookingTarget::Tenant { tenant },
             }],
         };
@@ -66,7 +76,7 @@ impl FleetOps {
                     "capacity: a grant names one booking per slot",
                     { "tenant" => tenant.0, "bookings" => bookings.len() }
                 );
-                assert_reachable!("capacity: a tenant's frontend slot is granted");
+                assert_reachable!("capacity: a tenant's slot is granted");
             }
             CapacityAnswer::Refused => {
                 assert_reachable!("capacity: a request is refused");

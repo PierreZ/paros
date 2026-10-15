@@ -985,7 +985,7 @@ request RPC and the placement of tenant coordinators.
   term; the slot is its placement.
 - **The simulation.** The machines' capacity floor is three footprints (the cell's, the
   universe's and one tenant's: 21 slots), so a founding member can host them. A creation may
-  ask for a frontend slot through the capacity request RPC, and may retry the same id.
+  ask for a tenant-level slot through the capacity request RPC, and may retry the same id.
   Oracles: every hosted tenant has its footprint, a tenant coordinator holds at most one live
   slot and only on a stateless machine, a grant names one booking per slot, and a retried
   request reads back its first answer. Gates: a tenant refused for its footprint, a tenant
