@@ -357,8 +357,14 @@ list and no rendezvous name. The same rule holds at two levels:
   the first `configure new` transaction, and each client reads `\xff/init_id` back to learn
   whether it won. paros has nothing elected before `cell init`, so the decree is that election.
 
-  The listed machines are the cell's **founding members**. `cell init` creates on them the cell
-  control journal and the cell's first election journal, both born at `failures-per-partition=1` with the cell's first
+  The first `2F+1` listed machines are the cell's **founding members**, with `F` from `parosctl
+  init --failures-per-partition` (default 1, so three founding members, decided on 2026-10-15:
+  before, every listed machine was a founding member, and seven listed machines gave the cell and
+  tenant control journals seven acceptors). When fewer are listed, every listed machine is a
+  founding member. `init` admits the other listed machines after the fleet steps, as `add-machine`
+  does (`paros::client::initialize::founding_members`), so a re-run lists the same machines in the
+  same order. `cell init` creates on the founding members the cell
+  control journal and the cell's first election journal, both born with the cell's first
   matchmaker set (decided on 2026-10-09, #240). The founding members campaign over that election
   journal for the first cell coordinator, and the winner installs itself as the control journal's
   leader with `SetLeader(its fresh uuid, unset)`. The founding list lives only in the cell
