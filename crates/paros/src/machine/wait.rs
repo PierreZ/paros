@@ -161,7 +161,11 @@ pub async fn wait_for_cell<P: Providers, L: CellLedger>(
             }
             Some((request, reply)) = admit.recv() => {
                 if let Err(label) = pin.allow(&providers, &request.token, Operation::Admit) {
-                    reply.send(wire::AdmitAck { admitted: false, refusal: label.into() });
+                    reply.send(wire::AdmitAck {
+                        admitted: false,
+                        refusal: label.into(),
+                        in_cell: false,
+                    });
                     continue;
                 }
                 let in_init = proposal.is_some();
@@ -458,6 +462,7 @@ async fn answer_admit<L: CellLedger>(
             wire::AdmitAck {
                 admitted: false,
                 refusal: refusal.into(),
+                in_cell: false,
             },
             None,
         )
@@ -482,6 +487,7 @@ async fn answer_admit<L: CellLedger>(
         wire::AdmitAck {
             admitted: true,
             refusal: String::new(),
+            in_cell: false,
         },
         Some(admission),
     )

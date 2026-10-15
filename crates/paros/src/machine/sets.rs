@@ -19,6 +19,11 @@
 //!    believe for the tenant's control journal) is exactly those machines,
 //!    release every slot on a draining machine.
 //!
+//! A settled set is judged again in turn once no other set is pending: a
+//! node that finishes a frozen generation proposes the members that
+//! answered its freeze, so a set in force can leave its booked machines
+//! after its move finished.
+//!
 //! The set keeps its size: the bootstrap generation's. No step names a
 //! draining machine in a set. A released member keeps its frozen store: it
 //! answers a late proposer with its successor (`crate::machine::matchmakers`).
@@ -80,11 +85,16 @@ pub(super) struct Sets {
     /// term's move, whose handover gets one round to finish first.
     inherited: BTreeSet<TenantId>,
     /// The tenants this term saw settled: their set in force is their
-    /// booked machines, none of them draining.
+    /// booked machines, none of them draining. A settled set is judged
+    /// again once no other set is pending, and leaves this set when its set
+    /// in force moved off its booked machines.
     settled: BTreeSet<TenantId>,
     /// The tenant the last step took: the next step takes the next one, so
     /// a set that waits holds no other back.
     last: Option<TenantId>,
+    /// The term's first finished move asks its handover again (a BUGGIFY
+    /// decision of the candidacy, carried in).
+    ask_again: bool,
 }
 
 /// Whether the registry holds `node` registered (not draining, not retired).
@@ -106,24 +116,37 @@ fn slots(registry: &Registry, tenant: TenantId) -> Vec<(u64, Booking)> {
 
 /// The next tenant after `last`, in id order and wrapping, whose set may
 /// need a step: hosted, not dropped, and unplaced, holding a slot on a
-/// draining machine, or not seen settled by this term.
+/// draining machine, or not seen settled by this term. Once none is, the
+/// next settled one, judged again: a settled set does not stay so (see
+/// [`Sets::step`]).
 fn next_set(
     registry: &Registry,
     settled: &BTreeSet<TenantId>,
     last: Option<TenantId>,
 ) -> Option<TenantId> {
-    let pending: BTreeSet<TenantId> = registry
+    let hosted: BTreeSet<TenantId> = registry
         .hosted()
         .filter(|tenant| !registry.dropped(*tenant))
+        .collect();
+    let pending: BTreeSet<TenantId> = hosted
+        .iter()
         .filter(|tenant| {
-            let slots = slots(registry, *tenant);
+            let slots = slots(registry, **tenant);
             slots.is_empty()
                 || slots.iter().any(|(_, b)| !registered(registry, b.node))
-                || !settled.contains(tenant)
+                || !settled.contains(*tenant)
         })
+        .copied()
         .collect();
-    last.and_then(|last| pending.range((Excluded(last), Unbounded)).next())
-        .or_else(|| pending.first())
+    assert!(pending.is_subset(&hosted), "a pending set is hosted");
+    // With none pending, every hosted set is a settled one to judge again.
+    let turn = if pending.is_empty() {
+        &hosted
+    } else {
+        &pending
+    };
+    last.and_then(|last| turn.range((Excluded(last), Unbounded)).next())
+        .or_else(|| turn.first())
         .copied()
 }
 
@@ -149,6 +172,21 @@ async fn set_in_force<P: Providers>(
 }
 
 impl Sets {
+    /// The set moves of a new term; `ask_again` is the candidacy's BUGGIFY
+    /// decision to ask the term's first finished move's handover again.
+    pub(super) fn new(ask_again: bool) -> Self {
+        let sets = Self {
+            ask_again,
+            ..Self::default()
+        };
+        assert!(
+            sets.settled.is_empty(),
+            "a new term has seen no set settled"
+        );
+        assert!(sets.started.is_empty(), "a new term has started no move");
+        sets
+    }
+
     /// Take one step of the next set's move, through the term's session
     /// `cell` (its bookings drawn by `desk`), calling the founding members
     /// where the cell's address book says they are. `None` when a write did
@@ -210,6 +248,20 @@ impl Sets {
         let mut members = reply.matchmakers.clone();
         members.sort_unstable();
         if members != target {
+            // A set this term saw settled does not stay so: any node finishes
+            // a frozen generation onto the members that answered its freeze,
+            // a thinner set, and a freeze may come from a stale retry of this
+            // term's own handover, accepted after the move it asked for was
+            // done. Judged again in turn, the set is moved back onto its
+            // booked machines (witness 5529552317995697871, PR #555 (fix
+            // main's red sweep, part 2): a set settled on its three booked
+            // machines, a retried handover froze it and was abandoned, and
+            // another node finished it onto two).
+            if self.settled.remove(&tenant) {
+                moonpool_assertions::reachable!(
+                    "coordinator: a settled set left its booked machines"
+                );
+            }
             // An earlier term's handover may still run: give it a round
             // before asking for another, so two handovers rarely duel.
             if !self.started.contains(&tenant) && self.inherited.insert(tenant) {
@@ -231,7 +283,20 @@ impl Sets {
                 },
             );
         }
-        self.finish(client, cell, tenant, &slots, &staying).await
+        let step = self.finish(client, cell, tenant, &slots, &staying).await;
+        // BUGGIFY (the candidacy's decision): the term's first finished move
+        // asks its handover again, as a retry of it that lands after the
+        // move does (a `Busy` answer retried by the client). Valid: a
+        // founding member accepts a handover onto the set in force, and the
+        // set may then leave its booked machines (a thinner set, finished by
+        // another node), which the next judgement of it must undo.
+        if matches!(step, Some(SetStep::Finished { .. })) && std::mem::take(&mut self.ask_again) {
+            moonpool_assertions::reachable!(
+                "coordinator: a finished set's handover is asked again"
+            );
+            let _ = nodes.reconfigure_matchmakers(tenant, &target, at).await;
+        }
+        step
     }
 
     /// The last step of a set's move: the set in force is its booked

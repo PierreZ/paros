@@ -172,7 +172,8 @@ pub(super) struct ChainConfig {
     pub(super) command_bytes: usize,
     /// Large payload size. Ceiling 16 KiB, still far under the batch cap.
     pub(super) large_command_bytes: usize,
-    /// Per-request client deadline. Floor 1 s: a write is answered once its
+    /// Per-request client deadline. Floor `REQUEST_FLOOR_MS` (1 s), which
+    /// also bounds a node's take-back budget (`TAKE_BACK_CEILING_MS`): a write is answered once its
     /// slot is decided and applied, ~500 ms on a slow deployment (a proxy,
     /// a slow tick), and a retry is answered from the log only once its own
     /// slot is, so a deadline under that answer abandons every write and
@@ -394,7 +395,7 @@ impl ChainConfig {
             reader: buggify_knob!(0_u64, 0_u64..2_u64) == 1,
             command_bytes: buggify_knob!(64_usize, 1_usize..257_usize),
             large_command_bytes: buggify_knob!(4096_usize, 512_usize..MAX_LARGE_COMMAND_BYTES + 1),
-            request_timeout_ms: buggify_knob!(1500_u64, 1000_u64..3001_u64),
+            request_timeout_ms: buggify_knob!(1500_u64, crate::shape::REQUEST_FLOOR_MS..3001_u64),
             pause_ms: buggify_knob!(75_u64, 1_u64..501_u64),
             compact_every: buggify_knob!(4_u64, 1_u64..9_u64),
             compaction: buggify_knob!(1_u64, 0_u64..1_u64) == 1,

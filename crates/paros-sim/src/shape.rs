@@ -55,6 +55,35 @@ const ROUND_TRIP_FLOOR_MS: u64 = 250;
 const RESOLVE_FLOOR_MS: u64 = 4 * ROUND_TRIP_FLOOR_MS;
 const _: () = assert!(RESOLVE_FLOOR_MS < 2000, "the floor sits under the default");
 
+/// The slowest beat a node draws (`tick_interval`), in milliseconds.
+const SLOWEST_TICK_MS: u64 = 200;
+
+/// The floor of a client's drawn request deadline
+/// (`ChainConfig::request_timeout_ms`), in milliseconds.
+pub(crate) const REQUEST_FLOOR_MS: u64 = 1_000;
+
+/// The longest a node's take-back budget (`proxy_take_back_resends` beats)
+/// may hold a delegated round, in milliseconds: a write whose round the
+/// leader must take back is answered after that budget plus two round
+/// trips (the client's call and the colocated Phase 2), and that answer
+/// must come inside the shortest deadline a client draws. Above it, a
+/// proxy whose `Accept` a needed acceptor drops (a node that counts fewer
+/// proxies, `NodeShape::proxy_count_lag`) makes every write and every
+/// retry of it outlast its deadline, so no write is acknowledged for the
+/// whole tail although the cluster keeps deciding the retries. Witness
+/// (cite only): sweep recipe 4157026387069203832 `[(9989,
+/// 3535784000140791486)]` on 2365d15 (and e0e605a), a single proxy that
+/// node 0 does not count, node 1 down for good: 27 beats of 50 ms per slot,
+/// 1.5 s an answer against a 1.5 s deadline, 91 slots decided in the tail
+/// and not one recovery write acknowledged. Production takes back after
+/// 2 s, inside the library client's 5 s deadline.
+const TAKE_BACK_CEILING_MS: u64 = REQUEST_FLOOR_MS - 2 * ROUND_TRIP_FLOOR_MS;
+const _: () = assert!(TAKE_BACK_CEILING_MS + 2 * ROUND_TRIP_FLOOR_MS <= REQUEST_FLOOR_MS);
+const _: () = assert!(
+    TAKE_BACK_CEILING_MS >= SLOWEST_TICK_MS,
+    "the slowest beat still takes a round back after one re-delegation"
+);
+
 /// The default per-restart chance of a terminal storage loss — a wiped node
 /// disk (#124) or an unusable matchmaker registry (#125).
 const DEFAULT_LOSS_PCT: u32 = 35;
@@ -184,7 +213,7 @@ impl NodeShape {
         // confirmations at ~9 ticks against a 5-tick window, 172 s without a
         // write). Its floor is two round trips.
         let ms = Duration::from_millis;
-        let tick_ms = buggify_knob!(50_u64, 10_u64..201_u64);
+        let tick_ms = buggify_knob!(50_u64, 10_u64..SLOWEST_TICK_MS + 1);
         // A slow-link seed beats fast: 10 to 17 ms (#386's witness ran 17).
         let tick_ms = if slow_link {
             tick_ms.clamp(10, 17)
@@ -300,9 +329,13 @@ impl NodeShape {
             // after a single re-delegation runs colocated while its proxy
             // may still decide it, and the two verdicts must agree
             // (P2b-idempotent fan-outs) — the whole point of pushing it.
-            // The ceiling stretches a dead proxy's cost per slot; the
-            // recovery tail still outlasts it.
-            proxy_take_back_resends: buggify_knob!(10_u64, 1_u64..41_u64),
+            // The ceiling stretches a dead or ignored proxy's cost per
+            // slot, and is lowered to `TAKE_BACK_CEILING_MS` of this
+            // node's beats: a write taken back must still be answered
+            // inside the shortest client deadline (the default, 10 beats
+            // of 50 ms, sits exactly on it).
+            proxy_take_back_resends: buggify_knob!(10_u64, 1_u64..41_u64)
+                .min(TAKE_BACK_CEILING_MS / tick_ms),
             // The proxy's retention budget (#142), in unanswered re-fan-outs
             // (one per beat), drawn independently of the take-back so a
             // seed can evict before the leader takes back or long after.
@@ -721,6 +754,9 @@ struct Registry {
     /// Run-level: whether the run draws the early-handover scenario (see
     /// [`early_handover`]), fixed by the first caller.
     early_handover: Option<bool>,
+    /// Run-level: whether the run draws the paged-handover scenario (see
+    /// [`paged_handover`]), fixed by the first caller.
+    paged_handover: Option<bool>,
     /// Run-level: whether the run draws the stalled-proxy scenario (see
     /// [`stalled_proxy`]), fixed by the first caller.
     stalled_proxy: Option<bool>,
@@ -1260,6 +1296,41 @@ pub(crate) fn early_handover(state: &StateHandle) -> bool {
         .get_or_insert_with(|| moonpool_sim::buggify_with_prob!(1.0))
 }
 
+/// Whether the run draws the **paged-handover scenario** (#551 (operator
+/// calls name their journal)): drawn once per seed, its own BUGGIFY
+/// location. A matchmaker handover's `Stop` is paged by journals, so a
+/// frozen registry spans several pages only when the handed-over set holds
+/// more non-blank registries than the stopped matchmaker's registry page.
+/// That needs three coins at once: several journals ([`journals`]), two of
+/// them in the main tenant, and a small registry page on a matchmaker
+/// (`registry_page`). The four paging gates fired on no seed of a
+/// 409-seed sweep at e0e605a, and on 1 of 300 hunt seeds. On a scenario
+/// seed the plan runs three journals, all in the main tenant, every
+/// matchmaker pages its registry one journal at a time
+/// ([`matchmaker_registry_page`]), and op 12 (`RECONFIGURE_MATCHMAKERS`)
+/// runs whatever the swarm mask: each of the four fired on 23 of the same
+/// 300 seeds. Each ingredient keeps its own coin on the other seeds.
+/// Rare-but-valid: each ingredient is a knob extreme or an operator's call.
+#[tracing::instrument(level = "debug", skip_all)]
+pub(crate) fn paged_handover(state: &StateHandle) -> bool {
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    *guard.paged_handover.get_or_insert_with(|| {
+        let paged = moonpool_sim::buggify_with_prob!(1.0);
+        if paged {
+            assert_reachable!("a run draws the paged-handover scenario");
+        }
+        paged
+    })
+}
+
+/// The registry page a matchmaker serves (#551 (operator calls name their
+/// journal)): the drawn one, or one journal on a paged-handover seed (the
+/// knob's floor, [`paged_handover`]).
+pub(crate) fn matchmaker_registry_page(state: &StateHandle, drawn: usize) -> usize {
+    if paged_handover(state) { 1 } else { drawn }
+}
+
 /// Whether the run draws the **stalled-proxy scenario** (#341): drawn once
 /// per seed, its own BUGGIFY location. Three mutation survivors of #269
 /// need a proxy whose rounds stay open: a leader that takes a delegated
@@ -1759,14 +1830,16 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
 pub(crate) fn journals(state: &StateHandle) -> JournalPlan {
     let main = identifiers(state).main;
     let slow = slow_link(state);
+    let paged = paged_handover(state);
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     guard
         .journals
         .get_or_insert_with(|| {
             let count = buggify_knob!(1_u64, 2_u64..4_u64);
-            // A slow-link seed loads every link with the most journals.
-            let count = if slow { 3 } else { count };
+            // A slow-link seed loads every link with the most journals, and
+            // a paged-handover seed hands over a set that holds them all.
+            let count = if slow || paged { 3 } else { count };
             // The first journal is the deployment's ([`Identifiers::main`]);
             // every other one's identifier is drawn (#235): a random journal id,
             // in the main journal's tenant or a random one — and, in another
@@ -1775,7 +1848,7 @@ pub(crate) fn journals(state: &StateHandle) -> JournalPlan {
             // fixed (§3.8).
             let mut ids = vec![main];
             while ids.len() < usize::try_from(count).unwrap_or(1) {
-                let tenant = if moonpool_sim::sim_random_bool(0.5) {
+                let tenant = if paged || moonpool_sim::sim_random_bool(0.5) {
                     main.tenant
                 } else {
                     TenantId(draw_id())

@@ -150,8 +150,13 @@ pub async fn identify<P: Providers>(
 /// What one `Admit` sent to a machine came back with.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AdmitOutcome {
-    /// The machine is in the cell: admitted now, or before.
+    /// The machine recorded its admission into the cell now.
     Admitted,
+    /// The machine was in the cell already, and this call recorded nothing:
+    /// a founding member, or a machine admitted before (the caller's own
+    /// earlier `Admit` whose answer was lost, or another operator's that
+    /// landed between this caller's `Identify` and its `Admit`).
+    InCell,
     /// The machine answered, and refused: its label (`other_cell`,
     /// `in_cell_init`, `malformed`, `storage`, or a refused token,
     /// `invalid_token`, `expired`, `forbidden`, #245).
@@ -197,6 +202,7 @@ pub async fn admit_at<P: Providers>(
         ..admission.to_wire()
     };
     match call_once::<P, AdmitRpc>(providers, rpc, names, target, &request, timeout).await {
+        Some(Ok(ack)) if ack.admitted && ack.in_cell => AdmitOutcome::InCell,
         Some(Ok(ack)) if ack.admitted => AdmitOutcome::Admitted,
         Some(Ok(ack)) => AdmitOutcome::Refused(ack.refusal),
         _ => AdmitOutcome::Unreachable,
