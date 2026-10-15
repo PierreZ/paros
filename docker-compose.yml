@@ -7,6 +7,7 @@
 #   docker compose run --rm parosctl journal create acme orders   # prints journal=T/J
 #   docker compose run --rm parosctl write T/J hello world --leader 7
 #   docker compose run --rm parosctl read T/J
+#   docker compose run --rm parosctl bench --tenant bench --journals 4 --clients 8 --duration 60s --ramp 10s
 #
 # The copy-paste demo is DEMO.md; the walkthrough is crates/parosd/README.md.
 # A machine mints its node id on

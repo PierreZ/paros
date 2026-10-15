@@ -35,6 +35,9 @@ serde_json = "1"
 # `parosctl tls show`: a certificate's names, use and validity. The same
 # version moonpool-rpc's certificate authority reads authorities with.
 x509-parser = "0.18"
+# `parosctl bench` (#517): latency histograms, and their raw export.
+hdrhistogram = "7"
+base64 = "0.22"
 
 [dev-dependencies]
 tempfile = "3"
