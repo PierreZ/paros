@@ -138,6 +138,9 @@ pub(crate) struct MachineBoard {
     maintenance: Vec<MaintenanceNote>,
     /// The machines an operator removed (#359), by minted id.
     removed: BTreeSet<u64>,
+    /// The machines an operator asked to remove (#359), by minted id: a
+    /// removal whose answer was lost may still have landed.
+    remove_asked: BTreeSet<u64>,
 }
 
 /// A maintenance window an operator opened over a machine (#359), for the
@@ -362,6 +365,16 @@ pub(crate) fn note_maintenance(state: &StateHandle, note: MaintenanceNote) {
 /// An operator removed machine `node` from the cell (#359).
 pub(crate) fn note_removed(state: &StateHandle, node: u64) {
     lock(&machine_board(state)).removed.insert(node);
+}
+
+/// An operator asks to remove machine `node` from the cell (#359).
+pub(crate) fn note_remove_asked(state: &StateHandle, node: u64) {
+    lock(&machine_board(state)).remove_asked.insert(node);
+}
+
+/// Whether an operator asked to remove machine `node` (#359).
+pub(crate) fn remove_asked(state: &StateHandle, node: u64) -> bool {
+    lock(&machine_board(state)).remove_asked.contains(&node)
 }
 
 /// The machines an operator removed (#359).

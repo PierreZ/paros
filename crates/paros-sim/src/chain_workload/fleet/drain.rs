@@ -154,6 +154,7 @@ impl FleetOps {
         (client, first): (&crate::client::ChainClient, usize),
         node: NodeId,
     ) -> bool {
+        crate::machine::note_remove_asked(ctx.state(), node.0);
         match session.remove(client, first, node).await {
             Ok(Removal::Removed) => {
                 assert_reachable!("drain: an operator removes a drained machine");

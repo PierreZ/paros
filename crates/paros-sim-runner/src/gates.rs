@@ -46,6 +46,10 @@ pub struct Rare {
 /// window seldom reaches, #485 the double fault, #486 the rest.
 pub const RARE: &[Rare] = &[
     Rare {
+        msg: "admit: a removed machine is refused admission",
+        reason: "an ADMIT that draws a machine an operator removed: one CI sweep seed (#359 (drain, remove and maintenance for machines))",
+    },
+    Rare {
         msg: "coordinator: a slot its journal's configuration left is released",
         reason: "a gone machine back before its move ended: none in 2,000 hunt seeds; the gone-machine scenario's back-soon coin aims at it (#498 (moves in the sweep), #475 (re-place after the Down bound))",
     },
