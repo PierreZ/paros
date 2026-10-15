@@ -433,6 +433,61 @@ impl CellSession {
             )
     }
 
+    /// The registry position this session's fold stands at: every entry
+    /// below it is folded.
+    #[must_use]
+    pub fn position(&self) -> u64 {
+        self.cell.folder().next_seq()
+    }
+
+    /// Send `Admit` again to the admitted machine `node` at `target`, with
+    /// the cell's machines this session knows now and the position its fold
+    /// stands at, once, within `timeout` (#505 (stranded admitted machine)).
+    /// The cell coordinator sends it to a machine whose registry fold is
+    /// stuck: every founding member its book names moved or was wiped, and
+    /// it adopts the newer book. Whether the machine acked it.
+    ///
+    /// # Panics
+    ///
+    /// If `node` is a founding member (a programmer error: the coordinator
+    /// sends this only to an admitted machine).
+    pub async fn readmit<P: Providers>(
+        &self,
+        providers: &P,
+        rpc: &RpcHandle<P>,
+        names: &Names,
+        (node, target): (NodeId, &Address),
+        timeout: Duration,
+    ) -> bool {
+        let admission = self.admission(node, target);
+        assert!(
+            admission
+                .members
+                .iter()
+                .any(|(id, addr)| *id == node && addr == target),
+            "an admission sent again names its machine where it answered"
+        );
+        assert!(
+            !self.members.contains(&node),
+            "a founding member is never admitted again"
+        );
+        let position = self.position();
+        matches!(
+            bootstrap::admit_at(
+                providers,
+                rpc,
+                names,
+                target,
+                &admission,
+                &[],
+                position,
+                timeout
+            )
+            .await,
+            AdmitOutcome::Admitted
+        )
+    }
+
     /// Whether the session holds the cell control journal open.
     #[must_use]
     pub fn is_open(&self) -> bool {

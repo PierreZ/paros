@@ -1422,7 +1422,12 @@ where
     // `crate::scenario::ADMIT_LATE`; drawn only where a registry is followed).
     let mut admission_owed: Option<std::time::Duration> = None;
     let late_admitter = system.is_some() && crate::scenario::late_admitter();
+    // The books an admitted machine's cache is offered (#505 (stranded
+    // admitted machine)): its follow's folds, and a book its cell
+    // coordinator handed it when its fold was stuck.
+    let mut offered_books = None;
     if let Some(CellMachine::Admitted { machine, cache }) = machine.clone() {
+        offered_books = Some(cache.subscribe());
         // An admitted machine answers its admission beside the journals
         // placed on it (#474), follows the registry for its cache (#211)
         // and registers the address it advertises now (#349).
@@ -2109,6 +2114,23 @@ where
                     // the loop.
                     if let Some(cache) = cache {
                         stores.cache_registry(cache);
+                    }
+                }
+                // An admitted machine's newest book (#505 (stranded admitted
+                // machine)): every seed it moved is dialed there from the
+                // follower's next read on, and so is its lane.
+                if let (Some(books), Some(f)) = (offered_books.as_mut(), follower.as_mut())
+                    && books.has_changed().unwrap_or(false)
+                {
+                    let offered = books.borrow_and_update().clone();
+                    for (peer, addr) in offered.map(|book| f.adopt(book.position, &book.machines)).unwrap_or_default() {
+                        let interface = f.registry().get(peer).map(|node| node.machine_interface.clone()).unwrap_or_default();
+                        out.readdress(peer, addr.clone(), interface.clone());
+                        if let Some(link) = links.client(MatchmakerId(peer.0)) {
+                            link.readdress(addr.clone(), &interface);
+                        }
+                        moonpool_assertions::reachable!("driver: an admitted machine dials a seed from an adopted book");
+                        tracing::info!(node = self_id, peer = peer.0, %addr, "seed_book_moved");
                     }
                 }
                 // The system journals (#189): fold what this node's own

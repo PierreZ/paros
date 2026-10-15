@@ -174,7 +174,25 @@ pub async fn admit<P: Providers>(
     token: &[u8],
     timeout: Duration,
 ) -> AdmitOutcome {
+    admit_at(providers, rpc, names, target, admission, token, 0, timeout).await
+}
+
+/// [`admit`], with the registry position `position` the admission's book is
+/// taken at: the cell coordinator's `Admit` sent again to an admitted
+/// machine whose registry fold is stuck (#505 (stranded admitted machine)).
+#[allow(clippy::too_many_arguments)]
+pub async fn admit_at<P: Providers>(
+    providers: &P,
+    rpc: &RpcHandle<P>,
+    names: &Names,
+    target: &Address,
+    admission: &Admission,
+    token: &[u8],
+    position: u64,
+    timeout: Duration,
+) -> AdmitOutcome {
     let request = wire::Admit {
+        registry_position: position,
         token: token.to_vec(),
         ..admission.to_wire()
     };

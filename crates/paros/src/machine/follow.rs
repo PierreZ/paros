@@ -13,6 +13,12 @@
 //! 3. each new book at or past the cached position is offered to the cache
 //!    ([`super::CacheSink`]), and the next read dials the new book.
 //!
+//! A book offered to the cache past the follow's own position (an `Admit`
+//! the cell coordinator sent again, #505 (stranded admitted machine)) is the
+//! book the next read dials: a machine whose every known founding member
+//! moved folds the registry again through the book its coordinator handed
+//! it.
+//!
 //! The follow draws no randomness and writes nothing to the cell: it runs in
 //! a task of its own beside the machine.
 
@@ -118,9 +124,28 @@ async fn run<P: Providers>(
         sink,
     } = follow;
     let me = facts.node_id;
+    // The position of the book the follow dials: the cache's at start, then
+    // each fold's and each adopted book's.
+    let mut position = floor;
     let mut fold: Option<(Vec<NodeId>, Folder<Registry>)> = None;
     let mut first = 0_usize;
     while !shutdown.is_cancelled() {
+        if let Some(adopted) = sink.latest()
+            && adopted.position > position
+        {
+            if adopted.machines != book {
+                moonpool_assertions::reachable!(
+                    "machine: an admitted machine's follow dials an adopted book"
+                );
+                tracing::info!(
+                    node = me.0,
+                    position = adopted.position,
+                    "follow_book_adopted"
+                );
+                book.clone_from(&adopted.machines);
+            }
+            position = adopted.position;
+        }
         let client = client_over(&providers, &rpc, &facts, &book, tunables, &shutdown);
         if client.server_count() > 0 {
             first = (first + 1) % client.server_count();
@@ -135,7 +160,7 @@ async fn run<P: Providers>(
                 && let LoadOutcome::Loaded { .. } = load(folder, cell.cell, &client, first, 0).await
                 && folder.is_whole()
                 && folder.next_seq() > 0
-                && folder.next_seq() >= floor
+                && folder.next_seq() >= position
             {
                 // The founding members at the addresses this machine knows:
                 // the registry moves the ones that registered elsewhere.
@@ -160,6 +185,7 @@ async fn run<P: Providers>(
                     book.clone_from(&machines);
                 }
                 if !machines.is_empty() {
+                    position = folder.next_seq();
                     sink.offer(CachedRegistry {
                         node: me,
                         position: folder.next_seq(),

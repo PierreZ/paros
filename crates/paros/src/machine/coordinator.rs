@@ -261,6 +261,9 @@ pub struct Watch {
     /// The `Identify` checks a `Register` left running, by machine (#454
     /// (control plane meets chaos)): see [`register`].
     probes: BTreeMap<NodeId, Probe>,
+    /// The registry fold position each admitted machine reported at its
+    /// last answer (#505 (stranded admitted machine)).
+    positions: BTreeMap<NodeId, u64>,
 }
 
 /// One `Identify` check of a machine's new address, run off the renewal
@@ -296,6 +299,7 @@ impl Watch {
             heard: BTreeMap::new(),
             ran: false,
             probes: BTreeMap::new(),
+            positions: BTreeMap::new(),
         }
     }
 
@@ -351,10 +355,10 @@ impl Watch {
             let answer = bootstrap::identify(providers, rpc, names, &addr, timeout)
                 .await
                 .filter(|ack| ack.node_id == id.0);
-            let command = match answer {
+            let command = match &answer {
                 Some(ack) => {
                     self.heard.insert(id, client.now());
-                    Self::answered(session, id, &addr, &ack)
+                    Self::answered(session, id, &addr, ack)
                 }
                 None => self.silent(session, id, client.now()),
             };
@@ -362,8 +366,43 @@ impl Watch {
                 session.record(client, 0, &command).await?;
                 wrote += 1;
             }
+            // A machine whose registry fold is stuck gets the cell's book
+            // again (#505 (stranded admitted machine)).
+            if let Some(ack) = answer
+                && self.stuck(session, id, &ack)
+                && session
+                    .readmit(providers, rpc, names, (id, &addr), timeout)
+                    .await
+            {
+                moonpool_assertions::reachable!(
+                    "coordinator: a stuck machine is handed the cell's book again"
+                );
+                tracing::info!(
+                    machine = id.0,
+                    position = session.position(),
+                    "machine_readmitted"
+                );
+            }
         }
         Ok(wrote)
+    }
+
+    /// Whether the admitted machine `id`, answering `ack`, folds the
+    /// registry no more (#505 (stranded admitted machine)): it serves the
+    /// cell, and it reports the same fold position below the registry's
+    /// tail as at its last answer. Such a machine dials its cell through a
+    /// book whose every founding member moved or was wiped, and nothing
+    /// booked on it can start until it learns where they are.
+    fn stuck(&mut self, session: &CellSession, id: NodeId, ack: &wire::IdentifyAck) -> bool {
+        let position = ack.registry_position;
+        let before = self.positions.insert(id, position);
+        // A founding member folds its own copy of the registry: it reports
+        // no position, and is never admitted.
+        if session.members().contains(&id) {
+            return false;
+        }
+        let serving = session.registry().serves(id) && ack.cell_id == session.journals().cell_id;
+        serving && position < session.position() && before == Some(position)
     }
 
     /// The change machine `id` answering `ack` at `addr` makes, if any: a
