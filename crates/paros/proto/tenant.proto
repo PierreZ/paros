@@ -24,6 +24,8 @@ message TenantEntry {
     CreateJournal create_journal = 2;
     DeleteJournal delete_journal = 3;
     Unplaceable unplaceable = 4;
+    Configure configure = 5;
+    Placed placed = 6;
   }
 }
 
@@ -85,9 +87,34 @@ message DeleteJournal {
 // (placement)): too few machines for its desired mode, or no free slot for
 // one of its acceptors. Recorded so a retry reads the refusal back; the
 // caller asks again under a new id. A live name answers `name_taken` instead.
+// An empty `name` is a configure's refusal (#214 (tenant modes)): a mode the
+// cell cannot place, which changes nothing.
 message Unplaceable {
   uint64 request = 1;
   bytes name = 2;
+}
+
+// Request `request`: change a desired mode (#214 (tenant modes), §3.4), the
+// tenant's FDB `configure`. `tenant_default` changes the default a create
+// that names no mode takes; else `id` names the live journal whose mode
+// changes (an id that names no live journal, `0` included, answers the
+// request `unknown_journal`). The coordinator applies a journal's new mode
+// by reconfiguration and placement, then records `Placed`. The writer mode
+// never changes.
+message Configure {
+  uint64 request = 1;
+  uint64 id = 2;
+  bool tenant_default = 3;
+  Desired desired = 4;
+}
+
+// The configuration in force of journal `id` once the coordinator applied
+// its desired mode (#214 (tenant modes)): what views show. The create's
+// `config` stays the journal's bootstrap configuration. A journal that is not
+// live changes nothing.
+message Placed {
+  uint64 id = 1;
+  paros.common.v1.AcceptorConfig config = 2;
 }
 
 // The checkpoint state (#230): the description, every journal ever created
@@ -97,6 +124,8 @@ message TenantState {
   Describe describe = 1;
   repeated JournalState journals = 2;
   repeated OutcomeState outcomes = 3;
+  // The default desired mode, once a `Configure` changed it (#214).
+  Desired default_desired = 4;
 }
 
 message JournalState {
@@ -107,11 +136,15 @@ message JournalState {
   paros.common.v1.AcceptorConfig config = 5;
   // The position of the delete that tombstoned it, plus one; 0 while live.
   uint64 deleted_at = 6;
+  // The configuration in force the coordinator last recorded (#214); unset
+  // while it is the create's `config`.
+  paros.common.v1.AcceptorConfig placed = 7;
 }
 
 message OutcomeState {
   uint64 request = 1;
-  // 1 created, 2 deleted, 3 name taken, 4 unknown journal, 5 unplaceable.
+  // 1 created, 2 deleted, 3 name taken, 4 unknown journal, 5 unplaceable,
+  // 6 configured (`id` 0: the tenant default).
   uint32 kind = 2;
   uint64 id = 3;
 }

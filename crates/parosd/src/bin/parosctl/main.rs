@@ -249,6 +249,10 @@ enum CellCommand {
     /// Create, delete and list a tenant's journals through its control
     /// journal and the tenant coordinator (#210).
     Journal(journal::JournalArgs),
+    /// FDB's `configure` (#214 (tenant modes)): a new desired mode for a
+    /// tenant's journal (`--journal`) or for its default; the tenant
+    /// coordinator applies a journal's mode by reconfiguration.
+    Configure(journal::ConfigureArgs),
     /// The load generator (#517): closed-loop clients writing and reading
     /// the journals of a tenant, throughput and latency per call each
     /// second, then the totals.
@@ -660,6 +664,17 @@ async fn online(global: Global, command: Command) -> ExitCode {
             fleet::run(&runtime.providers, &client, &ids, &labels, &out, args).await
         }
         CellCommand::Bench(args) => bench::run(&runtime, &client, &ids, args).await,
+        CellCommand::Configure(args) => {
+            journal::configure(
+                &runtime.providers,
+                &runtime.rpc,
+                &runtime.names,
+                &client,
+                &out,
+                args,
+            )
+            .await
+        }
         CellCommand::Journal(args) => {
             journal::run(
                 &runtime.providers,

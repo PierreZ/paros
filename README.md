@@ -53,6 +53,10 @@ docker compose run --rm parosctl read T/J
 Every session can run over TLS, mutual by default: `parosctl tls init` writes the
 authority and every certificate in one step.
 
+A journal's durability can change while it runs: `parosctl configure --tenant acme --journal
+orders --failures-per-partition 2` asks for five acceptors, and the tenant coordinator moves
+the journal there by reconfiguration, without losing a write (#214 (tenant modes)).
+
 The copy-paste demo, with Docker Compose or three local processes, is
 [`DEMO.md`](DEMO.md). The walkthrough — init, write and read, kill and restart a
 machine, supersede a writer, lose a disk — is

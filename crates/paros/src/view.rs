@@ -244,10 +244,12 @@ impl CellFacts<'_> {
                 kind: "data".to_string(),
                 writer: writer_label(journal.writer).to_string(),
                 desired: journal.desired.label(),
-                acceptors: journal.config.members().iter().map(|n| n.0).collect(),
+                // The configuration in force the coordinator recorded (#214
+                // (tenant modes)): the create's until a mode change.
+                acceptors: journal.placed.members().iter().map(|n| n.0).collect(),
                 matchmakers: Vec::new(),
                 desired_acceptors: journal.desired.acceptors() as u64,
-                placed: Some(config_to_proto(&journal.config)),
+                placed: Some(config_to_proto(&journal.placed)),
                 ..wire::JournalView::default()
             }));
         }

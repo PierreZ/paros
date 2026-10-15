@@ -419,6 +419,35 @@ pub enum TenantCommand {
         /// The name the create asked for.
         name: Vec<u8>,
     },
+    /// Request `request`: change a desired mode (#214 (tenant modes)), the
+    /// tenant's default or a live journal's. A journal target that names no
+    /// live journal answers `UnknownJournal`.
+    Configure {
+        /// The caller's idempotency id.
+        request: u64,
+        /// Whose mode changes.
+        target: ConfigureTarget,
+        /// The new mode.
+        desired: Desired,
+    },
+    /// The configuration in force of journal `id`, once the coordinator
+    /// applied its desired mode (#214 (tenant modes)). Not a request: it
+    /// records no outcome.
+    Placed {
+        /// The journal.
+        id: JournalId,
+        /// Its members and quorum system now.
+        config: AcceptorConfig,
+    },
+}
+
+/// Whose desired mode a `Configure` changes (#214 (tenant modes)).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConfigureTarget {
+    /// The default a create that names no mode takes.
+    TenantDefault,
+    /// A journal of the tenant (`0`: the name named none).
+    Journal(JournalId),
 }
 
 impl TenantCommand {
@@ -453,6 +482,26 @@ impl TenantCommand {
                 request: *request,
                 name: name.clone(),
             }),
+            TenantCommand::Configure {
+                request,
+                target,
+                desired,
+            } => {
+                let (id, tenant_default) = match target {
+                    ConfigureTarget::TenantDefault => (0, true),
+                    ConfigureTarget::Journal(id) => (id.0, false),
+                };
+                Kind::Configure(wire::Configure {
+                    request: *request,
+                    id,
+                    tenant_default,
+                    desired: Some(desired.to_wire()),
+                })
+            }
+            TenantCommand::Placed { id, config } => Kind::Placed(wire::Placed {
+                id: id.0,
+                config: Some(config_to_proto(config)),
+            }),
         };
         wire::TenantEntry { kind: Some(kind) }.encode_to_vec()
     }
@@ -485,6 +534,23 @@ impl TenantCommand {
                 request: refused.request,
                 name: refused.name,
             },
+            Kind::Configure(configure) => TenantCommand::Configure {
+                request: configure.request,
+                target: if configure.tenant_default {
+                    if configure.id != 0 {
+                        return Err("a tenant default names no journal");
+                    }
+                    ConfigureTarget::TenantDefault
+                } else {
+                    ConfigureTarget::Journal(JournalId(configure.id))
+                },
+                desired: Desired::from_wire(configure.desired)?,
+            },
+            Kind::Placed(placed) => TenantCommand::Placed {
+                id: JournalId(placed.id),
+                config: config_from_proto(placed.config)?
+                    .ok_or("a placed journal names its configuration")?,
+            },
         })
     }
 }
@@ -498,8 +564,12 @@ pub struct TenantJournal {
     pub writer: WriterMode,
     /// The mode it was created under.
     pub desired: Desired,
-    /// Its placement: the members the coordinator picked.
+    /// Its placement: the members the coordinator picked at its create,
+    /// its bootstrap configuration for life.
     pub config: AcceptorConfig,
+    /// The configuration in force the coordinator last recorded (#214
+    /// (tenant modes)): the create's `config` until a `Placed` entry.
+    pub placed: AcceptorConfig,
     /// The position of the delete that tombstoned it, if any.
     pub deleted_at: Option<u64>,
 }
@@ -517,6 +587,9 @@ pub enum RequestOutcome {
     UnknownJournal,
     /// The cell could not place the create (#212 (placement)).
     Unplaceable,
+    /// A desired mode changed (#214 (tenant modes)): a journal's, or the
+    /// tenant default's (`None`).
+    Configured(Option<JournalId>),
 }
 
 impl RequestOutcome {
@@ -527,6 +600,7 @@ impl RequestOutcome {
             RequestOutcome::NameTaken(id) => (3, id.0),
             RequestOutcome::UnknownJournal => (4, 0),
             RequestOutcome::Unplaceable => (5, 0),
+            RequestOutcome::Configured(id) => (6, id.map_or(0, |id| id.0)),
         };
         wire::OutcomeState { request, kind, id }
     }
@@ -538,6 +612,8 @@ impl RequestOutcome {
             (3, id) if id != 0 => RequestOutcome::NameTaken(JournalId(id)),
             (4, 0) => RequestOutcome::UnknownJournal,
             (5, 0) => RequestOutcome::Unplaceable,
+            (6, 0) => RequestOutcome::Configured(None),
+            (6, id) => RequestOutcome::Configured(Some(JournalId(id))),
             _ => return Err("an outcome state is out of range"),
         })
     }
@@ -565,6 +641,21 @@ pub enum TenantEvent {
     Deleted {
         /// The request.
         request: u64,
+        /// The journal.
+        id: JournalId,
+    },
+    /// A desired mode changed (#214 (tenant modes)): a journal's, or the
+    /// tenant default's (`id` `None`).
+    Configured {
+        /// The request.
+        request: u64,
+        /// The journal, or `None` for the tenant default.
+        id: Option<JournalId>,
+        /// The new mode.
+        desired: Desired,
+    },
+    /// The coordinator recorded journal `id`'s configuration in force.
+    Placed {
         /// The journal.
         id: JournalId,
     },
@@ -619,6 +710,11 @@ pub enum TenantRefusal {
     /// A second description that differs from the first, or one of another
     /// tenant.
     Redescribed,
+    /// A `Placed` entry for a journal that is not live.
+    NotPlaceable {
+        /// The journal it named.
+        id: JournalId,
+    },
 }
 
 /// The tenant control journal's fold.
@@ -629,6 +725,8 @@ pub struct TenantControl {
     /// The control journal's own id: taken from birth.
     control: JournalId,
     description: Option<Description>,
+    /// The default desired mode a `Configure` set (#214 (tenant modes)).
+    default: Option<Desired>,
     journals: BTreeMap<JournalId, TenantJournal>,
     /// Live names, to the journal holding each.
     names: BTreeMap<Vec<u8>, JournalId>,
@@ -650,6 +748,7 @@ impl TenantControl {
             tenant,
             control,
             description: None,
+            default: None,
             journals: BTreeMap::new(),
             names: BTreeMap::new(),
             outcomes: BTreeMap::new(),
@@ -679,6 +778,30 @@ impl TenantControl {
     #[must_use]
     pub fn description(&self) -> Option<&Description> {
         self.description.as_ref()
+    }
+
+    /// The desired mode a create that names none takes (#214 (tenant
+    /// modes)): the last `Configure` of the tenant default, else the
+    /// description's, else [`Desired::DEFAULT`].
+    #[must_use]
+    pub fn default_desired(&self) -> Desired {
+        self.default
+            .or_else(|| self.description.as_ref().map(|d| d.desired))
+            .unwrap_or(Desired::DEFAULT)
+    }
+
+    /// The largest `failures_per_partition` of the tenant: its default and
+    /// every live journal's (§3.4: its matchmaker set has `2F+1`
+    /// matchmakers, #214 (tenant modes)).
+    #[must_use]
+    pub fn largest_failures(&self) -> u32 {
+        self.live()
+            .map(|(_, j)| j.desired.durability.failures_per_partition)
+            .chain(std::iter::once(
+                self.default_desired().durability.failures_per_partition,
+            ))
+            .max()
+            .unwrap_or(Durability::DEFAULT.failures_per_partition)
     }
 
     /// Whether the tenant used `id` already (its control journal's, or any
@@ -748,6 +871,12 @@ impl TenantControl {
             }) => self.create(request, id, name, writer, desired, config),
             Ok(TenantCommand::DeleteJournal { request, id }) => self.delete(seq, request, id),
             Ok(TenantCommand::Unplaceable { request, name }) => self.refuse(request, &name),
+            Ok(TenantCommand::Configure {
+                request,
+                target,
+                desired,
+            }) => self.configure(request, target, desired),
+            Ok(TenantCommand::Placed { id, config }) => self.place(id, config),
             Err(_) => TenantEvent::Refused(TenantRefusal::Malformed),
         };
         self.assert_invariants();
@@ -800,6 +929,7 @@ impl TenantControl {
                 writer,
                 desired,
                 config: config.clone(),
+                placed: config.clone(),
                 deleted_at: None,
             },
         );
@@ -854,6 +984,63 @@ impl TenantControl {
         TenantEvent::Answered { request, outcome }
     }
 
+    /// A `Configure` (#214 (tenant modes)): the tenant default changes, or
+    /// a live journal's desired mode does. Its writer mode and its
+    /// bootstrap configuration never change.
+    fn configure(
+        &mut self,
+        request: u64,
+        target: ConfigureTarget,
+        desired: Desired,
+    ) -> TenantEvent {
+        if request == 0 {
+            return TenantEvent::Refused(TenantRefusal::Malformed);
+        }
+        if let Some(outcome) = self.outcome(request) {
+            return TenantEvent::Repeated { request, outcome };
+        }
+        let id = match target {
+            ConfigureTarget::TenantDefault => {
+                self.default = Some(desired);
+                None
+            }
+            ConfigureTarget::Journal(id) => {
+                let Some(journal) = self
+                    .journals
+                    .get_mut(&id)
+                    .filter(|j| j.deleted_at.is_none())
+                else {
+                    let outcome = RequestOutcome::UnknownJournal;
+                    self.outcomes.insert(request, outcome);
+                    return TenantEvent::Answered { request, outcome };
+                };
+                journal.desired = desired;
+                Some(id)
+            }
+        };
+        self.outcomes
+            .insert(request, RequestOutcome::Configured(id));
+        TenantEvent::Configured {
+            request,
+            id,
+            desired,
+        }
+    }
+
+    /// A `Placed` (#214 (tenant modes)): the configuration in force of a
+    /// live journal, recorded once the coordinator applied its mode.
+    fn place(&mut self, id: JournalId, config: AcceptorConfig) -> TenantEvent {
+        let Some(journal) = self
+            .journals
+            .get_mut(&id)
+            .filter(|j| j.deleted_at.is_none())
+        else {
+            return TenantEvent::Refused(TenantRefusal::NotPlaceable { id });
+        };
+        journal.placed = config;
+        TenantEvent::Placed { id }
+    }
+
     /// The fold's invariants: every live name maps to a live journal of that
     /// name, every created outcome to a journal it created, and the control
     /// journal is never a created one.
@@ -893,6 +1080,7 @@ impl TenantControl {
                     desired: Some(j.desired.to_wire()),
                     config: Some(config_to_proto(&j.config)),
                     deleted_at: j.deleted_at.map_or(0, |at| at + 1),
+                    placed: (j.placed != j.config).then(|| config_to_proto(&j.placed)),
                 })
                 .collect(),
             outcomes: self
@@ -900,6 +1088,7 @@ impl TenantControl {
                 .iter()
                 .map(|(request, outcome)| outcome.to_wire(*request))
                 .collect(),
+            default_desired: self.default.as_ref().map(Desired::to_wire),
         }
     }
 }
@@ -936,14 +1125,17 @@ impl Checkpointable for TenantControl {
             if deleted_at.is_none() && names.insert(j.name.clone(), id).is_some() {
                 return Err("a tenant state holds a live name twice");
             }
+            let config = config_from_proto(j.config)?
+                .ok_or("a tenant state journal names no configuration")?;
+            let placed = config_from_proto(j.placed)?.unwrap_or_else(|| config.clone());
             journals.insert(
                 id,
                 TenantJournal {
                     name: j.name,
                     writer: writer_mode_from_proto(j.writer)?,
                     desired: Desired::from_wire(j.desired)?,
-                    config: config_from_proto(j.config)?
-                        .ok_or("a tenant state journal names no configuration")?,
+                    config,
+                    placed,
                     deleted_at,
                 },
             );
@@ -955,7 +1147,12 @@ impl Checkpointable for TenantControl {
             }
             outcomes.insert(o.request, RequestOutcome::from_wire(o)?);
         }
+        let default = state
+            .default_desired
+            .map(|d| Desired::from_wire(Some(d)))
+            .transpose()?;
         self.description = description;
+        self.default = default;
         self.journals = journals;
         self.names = names;
         self.outcomes = outcomes;
@@ -1037,6 +1234,22 @@ mod tests {
                 request: 11,
                 name: b"orders".to_vec(),
             },
+            TenantCommand::Configure {
+                request: 12,
+                target: ConfigureTarget::Journal(JournalId(0x9e37)),
+                desired: "failures-per-partition=0,partitions=3"
+                    .parse()
+                    .expect("a mode"),
+            },
+            TenantCommand::Configure {
+                request: 13,
+                target: ConfigureTarget::TenantDefault,
+                desired: Desired::DEFAULT,
+            },
+            TenantCommand::Placed {
+                id: JournalId(0x9e37),
+                config: config(&[1, 2, 4]),
+            },
         ];
         for command in commands {
             assert_eq!(TenantCommand::decode(&command.encode()), Ok(command));
@@ -1061,6 +1274,126 @@ mod tests {
             }
         );
         assert!(t.get(JournalId(12)).is_none());
+    }
+
+    fn configure(request: u64, target: ConfigureTarget, desired: &str) -> Vec<u8> {
+        TenantCommand::Configure {
+            request,
+            target,
+            desired: desired.parse().expect("a mode"),
+        }
+        .encode()
+    }
+
+    #[test]
+    fn a_configure_changes_a_live_journal_or_the_default_and_a_retry_acts_once() {
+        let mut t = fold();
+        t.fold(0, &create(1, 11, b"a"));
+        let wide = "failures-per-partition=2";
+        assert_eq!(
+            t.fold(
+                1,
+                &configure(2, ConfigureTarget::Journal(JournalId(11)), wide)
+            ),
+            TenantEvent::Configured {
+                request: 2,
+                id: Some(JournalId(11)),
+                desired: wide.parse().expect("a mode"),
+            }
+        );
+        let journal = t.get(JournalId(11)).expect("created");
+        assert_eq!(journal.desired.durability.failures_per_partition, 2);
+        // The writer mode and the bootstrap configuration never change.
+        assert_eq!(journal.writer, WriterMode::Single);
+        assert_eq!(journal.config, config(&[1, 2, 3]));
+        assert_eq!(t.largest_failures(), 2);
+        // A retry under the same id reads back its outcome.
+        assert_eq!(
+            t.fold(
+                2,
+                &configure(2, ConfigureTarget::Journal(JournalId(11)), "partitions=3")
+            ),
+            TenantEvent::Repeated {
+                request: 2,
+                outcome: RequestOutcome::Configured(Some(JournalId(11)))
+            }
+        );
+        // A name that named no live journal is answered unknown.
+        assert_eq!(
+            t.fold(
+                3,
+                &configure(3, ConfigureTarget::Journal(JournalId(0)), wide)
+            ),
+            TenantEvent::Answered {
+                request: 3,
+                outcome: RequestOutcome::UnknownJournal
+            }
+        );
+        // The tenant default changes what a create that names none takes.
+        assert_eq!(t.default_desired(), Desired::DEFAULT);
+        t.fold(
+            4,
+            &configure(4, ConfigureTarget::TenantDefault, "partitions=2"),
+        );
+        assert_eq!(t.default_desired().durability.partitions, 2);
+        assert_eq!(t.outcome(4), Some(RequestOutcome::Configured(None)));
+        // A deleted journal is configured no more.
+        t.fold(5, &delete(5, 11));
+        assert_eq!(
+            t.fold(
+                6,
+                &configure(6, ConfigureTarget::Journal(JournalId(11)), wide)
+            ),
+            TenantEvent::Answered {
+                request: 6,
+                outcome: RequestOutcome::UnknownJournal
+            }
+        );
+        assert_eq!(t.largest_failures(), 1);
+    }
+
+    #[test]
+    fn a_placement_is_recorded_for_a_live_journal_and_kept_across_a_checkpoint() {
+        let mut t = fold();
+        t.fold(0, &create(1, 11, b"a"));
+        let placed = TenantCommand::Placed {
+            id: JournalId(11),
+            config: config(&[1, 2, 4]),
+        };
+        assert_eq!(
+            t.fold(1, &placed.encode()),
+            TenantEvent::Placed { id: JournalId(11) }
+        );
+        assert_eq!(
+            t.get(JournalId(11)).expect("created").placed,
+            config(&[1, 2, 4])
+        );
+        assert_eq!(
+            t.get(JournalId(11)).expect("created").config,
+            config(&[1, 2, 3])
+        );
+        t.fold(
+            2,
+            &configure(
+                2,
+                ConfigureTarget::TenantDefault,
+                "failures-per-partition=3",
+            ),
+        );
+        let mut restored = fold();
+        restored
+            .restore(2, &t.checkpoint())
+            .expect("a checkpoint restores");
+        assert_eq!(restored, t);
+        // A placement for a journal that is not live changes nothing.
+        let stray = TenantCommand::Placed {
+            id: JournalId(99),
+            config: config(&[1]),
+        };
+        assert_eq!(
+            t.fold(3, &stray.encode()),
+            TenantEvent::Refused(TenantRefusal::NotPlaceable { id: JournalId(99) })
+        );
     }
 
     #[test]
