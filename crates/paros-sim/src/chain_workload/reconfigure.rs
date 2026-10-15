@@ -505,9 +505,7 @@ impl ChainWorkload {
                     { "outcome" => format!("{outcome:?}") }
                 );
                 if outcome == ReconfigureOutcome::UnknownJournal {
-                    assert_reachable!(
-                        "reconfiguration: a request that names no journal is refused"
-                    );
+                    assert_reachable!("reconfiguration: a node refuses a request with no journal");
                 }
             }
             let outcome = reconfigurer
