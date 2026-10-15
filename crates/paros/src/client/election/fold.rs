@@ -24,7 +24,9 @@
 //! **Every campaign and renewal describes the whole leadership** (the term,
 //! the candidate, its leader uuid and interface), so the leader bounds the
 //! journal by truncating it to its own latest renewal: a watcher that starts
-//! there (a `Gap`, [`ElectionFold::gap`]) anchors on that record and agrees
+//! there (a `Gap`, [`ElectionFold::gap`]) anchors on that record (or on the
+//! campaign or hand-off that began the term, when the leader truncated
+//! before its first renewal counted) and agrees
 //! with every watcher that folded from the start. Until it meets an anchor,
 //! such a watcher knows no leader. The rule assumes nothing else truncates
 //! the journal: an election journal is the election's alone.
@@ -457,8 +459,9 @@ impl ElectionFold {
     }
 
     /// A fold past a gap: it anchors on a renewal (every renewal describes
-    /// the whole leadership), or on a campaign at the very floor (only the
-    /// leader truncates, to its own record), and counts nothing else.
+    /// the whole leadership), or on a campaign or a hand-off at the very
+    /// floor (only the leader truncates, to its own anchor, and the record
+    /// that began its term is one), and counts nothing else.
     fn anchor(&mut self, seq: u64, record: ElectionRecord) -> Change {
         let at_floor = self.floor == Some(seq);
         match record {
@@ -476,6 +479,21 @@ impl ElectionFold {
                 uuid,
             } if at_floor && term >= self.term => {
                 self.lead(term, candidate, uuid, seq);
+                Change::Adopted
+            }
+            // A hand-off begins its successor's term, as a campaign does:
+            // the successor's anchor until it renews, so its truncation may
+            // leave the hand-off at the floor. Unanchored, every later fold
+            // knew no leader and every campaign past it lost, for good
+            // (witness `replay-recipe 8483586457832106451
+            // 53223:2760145812269184061` on 9bcbd0f: the successor truncated
+            // to the hand-off, then rebooted).
+            ElectionRecord::Resign {
+                term,
+                successor: Some((successor, uuid)),
+                ..
+            } if at_floor && term + 1 >= self.term => {
+                self.lead(term + 1, successor, uuid, seq);
                 Change::Adopted
             }
             other => {
@@ -687,5 +705,38 @@ mod tests {
         assert_eq!(cut.leader().map(|l| (l.term, l.since)), Some((5, 4)));
         assert_eq!(cut.absorb(5, &renew(5, 9)), Change::Renewed);
         assert_eq!(cut.leader().map(|l| l.anchor), Some(5));
+    }
+
+    #[test]
+    fn the_successor_truncating_to_its_hand_off_leaves_an_anchor() {
+        let hand_off = ElectionRecord::Resign {
+            term: 4,
+            candidate: 1,
+            successor: Some((who(2), LeaderUuid(502))),
+        }
+        .encode();
+        let log = [campaign(4, 1), renew(4, 1), hand_off];
+        let (whole, _) = fold(&log);
+        let leader = whole.leader().expect("the successor leads");
+        assert_eq!((leader.term, leader.anchor), (5, 2), "its anchor");
+        // The successor truncates to its anchor and never renews: a fold
+        // from there knows the term, so the next campaign wins.
+        let mut cut = ElectionFold::new();
+        cut.gap(2);
+        assert_eq!(cut.absorb(2, &log[2]), Change::Adopted);
+        assert_eq!(
+            cut.leader().map(|l| (l.term, l.candidate.id, l.uuid)),
+            Some((5, 2, LeaderUuid(502)))
+        );
+        assert_eq!(
+            cut.absorb(3, &campaign(6, 3)),
+            Change::Won { deposed: Some(2) }
+        );
+        // Past the floor, a hand-off anchors nothing.
+        let mut late = ElectionFold::new();
+        late.gap(1);
+        assert_eq!(late.absorb(1, b"chain block"), Change::Ignored);
+        assert_eq!(late.absorb(2, &log[2]), Change::Ignored);
+        assert!(!late.is_known());
     }
 }

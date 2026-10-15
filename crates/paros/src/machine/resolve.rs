@@ -105,6 +105,12 @@ pub(crate) fn spawn<P: Providers>(
     if fresh {
         moonpool_assertions::reachable!("resolve: a machine answers from fresh folds");
     }
+    // The incarnation's first answer is cut short at once, on a BUGGIFY
+    // decision: it answers `unavailable`, keeps what it read, and the next
+    // answer goes on from there (#457). A short drawn bound alone left the
+    // cut-short gate unreached in sweeps (PR #552, #446). Drawn here, on
+    // the machine's start path, and carried to the task.
+    let mut hasty = moonpool_buggify::buggify_with_prob!(0.2);
     let providers = providers.clone();
     let rpc = rpc.clone();
     providers
@@ -122,10 +128,12 @@ pub(crate) fn spawn<P: Providers>(
                             folds = Folds::new(&resolver);
                         }
                         let answer = folds.answer(&providers, &rpc, &resolver, &request, &shutdown);
-                        let answer = providers
-                            .time()
-                            .timeout(resolver.answer_within, answer)
-                            .await;
+                        let within = if std::mem::take(&mut hasty) {
+                            Duration::from_millis(1)
+                        } else {
+                            resolver.answer_within
+                        };
+                        let answer = providers.time().timeout(within, answer).await;
                         completed = answer.is_ok();
                         // A fold is a consistent prefix at every await
                         // (each page folds whole before the next read):

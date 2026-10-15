@@ -18,9 +18,9 @@
 //! The id is never folded into a command fingerprint instead: that would
 //! protect only `Accepted`'s vhash, while `Prepare`, `Promise`, `Commit`,
 //! `Heartbeat` and catch-up would still cross journals. The matchmaker
-//! plane, the proxy leaders and the replica tier serve one journal each —
-//! the node's first user journal (asserted at boot); every other journal is
-//! plain Multi-Paxos over the whole pool.
+//! plane, the proxy leaders and the replica tier are shared processes too
+//! (#190, #193): each journal's `Config` names them or not, and they demux
+//! on the same identifier.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -430,36 +430,15 @@ impl<S, A> Journals<S, A> {
         serves
     }
 
-    /// The node's **plane** journal (the target of a journal-less call and
-    /// of the single-journal planes: matchmaking, retirement): the
-    /// deployment's journal — the one whose configuration names its
-    /// matchmakers, proxies or replicas, which only one journal of a process
-    /// may (#188) — or else the first live user journal. No identifier is fixed
-    /// (§3.8), so id order says nothing; the control journals serve no
-    /// plane.
-    pub(crate) fn first(&mut self) -> Option<(&JournalIdentifier, &mut JournalRt<S, A>)> {
-        let deployed = *self.plane()?.0;
-        assert!(
-            self.live.contains_key(&deployed),
-            "the plane's journal is live"
-        );
-        let first = self
-            .live
-            .iter_mut()
-            .find(|(journal, _)| **journal == deployed);
-        assert!(first.is_some(), "the plane's runtime is found");
-        first
-    }
-
-    /// The journal an operator call names (#474: a machine serves many), or
-    /// the plane ([`Journals::first`]) when it names none. `None` when the
-    /// named journal is not live here.
-    pub(crate) fn named_or_first(
+    /// The journal an operator call names (#474: a machine serves many).
+    /// `None` when it names none, or a journal not live here: no identifier
+    /// has a default (#439 (operator calls name their journal)).
+    pub(crate) fn named(
         &mut self,
         journal: JournalIdentifier,
     ) -> Option<(&JournalIdentifier, &mut JournalRt<S, A>)> {
         if !journal.is_set() {
-            return self.first();
+            return None;
         }
         let named = self.live.range_mut(journal..=journal).next();
         assert!(

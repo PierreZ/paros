@@ -85,8 +85,8 @@ use crate::audit::Audit;
 use crate::machine::{CellMachine, ControlJournals};
 use crate::rpc::{
     InspectRefusal, InspectTarget, MatchmakerClient, MatchmakersRefusal, ReadAck,
-    ReconfigureMatchmakersAck, ReplySender, SetLeaderAck, TruncateAck, WriteAck, leader_from_proto,
-    leader_uuid_from_proto,
+    ReconfigureMatchmakersAck, ReplySender, RetireAck, RetireRefusal, SetLeaderAck, TruncateAck,
+    WriteAck, leader_from_proto, leader_uuid_from_proto,
 };
 use crate::storage::LogStorage;
 use crate::system::{NodeStanding, RegistryEvent, SystemEvent};
@@ -141,6 +141,26 @@ impl<P: Providers, A: Audit> NodeLoop<'_, P, A> {
         waiters: &mut ClientWaiters,
         last: &mut Deltas,
     ) -> Result<(), RunError> {
+        self.settle_expiring(node, storage, waiters, last, None)
+            .await
+    }
+
+    /// [`Self::settle`], and on a tick the read expiry: `expiry` carries the
+    /// tick count and whether every confirming read expires early. The
+    /// expired long-polls are answered from the fold the batch reported,
+    /// before the next page is released.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::settle`].
+    async fn settle_expiring<S: LogStorage>(
+        &self,
+        node: &mut ColocatedNode,
+        storage: &mut S,
+        waiters: &mut ClientWaiters,
+        last: &mut Deltas,
+        expiry: Option<(u64, bool)>,
+    ) -> Result<(), RunError> {
         assert!(
             node.config().id.0 == self.self_id,
             "a node loop settles its own node"
@@ -148,6 +168,7 @@ impl<P: Providers, A: Audit> NodeLoop<'_, P, A> {
         let promised = node.hard_state().max_promised_ballot;
         let chosen = node.hard_state().chosen_index;
         let mut outbox = drain_ready(node, storage, self.out, waiters, self.audit).await?;
+        let reported = fold_head(node);
         if !outbox.gc_requests.is_empty() && crate::scenario::withhold_gc() {
             tracing::info!(node = self.self_id, "gc_requests_withheld");
             outbox.gc_requests.clear();
@@ -175,10 +196,44 @@ impl<P: Providers, A: Audit> NodeLoop<'_, P, A> {
         );
         // The journal fold only grows inside a batch: a journal read
         // long-polling at the tail is re-served here (#204).
+        // Nothing between the drain and here walks the prefix: the reads
+        // below see the fold the batch reported.
+        assert!(
+            fold_head(node) == reported,
+            "a node serves reads from the fold its batch reported"
+        );
         waiters.reads.wake(
             |from, limit, bytes| node.read_log(from, limit, bytes),
             NodeId(self.self_id),
             self.audit,
+        );
+        if let Some((ticks, expire_all)) = expiry {
+            waiters.reads.expire(
+                |from, limit, bytes| node.read_log(from, limit, bytes),
+                ticks,
+                self.tunables.read_retry_ticks,
+                expire_all,
+                NodeId(self.self_id),
+                self.audit,
+            );
+        }
+        assert!(
+            fold_head(node) == reported,
+            "serving reads never moves the fold"
+        );
+        // The batch is now durable, sent and applied, and every read this
+        // settle answered saw the fold it reported. Only at this boundary may
+        // the core materialize the next bounded Ready page. Released before
+        // the reads (inside the drain, as before #550 (replica serves an
+        // unreported fold page)), the core folds the page at once while its
+        // writes and its report wait for the next batch, and a read parked at
+        // the tail is served slots the node neither persisted nor reported
+        // (witness 12015710127796105877 on PR #552: a node served next_seq 5
+        // with its fold at slot 5 and its report at slot 3).
+        node.advance_recovery();
+        assert!(
+            fold_head(node) >= reported,
+            "releasing the next page never rewinds the fold"
         );
         // The settle tail persists and applies; it never lowers what it made
         // durable (the core's own marks, restated at the I/O seam).
@@ -710,17 +765,13 @@ impl<P: Providers> Shared<'_, P> {
         // would stop confirmed reads from ever completing during the chaos
         // window. Silent in the recovery tail; its gate is the audit's
         // `read_expired` (the `early` leg).
+        // They are answered in the settle, from the fold its batch reported,
+        // before the next page is released (#550 (replica serves an
+        // unreported fold page)).
         let expire_all =
             waiters.reads.has_confirming() && moonpool_buggify::buggify_fault_with_prob!(0.05);
-        waiters.reads.expire(
-            |from, limit, bytes| node.read_log(from, limit, bytes),
-            ticks,
-            tunables.read_retry_ticks,
-            expire_all,
-            NodeId(self_id),
-            &*audit,
-        );
-        lp.settle(node, storage, waiters, last).await?;
+        lp.settle_expiring(node, storage, waiters, last, Some((ticks, expire_all)))
+            .await?;
         // Surface a chosen slot stranded above the applied prefix. The
         // `Ready` handshake only ever hands out the *contiguous* prefix, so a
         // hole below a chosen slot is otherwise invisible from outside the
@@ -1162,10 +1213,10 @@ where
 /// [`run_node`]'s fail-stop crash. A seam crash is the process dying, for
 /// every journal.
 ///
-/// The matchmaker plane, the proxy leaders and the replica tier serve one
-/// journal each, the node's first user journal: every other journal of a
-/// node — the control journals included — runs plain Multi-Paxos
-/// (journal-tagged planes are #190 and #193).
+/// The matchmaker plane, the proxy leaders and the replica tier are shared
+/// by every journal that names them (#190, #193): each journal's
+/// [`paros_core::Config`] says whether it delegates to proxies and teaches
+/// replicas, and the messages carry its identifier.
 ///
 /// `node` is this process's node id, named by the caller (no id has a
 /// default, §3.8): every journal's [`paros_core::Config`] must carry it, and
@@ -1189,8 +1240,7 @@ where
 ///
 /// # Errors
 ///
-/// As [`run_node`]; [`RunError::Infra`] when several journals are asked of a
-/// deployment with matchmakers, proxies or replicas.
+/// As [`run_node`].
 ///
 /// # Panics
 ///
@@ -1278,24 +1328,6 @@ where
     }
     if journals.exhausted() && (!follows || journals.stranded()) {
         return journals.exit();
-    }
-    // The proxy leaders and the replica tier serve one journal each — the
-    // node's first user journal — so every other journal must run without
-    // them (#188; journal-tagged proxies are #193). Matchmakers serve every
-    // journal: one set per tenant, one registry per journal (#190).
-    let plane = journals.plane().map(|(journal, _)| *journal);
-    let planed = journals
-        .live
-        .iter()
-        .filter(|(journal, _)| Some(**journal) != plane)
-        .any(|(_, rt)| {
-            let config = rt.node.config();
-            config.proxy_count > 0 || config.replica_count > 0
-        });
-    if planed {
-        return Err(RunError::Infra(SimulationError::InvalidState(
-            "only a node's first journal may name proxies or replicas".into(),
-        )));
     }
     // The caller named the node (no id has a default, §3.8); every journal
     // it opened must agree. Caller input, so a mismatch is a refusal.
@@ -1554,6 +1586,8 @@ where
     // reconfigurer plus the two clocks that pace it, idle until a client asks
     // or until this node meets a frozen registry nobody finished replacing.
     let mut handovers: BTreeMap<TenantId, HandoverDriver> = BTreeMap::new();
+    // A handover pages its bootstrap by the matchmakers' page (#439).
+    let registry_page = tunables.registry_page;
     // Set by an accepted operator `Retire`: the node exits at its next tick,
     // after the ack had a beat to leave.
     let mut retiring: Option<JournalIdentifier> = None;
@@ -1814,7 +1848,7 @@ where
                 let folded = folded_answer(&reply);
                 let step = rt.node.on_match_reply(reply);
                 report_match_step(&rt.audit, self_id, matchmaker, ballot, folded, &step);
-                let handover = handovers.entry(tenant).or_insert_with(|| HandoverDriver::new(NodeId(self_id)));
+                let handover = handovers.entry(tenant).or_insert_with(|| HandoverDriver::new(NodeId(self_id), registry_page));
                 shared.with(&audits).on_match_refusal(&rt.node, handover, matchmaker, &step);
                 let outcome = shared.settle(rt).await;
                 journals.fold(journal, outcome, ticks, self_id)?;
@@ -1902,25 +1936,44 @@ where
                 // handover runs to completion on this node's own cadence.
                 // It hands over the set of the tenant the request names
                 // (#501 (matchmaker sets off the founders)), through a
-                // journal of that tenant this node serves, or the set of
-                // the node's first journal's tenant when it names none.
+                // journal of that tenant this node serves. No tenant has a
+                // default (#439 (operator calls name their journal)): an
+                // unset one, or one this node serves no journal of, is
+                // refused `unknown_tenant`; a tenant whose journals run
+                // without matchmakers, `no_matchmakers`.
                 let asked = TenantId(req.tenant);
-                let journal = if asked.0 == 0 {
-                    journals.first().map(|(journal, _)| *journal)
-                } else {
-                    journals
-                        .live
-                        .iter()
-                        .find(|(journal, rt)| journal.tenant == asked && rt.node.config().has_matchmakers())
-                        .map(|(journal, _)| *journal)
+                let serves = asked.0 != 0 && journals.live.keys().any(|journal| journal.tenant == asked);
+                let journal = journals
+                    .live
+                    .iter()
+                    .find(|(journal, rt)| asked.0 != 0 && journal.tenant == asked && rt.node.config().has_matchmakers())
+                    .map(|(journal, _)| *journal);
+                let Some(journal) = journal else {
+                    let refusal = if serves {
+                        MatchmakersRefusal::NoMatchmakers
+                    } else {
+                        moonpool_assertions::reachable!("operator: a matchmaker handover names a tenant the node does not serve");
+                        MatchmakersRefusal::UnknownTenant
+                    };
+                    tracing::info!(node = self_id, accepted = false, refusal = refusal.label(), "reconfigure_matchmakers_acked");
+                    shared.with(&node_audit).answer(
+                        Reply::ReconfigureMatchmakers,
+                        reply,
+                        ReconfigureMatchmakersAck {
+                            accepted: false,
+                            refusal: refusal.label().to_string(),
+                            generation: None,
+                        },
+                    );
+                    continue;
                 };
-                let Some(journal) = journal else { continue };
                 let tenant = journal.tenant;
-                assert!(asked.0 == 0 || tenant == asked, "a handover runs for the tenant asked");
+                assert!(tenant == asked, "a handover runs for the tenant asked");
+                assert!(tenant.0 != 0, "a handover names its tenant");
                 let audits = tenant_audits(&journals, &stores, tenant);
                 let Some(rt) = journals.live.get(&journal) else { continue };
                 let lp = shared.with(&audits);
-                let handover = handovers.entry(tenant).or_insert_with(|| HandoverDriver::new(NodeId(self_id)));
+                let handover = handovers.entry(tenant).or_insert_with(|| HandoverDriver::new(NodeId(self_id), registry_page));
                 let target: Vec<MatchmakerId> = req.members.iter().copied().map(MatchmakerId).collect();
                 let refusal = operator::reconfigure_matchmakers(&rt.node, handover, &target, |m| {
                     links.knows(*m)
@@ -1949,11 +2002,18 @@ where
             Some((req, reply)) = rpc.retire.recv() => {
                 // No settle tail: this arm only reads the core and arms a flag
                 // the tick arm acts on, so it produces no `Ready` batch. A
-                // retirement names the journal it leaves (#474), or the
-                // node's first journal on a node that serves one: it leaves
-                // that journal, and keeps serving the others (#188).
+                // retirement names the journal it leaves (#474): it leaves
+                // that journal, and keeps serving the others (#188). No
+                // journal has a default (#439 (operator calls name their
+                // journal)): an unset one, or one not live here, is refused.
                 let asked = JournalIdentifier::new(TenantId(req.tenant), paros_core::JournalId(req.journal));
-                let Some((&journal, rt)) = journals.named_or_first(asked) else { continue };
+                let Some((&journal, rt)) = journals.named(asked) else {
+                    moonpool_assertions::reachable!("operator: a retirement names a journal the node does not serve");
+                    let refusal = RetireRefusal::UnknownJournal;
+                    let ack = RetireAck { accepted: false, refusal: refusal.label().to_string() };
+                    shared.with(&node_audit).answer(Reply::Retire, reply, ack);
+                    continue;
+                };
                 let ack = operator::retire(&rt.node, &rt.audit, self_id, &req);
                 if ack.accepted {
                     retiring = Some(journal);
@@ -1962,10 +2022,16 @@ where
             }
             Some((req, reply)) = rpc.reconfigure.recv() => {
                 // An acceptor reconfiguration (#122): a matchmaker-deployment
-                // act on the journal it names (#474), or the node's one
-                // journal; a plain journal refuses it (`no_matchmakers`).
+                // act on the journal it names (#474); a plain journal refuses
+                // it (`no_matchmakers`). No journal has a default (#439
+                // (operator calls name their journal)): an unset one, or one
+                // not live here, is refused `unknown_journal`.
                 let asked = JournalIdentifier::new(TenantId(req.tenant), paros_core::JournalId(req.journal));
-                let Some((&journal, rt)) = journals.named_or_first(asked) else { continue };
+                let Some((&journal, rt)) = journals.named(asked) else {
+                    moonpool_assertions::reachable!("operator: a reconfiguration names a journal the node does not serve");
+                    shared.with(&node_audit).answer(Reply::Reconfigure, reply, operator::unknown_journal());
+                    continue;
+                };
                 let ack = operator::reconfigure(&mut rt.node, &rt.audit, self_id, &req);
                 let outcome = shared.settle(rt).await;
                 // A lost reconfiguration ack is ambiguous to the client, which
@@ -2089,7 +2155,7 @@ where
                     let takes_handover = rt.node.config().has_matchmakers() && paced.insert(journal.tenant);
                     let handover = takes_handover.then(|| {
                         (
-                            handovers.entry(journal.tenant).or_insert_with(|| HandoverDriver::new(NodeId(self_id))),
+                            handovers.entry(journal.tenant).or_insert_with(|| HandoverDriver::new(NodeId(self_id), registry_page)),
                             &audits,
                         )
                     });

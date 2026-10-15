@@ -365,7 +365,9 @@ Three layers, and nothing crosses them:
   strikes inside the chaos window the moment a decided slot lacks a member's copy
   (`paros_sim::world::bare_outage`, #270). Likewise on a seed that draws the lagging-acceptor
   scenario, the one acceptor it holds down may stay down at most `LATE_WINDOW` into the tail
-  (`paros_sim::world::lagging_acceptor`, #340). Likewise on a seed that draws the
+  (`paros_sim::world::lagging_acceptor`, #340). Likewise on a seed that draws the lagging-replica
+  scenario, the one replica it holds down may stay down at most `LATE_WINDOW` into the tail
+  (`paros_sim::world::lagging_replica`, #550 (replica serves an unreported fold page)). Likewise on a seed that draws the
   replaced-founder scenario, its wipe of a founder may strike at most `LATE_WINDOW` into the
   tail, once every founder formed (`paros_sim::world::replaced_founder`, #423). Likewise on a
   seed that draws the split-floor scenario (decided on 2026-10-11, #409), the acceptors whose

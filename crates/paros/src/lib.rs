@@ -17,13 +17,15 @@
 //!
 //! [`run_proxy`] is the same shape again for the **proxy leader** role (#142,
 //! Compartmentalized Paxos §3.1): the leader's Phase-2 fan-out and fold on a
-//! process of its own, with nothing to persist. Opt-in the same way: a
+//! process of its own, with nothing to persist, one `ProxyLeader` per journal it
+//! serves (#193). Opt-in the same way: a
 //! deployment whose `Config::proxy_count` is zero runs no proxy and exchanges
 //! exactly the plain deployment's messages.
 //!
 //! [`run_replica`] is the fourth (#144, Compartmentalized Paxos §3.3): a
 //! [`ReplicaNode`] — the chosen log and the application, no vote — over the
-//! same [`LogStorage`] a node runs on. Opt-in again: a deployment whose
+//! same [`LogStorage`] a node runs on, one per journal it serves, opened
+//! through the same [`JournalStores`] seam (#193). Opt-in again: a deployment whose
 //! `Config::replica_count` is zero runs none, and the node driver's learner
 //! traffic reaches the pool alone.
 
@@ -90,7 +92,7 @@ pub use matchmaker::{
     matchmaker_storage_contract_suite, run_matchmaker,
 };
 pub use provision::{Provisioned, provision_matchmaker_store, provision_store};
-pub use proxy::{ProxyConfig, run_proxy};
+pub use proxy::{ProxyConfig, ProxyJournal, run_proxy};
 pub use replica_tier::run_replica;
 pub use storage::{
     LogStorage, MemStorage, MetadataFault, StorageError, StorageRecord, WriteOutcome,

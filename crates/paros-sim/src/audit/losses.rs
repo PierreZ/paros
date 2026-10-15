@@ -120,8 +120,9 @@ impl Losses {
 
 impl AuditState {
     /// Whether the journal's liveness is excused by an outage's losses: a
-    /// slot no leader can decide again, or a lost slot whose every clean
-    /// copy is out of reach.
+    /// slot no leader can decide again, a lost slot whose every clean
+    /// copy is out of reach, or an undecided slot faulty copies freeze
+    /// ([`Self::frozen_by_faulty`]).
     pub(super) fn loss_excuses_liveness(&self) -> bool {
         self.losses.has_unrecoverable()
             || self.losses.planned.keys().any(|slot| self.stranded(*slot))
@@ -130,6 +131,90 @@ impl AuditState {
                 .planned
                 .keys()
                 .any(|slot| self.blocked_in_asked(*slot))
+            || self.frozen_by_faulty()
+    }
+
+    /// Whether an **undecided** slot is frozen by faulty copies no outage
+    /// planned: a live member's boot reported its entry faulty, no node
+    /// holds a clean copy the tally heard, and some configuration the
+    /// latest campaign asked has no Phase-1 quorum of qualifying answers
+    /// (a member holding nothing qualifies; a faulty one does not, with no
+    /// clean copy to set a threshold). The core's repair probe then waits
+    /// in CTRL's Case 3 for good, and every slot above stays unapplied.
+    ///
+    /// The cause is moonpool's storage chaos, which no copy budget vetoes:
+    /// a failed sync of a `Batched` commit leaves its batch in the file
+    /// image, and the next open keeps it as an ambiguous last batch, its
+    /// entries faulty (witness: sweep recipe 9252275353835136687
+    /// `[(30265, 13455160545654224654)]` on 8efe714, a flexible `q1 = 3`
+    /// over three nodes; the leader's own commit of slot 1 failed while
+    /// the two others were down, so slot 1 was never decided, yet node 0
+    /// reported it faulty at `(2, 0)` on every boot, and 22 decided slots
+    /// above it were never applied; red on "every quorum-decided slot is
+    /// applied by the end of the tail", green with this excuse). Nothing
+    /// was decided there, so no copy was lost: the excuse is liveness only,
+    /// judged afresh each time it is asked (a repair accept of the slot
+    /// makes a clean copy and lifts it).
+    fn frozen_by_faulty(&self) -> bool {
+        let down = self.down_for_good();
+        let faulty: BTreeSet<u64> = self
+            .reported_faulty
+            .iter()
+            .filter(|(node, _)| !down.contains(node) && !self.replicas.contains(node))
+            .flat_map(|(_, slots)| slots.iter().copied())
+            .collect();
+        faulty
+            .into_iter()
+            .any(|slot| self.undecided_slot_frozen(slot, &down))
+    }
+
+    /// [`Self::frozen_by_faulty`] for one slot.
+    fn undecided_slot_frozen(&self, slot: u64, down: &BTreeSet<u64>) -> bool {
+        if self.decided.contains_key(&slot) || self.trimmed_past(slot, down) {
+            return false;
+        }
+        let lost = |node: u64| {
+            self.reported_faulty
+                .get(&node)
+                .is_some_and(|slots| slots.contains(&slot))
+        };
+        // A copy some node may hold whole: a commit of the slot in flight
+        // (it may land unreported, #264), or a durable accept above the
+        // faulty identity its boot reported (a repair rewrote it).
+        if self
+            .in_flight
+            .keys()
+            .any(|(node, at)| *at == slot && !self.replicas.contains(node))
+        {
+            return false;
+        }
+        let clean = self
+            .accept_sets
+            .range((slot, 0, 0)..=(slot, u64::MAX, u64::MAX))
+            .flat_map(|((_, round, by), holders)| {
+                holders.iter().map(move |node| (*node, (*round, *by)))
+            })
+            .any(|(node, ballot)| {
+                !down.contains(&node)
+                    && !self.replicas.contains(&node)
+                    && (!lost(node)
+                        || self
+                            .faulty_ballots
+                            .get(&(node, slot))
+                            .is_none_or(|faulty| ballot > *faulty))
+            });
+        if clean {
+            return false;
+        }
+        self.asked_configurations().iter().any(|config| {
+            let qualifying: BTreeSet<NodeId> = config
+                .members()
+                .iter()
+                .filter(|member| !down.contains(&member.0) && !lost(member.0))
+                .copied()
+                .collect();
+            !config.has_phase1_quorum(&qualifying)
+        })
     }
 
     /// Whether the decided `slot` an outage hit is frozen because some

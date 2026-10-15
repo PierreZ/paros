@@ -554,3 +554,101 @@ fn a_registration_below_the_watermark_is_collected_even_when_damaged() {
         .await;
     });
 }
+
+async fn open_chunked(
+    provider: SimStorageProvider,
+    dir: &str,
+    meta_chunk: usize,
+) -> Result<Registry, StorageError> {
+    let mut registry = JournalMatchmakerStorage::new(
+        provider,
+        dir,
+        paros_core::JournalIdentifier::UNSET,
+        JournalStoreConfig {
+            meta_chunk,
+            ..JournalStoreConfig::small()
+        },
+    );
+    registry.boot_scan().await?;
+    Ok(registry)
+}
+
+/// #439: a set's scalars grow with its journals, past the one block of
+/// metainfo the journal holds. They are cut into chunks; every write of them
+/// takes fresh chunks, and a reboot reads back the latest, at the default
+/// chunk and at one far below it.
+#[test]
+fn scalars_larger_than_the_metainfo_survive_a_reboot_in_chunks() {
+    runtime().block_on(async {
+        let mut sim = sim(11);
+        run(&mut sim, |provider| async move {
+            for (dir, chunk) in [("big", super::META_CHUNK), ("tiny", 32)] {
+                let mut registry = open_chunked(provider.clone(), dir, chunk)
+                    .await
+                    .expect("open");
+                // Far more than one block: 400 journals' watermarks.
+                for journal in 1..=400 {
+                    registry
+                        .set_gc_watermark(JournalId(journal), ballot(0x1_0000 + journal))
+                        .await
+                        .expect("raise");
+                }
+                registry.sync().await.expect("sync");
+                // A second write takes a new epoch and clears the first.
+                registry
+                    .set_gc_watermark(JournalId(7), ballot(0x9_0000))
+                    .await
+                    .expect("raise");
+                registry.sync().await.expect("sync");
+                let written = registry.initial_state();
+                drop(registry);
+                let registry = open_chunked(provider.clone(), dir, chunk)
+                    .await
+                    .expect("boots");
+                assert_eq!(registry.initial_state(), written);
+                assert_eq!(
+                    registry.initial_state().gc_watermark(JournalId(7)),
+                    ballot(0x9_0000)
+                );
+                assert_eq!(
+                    registry.initial_state().gc_watermark(JournalId(400)),
+                    ballot(0x1_0000 + 400)
+                );
+                // The format probe reads the header alone.
+                assert!(
+                    !Registry::peek_formatted(&provider, dir, paros_core::JournalIdentifier::UNSET)
+                        .await
+                        .expect("peek")
+                );
+            }
+        })
+        .await;
+    });
+}
+
+/// #439: a damaged chunk the metainfo names loses the scalars: a crash
+/// verdict on the scalars, never a boot on a part of them.
+#[test]
+fn a_damaged_scalar_chunk_is_a_crash_verdict() {
+    runtime().block_on(async {
+        let mut sim = sim(12);
+        run(&mut sim, |provider| async move {
+            let mark = Ballot {
+                round: 0x00AB_CDEF_0123_4567,
+                node: NodeId(0x0076_5432_10FE_DCBA),
+            };
+            let mut registry = open_chunked(provider.clone(), "d", 64).await.expect("open");
+            registry.set_gc_watermark(J, mark).await.expect("raise");
+            registry.sync().await.expect("sync");
+            drop(registry);
+            assert!(rot(&provider, "d", &encode(&mark)[1..]).await);
+            match open_chunked(provider.clone(), "d", 64).await {
+                Err(StorageError::Corruption { record, .. }) => {
+                    assert_eq!(record, StorageRecord::MatchmakerScalars);
+                }
+                other => panic!("a damaged scalar chunk must crash: {other:?}"),
+            }
+        })
+        .await;
+    });
+}

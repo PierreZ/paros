@@ -27,7 +27,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use paros_core::{JournalIdentifier, LogRead, NodeId, ReadState, Seq, Slot};
+use paros_core::{LogRead, NodeId, ReadState, Seq, Slot};
 
 use crate::audit::{Audit, LogReadAnswer, LogReadReport};
 use crate::rpc::{Read, ReadAck, ReplySender, journal_view_to_proto};
@@ -266,31 +266,6 @@ fn send<A: Audit>(
         "log_read_served"
     );
     answer(audit, node, Reply::LogRead, reply, ack);
-}
-
-/// The refusal a call naming a journal this process does not serve gets
-/// (#185: an unset half, or any identifier but its own, #235), reported through
-/// [`Audit::journal_refused`]. `true` when the call was refused.
-pub(crate) fn refuse_journal<A: Audit>(
-    served: JournalIdentifier,
-    asked: JournalIdentifier,
-    call: &'static str,
-    node: NodeId,
-    audit: &A,
-) -> bool {
-    if asked.is_set() && asked == served {
-        return false;
-    }
-    // Negative space: a refusal is never for the named journal this serves.
-    if asked.is_set() {
-        assert!(
-            asked != served,
-            "a named journal this process serves is never refused"
-        );
-    }
-    audit.journal_refused(node, asked, call);
-    tracing::info!(node = node.0, journal = %asked, call, "journal_refused");
-    true
 }
 
 /// The grid row a quorum read asks instead of the core's `ctx % rows`:

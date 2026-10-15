@@ -524,6 +524,11 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         // walking the slots below it: an admitted forward jump.
         st.landings.entry(node.0).or_default().insert(landing);
         st.observe_applied_index(node.0, landing);
+        // The jump may raise the cluster's minimum floor like a truncation
+        // does: prune below it, so a late `Commit` there is judged against
+        // the pruned slot's decided vhash (witness 15198787338826444353 of
+        // PR #551 (operator calls name their journal) at a65d9cc).
+        st.prune_below_floor();
     }
 
     fn applied(
@@ -1194,6 +1199,27 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             "journal read: a served state never passes the applied journal",
             { "node" => node.0, "next_seq" => report.state.next_seq.0 }
         );
+        // A node or a replica serves only the fold it reported (#550
+        // (replica serves an unreported fold page)): the batch that holds
+        // the last position of the served state is one its walk reported,
+        // or one its boot or a trim-point jump landed past. Released early,
+        // the next apply page folds before its writes and its report; a
+        // server behind the cell then serves slots the others reported but
+        // it did not, which the journal-wide check above cannot see.
+        if let Some(last) = report.state.next_seq.0.checked_sub(1)
+            && let Some(slot) = st.journal.slot_holding(last)
+        {
+            let reported = st.applied_max.get(&node.0).copied();
+            assert_always!(
+                reported.is_some_and(|max| slot <= max),
+                "journal read: a server serves only the fold it reported",
+                {
+                    "node" => node.0,
+                    "slot" => slot,
+                    "reported" => reported.map_or(-1, |max| i64::try_from(max).unwrap_or(i64::MAX))
+                }
+            );
+        }
         // Every record is the one accepted at its position.
         for (position, record) in (from..).zip(report.records) {
             if let Some(known) = st.journal.record_at(position) {
@@ -2559,5 +2585,52 @@ mod tests {
             !has_always_violations(),
             "once the durable accept is folded the same vote is clean"
         );
+    }
+
+    /// A trim-point jump that raises the cluster's minimum floor prunes
+    /// below it, and a proxy's late `Commit` for a slot under the floor is
+    /// judged against its decided vhash, pruned or not (witness
+    /// 15198787338826444353 of PR #551 (operator calls name their journal)
+    /// at a65d9cc: a decided command flagged as unbacked).
+    #[test]
+    fn a_trim_jump_prunes_and_a_late_commit_below_the_floor_is_judged_decided() {
+        let user = 11;
+        let b = ballot(3, 0);
+        let world = Arc::new(AuditWorld::default());
+        let audit = NodeAudit::new(FrozenClock, world.clone());
+        {
+            let mut st = world.lock();
+            st.decided.insert(5, (b.round, b.node.0, user));
+            st.booted.insert(0);
+            st.booted.insert(1);
+            st.floor.insert(
+                0,
+                Floor {
+                    now: 8,
+                    ..Floor::default()
+                },
+            );
+            st.cluster_applied_max = Some(10);
+            st.prune_below_floor();
+            assert!(
+                st.decided.contains_key(&5),
+                "node 1 still at floor 0: nothing pruned"
+            );
+        }
+        reset_always_violations();
+        audit.trimmed_to(NodeId(1), Slot(8));
+        assert!(!has_always_violations());
+        {
+            let st = world.lock();
+            assert_eq!(st.cluster_min_floor(), 8);
+            assert!(
+                !st.decided.contains_key(&5),
+                "the trim jump prunes below the floor"
+            );
+            assert_eq!(st.decided_below_floor.get(&5), Some(&user));
+        }
+        audit.proxy_decided(ProxyId(0), Slot(5), b, user);
+        assert!(!has_always_violations(), "a decided command is backed");
+        reset_always_violations();
     }
 }

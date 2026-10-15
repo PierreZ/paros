@@ -198,7 +198,9 @@ and, failing that, takes it back. The budget is the driver's, born buggified.
 The proxy runs on a process of its own, driven by the third driver beside the
 node's and the matchmaker's. It has nothing to persist: no promise, no log, no
 format marker, so a crash reboots it empty and the leader's next re-delegation
-rebuilds every round it still needs. In the simulation the proxies are their
+rebuilds every round it still needs. One proxy process serves many journals. It
+keeps one proxy leader per journal, and the journal identifier on each message
+selects it, so no round of one journal meets a round of another. In the simulation the proxies are their
 own process group, drawn per seed like the matchmakers, killed and revived by
 their own attrition regime, and judged by one claim the node's own `Commit`
 already answers to: every `Commit` a proxy emits must be backed by a Phase-2
@@ -217,7 +219,7 @@ hole. The rule that closes both is in the next section.
 `Rounds::stalled` (`proposer/rounds.rs`);
 `Delegation`, `ColocatedNode::propose_in`, `ColocatedNode::take_back_delegated`
 (`node.rs`, `node/phase2.rs`); `Party`, `Audience::Proxy` (`message.rs`);
-`Config::proxy_count` (`state.rs`); the model checker `proxy_model.rs`; the
+`Config::proxy_count` (`state.rs`); `ProxyConfig`, `ProxyJournal`; the model checker `proxy_model.rs`; the
 example `paros-core/examples/proxy_leader.rs`; the driver `paros::run_proxy`
 (`paros/src/proxy/mod.rs`), the harness's `ProxyProcess` and `PROXY_GROUP`
 (`paros-sim/src/process/`, `roles.rs`), the audit's
@@ -244,7 +246,9 @@ missing range. When the range was truncated, the acceptor that answers sends a
 the floor does. The one replica that answers the client for
 slot `s` is `s % replica_count`, so each replica sends a share of the replies.
 Today the node that the client asked still sends the reply; the reply owner is
-the data a future client library will use.
+the data a future client library will use. One replica process serves many
+journals. It keeps one replica node and one store per journal, and each read
+names the journal it reads.
 
 Splitting the tiers raises a question about the other side: must an acceptor
 that no longer serves clients still keep the chosen log? The code answers it one
@@ -409,7 +413,9 @@ registry per journal, in one store, and every matchmaking message names its
 journal. So each journal has its own watermark, its own history and its own
 effective configuration. A storage fault in the store closes the whole set.
 A handover moves the registries of all its journals to the next generation
-together.
+together. One message cannot carry the registries of every journal, so the
+handover is paged: a stop answer and a bootstrap each carry a page of journals,
+and a member counts only when it has every page.
 
 **In the code.** `Matchmaking`, `Registration`, `RegistrationKind`,
 `MatchStep::StaleConfiguration` (`matchmaking.rs`, `matchmaker/state.rs`,

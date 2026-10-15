@@ -15,6 +15,9 @@ pub enum MatchmakersRefusal {
     UnknownMatchmaker,
     /// A handover is already in flight at the node asked.
     Busy,
+    /// The request names no tenant, or a tenant whose journals the node
+    /// does not serve (#439 (operator calls name their journal)).
+    UnknownTenant,
     /// A label this client does not know: a newer server. Never produced by
     /// a driver.
     Unrecognized,
@@ -29,6 +32,7 @@ impl MatchmakersRefusal {
             Self::Empty => "empty",
             Self::UnknownMatchmaker => "unknown_matchmaker",
             Self::Busy => "busy",
+            Self::UnknownTenant => "unknown_tenant",
             Self::Unrecognized => "unrecognized",
         }
     }
@@ -42,6 +46,7 @@ impl MatchmakersRefusal {
             "empty" => Self::Empty,
             "unknown_matchmaker" => Self::UnknownMatchmaker,
             "busy" => Self::Busy,
+            "unknown_tenant" => Self::UnknownTenant,
             _ => Self::Unrecognized,
         }
     }
@@ -62,6 +67,9 @@ pub enum RetireRefusal {
     /// No effective floor above the node's membership fence: nothing proves
     /// the cluster is done with the configurations it was in.
     NotCollected,
+    /// The request names no journal, or one the node does not serve (#439
+    /// (operator calls name their journal)).
+    UnknownJournal,
     /// A label this client does not know: a newer server. Never produced by
     /// a driver.
     Unrecognized,
@@ -77,6 +85,7 @@ impl RetireRefusal {
             Self::Member => "member",
             Self::Stale => "stale",
             Self::NotCollected => "not_collected",
+            Self::UnknownJournal => "unknown_journal",
             Self::Unrecognized => "unrecognized",
         }
     }
@@ -91,6 +100,7 @@ impl RetireRefusal {
             "member" => Self::Member,
             "stale" => Self::Stale,
             "not_collected" => Self::NotCollected,
+            "unknown_journal" => Self::UnknownJournal,
             _ => Self::Unrecognized,
         }
     }
@@ -108,6 +118,7 @@ mod tests {
             MatchmakersRefusal::Empty,
             MatchmakersRefusal::UnknownMatchmaker,
             MatchmakersRefusal::Busy,
+            MatchmakersRefusal::UnknownTenant,
         ] {
             assert_eq!(MatchmakersRefusal::from_label(refusal.label()), refusal);
         }
@@ -117,6 +128,7 @@ mod tests {
             RetireRefusal::Member,
             RetireRefusal::Stale,
             RetireRefusal::NotCollected,
+            RetireRefusal::UnknownJournal,
         ] {
             assert_eq!(RetireRefusal::from_label(refusal.label()), refusal);
         }

@@ -10,7 +10,7 @@
 
 use std::collections::BTreeMap;
 
-use super::{JournalRegistry, MatchmakerPhase, PendingBootstrap, Registration, RegistrationKind};
+use super::{BootstrapPage, JournalRegistry, MatchmakerPhase, Registration, RegistrationKind};
 use crate::membership::{AcceptorConfig, MatchmakerGeneration, MatchmakerId, MatchmakerSet};
 use crate::types::{Ballot, JournalId, NodeId};
 
@@ -373,19 +373,25 @@ pub struct GcAck {
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ReconfigureRequest {
-    /// Freeze `generation` and report its registry (`StopA`).
+    /// Freeze `generation` and report its registry (`StopA`), one page of
+    /// journals at a time (#439): the page holds the journals strictly
+    /// above `after` (`None`: from the first).
     Stop {
         /// The requesting node.
         from: NodeId,
         /// The generation to freeze.
         generation: MatchmakerGeneration,
+        /// The **journal cursor**: the page starts strictly above it.
+        after: Option<JournalId>,
     },
-    /// Hand a proposed successor's initial state to one of its members.
+    /// Hand one page of a proposed successor's initial state to one of its
+    /// members (#439): a set's journals are many, and a page holds at most
+    /// [`REGISTRY_PAGE`](super::REGISTRY_PAGE) of them.
     Bootstrap {
         /// The requesting node.
         from: NodeId,
-        /// The proposed set and every journal's reconstructed registry.
-        bootstrap: PendingBootstrap,
+        /// The proposed set and one page of the reconstructed registries.
+        bootstrap: BootstrapPage,
     },
     /// Phase 1a of the successor decree over `generation`'s matchmakers.
     DecreePrepare {
@@ -456,14 +462,23 @@ impl ReconfigureRequest {
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ReconfigureReply {
-    /// `generation` is frozen here (`StopB`): every journal's durable
-    /// registry, and the successor if already learned.
+    /// `generation` is frozen here (`StopB`): one page of the journals'
+    /// durable registries, and the successor if already learned.
     Stopped {
         /// The answering matchmaker.
         matchmaker: MatchmakerId,
         /// The frozen generation.
         generation: MatchmakerGeneration,
-        /// Every journal's durable registry (#190): its watermark, its
+        /// The request's cursor, echoed: the page holds the journals
+        /// strictly above it.
+        after: Option<JournalId>,
+        /// Where the next page starts, when this one was cut short (#439):
+        /// the last journal it holds. `None` means the report is complete:
+        /// only then does the member count toward the stop quorum.
+        next: Option<JournalId>,
+        /// One page of the journals' durable registries (#190, #439), at
+        /// most [`REGISTRY_PAGE`](super::REGISTRY_PAGE) journals, in
+        /// journal order: each its watermark, its
         /// registrations at or above it, and its **effective configuration**
         /// (see [`super::JournalScalars::effective`]). The reconstruction
         /// takes, per journal, the maximum watermark, the union above it and
@@ -484,12 +499,19 @@ pub enum ReconfigureReply {
         /// model checker's finding, seed 103).
         decree_promised: Ballot,
     },
-    /// The bootstrap for `set` is durably pending here.
+    /// The bootstrap for `set` is durably pending here, whole or up to
+    /// `held` (#439).
     Bootstrapped {
         /// The answering matchmaker.
         matchmaker: MatchmakerId,
         /// The proposed set the bootstrap was for.
         set: MatchmakerSet,
+        /// The last journal of the pages held so far, `None` when none is:
+        /// the next page starts strictly above it.
+        held: Option<JournalId>,
+        /// Whether the bootstrap is held whole: only then may the set be
+        /// chosen, and only a whole one activates.
+        complete: bool,
     },
     /// Phase 1b: promised `ballot`, reporting the vote held.
     Promised {

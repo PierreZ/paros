@@ -165,6 +165,9 @@ message GarbageCollectAck {
 
 message Stop {
   uint64 generation = 1;
+  // The last journal of the page already read (#439): the report starts
+  // after it. Absent asks for the first page.
+  optional uint64 after = 2;
 }
 
 // One journal's registry as a set's handover carries it (#190): its GC
@@ -182,8 +185,13 @@ message Bootstrap {
   // keeps one registry per journal since #190.
   reserved 2, 3, 4;
   MatchmakerSet set = 1;
-  // The reconstructed registry of every journal the stop quorum reported.
+  // One page of the reconstructed registries (#439): the journals after
+  // `after`, in order, at most one page of them.
   repeated JournalRegistry registries = 5;
+  // The last journal of the page before this one. Absent: the first page.
+  optional uint64 after = 6;
+  // Whether this page ends the reconstruction.
+  bool last = 7;
 }
 
 message DecreePrepare {
@@ -230,12 +238,20 @@ message StopAck {
   // quorum, so a rebooted node never reuses a ballot of its earlier
   // incarnation.
   .paros.common.v1.Ballot decree_promised = 5;
-  // The frozen registry of every journal this matchmaker holds.
+  // One page of the frozen registries this matchmaker holds (#439).
   repeated JournalRegistry registries = 7;
+  // The request's cursor, echoed.
+  optional uint64 after = 8;
+  // The last journal of a page cut short; absent when the report is whole.
+  optional uint64 next = 9;
 }
 
 message BootstrapAck {
   MatchmakerSet set = 1;
+  // The last journal held of the proposed set's bootstrap (#439).
+  optional uint64 held = 2;
+  // Whether the held bootstrap is whole.
+  bool complete = 3;
 }
 
 message DecreeVote {

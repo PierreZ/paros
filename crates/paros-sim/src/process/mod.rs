@@ -21,7 +21,6 @@
 //! restores the same way.
 
 use std::future::Future;
-use std::sync::Arc;
 
 use async_trait::async_trait;
 use moonpool_sim::{
@@ -32,7 +31,9 @@ use crate::audit::{AuditWorld, NodeAudit, audit_world};
 use crate::roles::{
     ACCEPTOR_GROUP, Deployment, MATCHMAKER_GROUP, PROXY_GROUP, REPLICA_GROUP, Role, replica_node_id,
 };
-use paros::{AcceptorConfig, NodeId, ReplicaId, parse_addr};
+use paros::{
+    AcceptorConfig, Config, JournalIdentifier, MatchmakerId, NodeId, ReplicaId, parse_addr,
+};
 
 mod acceptor;
 mod contract;
@@ -87,15 +88,90 @@ pub(super) fn bootstrap_config(
     AcceptorConfig::new(bootstrap, system)
 }
 
+/// The configuration `journal`, one of the run's static journals, runs
+/// under, derived from the main journal's `main` (#188, #190, #193). The
+/// main journal is the seed's deployment. On a matchmaker seed every other
+/// journal names the matchmakers too (one set per tenant, one registry per
+/// journal); on a plain seed it is plain Multi-Paxos over the whole pool.
+/// The proxy leaders and the replica tier serve every journal: each one's
+/// counts are the deployment's, so a proxy and a replica are shared
+/// processes keyed by the journal. Each journal but the main one runs its
+/// own writer mode (#241).
+pub(super) fn journal_config(
+    main: &Config,
+    policy: crate::shape::QuorumPolicy,
+    plan: &crate::shape::JournalPlan,
+    journal: JournalIdentifier,
+) -> Config {
+    if journal == plan.main {
+        return main.clone();
+    }
+    let config = if main.has_matchmakers() {
+        Config {
+            journal,
+            writer_mode: plan.mode(journal),
+            ..main.clone()
+        }
+    } else {
+        Config {
+            journal,
+            peers: main.pool().to_vec(),
+            quorum_system: policy.system(main.pool().len()),
+            matchmakers: Vec::new(),
+            matchmaker_pool: Vec::new(),
+            writer_mode: plan.mode(journal),
+            ..main.clone()
+        }
+    };
+    // The tier is the deployment's, whatever the journal (#193).
+    assert!(
+        config.proxy_count == main.proxy_count && config.replica_count == main.replica_count,
+        "every journal of the run names the deployment's proxies and replicas"
+    );
+    config
+}
+
+/// The main journal's configuration as `id` would run it, built from the
+/// seed's registry draws the way an acceptor builds its own (the bootstrap
+/// ranks, the matchmaker bootstrap, the quorum policy): what a proxy leader
+/// and a replica derive each journal's configuration from
+/// ([`journal_config`]).
+pub(super) fn main_config(
+    ctx: &SimContext,
+    deployment: &Deployment,
+    members: &[(NodeId, String)],
+    id: NodeId,
+) -> Config {
+    let has_matchmakers = !deployment.matchmakers().is_empty();
+    let bootstrap = bootstrap_config(ctx, members.len(), has_matchmakers);
+    let matchmaker_pool: Vec<MatchmakerId> = (0..deployment.matchmakers().len() as u64)
+        .map(MatchmakerId)
+        .collect();
+    let matchmakers: Vec<MatchmakerId> =
+        crate::shape::matchmaker_bootstrap_ranks(ctx.state(), matchmaker_pool.len())
+            .into_iter()
+            .map(MatchmakerId)
+            .collect();
+    Config {
+        peers: bootstrap.members().to_vec(),
+        quorum_system: bootstrap.quorum_system(),
+        nodes: members.iter().map(|(node, _)| *node).collect(),
+        matchmakers,
+        matchmaker_pool,
+        proxy_count: deployment.proxies().len(),
+        replica_count: deployment.replica_count(),
+        ..Config::new(id, crate::shape::identifiers(ctx.state()).main)
+    }
+}
+
 /// One role incarnation's harness rig, armed the same way for every role:
 /// the incarnation and its shape (`crate::shape::boot` — the rig's **only**
 /// draw, so a caller keeps it exactly where its own registry draws expect
-/// it), and the per-iteration audit — the shared checker every role folds into,
-/// and this incarnation's port. The disk's fault layer is not here: a proxy
-/// has no disk.
+/// it), and this incarnation's port on the main journal's audit world, the
+/// shared checker every role folds into. The disk's fault layer is not here:
+/// a proxy has no disk.
 pub(crate) struct RoleRig {
     pub(crate) incarnation: crate::shape::Incarnation,
-    pub(crate) checker: Arc<AuditWorld>,
     pub(crate) audit: NodeAudit<SimTimeProvider>,
 }
 
@@ -108,13 +184,8 @@ pub(crate) struct RoleRig {
 /// driver; that is the inline BUGGIFY sites' job.
 pub(crate) fn arm_role(ctx: &SimContext, my_ip: &str) -> RoleRig {
     let incarnation = crate::shape::boot(ctx.state(), my_ip);
-    let checker = audit_world(ctx.state());
-    let audit = NodeAudit::new(ctx.time().clone(), checker.clone());
-    RoleRig {
-        incarnation,
-        checker,
-        audit,
-    }
+    let audit = NodeAudit::new(ctx.time().clone(), audit_world(ctx.state()));
+    RoleRig { incarnation, audit }
 }
 
 /// Why an incarnation exits for good instead of booting (see the recovery

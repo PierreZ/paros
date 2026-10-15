@@ -96,9 +96,27 @@ pub(crate) struct NodeShape {
     /// ordinary restart, so even an operator who edits on every restart
     /// costs the cluster one restart delay per edit.
     pub(crate) config_edit_pct: u32,
+    /// How many of the deployment's proxy leaders this node does not count
+    /// (#193): a node configured with `proxy_count - lag` (never below
+    /// zero), as one is in the middle of a rolling change of the count
+    /// until the tenant coordinator applies counts (#214). A slot's proxy is
+    /// its leader's choice alone, and an acceptor that counts fewer proxies
+    /// drops an `Accept` whose reply goes to one it does not count, so mixed
+    /// counts change which proxy runs a round, or whether it runs at all
+    /// before the leader takes it back, never what is chosen. Floor 0: no
+    /// lag, every node agrees on the count. Extreme 1..=2.
+    pub(crate) proxy_count_lag: usize,
 }
 
 impl NodeShape {
+    /// `count` as this node counts it: the deployment's proxy count less
+    /// its lag, never below zero.
+    pub(crate) fn lagged_proxy_count(&self, count: usize) -> usize {
+        let lagged = count.saturating_sub(self.proxy_count_lag);
+        assert!(lagged <= count, "a lag never adds a proxy");
+        lagged
+    }
+
     /// Draw one node's shape — born workload-buggified (AGENTS.md
     /// prong 2): every default is production's constant, and an activated
     /// seed draws an extreme. One `buggify_knob!` location per knob, so a
@@ -175,12 +193,12 @@ impl NodeShape {
         };
         let floor_ticks = ROUND_TRIP_FLOOR_MS.div_ceil(tick_ms);
         let election_renew_ms = buggify_knob!(500_u64, 100_u64..1001_u64);
-        let drawn = DriverTunables {
+        let mut drawn = DriverTunables {
             tick_interval: ms(tick_ms),
             election_timeout_base: buggify_knob!(5_u64, 2_u64..13_u64).max(floor_ticks),
             keep_alive_interval: ms(buggify_knob!(2000_u64, ROUND_TRIP_FLOOR_MS..5001_u64)),
             keep_alive_timeout: ms(buggify_knob!(1000_u64, ROUND_TRIP_FLOOR_MS..3001_u64)),
-            connection_timeout: ms(buggify_knob!(1000_u64, ROUND_TRIP_FLOOR_MS..3001_u64)),
+            connection_timeout: ms(buggify_knob!(1000_u64, CONNECT_FLOOR_MS..3001_u64)),
             delivery_timeout: ms(buggify_knob!(1000_u64, ROUND_TRIP_FLOOR_MS..3001_u64)),
             read_retry_ticks: buggify_knob!(10_u64, 1_u64..41_u64).max(2 * floor_ticks),
             // Floor 0: a zero wait answers every journal read at the end at
@@ -233,12 +251,12 @@ impl NodeShape {
             // matchmakers their retained histories, never safety.
             gc_resend_ticks: buggify_knob!(5_u64, 1_u64..41_u64),
             // The handover re-send cadence. Floor 1; bounded above by the
-            // stall budget drawn just below — a cadence past
+            // stall budget drawn just below — a cadence at or past
             // `election_timeout * reconfigure_timeout_elections` would let
             // the phase be abandoned before it is ever re-sent, which is no
-            // retry rather than a slow one, so the ceiling stays under the
-            // smallest budget the next knob can draw (1 timeout × the
-            // election base's own floor).
+            // retry rather than a slow one, and a freeze that never closes
+            // (#548 (set handover never lands)). The draw is lowered under
+            // the shortest budget once both are drawn, below.
             reconfigurer_resend_ticks: buggify_knob!(5_u64, 1_u64..11_u64),
             // The handover stall budget. Floor 1 election timeout: one
             // re-sent request has time to be answered, and a phase nobody
@@ -384,6 +402,17 @@ impl NodeShape {
                 ms(buggify_knob!(2000_u64, RESOLVE_FLOOR_MS..2001_u64))
             },
         };
+        // The handover re-send cadence stays under the shortest stall
+        // budget, one base election timeout per election (`check_floors`):
+        // the freeze closes only on a re-send beat, so a budget that ends on
+        // or before it abandons every handover its stop quorum answered
+        // (#548 (set handover never lands): witness 4294352317195364374, a
+        // five-tick cadence against a five-tick budget, and a set that never
+        // left its founding member). A lowered draw runs at the edge, one
+        // tick under the budget.
+        drawn.reconfigurer_resend_ticks = drawn.reconfigurer_resend_ticks.min(
+            (drawn.election_timeout_base * drawn.reconfigure_timeout_elections).saturating_sub(1),
+        );
         // The production profile `parosd` ships (#209), whole: every field
         // at once, which the per-field locations above would draw together
         // only by chance. Each of its values lies inside its knob's range
@@ -407,6 +436,7 @@ impl NodeShape {
             wipe_pct: buggify_knob!(DEFAULT_LOSS_PCT, MIN_LOSS_PCT..MAX_LOSS_PCT + 1),
             matchmaker_loss_pct: buggify_knob!(DEFAULT_LOSS_PCT, MIN_LOSS_PCT..MAX_LOSS_PCT + 1),
             config_edit_pct: buggify_knob!(DEFAULT_CONFIG_EDIT_PCT, 25..MAX_LOSS_PCT + 1),
+            proxy_count_lag: buggify_knob!(0_usize, 1_usize..3_usize),
         }
     }
 }
@@ -718,6 +748,9 @@ struct Registry {
     /// Run-level: whether the run draws the split-floor scenario (see
     /// [`split_floor`]), fixed by the first caller.
     split_floor: Option<bool>,
+    /// Run-level: whether the run draws the lagging-replica scenario (see
+    /// [`lagging_replica`]), fixed by the first caller.
+    lagging_replica: Option<bool>,
     /// Run-level: whether the run runs the system journals (see
     /// [`system_journals`]), fixed by the first caller.
     system: Option<bool>,
@@ -839,6 +872,10 @@ pub(crate) fn journal_layout(state: &StateHandle) -> JournalStoreConfig {
         if batched {
             assert_reachable!("journal store: a seed commits with one sync per batch");
         }
+        // A matchmaker store's scalar chunk (#439): an extreme of 32 to
+        // 256 bytes cuts the scalars of a set with a pending bootstrap into
+        // several chunks. Floor 1.
+        let meta_chunk = buggify_knob!(paros::journal::META_CHUNK, 32_usize..257_usize);
         JournalStoreConfig {
             durability: if batched {
                 paros::journal::Durability::Batched
@@ -846,6 +883,7 @@ pub(crate) fn journal_layout(state: &StateHandle) -> JournalStoreConfig {
                 paros::journal::Durability::Ordered
             },
             geometry: journal_geometry(),
+            meta_chunk,
             ..JournalStoreConfig::small()
         }
     })
@@ -1356,6 +1394,44 @@ pub(crate) fn split_floor(state: &StateHandle) -> bool {
     })
 }
 
+/// Whether the run draws the **lagging-replica scenario** (#550 (replica
+/// serves an unreported fold page)): drawn once per seed, its own BUGGIFY
+/// location. A replica serves a read from its fold, and the fold must never
+/// pass what the replica reported. The order only matters when a catch-up
+/// backlog spans several apply pages and a read is confirmed in the batch
+/// that ends a page: a replica rebooted behind the cell, with a small apply
+/// page. Attrition brings a replica back fast and the apply page is small on
+/// few seeds: 1 red in 1,000 hunt seeds, with a local amplification. On a
+/// scenario seed `crate::world::lagging_replica` holds one replica down
+/// until the cell decided `lagging_replica::AHEAD` slots past its prefix,
+/// and every replica walks a small apply page ([`replica_apply_page`]).
+/// Each ingredient keeps its own coin on the other seeds. Rare-but-valid: a
+/// slow replica is, and so is a small page.
+#[tracing::instrument(level = "debug", skip_all)]
+pub(crate) fn lagging_replica(state: &StateHandle) -> bool {
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    *guard.lagging_replica.get_or_insert_with(|| {
+        let lagging = moonpool_sim::buggify_with_prob!(1.0);
+        if lagging {
+            assert_reachable!("a run draws the lagging-replica scenario");
+        }
+        lagging
+    })
+}
+
+/// The apply page a replica walks (#550 (replica serves an unreported fold
+/// page)): the node's drawn one, or on a lagging-replica seed a page of one
+/// or two slots (inside the knob's extreme), so the replica's catch-up spans
+/// several pages of a short journal. Floor 1, as the knob's.
+pub(crate) fn replica_apply_page(state: &StateHandle, drawn: usize) -> usize {
+    if !lagging_replica(state) {
+        return drawn;
+    }
+    let small = usize::try_from(moonpool_sim::sim_random_range(1_u64..3_u64)).unwrap_or(1);
+    drawn.min(small).max(1)
+}
+
 /// The fewest blocks a segment's entry log may have (floor of
 /// [`journal_geometry`]): it must hold the largest single entry a node
 /// stores, the workload's largest write (`ChainConfig`'s
@@ -1674,8 +1750,9 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
 /// and the 2,000-seed hunt that lifted the restriction was clean. The
 /// **default** journal is the seed's deployment — its matchmakers, proxies,
 /// replicas and bootstrap; every other journal is a plain Multi-Paxos
-/// journal over the whole pool (`crate::process`: the matchmaker plane, the
-/// proxy leaders and the replica tier serve one journal each). On a
+/// journal over the whole pool, or names the matchmakers on a matchmaker
+/// seed, and the proxy leaders and the replica tier serve every journal
+/// (`crate::process::journal_config`, #193). On a
 /// multi-journal seed a second location draws whether the driver's named
 /// location holds one journal on every node for the chaos window
 /// (`paros::scenario::HOLD_JOURNAL`): its siblings must keep committing.
@@ -2041,6 +2118,41 @@ fn renew_at_floor(tunables: &mut DriverTunables) {
     tunables.election_lease -= cut;
     tunables.machine_down_after -= cut;
 }
+
+/// The longest a machine of this campaign may take over one `Resolve`
+/// answer (#549 (resolve oracle red)): the drawn bound never passes the
+/// default (`NodeShape::draw`), and the production profile ships its own.
+pub(crate) fn resolve_answer_ceiling() -> Duration {
+    DriverTunables::default()
+        .resolve_answer_within
+        .max(DriverTunables::production().resolve_answer_within)
+}
+
+/// One `Resolve` call's own round trip on the recovery tail, past the
+/// machine's answer bound: two round trips of the driver's floor.
+pub(crate) const RESOLVE_ROUND_TRIP: Duration = Duration::from_millis(2 * ROUND_TRIP_FLOOR_MS);
+
+/// The slowest round trip a link keeps into the recovery tail, in
+/// milliseconds: moonpool's cross-datacenter link is at most 80 ms one way,
+/// and its per-pair latency (`max_pair_latency`, under 100 ms each way) is
+/// drawn once per pair and never healed. Recovery mode stops new pairs from
+/// degrading, not a pair that already is.
+const SLOWEST_ROUND_TRIP_MS: u64 = 2 * (80 + 100);
+
+/// The wall-clock floor of a drawn connect timeout, the driver's
+/// `connection_timeout` and the client's `connect_timeout_ms`. A connect is
+/// not one round trip: the runtime's timeout covers the TCP connect and the
+/// session handshake, TLS on half the seeds ([`crate::tls`]), so two round
+/// trips at least. Below that, a slow pair never connects for the whole run,
+/// a one-way partition wearing a knob's clothes. Witness (cite only): seed
+/// 8160241045276543599 on main 9bcbd0f, a TLS seed of three nodes where
+/// node 0 was wiped; node 2 drew a 251 ms timeout, and its connect to node 1
+/// (a 231 ms round trip, 715 ms for a first delivery with its connect)
+/// timed out 63 times in a row, so no ballot ever met a promise quorum.
+pub(crate) const CONNECT_FLOOR_MS: u64 = 1_000;
+
+const _: () = assert!(CONNECT_FLOOR_MS >= 2 * SLOWEST_ROUND_TRIP_MS);
+const _: () = assert!(CONNECT_FLOOR_MS > ROUND_TRIP_FLOOR_MS);
 
 #[cfg(test)]
 mod tests {

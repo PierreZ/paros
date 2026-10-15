@@ -137,8 +137,8 @@ pub use self::reconfigurer::{
     StartRefusal,
 };
 pub use self::state::{
-    DecreeRecord, JournalRegistry, JournalScalars, MatchmakerConfig, MatchmakerHardState,
-    MatchmakerPhase, PendingBootstrap, Registration, RegistrationKind,
+    BootstrapPage, DecreeRecord, JournalRegistry, JournalScalars, MatchmakerConfig,
+    MatchmakerHardState, MatchmakerPhase, PendingBootstrap, Registration, RegistrationKind,
 };
 pub(crate) use self::state::{raise_effective, resolved_phase, resolved_set};
 pub use self::storage::{MemRegistry, RegistryStorage};
@@ -861,14 +861,21 @@ impl Matchmaker {
         }
     }
 
-    /// Every journal's registry this matchmaker retains — for each,
-    /// everything at or above its watermark, with no upper bound, its
-    /// watermark and its effective configuration — the whole frozen set a
-    /// `StopB` hands the reconstruction (#190). A journal with nothing to
-    /// say is left out.
-    pub(super) fn frozen_registries(&self) -> BTreeMap<JournalId, JournalRegistry> {
-        let registries: BTreeMap<JournalId, JournalRegistry> = self
+    /// One page of the frozen registries (#439 (operator calls name their
+    /// journal)): the journals strictly above `after`, at most `page` of
+    /// them, each its history, watermark and effective configuration — the
+    /// frozen set a `StopB` hands the reconstruction (#190). A journal with
+    /// nothing to say is left out. The second value is where the next page
+    /// starts, `None` when this one ends the report.
+    pub(super) fn frozen_page(
+        &self,
+        after: Option<JournalId>,
+        page: usize,
+    ) -> (BTreeMap<JournalId, JournalRegistry>, Option<JournalId>) {
+        assert!(page > 0, "a frozen page carries a journal");
+        let mut above = self
             .journals()
+            .filter(|journal| after.is_none_or(|after| *journal > after))
             .map(|journal| {
                 (
                     journal,
@@ -879,8 +886,13 @@ impl Matchmaker {
                     },
                 )
             })
-            .filter(|(_, registry)| !registry.is_blank())
-            .collect();
+            .filter(|(_, registry)| !registry.is_blank());
+        let registries: BTreeMap<JournalId, JournalRegistry> = above.by_ref().take(page).collect();
+        let next = above
+            .next()
+            .is_some()
+            .then(|| registries.keys().next_back().copied())
+            .flatten();
         assert!(
             registries.values().all(|registry| registry
                 .history
@@ -889,7 +901,15 @@ impl Matchmaker {
                 .is_none_or(|b| *b >= registry.gc_watermark)),
             "a reported history starts at or above the watermark"
         );
-        registries
+        // A page cut short is full, and continues after its last journal.
+        if next.is_some() {
+            assert!(registries.len() == page, "a cut frozen page is full");
+            assert!(
+                next == registries.keys().next_back().copied(),
+                "a cut frozen page continues after its last journal"
+            );
+        }
+        (registries, next)
     }
 
     /// The cross-field checker, called at boot and at every public mutating
@@ -1047,7 +1067,9 @@ mod tests {
                         effective: None,
                     },
                 )]),
-            },
+                complete: true,
+            }
+            .page(None, REGISTRY_PAGE),
         });
         mm.ready().advance();
         mm.step_reconfigure(ReconfigureRequest::Chosen {
@@ -1253,7 +1275,9 @@ mod tests {
             bootstrap: PendingBootstrap {
                 set: losing.clone(),
                 registries: journal_registries(Ballot::zero(), history.clone(), None),
-            },
+                complete: true,
+            }
+            .page(None, REGISTRY_PAGE),
         });
         let (writes, replies) = drain_reconfigure(&mut mm);
         assert_eq!(writes.len(), 1, "the pending bootstrap is durable");
@@ -1291,7 +1315,9 @@ mod tests {
             bootstrap: PendingBootstrap {
                 set: set(1, &[0, 1, 3]),
                 registries: journal_registries(Ballot::zero(), history, None),
-            },
+                complete: true,
+            }
+            .page(None, REGISTRY_PAGE),
         });
         let (writes, replies) = drain_reconfigure(&mut member);
         assert!(matches!(&replies[0], ReconfigureReply::Refused { .. }));
@@ -1625,6 +1651,7 @@ mod tests {
         mm.step_reconfigure(ReconfigureRequest::Stop {
             from: NodeId(5),
             generation: G0,
+            after: None,
         });
         let (writes, replies) = drain_reconfigure(&mut mm);
         assert!(
@@ -1646,6 +1673,7 @@ mod tests {
         mm.step_reconfigure(ReconfigureRequest::Stop {
             from: NodeId(6),
             generation: G0,
+            after: None,
         });
         let (writes, replies) = drain_reconfigure(&mut mm);
         assert!(writes.is_empty(), "a re-sent stop writes nothing");
@@ -1667,6 +1695,7 @@ mod tests {
         mm.step_reconfigure(ReconfigureRequest::Stop {
             from: NodeId(5),
             generation: MatchmakerGeneration(4),
+            after: None,
         });
         let (_, replies) = drain_reconfigure(&mut mm);
         assert!(matches!(
@@ -1688,6 +1717,7 @@ mod tests {
         mm.step_reconfigure(ReconfigureRequest::Stop {
             from: NodeId(5),
             generation: G0,
+            after: None,
         });
         drain_reconfigure(&mut mm);
         let successor = set(1, &[0, 3, 4]);
@@ -1697,6 +1727,7 @@ mod tests {
         let bootstrap = PendingBootstrap {
             set: successor.clone(),
             registries: journal_registries(ballot(1, 1), history, None),
+            complete: true,
         };
         // A bootstrap for a set this matchmaker is not in is refused.
         mm.step_reconfigure(ReconfigureRequest::Bootstrap {
@@ -1704,14 +1735,15 @@ mod tests {
             bootstrap: PendingBootstrap {
                 set: set(1, &[3, 4, 5]),
                 ..bootstrap.clone()
-            },
+            }
+            .page(None, REGISTRY_PAGE),
         });
         let (writes, replies) = drain_reconfigure(&mut mm);
         assert!(writes.is_empty());
         assert!(matches!(replies[0], ReconfigureReply::Refused { .. }));
         mm.step_reconfigure(ReconfigureRequest::Bootstrap {
             from: NodeId(5),
-            bootstrap: bootstrap.clone(),
+            bootstrap: bootstrap.page(None, REGISTRY_PAGE),
         });
         let (writes, replies) = drain_reconfigure(&mut mm);
         assert_eq!(writes.len(), 1, "the pending bootstrap is durable");

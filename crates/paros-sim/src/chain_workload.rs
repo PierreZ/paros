@@ -697,9 +697,13 @@ impl ChainWorkload {
         // applies the same log, so the settle tail waits for it and the
         // live-read comparison judges it beside every acceptor. Empty on a
         // seed without replicas.
-        // The replica tier serves the default journal alone (#188).
         let main = crate::shape::identifiers(ctx.state()).main;
-        let replica_ips: Vec<(u64, String)> = if self.journal == main {
+        // The replica tier serves every journal of the run's static list
+        // (#193).
+        let replica_ips: Vec<(u64, String)> = if crate::shape::journals(ctx.state())
+            .ids
+            .contains(&self.journal)
+        {
             deployment
                 .replicas()
                 .iter()
@@ -750,6 +754,11 @@ impl ChainWorkload {
         // members)).
         if crate::shape::downed_founder(ctx.state()) && !operations.contains(&TENANT) {
             operations.push(TENANT);
+        }
+        // Likewise `READ` on a lagging-replica seed (#550 (replica serves an
+        // unreported fold page)).
+        if crate::shape::lagging_replica(ctx.state()) && !operations.contains(&READ) {
+            operations.push(READ);
         }
         // And `VIEW` on a downed-founder seed (#191 (status)).
         if crate::shape::downed_founder(ctx.state()) && !operations.contains(&VIEW) {
@@ -1496,6 +1505,12 @@ impl ChainWorkload {
                     // Any node or replica serves a journal read.
                     let span = server_count + replica_count;
                     let mut drawn = usize::try_from(raw_target >> 32).unwrap_or(0) % span.max(1);
+                    // On a lagging-replica seed every read asks a replica
+                    // first (#550 (replica serves an unreported fold page)):
+                    // the scenario's ingredients come together.
+                    if replica_count > 0 && crate::shape::lagging_replica(ctx.state()) {
+                        drawn = server_count + drawn % replica_count;
+                    }
                     // A client naming a journal this deployment does not
                     // serve (the unset identifier, or another tenant's) must be
                     // refused, never answered from the wrong journal.

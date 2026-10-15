@@ -687,8 +687,9 @@ impl TenantBootstraps {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct TenantStops(Arc<Mutex<StopAcks>>);
 
-/// What [`TenantStops`] holds.
-type StopAcks = BTreeMap<(u64, u64), BTreeMap<u64, BTreeMap<JournalId, FrozenRegistry>>>;
+/// What [`TenantStops`] holds: per matchmaker, its frozen registries and
+/// whether its report is whole (a report is paged, #439).
+type StopAcks = BTreeMap<(u64, u64), BTreeMap<u64, (BTreeMap<JournalId, FrozenRegistry>, bool)>>;
 
 impl TenantStops {
     fn lock(&self) -> std::sync::MutexGuard<'_, StopAcks> {
@@ -702,17 +703,28 @@ impl TenantStops {
         self.lock().remove(&(node, generation));
     }
 
-    /// `matchmaker`'s frozen registries, as `node`'s handover of
-    /// `generation` folded them (every journal's port folds the same reply).
+    /// One page of `matchmaker`'s frozen registries, as `node`'s handover of
+    /// `generation` folded it (every journal's port folds the same reply).
+    /// A first page starts the report; a later one extends it, and `whole`
+    /// marks its last page (#439).
     fn insert(
         &self,
         (node, generation, matchmaker): (u64, u64, u64),
         frozen: BTreeMap<JournalId, FrozenRegistry>,
+        first: bool,
+        whole: bool,
     ) {
-        self.lock()
+        let mut acks = self.lock();
+        let report = acks
             .entry((node, generation))
             .or_default()
-            .insert(matchmaker, frozen);
+            .entry(matchmaker)
+            .or_default();
+        if first {
+            report.0.clear();
+        }
+        report.0.extend(frozen);
+        report.1 = whole;
     }
 
     /// `journal`'s piece of every ack `node`'s handover of `generation`
@@ -727,7 +739,8 @@ impl TenantStops {
             .get(&(node, generation))
             .map(|acks| {
                 acks.iter()
-                    .map(|(m, frozen)| (*m, frozen.get(&journal).cloned().unwrap_or_default()))
+                    .filter(|(_, (_, whole))| *whole)
+                    .map(|(m, (frozen, _))| (*m, frozen.get(&journal).cloned().unwrap_or_default()))
                     .collect()
             })
             .unwrap_or_default()
@@ -2174,6 +2187,8 @@ impl MatchmakerAudit {
         }
         if let ReconfigureReply::Stopped {
             generation,
+            after,
+            next,
             registries,
             ..
         } = reply
@@ -2187,8 +2202,12 @@ impl MatchmakerAudit {
                     (*journal, (registry.gc_watermark, snapshot))
                 })
                 .collect();
-            self.stop_acks
-                .insert((node.0, generation.0, matchmaker.0), frozen);
+            self.stop_acks.insert(
+                (node.0, generation.0, matchmaker.0),
+                frozen,
+                after.is_none(),
+                next.is_none(),
+            );
         }
         match step {
             // The counted-but-short folds: progress the driver's stall
@@ -2729,9 +2748,18 @@ impl MatchmakerAudit {
         match reply {
             ReconfigureReply::Stopped {
                 generation,
+                after,
+                next,
                 registries,
                 ..
             } => {
+                // A page covers the journals after its cursor, up to its
+                // last one when cut (#439): judge this journal only there.
+                let covers = after.is_none_or(|after| journal > after)
+                    && next.is_none_or(|next| journal <= next);
+                if !covers {
+                    return;
+                }
                 let mine = registries.get(&journal).cloned().unwrap_or_default();
                 let (gc_watermark, history) = (&mine.gc_watermark, &mine.history);
                 // The freeze is durable before the answer, and the answer is
@@ -2754,7 +2782,14 @@ impl MatchmakerAudit {
                     { "matchmaker" => matchmaker.0, "reported" => reported.len(), "expected" => expected.len() }
                 );
             }
-            ReconfigureReply::Bootstrapped { set, .. } => {
+            // A page that did not fit may answer that nothing is held yet
+            // (#439): only an answer that names a holding is judged.
+            ReconfigureReply::Bootstrapped {
+                set,
+                held,
+                complete,
+                ..
+            } if held.is_some() || *complete => {
                 let members: Vec<u64> = set.members().iter().map(|m| m.0).collect();
                 let held = self
                     .bootstrapped
@@ -2803,7 +2838,8 @@ impl MatchmakerAudit {
                     "generation: a matchmaker refuses a handover step for another generation"
                 );
             }
-            ReconfigureReply::Promised { .. }
+            ReconfigureReply::Bootstrapped { .. }
+            | ReconfigureReply::Promised { .. }
             | ReconfigureReply::Accepted { .. }
             | ReconfigureReply::Nacked { .. } => {}
         }
