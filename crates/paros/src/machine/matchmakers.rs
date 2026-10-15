@@ -203,7 +203,8 @@ impl<S: StorageProvider + Clone + 'static> SetOpener for MachineSets<S> {
 /// dynamic endpoints)): its sets on `disk`, each journal's facts reported
 /// to the port `audits` makes for it. A machine outside the bootstrap set
 /// opens only the sets `booked` names (#501 (matchmaker sets off the
-/// founders)).
+/// founders)). It serves only requests of cell `cell_id` (#539 (matchmaker
+/// cell fence)).
 ///
 /// # Errors
 ///
@@ -215,7 +216,7 @@ pub(crate) fn spawn<P, S, A, F>(
     rpc: &RpcHandle<P>,
     machine: Option<&moonpool_rpc::ServiceGroup<crate::rpc::methods::MachineInterface>>,
     disk: ProviderDisk<S>,
-    (config, booked): (MatchmakerConfig, SetBookings),
+    (config, booked, cell_id): (MatchmakerConfig, SetBookings, u64),
     tunables: &DriverTunables,
     audits: Arc<F>,
     shutdown: CancellationToken,
@@ -266,6 +267,7 @@ where
                 page,
                 factory: &factory,
                 fail_stop: false,
+                cell_id,
             };
             let served = host
                 .serve::<P, _, _, _>(

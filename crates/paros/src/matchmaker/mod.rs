@@ -44,6 +44,7 @@ use crate::driver::events::{config_hash, reconfigure_kind, reconfigure_reply_kin
 use crate::driver::reply::Reply;
 use crate::driver::reply::match_answer;
 use crate::driver::{BootKind, BootRefusal, DriverTunables, RunError};
+use crate::rpc::Addressed;
 use crate::storage::StorageError;
 use crate::transport::Transport;
 
@@ -556,16 +557,20 @@ pub(crate) struct Host<'f, F> {
     /// only its set, which re-opens at its next request (a machine, where a
     /// storage fault quarantines its store, not the process).
     pub(crate) fail_stop: bool,
+    /// The cell this host serves (#539 (matchmaker cell fence)): a request
+    /// that names another is refused. `0` on a deployment without a cell
+    /// plan.
+    pub(crate) cell_id: u64,
 }
 
 impl<'f, F> Host<'f, F> {
-    /// The seat of `tenant`: hosted, or opened now through `opener`.
-    /// `None` when no set serves `tenant` here.
+    /// The seat of the tenant `addressed` names: hosted, or opened now
+    /// through `opener`. `None` when no set serves that tenant here.
     async fn seat<'h, S, A, O>(
         &self,
         hosted: &'h mut BTreeMap<TenantId, Seat<'f, S, A, F>>,
         opener: &mut O,
-        tenant: TenantId,
+        addressed: Addressed,
     ) -> Result<Option<&'h mut Seat<'f, S, A, F>>, RunError>
     where
         S: MatchmakerStorage,
@@ -573,6 +578,13 @@ impl<'f, F> Host<'f, F> {
         F: Fn(JournalIdentifier) -> A,
         O: SetOpener<Storage = S>,
     {
+        // Paired with `admitted`: a set opens only for its own cell's
+        // request (#539 (matchmaker cell fence)).
+        assert!(
+            addressed.cell_id == self.cell_id,
+            "a set is seated only for its own cell's request"
+        );
+        let tenant = addressed.tenant;
         let vacant = match hosted.entry(tenant) {
             std::collections::btree_map::Entry::Occupied(hosted) => {
                 return Ok(Some(hosted.into_mut()));
@@ -605,6 +617,36 @@ impl<'f, F> Host<'f, F> {
                 Ok(None)
             }
         }
+    }
+
+    /// The tenant of a request this host serves, or `None` when it is
+    /// another cell's or another matchmaker's: refused unanswered, and the
+    /// requester re-asks elsewhere.
+    fn admitted(&self, addressed: Addressed) -> Option<TenantId> {
+        let served = self.ours(addressed.cell_id) && self.addressed(addressed.to);
+        assert!(
+            !served || addressed.cell_id == self.cell_id,
+            "a served request names this host's cell"
+        );
+        served.then_some(addressed.tenant)
+    }
+
+    /// Whether a request of cell `cell_id` is this host's cell's (#539
+    /// (matchmaker cell fence)), as a peer batch is judged (#216): a
+    /// matchmaker at an address another cell left never answers it, nor
+    /// provisions a set for it.
+    fn ours(&self, cell_id: u64) -> bool {
+        let ours = cell_id == self.cell_id;
+        if !ours {
+            moonpool_assertions::reachable!("matchmaker: a request from another cell is refused");
+            tracing::warn!(
+                matchmaker = self.config.id.0,
+                from = cell_id,
+                cell = self.cell_id,
+                "matchmaker_foreign_cell"
+            );
+        }
+        ours
     }
 
     /// Whether a request addressed to `to` is this matchmaker's (#190): a
@@ -685,14 +727,14 @@ impl<'f, F> Host<'f, F> {
         loop {
             moonpool_core::select! {
                 error = run_edge(&mut edge) => return Err(error.into()),
-                Some(((tenant, to, request), reply)) = inbox.requests.recv() => {
+                Some(((addressed, request), reply)) = inbox.requests.recv() => {
                     // One request, one batch, one reply: the core answers every
                     // request it is stepped, and the drain hands the reply out
                     // only once the batch is durable.
-                    if !self.addressed(to) {
+                    let Some(tenant) = self.admitted(addressed) else {
                         continue;
-                    }
-                    let Some(seat) = self.seat(&mut hosted, opener, tenant).await? else {
+                    };
+                    let Some(seat) = self.seat(&mut hosted, opener, addressed).await? else {
                         continue;
                     };
                     let journal = request.journal;
@@ -720,17 +762,17 @@ impl<'f, F> Host<'f, F> {
                         match_answer(id, Reply::Match, reply, answer);
                     }
                 }
-                Some(((tenant, to, request), reply)) = inbox.collects.recv() => {
+                Some(((addressed, request), reply)) = inbox.collects.recv() => {
                     // The GC *primitive*, not the GC protocol: raise one
                     // journal's floor (a no-op at or below the current one,
                     // refused for a generation this matchmaker is not active
                     // for), persist it, and only then acknowledge with the floor
                     // in force. The leader owns the paper's §3.5 preconditions
                     // (`paros_core` `node/gc.rs`).
-                    if !self.addressed(to) {
+                    let Some(tenant) = self.admitted(addressed) else {
                         continue;
-                    }
-                    let Some(seat) = self.seat(&mut hosted, opener, tenant).await? else {
+                    };
+                    let Some(seat) = self.seat(&mut hosted, opener, addressed).await? else {
                         continue;
                     };
                     let GcRequest { from, journal, generation, watermark } = request;
@@ -767,15 +809,15 @@ impl<'f, F> Host<'f, F> {
                     seat.port(journal).matchmaker_gc_replied(id, &ack);
                     match_answer(id, Reply::GcAck, reply, ack);
                 }
-                Some(((tenant, to, request), reply)) = inbox.reconfigures.recv() => {
+                Some(((addressed, request), reply)) = inbox.reconfigures.recv() => {
                     // One step of a matchmaker-set handover (#125): the core
                     // answers it, and the reply leaves only once its write (a
                     // freeze, a pending bootstrap, a promise, a vote, an
                     // activation) is durable.
-                    if !self.addressed(to) {
+                    let Some(tenant) = self.admitted(addressed) else {
                         continue;
-                    }
-                    let Some(seat) = self.seat(&mut hosted, opener, tenant).await? else {
+                    };
+                    let Some(seat) = self.seat(&mut hosted, opener, addressed).await? else {
                         continue;
                     };
                     tracing::info!(
@@ -1059,6 +1101,8 @@ where
         page,
         factory: &audit,
         fail_stop: true,
+        // A standalone matchmaker serves a deployment without a cell plan.
+        cell_id: 0,
     };
     host.serve(
         Some(&mut edge),
