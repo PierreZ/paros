@@ -730,7 +730,8 @@ struct Candidacy {
     abandon: bool,
     /// The first fenced term steps down without a `Resign` record, as if
     /// the record were lost (a BUGGIFY decision): the fold still names the
-    /// term's leader, and the term must not come back.
+    /// term's leader, and the term must not come back. A fault: never in
+    /// the recovery tail ([`chaos`]).
     lose_resign: bool,
     /// The first term that advances a move resigns right after that step
     /// (a BUGGIFY decision, #474 (journals on admitted machines)), a
@@ -744,7 +745,8 @@ struct Candidacy {
     linger: bool,
     /// The first term this member serves takes a lease and a half longer
     /// to install (a BUGGIFY decision, #542 (coordinator starves its lease
-    /// while it installs)): its renewals must keep the term through it.
+    /// while it installs)): its renewals must keep the term through it. A
+    /// fault: never in the recovery tail ([`chaos`]).
     slow_install: bool,
     /// Each term's first finished matchmaker-set move asks its handover
     /// again, as a retry that lands after the move (a BUGGIFY decision,
@@ -961,7 +963,10 @@ async fn campaign<P: Providers>(
                         policy,
                     )
                     .await;
-                    if slow_install && matches!(opened.0, TermDuty::Served { .. }) {
+                    // Never in the recovery tail ([`chaos`]): a slow install
+                    // there spends a lease and a half of the settle the
+                    // election oracle allows.
+                    if slow_install && chaos() && matches!(opened.0, TermDuty::Served { .. }) {
                         slow_install = false;
                         slowed = Some(leader.term);
                         moonpool_assertions::reachable!("coordinator: a term installs slowly");
@@ -1010,7 +1015,9 @@ async fn campaign<P: Providers>(
                 // give the term to the next campaign, which installs itself
                 // under a fresh uuid (#349).
                 moonpool_assertions::reachable!("coordinator: a fenced term resigned");
-                if lose_resign {
+                // Never in the recovery tail ([`chaos`]): a lost resignation
+                // there leaves the cell with no coordinator for a lease.
+                if lose_resign && chaos() {
                     lose_resign = false;
                     moonpool_assertions::reachable!(
                         "coordinator: a fenced term's resignation was lost"
@@ -1170,7 +1177,11 @@ async fn campaign<P: Providers>(
 /// 7ec931e: three stalls in 18 s of the tail). Each is now a fault, silent
 /// when the candidacy starts in the tail, and this read drops one drawn in
 /// the chaos window and carried to a term the tail elects. A read of the
-/// run's phase, no draw; in production no decision is ever drawn.
+/// run's phase, no draw; in production no decision is ever drawn. A lost
+/// resignation and a slow install read it too: in the tail, an `init` fenced
+/// a term whose resignation was then lost, the next term installed slowly,
+/// and it published too late for the election to settle (witness
+/// `replay-main 94182577319794271` on 4c14100).
 fn chaos() -> bool {
     !moonpool_buggify::buggify_is_recovering()
 }
