@@ -315,6 +315,10 @@ pub struct MatchmakerReconfigurer {
     /// `1..=REGISTRY_PAGE`, the constant by default
     /// ([`MatchmakerReconfigurer::set_page`]).
     page: usize,
+    /// The smallest page a frozen member cut its report at in this handover
+    /// (#439): the bootstrap is paged no wider, so a successor meets pages
+    /// no larger than the set's own members send.
+    cut: Option<usize>,
 }
 
 impl MatchmakerReconfigurer {
@@ -333,6 +337,7 @@ impl MatchmakerReconfigurer {
             pending: Vec::new(),
             elapsed: 0,
             page: REGISTRY_PAGE,
+            cut: None,
         };
         assert!(!reconfigurer.is_busy(), "a fresh reconfigurer is idle");
         reconfigurer.assert_invariants();
@@ -587,6 +592,7 @@ impl MatchmakerReconfigurer {
             decree_floor: Ballot::zero(),
         };
         self.elapsed = 0;
+        self.cut = None;
         self.resend();
         assert!(
             matches!(self.phase, ReconfigurerPhase::Stopping { .. }),
@@ -883,10 +889,24 @@ impl MatchmakerReconfigurer {
         self.assert_requests_since(queued);
     }
 
+    /// The most journals one bootstrap page carries (#439): the driver's
+    /// page, no wider than the smallest page a frozen member cut its report
+    /// at.
+    fn bootstrap_page(&self) -> usize {
+        let page = self.cut.map_or(self.page, |cut| cut.min(self.page));
+        assert!(page > 0, "a bootstrap page carries a journal");
+        assert!(
+            page <= self.page,
+            "a bootstrap page is no wider than the driver's"
+        );
+        page
+    }
+
     /// The paged phases' re-sends (#439): each member not counted yet is
     /// asked for the page after the last one it answered.
     fn paged_requests(&self) -> Vec<(MatchmakerId, ReconfigureRequest)> {
         let me = self.node;
+        let page = self.bootstrap_page();
         let mut queue = Vec::new();
         match &self.phase {
             ReconfigurerPhase::Stopping {
@@ -915,7 +935,7 @@ impl MatchmakerReconfigurer {
                         *m,
                         ReconfigureRequest::Bootstrap {
                             from: me,
-                            bootstrap: bootstrap.page(after, self.page),
+                            bootstrap: bootstrap.page(after, page),
                         },
                     ));
                 }
@@ -1055,6 +1075,7 @@ impl MatchmakerReconfigurer {
                 if after != cursor || !well_formed {
                     return ReconfigurerStep::Ignored;
                 }
+                let width = registries.len();
                 let mut report = partial
                     .remove(&from)
                     .map(|(report, _)| report)
@@ -1062,6 +1083,9 @@ impl MatchmakerReconfigurer {
                 report.extend(registries);
                 *decree_floor = (*decree_floor).max(decree_promised);
                 if let Some(next) = next {
+                    // A cut page is full: the member's page is its width.
+                    assert!(width > 0, "a cut frozen page carries a journal");
+                    self.cut = Some(self.cut.map_or(width, |cut| cut.min(width)));
                     // The report continues: ask its next page now.
                     partial.insert(from, (report, next));
                     self.pending.push((
@@ -1138,11 +1162,14 @@ impl MatchmakerReconfigurer {
                             "handover: a reconfigurer sends a bootstrap over several pages"
                         );
                     }
+                    // `bootstrap_page` borrows all of `self`; the phase is
+                    // borrowed here, so read the two fields it reads.
+                    let page = self.cut.map_or(self.page, |cut| cut.min(self.page));
                     self.pending.push((
                         from,
                         ReconfigureRequest::Bootstrap {
                             from: self.node,
-                            bootstrap: bootstrap.page(holds, self.page),
+                            bootstrap: bootstrap.page(holds, page),
                         },
                     ));
                     return ReconfigurerStep::Bootstrapped {
