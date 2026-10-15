@@ -119,11 +119,20 @@ impl FleetOps {
             if self.cached_name(tenant, &name).is_some() && buggify_with_prob!(0.5) {
                 self.read_through_name(&cell, control, &name, payload).await;
             }
-            let op = if buggify_with_prob!(0.3) {
-                // FDB's `configure` (#214 (tenant modes)): a new desired mode
-                // for a journal of the tenant, or on a draw in four for the
-                // tenant's default. The coordinator applies a journal's by
-                // reconfiguration, under this client's load.
+            // FDB's `configure` (#214 (tenant modes)) on a draw in four, on
+            // a draw in two on a changed-mode seed, and on a BUGGIFY coin
+            // besides.
+            let every = if crate::shape::changed_mode(ctx.state()) {
+                2
+            } else {
+                4
+            };
+            let configure = (payload >> 56).is_multiple_of(every) || buggify_with_prob!(0.3);
+            let op = if configure {
+                // A new desired mode for a journal of the tenant, or on a
+                // draw in four for the tenant's default. The coordinator
+                // applies a journal's by reconfiguration, under this
+                // client's load.
                 // On a coin, the widest mode of one partition: it grows the
                 // journal onto every storage machine of the cell, so one full
                 // machine refuses it for want of slots.
@@ -897,14 +906,17 @@ fn drawn_desired(draw: u64) -> Desired {
 /// machines cannot place, or three failures in one partition, which takes
 /// every storage machine.
 fn drawn_configure(draw: u64) -> Desired {
+    // On three storage machines most modes place the same three slots, so
+    // the draw leans to the ones that change them: one acceptor (a shrink)
+    // and acceptor partitions (another quorum system on the same machines).
     let (failures_per_partition, partitions) = match (draw >> 24) % 10 {
-        0 | 1 => (1, 1),
-        2 => (0, 1),
+        0 => (1, 1),
+        1 | 2 => (0, 1),
         3 => (2, 1),
         4 => (0, 2),
-        5 => (0, 3),
-        6 => (0, 4),
-        7 => (1, 2),
+        5 | 6 => (0, 3),
+        7 => (0, 4),
+        8 => (1, 2),
         // The widest mode of one partition grows a journal onto every
         // storage machine: on a full cell it is refused for want of slots.
         _ => (3, 1),

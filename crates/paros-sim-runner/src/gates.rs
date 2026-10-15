@@ -78,6 +78,10 @@ pub const RARE: &[Rare] = &[
         reason: "marginal: the server side of an unplaceable create, missed by the sweep on main (#486)",
     },
     Rare {
+        msg: "coordinator: a mode change releases the slots it left",
+        reason: "marginal: a shrink finishes only once the leader's GC watermark reaches it, like a move's release (#498 (moves in the sweep)); 0 of 300 hunt seeds with the changed-mode scenario, while 4 shrank (#486)",
+    },
+    Rare {
         msg: "tenant coordinator: a configure refused for want of slots",
         reason: "marginal: the configure twin of an unplaceable create, needs a full machine; fired on 0 of 300 hunt seeds even with a widest-mode draw, while configures were recorded on 36 (#486)",
     },
