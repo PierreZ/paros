@@ -35,3 +35,4 @@ target
 # cargo-mutants output (`cargo xtask mutants`, #269)
 mutants.out/
 mutants.out.old/
+/target-main

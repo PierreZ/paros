@@ -45,6 +45,10 @@ pub struct Rare {
 /// window seldom reaches, #485 the double fault, #486 the rest.
 pub const RARE: &[Rare] = &[
     Rare {
+        msg: "driver: an admitted machine dials a seed from an adopted book",
+        reason: "marginal: needs an admitted machine whose founding members all moved (#505 (stranded admitted machine)); fired in main's sweep of 309 seeds at 8efe714, missed by PR #547's sweep of 232 (#486)",
+    },
+    Rare {
         msg: "journals: a create refused for capacity is asked again and placed",
         reason: "marginal: fired on 0 of 1,100 hunt seeds, missed by the sweep on main (#486)",
     },
