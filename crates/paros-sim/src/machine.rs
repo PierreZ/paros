@@ -133,6 +133,10 @@ pub(crate) struct MachineBoard {
     /// The audit's fold of the calls every machine metered (#366
     /// (metrics)): what the machines' counters must add up to.
     metered: paros::metrics::Totals,
+    /// Each machine's metrics by its process address (#366 (metrics)): a
+    /// reboot gets the metrics it had, as a real `/metrics` keeps counting
+    /// on the same host, and the oracle reads every one.
+    metrics: BTreeMap<String, paros::metrics::Metrics>,
 }
 
 impl MachineBoard {
@@ -721,16 +725,20 @@ impl Process for MachineProcess {
     }
 }
 
-/// The metrics machine `ctx` records on (#366 (metrics)): the source the
-/// runner keeps for its address, unless the seed runs its machines without
+/// The metrics machine `ctx` records on (#366 (metrics)): the ones the
+/// board keeps for its address, unless the seed runs its machines without
 /// metrics ([`crate::shape::unmetered`]).
 fn machine_metrics(ctx: &SimContext) -> paros::metrics::Metrics {
     if crate::shape::unmetered(ctx.state()) {
         assert_reachable!("metrics: the machines run without metrics");
         return paros::metrics::Metrics::off();
     }
-    ctx.metrics::<paros::metrics::PrometheusSource>()
-        .map_or_else(paros::metrics::Metrics::off, paros::metrics::Metrics::new)
+    let board = machine_board(ctx.state());
+    lock(&board)
+        .metrics
+        .entry(ctx.my_ip().to_string())
+        .or_insert_with(paros::metrics::Metrics::on)
+        .clone()
 }
 
 /// The port every simulated machine binds and advertises.
@@ -1431,43 +1439,40 @@ pub(crate) fn metered_call(board: &Mutex<MachineBoard>, call: paros::metrics::Ca
     lock(board).metered.received(call);
 }
 
-/// A machine answered a metered call with `written` bytes accepted and
-/// `read` bytes served (#366 (metrics), `Audit::call_answered`).
-pub(crate) fn metered_answer(board: &Mutex<MachineBoard>, written: u64, read: u64) {
-    let mut board = lock(board);
-    board.metered.written_bytes += written;
-    board.metered.read_bytes += read;
+/// A machine answered a metered call of kind `call` with `written` bytes
+/// accepted and `read` bytes served (#366 (metrics), `Audit::call_answered`).
+pub(crate) fn metered_answer(
+    board: &Mutex<MachineBoard>,
+    call: paros::metrics::CallKind,
+    written: u64,
+    read: u64,
+) {
+    lock(board).metered.answered(call, written, read);
 }
 
 /// Metrics only observe (#366 (metrics)): every machine's counters, read
-/// from the source the runner keeps for its address, add up to the audit's
+/// from the metrics the board keeps for its address, add up to the audit's
 /// own fold of the calls the machines reported, at this instant. A count
 /// and its report happen in one step, so the two never drift apart, across
-/// reboots and wipes too (a source outlives its process). A run whose
-/// machines record no metrics counts nothing.
+/// reboots and wipes too (a machine's metrics outlive its process). A run
+/// whose machines record no metrics counts nothing.
 pub(crate) fn check_metrics(ctx: &SimContext) {
     let board = machine_board(ctx.state());
-    let (ips, folded) = {
+    let (machines, counted, folded) = {
         let board = lock(&board);
-        let ips: BTreeSet<String> = board.ips.values().cloned().collect();
-        (ips, board.metered)
-    };
-    let mut counted = paros::metrics::Totals::default();
-    for ip in &ips {
-        if let Some(source) = ctx
-            .metrics_handle()
-            .get::<paros::metrics::PrometheusSource>(ip)
-        {
-            counted.add(&paros::metrics::Totals::of(&source));
+        let mut counted = paros::metrics::Totals::default();
+        for metrics in board.metrics.values() {
+            counted.add(&paros::metrics::Totals::of(metrics));
         }
-    }
+        (board.metrics.len(), counted, board.metered)
+    };
     assert_always!(
         counted == folded,
         "metrics: the machines' counters match the audit's fold of their calls",
         {
             "counted" => format!("{counted:?}"),
             "folded" => format!("{folded:?}"),
-            "machines" => ips.len()
+            "machines" => machines
         }
     );
     if crate::shape::unmetered(ctx.state()) {

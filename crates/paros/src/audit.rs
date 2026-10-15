@@ -32,7 +32,7 @@ use crate::Address;
 use crate::client::CallObserver;
 use crate::driver::BootRefusal;
 use crate::machine::{CachedRegistry, CellPlan, MachineRecord};
-use crate::metrics::CallKind;
+use crate::metrics::{CallKind, CallOutcome};
 use crate::name::JournalName;
 use crate::rpc::{EdgeRejection, MatchmakersRefusal, RetireRefusal};
 use crate::storage::StorageError;
@@ -533,15 +533,16 @@ pub trait Audit {
     /// counters against its own fold.
     fn call_received(&self, node: NodeId, journal: JournalIdentifier, call: CallKind) {}
 
-    /// The answer to a `call` [`Audit::call_received`] reported left, with
-    /// `written` bytes accepted and `read` bytes served (#366 (metrics)):
-    /// what `paros_call_seconds`, `paros_written_bytes_total` and
+    /// The answer to a call [`Audit::call_received`] reported left: `answer`
+    /// is the call and its outcome, with `written` bytes accepted and `read`
+    /// bytes served (#366 (metrics)). It is what `paros_call_answers_total`,
+    /// `paros_call_answer_seconds_total`, `paros_written_bytes_total` and
     /// `paros_read_bytes_total` count. A dropped answer is not reported.
     fn call_answered(
         &self,
         node: NodeId,
         journal: JournalIdentifier,
-        call: CallKind,
+        answer: (CallKind, CallOutcome),
         written: u64,
         read: u64,
     ) {

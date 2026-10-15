@@ -1,7 +1,8 @@
 //! The node loop's metering (#366 (metrics), [`crate::metrics`]): every
 //! data-plane call that reaches a journal this node runs is counted where
-//! the loop takes it, and its answer is timed and its bytes counted where
-//! the answer leaves, through the reply handle ([`ReplySender::observed`]).
+//! the loop takes it, and its answer is timed and counted by outcome and
+//! bytes where the answer leaves, through the reply handle
+//! ([`ReplySender::observed`]).
 //!
 //! Observation only: the counts are written after the outcome they count,
 //! and nothing here is read back by the loop. With metrics off the reply
@@ -17,8 +18,8 @@ use paros_core::{JournalIdentifier, NodeId};
 
 use crate::audit::Audit;
 use crate::machine::ControlJournals;
-use crate::metrics::{CallKind, Metrics};
-use crate::rpc::{ReadAck, ReplySender, WriteAck, WriteOutcome};
+use crate::metrics::{CallKind, CallOutcome, Metrics};
+use crate::rpc::{ReadAck, ReplySender, SetLeaderAck, TruncateAck, WriteAck, WriteOutcome};
 
 use super::system::ControlFollower;
 
@@ -67,27 +68,103 @@ pub(crate) fn journal_names<P: moonpool_core::Providers>(
     )
 }
 
-/// What an answer carried: bytes accepted and bytes served.
-pub(crate) type Carried<U> = fn(&U, u64) -> (u64, u64);
+/// What an answer said: its outcome, the bytes it accepted and the bytes
+/// it served.
+pub(crate) struct Answer {
+    pub(crate) outcome: CallOutcome,
+    pub(crate) written: u64,
+    pub(crate) read: u64,
+}
 
-/// A `Write`'s answer: its records' bytes when accepted.
-pub(crate) fn write_carried(ack: &WriteAck, bytes: u64) -> (u64, u64) {
-    if ack.outcome == WriteOutcome::Accepted as i32 {
-        (bytes, 0)
-    } else {
-        (0, 0)
+impl Answer {
+    fn bare(outcome: CallOutcome) -> Self {
+        Self {
+            outcome,
+            written: 0,
+            read: 0,
+        }
+    }
+
+    /// The outcome of an answer with no verdict: a redirect when it names
+    /// a leader.
+    fn no_verdict(unknown_journal: bool, leader: Option<u64>) -> Self {
+        Self::bare(if unknown_journal {
+            CallOutcome::UnknownJournal
+        } else if leader.is_some() {
+            CallOutcome::Redirected
+        } else {
+            CallOutcome::Unserved
+        })
     }
 }
 
-/// A `Read`'s answer: its page's bytes.
-pub(crate) fn read_carried(ack: &ReadAck, _: u64) -> (u64, u64) {
-    let bytes = ack.records.iter().map(Vec::len).sum::<usize>();
-    (0, u64::try_from(bytes).unwrap_or(u64::MAX))
+/// How an answer is judged; the `u64` is the bytes the request carried.
+pub(crate) type Judged<U> = fn(&U, u64) -> Answer;
+
+/// A `Write`'s answer: its records' bytes when accepted.
+pub(crate) fn write_answer(ack: &WriteAck, bytes: u64) -> Answer {
+    let outcome = match WriteOutcome::try_from(ack.outcome) {
+        Ok(WriteOutcome::Accepted) => {
+            return Answer {
+                outcome: CallOutcome::Ok,
+                written: bytes,
+                read: 0,
+            };
+        }
+        Ok(WriteOutcome::Duplicate) => CallOutcome::Duplicate,
+        Ok(WriteOutcome::Refused) => CallOutcome::Refused,
+        Ok(WriteOutcome::Truncated) => CallOutcome::Truncated,
+        Ok(WriteOutcome::TooLarge) => CallOutcome::TooLarge,
+        Ok(WriteOutcome::WrongMode) => CallOutcome::WrongMode,
+        Ok(WriteOutcome::None) | Err(_) => {
+            return Answer::no_verdict(ack.unknown_journal, ack.leader);
+        }
+    };
+    Answer::bare(outcome)
 }
 
-/// An answer that carries no records (`SetLeader`, `Truncate`).
-pub(crate) fn nothing_carried<U>(_: &U, _: u64) -> (u64, u64) {
-    (0, 0)
+/// A `Read`'s answer: its page's bytes.
+pub(crate) fn read_answer(ack: &ReadAck, _: u64) -> Answer {
+    if ack.unknown_journal || !ack.served {
+        return Answer::no_verdict(ack.unknown_journal, None);
+    }
+    if ack.truncated {
+        return Answer::bare(CallOutcome::Truncated);
+    }
+    let bytes = ack.records.iter().map(Vec::len).sum::<usize>();
+    Answer {
+        outcome: CallOutcome::Ok,
+        written: 0,
+        read: u64::try_from(bytes).unwrap_or(u64::MAX),
+    }
+}
+
+/// A `SetLeader`'s answer: a lost compare-and-set is refused.
+pub(crate) fn set_leader_answer(ack: &SetLeaderAck, _: u64) -> Answer {
+    if ack.wrong_mode {
+        Answer::bare(CallOutcome::WrongMode)
+    } else if ack.decided {
+        Answer::bare(if ack.won {
+            CallOutcome::Ok
+        } else {
+            CallOutcome::Refused
+        })
+    } else {
+        Answer::no_verdict(ack.unknown_journal, ack.leader)
+    }
+}
+
+/// A `Truncate`'s answer.
+pub(crate) fn truncate_answer(ack: &TruncateAck, _: u64) -> Answer {
+    if ack.wrong_mode {
+        Answer::bare(CallOutcome::WrongMode)
+    } else if ack.refused {
+        Answer::bare(CallOutcome::Refused)
+    } else if ack.decided {
+        Answer::bare(CallOutcome::Ok)
+    } else {
+        Answer::no_verdict(ack.unknown_journal, ack.leader)
+    }
 }
 
 /// One node's meter: its metrics, its clock and its node audit port.
@@ -101,7 +178,7 @@ pub(crate) struct Meter<'a, T, N> {
 impl<T: TimeProvider, N: Audit + Clone + Send + Sync + 'static> Meter<'_, T, N> {
     /// Count call `call` to `journal` (labelled with `names` at its first
     /// call) and hand back its reply handle, which times the answer and
-    /// counts what it `carried`; `bytes` are the records the request
+    /// counts it as `judged`; `bytes` are the records the request
     /// carried. With metrics off, `reply` comes back untouched.
     pub(crate) fn call<U: 'static>(
         &self,
@@ -109,7 +186,7 @@ impl<T: TimeProvider, N: Audit + Clone + Send + Sync + 'static> Meter<'_, T, N> 
         names: impl FnOnce() -> (String, String),
         (call, bytes): (CallKind, u64),
         reply: ReplySender<U>,
-        carried: Carried<U>,
+        judged: Judged<U>,
     ) -> ReplySender<U> {
         let Some(handles) = self.metrics.journal(journal, names) else {
             return reply;
@@ -119,7 +196,11 @@ impl<T: TimeProvider, N: Audit + Clone + Send + Sync + 'static> Meter<'_, T, N> 
         let (time, audit, node) = (self.time.clone(), self.audit.clone(), self.node);
         let started = time.now();
         reply.observed(move |ack| {
-            let (written, read) = carried(ack, bytes);
+            let Answer {
+                outcome,
+                written,
+                read,
+            } = judged(ack, bytes);
             assert!(
                 written == 0 || call == CallKind::Write,
                 "only a write's answer counts written bytes"
@@ -129,8 +210,8 @@ impl<T: TimeProvider, N: Audit + Clone + Send + Sync + 'static> Meter<'_, T, N> 
                 "only a read's answer counts read bytes"
             );
             let took = time.now().saturating_sub(started);
-            handles.answered(call, took, written, read);
-            audit.call_answered(node, journal, call, written, read);
+            handles.answered((call, outcome), took, written, read);
+            audit.call_answered(node, journal, (call, outcome), written, read);
         })
     }
 }

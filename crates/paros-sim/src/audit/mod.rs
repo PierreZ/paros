@@ -1704,12 +1704,12 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         &self,
         _node: NodeId,
         _journal: JournalIdentifier,
-        _call: paros::metrics::CallKind,
+        (call, _): (paros::metrics::CallKind, paros::metrics::CallOutcome),
         written: u64,
         read: u64,
     ) {
         if let Some((board, _)) = &self.machines {
-            crate::machine::metered_answer(board, written, read);
+            crate::machine::metered_answer(board, call, written, read);
         }
     }
 

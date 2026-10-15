@@ -525,6 +525,9 @@ fn monitor<P: Providers>(
     shutdown: &CancellationToken,
 ) -> (super::load::LoadBoard, Metrics) {
     let metrics = &settings.metrics;
+    // A start begins again: metrics a machine kept from its last run (the
+    // simulation's reboot) show it starting, not serving.
+    metrics.set_phase(Phase::Starting);
     let load = super::load::LoadBoard::default();
     super::load::spawn_monitor(
         providers,

@@ -36,9 +36,8 @@ moonpool-journal = { git = "https://github.com/PierreZ/moonpool", rev = "0169819
 moonpool-buggify = { git = "https://github.com/PierreZ/moonpool", rev = "0169819c5f59f3360eee59e5bf8a4612bf3feba1" }
 moonpool-assertions = { git = "https://github.com/PierreZ/moonpool", rev = "0169819c5f59f3360eee59e5bf8a4612bf3feba1" }
 # A machine's metrics (#366, `paros::metrics`): a plain `prometheus` registry
-# the simulation reads per machine and `parosd` serves as text; provider-free
+# `parosd` serves as text and the simulation reads per machine; provider-free
 # and wasm-safe.
-moonpool-prometheus = { git = "https://github.com/PierreZ/moonpool", rev = "0169819c5f59f3360eee59e5bf8a4612bf3feba1" }
 prometheus = { version = "0.14", default-features = false }
 
 prost = "0.14"

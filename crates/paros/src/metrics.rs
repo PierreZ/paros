@@ -1,27 +1,37 @@
 //! **Metrics** (#366, `docs/architecture.md` §3.6): what a machine counts
 //! about the calls it serves, for an operator, never for a decision.
 //!
-//! The library records through moonpool's `PrometheusSource`
-//! (`moonpool-prometheus`): a plain `prometheus` registry, provider-free and
-//! wasm-safe, that the simulation also reads per machine. `parosd` serves it
-//! as Prometheus text (`/metrics`); the simulation hands every machine the
-//! source the runner keeps for its address, so a reboot finds its counters
-//! again, as a real `/metrics` would on the same host.
+//! The library records in a plain `prometheus` registry, one per
+//! [`Metrics::on`], provider-free and wasm-safe. `parosd` serves it as
+//! Prometheus text (`/metrics`). The simulation keeps each machine's
+//! `Metrics` for its address and hands it back at a reboot, so a reboot
+//! finds its counters again, and reads the counters from it
+//! ([`Totals::of`]).
 //!
 //! | metric | kind | labels | where |
 //! |---|---|---|---|
-//! | `paros_calls_total` | counter | `call`, `tenant`, `journal` | a data-plane call reaches a journal this machine runs |
-//! | `paros_call_seconds` | histogram | `call` | the call's answer leaves (a dropped answer is not timed) |
-//! | `paros_written_bytes_total` | counter | `tenant`, `journal` | an accepted `Write` is answered |
-//! | `paros_read_bytes_total` | counter | `tenant`, `journal` | a `Read` page is answered |
-//! | `paros_applied_slot`, `paros_chosen_slot` | gauge | `tenant`, `journal` | every settled batch; the apply lag is their difference |
-//! | `paros_settle_seconds` | histogram | | a batch persisted (fsync included), sent and applied |
+//! | `paros_calls_total` | counter | `call`, journal | a data-plane call reaches a journal this machine runs |
+//! | `paros_call_answers_total` | counter | `call`, `outcome`, journal | the call's answer leaves (a dropped answer is not counted) |
+//! | `paros_call_answer_seconds_total` | counter | `call`, journal | the same answer: the time from the call's arrival |
+//! | `paros_written_bytes_total` | counter | journal | an accepted `Write` is answered |
+//! | `paros_read_bytes_total` | counter | journal | a `Read` page is answered |
+//! | `paros_applied_slot`, `paros_chosen_slot` | gauge | journal | every settled batch; the apply lag is their difference |
+//! | `paros_settles_total`, `paros_settle_seconds_total` | counter | | a batch persisted (fsync included), sent and applied |
 //! | `paros_machine_*` | gauge | | the last busyness window (#424) |
+//! | `paros_machine_load_windows_total` | counter | | a busyness window closes: the heartbeat |
 //! | `paros_machine_phase` | gauge | | 0 starting, 1 idle, 2 serving |
 //!
-//! Labels name entities by their names (tenant and journal), never by ids;
-//! an id is printed in hex only for a journal whose names the machine does
-//! not know.
+//! "journal" is four labels: `tenant` and `journal`, the names, and
+//! `tenant_id` and `journal_id`, the ids in hex. A journal whose names the
+//! machine does not know is named by its ids in hex. Every label value is
+//! bounded: a journal this machine runs, a call, an outcome.
+//!
+//! There is no histogram: a time is a seconds counter beside its count, so
+//! `rate(seconds) / rate(count)` is the mean over any window, and a single
+//! slow call is found in the traces. A call received and not answered is
+//! `paros_calls_total` less the answers. The outcomes are [`CallOutcome`]: the
+//! refusals and the calls this machine did not serve are counted beside
+//! the successes.
 //!
 //! **Observation only.** A metric is written after the outcome it counts
 //! is decided and is never read by the code that serves: no branch, no
@@ -39,28 +49,15 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-pub use moonpool_prometheus::PrometheusSource;
-use moonpool_prometheus::{
-    SimCounter, SimCounterVec, SimGauge, SimGaugeVec, SimHistogram, SimHistogramVec,
-};
 use paros_core::JournalIdentifier;
-use prometheus::HistogramOpts;
+use prometheus::{
+    Counter, CounterVec, Gauge, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts, Registry,
+};
 
 use crate::load::Busyness;
 
-/// The bounds of `paros_call_seconds`, in seconds: half a millisecond to
-/// ten seconds (a long-poll `Read` waits up to its own bound).
-const CALL_BUCKETS: [f64; 14] = [
-    0.000_5, 0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0,
-];
-
-/// The bounds of `paros_settle_seconds`, in seconds.
-const SETTLE_BUCKETS: [f64; 12] = [
-    0.000_1, 0.000_25, 0.000_5, 0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.5, 1.0,
-];
-
-const _: () = assert!(CALL_BUCKETS[0] > 0.0);
-const _: () = assert!(SETTLE_BUCKETS[0] > 0.0);
+/// The labels that name a journal: its names, then its ids in hex.
+const JOURNAL_LABELS: [&str; 4] = ["tenant", "journal", "tenant_id", "journal_id"];
 
 /// A data-plane call, the `call` label.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -108,6 +105,70 @@ impl CallKind {
             CallKind::SetLeader => 2,
             CallKind::Truncate => 3,
         }
+    }
+}
+
+/// How a call was answered, the `outcome` label: every success, refusal
+/// and call this machine did not serve has its own value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum CallOutcome {
+    /// Served: a write accepted, a page read, a truncation applied, a
+    /// leader set.
+    Ok,
+    /// A retry of a write accepted before: acked, nothing moved.
+    Duplicate,
+    /// Judged and refused: a stale writer or a lost compare-and-set.
+    Refused,
+    /// Refused: shaped for the other writer mode.
+    WrongMode,
+    /// The position asked for is below the journal's first position.
+    Truncated,
+    /// Refused at the edge: the batch is over this machine's limits.
+    TooLarge,
+    /// Sent to the leader.
+    Redirected,
+    /// This machine does not run the journal (any more).
+    UnknownJournal,
+    /// No verdict: the machine could not serve the call in time.
+    Unserved,
+}
+
+impl CallOutcome {
+    /// Every outcome, in label order.
+    pub const ALL: [CallOutcome; 9] = [
+        CallOutcome::Ok,
+        CallOutcome::Duplicate,
+        CallOutcome::Refused,
+        CallOutcome::WrongMode,
+        CallOutcome::Truncated,
+        CallOutcome::TooLarge,
+        CallOutcome::Redirected,
+        CallOutcome::UnknownJournal,
+        CallOutcome::Unserved,
+    ];
+
+    /// The stable `outcome` label.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            CallOutcome::Ok => "ok",
+            CallOutcome::Duplicate => "duplicate",
+            CallOutcome::Refused => "refused",
+            CallOutcome::WrongMode => "wrong_mode",
+            CallOutcome::Truncated => "truncated",
+            CallOutcome::TooLarge => "too_large",
+            CallOutcome::Redirected => "redirected",
+            CallOutcome::UnknownJournal => "unknown_journal",
+            CallOutcome::Unserved => "unserved",
+        }
+    }
+
+    /// The outcome a label names.
+    #[must_use]
+    pub fn of_label(label: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|outcome| outcome.label() == label)
     }
 }
 
@@ -206,135 +267,218 @@ struct Shared {
     journals: Mutex<BTreeMap<JournalIdentifier, JournalMetrics>>,
 }
 
-/// The registered families of one source.
+/// The registered families of one registry.
 struct Families {
-    source: Arc<PrometheusSource>,
-    calls: SimCounterVec,
-    latency: SimHistogramVec,
-    written: SimCounterVec,
-    read: SimCounterVec,
-    applied: SimGaugeVec,
-    chosen: SimGaugeVec,
-    settle: SimHistogram,
-    phase: SimGauge,
-    cpu_cores: SimGauge,
-    machine_cpu: SimGauge,
-    disk_busy: SimGauge,
-    disk_queue: SimGauge,
+    registry: Registry,
+    calls: IntCounterVec,
+    answers: IntCounterVec,
+    answer_seconds: CounterVec,
+    written: IntCounterVec,
+    read: IntCounterVec,
+    applied: IntGaugeVec,
+    chosen: IntGaugeVec,
+    machine: MachineFamilies,
 }
 
-/// One journal's handles, labelled once with its names.
+/// The families with no label: the machine's own.
+struct MachineFamilies {
+    settles: IntCounter,
+    settle_seconds: Counter,
+    phase: IntGauge,
+    windows: IntCounter,
+    cpu_cores: Gauge,
+    machine_cpu: Gauge,
+    disk_busy: Gauge,
+    disk_queue: IntGauge,
+}
+
+/// One journal's handles, labelled once with its names and ids.
 #[derive(Clone)]
 pub(crate) struct JournalMetrics {
-    calls: [SimCounter; 4],
-    latency: [SimHistogram; 4],
-    written: SimCounter,
-    read: SimCounter,
-    applied: SimGauge,
-    chosen: SimGauge,
+    /// The journal's four label values, in [`JOURNAL_LABELS`] order.
+    labels: Arc<[String; 4]>,
+    /// The answers family: a series is created at its first outcome.
+    answers: IntCounterVec,
+    calls: [IntCounter; 4],
+    answer_seconds: [Counter; 4],
+    written: IntCounter,
+    read: IntCounter,
+    applied: IntGauge,
+    chosen: IntGauge,
 }
 
-/// A family the source refuses is a bug here: the names, labels and
-/// buckets are constants.
+/// A family the registry refuses is a bug here: the names and labels are
+/// constants, and each registry holds paros's families once.
 fn registered<T>(family: prometheus::Result<T>) -> T {
     family.unwrap_or_else(|error| unreachable!("a paros metric registers: {error}"))
 }
 
+/// `metric`, registered in `registry`.
+fn register<T: prometheus::core::Collector + Clone + 'static>(registry: &Registry, metric: T) -> T {
+    registered(registry.register(Box::new(metric.clone())));
+    metric
+}
+
+/// `labels` with the journal's labels after them.
+fn with_journal<const N: usize>(labels: [&'static str; N]) -> Vec<&'static str> {
+    labels.into_iter().chain(JOURNAL_LABELS).collect()
+}
+
 impl Families {
-    fn register(source: Arc<PrometheusSource>) -> Self {
-        let journal = &["tenant", "journal"];
-        let calls = registered(source.counter_vec(
+    fn register(registry: Registry) -> Self {
+        let counters = |name: &str, help: &str, labels: &[&str]| {
+            register(
+                &registry,
+                registered(IntCounterVec::new(Opts::new(name, help), labels)),
+            )
+        };
+        let slots = |name: &str, help: &str| {
+            register(
+                &registry,
+                registered(IntGaugeVec::new(Opts::new(name, help), &JOURNAL_LABELS)),
+            )
+        };
+        let calls = counters(
             "paros_calls_total",
             "Data-plane calls that reached a journal this machine runs.",
-            &["call", "tenant", "journal"],
-        ));
-        let latency = registered(
-            source.histogram_vec(
-                HistogramOpts::new(
-                    "paros_call_seconds",
-                    "Time from a call's arrival to its answer.",
-                )
-                .buckets(CALL_BUCKETS.to_vec()),
-                &["call"],
-            ),
+            &with_journal(["call"]),
         );
-        let written = registered(source.counter_vec(
+        let answers = counters(
+            "paros_call_answers_total",
+            "Answers to data-plane calls, by outcome.",
+            &with_journal(["call", "outcome"]),
+        );
+        let answer_seconds = register(
+            &registry,
+            registered(CounterVec::new(
+                Opts::new(
+                    "paros_call_answer_seconds_total",
+                    "Seconds from each answered call's arrival to its answer, summed.",
+                ),
+                &with_journal(["call"]),
+            )),
+        );
+        let written = counters(
             "paros_written_bytes_total",
             "Bytes of records in the writes this machine accepted.",
-            journal,
-        ));
-        let read = registered(source.counter_vec(
+            &JOURNAL_LABELS,
+        );
+        let read = counters(
             "paros_read_bytes_total",
             "Bytes of records in the read pages this machine answered.",
-            journal,
-        ));
-        let applied = registered(source.gauge_vec(
+            &JOURNAL_LABELS,
+        );
+        let applied = slots(
             "paros_applied_slot",
             "The slot this machine's journal fold applied up to.",
-            journal,
-        ));
-        let chosen = registered(source.gauge_vec(
+        );
+        let chosen = slots(
             "paros_chosen_slot",
             "The slot this machine knows chosen up to.",
-            journal,
-        ));
-        let settle = registered(source.histogram_with_buckets(
-            "paros_settle_seconds",
-            "Time a batch takes to persist (fsync included), send and apply.",
-            SETTLE_BUCKETS.to_vec(),
-        ));
-        let phase = registered(source.gauge(
-            "paros_machine_phase",
-            "The machine's phase: 0 starting, 1 idle, 2 serving.",
-        ));
-        let cpu_cores = registered(source.gauge(
-            "paros_machine_cpu_cores",
-            "CPU cores the process used over the last window.",
-        ));
-        let machine_cpu = registered(source.gauge(
-            "paros_machine_cpu_ratio",
-            "The whole machine's CPU use over the last window, from 0 to 1.",
-        ));
-        let disk_busy = registered(source.gauge(
-            "paros_machine_disk_busy_ratio",
-            "The share of the last window the data disk was busy, from 0 to 1.",
-        ));
-        let disk_queue = registered(source.gauge(
-            "paros_machine_disk_queue_depth",
-            "I/Os in flight on the data disk at the last window's end.",
-        ));
+        );
         Self {
-            source,
             calls,
-            latency,
+            answers,
+            answer_seconds,
             written,
             read,
             applied,
             chosen,
-            settle,
+            machine: MachineFamilies::register(&registry),
+            registry,
+        }
+    }
+
+    fn journal(&self, id: JournalIdentifier, tenant: String, journal: String) -> JournalMetrics {
+        let labels = Arc::new([
+            tenant,
+            journal,
+            format!("{:x}", id.tenant.0),
+            format!("{:x}", id.journal.0),
+        ]);
+        let named = labels.each_ref().map(String::as_str);
+        let [tenant, journal, tenant_id, journal_id] = named;
+        let per_call = |call: CallKind| {
+            self.calls
+                .with_label_values(&[call.label(), tenant, journal, tenant_id, journal_id])
+        };
+        let seconds = |call: CallKind| {
+            self.answer_seconds.with_label_values(&[
+                call.label(),
+                tenant,
+                journal,
+                tenant_id,
+                journal_id,
+            ])
+        };
+        JournalMetrics {
+            calls: CallKind::ALL.map(per_call),
+            answer_seconds: CallKind::ALL.map(seconds),
+            written: self.written.with_label_values(&named),
+            read: self.read.with_label_values(&named),
+            applied: self.applied.with_label_values(&named),
+            chosen: self.chosen.with_label_values(&named),
+            answers: self.answers.clone(),
+            labels,
+        }
+    }
+}
+
+impl MachineFamilies {
+    fn register(registry: &Registry) -> Self {
+        let counter =
+            |name: &str, help: &str| register(registry, registered(IntCounter::new(name, help)));
+        let gauge = |name: &str, help: &str| register(registry, registered(Gauge::new(name, help)));
+        let settles = counter(
+            "paros_settles_total",
+            "Batches this machine persisted (fsync included), sent and applied.",
+        );
+        let settle_seconds = register(
+            registry,
+            registered(Counter::new(
+                "paros_settle_seconds_total",
+                "Seconds the settled batches took, summed.",
+            )),
+        );
+        let phase = register(
+            registry,
+            registered(IntGauge::new(
+                "paros_machine_phase",
+                "The machine's phase: 0 starting, 1 idle, 2 serving.",
+            )),
+        );
+        let windows = counter(
+            "paros_machine_load_windows_total",
+            "Busyness windows the machine closed: it stops when sampling stops.",
+        );
+        let cpu_cores = gauge(
+            "paros_machine_cpu_cores",
+            "CPU cores the process used over the last window.",
+        );
+        let machine_cpu = gauge(
+            "paros_machine_cpu_ratio",
+            "The whole machine's CPU use over the last window, from 0 to 1.",
+        );
+        let disk_busy = gauge(
+            "paros_machine_disk_busy_ratio",
+            "The share of the last window the data disk was busy, from 0 to 1.",
+        );
+        let disk_queue = register(
+            registry,
+            registered(IntGauge::new(
+                "paros_machine_disk_queue_depth",
+                "I/Os in flight on the data disk at the last window's end.",
+            )),
+        );
+        Self {
+            settles,
+            settle_seconds,
             phase,
+            windows,
             cpu_cores,
             machine_cpu,
             disk_busy,
             disk_queue,
-        }
-    }
-
-    fn journal(&self, tenant: &str, journal: &str) -> JournalMetrics {
-        let per_call = |call: CallKind| {
-            registered(
-                self.calls
-                    .with_label_values(&[call.label(), tenant, journal]),
-            )
-        };
-        let latency = |call: CallKind| registered(self.latency.with_label_values(&[call.label()]));
-        JournalMetrics {
-            calls: CallKind::ALL.map(per_call),
-            latency: CallKind::ALL.map(latency),
-            written: registered(self.written.with_label_values(&[tenant, journal])),
-            read: registered(self.read.with_label_values(&[tenant, journal])),
-            applied: registered(self.applied.with_label_values(&[tenant, journal])),
-            chosen: registered(self.chosen.with_label_values(&[tenant, journal])),
         }
     }
 }
@@ -346,20 +490,14 @@ impl Metrics {
         Self::default()
     }
 
-    /// Metrics recorded on a source of their own: `parosd`'s.
+    /// Metrics recorded in a registry of their own. A machine started
+    /// again with the same `Metrics` (the simulation's reboot) keeps
+    /// counting from where it stopped.
     #[must_use]
     pub fn on() -> Self {
-        Self::new(Arc::new(PrometheusSource::default()))
-    }
-
-    /// Metrics recorded on `source`. A source that already holds paros's
-    /// families (a machine started again on the same host, in the
-    /// simulation) is looked up, never registered twice.
-    #[must_use]
-    pub fn new(source: Arc<PrometheusSource>) -> Self {
         Self(Arc::new(Shared {
             phase: AtomicU8::new(Phase::Starting.to_u8()),
-            families: Some(Families::register(source)),
+            families: Some(Families::register(Registry::new())),
             journals: Mutex::new(BTreeMap::new()),
         }))
     }
@@ -370,21 +508,21 @@ impl Metrics {
         self.0.families.is_some()
     }
 
-    /// The source they record on, if any.
+    /// The registry they record in, if any.
     #[must_use]
-    pub fn source(&self) -> Option<&Arc<PrometheusSource>> {
-        self.0.families.as_ref().map(|families| &families.source)
+    pub fn registry(&self) -> Option<&Registry> {
+        self.0.families.as_ref().map(|families| &families.registry)
     }
 
-    /// Every metric of the source in the Prometheus text format; empty when
-    /// off.
+    /// Every metric of the registry in the Prometheus text format; empty
+    /// when off.
     #[must_use]
     pub fn render(&self) -> String {
         use prometheus::Encoder;
         let Some(families) = &self.0.families else {
             return String::new();
         };
-        let gathered = families.source.registry().gather();
+        let gathered = families.registry.gather();
         let mut text = Vec::new();
         match prometheus::TextEncoder::new().encode(&gathered, &mut text) {
             Ok(()) => String::from_utf8_lossy(&text).into_owned(),
@@ -412,7 +550,7 @@ impl Metrics {
     pub(crate) fn set_phase(&self, phase: Phase) {
         self.0.phase.store(phase.to_u8(), Ordering::Release);
         if let Some(families) = &self.0.families {
-            families.phase.set(f64::from(phase.to_u8()));
+            families.machine.phase.set(i64::from(phase.to_u8()));
         }
         assert_eq!(self.phase(), phase, "a phase set is the phase read");
     }
@@ -428,7 +566,7 @@ impl Metrics {
         let mut journals = self.journals();
         let handles = journals.entry(id).or_insert_with(|| {
             let (tenant, journal) = names();
-            families.journal(&tenant, &journal)
+            families.journal(id, tenant, journal)
         });
         Some(handles.clone())
     }
@@ -452,10 +590,11 @@ impl Metrics {
         let Some(families) = &self.0.families else {
             return;
         };
-        families.settle.observe_duration(took);
+        families.machine.settles.inc();
+        families.machine.settle_seconds.inc_by(took.as_secs_f64());
         if let Some(journal) = self.known(id) {
-            journal.applied.set(slot_f64(applied));
-            journal.chosen.set(slot_f64(chosen));
+            journal.applied.set(gauge_i64(applied));
+            journal.chosen.set(gauge_i64(chosen));
         }
     }
 
@@ -464,11 +603,12 @@ impl Metrics {
         let Some(families) = &self.0.families else {
             return;
         };
-        families.cpu_cores.set(busyness.cpu_cores);
-        families.machine_cpu.set(busyness.machine_cpu);
+        families.machine.windows.inc();
+        families.machine.cpu_cores.set(busyness.cpu_cores);
+        families.machine.machine_cpu.set(busyness.machine_cpu);
         if let Some(disk) = &busyness.disk {
-            families.disk_busy.set(disk.busy);
-            families.disk_queue.set(slot_f64(disk.queue_depth));
+            families.machine.disk_busy.set(disk.busy);
+            families.machine.disk_queue.set(gauge_i64(disk.queue_depth));
         }
     }
 
@@ -488,14 +628,16 @@ impl Metrics {
     }
 }
 
-/// What one source counted over every journal: the sums of
-/// `paros_calls_total` per call and of the two byte counters, read from the
-/// registry (#366 (metrics)). The simulation's oracle reads it from each
-/// machine's source.
+/// What one machine counted over every journal: the sums of
+/// `paros_calls_total` and `paros_call_answers_total` per call and of the
+/// two byte counters, read from its registry (#366 (metrics)). The
+/// simulation's oracle reads it from each machine's metrics.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Totals {
     /// Calls per [`CallKind::ALL`].
     pub calls: [u64; 4],
+    /// Answers per [`CallKind::ALL`], of every outcome.
+    pub answers: [u64; 4],
     /// `paros_written_bytes_total`, summed.
     pub written_bytes: u64,
     /// `paros_read_bytes_total`, summed.
@@ -503,24 +645,27 @@ pub struct Totals {
 }
 
 impl Totals {
-    /// What `source` counted; zero for a source paros never recorded on.
+    /// What `metrics` counted; zero when off.
     #[must_use]
-    pub fn of(source: &PrometheusSource) -> Self {
+    pub fn of(metrics: &Metrics) -> Self {
         let mut totals = Self::default();
-        for family in source.registry().gather() {
+        let Some(registry) = metrics.registry() else {
+            return totals;
+        };
+        for family in registry.gather() {
             for metric in family.get_metric() {
                 let value = count_of(metric.get_counter().get_value());
+                let call = || {
+                    metric
+                        .get_label()
+                        .iter()
+                        .find(|pair| pair.name() == "call")
+                        .and_then(|pair| CallKind::of_label(pair.value()))
+                        .unwrap_or_else(|| unreachable!("a call series names its call"))
+                };
                 match family.name() {
-                    "paros_calls_total" => {
-                        let call = metric
-                            .get_label()
-                            .iter()
-                            .find(|pair| pair.name() == "call")
-                            .and_then(|pair| CallKind::of_label(pair.value()));
-                        if let Some(call) = call {
-                            totals.calls[call.index()] += value;
-                        }
-                    }
+                    "paros_calls_total" => totals.calls[call().index()] += value,
+                    "paros_call_answers_total" => totals.answers[call().index()] += value,
                     "paros_written_bytes_total" => totals.written_bytes += value,
                     "paros_read_bytes_total" => totals.read_bytes += value,
                     _ => {}
@@ -535,9 +680,20 @@ impl Totals {
         self.calls[call.index()] += 1;
     }
 
+    /// Count an answer to a call of kind `call`, `written` bytes accepted
+    /// and `read` bytes served.
+    pub fn answered(&mut self, call: CallKind, written: u64, read: u64) {
+        self.answers[call.index()] += 1;
+        self.written_bytes += written;
+        self.read_bytes += read;
+    }
+
     /// Add `other`'s counts.
     pub fn add(&mut self, other: &Totals) {
         for (mine, theirs) in self.calls.iter_mut().zip(other.calls) {
+            *mine += theirs;
+        }
+        for (mine, theirs) in self.answers.iter_mut().zip(other.answers) {
             *mine += theirs;
         }
         self.written_bytes += other.written_bytes;
@@ -568,10 +724,27 @@ impl JournalMetrics {
         self.calls[call.index()].inc();
     }
 
-    /// The answer to a call of kind `call` left after `took`, with
-    /// `written` bytes accepted and `read` bytes served.
-    pub(crate) fn answered(&self, call: CallKind, took: Duration, written: u64, read: u64) {
-        self.latency[call.index()].observe_duration(took);
+    /// The answer to a call of kind `call` left after `took` with
+    /// `outcome`, `written` bytes accepted and `read` bytes served.
+    pub(crate) fn answered(
+        &self,
+        (call, outcome): (CallKind, CallOutcome),
+        took: Duration,
+        written: u64,
+        read: u64,
+    ) {
+        let [tenant, journal, tenant_id, journal_id] = self.labels.each_ref().map(String::as_str);
+        self.answers
+            .with_label_values(&[
+                call.label(),
+                outcome.label(),
+                tenant,
+                journal,
+                tenant_id,
+                journal_id,
+            ])
+            .inc();
+        self.answer_seconds[call.index()].inc_by(took.as_secs_f64());
         if written > 0 {
             self.written.inc_by(written);
         }
@@ -581,14 +754,10 @@ impl JournalMetrics {
     }
 }
 
-/// A slot or count as a gauge value: exact up to 2^53, which a slot never
-/// reaches in practice; a larger one is rounded, for display only.
-#[allow(
-    clippy::cast_precision_loss,
-    reason = "a gauge is for display; slots stay far below 2^53"
-)]
-fn slot_f64(slot: u64) -> f64 {
-    slot as f64
+/// A slot or count as an integer gauge value; one past `i64::MAX`, which
+/// no slot reaches, shows as `i64::MAX`.
+fn gauge_i64(value: u64) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
 }
 
 impl std::fmt::Debug for Metrics {

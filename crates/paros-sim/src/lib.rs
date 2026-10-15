@@ -384,10 +384,6 @@ fn storage_fault_mask() -> StorageFaultMask {
         .without(StorageFault::DiskFailure)
 }
 
-/// The points a metric series keeps per seed (#366 (metrics)): the oracles
-/// read the counters, never their history.
-const METRIC_SERIES_CAPACITY: usize = 16;
-
 /// Fresh main-campaign builder. Keeping all state behind process/workload
 /// factories is what makes fork-free exploration and recipe replay trustworthy.
 ///
@@ -414,13 +410,6 @@ fn chain_builder(digest: Option<DigestSink>) -> SimulationBuilder {
             Box::new(crate::frontend::FrontendProcess::chaotic())
         })
         .link_latency(LinkLatencyConfig::default())
-        // A metrics source per address (#366 (metrics)): a machine records
-        // on its own, and a reboot finds its counters again.
-        .metrics_factory(|_ip| {
-            let source = paros::metrics::PrometheusSource::default();
-            source.set_series_capacity(Some(METRIC_SERIES_CAPACITY));
-            std::sync::Arc::new(source)
-        })
         .workloads(WorkloadCount::Random(CLIENT_COUNT_RANGE), move |_| {
             Box::new(ChainWorkload::new(digest.clone()))
         })

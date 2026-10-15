@@ -1668,7 +1668,7 @@ where
                     || journal_names(follower.as_ref(), cell.as_ref(), journal),
                     (CallKind::Write, metered::request_bytes(&req.records)),
                     reply,
-                    metered::write_carried,
+                    metered::write_answer,
                 );
                 // The batch limits (#241, §2.7) are judged here, at the edge:
                 // a batch over them never reaches consensus.
@@ -1722,7 +1722,7 @@ where
                     || journal_names(follower.as_ref(), cell.as_ref(), journal),
                     (CallKind::SetLeader, 0),
                     reply,
-                    metered::nothing_carried,
+                    metered::set_leader_answer,
                 );
                 let new = leader_uuid_from_proto(req.new);
                 let old = leader_from_proto(req.old);
@@ -1759,7 +1759,7 @@ where
                     || journal_names(follower.as_ref(), cell.as_ref(), journal),
                     (CallKind::Truncate, 0),
                     reply,
-                    metered::nothing_carried,
+                    metered::truncate_answer,
                 );
                 let up_to = Seq(req.up_to);
                 let leader = leader_uuid_from_proto(req.leader);
@@ -1796,7 +1796,7 @@ where
                     || journal_names(follower.as_ref(), cell.as_ref(), journal),
                     (CallKind::Read, 0),
                     reply,
-                    metered::read_carried,
+                    metered::read_answer,
                 );
                 let ctx = rt.waiters.reads.next_ctx();
                 // The configuration the core reads over is its read basis
