@@ -102,7 +102,7 @@ pub(super) async fn sets_booked(ctx: &SimContext, known: &Cell, deadline: Durati
 }
 
 /// The cell's registry, read to its tail.
-async fn registry(known: &Cell, first: usize) -> Option<Registry> {
+pub(super) async fn registry(known: &Cell, first: usize) -> Option<Registry> {
     let mut cell = judged_cell(&known.members);
     let loaded =
         paros::client::checkpoint::load(&mut cell, known.journals.cell, &known.client, first, 0)

@@ -59,6 +59,7 @@ use std::time::Duration;
 use moonpool_core::Providers;
 use paros_core::{AcceptorConfig, JournalId, JournalIdentifier, LeaderUuid, NodeId, TenantId};
 
+use crate::client::capacity::{CapacityAnswer, CapacityRequest, Wanted};
 use crate::client::cell::CellSession;
 use crate::client::checkpoint::{
     AppendOutcome, CheckpointPolicy, Checkpointer, Folder, LoadOutcome, OpenOutcome, load,
@@ -67,7 +68,9 @@ use crate::client::fleet::Interrupted;
 use crate::client::journals::{JournalAnswer, JournalOp, JournalRequest};
 use crate::client::{ClaimOutcome, Client, ClientTunables, WriterOutcome};
 use crate::placement::{self, Shortfall, Step, Want};
-use crate::system::{Booking, BookingTarget, NodeStanding, Registry, Role, SystemCommand};
+use crate::system::{
+    Booking, BookingTarget, GrantKey, NodeStanding, Registry, Role, SystemCommand,
+};
 use crate::tenant::{CellKind, Description, Desired, RequestOutcome, TenantCommand, TenantControl};
 
 /// What `HostTenant` records of a tenant: its control journal, its name and
@@ -452,7 +455,7 @@ impl TenantDesk {
                         .get(journal.journal)
                         .is_none_or(|j| j.deleted_at.is_some())
             }
-            BookingTarget::Set { .. } => false,
+            BookingTarget::Set { .. } | BookingTarget::Tenant { .. } => false,
         };
         if release(client, cell, orphan).await? > 0 {
             moonpool_assertions::reachable!(
@@ -484,20 +487,18 @@ impl TenantDesk {
         }
     }
 
-    /// Book the slots `steps` asks for `want`, through the term's cell
-    /// session, each under a booking id drawn from the seed (drawn again
-    /// when the registry spent it).
+    /// Book the slots `steps` asks for `want` as one capacity request
+    /// (#476) through the term's cell session: every slot or none, under a
+    /// request id and booking ids drawn from the seed.
     ///
     /// # Errors
     ///
-    /// `Unavailable` when a booking did not land: the term's session is
-    /// over.
+    /// `Unavailable` when the grant did not land, or the registry refused
+    /// it: the term's session is over, or its fold was behind.
     ///
     /// # Panics
     ///
-    /// If the registry refuses a booking the placement computed from its own
-    /// fold for another reason than a spent id: the session is the cell
-    /// control journal's one writer, so its fold is the registry at its tail.
+    /// If a grant books another number of slots than it asked for.
     pub(super) async fn book<P: Providers>(
         &mut self,
         client: &Client<P>,
@@ -505,40 +506,38 @@ impl TenantDesk {
         want: &Want,
         steps: &[Step],
     ) -> Result<(), JournalAnswer> {
-        for step in steps {
-            let Step::Book { node } = *step else {
-                continue;
-            };
-            let held = Booking {
+        let slots: Vec<Wanted> = placement::booked(steps)
+            .into_iter()
+            .map(|node| Wanted {
                 node,
                 role: want.role,
                 target: want.target,
-            };
-            let mut booked = false;
-            for _ in 0..ID_DRAWS {
-                let booking = self.mix(0xB00C).max(1);
-                if cell.registry().spent().any(|spent| spent == booking) {
-                    continue;
-                }
-                let command = SystemCommand::BookCapacity {
-                    booking,
-                    node,
-                    role: want.role,
-                    target: want.target,
-                };
-                if cell.record(client, 0, &command).await.is_err() {
-                    return Err(JournalAnswer::Unavailable);
-                }
-                assert_eq!(
-                    cell.registry().booking(booking),
-                    Some(&held),
-                    "a booking the placement computed from the registry's tail lands"
-                );
-                booked = true;
-                break;
-            }
-            if !booked {
+            })
+            .collect();
+        if !slots.is_empty() {
+            // The tenant coordinator asks the cell coordinator for the
+            // slots it placed (#476): here a call into the term's own
+            // session, under an idempotency id of its own.
+            let Some(request) = (0..ID_DRAWS)
+                .map(|_| self.mix(0xCA9A).max(1))
+                .find(|id| cell.registry().grant_of(GrantKey::Request(*id)).is_none())
+            else {
                 return Err(JournalAnswer::Unavailable);
+            };
+            let request = CapacityRequest {
+                request,
+                tenant: want.target.tenant(),
+                slots,
+            };
+            match super::capacity::grant(client, cell, &request, || self.mix(0xB00C)).await {
+                CapacityAnswer::Granted(bookings) => {
+                    assert_eq!(
+                        bookings.len(),
+                        request.slots.len(),
+                        "a grant books every slot"
+                    );
+                }
+                _ => return Err(JournalAnswer::Unavailable),
             }
         }
         assert!(
@@ -747,6 +746,11 @@ impl TenantDesk {
 
     /// The next value of the desk's own sequence, salted with `salt`:
     /// derived from the seed and the draw count.
+    /// A booking id from the candidacy's seed (#476): a capacity request's.
+    pub(super) fn draw_booking(&mut self) -> u64 {
+        self.mix(0xB00C)
+    }
+
     fn mix(&mut self, salt: u64) -> u64 {
         self.draws += 1;
         let low = u64::try_from(self.seed & u128::from(u64::MAX)).unwrap_or(0);

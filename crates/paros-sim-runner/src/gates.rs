@@ -114,6 +114,10 @@ pub const RARE: &[Rare] = &[
         reason: "a reconfiguration onto a joiner on a registry seed: 12 hits in 1,000 hunt seeds (#477 (retire coordination moves into the control journals))",
     },
     Rare {
+        msg: "footprint: a dead tenant coordinator is placed again",
+        reason: "marginal: needs two admitted stateless machines and the one holding a tenant coordinator's slot marked down (#476 (tenant footprint)); missed by PR #556's sweep (#486)",
+    },
+    Rare {
         msg: "a replica serves a read before its next apply page",
         reason: "rare: fired on 0 of 440 hunt seeds with the lagging-replica scenario; a run decides a dozen slots, so a read seldom lands while a rebooted replica pages its backlog (#550 (replica serves an unreported fold page), #486)",
     },

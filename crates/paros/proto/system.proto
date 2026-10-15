@@ -36,7 +36,8 @@ message SystemEntry {
     MachineDown machine_down = 11;
     MachineUp machine_up = 12;
     MachineAdmitted machine_admitted = 13;
-    Maintenance maintenance = 14;
+    GrantCapacity grant_capacity = 14;
+    Maintenance maintenance = 15;
   }
 }
 
@@ -92,6 +93,9 @@ message BookCapacity {
   uint64 journal = 5;
   string role = 6;
   uint64 set = 7;
+  // A slot of the tenant as a whole (#476): its footprint or a tenant-wide
+  // role. `journal` and `set` are 0.
+  bool tenant_level = 8;
 }
 
 // The cell coordinator saw machine `id` stop answering (#211, D6): written
@@ -190,9 +194,10 @@ message RegistryState {
   repeated LivenessState liveness = 9;
   // The tenants the cell hosts, in id order (#210).
   repeated HostedTenantState hosted = 10;
+  repeated GrantState grants = 11;
   // The open maintenance windows (#359), machines in id order, then zones
   // in name order.
-  repeated MaintenanceState maintenance = 11;
+  repeated MaintenanceState maintenance = 12;
 }
 
 message MaintenanceState {
@@ -246,4 +251,31 @@ message BookingState {
   uint64 journal = 5;
   string role = 6;
   uint64 set = 7;
+  // A slot of the tenant as a whole (#476): its footprint or a tenant-wide
+  // role. `journal` and `set` are 0.
+  bool tenant_level = 8;
+}
+
+// A capacity request's outcome (#476), written by the cell coordinator (or,
+// for a tenant's footprint at its birth, by the session that hosts it):
+// every booking of `bookings` lands, or none does. `footprint` names the
+// tenant's footprint (and `request` is 0); otherwise `request` is the
+// requester's idempotency id. `refused` records that the writer found no
+// room: `bookings` is then empty.
+message GrantCapacity {
+  uint64 request = 1;
+  uint64 tenant = 2;
+  bool footprint = 3;
+  bool refused = 4;
+  repeated BookCapacity bookings = 5;
+}
+
+// One recorded grant (#476): its key, tenant, and the booking ids it
+// granted (none when refused).
+message GrantState {
+  uint64 request = 1;
+  uint64 tenant = 2;
+  bool footprint = 3;
+  bool refused = 4;
+  repeated uint64 bookings = 5;
 }

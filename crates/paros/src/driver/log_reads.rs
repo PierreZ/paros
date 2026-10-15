@@ -138,12 +138,20 @@ struct PendingRead {
 }
 
 /// The journal reads a driver is holding open.
-#[derive(Default)]
 pub(crate) struct JournalReads {
     /// Reads waiting on their quorum read, by the core's `ctx`.
     confirming: BTreeMap<u64, PendingRead>,
     /// Confirmed reads waiting at the tail, oldest first.
     parked: Vec<PendingRead>,
+    /// This runtime's first token, drawn at random when it was built. The
+    /// core matches a `PreReadAck` to its read by `ctx` alone, so a token
+    /// must stay unique across incarnations too: an ack a dead incarnation
+    /// asked for, still in flight, must not count toward a new read. A token
+    /// that restarted at zero let a watermark sampled before the new read
+    /// opened confirm it (witness 15744921041189386656, PR #562 (acceptor
+    /// partitions): a read served slot 1 while slot 2 was chosen before it
+    /// opened).
+    first_ctx: u64,
     next_ctx: u64,
     /// The driver tick of the last upkeep ([`JournalReads::expire`]): the
     /// clock every deadline here is counted on.
@@ -282,11 +290,34 @@ pub(crate) fn next_row(ctx: u64, rows: usize) -> usize {
 }
 
 impl JournalReads {
+    /// No read open yet; the first read's token is `first_ctx`, which the
+    /// caller draws at random once per runtime.
+    pub(crate) fn starting_at(first_ctx: u64) -> Self {
+        let reads = Self {
+            confirming: BTreeMap::new(),
+            parked: Vec::new(),
+            first_ctx,
+            next_ctx: first_ctx,
+            now: 0,
+        };
+        assert!(reads.minted() == 0, "a new runtime has minted no token");
+        reads.assert_invariants();
+        reads
+    }
+
+    /// How many tokens this runtime minted: the distance from its first
+    /// token, which wraps past `u64::MAX`.
+    fn minted(&self) -> u64 {
+        self.next_ctx.wrapping_sub(self.first_ctx)
+    }
+
     /// The read tally's own invariants: every token was minted here, every
     /// page is bounded, and only a read that may wait is parked.
     fn assert_invariants(&self) {
         assert!(
-            self.confirming.keys().all(|ctx| *ctx < self.next_ctx),
+            self.confirming
+                .keys()
+                .all(|ctx| ctx.wrapping_sub(self.first_ctx) < self.minted()),
             "every confirming read carries a token minted here"
         );
         assert!(
@@ -332,7 +363,8 @@ impl JournalReads {
         opened: Option<Slot>,
     ) {
         let ctx = self.next_ctx;
-        self.next_ctx += 1;
+        let minted = self.minted();
+        self.next_ctx = self.next_ctx.wrapping_add(1);
         self.confirming.insert(
             ctx,
             PendingRead {
@@ -346,7 +378,7 @@ impl JournalReads {
                 reply,
             },
         );
-        assert!(self.next_ctx > ctx, "a read token is never reused");
+        assert!(self.minted() > minted, "a read token is never reused");
         self.assert_invariants();
     }
 

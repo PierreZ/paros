@@ -417,7 +417,10 @@ fn quorum_text(quorum: QuorumSystem) -> String {
     match quorum {
         QuorumSystem::Majority => "majority".to_string(),
         QuorumSystem::Flexible { q1, q2 } => format!("flexible:{q1}:{q2}"),
-        QuorumSystem::Grid { rows, cols } => format!("grid:{rows}x{cols}"),
+        QuorumSystem::Grid { rows, cols, acks } if acks >= 1 && rows == 2 * acks - 1 => {
+            format!("partitions:{}:{cols}", acks - 1)
+        }
+        QuorumSystem::Grid { rows, cols, acks } => format!("grid:{rows}x{cols}:{acks}"),
     }
 }
 

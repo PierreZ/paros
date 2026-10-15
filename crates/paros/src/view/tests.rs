@@ -7,7 +7,7 @@ use crate::status::Word;
 fn words(status: &mut Hysteresis) -> (&mut Hysteresis, Duration) {
     (status, Duration::ZERO)
 }
-use crate::system::{Class, HostedTenant, SystemCommand};
+use crate::system::{BookingTarget, Class, GrantKey, HostedTenant, Role, Slot, SystemCommand};
 use crate::tenant::Survives;
 
 const CELL: u64 = 0xce11;
@@ -54,6 +54,19 @@ fn registry() -> Registry {
             cell_id: CELL,
             version: crate::fleet::METADATA_VERSION,
         },
+        // Its footprint (#476), on the founder that registered.
+        SystemCommand::GrantCapacity {
+            key: GrantKey::Footprint(TenantId(50)),
+            tenant: TenantId(50),
+            slots: Some(vec![Slot {
+                booking: 50,
+                node: NodeId(1),
+                role: Role::Acceptor,
+                target: BookingTarget::Tenant {
+                    tenant: TenantId(50),
+                },
+            }]),
+        },
         SystemCommand::HostTenant {
             fleet_id: FLEET,
             tenant: TenantId(50),
@@ -62,6 +75,19 @@ fn registry() -> Registry {
                 name: b"acme".to_vec(),
                 survives: Survives::Az,
             },
+        },
+        // Its footprint (#476), on the founder that registered.
+        SystemCommand::GrantCapacity {
+            key: GrantKey::Footprint(TenantId(60)),
+            tenant: TenantId(60),
+            slots: Some(vec![Slot {
+                booking: 60,
+                node: NodeId(1),
+                role: Role::Acceptor,
+                target: BookingTarget::Tenant {
+                    tenant: TenantId(60),
+                },
+            }]),
         },
         SystemCommand::HostTenant {
             fleet_id: FLEET,

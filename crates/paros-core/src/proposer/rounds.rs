@@ -82,7 +82,11 @@ pub struct Round<Id, V> {
     /// of a delegated one. The count a policy is judged on — the leader's
     /// take-back of a delegated round ([`Rounds::stalled_delegations`]) and
     /// a proxy's eviction of a round nobody answers ([`Rounds::stalled`]).
+    /// A move to another column ([`Rounds::move_to`]) starts it again.
     resends: u64,
+    /// How many times this round moved to another column (#533 (move a
+    /// stuck round)): what a decision reports when a moved round is chosen.
+    moves: u64,
 }
 
 impl<Id, V> Round<Id, V> {
@@ -115,6 +119,12 @@ impl<Id, V> Round<Id, V> {
     #[must_use]
     pub fn resends(&self) -> u64 {
         self.resends
+    }
+
+    /// How many times this round moved to another column.
+    #[must_use]
+    pub fn moves(&self) -> u64 {
+        self.moves
     }
 
     /// The proxy this round is delegated to, if it is.
@@ -410,6 +420,7 @@ impl<Id: Copy + Ord, V: Clone + Fingerprint> Rounds<Id, V> {
                 custody,
                 column,
                 resends: 0,
+                moves: 0,
             },
         );
         assert!(
@@ -443,6 +454,60 @@ impl<Id: Copy + Ord, V: Clone + Fingerprint> Rounds<Id, V> {
         }
         round.custody = Custody::colocated(own_vote);
         assert!(round.proxy().is_none(), "a round taken back is colocated");
+        true
+    }
+
+    /// **Move the colocated round at `slot` to `column`** (#533 (move a
+    /// stuck round)): the same slot, ballot and command, addressed from here
+    /// on to another column, its tally started again with `own_vote` (the
+    /// opener's own accept, when it is an addressee of `column` and its
+    /// record backs it). The votes of the old column are dropped: acks from
+    /// two columns never add up. The re-send count starts again, so a policy
+    /// judged on it waits a full budget before it moves the round again.
+    /// Whether the round moved: `false` when no round is open at `slot`, the
+    /// round is delegated (its votes are the proxy's), or it already runs in
+    /// `column`.
+    ///
+    /// Always safe: inside one ballot a slot has one value, so votes left in
+    /// the old column are for the same value, and every Phase-1 quorum
+    /// meets every column's Phase-2 quorum, so a later election finds the
+    /// value or proves it was not chosen.
+    ///
+    /// # Panics
+    ///
+    /// If `own_vote` is not an addressee of `column` under `config`, or an
+    /// assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
+    pub fn move_to(
+        &mut self,
+        config: &AcceptorConfig<Id>,
+        slot: Slot,
+        column: Option<usize>,
+        own_vote: Option<Id>,
+    ) -> bool {
+        let Some(round) = self.by_slot.get_mut(&slot) else {
+            return false;
+        };
+        if round.column == column || !matches!(round.custody, Custody::Colocated { .. }) {
+            return false;
+        }
+        assert!(
+            own_vote.is_none_or(|me| config.is_phase2_addressee(me, column)),
+            "a moved round's own vote is in its new column"
+        );
+        let before = round.moves;
+        round.column = column;
+        round.custody = Custody::colocated(own_vote);
+        round.resends = 0;
+        round.moves = round.moves.saturating_add(1);
+        assert!(round.moves > before, "a move is counted");
+        // Postcondition: no vote of the old column survives the move.
+        assert!(
+            round.accepted_by().is_some_and(|accepted_by| accepted_by
+                .iter()
+                .all(|n| config.is_phase2_addressee(*n, column))),
+            "a moved round counts only its new column"
+        );
         true
     }
 
@@ -561,6 +626,17 @@ impl<Id: Copy + Ord, V: Clone + Fingerprint> Rounds<Id, V> {
             !accepted_by.is_empty(),
             "a decision rests on at least one vote"
         );
+        if round.moves > 0 {
+            probe!(reachable, "phase2: a moved round is chosen");
+        }
+        if round.column.is_some()
+            && accepted_by.len() < config.phase2_addressees(round.column).len()
+        {
+            probe!(
+                reachable,
+                "phase2: a column decides on fewer than all its acceptors"
+            );
+        }
         Some((round.ballot, round.command.clone()))
     }
 
@@ -776,6 +852,28 @@ impl<Id: Copy + Ord, V: Clone + Fingerprint> Proposer<Id, V> {
             );
         }
         taken
+    }
+
+    /// Move the colocated round at `slot` to `column` ([`Rounds::move_to`]).
+    ///
+    /// # Panics
+    ///
+    /// As [`Rounds::move_to`].
+    pub fn move_round(
+        &mut self,
+        config: &AcceptorConfig<Id>,
+        slot: Slot,
+        column: Option<usize>,
+        own_vote: Option<Id>,
+    ) -> bool {
+        let moved = self.rounds.move_to(config, slot, column, own_vote);
+        if moved {
+            assert!(
+                self.rounds.column(slot) == Some(column),
+                "a moved round runs in its new column"
+            );
+        }
+        moved
     }
 
     /// The delegated rounds re-delegated at least `after` times without a

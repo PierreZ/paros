@@ -24,7 +24,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use moonpool_core::Providers;
+use moonpool_core::{Providers, RandomProvider};
 use paros_core::{ColocatedNode, JournalIdentifier, NodeId, Slot, TenantId};
 
 use crate::audit::Audit;
@@ -286,7 +286,9 @@ pub(crate) async fn boot_journal<P: Providers, S: LogStorage, A: Audit>(
         node,
         storage,
         audit,
-        waiters: ClientWaiters::default(),
+        // A fresh random token space per runtime: a reboot or a re-open
+        // never reuses a token a dead incarnation's acks may still answer.
+        waiters: ClientWaiters::new(providers.random().random()),
         last,
         match_resend: Cadence::default(),
         gc_resend: Cadence::default(),

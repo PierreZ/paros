@@ -35,6 +35,7 @@ pub mod client;
 mod corruption;
 mod driver;
 pub mod fleet;
+pub mod footprint;
 pub mod frontend;
 pub mod inspect;
 pub mod journal;

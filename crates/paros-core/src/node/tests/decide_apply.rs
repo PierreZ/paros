@@ -225,7 +225,7 @@ fn a_replayed_commit_for_a_known_slot_still_advances_the_prefix() {
 /// columns `{0, 3}`, `{1, 4}` and `{2, 5}`.
 fn grid_node(id: u64) -> ColocatedNode {
     let mut storage = TestStorage::new(id, &[0, 1, 2, 3, 4, 5]);
-    storage.config.quorum_system = crate::membership::QuorumSystem::Grid { rows: 2, cols: 3 };
+    storage.config.quorum_system = crate::membership::QuorumSystem::grid(2, 3);
     ColocatedNode::new(&storage)
 }
 
@@ -287,6 +287,59 @@ fn a_driver_named_column_is_the_round_s_column() {
     assert_eq!(
         accept_targets(&drain(&mut nodes[0])),
         vec![NodeId(1), NodeId(4)]
+    );
+}
+
+/// A stuck round moves to another column (#533 (move a stuck round)): the
+/// same slot, ballot and command go to the new column, the old column's
+/// votes stop counting, and the new column decides it.
+#[test]
+fn a_stuck_round_moves_to_another_column() {
+    let mut nodes: Vec<ColocatedNode> = (0..6).map(grid_node).collect();
+    make_leader(&mut nodes, 0);
+    // Slot 0 goes to column 0 = {0, 3}; node 3 never answers.
+    assert!(matches!(
+        nodes[0].propose(entry(1, 1, 10)),
+        ProposeResult::Accepted(Slot(0))
+    ));
+    let first = drain(&mut nodes[0]);
+    assert_eq!(accept_targets(&first), vec![NodeId(3)]);
+    assert!(
+        !nodes[0].move_round(Slot(0), 0),
+        "it runs in column 0 already"
+    );
+    assert!(
+        !nodes[1].move_round(Slot(0), 1),
+        "only the leader moves a round"
+    );
+    assert!(nodes[0].move_round(Slot(0), 1));
+    assert_eq!(nodes[0].proposer.round_column(Slot(0)), Some(Some(1)));
+    assert_eq!(nodes[0].proposer.rounds()[&Slot(0)].moves(), 1);
+    assert!(
+        nodes[0].proposer.rounds()[&Slot(0)]
+            .accepted_by()
+            .expect("colocated")
+            .is_empty(),
+        "the leader's own vote was column 0's and does not count in column 1"
+    );
+    let moved = drain(&mut nodes[0]);
+    assert_eq!(accept_targets(&moved), vec![NodeId(1), NodeId(4)]);
+    // A late vote from the old column counts for nothing.
+    let ballot = nodes[0].ballot();
+    nodes[0].step(Message::Accepted {
+        from: NodeId(3),
+        ballot,
+        slot: Slot(0),
+        vhash: command_fingerprint(&ucmd(1, 1, 10)),
+    });
+    assert_eq!(chosen_at(&nodes[0], 0), None);
+    deliver_all(&mut nodes, moved);
+    for n in &nodes {
+        assert_eq!(chosen_at(n, 0), Some(val(10)));
+    }
+    assert!(
+        !nodes[0].move_round(Slot(0), 2),
+        "a decided round is closed"
     );
 }
 

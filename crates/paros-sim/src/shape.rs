@@ -349,6 +349,13 @@ impl NodeShape {
             // round for a compacted slot is re-fanned-out; the tail
             // outlasts it.
             proxy_round_resends: buggify_knob!(20_u64, 1_u64..81_u64),
+            // The grid round's move budget (#533 (move a stuck round)), in
+            // re-sends (one per beat). Floor 1: a round moved after a single
+            // re-send runs in a second column while the first may still
+            // decide it, and the two verdicts must agree (one ballot, one
+            // value) — the state worth reaching. The ceiling leaves a stuck
+            // column's slots to the next leadership; the tail outlasts it.
+            partition_move_resends: buggify_knob!(10_u64, 1_u64..4_u64),
             // A quarantined journal's re-open delay (#188), in ticks. Floor
             // 1: a journal re-opened the next beat is a restart loop that
             // still leaves the node's other journals their beats; the
@@ -640,6 +647,11 @@ pub(crate) enum QuorumPolicy {
         rows: usize,
         /// The columns drawn at the pool.
         cols: usize,
+        /// How many acceptors of a column may miss a slot's Phase 2 (#532
+        /// (acceptor partitions)): a column decides on `rows - slack`
+        /// accepts, at least one. Zero is the full-column grid; `1` on a
+        /// three-row grid is the acceptor partitions `parosctl` offers.
+        slack: usize,
     },
 }
 
@@ -682,7 +694,7 @@ impl QuorumPolicy {
                     q2,
                 }
             }
-            QuorumPolicy::Grid { rows, cols } => {
+            QuorumPolicy::Grid { rows, cols, slack } => {
                 let layouts = grid_layouts(n);
                 layouts
                     .iter()
@@ -692,6 +704,7 @@ impl QuorumPolicy {
                     .map_or(QuorumSystem::Majority, |(rows, cols)| QuorumSystem::Grid {
                         rows: *rows,
                         cols: *cols,
+                        acks: rows.saturating_sub(slack).max(1),
                     })
             }
         }
@@ -1824,7 +1837,12 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
             // Every live journal holds one slot on each of its members
             // (#212 (placement)), so the default fits the run's few tenants
             // of three journal names each, and the extreme fills the cell.
-            let capacity = buggify_knob!(8_u64, 1_u64..4_u64);
+            // On top, every tenant's birth books its footprint (#476): the
+            // floor holds the cell tenant's, the universe tenant's and one
+            // tenant's on any one founding member, so `init` always fits and
+            // the extreme refuses a second tenant on a cell of one.
+            let floor = 3 * paros::footprint::Footprint::birth().storage();
+            let capacity = floor + buggify_knob!(8_u64, 1_u64..4_u64);
             // On half the drained-machine seeds, the machines advertise
             // names and a reboot renames one at the knob's extreme, so a
             // drain meets a machine renamed since it took its slots (#504
@@ -2047,7 +2065,11 @@ pub(crate) fn quorum_policy(state: &StateHandle, pool: usize) -> QuorumPolicy {
             let pick = moonpool_sim::sim_random_range(0..layouts.len());
             let (rows, cols) = layouts[pick];
             assert_reachable!("a run draws an acceptor grid");
-            return QuorumPolicy::Grid { rows, cols };
+            return QuorumPolicy::Grid {
+                rows,
+                cols,
+                slack: grid_slack(),
+            };
         }
         let q2 = buggify_knob!(majority, 1_usize..(pool / 2 + 1));
         // A slow-link seed reads from every acceptor: `q1 = n` waits on the
@@ -2075,8 +2097,29 @@ pub(crate) fn quorum_policy(state: &StateHandle, pool: usize) -> QuorumPolicy {
         // the outcomes — a slot decided on a column, an election covered by
         // a row — are the audit's gates).
         assert_reachable!("a run draws an acceptor grid");
-        QuorumPolicy::Grid { rows, cols }
+        QuorumPolicy::Grid {
+            rows,
+            cols,
+            slack: grid_slack(),
+        }
     })
+}
+
+/// A grid seed's column slack (#532 (acceptor partitions)): its own
+/// `buggify_knob!` location, default 0 (the full-column grid), extreme 1–2
+/// (a column decides on fewer than all its acceptors; on a three-row grid
+/// slack 1 is a majority of the partition). **Floor:** a column decides on
+/// at least one accept, clamped in [`QuorumPolicy::system`]; a Phase 1
+/// then needs every acceptor of every column, a valid configuration
+/// because the fault window closes before the recovery tail does.
+fn grid_slack() -> usize {
+    let slack = buggify_knob!(0_usize, 1_usize..3);
+    if slack > 0 {
+        // BUGGIFY pairing: a seed genuinely runs columns that decide on
+        // fewer than all their acceptors.
+        assert_reachable!("a run draws acceptor partitions");
+    }
+    slack
 }
 
 /// The smallest acceptor configuration a matchmaker seed ever puts in force
@@ -2381,20 +2424,29 @@ mod tests {
         assert!(grid_layouts(5).is_empty());
         assert_eq!(grid_layouts(6), vec![(2, 3), (3, 2)]);
         assert_eq!(grid_layouts(12), vec![(2, 6), (3, 4), (4, 3), (6, 2)]);
-        let policy = QuorumPolicy::Grid { rows: 3, cols: 2 };
+        let policy = QuorumPolicy::Grid {
+            rows: 3,
+            cols: 2,
+            slack: 0,
+        };
         assert_eq!(
             policy.system(6),
-            QuorumSystem::Grid { rows: 3, cols: 2 },
+            QuorumSystem::grid(3, 2),
             "the drawn layout where it tiles"
         );
         assert_eq!(
             policy.system(4),
-            QuorumSystem::Grid { rows: 2, cols: 2 },
+            QuorumSystem::grid(2, 2),
             "the first layout of a size the drawn row count does not tile"
         );
         assert_eq!(
-            QuorumPolicy::Grid { rows: 2, cols: 3 }.system(12),
-            QuorumSystem::Grid { rows: 2, cols: 6 },
+            QuorumPolicy::Grid {
+                rows: 2,
+                cols: 3,
+                slack: 0
+            }
+            .system(12),
+            QuorumSystem::grid(2, 6),
             "the layout with the drawn row count where one exists"
         );
         assert_eq!(
@@ -2405,6 +2457,24 @@ mod tests {
         assert_eq!(policy.system(5), QuorumSystem::Majority);
         for n in 1..=8 {
             assert!(policy.system(n).admits(n));
+        }
+        let partitions = QuorumPolicy::Grid {
+            rows: 3,
+            cols: 2,
+            slack: 1,
+        };
+        assert_eq!(partitions.system(6), QuorumSystem::partitions(1, 2));
+        assert_eq!(
+            partitions.system(4),
+            QuorumSystem::Grid {
+                rows: 2,
+                cols: 2,
+                acks: 1
+            },
+            "a slack clamps to one accept on a shorter column"
+        );
+        for n in 1..=8 {
+            assert!(partitions.system(n).admits(n));
         }
         assert_eq!(policy.tolerated_loss(6), 0);
         assert_eq!(policy.tolerated_loss(4), 0);

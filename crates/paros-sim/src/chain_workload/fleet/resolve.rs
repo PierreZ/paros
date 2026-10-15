@@ -5,13 +5,11 @@
 //! drawn one on: idle machines do not serve `Resolve` and are passed over,
 //! founding and admitted machines answer from their own folds.
 
-use std::collections::BTreeSet;
-
 use moonpool_sim::{assert_always, assert_reachable, assert_sometimes, buggify_with_prob};
 use paros::TenantId;
 use paros::client::resolve::{Resolution, resolve};
 
-use super::{FleetOps, with_names};
+use super::{FleetOps, removed_in, with_names};
 
 /// A name no operator ever creates (the operators draw from `NAMES`).
 const NEVER_CREATED: &[u8] = b"umbrella";
@@ -43,8 +41,7 @@ impl FleetOps {
         };
         let mut entry = self.machines.clone();
         entry.rotate_left(first % self.machines.len());
-        let removed: BTreeSet<TenantId> =
-            with_names(&self.state, |names| names.removed.keys().copied().collect());
+        let removed = removed_in(&self.state, cell.fleet);
         let resolution = resolve(
             self.connector.providers(),
             self.connector.rpc(),

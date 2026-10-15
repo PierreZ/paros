@@ -63,7 +63,7 @@ const HANDOVER_STALL: u64 = 4;
 const FOUR_ACCEPTORS: &[u64] = &[1, 2, 3, 4];
 
 /// The acceptor grid every grid level lays out: two rows of three.
-const GRID: QuorumSystem = QuorumSystem::Grid { rows: 2, cols: 3 };
+const GRID: QuorumSystem = QuorumSystem::grid(2, 3);
 
 /// Every prompt-governing flag. A level pins off the ones it teaches
 /// (`pinned_off`), which keeps them off whatever this list says.

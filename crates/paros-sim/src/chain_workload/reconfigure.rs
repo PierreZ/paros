@@ -160,7 +160,7 @@ pub(super) fn malformed_system(n: usize, draw: u64) -> Option<QuorumSystem> {
     let system = match draw % 3 {
         0 => QuorumSystem::Flexible { q1: 1, q2: 1 },
         1 => QuorumSystem::Flexible { q1: 1, q2: n - 1 },
-        _ => QuorumSystem::Grid { rows: 2, cols: n },
+        _ => QuorumSystem::grid(2, n),
     };
     Some(system)
 }

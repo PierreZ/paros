@@ -66,7 +66,9 @@ impl Process for MachineProcess {
         })?;
         let settings = MachineSettings {
             class: Class::Storage,
-            capacity: 8,
+            // parosd's default: every tenant's footprint takes 7 slots
+            // (#476 (tenant footprint)), the cell's and the universe's too.
+            capacity: 32,
             failure_domain: zone_of(index),
             name: format!("machine-{index}"),
             pin: paros::machine::AdminPin::open(),

@@ -470,7 +470,7 @@ mod tests {
     /// The `2 × 3` grid of Compartmentalized Paxos §3.2 over six acceptors:
     /// row `{1, 2, 3}` and `{4, 5, 6}`, columns `{1, 4}`, `{2, 5}`, `{3, 6}`.
     fn grid() -> AcceptorConfig {
-        AcceptorConfig::new(nodes(1..=6), QuorumSystem::Grid { rows: 2, cols: 3 })
+        AcceptorConfig::new(nodes(1..=6), QuorumSystem::grid(2, 3))
     }
 
     /// The point of the variant: a full row is a Phase-1 quorum and a full
@@ -542,7 +542,7 @@ mod tests {
     /// completes a Phase-1 quorum — while a column never does.
     #[test]
     fn a_grid_row_is_addressed_by_the_read_token_and_judged_as_a_row() {
-        let grid = QuorumSystem::Grid { rows: 2, cols: 3 };
+        let grid = QuorumSystem::grid(2, 3);
         let config = AcceptorConfig::new(nodes(1..=6), grid);
         assert_eq!(config.row_of(0), Some(0));
         assert_eq!(config.row_of(1), Some(1));
@@ -582,7 +582,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "an acceptor configuration admits its quorum system")]
     fn a_grid_that_does_not_tile_is_unconstructible() {
-        let _ = AcceptorConfig::new(nodes(1..=5), QuorumSystem::Grid { rows: 2, cols: 3 });
+        let _ = AcceptorConfig::new(nodes(1..=5), QuorumSystem::grid(2, 3));
     }
 
     /// A column is a grid notion: naming one under a majority is a

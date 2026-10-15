@@ -248,6 +248,7 @@ fn movable(registry: &Registry, members: &[u64], node: NodeId) -> bool {
         let moves = match b.target {
             BookingTarget::Journal(_) => b.role == Role::Acceptor,
             BookingTarget::Set { .. } => b.role == Role::Matchmaker,
+            BookingTarget::Tenant { .. } => false,
         };
         b.node == node && moves && storage.iter().any(|m| !holders.contains(m))
     })
