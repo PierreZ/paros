@@ -80,12 +80,13 @@ impl ColocatedNode {
                 self.push_nack(Party::Node(reply_to), ballot, from_slot);
             }
             PrepareOutcome::Promised { raised } => {
-                // A same-ballot continuation can arrive after this node
-                // learned the ballot through Commit/catch-up while it still
-                // held a different live campaign. The other proposer is leader
-                // contact even though the durable promise need not rise, so
-                // close that stale campaign before following the prepared
-                // ballot.
+                // Another proposer's Prepare closes this node's campaign or
+                // leadership. A same-ballot continuation can arrive after a
+                // leader learned the ballot through Commit/catch-up (a
+                // campaign closed right there, `mark_chosen`): the other
+                // proposer is leader contact even though the durable promise
+                // need not rise, so close that stale leadership before
+                // following the prepared ballot.
                 if ballot.node != me && self.role != NodeRole::Follower {
                     probe!(
                         reachable,
