@@ -856,6 +856,17 @@ impl FleetSession {
     /// Run `init`'s fleet half to its end (see [`FleetSession::init_step`]),
     /// taking an interrupted step again for up to `patience` (a cell still
     /// electing its leaders, an operator racing this one).
+    ///
+    /// The wait for the cell coordinator's `JoinFleet`
+    /// ([`Interrupted::NotJoined`], #513 (fleet Init duel)) has a patience of
+    /// its own, counted from the first time the run meets it, as
+    /// [`crate::client::initialize`] waits for the coordinator with its own.
+    /// The join is another writer's step: a run whose own writes took its
+    /// patience gave up at the first look, one watch round before the join
+    /// landed, and its operator ran `init` whole again (witness
+    /// 16841472241737394111 on 39b2782: `AddCell` landed 4 s into a 3 s
+    /// patience, the join 1.3 s later, and the recovery tail's settle had
+    /// run out by then).
     #[tracing::instrument(level = "debug", skip_all, fields(cell = self.journals.cell_id))]
     pub async fn init<P: Providers>(
         &mut self,
@@ -864,10 +875,15 @@ impl FleetSession {
         fleet_id: u64,
         patience: Duration,
     ) -> Run<u64> {
-        let deadline = client.now() + patience;
+        let mut deadline = client.now() + patience;
+        let mut joining = false;
         let mut steps = Vec::new();
         while steps.len() < MAX_STEPS {
             let step = self.init_step(client, first, fleet_id).await;
+            if !joining && matches!(step, Step::Interrupted(Interrupted::NotJoined { .. })) {
+                joining = true;
+                deadline = deadline.max(client.now() + patience);
+            }
             if retry(client, &step, deadline).await {
                 continue;
             }
