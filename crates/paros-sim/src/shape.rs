@@ -1548,6 +1548,11 @@ pub(crate) struct MachineLayout {
     /// (#349): the advertised string changes, and the cell's registry must
     /// learn it.
     pub(crate) rename_pct: u32,
+    /// The founding members keep their names (#504 (red drain seeds)): on
+    /// a drained-machine seed that renames, only admitted machines are
+    /// renamed, so the lone founder never strands them (#505 (stranded
+    /// admitted machine)).
+    pub(crate) founders_keep_names: bool,
 }
 
 /// The run's machine layout (#246), drawn once per seed by whoever asks
@@ -1604,9 +1609,20 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
             // (#212 (placement)), so the default fits the run's few tenants
             // of three journal names each, and the extreme fills the cell.
             let capacity = buggify_knob!(8_u64, 1_u64..4_u64);
-            let named = moonpool_sim::sim_random_bool(0.5) || moved;
+            // On half the drained-machine seeds, the machines advertise
+            // names and a reboot renames one at the knob's extreme, so a
+            // drain meets a machine renamed since it took its slots (#504
+            // (red drain seeds), witness 14650518500742172559 on e61b30e):
+            // the default never renames.
+            let renamed_drain = drained && moonpool_sim::sim_random_bool(0.5);
+            let named = moonpool_sim::sim_random_bool(0.5) || moved || renamed_drain;
             let move_pct = buggify_knob!(0_u32, 20_u32..81_u32);
             let rename_pct = buggify_knob!(0_u32, 20_u32..61_u32);
+            let rename_pct = if renamed_drain {
+                rename_pct.max(moonpool_sim::sim_random_range(20_u32..61_u32))
+            } else {
+                rename_pct
+            };
             let machines = (0..count)
                 .map(|rank| {
                     let class =
@@ -1637,6 +1653,7 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
                 named,
                 move_pct,
                 rename_pct,
+                founders_keep_names: renamed_drain,
             }
         })
         .clone()
