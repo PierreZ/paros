@@ -46,6 +46,10 @@ pub struct Rare {
 /// window seldom reaches, #485 the double fault, #486 the rest.
 pub const RARE: &[Rare] = &[
     Rare {
+        msg: "a replica serves a read before its next apply page",
+        reason: "rare: fired on 0 of 440 hunt seeds with the lagging-replica scenario; a run decides a dozen slots, so a read seldom lands while a rebooted replica pages its backlog (#550 (replica serves an unreported fold page), #486)",
+    },
+    Rare {
         msg: "driver: an admitted machine dials a seed from an adopted book",
         reason: "marginal: needs an admitted machine whose founding members all moved (#505 (stranded admitted machine)); fired in main's sweep of 309 seeds at 8efe714, missed by PR #547's sweep of 232 (#486)",
     },
@@ -1048,6 +1052,10 @@ pub const RARE: &[Rare] = &[
     Rare {
         msg: "coordinator: a move books its journal's new slot",
         reason: "a move off a drained machine: none in a 321-seed sweep that saturated (#498 (moves in the sweep), #529)",
+    },
+    Rare {
+        msg: "drain: an operator drains a renamed machine",
+        reason: "a drained-machine seed whose admitted machine was renamed first: 1 run in 480 hunt seeds with the rename draw (#504 (red drain seeds), #498 (moves in the sweep))",
     },
     Rare {
         msg: "coordinator: a move reconfigures its journal",

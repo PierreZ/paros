@@ -124,7 +124,13 @@ pub(super) async fn run_replica_role(
             parse_addr(my_ip)?,
             members.clone(),
             boot,
-            incarnation.shape.tunables,
+            paros::DriverTunables {
+                apply_page: crate::shape::replica_apply_page(
+                    ctx.state(),
+                    incarnation.shape.tunables.apply_page,
+                ),
+                ..incarnation.shape.tunables
+            },
             crate::tls::serving(ctx, paros::tls::Role::Machine, my_ip)?,
             ctx.shutdown().clone(),
             &audit,

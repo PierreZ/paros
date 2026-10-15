@@ -141,6 +141,26 @@ impl<P: Providers, A: Audit> NodeLoop<'_, P, A> {
         waiters: &mut ClientWaiters,
         last: &mut Deltas,
     ) -> Result<(), RunError> {
+        self.settle_expiring(node, storage, waiters, last, None)
+            .await
+    }
+
+    /// [`Self::settle`], and on a tick the read expiry: `expiry` carries the
+    /// tick count and whether every confirming read expires early. The
+    /// expired long-polls are answered from the fold the batch reported,
+    /// before the next page is released.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::settle`].
+    async fn settle_expiring<S: LogStorage>(
+        &self,
+        node: &mut ColocatedNode,
+        storage: &mut S,
+        waiters: &mut ClientWaiters,
+        last: &mut Deltas,
+        expiry: Option<(u64, bool)>,
+    ) -> Result<(), RunError> {
         assert!(
             node.config().id.0 == self.self_id,
             "a node loop settles its own node"
@@ -148,6 +168,7 @@ impl<P: Providers, A: Audit> NodeLoop<'_, P, A> {
         let promised = node.hard_state().max_promised_ballot;
         let chosen = node.hard_state().chosen_index;
         let mut outbox = drain_ready(node, storage, self.out, waiters, self.audit).await?;
+        let reported = fold_head(node);
         if !outbox.gc_requests.is_empty() && crate::scenario::withhold_gc() {
             tracing::info!(node = self.self_id, "gc_requests_withheld");
             outbox.gc_requests.clear();
@@ -175,10 +196,44 @@ impl<P: Providers, A: Audit> NodeLoop<'_, P, A> {
         );
         // The journal fold only grows inside a batch: a journal read
         // long-polling at the tail is re-served here (#204).
+        // Nothing between the drain and here walks the prefix: the reads
+        // below see the fold the batch reported.
+        assert!(
+            fold_head(node) == reported,
+            "a node serves reads from the fold its batch reported"
+        );
         waiters.reads.wake(
             |from, limit, bytes| node.read_log(from, limit, bytes),
             NodeId(self.self_id),
             self.audit,
+        );
+        if let Some((ticks, expire_all)) = expiry {
+            waiters.reads.expire(
+                |from, limit, bytes| node.read_log(from, limit, bytes),
+                ticks,
+                self.tunables.read_retry_ticks,
+                expire_all,
+                NodeId(self.self_id),
+                self.audit,
+            );
+        }
+        assert!(
+            fold_head(node) == reported,
+            "serving reads never moves the fold"
+        );
+        // The batch is now durable, sent and applied, and every read this
+        // settle answered saw the fold it reported. Only at this boundary may
+        // the core materialize the next bounded Ready page. Released before
+        // the reads (inside the drain, as before #550 (replica serves an
+        // unreported fold page)), the core folds the page at once while its
+        // writes and its report wait for the next batch, and a read parked at
+        // the tail is served slots the node neither persisted nor reported
+        // (witness 12015710127796105877 on PR #552: a node served next_seq 5
+        // with its fold at slot 5 and its report at slot 3).
+        node.advance_recovery();
+        assert!(
+            fold_head(node) >= reported,
+            "releasing the next page never rewinds the fold"
         );
         // The settle tail persists and applies; it never lowers what it made
         // durable (the core's own marks, restated at the I/O seam).
@@ -710,17 +765,13 @@ impl<P: Providers> Shared<'_, P> {
         // would stop confirmed reads from ever completing during the chaos
         // window. Silent in the recovery tail; its gate is the audit's
         // `read_expired` (the `early` leg).
+        // They are answered in the settle, from the fold its batch reported,
+        // before the next page is released (#550 (replica serves an
+        // unreported fold page)).
         let expire_all =
             waiters.reads.has_confirming() && moonpool_buggify::buggify_fault_with_prob!(0.05);
-        waiters.reads.expire(
-            |from, limit, bytes| node.read_log(from, limit, bytes),
-            ticks,
-            tunables.read_retry_ticks,
-            expire_all,
-            NodeId(self_id),
-            &*audit,
-        );
-        lp.settle(node, storage, waiters, last).await?;
+        lp.settle_expiring(node, storage, waiters, last, Some((ticks, expire_all)))
+            .await?;
         // Surface a chosen slot stranded above the applied prefix. The
         // `Ready` handshake only ever hands out the *contiguous* prefix, so a
         // hole below a chosen slot is otherwise invisible from outside the

@@ -751,6 +751,11 @@ impl ChainWorkload {
         if crate::shape::downed_founder(ctx.state()) && !operations.contains(&TENANT) {
             operations.push(TENANT);
         }
+        // Likewise `READ` on a lagging-replica seed (#550 (replica serves an
+        // unreported fold page)).
+        if crate::shape::lagging_replica(ctx.state()) && !operations.contains(&READ) {
+            operations.push(READ);
+        }
         // And `VIEW` on a downed-founder seed (#191 (status)).
         if crate::shape::downed_founder(ctx.state()) && !operations.contains(&VIEW) {
             operations.push(VIEW);
@@ -1496,6 +1501,12 @@ impl ChainWorkload {
                     // Any node or replica serves a journal read.
                     let span = server_count + replica_count;
                     let mut drawn = usize::try_from(raw_target >> 32).unwrap_or(0) % span.max(1);
+                    // On a lagging-replica seed every read asks a replica
+                    // first (#550 (replica serves an unreported fold page)):
+                    // the scenario's ingredients come together.
+                    if replica_count > 0 && crate::shape::lagging_replica(ctx.state()) {
+                        drawn = server_count + drawn % replica_count;
+                    }
                     // A client naming a journal this deployment does not
                     // serve (the unset identifier, or another tenant's) must be
                     // refused, never answered from the wrong journal.

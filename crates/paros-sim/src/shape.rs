@@ -729,6 +729,9 @@ struct Registry {
     /// Run-level: whether the run draws the split-floor scenario (see
     /// [`split_floor`]), fixed by the first caller.
     split_floor: Option<bool>,
+    /// Run-level: whether the run draws the lagging-replica scenario (see
+    /// [`lagging_replica`]), fixed by the first caller.
+    lagging_replica: Option<bool>,
     /// Run-level: whether the run runs the system journals (see
     /// [`system_journals`]), fixed by the first caller.
     system: Option<bool>,
@@ -1367,6 +1370,44 @@ pub(crate) fn split_floor(state: &StateHandle) -> bool {
     })
 }
 
+/// Whether the run draws the **lagging-replica scenario** (#550 (replica
+/// serves an unreported fold page)): drawn once per seed, its own BUGGIFY
+/// location. A replica serves a read from its fold, and the fold must never
+/// pass what the replica reported. The order only matters when a catch-up
+/// backlog spans several apply pages and a read is confirmed in the batch
+/// that ends a page: a replica rebooted behind the cell, with a small apply
+/// page. Attrition brings a replica back fast and the apply page is small on
+/// few seeds: 1 red in 1,000 hunt seeds, with a local amplification. On a
+/// scenario seed `crate::world::lagging_replica` holds one replica down
+/// until the cell decided `lagging_replica::AHEAD` slots past its prefix,
+/// and every replica walks a small apply page ([`replica_apply_page`]).
+/// Each ingredient keeps its own coin on the other seeds. Rare-but-valid: a
+/// slow replica is, and so is a small page.
+#[tracing::instrument(level = "debug", skip_all)]
+pub(crate) fn lagging_replica(state: &StateHandle) -> bool {
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    *guard.lagging_replica.get_or_insert_with(|| {
+        let lagging = moonpool_sim::buggify_with_prob!(1.0);
+        if lagging {
+            assert_reachable!("a run draws the lagging-replica scenario");
+        }
+        lagging
+    })
+}
+
+/// The apply page a replica walks (#550 (replica serves an unreported fold
+/// page)): the node's drawn one, or on a lagging-replica seed a page of one
+/// or two slots (inside the knob's extreme), so the replica's catch-up spans
+/// several pages of a short journal. Floor 1, as the knob's.
+pub(crate) fn replica_apply_page(state: &StateHandle, drawn: usize) -> usize {
+    if !lagging_replica(state) {
+        return drawn;
+    }
+    let small = usize::try_from(moonpool_sim::sim_random_range(1_u64..3_u64)).unwrap_or(1);
+    drawn.min(small).max(1)
+}
+
 /// The fewest blocks a segment's entry log may have (floor of
 /// [`journal_geometry`]): it must hold the largest single entry a node
 /// stores, the workload's largest write (`ChainConfig`'s
@@ -1559,6 +1600,11 @@ pub(crate) struct MachineLayout {
     /// (#349): the advertised string changes, and the cell's registry must
     /// learn it.
     pub(crate) rename_pct: u32,
+    /// The founding members keep their names (#504 (red drain seeds)): on
+    /// a drained-machine seed that renames, only admitted machines are
+    /// renamed, so the lone founder never strands them (#505 (stranded
+    /// admitted machine)).
+    pub(crate) founders_keep_names: bool,
 }
 
 /// The run's machine layout (#246), drawn once per seed by whoever asks
@@ -1615,9 +1661,20 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
             // (#212 (placement)), so the default fits the run's few tenants
             // of three journal names each, and the extreme fills the cell.
             let capacity = buggify_knob!(8_u64, 1_u64..4_u64);
-            let named = moonpool_sim::sim_random_bool(0.5) || moved;
+            // On half the drained-machine seeds, the machines advertise
+            // names and a reboot renames one at the knob's extreme, so a
+            // drain meets a machine renamed since it took its slots (#504
+            // (red drain seeds), witness 14650518500742172559 on e61b30e):
+            // the default never renames.
+            let renamed_drain = drained && moonpool_sim::sim_random_bool(0.5);
+            let named = moonpool_sim::sim_random_bool(0.5) || moved || renamed_drain;
             let move_pct = buggify_knob!(0_u32, 20_u32..81_u32);
             let rename_pct = buggify_knob!(0_u32, 20_u32..61_u32);
+            let rename_pct = if renamed_drain {
+                rename_pct.max(moonpool_sim::sim_random_range(20_u32..61_u32))
+            } else {
+                rename_pct
+            };
             let machines = (0..count)
                 .map(|rank| {
                     let class =
@@ -1648,6 +1705,7 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
                 named,
                 move_pct,
                 rename_pct,
+                founders_keep_names: renamed_drain,
             }
         })
         .clone()

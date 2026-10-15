@@ -6,8 +6,11 @@
 //! The signing key goes first (`init` may have stopped before it wrote
 //! it), then the rotated key: from then on a frontend that reads the entry
 //! again serves a token the rotated key signed. On a coin the operator also
-//! adds a spare key and removes it, and on another coin adds it again,
-//! which is refused: a removed key is never added again.
+//! adds a spare key, removes it and adds it again, which is refused: a
+//! removed key is never added again. The client's look holds only the keys
+//! in force, so the re-add reaches the fold, which refuses it at apply: one
+//! path fires the fold's, the client's and this workload's gates together,
+//! and a later rotation's spare add takes it again.
 
 use moonpool_sim::{assert_always, assert_reachable, buggify_with_prob};
 use paros::client::fleet::{FleetRefusal, FleetSession, Run, Step};
@@ -17,7 +20,7 @@ use crate::client::ChainClient;
 
 impl FleetOps {
     /// Add the signing key and the rotated key to the universe entry, and
-    /// on a coin add and remove the spare key.
+    /// on a coin add, remove and add again the spare key.
     pub(super) async fn rotate(
         &mut self,
         client: &ChainClient,
@@ -40,7 +43,7 @@ impl FleetOps {
             .add_root_key(client, first, &rotated, self.patience)
             .await;
         judge_key(&run, false);
-        if !matches!(run.outcome, Step::Done { .. }) || !buggify_with_prob!(0.5) {
+        if !matches!(run.outcome, Step::Done { .. }) || !buggify_with_prob!(0.75) {
             return;
         }
         let spare = crate::frontend::spare_entry(&self.state);
@@ -59,7 +62,7 @@ impl FleetOps {
                 assert_reachable!("fleet: an operator removes a root key it added");
             }
             judge_key(&removed, true);
-            if matches!(removed.outcome, Step::Done { .. }) && buggify_with_prob!(0.5) {
+            if matches!(removed.outcome, Step::Done { .. }) {
                 // The removed key again: its id and label are never reused.
                 let again = session
                     .add_root_key(client, first, &spare, self.patience)
