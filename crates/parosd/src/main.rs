@@ -41,6 +41,7 @@
 //! | 1 | [`RunError::Infra`]: bind, listen, address | fix the environment |
 //! | 2 | an invalid configuration | fix the variables |
 
+mod http;
 mod resolve;
 mod settings;
 mod tunables;
@@ -51,6 +52,7 @@ use std::time::Duration;
 use clap::Parser;
 use moonpool_core::{TokioProviders, TokioResolver, TokioStorageProvider};
 use paros::machine::{MachineAddresses, MachineError, MachineSettings, ProviderDisk};
+use paros::metrics::Metrics;
 use paros::{Address, BootRefusal, Names, NoAudit, RunError};
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
@@ -133,12 +135,27 @@ async fn run(settings: Settings) -> ExitCode {
             "parosd_pinned_root_keys"
         );
     }
+    // Metrics are always recorded (#366 (metrics)); `PAROS_HTTP_LISTEN`
+    // serves them, with the probes.
+    let metrics = Metrics::on();
+    let shutdown = shutdown_on_signal();
+    if let Some(http) = &settings.http_listen {
+        let addr = match patiently(|| resolve::resolve(http)) {
+            Ok(addr) => addr,
+            Err(error) => return invalid(&format!("PAROS_HTTP_LISTEN: {error}")),
+        };
+        if let Err(error) = http::serve(addr, metrics.clone(), shutdown.clone()).await {
+            eprintln!("parosd: PAROS_HTTP_LISTEN {addr}: {error}");
+            return ExitCode::FAILURE;
+        }
+    }
     let machine = MachineSettings {
         class: settings.class,
         capacity: settings.capacity,
         failure_domain: settings.failure_domain.clone(),
         name,
         pin,
+        metrics,
     };
     let disk = ProviderDisk::new(
         TokioStorageProvider::new(),
@@ -154,7 +171,7 @@ async fn run(settings: Settings) -> ExitCode {
         Names::new(TokioResolver::new()),
         tunables,
         transport,
-        shutdown_on_signal(),
+        shutdown,
     ))
     .await;
     match ran {

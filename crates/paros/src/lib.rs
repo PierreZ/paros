@@ -41,6 +41,7 @@ pub mod journal;
 pub mod load;
 pub mod machine;
 mod matchmaker;
+pub mod metrics;
 pub mod name;
 pub mod placement;
 mod provision;

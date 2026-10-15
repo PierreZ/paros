@@ -16,6 +16,7 @@
 //! | `PAROS_TLS_CA` | the universe's authority, PEM: the peers and callers it trusts |
 //! | `PAROS_TLS_CLIENT_AUTH` | `required` (mutual TLS, the default), `optional` or `off`: what it asks of a caller |
 //! | `PAROS_ROOT_PUBLIC_KEY` | the root public key files it pins while idle, comma-separated (#245 (Biscuit tokens)): `cell init` and `cell add-machine` then need an `admin` token; none trusts the network |
+//! | `PAROS_HTTP_LISTEN` | `HOST:PORT` of its HTTP endpoint (#366 (metrics)): `/metrics` (Prometheus text), `/healthz` and `/readyz`; none by default |
 //! | `PAROS_<FIELD>[_MS]` | one override per `DriverTunables` field ([`crate::tunables`]) |
 //!
 //! Each variable has the matching `--flag`. An unknown `PAROS_*` variable
@@ -31,7 +32,8 @@ use paros::{JournalStoreConfig, Transport};
 use paros_authz_biscuit::{BiscuitAuthz, KeyRing, RootPublicKey};
 
 /// The variables this module reads.
-const VARIABLES: [&str; 13] = [
+const VARIABLES: [&str; 14] = [
+    "PAROS_HTTP_LISTEN",
     "PAROS_NAME",
     "PAROS_LISTEN",
     "PAROS_ADVERTISE",
@@ -97,6 +99,11 @@ pub struct Settings {
     /// may change across starts.
     #[arg(long, env = "PAROS_NAME")]
     pub name: Option<String>,
+    /// `HOST:PORT` of its HTTP endpoint (#366 (metrics)): `/metrics` in
+    /// the Prometheus text format, `/healthz` (the process is alive) and
+    /// `/readyz` (a cell member whose stores opened). None by default.
+    #[arg(long, env = "PAROS_HTTP_LISTEN")]
+    pub http_listen: Option<String>,
     /// The store layout.
     #[arg(
         long,

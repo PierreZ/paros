@@ -249,9 +249,10 @@ enum CellCommand {
     /// Create, delete and list a tenant's journals through its control
     /// journal and the tenant coordinator (#210).
     Journal(journal::JournalArgs),
-    /// The load generator (#517): closed-loop clients writing and reading
-    /// the journals of a tenant, throughput and latency per call each
-    /// second, then the totals.
+    /// The load generator (#517, #194 (throughput benchmark)): clients
+    /// writing and reading the journals of a tenant, closed or open loop,
+    /// against the servers or a local cell (`--local N`); throughput and
+    /// latency per call each second, then the totals.
     Bench(bench::BenchArgs),
 }
 
@@ -598,8 +599,62 @@ async fn administer(
     }
 }
 
+/// `parosctl bench --local N` (#194 (throughput benchmark)): start a cell
+/// of N machines in this process, form it, run the bench against it, then
+/// stop it and delete its stores.
+async fn bench_local(global: &Global, args: bench::BenchArgs, machines: u64) -> ExitCode {
+    let runtime = match runtime(global) {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("parosctl: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let parent = args.local_dir.clone().unwrap_or_else(std::env::temp_dir);
+    let cell = match bench::local::start(machines, &parent) {
+        Ok(cell) => cell,
+        Err(error) => {
+            eprintln!("parosctl: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    output::note(&format!(
+        "local cell of {machines} machines, stores in {}",
+        cell.dir.display()
+    ));
+    let patience = Duration::from_millis(args.patience_ms());
+    let ending = if let Err(error) = cell.form(&runtime, patience).await {
+        output::note(&error);
+        Ending::Unreachable
+    } else {
+        let servers = bootstrap::discover(
+            &runtime.providers,
+            &runtime.rpc,
+            &runtime.names,
+            &cell.members,
+            global.timeout(),
+        )
+        .await;
+        let client = client(&runtime, &servers, global.timeout());
+        let ids: Vec<u64> = servers.iter().map(|(id, _)| *id).collect();
+        let dir = cell.dir.clone();
+        bench::run(&runtime, &client, &ids, args, (global.json, Some(&dir))).await
+    };
+    if let Err(error) = cell.stop() {
+        output::note(&format!("local cell: {error}"));
+    }
+    ending.into()
+}
+
 /// The commands that talk to servers.
 async fn online(global: Global, command: Command) -> ExitCode {
+    let command = match command {
+        Command::Cell(CellCommand::Bench(args)) if args.local.is_some() => {
+            let machines = args.local.expect("matched local");
+            return bench_local(&global, args, machines).await;
+        }
+        command => command,
+    };
     let cli = Cli { global, command };
     let fronted = !cli.global.frontends.is_empty()
         && matches!(&cli.command, Command::Cell(command) if through_frontend(command));
@@ -659,7 +714,9 @@ async fn online(global: Global, command: Command) -> ExitCode {
         CellCommand::Tenant(args) => {
             fleet::run(&runtime.providers, &client, &ids, &labels, &out, args).await
         }
-        CellCommand::Bench(args) => bench::run(&runtime, &client, &ids, args).await,
+        CellCommand::Bench(args) => {
+            bench::run(&runtime, &client, &ids, args, (cli.global.json, None)).await
+        }
         CellCommand::Journal(args) => {
             journal::run(
                 &runtime.providers,

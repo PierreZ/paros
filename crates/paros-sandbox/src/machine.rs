@@ -65,6 +65,7 @@ impl Process for MachineProcess {
             SimulationError::InvalidState(format!("{} is no machine IP", ctx.my_ip()))
         })?;
         let settings = MachineSettings {
+            metrics: paros::metrics::Metrics::off(),
             class: Class::Storage,
             capacity: 8,
             failure_domain: zone_of(index),

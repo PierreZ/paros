@@ -81,7 +81,7 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
 - **A reusable moonpool gap** (simulator infrastructure, not a paros bug) becomes a focused issue
   in `PierreZ/moonpool`; keep paros-side defense in depth meanwhile (`upstream-to-moonpool`).
   When paros needs the fix, improve moonpool autonomously (decided on 2026-10-09): open the
-  moonpool PR, merge it once its CI is green, then advance paros's pin (all thirteen lines).
+  moonpool PR, merge it once its CI is green, then advance paros's pin (all fourteen lines).
 - **Name every issue and PR number** (decided on 2026-10-10): write a short name next to it,
   e.g. "#216 (finish bootstrap)", in chats, comments, PR descriptions and commit messages.
 - **Never edit a `CHANGELOG.md` by hand**: release-plz generates it; the commit message is where
@@ -525,6 +525,6 @@ references), `scripts/` (`sancov-rustc.sh`, `build-play.sh`, `build-sandbox.sh`,
 
 Publishing mirrors moonpool: library crates share a release-plz `version_group` with per-crate
 `CHANGELOG.md`; binaries and xtask are `publish = false`. `paros`, `paros-sim` and `parosd` pin
-moonpool by **git** rev (thirteen lines across their `Cargo.toml`s, `paros-sandbox` included, advanced together), so only
+moonpool by **git** rev (fourteen lines across their `Cargo.toml`s, `paros-sandbox` included, advanced together), so only
 `paros-core` is truly publishable: its one moonpool line (`moonpool-assertions`, optional) also
 carries a crates.io `version`, which a publish resolves instead of the git rev.

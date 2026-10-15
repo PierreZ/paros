@@ -35,6 +35,11 @@ moonpool-journal = { git = "https://github.com/PierreZ/moonpool", rev = "0169819
 # simulation. `reachable!`/`sometimes!` are the probes beside them.
 moonpool-buggify = { git = "https://github.com/PierreZ/moonpool", rev = "0169819c5f59f3360eee59e5bf8a4612bf3feba1" }
 moonpool-assertions = { git = "https://github.com/PierreZ/moonpool", rev = "0169819c5f59f3360eee59e5bf8a4612bf3feba1" }
+# A machine's metrics (#366, `paros::metrics`): a plain `prometheus` registry
+# the simulation reads per machine and `parosd` serves as text; provider-free
+# and wasm-safe.
+moonpool-prometheus = { git = "https://github.com/PierreZ/moonpool", rev = "0169819c5f59f3360eee59e5bf8a4612bf3feba1" }
+prometheus = { version = "0.14", default-features = false }
 
 prost = "0.14"
 # The journal stores' record codec (paros-core's `serde` derives, one compact

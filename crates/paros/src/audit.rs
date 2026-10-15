@@ -32,6 +32,7 @@ use crate::Address;
 use crate::client::CallObserver;
 use crate::driver::BootRefusal;
 use crate::machine::{CachedRegistry, CellPlan, MachineRecord};
+use crate::metrics::CallKind;
 use crate::name::JournalName;
 use crate::rpc::{EdgeRejection, MatchmakersRefusal, RetireRefusal};
 use crate::storage::StorageError;
@@ -525,6 +526,26 @@ pub trait Audit {
     /// #318, or for a write the lost-verdict scenario's named location,
     /// [`LOSE_VERDICTS`](crate::scenario::LOSE_VERDICTS)).
     fn client_reply_dropped(&self, node: NodeId, reply: crate::Reply) {}
+
+    /// A data-plane `call` reached `journal` on this node, which records
+    /// metrics (#366 (metrics)): what `paros_calls_total` counts. Reported
+    /// only by a machine whose metrics are on, so a harness can check the
+    /// counters against its own fold.
+    fn call_received(&self, node: NodeId, journal: JournalIdentifier, call: CallKind) {}
+
+    /// The answer to a `call` [`Audit::call_received`] reported left, with
+    /// `written` bytes accepted and `read` bytes served (#366 (metrics)):
+    /// what `paros_call_seconds`, `paros_written_bytes_total` and
+    /// `paros_read_bytes_total` count. A dropped answer is not reported.
+    fn call_answered(
+        &self,
+        node: NodeId,
+        journal: JournalIdentifier,
+        call: CallKind,
+        written: u64,
+        read: u64,
+    ) {
+    }
 
     /// This Ready batch started `started` inherited or gap-fill accept rounds,
     /// including `gap_fills` fresh no-ops; `remaining` slots are deferred.

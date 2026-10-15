@@ -48,6 +48,7 @@ use super::{
     FormedCell, Joined, MachineFacts, ProviderDisk,
 };
 use crate::ControlPlan;
+use crate::metrics::{Metrics, Phase};
 use crate::transport::Transport;
 use crate::{Address, Audit, DriverTunables, Names, RunError};
 
@@ -68,6 +69,11 @@ pub struct MachineSettings {
     /// while it is idle (#245 (Biscuit tokens)): `parosd --root-public-key`,
     /// or nothing.
     pub pin: AdminPin,
+    /// Where it records its metrics and phase (#366 (metrics)):
+    /// [`Metrics::off`](crate::metrics::Metrics::off) records nothing, and
+    /// the machine serves the same either way. `parosd` serves it on
+    /// `/metrics`, `/healthz` and `/readyz`.
+    pub metrics: crate::metrics::Metrics,
 }
 
 /// A machine's two addresses (#257, `docs/architecture.md` §3.2): what it
@@ -303,18 +309,12 @@ where
     let MachineAddresses { listen, advertise } = addresses;
     let record = identity(&providers, &disk, &audit, &advertise, settings).await?;
     assert_eq!(record.class, settings.class, "the class is fixed at format");
-    // The machine samples its own busyness from its first start on (#424):
-    // every phase answers `Load` from this board.
-    let load = super::load::LoadBoard::default();
-    super::load::spawn_monitor(
-        &providers,
-        disk.root().to_string(),
-        tunables.load_interval,
-        load.clone(),
-        moonpool_buggify::buggify_with_prob!(0.2),
-        shutdown.clone(),
+    let facts = facts_of(
+        &record,
+        (advertise.clone(), listen),
+        names,
+        monitor(&providers, disk.root(), settings, &tunables, &shutdown),
     );
-    let facts = facts_of(&record, (advertise.clone(), listen), names, load);
     tracing::info!(
         machine = %facts.name,
         addr = %advertise,
@@ -338,6 +338,7 @@ where
             cached,
         })
     } else {
+        settings.metrics.set_phase(Phase::Idle);
         let mut ledger = DiskLedger {
             disk: &disk,
             audit: &audit,
@@ -513,11 +514,34 @@ async fn identity<P: Providers, S: StorageProvider + Clone, A: Audit>(
 
 /// The facts of the machine `record` names, advertising and binding
 /// `addresses`: no runtime serves it yet.
+/// The machine samples its own busyness from its first start on (#424):
+/// every phase answers `Load` from the board this returns, beside the
+/// metrics each window also goes to (#366 (metrics)).
+fn monitor<P: Providers>(
+    providers: &P,
+    root: &str,
+    settings: &MachineSettings,
+    tunables: &DriverTunables,
+    shutdown: &CancellationToken,
+) -> (super::load::LoadBoard, Metrics) {
+    let metrics = &settings.metrics;
+    let load = super::load::LoadBoard::default();
+    super::load::spawn_monitor(
+        providers,
+        root.to_string(),
+        tunables.load_interval,
+        (load.clone(), metrics.clone()),
+        moonpool_buggify::buggify_with_prob!(0.2),
+        shutdown.clone(),
+    );
+    (load, metrics.clone())
+}
+
 fn facts_of(
     record: &MachineRecord,
     (addr, listen): (Address, SocketAddr),
     names: Names,
-    load: super::load::LoadBoard,
+    (load, metrics): (super::load::LoadBoard, Metrics),
 ) -> MachineFacts {
     MachineFacts {
         node_id: record.node_id,
@@ -531,6 +555,7 @@ fn facts_of(
         incarnation: 0,
         machine_interface: Vec::new(),
         load,
+        metrics,
     }
 }
 
@@ -624,6 +649,7 @@ where
         "one matchmaker per founding member"
     );
     tracing::info!(machine = %cell.facts.name, addr = %cell.facts.addr, %listen, "machine_serving");
+    cell.facts.metrics.set_phase(Phase::Serving);
     crate::run_journals(
         providers,
         stores,
@@ -739,6 +765,7 @@ where
     }
     let listen = admitted.facts.listen;
     tracing::info!(machine = %admitted.facts.name, addr = %admitted.facts.addr, %listen, "machine_serving_admitted_journals");
+    admitted.facts.metrics.set_phase(Phase::Serving);
     crate::run_journals(
         providers,
         stores,
