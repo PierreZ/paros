@@ -40,6 +40,7 @@ image and the Compose toy are `Dockerfile` and `docker-compose.yml` at the repos
 - `src/bin/parosctl/token.rs` → `parosctl token mint|derive|inspect` (#400): Biscuit tokens over `paros-authz-biscuit`, offline; a token from the argument, `--token-file` or `PAROS_TOKEN`.
 - `src/bin/parosctl/views.rs` → `Asker`, `parosctl machine list|show`, `cell list|show`, `tenant list|show`, `roles [--cell|--tenant|--machine]` (#399): one `View` to the servers' cell, printed as a table (`output::table`) or JSON; the global `--as-tenant NAME` asks in one tenant's scope. `machine list|show` also ask every machine for `Load` (#424): the `CPU`, `MACHINE` and `DISK` columns, a `load` block, `no metrics` for a machine that does not answer.
 - `src/bin/parosctl/status.rs` → `parosctl status [--tenant t] [--cell c]` (#191 (status)): the universe line when the servers' cell hosts its directory, the cell (coordinator, machines available, slots per class) or one tenant (its machines and footprint), and every journal's desired, current and available acceptors with the word the cell shows (`healthy (now degraded)` while hysteresis holds a word back); `--json` adds a `status` block.
+- `src/bin/parosctl/bench.rs` → `parosctl bench` (#517 (`parosctl bench`)), the load generator: closed-loop clients over `paros::client`, `write` (client `i` to journal `i % N`, one shared `Writer` per journal) and `read-tail` (every byte checked) mixed by `--read-percent`; the 1 s tick, the ramp, Ctrl-C, `--tolerate-errors`. `bench/setup.rs` creates the tenant and the journals `bench-K` when missing and claims them; `bench/histograms.rs` → per-client HDR histograms swapped and merged each tick, the `--histograms` JSON lines (V2, base64; temp name, fsync, rename) and `read`, their reading half; `bench/records.rs` → `Rng` (SplitMix64 from `(seed, client)`), record `i` a pure function of `(seed, journal, i)` and `check`. No sim path: it calls only `paros::client`.
 - `src/bin/parosctl/labels.rs` → `Labels` → the names every command prints (#399): one admin cell view per command; short hex only when no view names an entity.
 - `src/bin/parosctl/commands.rs` → one fn per cell command: `write`, `read`, `tail`, `truncate`,
   `set-leader`, `inspect`, `reconfigure`, `retire`.
@@ -104,4 +105,5 @@ image and the Compose toy are `Dockerfile` and `docker-compose.yml` at the repos
   cargo unifies moonpool-core's features and this binary gets moonpool-sim's deterministic
   `select!`; `cargo build -p parosd` alone keeps tokio's macro verbatim.
 - `clap` (`derive`, `env`), `tokio` (`rt-multi-thread`, `macros`, `signal`), `tokio-util`,
-  `tracing`, `tracing-subscriber` (`env-filter`, `fmt`), `serde_json`; dev `futures`, `tempfile`.
+  `tracing`, `tracing-subscriber` (`env-filter`, `fmt`), `serde_json`, `hdrhistogram` and
+  `base64` (`parosctl bench`); dev `futures`, `tempfile`.
