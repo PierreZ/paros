@@ -171,8 +171,12 @@ impl FleetOps {
                 .into_iter()
                 .flatten(),
         );
+        // A wipe after the reply may have lost the plan it names, and the
+        // machines formed another since (#536 (cell init oracle reads a
+        // stale board)): the reply was true when it came.
         assert_always!(
-            crate::machine::formed_cell(ctx.state()) == Some(journals),
+            crate::machine::formed_cell(ctx.state()) == Some(journals)
+                || crate::machine::plan_lost(ctx.state(), journals.cell_id),
             "init: the cell init reports is the one the machines formed",
             { "cell" => journals.cell_id }
         );
@@ -264,8 +268,16 @@ impl FleetOps {
                 &token,
                 self.patience,
             );
-            let (run, second) = futures::future::join(whole, second).await;
-            judge_second(ctx, &other, &second, wiped);
+            // Judged as it resolves, not once the whole `init` ends: wipes in
+            // between change the board it is judged against (#536 (cell init
+            // oracle reads a stale board), witness
+            // `replay-recipe 18203814145639737644 16953:385774492864553900` on
+            // 616e83f).
+            let second = async {
+                let outcome = second.await;
+                judge_second(ctx, &other, &members, &outcome, wiped);
+            };
+            let (run, ()) = futures::future::join(whole, second).await;
             run
         } else {
             whole.await
@@ -418,11 +430,23 @@ impl FleetOps {
 /// one cell the machines formed, or decides nothing — never another. Sent
 /// to a machine `cell add-machine` admitted at `other` (#423), it is refused
 /// as `cell_exists`: that machine is in the cell already.
-fn judge_second(ctx: &SimContext, other: &Address, second: &InitOutcome, wiped: u64) {
+///
+/// `cell_exists` comes from any listed member a cell admitted, not only from
+/// `other`: the decree's fan-out refuses on the first member that answers
+/// `in_cell` (`paros::machine::cell_init`), such as a wiped founder's
+/// replacement the cell admitted back.
+fn judge_second(
+    ctx: &SimContext,
+    other: &Address,
+    members: &[Address],
+    second: &InitOutcome,
+    wiped: u64,
+) {
     match second {
         InitOutcome::Formed(plan) => {
             assert_always!(
-                crate::machine::formed_cell(ctx.state()) == Some(plan.control_journals()),
+                crate::machine::formed_cell(ctx.state()) == Some(plan.control_journals())
+                    || crate::machine::plan_lost(ctx.state(), plan.cell_id),
                 "init: two concurrent cell inits converge on one cell",
                 { "cell" => plan.cell_id }
             );
@@ -434,7 +458,10 @@ fn judge_second(ctx: &SimContext, other: &Address, second: &InitOutcome, wiped: 
                     || (label == "cell_lost" && crate::machine::cell_lost(ctx.state()))
                     || (label == "other_cell_init"
                         && crate::machine::founder_in_other_cell(ctx.state(), wiped))
-                    || (label == "cell_exists" && crate::machine::is_admitted(ctx.state(), other)),
+                    || (label == "cell_exists"
+                        && std::iter::once(other)
+                            .chain(members)
+                            .any(|member| crate::machine::is_admitted(ctx.state(), member))),
                 "init: a second concurrent cell init is refused only for a failed write",
                 { "refusal" => label.as_str() }
             );

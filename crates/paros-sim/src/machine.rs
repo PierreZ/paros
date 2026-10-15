@@ -370,6 +370,13 @@ pub(crate) fn cell_lost(state: &StateHandle) -> bool {
     !lock(&machine_board(state)).lost.is_empty()
 }
 
+/// Whether the plan of `cell_id` was voted and then lost to wipes (#536
+/// (cell init oracle reads a stale board)): a `cell init` reply that named
+/// it was true when it came, though the machines have since formed another.
+pub(crate) fn plan_lost(state: &StateHandle, cell_id: u64) -> bool {
+    lock(&machine_board(state)).lost.contains(&cell_id)
+}
+
 /// The process IP of the machine that advertises `addr` (#257): a named
 /// address, or one a moved machine left, is not the IP a kill strikes.
 pub(crate) fn process_ip(state: &StateHandle, addr: &Address) -> Option<String> {
