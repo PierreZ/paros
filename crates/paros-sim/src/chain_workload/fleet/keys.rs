@@ -6,7 +6,8 @@
 //! The signing key goes first (`init` may have stopped before it wrote
 //! it), then the rotated key: from then on a frontend that reads the entry
 //! again serves a token the rotated key signed. On a coin the operator also
-//! adds a spare key and removes it; a removed key is never added again.
+//! adds a spare key and removes it, and on another coin adds it again,
+//! which is refused: a removed key is never added again.
 
 use moonpool_sim::{assert_always, assert_reachable, buggify_with_prob};
 use paros::client::fleet::{FleetRefusal, FleetSession, Step};
@@ -58,6 +59,17 @@ impl FleetOps {
                 assert_reachable!("fleet: an operator removes a root key it added");
             }
             judge_key(&removed.outcome, true);
+            if matches!(removed.outcome, Step::Done { .. }) && buggify_with_prob!(0.5) {
+                // The removed key again: its id and label are never reused.
+                let again = session
+                    .add_root_key(client, first, &spare, self.patience)
+                    .await;
+                judge_key(&again.outcome, true);
+                assert_always!(
+                    !matches!(again.outcome, Step::Done { .. }),
+                    "fleet: a removed root key is never in force again"
+                );
+            }
         }
     }
 }
