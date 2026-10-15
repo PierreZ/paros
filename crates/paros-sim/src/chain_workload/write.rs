@@ -364,7 +364,15 @@ impl ChainWorkload {
                     None => nodes.resolve(&request, retry_target, retarget).await,
                 };
                 if resolved.by_read_back {
-                    assert_reachable!("client: a read-back alone proves an ambiguous write fenced");
+                    if matches!(resolved.resolution, Resolution::Written { .. }) {
+                        assert_reachable!(
+                            "client: a read-back alone proves an ambiguous write written"
+                        );
+                    } else {
+                        assert_reachable!(
+                            "client: a read-back alone proves an ambiguous write fenced"
+                        );
+                    }
                 }
                 match resolved.resolution {
                     Resolution::Written { seq, count } => {
