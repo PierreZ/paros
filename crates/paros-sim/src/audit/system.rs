@@ -209,30 +209,12 @@ impl SystemBoard {
                 booking,
                 node,
                 role,
-            } => {
-                let machine = self.machines.get(&node.0).copied();
-                assert_always!(
-                    machine.is_none_or(|(drawn, _)| drawn == role.class()),
-                    "registry: a booking takes a slot of the node's own class",
-                    { "node" => node.0, "lsn" => lsn }
-                );
-                assert_always!(
-                    self.spent.insert(*booking),
-                    "registry: a booking id is booked at most once across checkpoints",
-                    { "node" => node.0, "lsn" => lsn }
-                );
-                let held = self.bookings.values().filter(|n| **n == node.0).count() as u64;
-                assert_always!(
-                    machine.is_none_or(|(_, capacity)| held < capacity),
-                    "registry: a node is never booked past its capacity",
-                    { "node" => node.0, "lsn" => lsn, "held" => held }
-                );
-                let before = self.bookings.insert(*booking, node.0);
-                assert_always!(
-                    before.is_none(),
-                    "registry: a live booking id is never booked again",
-                    { "node" => node.0, "lsn" => lsn, "held_by" => before.unwrap_or_default() }
-                );
+            } => self.model_booking(lsn, *booking, *node, *role),
+            // A grant books its slots in order (#476), each judged alike.
+            RegistryEvent::Granted { slots, .. } => {
+                for slot in slots {
+                    self.model_booking(lsn, slot.booking, slot.node, slot.role);
+                }
             }
             RegistryEvent::Released { booking, .. } => {
                 self.bookings.remove(booking);
@@ -262,6 +244,34 @@ impl SystemBoard {
             }
             _ => {}
         }
+    }
+
+    /// The model's half of one booking (#211): `booking` of `node` for
+    /// `role`, first folded at `lsn`.
+    fn model_booking(&mut self, lsn: u64, booking: u64, node: NodeId, role: paros::system::Role) {
+        let machine = self.machines.get(&node.0).copied();
+        assert_always!(
+            machine.is_none_or(|(drawn, _)| drawn == role.class()),
+            "registry: a booking takes a slot of the node's own class",
+            { "node" => node.0, "lsn" => lsn }
+        );
+        assert_always!(
+            self.spent.insert(booking),
+            "registry: a booking id is booked at most once across checkpoints",
+            { "node" => node.0, "lsn" => lsn }
+        );
+        let held = self.bookings.values().filter(|n| **n == node.0).count() as u64;
+        assert_always!(
+            machine.is_none_or(|(_, capacity)| held < capacity),
+            "registry: a node is never booked past its capacity",
+            { "node" => node.0, "lsn" => lsn, "held" => held }
+        );
+        let before = self.bookings.insert(booking, node.0);
+        assert_always!(
+            before.is_none(),
+            "registry: a live booking id is never booked again",
+            { "node" => node.0, "lsn" => lsn, "held_by" => before.unwrap_or_default() }
+        );
     }
 
     /// `node` folded a registry checkpoint at `seq` (#230): `verified` as

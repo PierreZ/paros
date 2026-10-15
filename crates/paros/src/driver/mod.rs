@@ -2407,6 +2407,13 @@ impl<P: Providers, J: JournalStores> SystemCtx<'_, '_, P, J> {
                 SystemEvent::Registry(
                     RegistryEvent::Booked { node, .. } | RegistryEvent::Released { node, .. },
                 ) if node == me => place = true,
+                // A grant that books a slot here (#476 (tenant footprint)):
+                // a set's slots come as one grant, with no other event.
+                SystemEvent::Registry(RegistryEvent::Granted { ref slots, .. })
+                    if slots.iter().any(|slot| slot.node == me) =>
+                {
+                    place = true;
+                }
                 // The cell hosts a tenant (#210): every founding member
                 // serves its control journal (the placement until #212).
                 SystemEvent::Registry(RegistryEvent::TenantHosted { tenant, control }) => {
@@ -2596,7 +2603,8 @@ impl<P: Providers, J: JournalStores> SystemCtx<'_, '_, P, J> {
             .filter(|(_, b)| b.node == me && b.role == crate::system::Role::Acceptor)
             .filter_map(|(_, b)| match b.target {
                 crate::system::BookingTarget::Journal(journal) => Some(journal),
-                crate::system::BookingTarget::Set { .. } => None,
+                crate::system::BookingTarget::Set { .. }
+                | crate::system::BookingTarget::Tenant { .. } => None,
             })
             .collect();
         // The matchmaker sets booked here (#501 (matchmaker sets off the
@@ -2605,6 +2613,8 @@ impl<P: Providers, J: JournalStores> SystemCtx<'_, '_, P, J> {
             .registry()
             .bookings()
             .filter(|(_, b)| b.node == me && b.role == crate::system::Role::Matchmaker)
+            // A footprint's matchmaker slot (#476) reserves room only.
+            .filter(|(_, b)| matches!(b.target, crate::system::BookingTarget::Set { .. }))
             .map(|(_, b)| b.target.tenant())
             .collect();
         self.stores.book_sets(sets);
