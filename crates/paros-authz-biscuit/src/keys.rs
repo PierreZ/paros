@@ -51,7 +51,11 @@ impl RootKey {
     #[must_use]
     pub fn generate(label: &str, entropy: &Entropy) -> Self {
         let mut rng = entropy.rng();
-        let key_id = rng.next_u32();
+        // `0` is unset in paros (§3.8): the universe entry refuses it.
+        let mut key_id = rng.next_u32();
+        while key_id == 0 {
+            key_id = rng.next_u32();
+        }
         let key = PrivateKey::new_with_rng(Algorithm::Ed25519, &mut rng);
         Self {
             key_id,
@@ -143,6 +147,24 @@ impl RootPublicKey {
     #[must_use]
     pub fn label(&self) -> &str {
         &self.label
+    }
+
+    /// A public key from its parts: the universe entry's record of it
+    /// (#245), its text form `ed25519/<hex>`.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::BadKey`] when the text is not an Ed25519 public key.
+    pub fn from_parts(key_id: u32, label: &str, text: &str) -> Result<Self, Error> {
+        let key = PublicKey::from_str(text).map_err(|e| Error::BadKey(e.to_string()))?;
+        if key.algorithm() != Algorithm::Ed25519 {
+            return Err(Error::BadKey("not an ed25519 key".to_string()));
+        }
+        Ok(Self {
+            key_id,
+            label: label.to_string(),
+            key,
+        })
     }
 
     /// The key in Biscuit's text form, `ed25519/<hex>`.
@@ -266,6 +288,14 @@ mod tests {
         let c = RootKey::generate("a", &Entropy::from_bytes([8; 32]));
         assert_eq!(a.public(), b.public());
         assert_ne!(a.public(), c.public());
+    }
+
+    #[test]
+    fn a_key_is_rebuilt_from_its_parts() {
+        let key = RootKey::generate("a", &Entropy::from_bytes([3; 32])).public();
+        let back = RootPublicKey::from_parts(key.key_id(), key.label(), &key.key_text()).unwrap();
+        assert_eq!(back, key);
+        assert!(RootPublicKey::from_parts(1, "a", "ed25519/zz").is_err());
     }
 
     #[test]

@@ -253,6 +253,8 @@ impl Desk {
             fleet_id: self.nonzero(),
             leader_seed: u128::from(self.nonzero()),
             names: ("sandbox".into(), "cell-1".into()),
+            token: Vec::new(),
+            root_key: None,
         };
         let run = initialize(
             &self.providers,

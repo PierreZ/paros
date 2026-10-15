@@ -2,7 +2,8 @@
 //! machine serves — `Identify`, the cell decree's two phases (`PrepareCell`,
 //! `FormCell`) as an acceptor, `CellInit` as the decree's proposer, and
 //! `Admit` — until it forms a cell or a cell admits it (see the parent
-//! module).
+//! module). With a pinned root key, each of the four checks the caller's
+//! `admin` token first ([`AdminPin`], #245 (Biscuit tokens)).
 
 use std::collections::BTreeMap;
 use std::pin::Pin;
@@ -16,9 +17,10 @@ use tokio_util::sync::CancellationToken;
 
 use super::admitted::AdmittedMachine;
 use super::formed::{FormedCell, vote_ballot};
-use super::{Admission, CellPlan, Class, MachineFacts, ballot_from_wire, ballot_to_wire};
+use super::{AdminPin, Admission, CellPlan, Class, MachineFacts, ballot_from_wire, ballot_to_wire};
 use crate::driver::edge::RpcEdge;
 use crate::driver::{DriverTunables, RunError};
+use crate::frontend::Operation;
 use crate::rpc::machine as wire;
 use crate::rpc::methods::{AdmitRpc, CellInitRpc, FormCellRpc, IdentifyRpc, PrepareCellRpc};
 use crate::rpc::{Inbound, ReplySender, serve_well_known};
@@ -94,7 +96,8 @@ type Proposal<'a> = (
 /// Wait for a cell: serve the machine contract at `facts.listen` until this
 /// machine forms — it accepted a `FormCell` and no `CellInit` it drives is
 /// still in flight — or a cell admits it, and return how it joined, or
-/// `None` on `shutdown`.
+/// `None` on `shutdown`. `pin` checks the token of every call that puts it
+/// in a cell (#245).
 ///
 /// # Errors
 ///
@@ -112,6 +115,7 @@ pub async fn wait_for_cell<P: Providers, L: CellLedger>(
     ledger: &mut L,
     tunables: &DriverTunables,
     transport: &Transport,
+    pin: &AdminPin,
     shutdown: CancellationToken,
 ) -> Result<Option<Joined>, RunError> {
     assert!(ledger.vote().is_none(), "a formed machine does not wait");
@@ -156,6 +160,10 @@ pub async fn wait_for_cell<P: Providers, L: CellLedger>(
                 reply.send(facts.identify_ack(0));
             }
             Some((request, reply)) = admit.recv() => {
+                if let Err(label) = pin.allow(&providers, &request.token, Operation::Admit) {
+                    reply.send(wire::AdmitAck { admitted: false, refusal: label.into() });
+                    continue;
+                }
                 let in_init = proposal.is_some();
                 let (ack, admitted) = answer_admit(facts, ledger, &request, in_init).await;
                 reply.send(ack);
@@ -169,9 +177,25 @@ pub async fn wait_for_cell<P: Providers, L: CellLedger>(
                 }
             }
             Some((request, reply)) = prepare.recv() => {
+                if let Err(label) = pin.allow(&providers, &request.token, Operation::FormCell) {
+                    reply.send(wire::PrepareCellAck {
+                        identity: Some(facts.identify_ack(0)),
+                        refusal: label.into(),
+                        ..wire::PrepareCellAck::default()
+                    });
+                    continue;
+                }
                 reply.send(answer_prepare(facts, ledger, &request).await);
             }
             Some((request, reply)) = form.recv() => {
+                if let Err(label) = pin.allow(&providers, &request.token, Operation::FormCell) {
+                    reply.send(wire::FormCellAck {
+                        formed: false,
+                        refusal: label.into(),
+                        ..wire::FormCellAck::default()
+                    });
+                    continue;
+                }
                 reply.send(answer_form(facts, ledger, &request).await);
                 // A decree this machine drives finishes before it stops
                 // waiting: its own accept is the decree's last.
@@ -183,7 +207,9 @@ pub async fn wait_for_cell<P: Providers, L: CellLedger>(
                 }
             }
             Some((request, reply)) = init.recv() => {
-                if proposal.is_some() {
+                if let Err(label) = pin.allow(&providers, &request.token, Operation::FormCell) {
+                    reply.send(refused(label));
+                } else if proposal.is_some() {
                     // One decree at a time per receiver: the caller asks
                     // again, and finds what this one decided.
                     reply.send(refused("contended"));

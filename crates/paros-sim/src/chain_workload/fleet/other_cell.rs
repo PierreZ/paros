@@ -9,6 +9,7 @@
 //! cell, and a re-run `init` learns the cell a majority of the founding
 //! members serve.
 
+use moonpool_sim::{Providers as _, TimeProvider as _};
 use moonpool_sim::{SimContext, assert_always, assert_reachable};
 use paros::client::bootstrap::{self, InitOutcome};
 
@@ -31,6 +32,7 @@ impl FleetOps {
             self.connector.names(),
             &target,
             std::slice::from_ref(&target),
+            &crate::frontend::operator_token(ctx.state(), self.connector.providers().time().now()),
             self.patience,
         )
         .await;

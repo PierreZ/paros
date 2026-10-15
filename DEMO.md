@@ -153,6 +153,35 @@ hosts, name each machine (`--machines parosd-1,parosd-2,parosd-3`) and give each
 files. A `parosctl` without a certificate is refused at the handshake; set
 `PAROS_TLS_CLIENT_AUTH=optional` on the machines to admit it.
 
+## With root keys and tokens
+
+The same three machines, pinned to a root key (#245 (Biscuit tokens)). Each idle machine then
+forms a cell or joins one only for an `admin` token, and the universe keeps the key for every
+frontend. Make the key and the token offline:
+
+```sh
+parosctl key generate --out /tmp/paros-demo --label demo-1
+parosctl token mint --key /tmp/paros-demo/demo-1.private --role admin --ttl 1h \
+  --subject operator --out /tmp/paros-demo/admin.token
+# Then each machine pins the public half:
+export PAROS_ROOT_PUBLIC_KEY=/tmp/paros-demo/demo-1.public
+# ...start the three parosd as above, then initialize with the token and the key:
+parosctl --token-file /tmp/paros-demo/admin.token init --members "$PAROSCTL_SERVERS" \
+  --root-public-key /tmp/paros-demo/demo-1.public
+parosctl universe key list
+```
+
+A rotation is two commands. Add the next key, and remove the old one when its tokens expired:
+
+```sh
+parosctl key generate --out /tmp/paros-demo --label demo-2
+parosctl universe key add /tmp/paros-demo/demo-2.public
+parosctl universe key remove demo-1
+```
+
+`init` without a token is refused `forbidden` or `invalid_token` (exit 3). A frontend reads the
+keys in the universe, so `PAROS_FRONTEND_ROOT_PUBLIC_KEY` is optional.
+
 ## If something goes wrong
 
 - `init` says a member is not up yet: run it again; it resumes, and on a formed fleet it is refused

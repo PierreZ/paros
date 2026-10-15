@@ -35,6 +35,7 @@ use super::Client;
 use super::bootstrap::{self, InitOutcome};
 use super::election::read_election;
 use super::fleet::{FleetRefusal, FleetSession, Interrupted, Stage, Step};
+use crate::fleet::RootKeyEntry;
 use crate::machine::ControlJournals;
 use crate::system::Registry;
 use crate::{Address, Names};
@@ -121,6 +122,12 @@ pub struct InitParams {
     /// The universe's name and the cell's, for people (#252, #399): kept
     /// by the first run that writes them.
     pub names: (String, String),
+    /// The operator's `admin` token, sent with `CellInit`: a founding
+    /// member with a pinned root key checks it (#245 (Biscuit tokens)).
+    pub token: Vec<u8>,
+    /// The universe's first root public key, written into the universe
+    /// entry while it holds none (#245).
+    pub root_key: Option<RootKeyEntry>,
 }
 
 /// What a found cell is: its servers, its members and its control journals.
@@ -235,7 +242,8 @@ pub async fn initialize<P: Providers>(
     let patience = params.patience;
     let mut formation = None;
     for target in members {
-        match bootstrap::cell_init(providers, rpc, names, target, members, patience).await {
+        let token = &params.token;
+        match bootstrap::cell_init(providers, rpc, names, target, members, token, patience).await {
             InitOutcome::Formed(plan) => {
                 formation = Some(plan);
                 break;
@@ -297,6 +305,9 @@ pub async fn initialize<P: Providers>(
         return InitRun::Refused(InitRefusal::NoFleet);
     };
     let mut fleet = fleet.with_names(params.names.0.as_bytes(), params.names.1.as_bytes());
+    if let Some(key) = params.root_key {
+        fleet = fleet.with_root_key(key);
+    }
     let run = fleet.init(&client, 0, params.fleet_id, patience).await;
     match run.outcome {
         Step::Done {

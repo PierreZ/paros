@@ -15,20 +15,23 @@
 //! | `PAROS_TLS_KEY` | the certificate's private key, PEM |
 //! | `PAROS_TLS_CA` | the universe's authority, PEM: the peers and callers it trusts |
 //! | `PAROS_TLS_CLIENT_AUTH` | `required` (mutual TLS, the default), `optional` or `off`: what it asks of a caller |
+//! | `PAROS_ROOT_PUBLIC_KEY` | the root public key files it pins while idle, comma-separated (#245 (Biscuit tokens)): `cell init` and `cell add-machine` then need an `admin` token; none trusts the network |
 //! | `PAROS_<FIELD>[_MS]` | one override per `DriverTunables` field ([`crate::tunables`]) |
 //!
 //! Each variable has the matching `--flag`. An unknown `PAROS_*` variable
 //! is an error, so a typo never silently keeps a default.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use clap::{Parser, ValueEnum};
-use paros::machine::Class;
+use paros::machine::{AdminPin, Class};
 use paros::tls::{ClientCertificates, Files};
 use paros::{JournalStoreConfig, Transport};
+use paros_authz_biscuit::{BiscuitAuthz, KeyRing, RootPublicKey};
 
 /// The variables this module reads.
-const VARIABLES: [&str; 12] = [
+const VARIABLES: [&str; 13] = [
     "PAROS_NAME",
     "PAROS_LISTEN",
     "PAROS_ADVERTISE",
@@ -41,6 +44,7 @@ const VARIABLES: [&str; 12] = [
     "PAROS_TLS_KEY",
     "PAROS_TLS_CA",
     "PAROS_TLS_CLIENT_AUTH",
+    "PAROS_ROOT_PUBLIC_KEY",
 ];
 
 /// The store layout a machine runs.
@@ -115,6 +119,12 @@ pub struct Settings {
     /// `off` (server-authenticated TLS).
     #[arg(long, env = "PAROS_TLS_CLIENT_AUTH", default_value = "required", value_parser = parse_client_auth)]
     pub tls_client_auth: ClientCertificates,
+    /// The root public key files it pins while idle (#245 (Biscuit
+    /// tokens)): the calls that put it in a cell then need an `admin`
+    /// token signed by one of them. None: the network is the trust
+    /// boundary.
+    #[arg(long, env = "PAROS_ROOT_PUBLIC_KEY", value_delimiter = ',')]
+    pub root_public_key: Vec<PathBuf>,
 }
 
 impl Settings {
@@ -130,6 +140,33 @@ impl Settings {
             ca: ("PAROS_TLS_CA", self.tls_ca.as_deref()),
         }
         .serving(self.tls_client_auth)
+    }
+}
+
+impl Settings {
+    /// Its bootstrap pin: an [`AdminPin`] over the root public keys it
+    /// names, at the wall clock `epoch`; open when it names none.
+    ///
+    /// # Errors
+    ///
+    /// A key file that cannot be read or holds no key, or two keys under
+    /// one key id.
+    pub fn pin(&self, epoch: std::time::Duration) -> Result<AdminPin, String> {
+        if self.root_public_key.is_empty() {
+            return Ok(AdminPin::open());
+        }
+        let mut keys = Vec::with_capacity(self.root_public_key.len());
+        for path in &self.root_public_key {
+            let text = std::fs::read_to_string(path)
+                .map_err(|error| format!("PAROS_ROOT_PUBLIC_KEY {}: {error}", path.display()))?;
+            keys.push(
+                RootPublicKey::from_file(&text).map_err(|error| {
+                    format!("PAROS_ROOT_PUBLIC_KEY {}: {error}", path.display())
+                })?,
+            );
+        }
+        let ring = KeyRing::new(keys).map_err(|error| format!("PAROS_ROOT_PUBLIC_KEY: {error}"))?;
+        Ok(AdminPin::new(Arc::new(BiscuitAuthz::new(ring)), epoch))
     }
 }
 

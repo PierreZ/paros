@@ -8,8 +8,15 @@
 //! refuses its journal as unknown ([`Routes::stale`]). **Static
 //! stability** (§3.3): while the universe directory cannot be read, the
 //! tenant hop answers from the directory last read.
+//!
+//! **Root keys** (#245 (Biscuit tokens)): every read of the universe
+//! directory also takes its root public keys, which a token is checked
+//! against ([`keys`]). They are kept apart from the resolutions: forgetting
+//! a resolution never forgets the keys, and while the directory cannot be
+//! read the keys last read still rule.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use moonpool_core::Providers;
 use moonpool_rpc::RpcHandle;
@@ -23,7 +30,7 @@ use crate::client::names::{
     JournalNames, JournalResolution, TenantResolution, Unreadable, resolve_journal, tenant_in,
 };
 use crate::client::{Client, Server};
-use crate::fleet::FleetDirectory;
+use crate::fleet::{FleetDirectory, RootKeyEntry};
 use crate::name::JournalName;
 use crate::rpc::NodeClient;
 
@@ -56,6 +63,8 @@ pub(super) struct Routes<P: Providers> {
     cell: Option<Cell<P>>,
     /// The universe directory as last read.
     directory: Option<FleetDirectory>,
+    /// The universe entry's root public keys as last read (#245).
+    keys: Option<Arc<[RootKeyEntry]>>,
     /// Each tenant name's `TenantId` and control journal.
     tenants: BTreeMap<String, (TenantId, JournalIdentifier)>,
     /// Each tenant's journal names, keyed by its control journal.
@@ -71,10 +80,21 @@ impl<P: Providers> Routes<P> {
             rpc,
             cell: None,
             directory: None,
+            keys: None,
             tenants: BTreeMap::new(),
             journals: BTreeMap::new(),
             leaders: BTreeMap::new(),
         }
+    }
+
+    /// Keep `directory` as the one last read, and its root keys.
+    fn learn(&mut self, directory: FleetDirectory) -> &FleetDirectory {
+        let keys: Arc<[RootKeyEntry]> = directory.root_keys().cloned().collect();
+        if self.keys.as_deref() != Some(&*keys) {
+            tracing::info!(keys = keys.len(), "frontend_learned_root_keys");
+        }
+        self.keys = Some(keys);
+        self.directory.insert(directory)
     }
 
     /// Forget every resolution (the cell and the leader hints stay).
@@ -273,7 +293,7 @@ where
     let read = read_directory(client, 0, universe).await;
     let mut routes = lock(&shared.routes);
     let directory = match read {
-        Ok(directory) => routes.directory.insert(directory),
+        Ok(directory) => routes.learn(directory),
         Err(_) => match &routes.directory {
             Some(held) => {
                 moonpool_assertions::reachable!(
@@ -302,4 +322,35 @@ where
         | TenantResolution::Internal => Err(Resolved::Unknown),
         TenantResolution::Unreadable(_) => Err(Resolved::Unavailable),
     }
+}
+
+/// The universe entry's root public keys a token is checked against
+/// (#245): the keys last read, else (or with `refresh`) read from the
+/// universe directory now. `None` while no read ever succeeded: the
+/// [`super::Authz`]'s own pin then rules.
+pub(super) async fn keys<P, A>(shared: &Shared<P, A>, refresh: bool) -> Option<Arc<[RootKeyEntry]>>
+where
+    P: Providers,
+    A: Audit,
+{
+    let held = lock(&shared.routes).keys.clone();
+    if held.is_some() && !refresh {
+        return held;
+    }
+    let Some((universe, client)) = cell(shared).await else {
+        return held;
+    };
+    let read = read_directory(&client, 0, universe).await;
+    let mut routes = lock(&shared.routes);
+    match read {
+        Ok(directory) => {
+            routes.learn(directory);
+        }
+        Err(_) => {
+            moonpool_assertions::reachable!(
+                "frontend: the root keys last read rule while the universe directory is unreadable"
+            );
+        }
+    }
+    routes.keys.clone()
 }

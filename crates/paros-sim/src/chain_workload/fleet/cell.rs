@@ -5,7 +5,9 @@
 
 use paros::Address;
 use std::sync::Arc;
+use std::time::Duration;
 
+use moonpool_sim::{Providers as _, TimeProvider as _};
 use moonpool_sim::{
     SimContext, assert_always, assert_reachable, assert_sometimes, buggify_with_prob,
 };
@@ -219,8 +221,13 @@ impl FleetOps {
             assert_reachable!("init: an operator starts cell init at another founder");
             members.rotate_left(1 + usize::try_from(draw % (founders as u64 - 1)).unwrap_or(0));
         }
+        if crate::frontend::machines_pinned(ctx.state()) && buggify_with_prob!(0.1) {
+            self.init_with_tenant_token(&members[0], &members).await;
+        }
         let wiped = crate::machine::other_cells_wiped(ctx.state());
         let connector = self.connector.clone();
+        let token =
+            crate::frontend::operator_token(ctx.state(), connector.providers().time().now());
         let observer: Arc<dyn paros::client::CallObserver> = Arc::new(Announce::every(ctx));
         let whole = paros::client::initialize::initialize(
             connector.providers(),
@@ -238,6 +245,8 @@ impl FleetOps {
                 fleet_id: draw | 1,
                 leader_seed: self.leader_seeds.next(),
                 names: self.init_names.clone(),
+                token: token.clone(),
+                root_key: Some(crate::frontend::signing_entry(ctx.state())),
             },
         );
         let run = if founders > 1 && buggify_with_prob!(0.25) {
@@ -252,6 +261,7 @@ impl FleetOps {
                 connector.names(),
                 &other,
                 &members,
+                &token,
                 self.patience,
             );
             let (run, second) = futures::future::join(whole, second).await;
@@ -261,6 +271,37 @@ impl FleetOps {
             whole.await
         };
         self.judge(ctx, run, founders, wiped)
+    }
+
+    /// On a pinned seed (#245 (Biscuit tokens)), a `cell init` with a
+    /// tenant's token: a pinned machine refuses it, and nothing forms.
+    async fn init_with_tenant_token(&self, target: &Address, members: &[Address]) {
+        let connector = &self.connector;
+        let now = connector.providers().time().now();
+        let token = crate::frontend::token(
+            &self.state,
+            "acme",
+            "",
+            crate::frontend::Presented::Own,
+            now,
+        );
+        let outcome = bootstrap::cell_init(
+            connector.providers(),
+            connector.rpc(),
+            connector.names(),
+            target,
+            members,
+            &token,
+            self.patience.min(Duration::from_secs(5)),
+        )
+        .await;
+        assert_always!(
+            !matches!(outcome, InitOutcome::Formed(_)),
+            "init: a pinned machine never forms a cell for a tenant token"
+        );
+        if matches!(&outcome, InitOutcome::Refused(label) if label == "forbidden") {
+            assert_reachable!("init: a pinned machine refuses cell init for a tenant token");
+        }
     }
 
     /// What a whole `init` came to, judged; whether it ended.
@@ -340,6 +381,7 @@ impl FleetOps {
             self.connector.names(),
             &target,
             members,
+            &crate::frontend::operator_token(ctx.state(), self.connector.providers().time().now()),
             self.patience,
         )
         .await;

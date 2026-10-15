@@ -32,6 +32,7 @@ mod resolve;
 mod status;
 mod tls;
 mod token;
+mod universe;
 mod views;
 
 use std::process::ExitCode;
@@ -70,8 +71,8 @@ struct Global {
     servers: Vec<ServerArg>,
     /// The frontends to send the journal calls (`write`, `read`, `tail`,
     /// `truncate`, `set-leader`) through, comma-separated `HOST:PORT`
-    /// (#192 (the frontend)): each call carries the token in `PAROS_TOKEN`
-    /// and names its journal by name. The other commands still ask the
+    /// (#192 (the frontend)): each call carries the token (`--token`) and
+    /// names its journal by name. The other commands still ask the
     /// servers.
     #[arg(long, env = "PAROSCTL_FRONTENDS", value_delimiter = ',', global = true)]
     frontends: Vec<String>,
@@ -82,8 +83,9 @@ struct Global {
     #[arg(long, default_value = "5000", global = true)]
     timeout_ms: u64,
     /// Ask a view as tenant `NAME`, not as an admin (#399): the cell shows
-    /// that tenant's own spread only. Until tokens (#245), every caller is
-    /// an admin and may narrow itself so.
+    /// that tenant's own spread only. The machines answer views without a
+    /// token (the network is the trust boundary, §3.5), so every caller may
+    /// narrow itself so.
     #[arg(long, value_name = "NAME", global = true)]
     as_tenant: Option<String>,
     /// The universe's authority, PEM (`parosctl tls`): every session is
@@ -97,6 +99,15 @@ struct Global {
     /// The certificate's private key, PEM.
     #[arg(long, env = "PAROSCTL_TLS_KEY", global = true)]
     tls_key: Option<std::path::PathBuf>,
+    /// The Biscuit token every call presents, base64url (#245 (Biscuit
+    /// tokens)): a tenant or `admin` token through the frontends, and the
+    /// `admin` token `init` and `cell add-machine` send to an idle machine
+    /// that pins a root key. Given before the command.
+    #[arg(long, env = "PAROS_TOKEN", hide_env_values = true)]
+    token: Option<String>,
+    /// A file that holds the token, instead of `--token`.
+    #[arg(long, env = "PAROS_TOKEN_FILE", conflicts_with = "token")]
+    token_file: Option<std::path::PathBuf>,
 }
 
 /// One server entry: an explicit node id, or the addresses a name stands
@@ -145,6 +156,20 @@ impl Global {
     fn timeout(&self) -> Duration {
         Duration::from_millis(self.timeout_ms)
     }
+
+    /// The token every call presents (#245): `--token`, else
+    /// `--token-file`, else none.
+    fn token(&self) -> Result<Option<Vec<u8>>, String> {
+        let text = match (&self.token, &self.token_file) {
+            (Some(text), _) => text.clone(),
+            (None, Some(path)) => {
+                std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?
+            }
+            (None, None) => return Ok(None),
+        };
+        let token = paros_authz_biscuit::Token::from_text(&text).map_err(|e| e.to_string())?;
+        Ok(Some(token.as_bytes().to_vec()))
+    }
 }
 
 #[derive(Subcommand, Debug)]
@@ -168,6 +193,10 @@ enum Command {
     /// Biscuit tokens, offline (#400): `token mint` with a root key,
     /// `token derive` (narrower, macaroon style, no key), `token inspect`.
     Token(token::TokenArgs),
+    /// The universe entry (#245 (Biscuit tokens)): `universe key list`,
+    /// `universe key add <file.public>`, `universe key remove <label>`, the
+    /// root public keys every token is checked against.
+    Universe(universe::UniverseArgs),
     /// TLS certificates, offline: `tls init` writes the authority and a
     /// certificate per machine, frontend and admin in one step; `tls ca`,
     /// `tls issue`, `tls show`, `tls verify`.
@@ -296,12 +325,12 @@ fn client(
 }
 
 /// A client of the frontends `global` names (#192 (the frontend)), each
-/// call carrying the token in `PAROS_TOKEN`.
+/// call carrying the token (`--token`, `--token-file`, `PAROS_TOKEN`).
 fn frontend_client(runtime: &Runtime, global: &Global) -> Result<Client<TokioProviders>, String> {
-    let text = std::env::var("PAROS_TOKEN")
-        .map_err(|_| "no token for the frontends: set PAROS_TOKEN".to_string())?;
-    let token = paros_authz_biscuit::Token::from_text(&text).map_err(|e| e.to_string())?;
-    let pass = std::sync::Arc::new(paros::Pass::new(token.as_bytes().to_vec()));
+    let token = global.token()?.ok_or_else(|| {
+        "no token for the frontends: pass --token or --token-file, or set PAROS_TOKEN".to_string()
+    })?;
+    let pass = std::sync::Arc::new(paros::Pass::new(token));
     let mut servers = Vec::new();
     for (index, entry) in global.frontends.iter().enumerate() {
         let address =
@@ -503,6 +532,59 @@ async fn resolve_tenant(
     .into()
 }
 
+/// The admin commands that write the cell or the universe directory under
+/// an `admin` token (#245 (Biscuit tokens)): `init`, `cell`, `universe`.
+async fn administer(
+    runtime: &Runtime,
+    global: &Global,
+    asker: &views::Asker<'_>,
+    out: &Printer,
+    command: Command,
+) -> ExitCode {
+    let token = match global.token() {
+        Ok(token) => token.unwrap_or_default(),
+        Err(error) => {
+            eprintln!("parosctl: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if let Command::Init(args) = command {
+        let timeout = global.timeout();
+        let members = match args.members(&global.addrs()) {
+            Ok(members) => members,
+            Err(error) => {
+                eprintln!("parosctl: {error}");
+                return ExitCode::FAILURE;
+            }
+        };
+        let connect = |servers: &[(u64, Address)]| client(runtime, servers, timeout);
+        return init::run(&members, connect, out, asker, &args, token)
+            .await
+            .into();
+    }
+    let servers = servers(runtime, global).await;
+    if servers.is_empty() {
+        eprintln!("parosctl: no server answered with its node id");
+        return Ending::Unreachable.into();
+    }
+    let client = client(runtime, &servers, global.timeout());
+    match command {
+        Command::CellAdmin(args) => {
+            let labels = labels::Labels::fetch(asker).await;
+            cell::run(asker, &client, &servers, &labels, out, args, token)
+                .await
+                .into()
+        }
+        Command::Universe(args) => {
+            let ids: Vec<u64> = servers.iter().map(|(id, _)| *id).collect();
+            universe::run(&runtime.providers, &client, &ids, out, args)
+                .await
+                .into()
+        }
+        _ => unreachable!("only the admin commands are administered"),
+    }
+}
+
 /// The commands that talk to servers.
 async fn online(global: Global, command: Command) -> ExitCode {
     let cli = Cli { global, command };
@@ -525,31 +607,8 @@ async fn online(global: Global, command: Command) -> ExitCode {
         return run_view(&asker, &out, cli.command).await.into();
     }
     let command = match cli.command {
-        Command::Init(args) => {
-            let timeout = cli.global.timeout();
-            let members = match args.members(&cli.global.addrs()) {
-                Ok(members) => members,
-                Err(error) => {
-                    eprintln!("parosctl: {error}");
-                    return ExitCode::FAILURE;
-                }
-            };
-            let connect = |servers: &[(u64, Address)]| client(&runtime, servers, timeout);
-            return init::run(&members, connect, &out, &asker, &args)
-                .await
-                .into();
-        }
-        Command::CellAdmin(args) => {
-            let servers = servers(&runtime, &cli.global).await;
-            if servers.is_empty() {
-                eprintln!("parosctl: no server answered with its node id");
-                return Ending::Unreachable.into();
-            }
-            let client = client(&runtime, &servers, cli.global.timeout());
-            let labels = labels::Labels::fetch(&asker).await;
-            return cell::run(&asker, &client, &servers, &labels, &out, args)
-                .await
-                .into();
+        command @ (Command::Init(_) | Command::CellAdmin(_) | Command::Universe(_)) => {
+            return administer(&runtime, &cli.global, &asker, &out, command).await;
         }
         Command::Resolve(args) => return resolve_tenant(&runtime, &cli.global, &out, args).await,
         Command::Cell(command) => command,

@@ -10,11 +10,17 @@
 //! code the deterministic simulation runs. This binary holds only its
 //! Tokio wiring and configuration. It holds no key and no state.
 //!
+//! The root public keys it trusts are the universe entry's (#245 (Biscuit
+//! tokens), `parosctl universe key`), read with the universe directory.
+//! The key files it is configured with rule only while it has read none,
+//! or the universe holds none. Without them, it refuses every call until
+//! it read the universe entry's keys.
+//!
 //! | variable | meaning |
 //! |---|---|
 //! | `PAROS_FRONTEND_LISTEN` | `HOST:PORT` the frontend binds |
 //! | `PAROS_FRONTEND_CELL` | the cell's founding members, `HOST:PORT,…` (a Compose alias stands for each machine behind it) |
-//! | `PAROS_FRONTEND_ROOT_PUBLIC_KEY` | the root public key files it trusts, comma-separated (`parosctl key generate`) |
+//! | `PAROS_FRONTEND_ROOT_PUBLIC_KEY` | the root public key files it trusts until it read the universe entry's, comma-separated (`parosctl key generate`); optional |
 //! | `PAROS_FRONTEND_TIMEOUT_MS` | one forwarded attempt's timeout (default 5000) |
 //! | `PAROS_FRONTEND_TLS_CERT` | its certificate chain, PEM (`parosctl tls`, role `frontend`); with the next two, every session is TLS, to its clients and to the machines |
 //! | `PAROS_FRONTEND_TLS_KEY` | the certificate's private key, PEM |
@@ -61,7 +67,8 @@ struct Settings {
     /// The cell's founding members, `HOST:PORT,…`.
     #[arg(long, env = "PAROS_FRONTEND_CELL", value_delimiter = ',')]
     cell: Vec<String>,
-    /// The root public key files it trusts, comma-separated.
+    /// The root public key files it trusts until it read the universe
+    /// entry's, comma-separated.
     #[arg(long, env = "PAROS_FRONTEND_ROOT_PUBLIC_KEY", value_delimiter = ',')]
     root_public_key: Vec<std::path::PathBuf>,
     /// One forwarded attempt's timeout, in milliseconds.
@@ -138,9 +145,7 @@ fn configure(settings: &Settings) -> Result<(FrontendSettings, KeyRing), String>
         );
     }
     if keys.is_empty() {
-        return Err(
-            "PAROS_FRONTEND_ROOT_PUBLIC_KEY names no key: every call would be refused".into(),
-        );
+        tracing::info!("frontend_trusts_the_universe_entry_keys_only");
     }
     let ring = KeyRing::new(keys).map_err(|error| error.to_string())?;
     let transport = Files {

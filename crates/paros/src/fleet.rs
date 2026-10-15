@@ -61,10 +61,17 @@ use crate::client::checkpoint::{Checkpointable, Folded};
 use crate::rpc::fleet as wire;
 pub use crate::tenant::Survives;
 
+mod keys;
+
+pub use keys::RootKeyEntry;
+use keys::{KeyChange, RootKeys};
+
 /// The metadata version this fold speaks: written into every entry, and
 /// into the cell's side of the registration (`crate::system`). `2` since
-/// the tenant entry carries a set of groups and no placement (#243).
-pub const METADATA_VERSION: u32 = 2;
+/// the tenant entry carries a set of groups and no placement (#243); `3`
+/// since the universe entry holds root public keys (#245 (Biscuit
+/// tokens)).
+pub const METADATA_VERSION: u32 = 3;
 
 /// One tenant group (§3.7): a rule every member obeys. The set of groups is
 /// fixed by paros for now.
@@ -354,6 +361,13 @@ pub enum FleetCommand {
         /// The tenant.
         tenant: TenantId,
     },
+    /// A root public key joins the universe entry (#245 (Biscuit tokens)).
+    AddRootKey(RootKeyEntry),
+    /// The root key `label` leaves the universe entry, for good.
+    RemoveRootKey {
+        /// The key's label.
+        label: String,
+    },
 }
 
 /// One fleet entry: a command, stamped with the fleet it was written for and
@@ -426,6 +440,14 @@ impl FleetEntry {
             FleetCommand::RemoveTenant { tenant } => {
                 Kind::RemoveTenant(wire::RemoveTenant { tenant: tenant.0 })
             }
+            FleetCommand::AddRootKey(key) => Kind::AddRootKey(wire::AddRootKey {
+                key_id: key.key_id,
+                label: key.label.clone(),
+                public_key: key.public_key.clone(),
+            }),
+            FleetCommand::RemoveRootKey { label } => Kind::RemoveRootKey(wire::RemoveRootKey {
+                label: label.clone(),
+            }),
         };
         wire::FleetEntry {
             fleet_id: self.fleet_id,
@@ -470,6 +492,14 @@ impl FleetEntry {
             },
             Kind::RemoveTenant(remove) => FleetCommand::RemoveTenant {
                 tenant: TenantId(remove.tenant),
+            },
+            Kind::AddRootKey(add) => FleetCommand::AddRootKey(RootKeyEntry {
+                key_id: add.key_id,
+                label: add.label,
+                public_key: add.public_key,
+            }),
+            Kind::RemoveRootKey(remove) => FleetCommand::RemoveRootKey {
+                label: remove.label,
             },
         };
         Ok(Self {
@@ -565,6 +595,16 @@ pub enum FleetEvent {
         /// The tenant.
         tenant: TenantId,
     },
+    /// A root public key joined the universe entry (#245).
+    RootKeyAdded {
+        /// Its key id.
+        key_id: u32,
+    },
+    /// A root public key left the universe entry (#245).
+    RootKeyRemoved {
+        /// Its key id.
+        key_id: u32,
+    },
     /// The entry asked for what the directory already holds: a re-run step.
     Unchanged,
     /// A checkpoint (#227): every position below `covers_up_to` is in the
@@ -653,6 +693,25 @@ pub enum FleetDirectoryRefusal {
         /// The state asked for (`REMOVING` for a removal).
         to: TenantState,
     },
+    /// A root key, in force or removed, holds the key id or the label
+    /// (#245): neither is ever reused.
+    RootKeyTaken {
+        /// The key id asked for.
+        key_id: u32,
+        /// The label asked for.
+        label: String,
+    },
+    /// No root key in force holds the label.
+    UnknownRootKey {
+        /// The label named.
+        label: String,
+    },
+    /// The universe's last root key stays: no token could administer the
+    /// universe again.
+    LastRootKey {
+        /// The label named.
+        label: String,
+    },
 }
 
 /// The fleet as the fleet tenant recorded it.
@@ -674,6 +733,8 @@ pub struct FleetDirectory {
     names: BTreeMap<Vec<u8>, TenantId>,
     /// Ids removed from the directory: never reused.
     removed: BTreeSet<TenantId>,
+    /// The universe entry's root public keys (#245).
+    keys: RootKeys,
     next_seq: u64,
 }
 
@@ -751,6 +812,12 @@ impl FleetDirectory {
         self.cells()
             .map(|(id, _)| id)
             .find(|id| self.cell_name(*id) == name)
+    }
+
+    /// The universe entry's root public keys in force, in key id order
+    /// (#245): what an entry role verifies a token against.
+    pub fn root_keys(&self) -> impl Iterator<Item = &RootKeyEntry> {
+        self.keys.live()
     }
 
     /// Whether `tenant` was removed from the directory.
@@ -856,6 +923,8 @@ impl FleetDirectory {
             } => self.register_tenant(*control, name, *cell_id, *survives),
             FleetCommand::MarkTenant { tenant, state } => self.mark_tenant(*tenant, *state),
             FleetCommand::RemoveTenant { tenant } => self.remove_tenant(*tenant),
+            FleetCommand::AddRootKey(key) => Ok(self.keys.add(key)?.into()),
+            FleetCommand::RemoveRootKey { label } => Ok(self.keys.remove(label)?.into()),
         }
     }
 
@@ -1082,7 +1151,10 @@ impl FleetDirectory {
 
     fn state_to_wire(&self) -> wire::FleetDirectoryState {
         let fleet = self.fleet;
+        let (root_keys, removed_keys) = self.keys.to_wire();
         wire::FleetDirectoryState {
+            root_keys,
+            removed_keys,
             fleet_id: fleet.map_or(0, |f| f.id),
             version: fleet.map_or(0, |f| f.version),
             fleet_tenant: fleet.map_or(0, |f| f.control.tenant.0),
@@ -1184,13 +1256,25 @@ impl Checkpointable for FleetDirectory {
         if removed.iter().any(|id| tenants.contains_key(id)) {
             return Err("a fleet directory state holds a removed tenant");
         }
+        let keys = RootKeys::restore(state.root_keys, state.removed_keys)?;
         self.fleet = fleet;
         self.cells = cells;
         self.tenants = tenants;
         self.names = names;
         self.removed = removed;
+        self.keys = keys;
         self.next_seq = covers_up_to + 1;
         Ok(())
+    }
+}
+
+impl From<KeyChange> for FleetEvent {
+    fn from(change: KeyChange) -> Self {
+        match change {
+            KeyChange::Added(key_id) => Self::RootKeyAdded { key_id },
+            KeyChange::Removed(key_id) => Self::RootKeyRemoved { key_id },
+            KeyChange::Unchanged => Self::Unchanged,
+        }
     }
 }
 

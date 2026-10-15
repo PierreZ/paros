@@ -130,7 +130,17 @@ pub(super) async fn propose<P: Providers>(
             floor.is_none_or(|floor| ballot > floor),
             "a reopened decree opens above the promise that refused it"
         );
-        match attempt(providers, rpc, facts, &members, ballot, tunables).await {
+        match attempt(
+            providers,
+            rpc,
+            facts,
+            &members,
+            ballot,
+            &request.token,
+            tunables,
+        )
+        .await
+        {
             Attempt::Chosen(plan) => {
                 assert!(
                     plan.addrs().into_iter().eq(members.iter().cloned()),
@@ -179,11 +189,13 @@ async fn attempt<P: Providers>(
     facts: &MachineFacts,
     members: &[Address],
     ballot: Ballot,
+    token: &[u8],
     tunables: &DriverTunables,
 ) -> Attempt {
     let patience = tunables.connection_timeout;
     let ask = wire::PrepareCell {
         init: Some(ballot_to_wire(ballot)),
+        token: token.to_vec(),
     };
     let answers =
         fan_out::<P, PrepareCellRpc>(providers, rpc, &facts.names, members, &ask, patience).await;
@@ -199,6 +211,10 @@ async fn attempt<P: Providers>(
             "stateless" => return Attempt::Failed("stateless_member"),
             // A machine a cell admitted (#216): it is in a cell already.
             "in_cell" => return Attempt::Failed("cell_exists"),
+            // A member whose pinned root key refuses the token (#245).
+            label if super::pin::denied(label).is_some() => {
+                return Attempt::Failed(super::pin::denied(label).expect("guarded"));
+            }
             // That member's disk failed under it: nothing was decided.
             _ => return Attempt::Failed("member_unreachable"),
         }
@@ -340,7 +356,8 @@ async fn attempt<P: Providers>(
     // receiver that stopped driving, so it accepts once the others did. A
     // receiver the plan does not name (it replaced a wiped member) never
     // accepts it.
-    let form = plan.form_request(ballot);
+    let mut form = plan.form_request(ballot);
+    form.token = token.to_vec();
     let others: Vec<Address> = members
         .iter()
         .filter(|addr| **addr != facts.addr && intact.contains(*addr))
@@ -381,6 +398,9 @@ async fn attempt<P: Providers>(
                 // no accept.
                 "not_a_member" => {}
                 "storage" => return Attempt::Failed("member_unreachable"),
+                label if super::pin::denied(label).is_some() => {
+                    return Attempt::Failed(super::pin::denied(label).expect("guarded"));
+                }
                 _ => return Attempt::Failed("malformed"),
             }
         }

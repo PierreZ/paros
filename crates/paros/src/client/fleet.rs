@@ -29,6 +29,11 @@
 //!   #210 and #225.
 //! - **Removing a tenant**: the fleet tenant marks it `REMOVING`, the cell drops it (a
 //!   tombstone, written whether the cell hosted it or not), the fleet tenant removes it.
+//! - **Root keys** (#245 (Biscuit tokens)): `init` writes its root public key
+//!   into the universe entry right after `FormFleet`, when the directory holds
+//!   no key yet ([`FleetSession::with_root_key`]); `universe key add` and
+//!   `universe key remove` are one write each ([`FleetSession::add_root_key`],
+//!   [`FleetSession::remove_root_key`]).
 //!
 //! **Every step checks it still talks to the same fleet and the same cell**
 //! (FDB's `MetaclusterOperationContext`): every entry names the fleet the fleet tenant
@@ -69,6 +74,7 @@ use super::checkpoint::{
 };
 use super::outcome::ClaimOutcome;
 use super::writer::{Writer, WriterOutcome};
+use crate::fleet::RootKeyEntry;
 use crate::fleet::{
     CellState, FleetCommand, FleetDirectory, FleetEntry, METADATA_VERSION, TenantState,
 };
@@ -104,6 +110,10 @@ pub enum Stage {
     RegisterMachine,
     /// The machine recorded its admission (`Admit`, #216).
     Admit,
+    /// The universe entry took a root public key (#245).
+    AddRootKey,
+    /// A root public key left the universe entry (#245).
+    RemoveRootKey,
 }
 
 /// Why a fleet operation cannot go on: running it again changes nothing
@@ -162,6 +172,24 @@ pub enum FleetRefusal {
     Removed {
         /// The tenant.
         tenant: TenantId,
+    },
+    /// Another root key, in force or removed, holds the key's id or its
+    /// label (#245): neither is reused.
+    RootKeyTaken,
+    /// No root key in force has the label (#245).
+    UnknownRootKey,
+    /// The label names the universe's last root key, which stays (#245).
+    LastRootKey,
+    /// The root key is not one: an unset id, no label, or a text that is
+    /// not an Ed25519 public key (#245).
+    MalformedRootKey,
+    /// The machine being admitted checks an `admin` token against its
+    /// pinned root key, and refused the one sent (#245).
+    Denied {
+        /// The machine.
+        node: NodeId,
+        /// Why.
+        denial: crate::frontend::Denial,
     },
 }
 
@@ -259,6 +287,8 @@ pub struct FleetSession {
     /// The names `init` gives the universe and the cell (#252, #399):
     /// empty is unnamed.
     names: (Vec<u8>, Vec<u8>),
+    /// The root public key `init` writes into the universe entry (#245).
+    root_key: Option<RootKeyEntry>,
 }
 
 impl FleetSession {
@@ -287,7 +317,17 @@ impl FleetSession {
             diverged: None,
             survives: Survives::Az,
             names: (Vec::new(), Vec::new()),
+            root_key: None,
         })
+    }
+
+    /// Give the universe `key` as its first root public key when `init`
+    /// forms it (#245): written after `FormFleet` while the universe entry
+    /// holds no key. A re-run over a universe that holds keys writes none.
+    #[must_use]
+    pub fn with_root_key(mut self, key: RootKeyEntry) -> Self {
+        self.root_key = Some(key);
+        self
     }
 
     /// Name the universe `universe` and the cell `cell` when `init` forms
@@ -387,6 +427,17 @@ impl FleetSession {
                 .write_directory(client, first, fleet, form, Stage::FormFleet)
                 .await;
         };
+        if let Some(key) = &self.root_key
+            && self.directory.state().root_keys().next().is_none()
+        {
+            if !key.is_well_formed() {
+                return Step::Refused(FleetRefusal::MalformedRootKey);
+            }
+            let add = FleetCommand::AddRootKey(key.clone());
+            return self
+                .write_directory(client, first, fleet, add, Stage::AddRootKey)
+                .await;
+        }
         let Some(cell) = self.directory.state().cell(cell_id) else {
             // The cell tenant is the fleet tenant's already, under another cell: this
             // operation names the wrong cell (the fleet tenant would refuse the entry).
@@ -592,6 +643,160 @@ impl FleetSession {
             Some(tenant),
         )
         .await
+    }
+
+    /// One step of `universe key add` (#245): ends once the universe entry
+    /// holds `key`.
+    #[tracing::instrument(level = "trace", skip_all, fields(key = %key.label))]
+    pub async fn add_key_step<P: Providers>(
+        &mut self,
+        client: &Client<P>,
+        first: usize,
+        key: &RootKeyEntry,
+    ) -> Step<u32> {
+        if !key.is_well_formed() {
+            return Step::Refused(FleetRefusal::MalformedRootKey);
+        }
+        if let Err(stop) = self.open_directory(client, first).await {
+            return Step::Interrupted(stop);
+        }
+        let directory = self.directory.state();
+        let Some(fleet) = directory.fleet() else {
+            return Step::Refused(FleetRefusal::NotInitialized);
+        };
+        if directory.root_keys().any(|held| held == key) {
+            return Step::Done {
+                result: key.key_id,
+                last: None,
+            };
+        }
+        if directory
+            .root_keys()
+            .any(|held| held.key_id == key.key_id || held.label == key.label)
+        {
+            return Step::Refused(FleetRefusal::RootKeyTaken);
+        }
+        let add = FleetCommand::AddRootKey(key.clone());
+        let step = self
+            .finish_directory(client, first, fleet, add, Stage::AddRootKey, key.key_id)
+            .await;
+        self.judge_key(step, FleetRefusal::RootKeyTaken, |directory| {
+            directory.root_keys().any(|h| h == key)
+        })
+    }
+
+    /// One step of `universe key remove` (#245): ends once no key in force
+    /// has the label `label`, with the key id it removed (`None`: none was
+    /// in force, an earlier run removed it).
+    #[tracing::instrument(level = "trace", skip_all, fields(key = label))]
+    pub async fn remove_key_step<P: Providers>(
+        &mut self,
+        client: &Client<P>,
+        first: usize,
+        label: &str,
+    ) -> Step<Option<u32>> {
+        if let Err(stop) = self.open_directory(client, first).await {
+            return Step::Interrupted(stop);
+        }
+        let directory = self.directory.state();
+        let Some(fleet) = directory.fleet() else {
+            return Step::Refused(FleetRefusal::NotInitialized);
+        };
+        let Some(key_id) = directory
+            .root_keys()
+            .find(|key| key.label == label)
+            .map(|key| key.key_id)
+        else {
+            return Step::Done {
+                result: None,
+                last: None,
+            };
+        };
+        if directory.root_keys().count() == 1 {
+            return Step::Refused(FleetRefusal::LastRootKey);
+        }
+        let remove = FleetCommand::RemoveRootKey {
+            label: label.to_string(),
+        };
+        let step = self
+            .finish_directory(
+                client,
+                first,
+                fleet,
+                remove,
+                Stage::RemoveRootKey,
+                Some(key_id),
+            )
+            .await;
+        self.judge_key(step, FleetRefusal::LastRootKey, |directory| {
+            directory.root_keys().all(|key| key.label != label)
+        })
+    }
+
+    /// A key step the fold refused although the session's look allowed it
+    /// (another operator's key landed between): the step is refused for the
+    /// key with `refusal`, as the directory now stands.
+    fn judge_key<T>(
+        &self,
+        step: Step<T>,
+        refusal: FleetRefusal,
+        holds: impl Fn(&FleetDirectory) -> bool,
+    ) -> Step<T> {
+        if matches!(step, Step::Done { .. }) && !holds(self.directory.state()) {
+            moonpool_assertions::reachable!("fleet: a root key step lost a race at apply");
+            return Step::Refused(refusal);
+        }
+        step
+    }
+
+    /// Add `key` to the universe entry to its end (see
+    /// [`FleetSession::add_key_step`]), taking an interrupted step again for
+    /// up to `patience`.
+    #[tracing::instrument(level = "debug", skip_all)]
+    pub async fn add_root_key<P: Providers>(
+        &mut self,
+        client: &Client<P>,
+        first: usize,
+        key: &RootKeyEntry,
+        patience: Duration,
+    ) -> Run<u32> {
+        let deadline = client.now() + patience;
+        let mut steps = Vec::new();
+        while steps.len() < MAX_STEPS {
+            let step = self.add_key_step(client, first, key).await;
+            if retry(client, &step, deadline).await {
+                continue;
+            }
+            if let Some(end) = settle(step, &mut steps) {
+                return end;
+            }
+        }
+        going_round(steps)
+    }
+
+    /// Remove the root key `label` from the universe entry to its end (see
+    /// [`FleetSession::remove_key_step`]), taking an interrupted step again
+    /// for up to `patience`.
+    #[tracing::instrument(level = "debug", skip_all)]
+    pub async fn remove_root_key<P: Providers>(
+        &mut self,
+        client: &Client<P>,
+        first: usize,
+        label: &str,
+        patience: Duration,
+    ) -> Run<Option<u32>> {
+        let deadline = client.now() + patience;
+        let mut steps = Vec::new();
+        while steps.len() < MAX_STEPS {
+            let step = self.remove_key_step(client, first, label).await;
+            if retry(client, &step, deadline).await {
+                continue;
+            }
+            if let Some(end) = settle(step, &mut steps) {
+                return end;
+            }
+        }
+        going_round(steps)
     }
 
     /// Run `init`'s fleet half to its end (see [`FleetSession::init_step`]),

@@ -78,6 +78,7 @@ mod converge;
 mod drain;
 mod election;
 mod journals;
+mod keys;
 mod load;
 mod other_cell;
 mod placement;
@@ -267,7 +268,9 @@ impl FleetOps {
             policy,
         )
         .map(|session| {
-            session.with_names(self.init_names.0.as_bytes(), self.init_names.1.as_bytes())
+            session
+                .with_names(self.init_names.0.as_bytes(), self.init_names.1.as_bytes())
+                .with_root_key(crate::frontend::signing_entry(&self.state))
         })
     }
 
@@ -467,6 +470,12 @@ impl FleetOps {
         let Some(mut session) = self.session(&cell, cell.journals, policy) else {
             return;
         };
+        if self.initialized && buggify_with_prob!(0.1) {
+            // A root key rotation instead (#245 (Biscuit tokens)).
+            self.rotate(&client, &mut session, first).await;
+            judge_folds(&session);
+            return;
+        }
         if class % 2 == 0 {
             if buggify_with_prob!(0.2) {
                 let identifier = tenant_identifier(payload);
@@ -1362,6 +1371,12 @@ fn reach(stage: Stage) {
             assert_reachable!("admit: a step registers a machine in the cell");
         }
         Stage::Admit => assert_reachable!("admit: a step admits a machine"),
+        Stage::AddRootKey => {
+            assert_reachable!("fleet: a step adds a root key to the universe entry");
+        }
+        Stage::RemoveRootKey => {
+            assert_reachable!("fleet: a step removes a root key from the universe entry");
+        }
     }
 }
 

@@ -59,6 +59,12 @@ pub struct InitArgs {
     /// universe's cells. A re-run never renames.
     #[arg(long, default_value = "cell-1", value_parser = label)]
     cell_name: String,
+    /// The universe's first root public key, a `.public` (or `.private`)
+    /// file from `parosctl key generate` (#245 (Biscuit tokens)): every
+    /// token is checked against the universe entry's keys. A re-run over a
+    /// universe that holds a key writes none.
+    #[arg(long)]
+    root_public_key: Option<std::path::PathBuf>,
 }
 
 /// A name for people: no `/`, no space, no control character.
@@ -100,19 +106,35 @@ impl InitArgs {
 
 /// `parosctl init`: form the cell over `members`, wait for its coordinator
 /// and run the fleet steps, through a client `connect` builds over its
-/// members (`paros::client::initialize`).
+/// members (`paros::client::initialize`). `token` goes with `CellInit`: a
+/// founding member that pins a root key checks it (#245).
 pub async fn run(
     members: &[Address],
     connect: impl Fn(&[(u64, Address)]) -> Client<TokioProviders>,
     out: &Printer,
     asker: &Asker<'_>,
     args: &InitArgs,
+    token: Vec<u8>,
 ) -> Ending {
+    let root_key = match args
+        .root_public_key
+        .as_deref()
+        .map(crate::universe::read_key)
+    {
+        Some(Ok(key)) => Some(key),
+        Some(Err(error)) => {
+            note(&error);
+            return Ending::Refused;
+        }
+        None => None,
+    };
     let params = InitParams {
         patience: Duration::from_millis(args.patience_ms),
         fleet_id: nonzero(asker.providers),
         leader_seed: leader_seed(asker.providers),
         names: (args.universe_name.clone(), args.cell_name.clone()),
+        token,
+        root_key,
     };
     let (providers, rpc, names) = (asker.providers, asker.rpc, asker.names);
     match initialize::initialize(providers, rpc, names, members, connect, params).await {

@@ -392,7 +392,14 @@ list and no rendezvous name. The same rule holds at two levels:
 - **Trust.** An idle machine accepts the first `FormCell` or `Admit` that reaches it; under the
   network trust of section 3.5 that is the admin's. With Biscuit tokens (#245) both carry an admin
   token the machine checks, since otherwise another host could impersonate the cell (kubeadm pins
-  the control plane's CA for this reason).
+  the control plane's CA for this reason). Landed on 2026-10-15 (#245 (Biscuit tokens)): a
+  machine started with `PAROS_ROOT_PUBLIC_KEY` pins those keys (`paros::machine::AdminPin`) and,
+  while it is idle, checks an `admin` token on `CellInit`, `PrepareCell`, `FormCell` and `Admit`
+  (operations `form_cell` and `admit`, on an internal target). The proposer of `cell init` sends
+  the operator's token on to the other founding members. A refusal answers `invalid_token`,
+  `expired` or `forbidden`. A machine started without the variable trusts the network, as before.
+  The cell coordinator that finishes an admission an operator left in flight has no token, so a
+  pinned machine refuses it: the operator runs `cell add-machine` again with its token.
 
 This is the mainstream pattern, checked on 2026-10-09: Kafka KRaft passes the founding voters
 explicitly at format time (`--initial-controllers`, identical on every founder) and never
@@ -1091,10 +1098,15 @@ An entry with an empty tenant name names an internal journal by the call's ids, 
 founding members, which it learns from a majority of their addresses. `Resolve` (#216 (finish bootstrap))
 names no frontend until frontends are booked slots (#476), so a client gets its
 frontends' addresses from its configuration (`parosctl --frontends`, `PAROS_TOKEN`). The simulation runs zero to two frontends per seed, the
-same code, with root keys drawn per seed and a second key rotated in. The workload calls the
-tenants' journals through them by name, with the tenant's own token, and with tokens that must
-be denied: another tenant's token, an expired token, a key that no ring holds, bytes that are not
-a token, and a tenant token on an internal journal.
+same code, with root keys drawn per seed: `init` writes the signing key, every frontend pins
+only that key, and on a BUGGIFY location an operator rotates a second key in through the
+universe entry (#245 (Biscuit tokens)). The workload calls the
+tenants' journals through them by name, with the tenant's own token, with tokens derived from it
+(read-only, its one journal), and with tokens that must
+be denied: another tenant's token, an expired token, a key that no list holds, bytes that are not
+a token, a tenant token on an internal journal, a read-only token on a write and a token derived
+to another journal. A token the rotated key signed is served once an operator tried to add that
+key, and may be refused as `invalid_token` until the frontend read it.
 
 **Trust** (decided on 2026-10-04). The boundary is the network: only frontends and peers reach
 a node's journals (a separate network in the Compose toy; a client reaches a machine only for the
@@ -1137,6 +1149,23 @@ pairs and mints tokens for any role.
 - **Derive, macaroon style**: any holder narrows a token offline with `parosctl token derive`
   (read-only, one tenant, one journal, an earlier expiry), with no key: the key that signs the
   next block is inside the token. `--seal` removes it, so nothing more can be derived.
+- **The universe entry's keys** (landed on 2026-10-15, #245 (Biscuit tokens)). The universe
+  directory holds the root public keys in force (`AddRootKey`, `RemoveRootKey`, metadata
+  version 3). Each key has its key id and its label, and neither is ever used again after a
+  removal. The last key in force is never removed. `parosctl init --root-public-key <file>`
+  writes the first key, right after the universe is formed and only while the entry holds none.
+  `parosctl universe key list|add|remove` changes them, each change one idempotent write
+  through `paros::client::fleet`. A rotation is `key add` of the next key, then `key remove` of
+  the old one once its tokens expired.
+- **Which keys a check uses** (decided on 2026-10-15, #245). The keys in the universe entry
+  rule once a frontend read any. Until then, or while the entry holds none, a frontend checks
+  against the keys it is configured with (`PAROS_FRONTEND_ROOT_PUBLIC_KEY`, now optional).
+  A frontend reads the keys with the universe directory and keeps the keys it read last while
+  the directory cannot be read. A token refused as `invalid_token` makes it read the directory
+  once more and check again, so a key added is trusted at its first use. A key removed stops
+  being trusted at the next read of the directory. There is no read on a timer: that would be a
+  new tunable for no new guarantee. An idle machine has no universe entry, so it checks only its
+  pin (section 3.1).
 
 **Deterministic first, fewer features** (decided on 2026-10-04). Biscuit runs only in a way the
 simulation can replay, and features that cannot are left out:
@@ -1160,7 +1189,8 @@ simulation can replay, and features that cannot are left out:
 - Biscuit stays out of `paros-core` and `paros` (its wasm32 clock needs JavaScript's
   `performance`): `paros` defines the `Authz` trait and carries tokens as opaque bytes; the
   Biscuit implementation is its own crate, `paros-authz-biscuit` (#400), used by `parosctl`,
-  the `paros-frontend` binary and `paros-sim` (#192 (the frontend)), and by `parosd` with #245.
+  the `paros-frontend` binary and `paros-sim` (#192 (the frontend)), and by `parosd` for its
+  bootstrap pin (#245).
 
 **Routing goes through the universe tenant from M9.** The tenant name → `TenantId` → cell step is
 the resolver's from M12; until then the frontend resolves it from its fold of the universe directory,

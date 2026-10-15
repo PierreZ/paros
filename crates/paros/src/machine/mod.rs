@@ -68,6 +68,7 @@ mod lifecycle;
 pub mod load;
 mod matchmakers;
 mod moves;
+mod pin;
 mod record;
 pub(crate) mod register;
 mod resolve;
@@ -89,6 +90,7 @@ pub use cache::{CacheSink, CachedRegistry, spawn_writer, starting_book};
 pub use disk::ProviderDisk;
 pub use formed::FormedCell;
 pub use lifecycle::{MachineAddresses, MachineError, MachineSettings, run_machine};
+pub use pin::AdminPin;
 pub use record::{MachineRecord, journal_config};
 pub use sets::{SET, set_of};
 pub use stores::AuditScope;
@@ -447,6 +449,7 @@ impl Admission {
                 })
                 .collect(),
             founders: self.founders.iter().map(|id| id.0).collect(),
+            token: Vec::new(),
         }
     }
 }
@@ -666,6 +669,7 @@ impl CellPlan {
             fleet: self.fleet.map(Self::identifier_to_wire),
             election: Some(Self::identifier_to_wire(self.election)),
             init: Some(ballot_to_wire(ballot)),
+            token: Vec::new(),
         }
     }
 
