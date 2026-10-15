@@ -1440,15 +1440,6 @@ where
         )?;
     }
     if let Some(CellMachine::Founded(formed)) = machine {
-        // Every founding member campaigns for the cell coordinator (#240).
-        crate::machine::coordinator::spawn(
-            &providers,
-            &rpc_handle,
-            &formed,
-            &tunables,
-            node_audit.call_observer(),
-            incarnation_shutdown.clone(),
-        );
         // Every founding member answers the cell's views (#399).
         crate::machine::views::spawn(
             &providers,
@@ -1489,6 +1480,18 @@ where
             );
             unregistered = moved.then_some(ended);
         }
+        // Every founding member campaigns for the cell coordinator (#240):
+        // a moved one once its registration ended (#506 (renamed founder
+        // not registered)).
+        crate::machine::coordinator::spawn(
+            &providers,
+            &rpc_handle,
+            &formed,
+            &tunables,
+            node_audit.call_observer(),
+            unregistered.clone(),
+            incarnation_shutdown.clone(),
+        );
         formed.serve(
             &providers,
             &rpc_handle,

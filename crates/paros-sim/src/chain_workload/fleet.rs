@@ -1212,14 +1212,23 @@ impl FleetOps {
     /// under a new name at that name, so its peers dial it there. The
     /// machine asks the coordinator, which writes it; the registry is read
     /// again until it holds every one, or until `deadline`.
+    ///
+    /// The names are read from the board again at every attempt (#506
+    /// (renamed founder not registered)): a machine killed in the chaos
+    /// window may reboot in the recovery tail, and that reboot may rename it
+    /// again. A list taken once before the loop then waits for a name the
+    /// machine no longer advertises. Witness: seed 1904763865968447698 on
+    /// 2e959f3, founder 1 renamed `machine-1-1` then `machine-1-2` during
+    /// the check; the registry held `machine-1-2`.
     async fn renamed_registered(&self, ctx: &SimContext, known: &Cell, deadline: Duration) {
-        let renamed = crate::machine::renamed_founders(ctx.state(), self.layout.founders);
+        let mut renamed = crate::machine::renamed_founders(ctx.state(), self.layout.founders);
         if renamed.is_empty() {
             return;
         }
         let mut attempt = 0_u64;
         let mut held = false;
         while !held && ctx.time().now() < deadline && !ctx.shutdown().is_cancelled() {
+            renamed = crate::machine::renamed_founders(ctx.state(), self.layout.founders);
             let first = known.first(attempt);
             attempt += 1;
             let mut cell = judged_cell(&known.members);
