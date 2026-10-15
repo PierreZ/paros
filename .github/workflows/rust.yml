@@ -95,6 +95,21 @@ jobs:
         run: nix develop --command cargo check --target wasm32-unknown-unknown -p paros
       - name: Build the Paxos sandbox (paros on moonpool's simulator) for wasm32-unknown-unknown
         run: nix develop --command cargo check --target wasm32-unknown-unknown -p paros-sandbox
+      - name: Build the simulation harness for wasm32-unknown-unknown (the site runs a seed, #307)
+        run: nix develop --command cargo check --target wasm32-unknown-unknown -p paros-sim
+
+  # The site runs one seed of the main campaign in the browser (#307 (paros-sim in
+  # wasm)). A seed must be the same run there as natively: the same seeds run through
+  # the native binary and through the wasm bundle under node, and the JSON must be
+  # identical byte for byte (a usize draw narrowed on wasm32 once split them).
+  sim-seed:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - name: A seed runs the same in wasm as natively
+        run: nix develop --command scripts/build-sim-seed.sh --check 1 2 3 4 5 6 7 8 9 10
 
   # paros play, the interactive game: the engine crate's wasm build, the TypeScript
   # bindings ts-rs generates from its view types (committed; a stale copy fails the

@@ -137,6 +137,24 @@ the whole system.
   clock are simulated, and that its times are not production numbers.
 - **It explains Paxos and paros.** It never names a person or an audience.
 
+## The seed widget runs the simulation campaign (decided on 2026-10-09, #254, #307)
+
+The parosd pages run `paros-sim` live in the page, never a recorded trace or a JS mock. The
+shortcode `{{ sim_seed(seed="1") }}` mounts the seed widget (`website/sim-seed/`, staged at
+`/sim-seed/` by `scripts/build-sim-seed.sh`): it runs one seed of the main campaign in a Web
+Worker (`crates/paros-sim-web`) and shows whether every oracle held, the facts of the run and a
+timeline of the events the processes logged. The first page is `content/parosd/run-a-seed.md`.
+
+- **Same code, same run.** The widget calls `runSeed`, which runs the campaign the hunt runs. A
+  seed gives the same bytes in the browser as natively; CI's `sim-seed` job proves it.
+- **Say what is simulated.** A page with the widget says that the network, the disks and the
+  clock are simulated, and that its times are not production numbers.
+- **Names, not ids.** The widget hides the fields that are internal ids or hashes (`cell`,
+  `vhash`); add a new one to `HIDDEN_FIELDS` in `seed.js`.
+
+The rule above against seeds and `runSeed` in a chapter is the game's: it applies to the Paxos
+chapters, not to the parosd pages.
+
 ## Site text follows ASD-STE100
 
 The game's own text is Simplified Technical English, and the site pages written for it match

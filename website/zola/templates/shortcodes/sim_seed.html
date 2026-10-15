@@ -1,0 +1,9 @@
+{#- One seed of the paros simulation, run in the reader's browser (#307).
+    `seed` is the seed the widget shows first (a decimal string); a `#seed=N`
+    in the page URL overrides it. The widget's files are staged at
+    /sim-seed/ by scripts/build-sim-seed.sh. -#}
+<link rel="stylesheet" href="{{ get_url(path='sim-seed/seed.css') }}">
+<div class="sim-seed" data-seed="{{ seed | default(value='1') }}">
+  <noscript>This widget runs the simulation in your browser. It needs JavaScript.</noscript>
+</div>
+<script type="module" src="{{ get_url(path='sim-seed/seed.js') }}"></script>

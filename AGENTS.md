@@ -18,7 +18,9 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
 - `cargo clippy --all-targets -- -D warnings`
 - `RUSTDOCFLAGS="-D warnings" cargo doc -p paros-core --no-deps`
 - wasm gates: `cargo check --target wasm32-unknown-unknown -p paros-core`, the same with
-  `--no-default-features`, and `cargo check --target wasm32-unknown-unknown -p paros`
+  `--no-default-features`, `cargo check --target wasm32-unknown-unknown -p paros` and `-p
+  paros-sim`; `scripts/build-sim-seed.sh --check 1 … 10` (a seed is the same run in wasm as
+  natively, #307)
 - `cargo xtask sim run-all`: the sancov-guided sweep (`scripts/sancov-rustc.sh` is the
   `RUSTC_WRAPPER`, gated by `SANCOV_CRATES`; the flake `shellHook` exports it). The registered
   campaign is `paros-chain` (binary `sim-paros-chain`; `cargo xtask sim run paros-chain`).
@@ -507,14 +509,17 @@ Cargo workspace, every package under `crates/`. Dependency stack: `paros-core` �
 - `paros-sim` — the DST harness: processes, role map, storage ledger and injector, workload, audit.
 - `paros-sim-runner` — `sim-paros-chain` and `sim-paros-hunt` (`publish = false`).
 - `paros-play` — the interactive Paxos game's engine and wasm glue; the app is `website/play/`.
+- `paros-sim-web` — one seed of the main campaign in the browser (#307 (paros-sim in wasm)):
+  `runSeed` over `paros_sim::run_chain_seed_view`, and the native `paros-sim-seed` that prints
+  the same JSON; the widget is `website/sim-seed/` (`publish = false`).
 - `paros-sandbox` — the Paxos sandbox (#518 (Paxos visualization sandbox)): a paros universe on
   moonpool's simulated providers, the shipped `run_machine` and `paros::client`, replayed from a
   seed, a config and an action log; wasm glue; the page is `website/sandbox/`.
 - `xtask` — `cargo xtask sim` (the sancov runner) and `cargo xtask mutants` (the mutation hunt, #269).
 
-Elsewhere: `website/` holds everything a browser loads (decided on 2026-10-13): `website/zola/` (the website, Zola + Goyo, #254; `website/zola/AGENTS.md`, the `update-the-site` skill; built by `website/zola/build.sh`), `website/play/` (the game's app), `website/sandbox/` (the sandbox page, `scripts/build-sandbox.sh`); the Rust behind them stays in `crates/`,
+Elsewhere: `website/` holds everything a browser loads (decided on 2026-10-13): `website/zola/` (the website, Zola + Goyo, #254; `website/zola/AGENTS.md`, the `update-the-site` skill; built by `website/zola/build.sh`), `website/play/` (the game's app), `website/sandbox/` (the sandbox page, `scripts/build-sandbox.sh`), `website/sim-seed/` (the seed widget, the `sim_seed` shortcode, `scripts/build-sim-seed.sh`); the Rust behind them stays in `crates/`,
 `docs/architecture.md`, `docs/analysis/` (design notes), `docs/references/` (papers and source
-references), `scripts/` (`sancov-rustc.sh`, `build-play.sh`, `build-sandbox.sh`, `check-dockerfile-toolchain.sh`, `mutants-report.sh`), `.claude/skills/` and
+references), `scripts/` (`sancov-rustc.sh`, `build-play.sh`, `build-sandbox.sh`, `build-sim-seed.sh`, `check-dockerfile-toolchain.sh`, `mutants-report.sh`), `.claude/skills/` and
 `.claude/agents/`.
 
 Publishing mirrors moonpool: library crates share a release-plz `version_group` with per-crate

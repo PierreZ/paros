@@ -9,6 +9,9 @@ on:
       - "website/**"
       - "crates/paros-play/**"
       - "crates/paros-sandbox/**"
+      - "crates/paros-sim/**"
+      - "crates/paros-sim-web/**"
+      - "scripts/build-sim-seed.sh"
       - "scripts/build-sandbox.sh"
       - "website/zola/build.sh"
       - "scripts/build-play.sh"
@@ -39,6 +42,8 @@ jobs:
         run: nix develop --command scripts/build-play.sh
       - name: Build and stage the sandbox at /sandbox/app/
         run: nix develop --command scripts/build-sandbox.sh
+      - name: Build and stage the seed widget at /sim-seed/
+        run: nix develop --command scripts/build-sim-seed.sh
       - uses: actions/upload-pages-artifact@v5
         with:
           path: ./website/zola/public

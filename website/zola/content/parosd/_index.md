@@ -26,6 +26,7 @@ For example, `cell init` is a single-decree Paxos over the founding members.
 [The journal API](@/parosd/journal-api.md) describes the four calls, the two writer modes and
 the limits. [Admin views](@/parosd/admin-views.md) shows the machines, tenants and roles of a
 cell with `parosctl`. [TLS](@/parosd/tls.md) encrypts every session and proves every caller with
-mutual TLS. `parosd` is a work in progress. Later pages of this part will describe the control
+mutual TLS. [Run a simulation seed](@/parosd/run-a-seed.md) runs one seed of the paros
+simulation in your browser. `parosd` is a work in progress. Later pages of this part will describe the control
 hierarchy, the bootstrap, multi-tenancy, the cell design and how to run the Compose demo
 (`DEMO.md` in the repository).

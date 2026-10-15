@@ -1,0 +1,34 @@
+/* The seed widget (#307). Colours read on both Goyo themes. */
+.sim-seed {
+  --ss-line: rgba(127, 127, 127, 0.35); --ss-panel: rgba(127, 127, 127, 0.08);
+  --ss-muted: rgba(127, 127, 127, 1); --ss-ok: #3b6e47; --ss-bad: #9b3434;
+  --ss-accent: #2f5fb3;
+  border: 1px solid var(--ss-line); border-radius: 8px; padding: 12px; margin: 16px 0;
+  background: var(--ss-panel); font-size: 0.95rem; min-width: 0;
+}
+[data-theme="goyo-dark"] .sim-seed { --ss-ok: #6cbf84; --ss-bad: #e07a7a; --ss-accent: #7aa2f7; }
+.sim-seed .ss-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.sim-seed input, .sim-seed button { font: inherit; color: inherit; background: transparent;
+  border: 1px solid var(--ss-line); border-radius: 5px; padding: 4px 8px; }
+.sim-seed input { width: 14ch; max-width: 100%; }
+.sim-seed button { cursor: pointer; }
+.sim-seed button.ss-run { background: var(--ss-accent); border-color: var(--ss-accent); color: #fff; }
+.sim-seed button:disabled { opacity: 0.5; cursor: default; }
+.sim-seed .ss-verdict { margin: 10px 0 4px; font-weight: 600; }
+.sim-seed .ss-verdict.ok { color: var(--ss-ok); }
+.sim-seed .ss-verdict.bad { color: var(--ss-bad); }
+.sim-seed .ss-facts { display: flex; flex-wrap: wrap; gap: 6px 16px; color: var(--ss-muted); font-size: 0.85rem; }
+.sim-seed .ss-facts b { color: inherit; font-weight: 600; }
+.sim-seed ul.ss-violations { color: var(--ss-bad); margin: 6px 0; }
+.sim-seed .ss-timeline { width: 100%; overflow-x: auto; margin-top: 10px; }
+.sim-seed .ss-timeline svg { display: block; width: 100%; min-width: 520px; height: auto; }
+.sim-seed .ss-timeline text { fill: currentColor; font-size: 11px; }
+.sim-seed .ss-legend { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; }
+.sim-seed .ss-legend button { font-size: 0.8rem; padding: 2px 8px; border-radius: 12px; }
+.sim-seed .ss-legend button.off { opacity: 0.4; }
+.sim-seed .ss-swatch { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 5px; }
+.sim-seed .ss-events { max-height: 320px; overflow: auto; margin-top: 10px; border-top: 1px solid var(--ss-line); }
+.sim-seed table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
+.sim-seed td, .sim-seed th { text-align: left; padding: 2px 6px; border-bottom: 1px solid var(--ss-line);
+  vertical-align: top; overflow-wrap: anywhere; }
+.sim-seed .ss-note { color: var(--ss-muted); font-size: 0.8rem; margin-top: 8px; }

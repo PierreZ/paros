@@ -191,7 +191,7 @@ async fn leave(
     draw: u64,
 ) -> bool {
     if buggify_with_prob!(0.3) {
-        let pick = usize::try_from(draw).unwrap_or(0) % founders.len().max(1);
+        let pick = crate::draw_index(draw, founders.len());
         let Some((next, _)) = founders.get(pick) else {
             return true;
         };

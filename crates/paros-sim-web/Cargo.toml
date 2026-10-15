@@ -1,0 +1,31 @@
+[package]
+name = "paros-sim-web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "One seed of the paros main campaign, run in the browser: the wasm-bindgen entry the site mounts"
+publish = false
+
+[lib]
+# `cdylib` for the wasm-bindgen bundle the site loads, `rlib` for the native
+# binary that prints the same JSON (the wasm-equals-native check).
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "paros-sim-seed"
+path = "src/bin/paros-sim-seed.rs"
+
+[dependencies]
+paros-sim = { path = "../paros-sim", version = "0.2.0" }
+serde_json = "1"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# MUST stay exactly 0.2.129: the flake pins `wasm-bindgen-cli` 0.2.129, and the
+# CLI refuses a bundle produced by any other version of the crate.
+wasm-bindgen = "=0.2.129"
+console_error_panic_hook = "0.1"
+
+[lints]
+workspace = true

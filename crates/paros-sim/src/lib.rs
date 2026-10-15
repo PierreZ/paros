@@ -31,11 +31,13 @@ mod roles;
 mod shape;
 mod state;
 mod tls;
+mod view;
 mod world;
 
 pub use moonpool_sim::{AssertKind, AssertionStats, SimulationReport};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
+pub use view::{SeedEvent, SeedRun, VIEW_EVENTS, run_chain_seed_view};
 
 use moonpool_sim::{
     Attrition, AttritionScope, AttritionVictims, Chaos, ChaosMode, ExplorationConfig, GrayFailure,
@@ -429,6 +431,22 @@ fn chain_builder(digest: Option<DigestSink>) -> SimulationBuilder {
         .chaos_duration(CHAOS_CAP)
         .chaos_until_run_ends()
         .swarm_operations()
+}
+
+/// The index in `0..len` a 64-bit draw names: `draw % len`, reduced in
+/// `u64` before it narrows to `usize`. Narrowing first would turn most draws
+/// into `0` on a 32-bit target (`wasm32`), so a seed would run differently in
+/// the browser than natively (#307 (paros-sim in wasm)). `len == 0` gives `0`.
+pub(crate) fn draw_index(draw: u64, len: usize) -> usize {
+    let Ok(len64) = u64::try_from(len) else {
+        return 0;
+    };
+    if len64 == 0 {
+        return 0;
+    }
+    let index = usize::try_from(draw % len64).unwrap_or(0);
+    assert!(index < len, "a drawn index is inside its range");
+    index
 }
 
 /// Where a run publishes its end-of-run audit digest (see

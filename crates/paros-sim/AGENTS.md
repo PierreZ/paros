@@ -8,7 +8,8 @@ fault world, the one client workload and the audit. Stack: `paros-core` ←
 
 ## Map
 
-- `lib.rs` → `chain_builder`, `chaos_surfaces()`, the campaign constants, the entry points.
+- `lib.rs` → `chain_builder`, `chaos_surfaces()`, the campaign constants, the entry points; `draw_index` (a `u64` draw reduced before it narrows to `usize`, so a seed runs the same on wasm32, #307).
+- `view.rs` → `run_chain_seed_view`, `SeedRun`, `SeedEvent`, `VIEW_EVENTS` → one seed as data a page draws (#307 (paros-sim in wasm)): the same `chain_builder` with the digest sink and a recorder `Invariant` that copies the named events with their fields and the source's role; it only observes. `crates/paros-sim-web` exports it to the browser.
 - `roles.rs` → `Deployment`, `Role`, group names, `joiner_node_id`, `replica_node_id` → the per-seed role map.
 - `shape.rs` → `NodeShape`, `QuorumPolicy`, `JournalPlan` → every per-seed and per-node draw (below).
 - `process/mod.rs` → `NodeProcess::chaotic`, `MatchmakerProcess`, `ProxyProcess`, `ReplicaProcess`, `dispatch`, `arm_role` → one process group per role (#416): `process/acceptor.rs` (`run_acceptor`, one `Seat` per journal, the system journals' rig), `process/stores.rs` (`SimStores`, provisioning), `process/matchmaker.rs`, `process/proxy.rs`, `process/replica.rs`, `process/joiner.rs` (`JoinerProcess`, `IdleProcess`), `process/contract.rs` (`ContractSuiteWorkload`).
@@ -174,7 +175,7 @@ then admitted; it may stop after the registration and is resumed by the client's
 
 ## Entry points (`lib.rs:323-428`)
 
-`explore`, `run_chain_seed`, `chain_seed_digest`, `chain_seed_canary`, `chain_canary_hunt`,
+`explore`, `run_chain_seed`, `run_chain_seed_view`, `chain_seed_digest`, `chain_seed_canary`, `chain_canary_hunt`,
 `chain_smoke`, `explore_chain_seed`, `run_storage_contract_suite`.
 
 ## Local rules

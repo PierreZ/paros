@@ -101,6 +101,11 @@
 
           # Environment variables
           RUST_SRC_PATH = "${rust-toolchain}/lib/rustlib/src/rust/library";
+          # ring's C code (rustls, under paros-sim's TLS) built for the browser
+          # (#307 (paros-sim in wasm)): an unwrapped clang targets wasm32, which the
+          # gcc wrapper cannot.
+          CC_wasm32_unknown_unknown = "${pkgs.llvmPackages.clang-unwrapped}/bin/clang";
+          AR_wasm32_unknown_unknown = "${pkgs.llvmPackages.bintools-unwrapped}/bin/llvm-ar";
         };
       }
     );
