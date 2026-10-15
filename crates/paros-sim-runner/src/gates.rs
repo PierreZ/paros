@@ -45,6 +45,10 @@ pub struct Rare {
 /// window seldom reaches, #485 the double fault, #486 the rest.
 pub const RARE: &[Rare] = &[
     Rare {
+        msg: "a replica serves a read before its next apply page",
+        reason: "rare: fired on 0 of 440 hunt seeds with the lagging-replica scenario; a run decides a dozen slots, so a read seldom lands while a rebooted replica pages its backlog (#550 (replica serves an unreported fold page), #486)",
+    },
+    Rare {
         msg: "journals: a create refused for capacity is asked again and placed",
         reason: "marginal: fired on 0 of 1,100 hunt seeds, missed by the sweep on main (#486)",
     },

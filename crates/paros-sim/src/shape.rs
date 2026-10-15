@@ -1379,14 +1379,14 @@ pub(crate) fn lagging_replica(state: &StateHandle) -> bool {
 }
 
 /// The apply page a replica walks (#550 (replica serves an unreported fold
-/// page)): the node's drawn one, or on a lagging-replica seed a small page
-/// (1 to 4, the knob's extreme), so the replica's catch-up spans several
-/// pages. Floor 1, as the knob's.
+/// page)): the node's drawn one, or on a lagging-replica seed a page of one
+/// or two slots (inside the knob's extreme), so the replica's catch-up spans
+/// several pages of a short journal. Floor 1, as the knob's.
 pub(crate) fn replica_apply_page(state: &StateHandle, drawn: usize) -> usize {
     if !lagging_replica(state) {
         return drawn;
     }
-    let small = usize::try_from(moonpool_sim::sim_random_range(1_u64..5_u64)).unwrap_or(1);
+    let small = usize::try_from(moonpool_sim::sim_random_range(1_u64..3_u64)).unwrap_or(1);
     drawn.min(small).max(1)
 }
 

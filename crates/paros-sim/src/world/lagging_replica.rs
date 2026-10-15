@@ -36,9 +36,11 @@ use super::outage::POLL;
 const START: std::ops::Range<u64> = 800..2_000;
 
 /// How far the cell must be past the replica's prefix before it comes back:
-/// four pages of the largest small page (`crate::shape::replica_apply_page`
-/// draws 1 to 4), so the catch-up spans several pages on every scenario seed.
-pub(crate) const AHEAD: u64 = 16;
+/// three pages of the largest small page (`crate::shape::replica_apply_page`
+/// draws 1 or 2), so the catch-up spans several pages on every scenario seed.
+/// A run decides a dozen slots or so: a hold of 16 never ended before the
+/// tail in 30 hunt seeds.
+pub(crate) const AHEAD: u64 = 6;
 
 /// How often the injector checks the cell's progress while the replica is
 /// down.

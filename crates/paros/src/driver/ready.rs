@@ -302,11 +302,10 @@ where
         hinted.await;
     }
 
-    // The previous recovery page is now fully durable, sent, and applied. Only
-    // at this boundary may the core materialize the next bounded Ready page;
-    // doing it inside `Ready::advance` would move single-node state ahead of the
-    // I/O the async driver is still performing.
-    node.advance_recovery();
+    // The next bounded Ready page is not released here: the caller releases it
+    // (`advance_recovery`) once the reads parked at the tail and the overdue
+    // ones are answered from the fold this batch reported (`NodeLoop::settle`,
+    // #550 (replica serves an unreported fold page)).
     // The batch only ever moved the prefix forward.
     assert!(
         node.hard_state().chosen_index >= chosen_before,
