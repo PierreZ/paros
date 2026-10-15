@@ -77,8 +77,8 @@ image and the Compose toy are `Dockerfile` and `docker-compose.yml` at the repos
   the election journal, every hosted tenant's control journal and the journals tenants create
   (#210), plain Multi-Paxos or a grid over the founding members; any other
   machine idles until `parosctl cell add-machine` admits it, and then, like every `stateless` one, waits for placement (#211, #474). The founding members
-  elect the cell coordinator over the cell's election journal (#240); admin sessions still claim the cell control journal until
-  admin calls become requests to it (#212, #225). Do not build on these as final; the machine record, the boot rule and
+  elect the cell coordinator over the cell's election journal (#240); `cell add-machine` and `cell drain-machine` still claim the cell control journal until
+  admin calls become requests to it (#212, #225); the fleet operations only read it (#513, #225). Do not build on these as final; the machine record, the boot rule and
   `init`'s resumability stay.
 - `parosctl` holds **no client policy**: redirects, retries, claims, ambiguity, reader resume
   and `init`'s patience are `paros::client`'s; a command only parses, calls the library,
