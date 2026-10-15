@@ -1862,6 +1862,15 @@ control quorum will be recoverable at both the cell and the universe level, with
 data (section 3.10, deferred). Beyond one region, a multi-region cell survives the loss of a
 region (M12, below).
 
+**Offline inspection** (#365, M9). A refused boot (exit 78) tells the operator not to restart
+blindly; `parosctl store inspect <data-dir>` shows why, with `parosd` stopped: the machine
+record, and each store's format marker, promise, chosen index, floor, sealed state, faulty
+slots and, with `--records`, its accepted slots. It never writes the disk: opening a
+moonpool-journal store recovers it, and recovery writes, so `paros::inspect` copies each store
+to a scratch directory and opens the copy with the shipped boot scan. Names come from the
+cell's journals the disk holds, folded over their accepted prefix: a label, never evidence of
+what the cell chose.
+
 **The storage contract.** paros's stores are moonpool-journal's (`paros::journal`), and the
 simulation must give them at least the chaos the harness's in-memory stores carry today (decided
 on 2026-10-04, #176, #202). Every storage fault moonpool can inject is eventually in contract.
