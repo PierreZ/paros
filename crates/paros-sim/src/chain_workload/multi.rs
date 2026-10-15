@@ -398,8 +398,12 @@ async fn fenced_write_refused(step: &Step<'_>) {
 }
 
 /// The mode confusion on a single-writer journal (#241): an unfenced write,
-/// refused as of the wrong mode, or no verdict. One attempt, no redirect
-/// followed.
+/// refused as of the wrong mode, or no verdict. Sent to the leader the client
+/// believes in, and once more to the leader a redirect names, as
+/// [`fenced_write_refused`] does: only a node that proposes answers
+/// `WrongMode`, so a write sent to a random node was mostly redirected, and
+/// the refusal fired on too few seeds for the sweep (missed by main's sweep
+/// at c89f86e, #446).
 #[tracing::instrument(level = "debug", skip_all, fields(journal = %journal))]
 pub(super) async fn unfenced_write_refused(
     ctx: &SimContext,
@@ -411,8 +415,22 @@ pub(super) async fn unfenced_write_refused(
     let entry = append_entry(vec![b"unfenced".to_vec()]);
     // Sent to this journal: a slot of it may hold the write (refused).
     audit.note_appended(command_hash(&Command::Write(entry.clone())));
-    let attempt = write_once(nodes, journal, target, &entry, false, false);
-    let outcome = within(ctx, timeout, WriteOutcome::Ambiguous, attempt).await;
+    let send = |target: usize| {
+        within(
+            ctx,
+            timeout,
+            WriteOutcome::Ambiguous,
+            write_once(nodes, journal, target, &entry, false, false),
+        )
+    };
+    let mut outcome = send(nodes.leader().unwrap_or(target)).await;
+    if let WriteOutcome::Redirect {
+        leader: Some(leader),
+    } = outcome
+        && let Some(target) = nodes.index_of(leader)
+    {
+        outcome = send(target).await;
+    }
     if matches!(outcome, WriteOutcome::WrongMode { .. }) {
         assert_reachable!("chain: a single-writer journal refuses an unfenced write");
     }

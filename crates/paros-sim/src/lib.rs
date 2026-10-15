@@ -470,6 +470,22 @@ pub fn explore(max_iterations: usize) -> SimulationReport {
         .run_configured()
 }
 
+/// Run `iterations` more seeds of the sweep's campaign, with the same
+/// exploration, and no stop rule: the sancov runner's top-up when the
+/// coverage plateau stopped [`explore`] before the declared gates had seeds
+/// enough to be judged (`paros-sim-runner`'s `GATE_FLOOR_SEEDS`).
+#[must_use]
+#[tracing::instrument(level = "debug")]
+pub fn explore_more(iterations: usize) -> SimulationReport {
+    chain_builder(None)
+        .enable_exploration(exploration_config(
+            EXPLORATION_TIMELINES_PER_SEED,
+            sweep_workers(),
+        ))
+        .set_iterations(iterations)
+        .run_configured()
+}
+
 /// Run one fresh Chain timeline without requiring coverage saturation. Used for
 /// smoke and deterministic seed replay.
 #[must_use]
