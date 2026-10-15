@@ -96,9 +96,27 @@ pub(crate) struct NodeShape {
     /// ordinary restart, so even an operator who edits on every restart
     /// costs the cluster one restart delay per edit.
     pub(crate) config_edit_pct: u32,
+    /// How many of the deployment's proxy leaders this node does not count
+    /// (#193): a node configured with `proxy_count - lag` (never below
+    /// zero), as one is in the middle of a rolling change of the count
+    /// until the tenant coordinator applies counts (#214). A slot's proxy is
+    /// its leader's choice alone, and an acceptor that counts fewer proxies
+    /// drops an `Accept` whose reply goes to one it does not count, so mixed
+    /// counts change which proxy runs a round, or whether it runs at all
+    /// before the leader takes it back, never what is chosen. Floor 0: no
+    /// lag, every node agrees on the count. Extreme 1..=2.
+    pub(crate) proxy_count_lag: usize,
 }
 
 impl NodeShape {
+    /// `count` as this node counts it: the deployment's proxy count less
+    /// its lag, never below zero.
+    pub(crate) fn lagged_proxy_count(&self, count: usize) -> usize {
+        let lagged = count.saturating_sub(self.proxy_count_lag);
+        assert!(lagged <= count, "a lag never adds a proxy");
+        lagged
+    }
+
     /// Draw one node's shape — born workload-buggified (AGENTS.md
     /// prong 2): every default is production's constant, and an activated
     /// seed draws an extreme. One `buggify_knob!` location per knob, so a
@@ -407,6 +425,7 @@ impl NodeShape {
             wipe_pct: buggify_knob!(DEFAULT_LOSS_PCT, MIN_LOSS_PCT..MAX_LOSS_PCT + 1),
             matchmaker_loss_pct: buggify_knob!(DEFAULT_LOSS_PCT, MIN_LOSS_PCT..MAX_LOSS_PCT + 1),
             config_edit_pct: buggify_knob!(DEFAULT_CONFIG_EDIT_PCT, 25..MAX_LOSS_PCT + 1),
+            proxy_count_lag: buggify_knob!(0_usize, 1_usize..3_usize),
         }
     }
 }
@@ -1715,8 +1734,9 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
 /// and the 2,000-seed hunt that lifted the restriction was clean. The
 /// **default** journal is the seed's deployment — its matchmakers, proxies,
 /// replicas and bootstrap; every other journal is a plain Multi-Paxos
-/// journal over the whole pool (`crate::process`: the matchmaker plane, the
-/// proxy leaders and the replica tier serve one journal each). On a
+/// journal over the whole pool, or names the matchmakers on a matchmaker
+/// seed, and the proxy leaders and the replica tier serve every journal
+/// (`crate::process::journal_config`, #193). On a
 /// multi-journal seed a second location draws whether the driver's named
 /// location holds one journal on every node for the chaos window
 /// (`paros::scenario::HOLD_JOURNAL`): its siblings must keep committing.

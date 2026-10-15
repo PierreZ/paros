@@ -2208,8 +2208,12 @@ AGENTS.md.
   coordinator's alone: it books a created journal's acceptors (#212 (placement)).
 - `parosd` no longer runs the plain deployment (#190, landed): every journal is born with its
   tenant's matchmaker set on the founding members, and the matchmaker wire names its journal, so
-  every journal of a process may name matchmakers. Proxy leaders and replicas still serve only a
-  node's first journal; they follow (#193).
+  every journal of a process may name matchmakers. Proxy leaders and replicas are shared the
+  same way (#193, landed): a proxy keeps one `ProxyLeader` and a replica one `ReplicaNode` and
+  one store per journal, demuxed by `JournalIdentifier`. A node whose `Config::proxy_count`
+  differs from its peers' (a rolling change of the count) changes which proxy runs a round, or
+  makes the leader take the round back, never what is chosen; the simulation draws such nodes
+  per seed. The counts stay boot data until the tenant coordinator applies them (#214).
 - The coordinators replace the operator's client (#212): admin calls become requests to the
   elected coordinator. Since #240, `parosctl init` no longer claims the cell control journal: the
   elected cell coordinator installs its uuid there.
