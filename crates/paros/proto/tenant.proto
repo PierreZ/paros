@@ -48,13 +48,15 @@ message CellKind {
   string witness = 3;
 }
 
-// A desired mode (§3.4): a redundancy (1 single, 2 double, 3 triple) or a
-// grid `{rows, cols}` (redundancy 0, both set), and the replica count.
+// A desired mode (§3.4, #523): the durability, `failures_per_partition`
+// (0 to 3) over `partitions` acceptor partitions (at least 1, 0 is refused),
+// and the replica count. Tags 1 to 3 held the retired redundancy and grid.
 message Desired {
-  uint32 redundancy = 1;
-  uint32 rows = 2;
-  uint32 cols = 3;
+  reserved 1, 2, 3;
+  reserved "redundancy", "rows", "cols";
   uint32 replicas = 4;
+  uint32 failures_per_partition = 5;
+  uint32 partitions = 6;
 }
 
 // Request `request`: create journal `id` (drawn by the coordinator) named

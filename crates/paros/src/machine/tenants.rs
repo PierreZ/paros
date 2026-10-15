@@ -28,9 +28,9 @@
 //!
 //! **Placement inside granted capacity** (#212 (placement)). Only the
 //! founding members serve journals until journals move onto admitted
-//! machines, so they are the machines a create may use: a redundancy mode
-//! takes as many as it asks for, at most all of them, and a grid needs all
-//! its cells. Inside them, [`crate::placement::plan`] picks the members
+//! machines, so they are the machines a create may use: one acceptor
+//! partition takes as many as it asks for, at most all of them, and more
+//! acceptor partitions need all their acceptors (#523). Inside them, [`crate::placement::plan`] picks the members
 //! (zone by zone, least-loaded first, ties by a draw seeded with the
 //! tenant), and the coordinator books one acceptor slot on each in the cell
 //! control journal, through the term's cell session, *before* it writes the
@@ -68,9 +68,7 @@ use crate::client::journals::{JournalAnswer, JournalOp, JournalRequest};
 use crate::client::{ClaimOutcome, Client, ClientTunables, WriterOutcome};
 use crate::placement::{self, Shortfall, Step, Want};
 use crate::system::{Booking, BookingTarget, NodeStanding, Registry, Role, SystemCommand};
-use crate::tenant::{
-    CellKind, Description, Desired, DesiredMode, RequestOutcome, TenantCommand, TenantControl,
-};
+use crate::tenant::{CellKind, Description, Desired, RequestOutcome, TenantCommand, TenantControl};
 
 /// What `HostTenant` records of a tenant: its control journal, its name and
 /// what it survives.
@@ -227,7 +225,7 @@ impl TenantDesk {
                 survives,
                 cell_name: Vec::new(),
                 cell_kind: CellKind::default(),
-                desired: Desired::DOUBLE,
+                desired: Desired::DEFAULT,
             };
             if let Err(answer) = self
                 .append(
@@ -315,9 +313,12 @@ impl TenantDesk {
             "every founding member stores"
         );
         let wanted = desired.acceptors();
-        let count = match desired.mode {
-            DesiredMode::Redundancy(_) => wanted.max(1).min(storage.len()),
-            DesiredMode::Grid { .. } => wanted,
+        // One partition is a majority: it takes at most every storage
+        // machine. More partitions lay out a grid that needs all its cells.
+        let count = if desired.durability.partitions == 1 {
+            wanted.max(1).min(storage.len())
+        } else {
+            wanted
         };
         if count > storage.len() {
             moonpool_assertions::reachable!("tenant coordinator: a create is unplaceable");

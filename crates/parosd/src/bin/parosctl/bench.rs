@@ -27,10 +27,10 @@ use clap::Args;
 use moonpool_core::{Providers, RandomProvider, TokioProviders};
 use paros::Value;
 use paros::client::{Client, ReaderOutcome, Writer, WriterOutcome};
-use paros::tenant::Desired;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
+use crate::journal::DurabilityArgs;
 use crate::output::note;
 use crate::{Ending, Runtime};
 
@@ -52,9 +52,9 @@ pub struct BenchArgs {
     /// (single writer).
     #[arg(long, default_value = "4", value_parser = clap::value_parser!(u64).range(1..))]
     journals: u64,
-    /// The desired mode of a journal the bench creates.
-    #[arg(long, default_value = "double")]
-    desired: Desired,
+    /// The durability of a journal the bench creates.
+    #[command(flatten)]
+    durability: DurabilityArgs,
     /// How many concurrent clients, each one call at a time.
     #[arg(long, default_value = "8", value_parser = clap::value_parser!(u64).range(1..))]
     clients: u64,
@@ -213,7 +213,7 @@ async fn prepare(
         runtime,
         client,
         (&args.tenant, tenant),
-        (count, args.desired),
+        (count, args.durability.desired()),
         patience,
     )
     .await?;

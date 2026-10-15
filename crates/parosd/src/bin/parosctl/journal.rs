@@ -18,7 +18,7 @@ use paros::client::bootstrap::control_journals;
 use paros::client::fleet::read_directory;
 use paros::client::journals::{self, JournalAnswer, JournalOp, JournalRequest};
 use paros::fleet::TenantState;
-use paros::tenant::Desired;
+use paros::tenant::{Desired, Durability, MAX_FAILURES_PER_PARTITION};
 use paros::{JournalIdentifier, Names, TenantId, WriterMode};
 use serde_json::json;
 
@@ -52,12 +52,11 @@ enum JournalCommand {
         name: String,
         /// Who may write it: `single` (one fenced writer, the default) or
         /// `multi` (unfenced appends, #241). Fixed for the journal's life.
-        #[arg(long, default_value = "single", value_parser = parse_mode)]
-        mode: WriterMode,
-        /// The desired mode: `single`, `double` (the default), `triple` or
-        /// `grid:RxC`.
-        #[arg(long, default_value = "double")]
-        desired: Desired,
+        #[arg(long, default_value = "single", value_parser = parse_writers)]
+        writers: WriterMode,
+        /// Its durability.
+        #[command(flatten)]
+        durability: DurabilityArgs,
     },
     /// Delete a tenant's live journal by name: a tombstone, its id never
     /// used again.
@@ -74,12 +73,42 @@ enum JournalCommand {
     },
 }
 
-/// A writer mode as given on the command line.
-fn parse_mode(text: &str) -> Result<WriterMode, String> {
+/// A writer mode as given on the command line (`--writers`, #523).
+fn parse_writers(text: &str) -> Result<WriterMode, String> {
     match text {
         "single" => Ok(WriterMode::Single),
         "multi" => Ok(WriterMode::Multi),
-        _ => Err("a mode is single or multi".into()),
+        _ => Err("writers is single or multi".into()),
+    }
+}
+
+/// A journal's durability on the command line (§3.4, #523): each acceptor
+/// partition has `2F+1` acceptors.
+#[derive(Args, Debug, Clone, Copy)]
+pub struct DurabilityArgs {
+    /// `F`: the failures each acceptor partition survives, 0 to 3. Each
+    /// acceptor partition has `2F+1` acceptors.
+    #[arg(long, default_value = "1", value_parser = clap::value_parser!(u32).range(0..=i64::from(MAX_FAILURES_PER_PARTITION)))]
+    failures_per_partition: u32,
+    /// `P`: the acceptor partitions a journal's writes spread over, at least
+    /// 1 (the plain majority).
+    #[arg(long, default_value = "1", value_parser = clap::value_parser!(u32).range(1..))]
+    partitions: u32,
+}
+
+impl DurabilityArgs {
+    /// The desired mode it names.
+    ///
+    /// # Panics
+    ///
+    /// Never: clap bounds both values.
+    pub fn desired(self) -> Desired {
+        let durability = Durability::new(self.failures_per_partition, self.partitions)
+            .expect("clap bounds the durability");
+        Desired {
+            durability,
+            replicas: 0,
+        }
     }
 }
 
@@ -140,13 +169,13 @@ pub async fn run(
         }
         JournalCommand::Create {
             name,
-            mode,
-            desired,
+            writers,
+            durability,
             ..
         } => JournalOp::Create {
             name: name.into_bytes(),
-            writer: mode,
-            desired,
+            writer: writers,
+            desired: durability.desired(),
         },
         JournalCommand::Delete { name, .. } => JournalOp::Delete {
             name: name.into_bytes(),

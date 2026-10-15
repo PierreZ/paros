@@ -31,7 +31,7 @@ use crate::rpc::methods::{CoordinatorInterface, JournalRequestRpc};
 use crate::rpc::{
     config_from_proto, config_to_proto, writer_mode_from_proto, writer_mode_to_proto,
 };
-use crate::tenant::{Desired, DesiredMode, Redundancy, TenantControl};
+use crate::tenant::{Desired, TenantControl};
 use crate::{Address, Names};
 
 /// What a request asks for.
@@ -74,22 +74,13 @@ impl JournalRequest {
                 name,
                 writer,
                 desired,
-            } => {
-                let (redundancy, rows, cols) = match desired.mode {
-                    DesiredMode::Redundancy(Redundancy::Single) => (1, 0, 0),
-                    DesiredMode::Redundancy(Redundancy::Double) => (2, 0, 0),
-                    DesiredMode::Redundancy(Redundancy::Triple) => (3, 0, 0),
-                    DesiredMode::Grid { rows, cols } => (0, rows, cols),
-                };
-                Op::Create(wire::CreateJournalOp {
-                    name: name.clone(),
-                    writer: writer_mode_to_proto(*writer).into(),
-                    redundancy,
-                    rows,
-                    cols,
-                    replicas: desired.replicas,
-                })
-            }
+            } => Op::Create(wire::CreateJournalOp {
+                name: name.clone(),
+                writer: writer_mode_to_proto(*writer).into(),
+                replicas: desired.replicas,
+                failures_per_partition: desired.durability.failures_per_partition,
+                partitions: desired.durability.partitions,
+            }),
             JournalOp::Delete { name } => Op::Delete(wire::DeleteJournalOp { name: name.clone() }),
         };
         wire::JournalRequest {
@@ -118,10 +109,9 @@ impl JournalRequest {
                 name: create.name.clone(),
                 writer: writer_mode_from_proto(create.writer)?,
                 desired: Desired::from_wire(Some(crate::rpc::tenant::Desired {
-                    redundancy: create.redundancy,
-                    rows: create.rows,
-                    cols: create.cols,
                     replicas: create.replicas,
+                    failures_per_partition: create.failures_per_partition,
+                    partitions: create.partitions,
                 }))?,
             },
             Op::Delete(delete) => JournalOp::Delete {
@@ -387,7 +377,9 @@ mod tests {
             op: JournalOp::Create {
                 name: b"orders".to_vec(),
                 writer: WriterMode::Multi,
-                desired: "grid:2x3".parse().expect("a grid"),
+                desired: "failures-per-partition=0,partitions=3"
+                    .parse()
+                    .expect("a durability"),
             },
         };
         let wire = request.to_wire();

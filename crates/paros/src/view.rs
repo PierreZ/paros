@@ -280,7 +280,7 @@ impl CellFacts<'_> {
             name: Vec::new(),
             kind: kind.to_string(),
             writer: writer_label(writer).to_string(),
-            desired: "founders".to_string(),
+            desired: format!("founders · {} acceptors", founders.len()),
             desired_acceptors: founders.len() as u64,
             acceptors: founders,
             matchmakers: Vec::new(),

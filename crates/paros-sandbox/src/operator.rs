@@ -323,7 +323,7 @@ impl Desk {
         let Ok(desired) = mode.parse::<Desired>() else {
             return (
                 false,
-                format!("no mode {mode}: single, double, triple or grid:RxC"),
+                format!("no mode {mode}: failures-per-partition=F,partitions=P"),
             );
         };
         let Some(cell) = known.cell.as_ref() else {

@@ -186,7 +186,7 @@ ignores that `seq`. The mode is judged at apply, like every other rule. A call s
 other mode is refused in place with `WRONG_MODE` and the journal's view: an unfenced call on
 a single-writer journal, and a fenced call or a `SetLeader` on a multi-writer one.
 `paros::client::multi` builds the unfenced requests, and `parosctl write --multi` and
-`parosctl truncate --multi` send them. `parosctl journal create --mode` comes with the
+`parosctl truncate --multi` send them. `parosctl journal create --writers` (named `--mode` until #523) comes with the
 journal-create request to the tenant coordinator (#210, decided on 2026-10-09), not with #241. The simulation draws the mode per journal, judges every
 attempt against the same model in that mode, and a client sends the wrong-mode calls on
 purpose.
@@ -358,7 +358,7 @@ list and no rendezvous name. The same rule holds at two levels:
   whether it won. paros has nothing elected before `cell init`, so the decree is that election.
 
   The listed machines are the cell's **founding members**. `cell init` creates on them the cell
-  control journal and the cell's first election journal, both born `double` with the cell's first
+  control journal and the cell's first election journal, both born at `failures-per-partition=1` with the cell's first
   matchmaker set (decided on 2026-10-09, #240). The founding members campaign over that election
   journal for the first cell coordinator, and the winner installs itself as the control journal's
   leader with `SetLeader(its fresh uuid, unset)`. The founding list lives only in the cell
@@ -712,12 +712,12 @@ the only fence (section 2.3), so two actors that both believe they lead can neve
 winning, an actor folds its journal to the tail before its first control write and finishes every
 operation the journal holds in flight (`REGISTERING`, `REMOVING`); on its first refused write it
 stops. Hand-off is `SetLeader(successor, me)`. An election journal is low-throughput, so it always uses
-a redundancy mode (majority Multi-Paxos, section 3.4), never grid, and like every journal it
+one acceptor partition (majority Multi-Paxos, section 3.4), never several, and like every journal it
 has its tenant's matchmaker set (decided on 2026-10-04).
 
 **Where candidates run** (decided on 2026-10-04, amended on 2026-10-09, #240). The founding members
 campaign for the first cell coordinator over the election journal `cell init` creates on them,
-born `double` (section 3.1). The cell and universe coordinators run on the founding members until a
+born at `failures-per-partition=1` (section 3.1). The cell and universe coordinators run on the founding members until a
 `stateless` machine registers, then move there; the cell coordinator places tenant coordinators on
 `stateless` machines.
 
@@ -883,16 +883,54 @@ create.
 ### 3.4 Tenant modes
 
 A tenant's desired state is FDB's `configure` (decided on 2026-10-04): per journal or as a tenant
-default, a **redundancy mode** — `single`, `double` or `triple`, a majority over one, three or
-five acceptors — or the opt-in throughput mode **grid** `{rows, cols}`, plus per-role counts
+default, a **durability** `Durability { failures_per_partition, partitions }`
+(`parosctl journal create --failures-per-partition F --partitions P`), plus per-role counts
 (`frontends=`, `proxy_leaders=` and `batchers=` per tenant, `replicas=` per journal).
 
-**`single` survives no zone** (decided on 2026-10-07, #215): a majority over one acceptor cannot
-meet the zone rule of section 5. It stays a mode without zone survival, for development and the
-toy, shown `Degraded` in `parosctl status` (section 3.6), and it is refused for every control
-journal and every election journal. Control and election journals are born `double` (the cell's
-own on its three founding members, one per zone) and raised to `triple` by the cell coordinator, through
-ordinary reconfiguration, once five `storage` machines span three zones.
+**Durability names the guarantee** (decided on 2026-10-14, #523; it replaces the FDB names
+`single`, `double`, `triple` and `grid {rows, cols}` of 2026-10-04). In FDB the name counts the
+copies; in paros each acceptor stores a copy, so `double` stored three. The new names:
+
+| Old | New |
+|---|---|
+| `single` | `failures-per-partition=0` (1 acceptor) |
+| `double` | `failures-per-partition=1` (3 acceptors, the default) |
+| `triple` | `failures-per-partition=2` (5 acceptors) |
+| (new) | `failures-per-partition=3` (7 acceptors) |
+| `grid {rows, cols}` | `failures-per-partition=F partitions=P` |
+
+- **`failures-per-partition` (`F`)** is Compartmentalized Paxos's `f`, per acceptor partition.
+  Each acceptor partition has `2F+1` acceptors. The journal survives any `F` failures, and up to
+  `F` per acceptor partition when they are spread. `F` is 0 to 3.
+- **`partitions` (`P`)** is how many acceptor partitions a journal's writes spread over. The
+  default is 1, the plain majority; 0 is refused. Each entry goes to one acceptor partition and
+  is done at a majority of it; an election or a tail read needs a majority of every acceptor
+  partition (#532 (acceptor partitions)). Until #532 lands, `P > 1` is placed as the acceptor
+  grid with one column per acceptor partition (`2F+1` rows, `P` columns): a slot's Phase 2 goes
+  to its column.
+- **Derived numbers are shown, never typed, and the partition count is always shown**:
+  `1 per partition · 1 partition (any 1) · 3 acceptors`;
+  `1 per partition · 3 partitions (any 1, up to 3 spread) · 9 acceptors`.
+- Docs say "acceptor partition" the first time in a paragraph; a network fault stays a
+  "network partition". Zones keep their own word, the tenant's `survives`.
+- **The writer mode flag** is `--writers single|multi` (it was `--mode`), so `single` never
+  stands beside the durability flags. The type stays `WriterMode`.
+- **A tenant's matchmaker set** has `2F+1` matchmakers, `F` the largest `failures-per-partition`
+  of the tenant (its default and every journal); `partitions` plays no part, since the set stores
+  configurations, not slots. Today the set keeps its birth size of 3, which caps a journal's
+  election and GC at one matchmaker failure; the tenant coordinator grows or shrinks the set by
+  handover with #214 (tenant modes).
+- **Flexible quorums** (`QuorumSystem::Flexible`) stay core- and simulation-only; the CLI does
+  not expose them. Changing a live journal's durability is an ordinary reconfiguration through
+  `configure` (#214).
+
+**`failures-per-partition=0` survives no zone** (decided on 2026-10-07, #215): a majority over one
+acceptor cannot meet the zone rule of section 5. It stays a mode without zone survival, for
+development and the toy, shown `Degraded` in `parosctl status` (section 3.6), and it is refused
+for every control journal and every election journal. Control and election journals are born at
+`failures-per-partition=1` (the cell's own on its three founding members, one per zone) and
+raised to `failures-per-partition=2` by the cell coordinator, through ordinary reconfiguration,
+once five `storage` machines span three zones.
 
 **What a tenant survives** (decided on 2026-10-07, #252): a tenant's universe directory entry carries
 `survives: az | region`, recorded at `REGISTERING` and mirrored into the tenant's control journal
@@ -963,8 +1001,9 @@ Reconfiguration is the operational primitive for everything, so no tenant opts o
 
 Every tenant has a **minimum footprint**, booked in slots against its cell's capacity when the
 tenant is created: one coordinator slot, its matchmaker set, one acceptor quorum of its
-redundancy mode for data and one `double` quorum for its control journal (amended on 2026-10-07,
-#215: a `single` tenant's control journal still needs `double`). The universe tenant and the cell
+durability for data and one `failures-per-partition=1` quorum for its control journal (amended on
+2026-10-07, #215: a `failures-per-partition=0` tenant's control journal still needs
+`failures-per-partition=1`). The universe tenant and the cell
 tenant count too. A cell refuses a tenant whose footprint it cannot book.
 
 ### 3.5 The frontend and the resolver
@@ -1207,8 +1246,9 @@ judged (`observed`) and the word the cell shows (`word`):
 
 Every quorum question goes through the placed `AcceptorConfig`. A journal the cell made
 (control, election, universe directory) is desired on every founding member, a majority. The
-words compare shapes only: a `single` journal is Healthy when its one member is up, and the
-zone rule (the `single` exemption, the degraded trap) comes with #215. **Hysteresis**: the
+words compare shapes only: a `failures-per-partition=0` journal is Healthy when its one member
+is up, and the zone rule (the `failures-per-partition=0` exemption, the degraded trap) comes with
+#215. The desired column shows the durability's label, partition count included (#523). **Hysteresis**: the
 founding member that answers shows a new word only once it held for `status_hold` (a
 `DriverTunables` field; floor 0, which shows every answer's own word; production 20 s, two
 `machine_down_after`). The member keeps this in memory and never writes it. When the universe
@@ -1791,9 +1831,10 @@ the WPaxos read (section 10) established for one region with several availabilit
   is therefore not adopted.
 - paros's grid cannot express zone survival either: rows and columns are positional over sorted
   ids, and with column = zone a zone loss kills every row, with row = zone it kills every column.
-  The grid stays the opt-in throughput mode (section 3.4), with its cost (one dead acceptor
-  freezes its column until reconfiguration) stated to the tenant that picks it; the redundancy
-  modes are the zone-surviving default.
+  The grid stays the opt-in throughput layout (section 3.4, `partitions` above 1 until #532
+  (acceptor partitions)), with its cost (one dead acceptor freezes its column until
+  reconfiguration) stated to the tenant that picks it; one acceptor partition is the
+  zone-surviving default.
 - What is adopted (decided on 2026-10-07, #215), detailed below: failure domains inside
   `AcceptorConfig`, a placement rule judged through `QuorumSystem` and never a count, the leader
   following its writer through `relinquish_to` (WPaxos's steal without a Phase 1, section 3.4),
@@ -1827,12 +1868,13 @@ The rule is valid for `Majority`, `Flexible` and `Grid` alike. It is one pure fu
 
 **The shape of a regional cell.** A regional cell spans at least three zones (section 3.7). Its
 minimum production shape is two `storage` machines and one `stateless` machine per zone, nine
-machines: `triple` needs five acceptors on five distinct machines and survives a zone only when
-spread 2/2/1.
+machines: `failures-per-partition=2` needs five acceptors on five distinct machines and survives
+a zone only when spread 2/2/1.
 
-- **Acceptors**: `triple` 2/2/1, the lone acceptor preferably in the zone that writes least (a
-  later reconfiguration adjusts it); `double` 1/1/1; `single` none (section 3.4); the grid is
-  unchanged and outside the rule, the risk its tenant states when it picks it (section 3.4).
+- **Acceptors**: `failures-per-partition=2` 2/2/1, the lone acceptor preferably in the zone that
+  writes least (a later reconfiguration adjusts it); `failures-per-partition=1` 1/1/1;
+  `failures-per-partition=0` none (section 3.4); the grid (`partitions` above 1) is unchanged and
+  outside the rule, the risk its tenant states when it picks it (section 3.4).
 - **Matchmakers**: 1/1/1 or 2/2/1, majorities only; a tenant's matchmaker preferably never
   shares a machine with its acceptors, while capacity permits.
 - **Stateless roles**: once a tenant's pool has three instances, at least one frontend and one
@@ -1840,7 +1882,7 @@ spread 2/2/1.
   surviving zone after a zone loss.
 - **Replicas** spread over the zones, and a `Read` goes to the replica in the reader's zone.
 
-**The degraded trap.** After the loss of a zone that held two of a `triple` journal's acceptors,
+**The degraded trap.** After the loss of a zone that held two of a `failures-per-partition=2` journal's acceptors,
 three of five remain with zero slack, and the zone rule cannot be met again over two zones. The
 coordinator waits out the re-placement bound (section 3.2), the journal shows `Degraded`
 (section 3.6), and it is never re-placed into two zones; it is re-placed into a fourth zone only
@@ -1867,7 +1909,7 @@ new capacity and moves wait.
 
 **Multi-region cells** (M12, decided on 2026-10-07, #253; M13 folded into M12 on 2026-10-09). Failure domains are two-level,
 `(region, az)`: in a regional cell every member shares one region and the rule runs over AZs; in a
-multi-region cell it runs at both levels. A `triple` journal is placed 2/2/1 over the
+multi-region cell it runs at both levels. A `failures-per-partition=2` journal is placed 2/2/1 over the
 three regions, its lone acceptor in the witness region, and each region's acceptors of one
 journal sit in distinct AZs. The rule: for every region `r`, both quorums hold on `M` minus `r`;
 for every AZ `a`, both hold on `M` minus `a`; and no region alone holds a Phase-2 quorum.
@@ -2058,7 +2100,7 @@ AGENTS.md.
   layer: `parosctl --owner` becomes `--leader`, and the chain workload's alphabet, the
   linearizability model and the audit follow. The single-writer half (PR #281), the writer mode
   (PR #296), the batch limits and the read limits landed (#241 is done); `parosctl journal
-  create --mode` landed with #210.
+  create --mode` landed with #210 and became `--writers` with #523.
 - Landed (#210): the directory is gone. Every hosted tenant has its own control journal: its
   identifier is drawn with the tenant, recorded in the universe directory and in the cell's
   `HostTenant` (with the tenant's name and `survives`), and it is born on the founding members,
@@ -2091,8 +2133,8 @@ toy is the end of M9. The epic is #184, the backlog pointer #69, the verificatio
 | M7 | Journal API (#204, #205) | the four calls, the journal state machine in core, the wire and the driver, the chain workload's alphabet, the linearizability checker, the race knobs and BUGGIFY sites, the cut-over |
 | M8 | parosd deployable (#206 to #209, #221, #220, #196, #201) | Tokio providers linked, the stores on a real filesystem for the first time, the `JournalStores` opener, `Config` durable at `format`, `parosd provision` (replaced by `init` in M9), the uniform binary with class and capacity, Compose, `paros::client` (#221) and the `parosctl` CLI (#220), a tracing subscriber, exit codes |
 | M9 | The universe with one cell (#225, #226, #227 first; landed: #216 (PR #408), #192 (PR #412), #210 (PR #347), #211 (PR #352, PR #388), #239 (PR #464), #191, #390, #404, #228, #235, #229, #230, #176, #261, #263, #264 (PR #266), #267, #202, #213, #246, #247, #241, #243, #244, #240, #190, #212 (placement function and bookings), #474 (PR #499), #501, #257; still to do: #248, #475, #476, #477, #245, #252) | the control hierarchy and its decisions, the fenced `Truncate` on the wire, random ids and the `(TenantId, JournalId)` `JournalIdentifier`, the leader-uuid API and its two writer modes, `init` creating the universe with its matchmaker sets, the cell tenant and its machine registry with role slots and liveness, the universe tenant with its directory and tenant creation state machine, the election library and the coordinators it runs, requests to a leader, placement inside capacity granted by the cell, the checkpoint-and-truncate library, names at the frontend, the frontend with Biscuit `Authz` routing through the universe tenant, per-tenant matchmaker sets, `parosctl status` |
-| M10 | Roles per tenant (#193, #214, #194, #145, #195) | journal-tagged proxy leaders and replicas, batchers and unbatchers for multi-writer journals, tenant modes (redundancy, grid, role counts) applied by the tenant coordinator, quotas, the benchmark, then scale work |
-| M11 | Zones (#215) | `(region, az)` `FailureDomain`s in `AcceptorConfig` with its `cell_id` (one format bump), the two-predicate zone rule, zone round-robin placement, the `single` exemption, the leader following its writer's zone, zone-kill attrition and a zone-aware budget in the simulation, zone-spread matchmaker sets |
+| M10 | Roles per tenant (#193, #214, #194, #145, #195) | journal-tagged proxy leaders and replicas, batchers and unbatchers for multi-writer journals, tenant modes (durability, role counts) applied by the tenant coordinator, quotas, the benchmark, then scale work |
+| M11 | Zones (#215) | `(region, az)` `FailureDomain`s in `AcceptorConfig` with its `cell_id` (one format bump), the two-predicate zone rule, zone round-robin placement, the `failures-per-partition=0` exemption, the leader following its writer's zone, zone-kill attrition and a zone-aware budget in the simulation, zone-spread matchmaker sets |
 | M12 | Multiple cells (#232, #233, then #253) | adding and removing cells with tombstones, placement across cells by `kind` and `survives` (both carried since M9 with the cell's entry endpoint), tenant locks, moving tenants and the universe tenant between cells, splitting the universe tenant by range, the resolver beside the frontend (section 3.5); last, multi-region cells: the `MultiRegion` cell kind with its witness region, the two-level zone rule, pools per `(tenant, region)`, the universe tenant hosted in a multi-region cell, the partition through the witness in the simulation, moving tenants between cell kinds |
 | M13 | Upgrades and network compatibility (#363) | decided on 2026-10-10: a very late milestone. A wire version in the RPC handshake, a cell-wide active version in the cell control journal, features that turn on only when every machine supports them, rolling upgrades one machine at a time, a downgrade by one version, mixed-version cells in the simulation. This M13 is new: the earlier M13 (multi-region cells) went into M12 on 2026-10-09 |
 
@@ -2110,8 +2152,9 @@ The Compose toy is the user's demo, for running paros by hand, and is no part of
 simulation. Its machines are plain nodes (`node1`..`node3` over three failure domains, `storage4`,
 `stateless1`); `parosctl init --members` founds the cell on the first three, and an admin
 admits the others with `cell add-machine`. Its journals run
-`double`: four `storage` machines cannot hold `triple`'s five acceptors on distinct machines, so
-the toy cannot run `triple` (decided on 2026-10-07, #215).
+`failures-per-partition=1`: four `storage` machines cannot hold the five acceptors of
+`failures-per-partition=2` on distinct machines, so the toy cannot run it (decided on 2026-10-07,
+#215).
 
 From a fresh clone: `docker compose up`, then `parosctl init` against `node1`, which creates the
 universe, its one cell and the universe tenant. Generate a root key and mint an `admin` token offline with `parosctl`, then create a tenant and

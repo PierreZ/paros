@@ -379,7 +379,7 @@ mod tests {
             id: JournalId(id),
             name: name.to_vec(),
             writer: WriterMode::Single,
-            desired: Desired::DOUBLE,
+            desired: Desired::DEFAULT,
             config: AcceptorConfig::new(vec![NodeId(1)], QuorumSystem::Majority),
         }
         .encode()
