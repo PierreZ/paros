@@ -101,7 +101,6 @@ pub(super) async fn run_acceptor(
     // seed's draw schedule keeps its order.
     let RoleRig {
         incarnation,
-        checker: _,
         audit: _,
     } = arm_role(ctx, my_ip);
     // The seed's scenarios decide the driver's named BUGGIFY locations
@@ -112,6 +111,15 @@ pub(super) async fn run_acceptor(
     crate::shape::lagging_fold(ctx.state());
     crate::shape::handoff_storm(ctx.state());
     let shape = incarnation.shape;
+    // A node in the middle of a rolling change of the proxy count (#193):
+    // it counts fewer proxies than the deployment has, in every journal.
+    let config = Config {
+        proxy_count: shape.lagged_proxy_count(config.proxy_count),
+        ..config
+    };
+    if config.proxy_count < proxies.len() {
+        assert_reachable!("proxy: a node counts fewer proxies than the deployment");
+    }
     // The copy budget is sized by the run's configuration floor
     // (`crate::shape::config_floor`): the whole pool on a plain seed, the
     // smallest set a reconfiguration may shrink to on a matchmaker seed —
@@ -128,39 +136,13 @@ pub(super) async fn run_acceptor(
     // its own. The default journal is the seed's deployment (its
     // matchmakers, proxies, replicas and bootstrap); on a matchmaker seed
     // every other journal names the matchmakers too (#190), on a plain seed
-    // it is plain Multi-Paxos over the whole pool — the proxy leaders and
-    // the replica tier each serve one journal.
+    // it is plain Multi-Paxos over the whole pool, and the proxy leaders and
+    // the replica tier serve every journal (#193, `super::journal_config`).
     let mut seats: Vec<Seat> = plan
         .ids
         .iter()
         .map(|&journal| {
-            let config = if journal == plan.main {
-                config.clone()
-            } else if config.has_matchmakers() {
-                // A matchmaker seed (#190): every journal names the
-                // matchmakers, one set per tenant and one registry per
-                // journal; the proxy leaders and the replica tier still
-                // serve the main journal alone.
-                Config {
-                    journal,
-                    proxy_count: 0,
-                    replica_count: 0,
-                    writer_mode: plan.mode(journal),
-                    ..config.clone()
-                }
-            } else {
-                Config {
-                    journal,
-                    peers: config.pool().to_vec(),
-                    quorum_system: policy.system(config.pool().len()),
-                    matchmakers: Vec::new(),
-                    matchmaker_pool: Vec::new(),
-                    proxy_count: 0,
-                    replica_count: 0,
-                    writer_mode: plan.mode(journal),
-                    ..config.clone()
-                }
-            };
+            let config = super::journal_config(&config, policy, &plan, journal);
             let floor = crate::shape::config_floor(config.pool().len(), config.has_matchmakers());
             let clean_copies = policy.clean_copies(floor, config.pool().len());
             let world = storage_world_for(ctx.state(), journal);

@@ -18,9 +18,9 @@
 //! The id is never folded into a command fingerprint instead: that would
 //! protect only `Accepted`'s vhash, while `Prepare`, `Promise`, `Commit`,
 //! `Heartbeat` and catch-up would still cross journals. The matchmaker
-//! plane, the proxy leaders and the replica tier serve one journal each —
-//! the node's first user journal (asserted at boot); every other journal is
-//! plain Multi-Paxos over the whole pool.
+//! plane, the proxy leaders and the replica tier are shared processes too
+//! (#190, #193): each journal's `Config` names them or not, and they demux
+//! on the same identifier.
 
 use std::collections::{BTreeMap, BTreeSet};
 
