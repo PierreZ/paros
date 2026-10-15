@@ -1358,7 +1358,6 @@ fn reach(stage: Stage) {
     match stage {
         Stage::FormFleet => assert_reachable!("fleet: a step forms the fleet in the directory"),
         Stage::AddCell => assert_reachable!("fleet: a step adds the cell to the directory"),
-        Stage::JoinFleet => assert_reachable!("fleet: a step joins the cell to the fleet"),
         Stage::CellReady => {
             assert_reachable!("fleet: a step marks the cell READY in the directory");
         }

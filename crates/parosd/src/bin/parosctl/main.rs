@@ -177,9 +177,10 @@ impl Global {
 #[derive(Subcommand, Debug)]
 enum Command {
     /// Form the cell over its founding members with `cell init`'s decree
-    /// (#196, #216, #277); then `init` claims the cell control journal under a
-    /// leader uuid of its own, and the fleet steps register the cell in the fleet directory
-    /// (#229). Refused on an initialized fleet; a re-run resumes.
+    /// (#196, #216, #277); then the fleet steps register the cell in the fleet
+    /// directory (#229), and `init` reads the cell control journal and waits
+    /// for the cell coordinator to join the cell (#513). Refused on an
+    /// initialized fleet; a re-run resumes.
     Init(init::InitArgs),
     /// Cells (#216, #399): `cell list`, `cell show [<cell>]`, and `cell
     /// add-machine <addr>`, which admits an idle machine into the cell of
