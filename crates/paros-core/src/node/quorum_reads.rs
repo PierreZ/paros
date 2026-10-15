@@ -109,7 +109,8 @@ impl ColocatedNode {
         // A grid reads one row; a majority or a flexible split the whole
         // membership (#269).
         assert!(
-            row.is_some() == matches!(basis.config.quorum_system(), QuorumSystem::Grid { .. }),
+            row.is_some()
+                == matches!(basis.config.quorum_system(), QuorumSystem::Grid { rows, acks, .. } if acks == rows),
             "a read names a row exactly under a grid"
         );
         let own = basis

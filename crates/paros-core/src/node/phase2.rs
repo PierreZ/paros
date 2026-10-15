@@ -438,4 +438,54 @@ impl ColocatedNode {
         self.send_accept(slot, ballot, command, column, None);
         self.try_decide(slot);
     }
+
+    /// Move the leader's colocated round at `slot` to `column` (#533 (move a
+    /// stuck round)) and fan its `Accept` out there: the same ballot and
+    /// command, the tally started again in the new column with this node's
+    /// own accept when it is a member of that column. Whether it moved.
+    pub(super) fn move_round_to(&mut self, slot: Slot, column: usize) -> bool {
+        assert!(self.role == NodeRole::Leader, "only a leader moves a round");
+        let Some(round) = self.proposer.rounds().get(&slot) else {
+            return false;
+        };
+        if round.proxy().is_some() || round.column() == Some(column) {
+            return false;
+        }
+        let (ballot, command) = (round.ballot(), round.command().clone());
+        assert!(
+            ballot == self.ballot,
+            "a leader's in-flight rounds all run at its own ballot"
+        );
+        // Slots are independent: no acceptor needs slot N before it accepts
+        // slot N + 1, so the new column needs no backfill below the slot.
+        // The round itself is still open and above the floor.
+        assert!(
+            slot >= self.acceptor.first_slot(),
+            "a moved round lies above the compaction floor"
+        );
+        // A round can outlive its slot's choice for a moment (a `Commit` or
+        // a catch-up taught the replica first): nothing is left to move.
+        if self.replica.is_chosen(slot) {
+            probe!(
+                reachable,
+                "phase2: a stuck round whose slot is chosen elsewhere is not moved"
+            );
+            return false;
+        }
+        let recorded = self.record_own_round(slot, ballot, &command);
+        let own_vote = self.own_vote(recorded, Some(column));
+        if !self
+            .proposer
+            .move_round(&self.acceptors, slot, Some(column), own_vote)
+        {
+            return false;
+        }
+        probe!(
+            reachable,
+            "phase2: a leader moves a stuck round to another column"
+        );
+        self.send_accept(slot, ballot, command, Some(column), None);
+        self.try_decide(slot);
+        true
+    }
 }

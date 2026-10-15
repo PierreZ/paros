@@ -32,21 +32,28 @@ pub(crate) fn config_hash(config: &AcceptorConfig) -> u64 {
             bytes.extend_from_slice(&(q1 as u64).to_le_bytes());
             bytes.extend_from_slice(&(q2 as u64).to_le_bytes());
         }
-        paros_core::QuorumSystem::Grid { rows, cols } => {
-            bytes.push(2_u8);
+        paros_core::QuorumSystem::Grid { rows, cols, acks } => {
+            // A full-column grid keeps its tag; a column that decides on
+            // fewer than all its acceptors folds its ack count too (#532
+            // (acceptor partitions)).
+            bytes.push(if acks == rows { 2_u8 } else { 3_u8 });
             bytes.extend_from_slice(&(rows as u64).to_le_bytes());
             bytes.extend_from_slice(&(cols as u64).to_le_bytes());
+            if acks != rows {
+                bytes.extend_from_slice(&(acks as u64).to_le_bytes());
+            }
         }
     }
     // The encoding is the length word, one word per member and a tag that
-    // carries either nothing or two size words: nothing else is folded.
+    // carries nothing, two size words, or three (a grid's ack count):
+    // nothing else is folded.
     let header = 8 * (1 + config.members().len());
     assert!(
         bytes.len() > header,
         "a configuration digest folds its quorum tag"
     );
     assert!(
-        bytes.len() == header + 1 || bytes.len() == header + 17,
+        bytes.len() == header + 1 || bytes.len() == header + 17 || bytes.len() == header + 25,
         "a quorum tag carries nothing or two size words"
     );
     value_hash(&bytes)

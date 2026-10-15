@@ -766,6 +766,6 @@ pub fn quorum_name(system: paros_core::QuorumSystem) -> String {
     match system {
         paros_core::QuorumSystem::Majority => "majority".to_string(),
         paros_core::QuorumSystem::Flexible { q1, q2 } => format!("flexible q1={q1} q2={q2}"),
-        paros_core::QuorumSystem::Grid { rows, cols } => format!("grid {rows}x{cols}"),
+        paros_core::QuorumSystem::Grid { rows, cols, .. } => format!("grid {rows}x{cols}"),
     }
 }

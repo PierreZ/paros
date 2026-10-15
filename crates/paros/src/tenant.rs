@@ -168,9 +168,9 @@ pub const MAX_FAILURES_PER_PARTITION: u32 = 3;
 /// Each acceptor partition has `2F+1` acceptors, so the journal survives any
 /// `F` failures, and up to `F` per partition when they are spread. One
 /// partition is the plain majority. With more than one, each slot goes to
-/// one partition; until #532 (acceptor partitions) brings the majority per
-/// partition, that layout is the acceptor grid with one column per partition
-/// ([`Durability::quorum_system`]).
+/// one partition and is chosen by a majority of it; an election and a tail
+/// read need a majority of every partition (#532 (acceptor partitions),
+/// [`Durability::quorum_system`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Durability {
     /// `F`: the failures each acceptor partition survives, `0..=3`.
@@ -219,17 +219,17 @@ impl Durability {
     }
 
     /// The quorum system over its acceptors: a majority for one partition,
-    /// else the acceptor grid with one column per partition (each slot's
-    /// Phase 2 goes to one column) until #532 (acceptor partitions).
+    /// else the acceptor partitions (#532 (acceptor partitions)): each
+    /// slot's Phase 2 goes to one partition and a majority of it chooses.
     #[must_use]
     pub fn quorum_system(self) -> QuorumSystem {
         if self.partitions == 1 {
             QuorumSystem::Majority
         } else {
-            QuorumSystem::Grid {
-                rows: self.acceptors_per_partition(),
-                cols: self.partitions as usize,
-            }
+            QuorumSystem::partitions(
+                self.failures_per_partition as usize,
+                self.partitions as usize,
+            )
         }
     }
 
@@ -1245,7 +1245,11 @@ mod tests {
         );
         assert_eq!(
             spread.quorum_system(),
-            QuorumSystem::Grid { rows: 3, cols: 3 }
+            QuorumSystem::Grid {
+                rows: 3,
+                cols: 3,
+                acks: 2
+            }
         );
         assert_eq!(Durability::DEFAULT.quorum_system(), QuorumSystem::Majority);
         let lone = Durability::new(0, 1).expect("a durability");

@@ -98,7 +98,7 @@ const N6: NodeId = NodeId(6);
 
 /// Two rows of three: rows `{1, 2, 3}` and `{4, 5, 6}`, columns `{1, 4}`,
 /// `{2, 5}` and `{3, 6}`.
-const GRID: QuorumSystem = QuorumSystem::Grid { rows: 2, cols: 3 };
+const GRID: QuorumSystem = QuorumSystem::grid(2, 3);
 
 fn ballot(round: u64, node: NodeId) -> Ballot {
     Ballot { round, node }
@@ -730,7 +730,7 @@ fn main() {
     let config = config();
     assert!(config.is_well_formed(), "2 × 3 tiles six acceptors");
     assert!(
-        !QuorumSystem::Grid { rows: 2, cols: 3 }.admits(5),
+        !QuorumSystem::grid(2, 3).admits(5),
         "2 × 3 does not tile five: unconstructible"
     );
     let mut cluster: Vec<Node> = everyone().into_iter().map(Node::new).collect();

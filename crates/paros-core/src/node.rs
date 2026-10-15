@@ -31,7 +31,7 @@ use crate::collector::Collector;
 pub use crate::collector::GcStep;
 use crate::matchmaker::{GcRequest, MatchRequest};
 use crate::matchmaking::{Matchmaking, MembershipProbe};
-use crate::membership::{AcceptorConfig, MatchmakerId, MatchmakerSet, ProxyId};
+use crate::membership::{AcceptorConfig, MatchmakerId, MatchmakerSet, ProxyId, QuorumSystem};
 use crate::message::{Audience, Message, Party};
 use crate::proposer::{Proposer, Round};
 use crate::quorum_read::{QuorumReads, ReadBasis};
@@ -1165,6 +1165,57 @@ impl ColocatedNode {
         );
         self.assert_invariants();
         taken
+    }
+
+    /// **Move a stuck round to another column** (#533 (move a stuck round)):
+    /// the leader's open, colocated Phase-2 round at `slot` is addressed from
+    /// here on to `column` of the grid in force — the same slot, ballot and
+    /// command — and its tally counts only the new column's accepts. Returns
+    /// whether it moved: `false` on a node that is not the leader, under a
+    /// majority or a flexible split (no column), with no round open at
+    /// `slot`, for a delegated round (its votes are the proxy's; take it
+    /// back first), or when the round already runs in `column`.
+    ///
+    /// **The driver calls this** for a round that stayed open for its own
+    /// budget of re-sends ([`Round::resends`]): a column that cannot reach
+    /// its quorum (one acceptor of a full-column grid down, a majority of a
+    /// partition down) otherwise holds its slots, and the apply walk stalls
+    /// behind the first one. Which column, and when, is driver policy.
+    ///
+    /// **Always safe**, like the column override of
+    /// [`ColocatedNode::propose_in`]: inside one ballot a slot has one value,
+    /// so the votes left in the old column are harmless; every column is a
+    /// Phase-2 quorum group and every Phase-1 quorum meets every column's
+    /// Phase-2 quorum, so a later election finds the value or proves it was
+    /// not chosen. Slots are independent, so the new column needs no
+    /// backfill.
+    ///
+    /// # Panics
+    ///
+    /// If `column` is not a column of the grid in force — the driver derives
+    /// it from [`ColocatedNode::acceptors`], so this is a programmer error —
+    /// or an internal invariant is broken.
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, slot = slot.0, column)))]
+    pub fn move_round(&mut self, slot: Slot, column: usize) -> bool {
+        if self.role != NodeRole::Leader {
+            return false;
+        }
+        let QuorumSystem::Grid { cols, .. } = self.acceptors.quorum_system() else {
+            return false;
+        };
+        assert!(column < cols, "a round moves to a column of the grid");
+        let marks = self.durable_marks();
+        let moved = self.move_round_to(slot, column);
+        // A moved round runs in its new column, or it decided at once.
+        if moved && let Some(round) = self.proposer.rounds().get(&slot) {
+            assert!(
+                round.column() == Some(column),
+                "a moved round runs in its new column"
+            );
+        }
+        self.assert_marks_monotone(marks);
+        self.assert_invariants();
+        moved
     }
 
     /// The slots this leader currently holds **delegated** to a proxy, with

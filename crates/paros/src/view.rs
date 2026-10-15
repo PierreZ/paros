@@ -147,9 +147,10 @@ impl CellFacts<'_> {
             .bookings()
             .filter(|(_, booking)| booking.node == id)
             .map(|(booking, b)| {
-                let (journal, set) = match b.target {
-                    crate::system::BookingTarget::Journal(journal) => (journal.journal.0, 0),
-                    crate::system::BookingTarget::Set { set, .. } => (0, set),
+                let (journal, set, tenant_level) = match b.target {
+                    crate::system::BookingTarget::Journal(journal) => (journal.journal.0, 0, false),
+                    crate::system::BookingTarget::Set { set, .. } => (0, set, false),
+                    crate::system::BookingTarget::Tenant { .. } => (0, 0, true),
                 };
                 wire::BookingView {
                     booking,
@@ -157,6 +158,7 @@ impl CellFacts<'_> {
                     tenant: b.target.tenant().0,
                     journal,
                     set,
+                    tenant_level,
                 }
             })
             .collect();

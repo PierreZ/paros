@@ -23,12 +23,22 @@ use super::transport::{Outbound, send_messages};
 /// The client replies this node is holding open: the journal calls that
 /// wait on their slot's verdict (#204), and the journal reads that wait on
 /// their quorum read or at the tail.
-#[derive(Default)]
 pub(crate) struct ClientWaiters {
     /// The calls proposed at each slot, answered once it applies.
     pub(crate) pending: BTreeMap<Slot, Vec<Call>>,
     /// Journal reads (#204).
     pub(crate) reads: super::log_reads::JournalReads,
+}
+
+impl ClientWaiters {
+    /// No call and no read waiting; the first read opens at `first_read_ctx`
+    /// (drawn at random per runtime, [`super::log_reads::JournalReads`]).
+    pub(crate) fn new(first_read_ctx: u64) -> Self {
+        Self {
+            pending: BTreeMap::new(),
+            reads: super::log_reads::JournalReads::starting_at(first_read_ctx),
+        }
+    }
 }
 
 /// The last slot of the node's journal fold — what a read is served from.

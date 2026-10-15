@@ -131,6 +131,10 @@ impl FleetOps {
         };
         self.send_journal_request(ctx, &cell, control, request, (payload, policy))
             .await;
+        // A tenant coordinator's capacity request (#476), as the operator.
+        if buggify_with_prob!(0.3) {
+            self.ask_capacity(ctx, &cell, tenant).await;
+        }
         // The drained-machine scenario (#474 (journals on admitted
         // machines)) drains right after a create, when a journal may sit on
         // an admitted machine.
