@@ -1157,6 +1157,10 @@ pub const RARE: &[Rare] = &[
         msg: "gc: an operator probes the members' beliefs before a retirement",
         reason: "missed by the sweep of PR #510 (whole-run chaos): it needs an effective GC floor at a retirement step, rarer under whole-run chaos (#454 (control plane meets chaos), #486)",
     },
+    Rare {
+        msg: "coordinator: a settled set left its booked machines",
+        reason: "fired on 0 of 300 hunt seeds, and on a witness the sweep's exploration found (PR #555 (fix main's red sweep, part 2)): a set's handover asked again (11 of 300) must be abandoned frozen and finished by another node whose stop quorum misses a member (#501 (matchmaker sets off the founders), #486)",
+    },
 ];
 
 /// What the sweep ran of the declared gates.

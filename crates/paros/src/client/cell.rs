@@ -244,7 +244,10 @@ impl CellSession {
     /// One step of admitting the machine at `target` (#216), dialed through
     /// `names`. Ends with the machine's id once it answers `Identify` with
     /// this cell. The registration carries the address the machine
-    /// advertises (#257), which may differ from `target`.
+    /// advertises (#257), which may differ from `target`. It reports
+    /// [`Stage::Admit`] only when the machine recorded the admission on this
+    /// step's `Admit`; a machine already in the cell acks it with nothing
+    /// recorded, and the step ends with no stage.
     ///
     /// # Panics
     ///
@@ -341,6 +344,19 @@ impl CellSession {
                 Step::Done {
                     result: node,
                     last: Some(Stage::Admit),
+                }
+            }
+            // Admitted between this step's `Identify` and its `Admit`, by
+            // another operator or by this one's earlier `Admit` whose answer
+            // was lost: this step recorded nothing, so it reports no stage.
+            // Only an idle machine checks the token, so the stage it would
+            // report is one a pinned machine refused this token for (#245
+            // (Biscuit tokens); hunt seed 13248167694958944547 on e0e605a).
+            AdmitOutcome::InCell => {
+                self.record_admission(client, first, node).await;
+                Step::Done {
+                    result: node,
+                    last: None,
                 }
             }
             AdmitOutcome::Refused(label) => admit_refused(&label, node, target),
@@ -591,7 +607,7 @@ impl CellSession {
                 timeout
             )
             .await,
-            AdmitOutcome::Admitted
+            AdmitOutcome::Admitted | AdmitOutcome::InCell
         )
     }
 

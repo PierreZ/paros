@@ -224,7 +224,11 @@ pub struct DriverTunables {
     /// `(slot, ballot, command)` are P2b-idempotent), it merely runs more of
     /// the log colocated; the ceiling is unbounded and still winnable, a
     /// round a dead proxy holds forever being recovered by the next
-    /// leadership's Phase 1. Meaningless on a deployment without proxies.
+    /// leadership's Phase 1. A client is answered only once its round is
+    /// decided, so its deadline must outlast this budget's wall clock plus
+    /// two round trips: below that, every write whose proxy a needed
+    /// acceptor drops ends ambiguous. Meaningless on a deployment without
+    /// proxies.
     pub proxy_take_back_resends: u64,
     /// How many times a proxy leader may re-fan-out an open round (once per
     /// beat, by `ProxyLeader::resend_pending`) without an answer before it
