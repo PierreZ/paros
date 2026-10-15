@@ -660,7 +660,7 @@ fold stops, and nothing booked on it can start. The coordinator heals it in its 
   members all moved (PR #503's `stranded_ids` is gone). The gates are a coordinator that hands
   a stuck machine the book again and a machine that adopts it.
 
-#506 (renamed founder not registered) added the same hold to its candidacy for the cell
+#506 (renamed founder not registered) added the #390 hold to a moved founding member's candidacy for the cell
 coordinator (`machine/coordinator.rs`). Unregistered, such a member read the election through its
 own node, whose reads never confirm. A term it won kept a stale view for many seconds, and each
 of its claims fenced the terms its peers won. No term then answered `Register` for about 25 s
