@@ -46,6 +46,10 @@ pub struct Rare {
 /// window seldom reaches, #485 the double fault, #486 the rest.
 pub const RARE: &[Rare] = &[
     Rare {
+        msg: "a replica serves a read before its next apply page",
+        reason: "rare: fired on 0 of 440 hunt seeds with the lagging-replica scenario; a run decides a dozen slots, so a read seldom lands while a rebooted replica pages its backlog (#550 (replica serves an unreported fold page), #486)",
+    },
+    Rare {
         msg: "driver: an admitted machine dials a seed from an adopted book",
         reason: "marginal: needs an admitted machine whose founding members all moved (#505 (stranded admitted machine)); fired in main's sweep of 309 seeds at 8efe714, missed by PR #547's sweep of 232 (#486)",
     },

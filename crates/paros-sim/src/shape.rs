@@ -718,6 +718,9 @@ struct Registry {
     /// Run-level: whether the run draws the split-floor scenario (see
     /// [`split_floor`]), fixed by the first caller.
     split_floor: Option<bool>,
+    /// Run-level: whether the run draws the lagging-replica scenario (see
+    /// [`lagging_replica`]), fixed by the first caller.
+    lagging_replica: Option<bool>,
     /// Run-level: whether the run runs the system journals (see
     /// [`system_journals`]), fixed by the first caller.
     system: Option<bool>,
@@ -1354,6 +1357,44 @@ pub(crate) fn split_floor(state: &StateHandle) -> bool {
         }
         split
     })
+}
+
+/// Whether the run draws the **lagging-replica scenario** (#550 (replica
+/// serves an unreported fold page)): drawn once per seed, its own BUGGIFY
+/// location. A replica serves a read from its fold, and the fold must never
+/// pass what the replica reported. The order only matters when a catch-up
+/// backlog spans several apply pages and a read is confirmed in the batch
+/// that ends a page: a replica rebooted behind the cell, with a small apply
+/// page. Attrition brings a replica back fast and the apply page is small on
+/// few seeds: 1 red in 1,000 hunt seeds, with a local amplification. On a
+/// scenario seed `crate::world::lagging_replica` holds one replica down
+/// until the cell decided `lagging_replica::AHEAD` slots past its prefix,
+/// and every replica walks a small apply page ([`replica_apply_page`]).
+/// Each ingredient keeps its own coin on the other seeds. Rare-but-valid: a
+/// slow replica is, and so is a small page.
+#[tracing::instrument(level = "debug", skip_all)]
+pub(crate) fn lagging_replica(state: &StateHandle) -> bool {
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    *guard.lagging_replica.get_or_insert_with(|| {
+        let lagging = moonpool_sim::buggify_with_prob!(1.0);
+        if lagging {
+            assert_reachable!("a run draws the lagging-replica scenario");
+        }
+        lagging
+    })
+}
+
+/// The apply page a replica walks (#550 (replica serves an unreported fold
+/// page)): the node's drawn one, or on a lagging-replica seed a page of one
+/// or two slots (inside the knob's extreme), so the replica's catch-up spans
+/// several pages of a short journal. Floor 1, as the knob's.
+pub(crate) fn replica_apply_page(state: &StateHandle, drawn: usize) -> usize {
+    if !lagging_replica(state) {
+        return drawn;
+    }
+    let small = usize::try_from(moonpool_sim::sim_random_range(1_u64..3_u64)).unwrap_or(1);
+    drawn.min(small).max(1)
 }
 
 /// The fewest blocks a segment's entry log may have (floor of

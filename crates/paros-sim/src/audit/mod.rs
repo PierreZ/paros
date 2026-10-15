@@ -1194,6 +1194,27 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             "journal read: a served state never passes the applied journal",
             { "node" => node.0, "next_seq" => report.state.next_seq.0 }
         );
+        // A node or a replica serves only the fold it reported (#550
+        // (replica serves an unreported fold page)): the batch that holds
+        // the last position of the served state is one its walk reported,
+        // or one its boot or a trim-point jump landed past. Released early,
+        // the next apply page folds before its writes and its report; a
+        // server behind the cell then serves slots the others reported but
+        // it did not, which the journal-wide check above cannot see.
+        if let Some(last) = report.state.next_seq.0.checked_sub(1)
+            && let Some(slot) = st.journal.slot_holding(last)
+        {
+            let reported = st.applied_max.get(&node.0).copied();
+            assert_always!(
+                reported.is_some_and(|max| slot <= max),
+                "journal read: a server serves only the fold it reported",
+                {
+                    "node" => node.0,
+                    "slot" => slot,
+                    "reported" => reported.map_or(-1, |max| i64::try_from(max).unwrap_or(i64::MAX))
+                }
+            );
+        }
         // Every record is the one accepted at its position.
         for (position, record) in (from..).zip(report.records) {
             if let Some(known) = st.journal.record_at(position) {
