@@ -841,8 +841,11 @@ impl<P: Providers> Client<P> {
         led_from: Option<u64>,
     ) -> ResolveReport {
         let mut server = first;
-        for _ in 0..self.tunables.retry_budget.max(1) {
-            if let Some(resolution) = self.read_back(request, server, led_from).await {
+        for attempt in 0..self.tunables.retry_budget.max(1) {
+            if let Some(resolution) = self
+                .read_back(request, server, led_from, attempt == 0)
+                .await
+            {
                 return ResolveReport {
                     resolution,
                     by_read_back: true,
@@ -931,34 +934,42 @@ impl<P: Providers> Client<P> {
     ///
     /// Both proofs rest on fresh uuids, the precondition the journal
     /// already trusts its clients with (`docs/architecture.md` §2.3).
+    ///
+    /// The first read-back walks the server list ([`Client::read_any`]); a
+    /// later one, before each further re-send, asks `first` alone within
+    /// `read_timeout`, so the read-backs add at most one read timeout per
+    /// re-send to a resolve.
     async fn read_back(
         &self,
         request: &Write,
         first: usize,
         led_from: Option<u64>,
+        whole: bool,
     ) -> Option<Resolution> {
         let count = request.records.len() as u64;
         let leader = leader_uuid_from_proto(request.leader);
-        let back = self
-            .read_any(
-                &Read {
-                    journal: request.journal,
-                    tenant: request.tenant,
-                    from_seq: request.seq,
-                    limit: count.max(1),
-                    wait_ms: 0,
-                },
-                first,
-            )
-            .await;
-        let state = back.outcome.state()?;
+        let read = Read {
+            journal: request.journal,
+            tenant: request.tenant,
+            from_seq: request.seq,
+            limit: count.max(1),
+            wait_ms: 0,
+        };
+        let back = if whole {
+            self.read_any(&read, first).await.outcome
+        } else {
+            let attempt = self.read_attempt(first % self.servers.len(), read);
+            self.bounded(self.tunables.read_timeout, ReadOutcome::Ambiguous, attempt)
+                .await
+        };
+        let state = back.state()?;
         if state.first_seq.0 > request.seq {
             return Some(Resolution::Truncated { state });
         }
         if state.next_seq.0 <= request.seq && state.leader != Some(leader) {
             return Some(Resolution::NotWritten { state });
         }
-        if let ReadOutcome::Page { from, records, .. } = &back.outcome
+        if let ReadOutcome::Page { from, records, .. } = &back
             && count > 0
             && led_from.is_some_and(|from| from <= request.seq)
             && *from == request.seq
