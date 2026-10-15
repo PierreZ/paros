@@ -596,6 +596,9 @@ impl FleetSession {
             name: entry.name.clone(),
             survives: entry.survives,
         };
+        if let Err(stop) = self.look_before_claim(client, first, tenant).await {
+            return Step::Interrupted(stop);
+        }
         if let Err(stop) = self.cell_of(client, first, fleet, cell_id).await {
             return stop;
         }
@@ -1017,6 +1020,31 @@ impl FleetSession {
         Ok(())
     }
 
+    /// Look at the cell before a creation claims it (#513 (fleet Init
+    /// duel)): a creation that can only wait for its founders writes
+    /// nothing, so it must not fence the cell coordinator, the one writer
+    /// that registers them. A claim per resume fenced each new term before
+    /// it could, a livelock (witness seed 10781271886209970645 on PR #567
+    /// (observability)). A no-op while the session holds the cell.
+    async fn look_before_claim<P: Providers>(
+        &mut self,
+        client: &Client<P>,
+        first: usize,
+        tenant: TenantId,
+    ) -> Result<(), Interrupted> {
+        if self.cell_open {
+            return Ok(());
+        }
+        self.look_cell(client, first).await?;
+        if waits_on_founders(self.cell.state(), tenant) {
+            moonpool_assertions::reachable!(
+                "fleet: a creation waits for its founders without claiming the cell"
+            );
+            return Err(Interrupted::FoundersUnregistered);
+        }
+        Ok(())
+    }
+
     /// Fold the cell's control journal to its tail as a reader, claiming
     /// nothing (#513 (fleet Init duel)): `init` only reads the cell's side,
     /// which the cell coordinator writes. A claim here would fence the
@@ -1244,6 +1272,19 @@ pub(super) fn going_round<T>(steps: Vec<Stage>) -> Run<T> {
         outcome: Step::Interrupted(Interrupted::GoingRound { steps: steps.len() }),
         steps,
     }
+}
+
+/// Whether a creation of `tenant` can only wait on `registry`: the cell
+/// neither hosts nor dropped it, holds no footprint for it, and its birth
+/// footprint does not fit while a founding member is unregistered.
+/// [`FleetSession::footprint_step`] keeps the same arm for a fold that
+/// moved between the look and the claim.
+fn waits_on_founders(registry: &Registry, tenant: TenantId) -> bool {
+    !registry.hosts(tenant)
+        && !registry.dropped(tenant)
+        && registry.footprint(tenant).is_none()
+        && !footprint::ready(registry)
+        && footprint::plan(registry, tenant, &Footprint::birth()).is_err()
 }
 
 /// Claim `owner`'s journal and fold it to its tail: the first checkpoint
