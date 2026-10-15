@@ -16,8 +16,12 @@
 //! - a node-only `Inspect`, with its cell's control journals (§3.2), so a
 //!   client handed its address learns the cell from it (the node loop
 //!   answers it, and a journal it does not serve is refused as unknown);
-//! - `Admit` into its own cell, acked with no change (the caller's retry
-//!   after a lost answer), and into any other cell, refused;
+//! - `Identify`'s `registry_position`: its newest registry fold's position
+//!   (#505 (stranded admitted machine));
+//! - `Admit` into its own cell, acked (the caller's retry after a lost
+//!   answer, or the cell coordinator handing a machine whose fold is stuck
+//!   the cell's book again: a book taken past its own fold is adopted, #505),
+//!   and into any other cell, refused;
 //! - the cell decree, refused: it is in a cell, so a `cell init` that lists
 //!   it is refused as `cell_exists`, and it accepts no plan;
 //! - `Resolve`, from its folds of the registry and the universe directory
@@ -73,10 +77,17 @@ impl AdmittedMachine {
     }
 
     /// `Admit` at an admitted machine: acked for its own cell, refused for
-    /// any other.
-    fn admit_ack(&self, request: &wire::Admit) -> wire::AdmitAck {
+    /// any other. An `Admit` into its own cell whose book is taken past this
+    /// machine's newest registry fold, and names other machines, is adopted
+    /// as its book (#505 (stranded admitted machine)): the cell coordinator
+    /// sends it to a machine whose fold is stuck, because every founding
+    /// member its book names moved or was wiped.
+    fn admit_ack(&self, request: &wire::Admit, cache: &CacheSink) -> wire::AdmitAck {
         let refusal = match Admission::from_wire(request) {
-            Ok(admission) if admission.cell == self.admission.cell => "",
+            Ok(admission) if admission.cell == self.admission.cell => {
+                self.adopt(&admission, request.registry_position, cache);
+                ""
+            }
             Ok(_) => "other_cell",
             Err(_) => "malformed",
         };
@@ -89,6 +100,61 @@ impl AdmittedMachine {
             admitted: refusal.is_empty(),
             refusal: refusal.into(),
         }
+    }
+
+    /// The position of this machine's newest registry fold: the latest book
+    /// offered this incarnation, else the cache its disk held at start, else
+    /// 0.
+    fn position(&self, cache: &CacheSink) -> u64 {
+        let started = self.cached.as_ref().map_or(0, |c| c.position);
+        cache.latest().map_or(started, |c| c.position.max(started))
+    }
+
+    /// `Identify` at an admitted machine: who it is, in its cell, and its
+    /// newest registry fold's position (#505 (stranded admitted machine)).
+    fn identify_ack(&self, cache: &CacheSink) -> wire::IdentifyAck {
+        wire::IdentifyAck {
+            registry_position: self.position(cache),
+            ..self.facts.identify_ack(self.admission.cell.cell_id)
+        }
+    }
+
+    /// Adopt `admission`'s machines as this machine's book when they are
+    /// taken at `position`, past its newest fold, and differ from its book:
+    /// offered to the cache, from which the follow and the node loop dial
+    /// the cell (#505 (stranded admitted machine)).
+    fn adopt(&self, admission: &Admission, position: u64, cache: &CacheSink) {
+        assert!(
+            admission.cell == self.admission.cell,
+            "a machine adopts only a book of its own cell"
+        );
+        if position <= self.position(cache) {
+            return;
+        }
+        let book = cache.latest().map_or_else(|| self.book(), |c| c.machines);
+        if admission.members == book {
+            return;
+        }
+        let adopted = CachedRegistry {
+            node: self.facts.node_id,
+            position,
+            machines: admission.members.clone(),
+        };
+        // `Admission::check` refused an empty book: the cache's own contract
+        // holds.
+        assert_eq!(adopted.check(), Ok(()), "an adopted book is a cache");
+        moonpool_assertions::reachable!("machine: an admitted machine adopts a newer book");
+        tracing::info!(
+            node = self.facts.node_id.0,
+            position,
+            machines = adopted.machines.len(),
+            "admitted_book_adopted"
+        );
+        cache.offer(adopted);
+        assert!(
+            self.position(cache) == position,
+            "an adopted book is the newest fold"
+        );
     }
 
     /// Phase 1b of a cell decree at an admitted machine: refused, with its
@@ -180,7 +246,7 @@ impl AdmittedMachine {
         let cell = self.admission.cell;
         // Every machine answers `Load` (#424).
         super::load::serve(providers, rpc, &self.facts, shutdown.clone())?;
-        self.follow_and_register(providers, rpc, cache, tunables, &shutdown);
+        self.follow_and_register(providers, rpc, cache.clone(), tunables, &shutdown);
         // Any machine of the cell answers `Resolve` (#216).
         super::resolve::spawn(
             providers,
@@ -209,7 +275,7 @@ impl AdmittedMachine {
                         biased;
                         () = shutdown.cancelled() => return,
                         Some((_, reply)) = identify.recv() => {
-                            reply.send(self.facts.identify_ack(cell.cell_id));
+                            reply.send(self.identify_ack(&cache));
                         }
                         Some((_, reply)) = prepare.recv() => {
                             reply.send(self.prepare_ack());
@@ -228,7 +294,7 @@ impl AdmittedMachine {
                             });
                         }
                         Some((request, reply)) = admit.recv() => {
-                            reply.send(self.admit_ack(&request));
+                            reply.send(self.admit_ack(&request, &cache));
                         }
                         else => return,
                     }

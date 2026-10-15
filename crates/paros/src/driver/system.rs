@@ -123,7 +123,16 @@ pub(crate) struct Followed {
 pub(crate) struct ControlFollower<P: Providers> {
     self_id: NodeId,
     class: crate::system::Class,
-    seeds: Vec<NodeClient<P>>,
+    /// The nodes a remote read goes to, in turn, by id: each dialed where
+    /// the node last learned it is (#505 (stranded admitted machine)).
+    seeds: Vec<(NodeId, NodeClient<P>)>,
+    /// What a moved seed is dialed again through.
+    rpc: RpcHandle<P>,
+    names: crate::Names,
+    /// The position of the newest book the node adopted from outside its
+    /// fold (#505 (stranded admitted machine)): a registration the fold
+    /// meets below it is older than that book and moves no seed.
+    adopted: u64,
     /// Senders every node accepts whatever the registry says: the founding
     /// members and the deployment's static address book (replicas included).
     fixed: BTreeSet<NodeId>,
@@ -169,7 +178,12 @@ impl<P: Providers> ControlFollower<P> {
         let seeds = plan
             .seeds
             .iter()
-            .map(|(_, addr)| Ok(NodeClient::named(rpc, names.clone(), peer_target(addr)?)))
+            .map(|(id, addr)| {
+                Ok((
+                    *id,
+                    NodeClient::named(rpc, names.clone(), peer_target(addr)?),
+                ))
+            })
             .collect::<SimulationResult<Vec<_>>>()?;
         if seeds.is_empty() {
             return Err(SimulationError::InvalidState(
@@ -192,6 +206,9 @@ impl<P: Providers> ControlFollower<P> {
                 self_id: plan.self_id,
                 class: plan.class,
                 seeds,
+                rpc: rpc.clone(),
+                names: names.clone(),
+                adopted: 0,
                 fixed,
                 founders: plan.founders.clone(),
                 matchmakers: plan.matchmakers.clone(),
@@ -210,6 +227,64 @@ impl<P: Providers> ControlFollower<P> {
             },
             inbox,
         ))
+    }
+
+    /// Dial seed `id` at `addr` from its next read on: a seed that moved
+    /// (#349), which a node outside the founding members learns from its
+    /// registry fold or from a book its cell coordinator handed it (#505
+    /// (stranded admitted machine)). A node that is no seed is ignored.
+    /// Whether the seed moved.
+    pub(crate) fn reseed(&mut self, id: NodeId, addr: &crate::Address) -> bool {
+        assert!(id != self.self_id, "a node is never its own seed");
+        let count = self.seeds.len();
+        let Some((_, client)) = self
+            .seeds
+            .iter_mut()
+            .find(|(seed, client)| *seed == id && client.address() != addr)
+        else {
+            return false;
+        };
+        *client = NodeClient::named(&self.rpc, self.names.clone(), addr.clone());
+        assert_eq!(self.seeds.len(), count, "a moved seed stays one seed");
+        assert!(
+            self.seeds
+                .iter()
+                .any(|(seed, c)| *seed == id && c.address() == addr),
+            "a moved seed is dialed at its new address"
+        );
+        moonpool_assertions::reachable!("driver: a control follower dials a moved seed");
+        true
+    }
+
+    /// Adopt `book`, the cell's machines at registry position `position`,
+    /// handed from outside the fold (#505 (stranded admitted machine)): an
+    /// admitted machine whose every seed moved learns where they are from
+    /// its cell coordinator. Each seed `book` names is dialed there from its
+    /// next read on, unless the node adopted a newer book already. The
+    /// seeds that moved, at their new addresses.
+    pub(crate) fn adopt(
+        &mut self,
+        position: u64,
+        book: &[(NodeId, crate::Address)],
+    ) -> Vec<(NodeId, crate::Address)> {
+        if position <= self.adopted {
+            return Vec::new();
+        }
+        self.adopted = position;
+        let me = self.self_id;
+        let seeds: Vec<NodeId> = self.seeds.iter().map(|(id, _)| *id).collect();
+        let moved: Vec<(NodeId, crate::Address)> = book
+            .iter()
+            .filter(|(id, _)| *id != me && seeds.contains(id))
+            .filter(|(id, addr)| self.reseed(*id, addr))
+            .cloned()
+            .collect();
+        assert!(
+            moved.len() <= seeds.len(),
+            "a book moves each seed at most once"
+        );
+        assert_eq!(self.adopted, position, "the adopted position is the book's");
+        moved
     }
 
     /// This node's identity.
@@ -452,6 +527,15 @@ impl<P: Providers> ControlFollower<P> {
                     }
                     RegistryEvent::TenantDropped { tenant } => self.drop_tenant(*tenant),
                     RegistryEvent::Checkpoint { .. } => self.rehost(),
+                    // A seed registered at another address (#349): the next
+                    // read dials it there, unless an adopted book is newer.
+                    RegistryEvent::Reregistered { id, addr, .. }
+                        if *id != self.self_id && seq >= self.adopted =>
+                    {
+                        if let Ok(addr) = crate::Address::parse(addr) {
+                            self.reseed(*id, &addr);
+                        }
+                    }
                     _ => {}
                 }
                 SystemEvent::Registry(event)
@@ -527,7 +611,7 @@ impl<P: Providers> ControlFollower<P> {
             if local(journal) || self.outstanding.contains(&journal) {
                 continue;
             }
-            let client = self.seeds[self.next_seed % self.seeds.len()].clone();
+            let client = self.seeds[self.next_seed % self.seeds.len()].1.clone();
             self.next_seed = self.next_seed.wrapping_add(1);
             self.outstanding.insert(journal);
             let request = Read {

@@ -575,7 +575,8 @@ restart is supported:
   machine. So the registry write needs a majority of the other members. A cell of two cannot
   heal a moved member, and neither can a cell that lost another member. A machine whose cached
   book names no reachable machine cannot find its coordinator: the same static-stability limit
-  as a machine whose cached members are all gone (below). The durable cached registry fold
+  as a machine whose cached members are all gone (below). The coordinator still reaches an
+  admitted machine that did not move, and hands it the cell's book again (#505, below). The durable cached registry fold
   (below) lets a machine that restarts after others moved dial them where they are.
 - **The simulation.** On a seed whose machines advertise names, a cell machine's reboot comes
   back under a new name at a new IP (`rename_pct`). Its old name keeps the old IP, where
@@ -634,11 +635,37 @@ landed. Now such a member holds its journals' clocks until its registration ends
 (`driver/mod.rs`). It still answers every message that reaches it. A lone founding member is its
 own quorum, so it never holds.
 
+Landed in #505 (stranded admitted machine, 2026-10-15). An admitted machine reads the registry
+through the founding members its book names. When every one of them moved or was wiped, its
+fold stops, and nothing booked on it can start. The coordinator heals it in its incarnation:
+
+- **The machine reports its fold.** An admitted machine's `IdentifyAck` carries
+  `registry_position`, the position of its newest book. Other machines report 0.
+- **The watch sees a stuck fold.** At each round, the coordinator compares the position an
+  admitted machine that serves the cell reports with the position at its last answer. When the
+  position did not move and is below the coordinator's own fold, the coordinator sends `Admit`
+  again (`CellSession::readmit`). That `Admit` carries the cell's machines it knows now (the
+  founding members at their registered addresses) and its fold's position
+  (`Admit.registry_position`).
+- **The machine adopts a newer book.** An `Admit` into its own cell, taken past the machine's
+  newest fold and with other machines, is offered to its cache. The follow dials its next read
+  from that book. The node loop moves each control-journal seed and its lane to the address the
+  book names (`ControlFollower::adopt`). A registration the fold meets below that position
+  moves no seed. A registration at or above it moves the seed too (`ControlFollower::reseed`),
+  so a founding member that moves later is followed in the same incarnation.
+- **The limit.** A machine that moved itself while its book names no reachable machine cannot
+  register its new address, so the coordinator cannot reach it either. An admin admits it
+  again.
+- **The simulation.** The matchmaker sets' oracle no longer exempts a machine whose founding
+  members all moved (PR #503's `stranded_ids` is gone). The gates are a coordinator that hands
+  a stuck machine the book again and a machine that adopts it.
+
 **Finding the cell** (amended on 2026-10-09). There is no cluster file and no rendezvous name.
 A machine's configuration names no cell and no peer: it learns its cell when it is admitted
 (`FormCell` or `Admit`, section 3.1) and caches it durably. On every later start it finds the cell
 from its **cached registry fold**. If every cached member is gone, the machine cannot find its
-cell, and an admin admits it again (YugabyteDB makes the same trade: a tserver none of whose
+cell. The coordinator hands its book again to an admitted machine it still reaches (#505).
+Otherwise an admin admits it again (YugabyteDB makes the same trade: a tserver none of whose
 configured masters remain cannot rejoin).
 
 A client's only static input is an **entry endpoint**: a few addresses, or a DNS name the
