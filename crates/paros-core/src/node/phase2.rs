@@ -458,16 +458,19 @@ impl ColocatedNode {
         );
         // Slots are independent: no acceptor needs slot N before it accepts
         // slot N + 1, so the new column needs no backfill below the slot.
-        // The round itself is still open, above the floor and unchosen.
+        // The round itself is still open and above the floor.
         assert!(
             slot >= self.acceptor.first_slot(),
             "a moved round lies above the compaction floor"
         );
-        if self.ballot >= self.acceptor.promised() {
-            assert!(
-                !self.replica.is_chosen(slot),
-                "a moved round's slot is not chosen yet"
+        // A round can outlive its slot's choice for a moment (a `Commit` or
+        // a catch-up taught the replica first): nothing is left to move.
+        if self.replica.is_chosen(slot) {
+            probe!(
+                reachable,
+                "phase2: a stuck round whose slot is chosen elsewhere is not moved"
             );
+            return false;
         }
         let recorded = self.record_own_round(slot, ballot, &command);
         let own_vote = self.own_vote(recorded, Some(column));
