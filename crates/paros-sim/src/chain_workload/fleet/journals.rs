@@ -547,7 +547,14 @@ impl FleetOps {
         let Ok(named) = JournalName::new(tenant, &String::from_utf8_lossy(name)) else {
             return;
         };
-        let presented = Presented::drawn(draw >> 24);
+        // Once an operator rotated a key in, a call presents the rotated
+        // key's token on its own coin: the two ingredients of a served
+        // rotated token line up (#245 (Biscuit tokens)).
+        let presented = if frontend::rotation_tried(&self.state) && buggify_with_prob!(0.3) {
+            Presented::Rotated
+        } else {
+            Presented::drawn(draw >> 24)
+        };
         // On one draw in three the call names a journal by its ids instead:
         // the tenant's control journal, an internal journal only `admin`
         // reaches.

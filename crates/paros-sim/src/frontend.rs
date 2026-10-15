@@ -131,7 +131,7 @@ pub(crate) fn note_rotation(state: &StateHandle) {
 }
 
 /// Whether an operator ever tried to add the rotated key.
-fn rotation_tried(state: &StateHandle) -> bool {
+pub(crate) fn rotation_tried(state: &StateHandle) -> bool {
     root_keys(state).rotation.load(Ordering::SeqCst)
 }
 
