@@ -21,7 +21,7 @@ sim-only path, no buggify or hint here. The timeline is an `Invariant` that only
   shipped BUGGIFY sites and crash hints are inert, as in production. A log starts with `init`
   at 0 ms (over the first `machines`) and holds no other `init`.
 - `src/model.rs` → `Config`, `Action`, `Op` (`init`, `create_tenant`, `create_journal` with
-  its `mode`: `single`, `double`, `triple` or `grid:RxC`, `write`, `read`), `StepResult`,
+  its `mode`: `failures-per-partition=F,partitions=P` (#523), either part optional, `write`, `read`), `StepResult`,
   `Topology` (each machine's short and full node id and its zone), `TenantPlace`,
   `JournalPlace` (its `key`, acceptors in membership order, `Quorum`), `Event`, `RunView` →
   the JSON contract.
@@ -38,7 +38,7 @@ sim-only path, no buggify or hint here. The timeline is an `Invariant` that only
   names its journal, so the page colours each message by tenant).
 - `src/bin/paros-sandbox.rs` → the same JSON on stdin and stdout, natively.
 - `tests/probe.rs` → `init` over four of five machines; two tenants create, write and read; the topology names each journal's acceptors
-  and leader, and a `grid:2x2` journal's quorum shape; replay is identical, and a longer log
+  and leader, and the quorum shape of a journal over four acceptor partitions; replay is identical, and a longer log
   keeps the shorter one's steps.
 
 ## Gates

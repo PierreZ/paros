@@ -14,8 +14,8 @@ const PRESETS = {
     actions: [
       init(7),
       { at_ms: 3000, op: { kind: "create_tenant", tenant: "acme" } },
-      { at_ms: 4000, op: { kind: "create_journal", tenant: "acme", journal: "orders", mode: "grid:2x3" } },
-      { at_ms: 5000, op: { kind: "create_journal", tenant: "acme", journal: "audit", mode: "double" } },
+      { at_ms: 4000, op: { kind: "create_journal", tenant: "acme", journal: "orders", mode: "failures-per-partition=0,partitions=3" } },
+      { at_ms: 5000, op: { kind: "create_journal", tenant: "acme", journal: "audit", mode: "failures-per-partition=1" } },
       { at_ms: 7000, op: { kind: "write", tenant: "acme", journal: "orders", count: 12 } },
       { at_ms: 8000, op: { kind: "write", tenant: "acme", journal: "audit", count: 4 } },
       { at_ms: 9000, op: { kind: "read", tenant: "acme", journal: "orders", count: 12 } },
@@ -26,9 +26,9 @@ const PRESETS = {
     actions: [
       init(6),
       { at_ms: 3000, op: { kind: "create_tenant", tenant: "acme" } },
-      { at_ms: 3500, op: { kind: "create_journal", tenant: "acme", journal: "orders", mode: "double" } },
+      { at_ms: 3500, op: { kind: "create_journal", tenant: "acme", journal: "orders", mode: "failures-per-partition=1" } },
       { at_ms: 4000, op: { kind: "create_tenant", tenant: "globex" } },
-      { at_ms: 4500, op: { kind: "create_journal", tenant: "globex", journal: "events", mode: "triple" } },
+      { at_ms: 4500, op: { kind: "create_journal", tenant: "globex", journal: "events", mode: "failures-per-partition=2" } },
       { at_ms: 7000, op: { kind: "write", tenant: "acme", journal: "orders", count: 5 } },
       { at_ms: 8000, op: { kind: "write", tenant: "globex", journal: "events", count: 5 } },
     ],
@@ -117,7 +117,7 @@ function describe(op) {
   switch (op.kind) {
     case "init": return `init: cell init (cell-1 over m0–m${op.machines - 1}), then universe init`;
     case "create_tenant": return `create tenant ${op.tenant}`;
-    case "create_journal": return `create journal ${op.tenant}/${op.journal} (${op.mode || "double"})`;
+    case "create_journal": return `create journal ${op.tenant}/${op.journal} (${op.mode || "failures-per-partition=1"})`;
     case "write": return `write ${op.count} records to ${op.tenant}/${op.journal}`;
     case "read": return `read ${op.count} records of ${op.tenant}/${op.journal}`;
     default: return op.kind;

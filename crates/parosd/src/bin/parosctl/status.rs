@@ -2,8 +2,8 @@
 //! `docs/architecture.md` §3.6): how the universe, the cell or one tenant
 //! stands, in the spirit of `fdbcli status`.
 //!
-//! Three columns per journal: **desired** (the mode the tenant asked for and
-//! its acceptor count), **current** (the acceptors placed) and
+//! Three columns per journal: **desired** (the durability the tenant asked
+//! for, its partition count and acceptor count, #523), **current** (the acceptors placed) and
 //! **available** (the placed acceptors that are up and not leaving), with
 //! the word the cell shows (healthy, degraded, unavailable). A word the cell
 //! holds back (hysteresis) shows the word it judged now beside it.
@@ -84,7 +84,7 @@ fn journal_row(
     [
         text(&tenant.name),
         journal_label(journal),
-        format!("{} ({})", journal.desired, journal.desired_acceptors),
+        journal.desired.clone(),
         journal.acceptors.len().to_string(),
         available.to_string(),
         word_text(journal),

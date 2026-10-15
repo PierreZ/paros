@@ -157,115 +157,141 @@ impl CellKind {
     }
 }
 
-/// A redundancy mode (§3.4): a majority over one, three or five acceptors.
+/// The largest `failures_per_partition` a journal may ask for: seven
+/// acceptors per acceptor partition (#523, decided on 2026-10-14).
+pub const MAX_FAILURES_PER_PARTITION: u32 = 3;
+
+/// A journal's durability (§3.4, #523): how many failures each acceptor
+/// partition survives, and over how many acceptor partitions its writes
+/// spread.
+///
+/// Each acceptor partition has `2F+1` acceptors, so the journal survives any
+/// `F` failures, and up to `F` per partition when they are spread. One
+/// partition is the plain majority. With more than one, each slot goes to
+/// one partition; until #532 (acceptor partitions) brings the majority per
+/// partition, that layout is the acceptor grid with one column per partition
+/// ([`Durability::quorum_system`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Redundancy {
-    /// One acceptor: survives no zone (#215), refused for control journals.
-    Single,
-    /// Three acceptors.
-    Double,
-    /// Five acceptors.
-    Triple,
+pub struct Durability {
+    /// `F`: the failures each acceptor partition survives, `0..=3`.
+    pub failures_per_partition: u32,
+    /// `P`: the acceptor partitions, at least 1.
+    pub partitions: u32,
 }
 
-impl Redundancy {
-    /// The acceptors it asks for.
+impl Durability {
+    /// Three acceptors in one partition: the default.
+    pub const DEFAULT: Durability = Durability {
+        failures_per_partition: 1,
+        partitions: 1,
+    };
+
+    /// A durability of `failures_per_partition` over `partitions`.
+    ///
+    /// # Errors
+    ///
+    /// `failures_per_partition` above [`MAX_FAILURES_PER_PARTITION`], or
+    /// `partitions` of 0.
+    pub fn new(failures_per_partition: u32, partitions: u32) -> Result<Self, &'static str> {
+        if failures_per_partition > MAX_FAILURES_PER_PARTITION {
+            return Err("failures-per-partition is at most 3");
+        }
+        if partitions == 0 {
+            return Err("partitions is at least 1");
+        }
+        Ok(Durability {
+            failures_per_partition,
+            partitions,
+        })
+    }
+
+    /// The acceptors of one partition: `2F+1`.
+    #[must_use]
+    pub fn acceptors_per_partition(self) -> usize {
+        2 * self.failures_per_partition as usize + 1
+    }
+
+    /// The acceptors it asks for: `(2F+1) × P`.
     #[must_use]
     pub fn acceptors(self) -> usize {
-        match self {
-            Redundancy::Single => 1,
-            Redundancy::Double => 3,
-            Redundancy::Triple => 5,
+        self.acceptors_per_partition()
+            .saturating_mul(self.partitions as usize)
+    }
+
+    /// The quorum system over its acceptors: a majority for one partition,
+    /// else the acceptor grid with one column per partition (each slot's
+    /// Phase 2 goes to one column) until #532 (acceptor partitions).
+    #[must_use]
+    pub fn quorum_system(self) -> QuorumSystem {
+        if self.partitions == 1 {
+            QuorumSystem::Majority
+        } else {
+            QuorumSystem::Grid {
+                rows: self.acceptors_per_partition(),
+                cols: self.partitions as usize,
+            }
         }
     }
 
-    /// Its label.
+    /// Its label, with the derived numbers and always the partition count:
+    /// `1 per partition · 1 partition (any 1) · 3 acceptors`.
     #[must_use]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Redundancy::Single => "single",
-            Redundancy::Double => "double",
-            Redundancy::Triple => "triple",
-        }
+    pub fn label(self) -> String {
+        let f = self.failures_per_partition;
+        let p = self.partitions;
+        let partitions = if p == 1 { "partition" } else { "partitions" };
+        let survives = if p == 1 {
+            format!("any {f}")
+        } else {
+            format!("any {f}, up to {} spread", f.saturating_mul(p))
+        };
+        let n = self.acceptors();
+        let acceptors = if n == 1 { "acceptor" } else { "acceptors" };
+        format!("{f} per partition · {p} {partitions} ({survives}) · {n} {acceptors}")
     }
 }
 
-/// A desired mode (§3.4): a redundancy or a grid, plus the replica count. A
-/// caller names this, never members or an `AcceptorConfig`.
+/// A desired mode (§3.4): a [`Durability`] plus the replica count. A caller
+/// names this, never members or an `AcceptorConfig`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Desired {
-    /// The acceptor layout.
-    pub mode: DesiredMode,
+    /// The acceptors' durability.
+    pub durability: Durability,
     /// Replicas per journal (recorded; placed by #212).
     pub replicas: u32,
 }
 
-/// The acceptor layout of a [`Desired`] mode.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DesiredMode {
-    /// A majority over one, three or five acceptors.
-    Redundancy(Redundancy),
-    /// The opt-in throughput mode: a `rows × cols` grid.
-    Grid {
-        /// Rows, at least 2.
-        rows: u32,
-        /// Columns, at least 2.
-        cols: u32,
-    },
-}
-
 impl Desired {
-    /// The `double` default.
-    pub const DOUBLE: Desired = Desired {
-        mode: DesiredMode::Redundancy(Redundancy::Double),
+    /// The default: one failure in one partition, three acceptors.
+    pub const DEFAULT: Desired = Desired {
+        durability: Durability::DEFAULT,
         replicas: 0,
     };
 
     /// The acceptors it asks for.
     #[must_use]
     pub fn acceptors(&self) -> usize {
-        match self.mode {
-            DesiredMode::Redundancy(r) => r.acceptors(),
-            DesiredMode::Grid { rows, cols } => {
-                usize::try_from(rows.saturating_mul(cols)).unwrap_or(usize::MAX)
-            }
-        }
+        self.durability.acceptors()
     }
 
-    /// The quorum system over `members` acceptors this mode asks for.
+    /// The quorum system its acceptors are placed under.
     #[must_use]
     pub fn quorum_system(&self) -> QuorumSystem {
-        match self.mode {
-            DesiredMode::Redundancy(_) => QuorumSystem::Majority,
-            DesiredMode::Grid { rows, cols } => QuorumSystem::Grid {
-                rows: rows as usize,
-                cols: cols as usize,
-            },
-        }
+        self.durability.quorum_system()
     }
 
-    /// Its label (`double`, `grid 2x3`).
+    /// Its label ([`Durability::label`]).
     #[must_use]
     pub fn label(&self) -> String {
-        match self.mode {
-            DesiredMode::Redundancy(r) => r.as_str().to_string(),
-            DesiredMode::Grid { rows, cols } => format!("grid {rows}x{cols}"),
-        }
+        self.durability.label()
     }
 
     /// The wire form.
     #[must_use]
     pub fn to_wire(&self) -> wire::Desired {
-        let (redundancy, rows, cols) = match self.mode {
-            DesiredMode::Redundancy(Redundancy::Single) => (1, 0, 0),
-            DesiredMode::Redundancy(Redundancy::Double) => (2, 0, 0),
-            DesiredMode::Redundancy(Redundancy::Triple) => (3, 0, 0),
-            DesiredMode::Grid { rows, cols } => (0, rows, cols),
-        };
         wire::Desired {
-            redundancy,
-            rows,
-            cols,
+            failures_per_partition: self.durability.failures_per_partition,
+            partitions: self.durability.partitions,
             replicas: self.replicas,
         }
     }
@@ -274,18 +300,11 @@ impl Desired {
     ///
     /// # Errors
     ///
-    /// No mode, both modes, or a grid under 2×2.
+    /// No mode, `failures_per_partition` above 3 or no partition.
     pub fn from_wire(desired: Option<wire::Desired>) -> Result<Self, &'static str> {
         let desired = desired.ok_or("no desired mode")?;
-        let mode = match (desired.redundancy, desired.rows, desired.cols) {
-            (1, 0, 0) => DesiredMode::Redundancy(Redundancy::Single),
-            (2, 0, 0) => DesiredMode::Redundancy(Redundancy::Double),
-            (3, 0, 0) => DesiredMode::Redundancy(Redundancy::Triple),
-            (0, rows, cols) if rows >= 2 && cols >= 2 => DesiredMode::Grid { rows, cols },
-            _ => return Err("a desired mode is a redundancy or a grid of at least 2x2"),
-        };
         Ok(Desired {
-            mode,
+            durability: Durability::new(desired.failures_per_partition, desired.partitions)?,
             replicas: desired.replicas,
         })
     }
@@ -294,26 +313,29 @@ impl Desired {
 impl std::str::FromStr for Desired {
     type Err = &'static str;
 
-    /// `single`, `double`, `triple` or `grid:RxC`.
+    /// `failures-per-partition=F,partitions=P`, either part optional (the
+    /// default is `F=1`, `P=1`), in any order.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let mode = match s {
-            "single" => DesiredMode::Redundancy(Redundancy::Single),
-            "double" => DesiredMode::Redundancy(Redundancy::Double),
-            "triple" => DesiredMode::Redundancy(Redundancy::Triple),
-            grid => {
-                let (rows, cols) = grid
-                    .strip_prefix("grid:")
-                    .and_then(|g| g.split_once('x'))
-                    .ok_or("a mode is single, double, triple or grid:RxC")?;
-                let rows: u32 = rows.parse().map_err(|_| "grid rows are a number")?;
-                let cols: u32 = cols.parse().map_err(|_| "grid columns are a number")?;
-                if rows < 2 || cols < 2 {
-                    return Err("a grid is at least 2x2");
-                }
-                DesiredMode::Grid { rows, cols }
+        let mut f = Durability::DEFAULT.failures_per_partition;
+        let mut p = Durability::DEFAULT.partitions;
+        for part in s.split(',').map(str::trim).filter(|part| !part.is_empty()) {
+            let (key, value) = part
+                .split_once('=')
+                .ok_or("a mode is failures-per-partition=F,partitions=P")?;
+            let value: u32 = value
+                .trim()
+                .parse()
+                .map_err(|_| "a mode's value is a number")?;
+            match key.trim() {
+                "failures-per-partition" => f = value,
+                "partitions" => p = value,
+                _ => return Err("a mode names failures-per-partition and partitions"),
             }
-        };
-        Ok(Desired { mode, replicas: 0 })
+        }
+        Ok(Desired {
+            durability: Durability::new(f, p)?,
+            replicas: 0,
+        })
     }
 }
 
@@ -961,7 +983,7 @@ mod tests {
             id: JournalId(id),
             name: name.to_vec(),
             writer: WriterMode::Single,
-            desired: Desired::DOUBLE,
+            desired: Desired::DEFAULT,
             config: config(&[1, 2, 3]),
         }
         .encode()
@@ -992,7 +1014,10 @@ mod tests {
                     witness: "n".into(),
                 },
                 desired: Desired {
-                    mode: DesiredMode::Grid { rows: 2, cols: 3 },
+                    durability: Durability {
+                        failures_per_partition: 2,
+                        partitions: 3,
+                    },
                     replicas: 2,
                 },
             }),
@@ -1001,7 +1026,7 @@ mod tests {
                 id: JournalId(0x9e37),
                 name: b"orders".to_vec(),
                 writer: WriterMode::Multi,
-                desired: Desired::DOUBLE,
+                desired: Desired::DEFAULT,
                 config: config(&[1, 2, 3]),
             },
             TenantCommand::DeleteJournal {
@@ -1140,7 +1165,7 @@ mod tests {
             survives: Survives::Az,
             cell_name: Vec::new(),
             cell_kind: CellKind::default(),
-            desired: Desired::DOUBLE,
+            desired: Desired::DEFAULT,
         };
         let entry = TenantCommand::Describe(description.clone()).encode();
         assert_eq!(t.fold(0, &entry), TenantEvent::Described);
@@ -1178,9 +1203,71 @@ mod tests {
 
     #[test]
     fn desired_modes_parse() {
-        assert_eq!("double".parse::<Desired>(), Ok(Desired::DOUBLE));
-        assert_eq!("grid:2x3".parse::<Desired>().map(|d| d.acceptors()), Ok(6));
-        assert!("grid:1x3".parse::<Desired>().is_err());
-        assert!("quad".parse::<Desired>().is_err());
+        assert_eq!("".parse::<Desired>(), Ok(Desired::DEFAULT));
+        assert_eq!(
+            "failures-per-partition=1".parse::<Desired>(),
+            Ok(Desired::DEFAULT)
+        );
+        assert_eq!(
+            "partitions=3,failures-per-partition=1"
+                .parse::<Desired>()
+                .map(|d| d.acceptors()),
+            Ok(9)
+        );
+        assert_eq!(
+            "failures-per-partition=3"
+                .parse::<Desired>()
+                .map(|d| d.acceptors()),
+            Ok(7)
+        );
+        assert_eq!(
+            "failures-per-partition=0"
+                .parse::<Desired>()
+                .map(|d| d.acceptors()),
+            Ok(1)
+        );
+        assert!("failures-per-partition=4".parse::<Desired>().is_err());
+        assert!("partitions=0".parse::<Desired>().is_err());
+        assert!("double".parse::<Desired>().is_err());
+        assert!("copies=3".parse::<Desired>().is_err());
+    }
+
+    #[test]
+    fn a_durability_shows_its_partition_count() {
+        assert_eq!(
+            Durability::DEFAULT.label(),
+            "1 per partition · 1 partition (any 1) · 3 acceptors"
+        );
+        let spread = Durability::new(1, 3).expect("a durability");
+        assert_eq!(
+            spread.label(),
+            "1 per partition · 3 partitions (any 1, up to 3 spread) · 9 acceptors"
+        );
+        assert_eq!(
+            spread.quorum_system(),
+            QuorumSystem::Grid { rows: 3, cols: 3 }
+        );
+        assert_eq!(Durability::DEFAULT.quorum_system(), QuorumSystem::Majority);
+        let lone = Durability::new(0, 1).expect("a durability");
+        assert_eq!(
+            lone.label(),
+            "0 per partition · 1 partition (any 0) · 1 acceptor"
+        );
+    }
+
+    #[test]
+    fn a_durability_round_trips_the_wire() {
+        for f in 0..=MAX_FAILURES_PER_PARTITION {
+            for p in 1..=4 {
+                let desired = Desired {
+                    durability: Durability::new(f, p).expect("a durability"),
+                    replicas: p,
+                };
+                assert_eq!(Desired::from_wire(Some(desired.to_wire())), Ok(desired));
+            }
+        }
+        let mut wire = Desired::DEFAULT.to_wire();
+        wire.partitions = 0;
+        assert!(Desired::from_wire(Some(wire)).is_err());
     }
 }

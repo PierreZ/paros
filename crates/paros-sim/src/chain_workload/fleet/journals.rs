@@ -32,7 +32,7 @@ use paros::client::names::{JournalNames, JournalResolution};
 use paros::client::{ClaimOutcome, ReadOutcome};
 use paros::client::{Writer, WriterOutcome};
 use paros::fleet::{Groups, TenantState};
-use paros::tenant::Desired;
+use paros::tenant::{Desired, Durability};
 use paros::{JournalIdentifier, TenantId, Value, WriterMode};
 
 use std::collections::BTreeSet;
@@ -706,24 +706,28 @@ fn drawn_mode() -> WriterMode {
     }
 }
 
-/// The desired mode a create draws: mostly `double`; sometimes `single`,
-/// `triple`, or a grid no cell of three founders can place.
+/// The desired mode a create draws (#523): mostly the default (one failure
+/// in one acceptor partition); sometimes no failure, two or three failures,
+/// or four acceptor partitions no cell of three founders can place.
 fn drawn_desired(draw: u64) -> Desired {
-    let mode = match (draw >> 16) % 8 {
-        0 => "single",
-        1 => "triple",
-        2 => "grid:2x2",
-        _ => "double",
+    let (failures_per_partition, partitions) = match (draw >> 16) % 8 {
+        0 => (0, 1),
+        1 => (2, 1),
+        2 => (0, 4),
+        3 => (3, 1),
+        _ => (1, 1),
     };
-    mode.parse().unwrap_or(Desired::DOUBLE)
+    Durability::new(failures_per_partition, partitions).map_or(Desired::DEFAULT, |durability| {
+        Desired {
+            durability,
+            replicas: 0,
+        }
+    })
 }
 
 /// Whether a create under `desired` fits a cell of `members` founding
-/// members, slots aside: a redundancy mode takes at most all of them, a grid
-/// needs all its cells.
+/// members, slots aside: one acceptor partition takes at most all of them,
+/// more acceptor partitions need all their acceptors.
 fn desired_fits(desired: &Desired, members: usize) -> bool {
-    match desired.mode {
-        paros::tenant::DesiredMode::Redundancy(_) => true,
-        paros::tenant::DesiredMode::Grid { .. } => desired.acceptors() <= members,
-    }
+    desired.durability.partitions == 1 || desired.acceptors() <= members
 }

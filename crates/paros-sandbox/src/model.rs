@@ -59,9 +59,9 @@ pub enum Op {
         tenant: String,
         /// The journal's name, inside the tenant.
         journal: String,
-        /// Its desired mode, as `parosctl` names it: `single`, `double`,
-        /// `triple` or `grid:RxC`.
-        #[serde(default = "double")]
+        /// Its durability (#523): `failures-per-partition=F,partitions=P`,
+        /// either part optional (`F=1`, `P=1` by default).
+        #[serde(default = "default_durability")]
         mode: String,
     },
     /// Append `count` records to `journal` of `tenant`, as its one writer.
@@ -85,8 +85,8 @@ pub enum Op {
     },
 }
 
-fn double() -> String {
-    "double".into()
+fn default_durability() -> String {
+    "failures-per-partition=1".into()
 }
 
 /// What a step came to.

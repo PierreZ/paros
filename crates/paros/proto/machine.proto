@@ -240,17 +240,19 @@ message JournalRequest {
   }
 }
 
-// Create journal `name`, written in `writer` mode, under a desired mode: a
-// redundancy (1 single, 2 double, 3 triple), or a grid `{rows, cols}`
-// (redundancy 0, both at least 2). `replicas` is the replica count. The
-// coordinator draws the id and picks the members: a caller never names one.
+// Create journal `name`, written in `writer` mode, under a desired mode:
+// `failures_per_partition` (0 to 3) over `partitions` acceptor partitions (at
+// least 1, #523). `replicas` is the replica count. The coordinator draws the
+// id and picks the members: a caller never names one. Tags 3 to 5 held the
+// retired redundancy and grid.
 message CreateJournalOp {
+  reserved 3, 4, 5;
+  reserved "redundancy", "rows", "cols";
   bytes name = 1;
   paros.common.v1.WriterMode writer = 2;
-  uint32 redundancy = 3;
-  uint32 rows = 4;
-  uint32 cols = 5;
   uint32 replicas = 6;
+  uint32 failures_per_partition = 7;
+  uint32 partitions = 8;
 }
 
 // Delete the live journal named `name`: a tombstone, never a reuse.

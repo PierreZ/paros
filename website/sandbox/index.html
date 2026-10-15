@@ -76,13 +76,14 @@
           <label id="tenant-name-field">Tenant <input id="tenant-name" value="acme" size="10" /></label>
           <label id="tenant-pick-field">Tenant <select id="tenant-pick"></select></label>
           <label id="journal-name-field">Journal <input id="journal-name" value="orders" size="10" /></label>
-          <label id="mode-field">Mode <select id="mode">
-            <option value="single">single (1 acceptor)</option>
-            <option value="double" selected>double (3 acceptors)</option>
-            <option value="triple">triple (5 acceptors)</option>
-            <option value="grid:2x2">grid 2×2</option>
-            <option value="grid:2x3">grid 2×3</option>
-            <option value="grid:3x2">grid 3×2</option>
+          <label id="mode-field">Durability <select id="mode">
+            <option value="failures-per-partition=0">0 per partition · 1 partition (1 acceptor)</option>
+            <option value="failures-per-partition=1" selected>1 per partition · 1 partition (3 acceptors)</option>
+            <option value="failures-per-partition=2">2 per partition · 1 partition (5 acceptors)</option>
+            <option value="failures-per-partition=3">3 per partition · 1 partition (7 acceptors)</option>
+            <option value="failures-per-partition=0,partitions=2">0 per partition · 2 partitions (2 acceptors)</option>
+            <option value="failures-per-partition=0,partitions=4">0 per partition · 4 partitions (4 acceptors)</option>
+            <option value="failures-per-partition=1,partitions=2">1 per partition · 2 partitions (6 acceptors)</option>
           </select></label>
           <label id="journal-pick-field">Journal <select id="journal-pick"></select></label>
           <label id="count-field">N <input id="count" type="number" min="1" max="100" value="5" /></label>

@@ -18,9 +18,10 @@ The operator in the page makes the same calls as `parosctl`:
   machines: they choose the plan of the cell `cell-1`. `universe init` creates the universe
   tenant in that cell. The machines that `init` does not list stay idle.
 - "Create a tenant" is `parosctl tenant create`.
-- "Create a journal" is `parosctl journal create`. You choose its mode: `single`, `double`,
-  `triple` or a grid such as `grid:2x3`. The cell's coordinator places the journal on some of
-  the machines, one zone at a time.
+- "Create a journal" is `parosctl journal create`. You choose its durability: the failures
+  that each acceptor partition survives (`F`, 0 to 3) and the number of acceptor partitions
+  (`P`). Each acceptor partition has `2F+1` acceptors. The cell's coordinator places the journal
+  on some of the machines, one zone at a time.
 - "Write N records" appends N records to a journal you choose. Multi-Paxos chooses each record
   at a position of the journal.
 - "Read N records" reads N records of a journal you choose, from its first position.

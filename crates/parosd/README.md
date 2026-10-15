@@ -104,13 +104,14 @@ footprint is not booked yet (#212).
 **Journals.** `parosctl journal create acme orders` sends a request to the
 **tenant coordinator** — until #212 and #225, the elected cell coordinator, at
 the interface its election renewals publish. The coordinator draws the
-journal's id, picks its members from the desired mode (`--desired
-single|double|triple|grid:RxC`, `double` by default; placed on the founding
-members until #212), and writes the request to the tenant's control journal.
+journal's id, picks its members from its durability
+(`--failures-per-partition F`, 0 to 3, default 1, and `--partitions P`, at
+least 1, default 1: `2F+1` acceptors in each acceptor partition, #523), and
+writes the request to the tenant's control journal.
 Every machine folds that journal, and each member starts the journal there.
 The request carries an idempotency id: `parosctl` sends the same id again
 until a coordinator decides it, so a request acts once, across a coordinator
-change too. A live name is refused (`name_taken`); `--mode multi` creates a
+change too. A live name is refused (`name_taken`); `--writers multi` creates a
 multi-writer journal (#241). `parosctl journal delete acme orders` tombstones
 the journal: its id is never used again, and its name is free. `parosctl
 journal list acme` folds the tenant's control journal.
@@ -298,7 +299,7 @@ required, with no default tenant and no fixed id (#235, #239, `docs/architecture
 |---|---|
 | `parosctl init [--members a,b,c] [--patience-ms N]` | runs `cell init` over the founding members (default: the servers) at the first one still idle, retrying `member_unreachable` and `contended` within its patience; waits for the elected cell coordinator (#240), then registers the cell in the fleet directory (#229, #277); resumes an interrupted init, refused on an initialized fleet. Other refusals: `other_cell_init`, `cell_lost`, `not_a_member`, `stateless_member`, `malformed`, `storage` |
 | `parosctl tenant create <name> [--survives az\|region]`, `parosctl tenant delete <name>`, `parosctl tenant list` | creates (once; a held name is refused) or removes (resuming an interrupted run) a tenant through the fleet directory and the cell; lists the fleet directory's fleet, cells and tenants (#229) |
-| `parosctl journal create <tenant> <name> [--mode single\|multi] [--desired double\|…]`, `parosctl journal delete <tenant> <name>`, `parosctl journal list <tenant>` | creates or deletes a tenant's journal through the tenant coordinator, one idempotent request re-sent until decided (`created`, `deleted`, `name_taken`, `unknown_journal`, `unplaceable`); lists the tenant's control journal (#210) |
+| `parosctl journal create <tenant> <name> [--writers single\|multi] [--failures-per-partition F] [--partitions P]`, `parosctl journal delete <tenant> <name>`, `parosctl journal list <tenant>` | creates or deletes a tenant's journal through the tenant coordinator, one idempotent request re-sent until decided (`created`, `deleted`, `name_taken`, `unknown_journal`, `unplaceable`); lists the tenant's control journal (#210) |
 | `parosctl write <journal> <record>…` | claims the journal under the leader uuid `--leader` (hex, or `PAROSCTL_LEADER`; drawn at random when absent) unless it leads already (a read finding it the leader is adopted, never re-claimed), then writes at the tail; `--no-claim` writes under `--leader` without claiming, `--seq` at a given position |
 | `parosctl read <journal> [--from N] [--limit N] [--wait-ms N]` | reads records to the tail; a truncated range is reported and skipped |
 | `parosctl tail <journal> [--from N]` | follows the journal until interrupted |

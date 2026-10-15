@@ -22,7 +22,8 @@ docker compose up -d --build
 docker compose run --rm init
 
 # A tenant, then a journal in it (#210). The tenant coordinator draws the journal's id and
-# picks its members from the desired mode (`--desired double` by default). Prints:
+# picks its members from its durability (`--failures-per-partition 1 --partitions 1` by
+# default: three acceptors in one acceptor partition). Prints:
 #   created journal=id:T/J members=…
 docker compose run --rm parosctl tenant create acme
 docker compose run --rm parosctl journal create acme orders
@@ -52,7 +53,7 @@ docker compose run --rm parosctl tenant list
 
 # A tenant's journals: a second create of a live name is refused (exit 3), a delete is a
 # tombstone, and the list shows both.
-docker compose run --rm parosctl journal create acme events --mode multi
+docker compose run --rm parosctl journal create acme events --writers multi
 docker compose run --rm parosctl journal create acme events
 docker compose run --rm parosctl journal delete acme events
 docker compose run --rm parosctl journal list acme
