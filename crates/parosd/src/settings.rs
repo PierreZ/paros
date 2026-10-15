@@ -17,6 +17,9 @@
 //! | `PAROS_TLS_CLIENT_AUTH` | `required` (mutual TLS, the default), `optional` or `off`: what it asks of a caller |
 //! | `PAROS_ROOT_PUBLIC_KEY` | the root public key files it pins while idle, comma-separated (#245 (Biscuit tokens)): `cell init` and `cell add-machine` then need an `admin` token; none trusts the network |
 //! | `PAROS_HTTP_LISTEN` | `HOST:PORT` of its HTTP endpoint (#366 (metrics)): `/metrics` (Prometheus text), `/healthz` and `/readyz`; none by default |
+//! | `PAROS_OTLP_ENDPOINT` | an OpenTelemetry collector's OTLP/gRPC URL (`http://collector:4317`): spans and metrics are pushed there; none by default |
+//! | `PAROS_OTLP_TRACES_ENDPOINT`, `PAROS_OTLP_METRICS_ENDPOINT` | one signal's collector, in place of `PAROS_OTLP_ENDPOINT` |
+//! | `PAROS_OTLP_INTERVAL_MS` | how often the metrics are pushed (default 10000, at least 100) |
 //! | `PAROS_<FIELD>[_MS]` | one override per `DriverTunables` field ([`crate::tunables`]) |
 //!
 //! Each variable has the matching `--flag`. An unknown `PAROS_*` variable
@@ -32,8 +35,12 @@ use paros::{JournalStoreConfig, Transport};
 use paros_authz_biscuit::{BiscuitAuthz, KeyRing, RootPublicKey};
 
 /// The variables this module reads.
-const VARIABLES: [&str; 14] = [
+const VARIABLES: [&str; 18] = [
     "PAROS_HTTP_LISTEN",
+    "PAROS_OTLP_ENDPOINT",
+    "PAROS_OTLP_TRACES_ENDPOINT",
+    "PAROS_OTLP_METRICS_ENDPOINT",
+    "PAROS_OTLP_INTERVAL_MS",
     "PAROS_NAME",
     "PAROS_LISTEN",
     "PAROS_ADVERTISE",
@@ -104,6 +111,19 @@ pub struct Settings {
     /// `/readyz` (a cell member whose stores opened). None by default.
     #[arg(long, env = "PAROS_HTTP_LISTEN")]
     pub http_listen: Option<String>,
+    /// An OpenTelemetry collector's OTLP/gRPC URL (#366 (metrics)): the
+    /// spans and the metrics are pushed there. None by default.
+    #[arg(long, env = "PAROS_OTLP_ENDPOINT")]
+    pub otlp_endpoint: Option<String>,
+    /// The collector the spans go to, in place of `PAROS_OTLP_ENDPOINT`.
+    #[arg(long, env = "PAROS_OTLP_TRACES_ENDPOINT")]
+    pub otlp_traces_endpoint: Option<String>,
+    /// The collector the metrics go to, in place of `PAROS_OTLP_ENDPOINT`.
+    #[arg(long, env = "PAROS_OTLP_METRICS_ENDPOINT")]
+    pub otlp_metrics_endpoint: Option<String>,
+    /// How often the metrics are pushed, in milliseconds.
+    #[arg(long, env = "PAROS_OTLP_INTERVAL_MS", default_value_t = 10_000, value_parser = clap::value_parser!(u64).range(100..))]
+    pub otlp_interval_ms: u64,
     /// The store layout.
     #[arg(
         long,
@@ -135,6 +155,30 @@ pub struct Settings {
 }
 
 impl Settings {
+    /// The collector the spans go to, if any.
+    pub fn traces_endpoint(&self) -> Option<&str> {
+        self.otlp_traces_endpoint
+            .as_deref()
+            .or(self.otlp_endpoint.as_deref())
+    }
+
+    /// The collector the metrics go to, if any.
+    pub fn metrics_endpoint(&self) -> Option<&str> {
+        self.otlp_metrics_endpoint
+            .as_deref()
+            .or(self.otlp_endpoint.as_deref())
+    }
+
+    /// The name this machine gives its telemetry before it knows its
+    /// advertised address: `PAROS_NAME`, else `PAROS_ADVERTISE`, else
+    /// `PAROS_LISTEN`, as written.
+    pub fn instance(&self) -> &str {
+        self.name
+            .as_deref()
+            .or(self.advertise.as_deref())
+            .unwrap_or(&self.listen)
+    }
+
     /// Its transport: TLS with the three files, plaintext with none.
     ///
     /// # Errors

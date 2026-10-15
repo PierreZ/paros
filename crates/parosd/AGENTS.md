@@ -12,6 +12,7 @@ image and the Compose toy are `Dockerfile` and `docker-compose.yml` at the repos
   amnesia, wait, serve) → tracing subscriber, runtime, name resolution, `SIGTERM`/`SIGINT`
   → shutdown token, `MachineError` → exit codes.
 - `src/http.rs` → `serve`, `route` → `PAROS_HTTP_LISTEN` (#366 (metrics)): `/metrics` (the machine's `paros::metrics::Metrics` as Prometheus text), `/healthz`, `/readyz` (`503` with the phase until the machine serves its cell); plain HTTP/1.1, `GET` and `HEAD`, no state, no sim path. `main.rs` always records metrics (`Metrics::on`).
+- `src/otel.rs` → `Telemetry`, `exported` → `PAROS_OTLP_ENDPOINT`, `PAROS_OTLP_TRACES_ENDPOINT`, `PAROS_OTLP_METRICS_ENDPOINT`, `PAROS_OTLP_INTERVAL_MS` (#366 (metrics), decided on 2026-10-15: OTLP beside Prometheus): the `tracing` spans through `tracing-opentelemetry` (the exporter's own crates filtered out), and one observable instrument per `paros::metrics::Family` that reads the same registry at each push (a counter drops `_total`); started inside the runtime, flushed after `run` returns.
 - `build.rs` → `PAROS_COMMIT` (from the environment, else `git rev-parse HEAD`), the commit `parosctl bench --json` reports (#194 (throughput benchmark)).
 - `src/settings.rs` → `Settings`, `Layout`, `check_unknown` → `PAROS_*` variables (each also a
   `--flag`); an unknown `PAROS_*` variable is an error. `PAROS_TLS_CERT`, `PAROS_TLS_KEY`, `PAROS_TLS_CA` (all or none), `PAROS_TLS_CLIENT_AUTH` (`required` by default) → `Settings::transport` (PR #509 (mutual TLS)). `PAROS_ROOT_PUBLIC_KEY` (`.public` files, comma-separated) → `Settings::pin`, the machine's `AdminPin` over `BiscuitAuthz` at the start's wall clock (#245 (Biscuit tokens)); none: open.
@@ -107,6 +108,7 @@ image and the Compose toy are `Dockerfile` and `docker-compose.yml` at the repos
 - **Feature unification** (`Cargo.toml:18-21`): built with `paros-sim` in one workspace build,
   cargo unifies moonpool-core's features and this binary gets moonpool-sim's deterministic
   `select!`; `cargo build -p parosd` alone keeps tokio's macro verbatim.
+- `opentelemetry`, `opentelemetry_sdk`, `opentelemetry-otlp` (`grpc-tonic`), `tracing-opentelemetry`, `prometheus` (the registry's types): the OTLP push, `parosd` only.
 - `clap` (`derive`, `env`), `tokio` (`rt-multi-thread`, `macros`, `signal`), `tokio-util`,
   `tracing`, `tracing-subscriber` (`env-filter`, `fmt`), `serde_json`, `hdrhistogram` and
   `base64` (`parosctl bench`); dev `futures`, `tempfile`.

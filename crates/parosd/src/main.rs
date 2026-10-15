@@ -42,6 +42,7 @@
 //! | 2 | an invalid configuration | fix the variables |
 
 mod http;
+mod otel;
 mod resolve;
 mod settings;
 mod tunables;
@@ -56,6 +57,9 @@ use paros::metrics::Metrics;
 use paros::{Address, BootRefusal, Names, NoAudit, RunError};
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::Layer as _;
+use tracing_subscriber::layer::SubscriberExt as _;
+use tracing_subscriber::util::SubscriberInitExt as _;
 
 use crate::settings::Settings;
 
@@ -72,12 +76,6 @@ const RESOLVE_RETRY: Duration = Duration::from_millis(500);
 
 fn main() -> ExitCode {
     let settings = Settings::parse();
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn,parosd=info".into()),
-        )
-        .with_writer(std::io::stderr)
-        .init();
     if let Err(error) = settings::check_unknown(std::env::vars().map(|(name, _)| name)) {
         eprintln!("parosd: {error}");
         return ExitCode::from(2);
@@ -92,11 +90,36 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    runtime.block_on(Box::pin(run(settings)))
+    // Metrics are always recorded (#366 (metrics)); `PAROS_HTTP_LISTEN`
+    // serves them, with the probes, and `PAROS_OTLP_*` pushes them.
+    let metrics = Metrics::on();
+    let telemetry = {
+        let _entered = runtime.enter();
+        match otel::Telemetry::start(&settings, &metrics) {
+            Ok(telemetry) => telemetry,
+            Err(error) => {
+                eprintln!("parosd: {error}");
+                return ExitCode::from(2);
+            }
+        }
+    };
+    tracing_subscriber::registry()
+        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn,parosd=info".into()))
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
+        .with(telemetry.tracer().map(|tracer| {
+            tracing_opentelemetry::layer()
+                .with_tracer(tracer)
+                .with_filter(tracing_subscriber::filter::filter_fn(otel::exported))
+        }))
+        .init();
+    let code = runtime.block_on(Box::pin(run(settings, metrics)));
+    // The runtime's workers still run: the exporters flush over it.
+    telemetry.shutdown();
+    code
 }
 
 /// Run the machine: the library's lifecycle on this data directory.
-async fn run(settings: Settings) -> ExitCode {
+async fn run(settings: Settings, metrics: Metrics) -> ExitCode {
     let tunables = match tunables::from_env() {
         Ok(tunables) => tunables,
         Err(error) => return invalid(&error),
@@ -135,9 +158,6 @@ async fn run(settings: Settings) -> ExitCode {
             "parosd_pinned_root_keys"
         );
     }
-    // Metrics are always recorded (#366 (metrics)); `PAROS_HTTP_LISTEN`
-    // serves them, with the probes.
-    let metrics = Metrics::on();
     let shutdown = shutdown_on_signal();
     if let Some(http) = &settings.http_listen {
         let addr = match patiently(|| resolve::resolve(http)) {

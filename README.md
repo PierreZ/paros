@@ -54,7 +54,8 @@ Every session can run over TLS, mutual by default: `parosctl tls init` writes th
 authority and every certificate in one step.
 
 Each machine serves Prometheus metrics and two probes (`/metrics`, `/healthz`, `/readyz`) when
-`PAROS_HTTP_LISTEN` is set. To measure throughput and latency on one machine, with no cell to
+`PAROS_HTTP_LISTEN` is set. It pushes its spans and metrics to an OpenTelemetry collector when
+`PAROS_OTLP_ENDPOINT` is set. To measure throughput and latency on one machine, with no cell to
 start first:
 
 ```sh

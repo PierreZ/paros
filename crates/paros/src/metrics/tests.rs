@@ -125,3 +125,30 @@ fn totals_read_back_every_journal_from_the_registry() {
     assert_eq!((totals.written_bytes, totals.read_bytes), (20, 6));
     assert_eq!(totals.total_calls(), 6);
 }
+
+#[test]
+fn families_list_every_family_before_its_first_series() {
+    assert!(Metrics::off().families().is_empty());
+    let metrics = Metrics::on();
+    let families = metrics.families();
+    let named = |name: &str| families.iter().find(|f| f.name == name).cloned();
+    let calls = named("paros_calls_total").expect("listed with no series yet");
+    assert_eq!(calls.kind, super::FamilyKind::Counter);
+    let slot = named("paros_applied_slot").expect("listed");
+    assert_eq!(slot.kind, super::FamilyKind::Gauge);
+    let gathered = metrics.registry().expect("on").gather().len();
+    assert_eq!(families.len(), 15);
+    assert!(
+        gathered < families.len(),
+        "a family with no series is not gathered"
+    );
+    for family in &families {
+        assert!(family.name.starts_with("paros_"), "{}", family.name);
+        assert_eq!(
+            family.name.ends_with("_total"),
+            family.kind == super::FamilyKind::Counter,
+            "{}",
+            family.name
+        );
+    }
+}

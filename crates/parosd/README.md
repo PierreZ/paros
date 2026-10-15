@@ -199,6 +199,9 @@ error (exit 2), so a typo never silently keeps a default.
 | `PAROS_TLS_CERT`, `PAROS_TLS_KEY`, `PAROS_TLS_CA` | its certificate chain, its key and the universe's authority, PEM (`parosctl tls init`): all three turn TLS on for every session it serves and dials; only some is an error |
 | `PAROS_TLS_CLIENT_AUTH` | `required` (mutual TLS, the default), `optional` or `off` (server-authenticated TLS): what it asks of a caller |
 | `PAROS_HTTP_LISTEN` | `HOST:PORT` of the HTTP endpoint (#366 (metrics)): `/metrics` (Prometheus text), `/healthz` and `/readyz`; none when unset |
+| `PAROS_OTLP_ENDPOINT` | an OpenTelemetry collector's OTLP/gRPC URL: spans and metrics are pushed there; none when unset |
+| `PAROS_OTLP_TRACES_ENDPOINT`, `PAROS_OTLP_METRICS_ENDPOINT` | one signal's collector, in place of `PAROS_OTLP_ENDPOINT` |
+| `PAROS_OTLP_INTERVAL_MS` | how often the metrics are pushed (default `10000`, at least `100`) |
 | `RUST_LOG` | the log filter (default `warn,parosd=info`) |
 
 Every address is `HOST:PORT` with an explicit port; the host is an IP or a

@@ -389,6 +389,28 @@ impl Families {
         }
     }
 
+    /// Every registered family, in registration order.
+    fn collectors(&self) -> [&dyn prometheus::core::Collector; 15] {
+        let machine = &self.machine;
+        [
+            &self.calls,
+            &self.answers,
+            &self.answer_seconds,
+            &self.written,
+            &self.read,
+            &self.applied,
+            &self.chosen,
+            &machine.settles,
+            &machine.settle_seconds,
+            &machine.phase,
+            &machine.windows,
+            &machine.cpu_cores,
+            &machine.machine_cpu,
+            &machine.disk_busy,
+            &machine.disk_queue,
+        ]
+    }
+
     fn journal(&self, id: JournalIdentifier, tenant: String, journal: String) -> JournalMetrics {
         let labels = Arc::new([
             tenant,
@@ -514,6 +536,29 @@ impl Metrics {
         self.0.families.as_ref().map(|families| &families.registry)
     }
 
+    /// Every family these metrics record, series or not yet; empty when
+    /// off.
+    #[must_use]
+    pub fn families(&self) -> Vec<Family> {
+        let Some(families) = &self.0.families else {
+            return Vec::new();
+        };
+        let all = families
+            .collectors()
+            .into_iter()
+            .flat_map(prometheus::core::Collector::collect);
+        all.map(|family| Family {
+            name: family.name().to_string(),
+            help: family.help().to_string(),
+            kind: match family.get_field_type() {
+                prometheus::proto::MetricType::COUNTER => FamilyKind::Counter,
+                prometheus::proto::MetricType::GAUGE => FamilyKind::Gauge,
+                other => unreachable!("paros records no {other:?}"),
+            },
+        })
+        .collect()
+    }
+
     /// Every metric of the registry in the Prometheus text format; empty
     /// when off.
     #[must_use]
@@ -626,6 +671,28 @@ impl Metrics {
             })
             .collect()
     }
+}
+
+/// A metric family's kind: paros records counters and gauges only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FamilyKind {
+    /// Only goes up while the process lives.
+    Counter,
+    /// Any value: the latest one.
+    Gauge,
+}
+
+/// One metric family a [`Metrics`] records: what an exporter other than
+/// the Prometheus text (`parosd`'s OTLP push) registers once, then reads
+/// from [`Metrics::registry`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Family {
+    /// The Prometheus name, e.g. `paros_calls_total`.
+    pub name: String,
+    /// What it counts.
+    pub help: String,
+    /// Its kind.
+    pub kind: FamilyKind,
 }
 
 /// What one machine counted over every journal: the sums of
