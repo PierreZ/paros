@@ -1104,9 +1104,9 @@ fn stretch_tick() -> bool {
     stretched
 }
 
-/// Park `call` on the slot its proposal took (`result`), to be answered
-/// when that slot applies, or redirect it at once when this node does not
-/// lead.
+/// Park `call` on the slot its proposal took (`result`), with the ballot
+/// it was proposed under, to be answered when that slot applies, or
+/// redirect it at once when this node does not lead.
 fn park_call<S, A: Audit, P: Providers>(
     rt: &mut JournalRt<S, A>,
     result: ProposeResult,
@@ -1125,7 +1125,15 @@ fn park_call<S, A: Audit, P: Providers>(
                 slot < rt.node.proposer().next_slot(),
                 "a call waits on an allocated slot"
             );
-            rt.waiters.pending.entry(slot).or_default().push(call);
+            // The proposal's ballot: only a decision at it is this call's
+            // (`answer_applied_calls`).
+            let ballot = rt.node.ballot();
+            assert!(rt.node.is_leader(), "only a leader parks a call");
+            rt.waiters
+                .pending
+                .entry(slot)
+                .or_default()
+                .push((ballot, call));
             assert!(
                 rt.waiters.pending.contains_key(&slot),
                 "a held call is parked on its slot"
