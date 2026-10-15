@@ -178,7 +178,10 @@ const _: () = assert!(REGISTRY_PAGE > 0);
 /// watermark exactly when its highest one is), and its effective
 /// configuration (the highest reconfiguration) is the same. The criterion
 /// looks only forward, so a page asked from a cursor elides exactly what the
-/// whole answer elides.
+/// whole answer elides. That cross-page claim rests on [`Matchmaker::step`]
+/// refusing a registration at or below the journal's highest ballot
+/// (`Stale`): nothing lands inside a window a candidate is still paging. A
+/// change that lets a lower ballot register must re-check it.
 ///
 /// Without it, an answer cost one record per ballot ever registered above
 /// the watermark, and a leaderless cluster registers one per failed campaign

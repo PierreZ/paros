@@ -1485,7 +1485,10 @@ impl World {
             // configuration in the union some answerer contributed, pages
             // and all: at its own ballot, or at a later one that repeats it
             // (a page leaves out a belief a later registration repeats,
-            // #570 (election duel outlasts the recovery tail)).
+            // #570 (election duel outlasts the recovery tail)). This is
+            // weaker than "at its own ballot": it is what Phase 1 consumes,
+            // and the sim's per-page oracle (`check_page_window`) still pins
+            // every page exactly.
             assert!(
                 history
                     .range(*registered..)
