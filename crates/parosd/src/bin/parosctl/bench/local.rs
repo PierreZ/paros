@@ -125,7 +125,9 @@ async fn machine(
 ) -> Result<(), String> {
     let settings = MachineSettings {
         class: Class::Storage,
-        capacity: 8,
+        // parosd's default (`PAROS_CAPACITY`): since #556 (tenant birth
+        // footprint) a tenant's birth books slots before its first journal.
+        capacity: 32,
         failure_domain: format!("zone-{index}"),
         name: format!("local-{index}"),
         pin: AdminPin::open(),
