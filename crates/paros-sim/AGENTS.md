@@ -88,8 +88,9 @@ fault world, the one client workload and the audit. Stack: `paros-core` ←
 ## Per-seed draws (`shape.rs`)
 
 - `quorum_policy` → `Majority`, `Flexible { q2 }` (`q2` knob clamped `1..=n/2`, `q1 = n - q2 + 1`),
-  or `Grid { rows, cols }` from `grid_layouts` (floor `rows >= 2`, `cols >= 2`: `2×2`, `2×3`,
-  `3×2`). `QuorumPolicy::system(n)` applies it per configuration size; a size no layout tiles
+  or `Grid { rows, cols, slack }` from `grid_layouts` (floor `rows >= 2`, `cols >= 2`: `2×2`, `2×3`,
+  `3×2`); `slack` is its own knob (default 0, the full column; extreme 1–2: a column decides on
+  `rows - slack` accepts, at least one, the acceptor partitions of #532). `QuorumPolicy::system(n)` applies it per configuration size; a size no layout tiles
   runs a majority. The composer may switch a successor to majority, never the reverse.
 - `config_floor` → `MIN_BOOTSTRAP` on a matchmaker seed, the whole pool otherwise.
   `QuorumPolicy::clean_copies(floor, pool)` → floor minus the smallest `tolerated_loss` over

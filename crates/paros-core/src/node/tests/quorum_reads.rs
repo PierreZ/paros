@@ -7,7 +7,7 @@ use super::*;
 /// columns `{0, 3}`, `{1, 4}` and `{2, 5}`.
 fn grid_node(id: u64) -> ColocatedNode {
     let mut storage = TestStorage::new(id, &[0, 1, 2, 3, 4, 5]);
-    storage.config.quorum_system = crate::membership::QuorumSystem::Grid { rows: 2, cols: 3 };
+    storage.config.quorum_system = crate::membership::QuorumSystem::grid(2, 3);
     ColocatedNode::new(&storage)
 }
 

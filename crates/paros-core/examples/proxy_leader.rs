@@ -64,7 +64,7 @@ use paros_core::{
 
 /// Two rows of three: rows `{0, 1, 2}` and `{3, 4, 5}`, columns `{0, 3}`,
 /// `{1, 4}` and `{2, 5}`.
-const GRID: QuorumSystem = QuorumSystem::Grid { rows: 2, cols: 3 };
+const GRID: QuorumSystem = QuorumSystem::grid(2, 3);
 const NODES: u64 = 6;
 const PROXIES: usize = 2;
 /// The driver's take-back budget: re-delegations a proxy may swallow.

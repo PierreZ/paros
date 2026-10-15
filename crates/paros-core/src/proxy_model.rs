@@ -303,7 +303,7 @@ impl World {
         let mut rng = Rng::new(seed);
         let grid = rng.chance(1, 2);
         let (n, system) = if grid {
-            (4, QuorumSystem::Grid { rows: 2, cols: 2 })
+            (4, QuorumSystem::grid(2, 2))
         } else {
             (3, QuorumSystem::Majority)
         };

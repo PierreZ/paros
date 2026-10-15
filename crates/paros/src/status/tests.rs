@@ -52,7 +52,7 @@ fn no_live_quorum_of_a_phase_is_unavailable() {
     );
     // A grid: a full row is a Phase-1 quorum and a full column a Phase-2
     // one. Losing a whole column leaves no Phase-2 quorum.
-    let grid = QuorumSystem::Grid { rows: 2, cols: 2 };
+    let grid = QuorumSystem::grid(2, 2);
     let placed = config(&[1, 2, 3, 4], grid);
     assert_eq!(judge(&placed, 4, grid, standing(&[1], &[])), Word::Degraded);
     assert_eq!(

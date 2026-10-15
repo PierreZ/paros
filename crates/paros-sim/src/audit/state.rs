@@ -130,8 +130,9 @@ pub(super) struct AuditState {
     /// Cluster-wide: the value chosen for each slot.
     pub(super) chosen: BTreeMap<u64, u64>,
     /// Per open quorum read `(node, ctx)`: the highest slot applied anywhere
-    /// when it opened (#260) — the floor its served prefix must reach.
-    pub(super) read_floors: BTreeMap<(u64, u64), Option<u64>>,
+    /// when it opened (#260) — the floor its served prefix must reach — and
+    /// the simulated ms it opened at.
+    pub(super) read_floors: BTreeMap<(u64, u64), (Option<u64>, u64)>,
     /// Per node: the last durable promised ballot.
     pub(super) promised: BTreeMap<u64, Ballot>,
     /// `(ballot round, ballot node, slot)` → the command that ballot proposed.

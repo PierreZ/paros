@@ -97,11 +97,28 @@ const NAMES: [&[u8]; 3] = [b"acme", b"globex", b"initech"];
 /// a name is reusable once its removal completes, its id never is.
 #[derive(Default)]
 struct TenantNames {
-    /// Each removed tenant, to the name it held.
-    removed: BTreeMap<TenantId, Vec<u8>>,
+    /// Each removed tenant, by the fleet whose directory removed it (the
+    /// fleet tenant's control journal), to the name it held. An id is never
+    /// reused inside one fleet directory, the authority that enforces it. A
+    /// fleet formed after its cell was lost knows nothing of the old one: a
+    /// create still pending there may register the same id again (witness
+    /// 10193140021688847625, PR #562 (acceptor partitions)).
+    removed: BTreeMap<(JournalIdentifier, TenantId), Vec<u8>>,
     /// Each cell, to the name the first resolution through it gave
     /// (#239 (names at the edge)).
     cells: BTreeMap<u64, Vec<u8>>,
+}
+
+/// The tenants `fleet`'s directory removed, in the run so far.
+fn removed_in(state: &StateHandle, fleet: JournalIdentifier) -> BTreeSet<TenantId> {
+    with_names(state, |names| {
+        names
+            .removed
+            .keys()
+            .filter(|(at, _)| *at == fleet)
+            .map(|(_, tenant)| *tenant)
+            .collect()
+    })
 }
 
 /// Run `f` over the run's [`TenantNames`].
@@ -755,8 +772,7 @@ impl FleetOps {
         let Some(cell) = &self.cell else {
             return;
         };
-        let removed: BTreeSet<TenantId> =
-            with_names(&self.state, |names| names.removed.keys().copied().collect());
+        let removed = removed_in(&self.state, cell.fleet);
         let resolution = resolve_tenant(client, first, cell.fleet, name).await;
         if let TenantResolution::Resolved {
             tenant, control, ..
@@ -818,11 +834,11 @@ impl FleetOps {
                 run.steps.first() != Some(&Stage::RegisterTenant),
                 "fleet: a tenant creation resumed from REGISTERING"
             );
+            let fleet = self.cell.as_ref().map(|cell| cell.fleet);
             if with_names(&self.state, |names| {
-                names
-                    .removed
-                    .iter()
-                    .any(|(tenant, removed)| removed == name && *tenant != result)
+                names.removed.iter().any(|((at, tenant), removed)| {
+                    Some(*at) == fleet && removed == name && *tenant != result
+                })
             }) {
                 assert_reachable!(
                     "names: a tenant name is created again after a completed removal"
@@ -854,9 +870,11 @@ impl FleetOps {
             Step::Done { result, last } => {
                 let removed = last == Some(Stage::RemoveTenant);
                 if let (Some(tenant), true) = (result, removed) {
-                    with_names(&self.state, |names| {
-                        names.removed.insert(tenant, name.to_vec())
-                    });
+                    if let Some(cell) = &self.cell {
+                        with_names(&self.state, |names| {
+                            names.removed.insert((cell.fleet, tenant), name.to_vec())
+                        });
+                    }
                     assert_always!(
                         session.directory().named(name).is_none()
                             && session.directory().is_removed(tenant)
