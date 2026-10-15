@@ -19,10 +19,11 @@
 //! re-run — and adds the cell with its cell tenant, the cell records the
 //! fleet on its side, and the fleet tenant marks the cell `READY`. No
 //! identifier is fixed (§3.8): a first run takes them from the plan it
-//! formed, a re-run learns them from the members' `Inspect`. Both journals are
-//! written under the run's leader uuids: the run takes them over (#241),
-//! fencing the coordinator too until admin calls become requests to it
-//! (#212, #225; the coordinator stops at its first refused write). Every step is idempotent: `init` is
+//! formed, a re-run learns them from the members' `Inspect`. The run writes
+//! the fleet tenant's journal under its own leader uuid (#241). It never
+//! claims the cell control journal: the cell coordinator writes the cell's
+//! side of the join, and the run waits for it (#513 (fleet Init duel)), so
+//! `init` never fences the coordinator. Every step is idempotent: `init` is
 //! refused only when it found nothing left to do.
 
 use std::time::Duration;

@@ -13,7 +13,11 @@
 //!    ([`CellSession::open`]).
 //! 2. **Finish in-flight work**: admit every machine the registry holds that
 //!    is neither a founding member nor retired. `Admit` is idempotent, so a
-//!    machine an earlier term admitted answers that it is in the cell.
+//!    machine an earlier term admitted answers that it is in the cell. Then
+//!    join the cell to the universe when the universe directory holds the
+//!    cell and the cell has not joined (`JoinFleet`, [`super::universe`],
+//!    #513 (fleet Init duel)): `init` waits for this write and claims
+//!    nothing on the cell control journal.
 //! 3. **Publish** the interface: register the term's group, a moonpool
 //!    dynamic endpoint serving `Register` and `JournalRequest` (#404 (static
 //!    vs dynamic endpoints)), and let the next renewal name the member's
@@ -36,7 +40,8 @@
 //!    the Down bound)): the term's moves re-place its roles as a draining
 //!    machine's, unless an operator's maintenance window over it or its
 //!    zone is open (#359). Only changes are
-//!    written, never a heartbeat. The watch ends with the term, or at the
+//!    written, never a heartbeat. Each round also joins the cell to the
+//!    universe, as in step 2, until it joined. The watch ends with the term, or at the
 //!    term's first write that does not land: a coordinator an admin session
 //!    fenced does not fight back. It resigns the term instead, so that the
 //!    next term installs itself under a fresh uuid and its duties go on
@@ -64,8 +69,9 @@
 //! the coordinator resigns, so no write under that uuid follows.
 //!
 //! Until admin calls become requests to the coordinator (#212, #225), an
-//! admin session still claims the cell control journal and fences the
-//! coordinator. The coordinator does not fight back within its term: it
+//! admin session (`cell add-machine`, `cell drain-machine`, a tenant's
+//! creation or removal; never `init`, #513) still claims the cell control
+//! journal and fences the coordinator. The coordinator does not fight back within its term: it
 //! resigns, and the next term claims the journal again.
 //!
 //! The candidate draws no randomness of its own: its seed and its BUGGIFY
@@ -93,6 +99,7 @@ use crate::client::election::{Candidate, Election, ElectionTunables, Leader, Ste
 use crate::client::fleet::{Interrupted, Stage, Step as FleetStep};
 use crate::client::journals::{JournalAnswer, JournalRequest};
 use crate::client::{CallObserver, ClaimOutcome, Client, Server, bootstrap};
+use crate::fleet::FleetDirectory;
 use crate::rpc::machine as wire;
 use crate::rpc::methods::{CoordinatorInterface, JournalRequestRpc, RegisterRpc};
 use crate::rpc::{Inbound, NodeClient, ReplySender};
@@ -244,6 +251,13 @@ async fn open_term<P: Providers>(
         session.registry().nodes().count() >= admitted,
         "an admission finished is a registered machine"
     );
+    // An `init` that added the cell to the universe directory waits for the
+    // cell's side of the join (#513 (fleet Init duel)). A write that does
+    // not land ends the term's session, as a refused admission does.
+    if session.is_open() {
+        let mut directory = Folder::new(FleetDirectory::default());
+        let _ = super::universe::join(client, &mut session, &mut directory).await;
+    }
     let open = session.is_open().then_some(session);
     (TermDuty::Served { admitted }, open)
 }
@@ -282,6 +296,9 @@ pub struct Watch {
     /// The registry fold position each admitted machine reported at its
     /// last answer (#505 (stranded admitted machine)).
     positions: BTreeMap<NodeId, u64>,
+    /// The universe directory's fold, read at each round until the cell
+    /// joined the universe (#513 (fleet Init duel)).
+    directory: Folder<FleetDirectory>,
 }
 
 /// One `Identify` check of a machine's new address, run off the renewal
@@ -332,6 +349,7 @@ impl Watch {
             ran: false,
             probes: BTreeMap::new(),
             positions: BTreeMap::new(),
+            directory: Folder::new(FleetDirectory::default()),
         }
     }
 
@@ -455,6 +473,11 @@ impl Watch {
             .filter(|tenant| session.registry().dropped(*tenant))
             .collect();
         let mut wrote = 0;
+        // The cell's side of an `init` (#513 (fleet Init duel)): the
+        // operator waits for it, and claims nothing here.
+        if super::universe::join(client, session, &mut self.directory).await? {
+            wrote += 1;
+        }
         if !dropped.is_empty() {
             wrote +=
                 super::tenants::release(client, session, |b| dropped.contains(&b.target.tenant()))

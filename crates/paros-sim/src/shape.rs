@@ -415,13 +415,15 @@ impl NodeShape {
             status_hold: ms(buggify_knob!(1000_u64, 0_u64..4001_u64)),
             // A machine's own clients (#457 (hard-coded tunables)): the
             // coordinator's duties, the registry follow, the registration
-            // and the `Resolve` folds. Floor one round trip: shorter, every
-            // internal call is ambiguous. The range crosses the lease both
-            // ways on purpose: above `election_lease - election_renew`, one
-            // slow duty under chaos outlasts the lease and the members take
-            // over, again and again (the metastable plan's coordinator
+            // and the `Resolve` folds. Floor `INTERNAL_CALL_FLOOR_MS`, a
+            // fresh dial and a peer-served read: shorter, a call that must
+            // dial first is ambiguous every time (#565 (renamed founder's
+            // registration read times out)). The range crosses the lease
+            // both ways on purpose: above `election_lease - election_renew`,
+            // one slow duty under chaos outlasts the lease and the members
+            // take over, again and again (the metastable plan's coordinator
             // loop); the tail must still settle the election.
-            internal_request_timeout: ms(buggify_knob!(5000_u64, ROUND_TRIP_FLOOR_MS..8001_u64)),
+            internal_request_timeout: ms(buggify_knob!(5000_u64, INTERNAL_CALL_FLOOR_MS..8001_u64)),
             // Floor 1: one re-send per resolution, so an ambiguous internal
             // write is more often left unresolved.
             internal_retry_budget: buggify_knob!(4_u32, 1_u32..9_u32),
@@ -459,18 +461,23 @@ impl NodeShape {
         // The production profile `parosd` ships (#209), whole: every field
         // at once, which the per-field locations above would draw together
         // only by chance. Each of its values lies inside its knob's range
-        // (a 100 ms tick, a ten-tick election base, two-second reads), so
-        // this is a point of the swept space, not a new extreme, and it
-        // clears the round-trip floor above in wall-clock terms.
+        // (a 100 ms tick, a ten-tick election base, two-second reads), and
+        // it clears the round-trip floor above in wall-clock terms. One
+        // field is lowered: its two-second take-back fits production's
+        // five-second client deadline, not the sim's `REQUEST_FLOOR_MS`, so
+        // it takes the drawn knob's `TAKE_BACK_CEILING_MS` (witness
+        // 16141873764476836178: every recovery write timed out behind a
+        // proxy a needed acceptor did not count).
         // The per-field pairings below judge `drawn`, and only when it is
         // what runs: under the production profile no drawn extreme does.
         let production = !slow_link && buggify_knob!(0_u8, 1_u8..2_u8) == 1;
         let tunables = if production {
             assert_reachable!("a node runs the production driver tunables");
-            DriverTunables::production()
+            production_profile()
         } else {
             drawn
         };
+        check_take_back(&tunables);
         if !production {
             pair_extremes(&drawn, &defaults);
         }
@@ -482,6 +489,31 @@ impl NodeShape {
             proxy_count_lag: buggify_knob!(0_usize, 1_usize..3_usize),
         }
     }
+}
+
+/// `parosd`'s profile (#209), its take-back lowered to the sim's
+/// `TAKE_BACK_CEILING_MS`: production pairs two seconds with a five-second
+/// client deadline, the sim's clients draw theirs from `REQUEST_FLOOR_MS`.
+fn production_profile() -> DriverTunables {
+    let mut profile = DriverTunables::production();
+    let tick = u64::try_from(profile.tick_interval.as_millis())
+        .unwrap_or(u64::MAX)
+        .max(1);
+    profile.proxy_take_back_resends = profile
+        .proxy_take_back_resends
+        .min(TAKE_BACK_CEILING_MS / tick);
+    profile
+}
+
+/// Whichever profile runs, a write taken back is answered inside the
+/// shortest client deadline.
+fn check_take_back(tunables: &DriverTunables) {
+    let tick = u64::try_from(tunables.tick_interval.as_millis()).unwrap_or(u64::MAX);
+    assert_always!(
+        tunables.proxy_take_back_resends.saturating_mul(tick) <= TAKE_BACK_CEILING_MS,
+        "shape: a node's take-back fits the client's deadline floor",
+        { "resends" => tunables.proxy_take_back_resends, "tick_ms" => tick }
+    );
 }
 
 /// The BUGGIFY pairings of [`NodeShape::draw`]'s knobs: each extreme the
@@ -2273,6 +2305,26 @@ pub(crate) const CONNECT_FLOOR_MS: u64 = 1_000;
 
 const _: () = assert!(CONNECT_FLOOR_MS >= 2 * SLOWEST_ROUND_TRIP_MS);
 const _: () = assert!(CONNECT_FLOOR_MS > ROUND_TRIP_FLOOR_MS);
+
+/// The wall-clock floor of a drawn `internal_request_timeout`: one internal
+/// call that must dial its peer first. A machine's call goes to a peer it
+/// may not have a connection to (a renamed founding member reads the
+/// election journal from its peers at a new address, and every round
+/// dials again), so it waits out a connect ([`CONNECT_FLOOR_MS`]), then a
+/// read the peer confirms with a quorum: its own round trip and the
+/// confirmation's, each on the slowest link. Below that, a call that dials
+/// first is ambiguous every time. Witness (cite only): seed
+/// 17884888912503425398 on a0c4aa6, a renamed founder that drew 252 ms;
+/// each of its election reads timed out, so it never registered and never
+/// answered `Resolve` after chaos (#565 (renamed founder's registration
+/// read times out)).
+const INTERNAL_CALL_FLOOR_MS: u64 = CONNECT_FLOOR_MS + 2 * SLOWEST_ROUND_TRIP_MS;
+
+const _: () = assert!(INTERNAL_CALL_FLOOR_MS > CONNECT_FLOOR_MS);
+const _: () = assert!(
+    INTERNAL_CALL_FLOOR_MS < 2000,
+    "the floor sits under production's"
+);
 
 #[cfg(test)]
 mod tests {

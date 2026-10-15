@@ -31,6 +31,7 @@ mod output;
 #[path = "../../resolve.rs"]
 mod resolve;
 mod status;
+mod store;
 mod tls;
 mod token;
 mod universe;
@@ -176,9 +177,10 @@ impl Global {
 #[derive(Subcommand, Debug)]
 enum Command {
     /// Form the cell over its founding members with `cell init`'s decree
-    /// (#196, #216, #277); then `init` claims the cell control journal under a
-    /// leader uuid of its own, and the fleet steps register the cell in the fleet directory
-    /// (#229). Refused on an initialized fleet; a re-run resumes.
+    /// (#196, #216, #277); then the fleet steps register the cell in the fleet
+    /// directory (#229), and `init` reads the cell control journal and waits
+    /// for the cell coordinator to join the cell (#513). Refused on an
+    /// initialized fleet; a re-run resumes.
     Init(init::InitArgs),
     /// Cells (#216, #399): `cell list`, `cell show [<cell>]`, and `cell
     /// add-machine <addr>`, which admits an idle machine into the cell of
@@ -202,6 +204,10 @@ enum Command {
     /// certificate per machine, frontend and admin in one step; `tls ca`,
     /// `tls issue`, `tls show`, `tls verify`.
     Tls(tls::TlsArgs),
+    /// A machine's disk, offline (#365): `store inspect <data-dir>` reads
+    /// the record, every journal store and every matchmaker set without
+    /// starting `parosd`, and never writes to it.
+    Store(store::StoreArgs),
     /// The cell's machines (#399): `machine list`, `machine show <name>`.
     Machine(views::MachineArgs),
     /// Who holds which role now (#399): the coordinators, every journal's
@@ -406,12 +412,14 @@ fn main() -> ExitCode {
         .with_writer(std::io::stderr)
         .init();
     let cli = Cli::parse();
-    // The key and token commands are offline: no server, no runtime.
+    // The key, token, TLS and store commands are offline: no server, no
+    // client runtime.
     let out = Printer::new(cli.global.json);
     match cli.command {
         Command::Key(args) => key::run(&out, args).into(),
         Command::Token(args) => token::run(&out, args).into(),
         Command::Tls(args) => tls::run(&out, args).into(),
+        Command::Store(args) => store::run(&out, args).into(),
         command => match tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -622,7 +630,7 @@ async fn online(global: Global, command: Command) -> ExitCode {
         }
         Command::Resolve(args) => return resolve_tenant(&runtime, &cli.global, &out, args).await,
         Command::Cell(command) => command,
-        Command::Key(_) | Command::Token(_) | Command::Tls(_) => {
+        Command::Key(_) | Command::Token(_) | Command::Tls(_) | Command::Store(_) => {
             unreachable!("offline, handled in main")
         }
         Command::Machine(_) | Command::Roles(_) | Command::Status(_) => {

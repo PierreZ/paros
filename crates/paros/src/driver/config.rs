@@ -341,9 +341,12 @@ pub struct DriverTunables {
     pub status_hold: Duration,
     /// The request and read timeout of a machine's own clients (#457
     /// (hard-coded tunables)): the cell coordinator's, the registry follow,
-    /// the registration, and the `Resolve` folds. Floor 1 ms; below one
-    /// round trip every internal call is ambiguous, a liveness cost the
-    /// operator keeps, never a wrong answer. Above `election_lease` minus
+    /// the registration, and the `Resolve` folds. Floor 1 ms; it should
+    /// outlast a connect to a peer and a read that peer confirms with a
+    /// quorum, a wall-clock floor the operator keeps: below it, a call that
+    /// dials first is ambiguous every time (#565 (renamed founder's
+    /// registration read times out): a moved founding member never
+    /// registers), a liveness cost, never a wrong answer. Above `election_lease` minus
     /// `election_renew`, one slow call of a coordinator's duties outlasts
     /// its lease and the members take over: the production profile stays
     /// under that bound; the simulation also draws above it, so the control

@@ -285,6 +285,11 @@ A refusal is one of:
   membership or quorum system. Membership changes go through reconfiguration,
   never through the configuration.
 
+Before you act on a refusal, look at the disk with the machine stopped:
+`parosctl store inspect <data-dir>` (#365) prints the machine record and, for
+every store, its format marker, promise, chosen index, floor and faulty slots
+(`--records` adds every accepted slot). It never writes to the disk.
+
 ## parosctl
 
 The servers come from `--servers HOST:PORT,…` (or `PAROSCTL_SERVERS`): a name
@@ -309,6 +314,7 @@ required, with no default tenant and no fixed id (#235, #239, `docs/architecture
 | `parosctl reconfigure --journal J --members a,b,c [--quorum majority\|flexible:Q1:Q2\|grid:RxC]` | asks the leader of journal `J` for a new acceptor set; no journal is the default (#439), and a machine that does not serve `J` refuses it (`unknown_journal`) |
 | `parosctl retire --journal J --node N [--gc-watermark ROUND.NODE]` | retires a machine from journal `J`, carrying the GC watermark (read from the `inspect` of `J`'s leader when absent); the machine keeps serving its other journals |
 | `parosctl bench [--tenant T] [--journals N] [--clients N] [--duration D] [--ramp D] [--read-percent P] [--histograms FILE]` | the load generator (#517 (`parosctl bench`)): closed-loop clients `write` and `read-tail` the journals `bench-0`… of tenant `T` (created when missing), print throughput and latency per call each second, then the totals; `--histograms` writes the raw HDR histograms as JSON lines; the site's bench page |
+| `parosctl store inspect <data-dir> [--records] [--layout default\|small] [--scratch DIR]` | offline (#365): reads a stopped machine's disk without `parosd`: the machine record, every journal store (format marker and its `Config`, promise, chosen index, floor, sealed journal state, faulty slots; `--records`: every accepted slot and its records) and every matchmaker set (marker, generation, phase, registrations). Read-only: each store is copied to a scratch directory (`--scratch`, by default a fresh one under the system's temporary directory, removed after) and the copy is opened. Names come from the cell's journals on the disk; exit 3 when the record or a store does not read |
 | `parosctl tls init --out DIR --machines a,b,c [--frontends f] [--admins admin] [--universe U] [--days N]` | offline: writes the authority (`ca.crt`, `ca.key`) and a certificate per machine, frontend and admin (`<name>.crt`, `<name>.key`, mode 0600), and prints the variables each process reads; never overwrites a file |
 | `parosctl tls ca`, `parosctl tls issue <name> --role machine\|frontend\|admin\|client --ca-dir DIR [--host h] [--ip a]` | one authority, or one more certificate from it (a new machine, a renewal) |
 | `parosctl tls show <file>…`, `parosctl tls verify <file> --ca ca.crt` | what a file holds (identity, names, use, validity, days left); checks a certificate as a handshake would |

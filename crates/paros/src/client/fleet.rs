@@ -19,6 +19,9 @@
 //!   fleet}`), the cell joins the fleet directory `REGISTERING` with its cell
 //!   tenant (`AddCell`: `{internal, cell}`), the cell records the fleet on
 //!   its side (`JoinFleet`), and the fleet tenant marks the cell `READY`.
+//!   The cell coordinator writes `JoinFleet`, not the operator
+//!   ([`crate::machine`], #513 (fleet Init duel)): `init` reads the cell
+//!   control journal and waits for the join ([`Interrupted::NotJoined`]).
 //! - **Creating a tenant**: a `{users}` tenant only — the tenant API cannot
 //!   create an `internal` one. The fleet tenant registers it `REGISTERING` with its
 //!   identifier and its cell assignment (the one `READY` cell in M9), the cell
@@ -50,10 +53,18 @@
 //!
 //! **Who writes.** Both journals are written by the session that last claimed
 //! them with `SetLeader`, under a leader uuid drawn from the session's seed
-//! (#241; the cell coordinator of #225 is not built). Each journal has one
+//! (#241). Each journal has one
 //! leader per term, so two operators running at once fence each other: the
 //! loser's write is refused, its run is [`Step::Interrupted`], and running it
-//! again resumes from what the winner wrote. The fleet tenant is checkpointed as its
+//! again resumes from what the winner wrote. `init` claims only the fleet
+//! tenant's journal: it reads the cell control journal and never claims it
+//! (#513 (fleet Init duel)). A claim there fenced the elected cell
+//! coordinator, whose next term installed a fresh uuid and fenced the
+//! operator in turn; with slow links each claim lost to the next install,
+//! and `init` did not end (witness 1522711066683701314 on a0c4aa6, red on
+//! "fleet: an operation an operator stopped in ends in the recovery tail",
+//! green after). Tenant creation and removal still claim the cell control
+//! journal for their one cell step (#212, #225). The fleet tenant is checkpointed as its
 //! owner writes it ([`crate::client::checkpoint`], #227); the cell's journal
 //! is never checkpointed here — its owner's fold is the registry's, over a
 //! genesis pool only the deployment knows.
@@ -75,9 +86,7 @@ use super::checkpoint::{
 use super::outcome::ClaimOutcome;
 use super::writer::{Writer, WriterOutcome};
 use crate::fleet::RootKeyEntry;
-use crate::fleet::{
-    CellState, FleetCommand, FleetDirectory, FleetEntry, METADATA_VERSION, TenantState,
-};
+use crate::fleet::{CellState, FleetCommand, FleetDirectory, FleetEntry, TenantState};
 use crate::machine::ControlJournals;
 use crate::system::{FleetRegistration, HostedTenant, Registry, SystemCommand};
 use crate::tenant::Survives;
@@ -90,8 +99,6 @@ pub enum Stage {
     /// The cell joined the fleet directory, `REGISTERING`, with its cell
     /// tenant.
     AddCell,
-    /// The cell recorded the fleet on its side.
-    JoinFleet,
     /// The fleet tenant marked the cell `READY`.
     CellReady,
     /// The fleet tenant registered the tenant, `REGISTERING`.
@@ -218,6 +225,13 @@ pub enum Interrupted {
         journal: JournalIdentifier,
         /// The write's verdict.
         outcome: WriterOutcome,
+    },
+    /// The cell has not joined the fleet yet: the directory holds the cell,
+    /// and the cell coordinator writes the join into `journal`, the cell
+    /// control journal (#513 (fleet Init duel)). Nothing was written.
+    NotJoined {
+        /// The cell control journal.
+        journal: JournalIdentifier,
     },
     /// The machine being admitted did not answer, or failed to record its
     /// admission (#216). Its admission may have landed.
@@ -408,7 +422,7 @@ impl FleetSession {
         let Some(fleet) = self.directory.state().fleet() else {
             // The cell may have joined a fleet the fleet tenant lost (a recovery, #231):
             // its id is kept.
-            if let Err(stop) = self.open_cell(client, first).await {
+            if let Err(stop) = self.look_cell(client, first).await {
                 return Step::Interrupted(stop);
             }
             let fleet = self
@@ -456,19 +470,16 @@ impl FleetSession {
                 .write_directory(client, first, fleet, add, Stage::AddCell)
                 .await;
         };
-        if let Err(stop) = self.open_cell(client, first).await {
+        if let Err(stop) = self.look_cell(client, first).await {
             return Step::Interrupted(stop);
         }
         match self.cell.state().fleet() {
+            // The cell coordinator, the cell control journal's one writer,
+            // joins the cell once it reads the cell in the directory
+            // (#513 (fleet Init duel)): wait for it, claiming nothing.
             None => {
-                let join = SystemCommand::JoinFleet {
-                    fleet_id: fleet,
-                    cell_id,
-                    version: METADATA_VERSION,
-                };
-                return self
-                    .write_cell(client, first, &join, Stage::JoinFleet)
-                    .await;
+                moonpool_assertions::reachable!("fleet: an init waits for the cell to join");
+                return Step::Interrupted(Interrupted::NotJoined { journal: control });
             }
             Some(found) if (found.fleet_id, found.cell_id) != (fleet, cell_id) => {
                 return Step::Refused(FleetRefusal::CellMismatch {
@@ -961,6 +972,32 @@ impl FleetSession {
             self.cell_open = true;
         }
         Ok(())
+    }
+
+    /// Fold the cell's control journal to its tail as a reader, claiming
+    /// nothing (#513 (fleet Init duel)): `init` only reads the cell's side,
+    /// which the cell coordinator writes. A claim here would fence the
+    /// coordinator, whose next term fences this session in turn.
+    async fn look_cell<P: Providers>(
+        &mut self,
+        client: &Client<P>,
+        first: usize,
+    ) -> Result<(), Interrupted> {
+        let journal = self.journals.cell;
+        match self.cell.load(client, first, 0).await {
+            LoadOutcome::Loaded {
+                up_to, diverged, ..
+            } => {
+                assert_eq!(
+                    up_to,
+                    self.cell.folder().next_seq(),
+                    "a loaded fold stands at the position it reached"
+                );
+                self.note_diverged(journal, diverged);
+                Ok(())
+            }
+            outcome => Err(Interrupted::Behind { journal, outcome }),
+        }
     }
 
     /// Keep the first divergence a fold of `journal` reported.
