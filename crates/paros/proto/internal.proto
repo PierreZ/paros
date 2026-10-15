@@ -34,8 +34,9 @@ message RetireRequest {
   // belief a reboot resets. Absent, or at or below the node's own membership
   // fence, the request is refused with "not_collected".
   .paros.common.v1.Ballot gc_watermark = 1;
-  // The journal this node leaves (#474): a machine serves many. Unset on a
-  // node that serves one journal: then its first journal.
+  // The journal this node leaves (#474): a machine serves many. No journal
+  // has a default (#439): an unset one, or one the node does not serve, is
+  // refused as `unknown_journal`.
   uint64 tenant = 2;
   uint64 journal = 3;
 }
@@ -43,8 +44,9 @@ message RetireRequest {
 message RetireAck {
   bool accepted = 1;
   // Why it was refused, when it was: "plain" (no matchmakers, so nothing is
-  // ever collected), "leader", "member", or "not_collected" (no effective
-  // floor above this node's membership).
+  // ever collected), "leader", "member", "not_collected" (no effective
+  // floor above this node's membership), or "unknown_journal" (#439: the
+  // request names no journal, or one the node does not serve).
   string refusal = 2;
 }
 

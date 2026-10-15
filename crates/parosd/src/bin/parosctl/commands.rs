@@ -836,6 +836,10 @@ async fn inspect_nodes(client: &ParosClient, labels: &Labels, out: &Printer) -> 
 /// `parosctl reconfigure`.
 #[derive(Args, Debug)]
 pub struct ReconfigureArgs {
+    /// The journal to reconfigure, by name (`TENANT/JOURNAL`) or ids: a
+    /// machine serves many, and none is the default (#439).
+    #[arg(long)]
+    journal: JournalRef,
     /// The new acceptor set, comma-separated machine names (or, for local
     /// debugging, a unique hex prefix of a server's id each).
     #[arg(long, value_delimiter = ',', required = true)]
@@ -882,8 +886,12 @@ pub async fn reconfigure(
             Err(ending) => return ending,
         }
     }
+    let journal = match crate::names::journal(client, &args.journal).await {
+        Ok(journal) => journal,
+        Err(ending) => return ending,
+    };
     match client
-        .reconfigure(&members, args.quorum, start(client))
+        .reconfigure(journal.journal, &members, args.quorum, start(client))
         .await
     {
         ReconfigureOutcome::Started { round, leader } => {
@@ -903,6 +911,13 @@ pub async fn reconfigure(
                 || format!("refused {refusal:?}"),
                 || json!({ "outcome": "refused", "refusal": format!("{refusal:?}") }),
             );
+            Ending::Refused
+        }
+        ReconfigureOutcome::UnknownJournal => {
+            note(&format!(
+                "no machine asked serves journal {}",
+                journal.label
+            ));
             Ending::Refused
         }
         ReconfigureOutcome::NotLeader { .. } | ReconfigureOutcome::Unrecognized { .. } => {
@@ -928,11 +943,11 @@ pub struct RetireArgs {
     /// absent.
     #[arg(long, value_parser = parse_watermark)]
     gc_watermark: Option<(u64, NodeRef)>,
-    /// The journal whose leader reports the GC watermark, by name or ids
-    /// (the journal the matchmakers serve); needed without
-    /// `--gc-watermark`: no identifier has a default (#243).
+    /// The journal the machine leaves, by name or ids; without
+    /// `--gc-watermark`, its leader reports the watermark. No identifier
+    /// has a default (#243, #439).
     #[arg(long)]
-    journal: Option<JournalRef>,
+    journal: JournalRef,
 }
 
 fn parse_watermark(s: &str) -> Result<(u64, NodeRef), String> {
@@ -979,22 +994,16 @@ pub async fn retire(
         ));
         return Ending::Refused;
     };
+    let journal = match crate::names::journal(client, &args.journal).await {
+        Ok(journal) => journal.journal,
+        Err(ending) => return ending,
+    };
     let watermark = if let Some((round, node)) = args.gc_watermark {
         match node.resolve(&servers, labels) {
             Ok(node) => Ballot { round, node },
             Err(ending) => return ending,
         }
     } else {
-        let Some(journal) = args.journal else {
-            note(
-                "name the journal whose leader reports the watermark (--journal), or pass --gc-watermark",
-            );
-            return Ending::Refused;
-        };
-        let journal = match crate::names::journal(client, &journal).await {
-            Ok(journal) => journal.journal,
-            Err(ending) => return ending,
-        };
         let Some(watermark) = leader_watermark(client, journal).await else {
             note("no leader reports an effective GC watermark: nothing is retirable yet");
             return Ending::Refused;
@@ -1003,7 +1012,8 @@ pub async fn retire(
     };
     let request = RetireRequest {
         gc_watermark: Some(watermark),
-        ..RetireRequest::default()
+        tenant: journal.tenant.0,
+        journal: journal.journal.0,
     };
     match client.retire(target, request).await {
         RetireOutcome::Retired => {

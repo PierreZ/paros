@@ -203,8 +203,9 @@ message Reconfigure {
   uint64 phase2_quorum = 4;
   uint64 rows = 5;
   uint64 cols = 6;
-  // The journal to reconfigure (#474): a machine serves many. Unset on a
-  // node that serves one journal: then its first journal.
+  // The journal to reconfigure (#474): a machine serves many. No journal
+  // has a default (#439): an unset one, or one the node does not serve, is
+  // refused as `unknown_journal`.
   uint64 tenant = 7;
   uint64 journal = 8;
 }
@@ -213,7 +214,8 @@ message ReconfigureMatchmakers {
   // The new matchmaker set (matchmaker ids drawn from the deployment's pool).
   repeated uint64 members = 1;
   // The tenant whose set hands over (#501): a node hosts many tenants'
-  // journals. 0 names the tenant of the node's first journal.
+  // journals. No tenant has a default (#439): 0, or a tenant the node
+  // serves no journal of, is refused as `unknown_tenant`.
   uint64 tenant = 2;
 }
 
@@ -221,7 +223,7 @@ message ReconfigureMatchmakersAck {
   // Whether the handover was started at this node.
   bool accepted = 1;
   // Why it was refused, when it was: "no_matchmakers", "busy", "empty",
-  // "unknown_matchmaker".
+  // "unknown_matchmaker", "unknown_tenant".
   string refusal = 2;
   // The generation being replaced, when accepted.
   optional uint64 generation = 3;
@@ -233,7 +235,8 @@ message ReconfigureAck {
   // the new configuration). A refusal names its reason for diagnostics.
   bool accepted = 2;
   // Why it was refused, when it was: "not_leader", "no_matchmakers",
-  // "unchanged", "unknown_member", "unsettled", "round_exhausted".
+  // "unchanged", "unknown_member", "unsettled", "round_exhausted",
+  // "unknown_journal".
   string refusal = 3;
   // The ballot round the reconfiguration campaigns at, when accepted.
   optional uint64 round = 4;

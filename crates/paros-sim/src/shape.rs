@@ -842,6 +842,10 @@ pub(crate) fn journal_layout(state: &StateHandle) -> JournalStoreConfig {
         if batched {
             assert_reachable!("journal store: a seed commits with one sync per batch");
         }
+        // A matchmaker store's scalar chunk (#439): an extreme of 32 to
+        // 256 bytes cuts the scalars of a set with a pending bootstrap into
+        // several chunks. Floor 1.
+        let meta_chunk = buggify_knob!(paros::journal::META_CHUNK, 32_usize..257_usize);
         JournalStoreConfig {
             durability: if batched {
                 paros::journal::Durability::Batched
@@ -849,6 +853,7 @@ pub(crate) fn journal_layout(state: &StateHandle) -> JournalStoreConfig {
                 paros::journal::Durability::Ordered
             },
             geometry: journal_geometry(),
+            meta_chunk,
             ..JournalStoreConfig::small()
         }
     })

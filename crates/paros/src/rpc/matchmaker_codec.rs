@@ -4,9 +4,9 @@
 use std::collections::BTreeMap;
 
 use paros_core::{
-    AcceptorConfig, Ballot, GcAck, GcRequest, JournalId, JournalRegistry, MatchOutcome,
-    MatchRefusal, MatchReply, MatchRequest, MatchmakerGeneration, MatchmakerId, MatchmakerPhase,
-    MatchmakerSet, NodeId, PendingBootstrap, ReconfigureReply, ReconfigureRequest, Registration,
+    AcceptorConfig, Ballot, BootstrapPage, GcAck, GcRequest, JournalId, JournalRegistry,
+    MatchOutcome, MatchRefusal, MatchReply, MatchRequest, MatchmakerGeneration, MatchmakerId,
+    MatchmakerPhase, MatchmakerSet, NodeId, ReconfigureReply, ReconfigureRequest, Registration,
     RegistrationKind, TenantId,
 };
 
@@ -390,20 +390,31 @@ fn journal_registries_from_proto(
     )
 }
 
-fn bootstrap_to_proto(bootstrap: &PendingBootstrap) -> matchmaker::Bootstrap {
+fn bootstrap_to_proto(page: &BootstrapPage) -> matchmaker::Bootstrap {
     matchmaker::Bootstrap {
-        set: Some(mm_set_to_proto(&bootstrap.set)),
-        registries: journal_registries_to_proto(&bootstrap.registries),
+        set: Some(mm_set_to_proto(&page.set)),
+        registries: journal_registries_to_proto(&page.registries),
+        after: page.after.map(|j| j.0),
+        last: page.last,
     }
 }
 
-fn bootstrap_from_proto(
-    bootstrap: matchmaker::Bootstrap,
-) -> Result<PendingBootstrap, &'static str> {
-    Ok(PendingBootstrap {
+fn bootstrap_from_proto(bootstrap: matchmaker::Bootstrap) -> Result<BootstrapPage, &'static str> {
+    Ok(BootstrapPage {
         set: mm_set_from_proto(bootstrap.set)?,
+        after: cursor_from_proto(bootstrap.after)?,
         registries: journal_registries_from_proto(bootstrap.registries)?,
+        last: bootstrap.last,
     })
+}
+
+/// A page cursor (#439): absent, or a journal. Journal `0` is unset and
+/// names no page.
+fn cursor_from_proto(cursor: Option<u64>) -> Result<Option<JournalId>, &'static str> {
+    match cursor {
+        Some(0) => Err("a page cursor names no journal"),
+        cursor => Ok(cursor.map(JournalId)),
+    }
 }
 
 fn phase_to_proto(phase: MatchmakerPhase) -> i32 {
@@ -439,8 +450,11 @@ pub(crate) fn wire_reconfigure_request(
 ) -> WireReconfigureRequest {
     use matchmaker::reconfigure_request::Kind;
     let kind = match request {
-        ReconfigureRequest::Stop { generation, .. } => Kind::Stop(matchmaker::Stop {
+        ReconfigureRequest::Stop {
+            generation, after, ..
+        } => Kind::Stop(matchmaker::Stop {
             generation: generation.0,
+            after: after.map(|j| j.0),
         }),
         ReconfigureRequest::Bootstrap { bootstrap, .. } => {
             Kind::Bootstrap(bootstrap_to_proto(bootstrap))
@@ -493,6 +507,7 @@ pub(crate) fn reconfigure_request_from_wire(
         Kind::Stop(stop) => ReconfigureRequest::Stop {
             from,
             generation: MatchmakerGeneration(stop.generation),
+            after: cursor_from_proto(stop.after)?,
         },
         Kind::Bootstrap(bootstrap) => ReconfigureRequest::Bootstrap {
             from,
@@ -530,6 +545,8 @@ pub(crate) fn wire_reconfigure_reply(reply: &ReconfigureReply) -> WireReconfigur
     let kind = match reply {
         ReconfigureReply::Stopped {
             generation,
+            after,
+            next,
             registries,
             successor,
             decree_promised,
@@ -539,12 +556,19 @@ pub(crate) fn wire_reconfigure_reply(reply: &ReconfigureReply) -> WireReconfigur
             successor: successor.as_ref().map(mm_set_to_proto),
             decree_promised: Some(ballot_to_proto(*decree_promised)),
             registries: journal_registries_to_proto(registries),
+            after: after.map(|j| j.0),
+            next: next.map(|j| j.0),
         }),
-        ReconfigureReply::Bootstrapped { set, .. } => {
-            Kind::Bootstrapped(matchmaker::BootstrapAck {
-                set: Some(mm_set_to_proto(set)),
-            })
-        }
+        ReconfigureReply::Bootstrapped {
+            set,
+            held,
+            complete,
+            ..
+        } => Kind::Bootstrapped(matchmaker::BootstrapAck {
+            set: Some(mm_set_to_proto(set)),
+            held: held.map(|j| j.0),
+            complete: *complete,
+        }),
         ReconfigureReply::Promised {
             generation,
             ballot,
@@ -614,6 +638,8 @@ pub(crate) fn reconfigure_reply_from_wire(
         Kind::Stopped(ack) => ReconfigureReply::Stopped {
             matchmaker,
             generation: MatchmakerGeneration(ack.generation),
+            after: cursor_from_proto(ack.after)?,
+            next: cursor_from_proto(ack.next)?,
             registries: journal_registries_from_proto(ack.registries)?,
             successor: ack.successor.map(mm_set_value).transpose()?,
             decree_promised: ballot_from_proto(ack.decree_promised)?,
@@ -621,6 +647,8 @@ pub(crate) fn reconfigure_reply_from_wire(
         Kind::Bootstrapped(ack) => ReconfigureReply::Bootstrapped {
             matchmaker,
             set: mm_set_from_proto(ack.set)?,
+            held: cursor_from_proto(ack.held)?,
+            complete: ack.complete,
         },
         Kind::Promised(promise) => ReconfigureReply::Promised {
             matchmaker,

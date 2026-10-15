@@ -888,7 +888,10 @@ create.
   stops the journal when the slot is released, and it keeps the store. A journal starts as a
   member of its create's configuration, or else as a spare beside it. The configuration depends
   only on the create, so every start opens the store under the same one. `Reconfigure` and
-  `Retire` name their journal, because a machine serves many.
+  `Retire` name their journal, and `ReconfigureMatchmakers` names its tenant, because a machine
+  serves many. No journal or tenant is the default (decided on 2026-10-11, #439 (operator calls
+  name their journal)): a node refuses a call that names none, or one it does not serve
+  (`unknown_journal`, `unknown_tenant`).
 - **Moves.** `cell drain-machine` (`CellSession::drain`) marks a machine draining. At each watch
   round, the tenant coordinator takes one step of one move, in turn over the journals with a
   slot on a draining machine. A step books a slot on another storage machine, or asks the
@@ -925,6 +928,15 @@ create.
   successor, the chain that a journal booting at generation 0 walks to the set in force.
   Oracle: after chaos, every booked set in force is its booked machines, and a set that has
   a machine to go to holds no slot on a draining machine.
+- **A handover is paged** (#439 (operator calls name their journal)). A set keeps one registry
+  per journal of its tenant, so one message cannot carry them all. A `Stop` names the last
+  journal already read (`after`), and the `Stopped` answer carries one page of the frozen
+  registries and the last journal of a page cut short (`next`). The reconfigurer counts a
+  member toward the stop quorum only when its report is whole. A `Bootstrap` carries one page
+  of the reconstruction (`BootstrapPage`). A member holds the pages in order and answers the
+  last journal it holds, and only a whole bootstrap activates. The page size is the matchmakers'
+  `registry_page` (at most `REGISTRY_PAGE` journals). Pages of two reconstructions may mix in
+  one member: each journal's registry is valid on its own, so the mix is safe.
 - **Still to do.** Re-placement after a `Down`
   bound (#475), the tenant birth footprint, the capacity request RPC and tenant coordinators on
   `stateless` machines (#476), the operators' retire coordination in the control journals
@@ -1879,6 +1891,12 @@ the copies written one after the other; no snapshots and no compaction. A commit
 ships two, the simulation draws either. paros stores the state itself: a slot is a position, its
 ballot the entry's identity, the promise, chosen index, floor, sealed state and format marker the
 metainfo; a matchmaker registration is a position of its own, its generation in its identity.
+A matchmaker's scalars grow with its tenant's journals and its pending bootstraps, and the
+metainfo is one block, so they are entries too (#439 (operator calls name their journal)): the
+scalars are encoded and cut into chunks of `JournalStoreConfig::meta_chunk` bytes, and the
+metainfo is a header that holds the format marker, an epoch and the chunks' positions. Each
+write of the scalars takes a fresh epoch and fresh positions in the commit of its header, and
+the old chunks go with the clears.
 **A commit is atomic one way only**: the journal writes a commit's metainfo only once its batch
 is durable (moonpool#309, pinned since 0a68199), so a durable metainfo vouches for its batch,
 but a crash between the two lands the batch without its metainfo. paros puts a batch and the

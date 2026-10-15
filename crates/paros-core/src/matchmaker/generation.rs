@@ -16,8 +16,8 @@
 use std::collections::BTreeMap;
 
 use super::{
-    DecreeRecord, JournalScalars, Matchmaker, MatchmakerPhase, MatchmakerWriteOp, PendingBootstrap,
-    ReconfigureReply, ReconfigureRequest, Registration, raise_effective,
+    BootstrapPage, DecreeRecord, JournalScalars, Matchmaker, MatchmakerPhase, MatchmakerWriteOp,
+    PendingBootstrap, ReconfigureReply, ReconfigureRequest, Registration, raise_effective,
 };
 use crate::acceptor::{AcceptOutcome, Acceptor, PrepareOutcome};
 use crate::membership::{MatchmakerGeneration, MatchmakerId, MatchmakerSet};
@@ -49,7 +49,9 @@ impl Matchmaker {
             .collect();
         let generation = self.hard_state.generation;
         let reply = match request {
-            ReconfigureRequest::Stop { generation, .. } => self.on_stop(generation),
+            ReconfigureRequest::Stop {
+                generation, after, ..
+            } => self.on_stop(generation, after),
             ReconfigureRequest::Bootstrap { bootstrap, .. } => self.on_bootstrap(bootstrap),
             ReconfigureRequest::DecreePrepare {
                 generation, ballot, ..
@@ -124,8 +126,14 @@ impl Matchmaker {
     }
 
     /// `StopA`: freeze `generation` (durably, before the answer leaves) and
-    /// report the registry the successor is reconstructed from.
-    fn on_stop(&mut self, generation: MatchmakerGeneration) -> ReconfigureReply {
+    /// report one page of the registry the successor is reconstructed from
+    /// (#439): the journals strictly above `after`. A frozen registry never
+    /// changes, so the pages of one report agree whenever they are asked.
+    fn on_stop(
+        &mut self,
+        generation: MatchmakerGeneration,
+        after: Option<JournalId>,
+    ) -> ReconfigureReply {
         if !self.serves_handover_of(generation) {
             return self.refusal();
         }
@@ -141,21 +149,31 @@ impl Matchmaker {
             self.phase() == MatchmakerPhase::Stopped,
             "a stop leaves the generation frozen"
         );
+        let (registries, next) = self.frozen_page(after, self.page);
+        if next.is_some() {
+            probe!(reachable, "handover: a frozen registry spans several pages");
+        }
         ReconfigureReply::Stopped {
             matchmaker: self.config.id,
             generation,
-            registries: self.frozen_registries(),
+            after,
+            next,
+            registries,
             successor: self.hard_state.successor.clone(),
             decree_promised: self.hard_state.decree.promised,
         }
     }
 
-    /// Hold a proposed successor's reconstruction durably, pending its decree.
-    fn on_bootstrap(&mut self, bootstrap: PendingBootstrap) -> ReconfigureReply {
+    /// Hold one page of a proposed successor's reconstruction durably,
+    /// pending its decree (#439): pages chain by their cursor, a first page
+    /// starts the bootstrap over unless it is whole, and a whole bootstrap
+    /// is never replaced (see [`PendingBootstrap`] for why two
+    /// reconstructions' pages may meet).
+    fn on_bootstrap(&mut self, page: BootstrapPage) -> ReconfigureReply {
         let me = self.config.id;
         let current = self.set();
         let current_generation = current.generation;
-        let set = bootstrap.set.clone();
+        let set = page.set.clone();
         // Wire hygiene: a proposal this matchmaker is not in, or one
         // that would not move it forward, is refused whole. So is a competing
         // proposal for a generation already settled here: once a
@@ -169,43 +187,67 @@ impl Matchmaker {
             .as_ref()
             .is_some_and(|s| set.generation <= s.generation && set != *s);
         if !set.contains(me) || set.generation <= current.generation || settled {
-            self.refusal()
-        } else {
-            // Keyed by the proposed set: two reconfigurers may
-            // bootstrap this matchmaker into two different proposed
-            // successors of one generation, and only the chosen one
-            // activates. Idempotent for the same set (a resent
-            // bootstrap from the same reconstruction).
-            if let Some(existing) = self.hard_state.pending.iter_mut().find(|p| p.set == set) {
-                if *existing != bootstrap {
-                    // A different reconstruction of the same
-                    // proposal (two reconfigurers, two frozen
-                    // quorums): the later one supersedes, whole.
-                    *existing = bootstrap;
-                    self.stage_scalars();
-                }
-            } else {
-                self.hard_state.pending.push(bootstrap);
-                self.stage_scalars();
+            return self.refusal();
+        }
+        // Keyed by the proposed set: two reconfigurers may bootstrap this
+        // matchmaker into two different proposed successors of one
+        // generation, and only the chosen one activates.
+        let index = self.hard_state.pending.iter().position(|p| p.set == set);
+        let held = index.map(|i| &self.hard_state.pending[i]);
+        let whole = held.is_some_and(|p| p.complete);
+        // A malformed page, a whole bootstrap, or a page that does not
+        // continue what is held moves nothing: the answer names what is
+        // held, and the reconfigurer resumes from there.
+        let fits = page.is_well_formed()
+            && !whole
+            && (page.after.is_none() || held.is_some_and(|p| p.held() == page.after));
+        if fits {
+            let mut registries = match (page.after, index) {
+                (Some(_), Some(i)) => std::mem::take(&mut self.hard_state.pending[i].registries),
+                _ => BTreeMap::new(),
+            };
+            registries.extend(page.registries);
+            let bootstrap = PendingBootstrap {
+                set: set.clone(),
+                registries,
+                complete: page.last,
+            };
+            if page.after.is_some() {
+                probe!(reachable, "handover: a bootstrap continues on a later page");
             }
-            // The proposal is held, once, for the set it names.
-            assert!(
-                self.hard_state
-                    .pending
-                    .iter()
-                    .filter(|p| p.set == set)
-                    .count()
-                    == 1,
-                "a bootstrap is held once per proposed set"
-            );
-            assert!(
-                set.generation > current_generation,
-                "a bootstrap is for a later generation"
-            );
-            ReconfigureReply::Bootstrapped {
-                matchmaker: me,
-                set,
+            match index {
+                Some(i) => self.hard_state.pending[i] = bootstrap,
+                None => self.hard_state.pending.push(bootstrap),
             }
+            self.stage_scalars();
+        }
+        // The proposal is held at most once, for the set it names.
+        assert!(
+            self.hard_state
+                .pending
+                .iter()
+                .filter(|p| p.set == set)
+                .count()
+                <= 1,
+            "a bootstrap is held once per proposed set"
+        );
+        assert!(
+            set.generation > current_generation,
+            "a bootstrap is for a later generation"
+        );
+        let held = self.hard_state.pending.iter().find(|p| p.set == set);
+        // A whole bootstrap stays whole.
+        if whole {
+            assert!(
+                held.is_some_and(|p| p.complete),
+                "a whole bootstrap is never replaced"
+            );
+        }
+        ReconfigureReply::Bootstrapped {
+            matchmaker: me,
+            set,
+            held: held.and_then(PendingBootstrap::held),
+            complete: held.is_some_and(|p| p.complete),
         }
     }
 
@@ -523,15 +565,18 @@ impl Matchmaker {
         if !successor.contains(self.config.id) || successor.generation <= self.set().generation {
             return false;
         }
+        // Only a whole bootstrap activates (#439): a set is chosen only once
+        // every member held it whole, and a whole one is never replaced.
         let Some(index) = self
             .hard_state
             .pending
             .iter()
-            .position(|p| p.set == *successor)
+            .position(|p| p.set == *successor && p.complete)
         else {
             return false;
         };
         let bootstrap = self.hard_state.pending.remove(index);
+        assert!(bootstrap.complete, "an activation reads a whole bootstrap");
         // The activated watermark is the maximum of the reconstructed one
         // and this matchmaker's own. Both are legitimate floors over the
         // reconstructed registry: the reconstructed one is the maximum over

@@ -409,7 +409,9 @@ registry per journal, in one store, and every matchmaking message names its
 journal. So each journal has its own watermark, its own history and its own
 effective configuration. A storage fault in the store closes the whole set.
 A handover moves the registries of all its journals to the next generation
-together.
+together. One message cannot carry the registries of every journal, so the
+handover is paged: a stop answer and a bootstrap each carry a page of journals,
+and a member counts only when it has every page.
 
 **In the code.** `Matchmaking`, `Registration`, `RegistrationKind`,
 `MatchStep::StaleConfiguration` (`matchmaking.rs`, `matchmaker/state.rs`,

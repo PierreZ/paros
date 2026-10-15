@@ -219,7 +219,7 @@ impl Sets {
                 return Some(SetStep::Waiting);
             }
             return Some(
-                match nodes.reconfigure_matchmakers_of(tenant, &target, at).await {
+                match nodes.reconfigure_matchmakers(tenant, &target, at).await {
                     ReconfigureMatchmakersOutcome::Started { .. } => {
                         moonpool_assertions::reachable!(
                             "coordinator: a set hands over to its booked machines"
