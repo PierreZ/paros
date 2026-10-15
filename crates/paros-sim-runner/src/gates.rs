@@ -46,6 +46,10 @@ pub struct Rare {
 /// window seldom reaches, #485 the double fault, #486 the rest.
 pub const RARE: &[Rare] = &[
     Rare {
+        msg: "footprint: a dead tenant coordinator is placed again",
+        reason: "marginal: needs two admitted stateless machines and the one holding a tenant coordinator's slot marked down (#476 (tenant footprint)); missed by PR #556's sweep (#486)",
+    },
+    Rare {
         msg: "driver: an admitted machine dials a seed from an adopted book",
         reason: "marginal: needs an admitted machine whose founding members all moved (#505 (stranded admitted machine)); fired in main's sweep of 309 seeds at 8efe714, missed by PR #547's sweep of 232 (#486)",
     },

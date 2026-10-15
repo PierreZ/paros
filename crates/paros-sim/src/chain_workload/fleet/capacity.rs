@@ -12,7 +12,7 @@ use moonpool_sim::{
     RandomProvider, SimContext, assert_always, assert_reachable, buggify_with_prob,
 };
 use paros::client::capacity::{self, CapacityAnswer, CapacityRequest, Wanted};
-use paros::system::{BookingTarget, Role};
+use paros::system::{BookingTarget, Class, Role};
 use paros::{JournalIdentifier, NodeId, TenantId};
 
 use super::FleetOps;
@@ -30,7 +30,25 @@ impl FleetOps {
         if machines.is_empty() {
             return;
         }
-        let node = NodeId(machines[ctx.random().random_range(0..machines.len())]);
+        // Mostly a stateless machine that serves the cell and has room, as a
+        // tenant coordinator asks; else any machine, which may be refused.
+        let room = if ctx.random().random_bool(0.7)
+            && let Some(registry) = super::sets::registry(cell, 0).await
+        {
+            registry
+                .nodes()
+                .filter(|(node, n)| {
+                    n.class == Class::Stateless
+                        && registry.serves(*node)
+                        && registry.available(*node) > 0
+                })
+                .map(|(node, _)| node.0)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let pool = if room.is_empty() { &machines } else { &room };
+        let node = NodeId(pool[ctx.random().random_range(0..pool.len())]);
         let request = CapacityRequest {
             request: ctx.random().random_range(1..u64::MAX),
             tenant,
