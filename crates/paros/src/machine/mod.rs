@@ -88,6 +88,7 @@ pub(crate) use book::with_own;
 pub use book::{address_book, cell_book};
 pub use cache::{CacheSink, CachedRegistry, spawn_writer, starting_book};
 pub use disk::ProviderDisk;
+pub(crate) use disk::{read_all, write_all};
 pub use formed::FormedCell;
 pub use lifecycle::{MachineAddresses, MachineError, MachineSettings, run_machine};
 pub use pin::AdminPin;
