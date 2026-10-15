@@ -21,7 +21,9 @@ mode. In a single-writer journal, the writer holds a leader uuid, and `Write` an
 must carry it. `SetLeader(new, old)` replaces the uuid only if the current one is `old`.
 
 `parosd` uses paros's own journals, leader election and Paxos flavors for its control plane.
-For example, `cell init` is a single-decree Paxos over the founding members.
+For example, `cell init` is a single-decree Paxos over the founding members. `parosctl init`
+makes the first three listed machines the founding members and admits the others, so the
+control journals have three acceptors. `--failures-per-partition F` sets `2F+1` founding members.
 
 [The journal API](@/parosd/journal-api.md) describes the four calls, the two writer modes and
 the limits. [Admin views](@/parosd/admin-views.md) shows the machines, tenants and roles of a

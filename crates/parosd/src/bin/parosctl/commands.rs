@@ -693,7 +693,10 @@ fn quorum_text(reply: &InspectReply) -> String {
     match quorum_system_from_proto(&wire) {
         Ok(QuorumSystem::Majority) => "majority".to_string(),
         Ok(QuorumSystem::Flexible { q1, q2 }) => format!("flexible:{q1}:{q2}"),
-        Ok(QuorumSystem::Grid { rows, cols }) => format!("grid:{rows}x{cols}"),
+        Ok(QuorumSystem::Grid { rows, cols, acks }) if acks >= 1 && rows == 2 * acks - 1 => {
+            format!("partitions:{}:{cols}", acks - 1)
+        }
+        Ok(QuorumSystem::Grid { rows, cols, acks }) => format!("grid:{rows}x{cols}:{acks}"),
         Err(_) => "unknown".to_string(),
     }
 }
@@ -844,13 +847,15 @@ pub struct ReconfigureArgs {
     /// debugging, a unique hex prefix of a server's id each).
     #[arg(long, value_delimiter = ',', required = true)]
     members: Vec<NodeRef>,
-    /// Its quorum system: `majority`, `flexible:Q1:Q2` or `grid:ROWSxCOLS`.
+    /// Its quorum system: `majority`, `flexible:Q1:Q2` or
+    /// `partitions:F:P` (`P` acceptor partitions of `2F+1` acceptors each,
+    /// #532 (acceptor partitions)).
     #[arg(long, default_value = "majority", value_parser = parse_quorum)]
     quorum: QuorumSystem,
 }
 
 fn parse_quorum(s: &str) -> Result<QuorumSystem, String> {
-    let bad = || format!("expected majority, flexible:Q1:Q2 or grid:ROWSxCOLS, got {s:?}");
+    let bad = || format!("expected majority, flexible:Q1:Q2 or partitions:F:P, got {s:?}");
     if s == "majority" {
         return Ok(QuorumSystem::Majority);
     }
@@ -861,12 +866,14 @@ fn parse_quorum(s: &str) -> Result<QuorumSystem, String> {
             q2: q2.parse().map_err(|_| bad())?,
         });
     }
-    if let Some(grid) = s.strip_prefix("grid:") {
-        let (rows, cols) = grid.split_once('x').ok_or_else(bad)?;
-        return Ok(QuorumSystem::Grid {
-            rows: rows.parse().map_err(|_| bad())?,
-            cols: cols.parse().map_err(|_| bad())?,
-        });
+    if let Some(partitions) = s.strip_prefix("partitions:") {
+        let (f, p) = partitions.split_once(':').ok_or_else(bad)?;
+        let f: usize = f.parse().map_err(|_| bad())?;
+        let p: usize = p.parse().map_err(|_| bad())?;
+        if f > 3 || p == 0 {
+            return Err(bad());
+        }
+        return Ok(QuorumSystem::partitions(f, p));
     }
     Err(bad())
 }

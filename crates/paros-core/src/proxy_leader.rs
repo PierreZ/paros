@@ -1002,10 +1002,7 @@ mod tests {
         let mut proxy = ProxyLeader::new(ProxyId(0), majority(&[0, 1, 2]));
         proxy.step(delegation(0, 0, ballot(3, 0), 4, cmd(4)));
         drain(&mut proxy);
-        let grid = AcceptorConfig::new(
-            (0..4).map(NodeId).collect(),
-            QuorumSystem::Grid { rows: 2, cols: 2 },
-        );
+        let grid = AcceptorConfig::new((0..4).map(NodeId).collect(), QuorumSystem::grid(2, 2));
         proxy.step(Message::Accept {
             reply_to: Party::Proxy(ProxyId(0)),
             leader: NodeId(3),

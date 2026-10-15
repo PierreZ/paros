@@ -247,6 +247,19 @@ pub struct DriverTunables {
     /// eviction reclaims only rounds the leader is done with. Meaningless
     /// on a proxy-less deployment, and read only by `run_proxy`.
     pub proxy_round_resends: u64,
+    /// How many times a colocated round of a grid (acceptor partitions) may
+    /// be re-sent (once per beat, by `resend_pending`) without a decision
+    /// before the leader **moves** it to another column
+    /// (`ColocatedNode::move_round`, #533 (move a stuck round)): a column
+    /// that cannot reach its quorum otherwise holds its slots, and the apply
+    /// walk stalls behind the first one. Driver policy, never a constant of
+    /// the state machine. Floor 1 — a move after a single re-send is always
+    /// safe (one ballot, one value; every Phase-1 quorum meets every
+    /// column), it merely spreads a slot over more acceptors; the ceiling is
+    /// unbounded and still winnable, a stuck round being recovered by the
+    /// next leadership's Phase 1. Meaningless under a majority or a flexible
+    /// split.
+    pub partition_move_resends: u64,
     /// The most records one `Write` may carry (#241, `docs/architecture.md`
     /// §2.7). A larger batch is refused at the edge (`TooLarge`) before it
     /// reaches consensus. Floor 1: a one-record batch always fits, so a
@@ -382,6 +395,7 @@ impl Default for DriverTunables {
             reconfigure_backoff_max_ticks: ELECTION_TIMEOUT_BASE * 2,
             proxy_take_back_resends: PROXY_TAKE_BACK_RESENDS,
             proxy_round_resends: PROXY_ROUND_RESENDS,
+            partition_move_resends: PARTITION_MOVE_RESENDS,
             max_batch_records: MAX_BATCH_RECORDS,
             max_batch_bytes: MAX_BATCH_BYTES,
             election_lease: ELECTION_LEASE,
@@ -563,6 +577,13 @@ const PROXY_TAKE_BACK_RESENDS: u64 = ELECTION_TIMEOUT_BASE * 2;
 /// its floor.
 const PROXY_ROUND_RESENDS: u64 = PROXY_TAKE_BACK_RESENDS * 2;
 
+/// Default move budget of a grid round (#533 (move a stuck round)), in
+/// re-sends — one per beat: the proxy take-back's budget, so a column that
+/// cannot decide costs a slot a fraction of a second rather than an
+/// election. Driver policy (the core only counts), and a [`DriverTunables`]
+/// field so the harness can push it to its floor.
+const PARTITION_MOVE_RESENDS: u64 = PROXY_TAKE_BACK_RESENDS;
+
 /// Default stall budget for a matchmaker-set handover, in election timeouts:
 /// long enough for a slow matchmaker to answer a re-sent request, short enough
 /// that a dead one does not hold the `Busy` refusal for the rest of a run.
@@ -577,6 +598,7 @@ const RECONFIGURE_TIMEOUT_ELECTIONS: u64 = 4;
 const _: () = assert!(ELECTION_TIMEOUT_BASE >= 2 * paros_core::HEARTBEAT_TICKS);
 const _: () = assert!(QUARANTINE_TICKS > ELECTION_TIMEOUT_BASE);
 const _: () = assert!(PROXY_ROUND_RESENDS > PROXY_TAKE_BACK_RESENDS);
+const _: () = assert!(PARTITION_MOVE_RESENDS > 0);
 const _: () = assert!(ELECTION_BACKOFF_DOUBLINGS >= 2);
 const _: () = assert!(READ_RETRY_TICKS > 0);
 const _: () = assert!(RECONFIGURE_TIMEOUT_ELECTIONS > 0);

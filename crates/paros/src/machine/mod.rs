@@ -59,10 +59,12 @@
 mod admitted;
 mod book;
 mod cache;
+mod capacity;
 mod cell_init;
 pub mod coordinator;
 mod disk;
 mod follow;
+mod footprints;
 mod formed;
 mod lifecycle;
 pub mod load;

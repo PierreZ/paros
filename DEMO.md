@@ -122,7 +122,9 @@ done
 # Every parosctl command talks to the three machines.
 export PAROSCTL_SERVERS=127.0.0.1:4501,127.0.0.1:4502,127.0.0.1:4503
 
-# `cell init` over the three, every one of them needed (the servers, by default).
+# `cell init` over the three, every one of them needed (the servers, by default). The first
+# 2F+1 listed machines found the cell (`--failures-per-partition`, default 1): `init` admits
+# any others, and the control journals keep three acceptors.
 parosctl init --members "$PAROSCTL_SERVERS"
 parosctl tenant create acme
 parosctl journal create acme orders | tee /tmp/paros-demo/create.out

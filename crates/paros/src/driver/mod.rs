@@ -728,6 +728,12 @@ impl<P: Providers> Shared<'_, P> {
                     "delegation_taken_back"
                 );
             }
+            // Liveness under a stuck acceptor partition (#533 (move a stuck
+            // round)): a grid round re-sent the budget's worth of beats
+            // without a decision moves to another column. The budget is
+            // driver policy (`partition_move_resends`, born buggified); the
+            // core only counts and moves.
+            move_stuck_rounds(node, tunables.partition_move_resends, self_id);
         }
         // The open matchmaking request's re-send (#120): paced by
         // `match_resend_ticks`, and its own BUGGIFY location — consulted only
@@ -1036,6 +1042,49 @@ fn delegation_choice(node: &ColocatedNode) -> Delegation {
         assert!(node.is_leader(), "only a leader delegates");
     }
     choice
+}
+
+/// Move every colocated grid round re-sent at least `after` times without
+/// a decision to another column (#533 (move a stuck round)): the next column
+/// round-robin, or on a BUGGIFY decision the one after it, so a slot may
+/// skip a column. A no-op on a node that is not the leader and under a
+/// majority or a flexible split. Drawn on the node loop.
+fn move_stuck_rounds(node: &mut ColocatedNode, after: u64, self_id: u64) {
+    let QuorumSystem::Grid { cols, .. } = node.acceptors().quorum_system() else {
+        return;
+    };
+    if cols < 2 || !node.is_leader() {
+        return;
+    }
+    let stuck: Vec<(paros_core::Slot, usize)> = node
+        .proposer()
+        .rounds()
+        .iter()
+        .filter(|(_, round)| round.proxy().is_none() && round.resends() >= after)
+        .filter_map(|(slot, round)| round.column().map(|column| (*slot, column)))
+        .collect();
+    for (slot, column) in stuck {
+        let step = if cols >= 3 && moonpool_buggify::buggify_fault_with_prob!(0.25) {
+            moonpool_assertions::reachable!(
+                "grid: the driver skips a column when it moves a round"
+            );
+            2
+        } else {
+            1
+        };
+        let next = (column + step) % cols;
+        assert!(next != column, "a stuck round moves to another column");
+        if node.move_round(slot, next) {
+            moonpool_assertions::reachable!("grid: the driver moves a stuck round");
+            tracing::info!(
+                node = self_id,
+                slot = slot.0,
+                from = column,
+                to = next,
+                "round_moved"
+            );
+        }
+    }
 }
 
 /// The column of a grid this proposal's Phase 2 goes to instead of the
@@ -1809,8 +1858,8 @@ where
                 // own location; the replica tier has the other. Otherwise the
                 // core's `ctx % rows` stands.
                 let row = basis.as_ref().and_then(|b| match b.config.quorum_system() {
-                    QuorumSystem::Grid { rows, .. }
-                        if rows >= 2 && moonpool_buggify::buggify_fault_with_prob!(0.10) =>
+                    QuorumSystem::Grid { rows, acks, .. }
+                        if rows >= 2 && acks == rows && moonpool_buggify::buggify_fault_with_prob!(0.10) =>
                     {
                         moonpool_assertions::reachable!("grid: the driver overrides a quorum read's row");
                         Some(log_reads::next_row(ctx, rows))
@@ -2414,6 +2463,13 @@ impl<P: Providers, J: JournalStores> SystemCtx<'_, '_, P, J> {
                 SystemEvent::Registry(
                     RegistryEvent::Booked { node, .. } | RegistryEvent::Released { node, .. },
                 ) if node == me => place = true,
+                // A grant that books a slot here (#476 (tenant footprint)):
+                // a set's slots come as one grant, with no other event.
+                SystemEvent::Registry(RegistryEvent::Granted { ref slots, .. })
+                    if slots.iter().any(|slot| slot.node == me) =>
+                {
+                    place = true;
+                }
                 // The cell hosts a tenant (#210): every founding member
                 // serves its control journal (the placement until #212).
                 SystemEvent::Registry(RegistryEvent::TenantHosted { tenant, control }) => {
@@ -2603,7 +2659,8 @@ impl<P: Providers, J: JournalStores> SystemCtx<'_, '_, P, J> {
             .filter(|(_, b)| b.node == me && b.role == crate::system::Role::Acceptor)
             .filter_map(|(_, b)| match b.target {
                 crate::system::BookingTarget::Journal(journal) => Some(journal),
-                crate::system::BookingTarget::Set { .. } => None,
+                crate::system::BookingTarget::Set { .. }
+                | crate::system::BookingTarget::Tenant { .. } => None,
             })
             .collect();
         // The matchmaker sets booked here (#501 (matchmaker sets off the
@@ -2612,6 +2669,8 @@ impl<P: Providers, J: JournalStores> SystemCtx<'_, '_, P, J> {
             .registry()
             .bookings()
             .filter(|(_, b)| b.node == me && b.role == crate::system::Role::Matchmaker)
+            // A footprint's matchmaker slot (#476) reserves room only.
+            .filter(|(_, b)| matches!(b.target, crate::system::BookingTarget::Set { .. }))
             .map(|(_, b)| b.target.tenant())
             .collect();
         self.stores.book_sets(sets);

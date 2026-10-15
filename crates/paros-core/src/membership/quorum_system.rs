@@ -44,34 +44,43 @@ pub enum QuorumSystem {
         q2: usize,
     },
     /// An **acceptor grid** (Compartmentalized Paxos §3.2, *Compartmentalization
-    /// 2*; Flexible Paxos §4, grid quorums): the sorted membership laid out
-    /// row-major in `rows × cols`, member `i` at `(i / cols, i % cols)`, so
-    /// the layout is a pure function of the configuration and every node
-    /// derives the same one. **A Phase-1 quorum is any full row; a Phase-2
-    /// quorum is any full column.** Every row meets every column in exactly
-    /// one cell, so the cross-phase intersection holds by construction — no
-    /// arithmetic to check ([`QuorumSystem::cross_intersects`] answers `true`).
+    /// 2*; Flexible Paxos §4, grid quorums), generalized to **acceptor
+    /// partitions** (#532 (acceptor partitions)): the sorted membership laid
+    /// out row-major in `rows × cols`, member `i` at `(i / cols, i % cols)`,
+    /// so the layout is a pure function of the configuration and every node
+    /// derives the same one. A column is a **partition**. **A Phase-2 quorum
+    /// is any `acks` acceptors of one column; a Phase-1 quorum is any
+    /// `rows - acks + 1` acceptors of every column.** Inside one column the
+    /// two counts add up to more than the column, so every Phase-1 quorum
+    /// meets every Phase-2 quorum by construction
+    /// ([`QuorumSystem::cross_intersects`]). Acks from two columns never add
+    /// up.
     ///
     /// What the grid buys: each slot's Phase 2 is addressed to **one column**
     /// ([`QuorumSystem::column_of`], `slot % cols`), so every acceptor sees
     /// `1 / cols` of the commands and the acceptor tier's throughput scales
-    /// with `cols`. What it costs: a Phase-1 quorum is a *whole* row (`cols`
-    /// specific acceptors, not any `cols`), and a Phase-2 quorum a whole
-    /// column, so failure tolerance is about *which* acceptors fail — one
-    /// dead acceptor per row leaves no full row for the next election, one
-    /// per column no full column for its slots. The `1 × n` and `n × 1`
-    /// grids are Flexible's `|Q1| = 1, |Q2| = n` thought experiment and its
+    /// with `cols`. What it costs: an election and a quorum read need
+    /// answers from every column. `acks = rows` is the full-column grid of
+    /// Compartmentalized Paxos: one dead acceptor freezes its column (until
+    /// the leader moves the round, #533 (move a stuck round)), and a Phase 1
+    /// needs one acceptor of every column (any full row is one). The
+    /// partitions `parosctl` offers are `rows = 2F+1`, `acks = F+1`: a
+    /// majority of one partition decides, a majority of every partition
+    /// elects ([`QuorumSystem::partitions`]). The `1 × n` and `n × 1` grids
+    /// are Flexible's `|Q1| = 1, |Q2| = n` thought experiment and its
     /// mirror: well formed here, and a deployment's own business.
     ///
-    /// Well-formed over `n` members when `rows >= 1`, `cols >= 1` and
-    /// `rows * cols == n` ([`QuorumSystem::admits`]); a configuration that
-    /// does not admit its grid cannot be constructed.
+    /// Well-formed over `n` members when `rows >= 1`, `cols >= 1`,
+    /// `1 <= acks <= rows` and `rows * cols == n` ([`QuorumSystem::admits`]);
+    /// a configuration that does not admit its grid cannot be constructed.
     Grid {
-        /// Rows of the grid: how many Phase-1 quorums there are.
+        /// Rows of the grid: the acceptors of one column (one partition).
         rows: usize,
-        /// Columns of the grid: how many Phase-2 quorums there are, and the
-        /// modulus a slot's column is drawn from.
+        /// Columns of the grid: the partitions, and the modulus a slot's
+        /// column is drawn from.
         cols: usize,
+        /// The accepts of one column that choose a value, `1..=rows`.
+        acks: usize,
     },
 }
 
@@ -164,6 +173,23 @@ pub(super) fn rank_is_in(rank: u64, count: usize) -> bool {
     inside
 }
 
+/// How many members of column `column` of a `cols`-wide grid laid
+/// row-major over `members` are in `voters`: the count a partition's quorum
+/// compares (#532 (acceptor partitions)).
+pub(super) fn column_votes<I: Ord>(
+    members: &[I],
+    cols: usize,
+    column: usize,
+    voters: &BTreeSet<I>,
+) -> usize {
+    let height = grid_column(members, cols, column).count();
+    let voted = grid_column(members, cols, column)
+        .filter(|m| voters.contains(*m))
+        .count();
+    assert!(voted <= height, "a column counts at most its own members");
+    voted
+}
+
 /// Whether every member of `cell` voted.
 pub(super) fn all_voted<'a, I: Ord + 'a>(
     cell: impl IntoIterator<Item = &'a I>,
@@ -173,6 +199,57 @@ pub(super) fn all_voted<'a, I: Ord + 'a>(
 }
 
 impl QuorumSystem {
+    /// The full-column grid of `rows × cols`: a slot is chosen once every
+    /// acceptor of its column accepted it (`acks = rows`).
+    #[must_use]
+    pub const fn grid(rows: usize, cols: usize) -> Self {
+        QuorumSystem::Grid {
+            rows,
+            cols,
+            acks: rows,
+        }
+    }
+
+    /// `partitions` acceptor partitions of `2F+1` acceptors each, `F` the
+    /// `failures_per_partition` (#532 (acceptor partitions)): a grid of
+    /// `2F+1` rows and one column per partition, where a majority (`F+1`) of
+    /// one partition chooses a slot and a majority of every partition
+    /// elects.
+    #[must_use]
+    pub const fn partitions(failures_per_partition: usize, partitions: usize) -> Self {
+        QuorumSystem::Grid {
+            rows: 2 * failures_per_partition + 1,
+            cols: partitions,
+            acks: failures_per_partition + 1,
+        }
+    }
+
+    /// The acceptors of every column a Phase-1 quorum holds under a grid:
+    /// `rows - acks + 1`, one more than a column can lose and still
+    /// choose. `None` under a majority or a flexible split.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
+    #[must_use]
+    pub fn phase1_per_column(self) -> Option<usize> {
+        match self {
+            QuorumSystem::Majority | QuorumSystem::Flexible { .. } => None,
+            QuorumSystem::Grid { rows, acks, .. } => {
+                let per_column = rows.saturating_sub(acks).saturating_add(1);
+                // With `acks` inside the column, the two counts overlap.
+                if (1..=rows).contains(&acks) {
+                    assert!(
+                        per_column + acks > rows,
+                        "inside a column a Phase-1 count meets a Phase-2 count"
+                    );
+                }
+                Some(per_column)
+            }
+        }
+    }
+
     /// The number of acceptors a **Phase-1** quorum over a membership of
     /// `members` takes. Kept, with [`QuorumSystem::phase2_quorum_size`], for
     /// the one thing a predicate cannot report — how many more answers a
@@ -188,13 +265,19 @@ impl QuorumSystem {
         let size = match self {
             QuorumSystem::Majority => majority_of(members),
             QuorumSystem::Flexible { q1, .. } => q1,
-            // A row: `cols` acceptors wide.
-            QuorumSystem::Grid { cols, .. } => cols,
+            // `rows - acks + 1` in each of the `cols` columns.
+            QuorumSystem::Grid { cols, .. } => {
+                cols.saturating_mul(self.phase1_per_column().unwrap_or(0))
+            }
         };
-        if let QuorumSystem::Grid { rows, cols } = self
+        if let QuorumSystem::Grid { rows, cols, acks } = self
+            && (1..=rows).contains(&acks)
             && rows.checked_mul(cols) == Some(members)
         {
-            assert!(size <= members, "a full row fits inside a tiled membership");
+            assert!(
+                size <= members,
+                "a Phase-1 quorum fits inside a tiled membership"
+            );
         }
         size
     }
@@ -211,15 +294,16 @@ impl QuorumSystem {
         let size = match self {
             QuorumSystem::Majority => majority_of(members),
             QuorumSystem::Flexible { q2, .. } => q2,
-            // A column: `rows` acceptors tall.
-            QuorumSystem::Grid { rows, .. } => rows,
+            // `acks` of one column.
+            QuorumSystem::Grid { acks, .. } => acks,
         };
-        if let QuorumSystem::Grid { rows, cols } = self
+        if let QuorumSystem::Grid { rows, cols, .. } = self
             && rows.checked_mul(cols) == Some(members)
+            && size <= rows
         {
             assert!(
                 size <= members,
-                "a full column fits inside a tiled membership"
+                "a column's quorum fits inside a tiled membership"
             );
         }
         size
@@ -234,9 +318,10 @@ impl QuorumSystem {
     /// one phase's quorums *not* intersect each other (the paper's whole
     /// point — an even cluster with `|Q2| = n/2`), which the old
     /// self-intersection assert forbade outright. For [`QuorumSystem::Grid`]
-    /// it is **geometry, true by construction**: a row and a column of the
-    /// same grid always share exactly one cell, so a full row always meets a
-    /// full column — whatever `rows` and `cols` are.
+    /// it is **per column, true by construction**: a Phase-1 quorum holds
+    /// `rows - acks + 1` of every column and a Phase-2 quorum `acks` of one,
+    /// and those two counts overlap inside that column — whatever `rows` and
+    /// `cols` are, as long as `1 <= acks <= rows`.
     ///
     /// # Panics
     ///
@@ -250,13 +335,22 @@ impl QuorumSystem {
                     .saturating_add(self.phase2_quorum_size(members))
                     > members
             }
-            QuorumSystem::Grid { .. } => true,
+            QuorumSystem::Grid { rows, acks, .. } => (1..=rows).contains(&acks),
         };
-        // Two majorities always meet; a row always meets a column.
-        if matches!(self, QuorumSystem::Majority | QuorumSystem::Grid { .. }) {
+        // Two majorities always meet.
+        if matches!(self, QuorumSystem::Majority) {
             assert!(
                 intersects,
                 "a majority or a grid cross-intersects by construction"
+            );
+        }
+        // Inside a column the two counts meet (`phase1_per_column` asserts
+        // the overlap).
+        if intersects && let QuorumSystem::Grid { rows, .. } = self {
+            assert!(
+                self.phase1_per_column()
+                    .is_some_and(|per_column| per_column <= rows),
+                "a grid's Phase-1 count fits in a column"
             );
         }
         intersects
@@ -271,8 +365,8 @@ impl QuorumSystem {
     ///
     /// A majority admits every non-empty membership. A flexible split admits
     /// `n` when `1 <= q1 <= n`, `1 <= q2 <= n` and `q1 + q2 > n`. A grid
-    /// admits `n` when `rows >= 1`, `cols >= 1` and `rows * cols == n` — the
-    /// layout must tile the membership exactly, or some row or column would
+    /// admits `n` when `rows >= 1`, `cols >= 1`, `1 <= acks <= rows` and
+    /// `rows * cols == n` — the layout must tile the membership exactly, or some row or column would
     /// be short and the set-membership predicates would answer for a cell
     /// that does not exist.
     ///
@@ -291,8 +385,11 @@ impl QuorumSystem {
                     && (1..=members).contains(&q2)
                     && self.cross_intersects(members)
             }
-            QuorumSystem::Grid { rows, cols } => {
-                rows >= 1 && cols >= 1 && rows.checked_mul(cols) == Some(members)
+            QuorumSystem::Grid { rows, cols, acks } => {
+                rows >= 1
+                    && cols >= 1
+                    && (1..=rows).contains(&acks)
+                    && rows.checked_mul(cols) == Some(members)
             }
         };
         // Admission is exactly what Paxos safety needs: every admitted system
@@ -370,8 +467,12 @@ impl QuorumSystem {
     }
 
     /// The **row** a quorum read is addressed to under this quorum system
-    /// (#143): `ctx % rows` on a [`QuorumSystem::Grid`], `None` — the whole
-    /// membership — under a majority or a flexible split, which name no row.
+    /// (#143): `ctx % rows` on a full-column [`QuorumSystem::Grid`] (`acks =
+    /// rows`, where one acceptor of every column is a Phase-1 quorum and a
+    /// row is one), `None` — the whole membership — under a majority, a
+    /// flexible split or a grid whose column decides on fewer than all its
+    /// acceptors: there a read needs `rows - acks + 1` of every column, and
+    /// one row is not enough (#532 (acceptor partitions)).
     /// The Phase-1 twin of [`QuorumSystem::column_of`]: a pure function of
     /// the read's token, so the core draws nothing (a driver that wants to
     /// perturb the choice does so through its own hook, never here).
@@ -387,10 +488,11 @@ impl QuorumSystem {
     pub fn row_of(self, ctx: u64) -> Option<usize> {
         let row = match self {
             QuorumSystem::Majority | QuorumSystem::Flexible { .. } => None,
-            QuorumSystem::Grid { rows, .. } => Some(residue(ctx, rows)),
+            QuorumSystem::Grid { rows, acks, .. } => (acks == rows).then(|| residue(ctx, rows)),
         };
-        if let (QuorumSystem::Grid { rows, .. }, Some(row)) = (self, row) {
+        if let (QuorumSystem::Grid { rows, acks, .. }, Some(row)) = (self, row) {
             assert!(row < rows.max(1), "a read's row lies inside the grid");
+            assert!(acks == rows, "only a full-column grid reads one row");
         } else {
             assert!(row.is_none(), "only a grid names a row");
         }
@@ -426,13 +528,13 @@ impl QuorumSystem {
 
     /// Whether `row` names a read row of this system: `None` under a
     /// majority or a flexible split (the whole membership), and on a grid
-    /// either `None` or a row below `rows`.
+    /// either `None` or, on a full-column grid only, a row below `rows`.
     #[must_use]
     pub fn admits_read_row(self, row: Option<usize>) -> bool {
         match (self, row) {
             (_, None) => true,
             (QuorumSystem::Majority | QuorumSystem::Flexible { .. }, Some(_)) => false,
-            (QuorumSystem::Grid { rows, .. }, Some(row)) => row < rows,
+            (QuorumSystem::Grid { rows, acks, .. }, Some(row)) => acks == rows && row < rows,
         }
     }
 
@@ -442,9 +544,9 @@ impl QuorumSystem {
     /// Identical to [`QuorumSystem::is_phase2_quorum`] under
     /// [`QuorumSystem::Majority`]; [`QuorumSystem::Flexible`] counts against
     /// `q1` here and `q2` there. A voter outside `members` never counts.
-    /// Under a grid this is *any* full row — the row-less form an election
-    /// asks; a quorum read addressed to one row is judged by
-    /// [`QuorumSystem::is_phase1_quorum_in`] with that row.
+    /// Under a grid this is `rows - acks + 1` acceptors of every column — the
+    /// row-less form an election asks; a quorum read addressed to one row is
+    /// judged by [`QuorumSystem::is_phase1_quorum_in`] with that row.
     ///
     /// # Panics
     ///
@@ -466,7 +568,9 @@ impl QuorumSystem {
     /// Whether `voters` form a **Phase-1** quorum over `members` **in
     /// `row`**: the form a quorum read asks (#143), judged by the row it
     /// was addressed to. `None` names no row — the whole membership under a
-    /// majority or a flexible split, *any* full row under a grid.
+    /// majority or a flexible split, `rows - acks + 1` acceptors of every
+    /// column under a grid. A named row is a quorum when it is whole, on a
+    /// full-column grid only.
     ///
     /// # Panics
     ///
@@ -497,12 +601,17 @@ impl QuorumSystem {
                 );
                 counted(members, voters) >= q1
             }
-            // Set membership, not a count: the named row — or some row —
-            // lies wholly in `voters`.
-            QuorumSystem::Grid { rows, cols } => match row {
-                Some(row) => row < rows && all_voted(grid_row(members, cols, row), voters),
-                None => (0..rows).any(|row| all_voted(grid_row(members, cols, row), voters)),
-            },
+            // The named row lies wholly in `voters`, or every column holds
+            // `rows - acks + 1` of them.
+            QuorumSystem::Grid { rows, cols, acks } => {
+                if let Some(row) = row {
+                    acks == rows && row < rows && all_voted(grid_row(members, cols, row), voters)
+                } else {
+                    let per_column = self.phase1_per_column().unwrap_or(usize::MAX);
+                    cols >= 1
+                        && (0..cols).all(|c| column_votes(members, cols, c, voters) >= per_column)
+                }
+            }
         };
         // A quorum is never assembled out of strangers alone.
         if quorum && !members.is_empty() {
@@ -588,8 +697,9 @@ impl QuorumSystem {
     /// Whether `voters` form a **Phase-2** quorum over `members`: the accepts
     /// that choose a value, and every claim that rests on one — a leader's
     /// standing authority (`CheckQuorum`) and the GC fence's custody claim. A voter outside `members` never counts. Under a
-    /// grid this is *any* full column — the column-less form the standing
-    /// claims ask; a round that was addressed to one column is judged by
+    /// grid this is `acks` acceptors of *any* one column — the column-less
+    /// form the standing claims ask; a round that was addressed to one
+    /// column is judged by
     /// [`QuorumSystem::is_phase2_quorum_in`] with that column.
     ///
     /// # Panics
@@ -611,13 +721,14 @@ impl QuorumSystem {
     /// Whether `voters` form a **Phase-2** quorum over `members` **in
     /// `column`**: the form a decision asks, judged by the column the round
     /// was addressed to. `None` names no column — the whole membership under
-    /// a majority or a flexible split, *any* full column under a grid.
+    /// a majority or a flexible split, `acks` acceptors of *any* one column
+    /// under a grid. Acks from two columns never add up.
     ///
     /// A vote from outside the column never counts here, even from a
     /// configured acceptor: an acceptor that received a misrouted or
     /// duplicated `Accept` may well have accepted it (acceptor guards are
     /// pool-based, never configuration-based), but the round's quorum is its
-    /// column, and only a full column proves the value chosen. The caller
+    /// column, and only `acks` of that column prove the value chosen. The caller
     /// keeps such a vote out of the tally
     /// ([`QuorumSystem::is_phase2_addressee`]); the decision restates it.
     ///
@@ -650,11 +761,11 @@ impl QuorumSystem {
                 );
                 counted(members, voters) >= q2
             }
-            QuorumSystem::Grid { cols, .. } => match column {
+            QuorumSystem::Grid { cols, acks, .. } => match column {
                 Some(column) => {
-                    column < cols && all_voted(grid_column(members, cols, column), voters)
+                    column < cols && column_votes(members, cols, column, voters) >= acks
                 }
-                None => (0..cols).any(|c| all_voted(grid_column(members, cols, c), voters)),
+                None => (0..cols).any(|c| column_votes(members, cols, c, voters) >= acks),
             },
         };
         // A quorum is never assembled out of strangers alone.
@@ -755,7 +866,7 @@ mod tests {
     /// The well-formedness arm: the layout must tile the membership.
     #[test]
     fn a_grid_admits_exactly_what_it_tiles() {
-        let g = |rows, cols| QuorumSystem::Grid { rows, cols };
+        let g = QuorumSystem::grid;
         assert!(g(2, 3).admits(6));
         assert!(g(3, 2).admits(6));
         assert!(g(1, 6).admits(6), "1 × n is Flexible's |Q1| = 1 experiment");
@@ -766,6 +877,56 @@ mod tests {
         assert!(!g(0, 6).admits(6));
         assert!(!g(6, 0).admits(6));
         assert!(!g(usize::MAX, 2).admits(6), "no overflow");
+        let acks = |acks| QuorumSystem::Grid {
+            rows: 3,
+            cols: 2,
+            acks,
+        };
+        assert!(acks(1).admits(6));
+        assert!(acks(3).admits(6));
+        assert!(!acks(0).admits(6), "a column decides on one accept or more");
+        assert!(!acks(4).admits(6), "no more accepts than the column holds");
+    }
+
+    /// Acceptor partitions (#532 (acceptor partitions)): a majority of one
+    /// partition decides, a majority of every partition elects, and acks
+    /// from two partitions never add up.
+    #[test]
+    fn partitions_decide_on_a_majority_of_one_column() {
+        use std::collections::BTreeSet;
+        // Two partitions of three: columns {0, 2, 4} and {1, 3, 5}.
+        let system = QuorumSystem::partitions(1, 2);
+        assert_eq!(
+            system,
+            QuorumSystem::Grid {
+                rows: 3,
+                cols: 2,
+                acks: 2
+            }
+        );
+        let members: Vec<u8> = (0..6).collect();
+        let set = |v: &[u8]| v.iter().copied().collect::<BTreeSet<u8>>();
+        assert!(system.admits(6));
+        assert_eq!(system.phase2_quorum_size(6), 2);
+        assert_eq!(system.phase1_quorum_size(6), 4);
+        assert!(system.is_phase2_quorum_in(&members, &set(&[0, 4]), Some(0)));
+        assert!(!system.is_phase2_quorum_in(&members, &set(&[0, 1]), Some(0)));
+        assert!(
+            !system.is_phase2_quorum(&members, &set(&[0, 1])),
+            "acks from two partitions never add up"
+        );
+        assert!(system.is_phase1_quorum(&members, &set(&[0, 2, 1, 5])));
+        assert!(
+            !system.is_phase1_quorum(&members, &set(&[0, 2, 4, 1])),
+            "a Phase-1 quorum holds a majority of every partition"
+        );
+        assert_eq!(system.row_of(7), None, "a read asks every partition");
+        // The full-column grid keeps its row reads, and one acceptor of
+        // every column elects.
+        let full = QuorumSystem::grid(3, 2);
+        assert_eq!(full.row_of(7), Some(1));
+        assert!(full.is_phase1_quorum(&members, &set(&[0, 3])));
+        assert!(!full.is_phase2_quorum_in(&members, &set(&[0, 2]), Some(0)));
     }
 
     /// The well-formedness arm, spelled out: `1 <= q1 <= n`, `1 <= q2 <= n`,

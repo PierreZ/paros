@@ -83,6 +83,7 @@ impl DriverTunables {
     /// | re-send cadences | one election base | a lost reply costs a round trip before the retry |
     /// | `reconfigure_backoff_max_ticks` | two election bases | |
     /// | `proxy_take_back_resends`, `proxy_round_resends` | 20, 40 beats | two and four seconds |
+    /// | `partition_move_resends` | 20 beats | two seconds before a stuck round moves to another acceptor partition (#533) |
     /// | `election_lease`, `election_renew` | 3 s, 1 s | a cell coordinator renews three times per lease (#240) |
     /// | `election_compact_after` | 64 | the election journal's log stays a few kilobytes |
     /// | `machine_down_after` | 10 s | a machine silent for ten renewal periods is down; a reboot is shorter (#211) |
@@ -117,6 +118,7 @@ impl DriverTunables {
             reconfigure_backoff_max_ticks: 2 * ELECTION_BASE,
             proxy_take_back_resends: 2 * ELECTION_BASE,
             proxy_round_resends: 4 * ELECTION_BASE,
+            partition_move_resends: 2 * ELECTION_BASE,
             election_lease: Duration::from_secs(3),
             election_renew: Duration::from_secs(1),
             election_compact_after: 64,
@@ -150,7 +152,7 @@ impl DriverTunables {
     }
 
     /// Every checked field: its name, its value and its floor.
-    fn floor_table(&self) -> [(&'static str, u64, u64); 41] {
+    fn floor_table(&self) -> [(&'static str, u64, u64); 42] {
         let ms = |d: Duration| u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
         let count = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
         [
@@ -207,6 +209,7 @@ impl DriverTunables {
             ),
             ("proxy_take_back_resends", self.proxy_take_back_resends, 1),
             ("proxy_round_resends", self.proxy_round_resends, 1),
+            ("partition_move_resends", self.partition_move_resends, 1),
             ("max_batch_records", self.max_batch_records, 1),
             ("max_batch_bytes", self.max_batch_bytes, 1),
             ("election_renew", ms(self.election_renew), 1),

@@ -255,6 +255,7 @@ impl Desk {
             names: ("sandbox".into(), "cell-1".into()),
             token: Vec::new(),
             root_key: None,
+            failures_per_partition: paros::client::initialize::FAILURES_PER_PARTITION,
         };
         let run = initialize(
             &self.providers,
@@ -267,9 +268,15 @@ impl Desk {
         .await;
         match run {
             InitRun::Initialized(done) | InitRun::AlreadyInitialized(done) => {
+                // The admitted machines serve journals too: the client
+                // reaches them as it reaches the founding members.
+                let mut done = done;
+                let admitted = done.admitted.clone();
+                done.servers.extend(admitted);
                 let detail = format!(
-                    "cell-1 formed over {} machines, coordinator {}",
+                    "cell-1 formed over {} machines, {} admitted, coordinator {}",
                     done.members.len(),
+                    done.admitted.len(),
                     short(done.coordinator.0)
                 );
                 known.cell = Some(done);

@@ -415,3 +415,36 @@ message DiskLoad {
   double read_bps = 6;
   double write_bps = 7;
 }
+
+// A tenant coordinator asks the cell coordinator for capacity (#476): the
+// slots it placed, under its idempotency id. The cell coordinator draws the
+// booking ids and records the outcome under `request` in the cell control
+// journal, so a retry reads it back.
+message CapacityRequest {
+  // The idempotency id: drawn by the caller, set, and the same on every
+  // retry of one request.
+  uint64 request = 1;
+  // The tenant the capacity is for.
+  uint64 tenant = 2;
+  // The slots: each of the tenant, all granted or none.
+  repeated CapacitySlot slots = 3;
+}
+
+// One slot a capacity request asks for: a role of a journal (`journal`), of
+// a matchmaker set (`set`), or of the tenant as a whole (`tenant_level`).
+message CapacitySlot {
+  uint64 node = 1;
+  string role = 2;
+  uint64 journal = 3;
+  uint64 set = 4;
+  bool tenant_level = 5;
+}
+
+message CapacityRequestAck {
+  // "granted" (`bookings` names each slot's booking, in order), "refused"
+  // (no room: ask again under a new id). Or why it was not decided, to retry
+  // with the same `request`: "not_coordinator", "unavailable". Or a
+  // refusal: "unknown_tenant", "malformed".
+  string outcome = 1;
+  repeated uint64 bookings = 2;
+}
