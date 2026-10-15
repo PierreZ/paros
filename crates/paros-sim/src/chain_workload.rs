@@ -760,6 +760,13 @@ impl ChainWorkload {
         if crate::shape::lagging_replica(ctx.state()) && !operations.contains(&READ) {
             operations.push(READ);
         }
+        // Likewise `RECONFIGURE_MATCHMAKERS` on a paged-handover seed (#551
+        // (operator calls name their journal)).
+        if crate::shape::paged_handover(ctx.state())
+            && !operations.contains(&RECONFIGURE_MATCHMAKERS)
+        {
+            operations.push(RECONFIGURE_MATCHMAKERS);
+        }
         // And `VIEW` on a downed-founder seed (#191 (status)).
         if crate::shape::downed_founder(ctx.state()) && !operations.contains(&VIEW) {
             operations.push(VIEW);
