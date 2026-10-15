@@ -697,9 +697,13 @@ impl ChainWorkload {
         // applies the same log, so the settle tail waits for it and the
         // live-read comparison judges it beside every acceptor. Empty on a
         // seed without replicas.
-        // The replica tier serves the default journal alone (#188).
         let main = crate::shape::identifiers(ctx.state()).main;
-        let replica_ips: Vec<(u64, String)> = if self.journal == main {
+        // The replica tier serves every journal of the run's static list
+        // (#193).
+        let replica_ips: Vec<(u64, String)> = if crate::shape::journals(ctx.state())
+            .ids
+            .contains(&self.journal)
+        {
             deployment
                 .replicas()
                 .iter()

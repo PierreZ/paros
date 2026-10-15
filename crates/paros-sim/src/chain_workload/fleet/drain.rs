@@ -128,7 +128,7 @@ impl FleetOps {
         let node = admitted[usize::try_from(draw % admitted.len() as u64).unwrap_or(0)];
         if gone {
             // A window first, on a coin, then the machine goes down (#475).
-            if buggify_with_prob!(0.5) {
+            if buggify_with_prob!(0.75) {
                 self.maintain(ctx, &mut session, (&cell.client, first), node)
                     .await;
             }
@@ -187,7 +187,7 @@ impl FleetOps {
             .filter(|(_, b)| b.node == node)
             .map(|(id, b)| (id, b.target))
             .collect();
-        let scope = if buggify_with_prob!(0.3) {
+        let scope = if buggify_with_prob!(0.5) {
             assert_reachable!("drain: an operator puts a zone in maintenance");
             MaintenanceScope::Zone(zone)
         } else {

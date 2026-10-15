@@ -40,16 +40,17 @@
 //! node driver then sends its learner traffic to the pool alone, exactly the
 //! plain deployment's messages.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use moonpool_buggify::hint::Strike;
-use moonpool_core::{Providers, SimulationResult, TimeProvider};
+use moonpool_core::{Providers, SimulationError, SimulationResult, TimeProvider};
 use paros_core::{
     Ballot, Command, JournalId, JournalIdentifier, MustSync, NodeId, Outcome, Party, QuorumSystem,
     ReadState, ReplicaNode, Slot, TenantId, WriteOp,
 };
 
-use crate::driver::log_reads::{JournalReads, ReadLimits, refuse_journal};
+use crate::driver::JournalStores;
+use crate::driver::log_reads::{JournalReads, ReadLimits};
 use crate::transport::Transport;
 use tokio_util::sync::CancellationToken;
 
@@ -311,57 +312,180 @@ where
     Ok(self_id)
 }
 
+/// One journal this replica serves (#193): its own `ReplicaNode`, store,
+/// reads and audit port. Nothing crosses journals.
+struct ReplicaRt<S, A> {
+    replica: ReplicaNode,
+    storage: S,
+    reads: JournalReads,
+    audit: A,
+}
+
+impl<S: LogStorage, A: Audit + Clone + Send + Sync + 'static> ReplicaRt<S, A> {
+    /// Drain this journal's batch and serve the reads it confirmed, `expire`
+    /// as [`serve_and_advance`] takes it; whether a read was confirmed.
+    async fn settle(
+        &mut self,
+        out: &Outbound,
+        self_id: u64,
+        expire: Option<(u64, u64)>,
+    ) -> Result<bool, RunError> {
+        let drained = drain(
+            &mut self.replica,
+            &mut self.storage,
+            out,
+            self_id,
+            &self.audit,
+        )
+        .await?;
+        let confirmed = !drained.reads.is_empty();
+        serve_and_advance(
+            &mut self.reads,
+            &drained,
+            &mut self.replica,
+            expire,
+            NodeId(self_id),
+            &self.audit,
+        );
+        Ok(confirmed)
+    }
+}
+
+/// Note that `journal`'s replica confirmed a read: one replica serving reads
+/// for two journals is the shared process #193 makes of it.
+fn note_read(read: &mut BTreeSet<JournalIdentifier>, journal: JournalIdentifier) {
+    if read.insert(journal) && read.len() >= 2 {
+        moonpool_assertions::reachable!("replica: one replica serves reads for two journals");
+    }
+    assert!(read.contains(&journal), "a journal that read is remembered");
+}
+
+/// Open and boot every journal `stores` lists: each store scanned and its
+/// format marker judged against the operator's claim, its `ReplicaNode`
+/// rebuilt from it and tuned. A journal whose store stays down for good is
+/// left out. Every store names one replica id; a store naming another is
+/// caller input, refused.
+async fn boot_journals<J: JournalStores>(
+    stores: &mut J,
+    tunables: &DriverTunables,
+) -> Result<
+    (
+        u64,
+        BTreeMap<JournalIdentifier, ReplicaRt<J::Store, J::Audit>>,
+    ),
+    RunError,
+> {
+    let mut journals = BTreeMap::new();
+    let mut self_id: Option<u64> = None;
+    for journal in stores.journals() {
+        let Some((mut storage, boot)) = stores.open(journal).await else {
+            tracing::info!(journal = %journal, "replica_journal_down");
+            continue;
+        };
+        let audit = stores.audit(journal);
+        let id = boot_store(&mut storage, boot, &audit).await?;
+        stores.opened(journal);
+        if self_id.is_some_and(|known| known != id) {
+            return Err(RunError::Infra(SimulationError::InvalidState(
+                "a replica's stores name one replica".into(),
+            )));
+        }
+        self_id = Some(id);
+        let mut replica = ReplicaNode::new(&storage);
+        if replica.config().journal != journal {
+            return Err(RunError::Infra(SimulationError::InvalidState(
+                "a replica's store names its own journal".into(),
+            )));
+        }
+        tune(&mut replica, tunables);
+        report_boot(&replica, id, &audit);
+        journals.insert(
+            journal,
+            ReplicaRt {
+                replica,
+                storage,
+                reads: JournalReads::default(),
+                audit,
+            },
+        );
+    }
+    let Some(self_id) = self_id else {
+        return Err(RunError::Infra(SimulationError::InvalidState(
+            "a replica serves at least one journal".into(),
+        )));
+    };
+    assert!(!journals.is_empty(), "a booted replica serves a journal");
+    assert!(
+        journals
+            .values()
+            .all(|rt| rt.replica.config().id.0 == self_id),
+        "every journal of a replica runs under its one id"
+    );
+    Ok((self_id, journals))
+}
+
 /// Drive a paros replica to completion over the given providers.
 ///
 /// Generic over `P: Providers` (production *or* simulation) and
-/// `S: LogStorage` (the injected durable storage, the same trait a node
-/// runs on). The loop owns a [`ReplicaNode`] rebuilt from `storage`, serves
-/// the node contract's learner subset on `local_addr`, and sends its
-/// catch-up requests to the acceptors named in `members` — the full **node
-/// pool** (`NodeId` → address), the same list every node is given. The
-/// replica's own id, read from the store's `Config`, is outside that pool.
+/// `J: JournalStores` (the journals this replica serves and their injected
+/// durable stores, the same seam a node runs on). A replica is a shared
+/// process (#193, §3.4): one [`ReplicaNode`] and one store per journal,
+/// demuxed by the [`JournalIdentifier`] every message and call names, and
+/// nothing crosses journals. The loop serves the node contract's learner
+/// subset on `local_addr` and sends its catch-up requests to the acceptors
+/// named in `members` — the full **node pool** (`NodeId` → address), the
+/// same list every node is given. The replica's own id, read from the
+/// stores' `Config`s (one id for every journal), is outside that pool.
 ///
-/// `boot` is the operator's claim about `storage` ([`BootKind`], #147),
+/// Each store's boot claim ([`BootKind`], #147) comes from `stores` and is
 /// judged against the store's format marker before the core reads a byte,
 /// exactly as on a node: a replica that lost its disk comes back as a first
 /// boot and relearns the log from the acceptors, because a replica holds no
-/// promise — there is nothing an amnesiac replica could regress.
+/// promise — there is nothing an amnesiac replica could regress. A journal
+/// `stores` cannot open stays down on this replica for good.
 ///
-/// `tunables` and `audit` are the seams every driver in this crate takes:
-/// the tick cadence and the transport shape, and the observation port. The
-/// send seam's drops and duplicates and the row override are inline BUGGIFY
-/// locations. The durability
-/// moments are `hint!`s inline.
+/// `tunables` is the tick cadence and the transport shape; each journal
+/// reports to its own audit port (`JournalStores::audit`), the replica's
+/// own facts to `JournalStores::node_audit`. The send seam's drops and
+/// duplicates and the row override are inline BUGGIFY locations. The
+/// durability moments are `hint!`s inline.
 ///
 /// # Errors
 ///
-/// [`RunError::Storage`] when a storage call failed (recovered by
-/// re-running against the surviving store), [`RunError::Refused`] when
-/// `boot` and the format marker disagree, [`RunError::Infra`] for a genuine
-/// provider failure.
+/// [`RunError::Storage`] when a storage call failed, on any journal
+/// (recovered by re-running against the surviving stores: a replica is
+/// fail-stop, as it was with one journal), [`RunError::Refused`] when a
+/// boot claim and its format marker disagree, [`RunError::Infra`] for a
+/// genuine provider failure or stores that name no journal or several
+/// replica ids.
+///
+/// # Panics
+///
+/// If an internal invariant is broken (a boot batch that confirms a read,
+/// a fold that moved under a served read): a programmer error, never an
+/// operating condition.
 #[tracing::instrument(level = "debug", skip_all, fields(local_addr = %local_addr, members = members.len()))]
 // The parameters are the replica's complete wiring; the loop is one select
-// over the lane, the beat and the shutdown.
-#[allow(clippy::too_many_arguments)]
-pub async fn run_replica<P, S, A>(
+// over the lane, the reads, the beat, the inspections and the shutdown.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub async fn run_replica<P, J>(
     providers: P,
-    mut storage: S,
+    mut stores: J,
     local_addr: String,
     members: Vec<(NodeId, String)>,
-    boot: BootKind,
     tunables: DriverTunables,
     transport: Transport,
     shutdown: CancellationToken,
-    audit: &A,
 ) -> Result<(), RunError>
 where
     P: Providers,
-    S: LogStorage,
-    // Not `Send + 'static`, as on `run_node`: a hook is consulted from this
-    // loop and never from a spawned task.
-    A: Audit + Clone + Send + Sync + 'static,
+    J: JournalStores,
 {
-    let self_id = boot_store(&mut storage, boot, audit).await?;
+    let (self_id, mut journals) = boot_journals(&mut stores, &tunables).await?;
+    let node_audit = stores.node_audit();
+    if journals.len() >= 2 {
+        moonpool_assertions::reachable!("replica: a replica serves several journals");
+    }
 
     let incarnation_shutdown = CancellationToken::new();
     let _incarnation_guard = incarnation_shutdown.clone().drop_guard();
@@ -381,33 +505,30 @@ where
         me,
         // No cell plan reaches a replica yet: it runs on no machine.
         0,
-        edge_reporter(audit, me),
+        edge_reporter(&node_audit, me),
         incarnation_shutdown.clone(),
     )?;
-
-    let mut replica = ReplicaNode::new(&storage);
-    tune(&mut replica, &tunables);
-    report_boot(&replica, self_id, audit);
 
     let out = acceptor_lanes(
         &providers,
         &edge,
         &tunables,
         &incarnation_shutdown,
-        audit,
+        &node_audit,
         me,
         members,
     )?;
 
-    // The boot may already carry a batch: records learned above the prefix
-    // before the crash complete it on the way back up.
-    let mut reads = JournalReads::default();
-    let booted = drain(&mut replica, &mut storage, &out, self_id, audit).await?;
-    // Nothing is parked yet: the boot batch confirms no read.
-    assert!(booted.reads.is_empty(), "a boot batch confirms no read");
-    serve_and_advance(&mut reads, &booted, &mut replica, None, me_id, audit);
+    // The boot may already carry a batch per journal: records learned above
+    // the prefix before the crash complete it on the way back up. Nothing is
+    // parked yet, so a boot batch confirms no read.
+    for rt in journals.values_mut() {
+        let confirmed = rt.settle(&out, self_id, None).await?;
+        assert!(!confirmed, "a boot batch confirms no read");
+    }
 
-    let journal = replica.config().journal;
+    // The journals that confirmed a read in this incarnation.
+    let mut read: BTreeSet<JournalIdentifier> = BTreeSet::new();
     let mut ticks: u64 = 0;
     let time = providers.time().clone();
     let mut next_tick = time.now() + tunables.tick_interval;
@@ -415,54 +536,71 @@ where
         moonpool_core::select! {
             error = edge.run() => return Err(error.into()),
             Some((to, msg)) = inbox.recv() => {
-                if to != journal {
+                let Some(rt) = journals.get_mut(&to) else {
                     tracing::info!(node = self_id, journal = %to, "foreign_journal_dropped");
                     continue;
-                }
+                };
                 trace_received(self_id, &msg);
-                replica.step(msg);
-                let drained = drain(&mut replica, &mut storage, &out, self_id, audit).await?;
-                serve_and_advance(&mut reads, &drained, &mut replica, None, me_id, audit);
+                rt.replica.step(msg);
+                if rt.settle(&out, self_id, None).await? {
+                    note_read(&mut read, to);
+                }
             }
             Some((req, reply)) = log_reads.recv() => {
                 // A journal `Read` (#204): a leaderless read served from this
-                // replica's own fold (§3.4) — the core asks a row of the
-                // configuration it believes in force, and the read is served
-                // once the row answered whole and this replica folded the
-                // maximum watermark. The row override is the node's hook,
-                // asked only under a grid, from the loop.
-                if refuse_journal(journal, JournalIdentifier::new(TenantId(req.tenant), JournalId(req.journal)), "read", me_id, audit) {
+                // replica's own fold of the journal it names (§3.4) — the
+                // core asks a row of the configuration it believes in force,
+                // and the read is served once the row answered whole and
+                // this replica folded the maximum watermark. The row
+                // override is the node's hook, asked only under a grid, from
+                // the loop. A journal this replica does not serve is refused.
+                let asked = JournalIdentifier::new(TenantId(req.tenant), JournalId(req.journal));
+                let Some(rt) = journals.get_mut(&asked).filter(|_| asked.is_set()) else {
+                    node_audit.journal_refused(me_id, asked, "read");
+                    tracing::info!(node = self_id, journal = %asked, call = "read", "journal_refused");
                     let refused = ReadAck { unknown_journal: true, ..ReadAck::default() };
-                    answer(audit, me_id, Reply::LogRead, reply, refused);
+                    answer(&node_audit, me_id, Reply::LogRead, reply, refused);
                     continue;
+                };
+                open_read(&mut rt.replica, &mut rt.reads, &req, reply, &tunables, &rt.audit);
+                if rt.settle(&out, self_id, None).await? {
+                    note_read(&mut read, asked);
                 }
-                open_read(&mut replica, &mut reads, &req, reply, &tunables, audit);
-                let drained = drain(&mut replica, &mut storage, &out, self_id, audit).await?;
-                serve_and_advance(&mut reads, &drained, &mut replica, None, me_id, audit);
             }
             _ = time.sleep(next_tick.saturating_sub(time.now())) => {
                 next_tick = time.now() + tunables.tick_interval;
                 ticks += 1;
-                replica.tick();
-                let drained = drain(&mut replica, &mut storage, &out, self_id, audit).await?;
                 let expire = Some((ticks, tunables.read_retry_ticks));
-                serve_and_advance(&mut reads, &drained, &mut replica, expire, me_id, audit);
-                if let Some((hole, above)) = replica.replica().chosen_gap() {
-                    audit.chosen_gap(NodeId(self_id), hole, above);
-                    tracing::info!(replica = self_id, hole = hole.0, above = above.0, "chosen_gap");
+                // Each journal's beat, in identifier order (iteration order
+                // is part of determinism).
+                for (journal, rt) in &mut journals {
+                    rt.replica.tick();
+                    if rt.settle(&out, self_id, expire).await? {
+                        note_read(&mut read, *journal);
+                    }
+                    if let Some((hole, above)) = rt.replica.replica().chosen_gap() {
+                        rt.audit.chosen_gap(me_id, hole, above);
+                        tracing::info!(replica = self_id, journal = %journal, hole = hole.0, above = above.0, "chosen_gap");
+                    }
                 }
                 tracing::info!(replica = self_id, "replica_tick");
             }
             Some((req, reply)) = inspects.recv() => {
                 // No batch: an inspect reads the replica and its store. It
-                // names the replica's journal or asks for the node alone; an
-                // unset identifier or another journal is refused (#243).
-                let full = inspect(&replica);
+                // names a journal this replica serves or asks for the node
+                // alone; an unset identifier or another journal is refused
+                // (#243).
+                let first = journals.values().next().map(|rt| inspect(&rt.replica));
+                let Some(first) = first else {
+                    continue;
+                };
                 let answer = match req.target() {
-                    Ok(InspectTarget::Node) => full.node_facts(),
-                    Ok(InspectTarget::Journal(journal)) if journal == replica.config().journal => full,
-                    Ok(InspectTarget::Journal(_)) => full.refused(InspectRefusal::UnknownJournal),
-                    Err(refusal) => full.refused(refusal),
+                    Ok(InspectTarget::Node) => first.node_facts(),
+                    Ok(InspectTarget::Journal(journal)) => journals.get(&journal).map_or_else(
+                        || first.refused(InspectRefusal::UnknownJournal),
+                        |rt| inspect(&rt.replica),
+                    ),
+                    Err(refusal) => first.refused(refusal),
                 };
                 let _ = reply.send(answer);
             }

@@ -194,10 +194,13 @@ impl DriverTunables {
                 self.reconfigurer_resend_ticks,
                 1,
             ),
+            // The stall budget outlasts the re-send cadence (#548 (set
+            // handover never lands)): the shortest budget, one base election
+            // timeout per election, ends above `reconfigurer_resend_ticks`.
             (
                 "reconfigure_timeout_elections",
                 self.reconfigure_timeout_elections,
-                1,
+                self.reconfigurer_resend_ticks / self.election_timeout_base.max(1) + 1,
             ),
             (
                 "reconfigure_backoff_max_ticks",
@@ -323,6 +326,29 @@ mod tests {
         assert_eq!(
             zero.check_floors().map_err(|b| b.field),
             Err("tick_interval")
+        );
+    }
+
+    #[test]
+    fn the_handover_stall_budget_outlasts_its_resend_cadence() {
+        let edge = DriverTunables {
+            election_timeout_base: 5,
+            reconfigurer_resend_ticks: 4,
+            reconfigure_timeout_elections: 1,
+            ..DriverTunables::default()
+        };
+        assert_eq!(edge.check_floors(), Ok(()));
+        let equal = DriverTunables {
+            reconfigurer_resend_ticks: 5,
+            ..edge
+        };
+        assert_eq!(
+            equal.check_floors(),
+            Err(BelowFloor {
+                field: "reconfigure_timeout_elections",
+                value: 1,
+                floor: 2,
+            })
         );
     }
 }

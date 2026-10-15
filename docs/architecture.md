@@ -796,7 +796,8 @@ coordinator is `paros::machine::coordinator`:
 - **Log space.** Each renewal describes the whole leadership, so the leader truncates the
   election journal to its own latest renewal once `compact_after` records lie below it. A
   renewal is its own checkpoint. A reader that starts at the floor anchors on the leader's
-  record there. Nothing else may truncate an election journal.
+  record there: a renewal, or the campaign or hand-off that began the term when the leader
+  truncated before its first renewal counted. Nothing else may truncate an election journal.
 - **The interface.** Records carry the candidate's interface: its address, and the encoded
   `InterfaceRef` of its term's group (`reference`, #404), opaque to the election. The
   coordinator publishes them with its first renewal after its term's duties; until then both
@@ -2240,8 +2241,12 @@ AGENTS.md.
   coordinator's alone: it books a created journal's acceptors (#212 (placement)).
 - `parosd` no longer runs the plain deployment (#190, landed): every journal is born with its
   tenant's matchmaker set on the founding members, and the matchmaker wire names its journal, so
-  every journal of a process may name matchmakers. Proxy leaders and replicas still serve only a
-  node's first journal; they follow (#193).
+  every journal of a process may name matchmakers. Proxy leaders and replicas are shared the
+  same way (#193, landed): a proxy keeps one `ProxyLeader` and a replica one `ReplicaNode` and
+  one store per journal, demuxed by `JournalIdentifier`. A node whose `Config::proxy_count`
+  differs from its peers' (a rolling change of the count) changes which proxy runs a round, or
+  makes the leader take the round back, never what is chosen; the simulation draws such nodes
+  per seed. The counts stay boot data until the tenant coordinator applies them (#214).
 - The coordinators replace the operator's client (#212): admin calls become requests to the
   elected coordinator. Since #240, `parosctl init` no longer claims the cell control journal: the
   elected cell coordinator installs its uuid there.

@@ -8,12 +8,18 @@
 //! any maintenance window over it passed (#359). The machine comes back
 //! later as a new incarnation and keeps no slot it lost.
 //!
+//! On a coin the machine comes back soon after the longest bound instead
+//! (`BACK_SOON_MS` past it): the coordinator may have started a move, and
+//! the machine answers before the move ends. The coordinator then releases
+//! the slot the journal's configuration left (`machine::moves`' trim).
+//!
 //! The cell keeps its founding member up, so the tail's liveness claims
 //! still hold; the strike may come up to `LATE_WINDOW` into the tail.
 
 use async_trait::async_trait;
 use moonpool_sim::{
     FaultContext, FaultInjector, RebootKind, SimulationResult, TimeProvider, assert_reachable,
+    buggify_with_prob,
 };
 
 use super::late_outage::LATE_WINDOW;
@@ -23,6 +29,10 @@ use super::outage::POLL;
 /// `machine_replace_after` the simulation draws (`crate::shape`: a renewal
 /// period of at most 1 s, plus at most 3 s, plus at most 8 s).
 const GONE_MS: std::ops::Range<usize> = 13_000..18_001;
+
+/// How long past the longest `machine_replace_after` a machine that comes
+/// back soon stays down, in milliseconds: a move's first steps fit in it.
+const BACK_SOON_MS: std::ops::Range<usize> = 500..3_001;
 
 /// The gone-machine injector (see the module doc): a fresh one per
 /// timeline.
@@ -53,6 +63,15 @@ impl FaultInjector for GoneMachine {
         };
         assert_reachable!("machine: the scenario takes a machine holding a slot down");
         tracing::info!(%target, "gone_machine_strikes");
-        ctx.reboot_with_delays(&target, RebootKind::Crash, &GONE_MS, &(0..1))
+        let hold = if buggify_with_prob!(0.5) {
+            assert_reachable!("machine: a gone machine comes back soon after the bound");
+            let bound =
+                usize::try_from(crate::shape::longest_replace_after(ctx.state()).as_millis())
+                    .unwrap_or(GONE_MS.start);
+            bound + BACK_SOON_MS.start..bound + BACK_SOON_MS.end
+        } else {
+            GONE_MS
+        };
+        ctx.reboot_with_delays(&target, RebootKind::Crash, &hold, &(0..1))
     }
 }

@@ -1392,7 +1392,9 @@ impl AuditState {
                 }
             );
         } else {
-            let decided = self.decided_below_floor.get(&slot).copied();
+            // Below the floor the slot is decided, pruned or not yet: a floor
+            // raised without a prune leaves it in `decided`.
+            let decided = self.decided_vhash(slot);
             assert_always!(
                 decided == Some(vhash),
                 "proxy: a Commit a proxy emits is backed by a durable Phase-2 quorum at one ballot",

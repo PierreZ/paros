@@ -1213,10 +1213,10 @@ where
 /// [`run_node`]'s fail-stop crash. A seam crash is the process dying, for
 /// every journal.
 ///
-/// The matchmaker plane, the proxy leaders and the replica tier serve one
-/// journal each, the node's first user journal: every other journal of a
-/// node — the control journals included — runs plain Multi-Paxos
-/// (journal-tagged planes are #190 and #193).
+/// The matchmaker plane, the proxy leaders and the replica tier are shared
+/// by every journal that names them (#190, #193): each journal's
+/// [`paros_core::Config`] says whether it delegates to proxies and teaches
+/// replicas, and the messages carry its identifier.
 ///
 /// `node` is this process's node id, named by the caller (no id has a
 /// default, §3.8): every journal's [`paros_core::Config`] must carry it, and
@@ -1240,8 +1240,7 @@ where
 ///
 /// # Errors
 ///
-/// As [`run_node`]; [`RunError::Infra`] when several journals are asked of a
-/// deployment with matchmakers, proxies or replicas.
+/// As [`run_node`].
 ///
 /// # Panics
 ///
@@ -1329,24 +1328,6 @@ where
     }
     if journals.exhausted() && (!follows || journals.stranded()) {
         return journals.exit();
-    }
-    // The proxy leaders and the replica tier serve one journal each — the
-    // node's first user journal — so every other journal must run without
-    // them (#188; journal-tagged proxies are #193). Matchmakers serve every
-    // journal: one set per tenant, one registry per journal (#190).
-    let plane = journals.plane().map(|(journal, _)| *journal);
-    let planed = journals
-        .live
-        .iter()
-        .filter(|(journal, _)| Some(**journal) != plane)
-        .any(|(_, rt)| {
-            let config = rt.node.config();
-            config.proxy_count > 0 || config.replica_count > 0
-        });
-    if planed {
-        return Err(RunError::Infra(SimulationError::InvalidState(
-            "only a node's first journal may name proxies or replicas".into(),
-        )));
     }
     // The caller named the node (no id has a default, §3.8); every journal
     // it opened must agree. Caller input, so a mismatch is a refusal.

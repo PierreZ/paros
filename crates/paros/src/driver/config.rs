@@ -198,7 +198,13 @@ pub struct DriverTunables {
     /// (`stalled_for`). Floor 1 election timeout — long enough for a slow
     /// matchmaker to answer one re-sent request; below that a healthy
     /// handover could not finish, which is not an extreme configuration but
-    /// a broken one.
+    /// a broken one. The shortest budget, `election_timeout_base` times this,
+    /// also stays above `reconfigurer_resend_ticks`: the freeze closes only
+    /// on a re-send beat, and a budget that ends at or before that beat
+    /// abandons every handover on the tick its stop quorum would have closed
+    /// (#548 (set handover never lands): witness 4294352317195364374, a
+    /// five-tick cadence against a one-election budget of five ticks, so a
+    /// set's handover onto an admitted machine restarted for the whole tail).
     pub reconfigure_timeout_elections: u64,
     /// Upper bound on the jittered backoff a preempted successor decree waits
     /// before it reopens at a higher ballot — the symmetry break between

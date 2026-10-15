@@ -29,3 +29,11 @@
 - Patching moonpool to add a `tracing_subscriber::fmt` layer (feature `fmt`) in
   `SimulationLayer::install`, timed with `SimTime::new(handle)`, prints every event with sim
   time. Patch all seven git crates (assertions, buggify, core, explorer, journal, rpc, sim).
+- Audit fold split: every path that raises `st.floor` must also call `prune_below_floor()`, or
+  `cluster_min_floor()` moves past slots still in the live `decided` tally while
+  `decided_below_floor` lacks them. An oracle that switches on `slot >= cluster_min_floor()` and
+  reads only one map then reports a valid fact as red. The signature is a below-floor `proxy:`
+  violation whose slot sits exactly one below a trim-jump `point` (`trimmed_to` did not prune).
+- A CI sweep failure under forked workers is a timeline (seed + recipe), so `replay-main` of the
+  printed seed can be green without a determinism leak. Run `replay-canary` to rule out a leak,
+  then hunt for the message with a release `sim-paros-hunt` (about 1 s per seed, 16 s in debug).

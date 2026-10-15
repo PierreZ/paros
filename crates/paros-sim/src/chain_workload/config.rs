@@ -269,8 +269,8 @@ pub(super) struct ChainConfig {
     /// state. Ceiling 2 s: long enough for a member of the successor to
     /// lead it, far inside the recovery budget.
     pub(super) reboot_successor_delay_ms: u64,
-    /// The client runtime's connect timeout. Floor 250 ms: one round trip
-    /// over the default cross-datacenter link; a shorter one never connects.
+    /// The client runtime's connect timeout. Floor `CONNECT_FLOOR_MS`: a
+    /// connect and its TLS handshake, two round trips on the slowest link.
     pub(super) connect_timeout_ms: u64,
     /// The client runtime's liveness-ping interval. Floor 250 ms (same
     /// bound); a half-open connection is failed once a ping goes unanswered.
@@ -416,7 +416,7 @@ impl ChainConfig {
             reconfigure_attempts: buggify_knob!(4_u8, 1_u8..9_u8),
             reconfigure_matchmakers_attempts: buggify_knob!(4_u8, 1_u8..9_u8),
             reboot_successor_delay_ms: buggify_knob!(600_u64, 50_u64..2001_u64),
-            connect_timeout_ms: buggify_knob!(1000_u64, 250_u64..3001_u64),
+            connect_timeout_ms: buggify_knob!(1000_u64, crate::shape::CONNECT_FLOOR_MS..3001_u64),
             keep_alive_interval_ms: buggify_knob!(2000_u64, 250_u64..5001_u64),
             keep_alive_timeout_ms: buggify_knob!(1000_u64, 250_u64..3001_u64),
             read_timeout_ms: buggify_knob!(2000_u64, 1000_u64..4001_u64),

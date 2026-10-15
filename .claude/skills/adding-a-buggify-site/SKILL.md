@@ -64,7 +64,8 @@ For anything that shapes a run (a count, a window, a capacity, a rate):
 - **Document the floor next to the site**, and only add the knob where the
   extreme is a valid configuration: a peer queue that cannot hold one tick of
   traffic, or a one-message delivery batch, is a permanent partition wearing a
-  knob's clothes (the driver timings floor at `ROUND_TRIP_FLOOR_MS`).
+  knob's clothes (the driver timings floor at `ROUND_TRIP_FLOOR_MS`, the
+  connect timeouts at `CONNECT_FLOOR_MS`).
 - Never buggify an oracle threshold (`DEPOSED_TICK_SLACK` in
   `audit/state.rs`, `PLATEAU_SEEDS` and `CHAOS_DURATION_MS` in `lib.rs`,
   `SETTLE` in `chain_workload/reads.rs`) or a schedule
