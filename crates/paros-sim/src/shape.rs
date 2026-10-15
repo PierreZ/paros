@@ -175,7 +175,7 @@ impl NodeShape {
         };
         let floor_ticks = ROUND_TRIP_FLOOR_MS.div_ceil(tick_ms);
         let election_renew_ms = buggify_knob!(500_u64, 100_u64..1001_u64);
-        let drawn = DriverTunables {
+        let mut drawn = DriverTunables {
             tick_interval: ms(tick_ms),
             election_timeout_base: buggify_knob!(5_u64, 2_u64..13_u64).max(floor_ticks),
             keep_alive_interval: ms(buggify_knob!(2000_u64, ROUND_TRIP_FLOOR_MS..5001_u64)),
@@ -233,12 +233,12 @@ impl NodeShape {
             // matchmakers their retained histories, never safety.
             gc_resend_ticks: buggify_knob!(5_u64, 1_u64..41_u64),
             // The handover re-send cadence. Floor 1; bounded above by the
-            // stall budget drawn just below — a cadence past
+            // stall budget drawn just below — a cadence at or past
             // `election_timeout * reconfigure_timeout_elections` would let
             // the phase be abandoned before it is ever re-sent, which is no
-            // retry rather than a slow one, so the ceiling stays under the
-            // smallest budget the next knob can draw (1 timeout × the
-            // election base's own floor).
+            // retry rather than a slow one, and a freeze that never closes
+            // (#548 (set handover never lands)). The draw is lowered under
+            // the shortest budget once both are drawn, below.
             reconfigurer_resend_ticks: buggify_knob!(5_u64, 1_u64..11_u64),
             // The handover stall budget. Floor 1 election timeout: one
             // re-sent request has time to be answered, and a phase nobody
@@ -384,6 +384,17 @@ impl NodeShape {
                 ms(buggify_knob!(2000_u64, RESOLVE_FLOOR_MS..2001_u64))
             },
         };
+        // The handover re-send cadence stays under the shortest stall
+        // budget, one base election timeout per election (`check_floors`):
+        // the freeze closes only on a re-send beat, so a budget that ends on
+        // or before it abandons every handover its stop quorum answered
+        // (#548 (set handover never lands): witness 4294352317195364374, a
+        // five-tick cadence against a five-tick budget, and a set that never
+        // left its founding member). A lowered draw runs at the edge, one
+        // tick under the budget.
+        drawn.reconfigurer_resend_ticks = drawn.reconfigurer_resend_ticks.min(
+            (drawn.election_timeout_base * drawn.reconfigure_timeout_elections).saturating_sub(1),
+        );
         // The production profile `parosd` ships (#209), whole: every field
         // at once, which the per-field locations above would draw together
         // only by chance. Each of its values lies inside its knob's range
