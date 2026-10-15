@@ -571,7 +571,9 @@ struct Candidacy {
     /// The failure detector's timeout (#211).
     down_after: Duration,
     /// The leader stops renewing for one lease and a half after its first
-    /// term's duties (a BUGGIFY decision: the takeover's way in).
+    /// term's duties (a BUGGIFY decision: the takeover's way in). A fault:
+    /// never in the recovery tail ([`chaos`]), like `hand_off` and
+    /// `quit_mid_move`.
     stall: bool,
     /// The leader hands its first term on to another founding member after
     /// its duties (a BUGGIFY decision).
@@ -634,14 +636,14 @@ pub(crate) fn spawn<P: Providers>(
         seed: providers.random().random(),
         tunables: election,
         down_after: tunables.machine_down_after,
-        stall: moonpool_buggify::buggify_with_prob!(0.3),
-        hand_off: formed.plan.members.len() > 1 && moonpool_buggify::buggify_with_prob!(0.25),
+        stall: moonpool_buggify::buggify_fault_with_prob!(0.3),
+        hand_off: formed.plan.members.len() > 1 && moonpool_buggify::buggify_fault_with_prob!(0.25),
         reuse: moonpool_buggify::buggify_with_prob!(0.3),
         impatient: moonpool_buggify::buggify_with_prob!(0.3),
         abandon: moonpool_buggify::buggify_with_prob!(0.3),
         lose_resign: moonpool_buggify::buggify_with_prob!(0.5),
         linger: moonpool_buggify::buggify_with_prob!(0.5),
-        quit_mid_move: moonpool_buggify::buggify_with_prob!(0.5),
+        quit_mid_move: moonpool_buggify::buggify_fault_with_prob!(0.5),
         slow_install: moonpool_buggify::buggify_with_prob!(0.3),
     };
     let mut client = cell_client(providers, rpc, formed, tunables).with_shutdown(shutdown.clone());
@@ -874,7 +876,7 @@ async fn campaign<P: Providers>(
                 desk = None;
                 assert!(watching.is_none(), "a resigned term holds no session");
             }
-            Step::Leading { leader, .. } if handing => {
+            Step::Leading { leader, .. } if handing && chaos() => {
                 handing = false;
                 desk = None;
                 if let Some(next) = successor(&plan, me)
@@ -886,7 +888,7 @@ async fn campaign<P: Providers>(
                     hand_off(&client, journals.cell, leader.uuid, uuid, 0).await;
                 }
             }
-            Step::Leading { .. } if stall => {
+            Step::Leading { .. } if stall && chaos() => {
                 // A leader that stops calling: no renewal for longer than a
                 // lease, so the other members take over.
                 stall = false;
@@ -939,7 +941,7 @@ async fn campaign<P: Providers>(
                 let stepped = renewing(&providers, &mut election, duties).await;
                 match stepped {
                     Some(None) => watching = None,
-                    Some(Some(true)) if quit_mid_move => {
+                    Some(Some(true)) if quit_mid_move && chaos() => {
                         // A term that stops in the middle of a move: the
                         // next term finds the move where this one left it.
                         quit_mid_move = false;
@@ -1000,6 +1002,19 @@ async fn campaign<P: Providers>(
             election.resign(None).await;
         }
     }
+}
+
+/// Whether a term-ending BUGGIFY decision the node loop drew at spawn (a
+/// stall, a hand-off, a resignation mid-move) may fire: never once the run's
+/// recovery tail began. Drawn as plain BUGGIFY, they fired in the tail: each
+/// founding member of a cell formed there ended its first term in turn, and
+/// the election never settled (witness `replay-main 15129731564713398037` on
+/// 7ec931e: three stalls in 18 s of the tail). Each is now a fault, silent
+/// when the candidacy starts in the tail, and this read drops one drawn in
+/// the chaos window and carried to a term the tail elects. A read of the
+/// run's phase, no draw; in production no decision is ever drawn.
+fn chaos() -> bool {
+    !moonpool_buggify::buggify_is_recovering()
 }
 
 /// Run `work`, one of a led term's duties, and renew the term each time a
