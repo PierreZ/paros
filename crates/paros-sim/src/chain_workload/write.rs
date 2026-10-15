@@ -356,12 +356,20 @@ impl ChainWorkload {
                 } else {
                     None
                 };
-                let resolved = match resent {
-                    Some(resolution) => paros::client::ResolveReport {
+                let resolved = if let Some(resolution) = resent {
+                    paros::client::ResolveReport {
                         resolution,
                         by_read_back: false,
-                    },
-                    None => nodes.resolve(&request, retry_target, retarget).await,
+                    }
+                } else {
+                    // The writer's own `led_from`, only for an entry under
+                    // the uuid it leads with (#564).
+                    let led_from = writer
+                        .led_from()
+                        .filter(|_| writer.owned() == Some(submission.entry.leader));
+                    nodes
+                        .resolve(&request, retry_target, retarget, led_from)
+                        .await
                 };
                 if resolved.by_read_back {
                     if matches!(resolved.resolution, Resolution::Written { .. }) {

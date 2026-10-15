@@ -798,7 +798,8 @@ impl<P: Providers> Client<P> {
     /// Settle a write whose answer never came. First read the position
     /// back: a journal whose tail has not reached it under another leader
     /// proves the write fenced for good, and a page that holds exactly the
-    /// write under its leader proves it written (#564). Otherwise re-send the
+    /// write at the tail under its leader, at or above `led_from`, proves it
+    /// written (#564). Otherwise re-send the
     /// identical write — the journal answers a write it holds from the log
     /// (`Duplicate`) and refuses one whose position another write took —
     /// up to `retry_budget` times, `retry_backoff` apart, each after a new
@@ -808,14 +809,21 @@ impl<P: Providers> Client<P> {
     /// [`CallObserver::resolved`]): a write resolved not written is one a
     /// history checker holds to never landing in the leadership it was
     /// sent under (#444).
+    ///
+    /// `led_from` is a position from which the caller knows the request's
+    /// uuid leads: the `next_seq` of a view that named it the leader
+    /// ([`Writer::led_from`]). Only with it, and only for a request at or
+    /// above it, does a read-back prove the write written; `None` leaves
+    /// that proof to the re-sends.
     pub async fn resolve(
         &self,
         request: &Write,
         first: usize,
         retarget: Retarget,
+        led_from: Option<u64>,
     ) -> ResolveReport {
         let token = self.observer.resolving(request);
-        let report = self.settle(request, first, retarget).await;
+        let report = self.settle(request, first, retarget, led_from).await;
         if let Some(token) = token {
             self.observer.resolved(token, &report);
         }
@@ -825,10 +833,16 @@ impl<P: Providers> Client<P> {
     /// [`Client::resolve`]'s read-backs and re-sends: a read-back before
     /// every re-send, so a first attempt that lands while the re-sends
     /// time out still settles (#564).
-    async fn settle(&self, request: &Write, first: usize, retarget: Retarget) -> ResolveReport {
+    async fn settle(
+        &self,
+        request: &Write,
+        first: usize,
+        retarget: Retarget,
+        led_from: Option<u64>,
+    ) -> ResolveReport {
         let mut server = first;
         for _ in 0..self.tunables.retry_budget.max(1) {
-            if let Some(resolution) = self.read_back(request, server).await {
+            if let Some(resolution) = self.read_back(request, server, led_from).await {
                 return ResolveReport {
                     resolution,
                     by_read_back: true,
@@ -896,23 +910,33 @@ impl<P: Providers> Client<P> {
     /// - Below the journal's floor: [`Resolution::Truncated`].
     /// - Not reached under another leader: [`Resolution::NotWritten`], for
     ///   good, since the fenced uuid never leads again.
-    /// - Exactly the request's records at its position, read while the
-    ///   journal's leader is still the request's uuid:
-    ///   [`Resolution::Written`] (#564). A position at or above the claim's
-    ///   tail is written only under the uuid in force, and the uuid led
-    ///   since its claim, so the records are this writer's. A re-send would
-    ///   take a new slot that may time out like the first attempt, so
-    ///   without this a client whose deadline is shorter than the commit
+    /// - Exactly the request's records at its position, at or above
+    ///   `led_from`, ending at the journal's tail, read while the journal's
+    ///   leader is still the request's uuid: [`Resolution::Written`]
+    ///   (#564). The uuid led from `led_from` and leads still, and a uuid
+    ///   never leads twice, so every position from `led_from` on was
+    ///   written under it. A page shows no batch boundaries, so the tail
+    ///   bounds the batch: nothing follows the records, so the journal
+    ///   holds a write with this uuid and exactly these records at this
+    ///   position, one the journal itself answers as this write
+    ///   (`Duplicate`). A re-send
+    ///   would take a new slot that may time out like the first attempt,
+    ///   so without this a client whose deadline is shorter than the commit
     ///   path never settles. The bytes alone prove nothing (two writers'
-    ///   one-byte records are equal): the page's position, its length and
-    ///   the leader must all match.
+    ///   one-byte records are equal), nor does the leader alone: a request
+    ///   below `led_from` can find a predecessor's identical bytes (a
+    ///   writer that wrote before its claim's answer came back, hunt seed
+    ///   10942456551287199571). The position, the length, the records, the
+    ///   leader, the tail and `led_from` must all match.
     ///
     /// Both proofs rest on fresh uuids, the precondition the journal
-    /// already trusts its clients with (`docs/architecture.md` §2.3). The
-    /// `Written` proof also needs `request.seq` at or above the tail its
-    /// claim read: a request below it may find a predecessor's identical
-    /// bytes. The library's [`Writer`] never writes below its claim.
-    async fn read_back(&self, request: &Write, first: usize) -> Option<Resolution> {
+    /// already trusts its clients with (`docs/architecture.md` §2.3).
+    async fn read_back(
+        &self,
+        request: &Write,
+        first: usize,
+        led_from: Option<u64>,
+    ) -> Option<Resolution> {
         let count = request.records.len() as u64;
         let leader = leader_uuid_from_proto(request.leader);
         let back = self
@@ -936,7 +960,9 @@ impl<P: Providers> Client<P> {
         }
         if let ReadOutcome::Page { from, records, .. } = &back.outcome
             && count > 0
+            && led_from.is_some_and(|from| from <= request.seq)
             && *from == request.seq
+            && state.next_seq.0 == request.seq + count
             && state.leader == Some(leader)
             && records.len() as u64 == count
             && *records == request.records

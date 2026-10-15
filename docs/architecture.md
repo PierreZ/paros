@@ -124,9 +124,10 @@ the leader treats it as ambiguous and reads the tail. The log is the deduplicati
 is no per-client session ledger and nothing to expire. The client settles an ambiguous `Write`
 with a read-back before each identical re-send (`Client::resolve`): a position below the floor is
 `Truncated`; a tail short of it under another leader proves it not written; a page that holds
-exactly the batch at its position while the journal's leader is still the write's uuid proves it
-written (decided on 2026-10-15, #564), so a client whose deadline is shorter than the commit path
-still settles. Both proofs rest on fresh uuids (§2.3). One slot holds one single-writer `Write`;
+exactly the batch at its position, ending at the tail, while the journal's leader is still the
+write's uuid, at or above a position where the writer saw that uuid lead (`Writer::led_from`),
+proves it written (decided on 2026-10-15, #564), so a client whose deadline is shorter than the
+commit path still settles. Both proofs rest on fresh uuids (§2.3). One slot holds one single-writer `Write`;
 a single-writer journal batches in its client (`paros::client::Writer`), never in a batcher.
 
 A leader may refuse a `Write` from its own fold at propose time, so a superseded leader's
