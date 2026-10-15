@@ -9,11 +9,13 @@
 //! drains one machine at a time, only one that holds a journal's or a
 //! matchmaker set's slot another storage machine could take (#501
 //! (matchmaker sets off the founders)), at an `ADMIT` or right after a
-//! journal create, and admits machines until then.
+//! journal create, and admits machines until then. On its own BUGGIFY
+//! location, the operator drains a machine renamed since it joined (#504
+//! (red drain seeds)).
 
 use std::collections::BTreeSet;
 
-use moonpool_sim::{SimContext, assert_reachable};
+use moonpool_sim::{SimContext, assert_reachable, buggify_with_prob};
 use paros::NodeId;
 use paros::client::cell::CellSession;
 use paros::client::checkpoint::CheckpointPolicy;
@@ -106,11 +108,21 @@ impl FleetOps {
         if loaded && draining {
             return false;
         }
-        let admitted: Vec<NodeId> = if loaded {
+        let mut admitted: Vec<NodeId> = if loaded {
             admitted.into_iter().filter(|node| movable(*node)).collect()
         } else {
             admitted
         };
+        // On its own location, a machine renamed since it took its slots
+        // (#504 (red drain seeds), witness 14650518500742172559 on
+        // e61b30e): its peers must follow its new name for its journals to
+        // elect the leader a move asks to reconfigure (#454 (control plane
+        // meets chaos), `readdress_peer`).
+        let renamed = crate::machine::renamed_ids(ctx.state());
+        if admitted.iter().any(|node| renamed.contains(&node.0)) && buggify_with_prob!(0.5) {
+            admitted.retain(|node| renamed.contains(&node.0));
+            assert_reachable!("drain: an operator drains a renamed machine");
+        }
         if admitted.is_empty() {
             return false;
         }

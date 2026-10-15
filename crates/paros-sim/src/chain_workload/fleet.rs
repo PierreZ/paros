@@ -471,7 +471,7 @@ impl FleetOps {
         let Some(mut session) = self.session(&cell, cell.journals, policy) else {
             return;
         };
-        if self.initialized && buggify_with_prob!(0.1) {
+        if self.initialized && buggify_with_prob!(0.15) {
             // A root key rotation instead (#245 (Biscuit tokens)).
             self.rotate(&client, &mut session, first).await;
             judge_folds(&session);
