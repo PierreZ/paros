@@ -46,6 +46,10 @@ pub struct Rare {
 /// window seldom reaches, #485 the double fault, #486 the rest.
 pub const RARE: &[Rare] = &[
     Rare {
+        msg: "grid: the driver skips a column when it moves a round",
+        reason: "marginal: needs a grid of three or more columns, a round stuck past its re-send budget and the skip coin (#533 (move a stuck round)); missed by PR #567's sweep (#486)",
+    },
+    Rare {
         msg: "footprint: a dead tenant coordinator is placed again",
         reason: "marginal: needs two admitted stateless machines and the one holding a tenant coordinator's slot marked down (#476 (tenant footprint)); missed by PR #556's sweep (#486)",
     },
