@@ -6,12 +6,10 @@
 //! off a draining machine. Each step starts from the registry alone, so a
 //! later term finishes what an earlier one started.
 //!
-//! The cell tenant's and the universe tenant's footprints are booked by
-//! `init` when every founding member registered before it joins the fleet.
-//! The founding members register through this coordinator, which an
-//! admin session fences while `init` runs, so `init` goes on without them
-//! and a later step books them here, once they fit. The coordinator never
-//! records their refusal: they wait for room.
+//! The cell tenant's and the universe tenant's footprints are booked
+//! here: the coordinator joins the cell to the fleet (#513 (fleet Init
+//! duel)), and `init` books neither. A step books them once they fit; the
+//! coordinator never records their refusal: they wait for room.
 
 use std::collections::BTreeSet;
 use std::ops::Bound::{Excluded, Unbounded};
@@ -28,7 +26,7 @@ use crate::system::{GrantKey, Registry, Role, SystemCommand};
 #[derive(Debug)]
 pub(super) struct Footprints {
     /// The cell tenant and, when this cell hosts it, the universe tenant:
-    /// booked here when `init` could not book them.
+    /// booked here, never by `init`.
     internal: Vec<TenantId>,
     /// The tenant the last step took: the next step starts after it.
     last: Option<TenantId>,

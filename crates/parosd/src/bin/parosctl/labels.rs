@@ -91,6 +91,11 @@ impl Labels {
         labels
     }
 
+    /// Name machine `id` `name`, unless a view already named it.
+    pub fn name_machine(&mut self, id: u64, name: &str) {
+        self.machines.entry(id).or_insert_with(|| name.to_string());
+    }
+
     /// Machine `id`'s name.
     pub fn machine(&self, id: u64) -> String {
         self.machines.get(&id).cloned().unwrap_or_else(|| short(id))

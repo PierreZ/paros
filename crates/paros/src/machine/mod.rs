@@ -77,6 +77,7 @@ mod resolve;
 mod sets;
 mod stores;
 mod tenants;
+mod universe;
 pub(crate) mod views;
 mod wait;
 
@@ -90,6 +91,7 @@ pub(crate) use book::with_own;
 pub use book::{address_book, cell_book};
 pub use cache::{CacheSink, CachedRegistry, spawn_writer, starting_book};
 pub use disk::ProviderDisk;
+pub(crate) use disk::{read_all, write_all};
 pub use formed::FormedCell;
 pub use lifecycle::{MachineAddresses, MachineError, MachineSettings, run_machine};
 pub use pin::AdminPin;

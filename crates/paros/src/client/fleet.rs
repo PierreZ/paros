@@ -18,8 +18,11 @@
 //!   itself (`FormFleet`: the fleet tenant is the fleet's first tenant, `{internal,
 //!   fleet}`), the cell joins the fleet directory `REGISTERING` with its cell
 //!   tenant (`AddCell`: `{internal, cell}`), the cell records the fleet on
-//!   its side (`JoinFleet`), and the fleet tenant marks the cell `READY`. Before
-//!   `JoinFleet` the cell books the cell tenant's and the fleet tenant's
+//!   its side (`JoinFleet`), and the fleet tenant marks the cell `READY`.
+//!   The cell coordinator writes `JoinFleet`, not the operator
+//!   ([`crate::machine`], #513 (fleet Init duel)): `init` reads the cell
+//!   control journal and waits for the join ([`Interrupted::NotJoined`]).
+//!   The coordinator also books the cell tenant's and the fleet tenant's
 //!   footprints (#476 (tenant footprint)).
 //! - **Creating a tenant**: a `{users}` tenant only — the tenant API cannot
 //!   create an `internal` one. The fleet tenant registers it `REGISTERING` with its
@@ -53,10 +56,18 @@
 //!
 //! **Who writes.** Both journals are written by the session that last claimed
 //! them with `SetLeader`, under a leader uuid drawn from the session's seed
-//! (#241; the cell coordinator of #225 is not built). Each journal has one
+//! (#241). Each journal has one
 //! leader per term, so two operators running at once fence each other: the
 //! loser's write is refused, its run is [`Step::Interrupted`], and running it
-//! again resumes from what the winner wrote. The fleet tenant is checkpointed as its
+//! again resumes from what the winner wrote. `init` claims only the fleet
+//! tenant's journal: it reads the cell control journal and never claims it
+//! (#513 (fleet Init duel)). A claim there fenced the elected cell
+//! coordinator, whose next term installed a fresh uuid and fenced the
+//! operator in turn; with slow links each claim lost to the next install,
+//! and `init` did not end (witness 1522711066683701314 on a0c4aa6, red on
+//! "fleet: an operation an operator stopped in ends in the recovery tail",
+//! green after). Tenant creation and removal still claim the cell control
+//! journal for their one cell step (#212, #225). The fleet tenant is checkpointed as its
 //! owner writes it ([`crate::client::checkpoint`], #227); the cell's journal
 //! is never checkpointed here — its owner's fold is the registry's, over a
 //! genesis pool only the deployment knows.
@@ -78,9 +89,7 @@ use super::checkpoint::{
 use super::outcome::ClaimOutcome;
 use super::writer::{Writer, WriterOutcome};
 use crate::fleet::RootKeyEntry;
-use crate::fleet::{
-    CellState, FleetCommand, FleetDirectory, FleetEntry, METADATA_VERSION, TenantState,
-};
+use crate::fleet::{CellState, FleetCommand, FleetDirectory, FleetEntry, TenantState};
 use crate::footprint::{self, Footprint};
 use crate::machine::ControlJournals;
 use crate::system::{FleetRegistration, GrantKey, HostedTenant, Registry, SystemCommand};
@@ -94,8 +103,6 @@ pub enum Stage {
     /// The cell joined the fleet directory, `REGISTERING`, with its cell
     /// tenant.
     AddCell,
-    /// The cell recorded the fleet on its side.
-    JoinFleet,
     /// The fleet tenant marked the cell `READY`.
     CellReady,
     /// The fleet tenant registered the tenant, `REGISTERING`.
@@ -235,6 +242,13 @@ pub enum Interrupted {
         journal: JournalIdentifier,
         /// The write's verdict.
         outcome: WriterOutcome,
+    },
+    /// The cell has not joined the fleet yet: the directory holds the cell,
+    /// and the cell coordinator writes the join into `journal`, the cell
+    /// control journal (#513 (fleet Init duel)). Nothing was written.
+    NotJoined {
+        /// The cell control journal.
+        journal: JournalIdentifier,
     },
     /// The machine being admitted did not answer, or failed to record its
     /// admission (#216). Its admission may have landed.
@@ -429,7 +443,7 @@ impl FleetSession {
         let Some(fleet) = self.directory.state().fleet() else {
             // The cell may have joined a fleet the fleet tenant lost (a recovery, #231):
             // its id is kept.
-            if let Err(stop) = self.open_cell(client, first).await {
+            if let Err(stop) = self.look_cell(client, first).await {
                 return Step::Interrupted(stop);
             }
             let fleet = self
@@ -477,19 +491,24 @@ impl FleetSession {
                 .write_directory(client, first, fleet, add, Stage::AddCell)
                 .await;
         };
-        if let Err(stop) = self.open_cell(client, first).await {
+        if let Err(stop) = self.look_cell(client, first).await {
             return Step::Interrupted(stop);
         }
-        if let Some(step) = self
-            .join_step(
-                client,
-                first,
-                (fleet, cell_id),
-                [control.tenant, fleet_control.tenant],
-            )
-            .await
-        {
-            return step;
+        match self.cell.state().fleet() {
+            // The cell coordinator, the cell control journal's one writer,
+            // joins the cell once it reads the cell in the directory
+            // (#513 (fleet Init duel)): wait for it, claiming nothing.
+            None => {
+                moonpool_assertions::reachable!("fleet: an init waits for the cell to join");
+                return Step::Interrupted(Interrupted::NotJoined { journal: control });
+            }
+            Some(found) if (found.fleet_id, found.cell_id) != (fleet, cell_id) => {
+                return Step::Refused(FleetRefusal::CellMismatch {
+                    expected: (fleet, cell_id),
+                    found: Some(found),
+                });
+            }
+            Some(_) => {}
         }
         match cell.state {
             CellState::Ready => Step::Done {
@@ -998,6 +1017,32 @@ impl FleetSession {
         Ok(())
     }
 
+    /// Fold the cell's control journal to its tail as a reader, claiming
+    /// nothing (#513 (fleet Init duel)): `init` only reads the cell's side,
+    /// which the cell coordinator writes. A claim here would fence the
+    /// coordinator, whose next term fences this session in turn.
+    async fn look_cell<P: Providers>(
+        &mut self,
+        client: &Client<P>,
+        first: usize,
+    ) -> Result<(), Interrupted> {
+        let journal = self.journals.cell;
+        match self.cell.load(client, first, 0).await {
+            LoadOutcome::Loaded {
+                up_to, diverged, ..
+            } => {
+                assert_eq!(
+                    up_to,
+                    self.cell.folder().next_seq(),
+                    "a loaded fold stands at the position it reached"
+                );
+                self.note_diverged(journal, diverged);
+                Ok(())
+            }
+            outcome => Err(Interrupted::Behind { journal, outcome }),
+        }
+    }
+
     /// Keep the first divergence a fold of `journal` reported.
     fn note_diverged(&mut self, journal: JournalIdentifier, diverged: Option<u64>) {
         if self.diverged.is_none() {
@@ -1085,57 +1130,6 @@ impl FleetSession {
             }
         }
         Ok(())
-    }
-
-    /// `init`'s cell side, once the directory holds the cell: refuse a cell
-    /// joined to another fleet, book the cell tenant's and the universe
-    /// tenant's footprints (#476, `tenants`) before the cell joins (a cell
-    /// that cannot run them hosts nothing), then write `JoinFleet`. `None`
-    /// once the cell joined and both footprints are granted.
-    async fn join_step<P: Providers>(
-        &mut self,
-        client: &Client<P>,
-        first: usize,
-        (fleet, cell_id): (u64, u64),
-        tenants: [TenantId; 2],
-    ) -> Option<Step<u64>> {
-        if let Some(found) = self.cell.state().fleet()
-            && (found.fleet_id, found.cell_id) != (fleet, cell_id)
-        {
-            return Some(Step::Refused(FleetRefusal::CellMismatch {
-                expected: (fleet, cell_id),
-                found: Some(found),
-            }));
-        }
-        for tenant in tenants {
-            match self.footprint_step(client, first, tenant).await {
-                // The founding members register through the cell
-                // coordinator, which this session fences: the coordinator
-                // books these footprints once they register.
-                Some(Step::Interrupted(Interrupted::FoundersUnregistered)) => {
-                    moonpool_assertions::reachable!(
-                        "fleet: init leaves an internal footprint to the coordinator"
-                    );
-                }
-                step => {
-                    if let Some(step) = step.and_then(relay) {
-                        return Some(step);
-                    }
-                }
-            }
-        }
-        if self.cell.state().fleet().is_some() {
-            return None;
-        }
-        let join = SystemCommand::JoinFleet {
-            fleet_id: fleet,
-            cell_id,
-            version: METADATA_VERSION,
-        };
-        Some(
-            self.write_cell(client, first, &join, Stage::JoinFleet)
-                .await,
-        )
     }
 
     /// The footprint step of `tenant` (#476): `None` once the cell granted

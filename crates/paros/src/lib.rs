@@ -37,6 +37,7 @@ mod driver;
 pub mod fleet;
 pub mod footprint;
 pub mod frontend;
+pub mod inspect;
 pub mod journal;
 pub mod load;
 pub mod machine;

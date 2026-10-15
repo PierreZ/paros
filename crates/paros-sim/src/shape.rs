@@ -405,13 +405,15 @@ impl NodeShape {
             status_hold: ms(buggify_knob!(1000_u64, 0_u64..4001_u64)),
             // A machine's own clients (#457 (hard-coded tunables)): the
             // coordinator's duties, the registry follow, the registration
-            // and the `Resolve` folds. Floor one round trip: shorter, every
-            // internal call is ambiguous. The range crosses the lease both
-            // ways on purpose: above `election_lease - election_renew`, one
-            // slow duty under chaos outlasts the lease and the members take
-            // over, again and again (the metastable plan's coordinator
+            // and the `Resolve` folds. Floor `INTERNAL_CALL_FLOOR_MS`, a
+            // fresh dial and a peer-served read: shorter, a call that must
+            // dial first is ambiguous every time (#565 (renamed founder's
+            // registration read times out)). The range crosses the lease
+            // both ways on purpose: above `election_lease - election_renew`,
+            // one slow duty under chaos outlasts the lease and the members
+            // take over, again and again (the metastable plan's coordinator
             // loop); the tail must still settle the election.
-            internal_request_timeout: ms(buggify_knob!(5000_u64, ROUND_TRIP_FLOOR_MS..8001_u64)),
+            internal_request_timeout: ms(buggify_knob!(5000_u64, INTERNAL_CALL_FLOOR_MS..8001_u64)),
             // Floor 1: one re-send per resolution, so an ambiguous internal
             // write is more often left unresolved.
             internal_retry_budget: buggify_knob!(4_u32, 1_u32..9_u32),
@@ -2256,6 +2258,26 @@ pub(crate) const CONNECT_FLOOR_MS: u64 = 1_000;
 
 const _: () = assert!(CONNECT_FLOOR_MS >= 2 * SLOWEST_ROUND_TRIP_MS);
 const _: () = assert!(CONNECT_FLOOR_MS > ROUND_TRIP_FLOOR_MS);
+
+/// The wall-clock floor of a drawn `internal_request_timeout`: one internal
+/// call that must dial its peer first. A machine's call goes to a peer it
+/// may not have a connection to (a renamed founding member reads the
+/// election journal from its peers at a new address, and every round
+/// dials again), so it waits out a connect ([`CONNECT_FLOOR_MS`]), then a
+/// read the peer confirms with a quorum: its own round trip and the
+/// confirmation's, each on the slowest link. Below that, a call that dials
+/// first is ambiguous every time. Witness (cite only): seed
+/// 17884888912503425398 on a0c4aa6, a renamed founder that drew 252 ms;
+/// each of its election reads timed out, so it never registered and never
+/// answered `Resolve` after chaos (#565 (renamed founder's registration
+/// read times out)).
+const INTERNAL_CALL_FLOOR_MS: u64 = CONNECT_FLOOR_MS + 2 * SLOWEST_ROUND_TRIP_MS;
+
+const _: () = assert!(INTERNAL_CALL_FLOOR_MS > CONNECT_FLOOR_MS);
+const _: () = assert!(
+    INTERNAL_CALL_FLOOR_MS < 2000,
+    "the floor sits under production's"
+);
 
 #[cfg(test)]
 mod tests {
