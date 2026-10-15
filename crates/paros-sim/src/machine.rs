@@ -279,6 +279,21 @@ pub(crate) fn admitted_ids(state: &StateHandle) -> BTreeSet<u64> {
         .collect()
 }
 
+/// The minted id of every machine renamed this run (#349): a peer that
+/// opened a lane to it before its rename must follow its new name.
+pub(crate) fn renamed_ids(state: &StateHandle) -> BTreeSet<u64> {
+    let board = machine_board(state);
+    let board = lock(&board);
+    board
+        .renamed
+        .keys()
+        .filter_map(|rank| {
+            let addr = Address::parse(&format!("{}:{MACHINE_PORT}", machine_host(*rank))).ok()?;
+            board.nodes.get(&addr).copied()
+        })
+        .collect()
+}
+
 /// Whether the machine at `addr` is a founding member `init` lists.
 pub(crate) fn is_founder(state: &StateHandle, addr: &Address) -> bool {
     lock(&machine_board(state)).founders.contains(addr)
@@ -844,13 +859,16 @@ async fn on_disk<S: moonpool_sim::StorageProvider + Clone>(
 /// member was wiped, no other one was renamed, and the cell is not of two
 /// (each member is the other's majority). A machine outside the founders is in
 /// no quorum; it is renamed only while every founding member keeps its
-/// name, so the founders its admission names still answer.
+/// name, so the founders its admission names still answer. On a seed whose
+/// founding members keep their names (`MachineLayout::founders_keep_names`),
+/// only a machine outside them is renamed.
 fn may_rename(board: &MachineBoard, layout: &crate::shape::MachineLayout, rank: usize) -> bool {
     let founder_renamed = board.renamed.keys().any(|r| *r < layout.founders);
     if rank >= layout.founders {
         return !founder_renamed;
     }
-    layout.founders != 2
+    !layout.founders_keep_names
+        && layout.founders != 2
         && all_founders_formed(board)
         && board.wiped.is_empty()
         && board

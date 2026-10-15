@@ -1050,6 +1050,10 @@ pub const RARE: &[Rare] = &[
         reason: "a move off a drained machine: none in a 321-seed sweep that saturated (#498 (moves in the sweep), #529)",
     },
     Rare {
+        msg: "drain: an operator drains a renamed machine",
+        reason: "a drained-machine seed whose admitted machine was renamed first: 1 run in 480 hunt seeds with the rename draw (#504 (red drain seeds), #498 (moves in the sweep))",
+    },
+    Rare {
         msg: "coordinator: a move reconfigures its journal",
         reason: "a move off a drained machine: none in a 321-seed sweep that saturated, 1 of 1 checks in another (#498 (moves in the sweep), #529)",
     },
