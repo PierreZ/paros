@@ -48,7 +48,11 @@ pub(super) async fn run_matchmaker_role(
     // A matchmaker has a shape too: its transport tunables and its
     // write-window crash bias, drawn once per seed like a node's.
     let RoleRig { incarnation, .. } = arm_role(ctx, my_ip);
-    let shape = incarnation.shape;
+    let mut shape = incarnation.shape;
+    // A paged-handover seed pages every frozen registry one journal at a
+    // time (#551 (operator calls name their journal)).
+    shape.tunables.registry_page =
+        crate::shape::matchmaker_registry_page(ctx.state(), shape.tunables.registry_page);
     // One set per tenant of the run's journals (#190): every journal of a
     // matchmaker seed names the matchmakers, so each tenant's set keeps a
     // registry per journal of that tenant, and each journal's audit world

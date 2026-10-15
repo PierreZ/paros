@@ -67,7 +67,7 @@
 //! The candidate draws no randomness of its own: its seed and its BUGGIFY
 //! decisions (a stalled leader, a hand-off, a reused journal id, an
 //! impatient term, a lost resignation, a group that outlives its term by one
-//! step, a slow install) are drawn on the node loop before the task starts, and the backoff
+//! step, a slow install, a set's handover asked again) are drawn on the node loop before the task starts, and the backoff
 //! jitter and the journal ids derive from the seed.
 
 use std::collections::BTreeMap;
@@ -618,6 +618,11 @@ struct Candidacy {
     /// to install (a BUGGIFY decision, #542 (coordinator starves its lease
     /// while it installs)): its renewals must keep the term through it.
     slow_install: bool,
+    /// Each term's first finished matchmaker-set move asks its handover
+    /// again, as a retry that lands after the move (a BUGGIFY decision,
+    /// #501 (matchmaker sets off the founders)): the set may then leave its
+    /// booked machines, and the term must move it back.
+    ask_again: bool,
 }
 
 /// Start the candidacy of the founding member `formed` for the cell
@@ -656,6 +661,7 @@ pub(crate) fn spawn<P: Providers>(
         linger: moonpool_buggify::buggify_with_prob!(0.5),
         quit_mid_move: moonpool_buggify::buggify_fault_with_prob!(0.5),
         slow_install: moonpool_buggify::buggify_with_prob!(0.3),
+        ask_again: moonpool_buggify::buggify_with_prob!(0.3),
     };
     let mut client = cell_client(providers, rpc, formed, tunables).with_shutdown(shutdown.clone());
     if let Some(observer) = observer {
@@ -734,6 +740,7 @@ async fn campaign<P: Providers>(
         mut linger,
         mut quit_mid_move,
         mut slow_install,
+        ask_again,
     } = candidacy;
     let founder_ids: Vec<NodeId> = plan.members.iter().map(|(id, _)| *id).collect();
     let journals = plan.control_journals();
@@ -773,7 +780,7 @@ async fn campaign<P: Providers>(
     // matchmaker sets' placements and moves (#501 (matchmaker sets off the
     // founders)).
     let mut moves = Moves::default();
-    let mut sets = Sets::default();
+    let mut sets = Sets::new(ask_again);
     // The served term's footprint steps (#476).
     let internal: Vec<TenantId> = std::iter::once(journals.cell.tenant)
         .chain(journals.fleet.map(|fleet| fleet.tenant))
@@ -846,7 +853,7 @@ async fn campaign<P: Providers>(
                     (session, watch)
                 });
                 moves = Moves::default();
-                sets = Sets::default();
+                sets = Sets::new(ask_again);
                 footprints = Footprints::new(internal.clone());
                 match duty {
                     TermDuty::Served { .. } => {

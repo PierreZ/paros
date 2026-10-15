@@ -99,6 +99,7 @@ impl AdmittedMachine {
         wire::AdmitAck {
             admitted: refusal.is_empty(),
             refusal: refusal.into(),
+            in_cell: refusal.is_empty(),
         }
     }
 

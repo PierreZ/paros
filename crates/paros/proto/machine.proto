@@ -241,6 +241,10 @@ message AdmitAck {
   // cell: admitting it could put it in two cells), "storage", or a refused
   // token (#245): "invalid_token", "expired", "forbidden".
   string refusal = 2;
+  // Whether the machine was in this cell already, so this call recorded
+  // nothing: a founding member, or a machine admitted before. Only an idle
+  // machine records an admission, and only it checks the token (#245).
+  bool in_cell = 3;
 }
 
 message Register {
