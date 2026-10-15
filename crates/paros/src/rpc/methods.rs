@@ -43,9 +43,9 @@
 //!   cell's founding members gave it, and `Resolve` answers them. Each of
 //!   these methods keeps its well-known endpoint: plain Multi-Paxos, with no
 //!   registry, reaches its peers by address alone.
-//! - [`CoordinatorInterface`]: `Register` and `JournalRequest`, one group
+//! - [`CoordinatorInterface`]: `Register`, `JournalRequest` and `CapacityRequest` (#476), one group
 //!   per coordinator term, published in the election journal. A request to
-//!   an ended term fails at the transport. These two methods have no
+//!   an ended term fails at the transport. These methods have no
 //!   well-known endpoint.
 
 use moonpool_rpc::{
@@ -100,6 +100,7 @@ impl InterfaceMethod<MachineInterface> for ReconfigureRpc {}
 impl InterfaceMethod<MachineInterface> for ReconfigureMatchmakersRpc {}
 impl InterfaceMethod<CoordinatorInterface> for RegisterRpc {}
 impl InterfaceMethod<CoordinatorInterface> for JournalRequestRpc {}
+impl InterfaceMethod<CoordinatorInterface> for CapacityRequestRpc {}
 
 /// A method served only in a dynamic group: it has a method id, and no
 /// well-known endpoint.
@@ -252,6 +253,12 @@ dynamic_method!(
     /// (#210).
     JournalRequestRpc, 0x5041_0308, machine::JournalRequest => machine::JournalRequestAck,
     "paros.machine.JournalRequest"
+);
+dynamic_method!(
+    /// A tenant coordinator's request for capacity, sent to the cell
+    /// coordinator (#476).
+    CapacityRequestRpc, 0x5041_030C, machine::CapacityRequest => machine::CapacityRequestAck,
+    "paros.machine.CapacityRequest"
 );
 well_known_method!(
     /// An administrative view of the cell (#399): answered by a founding

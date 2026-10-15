@@ -73,6 +73,7 @@ use crate::client::{ChainClient, Connector};
 use crate::shape::MachineLayout;
 
 mod admit;
+mod capacity;
 mod cell;
 mod converge;
 mod drain;
@@ -97,11 +98,28 @@ const NAMES: [&[u8]; 3] = [b"acme", b"globex", b"initech"];
 /// a name is reusable once its removal completes, its id never is.
 #[derive(Default)]
 struct TenantNames {
-    /// Each removed tenant, to the name it held.
-    removed: BTreeMap<TenantId, Vec<u8>>,
+    /// Each removed tenant, by the fleet whose directory removed it (the
+    /// fleet tenant's control journal), to the name it held. An id is never
+    /// reused inside one fleet directory, the authority that enforces it. A
+    /// fleet formed after its cell was lost knows nothing of the old one: a
+    /// create still pending there may register the same id again (witness
+    /// 10193140021688847625, PR #562 (acceptor partitions)).
+    removed: BTreeMap<(JournalIdentifier, TenantId), Vec<u8>>,
     /// Each cell, to the name the first resolution through it gave
     /// (#239 (names at the edge)).
     cells: BTreeMap<u64, Vec<u8>>,
+}
+
+/// The tenants `fleet`'s directory removed, in the run so far.
+fn removed_in(state: &StateHandle, fleet: JournalIdentifier) -> BTreeSet<TenantId> {
+    with_names(state, |names| {
+        names
+            .removed
+            .keys()
+            .filter(|(at, _)| *at == fleet)
+            .map(|(_, tenant)| *tenant)
+            .collect()
+    })
 }
 
 /// Run `f` over the run's [`TenantNames`].
@@ -755,8 +773,7 @@ impl FleetOps {
         let Some(cell) = &self.cell else {
             return;
         };
-        let removed: BTreeSet<TenantId> =
-            with_names(&self.state, |names| names.removed.keys().copied().collect());
+        let removed = removed_in(&self.state, cell.fleet);
         let resolution = resolve_tenant(client, first, cell.fleet, name).await;
         if let TenantResolution::Resolved {
             tenant, control, ..
@@ -818,11 +835,11 @@ impl FleetOps {
                 run.steps.first() != Some(&Stage::RegisterTenant),
                 "fleet: a tenant creation resumed from REGISTERING"
             );
+            let fleet = self.cell.as_ref().map(|cell| cell.fleet);
             if with_names(&self.state, |names| {
-                names
-                    .removed
-                    .iter()
-                    .any(|(tenant, removed)| removed == name && *tenant != result)
+                names.removed.iter().any(|((at, tenant), removed)| {
+                    Some(*at) == fleet && removed == name && *tenant != result
+                })
             }) {
                 assert_reachable!(
                     "names: a tenant name is created again after a completed removal"
@@ -854,9 +871,11 @@ impl FleetOps {
             Step::Done { result, last } => {
                 let removed = last == Some(Stage::RemoveTenant);
                 if let (Some(tenant), true) = (result, removed) {
-                    with_names(&self.state, |names| {
-                        names.removed.insert(tenant, name.to_vec())
-                    });
+                    if let Some(cell) = &self.cell {
+                        with_names(&self.state, |names| {
+                            names.removed.insert((cell.fleet, tenant), name.to_vec())
+                        });
+                    }
                     assert_always!(
                         session.directory().named(name).is_none()
                             && session.directory().is_removed(tenant)
@@ -1195,15 +1214,7 @@ impl FleetOps {
             );
             assert_reachable!("fleet: a run ends with the cell READY in the directory");
         }
-        for (tenant, entry) in directory.tenants() {
-            if entry.groups == Groups::SERVED {
-                assert_always!(
-                    matches!(entry.state, TenantState::Ready),
-                    "fleet: no tenant is left mid-operation after chaos",
-                    { "tenant" => tenant.0, "state" => format!("{:?}", entry.state) }
-                );
-            }
-        }
+        no_tenant_mid_operation(&directory, cell);
         directory_equals_cell(&directory, cell);
     }
 
@@ -1321,6 +1332,24 @@ fn judged_cell(members: &[u64]) -> Folder<JudgedRegistry> {
 /// `MetaclusterConsistency`) for two folds of one instant: the same fleet,
 /// the cell in the directory, every tenant the cell hosts in the directory
 /// under that cell, every `READY` `users` tenant in the directory hosted.
+/// After chaos, no served tenant is left mid-operation: each is `READY`,
+/// or `ERROR` once its cell refused its footprint (#476).
+fn no_tenant_mid_operation(directory: &FleetDirectory, cell: &Registry) {
+    for (tenant, entry) in directory.tenants() {
+        if entry.groups == Groups::SERVED {
+            // A creation its cell refused for its footprint ends `ERROR`
+            // (#476): that is an end, not the middle of an operation.
+            let refused = cell.footprint(tenant).is_some_and(|g| !g.granted());
+            assert_always!(
+                matches!(entry.state, TenantState::Ready)
+                    || (entry.state == TenantState::Error && refused),
+                "fleet: no tenant is left mid-operation after chaos",
+                { "tenant" => tenant.0, "state" => format!("{:?}", entry.state) }
+            );
+        }
+    }
+}
+
 fn directory_equals_cell(directory: &FleetDirectory, cell: &Registry) {
     let (Some(fleet), Some(joined)) = (directory.fleet(), cell.fleet()) else {
         return;
@@ -1342,6 +1371,15 @@ fn directory_equals_cell(directory: &FleetDirectory, cell: &Registry) {
         );
     }
     for (tenant, entry) in directory.tenants() {
+        // A tenant is marked `ERROR` only once its cell refused its
+        // footprint (#476), and such a tenant is never hosted.
+        if entry.state == TenantState::Error {
+            assert_always!(
+                cell.footprint(tenant).is_some_and(|g| !g.granted()) && !cell.hosts(tenant),
+                "fleet: a tenant marked ERROR is one its cell refused for its footprint",
+                { "tenant" => tenant.0 }
+            );
+        }
         if entry.groups == Groups::SERVED && entry.state == TenantState::Ready {
             assert_always!(
                 cell.hosts(tenant),
@@ -1365,6 +1403,10 @@ fn reach(stage: Stage) {
             assert_reachable!("fleet: a step registers a tenant in the directory");
         }
         Stage::HostTenant => assert_reachable!("fleet: a step hosts a tenant on the cell"),
+        Stage::Footprint => assert_reachable!("fleet: a step records a tenant's footprint"),
+        Stage::TenantError => {
+            assert_reachable!("fleet: a tenant is refused for its footprint");
+        }
         Stage::TenantReady => {
             assert_reachable!("fleet: a step marks a tenant READY in the directory");
         }

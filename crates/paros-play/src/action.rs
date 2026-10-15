@@ -101,10 +101,10 @@ impl QuorumSpec {
                 q1: usize::try_from(q1).unwrap_or(usize::MAX),
                 q2: usize::try_from(q2).unwrap_or(usize::MAX),
             },
-            QuorumSpec::Grid { rows, cols } => paros_core::QuorumSystem::Grid {
-                rows: usize::try_from(rows).unwrap_or(usize::MAX),
-                cols: usize::try_from(cols).unwrap_or(usize::MAX),
-            },
+            QuorumSpec::Grid { rows, cols } => paros_core::QuorumSystem::grid(
+                usize::try_from(rows).unwrap_or(usize::MAX),
+                usize::try_from(cols).unwrap_or(usize::MAX),
+            ),
         }
     }
 }

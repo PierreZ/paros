@@ -43,7 +43,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use moonpool_buggify::hint::Strike;
-use moonpool_core::{Providers, SimulationError, SimulationResult, TimeProvider};
+use moonpool_core::{Providers, RandomProvider, SimulationError, SimulationResult, TimeProvider};
 use paros_core::{
     Ballot, Command, JournalId, JournalIdentifier, MustSync, NodeId, Outcome, Party, QuorumSystem,
     ReadState, ReplicaNode, Slot, TenantId, WriteOp,
@@ -279,8 +279,8 @@ fn open_read<A: Audit>(
     // and neither the row hook nor the audit hears of the read.
     let basis = replica.read_basis();
     let row = basis.as_ref().and_then(|b| match b.config.quorum_system() {
-        QuorumSystem::Grid { rows, .. }
-            if rows >= 2 && moonpool_buggify::buggify_fault_with_prob!(0.10) =>
+        QuorumSystem::Grid { rows, acks, .. }
+            if rows >= 2 && acks == rows && moonpool_buggify::buggify_fault_with_prob!(0.10) =>
         {
             moonpool_assertions::reachable!("grid: the driver overrides a quorum read's row");
             Some(crate::driver::log_reads::next_row(ctx, rows))
@@ -365,7 +365,8 @@ fn note_read(read: &mut BTreeSet<JournalIdentifier>, journal: JournalIdentifier)
 /// rebuilt from it and tuned. A journal whose store stays down for good is
 /// left out. Every store names one replica id; a store naming another is
 /// caller input, refused.
-async fn boot_journals<J: JournalStores>(
+async fn boot_journals<P: Providers, J: JournalStores>(
+    providers: &P,
     stores: &mut J,
     tunables: &DriverTunables,
 ) -> Result<
@@ -404,7 +405,9 @@ async fn boot_journals<J: JournalStores>(
             ReplicaRt {
                 replica,
                 storage,
-                reads: JournalReads::default(),
+                // A fresh random token space per incarnation (see
+                // `JournalReads`): a dead incarnation's acks never match.
+                reads: JournalReads::starting_at(providers.random().random()),
                 audit,
             },
         );
@@ -481,7 +484,7 @@ where
     P: Providers,
     J: JournalStores,
 {
-    let (self_id, mut journals) = boot_journals(&mut stores, &tunables).await?;
+    let (self_id, mut journals) = boot_journals(&providers, &mut stores, &tunables).await?;
     let node_audit = stores.node_audit();
     if journals.len() >= 2 {
         moonpool_assertions::reachable!("replica: a replica serves several journals");

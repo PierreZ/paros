@@ -171,9 +171,15 @@ pub(crate) fn phase1_note(system: QuorumSystem, members: usize) -> String {
             "A Phase-1 quorum here is {q1} of {members}. Phase 2 takes only {q2}. The two \
              numbers must add up to more than {members}. Nothing else is required of either."
         ),
-        QuorumSystem::Grid { rows, cols } => format!(
-            "A Phase-1 quorum here is one whole row of the {rows} by {cols} grid. It must be \
-             those named acceptors, and not any {cols} of them."
+        QuorumSystem::Grid { rows, cols, acks } if acks == rows => format!(
+            "A Phase-1 quorum here is one acceptor of every column of the {rows} by {cols} \
+             grid. Any whole row is one, but not any {cols} acceptors."
+        ),
+        QuorumSystem::Grid {
+            rows, cols, acks, ..
+        } => format!(
+            "A Phase-1 quorum here is {} acceptors of every column of the {rows} by {cols} grid.",
+            rows - acks + 1
         ),
     }
 }
@@ -190,9 +196,12 @@ pub(crate) fn phase2_note(system: QuorumSystem, members: usize) -> String {
              share an acceptor. Safety needs only one thing: every Phase-1 quorum of {q1} meets \
              every Phase-2 quorum."
         ),
-        QuorumSystem::Grid { rows, cols } => format!(
+        QuorumSystem::Grid { rows, cols, acks } if acks == rows => format!(
             "A Phase-2 quorum here is one whole column of the {rows} by {cols} grid. A column \
              holds {rows} named acceptors. Every row meets every column in exactly one acceptor."
+        ),
+        QuorumSystem::Grid { rows, cols, acks } => format!(
+            "A Phase-2 quorum here is {acks} acceptors of one column of the {rows} by {cols} grid."
         ),
     }
 }

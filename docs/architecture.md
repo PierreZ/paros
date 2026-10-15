@@ -357,8 +357,14 @@ list and no rendezvous name. The same rule holds at two levels:
   the first `configure new` transaction, and each client reads `\xff/init_id` back to learn
   whether it won. paros has nothing elected before `cell init`, so the decree is that election.
 
-  The listed machines are the cell's **founding members**. `cell init` creates on them the cell
-  control journal and the cell's first election journal, both born at `failures-per-partition=1` with the cell's first
+  The first `2F+1` listed machines are the cell's **founding members**, with `F` from `parosctl
+  init --failures-per-partition` (default 1, so three founding members, decided on 2026-10-15:
+  before, every listed machine was a founding member, and seven listed machines gave the cell and
+  tenant control journals seven acceptors). When fewer are listed, every listed machine is a
+  founding member. `init` admits the other listed machines after the fleet steps, as `add-machine`
+  does (`paros::client::initialize::founding_members`), so a re-run lists the same machines in the
+  same order. `cell init` creates on the founding members the cell
+  control journal and the cell's first election journal, both born with the cell's first
   matchmaker set (decided on 2026-10-09, #240). The founding members campaign over that election
   journal for the first cell coordinator, and the winner installs itself as the control journal's
   leader with `SetLeader(its fresh uuid, unset)`. The founding list lives only in the cell
@@ -874,8 +880,8 @@ create.
 - **Booking before the create.** The tenant coordinator plans a create's acceptors over the
   cell's storage machines, founding or admitted (#474), and books one acceptor slot
   on each in the cell control journal, through the term's cell session, before it writes the
-  create. The elected cell coordinator is still every tenant's coordinator (#476 adds the request
-  RPC), so the request for capacity is a call into its own session.
+  create. The elected cell coordinator is still every tenant's coordinator, so the request for
+  capacity is a call into its own session (#476 (tenant footprint) made it a `CapacityRequest`).
 - **A refusal is recorded.** A create the cell has no slot for, or too wide for the founding
   members, is written `Unplaceable` under its request id, so a retry reads the refusal back; the
   caller asks again under a new id. A create whose founding members are not all registered yet
@@ -948,9 +954,58 @@ create.
   `registry_page` (at most `REGISTRY_PAGE` journals). Pages of two reconstructions may mix in
   one member: each journal's registry is valid on its own, so the mix is safe.
 - **Still to do.** Re-placement after a `Down`
-  bound (#475), the tenant birth footprint, the capacity request RPC and tenant coordinators on
-  `stateless` machines (#476), the operators' retire coordination in the control journals
-  (#477).
+  bound (#475), the operators' retire coordination in the control journals (#477), and the
+  tenant coordinator actor that runs on the stateless machine its slot books (a follow-up of
+  #476).
+
+*Landed* (#476 (tenant footprint), 2026-10-15): the tenant birth footprint, the capacity
+request RPC and the placement of tenant coordinators.
+
+- **The footprint is a grant.** `SystemCommand::GrantCapacity` books a set of slots all or
+  none, under a key: `Footprint(tenant)` or `Request(id)`. The first grant under a key decides
+  it, and a refused grant is recorded too, so a retry reads the outcome back. A slot that the
+  fold refuses at apply (class, capacity, a spent id) refuses the whole grant, and the fold
+  records nothing for it. Footprint slots use the target `BookingTarget::Tenant { tenant }`:
+  a tenant-level slot, so two of them may share a machine.
+- **What a footprint holds** (`paros::footprint`). At birth the durability is
+  `Durability::DEFAULT` (`failures-per-partition=1`, until a creation names one): one acceptor
+  quorum (2 slots), one quorum for the control journal (2 slots) and the matchmaker set
+  (3 slots), on storage machines, plus one coordinator slot on a `stateless` machine. When no
+  stateless machine serves with a free slot, the founding members host the coordinator and
+  the footprint holds no coordinator slot.
+- **A host needs its footprint.** The fold refuses `HostTenant` (`NoFootprint`) for a tenant
+  with no granted footprint. The fleet state machines write the footprint as a step of its
+  own: a tenant creation books the tenant's before `HostTenant`. The cell coordinator books
+  the cell tenant's and the universe tenant's, since it also writes `JoinFleet` (#513 (fleet
+  Init duel)). A creation whose footprint the cell
+  refuses marks the tenant `ERROR` in the universe directory and answers `NoFootprint`; a
+  delete frees its name. The cell records a refusal only once every founding member is
+  registered, so a missing founder delays a creation and never refuses it.
+- **`init` waits for the founding members.** A founding member registers through the cell
+  coordinator, and a fleet step's claim fences the coordinator. So `init` reads the cell
+  control journal, without a claim, until it holds every founding member, before its fleet
+  steps. After its patience it goes on. The coordinator books the cell's and the universe's
+  footprints once they fit, and never refuses them.
+- **The capacity request RPC** (`CapacityRequest`, `0x5041_030C`, served in the
+  `CoordinatorInterface` group). A request names its tenant, an idempotency id and its slots
+  (node, role, target). The cell coordinator answers a decided id from its record, refuses a
+  tenant the cell neither hosts nor booked, and else writes the grant, or its refusal, in the
+  cell control journal. The tenant desk books a create's acceptors through the same path,
+  in process (`machine/capacity.rs`); `paros::client::capacity` is the remote caller.
+- **Placement of tenant coordinators.** At each watch round, after the journal and set steps,
+  the cell coordinator takes one footprint step of one tenant, in turn
+  (`machine/footprints.rs`, `paros::footprint::fix`): it books a coordinator slot on a live
+  stateless machine when the tenant has none or its machine is down, releases the dead one
+  once replaced, books a missing storage slot, and moves a slot off a draining machine.
+  Until the follow-up, the tenant coordinator actor still runs inside the cell coordinator's
+  term; the slot is its placement.
+- **The simulation.** The machines' capacity floor is three footprints (the cell's, the
+  universe's and one tenant's: 21 slots), so a founding member can host them. A creation may
+  ask for a tenant-level slot through the capacity request RPC, and may retry the same id.
+  Oracles: every hosted tenant has its footprint, a tenant coordinator holds at most one live
+  slot and only on a stateless machine, a grant names one booking per slot, and a retried
+  request reads back its first answer. Gates: a tenant refused for its footprint, a tenant
+  coordinator placed on a stateless machine, a request refused.
 
 ### 3.4 Tenant modes
 
@@ -977,9 +1032,22 @@ copies; in paros each acceptor stores a copy, so `double` stored three. The new 
 - **`partitions` (`P`)** is how many acceptor partitions a journal's writes spread over. The
   default is 1, the plain majority; 0 is refused. Each entry goes to one acceptor partition and
   is done at a majority of it; an election or a tail read needs a majority of every acceptor
-  partition (#532 (acceptor partitions)). Until #532 lands, `P > 1` is placed as the acceptor
-  grid with one column per acceptor partition (`2F+1` rows, `P` columns): a slot's Phase 2 goes
-  to its column.
+  partition (#532 (acceptor partitions), landed). In the core an acceptor partition is a grid
+  column: `QuorumSystem::Grid { rows: 2F+1, cols: P, acks: F+1 }`
+  (`QuorumSystem::partitions`). Acks from two acceptor partitions never add up. Elections and
+  tail reads stop when any acceptor partition loses its majority, so their availability is lower
+  than one big majority; reads at a known offset need no quorum. The core predicates stay
+  general (`acks` of `rows` in one column for Phase 2, `rows - acks + 1` of every column for
+  Phase 1), and the simulation draws other `acks` too, the full column (`acks = rows`) included;
+  the CLI and the docs expose only acceptor partitions.
+- **A stuck round moves** (#533 (move a stuck round)): a Phase-2 round that stays open for
+  `DriverTunables::partition_move_resends` re-sends moves to the next acceptor partition
+  (`ColocatedNode::move_round`): the same slot, ballot and value, its tally counting only the new
+  acceptor partition. Inside one ballot a slot has one value, and every Phase-1 quorum meets
+  every acceptor partition, so a later election finds the value or proves it was not chosen.
+  Slots are independent, so the new acceptor partition needs no backfill. Reconfiguration away
+  from a failing acceptor partition still needs a majority of every old acceptor partition in
+  the new configuration's Phase 1: replace an acceptor partition while it keeps a live majority.
 - **Derived numbers are shown, never typed, and the partition count is always shown**:
   `1 per partition · 1 partition (any 1) · 3 acceptors`;
   `1 per partition · 3 partitions (any 1, up to 3 spread) · 9 acceptors`.
@@ -1076,7 +1144,9 @@ tenant is created: one coordinator slot, its matchmaker set, one acceptor quorum
 durability for data and one `failures-per-partition=1` quorum for its control journal (amended on
 2026-10-07, #215: a `failures-per-partition=0` tenant's control journal still needs
 `failures-per-partition=1`). The universe tenant and the cell
-tenant count too. A cell refuses a tenant whose footprint it cannot book.
+tenant count too. A cell refuses a tenant whose footprint it cannot book (landed with #476
+(tenant footprint), section 3.3: the footprint's durability is `failures-per-partition=1`
+until a creation names one).
 
 ### 3.5 The frontend and the resolver
 
@@ -1804,7 +1874,8 @@ journal, and the journal's leader-uuid rules (section 2) sit on top, judged at a
 
 **The write path.** The leader only *sequences*: it gives each command a slot and hands it off.
 A proxy leader does the Phase-2 work for that slot, so the leader's CPU and network stop being the
-bottleneck. Acceptors may form a grid, so a Phase-2 quorum is one column and not a majority.
+bottleneck. Acceptors may form acceptor partitions, so a Phase-2 quorum is a majority of one
+acceptor partition and not a majority of all (#532 (acceptor partitions)).
 Replicas learn chosen slots, walk the contiguous prefix and apply them; that apply is where the
 journal state machine judges each `Write`, `Truncate` and `SetLeader`. Batchers and unbatchers
 (multi-writer journals only, section 2.4) group many clients' writes into one slot and fan the
@@ -1941,9 +2012,9 @@ the WPaxos read (section 10) established for one region with several availabilit
   is therefore not adopted.
 - paros's grid cannot express zone survival either: rows and columns are positional over sorted
   ids, and with column = zone a zone loss kills every row, with row = zone it kills every column.
-  The grid stays the opt-in throughput layout (section 3.4, `partitions` above 1 until #532
-  (acceptor partitions)), with its cost (one dead acceptor freezes its column until
-  reconfiguration) stated to the tenant that picks it; one acceptor partition is the
+  Acceptor partitions stay the opt-in throughput layout (section 3.4, `partitions` above 1,
+  #532 (acceptor partitions)), with their cost (an election needs a majority of every acceptor
+  partition) stated to the tenant that picks them; one acceptor partition is the
   zone-surviving default.
 - What is adopted (decided on 2026-10-07, #215), detailed below: failure domains inside
   `AcceptorConfig`, a placement rule judged through `QuorumSystem` and never a count, the leader
@@ -2246,7 +2317,7 @@ toy is the end of M9. The epic is #184, the backlog pointer #69, the verificatio
 |---|---|---|
 | M7 | Journal API (#204, #205) | the four calls, the journal state machine in core, the wire and the driver, the chain workload's alphabet, the linearizability checker, the race knobs and BUGGIFY sites, the cut-over |
 | M8 | parosd deployable (#206 to #209, #221, #220, #196, #201) | Tokio providers linked, the stores on a real filesystem for the first time, the `JournalStores` opener, `Config` durable at `format`, `parosd provision` (replaced by `init` in M9), the uniform binary with class and capacity, Compose, `paros::client` (#221) and the `parosctl` CLI (#220), a tracing subscriber, exit codes |
-| M9 | The universe with one cell (#225, #226, #227 first; landed: #216 (PR #408), #192 (PR #412), #210 (PR #347), #211 (PR #352, PR #388), #239 (PR #464), #191, #390, #404, #228, #235, #229, #230, #176, #261, #263, #264 (PR #266), #267, #202, #213, #246, #247, #241, #243, #244, #240, #190, #212 (placement function and bookings), #474 (PR #499), #501, #257, #245 (PR #535); still to do: #248, #475, #476, #477, #252) | the control hierarchy and its decisions, the fenced `Truncate` on the wire, random ids and the `(TenantId, JournalId)` `JournalIdentifier`, the leader-uuid API and its two writer modes, `init` creating the universe with its matchmaker sets, the cell tenant and its machine registry with role slots and liveness, the universe tenant with its directory and tenant creation state machine, the election library and the coordinators it runs, requests to a leader, placement inside capacity granted by the cell, the checkpoint-and-truncate library, names at the frontend, the frontend with Biscuit `Authz` routing through the universe tenant, per-tenant matchmaker sets, `parosctl status` |
+| M9 | The universe with one cell (#225, #226, #227 first; landed: #216 (PR #408), #192 (PR #412), #210 (PR #347), #211 (PR #352, PR #388), #239 (PR #464), #191, #390, #404, #228, #235, #229, #230, #176, #261, #263, #264 (PR #266), #267, #202, #213, #246, #247, #241, #243, #244, #240, #190, #212 (placement function and bookings), #474 (PR #499), #501, #257, #245 (PR #535), #476; still to do: #248, #475, #477, #252) | the control hierarchy and its decisions, the fenced `Truncate` on the wire, random ids and the `(TenantId, JournalId)` `JournalIdentifier`, the leader-uuid API and its two writer modes, `init` creating the universe with its matchmaker sets, the cell tenant and its machine registry with role slots and liveness, the universe tenant with its directory and tenant creation state machine, the election library and the coordinators it runs, requests to a leader, placement inside capacity granted by the cell, the checkpoint-and-truncate library, names at the frontend, the frontend with Biscuit `Authz` routing through the universe tenant, per-tenant matchmaker sets, `parosctl status` |
 | M10 | Roles per tenant (#193, #214, #194, #145, #195) | journal-tagged proxy leaders and replicas, batchers and unbatchers for multi-writer journals, tenant modes (durability, role counts) applied by the tenant coordinator, quotas, the benchmark, then scale work |
 | M11 | Zones (#215) | `(region, az)` `FailureDomain`s in `AcceptorConfig` with its `cell_id` (one format bump), the two-predicate zone rule, zone round-robin placement, the `failures-per-partition=0` exemption, the leader following its writer's zone, zone-kill attrition and a zone-aware budget in the simulation, zone-spread matchmaker sets |
 | M12 | Multiple cells (#232, #233, then #253) | adding and removing cells with tombstones, placement across cells by `kind` and `survives` (both carried since M9 with the cell's entry endpoint), tenant locks, moving tenants and the universe tenant between cells, splitting the universe tenant by range, the resolver beside the frontend (section 3.5); last, multi-region cells: the `MultiRegion` cell kind with its witness region, the two-level zone rule, pools per `(tenant, region)`, the universe tenant hosted in a multi-region cell, the partition through the witness in the simulation, moving tenants between cell kinds |

@@ -22,14 +22,17 @@
 //!   The cell coordinator writes `JoinFleet`, not the operator
 //!   ([`crate::machine`], #513 (fleet Init duel)): `init` reads the cell
 //!   control journal and waits for the join ([`Interrupted::NotJoined`]).
+//!   The coordinator also books the cell tenant's and the fleet tenant's
+//!   footprints (#476 (tenant footprint)).
 //! - **Creating a tenant**: a `{users}` tenant only — the tenant API cannot
 //!   create an `internal` one. The fleet tenant registers it `REGISTERING` with its
 //!   identifier and its cell assignment (the one `READY` cell in M9), the cell
 //!   hosts it (`HostTenant`), the fleet tenant marks it `READY`. A
 //!   name the fleet tenant holds in `REGISTERING` — an earlier run's, whoever ran it — is
 //!   resumed under its id; a name held `READY` ends the operation at once.
-//!   Booking the tenant's footprint and writing its own control journal are
-//!   #210 and #225.
+//!   Before `HostTenant` the cell books the tenant's footprint
+//!   ([`crate::footprint`], #476 (tenant footprint)); a footprint the cell
+//!   refuses marks the tenant `ERROR` and ends the creation `NoFootprint`.
 //! - **Removing a tenant**: the fleet tenant marks it `REMOVING`, the cell drops it (a
 //!   tombstone, written whether the cell hosted it or not), the fleet tenant removes it.
 //! - **Root keys** (#245 (Biscuit tokens)): `init` writes its root public key
@@ -87,8 +90,9 @@ use super::outcome::ClaimOutcome;
 use super::writer::{Writer, WriterOutcome};
 use crate::fleet::RootKeyEntry;
 use crate::fleet::{CellState, FleetCommand, FleetDirectory, FleetEntry, TenantState};
+use crate::footprint::{self, Footprint};
 use crate::machine::ControlJournals;
-use crate::system::{FleetRegistration, HostedTenant, Registry, SystemCommand};
+use crate::system::{FleetRegistration, GrantKey, HostedTenant, Registry, SystemCommand};
 use crate::tenant::Survives;
 
 /// One step a fleet operation wrote.
@@ -105,6 +109,11 @@ pub enum Stage {
     RegisterTenant,
     /// The cell hosts the tenant.
     HostTenant,
+    /// The cell recorded a tenant's footprint (#476): booked, or refused.
+    Footprint,
+    /// The fleet tenant marked the tenant `ERROR`: its cell refused its
+    /// footprint (#476).
+    TenantError,
     /// The fleet tenant marked the tenant `READY`.
     TenantReady,
     /// The fleet tenant marked the tenant `REMOVING`.
@@ -173,6 +182,14 @@ pub enum FleetRefusal {
         /// The machine.
         node: NodeId,
     },
+    /// The cell has too few free slots for the tenant's footprint (#476):
+    /// the cell refused it, and a creation marks the tenant `ERROR` (remove
+    /// it to free its name). For `init`, the cell tenant's or the universe
+    /// tenant's.
+    NoFootprint {
+        /// The tenant.
+        tenant: TenantId,
+    },
     /// The tenant being created was removed meanwhile: a removal overtook
     /// the creation (the fleet tenant holds it `REMOVING`, or the cell dropped it, and
     /// never hosts it again).
@@ -239,6 +256,10 @@ pub enum Interrupted {
         /// The machine's address.
         addr: crate::Address,
     },
+    /// A founding member is not registered in the cell control journal yet
+    /// (#349), and a footprint does not fit without it: it is refused only
+    /// once every founder offers its slots (#476).
+    FoundersUnregistered,
     /// The run took its step budget without ending: other operators keep
     /// moving the journals under it.
     GoingRound {
@@ -564,7 +585,11 @@ impl FleetSession {
             TenantState::Registering => entry.cell_id,
             // This creation's own tenant, which a removal overtook.
             TenantState::Removing => return Step::Refused(FleetRefusal::Removed { tenant }),
-            state => return Step::Refused(FleetRefusal::NameTaken { tenant, state }),
+            // Marked by this creation once its cell refused its footprint.
+            TenantState::Error => return Step::Refused(FleetRefusal::NoFootprint { tenant }),
+            state @ TenantState::UpdatingConfiguration => {
+                return Step::Refused(FleetRefusal::NameTaken { tenant, state });
+            }
         };
         let hosted = HostedTenant {
             control: entry.control,
@@ -580,6 +605,24 @@ impl FleetSession {
             return Step::Refused(FleetRefusal::Removed { tenant });
         }
         if !self.cell.state().hosts(tenant) {
+            // The footprint first (#476): a cell hosts only a tenant it can
+            // run. A refusal ends the creation: the tenant is marked `ERROR`.
+            match self.footprint_step(client, first, tenant).await {
+                Some(Step::Refused(FleetRefusal::NoFootprint { .. })) => {
+                    let error = FleetCommand::MarkTenant {
+                        tenant,
+                        state: TenantState::Error,
+                    };
+                    return self
+                        .write_directory(client, first, fleet, error, Stage::TenantError)
+                        .await;
+                }
+                step => {
+                    if let Some(step) = step.and_then(relay) {
+                        return step;
+                    }
+                }
+            }
             let host = SystemCommand::HostTenant {
                 fleet_id: fleet,
                 tenant,
@@ -1089,6 +1132,43 @@ impl FleetSession {
         Ok(())
     }
 
+    /// The footprint step of `tenant` (#476): `None` once the cell granted
+    /// it; [`FleetRefusal::NoFootprint`] once the cell refused it; else the
+    /// write of its grant (`paros::footprint::plan` over the session's
+    /// fold, at its tail), or its refusal when the slots do not fit. A
+    /// footprint is refused only once every founding member registered.
+    async fn footprint_step<P: Providers>(
+        &mut self,
+        client: &Client<P>,
+        first: usize,
+        tenant: TenantId,
+    ) -> Option<Step<()>> {
+        let registry = self.cell.state();
+        match registry.footprint(tenant) {
+            Some(grant) if grant.granted() => return None,
+            Some(_) => return Some(Step::Refused(FleetRefusal::NoFootprint { tenant })),
+            None => {}
+        }
+        let slots = match footprint::plan(registry, tenant, &Footprint::birth()) {
+            Ok(slots) => Some(slots),
+            // An unregistered founder offers no slot yet: no refusal before
+            // it registers.
+            Err(_) if !footprint::ready(registry) => {
+                return Some(Step::Interrupted(Interrupted::FoundersUnregistered));
+            }
+            Err(_) => None,
+        };
+        let grant = SystemCommand::GrantCapacity {
+            key: GrantKey::Footprint(tenant),
+            tenant,
+            slots,
+        };
+        Some(
+            self.write_cell(client, first, &grant, Stage::Footprint)
+                .await,
+        )
+    }
+
     async fn write_cell<P: Providers, T>(
         &mut self,
         client: &Client<P>,
@@ -1106,6 +1186,17 @@ impl FleetSession {
                 Step::Interrupted(stop)
             }
         }
+    }
+}
+
+/// A footprint step as a step of another operation: `None` when it wrote
+/// nothing and the operation goes on.
+fn relay<T>(step: Step<()>) -> Option<Step<T>> {
+    match step {
+        Step::Refused(refusal) => Some(Step::Refused(refusal)),
+        Step::Advanced(stage) => Some(Step::Advanced(stage)),
+        Step::Interrupted(interrupted) => Some(Step::Interrupted(interrupted)),
+        Step::Done { .. } => None,
     }
 }
 

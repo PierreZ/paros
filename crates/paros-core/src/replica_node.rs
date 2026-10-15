@@ -459,7 +459,8 @@ impl ReplicaNode {
         };
         let row = basis.config.read_row(ctx, row);
         assert!(
-            row.is_some() == matches!(basis.config.quorum_system(), QuorumSystem::Grid { .. }),
+            row.is_some()
+                == matches!(basis.config.quorum_system(), QuorumSystem::Grid { rows, acks, .. } if acks == rows),
             "a read names a row exactly under a grid"
         );
         let addressees = self

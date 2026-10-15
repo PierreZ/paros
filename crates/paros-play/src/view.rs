@@ -384,7 +384,7 @@ pub fn quorum_view(system: QuorumSystem) -> QuorumSystemView {
             rows: None,
             cols: None,
         },
-        QuorumSystem::Grid { rows, cols } => QuorumSystemView {
+        QuorumSystem::Grid { rows, cols, .. } => QuorumSystemView {
             kind: QuorumKindView::Grid,
             q1: None,
             q2: None,

@@ -178,6 +178,86 @@ pub enum SystemCommand {
         /// The tenant.
         tenant: TenantId,
     },
+    /// A capacity request's outcome (#476): every slot of `slots` is booked
+    /// for `tenant`, or none is. `None` records that its writer found no
+    /// room. The first grant under a key wins; a repeat changes nothing.
+    GrantCapacity {
+        /// What it is recorded under.
+        key: GrantKey,
+        /// The tenant the capacity is for: every slot's target is its.
+        tenant: TenantId,
+        /// The slots, or `None` for a refusal.
+        slots: Option<Vec<Slot>>,
+    },
+}
+
+/// One slot a grant books (#476): what one `BookCapacity` names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Slot {
+    /// The id its writer drew; never booked before.
+    pub booking: u64,
+    /// The node.
+    pub node: NodeId,
+    /// The role the slot holds.
+    pub role: Role,
+    /// What the slot is for.
+    pub target: BookingTarget,
+}
+
+impl Slot {
+    fn to_wire(self) -> wire::BookCapacity {
+        let (tenant, journal, set, tenant_level) = self.target.to_wire();
+        wire::BookCapacity {
+            booking: self.booking,
+            node: self.node.0,
+            tenant,
+            journal,
+            role: self.role.as_str().into(),
+            set,
+            tenant_level,
+        }
+    }
+
+    fn from_wire(book: &wire::BookCapacity) -> Result<Self, &'static str> {
+        Ok(Slot {
+            booking: book.booking,
+            node: NodeId(book.node),
+            role: book.role.parse()?,
+            target: BookingTarget::from_wire(
+                book.tenant,
+                book.journal,
+                book.set,
+                book.tenant_level,
+            )?,
+        })
+    }
+}
+
+/// What a grant is recorded under (#476): a tenant's footprint, booked at
+/// its birth, or a capacity request's idempotency id.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum GrantKey {
+    /// The minimum footprint of the tenant (`docs/architecture.md` §3.4).
+    Footprint(TenantId),
+    /// A capacity request, by the id its requester drew (never `0`).
+    Request(u64),
+}
+
+/// A recorded grant (#476).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Grant {
+    /// The tenant it is for.
+    pub tenant: TenantId,
+    /// The booking ids it granted, or `None` when it was refused.
+    pub bookings: Option<Vec<u64>>,
+}
+
+impl Grant {
+    /// Whether the capacity was granted.
+    #[must_use]
+    pub fn granted(&self) -> bool {
+        self.bookings.is_some()
+    }
 }
 
 impl SystemCommand {
@@ -213,17 +293,15 @@ impl SystemCommand {
                 node,
                 role,
                 target,
-            } => {
-                let (tenant, journal, set) = target.to_wire();
-                Kind::BookCapacity(wire::BookCapacity {
+            } => Kind::BookCapacity(
+                Slot {
                     booking: *booking,
-                    node: node.0,
-                    tenant,
-                    journal,
-                    role: role.as_str().into(),
-                    set,
-                })
-            }
+                    node: *node,
+                    role: *role,
+                    target: *target,
+                }
+                .to_wire(),
+            ),
             SystemCommand::MachineDown { id, incarnation } => {
                 let (incarnation_high, incarnation_low) = incarnation_halves(*incarnation);
                 Kind::MachineDown(wire::MachineDown {
@@ -270,6 +348,19 @@ impl SystemCommand {
                 fleet_id: *fleet_id,
                 tenant: tenant.0,
             }),
+            SystemCommand::GrantCapacity { key, tenant, slots } => {
+                let (request, footprint) = match key {
+                    GrantKey::Footprint(_) => (0, true),
+                    GrantKey::Request(request) => (*request, false),
+                };
+                Kind::GrantCapacity(wire::GrantCapacity {
+                    request,
+                    tenant: tenant.0,
+                    footprint,
+                    refused: slots.is_none(),
+                    bookings: slots.iter().flatten().map(|slot| slot.to_wire()).collect(),
+                })
+            }
         };
         wire::SystemEntry { kind: Some(kind) }.encode_to_vec()
     }
@@ -303,12 +394,15 @@ impl SystemCommand {
             Kind::RetireNode(retire) => SystemCommand::RetireNode {
                 id: NodeId(retire.id),
             },
-            Kind::BookCapacity(book) => SystemCommand::BookCapacity {
-                booking: book.booking,
-                node: NodeId(book.node),
-                role: book.role.parse()?,
-                target: BookingTarget::from_wire(book.tenant, book.journal, book.set)?,
-            },
+            Kind::BookCapacity(book) => {
+                let slot = Slot::from_wire(&book)?;
+                SystemCommand::BookCapacity {
+                    booking: slot.booking,
+                    node: slot.node,
+                    role: slot.role,
+                    target: slot.target,
+                }
+            }
             Kind::MachineDown(down) => SystemCommand::MachineDown {
                 id: NodeId(down.id),
                 incarnation: incarnation_from_halves(down.incarnation_high, down.incarnation_low),
@@ -341,6 +435,35 @@ impl SystemCommand {
                 fleet_id: drop.fleet_id,
                 tenant: TenantId(drop.tenant),
             },
+            Kind::GrantCapacity(grant) => {
+                let key = if grant.footprint {
+                    if grant.request != 0 {
+                        return Err("a footprint grant names no request");
+                    }
+                    GrantKey::Footprint(TenantId(grant.tenant))
+                } else {
+                    GrantKey::Request(grant.request)
+                };
+                if grant.refused && !grant.bookings.is_empty() {
+                    return Err("a refused grant books nothing");
+                }
+                let slots = if grant.refused {
+                    None
+                } else {
+                    Some(
+                        grant
+                            .bookings
+                            .iter()
+                            .map(Slot::from_wire)
+                            .collect::<Result<Vec<_>, _>>()?,
+                    )
+                };
+                SystemCommand::GrantCapacity {
+                    key,
+                    tenant: TenantId(grant.tenant),
+                    slots,
+                }
+            }
         })
     }
 }
@@ -448,6 +571,16 @@ pub enum BookingTarget {
         /// The set's id within the tenant (never `0`).
         set: u64,
     },
+    /// `tenant` as a whole (#476): its minimum footprint (`docs/architecture.md`
+    /// §3.4), the slots its birth booked against the cell's capacity, whose
+    /// `Coordinator` slot is where the cell coordinator placed the tenant's
+    /// coordinator, and its tenant-wide roles (its frontends). Unlike a
+    /// journal's or a set's role instance, a tenant may hold several slots of
+    /// one role on one machine.
+    Tenant {
+        /// The tenant.
+        tenant: TenantId,
+    },
 }
 
 impl BookingTarget {
@@ -456,20 +589,35 @@ impl BookingTarget {
     pub fn tenant(self) -> TenantId {
         match self {
             BookingTarget::Journal(journal) => journal.tenant,
-            BookingTarget::Set { tenant, .. } => tenant,
+            BookingTarget::Set { tenant, .. } | BookingTarget::Tenant { tenant } => tenant,
         }
     }
 
-    /// The wire's `(tenant, journal, set)`: `set` is `0` for a journal and
-    /// `journal` is `0` for a set.
-    fn to_wire(self) -> (u64, u64, u64) {
+    /// The wire's `(tenant, journal, set, tenant_level)`: `set` is `0` for a
+    /// journal, `journal` is `0` for a set, and both are `0` for the tenant
+    /// as a whole.
+    fn to_wire(self) -> (u64, u64, u64, bool) {
         match self {
-            BookingTarget::Journal(journal) => (journal.tenant.0, journal.journal.0, 0),
-            BookingTarget::Set { tenant, set } => (tenant.0, 0, set),
+            BookingTarget::Journal(journal) => (journal.tenant.0, journal.journal.0, 0, false),
+            BookingTarget::Set { tenant, set } => (tenant.0, 0, set, false),
+            BookingTarget::Tenant { tenant } => (tenant.0, 0, 0, true),
         }
     }
 
-    fn from_wire(tenant: u64, journal: u64, set: u64) -> Result<Self, &'static str> {
+    fn from_wire(
+        tenant: u64,
+        journal: u64,
+        set: u64,
+        tenant_level: bool,
+    ) -> Result<Self, &'static str> {
+        if tenant_level {
+            if journal != 0 || set != 0 {
+                return Err("a tenant's booking names no journal and no set");
+            }
+            return Ok(BookingTarget::Tenant {
+                tenant: TenantId(tenant),
+            });
+        }
         match (journal, set) {
             (_, 0) => Ok(BookingTarget::Journal(JournalIdentifier::new(
                 TenantId(tenant),
@@ -666,6 +814,18 @@ pub enum RegistryEvent {
     /// The entry asked for what the cell already records: a re-run step of
     /// a fleet operation (#229).
     Unchanged,
+    /// A grant booked every slot it names (#476).
+    Granted {
+        /// What it is recorded under.
+        key: GrantKey,
+        /// The slots booked.
+        slots: Vec<Slot>,
+    },
+    /// A grant's writer found no room, and the refusal is recorded (#476).
+    GrantRefused {
+        /// What it is recorded under.
+        key: GrantKey,
+    },
     /// A checkpoint (#230): every position below `covers_up_to` is in the
     /// state this fold now holds — restored from it, or verified against it
     /// (the fold reports which through its audit, not here, so every fold
@@ -773,6 +933,12 @@ pub enum RegistryRefusal {
         /// The tenant named.
         tenant: TenantId,
     },
+    /// A `HostTenant` of a tenant whose footprint the cell has not granted
+    /// (#476): a cell hosts a tenant only once its footprint is booked.
+    NoFootprint {
+        /// The tenant named.
+        tenant: TenantId,
+    },
 }
 
 /// The registry's fold (#189, #211): the genesis pool the deployment was
@@ -805,6 +971,9 @@ pub struct Registry {
     spent: BTreeSet<u64>,
     /// What the cell coordinator last wrote of each machine's liveness.
     liveness: BTreeMap<NodeId, Liveness>,
+    /// Every grant recorded (#476): its outcome stays, so a retry under its
+    /// key reads it back.
+    grants: BTreeMap<GrantKey, Grant>,
     next_seq: u64,
 }
 
@@ -928,6 +1097,9 @@ impl Registry {
             }) => self.host(fleet_id, tenant, Some(hosted)),
             Some(SystemCommand::DropTenant { fleet_id, tenant }) => {
                 self.host(fleet_id, tenant, None)
+            }
+            Some(SystemCommand::GrantCapacity { key, tenant, slots }) => {
+                self.grant(key, tenant, slots)
             }
             _ => RegistryEvent::Refused(RegistryRefusal::Malformed),
         }
@@ -1054,6 +1226,10 @@ impl Registry {
             if self.hosted.contains_key(&tenant) {
                 return RegistryEvent::Unchanged;
             }
+            // A cell hosts a tenant only once its footprint is booked (#476).
+            if !self.footprint(tenant).is_some_and(Grant::granted) {
+                return RegistryEvent::Refused(RegistryRefusal::NoFootprint { tenant });
+            }
             let control = hosted.control;
             self.hosted.insert(tenant, hosted);
             return RegistryEvent::TenantHosted { tenant, control };
@@ -1124,10 +1300,12 @@ impl Registry {
         if self.booked(id) >= node.capacity {
             return RegistryEvent::Refused(RegistryRefusal::NoCapacity { id });
         }
-        if self
-            .bookings
-            .values()
-            .any(|b| b.node == id && b.role == role && b.target == target)
+        // A tenant's slots are not role instances: they may stack (#476).
+        if !matches!(target, BookingTarget::Tenant { .. })
+            && self
+                .bookings
+                .values()
+                .any(|b| b.node == id && b.role == role && b.target == target)
         {
             return RegistryEvent::Refused(RegistryRefusal::AlreadyBooked { id });
         }
@@ -1149,6 +1327,92 @@ impl Registry {
             node: id,
             role,
         }
+    }
+
+    /// `GrantCapacity` (#476): record a refusal, or book every slot and
+    /// record the grant, or book none. A slot the fold refuses undoes the
+    /// slots booked before it, and nothing is recorded: the requester
+    /// plans again from the newer fold. The first grant under a key wins.
+    fn grant(
+        &mut self,
+        key: GrantKey,
+        tenant: TenantId,
+        slots: Option<Vec<Slot>>,
+    ) -> RegistryEvent {
+        let keyed = match key {
+            GrantKey::Footprint(of) => of == tenant,
+            GrantKey::Request(request) => request != 0,
+        };
+        if !tenant.is_set() || !keyed {
+            return RegistryEvent::Refused(RegistryRefusal::Malformed);
+        }
+        if self.grants.contains_key(&key) {
+            return RegistryEvent::Unchanged;
+        }
+        let Some(slots) = slots else {
+            self.grants.insert(
+                key,
+                Grant {
+                    tenant,
+                    bookings: None,
+                },
+            );
+            return RegistryEvent::GrantRefused { key };
+        };
+        if slots.is_empty() || slots.iter().any(|slot| slot.target.tenant() != tenant) {
+            return RegistryEvent::Refused(RegistryRefusal::Malformed);
+        }
+        let mut booked: Vec<u64> = Vec::with_capacity(slots.len());
+        for slot in &slots {
+            match self.book(slot.booking, slot.node, slot.role, slot.target) {
+                RegistryEvent::Booked { .. } => booked.push(slot.booking),
+                refused => {
+                    for booking in booked {
+                        assert!(
+                            self.bookings.remove(&booking).is_some(),
+                            "an undone slot was live"
+                        );
+                        assert!(
+                            self.spent.remove(&booking),
+                            "an undone slot's id was spent here"
+                        );
+                    }
+                    return refused;
+                }
+            }
+        }
+        assert_eq!(booked.len(), slots.len(), "a grant books every slot");
+        self.grants.insert(
+            key,
+            Grant {
+                tenant,
+                bookings: Some(booked),
+            },
+        );
+        RegistryEvent::Granted { key, slots }
+    }
+
+    /// The grant recorded under `key` (#476).
+    #[must_use]
+    pub fn grant_of(&self, key: GrantKey) -> Option<&Grant> {
+        self.grants.get(&key)
+    }
+
+    /// Every grant recorded, in key order (#476).
+    pub fn grants(&self) -> impl Iterator<Item = (GrantKey, &Grant)> {
+        self.grants.iter().map(|(key, grant)| (*key, grant))
+    }
+
+    /// The footprint grant of `tenant` (#476): granted at its birth, or
+    /// refused.
+    #[must_use]
+    pub fn footprint(&self, tenant: TenantId) -> Option<&Grant> {
+        self.grants.get(&GrantKey::Footprint(tenant))
+    }
+
+    /// The genesis pool, in id order: the founding members.
+    pub fn genesis(&self) -> impl Iterator<Item = NodeId> + '_ {
+        self.genesis.iter().copied()
     }
 
     /// `MachineDown` (#211, D6): a change only. Refused for a machine
@@ -1361,7 +1625,7 @@ impl Registry {
                 .bookings
                 .iter()
                 .map(|(id, b)| {
-                    let (tenant, journal, set) = b.target.to_wire();
+                    let (tenant, journal, set, tenant_level) = b.target.to_wire();
                     wire::BookingState {
                         booking: *id,
                         node: b.node.0,
@@ -1369,6 +1633,7 @@ impl Registry {
                         journal,
                         role: b.role.as_str().into(),
                         set,
+                        tenant_level,
                     }
                 })
                 .collect(),
@@ -1397,6 +1662,23 @@ impl Registry {
                 })
                 .collect(),
             dropped: self.dropped.iter().map(|t| t.0).collect(),
+            grants: self
+                .grants
+                .iter()
+                .map(|(key, grant)| {
+                    let (request, footprint) = match key {
+                        GrantKey::Footprint(_) => (0, true),
+                        GrantKey::Request(request) => (*request, false),
+                    };
+                    wire::GrantState {
+                        request,
+                        tenant: grant.tenant.0,
+                        footprint,
+                        refused: !grant.granted(),
+                        bookings: grant.bookings.clone().unwrap_or_default(),
+                    }
+                })
+                .collect(),
         }
     }
 }
@@ -1447,7 +1729,7 @@ impl Checkpointable for Registry {
                 Booking {
                     node: NodeId(b.node),
                     role: b.role.parse()?,
-                    target: BookingTarget::from_wire(b.tenant, b.journal, b.set)?,
+                    target: BookingTarget::from_wire(b.tenant, b.journal, b.set, b.tenant_level)?,
                 },
             );
         }
@@ -1491,8 +1773,10 @@ impl Checkpointable for Registry {
         {
             return Err("a registry state hosts a tenant it cannot");
         }
+        let grants = grants_from_wire(state.grants, &spent)?;
         self.nodes = nodes;
         self.bookings = bookings;
+        self.grants = grants;
         self.spent = spent;
         self.liveness = liveness;
         self.fleet = fleet;
@@ -1501,6 +1785,36 @@ impl Checkpointable for Registry {
         self.next_seq = covers_up_to + 1;
         Ok(())
     }
+}
+
+/// The grants of a registry checkpoint (#476): each under its key, its
+/// booking ids spent.
+fn grants_from_wire(
+    states: Vec<wire::GrantState>,
+    spent: &BTreeSet<u64>,
+) -> Result<BTreeMap<GrantKey, Grant>, &'static str> {
+    let mut grants = BTreeMap::new();
+    for g in states {
+        let key = match (g.footprint, g.request) {
+            (true, 0) => GrantKey::Footprint(TenantId(g.tenant)),
+            (false, request) if request != 0 => GrantKey::Request(request),
+            _ => return Err("a registry state names a grant by no key"),
+        };
+        if g.refused && !g.bookings.is_empty() {
+            return Err("a registry state holds a refused grant that booked");
+        }
+        if g.bookings.iter().any(|b| !spent.contains(b)) {
+            return Err("a registry state holds a grant whose booking id is not spent");
+        }
+        grants.insert(
+            key,
+            Grant {
+                tenant: TenantId(g.tenant),
+                bookings: (!g.refused).then_some(g.bookings),
+            },
+        );
+    }
+    Ok(grants)
 }
 
 /// The event a [`Folded`] registry record is reported as: an entry's own
@@ -1598,6 +1912,23 @@ mod tests {
             SystemCommand::DropTenant {
                 fleet_id: 11,
                 tenant: TenantId(300),
+            },
+            SystemCommand::GrantCapacity {
+                key: GrantKey::Footprint(TenantId(300)),
+                tenant: TenantId(300),
+                slots: Some(vec![Slot {
+                    booking: 9,
+                    node: NodeId(100),
+                    role: Role::Coordinator,
+                    target: BookingTarget::Tenant {
+                        tenant: TenantId(300),
+                    },
+                }]),
+            },
+            SystemCommand::GrantCapacity {
+                key: GrantKey::Request(77),
+                tenant: TenantId(300),
+                slots: None,
             },
         ];
         for command in commands {
@@ -1698,7 +2029,8 @@ mod tests {
         }
         assert_eq!(Role::of(Class::Storage).count(), 3);
         assert!("seed".parse::<Role>().is_err());
-        assert!(BookingTarget::from_wire(1, 2, 3).is_err());
+        assert!(BookingTarget::from_wire(1, 2, 3, false).is_err());
+        assert!(BookingTarget::from_wire(1, 2, 0, true).is_err());
     }
 
     #[test]
@@ -2035,79 +2367,107 @@ mod tests {
             })
         };
         let mut registry = Registry::new([NodeId(0)]);
+        registry.fold(0, &register(0, Class::Storage, 1));
+        let footprint = |tenant: u64, slots| {
+            one(&SystemCommand::GrantCapacity {
+                key: GrantKey::Footprint(TenantId(tenant)),
+                tenant: TenantId(tenant),
+                slots,
+            })
+        };
+        // A tenant whose footprint was refused is never hosted (#476).
+        assert_eq!(
+            registry.fold(1, &footprint(301, None)),
+            RegistryEvent::GrantRefused {
+                key: GrantKey::Footprint(TenantId(301))
+            }
+        );
+        let slot = Slot {
+            booking: 1,
+            node: NodeId(0),
+            role: Role::Acceptor,
+            target: BookingTarget::Tenant {
+                tenant: TenantId(300),
+            },
+        };
+        assert!(matches!(
+            registry.fold(2, &footprint(300, Some(vec![slot]))),
+            RegistryEvent::Granted { .. }
+        ));
         // Nothing is hosted before the cell joins a fleet.
         assert_eq!(
-            registry.fold(0, &host(fleet, 300)),
+            registry.fold(3, &host(fleet, 300)),
             RegistryEvent::Refused(RegistryRefusal::OtherFleet { fleet_id: fleet })
         );
         assert_eq!(
-            registry.fold(1, &join(fleet, cell, crate::fleet::METADATA_VERSION + 1)),
+            registry.fold(4, &join(fleet, cell, crate::fleet::METADATA_VERSION + 1)),
             RegistryEvent::Refused(RegistryRefusal::Unsupported)
         );
         assert_eq!(
-            registry.fold(2, &join(fleet, cell, 1)),
+            registry.fold(5, &join(fleet, cell, 1)),
             RegistryEvent::JoinedFleet {
                 fleet_id: fleet,
                 cell_id: cell
             }
         );
         assert_eq!(
-            registry.fold(3, &join(fleet, cell, 1)),
+            registry.fold(6, &join(fleet, cell, 1)),
             RegistryEvent::Unchanged
         );
         assert_eq!(
-            registry.fold(4, &join(fleet, cell + 1, 1)),
+            registry.fold(7, &join(fleet, cell + 1, 1)),
             RegistryEvent::Refused(RegistryRefusal::OtherFleet { fleet_id: fleet })
         );
         assert_eq!(
-            registry.fold(5, &host(fleet, 300)),
+            registry.fold(8, &host(fleet, 300)),
             RegistryEvent::TenantHosted {
                 tenant: TenantId(300),
                 control: JournalId(301),
             }
         );
         assert_eq!(
-            registry.fold(6, &host(fleet, 300)),
+            registry.fold(9, &host(fleet, 300)),
             RegistryEvent::Unchanged
         );
         assert_eq!(
-            registry.fold(7, &host(fleet + 1, 301)),
+            registry.fold(10, &host(fleet + 1, 301)),
             RegistryEvent::Refused(RegistryRefusal::OtherFleet {
                 fleet_id: fleet + 1
             })
         );
         assert_eq!(
-            registry.fold(8, &host(fleet, 0)),
+            registry.fold(11, &host(fleet, 0)),
             RegistryEvent::Refused(RegistryRefusal::Malformed)
         );
         assert!(registry.hosts(TenantId(300)));
+        assert!(!registry.hosts(TenantId(301)));
         // The checkpoint carries the registration and the tenant list.
         let mut restored = Registry::new([NodeId(0)]);
         restored
-            .restore(8, &registry.checkpoint())
+            .restore(11, &registry.checkpoint())
             .expect("restores");
         assert_eq!(restored, registry);
         assert_eq!(
-            registry.fold(9, &drop(fleet, 300)),
+            registry.fold(12, &drop(fleet, 300)),
             RegistryEvent::TenantDropped {
                 tenant: TenantId(300)
             }
         );
         assert_eq!(
-            registry.fold(10, &drop(fleet, 300)),
+            registry.fold(13, &drop(fleet, 300)),
             RegistryEvent::Unchanged
         );
         assert_eq!(registry.hosted().count(), 0);
         // A dropped tenant is never hosted again: a stale host is refused.
         assert_eq!(
-            registry.fold(11, &host(fleet, 300)),
+            registry.fold(14, &host(fleet, 300)),
             RegistryEvent::Refused(RegistryRefusal::TenantDropped {
                 tenant: TenantId(300)
             })
         );
         // A drop of a tenant never hosted still tombstones it.
         assert_eq!(
-            registry.fold(12, &drop(fleet, 301)),
+            registry.fold(15, &drop(fleet, 301)),
             RegistryEvent::TenantDropped {
                 tenant: TenantId(301)
             }
@@ -2115,7 +2475,90 @@ mod tests {
         assert!(registry.dropped(TenantId(301)));
         let mut restored = Registry::new([NodeId(0)]);
         restored
-            .restore(12, &registry.checkpoint())
+            .restore(15, &registry.checkpoint())
+            .expect("restores");
+        assert_eq!(restored, registry);
+    }
+    #[test]
+    fn a_grant_books_every_slot_or_none_and_a_host_needs_its_footprint() {
+        let fleet = 0xf1ee7;
+        let tenant = TenantId(300);
+        let target = BookingTarget::Tenant { tenant };
+        let mut registry = Registry::new([NodeId(0)]);
+        registry.fold(0, &register(0, Class::Storage, 2));
+        registry.fold(
+            1,
+            &one(&SystemCommand::JoinFleet {
+                fleet_id: fleet,
+                cell_id: 0xce11,
+                version: 1,
+            }),
+        );
+        let host = one(&SystemCommand::HostTenant {
+            fleet_id: fleet,
+            tenant,
+            hosted: hosted(301),
+        });
+        assert_eq!(
+            registry.fold(2, &host),
+            RegistryEvent::Refused(RegistryRefusal::NoFootprint { tenant })
+        );
+        let slot = |booking| Slot {
+            booking,
+            node: NodeId(0),
+            role: Role::Acceptor,
+            target,
+        };
+        let grant = |slots: Vec<Slot>| {
+            one(&SystemCommand::GrantCapacity {
+                key: GrantKey::Footprint(tenant),
+                tenant,
+                slots: Some(slots),
+            })
+        };
+        // Three slots on a machine of two: the third undoes the first two.
+        assert_eq!(
+            registry.fold(3, &grant(vec![slot(1), slot(2), slot(3)])),
+            RegistryEvent::Refused(RegistryRefusal::NoCapacity { id: NodeId(0) })
+        );
+        assert_eq!(registry.booked(NodeId(0)), 0);
+        assert!(
+            registry.footprint(tenant).is_none(),
+            "a slot refused records nothing"
+        );
+        // Two slots of one role stack on one machine: a footprint is slots.
+        assert!(matches!(
+            registry.fold(4, &grant(vec![slot(1), slot(2)])),
+            RegistryEvent::Granted { .. }
+        ));
+        assert_eq!(registry.booked(NodeId(0)), 2);
+        assert_eq!(
+            registry.fold(5, &grant(vec![slot(4)])),
+            RegistryEvent::Unchanged,
+            "the first grant under a key wins"
+        );
+        // A slot for another tenant is malformed; so is a request id of 0.
+        let foreign = one(&SystemCommand::GrantCapacity {
+            key: GrantKey::Request(9),
+            tenant,
+            slots: Some(vec![Slot {
+                target: BookingTarget::Tenant {
+                    tenant: TenantId(7),
+                },
+                ..slot(5)
+            }]),
+        });
+        assert_eq!(
+            registry.fold(6, &foreign),
+            RegistryEvent::Refused(RegistryRefusal::Malformed)
+        );
+        assert!(matches!(
+            registry.fold(7, &host),
+            RegistryEvent::TenantHosted { .. }
+        ));
+        let mut restored = Registry::new([NodeId(0)]);
+        restored
+            .restore(7, &registry.checkpoint())
             .expect("restores");
         assert_eq!(restored, registry);
     }

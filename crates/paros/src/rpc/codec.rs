@@ -119,8 +119,12 @@ pub fn quorum_system_to_proto(quorum_system: QuorumSystem) -> WireQuorumSystem {
         QuorumSystem::Flexible { q1, q2 } => {
             (common::QuorumSystem::Flexible, size(q1), size(q2), 0, 0)
         }
-        QuorumSystem::Grid { rows, cols } => {
-            (common::QuorumSystem::Grid, 0, 0, size(rows), size(cols))
+        // A grid's ack count rides `phase2_quorum` (#532 (acceptor
+        // partitions)); a full-column grid leaves it at zero, so its encoding
+        // is the one from before partitions.
+        QuorumSystem::Grid { rows, cols, acks } => {
+            let acks = if acks == rows { 0 } else { size(acks) };
+            (common::QuorumSystem::Grid, 0, acks, size(rows), size(cols))
         }
     };
     WireQuorumSystem {
@@ -146,10 +150,16 @@ pub fn quorum_system_from_proto(wire: &WireQuorumSystem) -> Result<QuorumSystem,
             q1: usize::try_from(wire.phase1_quorum).map_err(|_| "phase-1 quorum out of range")?,
             q2: usize::try_from(wire.phase2_quorum).map_err(|_| "phase-2 quorum out of range")?,
         }),
-        Ok(common::QuorumSystem::Grid) => Ok(QuorumSystem::Grid {
-            rows: usize::try_from(wire.rows).map_err(|_| "grid rows out of range")?,
-            cols: usize::try_from(wire.cols).map_err(|_| "grid cols out of range")?,
-        }),
+        Ok(common::QuorumSystem::Grid) => {
+            let rows = usize::try_from(wire.rows).map_err(|_| "grid rows out of range")?;
+            let cols = usize::try_from(wire.cols).map_err(|_| "grid cols out of range")?;
+            // Zero is the full column.
+            let acks = match wire.phase2_quorum {
+                0 => rows,
+                acks => usize::try_from(acks).map_err(|_| "grid acks out of range")?,
+            };
+            Ok(QuorumSystem::Grid { rows, cols, acks })
+        }
         Err(_) => Err("unknown quorum system"),
     }
 }
