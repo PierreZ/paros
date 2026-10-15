@@ -180,7 +180,7 @@ impl NodeShape {
             election_timeout_base: buggify_knob!(5_u64, 2_u64..13_u64).max(floor_ticks),
             keep_alive_interval: ms(buggify_knob!(2000_u64, ROUND_TRIP_FLOOR_MS..5001_u64)),
             keep_alive_timeout: ms(buggify_knob!(1000_u64, ROUND_TRIP_FLOOR_MS..3001_u64)),
-            connection_timeout: ms(buggify_knob!(1000_u64, ROUND_TRIP_FLOOR_MS..3001_u64)),
+            connection_timeout: ms(buggify_knob!(1000_u64, CONNECT_FLOOR_MS..3001_u64)),
             delivery_timeout: ms(buggify_knob!(1000_u64, ROUND_TRIP_FLOOR_MS..3001_u64)),
             read_retry_ticks: buggify_knob!(10_u64, 1_u64..41_u64).max(2 * floor_ticks),
             // Floor 0: a zero wait answers every journal read at the end at
@@ -2106,6 +2106,28 @@ pub(crate) fn resolve_answer_ceiling() -> Duration {
 /// One `Resolve` call's own round trip on the recovery tail, past the
 /// machine's answer bound: two round trips of the driver's floor.
 pub(crate) const RESOLVE_ROUND_TRIP: Duration = Duration::from_millis(2 * ROUND_TRIP_FLOOR_MS);
+
+/// The slowest round trip a link keeps into the recovery tail, in
+/// milliseconds: moonpool's cross-datacenter link is at most 80 ms one way,
+/// and its per-pair latency (`max_pair_latency`, under 100 ms each way) is
+/// drawn once per pair and never healed. Recovery mode stops new pairs from
+/// degrading, not a pair that already is.
+const SLOWEST_ROUND_TRIP_MS: u64 = 2 * (80 + 100);
+
+/// The wall-clock floor of a drawn connect timeout, the driver's
+/// `connection_timeout` and the client's `connect_timeout_ms`. A connect is
+/// not one round trip: the runtime's timeout covers the TCP connect and the
+/// session handshake, TLS on half the seeds ([`crate::tls`]), so two round
+/// trips at least. Below that, a slow pair never connects for the whole run,
+/// a one-way partition wearing a knob's clothes. Witness (cite only): seed
+/// 8160241045276543599 on main 9bcbd0f, a TLS seed of three nodes where
+/// node 0 was wiped; node 2 drew a 251 ms timeout, and its connect to node 1
+/// (a 231 ms round trip, 715 ms for a first delivery with its connect)
+/// timed out 63 times in a row, so no ballot ever met a promise quorum.
+pub(crate) const CONNECT_FLOOR_MS: u64 = 1_000;
+
+const _: () = assert!(CONNECT_FLOOR_MS >= 2 * SLOWEST_ROUND_TRIP_MS);
+const _: () = assert!(CONNECT_FLOOR_MS > ROUND_TRIP_FLOOR_MS);
 
 #[cfg(test)]
 mod tests {
