@@ -17,6 +17,7 @@
 //! | 5 | no server answered: nothing was decided |
 //! | 2 | bad arguments (clap's own) |
 
+mod bench;
 mod cell;
 mod commands;
 mod entry;
@@ -213,6 +214,10 @@ enum CellCommand {
     /// Create, delete and list a tenant's journals through its control
     /// journal and the tenant coordinator (#210).
     Journal(journal::JournalArgs),
+    /// The load generator (#517): closed-loop clients writing and reading
+    /// the journals of a tenant, throughput and latency per call each
+    /// second, then the totals.
+    Bench(bench::BenchArgs),
 }
 
 /// How a command ended, as an exit code.
@@ -570,6 +575,7 @@ async fn online(global: Global, command: Command) -> ExitCode {
     } else {
         labels::Labels::default()
     };
+    let ids: Vec<u64> = servers.iter().map(|(id, _)| *id).collect();
     let ending = match command {
         CellCommand::Write(args) => commands::write(&runtime.providers, &client, &out, args).await,
         CellCommand::Read(args) => commands::read(&client, &out, args).await,
@@ -584,9 +590,9 @@ async fn online(global: Global, command: Command) -> ExitCode {
         CellCommand::Reconfigure(args) => commands::reconfigure(&client, &labels, &out, args).await,
         CellCommand::Retire(args) => commands::retire(&client, &labels, &out, args).await,
         CellCommand::Tenant(args) => {
-            let ids: Vec<u64> = servers.iter().map(|(id, _)| *id).collect();
             fleet::run(&runtime.providers, &client, &ids, &labels, &out, args).await
         }
+        CellCommand::Bench(args) => bench::run(&runtime, &client, &ids, args).await,
         CellCommand::Journal(args) => {
             journal::run(
                 &runtime.providers,
