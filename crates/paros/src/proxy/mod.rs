@@ -298,6 +298,11 @@ fn note_decided(decided: &mut BTreeSet<JournalIdentifier>, journal: JournalIdent
 /// accept, a bad address), or a `config` that names no journal or one
 /// journal twice. A proxy has no storage and no crash seam, so no other
 /// exit exists.
+///
+/// # Panics
+///
+/// If an internal invariant is broken (a journal served twice, a decided
+/// journal forgotten): a programmer error, never an operating condition.
 #[tracing::instrument(level = "debug", skip_all, fields(proxy = config.id.0, local_addr = %local_addr, members = members.len(), journals = config.journals.len()))]
 // The parameters are the proxy's complete wiring; a bundle would only rename
 // them. The loop is one select over the contract's one inbox and the beat.

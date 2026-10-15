@@ -458,6 +458,12 @@ async fn boot_journals<J: JournalStores>(
 /// boot claim and its format marker disagree, [`RunError::Infra`] for a
 /// genuine provider failure or stores that name no journal or several
 /// replica ids.
+///
+/// # Panics
+///
+/// If an internal invariant is broken (a boot batch that confirms a read,
+/// a fold that moved under a served read): a programmer error, never an
+/// operating condition.
 #[tracing::instrument(level = "debug", skip_all, fields(local_addr = %local_addr, members = members.len()))]
 // The parameters are the replica's complete wiring; the loop is one select
 // over the lane, the reads, the beat, the inspections and the shutdown.
