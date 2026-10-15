@@ -426,6 +426,7 @@ fn chain_builder(digest: Option<DigestSink>) -> SimulationBuilder {
         .fault_factory(|| Box::new(crate::world::replaced_founder::ReplacedFounder))
         .fault_factory(|| Box::new(crate::world::lagging_acceptor::LaggingAcceptor))
         .fault_factory(|| Box::new(crate::world::split_floor::SplitFloor))
+        .fault_factory(|| Box::new(crate::world::lagging_replica::LaggingReplica))
         .chaos_duration(CHAOS_CAP)
         .chaos_until_run_ends()
         .swarm_operations()

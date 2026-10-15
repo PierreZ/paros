@@ -14,6 +14,7 @@ pub(crate) mod cut;
 pub(crate) mod downed_founder;
 pub(crate) mod injector;
 pub(crate) mod lagging_acceptor;
+pub(crate) mod lagging_replica;
 pub(crate) mod late_outage;
 pub(crate) mod moved_founder;
 pub(crate) mod node_store;

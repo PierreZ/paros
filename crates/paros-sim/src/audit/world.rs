@@ -549,6 +549,20 @@ impl AuditWorld {
             .any(|(_, floor)| *floor > held)
     }
 
+    /// Whether a node of the cell decided at least `slots` slots past
+    /// `replica`'s chosen prefix (#550 (replica serves an unreported fold
+    /// page)): the replica's next catch-up is a backlog its apply walk
+    /// pages through. The lagging-replica scenario holds the replica down
+    /// until then (`crate::world::lagging_replica`).
+    pub(crate) fn cell_ahead_of(&self, replica: u64, slots: u64) -> bool {
+        let st = self.lock();
+        let held = st.decided_prefix.get(&replica).copied().unwrap_or(0);
+        st.decided_prefix
+            .iter()
+            .filter(|(node, _)| **node != replica && !st.replicas.contains(*node))
+            .any(|(_, prefix)| *prefix >= held.saturating_add(slots))
+    }
+
     /// The slots a durable accept quorum decided (#263: what an outage
     /// aims at), above the pruned prefix, each with the members of the
     /// configuration its deciding ballot was bound to (the departed

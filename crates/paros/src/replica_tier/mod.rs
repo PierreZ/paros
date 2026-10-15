@@ -97,13 +97,24 @@ fn report_boot<A: Audit>(replica: &ReplicaNode, self_id: u64, audit: &A) {
     );
 }
 
+/// One drained batch: the quorum reads it confirmed and the fold head it
+/// reported. The reads are served from exactly that fold, before the next
+/// page of a deferred walk is released ([`serve_and_advance`]).
+struct Drained {
+    reads: Vec<ReadState>,
+    head: Option<Slot>,
+}
+
 /// Run the [`ReplicaReady`](paros_core::ReplicaReady) handshake once, in the
 /// node driver's order and with its seams: persist the learned records, the
 /// chosen index and a decided floor (the `BeforeSync` seam inside), send the
 /// catch-up requests (after the `AfterSyncBeforeSend` seam), report the
-/// slots the walk moved over, release the next page of a deferred walk, and
-/// hand back the quorum reads this batch confirmed: answered only now, after
-/// the walk that covers them (the node's order, `drain_ready` step 3b).
+/// slots the walk moved over, and hand back the quorum reads this batch
+/// confirmed with the fold head it reported. It does not release the next
+/// page of a deferred walk: [`serve_and_advance`] does, after the reads are
+/// answered from the fold this batch reported (the node's order,
+/// `drain_ready` step 3b, then `advance_recovery`; #550 (replica serves an
+/// unreported fold page)).
 #[tracing::instrument(level = "trace", skip_all, fields(replica = self_id))]
 async fn drain<S: LogStorage, A: Audit>(
     replica: &mut ReplicaNode,
@@ -111,7 +122,7 @@ async fn drain<S: LogStorage, A: Audit>(
     out: &Outbound,
     self_id: u64,
     audit: &A,
-) -> Result<Vec<ReadState>, RunError> {
+) -> Result<Drained, RunError> {
     let ready = replica.ready();
     let writes: Vec<WriteOp> = ready.writes().to_vec();
     let messages: Vec<(Party, paros_core::Message)> = ready
@@ -143,8 +154,71 @@ async fn drain<S: LogStorage, A: Audit>(
         let outcome = (*outcome != Outcome::Noop).then_some(outcome);
         report_applied(audit, self_id, *slot, command, outcome);
     }
+    let head = fold_head(replica);
+    // Every slot this batch reported is in the fold it hands back.
+    if let Some((last, _, _)) = committed.last() {
+        assert!(
+            head.is_some_and(|head| head >= *last),
+            "a drained batch's fold covers every slot it reported"
+        );
+    }
+    Ok(Drained {
+        reads: read_states,
+        head,
+    })
+}
+
+/// Serve the reads a drained batch confirmed from the fold that batch
+/// reported, then release the next page of a deferred walk (#550 (replica
+/// serves an unreported fold page)). The order is the node driver's
+/// (`drain_ready`: step 3b, then `advance_recovery`): released first, the
+/// core folds the next page at once, while its writes and its `committed`
+/// report wait for the next batch, and a read would be served from slots the
+/// replica has neither persisted nor reported. Witness 147148122662988833
+/// (with a local rename amplification), `log_read_served`: a rebooted
+/// replica paging its catch-up served `next_seq` 11 with slot 42 unreported.
+///
+/// On a tick, `expire` carries the tick count and the confirmation window:
+/// the long-polls whose wait ran out are answered here too, from the same
+/// reported fold, before the release.
+fn serve_and_advance<A: Audit>(
+    reads: &mut JournalReads,
+    drained: &Drained,
+    replica: &mut ReplicaNode,
+    expire: Option<(u64, u64)>,
+    me: NodeId,
+    audit: &A,
+) {
+    assert!(
+        fold_head(replica) == drained.head,
+        "a replica serves reads from the fold its last batch reported"
+    );
+    serve_reads(reads, &drained.reads, replica, me, audit);
+    if let Some((ticks, retry_ticks)) = expire {
+        reads.expire(
+            |from, limit, bytes| replica.read_log(from, limit, bytes),
+            ticks,
+            retry_ticks,
+            false,
+            me,
+            audit,
+        );
+    }
+    assert!(
+        fold_head(replica) == drained.head,
+        "serving reads never moves the fold"
+    );
     replica.advance_recovery();
-    Ok(read_states)
+    assert!(
+        fold_head(replica) >= drained.head,
+        "releasing the next page never rewinds the fold"
+    );
+    if !drained.reads.is_empty() && fold_head(replica) > drained.head {
+        // The path #550 (replica serves an unreported fold page) broke: a
+        // read confirmed in the batch that ends a page, answered before the
+        // next page folds.
+        moonpool_assertions::reachable!("a replica serves a read before its next apply page");
+    }
 }
 
 /// The last slot of this replica's journal fold — what a read is served
@@ -327,9 +401,12 @@ where
 
     // The boot may already carry a batch: records learned above the prefix
     // before the crash complete it on the way back up.
-    drain(&mut replica, &mut storage, &out, self_id, audit).await?;
-
     let mut reads = JournalReads::default();
+    let booted = drain(&mut replica, &mut storage, &out, self_id, audit).await?;
+    // Nothing is parked yet: the boot batch confirms no read.
+    assert!(booted.reads.is_empty(), "a boot batch confirms no read");
+    serve_and_advance(&mut reads, &booted, &mut replica, None, me_id, audit);
+
     let journal = replica.config().journal;
     let mut ticks: u64 = 0;
     let time = providers.time().clone();
@@ -344,8 +421,8 @@ where
                 }
                 trace_received(self_id, &msg);
                 replica.step(msg);
-                let served = drain(&mut replica, &mut storage, &out, self_id, audit).await?;
-                serve_reads(&mut reads, &served, &replica, me_id, audit);
+                let drained = drain(&mut replica, &mut storage, &out, self_id, audit).await?;
+                serve_and_advance(&mut reads, &drained, &mut replica, None, me_id, audit);
             }
             Some((req, reply)) = log_reads.recv() => {
                 // A journal `Read` (#204): a leaderless read served from this
@@ -360,23 +437,16 @@ where
                     continue;
                 }
                 open_read(&mut replica, &mut reads, &req, reply, &tunables, audit);
-                let served = drain(&mut replica, &mut storage, &out, self_id, audit).await?;
-                serve_reads(&mut reads, &served, &replica, me_id, audit);
+                let drained = drain(&mut replica, &mut storage, &out, self_id, audit).await?;
+                serve_and_advance(&mut reads, &drained, &mut replica, None, me_id, audit);
             }
             _ = time.sleep(next_tick.saturating_sub(time.now())) => {
                 next_tick = time.now() + tunables.tick_interval;
                 ticks += 1;
                 replica.tick();
-                let served = drain(&mut replica, &mut storage, &out, self_id, audit).await?;
-                serve_reads(&mut reads, &served, &replica, me_id, audit);
-                reads.expire(
-                    |from, limit, bytes| replica.read_log(from, limit, bytes),
-                    ticks,
-                    tunables.read_retry_ticks,
-                    false,
-                    me_id,
-                    audit,
-                );
+                let drained = drain(&mut replica, &mut storage, &out, self_id, audit).await?;
+                let expire = Some((ticks, tunables.read_retry_ticks));
+                serve_and_advance(&mut reads, &drained, &mut replica, expire, me_id, audit);
                 if let Some((hole, above)) = replica.replica().chosen_gap() {
                     audit.chosen_gap(NodeId(self_id), hole, above);
                     tracing::info!(replica = self_id, hole = hole.0, above = above.0, "chosen_gap");
