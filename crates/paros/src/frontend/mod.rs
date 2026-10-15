@@ -25,7 +25,11 @@
 //! cannot be read, the frontend resolves from the fold it holds.
 //!
 //! **Trust** (§3.5): the network is the boundary. A frontend holds no key
-//! and no state that survives it; nodes do no authorization.
+//! and no state that survives it; nodes do no authorization. A token is
+//! checked against the universe entry's root public keys, read with the
+//! universe directory and read again, once, when a token does not verify
+//! (a key rotated in since, #245 (Biscuit tokens)); until a first read the
+//! [`Authz`]'s own pin rules.
 //!
 //! Until placement (#212) the frontend fronts the cell's founding members,
 //! which serve every journal; and since `Resolve` (#216) names no frontend
@@ -358,12 +362,29 @@ where
         Named::Internal(_) => Target::Internal,
     };
     let now = shared.settings.epoch + moonpool_core::TimeProvider::now(shared.providers.time());
-    let request = Request {
+    let keys = routes::keys(shared, false).await;
+    let refreshed;
+    let mut request = Request {
         operation,
         target,
         now,
+        keys: keys.as_deref(),
     };
-    if let Err(denial) = shared.authz.authorize(&entry.token, &request) {
+    let mut checked = shared.authz.authorize(&entry.token, &request);
+    if checked == Err(Denial::InvalidToken) && keys.is_some() {
+        // The token may be signed by a key the universe entry took since
+        // the frontend last read it (a rotation): read the keys again,
+        // once, and check again.
+        refreshed = routes::keys(shared, true).await;
+        if refreshed != keys {
+            moonpool_assertions::reachable!(
+                "frontend: a token is checked again against root keys read afresh"
+            );
+            request.keys = refreshed.as_deref();
+            checked = shared.authz.authorize(&entry.token, &request);
+        }
+    }
+    if let Err(denial) = checked {
         assert!(
             denial != Denial::Malformed,
             "an Authz never answers malformed"

@@ -3,6 +3,7 @@
 
 use std::time::{Duration, SystemTime};
 
+use paros::fleet::RootKeyEntry;
 use paros::frontend::{Authz, Denial, Operation, Request, Target};
 use paros_authz_biscuit::{
     BiscuitAuthz, Entropy, Grant, KeyRing, Role, RootKey, mint, since_epoch,
@@ -31,6 +32,7 @@ fn call(operation: Operation, target: Target<'_>, late: Duration) -> Request<'_>
         operation,
         target,
         now: since_epoch(minted_at()) + late,
+        keys: None,
     }
 }
 
@@ -106,4 +108,57 @@ fn an_admin_token_reaches_internal_journals_and_a_rotated_in_key_verifies() {
         old_only.authorize(&admin, &call(Operation::Read, ORDERS, Duration::ZERO)),
         Err(Denial::InvalidToken)
     );
+}
+
+fn entry(key: &RootKey) -> RootKeyEntry {
+    let public = key.public();
+    RootKeyEntry {
+        key_id: public.key_id(),
+        label: public.label().into(),
+        public_key: public.key_text(),
+    }
+}
+
+#[test]
+fn the_universe_entry_keys_rule_over_the_pin() {
+    let pinned = RootKey::generate("pinned", &Entropy::from_bytes([1; 32]));
+    let added = RootKey::generate("added", &Entropy::from_bytes([3; 32]));
+    let authz = BiscuitAuthz::new(KeyRing::new([pinned.public()]).unwrap());
+    let by_pinned = token(&pinned, Role::Admin);
+    let by_added = token(&added, Role::Admin);
+    let at = |keys| Request {
+        keys,
+        ..call(Operation::Write, Target::Internal, Duration::ZERO)
+    };
+    // No keys read yet, or none held: the pin rules.
+    assert_eq!(authz.authorize(&by_pinned, &at(None)), Ok(()));
+    assert_eq!(authz.authorize(&by_pinned, &at(Some(&[]))), Ok(()));
+    assert_eq!(
+        authz.authorize(&by_added, &at(None)),
+        Err(Denial::InvalidToken)
+    );
+    // The entry holds both: both verify.
+    let both = [entry(&pinned), entry(&added)];
+    assert_eq!(authz.authorize(&by_added, &at(Some(&both))), Ok(()));
+    assert_eq!(authz.authorize(&by_pinned, &at(Some(&both))), Ok(()));
+    // The pinned key removed from the entry: it no longer verifies.
+    let rotated = [entry(&added)];
+    assert_eq!(
+        authz.authorize(&by_pinned, &at(Some(&rotated))),
+        Err(Denial::InvalidToken)
+    );
+}
+
+#[test]
+fn an_idle_machine_call_needs_an_admin_token() {
+    let key = RootKey::generate("pin", &Entropy::from_bytes([1; 32]));
+    let authz = BiscuitAuthz::new(KeyRing::new([key.public()]).unwrap());
+    let admin = token(&key, Role::Admin);
+    let tenant = token(&key, Role::Tenant("acme".into()));
+    for op in [Operation::FormCell, Operation::Admit] {
+        let request = call(op, Target::Internal, Duration::ZERO);
+        assert_eq!(authz.authorize(&admin, &request), Ok(()));
+        assert_eq!(authz.authorize(&tenant, &request), Err(Denial::Forbidden));
+        assert_eq!(authz.authorize(b"", &request), Err(Denial::InvalidToken));
+    }
 }

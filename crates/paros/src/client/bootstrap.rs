@@ -54,7 +54,8 @@ pub enum InitOutcome {
     Formed(CellPlan),
     /// The machine answered, and refused: its label (`not_a_member`,
     /// `stateless_member`, `other_cell_init`, `cell_lost`, `malformed`,
-    /// `storage`).
+    /// `storage`, or a refused token, `invalid_token`, `expired`,
+    /// `forbidden`, #245).
     Refused(String),
     /// The machine answered with a plan that does not decode.
     Malformed,
@@ -79,18 +80,23 @@ const INIT_RETRY: Duration = Duration::from_millis(500);
 /// [`InitOutcome::Unreachable`]. Each attempt waits up to [`INIT_ATTEMPT`]:
 /// the machine runs both phases of the decree before it answers. Re-sending
 /// is safe: a plan any listed machine accepted is finished, never redrawn.
+/// `token` is the caller's `admin` token, which a machine with a pinned root
+/// key checks (#245 (Biscuit tokens)).
+#[allow(clippy::too_many_arguments)]
 pub async fn cell_init<P: Providers>(
     providers: &P,
     rpc: &RpcHandle<P>,
     names: &Names,
     target: &Address,
     members: &[Address],
+    token: &[u8],
     patience: Duration,
 ) -> InitOutcome {
     let time = providers.time();
     let deadline = time.now() + patience;
     let request = wire::CellInit {
         members: members.iter().map(Address::to_string).collect(),
+        token: token.to_vec(),
     };
     loop {
         let remaining = deadline.saturating_sub(time.now());
@@ -147,7 +153,8 @@ pub enum AdmitOutcome {
     /// The machine is in the cell: admitted now, or before.
     Admitted,
     /// The machine answered, and refused: its label (`other_cell`,
-    /// `in_cell_init`, `malformed`, `storage`).
+    /// `in_cell_init`, `malformed`, `storage`, or a refused token,
+    /// `invalid_token`, `expired`, `forbidden`, #245).
     Refused(String),
     /// No answer within the timeout: the admission may have landed. Send it
     /// again; an admitted machine acks its own cell's.
@@ -155,16 +162,22 @@ pub enum AdmitOutcome {
 }
 
 /// Send `admission` to the machine at `target` (#216), once, within
-/// `timeout`.
+/// `timeout`, with the caller's `admin` token, which a machine with a
+/// pinned root key checks (#245 (Biscuit tokens)).
+#[allow(clippy::too_many_arguments)]
 pub async fn admit<P: Providers>(
     providers: &P,
     rpc: &RpcHandle<P>,
     names: &Names,
     target: &Address,
     admission: &Admission,
+    token: &[u8],
     timeout: Duration,
 ) -> AdmitOutcome {
-    let request = admission.to_wire();
+    let request = wire::Admit {
+        token: token.to_vec(),
+        ..admission.to_wire()
+    };
     match call_once::<P, AdmitRpc>(providers, rpc, names, target, &request, timeout).await {
         Some(Ok(ack)) if ack.admitted => AdmitOutcome::Admitted,
         Some(Ok(ack)) => AdmitOutcome::Refused(ack.refusal),

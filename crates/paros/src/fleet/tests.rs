@@ -16,6 +16,14 @@ fn cell_control() -> JournalIdentifier {
     identifier(0xc0de, 0x52)
 }
 
+fn root_key(key_id: u32, label: &str) -> RootKeyEntry {
+    RootKeyEntry {
+        key_id,
+        label: label.into(),
+        public_key: format!("ed25519/{}", "0f".repeat(32)),
+    }
+}
+
 fn entry(command: FleetCommand) -> Vec<u8> {
     FleetEntry::new(FLEET, command).encode()
 }
@@ -110,6 +118,10 @@ fn every_entry_round_trips() {
         },
         FleetCommand::RemoveTenant {
             tenant: TenantId(300),
+        },
+        FleetCommand::AddRootKey(root_key(7, "current")),
+        FleetCommand::RemoveRootKey {
+            label: "current".into(),
         },
     ];
     for command in commands {
@@ -486,6 +498,16 @@ fn a_checkpoint_restores_the_whole_directory() {
     directory.fold(5, &mark(300, TenantState::Ready));
     directory.fold(6, &mark(301, TenantState::Removing));
     directory.fold(7, &remove(301));
+    let added = directory.fold(8, &entry(FleetCommand::AddRootKey(root_key(1, "current"))));
+    assert_eq!(added, FleetEvent::RootKeyAdded { key_id: 1 });
+    directory.fold(9, &entry(FleetCommand::AddRootKey(root_key(2, "next"))));
+    let removed = directory.fold(
+        10,
+        &entry(FleetCommand::RemoveRootKey {
+            label: "current".into(),
+        }),
+    );
+    assert_eq!(removed, FleetEvent::RootKeyRemoved { key_id: 1 });
     let state = directory.checkpoint();
     let mut restored = FleetDirectory::default();
     restored
@@ -494,9 +516,18 @@ fn a_checkpoint_restores_the_whole_directory() {
     assert_eq!(restored, directory);
     // Equal states encode to equal bytes.
     assert_eq!(restored.checkpoint(), state);
+    let keys: Vec<_> = restored.root_keys().map(|key| key.key_id).collect();
+    assert_eq!(keys, [2]);
     // The restored fold goes on like the original.
     assert_eq!(
-        restored.fold(8, &register(301, b"globex")),
+        restored.fold(11, &entry(FleetCommand::AddRootKey(root_key(1, "again")))),
+        FleetEvent::Refused(FleetDirectoryRefusal::RootKeyTaken {
+            key_id: 1,
+            label: "again".into()
+        })
+    );
+    assert_eq!(
+        restored.fold(12, &register(301, b"globex")),
         FleetEvent::Refused(FleetDirectoryRefusal::TenantIdTaken {
             tenant: TenantId(301)
         })
@@ -530,4 +561,29 @@ fn the_groups_decide_who_moves() {
     for bits in [0, 1, 2, 4, 6, 9, 15, 16] {
         assert_eq!(Groups::from_wire(bits), None, "bits {bits} name no set");
     }
+}
+
+#[test]
+fn a_root_key_needs_a_formed_fleet() {
+    let mut directory = FleetDirectory::default();
+    assert_eq!(
+        directory.fold(0, &entry(FleetCommand::AddRootKey(root_key(1, "current")))),
+        FleetEvent::Refused(FleetDirectoryRefusal::NoFleet)
+    );
+    let mut directory = formed();
+    assert_eq!(
+        directory.fold(3, &entry(FleetCommand::AddRootKey(root_key(1, "current")))),
+        FleetEvent::RootKeyAdded { key_id: 1 }
+    );
+    assert_eq!(
+        directory.fold(
+            4,
+            &entry(FleetCommand::RemoveRootKey {
+                label: "current".into()
+            })
+        ),
+        FleetEvent::Refused(FleetDirectoryRefusal::LastRootKey {
+            label: "current".into()
+        })
+    );
 }

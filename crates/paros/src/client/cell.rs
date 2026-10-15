@@ -35,6 +35,7 @@ use super::checkpoint::{CheckpointPolicy, Checkpointer};
 use super::fleet::{
     FleetRefusal, Interrupted, Run, Stage, Step, append, going_round, open, retry, settle,
 };
+use crate::frontend::Denial;
 use crate::machine::{Admission, Class, ControlJournals};
 use crate::system::{NodeStanding, Registry, SystemCommand};
 use crate::{Address, Names};
@@ -57,6 +58,9 @@ pub struct CellSession {
     founders: Vec<(NodeId, Address)>,
     cell: Checkpointer<Registry>,
     cell_open: bool,
+    /// The `admin` token every `Admit` carries (#245 (Biscuit tokens)):
+    /// empty for a cell coordinator, which holds none.
+    token: Vec<u8>,
 }
 
 impl CellSession {
@@ -82,7 +86,17 @@ impl CellSession {
             founders,
             cell: Checkpointer::new(journals.cell, seed, genesis, policy),
             cell_open: false,
+            token: Vec::new(),
         }
+    }
+
+    /// Send `token`, the operator's `admin` token, with every `Admit`: a
+    /// machine with a pinned root key refuses an admission without it
+    /// (#245 (Biscuit tokens)).
+    #[must_use]
+    pub fn with_token(mut self, token: Vec<u8>) -> Self {
+        self.token = token;
+        self
     }
 
     /// A session like [`CellSession::new`] that writes the cell control
@@ -104,6 +118,7 @@ impl CellSession {
             founders,
             cell: Checkpointer::with_uuid(journals.cell, uuid, genesis, policy),
             cell_open: false,
+            token: Vec::new(),
         }
     }
 
@@ -301,7 +316,8 @@ impl CellSession {
             admission.members.iter().any(|(id, _)| *id == node),
             "an admission names the machine it admits"
         );
-        match bootstrap::admit(providers, rpc, names, target, &admission, timeout).await {
+        let token = &self.token;
+        match bootstrap::admit(providers, rpc, names, target, &admission, token, timeout).await {
             AdmitOutcome::Admitted => {
                 self.record_admission(client, first, node).await;
                 Step::Done {
@@ -309,14 +325,7 @@ impl CellSession {
                     last: Some(Stage::Admit),
                 }
             }
-            AdmitOutcome::Refused(label) => match label.as_str() {
-                "other_cell" => Step::Refused(FleetRefusal::OtherCell { node, cell_id: 0 }),
-                "in_cell_init" => Step::Refused(FleetRefusal::InCellInit { node }),
-                "malformed" => Step::Refused(FleetRefusal::Unset),
-                _ => Step::Interrupted(Interrupted::MachineUnreachable {
-                    addr: target.clone(),
-                }),
-            },
+            AdmitOutcome::Refused(label) => admit_refused(&label, node, target),
             AdmitOutcome::Unreachable => Step::Interrupted(Interrupted::MachineUnreachable {
                 addr: target.clone(),
             }),
@@ -475,4 +484,20 @@ fn founding(
     members.dedup();
     founders.retain(|(id, _)| members.contains(id));
     (members, founders)
+}
+
+/// What a machine's refusal of `Admit` comes to.
+fn admit_refused(label: &str, node: NodeId, target: &Address) -> Step<NodeId> {
+    if let Some(denial) = Denial::of_label(label) {
+        moonpool_assertions::reachable!("admit: a pinned machine refuses an admission's token");
+        return Step::Refused(FleetRefusal::Denied { node, denial });
+    }
+    match label {
+        "other_cell" => Step::Refused(FleetRefusal::OtherCell { node, cell_id: 0 }),
+        "in_cell_init" => Step::Refused(FleetRefusal::InCellInit { node }),
+        "malformed" => Step::Refused(FleetRefusal::Unset),
+        _ => Step::Interrupted(Interrupted::MachineUnreachable {
+            addr: target.clone(),
+        }),
+    }
 }

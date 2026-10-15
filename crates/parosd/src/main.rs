@@ -119,11 +119,26 @@ async fn run(settings: Settings) -> ExitCode {
     if let Err(error) = paros::name::check_label(&name) {
         return invalid(&format!("PAROS_NAME {name:?}: {error}"));
     }
+    // The pin's wall clock is `epoch + time.now()`, read as the providers
+    // start (#245 (Biscuit tokens)).
+    let pin = match settings.pin(paros_authz_biscuit::since_epoch(
+        std::time::SystemTime::now(),
+    )) {
+        Ok(pin) => pin,
+        Err(error) => return invalid(&error),
+    };
+    if pin.is_pinned() {
+        tracing::info!(
+            keys = settings.root_public_key.len(),
+            "parosd_pinned_root_keys"
+        );
+    }
     let machine = MachineSettings {
         class: settings.class,
         capacity: settings.capacity,
         failure_domain: settings.failure_domain.clone(),
         name,
+        pin,
     };
     let disk = ProviderDisk::new(
         TokioStorageProvider::new(),

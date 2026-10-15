@@ -44,7 +44,7 @@ use tokio_util::sync::CancellationToken;
 use super::record::{MachineRecord, journal_config};
 use super::stores::{AuditScope, MachineStores};
 use super::{
-    Admission, AdmittedMachine, CachedRegistry, CellLedger, CellMachine, CellPlan, Class,
+    AdminPin, Admission, AdmittedMachine, CachedRegistry, CellLedger, CellMachine, CellPlan, Class,
     FormedCell, Joined, MachineFacts, ProviderDisk,
 };
 use crate::ControlPlan;
@@ -64,6 +64,10 @@ pub struct MachineSettings {
     /// across starts. `parosd` defaults it to the host of its advertised
     /// address.
     pub name: String,
+    /// What it checks the token of a call that puts it in a cell against
+    /// while it is idle (#245 (Biscuit tokens)): `parosd --root-public-key`,
+    /// or nothing.
+    pub pin: AdminPin,
 }
 
 /// A machine's two addresses (#257, `docs/architecture.md` §3.2): what it
@@ -346,6 +350,7 @@ where
             &mut ledger,
             &tunables,
             &transport,
+            &settings.pin,
             shutdown.clone(),
         )
         .await

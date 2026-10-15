@@ -117,6 +117,9 @@ message JournalIdentifier {
 message PrepareCell {
   // The decree's ballot: a fresh random `init_id` and the receiver's node.
   .paros.common.v1.Ballot init = 1;
+  // The `admin` token the `CellInit` carried (#245 (Biscuit tokens)): an
+  // idle machine with a pinned root key checks it.
+  bytes token = 2;
 }
 
 message PrepareCellAck {
@@ -128,7 +131,8 @@ message PrepareCellAck {
   .paros.common.v1.Ballot promise = 3;
   // The plan it accepted, at the ballot it accepted it (its `init`), if any.
   FormCell vote = 4;
-  // Why it could not answer, when it could not: "storage".
+  // Why it could not answer, when it could not: "storage", or a refused
+  // token (#245): "invalid_token", "expired", "forbidden".
   string refusal = 5;
 }
 
@@ -149,12 +153,16 @@ message FormCell {
   // The cell's first election journal (#240): a multi-writer journal of the
   // cell tenant, over which the founding members elect the cell coordinator.
   JournalIdentifier election = 7;
+  // The `admin` token the `CellInit` carried (#245): an idle machine with a
+  // pinned root key checks it. Empty in a vote a machine reports.
+  bytes token = 8;
 }
 
 message FormCellAck {
   bool formed = 1;
   // Why not, when not: "not_a_member", "other_cell", "malformed",
-  // "stateless", "storage", "promised_higher".
+  // "stateless", "storage", "promised_higher", or a refused token (#245):
+  // "invalid_token", "expired", "forbidden".
   string refusal = 2;
   // The promise that refused it, on "promised_higher".
   .paros.common.v1.Ballot promise = 3;
@@ -163,6 +171,10 @@ message FormCellAck {
 message CellInit {
   // The founding members, by address: every one an acceptor of the decree.
   repeated string members = 1;
+  // The caller's `admin` token (#245 (Biscuit tokens)): checked by the
+  // receiver and every member with a pinned root key, and sent on in the
+  // decree's `PrepareCell` and `FormCell`.
+  bytes token = 2;
 }
 
 message CellInitAck {
@@ -170,7 +182,9 @@ message CellInitAck {
   // Why not, when not: "not_a_member", "malformed", "stateless_member",
   // "member_unreachable", "contended", "other_cell_init", "cell_lost" (a
   // majority of the accepted plan's members were wiped), "cell_exists" (a
-  // member is admitted into a cell already, #216), "storage".
+  // member is admitted into a cell already, #216), "storage", or a token the
+  // receiver or a member refused (#245): "invalid_token", "expired",
+  // "forbidden".
   string refusal = 2;
   uint64 cell_id = 3;
   repeated Member members = 4;
@@ -202,13 +216,18 @@ message Admit {
   // matchmakers. An admitted machine follows the control journals from them
   // and serves the journals placed on it with their matchmaker sets.
   repeated uint64 founders = 6;
+  // The caller's `admin` token (#245 (Biscuit tokens)): an idle machine
+  // with a pinned root key checks it. A cell coordinator that finishes an
+  // admission holds none, so a pinned machine waits for the operator's.
+  bytes token = 7;
 }
 
 message AdmitAck {
   bool admitted = 1;
   // Why not, when not: "malformed", "other_cell" (the machine belongs to
   // another cell), "in_cell_init" (it promised in a `cell init` and has no
-  // cell: admitting it could put it in two cells), "storage".
+  // cell: admitting it could put it in two cells), "storage", or a refused
+  // token (#245): "invalid_token", "expired", "forbidden".
   string refusal = 2;
 }
 

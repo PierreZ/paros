@@ -172,6 +172,24 @@ pub fn refusal_text(refusal: &FleetRefusal, labels: &Labels) -> String {
                 labels.tenant(*tenant)
             )
         }
+        FleetRefusal::RootKeyTaken => "root_key_taken: another root key, in force or \
+             removed, has this key id or this label: generate a new key"
+            .into(),
+        FleetRefusal::UnknownRootKey => {
+            "unknown_root_key: no root key in force has this label".into()
+        }
+        FleetRefusal::LastRootKey => "last_root_key: the universe keeps its last root key: \
+             add the next key first"
+            .into(),
+        FleetRefusal::MalformedRootKey => {
+            "malformed_root_key: not an ed25519 public key file".into()
+        }
+        FleetRefusal::Denied { node, denial } => format!(
+            "{}: machine {} checks an admin token against its pinned root key \
+             (PAROS_ROOT_PUBLIC_KEY): pass one with --token or PAROS_TOKEN",
+            denial.as_str(),
+            labels.machine(node.0)
+        ),
     }
 }
 
@@ -195,6 +213,38 @@ pub fn steps(steps: &[Stage]) -> Vec<String> {
     steps.iter().map(|s| format!("{s:?}")).collect()
 }
 
+/// A fleet session over the servers' initialized cell, under a leader seed
+/// of its own; else how the command ends.
+pub async fn open_session(
+    providers: &TokioProviders,
+    client: &ParosClient,
+    servers: &[u64],
+) -> Result<FleetSession, Ending> {
+    let Some(journals) = control_journals(client).await else {
+        note("no server named its cell's control journals: is the cell initialized?");
+        return Err(Ending::Unreachable);
+    };
+    if journals.fleet.is_none() {
+        note("the cell names no fleet journal");
+        return Err(Ending::Refused);
+    }
+    match initialized(client, &journals).await {
+        Some(true) => {}
+        Some(false) => {
+            note("the cell control journal has no leader: run parosctl init first");
+            return Err(Ending::Refused);
+        }
+        None => {
+            note("no server served the cell control journal's state");
+            return Err(Ending::Unreachable);
+        }
+    }
+    session(client, journals, leader_seed(providers), servers).ok_or_else(|| {
+        note("the cell names no fleet journal");
+        Ending::Refused
+    })
+}
+
 /// `parosctl tenant …`.
 pub async fn run(
     providers: &TokioProviders,
@@ -204,28 +254,9 @@ pub async fn run(
     out: &Printer,
     args: TenantArgs,
 ) -> Ending {
-    let Some(journals) = control_journals(client).await else {
-        note("no server named its cell's control journals: is the cell initialized?");
-        return Ending::Unreachable;
-    };
-    if journals.fleet.is_none() {
-        note("the cell names no fleet journal");
-        return Ending::Refused;
-    }
-    match initialized(client, &journals).await {
-        Some(true) => {}
-        Some(false) => {
-            note("the cell control journal has no leader: run parosctl init first");
-            return Ending::Refused;
-        }
-        None => {
-            note("no server served the cell control journal's state");
-            return Ending::Unreachable;
-        }
-    }
-    let Some(mut fleet) = session(client, journals, leader_seed(providers), servers) else {
-        note("the cell names no fleet journal");
-        return Ending::Refused;
+    let mut fleet = match open_session(providers, client, servers).await {
+        Ok(fleet) => fleet,
+        Err(ending) => return ending,
     };
     let patience = Duration::from_millis(args.patience_ms);
     match args.command {

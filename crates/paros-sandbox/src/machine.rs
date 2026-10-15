@@ -69,6 +69,7 @@ impl Process for MachineProcess {
             capacity: 8,
             failure_domain: zone_of(index),
             name: format!("machine-{index}"),
+            pin: paros::machine::AdminPin::open(),
         };
         let listen = machine_addr(index)
             .literal()
