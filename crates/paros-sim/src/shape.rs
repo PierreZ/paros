@@ -2020,6 +2020,19 @@ fn renew_at_floor(tunables: &mut DriverTunables) {
     tunables.machine_down_after -= cut;
 }
 
+/// The longest a machine of this campaign may take over one `Resolve`
+/// answer (#549 (resolve oracle red)): the drawn bound never passes the
+/// default (`NodeShape::draw`), and the production profile ships its own.
+pub(crate) fn resolve_answer_ceiling() -> Duration {
+    DriverTunables::default()
+        .resolve_answer_within
+        .max(DriverTunables::production().resolve_answer_within)
+}
+
+/// One `Resolve` call's own round trip on the recovery tail, past the
+/// machine's answer bound: two round trips of the driver's floor.
+pub(crate) const RESOLVE_ROUND_TRIP: Duration = Duration::from_millis(2 * ROUND_TRIP_FLOOR_MS);
+
 #[cfg(test)]
 mod tests {
     use super::*;

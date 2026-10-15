@@ -166,6 +166,16 @@ impl FleetOps {
     /// position 0, so a fold longer than the bound never answered again.
     /// This is the escape check of that loop: the cause is gone, the
     /// machine must answer by itself.
+    ///
+    /// The check waits for each answer as long as a machine may take over
+    /// one, plus its round trip, whatever this operator's own patience
+    /// (#549 (resolve oracle red)). A machine answers one request at a
+    /// time, and an answer reads two tails through the cell's machines: it
+    /// routinely takes longer than a short patience (450 to 900 ms against 537 ms on
+    /// witness 6245465788840461241): the operator gave up on every ask, and
+    /// its abandoned asks queued ahead of the next one, so each answer came
+    /// back to a caller already gone. That is an impatient client, not a
+    /// silent machine.
     #[tracing::instrument(level = "debug", skip_all, fields(client = self.client_id))]
     pub(super) async fn resolve_answers(
         &self,
@@ -175,6 +185,9 @@ impl FleetOps {
     ) {
         use moonpool_sim::TimeProvider;
         let wiped = crate::machine::wiped_ids(ctx.state());
+        let patience = self
+            .patience
+            .max(crate::shape::resolve_answer_ceiling() + crate::shape::RESOLVE_ROUND_TRIP);
         // Every member is asked in each round, so one member that stays
         // silent cannot use up the others' time.
         let mut silent: Vec<(u64, _)> = cell
@@ -192,7 +205,7 @@ impl FleetOps {
                     self.connector.names(),
                     std::slice::from_ref(&addr),
                     NEVER_CREATED,
-                    self.patience,
+                    patience,
                 )
                 .await;
                 if resolution == Resolution::Unavailable {
