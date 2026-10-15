@@ -129,8 +129,9 @@ impl RootKeys {
                 label: label.to_string(),
             });
         };
+        // The client refuses this before it writes (`LastRootKey`); the
+        // fold refuses it again for two removals that race.
         if self.live.len() == 1 {
-            moonpool_assertions::reachable!("fleet: the last root key is never removed");
             return Err(FleetDirectoryRefusal::LastRootKey {
                 label: label.to_string(),
             });

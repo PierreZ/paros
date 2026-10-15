@@ -10,7 +10,7 @@
 //! which is refused: a removed key is never added again.
 
 use moonpool_sim::{assert_always, assert_reachable, buggify_with_prob};
-use paros::client::fleet::{FleetRefusal, FleetSession, Step};
+use paros::client::fleet::{FleetRefusal, FleetSession, Run, Step};
 
 use super::FleetOps;
 use crate::client::ChainClient;
@@ -28,7 +28,7 @@ impl FleetOps {
         let run = session
             .add_root_key(client, first, &signing, self.patience)
             .await;
-        judge_key(&run.outcome, false);
+        judge_key(&run, false);
         if !matches!(run.outcome, Step::Done { .. }) {
             return;
         }
@@ -39,7 +39,7 @@ impl FleetOps {
         let run = session
             .add_root_key(client, first, &rotated, self.patience)
             .await;
-        judge_key(&run.outcome, false);
+        judge_key(&run, false);
         if !matches!(run.outcome, Step::Done { .. }) || !buggify_with_prob!(0.5) {
             return;
         }
@@ -47,7 +47,7 @@ impl FleetOps {
         let run = session
             .add_root_key(client, first, &spare, self.patience)
             .await;
-        judge_key(&run.outcome, true);
+        judge_key(&run, true);
         if let Step::Done { .. } = run.outcome {
             let removed = session
                 .remove_root_key(client, first, &spare.label, self.patience)
@@ -58,13 +58,13 @@ impl FleetOps {
             {
                 assert_reachable!("fleet: an operator removes a root key it added");
             }
-            judge_key(&removed.outcome, true);
+            judge_key(&removed, true);
             if matches!(removed.outcome, Step::Done { .. }) && buggify_with_prob!(0.5) {
                 // The removed key again: its id and label are never reused.
                 let again = session
                     .add_root_key(client, first, &spare, self.patience)
                     .await;
-                judge_key(&again.outcome, true);
+                judge_key(&again, true);
                 assert_always!(
                     !matches!(again.outcome, Step::Done { .. }),
                     "fleet: a removed root key is never in force again"
@@ -74,10 +74,11 @@ impl FleetOps {
     }
 }
 
-/// What a key step came to: never refused, but the spare key (`spare`)
+/// What a key run came to, a reachable per step: never refused, but the spare key (`spare`)
 /// added again after its removal, refused as taken.
-fn judge_key<T>(outcome: &Step<T>, spare: bool) {
-    match outcome {
+fn judge_key<T>(run: &Run<T>, spare: bool) {
+    run.steps.iter().copied().for_each(super::reach);
+    match &run.outcome {
         Step::Refused(FleetRefusal::RootKeyTaken) if spare => {
             assert_reachable!("fleet: a removed root key is never added again");
         }
