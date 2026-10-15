@@ -168,6 +168,12 @@ impl CellFacts<'_> {
             founder: founder.is_some(),
             booked: self.registry.booked(id),
             bookings,
+            maintenance_ms: self
+                .registry
+                .maintenance_of(id)
+                .map(|(_, window)| window.for_ms)
+                .max()
+                .unwrap_or(0),
             ..wire::MachineView::default()
         };
         match self.registry.get(id) {
@@ -177,7 +183,7 @@ impl CellFacts<'_> {
                 class: node.class.as_str().to_string(),
                 capacity: node.capacity,
                 failure_domain: node.failure_domain.clone(),
-                standing: standing(node.standing).to_string(),
+                standing: standing(node.standing, self.registry.booked(id)).to_string(),
                 ..base
             },
             None => wire::MachineView {
@@ -236,17 +242,20 @@ impl CellFacts<'_> {
         let mut journals =
             vec![self.founders_journal(hosted.control, "control", WriterMode::Single)];
         if let Some(control) = self.tenants.iter().find(|c| c.tenant() == tenant) {
-            journals.extend(control.live().map(|(id, journal)| wire::JournalView {
-                journal: id.0,
-                name: journal.name.clone(),
-                kind: "data".to_string(),
-                writer: writer_label(journal.writer).to_string(),
-                desired: journal.desired.label(),
-                acceptors: journal.config.members().iter().map(|n| n.0).collect(),
-                matchmakers: Vec::new(),
-                desired_acceptors: journal.desired.acceptors() as u64,
-                placed: Some(config_to_proto(&journal.config)),
-                ..wire::JournalView::default()
+            journals.extend(control.live().map(|(id, journal)| {
+                let placed = self.placed(JournalIdentifier::new(tenant, id), &journal.config);
+                wire::JournalView {
+                    journal: id.0,
+                    name: journal.name.clone(),
+                    kind: "data".to_string(),
+                    writer: writer_label(journal.writer).to_string(),
+                    desired: journal.desired.label(),
+                    acceptors: placed.members().iter().map(|n| n.0).collect(),
+                    matchmakers: Vec::new(),
+                    desired_acceptors: journal.desired.acceptors() as u64,
+                    placed: Some(config_to_proto(&placed)),
+                    ..wire::JournalView::default()
+                }
             }));
         }
         Some(wire::TenantView {
@@ -259,6 +268,33 @@ impl CellFacts<'_> {
             cell_id: self.cell_id,
             journals,
         })
+    }
+
+    /// Where journal `journal`, created as `created`, is placed now: its
+    /// acceptor slots in the registry (#475 (re-place after the Down
+    /// bound)). A move off a draining or gone machine changes the members
+    /// and keeps the quorum system. A journal in the middle of a move holds
+    /// more slots than its shape, shown under a majority so it is never
+    /// judged in its desired shape. A journal with no slot (one no
+    /// coordinator placed) is placed where it was created.
+    fn placed(&self, journal: JournalIdentifier, created: &AcceptorConfig) -> AcceptorConfig {
+        let target = crate::system::BookingTarget::Journal(journal);
+        let slots: Vec<NodeId> = self
+            .registry
+            .bookings()
+            .filter(|(_, b)| b.role == crate::system::Role::Acceptor && b.target == target)
+            .map(|(_, b)| b.node)
+            .collect();
+        if slots.is_empty() {
+            return created.clone();
+        }
+        let placed = if slots.len() == created.members().len() {
+            AcceptorConfig::new(slots, created.quorum_system())
+        } else {
+            AcceptorConfig::new(slots, QuorumSystem::Majority)
+        };
+        assert!(!placed.members().is_empty(), "a placed journal has members");
+        placed
     }
 
     /// A journal the cell made on its founding members (a control journal,
@@ -299,10 +335,12 @@ impl CellFacts<'_> {
     }
 }
 
-/// A standing's label.
-fn standing(standing: NodeStanding) -> &'static str {
+/// A standing's label: a draining machine that holds no slot is drained
+/// (#359), ready for `cell remove-machine`.
+fn standing(standing: NodeStanding, booked: u64) -> &'static str {
     match standing {
         NodeStanding::Registered => "registered",
+        NodeStanding::Draining if booked == 0 => "drained",
         NodeStanding::Draining => "draining",
         NodeStanding::Retired => "retired",
     }

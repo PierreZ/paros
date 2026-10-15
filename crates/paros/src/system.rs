@@ -145,6 +145,16 @@ pub enum SystemCommand {
         /// The machine.
         id: NodeId,
     },
+    /// Open (or end, `for_ms == 0`) an operator's maintenance window over
+    /// a machine or a failure domain (#359): the cell coordinator re-places
+    /// no role of a machine it covers while the window is open.
+    Maintenance {
+        /// The machine or the failure domain.
+        scope: MaintenanceScope,
+        /// How long the window lasts, from when the coordinator first folds
+        /// the entry; `0` ends it.
+        for_ms: u64,
+    },
     /// Release a booking.
     ReleaseCapacity {
         /// The booking.
@@ -243,6 +253,17 @@ impl SystemCommand {
             SystemCommand::MachineAdmitted { id } => {
                 Kind::MachineAdmitted(wire::MachineAdmitted { id: id.0 })
             }
+            SystemCommand::Maintenance { scope, for_ms } => {
+                let (node, zone) = match scope {
+                    MaintenanceScope::Machine(id) => (id.0, String::new()),
+                    MaintenanceScope::Zone(zone) => (0, zone.clone()),
+                };
+                Kind::Maintenance(wire::Maintenance {
+                    node,
+                    zone,
+                    for_ms: *for_ms,
+                })
+            }
             SystemCommand::ReleaseCapacity { booking } => {
                 Kind::ReleaseCapacity(wire::ReleaseCapacity { booking: *booking })
             }
@@ -319,6 +340,10 @@ impl SystemCommand {
             },
             Kind::MachineAdmitted(admitted) => SystemCommand::MachineAdmitted {
                 id: NodeId(admitted.id),
+            },
+            Kind::Maintenance(window) => SystemCommand::Maintenance {
+                scope: MaintenanceScope::from_wire(window.node, window.zone)?,
+                for_ms: window.for_ms,
             },
             Kind::ReleaseCapacity(release) => SystemCommand::ReleaseCapacity {
                 booking: release.booking,
@@ -514,6 +539,54 @@ impl NodeStanding {
     }
 }
 
+/// What a maintenance window covers (#359): one machine, or every machine
+/// of one failure domain.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum MaintenanceScope {
+    /// One machine.
+    Machine(NodeId),
+    /// Every machine of a failure domain (a zone).
+    Zone(String),
+}
+
+impl MaintenanceScope {
+    fn from_wire(node: u64, zone: String) -> Result<Self, &'static str> {
+        match (node, zone.is_empty()) {
+            (0, false) => Ok(Self::Zone(zone)),
+            (node, true) if node != 0 => Ok(Self::Machine(NodeId(node))),
+            _ => Err("a maintenance window covers one machine or one zone"),
+        }
+    }
+
+    fn to_wire(&self) -> (u64, String) {
+        match self {
+            Self::Machine(id) => (id.0, String::new()),
+            Self::Zone(zone) => (0, zone.clone()),
+        }
+    }
+
+    /// Whether the window covers machine `id` of failure domain `zone`.
+    #[must_use]
+    pub fn covers(&self, id: NodeId, zone: &str) -> bool {
+        match self {
+            Self::Machine(machine) => *machine == id,
+            Self::Zone(domain) => domain == zone,
+        }
+    }
+}
+
+/// An open maintenance window (#359): its length and the position of the
+/// entry that opened it. A coordinator measures it on its own clock from
+/// when it first folds that entry: the registry holds no time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MaintenanceWindow {
+    /// How long it lasts, in milliseconds.
+    pub for_ms: u64,
+    /// The position of the entry that opened it: a later entry for the same
+    /// scope opens a new window.
+    pub seq: u64,
+}
+
 /// A node the registry registered.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RegisteredNode {
@@ -636,6 +709,14 @@ pub enum RegistryEvent {
         incarnation: u128,
         /// Whether the registry held it down.
         was_down: bool,
+    },
+    /// A maintenance window was opened, or ended (`for_ms == 0`), over
+    /// `scope` (#359).
+    Maintenance {
+        /// The machine or failure domain.
+        scope: MaintenanceScope,
+        /// The window's length; `0` when it ended.
+        for_ms: u64,
     },
     /// A booking was released.
     Released {
@@ -805,6 +886,8 @@ pub struct Registry {
     spent: BTreeSet<u64>,
     /// What the cell coordinator last wrote of each machine's liveness.
     liveness: BTreeMap<NodeId, Liveness>,
+    /// The open maintenance windows (#359).
+    maintenance: BTreeMap<MaintenanceScope, MaintenanceWindow>,
     next_seq: u64,
 }
 
@@ -890,6 +973,7 @@ impl Registry {
                     node.standing = NodeStanding::Retired;
                     self.bookings.retain(|_, booking| booking.node != id);
                     self.liveness.remove(&id);
+                    self.maintenance.remove(&MaintenanceScope::Machine(id));
                     RegistryEvent::Retired { id }
                 }
                 _ => RegistryEvent::Refused(RegistryRefusal::NotDraining { id }),
@@ -903,6 +987,9 @@ impl Registry {
             Some(SystemCommand::MachineDown { id, incarnation }) => self.down(id, incarnation),
             Some(SystemCommand::MachineUp { id, incarnation }) => self.up(id, incarnation),
             Some(SystemCommand::MachineAdmitted { id }) => self.admitted(id),
+            Some(SystemCommand::Maintenance { scope, for_ms }) => {
+                self.open_maintenance(seq, scope, for_ms)
+            }
             Some(SystemCommand::ReleaseCapacity { booking }) => {
                 match self.bookings.remove(&booking) {
                     Some(held) => RegistryEvent::Released {
@@ -1001,6 +1088,56 @@ impl Registry {
                 }
             }
         }
+    }
+
+    /// Open, replace or end (`for_ms == 0`) the maintenance window over
+    /// `scope`, from the entry at `seq` (#359). A machine window names a
+    /// machine of the pool: a genesis node, or one registered and not
+    /// retired.
+    fn open_maintenance(
+        &mut self,
+        seq: u64,
+        scope: MaintenanceScope,
+        for_ms: u64,
+    ) -> RegistryEvent {
+        if let MaintenanceScope::Machine(id) = &scope
+            && !self.contains(*id)
+        {
+            return RegistryEvent::Refused(RegistryRefusal::NotInPool { id: *id });
+        }
+        if for_ms == 0 {
+            return match self.maintenance.remove(&scope) {
+                Some(_) => RegistryEvent::Maintenance { scope, for_ms },
+                None => RegistryEvent::Unchanged,
+            };
+        }
+        self.maintenance
+            .insert(scope.clone(), MaintenanceWindow { for_ms, seq });
+        assert!(
+            self.maintenance.get(&scope).is_some_and(|w| w.seq == seq),
+            "a maintenance entry opens its own window"
+        );
+        RegistryEvent::Maintenance { scope, for_ms }
+    }
+
+    /// The open maintenance windows (#359), with what each covers.
+    pub fn maintenance(&self) -> impl Iterator<Item = (&MaintenanceScope, &MaintenanceWindow)> {
+        self.maintenance.iter()
+    }
+
+    /// The open maintenance windows that cover machine `id` (#359): its
+    /// own, and its failure domain's.
+    pub fn maintenance_of(
+        &self,
+        id: NodeId,
+    ) -> impl Iterator<Item = (&MaintenanceScope, &MaintenanceWindow)> {
+        let zone = self.get(id).map(|n| n.failure_domain.clone());
+        self.maintenance
+            .iter()
+            .filter(move |(scope, _)| match scope {
+                MaintenanceScope::Machine(machine) => *machine == id,
+                MaintenanceScope::Zone(domain) => zone.as_deref() == Some(domain.as_str()),
+            })
     }
 
     fn join_fleet(&mut self, joined: FleetRegistration) -> RegistryEvent {
@@ -1397,6 +1534,19 @@ impl Registry {
                 })
                 .collect(),
             dropped: self.dropped.iter().map(|t| t.0).collect(),
+            maintenance: self
+                .maintenance
+                .iter()
+                .map(|(scope, window)| {
+                    let (node, zone) = scope.to_wire();
+                    wire::MaintenanceState {
+                        node,
+                        zone,
+                        for_ms: window.for_ms,
+                        seq: window.seq,
+                    }
+                })
+                .collect(),
         }
     }
 }
@@ -1491,9 +1641,23 @@ impl Checkpointable for Registry {
         {
             return Err("a registry state hosts a tenant it cannot");
         }
+        let mut maintenance = BTreeMap::new();
+        for m in state.maintenance {
+            if m.for_ms == 0 || m.seq > covers_up_to {
+                return Err("a registry state holds a maintenance window it cannot");
+            }
+            maintenance.insert(
+                MaintenanceScope::from_wire(m.node, m.zone)?,
+                MaintenanceWindow {
+                    for_ms: m.for_ms,
+                    seq: m.seq,
+                },
+            );
+        }
         self.nodes = nodes;
         self.bookings = bookings;
         self.spent = spent;
+        self.maintenance = maintenance;
         self.liveness = liveness;
         self.fleet = fleet;
         self.hosted = hosted;

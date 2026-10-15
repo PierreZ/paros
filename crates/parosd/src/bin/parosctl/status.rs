@@ -26,7 +26,7 @@ use serde_json::{Value, json};
 use crate::Ending;
 use crate::output::{Printer, table};
 use crate::views::{
-    Asker, coordinator_text, indent, journal_label, machine_names, reply_json, state, text,
+    Asker, coordinator_text, indent, journal_label, machine_names, machine_state, reply_json, text,
 };
 
 /// `parosctl status`.
@@ -258,7 +258,7 @@ async fn tenant_status(asker: &Asker<'_>, out: &Printer, name: &str) -> Ending {
                 } else {
                     m.failure_domain.clone()
                 },
-                state(m.up).to_string(),
+                machine_state(m),
                 footprint.get(&m.node_id).copied().unwrap_or(0).to_string(),
             ]
         })

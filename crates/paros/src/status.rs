@@ -81,7 +81,7 @@ pub fn member(machine: Option<&wire::MachineView>) -> Member {
     match machine {
         None => Member::Gone,
         Some(m) if !m.up || m.standing == "retired" => Member::Gone,
-        Some(m) if m.standing == "draining" => Member::Leaving,
+        Some(m) if m.standing == "draining" || m.standing == "drained" => Member::Leaving,
         Some(_) => Member::Serving,
     }
 }

@@ -377,6 +377,9 @@ Three layers, and nothing crosses them:
   seed that draws the slow-machine scenario, its slowing of a founder may strike at most
   `LATE_WINDOW` into the tail, once the cell formed, and lasts 4–6 s
   (`paros_sim::world::slow_machine`, #424 (busyness metrics)). Likewise on a seed that draws
+  the gone-machine scenario, its crash of a machine that holds a slot may strike at most
+  `LATE_WINDOW` into the tail and lasts 13–18 s, past every `machine_replace_after`
+  (`paros_sim::world::gone_machine`, #475 (re-place after the Down bound)). Likewise on a seed that draws
   the lagging-fold scenario, half the nodes admit the registry's pool 2 s late
   (`paros::scenario::ADMIT_LATE`, #387 (unpooled joiner)), in the tail too: the hold is a bound,
   not a window, because most joiners register in the tail.

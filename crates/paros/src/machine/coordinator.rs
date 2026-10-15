@@ -31,7 +31,11 @@
 //!    that answers as a machine of this cell is written `MachineAdmitted`
 //!    once, and only then may placement book it (#511 (placement books
 //!    machines that never served)); one silent for
-//!    `machine_down_after` is written `MachineDown`. Only changes are
+//!    `machine_down_after` is written `MachineDown`. A machine held down
+//!    and silent for `machine_replace_after` is gone (#475 (re-place after
+//!    the Down bound)): the term's moves re-place its roles as a draining
+//!    machine's, unless an operator's maintenance window over it or its
+//!    zone is open (#359). Only changes are
 //!    written, never a heartbeat. The watch ends with the term, or at the
 //!    term's first write that does not land: a coordinator an admin session
 //!    fenced does not fight back. It resigns the term instead, so that the
@@ -92,7 +96,7 @@ use crate::client::{CallObserver, ClaimOutcome, Client, Server, bootstrap};
 use crate::rpc::machine as wire;
 use crate::rpc::methods::{CoordinatorInterface, JournalRequestRpc, RegisterRpc};
 use crate::rpc::{Inbound, NodeClient, ReplySender};
-use crate::system::{NodeStanding, Registry, SystemCommand};
+use crate::system::{MaintenanceScope, NodeStanding, Registry, SystemCommand};
 use crate::{Address, DriverTunables, Names};
 
 /// A served term's session and its watch over the cell's machines (#211).
@@ -252,6 +256,16 @@ async fn open_term<P: Providers>(
 pub struct Watch {
     /// How long a machine is silent before it is marked down.
     down_after: Duration,
+    /// How long a machine is silent before its roles are re-placed (#475).
+    replace_after: Duration,
+    /// When this watch first folded each open maintenance window, keyed by
+    /// what it covers, with the position of the entry that opened it
+    /// (#359): the window runs on this watch's clock from then.
+    windows: BTreeMap<MaintenanceScope, (u64, Duration)>,
+    /// The machines this watch named gone: they stay gone for the term
+    /// while a slot is booked on them, so a move started off one finishes
+    /// even when it answers again before the move ends.
+    departed: std::collections::BTreeSet<NodeId>,
     /// How often a round runs.
     every: Duration,
     /// When the watch started: a machine never heard is silent since then.
@@ -281,22 +295,36 @@ struct Probe {
 }
 
 impl Watch {
-    /// A watch started `now`, running a round `every` period and marking a
-    /// machine down after `down_after` of silence.
+    /// A watch started `now`, running a round `every` period, marking a
+    /// machine down after `down_after` of silence and naming it gone after
+    /// `replace_after` (#475).
     ///
     /// # Panics
     ///
     /// If `down_after` is not above `every`: one missed round would mark a
-    /// machine down (the tunables' floor refuses it).
+    /// machine down (the tunables' floor refuses it). If `replace_after` is
+    /// not above `down_after`: a machine would be re-placed before it is
+    /// down (the tunables' floor refuses it too).
     #[must_use]
-    pub fn new(now: Duration, every: Duration, down_after: Duration) -> Self {
+    pub fn new(
+        now: Duration,
+        every: Duration,
+        (down_after, replace_after): (Duration, Duration),
+    ) -> Self {
         assert!(!every.is_zero(), "a watch round has a period");
         assert!(
             down_after > every,
             "one missed round never marks a machine down"
         );
+        assert!(
+            replace_after > down_after,
+            "a machine is re-placed only once it is down"
+        );
         Self {
             down_after,
+            replace_after,
+            windows: BTreeMap::new(),
+            departed: std::collections::BTreeSet::new(),
             every,
             started: now,
             next: now,
@@ -311,6 +339,84 @@ impl Watch {
     #[must_use]
     pub fn ran(&self) -> bool {
         self.ran
+    }
+
+    /// The machines whose roles the term re-places at `now` (#475 (re-place
+    /// after the Down bound)): registered machines `registry` holds down
+    /// that this watch has not heard for `replace_after`, outside every open
+    /// maintenance window over them or their zone (#359), and every machine
+    /// named gone before that still holds a slot. A machine that answers
+    /// again inside the bound keeps its roles: a reboot rejoins in place.
+    ///
+    /// # Panics
+    ///
+    /// A machine named gone is not in `registry`: a watch bug.
+    pub fn gone(
+        &mut self,
+        registry: &Registry,
+        now: Duration,
+    ) -> std::collections::BTreeSet<NodeId> {
+        // Each window runs from when this watch first folded the entry that
+        // opened it: the registry holds no time.
+        let open: BTreeMap<MaintenanceScope, u64> = registry
+            .maintenance()
+            .map(|(scope, window)| (scope.clone(), window.seq))
+            .collect();
+        self.windows
+            .retain(|scope, (seq, _)| open.get(scope) == Some(seq));
+        for (scope, seq) in open {
+            self.windows.entry(scope).or_insert((seq, now));
+        }
+        self.departed.retain(|node| registry.booked(*node) > 0);
+        let mut gone = self.departed.clone();
+        for (id, node) in registry.nodes() {
+            if node.standing != NodeStanding::Registered
+                || registry.liveness(id).up
+                || gone.contains(&id)
+            {
+                continue;
+            }
+            let since = self.heard.get(&id).copied().unwrap_or(self.started);
+            if now.saturating_sub(since) < self.replace_after {
+                continue;
+            }
+            let mut windows = registry.maintenance_of(id).peekable();
+            let covered = windows.peek().is_some();
+            let held = windows.any(|(scope, window)| {
+                self.windows
+                    .get(scope)
+                    .is_some_and(|(_, seen)| now < *seen + Duration::from_millis(window.for_ms))
+            });
+            if held {
+                if registry.booked(id) > 0 {
+                    moonpool_assertions::reachable!(
+                        "coordinator: a maintenance window holds a down machine's roles"
+                    );
+                }
+                continue;
+            }
+            if covered && registry.booked(id) > 0 {
+                moonpool_assertions::reachable!(
+                    "coordinator: a maintenance window ended while its machine was down"
+                );
+            }
+            if registry.booked(id) > 0 {
+                moonpool_assertions::reachable!(
+                    "coordinator: a machine down past its bound is gone"
+                );
+                tracing::info!(machine = id.0, "machine_gone");
+            }
+            gone.insert(id);
+        }
+        self.departed
+            .extend(gone.iter().copied().filter(|n| registry.booked(*n) > 0));
+        for id in &gone {
+            assert!(
+                registry.get(*id).is_some(),
+                "a machine named gone is registered"
+            );
+        }
+        gone
     }
 
     /// Run one round if one is due at `now`, writing each change through
@@ -425,6 +531,11 @@ impl Watch {
         let registry = session.registry();
         let cell_id = session.journals().cell_id;
         let held = registry.liveness(id);
+        if !held.up && registry.booked(id) > 0 {
+            // A machine back before its roles moved keeps them: a reboot
+            // rejoins in place (#475).
+            moonpool_assertions::reachable!("coordinator: a machine marked down rejoins in place");
+        }
         match registry.get(id) {
             Some(node) if node.incarnation != incarnation => {
                 // A reboot of a registered machine: it registers again, as
@@ -568,8 +679,13 @@ struct Candidacy {
     plan: CellPlan,
     seed: u128,
     tunables: ElectionTunables,
-    /// The failure detector's timeout (#211).
-    down_after: Duration,
+    /// The failure detector's timeout (#211), and the re-placement bound
+    /// (#475).
+    down_after: (Duration, Duration),
+    /// The first term that finds a machine gone defers its re-placement by
+    /// one round (a BUGGIFY decision, #475 (re-place after the Down
+    /// bound)): the machine must still move at the next.
+    defer: bool,
     /// The leader stops renewing for one lease and a half after its first
     /// term's duties (a BUGGIFY decision: the takeover's way in).
     stall: bool,
@@ -633,7 +749,8 @@ pub(crate) fn spawn<P: Providers>(
         plan: formed.plan.clone(),
         seed: providers.random().random(),
         tunables: election,
-        down_after: tunables.machine_down_after,
+        down_after: (tunables.machine_down_after, tunables.machine_replace_after),
+        defer: moonpool_buggify::buggify_with_prob!(0.3),
         stall: moonpool_buggify::buggify_with_prob!(0.3),
         hand_off: formed.plan.members.len() > 1 && moonpool_buggify::buggify_with_prob!(0.25),
         reuse: moonpool_buggify::buggify_with_prob!(0.3),
@@ -712,6 +829,7 @@ async fn campaign<P: Providers>(
         seed,
         tunables,
         down_after,
+        mut defer,
         mut stall,
         hand_off: mut handing,
         reuse,
@@ -917,18 +1035,28 @@ async fn campaign<P: Providers>(
                             Ok(_) if watch.ran() => {
                                 if let Some((_, desk)) = desk.as_mut() {
                                     let ctx = (&providers, &rpc, &names, &client);
-                                    stepped = Some(match moves.step(ctx, session, desk).await {
-                                        None => None,
-                                        Some(step) => {
-                                            let set = sets.step(ctx, session, desk).await;
-                                            // A set's move is left mid-way once its
-                                            // handover started, so the next term
-                                            // finds it running.
-                                            set.map(|set| {
-                                                step.in_flight() || set == SetStep::HandedOver
-                                            })
-                                        }
-                                    });
+                                    let mut gone = watch.gone(session.registry(), client.now());
+                                    if defer && !gone.is_empty() {
+                                        defer = false;
+                                        gone.clear();
+                                        moonpool_assertions::reachable!(
+                                            "coordinator: a re-placement is deferred"
+                                        );
+                                    }
+                                    stepped =
+                                        Some(match moves.step(ctx, session, desk, &gone).await {
+                                            None => None,
+                                            Some(step) => {
+                                                let set =
+                                                    sets.step(ctx, session, desk, &gone).await;
+                                                // A set's move is left mid-way once its
+                                                // handover started, so the next term
+                                                // finds it running.
+                                                set.map(|set| {
+                                                    step.in_flight() || set == SetStep::HandedOver
+                                                })
+                                            }
+                                        });
                                 }
                             }
                             Ok(_) => {}

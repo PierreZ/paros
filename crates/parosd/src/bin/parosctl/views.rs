@@ -233,6 +233,16 @@ pub(crate) fn state(up: bool) -> &'static str {
     if up { "up" } else { "down" }
 }
 
+/// A machine's state: `up` or `down`, and `in maintenance` while a
+/// maintenance window over it or its zone is open (#359).
+pub(crate) fn machine_state(m: &wire::MachineView) -> String {
+    if m.maintenance_ms > 0 {
+        format!("{}, in maintenance", state(m.up))
+    } else {
+        state(m.up).to_string()
+    }
+}
+
 /// `parosctl machine …`.
 pub async fn machine(asker: &Asker<'_>, out: &Printer, args: MachineArgs) -> Ending {
     match args.command {
@@ -269,7 +279,7 @@ pub async fn machine(asker: &Asker<'_>, out: &Printer, args: MachineArgs) -> End
                         m.capacity,
                         if m.failure_domain.is_empty() { "-" } else { &m.failure_domain },
                         m.standing,
-                        state(m.up),
+                        machine_state(m),
                         if m.founder { "yes" } else { "no" },
                         self::text(&reply.cell_name),
                     );
@@ -316,7 +326,7 @@ async fn machine_list(asker: &Asker<'_>, out: &Printer, cell: Option<&str>) -> E
                     m.failure_domain.clone()
                 },
                 m.standing.clone(),
-                state(m.up).to_string(),
+                machine_state(m),
                 cpu,
                 machine,
                 disk,
@@ -650,7 +660,7 @@ pub async fn tenant_show(asker: &Asker<'_>, out: &Printer, name: &str) -> Ending
                 } else {
                     m.failure_domain.clone()
                 },
-                state(m.up).to_string(),
+                machine_state(m),
                 footprint.get(&m.node_id).copied().unwrap_or(0).to_string(),
             ]
         })
@@ -833,6 +843,7 @@ fn machine_json(m: &wire::MachineView) -> Value {
         "failure_domain": m.failure_domain,
         "standing": m.standing,
         "up": m.up,
+        "maintenance_ms": m.maintenance_ms,
         "founder": m.founder,
         "incarnation": format!("{:016x}{:016x}", m.incarnation_high, m.incarnation_low),
         "bookings": m.bookings.iter().map(|b| json!({

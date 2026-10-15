@@ -92,14 +92,18 @@ message MachineView {
   uint64 capacity = 5;
   uint64 booked = 6;
   string failure_domain = 7;
-  // "registered", "draining", "retired"; "founding" for a founding member
-  // the registry never held.
+  // "registered", "draining", "drained" (draining, no slot left, #359),
+  // "retired"; "founding" for a founding member the registry never held.
   string standing = 8;
   bool up = 9;
   fixed64 incarnation_high = 10;
   fixed64 incarnation_low = 11;
   bool founder = 12;
   repeated BookingView bookings = 13;
+  // The longest open maintenance window over the machine or its failure
+  // domain, in milliseconds, as the registry records it (#359); 0 when none
+  // is open. The window runs on the cell coordinator's clock.
+  uint64 maintenance_ms = 14;
 }
 
 message BookingView {

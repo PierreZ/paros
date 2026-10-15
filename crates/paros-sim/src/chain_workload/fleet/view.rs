@@ -370,7 +370,9 @@ fn expected_word(reply: &ViewReply, journal: &paros::wire::view::JournalView) ->
     }
     let staying = live
         .iter()
-        .filter(|id| machine(id.0).is_some_and(|m| m.standing != "draining"))
+        .filter(|id| {
+            machine(id.0).is_some_and(|m| m.standing != "draining" && m.standing != "drained")
+        })
         .count();
     let desired = usize::try_from(journal.desired_acceptors).unwrap_or(usize::MAX);
     Some(if staying == placed.members().len() && desired == staying {

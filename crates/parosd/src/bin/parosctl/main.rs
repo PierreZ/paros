@@ -456,7 +456,10 @@ fn is_view(command: &Command) -> bool {
         Command::Machine(_) | Command::Roles(_) | Command::Status(_) => true,
         Command::CellAdmin(args) => !matches!(
             args.command,
-            cell::CellAdminCommand::AddMachine { .. } | cell::CellAdminCommand::DrainMachine { .. }
+            cell::CellAdminCommand::AddMachine { .. }
+                | cell::CellAdminCommand::DrainMachine { .. }
+                | cell::CellAdminCommand::RemoveMachine { .. }
+                | cell::CellAdminCommand::Maintenance { .. }
         ),
         Command::Cell(CellCommand::Tenant(args)) => matches!(
             args.command,
@@ -491,7 +494,9 @@ async fn run_view(asker: &views::Asker<'_>, out: &Printer, command: Command) -> 
                 views::cell_show(asker, out, cell.as_deref()).await
             }
             cell::CellAdminCommand::AddMachine { .. }
-            | cell::CellAdminCommand::DrainMachine { .. } => unreachable!("not a view"),
+            | cell::CellAdminCommand::DrainMachine { .. }
+            | cell::CellAdminCommand::RemoveMachine { .. }
+            | cell::CellAdminCommand::Maintenance { .. } => unreachable!("not a view"),
         },
         Command::Cell(CellCommand::Tenant(args)) => match args.command {
             fleet::TenantCommand::Show { name } => views::tenant_show(asker, out, &name).await,

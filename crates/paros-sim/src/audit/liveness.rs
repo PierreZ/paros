@@ -10,6 +10,13 @@
 //!   coordinator that wrote one.
 //! - **Gates** — a machine marked down, a machine back up without
 //!   re-placement, a rebooted machine registered again.
+//!
+//! It also remembers which machines the coordinator ever marked down in
+//! the history it folded (#475 (re-place after the Down bound)): only such
+//! a machine may lose a slot while it stays registered. A fold that
+//! restored a checkpoint saw only part of the history.
+
+use std::collections::BTreeSet;
 
 use moonpool_sim::{assert_always, assert_reachable};
 use paros::NodeId;
@@ -20,6 +27,10 @@ use paros::system::{Registry, RegistryEvent, RegistryRefusal};
 #[derive(Clone, Debug)]
 pub(crate) struct JudgedRegistry {
     registry: Registry,
+    /// The machines a `MachineDown` named, in the history folded.
+    ever_down: BTreeSet<NodeId>,
+    /// Whether the fold restored a checkpoint: it saw part of the history.
+    restored: bool,
 }
 
 impl JudgedRegistry {
@@ -27,7 +38,15 @@ impl JudgedRegistry {
     pub(crate) fn new(genesis: impl IntoIterator<Item = NodeId>) -> Self {
         Self {
             registry: Registry::new(genesis),
+            ever_down: BTreeSet::new(),
+            restored: false,
         }
+    }
+
+    /// Whether the history folded may have marked machine `id` down: a
+    /// `MachineDown` named it, or the fold restored a checkpoint.
+    pub(crate) fn maybe_down(&self, id: NodeId) -> bool {
+        self.restored || self.ever_down.contains(&id)
     }
 
     /// The registry folded so far.
@@ -71,6 +90,9 @@ impl Checkpointable for JudgedRegistry {
     fn apply(&mut self, seq: u64, record: &[u8]) -> RegistryEvent {
         let event = self.registry.apply(seq, record);
         Self::judge(&event);
+        if let RegistryEvent::MachineDown { id } = &event {
+            self.ever_down.insert(*id);
+        }
         event
     }
 
@@ -79,6 +101,7 @@ impl Checkpointable for JudgedRegistry {
     }
 
     fn restore(&mut self, covers_up_to: u64, state: &[u8]) -> Result<(), &'static str> {
+        self.restored = true;
         self.registry.restore(covers_up_to, state)
     }
 }

@@ -34,7 +34,9 @@
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use moonpool_sim::{SimContext, assert_always, assert_reachable, buggify_with_prob};
+use moonpool_sim::{
+    RandomProvider, SimContext, assert_always, assert_reachable, buggify_with_prob,
+};
 use paros::client::checkpoint::{
     CheckpointOutcome, CheckpointPolicy, CheckpointRecord, Checkpointer, Folded, Folder,
     OpenOutcome,
@@ -614,8 +616,9 @@ impl SystemOps {
     }
 
     /// The joiners a reconfiguration may name now (#189): registered (not
-    /// draining, not retired) in the registry a seed serves, and not
-    /// reserved for retirement. Empty on a run without system journals.
+    /// draining, not retired) in the registry a seed serves. A composer
+    /// names one only once it holds a slot ([`SystemOps::hold_joiners`]).
+    /// Empty on a run without system journals.
     pub(super) async fn joinable(
         &self,
         ctx: &SimContext,
@@ -631,19 +634,82 @@ impl SystemOps {
         let Some((_, registry)) = self.read_back(ctx, nodes, draw).await else {
             return Vec::new();
         };
-        let world = crate::world::storage_world(ctx.state());
-        let world = world
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         registry
             .nodes()
-            .filter(|(id, node)| {
-                node.standing == NodeStanding::Registered
-                    && node.class == Class::Storage
-                    && !world.is_retiring_joiner(id.0)
+            .filter(|(_, node)| {
+                node.standing == NodeStanding::Registered && node.class == Class::Storage
             })
             .map(|(id, _)| id.0)
             .collect()
+    }
+
+    /// Whether `node` holds the acceptor slot of the deployment's journal a
+    /// composer books before it names the joiner (#477 (retire coordination
+    /// moves into the control journals)).
+    fn holds_slot(&self, registry: &Registry, node: NodeId) -> bool {
+        registry.bookings().any(|(_, b)| {
+            b.node == node
+                && b.role == Role::Acceptor
+                && b.target == BookingTarget::Journal(self.main)
+        })
+    }
+
+    /// Book an acceptor slot of the deployment's journal in the registry on
+    /// every joiner `members` names that holds none yet (#477 (retire
+    /// coordination moves into the control journals)). Whether every one
+    /// holds its slot: only then may a reconfiguration name them.
+    ///
+    /// The registry is the coordination: it books only a registered joiner,
+    /// and a retirement needs a draining one that holds no such slot
+    /// ([`SystemOps::registry_step`]). So a joiner a reconfiguration names
+    /// is never retired, whichever operator writes first.
+    pub(super) async fn hold_joiners(
+        &mut self,
+        ctx: &SimContext,
+        nodes: &ChainClient,
+        members: &[u64],
+        draw: u64,
+    ) -> bool {
+        let joiners: Vec<NodeId> = members
+            .iter()
+            .map(|m| NodeId(*m))
+            .filter(|m| self.joiners.iter().any(|(id, _, _)| id == m))
+            .collect();
+        if joiners.is_empty() {
+            return true;
+        }
+        let Some((_, registry)) = self.read_back(ctx, nodes, draw).await else {
+            return false;
+        };
+        let lacking: Vec<NodeId> = joiners
+            .into_iter()
+            .filter(|node| !self.holds_slot(&registry, *node))
+            .collect();
+        if lacking.is_empty() {
+            return true;
+        }
+        for node in &lacking {
+            let command = SystemCommand::BookCapacity {
+                booking: ctx.random().random::<u64>() | 1,
+                node: *node,
+                role: Role::Acceptor,
+                target: BookingTarget::Journal(self.main),
+            };
+            if !matches!(
+                self.append(ctx, nodes, self.registry, &command, draw).await,
+                Appended::At(_)
+            ) {
+                return false;
+            }
+        }
+        let Some((_, registry)) = self.read_back(ctx, nodes, draw).await else {
+            return false;
+        };
+        let held = lacking.iter().all(|node| self.holds_slot(&registry, *node));
+        if held {
+            assert_reachable!("system: a composer books a joiner's slot before it names it");
+        }
+        held
     }
 
     /// `REGISTER_NODE` / `DRAIN_NODE` / `RETIRE_NODE`: one registry entry for
@@ -731,14 +797,14 @@ impl SystemOps {
                 if standing == NodeStanding::Registered {
                     SystemCommand::DrainNode { id }
                 } else {
-                    // The operators coordinate (#189, the joiner's #198): a
-                    // joiner some reconfiguration named is never retired,
-                    // and once reserved no composer names it.
-                    if self.active
-                        && !crate::world::storage_world(ctx.state())
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .reserve_joiner_retirement(id.0)
+                    // The operators coordinate through the registry (#189,
+                    // #477 (retire coordination moves into the control
+                    // journals)): a composer books a joiner's slot before it
+                    // names it, and a draining joiner takes no booking, so
+                    // one read here, after the drain, is final.
+                    if registry
+                        .as_ref()
+                        .is_some_and(|registry| self.holds_slot(registry, id))
                     {
                         assert_reachable!(
                             "system: a retirement of a joiner a reconfiguration named is withheld"
@@ -937,7 +1003,7 @@ impl SystemOps {
                 booking,
                 node,
                 role,
-                target: BookingTarget::Journal(self.main),
+                target: BookingTarget::Journal(self.registry),
             };
             self.append(ctx, nodes, self.registry, &command, draw).await;
             return;
@@ -956,7 +1022,9 @@ impl SystemOps {
         };
         let roles: Vec<Role> = Role::of(class).collect();
         let role = roles[usize::try_from((draw >> 16) % roles.len() as u64).unwrap_or(0)];
-        let journal = self.main;
+        // The registry's own identifier: the deployment's journal's
+        // acceptor slots are the composers' (#477).
+        let journal = self.registry;
         let target = if role == Role::Matchmaker {
             BookingTarget::Set {
                 tenant: journal.tenant,
