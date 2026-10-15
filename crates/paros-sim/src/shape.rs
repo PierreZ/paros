@@ -1603,7 +1603,12 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
             // Every live journal holds one slot on each of its members
             // (#212 (placement)), so the default fits the run's few tenants
             // of three journal names each, and the extreme fills the cell.
-            let capacity = buggify_knob!(8_u64, 1_u64..4_u64);
+            // On top, every tenant's birth books its footprint (#476): the
+            // floor holds the cell tenant's, the universe tenant's and one
+            // tenant's on any one founding member, so `init` always fits and
+            // the extreme refuses a second tenant on a cell of one.
+            let floor = 3 * paros::footprint::Footprint::birth().storage();
+            let capacity = floor + buggify_knob!(8_u64, 1_u64..4_u64);
             let named = moonpool_sim::sim_random_bool(0.5) || moved;
             let move_pct = buggify_knob!(0_u32, 20_u32..81_u32);
             let rename_pct = buggify_knob!(0_u32, 20_u32..61_u32);

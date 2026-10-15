@@ -135,6 +135,11 @@ pub fn refusal_text(refusal: &FleetRefusal, labels: &Labels) -> String {
             )
         ),
         FleetRefusal::CellRemoving => "cell_removing".into(),
+        FleetRefusal::NoFootprint { tenant } => format!(
+            "no_footprint: the cell has too few free slots for tenant {}'s footprint \
+             (it is marked ERROR: delete it to free its name)",
+            labels.tenant(*tenant)
+        ),
         FleetRefusal::IdTaken => "id_taken".into(),
         FleetRefusal::NameTaken { tenant, state } => format!(
             "name_taken: tenant {} is {}{}",

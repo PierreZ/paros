@@ -123,6 +123,7 @@ fn judge(tenants: &[TenantControl], registry: &Registry) {
             { "node" => booking.node.0 }
         );
     }
+    footprints(registry);
     for control in tenants {
         let tenant = control.tenant();
         if registry.dropped(tenant) {
@@ -171,6 +172,74 @@ fn judge(tenants: &[TenantControl], registry: &Registry) {
                 );
             }
         }
+    }
+}
+
+/// The footprints' oracle (#476): every tenant the cell hosts has its
+/// footprint granted, and a footprint's coordinator slots are on
+/// `stateless` machines, one up at most; gates: a footprint whole after
+/// chaos, and a tenant's coordinator on a `stateless` machine.
+fn footprints(registry: &Registry) {
+    for tenant in registry.hosted() {
+        assert_always!(
+            registry.footprint(tenant).is_some_and(paros::system::Grant::granted),
+            "footprint: every tenant the cell hosts has its footprint",
+            { "tenant" => tenant.0 }
+        );
+    }
+    let birth = paros::footprint::Footprint::birth();
+    for (key, grant) in registry.grants() {
+        let paros::system::GrantKey::Footprint(tenant) = key else {
+            continue;
+        };
+        if !grant.granted() || registry.dropped(tenant) {
+            continue;
+        }
+        let target = BookingTarget::Tenant { tenant };
+        let held: Vec<paros::system::Booking> = registry
+            .bookings()
+            .filter(|(_, b)| b.target == target)
+            .map(|(_, b)| *b)
+            .collect();
+        let coordinators: Vec<NodeId> = held
+            .iter()
+            .filter(|b| b.role == Role::Coordinator)
+            .map(|b| b.node)
+            .collect();
+        let live = coordinators
+            .iter()
+            .filter(|node| registry.liveness(**node).up)
+            .count();
+        assert_always!(
+            live <= 1,
+            "footprint: a tenant's coordinator holds one live slot at most",
+            { "tenant" => tenant.0, "live" => live }
+        );
+        assert_always!(
+            coordinators
+                .iter()
+                .all(|node| registry.get(*node).is_some_and(|n| n.class == Class::Stateless)),
+            "footprint: a tenant's coordinator is booked on a stateless machine",
+            { "tenant" => tenant.0 }
+        );
+        if !coordinators.is_empty() {
+            assert_reachable!(
+                "footprint: a tenant's coordinator is on a stateless machine after chaos"
+            );
+        }
+        let storage = held
+            .iter()
+            .filter(|b| b.role.class() == Class::Storage)
+            .filter(|b| {
+                registry
+                    .get(b.node)
+                    .is_some_and(|n| n.standing == NodeStanding::Registered)
+            })
+            .count() as u64;
+        assert_sometimes!(
+            storage >= birth.storage(),
+            "footprint: a tenant's footprint is whole after chaos"
+        );
     }
 }
 

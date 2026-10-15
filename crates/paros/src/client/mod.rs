@@ -62,6 +62,7 @@
 //! RPC runtime, and nothing else.
 
 pub mod bootstrap;
+pub mod capacity;
 pub mod cell;
 pub mod checkpoint;
 pub mod election;

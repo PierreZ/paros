@@ -76,13 +76,16 @@ use std::time::Duration;
 
 use moonpool_core::{Detach, Providers, RandomProvider, TaskProvider, TimeProvider};
 use moonpool_rpc::{AccessClass, RpcHandle, ServiceGroup};
-use paros_core::{LeaderUuid, NodeId};
+use paros_core::{LeaderUuid, NodeId, TenantId};
 use tokio_util::sync::CancellationToken;
 
+use super::capacity;
+use super::footprints::Footprints;
 use super::moves::Moves;
 use super::sets::{SetStep, Sets};
 use super::tenants::TenantDesk;
 use super::{CellPlan, Class, ControlJournals, FormedCell, incarnation_from_halves};
+use crate::client::capacity::{CapacityAnswer, CapacityRequest};
 use crate::client::cell::CellSession;
 use crate::client::checkpoint::{CheckpointPolicy, Folder, LoadOutcome, load};
 use crate::client::election::{Candidate, Election, ElectionTunables, Leader, Step, hand_off};
@@ -90,7 +93,9 @@ use crate::client::fleet::{Interrupted, Stage, Step as FleetStep};
 use crate::client::journals::{JournalAnswer, JournalRequest};
 use crate::client::{CallObserver, ClaimOutcome, Client, Server, bootstrap};
 use crate::rpc::machine as wire;
-use crate::rpc::methods::{CoordinatorInterface, JournalRequestRpc, RegisterRpc};
+use crate::rpc::methods::{
+    CapacityRequestRpc, CoordinatorInterface, JournalRequestRpc, RegisterRpc,
+};
 use crate::rpc::{Inbound, NodeClient, ReplySender};
 use crate::system::{NodeStanding, Registry, SystemCommand};
 use crate::{Address, DriverTunables, Names};
@@ -104,6 +109,9 @@ type Requests = Inbound<JournalRequestRpc, wire::JournalRequest, wire::JournalRe
 /// The machines' `Register` endpoint (#349).
 type Registers = Inbound<RegisterRpc, wire::Register, wire::RegisterAck>;
 
+/// The tenant coordinators' capacity requests' endpoint (#476).
+type Capacities = Inbound<CapacityRequestRpc, wire::CapacityRequest, wire::CapacityRequestAck>;
+
 /// A served term's dynamic endpoint (#404 (static vs dynamic endpoints)):
 /// one moonpool group serving `Register` and `JournalRequest`, published in
 /// the election journal. Dropping it destroys the endpoint: a request sent
@@ -115,6 +123,7 @@ struct TermGroup {
     group: ServiceGroup<CoordinatorInterface>,
     registers: Registers,
     requests: Requests,
+    capacities: Capacities,
 }
 
 impl TermGroup {
@@ -127,6 +136,7 @@ impl TermGroup {
             .ok()?;
         let registers = Inbound::plain(group.serve::<RegisterRpc>().ok()?);
         let requests = Inbound::plain(group.serve::<JournalRequestRpc>().ok()?);
+        let capacities = Inbound::plain(group.serve::<CapacityRequestRpc>().ok()?);
         assert!(
             !group.endpoint().token().is_well_known(),
             "a term group is a dynamic endpoint"
@@ -136,6 +146,7 @@ impl TermGroup {
             group,
             registers,
             requests,
+            capacities,
         })
     }
 
@@ -761,6 +772,11 @@ async fn campaign<P: Providers>(
     // founders)).
     let mut moves = Moves::default();
     let mut sets = Sets::default();
+    // The served term's footprint steps (#476).
+    let internal: Vec<TenantId> = std::iter::once(journals.cell.tenant)
+        .chain(journals.fleet.map(|fleet| fleet.tenant))
+        .collect();
+    let mut footprints = Footprints::new(internal.clone());
     // The served term's dynamic endpoint (#404).
     let mut group: Option<TermGroup> = None;
     // The term whose install was slowed, until the next step judges it.
@@ -829,6 +845,7 @@ async fn campaign<P: Providers>(
                 });
                 moves = Moves::default();
                 sets = Sets::default();
+                footprints = Footprints::new(internal.clone());
                 match duty {
                     TermDuty::Served { .. } => {
                         served = Some(leader.term);
@@ -921,10 +938,17 @@ async fn campaign<P: Providers>(
                                         None => None,
                                         Some(step) => {
                                             let set = sets.step(ctx, session, desk).await;
+                                            // Then one step of a footprint (#476): a
+                                            // tenant coordinator placed, or a slot
+                                            // moved off a draining machine.
+                                            let footprint = match set {
+                                                Some(_) => footprints.step(&client, session).await,
+                                                None => None,
+                                            };
                                             // A set's move is left mid-way once its
                                             // handover started, so the next term
                                             // finds it running.
-                                            set.map(|set| {
+                                            set.zip(footprint).map(|(set, _)| {
                                                 step.in_flight() || set == SetStep::HandedOver
                                             })
                                         }
@@ -1067,9 +1091,13 @@ async fn answer_until<P: Providers>(
     shutdown: &CancellationToken,
 ) {
     loop {
-        let (registers, requests) = match group.as_deref_mut() {
-            Some(g) => (Some(&mut g.registers), Some(&mut g.requests)),
-            None => (None, None),
+        let (registers, requests, capacities) = match group.as_deref_mut() {
+            Some(g) => (
+                Some(&mut g.registers),
+                Some(&mut g.requests),
+                Some(&mut g.capacities),
+            ),
+            None => (None, None, None),
         };
         let left = until.saturating_sub(providers.time().now());
         if left.is_zero() || shutdown.is_cancelled() {
@@ -1105,6 +1133,29 @@ async fn answer_until<P: Providers>(
                         );
                         JournalAnswer::NotCoordinator
                     }
+                };
+                reply.send(answer.to_wire());
+            }
+            Some((request, reply)) = next_request(capacities) => {
+                // A tenant coordinator's capacity request (#476): decided
+                // through the term's session, its booking ids drawn by the
+                // desk.
+                let answer = match (CapacityRequest::from_wire(&request), desk.as_mut()) {
+                    (Err(_), _) => CapacityAnswer::Malformed,
+                    (Ok(_), None) => CapacityAnswer::NotCoordinator,
+                    (Ok(request), Some((_, desk))) => match watching.as_mut() {
+                        None => CapacityAnswer::Unavailable,
+                        Some((session, _)) => {
+                            let answer = capacity::grant(client, session, &request, || {
+                                desk.draw_booking()
+                            })
+                            .await;
+                            if !session.is_open() {
+                                *watching = None;
+                            }
+                            answer
+                        }
+                    },
                 };
                 reply.send(answer.to_wire());
             }

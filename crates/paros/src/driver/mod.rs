@@ -2481,7 +2481,8 @@ impl<P: Providers, J: JournalStores> SystemCtx<'_, '_, P, J> {
             .filter(|(_, b)| b.node == me && b.role == crate::system::Role::Acceptor)
             .filter_map(|(_, b)| match b.target {
                 crate::system::BookingTarget::Journal(journal) => Some(journal),
-                crate::system::BookingTarget::Set { .. } => None,
+                crate::system::BookingTarget::Set { .. }
+                | crate::system::BookingTarget::Tenant { .. } => None,
             })
             .collect();
         // The matchmaker sets booked here (#501 (matchmaker sets off the

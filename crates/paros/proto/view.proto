@@ -110,6 +110,9 @@ message BookingView {
   uint64 journal = 4;
   // The matchmaker set booked for (0 for a journal).
   uint64 set = 5;
+  // A slot of the tenant as a whole (#476): its footprint or a tenant-wide
+  // role. `journal` and `set` are 0.
+  bool tenant_level = 6;
 }
 
 // One tenant. A tenant scope sees only its own.

@@ -73,6 +73,7 @@ use crate::client::{ChainClient, Connector};
 use crate::shape::MachineLayout;
 
 mod admit;
+mod capacity;
 mod cell;
 mod converge;
 mod drain;
@@ -1195,15 +1196,7 @@ impl FleetOps {
             );
             assert_reachable!("fleet: a run ends with the cell READY in the directory");
         }
-        for (tenant, entry) in directory.tenants() {
-            if entry.groups == Groups::SERVED {
-                assert_always!(
-                    matches!(entry.state, TenantState::Ready),
-                    "fleet: no tenant is left mid-operation after chaos",
-                    { "tenant" => tenant.0, "state" => format!("{:?}", entry.state) }
-                );
-            }
-        }
+        no_tenant_mid_operation(&directory, cell);
         directory_equals_cell(&directory, cell);
     }
 
@@ -1321,6 +1314,24 @@ fn judged_cell(members: &[u64]) -> Folder<JudgedRegistry> {
 /// `MetaclusterConsistency`) for two folds of one instant: the same fleet,
 /// the cell in the directory, every tenant the cell hosts in the directory
 /// under that cell, every `READY` `users` tenant in the directory hosted.
+/// After chaos, no served tenant is left mid-operation: each is `READY`,
+/// or `ERROR` once its cell refused its footprint (#476).
+fn no_tenant_mid_operation(directory: &FleetDirectory, cell: &Registry) {
+    for (tenant, entry) in directory.tenants() {
+        if entry.groups == Groups::SERVED {
+            // A creation its cell refused for its footprint ends `ERROR`
+            // (#476): that is an end, not the middle of an operation.
+            let refused = cell.footprint(tenant).is_some_and(|g| !g.granted());
+            assert_always!(
+                matches!(entry.state, TenantState::Ready)
+                    || (entry.state == TenantState::Error && refused),
+                "fleet: no tenant is left mid-operation after chaos",
+                { "tenant" => tenant.0, "state" => format!("{:?}", entry.state) }
+            );
+        }
+    }
+}
+
 fn directory_equals_cell(directory: &FleetDirectory, cell: &Registry) {
     let (Some(fleet), Some(joined)) = (directory.fleet(), cell.fleet()) else {
         return;
@@ -1342,6 +1353,15 @@ fn directory_equals_cell(directory: &FleetDirectory, cell: &Registry) {
         );
     }
     for (tenant, entry) in directory.tenants() {
+        // A tenant is marked `ERROR` only once its cell refused its
+        // footprint (#476), and such a tenant is never hosted.
+        if entry.state == TenantState::Error {
+            assert_always!(
+                cell.footprint(tenant).is_some_and(|g| !g.granted()) && !cell.hosts(tenant),
+                "fleet: a tenant marked ERROR is one its cell refused for its footprint",
+                { "tenant" => tenant.0 }
+            );
+        }
         if entry.groups == Groups::SERVED && entry.state == TenantState::Ready {
             assert_always!(
                 cell.hosts(tenant),
@@ -1366,6 +1386,10 @@ fn reach(stage: Stage) {
             assert_reachable!("fleet: a step registers a tenant in the directory");
         }
         Stage::HostTenant => assert_reachable!("fleet: a step hosts a tenant on the cell"),
+        Stage::Footprint => assert_reachable!("fleet: a step records a tenant's footprint"),
+        Stage::TenantError => {
+            assert_reachable!("fleet: a tenant is refused for its footprint");
+        }
         Stage::TenantReady => {
             assert_reachable!("fleet: a step marks a tenant READY in the directory");
         }

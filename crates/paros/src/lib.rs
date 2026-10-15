@@ -33,6 +33,7 @@ pub mod client;
 mod corruption;
 mod driver;
 pub mod fleet;
+pub mod footprint;
 pub mod frontend;
 pub mod journal;
 pub mod load;
