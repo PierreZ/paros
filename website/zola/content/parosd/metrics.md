@@ -50,9 +50,10 @@ rate(paros_call_answer_seconds_total[5m]) / rate(paros_call_answers_total[5m])
 Use the traces to find one slow call.
 
 "journal" is four labels. `tenant` and `journal` are the names. `tenant_id` and `journal_id`
-are the ids in hex. The cell's own journals are `cell/registry`, `cell/election` and
-`universe/directory`. A tenant's control journal is `<tenant>/control`. A journal whose names
-the machine does not know yet has its ids in hex in place of the names.
+are the ids in hex. The names are the names `parosctl` prints. The cell's own journals are
+`cell/(control)`, `cell/(election)` and `universe/(directory)`. A tenant's control journal is
+`<tenant>/(control)`. A journal whose names the machine does not know yet has its ids in hex in
+place of the names.
 
 The counters start at zero when the process starts.
 

@@ -1437,8 +1437,10 @@ the code that serves never reads them.
   sent and applied; the last busyness window as `paros_machine_*` gauges, with
   `paros_machine_load_windows_total` as the heartbeat; and `paros_machine_phase` (starting,
   idle, serving). A journal's series carry four labels: `tenant` and `journal`, the names, as
-  every output gives them (§3.5), and `tenant_id` and `journal_id`, the ids in hex. A journal
-  whose names the machine does not know is named by its ids in hex.
+  every output gives them (§3.5): the cell's own journals are `cell/(control)`,
+  `cell/(election)` and `universe/(directory)`, and a tenant's control journal is
+  `<tenant>/(control)`. `tenant_id` and `journal_id` are the ids in hex. A journal whose names
+  the machine does not know is named by its ids in hex.
 - **Where it shows.** `parosd` serves the registry as Prometheus text on `/metrics` when
   `PAROS_HTTP_LISTEN` is set, with two probes: `/healthz` (`200` while the process answers) and
   `/readyz` (`200` once the machine serves its cell, `503` with its phase before). The HTTP
@@ -1592,7 +1594,10 @@ without rules, may come later (decided on 2026-10-04). **Tags will replace the g
 primitive): tenants, journals, machines and cells carry `key:value` tags. Reserved `paros/` keys
 are written only by the control plane and parsed into typed policies (`paros/kind`, `paros/role`,
 `paros/movable`, `paros/group`, a machine's class and zone, a cell's kind). User keys are opaque
-to paros. The table below stays in force until #575 lands:
+to paros. **Internal names take no prefix** (decided on 2026-10-15, #575): an internal tenant
+shows as `<kind>:<name>` (`cell:paris`, or `cell` with no name), its journals as `(control)`,
+`(election)` and `(directory)`, in every output, the metrics included; a user tenant's name
+refuses `:`. The table below stays in force until #575 lands:
 
 | Group | Rule | Members |
 |---|---|---|

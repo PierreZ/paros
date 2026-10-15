@@ -23,10 +23,12 @@ use crate::rpc::{ReadAck, ReplySender, SetLeaderAck, TruncateAck, WriteAck, Writ
 
 use super::system::ControlFollower;
 
-/// The names a journal's metrics are labelled with, `(tenant, journal)`:
-/// the cell's own journals by their role, a tenant's control journal as
-/// `control`, a tenant's journal by its name. A journal whose names this
-/// node does not know is labelled with its ids in hex.
+/// The names a journal's metrics are labelled with, `(tenant, journal)`,
+/// the names `parosctl` prints (decided on 2026-10-15, #575 (key:value
+/// tags)): the cell's own journals under the tenant `cell` or `universe`
+/// as `(control)`, `(election)` and `(directory)`, a tenant's control
+/// journal as `(control)`, a tenant's journal by its name. A journal whose
+/// names this node does not know is labelled with its ids in hex.
 pub(crate) fn journal_names<P: moonpool_core::Providers>(
     follower: Option<&ControlFollower<P>>,
     cell: Option<&ControlJournals>,
@@ -35,13 +37,13 @@ pub(crate) fn journal_names<P: moonpool_core::Providers>(
     let text = |bytes: &[u8]| String::from_utf8_lossy(bytes).into_owned();
     if let Some(cell) = cell {
         if journal == cell.cell {
-            return ("cell".into(), "registry".into());
+            return ("cell".into(), "(control)".into());
         }
         if Some(journal) == cell.election {
-            return ("cell".into(), "election".into());
+            return ("cell".into(), "(election)".into());
         }
         if Some(journal) == cell.fleet {
-            return ("universe".into(), "directory".into());
+            return ("universe".into(), "(directory)".into());
         }
     }
     if let Some(follower) = follower {
@@ -49,7 +51,7 @@ pub(crate) fn journal_names<P: moonpool_core::Providers>(
         if let Some(hosted) = hosted
             && hosted.control == journal.journal
         {
-            return (text(&hosted.name), "control".into());
+            return (text(&hosted.name), "(control)".into());
         }
         if let Some(tenant) = follower.tenant(journal.tenant)
             && let Some(created) = tenant.get(journal.journal)
