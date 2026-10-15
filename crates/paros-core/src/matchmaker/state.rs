@@ -83,8 +83,20 @@ impl JournalRegistry {
 
 /// A successor generation's initial state, handed to each of its members by
 /// the reconfigurer and held **pending** until the decree chooses that set.
-/// Stored as one record: it arrives in one message, is replaced whole, and
-/// becomes the per-record registries only at activation.
+/// It arrives one page at a time (#439 (operator calls name their journal)):
+/// a member holds the pages in journal order, and only a whole bootstrap
+/// may be chosen or activated. It becomes the per-record registries only at
+/// activation.
+///
+/// **Why pages of two reconstructions may meet.** Two reconfigurers may
+/// bootstrap one proposed set from two frozen quorums. Each reconstruction is
+/// valid journal by journal: every completed registration, effective
+/// configuration and effective floor reached a quorum of the frozen
+/// generation, so every frozen quorum's reconstruction carries it, and a
+/// journal a reconstruction leaves out had nothing to carry. Pages chain by
+/// their cursor, so a held bootstrap covers each journal exactly once, from
+/// one reconstruction or the other: valid either way. A whole bootstrap is
+/// never replaced, so a set chosen on whole bootstraps activates on them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PendingBootstrap {
@@ -93,8 +105,100 @@ pub struct PendingBootstrap {
     /// The reconstructed registry of every journal of the set (#190): per
     /// journal, the maximum watermark, the union at or above it and the
     /// maximum effective configuration over the frozen quorum. A journal
-    /// absent here has nothing to carry.
+    /// absent here has nothing to carry. While `complete` is false, the
+    /// journals up to the last one held.
     pub registries: BTreeMap<JournalId, JournalRegistry>,
+    /// Whether every page is held (#439). A reconstruction is whole when it
+    /// is made.
+    pub complete: bool,
+}
+
+impl PendingBootstrap {
+    /// The last journal held, `None` when none is: a page continues
+    /// strictly above it.
+    #[must_use]
+    pub fn held(&self) -> Option<JournalId> {
+        self.registries.keys().next_back().copied()
+    }
+
+    /// The page of this reconstruction strictly above `after`, at most
+    /// `page` journals; it is the last when nothing follows it.
+    ///
+    /// # Panics
+    ///
+    /// If `page` is zero or above [`REGISTRY_PAGE`](super::REGISTRY_PAGE),
+    /// or the bootstrap is not whole: a programmer error.
+    #[must_use]
+    pub fn page(&self, after: Option<JournalId>, page: usize) -> BootstrapPage {
+        assert!(page > 0, "a bootstrap page carries a journal");
+        assert!(
+            page <= super::REGISTRY_PAGE,
+            "a bootstrap page never exceeds its ceiling"
+        );
+        assert!(self.complete, "only a whole reconstruction is paged out");
+        let above = self
+            .registries
+            .iter()
+            .filter(|(journal, _)| after.is_none_or(|after| **journal > after));
+        let registries: BTreeMap<JournalId, JournalRegistry> = above
+            .clone()
+            .take(page)
+            .map(|(journal, registry)| (*journal, registry.clone()))
+            .collect();
+        let last = above.count() <= page;
+        let cut = BootstrapPage {
+            set: self.set.clone(),
+            after,
+            registries,
+            last,
+        };
+        // A page that is not the last is full, so it moves the cursor.
+        assert!(
+            cut.last || cut.registries.len() == page,
+            "a cut page is full"
+        );
+        assert!(
+            cut.is_well_formed(),
+            "a page of a reconstruction is well formed"
+        );
+        cut
+    }
+}
+
+/// One page of a [`PendingBootstrap`] on the wire (#439): the journals
+/// strictly above `after`, in journal order, at most
+/// [`REGISTRY_PAGE`](super::REGISTRY_PAGE) of them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct BootstrapPage {
+    /// The proposed successor set.
+    pub set: MatchmakerSet,
+    /// The cursor: the page holds the journals strictly above it (`None`:
+    /// from the first).
+    pub after: Option<JournalId>,
+    /// The page's reconstructed registries.
+    pub registries: BTreeMap<JournalId, JournalRegistry>,
+    /// Whether the page ends the reconstruction.
+    pub last: bool,
+}
+
+impl BootstrapPage {
+    /// Wire hygiene: every journal strictly above the cursor, at most a
+    /// ceiling of them, none blank, and a page that is not the last holds a
+    /// journal (else it could never move a cursor).
+    #[must_use]
+    pub fn is_well_formed(&self) -> bool {
+        self.registries.len() <= super::REGISTRY_PAGE
+            && self
+                .registries
+                .keys()
+                .all(|journal| self.after.is_none_or(|after| *journal > after))
+            && self
+                .registries
+                .values()
+                .all(|registry| !registry.is_blank())
+            && (self.last || !self.registries.is_empty())
+    }
 }
 
 /// One journal's durable scalars inside a matchmaker set (#190): its GC

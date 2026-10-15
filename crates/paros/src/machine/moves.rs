@@ -259,10 +259,7 @@ impl Moves {
                 return Some(MoveStep::Waiting);
             };
             return Some(
-                match nodes
-                    .reconfigure_journal(journal, &target, system, at)
-                    .await
-                {
+                match nodes.reconfigure(journal, &target, system, at).await {
                     ReconfigureOutcome::Started { .. } => {
                         moonpool_assertions::reachable!(
                             "coordinator: a move reconfigures its journal"

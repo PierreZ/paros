@@ -85,8 +85,8 @@ use crate::audit::Audit;
 use crate::machine::{CellMachine, ControlJournals};
 use crate::rpc::{
     InspectRefusal, InspectTarget, MatchmakerClient, MatchmakersRefusal, ReadAck,
-    ReconfigureMatchmakersAck, ReplySender, SetLeaderAck, TruncateAck, WriteAck, leader_from_proto,
-    leader_uuid_from_proto,
+    ReconfigureMatchmakersAck, ReplySender, RetireAck, RetireRefusal, SetLeaderAck, TruncateAck,
+    WriteAck, leader_from_proto, leader_uuid_from_proto,
 };
 use crate::storage::LogStorage;
 use crate::system::{NodeStanding, RegistryEvent, SystemEvent};
@@ -1605,6 +1605,8 @@ where
     // reconfigurer plus the two clocks that pace it, idle until a client asks
     // or until this node meets a frozen registry nobody finished replacing.
     let mut handovers: BTreeMap<TenantId, HandoverDriver> = BTreeMap::new();
+    // A handover pages its bootstrap by the matchmakers' page (#439).
+    let registry_page = tunables.registry_page;
     // Set by an accepted operator `Retire`: the node exits at its next tick,
     // after the ack had a beat to leave.
     let mut retiring: Option<JournalIdentifier> = None;
@@ -1865,7 +1867,7 @@ where
                 let folded = folded_answer(&reply);
                 let step = rt.node.on_match_reply(reply);
                 report_match_step(&rt.audit, self_id, matchmaker, ballot, folded, &step);
-                let handover = handovers.entry(tenant).or_insert_with(|| HandoverDriver::new(NodeId(self_id)));
+                let handover = handovers.entry(tenant).or_insert_with(|| HandoverDriver::new(NodeId(self_id), registry_page));
                 shared.with(&audits).on_match_refusal(&rt.node, handover, matchmaker, &step);
                 let outcome = shared.settle(rt).await;
                 journals.fold(journal, outcome, ticks, self_id)?;
@@ -1953,25 +1955,44 @@ where
                 // handover runs to completion on this node's own cadence.
                 // It hands over the set of the tenant the request names
                 // (#501 (matchmaker sets off the founders)), through a
-                // journal of that tenant this node serves, or the set of
-                // the node's first journal's tenant when it names none.
+                // journal of that tenant this node serves. No tenant has a
+                // default (#439 (operator calls name their journal)): an
+                // unset one, or one this node serves no journal of, is
+                // refused `unknown_tenant`; a tenant whose journals run
+                // without matchmakers, `no_matchmakers`.
                 let asked = TenantId(req.tenant);
-                let journal = if asked.0 == 0 {
-                    journals.first().map(|(journal, _)| *journal)
-                } else {
-                    journals
-                        .live
-                        .iter()
-                        .find(|(journal, rt)| journal.tenant == asked && rt.node.config().has_matchmakers())
-                        .map(|(journal, _)| *journal)
+                let serves = asked.0 != 0 && journals.live.keys().any(|journal| journal.tenant == asked);
+                let journal = journals
+                    .live
+                    .iter()
+                    .find(|(journal, rt)| asked.0 != 0 && journal.tenant == asked && rt.node.config().has_matchmakers())
+                    .map(|(journal, _)| *journal);
+                let Some(journal) = journal else {
+                    let refusal = if serves {
+                        MatchmakersRefusal::NoMatchmakers
+                    } else {
+                        moonpool_assertions::reachable!("operator: a matchmaker handover names a tenant the node does not serve");
+                        MatchmakersRefusal::UnknownTenant
+                    };
+                    tracing::info!(node = self_id, accepted = false, refusal = refusal.label(), "reconfigure_matchmakers_acked");
+                    shared.with(&node_audit).answer(
+                        Reply::ReconfigureMatchmakers,
+                        reply,
+                        ReconfigureMatchmakersAck {
+                            accepted: false,
+                            refusal: refusal.label().to_string(),
+                            generation: None,
+                        },
+                    );
+                    continue;
                 };
-                let Some(journal) = journal else { continue };
                 let tenant = journal.tenant;
-                assert!(asked.0 == 0 || tenant == asked, "a handover runs for the tenant asked");
+                assert!(tenant == asked, "a handover runs for the tenant asked");
+                assert!(tenant.0 != 0, "a handover names its tenant");
                 let audits = tenant_audits(&journals, &stores, tenant);
                 let Some(rt) = journals.live.get(&journal) else { continue };
                 let lp = shared.with(&audits);
-                let handover = handovers.entry(tenant).or_insert_with(|| HandoverDriver::new(NodeId(self_id)));
+                let handover = handovers.entry(tenant).or_insert_with(|| HandoverDriver::new(NodeId(self_id), registry_page));
                 let target: Vec<MatchmakerId> = req.members.iter().copied().map(MatchmakerId).collect();
                 let refusal = operator::reconfigure_matchmakers(&rt.node, handover, &target, |m| {
                     links.knows(*m)
@@ -2000,11 +2021,18 @@ where
             Some((req, reply)) = rpc.retire.recv() => {
                 // No settle tail: this arm only reads the core and arms a flag
                 // the tick arm acts on, so it produces no `Ready` batch. A
-                // retirement names the journal it leaves (#474), or the
-                // node's first journal on a node that serves one: it leaves
-                // that journal, and keeps serving the others (#188).
+                // retirement names the journal it leaves (#474): it leaves
+                // that journal, and keeps serving the others (#188). No
+                // journal has a default (#439 (operator calls name their
+                // journal)): an unset one, or one not live here, is refused.
                 let asked = JournalIdentifier::new(TenantId(req.tenant), paros_core::JournalId(req.journal));
-                let Some((&journal, rt)) = journals.named_or_first(asked) else { continue };
+                let Some((&journal, rt)) = journals.named(asked) else {
+                    moonpool_assertions::reachable!("operator: a retirement names a journal the node does not serve");
+                    let refusal = RetireRefusal::UnknownJournal;
+                    let ack = RetireAck { accepted: false, refusal: refusal.label().to_string() };
+                    shared.with(&node_audit).answer(Reply::Retire, reply, ack);
+                    continue;
+                };
                 let ack = operator::retire(&rt.node, &rt.audit, self_id, &req);
                 if ack.accepted {
                     retiring = Some(journal);
@@ -2013,10 +2041,16 @@ where
             }
             Some((req, reply)) = rpc.reconfigure.recv() => {
                 // An acceptor reconfiguration (#122): a matchmaker-deployment
-                // act on the journal it names (#474), or the node's one
-                // journal; a plain journal refuses it (`no_matchmakers`).
+                // act on the journal it names (#474); a plain journal refuses
+                // it (`no_matchmakers`). No journal has a default (#439
+                // (operator calls name their journal)): an unset one, or one
+                // not live here, is refused `unknown_journal`.
                 let asked = JournalIdentifier::new(TenantId(req.tenant), paros_core::JournalId(req.journal));
-                let Some((&journal, rt)) = journals.named_or_first(asked) else { continue };
+                let Some((&journal, rt)) = journals.named(asked) else {
+                    moonpool_assertions::reachable!("operator: a reconfiguration names a journal the node does not serve");
+                    shared.with(&node_audit).answer(Reply::Reconfigure, reply, operator::unknown_journal());
+                    continue;
+                };
                 let ack = operator::reconfigure(&mut rt.node, &rt.audit, self_id, &req);
                 let outcome = shared.settle(rt).await;
                 // A lost reconfiguration ack is ambiguous to the client, which
@@ -2140,7 +2174,7 @@ where
                     let takes_handover = rt.node.config().has_matchmakers() && paced.insert(journal.tenant);
                     let handover = takes_handover.then(|| {
                         (
-                            handovers.entry(journal.tenant).or_insert_with(|| HandoverDriver::new(NodeId(self_id))),
+                            handovers.entry(journal.tenant).or_insert_with(|| HandoverDriver::new(NodeId(self_id), registry_page)),
                             &audits,
                         )
                     });

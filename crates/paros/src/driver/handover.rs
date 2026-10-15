@@ -37,10 +37,13 @@ pub(crate) struct HandoverDriver {
 
 impl HandoverDriver {
     /// Idle until a client asks, or until this node meets a frozen registry
-    /// nobody finished replacing.
-    pub(crate) fn new(node: NodeId) -> Self {
+    /// nobody finished replacing. `page` bounds the journals one handover
+    /// message carries (`DriverTunables::registry_page`, #439).
+    pub(crate) fn new(node: NodeId, page: usize) -> Self {
+        let mut reconfigurer = MatchmakerReconfigurer::new(node);
+        reconfigurer.set_page(page.clamp(1, paros_core::REGISTRY_PAGE));
         let driver = Self {
-            reconfigurer: MatchmakerReconfigurer::new(node),
+            reconfigurer,
             resend: Cadence::default(),
             backoff: 0,
         };

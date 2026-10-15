@@ -56,8 +56,8 @@ use crate::membership::{AcceptorConfig, QuorumSystem};
 
 use super::SuccessorDecree;
 use super::{
-    JournalRegistry, MatchmakerId, MatchmakerSet, PendingBootstrap, ReconfigureReply,
-    ReconfigureRequest, raise_effective,
+    JournalRegistry, MatchmakerId, MatchmakerSet, PendingBootstrap, REGISTRY_PAGE,
+    ReconfigureReply, ReconfigureRequest, raise_effective,
 };
 use crate::types::{Ballot, JournalId, NodeId};
 
@@ -83,8 +83,11 @@ pub enum ReconfigurerPhase {
         /// proposes the members that answered the freeze.
         target: Option<Vec<MatchmakerId>>,
         /// The frozen registries collected so far, every journal's per
-        /// member (#190).
+        /// member (#190), from the members whose report is whole.
         acks: BTreeMap<MatchmakerId, BTreeMap<JournalId, JournalRegistry>>,
+        /// The pages of a report still cut short (#439), per member: the
+        /// journals so far and the cursor its next page starts after.
+        partial: BTreeMap<MatchmakerId, (BTreeMap<JournalId, JournalRegistry>, JournalId)>,
         /// The highest decree ballot any frozen member reported promised:
         /// the decree opens strictly above it (see `decree_promised` on
         /// [`ReconfigureReply::Stopped`]).
@@ -96,8 +99,11 @@ pub enum ReconfigurerPhase {
         old: MatchmakerSet,
         /// The reconstruction, addressed to every member of the proposed set.
         bootstrap: PendingBootstrap,
-        /// Members that durably hold it.
+        /// Members that durably hold it whole.
         acks: BTreeSet<MatchmakerId>,
+        /// The last journal each member reported it holds of a bootstrap
+        /// still cut short (#439): its next page starts after it.
+        held: BTreeMap<MatchmakerId, Option<JournalId>>,
         /// The stop quorum's decree floor, carried to the decree.
         decree_floor: Ballot,
     },
@@ -305,6 +311,14 @@ pub struct MatchmakerReconfigurer {
     /// Driver ticks since the running phase last made progress (see
     /// [`MatchmakerReconfigurer::stalled_for`]).
     elapsed: u64,
+    /// The most journals one bootstrap page carries (#439): a tunable in
+    /// `1..=REGISTRY_PAGE`, the constant by default
+    /// ([`MatchmakerReconfigurer::set_page`]).
+    page: usize,
+    /// The smallest page a frozen member cut its report at in this handover
+    /// (#439): the bootstrap is paged no wider, so a successor meets pages
+    /// no larger than the set's own members send.
+    cut: Option<usize>,
 }
 
 impl MatchmakerReconfigurer {
@@ -322,10 +336,30 @@ impl MatchmakerReconfigurer {
             phase: ReconfigurerPhase::Idle,
             pending: Vec::new(),
             elapsed: 0,
+            page: REGISTRY_PAGE,
+            cut: None,
         };
         assert!(!reconfigurer.is_busy(), "a fresh reconfigurer is idle");
         reconfigurer.assert_invariants();
         reconfigurer
+    }
+
+    /// The driver sets the bootstrap page size (#439): the most journals
+    /// one `Bootstrap` carries. A small page makes a reconstruction span
+    /// several pages.
+    ///
+    /// # Panics
+    ///
+    /// If `page` is zero or above [`REGISTRY_PAGE`]: a programmer error,
+    /// never an operating condition.
+    pub fn set_page(&mut self, page: usize) {
+        assert!(page > 0, "a bootstrap page carries a journal");
+        assert!(
+            page <= REGISTRY_PAGE,
+            "a bootstrap page never exceeds its ceiling"
+        );
+        self.page = page;
+        assert!(self.page == page, "the driver's page is in force");
     }
 
     /// The handover's per-phase invariants: who may have answered, which
@@ -346,11 +380,21 @@ impl MatchmakerReconfigurer {
                 assert!(self.elapsed == 0, "an idle reconfigurer's clock is stopped");
             }
             ReconfigurerPhase::Stopping {
-                old, target, acks, ..
+                old,
+                target,
+                acks,
+                partial,
+                ..
             } => {
                 assert!(
                     acks.keys().all(|m| old.contains(*m)),
                     "only members of the replaced generation acknowledge its freeze"
+                );
+                assert!(
+                    partial
+                        .keys()
+                        .all(|m| old.contains(*m) && !acks.contains_key(m)),
+                    "a report still cut short is a member's that is not whole"
                 );
                 assert!(
                     target.as_ref().is_none_or(|t| !t.is_empty()),
@@ -361,8 +405,18 @@ impl MatchmakerReconfigurer {
                 old,
                 bootstrap,
                 acks,
+                held,
                 ..
             } => {
+                assert!(
+                    bootstrap.complete,
+                    "a bootstrap is paged out of a whole reconstruction"
+                );
+                assert!(
+                    held.keys()
+                        .all(|m| bootstrap.set.contains(*m) && !acks.contains(m)),
+                    "a bootstrap still cut short is a member's that is not whole"
+                );
                 assert!(
                     bootstrap.set.generation == old.generation.next(),
                     "a bootstrap proposes the next generation"
@@ -534,9 +588,11 @@ impl MatchmakerReconfigurer {
             old: current.clone(),
             target,
             acks: BTreeMap::new(),
+            partial: BTreeMap::new(),
             decree_floor: Ballot::zero(),
         };
         self.elapsed = 0;
+        self.cut = None;
         self.resend();
         assert!(
             matches!(self.phase, ReconfigurerPhase::Stopping { .. }),
@@ -643,6 +699,7 @@ impl MatchmakerReconfigurer {
             target,
             acks,
             decree_floor,
+            ..
         } = &mut self.phase
         else {
             return None;
@@ -705,6 +762,7 @@ impl MatchmakerReconfigurer {
         let bootstrap = PendingBootstrap {
             set: MatchmakerSet::new(old.generation.next(), target),
             registries,
+            complete: true,
         };
         assert!(
             holds_nothing_below(&bootstrap.registries),
@@ -731,6 +789,7 @@ impl MatchmakerReconfigurer {
             old: old.clone(),
             bootstrap: bootstrap.clone(),
             acks: BTreeSet::new(),
+            held: BTreeMap::new(),
             decree_floor: *decree_floor,
         };
         self.elapsed = 0;
@@ -755,33 +814,11 @@ impl MatchmakerReconfigurer {
     pub fn resend(&mut self) {
         let me = self.node;
         let queued = self.pending.len();
-        let mut queue: Vec<(MatchmakerId, ReconfigureRequest)> = Vec::new();
+        let mut queue = self.paged_requests();
         match &mut self.phase {
-            ReconfigurerPhase::Idle => {}
-            ReconfigurerPhase::Stopping { old, acks, .. } => {
-                for m in old.members().iter().filter(|m| !acks.contains_key(m)) {
-                    queue.push((
-                        *m,
-                        ReconfigureRequest::Stop {
-                            from: me,
-                            generation: old.generation,
-                        },
-                    ));
-                }
-            }
-            ReconfigurerPhase::Bootstrapping {
-                bootstrap, acks, ..
-            } => {
-                for m in bootstrap.set.members().iter().filter(|m| !acks.contains(m)) {
-                    queue.push((
-                        *m,
-                        ReconfigureRequest::Bootstrap {
-                            from: me,
-                            bootstrap: bootstrap.clone(),
-                        },
-                    ));
-                }
-            }
+            ReconfigurerPhase::Idle
+            | ReconfigurerPhase::Stopping { .. }
+            | ReconfigurerPhase::Bootstrapping { .. } => {}
             ReconfigurerPhase::Deciding {
                 old,
                 bootstrap,
@@ -850,6 +887,73 @@ impl MatchmakerReconfigurer {
         }
         self.pending.extend(queue);
         self.assert_requests_since(queued);
+    }
+
+    /// The most journals one bootstrap page carries (#439): the driver's
+    /// page, no wider than the smallest page a frozen member cut its report
+    /// at.
+    fn bootstrap_page(&self) -> usize {
+        let page = self.cut.map_or(self.page, |cut| cut.min(self.page));
+        assert!(page > 0, "a bootstrap page carries a journal");
+        assert!(
+            page <= self.page,
+            "a bootstrap page is no wider than the driver's"
+        );
+        page
+    }
+
+    /// The paged phases' re-sends (#439): each member not counted yet is
+    /// asked for the page after the last one it answered.
+    fn paged_requests(&self) -> Vec<(MatchmakerId, ReconfigureRequest)> {
+        let me = self.node;
+        let page = self.bootstrap_page();
+        let mut queue = Vec::new();
+        match &self.phase {
+            ReconfigurerPhase::Stopping {
+                old, acks, partial, ..
+            } => {
+                for m in old.members().iter().filter(|m| !acks.contains_key(m)) {
+                    queue.push((
+                        *m,
+                        ReconfigureRequest::Stop {
+                            from: me,
+                            generation: old.generation,
+                            after: partial.get(m).map(|(_, cursor)| *cursor),
+                        },
+                    ));
+                }
+            }
+            ReconfigurerPhase::Bootstrapping {
+                bootstrap,
+                acks,
+                held,
+                ..
+            } => {
+                for m in bootstrap.set.members().iter().filter(|m| !acks.contains(m)) {
+                    let after = held.get(m).copied().flatten();
+                    queue.push((
+                        *m,
+                        ReconfigureRequest::Bootstrap {
+                            from: me,
+                            bootstrap: bootstrap.page(after, page),
+                        },
+                    ));
+                }
+            }
+            ReconfigurerPhase::Idle
+            | ReconfigurerPhase::Deciding { .. }
+            | ReconfigurerPhase::Publishing { .. } => {}
+        }
+        // Only a member that has not answered whole is asked again.
+        assert!(
+            queue.iter().all(|(m, _)| match &self.phase {
+                ReconfigurerPhase::Stopping { acks, .. } => !acks.contains_key(m),
+                ReconfigurerPhase::Bootstrapping { acks, .. } => !acks.contains(m),
+                _ => false,
+            }),
+            "a re-send asks only a member not counted yet"
+        );
+        queue
     }
 
     /// A re-send's postconditions: it only adds requests, each in this
@@ -926,11 +1030,14 @@ impl MatchmakerReconfigurer {
             ReconfigurerPhase::Stopping {
                 old,
                 acks,
+                partial,
                 decree_floor,
                 ..
             } => {
                 let ReconfigureReply::Stopped {
                     generation,
+                    after,
+                    next,
                     registries,
                     successor,
                     decree_promised,
@@ -946,7 +1053,7 @@ impl MatchmakerReconfigurer {
                     self.abort();
                     return ReconfigurerStep::Superseded { successor };
                 }
-                if acks.insert(from, registries).is_some() {
+                if acks.contains_key(&from) {
                     // A member that already answered: the freeze is
                     // idempotent, so a re-sent `Stop` is answered again and
                     // the second copy moves nothing. Reporting it as
@@ -955,7 +1062,51 @@ impl MatchmakerReconfigurer {
                     // for the rest of a run.
                     return ReconfigurerStep::Ignored;
                 }
+                // A page counts only where it continues the member's report
+                // (#439): a stale or duplicated page moves nothing. Wire
+                // hygiene: at most a ceiling of journals, all above the
+                // cursor, and a cut page continues after its last journal.
+                let cursor = partial.get(&from).map(|(_, cursor)| *cursor);
+                let well_formed = registries.len() <= REGISTRY_PAGE
+                    && registries
+                        .keys()
+                        .all(|journal| after.is_none_or(|after| *journal > after))
+                    && next.is_none_or(|next| registries.keys().next_back() == Some(&next));
+                if after != cursor || !well_formed {
+                    return ReconfigurerStep::Ignored;
+                }
+                let width = registries.len();
+                let mut report = partial
+                    .remove(&from)
+                    .map(|(report, _)| report)
+                    .unwrap_or_default();
+                report.extend(registries);
                 *decree_floor = (*decree_floor).max(decree_promised);
+                if let Some(next) = next {
+                    // A cut page is full: the member's page is its width.
+                    assert!(width > 0, "a cut frozen page carries a journal");
+                    self.cut = Some(self.cut.map_or(width, |cut| cut.min(width)));
+                    // The report continues: ask its next page now.
+                    partial.insert(from, (report, next));
+                    self.pending.push((
+                        from,
+                        ReconfigureRequest::Stop {
+                            from: self.node,
+                            generation,
+                            after: Some(next),
+                        },
+                    ));
+                    return ReconfigurerStep::Stopped {
+                        remaining: old.quorum_size().saturating_sub(acks.len()),
+                    };
+                }
+                if after.is_some() {
+                    probe!(
+                        reachable,
+                        "handover: a reconfigurer reads a frozen registry over several pages"
+                    );
+                }
+                acks.insert(from, report);
                 // The freeze does **not** close here. A quorum is what the
                 // reconstruction *needs*, never what it should settle for:
                 // closing on the ack that completed it made every `finish`
@@ -982,14 +1133,51 @@ impl MatchmakerReconfigurer {
                 old,
                 bootstrap,
                 acks,
+                held,
                 decree_floor,
             } => {
-                let ReconfigureReply::Bootstrapped { set, .. } = reply else {
+                let ReconfigureReply::Bootstrapped {
+                    set,
+                    held: holds,
+                    complete,
+                    ..
+                } = reply
+                else {
                     return ReconfigurerStep::Ignored;
                 };
-                if set != bootstrap.set || !set.contains(from) || !acks.insert(from) {
+                if set != bootstrap.set || !set.contains(from) || acks.contains(&from) {
                     return ReconfigurerStep::Ignored;
                 }
+                if !complete {
+                    // The member holds the pages up to `holds` (#439): send
+                    // the next one now. An answer that moved nothing is no
+                    // progress; the driver's re-send cadence asks again.
+                    if held.get(&from).copied().flatten() == holds && held.contains_key(&from) {
+                        return ReconfigurerStep::Ignored;
+                    }
+                    held.insert(from, holds);
+                    if holds.is_some() {
+                        probe!(
+                            reachable,
+                            "handover: a reconfigurer sends a bootstrap over several pages"
+                        );
+                    }
+                    // `bootstrap_page` borrows all of `self`; the phase is
+                    // borrowed here, so read the two fields it reads.
+                    let page = self.cut.map_or(self.page, |cut| cut.min(self.page));
+                    self.pending.push((
+                        from,
+                        ReconfigureRequest::Bootstrap {
+                            from: self.node,
+                            bootstrap: bootstrap.page(holds, page),
+                        },
+                    ));
+                    return ReconfigurerStep::Bootstrapped {
+                        remaining: bootstrap.set.members().len() - acks.len(),
+                    };
+                }
+                held.remove(&from);
+                acks.insert(from);
                 assert!(
                     acks.len() <= bootstrap.set.members().len(),
                     "only members of the proposed set acknowledge its bootstrap"
@@ -1462,6 +1650,8 @@ mod tests {
         r.on_reply(ReconfigureReply::Stopped {
             matchmaker: MatchmakerId(0),
             generation: MatchmakerGeneration(0),
+            after: None,
+            next: None,
             registries: BTreeMap::new(),
             successor: None,
             decree_promised: Ballot::zero(),

@@ -443,6 +443,9 @@ pub enum ReconfigureOutcome {
         /// Why.
         refusal: ReconfigureRefusal,
     },
+    /// The request names no journal, or one the node asked does not serve
+    /// (#439 (operator calls name their journal)): no journal has a default.
+    UnknownJournal,
     /// A refusal label this client does not know: a newer server.
     Unrecognized {
         /// The answering node's leader hint.
@@ -468,6 +471,7 @@ impl ReconfigureOutcome {
         }
         let refusal = match ack.refusal.as_str() {
             "not_leader" => return Self::NotLeader { leader },
+            "unknown_journal" => return Self::UnknownJournal,
             "no_matchmakers" => ReconfigureRefusal::NoMatchmakers,
             "unchanged" => ReconfigureRefusal::Unchanged,
             "unknown_member" => ReconfigureRefusal::UnknownMember,
