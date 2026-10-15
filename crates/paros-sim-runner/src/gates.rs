@@ -36,9 +36,10 @@ pub struct Rare {
     pub reason: &'static str,
 }
 
-/// The declared gates the sweep may miss. A sweep runs 300 to 700 seeds
-/// before its coverage plateaus, so a gate that fires on fewer than about
-/// 1.5 % of seeds can miss one. Each rate is the number of seeds, of 810
+/// The declared gates the sweep may miss. A sweep's coverage plateaus after
+/// 170 to 700 seeds, and the runner tops it up to at least 400 before it
+/// judges these (`GATE_FLOOR_SEEDS`), so a gate that fires on fewer than
+/// about 1.5 % of seeds can miss one. Each rate is the number of seeds, of 810
 /// single-seed hunts (`sim-paros-hunt main 1`, or 1,000 where the reason
 /// says so), on which the gate fired; a hit count is no measure, because
 /// one seed can fire a gate hundreds of times. #495 owns the sites the chaos

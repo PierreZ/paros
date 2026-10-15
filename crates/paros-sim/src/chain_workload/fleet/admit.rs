@@ -55,6 +55,7 @@ impl FleetOps {
         let founders = self.layout.founders;
         let outside = founders..self.machines.len();
         let mut at_founder = false;
+        let fresh = self.admitting.is_none() && replaced.is_none();
         let mut target = match self.admitting.take().or(replaced) {
             Some(target) => target,
             None if outside.is_empty() || buggify_with_prob!(0.1) => {
@@ -73,8 +74,13 @@ impl FleetOps {
         // On its own location, a founding member the operator did not reach
         // (one that does not serve its cell yet, mid `cell init`): the
         // admission names it in no book the session holds. The library
-        // asserted on it once (hunt seed 7921884428541148436).
-        if at_founder
+        // asserted on it once (hunt seed 7921884428541148436). Also on a
+        // freshly drawn target outside the founders, and always on a
+        // downed-founder seed, whose down founder serves nothing: the gate
+        // needed a founder target and a founder unreached at once, and
+        // main's sweep at c89f86e missed it (#446).
+        if (at_founder
+            || (fresh && (crate::shape::downed_founder(ctx.state()) || buggify_with_prob!(0.1))))
             && buggify_with_prob!(0.5)
             && let Some(unreached) = self.machines[..founders.min(self.machines.len())]
                 .iter()
