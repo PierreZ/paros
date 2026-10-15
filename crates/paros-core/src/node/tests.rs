@@ -369,15 +369,17 @@ fn step_at(nodes: &mut [ColocatedNode], to: NodeId, msg: Message) {
 // Two **guard** tests (plus the acceptor-side containment below). #67 asked
 // whether a Candidate that learns a higher ballot mid-campaign can go on to win
 // at its now-stale ballot; the answer used to be yes, through the two
-// promise-raising paths that deliberately leave the campaign open: `mark_chosen`
-// (a learned `Commit`/`CatchUpResponse`) and the snapshot install #186 deleted
-// (a snapshot whose serving peer minted its promise with no quorum behind it —
-// the #88 route, uncontained by quorum intersection at n >= 5; a trim-point
-// jump moves no promise, so the route is gone for good). `try_become_leader` now
-// refuses any win whose election ballot sits below the node's own
-// `max_promised_ballot`, restoring "a leader's ballot >= its own promise".
-// These tests pin the refusal, the self-heal (the next campaign ratchets past
-// the learned promise), and the healthy re-propose the stale win used to break.
+// promise-raising paths that left the campaign open: `mark_chosen` (a learned
+// `Commit`/`CatchUpResponse`) and the snapshot install #186 deleted (a snapshot
+// whose serving peer minted its promise with no quorum behind it — the #88
+// route, uncontained by quorum intersection at n >= 5; a trim-point jump moves
+// no promise, so the route is gone for good). `try_become_leader` then refused
+// the stale win; now `mark_chosen` closes the campaign where the promise rises
+// (a live campaign's promise sits at its ballot, `assert_invariants`; witness
+// 13099780746496209636, a matchmaking phase that reached Phase 1 past its
+// promise), restoring "a leader's ballot >= its own promise". These tests pin
+// the close, the self-heal (the next campaign ratchets past the learned
+// promise), and the healthy re-propose the stale win used to break.
 
 mod acceptor;
 mod bounds;

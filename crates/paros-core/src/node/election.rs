@@ -526,23 +526,22 @@ impl ColocatedNode {
     /// Candidate -> Leader once a promise quorum holds: re-propose every
     /// recovered in-flight slot under the new ballot (gap fill), then stream.
     ///
-    /// A campaign whose ballot has fallen **below the node's own promise** is
-    /// refused even with a quorum behind it (#67/#88). Mid-election, two paths
-    /// raise `max_promised_ballot` without closing the campaign: `mark_chosen`
-    /// on a learned `Commit`/`CatchUpResponse` (and, until #186 deleted it, a
-    /// snapshot install whose serving peer minted its promise with no quorum
-    /// at all).
-    /// Winning below the own promise breaks "a leader's ballot >= its own
-    /// promise": every self-accept is skipped (`start_accept_round`'s
+    /// A campaign never wins below the node's own promise (#67/#88): a live
+    /// campaign's promise sits at its ballot (`assert_invariants`), because
+    /// every path that raises the promise past the ballot closes the
+    /// campaign, `mark_chosen` on a learned `Commit`/`CatchUpResponse`
+    /// included. That path once left the campaign open, and this gate
+    /// refused the stale win; a matchmaking phase then reached Phase 1 with
+    /// its promise past its ballot (witness 13099780746496209636 on PR #556
+    /// (tenant footprint)), so the campaign now closes where the promise
+    /// rises.
+    /// Winning below the own promise would break "a leader's ballot >= its
+    /// own promise": every self-accept is skipped (`start_accept_round`'s
     /// `ballot >= max_promised_ballot` check), so recovered slots reach
     /// the round tally but never `accepted`, `next_slot` — derived from
     /// `accepted` — lands *below* an in-flight slot, and a later `propose`
     /// re-proposes a different command under the same `(slot, ballot)`: two
     /// values can then assemble accept quorums for one slot at n >= 5.
-    /// Refusal is a plain non-win: the election stays open and self-heals —
-    /// the next election timeout campaigns at `max(max_promised_ballot.round,
-    /// ..) + 1` (`on_check_leader`), above the promise that caused the
-    /// refusal.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0)))]
     pub(super) fn try_become_leader(&mut self) {
         // The win gate (#121): every prior configuration covered — one
@@ -551,19 +550,17 @@ impl ColocatedNode {
         if self.role != NodeRole::Candidate {
             return;
         }
+        // The #67/#88 half of the gate never refuses: a live campaign's
+        // promise sits at its ballot.
+        assert!(
+            self.acceptor.promised() == self.ballot,
+            "a live campaign's promise sits at its ballot"
+        );
         if !self.proposer.phase1_won(self.acceptor.promised()) {
-            // The #67/#88 refusal: every prior configuration is covered, but
-            // the node's own promise moved past the campaign's ballot.
-            if let Some(election) = self.proposer.election().filter(|e| e.covered()) {
-                assert!(
-                    election.ballot() < self.acceptor.promised(),
-                    "a covered campaign is refused only below its own promise"
-                );
-                probe!(
-                    reachable,
-                    "phase1: a covered campaign is refused because its own promise moved past it"
-                );
-            }
+            assert!(
+                self.proposer.election().is_none_or(|e| !e.covered()),
+                "a covered campaign at its own promise wins"
+            );
             return;
         }
         let me = self.config.id;
