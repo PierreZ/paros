@@ -977,9 +977,22 @@ copies; in paros each acceptor stores a copy, so `double` stored three. The new 
 - **`partitions` (`P`)** is how many acceptor partitions a journal's writes spread over. The
   default is 1, the plain majority; 0 is refused. Each entry goes to one acceptor partition and
   is done at a majority of it; an election or a tail read needs a majority of every acceptor
-  partition (#532 (acceptor partitions)). Until #532 lands, `P > 1` is placed as the acceptor
-  grid with one column per acceptor partition (`2F+1` rows, `P` columns): a slot's Phase 2 goes
-  to its column.
+  partition (#532 (acceptor partitions), landed). In the core an acceptor partition is a grid
+  column: `QuorumSystem::Grid { rows: 2F+1, cols: P, acks: F+1 }`
+  (`QuorumSystem::partitions`). Acks from two acceptor partitions never add up. Elections and
+  tail reads stop when any acceptor partition loses its majority, so their availability is lower
+  than one big majority; reads at a known offset need no quorum. The core predicates stay
+  general (`acks` of `rows` in one column for Phase 2, `rows - acks + 1` of every column for
+  Phase 1), and the simulation draws other `acks` too, the full column (`acks = rows`) included;
+  the CLI and the docs expose only acceptor partitions.
+- **A stuck round moves** (#533 (move a stuck round)): a Phase-2 round that stays open for
+  `DriverTunables::partition_move_resends` re-sends moves to the next acceptor partition
+  (`ColocatedNode::move_round`): the same slot, ballot and value, its tally counting only the new
+  acceptor partition. Inside one ballot a slot has one value, and every Phase-1 quorum meets
+  every acceptor partition, so a later election finds the value or proves it was not chosen.
+  Slots are independent, so the new acceptor partition needs no backfill. Reconfiguration away
+  from a failing acceptor partition still needs a majority of every old acceptor partition in
+  the new configuration's Phase 1: replace an acceptor partition while it keeps a live majority.
 - **Derived numbers are shown, never typed, and the partition count is always shown**:
   `1 per partition · 1 partition (any 1) · 3 acceptors`;
   `1 per partition · 3 partitions (any 1, up to 3 spread) · 9 acceptors`.
@@ -1804,7 +1817,8 @@ journal, and the journal's leader-uuid rules (section 2) sit on top, judged at a
 
 **The write path.** The leader only *sequences*: it gives each command a slot and hands it off.
 A proxy leader does the Phase-2 work for that slot, so the leader's CPU and network stop being the
-bottleneck. Acceptors may form a grid, so a Phase-2 quorum is one column and not a majority.
+bottleneck. Acceptors may form acceptor partitions, so a Phase-2 quorum is a majority of one
+acceptor partition and not a majority of all (#532 (acceptor partitions)).
 Replicas learn chosen slots, walk the contiguous prefix and apply them; that apply is where the
 journal state machine judges each `Write`, `Truncate` and `SetLeader`. Batchers and unbatchers
 (multi-writer journals only, section 2.4) group many clients' writes into one slot and fan the
@@ -1941,9 +1955,9 @@ the WPaxos read (section 10) established for one region with several availabilit
   is therefore not adopted.
 - paros's grid cannot express zone survival either: rows and columns are positional over sorted
   ids, and with column = zone a zone loss kills every row, with row = zone it kills every column.
-  The grid stays the opt-in throughput layout (section 3.4, `partitions` above 1 until #532
-  (acceptor partitions)), with its cost (one dead acceptor freezes its column until
-  reconfiguration) stated to the tenant that picks it; one acceptor partition is the
+  Acceptor partitions stay the opt-in throughput layout (section 3.4, `partitions` above 1,
+  #532 (acceptor partitions)), with their cost (an election needs a majority of every acceptor
+  partition) stated to the tenant that picks them; one acceptor partition is the
   zone-surviving default.
 - What is adopted (decided on 2026-10-07, #215), detailed below: failure domains inside
   `AcceptorConfig`, a placement rule judged through `QuorumSystem` and never a count, the leader

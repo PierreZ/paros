@@ -1143,7 +1143,7 @@ fn a_read_across_a_leader_change_is_linearizable() {
 
 // ---- Act IV: the grid -------------------------------------------------------
 
-const GRID: QuorumSystem = QuorumSystem::Grid { rows: 2, cols: 3 };
+const GRID: QuorumSystem = QuorumSystem::grid(2, 3);
 
 #[test]
 fn a_grid_addresses_each_slot_to_its_own_column() {

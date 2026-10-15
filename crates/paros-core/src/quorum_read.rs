@@ -544,10 +544,7 @@ mod tests {
     use crate::types::NodeId;
 
     fn grid() -> AcceptorConfig {
-        AcceptorConfig::new(
-            (1..=6).map(NodeId).collect(),
-            QuorumSystem::Grid { rows: 2, cols: 3 },
-        )
+        AcceptorConfig::new((1..=6).map(NodeId).collect(), QuorumSystem::grid(2, 3))
     }
 
     fn basis(config: AcceptorConfig, since: Ballot) -> ReadBasis<NodeId> {

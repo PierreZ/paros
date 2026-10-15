@@ -279,8 +279,8 @@ fn open_read<A: Audit>(
     // and neither the row hook nor the audit hears of the read.
     let basis = replica.read_basis();
     let row = basis.as_ref().and_then(|b| match b.config.quorum_system() {
-        QuorumSystem::Grid { rows, .. }
-            if rows >= 2 && moonpool_buggify::buggify_fault_with_prob!(0.10) =>
+        QuorumSystem::Grid { rows, acks, .. }
+            if rows >= 2 && acks == rows && moonpool_buggify::buggify_fault_with_prob!(0.10) =>
         {
             moonpool_assertions::reachable!("grid: the driver overrides a quorum read's row");
             Some(crate::driver::log_reads::next_row(ctx, rows))

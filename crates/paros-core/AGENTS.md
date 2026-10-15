@@ -23,7 +23,7 @@ buggified: perturbed only through its public API. Doctrine lives in the root `AG
 - `replica_node.rs` → `ReplicaNode`, `ReplicaReady`, `ReplicaCounters` → the third deployment (#144); module doc holds the coupling analysis.
 - `replica_node/tests.rs` → three `ColocatedNode`s and two replicas over a hand-driven network.
 - `quorum_read.rs` → `QuorumRead`, `QuorumReads`, `PreReadFold`, `ReadBasis` → the leaderless read tally (#143) and the won leadership's configuration and fence it is judged over (#260).
-- `membership/` (`quorum_system.rs`, `acceptor_config.rs`, `ids.rs`, `matchmaker_set.rs`) → `AcceptorConfig`, `MatchmakerSet`, `QuorumSystem::{Majority, Flexible, Grid}` → the one quorum boundary, incl. column/row addressing.
+- `membership/` (`quorum_system.rs`, `acceptor_config.rs`, `ids.rs`, `matchmaker_set.rs`) → `AcceptorConfig`, `MatchmakerSet`, `QuorumSystem::{Majority, Flexible, Grid}` → the one quorum boundary, incl. column/row addressing; `Grid { rows, cols, acks }` is the acceptor partitions (#532): `acks` of one column decide, `rows - acks + 1` of every column elect, a row is a read quorum only when `acks = rows` (`QuorumSystem::grid`, `QuorumSystem::partitions`).
 - `matchmaking.rs` → `Matchmaking`, `MembershipProbe` → the candidate's matchmaking phase and the membership probe (#173: at boot; #270: re-probed from outside a heard belief; #278: against a matched fact or a won leadership, late answers folded).
 - `matchmaker.rs` → `Matchmaker` → the registry and its generations (re-exports the submodules below).
 - `decree.rs` → `Decree<Id, V>`, `DecreePromise`, `AcceptFold`, `DECREE_SLOT` → single-decree Paxos over the shared `Proposer` and `Acceptor` at slot zero: the matchmaker handover's successor decree (`SuccessorDecree`) and `cell init`'s plan (#277).
@@ -44,7 +44,7 @@ buggified: perturbed only through its public API. Doctrine lives in the root `AG
 
 ## Public surface
 
-`ColocatedNode::{new, step, tick, ready, advance, propose, propose_in, propose_control,
+`ColocatedNode::{new, step, tick, ready, advance, propose, propose_in, propose_control, move_round,
 read_log, quorum_read, reconfigure, may_retire, …}`, `ReplicaNode`, `ProxyLeader`,
 `Matchmaker`, `MatchmakerReconfigurer`, and the bare roles (`acceptor`, `proposer`, `replica`,
 `matchmaking`, `membership`, `quorum_read`, `retained`, `journal_state` are `pub mod`).

@@ -79,10 +79,10 @@ property each one teaches. Read them in order:
    four nodes under `Flexible { q1: 3, q2: 2 }` decide on two accepts, and the next election
    needs three promises so that one of them reports what the deciding pair chose.
 5. [`acceptor_grid.rs`](crates/paros-core/examples/acceptor_grid.rs) — the acceptor grid of
-   Compartmentalized Paxos: six nodes under `Grid { rows: 2, cols: 3 }`, every slot's Phase 2
+   Compartmentalized Paxos: six nodes under `QuorumSystem::grid(2, 3)`, every slot's Phase 2
    addressed to one column so each acceptor sees a third of the commands, a majority of
-   promises that is still not a row, and the next election needing a full row because each
-   promise in it reports exactly its own column's value.
+   promises that still misses a column, and the next election needing one acceptor of every
+   column (a full row is one) because each promise in it reports exactly its own column's value.
 6. [`quorum_read.rs`](crates/paros-core/examples/quorum_read.rs) — Paxos Quorum Reads: a
    row of the same grid answers with its vote watermarks while a column is mid-decision, the
    reader settles on the maximum and waits for its replica to apply it, and the leader sends
