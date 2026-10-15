@@ -12,14 +12,16 @@
 //! (`BACK_SOON_MS` past it): the coordinator may have started a move, and
 //! the machine answers before the move ends. The coordinator then releases
 //! the slot the journal's configuration left (`machine::moves`' trim).
+//! When a node drew the production bound (5 min), that return would
+//! outlast the run: the machine then only reboots, inside `GONE_MS`.
 //!
 //! The cell keeps its founding member up, so the tail's liveness claims
 //! still hold; the strike may come up to `LATE_WINDOW` into the tail.
 
 use async_trait::async_trait;
 use moonpool_sim::{
-    FaultContext, FaultInjector, RebootKind, SimulationResult, TimeProvider, assert_reachable,
-    buggify_with_prob,
+    FaultContext, FaultInjector, RebootKind, SimulationResult, TimeProvider, assert_always,
+    assert_reachable, buggify_with_prob,
 };
 
 use super::late_outage::LATE_WINDOW;
@@ -63,15 +65,26 @@ impl FaultInjector for GoneMachine {
         };
         assert_reachable!("machine: the scenario takes a machine holding a slot down");
         tracing::info!(%target, "gone_machine_strikes");
-        let hold = if buggify_with_prob!(0.5) {
+        let soon = buggify_with_prob!(0.5);
+        let bound = usize::try_from(crate::shape::longest_replace_after(ctx.state()).as_millis())
+            .unwrap_or(GONE_MS.start);
+        // A node on the production profile re-places only after 5 min
+        // (`DriverTunables::production`): "soon after" that bound outlasts
+        // the run, so the machine never comes back and its slots are
+        // neither re-placed nor served again (#475 (re-place after the Down
+        // bound), witness 17654395222008150181 on e5e20d8). Such a machine
+        // only reboots, inside `GONE_MS`.
+        let hold = if soon && bound + BACK_SOON_MS.end <= GONE_MS.end {
             assert_reachable!("machine: a gone machine comes back soon after the bound");
-            let bound =
-                usize::try_from(crate::shape::longest_replace_after(ctx.state()).as_millis())
-                    .unwrap_or(GONE_MS.start);
             bound + BACK_SOON_MS.start..bound + BACK_SOON_MS.end
         } else {
             GONE_MS
         };
+        assert_always!(
+            hold.end <= GONE_MS.end,
+            "machine: a gone machine comes back inside the scenario's window",
+            { "hold_ms" => hold.end, "bound_ms" => bound }
+        );
         ctx.reboot_with_delays(&target, RebootKind::Crash, &hold, &(0..1))
     }
 }
