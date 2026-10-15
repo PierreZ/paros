@@ -206,34 +206,6 @@ fn gap_fill_releases_the_chosen_prefix_in_bounded_chunks() {
     );
 }
 
-/// A same-ballot continuation closes a different stale campaign.
-#[test]
-fn a_same_ballot_continuation_closes_a_stale_campaign() {
-    let (mut stale, stale_ballot) = candidate(0);
-    let learned = Ballot {
-        round: stale_ballot.round + 1,
-        node: NodeId(1),
-    };
-    stale.step(Message::Commit {
-        from: Party::Node(NodeId(1)),
-        ballot: learned,
-        slot: Slot(0),
-        command: command(0),
-    });
-    let _ = take_ready(&mut stale);
-    stale.step(Message::Prepare {
-        reply_to: NodeId(1),
-        ballot: learned,
-        from_slot: Slot(1),
-        config: None,
-    });
-    assert_eq!(
-        stale.role(),
-        NodeRole::Follower,
-        "a same-ballot continuation closes a different stale campaign"
-    );
-}
-
 /// An `Accepted` is credited when its fingerprint names the admitted command,
 /// identity included. (A same-ballot mismatch panics: `decide_apply`.)
 #[test]

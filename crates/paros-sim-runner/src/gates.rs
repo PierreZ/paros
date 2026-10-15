@@ -114,10 +114,6 @@ pub const RARE: &[Rare] = &[
         reason: "marginal: fired on 8 of 810 hunt seeds (#486)",
     },
     Rare {
-        msg: "phase1: a covered campaign is refused because its own promise moved past it",
-        reason: "marginal: fired on none of 810 hunt seeds (#486)",
-    },
-    Rare {
         msg: "phase1: a fresh leader heals a faulty chosen slot from its promise quorum",
         reason: "marginal: fired on 2 of 810 hunt seeds (#486)",
     },

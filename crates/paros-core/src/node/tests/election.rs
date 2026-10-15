@@ -342,12 +342,16 @@ fn a_partial_promise_page_does_not_count_toward_the_quorum() {
 }
 
 #[test]
-fn a_same_ballot_continuation_closes_a_different_stale_campaign() {
-    let mut n = node(0, &[0, 1, 2]);
-    campaign(&mut n);
-    let stale_campaign = n.ballot();
+fn a_same_ballot_continuation_closes_a_different_stale_leadership() {
+    let mut nodes = cluster::<3>();
+    make_leader(&mut nodes, 0);
+    let [mut n, _, _] = nodes;
+    let stale = n.ballot();
     let _ = drain(&mut n);
-    let learned = ballot(stale_campaign.round + 1, 1);
+    // A leader that learns a higher-ballot commit stays a leader until a
+    // deposing message arrives (a campaign would close here instead,
+    // `mark_chosen`): the promise rises, the role does not move.
+    let learned = ballot(stale.round + 1, 1);
     n.step(Message::Commit {
         from: Party::Node(NodeId(1)),
         ballot: learned,
@@ -355,7 +359,7 @@ fn a_same_ballot_continuation_closes_a_different_stale_campaign() {
         command: ucmd(5, 1, 9),
     });
     let _ = drain(&mut n);
-    assert_eq!(n.role(), NodeRole::Candidate);
+    assert_eq!(n.role(), NodeRole::Leader);
     assert_eq!(n.hard_state().max_promised_ballot, learned);
 
     n.step(Message::Prepare {
@@ -578,10 +582,11 @@ fn truncated_quorum_refuses_a_blind_candidate() {
 }
 
 /// #67/#88, route 1 (`mark_chosen`, via `on_commit` / `on_catchup_response`):
-/// a candidate that learns a higher-ballot commit mid-campaign refuses the
-/// stale win, and the next campaign recovers the reported slot properly.
+/// a candidate that learns a higher-ballot commit mid-campaign closes its
+/// campaign, so a late promise wins nothing, and the next campaign recovers
+/// the reported slot properly.
 ///
-/// Pre-guard, the win went through and the damage was downstream:
+/// Before any guard, the win went through and the damage was downstream:
 /// `start_accept_round`'s "never lower our promise" guard skipped the
 /// self-accept for every recovered slot, so those never entered `accepted`;
 /// `next_slot` — derived from `accepted` — landed *below* an in-flight slot,
@@ -589,7 +594,7 @@ fn truncated_quorum_refuses_a_blind_candidate() {
 /// `(ballot, slot)` (`paros_sim::audit`'s "one ballot proposes at most one
 /// command for a slot" catches it).
 #[test]
-fn a_candidate_that_learns_a_higher_ballot_commit_refuses_the_stale_win() {
+fn a_candidate_that_learns_a_higher_ballot_commit_closes_its_campaign() {
     let mut x = node(0, &[0, 1, 2]);
     let b = ballot(1, 0);
     let b_prime = ballot(1, 2);
@@ -602,8 +607,8 @@ fn a_candidate_that_learns_a_higher_ballot_commit_refuses_the_stale_win() {
     let _ = drain(&mut x);
 
     // A `Commit` at `b'` arrives: some other proposer won `b'` with a quorum X
-    // was not part of, and decided slot 0. X learns it as a *learner*; the
-    // campaign stays open, but the promise is now above the campaign's ballot.
+    // was not part of, and decided slot 0. X learns it as a *learner*: the
+    // promise rises to `b'`, so the campaign at `b` is over.
     x.step(Message::Commit {
         from: Party::Node(NodeId(2)),
         ballot: b_prime,
@@ -611,31 +616,28 @@ fn a_candidate_that_learns_a_higher_ballot_commit_refuses_the_stale_win() {
         command: Command::Control(Control::Noop),
     });
     let _ = drain(&mut x);
-    assert_eq!(x.role, NodeRole::Candidate, "the campaign is untouched");
     assert_eq!(
         x.hard_state().max_promised_ballot,
         b_prime,
         "`mark_chosen` raised the promise to the choosing ballot"
     );
+    assert_eq!(x.role, NodeRole::Follower, "the campaign is closed");
+    assert!(x.proposer.election().is_none());
 
     // The delayed `Promise(b)` lands: a perfectly well-formed promise for a
     // ballot X has since promised away. The quorum is there — the win is not.
     let mut reported = BTreeMap::new();
     reported.insert(Slot(3), (ballot(0, 1), ucmd(9, 9, 0xA0)));
     x.step(terminal_promise(NodeId(1), b, reported));
-    assert_eq!(x.role, NodeRole::Candidate, "the stale win is refused");
-    assert!(
-        x.proposer.election().is_some(),
-        "the refused campaign stays open"
-    );
+    assert_eq!(x.role, NodeRole::Follower, "a late promise wins nothing");
     assert!(
         x.proposer.rounds().is_empty(),
         "nothing is proposed at the stale ballot"
     );
     let _ = drain(&mut x);
 
-    // Self-heal: the next campaign ratchets past the promise that refused the
-    // win, and the same reported slot is recovered *properly* this time.
+    // Self-heal: the next campaign ratchets past the learned promise, and the
+    // same reported slot is recovered *properly* this time.
     x.on_check_leader();
     let b2 = x.ballot;
     assert!(
@@ -956,4 +958,28 @@ fn a_paging_campaign_keeps_its_promisers_quiet() {
         Some(2),
         "a repeated Promise counts once"
     );
+}
+
+/// A live campaign's promise sits at its ballot (`assert_invariants`), on
+/// the plain path too: a candidate in Phase 1 that learns, by a catch-up
+/// replay, a slot chosen above its ballot closes its campaign, so a late
+/// promise at the old ballot makes no leadership its own promise refuses.
+#[test]
+fn a_replayed_slot_chosen_above_a_phase_one_campaign_closes_it() {
+    let mut n = node(1, &[0, 1, 2]);
+    n.set_election_timeout(1);
+    n.tick();
+    assert_eq!(n.role(), NodeRole::Candidate);
+    let b = n.ballot();
+    let _ = drain(&mut n);
+    let above = ballot(b.round + 1, 2);
+    n.step(Message::CatchUpResponse {
+        from: NodeId(2),
+        entries: BTreeMap::from([(Slot(0), (above, ucmd(7, 7, 2)))]),
+    });
+    assert_eq!(chosen_at(&n, 0), Some(val(2)), "the slot is learned chosen");
+    assert_eq!(n.hard_state().max_promised_ballot, above);
+    assert_eq!(n.role(), NodeRole::Follower, "the campaign is closed");
+    n.step(terminal_promise(NodeId(2), b, BTreeMap::new()));
+    assert_eq!(n.role(), NodeRole::Follower, "a late promise elects nobody");
 }
