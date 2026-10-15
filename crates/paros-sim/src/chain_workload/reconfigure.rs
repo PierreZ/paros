@@ -11,6 +11,7 @@ use moonpool_sim::{
 };
 use paros::client::{
     MatchmakersRefusal, ReconfigureMatchmakersOutcome, ReconfigureOutcome, RetireOutcome,
+    RetireRefusal,
 };
 use paros::{
     JournalIdentifier, QuorumSystem, ReconfigureRefusal, RetireRequest, TenantId, WireQuorumSystem,
@@ -764,6 +765,30 @@ impl ChainWorkload {
         // a follower answers an empty list and the step is a
         // no-op.
         let probe_target = nodes.leader().unwrap_or(target);
+        // An operator that retires a node from no journal (#439 (operator
+        // calls name their journal)), its own location: no journal has a
+        // default, so the node refuses it and leaves nothing.
+        if buggify_with_prob!(0.05) {
+            assert_reachable!("gc: an operator retires a node from no journal");
+            let outcome = nodes
+                .retire(
+                    probe_target,
+                    RetireRequest {
+                        gc_watermark: None,
+                        tenant: JournalIdentifier::UNSET.tenant.0,
+                        journal: JournalIdentifier::UNSET.journal.0,
+                    },
+                )
+                .await;
+            assert_always!(
+                matches!(
+                    outcome,
+                    RetireOutcome::Refused(RetireRefusal::UnknownJournal) | RetireOutcome::Ambiguous
+                ),
+                "gc: a retirement that names no journal is refused",
+                { "outcome" => format!("{outcome:?}") }
+            );
+        }
         // The retirable list, the configuration in force and the
         // effective GC watermark come from the *same* reply: the
         // world can hold the protocol to "a retirable node is
