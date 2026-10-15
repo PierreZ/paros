@@ -105,7 +105,22 @@ pub struct JournalStoreConfig {
     /// reported faulty like a corrupt one. Recorded per batch, so it may
     /// change between restarts.
     pub durability: Durability,
+    /// The bytes of one chunk of a matchmaker store's scalars (#439). The
+    /// metainfo holds one block, so the scalars of a tenant with many
+    /// journals live in entries of this size, the metainfo naming them.
+    /// Floor 1 (every chunk carries a byte); ceiling [`META_CHUNK_CEILING`],
+    /// so a chunk fits a segment of the small geometry.
+    pub meta_chunk: usize,
 }
+
+/// The default size of a matchmaker store's scalar chunk (#439).
+pub const META_CHUNK: usize = 2048;
+
+/// The largest scalar chunk a store writes: well inside the entry region of
+/// the small geometry's segments.
+pub const META_CHUNK_CEILING: usize = 16 * 1024;
+
+const _: () = assert!(META_CHUNK > 0 && META_CHUNK <= META_CHUNK_CEILING);
 
 impl Default for JournalStoreConfig {
     /// 64 MiB segments, two syncs per commit.
@@ -114,6 +129,7 @@ impl Default for JournalStoreConfig {
             geometry: Geometry::default(),
             direct_io: DirectIo::Optional,
             durability: Durability::Ordered,
+            meta_chunk: META_CHUNK,
         };
         config.assert_layout();
         config
@@ -137,6 +153,11 @@ impl JournalStoreConfig {
     /// A shipped layout is one the journal opens.
     fn assert_layout(self) {
         assert!(self.geometry.is_valid(), "a shipped geometry is valid");
+        assert!(self.meta_chunk > 0, "a scalar chunk carries a byte");
+        assert!(
+            self.meta_chunk <= META_CHUNK_CEILING,
+            "a scalar chunk fits a segment"
+        );
     }
 
     fn journal(self) -> JournalConfig {
@@ -192,7 +213,7 @@ fn id_ballot(id: &Id) -> (Ballot, u8) {
 }
 
 /// Bumped when an encoding changes; bytes of another version do not decode.
-const FORMAT_VERSION: u8 = 3;
+const FORMAT_VERSION: u8 = 4;
 
 /// A version byte and the value's `postcard` encoding.
 fn encode<T: Serialize + DeserializeOwned + PartialEq>(value: &T) -> Vec<u8> {

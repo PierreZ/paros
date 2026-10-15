@@ -1551,6 +1551,8 @@ where
     // reconfigurer plus the two clocks that pace it, idle until a client asks
     // or until this node meets a frozen registry nobody finished replacing.
     let mut handovers: BTreeMap<TenantId, HandoverDriver> = BTreeMap::new();
+    // A handover pages its bootstrap by the matchmakers' page (#439).
+    let registry_page = tunables.registry_page;
     // Set by an accepted operator `Retire`: the node exits at its next tick,
     // after the ack had a beat to leave.
     let mut retiring: Option<JournalIdentifier> = None;
@@ -1811,7 +1813,7 @@ where
                 let folded = folded_answer(&reply);
                 let step = rt.node.on_match_reply(reply);
                 report_match_step(&rt.audit, self_id, matchmaker, ballot, folded, &step);
-                let handover = handovers.entry(tenant).or_insert_with(|| HandoverDriver::new(NodeId(self_id)));
+                let handover = handovers.entry(tenant).or_insert_with(|| HandoverDriver::new(NodeId(self_id), registry_page));
                 shared.with(&audits).on_match_refusal(&rt.node, handover, matchmaker, &step);
                 let outcome = shared.settle(rt).await;
                 journals.fold(journal, outcome, ticks, self_id)?;
@@ -1936,7 +1938,7 @@ where
                 let audits = tenant_audits(&journals, &stores, tenant);
                 let Some(rt) = journals.live.get(&journal) else { continue };
                 let lp = shared.with(&audits);
-                let handover = handovers.entry(tenant).or_insert_with(|| HandoverDriver::new(NodeId(self_id)));
+                let handover = handovers.entry(tenant).or_insert_with(|| HandoverDriver::new(NodeId(self_id), registry_page));
                 let target: Vec<MatchmakerId> = req.members.iter().copied().map(MatchmakerId).collect();
                 let refusal = operator::reconfigure_matchmakers(&rt.node, handover, &target, |m| {
                     links.knows(*m)
@@ -2118,7 +2120,7 @@ where
                     let takes_handover = rt.node.config().has_matchmakers() && paced.insert(journal.tenant);
                     let handover = takes_handover.then(|| {
                         (
-                            handovers.entry(journal.tenant).or_insert_with(|| HandoverDriver::new(NodeId(self_id))),
+                            handovers.entry(journal.tenant).or_insert_with(|| HandoverDriver::new(NodeId(self_id), registry_page)),
                             &audits,
                         )
                     });

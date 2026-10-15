@@ -4,10 +4,22 @@
 //! Each registration is an entry at a registration number of its own, its
 //! ballot and its generation in the entry's identity, its journal in the
 //! payload (#190: one store holds every journal of its tenant's set); the
-//! scalars (generation, freeze, decree, each journal's watermark) and the
-//! format marker are the journal's metainfo. A raised watermark clears its
-//! journal's registrations below it; an install clears them all and writes
-//! the successor's.
+//! scalars (generation, freeze, decree, each journal's watermark) are
+//! entries too, and the journal's metainfo holds the format marker and
+//! names them. A raised watermark clears its journal's registrations below
+//! it; an install clears them all and writes the successor's.
+//!
+//! **The scalars are paged** (#439): the metainfo is one block (about 4 KB),
+//! and a tenant's scalars grow with its journals and its pending
+//! bootstraps. So the scalars are encoded whole and cut into chunks of
+//! [`JournalStoreConfig::meta_chunk`] bytes, each an entry whose identity
+//! names its epoch and its index. The metainfo is a header: the format
+//! marker, the epoch, and the positions of the chunks. Every write of the
+//! scalars takes a fresh epoch (above every epoch on the disk) and fresh
+//! positions, in the commit that carries the metainfo, so a durable header
+//! vouches for its chunks (moonpool#309). The chunks of earlier epochs go
+//! with the clears; a boot drops every chunk the header does not name, and a
+//! damaged or missing chunk it names is a crash verdict.
 //!
 //! **A sync is up to three commits, in an order every crash point survives**
 //! (#176): the boot's own clears, the new registrations with the metainfo,
@@ -59,7 +71,7 @@ use moonpool_core::StorageProvider;
 use std::ops::Range;
 
 use moonpool_buggify::hint::Strike;
-use moonpool_journal::{Batch, ID_SIZE, Id, Journal, ReadError, State};
+use moonpool_journal::{Batch, Entry, ID_SIZE, Id, Journal, ReadError, State};
 use paros_core::{
     Ballot, JournalId, JournalIdentifier, MatchmakerConfig, MatchmakerGeneration,
     MatchmakerHardState, Registration, RegistryStorage,
@@ -76,6 +88,31 @@ use crate::storage::{StorageError, StorageRecord, WriteOutcome};
 
 /// The kind byte of a registration's identity.
 const REGISTRATION: u8 = 2;
+
+/// The kind byte of a scalar chunk's identity (#439).
+const SCALARS: u8 = 3;
+
+/// A scalar chunk's identity: its epoch, its index, and the kind byte where
+/// a registration's sits.
+fn chunk_id(epoch: u64, index: u64) -> Id {
+    let mut id = [0; ID_SIZE];
+    id[..8].copy_from_slice(&epoch.to_le_bytes());
+    id[8..16].copy_from_slice(&index.to_le_bytes());
+    id[16] = SCALARS;
+    // Pair of `id_chunk`.
+    assert!(
+        id_chunk(&id) == Some((epoch, index)),
+        "a chunk's identity reads back as its epoch and index"
+    );
+    id
+}
+
+/// The epoch and index a scalar chunk's identity names; `None` for any
+/// other entry.
+fn id_chunk(id: &Id) -> Option<(u64, u64)> {
+    let word = |at: usize| u64::from_le_bytes(id[at..at + 8].try_into().expect("8 bytes"));
+    (id[16] == SCALARS).then(|| (word(0), word(8)))
+}
 
 /// Where a registration's generation sits in its identity: after the ballot
 /// and the kind byte, in the identity's last bytes.
@@ -109,9 +146,10 @@ fn id_generation(id: &Id) -> MatchmakerGeneration {
     MatchmakerGeneration(u64::from_le_bytes(word))
 }
 
-/// The matchmaker's metainfo: the format marker (#183, #207) and the
-/// durable scalars.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// The matchmaker's logical metainfo: the format marker (#183, #207) and
+/// the durable scalars. The disk holds it as a [`Header`] in the journal's
+/// metainfo and the [`Body`] in chunks (#439).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct MatchMeta {
     /// Set once by `format`, never cleared or edited.
     formatted: Option<MatchmakerConfig>,
@@ -119,7 +157,30 @@ struct MatchMeta {
     /// Every journal a registration of this store was staged in (#190),
     /// named with the metainfo that vouches for its first registration: the
     /// floor a damaged entry, whose journal is unknown, is judged against.
-    #[serde(default)]
+    journals: BTreeSet<JournalId>,
+}
+
+/// The journal's metainfo (#439): the format marker and where the scalars'
+/// chunks are. It stays a few bytes whatever the tenant holds.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+struct Header {
+    formatted: Option<MatchmakerConfig>,
+    /// The epoch of the chunks this header names; `0` names none.
+    epoch: u64,
+    /// The chunks' positions: chunk `i` is at `chunks.start + i`.
+    chunks: Range<u64>,
+}
+
+/// A replayed entry: its position and what the read found.
+type Replayed = (u64, Result<Entry, ReadError>);
+
+/// A staged entry: its position, identity and payload.
+type Staged = (u64, (Id, Vec<u8>));
+
+/// What the chunks carry, encoded whole and then cut.
+#[derive(Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+struct Body {
+    scalars: MatchmakerHardState,
     journals: BTreeSet<JournalId>,
 }
 
@@ -169,6 +230,12 @@ pub struct JournalMatchmakerStorage<P: StorageProvider> {
     /// Positions the boot dropped: the first commit of the next sync, so no
     /// later metainfo (whose floor may be lower) meets them again.
     boot_clears: Vec<Range<u64>>,
+    /// The highest chunk epoch on the disk (#439): the next write of the
+    /// scalars takes the one above it.
+    epoch: u64,
+    /// The chunks the durable header names; cleared once a later header is
+    /// durable.
+    chunks: Range<u64>,
 }
 
 impl<P: StorageProvider> std::fmt::Debug for JournalMatchmakerStorage<P> {
@@ -184,6 +251,11 @@ impl<P: StorageProvider> JournalMatchmakerStorage<P> {
     /// A store kept under `dir` on `provider`, for the matchmaker plane of
     /// `id` (the identity its journal is stamped with). Nothing is read
     /// until the boot scan.
+    ///
+    /// # Panics
+    ///
+    /// When `store` names a scalar chunk of zero bytes: a programmer
+    /// error, never an operating condition.
     #[must_use]
     pub fn new(
         provider: P,
@@ -191,6 +263,7 @@ impl<P: StorageProvider> JournalMatchmakerStorage<P> {
         id: JournalIdentifier,
         store: JournalStoreConfig,
     ) -> Self {
+        assert!(store.meta_chunk > 0, "a scalar chunk carries a byte");
         Self {
             provider,
             dir: dir.into(),
@@ -206,6 +279,8 @@ impl<P: StorageProvider> JournalMatchmakerStorage<P> {
             puts: BTreeMap::new(),
             clears: Vec::new(),
             boot_clears: Vec::new(),
+            epoch: 0,
+            chunks: 0..0,
         }
     }
 
@@ -248,9 +323,8 @@ impl<P: StorageProvider> JournalMatchmakerStorage<P> {
         else {
             return Ok(false);
         };
-        let meta: MatchMeta =
-            decode(&bytes).ok_or(undecodable(StorageRecord::MatchmakerScalars))?;
-        Ok(meta.formatted.is_some())
+        let header: Header = decode(&bytes).ok_or(undecodable(StorageRecord::MatchmakerScalars))?;
+        Ok(header.formatted.is_some())
     }
 
     /// Each journal's effective configuration covers every
@@ -311,14 +385,15 @@ impl<P: StorageProvider> JournalMatchmakerStorage<P> {
         let Some((journal, _recovery)) = opened else {
             return Ok(());
         };
-        self.meta = decode(journal.meta()).ok_or(undecodable(StorageRecord::MatchmakerScalars))?;
-        self.durable_meta = self.meta.clone();
-        let lowest = self.meta.lowest_watermark();
-        let generation = self.meta.scalars.generation;
+        let header: Header =
+            decode(journal.meta()).ok_or(undecodable(StorageRecord::MatchmakerScalars))?;
         let replay = journal.replay(..).await.map_err(|_| StorageError::Io {
             record: StorageRecord::Store,
             outcome: WriteOutcome::Unknown,
         })?;
+        let replay = self.read_scalars(&journal, &header, replay)?;
+        let lowest = self.meta.lowest_watermark();
+        let generation = self.meta.scalars.generation;
         for (position, read) in replay {
             self.next_position = self.next_position.max(position + 1);
             // What the durable metainfo does not vouch for: of another
@@ -403,6 +478,143 @@ impl<P: StorageProvider> JournalMatchmakerStorage<P> {
         );
         self.journal = Some(journal);
         Ok(())
+    }
+
+    /// The scalars the durable `header` names, read from their chunks
+    /// (#439); every other chunk is dropped. Returns the rest of `replay`.
+    ///
+    /// A chunk the header names that is missing, damaged or of another
+    /// epoch is a crash verdict: the header is written only once its
+    /// chunks are durable, so the scalars are lost.
+    fn read_scalars(
+        &mut self,
+        journal: &Journal<P>,
+        header: &Header,
+        replay: Vec<Replayed>,
+    ) -> Result<Vec<Replayed>, StorageError> {
+        assert!(
+            header.epoch > 0 || header.chunks.is_empty(),
+            "a header names chunks only at an epoch"
+        );
+        let lost = |verdict| StorageError::Corruption {
+            record: StorageRecord::MatchmakerScalars,
+            fault: IntegrityFault::LostWrite,
+            verdict,
+        };
+        let mut bytes = Vec::new();
+        let mut rest = Vec::with_capacity(replay.len());
+        let mut next = header.chunks.start;
+        self.epoch = header.epoch;
+        for (position, read) in replay {
+            let id = match &read {
+                Ok(entry) => entry.id,
+                Err(ReadError::Damaged { id, .. }) => *id,
+                Err(ReadError::Empty { .. } | ReadError::Io(_)) => {
+                    return Err(StorageError::Io {
+                        record: StorageRecord::Store,
+                        outcome: WriteOutcome::Unknown,
+                    });
+                }
+            };
+            let Some((epoch, index)) = id_chunk(&id) else {
+                rest.push((position, read));
+                continue;
+            };
+            self.next_position = self.next_position.max(position + 1);
+            self.epoch = self.epoch.max(epoch);
+            if !header.chunks.contains(&position) {
+                self.boot_clears.push(position..position + 1);
+                continue;
+            }
+            // The header's chunks are read in order, each where it says.
+            let Ok(entry) = read else {
+                let verdict = if matches!(journal.state(position), State::Ambiguous { .. }) {
+                    CorruptionVerdict::Undecidable
+                } else {
+                    CorruptionVerdict::Corrupted
+                };
+                return Err(StorageError::Corruption {
+                    record: StorageRecord::MatchmakerScalars,
+                    fault: IntegrityFault::ChecksumMismatch,
+                    verdict,
+                });
+            };
+            // A chunk skipped is a chunk lost; one that names another epoch
+            // or index where the header names this one is misdirected.
+            if position != next {
+                return Err(lost(CorruptionVerdict::Corrupted));
+            }
+            if epoch != header.epoch || index != position - header.chunks.start {
+                return Err(undecodable(StorageRecord::MatchmakerScalars));
+            }
+            bytes.extend_from_slice(&entry.payload);
+            next += 1;
+        }
+        if next != header.chunks.end {
+            return Err(lost(CorruptionVerdict::Corrupted));
+        }
+        let body: Body = if header.chunks.is_empty() {
+            Body::default()
+        } else {
+            decode(&bytes).ok_or(undecodable(StorageRecord::MatchmakerScalars))?
+        };
+        self.meta = MatchMeta {
+            formatted: header.formatted.clone(),
+            scalars: body.scalars,
+            journals: body.journals,
+        };
+        self.durable_meta = self.meta.clone();
+        self.chunks = header.chunks.clone();
+        // Boot side of the chunk pair: the header's chunks are the ones
+        // kept, and the next epoch is above every one on the disk.
+        assert!(
+            self.epoch >= header.epoch,
+            "the epoch floor covers the header's"
+        );
+        assert!(
+            self.boot_clears
+                .iter()
+                .all(|cleared| !header.chunks.contains(&cleared.start)),
+            "a boot never drops a chunk its header names"
+        );
+        Ok(rest)
+    }
+
+    /// The scalars cut into chunks at a fresh epoch and fresh positions,
+    /// and the header that names them (#439).
+    fn cut_scalars(&mut self) -> (Header, Vec<Staged>) {
+        let body = encode(&Body {
+            scalars: self.meta.scalars.clone(),
+            journals: self.meta.journals.clone(),
+        });
+        self.epoch += 1;
+        let start = self.next_position;
+        let chunks: Vec<Staged> = body
+            .chunks(self.store.meta_chunk)
+            .zip(0_u64..)
+            .map(|(bytes, index)| (start + index, (chunk_id(self.epoch, index), bytes.to_vec())))
+            .collect();
+        let count = u64::try_from(chunks.len()).expect("a chunk count fits a u64");
+        self.next_position = start + count;
+        if count > 1 {
+            moonpool_assertions::reachable!("matchmaker: its scalars span several chunks");
+        }
+        let header = Header {
+            formatted: self.meta.formatted.clone(),
+            epoch: self.epoch,
+            chunks: start..start + count,
+        };
+        // Write side of the chunk pair: the chunks are the whole encoding.
+        assert!(count > 0, "the scalars take at least one chunk");
+        assert!(
+            chunks
+                .iter()
+                .map(|(_, (_, bytes))| bytes.len())
+                .sum::<usize>()
+                == body.len(),
+            "the chunks carry the whole encoding"
+        );
+        (header, chunks)
     }
 
     /// Boot side of the boot-drop pair (#488 (matchmaker boot drop)): a
@@ -659,15 +871,32 @@ impl<P: StorageProvider> MatchmakerStorage for JournalMatchmakerStorage<P> {
             }
             hinted.await;
         }
+        let mut clears = clears;
+        let mut written = None;
         if self.meta_dirty {
-            batch.set_meta(encode(&self.meta));
+            // The scalars at a fresh epoch and fresh positions, ahead of the
+            // header that names them (#439).
+            let (header, chunks) = self.cut_scalars();
+            for (position, (id, payload)) in chunks {
+                if !batch.is_empty() && !batch.fits_another(geometry, payload.len()) {
+                    self.commit(std::mem::take(&mut batch)).await?;
+                }
+                batch.put(position, id, payload);
+            }
+            batch.set_meta(encode(&header));
+            written = Some(header);
         }
         if !batch.is_empty() || self.meta_dirty {
             self.commit(batch).await?;
         }
-        if self.meta_dirty {
+        if let Some(header) = written {
             self.durable_meta = self.meta.clone();
             self.meta_dirty = false;
+            // The chunks the header replaced go with the clears.
+            let replaced = std::mem::replace(&mut self.chunks, header.chunks);
+            if !replaced.is_empty() {
+                clears.push(replaced);
+            }
         }
         // The clears, last: until they land a boot drops what they clear.
         if !clears.is_empty() {
@@ -703,16 +932,27 @@ impl<P: StorageProvider> JournalMatchmakerStorage<P> {
     /// lands before the batch it opens for.
     async fn commit(&mut self, batch: Batch) -> Result<(), StorageError> {
         if self.journal.is_none() {
+            // A store never committed holds no scalars yet: its header names
+            // no chunk.
+            assert!(
+                self.durable_meta == MatchMeta::default() && self.chunks.is_empty(),
+                "a store is created before any scalars are durable"
+            );
             let early = MatchMeta {
                 formatted: self.meta.formatted.clone(),
                 ..self.durable_meta.clone()
+            };
+            let header = Header {
+                formatted: early.formatted.clone(),
+                epoch: 0,
+                chunks: 0..0,
             };
             let created = Journal::create(
                 self.provider.clone(),
                 &self.dir,
                 store_id(self.id),
                 self.store.journal(),
-                &encode(&early),
+                &encode(&header),
             )
             .await
             .map_err(|e| open_error(&e, StorageRecord::MatchmakerScalars))?;

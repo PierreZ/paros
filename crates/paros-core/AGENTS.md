@@ -27,9 +27,9 @@ buggified: perturbed only through its public API. Doctrine lives in the root `AG
 - `matchmaking.rs` → `Matchmaking`, `MembershipProbe` → the candidate's matchmaking phase and the membership probe (#173: at boot; #270: re-probed from outside a heard belief; #278: against a matched fact or a won leadership, late answers folded).
 - `matchmaker.rs` → `Matchmaker` → the registry and its generations (re-exports the submodules below).
 - `decree.rs` → `Decree<Id, V>`, `DecreePromise`, `AcceptFold`, `DECREE_SLOT` → single-decree Paxos over the shared `Proposer` and `Acceptor` at slot zero: the matchmaker handover's successor decree (`SuccessorDecree`) and `cell init`'s plan (#277).
-- `matchmaker/{generation,reconfigurer}.rs` → the generation machine, `MatchmakerReconfigurer`.
+- `matchmaker/{generation,reconfigurer}.rs` → the generation machine, `MatchmakerReconfigurer`; a `Stop` and a `Bootstrap` are paged (`BootstrapPage`, #439).
 - `matchmaker/{message,state,storage,write}.rs` → wire contract, durable state, `RegistryStorage` + `MemRegistry` (the reference registry), `MatchmakerWriteOp` + `MatchmakerReady`.
-- `matchmaker/handover_model.rs` → the handover model checker (test-only).
+- `matchmaker/handover_model.rs` → the handover model checker (test-only); half its seeds page by one or two journals (#439).
 - `proxy_model.rs` → the proxy-leader model checker (test-only); `model_support.rs` → seeded RNG + lossy mailbox both share.
 - `retained.rs` → `RetainedWindow` → a map with a floor under it.
 - `node.rs` → `ColocatedNode`, `Delegation`, the private `Counters` → entry points and driver-policy methods (`resend_pending`, `take_back_delegated`, `step_down`, `campaign_above`, `relinquish_to`, `reconfigure`, `quorum_read`).

@@ -275,9 +275,9 @@ fn every_variant() -> Vec<Message> {
 #[allow(clippy::too_many_lines)]
 fn matchmaker_contract_round_trips() {
     use paros_core::{
-        AcceptorConfig, GcAck, GcRequest, JournalId, JournalRegistry, MatchOutcome, MatchRefusal,
-        MatchReply, MatchRequest, MatchmakerGeneration, MatchmakerId, MatchmakerPhase,
-        MatchmakerSet, PendingBootstrap, QuorumSystem, ReconfigureReply, ReconfigureRequest,
+        AcceptorConfig, BootstrapPage, GcAck, GcRequest, JournalId, JournalRegistry, MatchOutcome,
+        MatchRefusal, MatchReply, MatchRequest, MatchmakerGeneration, MatchmakerId,
+        MatchmakerPhase, MatchmakerSet, QuorumSystem, ReconfigureReply, ReconfigureRequest,
         Registration, TenantId,
     };
     // #190: every request names its tenant and journal, and both survive.
@@ -465,18 +465,37 @@ fn matchmaker_contract_round_trips() {
             },
         ),
     ]);
-    let bootstrap = PendingBootstrap {
+    let bootstrap = BootstrapPage {
         set: set(1, &[0, 1, 3]),
+        after: None,
         registries: registries.clone(),
+        last: true,
+    };
+    // A later page of a bootstrap cut short (#439).
+    let later = BootstrapPage {
+        set: set(1, &[0, 1, 3]),
+        after: Some(JournalId(0xA1)),
+        registries: registries.clone(),
+        last: false,
     };
     for request in [
         ReconfigureRequest::Stop {
             from: NodeId(4),
             generation: g(0),
+            after: None,
+        },
+        ReconfigureRequest::Stop {
+            from: NodeId(4),
+            generation: g(0),
+            after: Some(JournalId(0xB3)),
         },
         ReconfigureRequest::Bootstrap {
             from: NodeId(4),
             bootstrap: bootstrap.clone(),
+        },
+        ReconfigureRequest::Bootstrap {
+            from: NodeId(4),
+            bootstrap: later,
         },
         ReconfigureRequest::DecreePrepare {
             from: NodeId(4),
@@ -507,13 +526,32 @@ fn matchmaker_contract_round_trips() {
         ReconfigureReply::Stopped {
             matchmaker: MatchmakerId(1),
             generation: g(0),
-            registries,
+            after: None,
+            next: None,
+            registries: registries.clone(),
             successor: Some(set(1, &[0, 1, 3])),
+            decree_promised: ballot(3, 2),
+        },
+        ReconfigureReply::Stopped {
+            matchmaker: MatchmakerId(1),
+            generation: g(0),
+            after: Some(JournalId(0xA1)),
+            next: Some(JournalId(0xB3)),
+            registries,
+            successor: None,
             decree_promised: ballot(3, 2),
         },
         ReconfigureReply::Bootstrapped {
             matchmaker: MatchmakerId(3),
             set: set(1, &[0, 1, 3]),
+            held: Some(JournalId(0xB3)),
+            complete: true,
+        },
+        ReconfigureReply::Bootstrapped {
+            matchmaker: MatchmakerId(3),
+            set: set(1, &[0, 1, 3]),
+            held: None,
+            complete: false,
         },
         ReconfigureReply::Promised {
             matchmaker: MatchmakerId(1),
@@ -559,6 +597,54 @@ fn matchmaker_contract_round_trips() {
             reply
         );
     }
+}
+
+/// A page cursor names a journal (#439): journal `0` is unset, so a cursor
+/// that names it is malformed, never the first page.
+#[test]
+fn a_page_cursor_of_journal_zero_is_refused() {
+    use super::matchmaker::reconfigure_reply::Kind as ReplyKind;
+    use super::matchmaker::reconfigure_request::Kind as RequestKind;
+    use paros_core::{
+        JournalId, MatchmakerGeneration as g, MatchmakerId, MatchmakerSet, ReconfigureReply,
+        ReconfigureRequest, TenantId,
+    };
+    let set = |generation: u64, members: &[u64]| {
+        MatchmakerSet::new(
+            g(generation),
+            members.iter().copied().map(MatchmakerId).collect(),
+        )
+    };
+    let addressed = super::Addressed {
+        cell_id: 0xD4,
+        tenant: TenantId(0xA1),
+        to: MatchmakerId(1),
+    };
+    let stop = ReconfigureRequest::Stop {
+        from: NodeId(4),
+        generation: g(0),
+        after: Some(JournalId(9)),
+    };
+    let mut wire = super::matchmaker_codec::wire_reconfigure_request(addressed, &stop);
+    assert!(super::matchmaker_codec::reconfigure_request_from_wire(wire.clone()).is_ok());
+    let Some(RequestKind::Stop(inner)) = wire.kind.as_mut() else {
+        unreachable!("a Stop encodes as a Stop")
+    };
+    inner.after = Some(0);
+    assert!(super::matchmaker_codec::reconfigure_request_from_wire(wire).is_err());
+    let ack = ReconfigureReply::Bootstrapped {
+        matchmaker: MatchmakerId(3),
+        set: set(1, &[0, 1, 3]),
+        held: Some(JournalId(9)),
+        complete: false,
+    };
+    let mut wire = super::matchmaker_codec::wire_reconfigure_reply(&ack);
+    assert!(super::matchmaker_codec::reconfigure_reply_from_wire(wire.clone()).is_ok());
+    let Some(ReplyKind::Bootstrapped(inner)) = wire.kind.as_mut() else {
+        unreachable!("a Bootstrapped encodes as a Bootstrapped")
+    };
+    inner.held = Some(0);
+    assert!(super::matchmaker_codec::reconfigure_reply_from_wire(wire).is_err());
 }
 
 /// The `leader` field of an `Accept` is absent from the wire whenever it

@@ -102,7 +102,8 @@ fault world, the one client workload and the audit. Stack: `paros-core` ←
   and every journal on `JournalStorage`, matchmakers on `JournalMatchmakerStorage`; its
   `Durability` a knob (two syncs by default, one at the extreme) and its segment geometry a knob
   per region (`journal_geometry`: floors `PERSIST_BLOCKS_FLOOR` = 2 blocks,
-  `ENTRY_BLOCKS_FLOOR` = 17, the workload's largest write). A crash at a driver `hint!` is a
+  `ENTRY_BLOCKS_FLOOR` = 17, the workload's largest write), and a matchmaker store's scalar
+  chunk a knob (`meta_chunk`, default 2048 bytes, extreme 32–256, floor 1, #439). A crash at a driver `hint!` is a
   power loss the attrition regime takes, a cut mid-commit is a journal store's own `hint!` budgeted by `world/cut.rs`, a wipe deletes the journal's files, the ledgered injector
   damages a boot, and moonpool's storage chaos runs under it. A quiet seat (a replica, a held
   journal) stores ordered with the injector dark; a cut there is torn or whole and spends no budget. `withhold_gc` → a seed

@@ -131,6 +131,8 @@ struct Site {
     live: Option<Matchmaker>,
     /// Whether this matchmaker has ever been rebooted from its disk.
     restarted: bool,
+    /// The world's page size (#439): a frozen report is paged by it.
+    page: usize,
 }
 
 impl Site {
@@ -138,8 +140,18 @@ impl Site {
         if self.live.is_none() && *self.disk.hard_state() != MatchmakerHardState::default() {
             self.restarted = true;
         }
-        self.live = Some(Matchmaker::new(&self.config, &self.disk));
+        let mut live = Matchmaker::new(&self.config, &self.disk);
+        live.set_registry_page(self.page);
+        self.live = Some(live);
     }
+}
+
+/// A fresh reconfigurer for `node` that pages its bootstraps by `page`
+/// (#439).
+fn paged(node: NodeId, page: usize) -> MatchmakerReconfigurer {
+    let mut reconfigurer = MatchmakerReconfigurer::new(node);
+    reconfigurer.set_page(page);
+    reconfigurer
 }
 
 /// A node's open matchmaking campaign: the real candidate tally over the
@@ -187,11 +199,15 @@ enum PhaseShape {
     Stopping {
         generation: MatchmakerGeneration,
         acks: Vec<MatchmakerId>,
+        /// Each report still cut short and its cursor (#439).
+        partial: Vec<(MatchmakerId, JournalId)>,
         decree_floor: Ballot,
     },
     Bootstrapping {
         set: MatchmakerSet,
         acks: Vec<MatchmakerId>,
+        /// Each member's held cursor of a paged bootstrap (#439).
+        held: Vec<(MatchmakerId, Option<JournalId>)>,
     },
     Deciding {
         ballot: Ballot,
@@ -212,18 +228,24 @@ impl PhaseShape {
             ReconfigurerPhase::Stopping {
                 old,
                 acks,
+                partial,
                 decree_floor,
                 ..
             } => Self::Stopping {
                 generation: old.generation,
                 acks: acks.keys().copied().collect(),
+                partial: partial.iter().map(|(m, (_, at))| (*m, *at)).collect(),
                 decree_floor: *decree_floor,
             },
             ReconfigurerPhase::Bootstrapping {
-                bootstrap, acks, ..
+                bootstrap,
+                acks,
+                held,
+                ..
             } => Self::Bootstrapping {
                 set: bootstrap.set.clone(),
                 acks: acks.iter().copied().collect(),
+                held: held.iter().map(|(m, at)| (*m, *at)).collect(),
             },
             ReconfigurerPhase::Deciding { decree, .. } => Self::Deciding {
                 ballot: decree.ballot(),
@@ -351,6 +373,10 @@ struct Reach {
     /// A journal raised its GC watermark while a sibling journal's floor on
     /// the same disk stayed elsewhere (#190).
     independent_gc: u64,
+    /// A frozen report was cut into pages (#439).
+    paged_stop: u64,
+    /// A member held a bootstrap cut short, awaiting its next page (#439).
+    paged_bootstrap: u64,
 }
 
 impl Reach {
@@ -396,6 +422,8 @@ impl Reach {
             ),
             ("multi_journal_handover", self.multi_journal_handover),
             ("independent_gc", self.independent_gc),
+            ("paged_stop", self.paged_stop),
+            ("paged_bootstrap", self.paged_bootstrap),
         ];
         for (name, count) in counters {
             assert!(
@@ -596,11 +624,20 @@ struct World {
     /// proposes the members that answered a freeze — a quorum of the old
     /// set at least — so only an operator can take the set below that.
     smallest_started: Option<usize>,
+    /// The page size of every matchmaker and reconfigurer (#439): on half
+    /// the seeds smaller than the set's journals, so a frozen report and a
+    /// bootstrap span several pages.
+    page: usize,
 }
 
 impl World {
     fn new(seed: u64) -> Self {
         let bootstrap: Vec<MatchmakerId> = (0..BOOTSTRAP).map(MatchmakerId).collect();
+        let page = if seed.is_multiple_of(2) {
+            1 + usize::try_from(seed / 2 % 2).unwrap_or(0)
+        } else {
+            super::REGISTRY_PAGE
+        };
         let sites = (0..POOL)
             .map(|i| {
                 let config = MatchmakerConfig {
@@ -612,6 +649,7 @@ impl World {
                     disk: Disk::default(),
                     live: None,
                     restarted: false,
+                    page,
                 };
                 site.boot();
                 site
@@ -620,7 +658,7 @@ impl World {
         let believed = MatchmakerSet::new(MatchmakerGeneration(0), bootstrap.clone());
         let nodes = (0..NODES)
             .map(|i| Node {
-                reconfigurer: MatchmakerReconfigurer::new(NodeId(i)),
+                reconfigurer: paged(NodeId(i), page),
                 believed: believed.clone(),
                 next_round: 1,
                 backoff: 0,
@@ -638,6 +676,7 @@ impl World {
             reach: Reach::default(),
             chaos: true,
             smallest_started: None,
+            page,
         }
     }
 
@@ -1131,12 +1170,12 @@ impl World {
                         "a Stopped reply reports the durable scalars"
                     );
                 }
-                ReconfigureReply::Bootstrapped { set, .. } => {
-                    assert!(
-                        disk.pending.iter().any(|p| p.set == *set),
-                        "a Bootstrapped reply names a durably pending bootstrap"
-                    );
-                }
+                ReconfigureReply::Bootstrapped {
+                    set,
+                    held,
+                    complete,
+                    ..
+                } => assert_bootstrap_backed(disk, set, *held, *complete),
                 ReconfigureReply::Promised { ballot, .. } => {
                     assert!(
                         disk.decree.promised >= *ballot,
@@ -1170,6 +1209,15 @@ impl World {
     }
 
     fn reconfigure_reply(&mut self, to: NodeId, reply: &ReconfigureReply) {
+        match reply {
+            ReconfigureReply::Stopped { next: Some(_), .. } => self.reach.paged_stop += 1,
+            ReconfigureReply::Bootstrapped {
+                held: Some(_),
+                complete: false,
+                ..
+            } => self.reach.paged_bootstrap += 1,
+            _ => {}
+        }
         let shape_before = PhaseShape::of(&self.node(to).reconfigurer);
         let elapsed_before = self.node(to).reconfigurer.stalled_for();
         let step = self.node(to).reconfigurer.on_reply(reply.clone());
@@ -1718,8 +1766,9 @@ impl World {
                 if matches!(n.reconfigurer.phase(), ReconfigurerPhase::Deciding { .. }) {
                     self.reach.killed_deciding += 1;
                 }
+                let page = self.page;
                 let n = self.node(node);
-                n.reconfigurer = MatchmakerReconfigurer::new(node);
+                n.reconfigurer = paged(node, page);
                 n.backoff = 0;
             }
             86 => {
@@ -1728,8 +1777,9 @@ impl World {
                     MatchmakerGeneration(0),
                     (0..BOOTSTRAP).map(MatchmakerId).collect(),
                 );
+                let page = self.page;
                 let n = self.node(node);
-                n.reconfigurer = MatchmakerReconfigurer::new(node);
+                n.reconfigurer = paged(node, page);
                 n.believed = bootstrap;
                 n.backoff = 0;
                 n.campaign = None;
@@ -1940,8 +1990,9 @@ impl World {
             MatchmakerGeneration(0),
             (0..BOOTSTRAP).map(MatchmakerId).collect(),
         );
+        let page = self.page;
         for (i, node) in self.nodes.iter_mut().enumerate() {
-            node.reconfigurer = MatchmakerReconfigurer::new(NodeId(i as u64));
+            node.reconfigurer = paged(NodeId(i as u64), page);
             node.believed = bootstrap.clone();
             node.backoff = 0;
             node.campaign = None;
@@ -2104,6 +2155,8 @@ fn handover_holds_under_seeded_chaos_and_converges() {
         total.chosen_resent_to_activated += reach.chosen_resent_to_activated;
         total.multi_journal_handover += reach.multi_journal_handover;
         total.independent_gc += reach.independent_gc;
+        total.paged_stop += reach.paged_stop;
+        total.paged_bootstrap += reach.paged_bootstrap;
     }
     eprintln!("handover model: {seeds} seeds x {chaos_steps} chaos steps: {total:?}");
     total.assert_all();
@@ -2288,7 +2341,8 @@ fn finish_with_a_partial_quorum_and_a_late_straggler() {
         }
     }
     world.network.clear();
-    world.node(node).reconfigurer = MatchmakerReconfigurer::new(node);
+    let page = world.page;
+    world.node(node).reconfigurer = paged(node, page);
     // Another node meets the frozen generation: finish with whoever answers
     // (C is still unreachable).
     let finisher = NodeId(1);
@@ -2400,7 +2454,8 @@ fn killing_the_reconfigurer_after_chosen_cannot_change_the_outcome() {
             world.deliver(envelope);
         }
         world.network.clear();
-        world.node(node).reconfigurer = MatchmakerReconfigurer::new(node);
+        let page = world.page;
+        world.node(node).reconfigurer = paged(node, page);
         // A different node, believing the bootstrap set, meets the pool.
         for step in 0..QUIET_STEPS {
             world.quiet_step(step);
@@ -2536,6 +2591,7 @@ fn every_quorum_registration_survives_every_stop_quorum() {
                             let stop = ReconfigureRequest::Stop {
                                 from: reconfigurer_node,
                                 generation: MatchmakerGeneration(0),
+                                after: None,
                             };
                             world.deliver(Envelope::Reconfigure {
                                 to: MatchmakerId(m),
@@ -2600,4 +2656,28 @@ fn every_quorum_registration_survives_every_stop_quorum() {
         }
     }
     assert_eq!(cases, 3 * 3 * 3 * 2 * 2);
+}
+
+/// Claim 9 at a `Bootstrapped` reply: a page that did not fit answers what
+/// is held, which may be nothing yet (#439); anything it names is durable.
+fn assert_bootstrap_backed(
+    disk: &MatchmakerHardState,
+    set: &MatchmakerSet,
+    held: Option<JournalId>,
+    complete: bool,
+) {
+    if held.is_some() || complete {
+        assert!(
+            disk.pending.iter().any(|p| p.set == *set),
+            "a Bootstrapped reply names a durably pending bootstrap"
+        );
+    }
+    assert!(
+        disk.pending
+            .iter()
+            .find(|p| p.set == *set)
+            .map_or((None, false), |p| (p.held(), p.complete))
+            == (held, complete),
+        "a Bootstrapped reply reports the durable cursor"
+    );
 }
