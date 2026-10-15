@@ -795,6 +795,10 @@ coordinator is `paros::machine::coordinator`:
   `SetLeader(uuid, current)`, folds that journal to its tail, and admits again every registered
   machine that is not a founding member and not retired (`Admit` is idempotent). Then it
   publishes its interface. A lost install ends the term, and the coordinator resigns.
+  The coordinator renews each time a renewal is due while the install and the term's later
+  duties run (decided on 2026-10-15, #542 (coordinator starves its lease while it
+  installs)). So the lease covers one renewal's round trip, never an install: a slow cell
+  kept no term before.
 - **Interim.** The admin calls are not yet requests to the coordinator (#212, #225). An
   admin session still claims the cell control journal and fences the coordinator. The
   coordinator does not fight back within its term: it resigns, and the next term installs

@@ -625,7 +625,7 @@ impl StorageWorld {
             .values()
             .flatten()
             .copied()
-            .filter(|slot| !self.lossy.contains(slot))
+            .filter(|slot| !self.lossy.contains(slot) && !self.trimmed_live(*slot))
             .collect();
         marked.into_iter().all(|slot| {
             let unclean: BTreeSet<&String> = self
@@ -763,6 +763,22 @@ impl StorageWorld {
             unclean.insert(node);
         }
         self.cluster_size.saturating_sub(unclean.len())
+    }
+
+    /// Whether a live acceptor truncated past `slot`: one that is neither a
+    /// replica nor parked holds a floor above it. Its truncation was
+    /// decided, so a laggard that lost the slot jumps to that trim point and
+    /// nobody needs a copy again. The split-floor loss (#409) leaves such a
+    /// slot short of a clean quorum on purpose, and the clean-quorum gate
+    /// then fired at the next unrelated cut (witness 10128353224463274009,
+    /// `storage: cut and parked acceptors fit one loss budget`). Once the
+    /// ahead acceptor is parked the slot is judged again.
+    fn trimmed_live(&self, slot: u64) -> bool {
+        self.custody.iter().any(|(node, custody)| {
+            custody.first() > slot
+                && !self.replicas.contains(node)
+                && !self.parked.contains_key(node)
+        })
     }
 
     /// How many nodes a run may terminally lose to detected corruption while
@@ -925,11 +941,13 @@ pub(crate) fn storage_fault_stats(
     let quorum = guard.quorum();
     // A slot the loss budget spent (#263) is excused: it lost its clean
     // quorum by permission, and the audit judges what it must do instead.
+    // So is a slot a live acceptor truncated past (`trimmed_live`): its
+    // trim point serves it.
     let marked: BTreeSet<u64> = guard
         .marks
         .values()
         .flat_map(|marks| marks.iter().copied())
-        .filter(|slot| !guard.lossy.contains(slot))
+        .filter(|slot| !guard.lossy.contains(slot) && !guard.trimmed_live(*slot))
         .collect();
     for slot in marked {
         // The availability re-derivation deliberately differs from the

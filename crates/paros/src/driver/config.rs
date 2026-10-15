@@ -254,7 +254,10 @@ pub struct DriverTunables {
     /// above `election_renew` (refused at or below it). It must also
     /// outlast one renewal's round trip, a wall-clock floor the operator
     /// keeps: below it members take over from a live coordinator, which
-    /// costs availability, never safety.
+    /// costs availability, never safety. It covers one renewal's round
+    /// trip, never a term's install or duties: the coordinator renews
+    /// while those run (#542 (coordinator starves its lease while it
+    /// installs)).
     pub election_lease: Duration,
     /// How often the cell coordinator renews its leadership in the election
     /// journal (#240). Floor 1 ms; it stays under `election_lease`.

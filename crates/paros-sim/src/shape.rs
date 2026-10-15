@@ -2033,6 +2033,20 @@ const ELECTION_RENEW_FLOOR: Duration = Duration::from_millis(100);
 /// Run `tunables`' cell election at its renewal floor, the lease and the
 /// failure detector moved down with it, so each keeps its margin past the
 /// renewal period.
+/// The longest cell election lease any node booted under so far (#542
+/// (coordinator starves its lease while it installs)): the span over which
+/// `election_settles` holds one term renewing. Zero before any boot.
+pub(crate) fn longest_election_lease(state: &StateHandle) -> Duration {
+    let registry = registry(state);
+    let guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    guard
+        .nodes
+        .values()
+        .map(|entry| entry.shape.tunables.election_lease)
+        .max()
+        .unwrap_or(Duration::ZERO)
+}
+
 fn renew_at_floor(tunables: &mut DriverTunables) {
     let cut = tunables.election_renew.saturating_sub(ELECTION_RENEW_FLOOR);
     tunables.election_renew -= cut;
