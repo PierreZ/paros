@@ -213,10 +213,22 @@ async fn leave(
     false
 }
 
+/// How many times one published term's anchor moves before
+/// [`election_settles`] judges the election settled (#542 (coordinator
+/// starves its lease while it installs)): a doomed term over a slow link
+/// renewed once in 3 s and passed a check of one move. Not a knob: an
+/// oracle threshold.
+const RENEWALS_SEEN: u32 = 3;
+
 /// Liveness (#240): once the chaos window closed, the cell's election
-/// settles on one leader that keeps renewing. Two reads of the election
-/// journal by `deadline` name the same leader, the later one past a renewal
-/// the earlier did not hold.
+/// settles on one leader that keeps renewing. Reads of the election journal
+/// by `deadline` see one term's anchor move [`RENEWALS_SEEN`] times, from
+/// its first record that names its published interface, over a span longer
+/// than a lease and a half of the longest lease any node runs (#542
+/// (coordinator starves its lease while it installs)): a term deposed about
+/// 1.5 s after each publish renews twice within 100 ms too, so two reads
+/// alone let that livelock pass to a downstream check (witness
+/// 17167272764625629279).
 pub(in crate::chain_workload) async fn election_settles(
     ctx: &SimContext,
     cell: &Cell,
@@ -225,6 +237,11 @@ pub(in crate::chain_workload) async fn election_settles(
     let Some(journal) = cell.journals.election else {
         return;
     };
+    let lease = crate::shape::longest_election_lease(ctx.state());
+    let span = lease + lease / 2;
+    // The term followed, its latest anchor seen, when it was first seen,
+    // and how many times its anchor moved since.
+    let mut first: Option<(u64, u64, Duration, u32)> = None;
     let mut seen: Option<(u64, u64)> = None;
     let mut settled = false;
     let mut attempt = 0_usize;
@@ -232,10 +249,21 @@ pub(in crate::chain_workload) async fn election_settles(
         attempt += 1;
         if let Some(fold) = read_election(&cell.client, journal, attempt).await {
             note_terms(ctx, journal, &fold);
-            if let Some(leader) = fold.leader() {
-                let now = (leader.term, leader.anchor);
-                settled = seen.is_some_and(|(term, anchor)| term == now.0 && anchor < now.1);
-                seen = Some(now);
+            // A term counts from its first record that names the
+            // published interface: the term served its install.
+            if let Some(leader) = fold.leader().filter(|l| !l.candidate.interface.is_empty()) {
+                let now = ctx.time().now();
+                match first.as_mut() {
+                    Some((term, anchor, since, moved)) if *term == leader.term => {
+                        if *anchor < leader.anchor {
+                            *anchor = leader.anchor;
+                            *moved += 1;
+                        }
+                        settled = *moved >= RENEWALS_SEEN && now.saturating_sub(*since) > span;
+                    }
+                    _ => first = Some((leader.term, leader.anchor, now, 0)),
+                }
+                seen = Some((leader.term, leader.anchor));
             }
         }
         if !settled && ctx.time().sleep(Duration::from_millis(100)).await.is_err() {

@@ -490,13 +490,16 @@ impl<P: Providers> Election<P> {
             .renewed
             .is_none_or(|at| now.saturating_sub(at) >= self.tunables.renew_every);
         if due {
-            self.renewed = Some(now);
             let record = ElectionRecord::Renew {
                 term: leader.term,
                 candidate: self.me.clone(),
                 uuid: leader.uuid,
             };
             self.append(&record).await;
+            // Counted once the write returned: a renewal its caller dropped
+            // mid-way ([`Election::renew_if_due`] beside a duty that ended)
+            // is due again at once.
+            self.renewed = Some(now);
         }
         if leader.anchor >= self.floor.saturating_add(self.tunables.compact_after) {
             let request = open_truncate_request(self.journal, leader.anchor);
@@ -511,6 +514,39 @@ impl<P: Providers> Election<P> {
                 moonpool_assertions::reachable!("election: the leader truncated to its renewal");
             }
         }
+    }
+
+    /// Renew the term this candidate leads when a renewal is due, without a
+    /// watch first. A leader calls it while its term's duties run between
+    /// two [`Election::step`]s (an install, a fold, a watch round), so a
+    /// duty longer than a lease does not let the lease run out (#542
+    /// (coordinator starves its lease while it installs)). A term the fold
+    /// gave to another candidate meanwhile is renewed in vain: the fold
+    /// counts no renewal from a writer it does not name. Whether this
+    /// candidate leads a term.
+    ///
+    /// # Panics
+    ///
+    /// If its postcondition fails (a programmer error).
+    pub async fn renew_if_due(&mut self) -> bool {
+        let Some(leader) = self.leading().cloned() else {
+            return false;
+        };
+        assert!(self.mine(&leader), "a led term is this candidate's");
+        self.renew(&leader).await;
+        assert!(self.renewed.is_some(), "a renewal ran, or ran recently");
+        true
+    }
+
+    /// How long until this candidate's next renewal is due, on its own
+    /// clock: zero when one is due now (or none was sent this term).
+    #[must_use]
+    pub fn renewal_due_in(&self) -> Duration {
+        let Some(at) = self.renewed else {
+            return Duration::ZERO;
+        };
+        let since = self.client.now().saturating_sub(at);
+        self.tunables.renew_every.saturating_sub(since)
     }
 
     /// Step down from the term this candidate leads, handing the next term

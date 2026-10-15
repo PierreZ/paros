@@ -46,6 +46,10 @@
 //!    reaches the group of a term that just ended is refused
 //!    (`not_coordinator`).
 //!
+//! Each duty runs beside the term's renewals (`renewing`, #542 (coordinator
+//! starves its lease while it installs)): one duty can outlast a lease, and
+//! a term that renewed only between duties was deposed before it served.
+//!
 //! For a term it served, the coordinator also acts as the **tenant
 //! coordinator** of every tenant its cell hosts (#210, until #212 and
 //! #225): it answers the journal requests sent to the interface it
@@ -63,7 +67,7 @@
 //! The candidate draws no randomness of its own: its seed and its BUGGIFY
 //! decisions (a stalled leader, a hand-off, a reused journal id, an
 //! impatient term, a lost resignation, a group that outlives its term by one
-//! step) are drawn on the node loop before the task starts, and the backoff
+//! step, a slow install) are drawn on the node loop before the task starts, and the backoff
 //! jitter and the journal ids derive from the seed.
 
 use std::collections::BTreeMap;
@@ -597,6 +601,10 @@ struct Candidacy {
     /// application (`not_coordinator`), then the group drops and the next
     /// request fails at the transport.
     linger: bool,
+    /// The first term this member serves takes a lease and a half longer
+    /// to install (a BUGGIFY decision, #542 (coordinator starves its lease
+    /// while it installs)): its renewals must keep the term through it.
+    slow_install: bool,
 }
 
 /// Start the candidacy of the founding member `formed` for the cell
@@ -634,6 +642,7 @@ pub(crate) fn spawn<P: Providers>(
         lose_resign: moonpool_buggify::buggify_with_prob!(0.5),
         linger: moonpool_buggify::buggify_with_prob!(0.5),
         quit_mid_move: moonpool_buggify::buggify_with_prob!(0.5),
+        slow_install: moonpool_buggify::buggify_with_prob!(0.3),
     };
     let mut client = cell_client(providers, rpc, formed, tunables).with_shutdown(shutdown.clone());
     if let Some(observer) = observer {
@@ -711,6 +720,7 @@ async fn campaign<P: Providers>(
         mut lose_resign,
         mut linger,
         mut quit_mid_move,
+        mut slow_install,
     } = candidacy;
     let founder_ids: Vec<NodeId> = plan.members.iter().map(|(id, _)| *id).collect();
     let journals = plan.control_journals();
@@ -753,6 +763,8 @@ async fn campaign<P: Providers>(
     let mut sets = Sets::default();
     // The served term's dynamic endpoint (#404).
     let mut group: Option<TermGroup> = None;
+    // The term whose install was slowed, until the next step judges it.
+    let mut slowed: Option<u64> = None;
     let mut steps = 0_u64;
     let mut waited = false;
     while !shutdown.is_cancelled() {
@@ -774,23 +786,43 @@ async fn campaign<P: Providers>(
         }
         hold = None;
         steps += 1;
-        match election.step(jitter(seed, steps, tunables.lease)).await {
+        let step = election.step(jitter(seed, steps, tunables.lease)).await;
+        if let Some(term) = slowed.take() {
+            moonpool_assertions::sometimes!(
+                matches!(&step, Step::Leading { leader, .. } if leader.term == term),
+                "coordinator: a term kept its lease through a slow install"
+            );
+        }
+        match step {
             Step::Leading { leader, .. } if resigned == Some(leader.term) => {
                 desk = None;
                 watching = None;
                 election.resign(None).await;
             }
             Step::Leading { leader, .. } if served != Some(leader.term) => {
-                let (duty, session) = open_term(
-                    &providers,
-                    &rpc,
-                    &client,
-                    &names,
-                    (journals, founders.clone()),
-                    &leader,
-                    policy,
-                )
-                .await;
+                let install = async {
+                    let opened = open_term(
+                        &providers,
+                        &rpc,
+                        &client,
+                        &names,
+                        (journals, founders.clone()),
+                        &leader,
+                        policy,
+                    )
+                    .await;
+                    if slow_install && matches!(opened.0, TermDuty::Served { .. }) {
+                        slow_install = false;
+                        slowed = Some(leader.term);
+                        moonpool_assertions::reachable!("coordinator: a term installs slowly");
+                        let _ = providers
+                            .time()
+                            .sleep(tunables.lease + tunables.lease / 2)
+                            .await;
+                    }
+                    opened
+                };
+                let (duty, session) = renewing(&providers, &mut election, install).await;
                 watching = session.map(|session| {
                     let watch = Watch::new(client.now(), tunables.renew_every, down_after);
                     (session, watch)
@@ -814,9 +846,8 @@ async fn campaign<P: Providers>(
                     TermDuty::Unavailable => {
                         // The next try dials the founders where the
                         // registry holds them now.
-                        if let Some(followed) =
-                            follow_book(&rpc, &client, &names, &plan, (me, &addr)).await
-                        {
+                        let follow = follow_book(&rpc, &client, &names, &plan, (me, &addr));
+                        if let Some(followed) = renewing(&providers, &mut election, follow).await {
                             client = followed;
                         }
                     }
@@ -869,39 +900,43 @@ async fn campaign<P: Providers>(
                 continue;
             }
             Step::Leading { .. } if watching.is_some() => {
-                let mut stepped = None;
-                if let Some((session, watch)) = watching.as_mut() {
-                    match watch
-                        .round(&providers, &rpc, &client, &names, session)
-                        .await
-                    {
-                        // The term's first write that did not land ends its
-                        // watch: never fight the session that fenced it.
-                        Err(_) => watching = None,
-                        // A round ran: the tenant coordinator takes one step
-                        // of a move off a draining machine (#474), then one
-                        // step of a matchmaker set's placement or move (#501
-                        // (matchmaker sets off the founders)).
-                        Ok(_) if watch.ran() => {
-                            if let Some((_, desk)) = desk.as_mut() {
-                                let ctx = (&providers, &rpc, &names, &client);
-                                stepped = Some(match moves.step(ctx, session, desk).await {
-                                    None => None,
-                                    Some(step) => {
-                                        let set = sets.step(ctx, session, desk).await;
-                                        // A set's move is left mid-way once its
-                                        // handover started, so the next term
-                                        // finds it running.
-                                        set.map(|set| {
-                                            step.in_flight() || set == SetStep::HandedOver
-                                        })
-                                    }
-                                });
+                let duties = async {
+                    let mut stepped = None;
+                    if let Some((session, watch)) = watching.as_mut() {
+                        match watch
+                            .round(&providers, &rpc, &client, &names, session)
+                            .await
+                        {
+                            // The term's first write that did not land ends its
+                            // watch: never fight the session that fenced it.
+                            Err(_) => watching = None,
+                            // A round ran: the tenant coordinator takes one step
+                            // of a move off a draining machine (#474), then one
+                            // step of a matchmaker set's placement or move (#501
+                            // (matchmaker sets off the founders)).
+                            Ok(_) if watch.ran() => {
+                                if let Some((_, desk)) = desk.as_mut() {
+                                    let ctx = (&providers, &rpc, &names, &client);
+                                    stepped = Some(match moves.step(ctx, session, desk).await {
+                                        None => None,
+                                        Some(step) => {
+                                            let set = sets.step(ctx, session, desk).await;
+                                            // A set's move is left mid-way once its
+                                            // handover started, so the next term
+                                            // finds it running.
+                                            set.map(|set| {
+                                                step.in_flight() || set == SetStep::HandedOver
+                                            })
+                                        }
+                                    });
+                                }
                             }
+                            Ok(_) => {}
                         }
-                        Ok(_) => {}
                     }
-                }
+                    stepped
+                };
+                let stepped = renewing(&providers, &mut election, duties).await;
                 match stepped {
                     Some(None) => watching = None,
                     Some(Some(true)) if quit_mid_move => {
@@ -947,15 +982,15 @@ async fn campaign<P: Providers>(
         let until = providers.time().now() + pace;
         let ctx = (&providers, &rpc, &client, &names);
         let cell = (plan.cell_id, tunables.renew_every);
-        answer_until(
+        let answers = answer_until(
             ctx,
             cell,
             until,
             group.as_mut(),
             (&mut watching, &mut desk),
             &shutdown,
-        )
-        .await;
+        );
+        renewing(&providers, &mut election, answers).await;
         if let Some((term, _)) = desk.as_ref().filter(|(_, desk)| desk.superseded()) {
             // A tenant control journal refused the term's uuid: end the
             // term, as a refused cell control journal does.
@@ -965,6 +1000,45 @@ async fn campaign<P: Providers>(
             election.resign(None).await;
         }
     }
+}
+
+/// Run `work`, one of a led term's duties, and renew the term each time a
+/// renewal falls due until it ends (#542 (coordinator starves its lease
+/// while it installs)). [`Election::step`] renews only between duties, and
+/// one duty may outlast a lease: an install claims and folds the cell
+/// control journal, a watch round `Identify`s every machine. Without these
+/// renewals every term of a slow cell was deposed before it served
+/// (witness 17167272764625629279, a 1.6 s lease over a slow link). A
+/// renewal still in flight when `work` ends is dropped: the next step sends
+/// it again. With no term led, `work` runs alone.
+async fn renewing<P: Providers, T>(
+    providers: &P,
+    election: &mut Election<P>,
+    work: impl std::future::Future<Output = T>,
+) -> T {
+    let mut work = std::pin::pin!(work);
+    while election.leading().is_some() {
+        let wait = election.renewal_due_in();
+        let renewal = async {
+            let _ = providers.time().sleep(wait).await;
+            election.renew_if_due().await
+        };
+        moonpool_core::select! {
+            biased;
+            out = &mut work => return out,
+            led = renewal => {
+                if !led {
+                    break;
+                }
+                moonpool_assertions::reachable!("coordinator: a term renewed during its duties");
+            }
+        }
+    }
+    assert!(
+        election.leading().is_none(),
+        "only a term no longer led runs its duty without renewals"
+    );
+    work.await
 }
 
 /// The next request `inbound` holds, or never when there is no endpoint.

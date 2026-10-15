@@ -8,7 +8,11 @@ mod gates;
 mod scan;
 
 use common::{arg, is_clean, print_failed_runs, print_never_fired, print_seed_counts};
-use paros_sim::{AssertKind, COVERAGE_ITERATIONS, SimulationReport, explore};
+use std::collections::BTreeMap;
+
+use paros_sim::{
+    AssertKind, AssertionStats, COVERAGE_ITERATIONS, SimulationReport, explore, explore_more,
+};
 
 fn main() {
     // Optional first arg: exploration iteration budget (defaults to the sancov
@@ -51,11 +55,25 @@ fn main() {
     // sweep's real exit criterion, and "did not saturate" is useless without
     // knowing *which* gate is starving — that is the knob to tune.
     print_never_fired(&report, "  ");
+    let top_up = top_up(&report);
+    let slots = merged_slots(&report, top_up.as_ref());
     // A declared gate that never ran has no slot, so moonpool never judges it
     // (#446 (a gate that never fires cannot fail the sweep)).
-    let declared = gates::judge(&report.assertion_results);
+    let declared = gates::judge(&slots);
     gates::print(&declared, "  ");
-    gates::print_rarest(&report.assertion_results, RAREST);
+    gates::print_rarest(&slots, RAREST);
+    if let Some(more) = top_up.as_ref().filter(|more| !is_clean(more)) {
+        print_failed_runs(more);
+        println!(
+            "  TOP-UP SAFETY VIOLATIONS: {:?}",
+            more.assertion_violations
+        );
+        println!(
+            "  TOP-UP FAILING SEEDS (replay with sim-paros-hunt replay-main): {:?}",
+            more.seeds_failing
+        );
+        std::process::exit(1);
+    }
     if is_clean(&report)
         && report.coverage_violations.is_empty()
         && declared.missing.is_empty()
@@ -79,6 +97,48 @@ fn main() {
         // any correctness, coverage, or saturation defect must fail CI.
         std::process::exit(1);
     }
+}
+
+/// The seeds the declared gates are judged over, at least. The coverage
+/// plateau stops the sweep after 170 to 700 seeds, whatever the gates' rates:
+/// at 170 seeds a gate that fires on 1.5 % of seeds misses 8 % of sweeps,
+/// and with hundreds of declared gates some PR's sweep goes red by chance
+/// (PR #551's and main's sweeps of 2026-10-15, #446). At 400 seeds such a gate
+/// misses 0.2 % of sweeps, which is the bound [`gates::RARE`] is written for.
+const GATE_FLOOR_SEEDS: usize = 400;
+
+/// When the plateau stopped the sweep under [`GATE_FLOOR_SEEDS`], run the
+/// seeds it lacks: their gates count toward the declared-gate judgement and
+/// their safety oracles judge as the sweep's do. Coverage saturation is
+/// still the sweep's own.
+fn top_up(report: &SimulationReport) -> Option<SimulationReport> {
+    let lacking = GATE_FLOOR_SEEDS.checked_sub(report.iterations)?;
+    if lacking == 0 {
+        return None;
+    }
+    println!("--- top-up: {lacking} seeds to reach {GATE_FLOOR_SEEDS} for the declared gates ---");
+    let more = explore_more(lacking);
+    print_seed_counts(&more, "");
+    if let Some(exploration) = &more.exploration {
+        for recipe in &exploration.bug_recipes {
+            println!("  bug recipe seed={} {:?}", recipe.seed, recipe.recipe);
+        }
+    }
+    Some(more)
+}
+
+/// The sweep's assertion slots, with the top-up's added.
+fn merged_slots(
+    report: &SimulationReport,
+    top_up: Option<&SimulationReport>,
+) -> BTreeMap<String, AssertionStats> {
+    let mut slots = report.assertion_results.clone();
+    for (msg, stats) in top_up.iter().flat_map(|more| &more.assertion_results) {
+        let slot = slots.entry(msg.clone()).or_default();
+        slot.total_checks += stats.total_checks;
+        slot.successes += stats.successes;
+    }
+    slots
 }
 
 /// How many of the rarest declared gates the sweep prints: its marginal

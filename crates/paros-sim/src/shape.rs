@@ -374,8 +374,15 @@ impl NodeShape {
             // read and the machine never answered). A fold from position 0
             // then takes several answers, each going on from where the last
             // one stopped (#457). The final resolve check holds every
-            // founding member to an answer after chaos.
-            resolve_answer_within: ms(buggify_knob!(2000_u64, RESOLVE_FLOOR_MS..2001_u64)),
+            // founding member to an answer after chaos. On a slow-link seed,
+            // half the time the floor itself: a fold then spans several
+            // answers, and an answer is cut short with its folds kept (that
+            // gate missed the sweep of PR #551, #446).
+            resolve_answer_within: if slow_link && moonpool_sim::buggify_with_prob!(0.5) {
+                ms(RESOLVE_FLOOR_MS)
+            } else {
+                ms(buggify_knob!(2000_u64, RESOLVE_FLOOR_MS..2001_u64))
+            },
         };
         // The production profile `parosd` ships (#209), whole: every field
         // at once, which the per-field locations above would draw together
@@ -1997,6 +2004,20 @@ const ELECTION_RENEW_FLOOR: Duration = Duration::from_millis(100);
 /// Run `tunables`' cell election at its renewal floor, the lease and the
 /// failure detector moved down with it, so each keeps its margin past the
 /// renewal period.
+/// The longest cell election lease any node booted under so far (#542
+/// (coordinator starves its lease while it installs)): the span over which
+/// `election_settles` holds one term renewing. Zero before any boot.
+pub(crate) fn longest_election_lease(state: &StateHandle) -> Duration {
+    let registry = registry(state);
+    let guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    guard
+        .nodes
+        .values()
+        .map(|entry| entry.shape.tunables.election_lease)
+        .max()
+        .unwrap_or(Duration::ZERO)
+}
+
 fn renew_at_floor(tunables: &mut DriverTunables) {
     let cut = tunables.election_renew.saturating_sub(ELECTION_RENEW_FLOOR);
     tunables.election_renew -= cut;
