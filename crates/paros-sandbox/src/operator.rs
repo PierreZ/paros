@@ -268,6 +268,11 @@ impl Desk {
         .await;
         match run {
             InitRun::Initialized(done) | InitRun::AlreadyInitialized(done) => {
+                // The admitted machines serve journals too: the client
+                // reaches them as it reaches the founding members.
+                let mut done = done;
+                let admitted = done.admitted.clone();
+                done.servers.extend(admitted);
                 let detail = format!(
                     "cell-1 formed over {} machines, {} admitted, coordinator {}",
                     done.members.len(),
