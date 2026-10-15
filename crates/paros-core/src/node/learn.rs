@@ -8,7 +8,7 @@
 //! Phase-2 half — opening a round, fanning it out, folding the votes and
 //! deciding — is `node/phase2.rs`.
 
-use super::{Ballot, ColocatedNode, Command, Slot};
+use super::{Ballot, ColocatedNode, Command, NodeRole, Slot};
 
 impl ColocatedNode {
     /// Learner: a command was chosen elsewhere — by another leader's tally,
@@ -98,7 +98,27 @@ impl ColocatedNode {
         // boot again.
         if ballot > self.acceptor.promised() {
             self.acceptor.set_promise(ballot, &mut self.pending_writes);
+            // A live campaign's promise sits at its ballot
+            // (`assert_invariants`): a candidate that learns a slot chosen
+            // above its ballot can no longer accept its own rounds, so its
+            // campaign is over, as a higher `Prepare` ends it in
+            // `on_prepare`. Left open, a matchmaking phase reached Phase 1
+            // with the promise past the ballot (witness
+            // 13099780746496209636 on PR #556 (tenant footprint): a
+            // candidate at (2,1) learned slot 0 chosen at (3,2) through a
+            // `Commit`, then its matchmaker quorum answered).
+            if self.role == NodeRole::Candidate {
+                probe!(
+                    reachable,
+                    "learn: a slot chosen above a campaign's ballot closes it"
+                );
+                self.become_follower(None);
+            }
         }
+        assert!(
+            self.role != NodeRole::Candidate || self.acceptor.promised() == self.ballot,
+            "a learned slot leaves a live campaign's promise at its ballot"
+        );
         // Record the *chosen* value as the authoritative accepted command. An
         // upsert is load-bearing: a node may hold a stale lower-ballot accept
         // it picked up from a failed earlier ballot, and `chosen` is rebuilt

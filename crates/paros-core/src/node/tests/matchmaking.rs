@@ -1181,3 +1181,47 @@ fn a_floor_raised_over_the_cursor_between_two_pages_still_completes_the_campaign
         "every prior configuration sits below the raised floor"
     );
 }
+
+/// A live campaign's promise sits at its ballot (`assert_invariants`): a
+/// candidate still in its matchmaking phase that learns a slot chosen at a
+/// higher ballot raises its promise there, so its campaign closes, as a
+/// higher `Prepare` closes it. Its matchmaker quorum answering afterwards
+/// opens no Phase 1 (which would run at a ballot its own promise refuses),
+/// and its next campaign opens above the learned ballot.
+#[test]
+fn a_slot_chosen_above_a_matchmaking_campaign_closes_it() {
+    let mut n = deployed_node(1, &[0, 1, 2], &[0, 1, 2], 3);
+    let mut mms = registries(3);
+    campaign(&mut n);
+    let b = n.ballot();
+    assert_eq!(n.role(), NodeRole::Candidate);
+    assert!(n.matchmaking_pending());
+    let requests = drain_match_requests(&mut n);
+    let replies = matchmake(&mut mms, requests);
+    // Another proposer chose slot 0 at a ballot above the campaign's.
+    let above = ballot(b.round + 1, 2);
+    n.step(Message::Commit {
+        from: Party::Node(NodeId(2)),
+        ballot: above,
+        slot: Slot(0),
+        command: ucmd(7, 7, 2),
+    });
+    assert_eq!(chosen_at(&n, 0), Some(val(2)), "the slot is learned chosen");
+    assert_eq!(
+        n.hard_state().max_promised_ballot,
+        above,
+        "the promise follows it"
+    );
+    assert_eq!(n.role(), NodeRole::Follower, "the campaign is closed");
+    assert!(!n.matchmaking_pending());
+    // The matchmaker quorum's answers arrive late: they fold into nothing.
+    for reply in replies {
+        assert_eq!(n.on_match_reply(reply), MatchStep::Ignored);
+    }
+    assert!(prepares(&drain(&mut n)).is_empty(), "no Phase 1 opens");
+    // The next campaign opens above the ballot the promise learned.
+    campaign(&mut n);
+    assert_eq!(n.role(), NodeRole::Candidate);
+    assert!(n.ballot() > above);
+    assert_eq!(n.hard_state().max_promised_ballot, n.ballot());
+}
