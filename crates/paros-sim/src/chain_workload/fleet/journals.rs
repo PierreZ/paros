@@ -547,15 +547,24 @@ impl FleetOps {
         let Ok(named) = JournalName::new(tenant, &String::from_utf8_lossy(name)) else {
             return;
         };
-        let presented = Presented::drawn(draw >> 24);
+        // Once an operator rotated a key in, a call presents the rotated
+        // key's token on its own coin: the two ingredients of a served
+        // rotated token line up (#245 (Biscuit tokens)).
+        let presented = if frontend::rotation_tried(&self.state) && buggify_with_prob!(0.3) {
+            Presented::Rotated
+        } else {
+            Presented::drawn(draw >> 24)
+        };
         // On one draw in three the call names a journal by its ids instead:
         // the tenant's control journal, an internal journal only `admin`
         // reaches.
         let internal = (draw >> 48).is_multiple_of(3);
         let now = self.connector.providers().time().now();
+        let journal_name = String::from_utf8_lossy(name);
         let pass = Arc::new(Pass::new(frontend::token(
             &self.state,
             tenant,
+            &journal_name,
             presented,
             now,
         )));
@@ -565,48 +574,31 @@ impl FleetOps {
             pass.bind(LOCAL, named);
             LOCAL
         };
-        let expected = match presented {
-            Presented::Admin => None,
-            Presented::Own | Presented::Rotated if !internal => None,
-            Presented::Own | Presented::Rotated | Presented::OtherTenant => Some(Denial::Forbidden),
-            Presented::Expired => Some(Denial::Expired),
-            Presented::UnknownKey | Presented::Garbage => Some(Denial::InvalidToken),
+        let writes = !internal && (draw >> 52).is_multiple_of(2);
+        let call = Call {
+            presented,
+            expected: expected_denial(presented, internal, writes),
         };
         let client = self.connector.through(&self.frontends, &pass);
         let first = usize::try_from(draw % self.frontends.len() as u64).unwrap_or(0);
-        if !internal && (draw >> 52).is_multiple_of(2) {
-            self.write_through_frontend(&client, journal, expected, first, draw)
+        if writes {
+            self.write_through_frontend(&client, journal, call, first, draw)
                 .await;
             return;
         }
         let request = paros::client::Reader::new(journal, 0).request(1, 0);
-        let outcome = client.read_any(&request, first).await.outcome;
-        match (expected, outcome) {
-            (None, ReadOutcome::Denied(denial)) => assert_always!(
-                false,
-                "frontend: a call in its token's rights is never denied",
-                { "denial" => denial.as_str() }
-            ),
-            (None, ReadOutcome::Page { .. }) if internal => {
-                assert_reachable!("frontend: an admin reads an internal journal by its ids");
-            }
-            (None, ReadOutcome::Page { .. }) => {
-                assert_reachable!("frontend: a tenant reads its journal by name");
-            }
-            (Some(want), ReadOutcome::Denied(denial)) => {
-                assert_always!(
-                    denial == want,
-                    "frontend: a denial names its cause",
-                    { "want" => want.as_str(), "denial" => denial.as_str() }
-                );
+        match client.read_any(&request, first).await.outcome {
+            ReadOutcome::Denied(denial) if call.denied(denial) => {
                 assert_reachable!("frontend: a call outside its token's rights is denied");
             }
-            (Some(want), ReadOutcome::Page { .. } | ReadOutcome::Truncated { .. }) => {
-                assert_always!(
-                    false,
-                    "frontend: a call outside its token's rights is never served",
-                    { "want" => want.as_str() }
-                );
+            ReadOutcome::Page { .. } | ReadOutcome::Truncated { .. }
+                if call.served(&self.state) =>
+            {
+                if internal {
+                    assert_reachable!("frontend: an admin reads an internal journal by its ids");
+                } else {
+                    assert_reachable!("frontend: a tenant reads its journal by name");
+                }
             }
             _ => {}
         }
@@ -635,7 +627,7 @@ impl FleetOps {
         &mut self,
         client: &ChainClient,
         journal: JournalIdentifier,
-        expected: Option<Denial>,
+        call: Call,
         first: usize,
         draw: u64,
     ) {
@@ -651,28 +643,13 @@ impl FleetOps {
                     .await
             }
         };
-        match (expected, outcome) {
-            (None, WriterOutcome::Written { .. }) => {
+        match outcome {
+            WriterOutcome::Written { .. } if call.served(&self.state) => {
                 assert_reachable!("frontend: a tenant writes its journal by name");
             }
-            (None, WriterOutcome::Denied(denial)) => assert_always!(
-                false,
-                "frontend: a call in its token's rights is never denied",
-                { "denial" => denial.as_str() }
-            ),
-            (Some(want), WriterOutcome::Denied(denial)) => {
-                assert_always!(
-                    denial == want,
-                    "frontend: a denial names its cause",
-                    { "want" => want.as_str(), "denial" => denial.as_str() }
-                );
+            WriterOutcome::Denied(denial) if call.denied(denial) => {
                 assert_reachable!("frontend: a write outside its token's rights is denied");
             }
-            (Some(want), WriterOutcome::Written { .. }) => assert_always!(
-                false,
-                "frontend: a call outside its token's rights is never served",
-                { "want" => want.as_str() }
-            ),
             _ => {}
         }
     }
@@ -693,6 +670,94 @@ impl FleetOps {
         {
             assert_reachable!("system: a created journal commits an append");
         }
+    }
+}
+
+/// One call through a frontend: the token presented and the denial its
+/// rights call for (`None`: it is served).
+#[derive(Clone, Copy)]
+struct Call {
+    presented: Presented,
+    expected: Option<Denial>,
+}
+
+impl Call {
+    /// Judge a denial; whether it was the one the token's rights call for.
+    /// A token the rotated key signed may also be `invalid_token` while the
+    /// frontend has not read that key yet (#245 (Biscuit tokens)).
+    fn denied(self, denial: Denial) -> bool {
+        if denial == Denial::InvalidToken && self.presented.may_be_unknown() {
+            assert_reachable!("frontend: a token signed by a key not read yet is refused");
+            return false;
+        }
+        match self.expected {
+            None => {
+                assert_always!(
+                    false,
+                    "frontend: a call in its token's rights is never denied",
+                    { "denial" => denial.as_str() }
+                );
+                false
+            }
+            Some(want) => {
+                assert_always!(
+                    denial == want,
+                    "frontend: a denial names its cause",
+                    { "want" => want.as_str(), "denial" => denial.as_str() }
+                );
+                if matches!(
+                    self.presented,
+                    Presented::ReadOnly | Presented::OtherJournal
+                ) {
+                    assert_reachable!("frontend: a derived token's restriction denies a call");
+                }
+                true
+            }
+        }
+    }
+
+    /// Judge a served call; whether its token's rights allow it.
+    fn served(self, state: &moonpool_sim::StateHandle) -> bool {
+        assert_always!(
+            self.presented.may_be_served(state),
+            "frontend: a token signed by a key the universe never held is never served"
+        );
+        if self.presented.may_be_unknown() {
+            assert_reachable!("frontend: a token signed by a rotated-in key is served");
+        }
+        if matches!(self.presented, Presented::ReadOnly | Presented::OwnJournal)
+            && self.expected.is_none()
+        {
+            assert_reachable!("frontend: a derived token is served within its restriction");
+        }
+        if let Some(want) = self.expected {
+            assert_always!(
+                false,
+                "frontend: a call outside its token's rights is never served",
+                { "want" => want.as_str() }
+            );
+            return false;
+        }
+        true
+    }
+}
+
+/// The denial a call's token rights call for (`None`: it is served): a
+/// call by ids is to an internal journal, which only `admin` reaches; a
+/// derived token (#400) keeps its restriction.
+fn expected_denial(presented: Presented, internal: bool, writes: bool) -> Option<Denial> {
+    match presented {
+        Presented::Admin => None,
+        Presented::Own | Presented::Rotated | Presented::OwnJournal if !internal => None,
+        Presented::ReadOnly if !internal && !writes => None,
+        Presented::Own
+        | Presented::Rotated
+        | Presented::OwnJournal
+        | Presented::ReadOnly
+        | Presented::OtherTenant
+        | Presented::OtherJournal => Some(Denial::Forbidden),
+        Presented::Expired => Some(Denial::Expired),
+        Presented::UnknownKey | Presented::Garbage => Some(Denial::InvalidToken),
     }
 }
 

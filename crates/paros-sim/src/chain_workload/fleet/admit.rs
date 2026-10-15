@@ -9,6 +9,7 @@
 
 use paros::Address;
 
+use moonpool_sim::{Providers as _, TimeProvider as _};
 use moonpool_sim::{
     SimContext, assert_always, assert_reachable, assert_sometimes, buggify_with_prob,
 };
@@ -88,13 +89,15 @@ impl FleetOps {
             .iter()
             .map(|(id, addr)| (NodeId(*id), addr.clone()))
             .collect();
+        let (token, bad_token) = self.admission_token(ctx);
         let mut session = CellSession::new(
             cell.journals,
             &members,
             founders,
             self.leader_seeds.next(),
             policy,
-        );
+        )
+        .with_token(token);
         let client = cell.client.clone();
         let first = cell.first(draw);
         let providers = self.connector.providers().clone();
@@ -122,7 +125,26 @@ impl FleetOps {
                 self.patience,
             )
             .await;
-        self.judge_admission(ctx, &session, target, run);
+        self.judge_admission(ctx, &session, target, run, bad_token);
+    }
+
+    /// The operator's token for an admission (#245 (Biscuit tokens)):
+    /// `admin` on a pinned seed; on its own location a tenant's, which a
+    /// pinned machine refuses. Whether it is the tenant's.
+    fn admission_token(&self, ctx: &SimContext) -> (Vec<u8>, bool) {
+        let now = self.connector.providers().time().now();
+        if crate::frontend::machines_pinned(ctx.state()) && buggify_with_prob!(0.15) {
+            assert_reachable!("admit: an operator presents a tenant token to a pinned machine");
+            let token = crate::frontend::token(
+                ctx.state(),
+                "acme",
+                "",
+                crate::frontend::Presented::Own,
+                now,
+            );
+            return (token, true);
+        }
+        (crate::frontend::operator_token(ctx.state(), now), false)
     }
 
     /// One admission step at a machine outside the founding members, kept
@@ -151,13 +173,16 @@ impl FleetOps {
             .iter()
             .map(|(id, addr)| (NodeId(*id), addr.clone()))
             .collect();
+        let token =
+            crate::frontend::operator_token(ctx.state(), self.connector.providers().time().now());
         let mut session = CellSession::new(
             cell.journals,
             &members,
             founders,
             self.leader_seeds.next(),
             policy,
-        );
+        )
+        .with_token(token);
         let providers = self.connector.providers().clone();
         let rpc = self.connector.rpc().clone();
         let names = self.connector.names().clone();
@@ -186,9 +211,14 @@ impl FleetOps {
         session: &CellSession,
         target: Address,
         run: Run<NodeId>,
+        bad_token: bool,
     ) {
         run.steps.iter().copied().for_each(reach);
         let founder = crate::machine::is_founder(ctx.state(), &target);
+        assert_always!(
+            !bad_token || !run.steps.contains(&Stage::Admit),
+            "admit: a pinned machine never admits for a tenant token"
+        );
         match run.outcome {
             Step::Done { result, .. } => {
                 if run.steps.is_empty() {
@@ -231,6 +261,17 @@ impl FleetOps {
                     "admit: only a founding member refuses an admission for cell init"
                 );
                 assert_reachable!("admit: a founding member mid cell init refuses an admission");
+            }
+            Step::Refused(FleetRefusal::Denied { denial, .. }) => {
+                assert_always!(
+                    bad_token && denial == paros::frontend::Denial::Forbidden,
+                    "admit: a pinned machine denies only a tenant token",
+                    { "denial" => denial.as_str() }
+                );
+                assert_reachable!("admit: a pinned machine denies a tenant token");
+                // The registration may stand: the next `ADMIT` finishes it
+                // with the operator's own token.
+                self.admitting = Some(target);
             }
             Step::Refused(FleetRefusal::OtherCell { cell_id, .. }) => {
                 // One cell per run, unless a wiped one-founder cell formed

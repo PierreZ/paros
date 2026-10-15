@@ -88,13 +88,39 @@ fn registrations_from_proto(
     )
 }
 
+/// Where a matchmaker request goes: the requester's cell (#539
+/// (matchmaker cell fence)), the tenant whose set serves it and the
+/// matchmaker addressed (#190). A host serves only its own cell's requests.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Addressed {
+    /// The requester's cell; `0` on a deployment without a cell plan.
+    pub(crate) cell_id: u64,
+    pub(crate) tenant: TenantId,
+    pub(crate) to: MatchmakerId,
+}
+
+impl Addressed {
+    fn from_wire(cell_id: u64, tenant: u64, to: u64) -> Self {
+        Self {
+            cell_id,
+            tenant: TenantId(tenant),
+            to: MatchmakerId(to),
+        }
+    }
+}
+
 /// Encode a matchmaking request of `tenant`'s set for the wire.
 #[must_use]
 pub(crate) fn wire_match_request(
-    (tenant, to): (TenantId, MatchmakerId),
+    Addressed {
+        cell_id,
+        tenant,
+        to,
+    }: Addressed,
     request: &MatchRequest,
 ) -> WireMatchRequest {
     WireMatchRequest {
+        cell_id,
         tenant: tenant.0,
         to: to.0,
         journal: request.journal.0,
@@ -114,9 +140,8 @@ pub(crate) fn wire_match_request(
 /// Returns a static description of the first malformed field.
 pub(crate) fn match_request_from_wire(
     request: WireMatchRequest,
-) -> Result<(TenantId, MatchmakerId, MatchRequest), &'static str> {
-    let tenant = TenantId(request.tenant);
-    let to = MatchmakerId(request.to);
+) -> Result<(Addressed, MatchRequest), &'static str> {
+    let addressed = Addressed::from_wire(request.cell_id, request.tenant, request.to);
     let journal = JournalId(request.journal);
     let from = NodeId(request.from);
     let ballot = ballot_from_proto(request.ballot)?;
@@ -132,7 +157,7 @@ pub(crate) fn match_request_from_wire(
         Some(cursor) => base.from_page(cursor.into()),
         None => base,
     };
-    Ok((tenant, to, request))
+    Ok((addressed, request))
 }
 
 /// Encode a matchmaker's reply for the wire.
@@ -241,10 +266,15 @@ pub(crate) fn match_reply_from_wire(reply: WireMatchReply) -> Result<MatchReply,
 /// Encode a garbage-collection request of `tenant`'s set for the wire.
 #[must_use]
 pub(crate) fn wire_garbage_collect(
-    (tenant, to): (TenantId, MatchmakerId),
+    Addressed {
+        cell_id,
+        tenant,
+        to,
+    }: Addressed,
     request: &GcRequest,
 ) -> WireGarbageCollect {
     WireGarbageCollect {
+        cell_id,
         tenant: tenant.0,
         to: to.0,
         journal: request.journal.0,
@@ -260,10 +290,9 @@ pub(crate) fn wire_garbage_collect(
 /// Returns a static description of the first malformed field.
 pub(crate) fn garbage_collect_from_wire(
     request: WireGarbageCollect,
-) -> Result<(TenantId, MatchmakerId, GcRequest), &'static str> {
+) -> Result<(Addressed, GcRequest), &'static str> {
     Ok((
-        TenantId(request.tenant),
-        MatchmakerId(request.to),
+        Addressed::from_wire(request.cell_id, request.tenant, request.to),
         GcRequest {
             from: NodeId(request.from),
             journal: JournalId(request.journal),
@@ -401,7 +430,11 @@ fn phase_from_proto(phase: i32) -> Result<MatchmakerPhase, &'static str> {
 /// wire.
 #[must_use]
 pub(crate) fn wire_reconfigure_request(
-    (tenant, to): (TenantId, MatchmakerId),
+    Addressed {
+        cell_id,
+        tenant,
+        to,
+    }: Addressed,
     request: &ReconfigureRequest,
 ) -> WireReconfigureRequest {
     use matchmaker::reconfigure_request::Kind;
@@ -442,6 +475,7 @@ pub(crate) fn wire_reconfigure_request(
         kind: Some(kind),
         tenant: tenant.0,
         to: to.0,
+        cell_id,
     }
 }
 
@@ -451,11 +485,10 @@ pub(crate) fn wire_reconfigure_request(
 /// Returns a static description of the first malformed field.
 pub(crate) fn reconfigure_request_from_wire(
     request: WireReconfigureRequest,
-) -> Result<(TenantId, MatchmakerId, ReconfigureRequest), &'static str> {
+) -> Result<(Addressed, ReconfigureRequest), &'static str> {
     use matchmaker::reconfigure_request::Kind;
     let from = NodeId(request.from);
-    let tenant = TenantId(request.tenant);
-    let to = MatchmakerId(request.to);
+    let addressed = Addressed::from_wire(request.cell_id, request.tenant, request.to);
     let decoded = match request.kind.ok_or("missing reconfigure request kind")? {
         Kind::Stop(stop) => ReconfigureRequest::Stop {
             from,
@@ -487,7 +520,7 @@ pub(crate) fn reconfigure_request_from_wire(
             successor: mm_set_from_proto(chosen.successor)?,
         },
     };
-    Ok((tenant, to, decoded))
+    Ok((addressed, decoded))
 }
 
 /// Encode a matchmaker's reconfiguration reply for the wire.

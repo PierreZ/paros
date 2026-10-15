@@ -19,7 +19,7 @@ use tokio_util::sync::CancellationToken;
 use crate::audit::Audit;
 use crate::driver::events::{reconfigure_kind, registration_history_hash};
 use crate::rpc::{
-    MatchmakerClient, garbage_collect_ack_from_wire, match_reply_from_wire,
+    Addressed, MatchmakerClient, garbage_collect_ack_from_wire, match_reply_from_wire,
     reconfigure_reply_from_wire, wire_garbage_collect, wire_match_request,
     wire_reconfigure_request,
 };
@@ -44,6 +44,9 @@ pub(crate) struct MatchmakerLinks<P: Providers> {
     pub(crate) reconfigure_replies: mpsc::Sender<(TenantId, ReconfigureReply)>,
     pub(crate) timeout: Duration,
     pub(crate) shutdown: CancellationToken,
+    /// The cell every request names (#539 (matchmaker cell fence)), as
+    /// every peer batch does (#216): `0` on a deployment without a cell plan.
+    pub(crate) cell_id: u64,
 }
 
 /// This driver's link to one matchmaker, or `None` with a warning: a request
@@ -77,6 +80,16 @@ impl<P: Providers> MatchmakerLinks<P> {
     /// The link to `matchmaker`, if this driver has one.
     pub(crate) fn client(&self, matchmaker: MatchmakerId) -> Option<MatchmakerClient<P>> {
         self.clients().get(&matchmaker).cloned()
+    }
+
+    /// Where a request of `tenant`'s set to `matchmaker` goes, in this
+    /// driver's cell.
+    fn addressed(&self, tenant: TenantId, matchmaker: MatchmakerId) -> Addressed {
+        Addressed {
+            cell_id: self.cell_id,
+            tenant,
+            to: matchmaker,
+        }
     }
 
     /// Whether this driver has a link to `matchmaker`.
@@ -210,7 +223,7 @@ fn send_gc_requests<P: Providers, A: Audit>(
             fence = fence.map_or(-1_i64, |s| i64::try_from(s.0).unwrap_or(i64::MAX)),
             "gc_request_sent"
         );
-        let wire = wire_garbage_collect((tenant, matchmaker), &request);
+        let wire = wire_garbage_collect(links.addressed(tenant, matchmaker), &request);
         spawn_matchmaker_rpc(
             providers,
             links,
@@ -253,7 +266,7 @@ pub(crate) fn send_reconfigure_requests<P: Providers, A: Audit>(
             kind = reconfigure_kind(&request),
             "reconfigure_request_sent"
         );
-        let wire = wire_reconfigure_request((tenant, matchmaker), &request);
+        let wire = wire_reconfigure_request(links.addressed(tenant, matchmaker), &request);
         spawn_matchmaker_rpc(
             providers,
             links,
@@ -362,7 +375,7 @@ fn send_match_requests<P: Providers, A: Audit>(
                 "match_request_sent"
             );
         }
-        let wire = wire_match_request((tenant, matchmaker), &request);
+        let wire = wire_match_request(links.addressed(tenant, matchmaker), &request);
         spawn_matchmaker_rpc(
             providers,
             links,

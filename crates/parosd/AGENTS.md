@@ -12,7 +12,7 @@ image and the Compose toy are `Dockerfile` and `docker-compose.yml` at the repos
   amnesia, wait, serve) → tracing subscriber, runtime, name resolution, `SIGTERM`/`SIGINT`
   → shutdown token, `MachineError` → exit codes.
 - `src/settings.rs` → `Settings`, `Layout`, `check_unknown` → `PAROS_*` variables (each also a
-  `--flag`); an unknown `PAROS_*` variable is an error. `PAROS_TLS_CERT`, `PAROS_TLS_KEY`, `PAROS_TLS_CA` (all or none), `PAROS_TLS_CLIENT_AUTH` (`required` by default) → `Settings::transport` (PR #509 (mutual TLS)).
+  `--flag`); an unknown `PAROS_*` variable is an error. `PAROS_TLS_CERT`, `PAROS_TLS_KEY`, `PAROS_TLS_CA` (all or none), `PAROS_TLS_CLIENT_AUTH` (`required` by default) → `Settings::transport` (PR #509 (mutual TLS)). `PAROS_ROOT_PUBLIC_KEY` (`.public` files, comma-separated) → `Settings::pin`, the machine's `AdminPin` over `BiscuitAuthz` at the start's wall clock (#245 (Biscuit tokens)); none: open.
 - The disk is the library's `paros::machine::ProviderDisk` over `TokioStorageProvider`, rooted
   at the data directory: the record `<data-dir>/machine` and the stores
   `<data-dir>/journals/<tenant>/<journal>/` (#235). No disk or store type lives here (#294).
@@ -22,11 +22,12 @@ image and the Compose toy are `Dockerfile` and `docker-compose.yml` at the repos
 - `src/tunables.rs` → `from_env`, `variables` → `DriverTunables::production()` plus a
   `PAROS_<FIELD>[_MS]` override per field, refused below its floor (#209); the cell election's
   `PAROS_ELECTION_LEASE_MS`, `PAROS_ELECTION_RENEW_MS`, `PAROS_ELECTION_COMPACT_AFTER` (#240).
-- `src/bin/paros-frontend.rs` → `paros-frontend` (#192 (the frontend)): `paros::frontend::run_frontend` over Tokio with `paros_authz_biscuit::BiscuitAuthz`; `PAROS_FRONTEND_LISTEN`, `PAROS_FRONTEND_CELL` (the founding members), `PAROS_FRONTEND_ROOT_PUBLIC_KEY` (one or more `.public` files: the ring), `PAROS_FRONTEND_TIMEOUT_MS`; its wall clock is `SystemTime::now()` at start plus the provider's time.
+- `src/bin/paros-frontend.rs` → `paros-frontend` (#192 (the frontend)): `paros::frontend::run_frontend` over Tokio with `paros_authz_biscuit::BiscuitAuthz`; `PAROS_FRONTEND_LISTEN`, `PAROS_FRONTEND_CELL` (the founding members), `PAROS_FRONTEND_ROOT_PUBLIC_KEY` (`.public` files: the pin until it read the universe entry's keys; optional since #245 (Biscuit tokens)), `PAROS_FRONTEND_TIMEOUT_MS`; its wall clock is `SystemTime::now()` at start plus the provider's time.
 - `src/bin/parosctl/main.rs` → `parosctl` → global options (`--frontends`/`PAROSCTL_FRONTENDS`: `write`, `read`, `tail`, `truncate` and `set-leader` go through the frontends with the token in `PAROS_TOKEN`, #192 (the frontend)), the offline `key` and `token`
-  commands (no server, no runtime), server ids discovered from `Inspect`, `init` vs the cell
+  commands (no server, no runtime), the admin `--token`/`--token-file` (`PAROS_TOKEN`, `PAROS_TOKEN_FILE`) that `init` and `cell` present to a pinned machine (#245 (Biscuit tokens)), server ids discovered from `Inspect`, `init` vs the cell
   commands, exit codes.
-- `src/bin/parosctl/init.rs` → `parosctl init [--members a,b,c] [--patience-ms N]`: resolves the
+- `src/bin/parosctl/universe.rs` → `parosctl universe key list|add|remove` (#245 (Biscuit tokens)): the universe entry's root public keys, by label, each change one idempotent write through `paros::client::fleet`; `read_key` reads a `.public` or `.private` file, shared with `init`.
+- `src/bin/parosctl/init.rs` → `parosctl init [--members a,b,c] [--patience-ms N] [--root-public-key FILE]` (the universe's first root key, #245): resolves the
   founding members (default: the servers), runs `paros::client::initialize` over them and prints
   what it came to (`cell init`, the elected coordinator, the fleet steps; #229, #240, #246, #277).
 - `src/bin/parosctl/fleet.rs` → `parosctl tenant create|delete` over

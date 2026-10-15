@@ -284,6 +284,12 @@ fn matchmaker_contract_round_trips() {
     let tenant = TenantId(0xA1);
     // The matchmaker addressed (#190).
     let to = MatchmakerId(0xC3);
+    // A cell id rides every request (#539 (matchmaker cell fence)).
+    let addressed = super::Addressed {
+        cell_id: 0xD4,
+        tenant,
+        to,
+    };
     let j = JournalId(0xB2);
     let ballot = |round: u64, node: u64| Ballot {
         round,
@@ -307,12 +313,12 @@ fn matchmaker_contract_round_trips() {
         MatchRequest::reconfigure(j, NodeId(4), ballot(8, 4), config(&[1, 2, 3]), g(3)),
         MatchRequest::probe(j, NodeId(5), ballot(9, 5), config(&[0, 1, 2]), g(1)),
     ] {
-        let wire = super::matchmaker_codec::wire_match_request((tenant, to), &request);
+        let wire = super::matchmaker_codec::wire_match_request(addressed, &request);
         let bytes = wire.encode_to_vec();
         let decoded = super::WireMatchRequest::decode(bytes.as_slice()).expect("decode");
         assert_eq!(
             super::matchmaker_codec::match_request_from_wire(decoded).expect("request"),
-            (tenant, to, request)
+            (addressed, request)
         );
     }
 
@@ -431,12 +437,12 @@ fn matchmaker_contract_round_trips() {
         generation: g(1),
         watermark: ballot(3, 1),
     };
-    let wire = super::matchmaker_codec::wire_garbage_collect((tenant, to), &gc);
+    let wire = super::matchmaker_codec::wire_garbage_collect(addressed, &gc);
     let decoded =
         super::WireGarbageCollect::decode(wire.encode_to_vec().as_slice()).expect("decode");
     assert_eq!(
         super::matchmaker_codec::garbage_collect_from_wire(decoded).expect("gc"),
-        (tenant, to, gc)
+        (addressed, gc)
     );
 
     // The handover contract (#125): every request and reply kind.
@@ -489,12 +495,12 @@ fn matchmaker_contract_round_trips() {
             successor: set(1, &[0, 1, 3]),
         },
     ] {
-        let wire = super::matchmaker_codec::wire_reconfigure_request((tenant, to), &request);
+        let wire = super::matchmaker_codec::wire_reconfigure_request(addressed, &request);
         let decoded =
             super::WireReconfigureRequest::decode(wire.encode_to_vec().as_slice()).expect("decode");
         assert_eq!(
             super::matchmaker_codec::reconfigure_request_from_wire(decoded).expect("request"),
-            (tenant, to, request)
+            (addressed, request)
         );
     }
     for reply in [

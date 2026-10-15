@@ -26,6 +26,8 @@ message FleetEntry {
     RegisterTenant register_tenant = 6;
     MarkTenant mark_tenant = 7;
     RemoveTenant remove_tenant = 8;
+    AddRootKey add_root_key = 9;
+    RemoveRootKey remove_root_key = 10;
   }
 }
 
@@ -90,6 +92,35 @@ message RemoveTenant {
   uint64 tenant = 1;
 }
 
+// A root public key joins the universe entry (#245 (Biscuit tokens)):
+// `init --root-public-key` writes the first, `universe key add` the next.
+// Every entry role verifies a token against the keys the directory holds.
+// A key id or a label any key holds, or ever held, is refused: neither is
+// reused. The same key again changes nothing.
+message AddRootKey {
+  // The Biscuit `root_key_id`: random, never 0.
+  uint32 key_id = 1;
+  // The key's name, for people: what an operator types.
+  string label = 2;
+  // The key in Biscuit's text form, `ed25519/<64 hex>`. paros stores it
+  // and never reads it: the verifier does.
+  string public_key = 3;
+}
+
+// `universe key remove`: the key `label` leaves the universe entry, for
+// good. The last key is never removed: no token could administer the
+// universe again. A removal of a removed key changes nothing.
+message RemoveRootKey {
+  string label = 1;
+}
+
+// One root public key of the universe entry, in a checkpoint.
+message RootKey {
+  uint32 key_id = 1;
+  string label = 2;
+  string public_key = 3;
+}
+
 // The checkpoint state: the fleet, every cell and tenant entry by id, and
 // every removed tenant id — in id order, so equal states encode to equal
 // bytes.
@@ -101,6 +132,11 @@ message FleetDirectoryState {
   repeated uint64 removed = 5;
   uint64 fleet_tenant = 6;
   uint64 fleet_journal = 7;
+  // The root public keys in force, in key id order (#245).
+  repeated RootKey root_keys = 8;
+  // The keys removed, in key id order: their ids and labels are never
+  // reused.
+  repeated RootKey removed_keys = 9;
 }
 
 message CellEntry {

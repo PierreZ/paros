@@ -6,9 +6,15 @@
 //! (§3.5), and `paros-authz-biscuit` implements [`Authz`]. The request is
 //! stated in names, never ids (decided on 2026-10-10): a token names a
 //! tenant and a journal by their string names.
+//!
+//! **Which keys** (#245 (Biscuit tokens)): the universe entry's root public
+//! keys rule once the caller read any ([`Request::keys`]); before that, an
+//! implementation checks against the keys it was configured with (the
+//! bootstrap pin: `paros-frontend`'s, `parosd --root-public-key`).
 
 use std::time::Duration;
 
+use crate::fleet::RootKeyEntry;
 use crate::rpc::FrontendVerdict;
 
 /// The call a token is checked for.
@@ -22,6 +28,11 @@ pub enum Operation {
     Truncate,
     /// A `SetLeader`.
     SetLeader,
+    /// An idle machine's part in forming a cell (#245): `CellInit`,
+    /// `PrepareCell` and `FormCell`.
+    FormCell,
+    /// An idle machine's admission into a cell (#245): `Admit`.
+    Admit,
 }
 
 impl Operation {
@@ -39,6 +50,8 @@ impl Operation {
             Self::Read => "read",
             Self::Truncate => "truncate",
             Self::SetLeader => "set_leader",
+            Self::FormCell => "form_cell",
+            Self::Admit => "admit",
         }
     }
 }
@@ -69,6 +82,10 @@ pub struct Request<'a> {
     /// The frontend's wall clock, since the Unix epoch: its settings'
     /// epoch plus its provider's time (never `SystemTime::now()`).
     pub now: Duration,
+    /// The universe entry's root public keys, as the caller last read them
+    /// (#245): they rule when there are any. `None` (or none held): the
+    /// implementation's own pin.
+    pub keys: Option<&'a [RootKeyEntry]>,
 }
 
 /// Why a frontend refused a call before it reached any machine. Judged by
@@ -107,6 +124,15 @@ impl Denial {
             Self::Forbidden => FrontendVerdict::Forbidden,
             Self::Malformed => FrontendVerdict::Malformed,
         }
+    }
+
+    /// The denial a refusal label names (a machine's `invalid_token`,
+    /// `expired`, `forbidden`, #245), if it names one.
+    #[must_use]
+    pub fn of_label(label: &str) -> Option<Self> {
+        [Self::InvalidToken, Self::Expired, Self::Forbidden]
+            .into_iter()
+            .find(|denial| denial.as_str() == label)
     }
 
     /// The denial a wire verdict carries, if it carries one.

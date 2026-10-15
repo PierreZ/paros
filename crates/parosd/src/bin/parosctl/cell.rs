@@ -65,7 +65,8 @@ pub enum CellAdminCommand {
 }
 
 /// `parosctl cell …`, through `client` (the cell's `servers`, id and address
-/// each).
+/// each). `add-machine` sends `token` with its `Admit`: a machine that pins
+/// a root key checks it (#245 (Biscuit tokens)).
 pub async fn run(
     asker: &Asker<'_>,
     client: &Client<TokioProviders>,
@@ -73,6 +74,7 @@ pub async fn run(
     labels: &Labels,
     out: &Printer,
     args: CellArgs,
+    token: Vec<u8>,
 ) -> Ending {
     let addr = match args.command {
         CellAdminCommand::AddMachine { addr } => addr,
@@ -89,7 +91,7 @@ pub async fn run(
         }
     };
     let mut session = match session(asker, client, servers).await {
-        Ok(session) => session,
+        Ok(session) => session.with_token(token),
         Err(ending) => return ending,
     };
     let journals = session.journals();

@@ -123,7 +123,7 @@ pub use codec::{
 pub(crate) use codec::{config_from_proto, config_to_proto};
 pub(crate) use consensus::{message_from_proto, message_to_proto};
 pub(crate) use matchmaker_codec::{
-    garbage_collect_ack_from_wire, garbage_collect_from_wire, match_reply_from_wire,
+    Addressed, garbage_collect_ack_from_wire, garbage_collect_from_wire, match_reply_from_wire,
     match_request_from_wire, reconfigure_reply_from_wire, reconfigure_request_from_wire,
     wire_garbage_collect, wire_garbage_collect_ack, wire_match_reply, wire_match_request,
     wire_reconfigure_reply, wire_reconfigure_request,

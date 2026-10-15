@@ -3,12 +3,20 @@
 //!
 //! The frontend adds the time from its provider's clock (`epoch` plus the
 //! provider's `now`), so the simulation replays every decision.
+//!
+//! **Which keys** (#245 (Biscuit tokens)): the universe entry's root public
+//! keys the request carries rule when there are any; else the ring this
+//! [`BiscuitAuthz`] was built with, the bootstrap pin (`paros-frontend`'s
+//! keys, `parosd --root-public-key`). A key of the entry that does not
+//! parse is left out: it verifies nothing.
 
 use std::time::{Duration, SystemTime};
 
 use paros::frontend::{self, Authz, Denial, Target};
 
-use crate::{KeyRing, Operation, Refusal, Request, TargetKind, Token, authorize};
+use paros::fleet::RootKeyEntry;
+
+use crate::{KeyRing, Operation, Refusal, Request, RootPublicKey, TargetKind, Token, authorize};
 
 /// The Biscuit [`Authz`]: every token checked against the root public keys
 /// of a ring, with the one policy (`crate::POLICY`).
@@ -39,6 +47,8 @@ pub fn operation(operation: frontend::Operation) -> Operation {
         frontend::Operation::Read => Operation::JournalRead,
         frontend::Operation::Truncate => Operation::JournalTruncate,
         frontend::Operation::SetLeader => Operation::JournalSetLeader,
+        frontend::Operation::FormCell => Operation::CellForm,
+        frontend::Operation::Admit => Operation::MachineAdmit,
     }
 }
 
@@ -57,7 +67,15 @@ impl Authz for BiscuitAuthz {
             journal,
             now: SystemTime::UNIX_EPOCH + request.now,
         };
-        authorize(&Token::from_bytes(token.to_vec()), &self.ring, &checked).map_err(|refusal| {
+        let entry;
+        let ring = match request.keys {
+            Some(keys) if !keys.is_empty() => {
+                entry = ring_of(keys);
+                &entry
+            }
+            _ => &self.ring,
+        };
+        authorize(&Token::from_bytes(token.to_vec()), ring, &checked).map_err(|refusal| {
             match refusal {
                 Refusal::InvalidToken => Denial::InvalidToken,
                 Refusal::Expired => Denial::Expired,
@@ -65,6 +83,15 @@ impl Authz for BiscuitAuthz {
             }
         })
     }
+}
+
+/// The ring of the universe entry's `keys`: every key that parses.
+fn ring_of(keys: &[RootKeyEntry]) -> KeyRing {
+    let parsed = keys
+        .iter()
+        .filter_map(|key| RootPublicKey::from_parts(key.key_id, &key.label, &key.public_key).ok());
+    // The entry never holds two keys under one id (its fold refuses it).
+    KeyRing::new(parsed).unwrap_or_default()
 }
 
 /// The time since the Unix epoch that `now` is, for a frontend's settings.

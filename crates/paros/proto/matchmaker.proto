@@ -57,6 +57,11 @@ message MatchRequest {
   // The matchmaker addressed (#190): a process that is another drops the
   // request (a machine that took over an address answers for no set).
   uint64 to = 10;
+  // The requester's cell (#539 (matchmaker cell fence)), as a peer batch
+  // carries it (#216): a host of another cell refuses the request, so a
+  // machine at an address another cell left never provisions a set for it.
+  // `0` on a deployment without a cell plan.
+  uint64 cell_id = 11;
 }
 
 message Registration {
@@ -140,6 +145,8 @@ message GarbageCollect {
   uint64 journal = 5;
   // The matchmaker addressed (#190).
   uint64 to = 6;
+  // The requester's cell (#539 (matchmaker cell fence)).
+  uint64 cell_id = 7;
 }
 
 message GarbageCollectAck {
@@ -201,6 +208,8 @@ message ReconfigureRequest {
   uint64 tenant = 7;
   // The matchmaker addressed (#190).
   uint64 to = 8;
+  // The requester's cell (#539 (matchmaker cell fence)).
+  uint64 cell_id = 9;
   oneof kind {
     Stop stop = 2;
     Bootstrap bootstrap = 3;

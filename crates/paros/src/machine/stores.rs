@@ -280,9 +280,10 @@ where
         providers: &P,
         rpc: &RpcHandle<P>,
         machine: Option<&moonpool_rpc::ServiceGroup<crate::rpc::methods::MachineInterface>>,
-        tunables: &DriverTunables,
+        (tunables, cell_id): (&DriverTunables, u64),
         shutdown: CancellationToken,
     ) -> SimulationResult<()> {
+        assert!(cell_id != 0, "a machine hosts its cell's sets");
         let Some(config) = self.matchmaker.clone() else {
             return Ok(());
         };
@@ -292,7 +293,7 @@ where
             rpc,
             machine,
             self.disk.clone(),
-            (config, Arc::clone(&self.sets)),
+            (config, Arc::clone(&self.sets), cell_id),
             tunables,
             Arc::new(move |journal| audits(AuditScope::Journal(journal))),
             shutdown,
