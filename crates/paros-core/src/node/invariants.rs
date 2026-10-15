@@ -372,6 +372,17 @@ impl ColocatedNode {
                     self.ballot.node == self.config.id,
                     "an operating ballot names its own node"
                 );
+                // A live campaign's promise sits at its ballot: `campaign`
+                // promises the ballot it opens at, and every path that
+                // raises the promise past it closes the campaign (a higher
+                // `Prepare`, an `Accept` from another leader, a handoff
+                // install, a slot learned chosen above it in
+                // `mark_chosen`). `start_phase1` relies on it when
+                // matchmaking hands over (witness 13099780746496209636).
+                assert!(
+                    self.acceptor.promised() == self.ballot,
+                    "a live campaign's promise sits at its ballot"
+                );
             }
             NodeRole::Follower => {
                 assert!(
