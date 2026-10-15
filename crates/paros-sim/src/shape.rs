@@ -55,6 +55,35 @@ const ROUND_TRIP_FLOOR_MS: u64 = 250;
 const RESOLVE_FLOOR_MS: u64 = 4 * ROUND_TRIP_FLOOR_MS;
 const _: () = assert!(RESOLVE_FLOOR_MS < 2000, "the floor sits under the default");
 
+/// The slowest beat a node draws (`tick_interval`), in milliseconds.
+const SLOWEST_TICK_MS: u64 = 200;
+
+/// The floor of a client's drawn request deadline
+/// (`ChainConfig::request_timeout_ms`), in milliseconds.
+pub(crate) const REQUEST_FLOOR_MS: u64 = 1_000;
+
+/// The longest a node's take-back budget (`proxy_take_back_resends` beats)
+/// may hold a delegated round, in milliseconds: a write whose round the
+/// leader must take back is answered after that budget plus two round
+/// trips (the client's call and the colocated Phase 2), and that answer
+/// must come inside the shortest deadline a client draws. Above it, a
+/// proxy whose `Accept` a needed acceptor drops (a node that counts fewer
+/// proxies, `NodeShape::proxy_count_lag`) makes every write and every
+/// retry of it outlast its deadline, so no write is acknowledged for the
+/// whole tail although the cluster keeps deciding the retries. Witness
+/// (cite only): sweep recipe 4157026387069203832 `[(9989,
+/// 3535784000140791486)]` on 2365d15 (and e0e605a), a single proxy that
+/// node 0 does not count, node 1 down for good: 27 beats of 50 ms per slot,
+/// 1.5 s an answer against a 1.5 s deadline, 91 slots decided in the tail
+/// and not one recovery write acknowledged. Production takes back after
+/// 2 s, inside the library client's 5 s deadline.
+const TAKE_BACK_CEILING_MS: u64 = REQUEST_FLOOR_MS - 2 * ROUND_TRIP_FLOOR_MS;
+const _: () = assert!(TAKE_BACK_CEILING_MS + 2 * ROUND_TRIP_FLOOR_MS <= REQUEST_FLOOR_MS);
+const _: () = assert!(
+    TAKE_BACK_CEILING_MS >= SLOWEST_TICK_MS,
+    "the slowest beat still takes a round back after one re-delegation"
+);
+
 /// The default per-restart chance of a terminal storage loss — a wiped node
 /// disk (#124) or an unusable matchmaker registry (#125).
 const DEFAULT_LOSS_PCT: u32 = 35;
@@ -184,7 +213,7 @@ impl NodeShape {
         // confirmations at ~9 ticks against a 5-tick window, 172 s without a
         // write). Its floor is two round trips.
         let ms = Duration::from_millis;
-        let tick_ms = buggify_knob!(50_u64, 10_u64..201_u64);
+        let tick_ms = buggify_knob!(50_u64, 10_u64..SLOWEST_TICK_MS + 1);
         // A slow-link seed beats fast: 10 to 17 ms (#386's witness ran 17).
         let tick_ms = if slow_link {
             tick_ms.clamp(10, 17)
@@ -300,9 +329,13 @@ impl NodeShape {
             // after a single re-delegation runs colocated while its proxy
             // may still decide it, and the two verdicts must agree
             // (P2b-idempotent fan-outs) — the whole point of pushing it.
-            // The ceiling stretches a dead proxy's cost per slot; the
-            // recovery tail still outlasts it.
-            proxy_take_back_resends: buggify_knob!(10_u64, 1_u64..41_u64),
+            // The ceiling stretches a dead or ignored proxy's cost per
+            // slot, and is lowered to `TAKE_BACK_CEILING_MS` of this
+            // node's beats: a write taken back must still be answered
+            // inside the shortest client deadline (the default, 10 beats
+            // of 50 ms, sits exactly on it).
+            proxy_take_back_resends: buggify_knob!(10_u64, 1_u64..41_u64)
+                .min(TAKE_BACK_CEILING_MS / tick_ms),
             // The proxy's retention budget (#142), in unanswered re-fan-outs
             // (one per beat), drawn independently of the take-back so a
             // seed can evict before the leader takes back or long after.
