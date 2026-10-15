@@ -87,7 +87,8 @@ pub trait JournalStores {
     /// Start what this node hosts beside its journals on its own RPC edge
     /// `rpc`, until `shutdown`: a founding member's matchmaker sets (#190),
     /// also served in its `machine` group (#404 (static vs dynamic
-    /// endpoints)). The default hosts nothing.
+    /// endpoints)), serving only requests of cell `cell_id` (#539
+    /// (matchmaker cell fence)). The default hosts nothing.
     ///
     /// # Errors
     ///
@@ -97,10 +98,10 @@ pub trait JournalStores {
         providers: &P,
         rpc: &moonpool_rpc::RpcHandle<P>,
         machine: Option<&moonpool_rpc::ServiceGroup<crate::rpc::methods::MachineInterface>>,
-        tunables: &DriverTunables,
+        (tunables, cell_id): (&DriverTunables, u64),
         shutdown: tokio_util::sync::CancellationToken,
     ) -> moonpool_core::SimulationResult<()> {
-        let _ = (providers, rpc, machine, tunables, shutdown);
+        let _ = (providers, rpc, machine, tunables, cell_id, shutdown);
         Ok(())
     }
 

@@ -662,6 +662,11 @@ there it calls `Resolve` (below).
   on 2026-10-10, #216): every batch carries the sender's `cell_id`, and a receiver of another
   cell refuses the whole batch before it decodes a message. The simulation makes the shape: an operator founds another cell on the
   machine that replaced a wiped member, and the first cell still sends to that address.
+  The matchmaker requests carry the same `cell_id` (amended on 2026-10-15, #539 (matchmaker
+  cell fence)): `Matchmake`, `GarbageCollect` and `Reconfigure` go outside the peer lane. A
+  matchmaker host refuses a request of another cell before it reads the tenant. Without this
+  fence, a machine at an address another cell left provisioned a second set of generation 0
+  for that cell's tenant, and two sets were authoritative for one generation.
   Discovery has the same hazard, so a re-run `init` learns the cell a majority of the founding
   members serve, and `cell init` never adopts a vote for another list's plan.
   **`universe_id` is not on the peer batch** (amended on 2026-10-10, #216). Peer traffic stays

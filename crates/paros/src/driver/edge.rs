@@ -28,14 +28,15 @@ use std::sync::Arc;
 use moonpool_core::{Providers, SimulationError, SimulationResult};
 use moonpool_rpc::{RpcHandle, ServiceGroup};
 use paros_core::{
-    GcAck, GcRequest, JournalIdentifier, MatchReply, MatchRequest, MatchmakerId, Message, Party,
-    ReconfigureReply, ReconfigureRequest, TenantId,
+    GcAck, GcRequest, JournalIdentifier, MatchReply, MatchRequest, Message, Party,
+    ReconfigureReply, ReconfigureRequest,
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use super::config::DriverTunables;
 use crate::audit::Audit;
+use crate::rpc::Addressed;
 use crate::rpc::methods::{
     GarbageCollectRpc, InspectRpc, MachineInterface, MatchmakeRpc, MatchmakerReconfigureRpc,
     ReadRpc, ReconfigureMatchmakersRpc, ReconfigureRpc, RetireRpc, SetLeaderRpc, TruncateRpc,
@@ -218,13 +219,10 @@ impl ReplicaInbox {
 /// A matchmaker's inbound queues: the contract's three methods, decoded
 /// into the core's types (a malformed request never reaches the loop).
 pub(crate) struct MatchmakerInbox {
-    pub(crate) requests: Inbound<MatchmakeRpc, (TenantId, MatchmakerId, MatchRequest), MatchReply>,
-    pub(crate) collects: Inbound<GarbageCollectRpc, (TenantId, MatchmakerId, GcRequest), GcAck>,
-    pub(crate) reconfigures: Inbound<
-        MatchmakerReconfigureRpc,
-        (TenantId, MatchmakerId, ReconfigureRequest),
-        ReconfigureReply,
-    >,
+    pub(crate) requests: Inbound<MatchmakeRpc, (Addressed, MatchRequest), MatchReply>,
+    pub(crate) collects: Inbound<GarbageCollectRpc, (Addressed, GcRequest), GcAck>,
+    pub(crate) reconfigures:
+        Inbound<MatchmakerReconfigureRpc, (Addressed, ReconfigureRequest), ReconfigureReply>,
 }
 
 impl MatchmakerInbox {

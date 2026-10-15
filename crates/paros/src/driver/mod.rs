@@ -1400,7 +1400,7 @@ where
         &providers,
         &rpc_handle,
         machine_group.as_ref(),
-        &tunables,
+        (&tunables, cell_id),
         incarnation_shutdown.clone(),
     )?;
     // A machine's vote is final: it answers the cell decree from its record
@@ -1540,6 +1540,7 @@ where
         reconfigure_replies: reconfigure_reply_tx,
         timeout: tunables.delivery_timeout,
         shutdown: incarnation_shutdown.clone(),
+        cell_id,
     };
     // The matchmaker-set handovers (#125), one per tenant (#190): the
     // reconfigurer plus the two clocks that pace it, idle until a client asks
