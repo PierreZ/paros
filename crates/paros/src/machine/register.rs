@@ -33,7 +33,8 @@
 //! interface at every start (#404), so each of its starts registers once. The request draws no
 //! randomness: it runs in a task of its own beside the machine. It tells
 //! the machine when it ends ([`spawn`]'s receiver): a moved founding member
-//! holds its journals' clocks until then (#390, `crate::driver`).
+//! holds its journals' clocks (#390, `crate::driver`) and its candidacy for
+//! the cell coordinator (#506, `super::coordinator`) until then.
 
 use std::time::Duration;
 

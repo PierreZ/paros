@@ -634,6 +634,13 @@ landed. Now such a member holds its journals' clocks until its registration ends
 (`driver/mod.rs`). It still answers every message that reaches it. A lone founding member is its
 own quorum, so it never holds.
 
+#506 (renamed founder not registered) added the same hold to its candidacy for the cell
+coordinator (`machine/coordinator.rs`). Unregistered, such a member read the election through its
+own node, whose reads never confirm. A term it won kept a stale view for many seconds, and each
+of its claims fenced the terms its peers won. No term then answered `Register` for about 25 s
+(witness 12633892831069003880 on a rename-heavy hunt). Now it campaigns only once its
+registration ends.
+
 **Finding the cell** (amended on 2026-10-09). There is no cluster file and no rendezvous name.
 A machine's configuration names no cell and no peer: it learns its cell when it is admitted
 (`FormCell` or `Admit`, section 3.1) and caches it durably. On every later start it finds the cell

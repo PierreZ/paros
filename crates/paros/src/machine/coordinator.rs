@@ -572,6 +572,7 @@ pub(crate) fn spawn<P: Providers>(
     formed: &FormedCell,
     tunables: &DriverTunables,
     observer: Option<Arc<dyn CallObserver>>,
+    hold: Option<tokio::sync::watch::Receiver<bool>>,
     shutdown: CancellationToken,
 ) {
     let election = election_tunables(tunables);
@@ -605,7 +606,7 @@ pub(crate) fn spawn<P: Providers>(
         .task()
         .spawn_task(
             "paros-cell-coordinator",
-            campaign(providers.clone(), rpc, client, candidacy, shutdown),
+            campaign(providers.clone(), rpc, client, candidacy, hold, shutdown),
         )
         .detach();
 }
@@ -652,6 +653,7 @@ async fn campaign<P: Providers>(
     rpc: RpcHandle<P>,
     mut client: Client<P>,
     candidacy: Candidacy,
+    mut hold: Option<tokio::sync::watch::Receiver<bool>>,
     shutdown: CancellationToken,
 ) {
     let Candidacy {
@@ -713,7 +715,25 @@ async fn campaign<P: Providers>(
     // The served term's dynamic endpoint (#404).
     let mut group: Option<TermGroup> = None;
     let mut steps = 0_u64;
+    let mut waited = false;
     while !shutdown.is_cancelled() {
+        // A moved founding member campaigns only once its registration
+        // ended (#506 (renamed founder not registered)): its peers cannot
+        // reach it, and the reads it serves never confirm, so a term it won
+        // would read a stale election and fence the terms the others win.
+        if hold.as_ref().is_some_and(|ended| !*ended.borrow()) {
+            if !waited {
+                waited = true;
+                moonpool_assertions::reachable!(
+                    "coordinator: a moved founding member waits for its registration"
+                );
+            }
+            if providers.time().sleep(pace).await.is_err() {
+                return;
+            }
+            continue;
+        }
+        hold = None;
         steps += 1;
         match election.step(jitter(seed, steps, tunables.lease)).await {
             Step::Leading { leader, .. } if resigned == Some(leader.term) => {
