@@ -233,6 +233,10 @@ fn every_refusal_label_the_node_sends_is_typed() {
         reconfigure("not_leader"),
         ReconfigureOutcome::NotLeader { leader: None }
     );
+    assert_eq!(
+        reconfigure("unknown_journal"),
+        ReconfigureOutcome::UnknownJournal
+    );
     for (label, refusal) in [
         ("no_matchmakers", ReconfigureRefusal::NoMatchmakers),
         ("unchanged", ReconfigureRefusal::Unchanged),
@@ -272,6 +276,7 @@ fn every_refusal_label_the_node_sends_is_typed() {
         ("empty", MatchmakersRefusal::Empty),
         ("unknown_matchmaker", MatchmakersRefusal::UnknownMatchmaker),
         ("busy", MatchmakersRefusal::Busy),
+        ("unknown_tenant", MatchmakersRefusal::UnknownTenant),
         ("?", MatchmakersRefusal::Unrecognized),
     ] {
         assert_eq!(
@@ -289,6 +294,7 @@ fn every_refusal_label_the_node_sends_is_typed() {
         ("member", RetireRefusal::Member),
         ("stale", RetireRefusal::Stale),
         ("not_collected", RetireRefusal::NotCollected),
+        ("unknown_journal", RetireRefusal::UnknownJournal),
         ("?", RetireRefusal::Unrecognized),
     ] {
         assert_eq!(

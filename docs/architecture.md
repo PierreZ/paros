@@ -877,7 +877,10 @@ create.
   stops the journal when the slot is released, and it keeps the store. A journal starts as a
   member of its create's configuration, or else as a spare beside it. The configuration depends
   only on the create, so every start opens the store under the same one. `Reconfigure` and
-  `Retire` name their journal, because a machine serves many.
+  `Retire` name their journal, and `ReconfigureMatchmakers` names its tenant, because a machine
+  serves many. No journal or tenant is the default (decided on 2026-10-11, #439 (operator calls
+  name their journal)): a node refuses a call that names none, or one it does not serve
+  (`unknown_journal`, `unknown_tenant`).
 - **Moves.** `cell drain-machine` (`CellSession::drain`) marks a machine draining. At each watch
   round, the tenant coordinator takes one step of one move, in turn over the journals with a
   slot on a draining machine. A step books a slot on another storage machine, or asks the

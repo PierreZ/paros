@@ -1104,25 +1104,14 @@ impl<P: Providers> Client<P> {
         TruncateOutcome::Ambiguous
     }
 
-    /// Ask for the acceptor set `members` under `quorum_system`, starting at
-    /// server `target`: a `not_leader` redirect is followed, an `unsettled`
-    /// leader is re-asked `retry_backoff` later, every other refusal is the
-    /// answer; at most `retry_budget` asks.
+    /// Ask for the acceptor set `members` of `journal` under
+    /// `quorum_system`, starting at server `target`: a `not_leader` redirect
+    /// is followed, an `unsettled` leader is re-asked `retry_backoff` later,
+    /// every other refusal is the answer; at most `retry_budget` asks. A
+    /// machine serves many journals, so the request names the one it
+    /// changes (#474); no journal has a default (#439 (operator calls name
+    /// their journal)).
     pub async fn reconfigure(
-        &self,
-        members: &[u64],
-        quorum_system: QuorumSystem,
-        target: usize,
-    ) -> ReconfigureOutcome {
-        self.reconfigure_journal(JournalIdentifier::UNSET, members, quorum_system, target)
-            .await
-    }
-
-    /// [`Client::reconfigure`] of the journal `journal` (#474): a machine
-    /// serves many, so the request names the one it changes. The unset
-    /// identifier asks for the server's first journal, as
-    /// [`Client::reconfigure`] does.
-    pub async fn reconfigure_journal(
         &self,
         journal: JournalIdentifier,
         members: &[u64],
@@ -1177,23 +1166,13 @@ impl<P: Providers> Client<P> {
         ReconfigureOutcome::Ambiguous
     }
 
-    /// Ask server `target` to drive a matchmaker-set handover onto
-    /// `members`: a busy reconfigurer is re-asked `retry_backoff` later,
-    /// every other refusal is the answer; at most `retry_budget` asks.
+    /// Ask server `target` to drive a handover of `tenant`'s matchmaker set
+    /// onto `members`: a busy reconfigurer is re-asked `retry_backoff`
+    /// later, every other refusal is the answer; at most `retry_budget`
+    /// asks. A node hosts many tenants' journals, so the request names the
+    /// set it hands over (#501 (matchmaker sets off the founders)); no
+    /// tenant has a default (#439 (operator calls name their journal)).
     pub async fn reconfigure_matchmakers(
-        &self,
-        members: &[u64],
-        target: usize,
-    ) -> ReconfigureMatchmakersOutcome {
-        self.reconfigure_matchmakers_of(TenantId(0), members, target)
-            .await
-    }
-
-    /// [`Client::reconfigure_matchmakers`] of `tenant`'s set (#501
-    /// (matchmaker sets off the founders)): a node hosts many tenants'
-    /// journals, so the request names the set it hands over. The unset
-    /// tenant asks for the set of the server's first journal's tenant.
-    pub async fn reconfigure_matchmakers_of(
         &self,
         tenant: TenantId,
         members: &[u64],

@@ -112,6 +112,21 @@ pub(crate) fn retire<A: Audit>(
     }
 }
 
+/// The answer to a `Reconfigure` that names no journal, or one the node does
+/// not serve (#439 (operator calls name their journal)): refused, no leader
+/// named, nothing started.
+pub(crate) fn unknown_journal() -> ReconfigureAck {
+    let ack = ReconfigureAck {
+        leader: None,
+        accepted: false,
+        refusal: "unknown_journal".to_string(),
+        round: None,
+    };
+    assert!(!ack.accepted, "an unknown journal starts nothing");
+    assert!(ack.round.is_none(), "an unknown journal names no round");
+    ack
+}
+
 /// Which leg refuses a retirement at `watermark` (`None`: the core admits
 /// it, [`ColocatedNode::may_retire`]). The legs after the first are only
 /// the operator's diagnosis; the decision is the core's.

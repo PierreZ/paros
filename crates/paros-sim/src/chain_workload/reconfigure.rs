@@ -13,7 +13,8 @@ use paros::client::{
     MatchmakersRefusal, ReconfigureMatchmakersOutcome, ReconfigureOutcome, RetireOutcome,
 };
 use paros::{
-    QuorumSystem, ReconfigureRefusal, RetireRequest, WireQuorumSystem, quorum_system_from_proto,
+    JournalIdentifier, QuorumSystem, ReconfigureRefusal, RetireRequest, TenantId, WireQuorumSystem,
+    quorum_system_from_proto,
 };
 
 use super::system::SystemOps;
@@ -182,6 +183,7 @@ pub(super) fn ledger_answer(
         ReconfigureOutcome::Started { round, .. } => Some(*round),
         ReconfigureOutcome::NotLeader { .. }
         | ReconfigureOutcome::Refused { .. }
+        | ReconfigureOutcome::UnknownJournal
         | ReconfigureOutcome::Unrecognized { .. } => None,
         ReconfigureOutcome::Ambiguous => return,
     };
@@ -202,6 +204,24 @@ pub(super) fn live_candidates(
         .filter(|(_, ip)| !dead.contains(*ip))
         .map(|(i, _)| u64::try_from(i).unwrap_or(u64::MAX))
         .collect()
+}
+
+/// An operator that names no tenant (#439 (operator calls name their
+/// journal)), its own location: the node refuses it and nothing starts.
+async fn unnamed_tenant(reconfigurer: &crate::client::ChainClient, next: &[u64], target: usize) {
+    assert_reachable!("generation: an operator names no tenant");
+    let outcome = reconfigurer
+        .reconfigure_matchmakers(TenantId(0), next, target)
+        .await;
+    assert_always!(
+        matches!(
+            outcome,
+            ReconfigureMatchmakersOutcome::Refused(MatchmakersRefusal::UnknownTenant)
+                | ReconfigureMatchmakersOutcome::Ambiguous
+        ),
+        "generation: a handover that names no tenant is refused",
+        { "outcome" => format!("{outcome:?}") }
+    );
 }
 
 impl ChainWorkload {
@@ -467,7 +487,32 @@ impl ChainWorkload {
             // request leaves, answered below; a retirement reads
             // it (`StorageWorld::retire`).
             let ledger_id = ledger_request(ctx.state(), &next);
-            let outcome = reconfigurer.reconfigure(&next, system, probe_target).await;
+            // An operator that names no journal (#439 (operator calls name
+            // their journal)), its own location: no journal has a default,
+            // so the node refuses it and nothing starts.
+            let unnamed = buggify_with_prob!(0.03);
+            if unnamed {
+                assert_reachable!("reconfiguration: an operator names no journal");
+                let outcome = reconfigurer
+                    .reconfigure(JournalIdentifier::UNSET, &next, system, probe_target)
+                    .await;
+                assert_always!(
+                    matches!(
+                        outcome,
+                        ReconfigureOutcome::UnknownJournal | ReconfigureOutcome::Ambiguous
+                    ),
+                    "reconfiguration: a request that names no journal is refused",
+                    { "outcome" => format!("{outcome:?}") }
+                );
+                if outcome == ReconfigureOutcome::UnknownJournal {
+                    assert_reachable!(
+                        "reconfiguration: a request that names no journal is refused"
+                    );
+                }
+            }
+            let outcome = reconfigurer
+                .reconfigure(journal, &next, system, probe_target)
+                .await;
             tracing::info!(shape = name, outcome = ?outcome, "chain_reconfigure_outcome");
             ledger_answer(ctx.state(), ledger_id, &outcome);
             // On a lagging-fold seed a reconfiguration onto a joiner just
@@ -566,13 +611,15 @@ impl ChainWorkload {
                 | ReconfigureOutcome::Unrecognized { leader } => {
                     adopt_plane_leader(nodes, has_matchmakers, leader);
                 }
-                ReconfigureOutcome::Ambiguous => {}
+                // The journal is quarantined or down at the node asked.
+                ReconfigureOutcome::UnknownJournal | ReconfigureOutcome::Ambiguous => {}
             }
         }
     }
 
     /// One `RECONFIGURE_MATCHMAKERS` step (#125): ask for a successor
     /// matchmaker set, composed from the set in force.
+    #[allow(clippy::too_many_lines)]
     pub(super) async fn reconfigure_matchmakers_step(&mut self, step: &Step<'_>) {
         let Step {
             config,
@@ -653,8 +700,11 @@ impl ChainWorkload {
                 );
             }
             tracing::info!(shape = name, members = ?next, "chain_reconfigure_matchmakers_request");
+            if buggify_with_prob!(0.03) {
+                unnamed_tenant(matchmaker_reconfigurer, &next, target).await;
+            }
             let outcome = matchmaker_reconfigurer
-                .reconfigure_matchmakers(&next, target)
+                .reconfigure_matchmakers(journal.tenant, &next, target)
                 .await;
             tracing::info!(shape = name, outcome = ?outcome, "chain_reconfigure_matchmakers_outcome");
             match outcome {
@@ -677,14 +727,19 @@ impl ChainWorkload {
                     );
                     self.adversarial.reconfigure_matchmakers_started[observed_slot] = true;
                 }
-                ReconfigureMatchmakersOutcome::Refused(refusal) => {
+                // A tenant whose journals are quarantined or down at the
+                // node asked is one it serves nothing of now.
+                ReconfigureMatchmakersOutcome::Refused(refusal)
+                    if refusal != MatchmakersRefusal::UnknownTenant =>
+                {
                     assert_always!(
                         (refusal == MatchmakersRefusal::NoMatchmakers) != has_matchmakers,
                         "generation: only a deployment without matchmakers refuses for lack of them",
                         { "shape" => name, "refusal" => format!("{refusal:?}") }
                     );
                 }
-                ReconfigureMatchmakersOutcome::Ambiguous => {}
+                ReconfigureMatchmakersOutcome::Refused(_)
+                | ReconfigureMatchmakersOutcome::Ambiguous => {}
             }
         }
     }
@@ -794,7 +849,9 @@ impl ChainWorkload {
                 assert_reachable!("gc: an operator asks to re-add a node just before retiring it");
                 let ledger_id = ledger_request(ctx.state(), &readd);
                 let system = policy.system(readd.len());
-                let outcome = reconfigurer.reconfigure(&readd, system, probe_target).await;
+                let outcome = reconfigurer
+                    .reconfigure(journal, &readd, system, probe_target)
+                    .await;
                 ledger_answer(ctx.state(), ledger_id, &outcome);
             }
             // Park the identity first, under the dead-node budget
@@ -837,7 +894,8 @@ impl ChainWorkload {
                         victim,
                         RetireRequest {
                             gc_watermark: evidence,
-                            ..RetireRequest::default()
+                            tenant: journal.tenant.0,
+                            journal: journal.journal.0,
                         },
                     )
                     .await;
