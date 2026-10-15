@@ -168,6 +168,7 @@ impl LocalCell {
             names: ("universe".into(), "local".into()),
             token: Vec::new(),
             root_key: None,
+            failures_per_partition: initialize::FAILURES_PER_PARTITION,
         };
         let connect = |servers: &[(u64, Address)]| crate::client(runtime, servers, patience);
         let run = initialize::initialize(
