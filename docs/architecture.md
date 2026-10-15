@@ -385,6 +385,13 @@ list and no rendezvous name. The same rule holds at two levels:
   tenant's `JournalIdentifier`, both random, recorded in the cell plan of the admitted cell
   (`universe add-cell` records the same two in each cell it admits later), then registers the cell as the first entry in the universe directory and
   writes the matching registration on the cell side (section 3.7).
+  The cell coordinator writes the cell's side (`JoinFleet`), not the operator (decided on
+  2026-10-15, #513 (fleet Init duel)). The coordinator reads the universe directory the cell
+  hosts. When the directory holds the cell and the cell has not joined, the coordinator writes
+  `JoinFleet`, at its install and at each watch round. `init` reads the cell control journal,
+  waits for the join, then marks the cell `READY`. So `init` never claims the cell control
+  journal. Before, its claim fenced the coordinator, the next term fenced `init` in turn, and
+  with slow links `init` did not end.
 - Each step is idempotent and is a step of an operation state machine (section 3.7): re-running a
   call after a crash resumes it, learning the ids back through `Inspect`.
 - **No implicit formation.** A machine with an empty, uninitialized store waits indefinitely. It
@@ -804,7 +811,9 @@ coordinator is `paros::machine::coordinator`:
   admin session still claims the cell control journal and fences the coordinator. The
   coordinator does not fight back within its term: it resigns, and the next term installs
   a fresh uuid (#349: a fenced term cannot register a moved machine). `parosctl init` claims
-  nothing: it waits until the coordinator installed its uuid, then runs the fleet steps.
+  nothing on the cell control journal: it waits until the coordinator installed its uuid, then
+  runs the fleet steps, and the coordinator writes the cell's `JoinFleet` (#513 (fleet Init
+  duel)).
 - **Knobs.** `DriverTunables::election_lease`, `election_renew` and `election_compact_after`,
   each with a floor; `parosd` reads them as `PAROS_ELECTION_*` variables.
 

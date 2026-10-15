@@ -75,6 +75,7 @@ mod resolve;
 mod sets;
 mod stores;
 mod tenants;
+mod universe;
 pub(crate) mod views;
 mod wait;
 
