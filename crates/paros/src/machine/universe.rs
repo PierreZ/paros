@@ -20,6 +20,9 @@
 //! The coordinator joins the cell at its install (an interrupted `init`) and
 //! at every watch round until the cell joined. A read of the directory that
 //! does not reach its tail writes nothing: the next round reads again.
+//! A cell whose plan names no fleet journal (a cell that does not host the
+//! universe tenant, M12) is never joined here: `universe add-cell` owns
+//! that join.
 
 use moonpool_core::Providers;
 

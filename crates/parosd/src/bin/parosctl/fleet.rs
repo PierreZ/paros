@@ -204,6 +204,13 @@ pub fn interrupted(stop: &Interrupted) -> Ending {
             outcome: paros::client::WriterOutcome::Ambiguous,
             ..
         } => Ending::Ambiguous,
+        Interrupted::NotJoined { .. } => {
+            note(
+                "the cell coordinator has not joined the cell to the universe yet: \
+                 nothing was lost, run the same command again",
+            );
+            Ending::Unreachable
+        }
         _ => Ending::Unreachable,
     }
 }
