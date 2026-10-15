@@ -89,6 +89,10 @@ pub(super) struct Sets {
     /// The tenant the last step took: the next step takes the next one, so
     /// a set that waits holds no other back.
     last: Option<TenantId>,
+    /// The generation in force when this term's last handover of each
+    /// tenant's set started: a release waits until a later generation is
+    /// in force.
+    handed: BTreeMap<TenantId, u64>,
 }
 
 /// The live slots of `tenant`'s set.
@@ -210,7 +214,16 @@ impl Sets {
         target.sort_unstable();
         let mut members = reply.matchmakers.clone();
         members.sort_unstable();
-        if members != target {
+        // A handover an earlier term started may still land on a machine
+        // this release frees: the founders' belief is no fence. Release
+        // only once a handover this term started is in force, even onto
+        // the same members (#563 (set release races a late handover),
+        // witness 11433570171281660862 on 15d04c1).
+        let fenced = self
+            .handed
+            .get(&tenant)
+            .is_some_and(|g| reply.matchmaker_generation > *g);
+        if members != target || (slots.len() > staying.len() && !fenced) {
             // An earlier term's handover may still run: give it a round
             // before asking for another, so two handovers rarely duel.
             if !self.started.contains(&tenant) && self.inherited.insert(tenant) {
@@ -226,6 +239,7 @@ impl Sets {
                             "coordinator: a set hands over to its booked machines"
                         );
                         self.started.insert(tenant);
+                        self.handed.insert(tenant, reply.matchmaker_generation);
                         SetStep::HandedOver
                     }
                     _ => SetStep::Waiting,
@@ -262,6 +276,7 @@ impl Sets {
             );
         }
         self.settled.insert(tenant);
+        self.handed.remove(&tenant);
         let started = self.started.remove(&tenant);
         let inherited = self.inherited.remove(&tenant);
         if leaving.is_empty() && !started && !inherited {

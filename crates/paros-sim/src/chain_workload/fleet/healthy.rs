@@ -9,7 +9,10 @@
 //! not serving (down, draining, unknown) and the cell has fewer storage
 //! machines to go to than such members (registered, serving the cell, up,
 //! with a free slot, outside any maintenance window and holding no slot of
-//! the journal). It is excused too while a maintenance window covers one
+//! the journal). It is excused when the members that serve hold no quorum:
+//! no leader can reconfigure it (a wipe of a quorum loses it for good,
+//! witness 17795399505419045907 on a0c4aa6). It is excused too while a
+//! maintenance window covers one
 //! of its members (#359), and on a seed whose coordinators wait longer than
 //! the settle tail before they re-place (the shipped profile's bound).
 
@@ -21,7 +24,7 @@ use paros::NodeId;
 use paros::client::checkpoint::LoadOutcome;
 use paros::client::views::{ViewOutcome, ask, request};
 use paros::machine::Class;
-use paros::status::{Member, Word, member, observe};
+use paros::status::{Member, Word, judge, member, observe, placed};
 use paros::system::{NodeStanding, Registry};
 use paros::view::Scope;
 use paros::wire::view::{CellQuery, JournalView, ViewReply, view_request::Query};
@@ -57,7 +60,8 @@ impl FleetOps {
             if let ViewOutcome::Answered(reply) = outcome
                 && let Some(registry) = read(cell, attempt).await
             {
-                match unhealthy(&reply, &registry) {
+                let wiped = crate::machine::wiped_ids(ctx.state());
+                match unhealthy(&reply, &registry, &wiped) {
                     None => {
                         assert_reachable!("status: every journal shows healthy after chaos");
                         return;
@@ -95,11 +99,15 @@ async fn read(cell: &Cell, attempt: u64) -> Option<Registry> {
 
 /// The first data journal of `reply` that does not show healthy and is not
 /// excused, as `(tenant, journal, word)`.
-fn unhealthy(reply: &ViewReply, registry: &Registry) -> Option<(u64, u64, String)> {
+fn unhealthy(
+    reply: &ViewReply,
+    registry: &Registry,
+    wiped: &BTreeSet<u64>,
+) -> Option<(u64, u64, String)> {
     for tenant in &reply.tenants {
         for journal in tenant.journals.iter().filter(|j| j.kind == "data") {
             let word = observe(journal, &reply.machines);
-            if word == Some(Word::Healthy) || excused(reply, registry, journal) {
+            if word == Some(Word::Healthy) || excused(reply, registry, journal, wiped) {
                 continue;
             }
             let word = word.map_or("none", Word::as_str).to_string();
@@ -109,11 +117,34 @@ fn unhealthy(reply: &ViewReply, registry: &Registry) -> Option<(u64, u64, String
     None
 }
 
-/// Whether the cell cannot hold `journal`'s shape now: a maintenance window
+/// Whether the cell cannot hold `journal`'s shape now: the members that
+/// serve hold no quorum (a wipe or an outage took it), a maintenance window
 /// covers a member, or fewer machines can take a slot than members fail to
 /// serve.
-fn excused(reply: &ViewReply, registry: &Registry, journal: &JournalView) -> bool {
+fn excused(
+    reply: &ViewReply,
+    registry: &Registry,
+    journal: &JournalView,
+    wiped: &BTreeSet<u64>,
+) -> bool {
     let machine = |id: u64| reply.machines.iter().find(|m| m.node_id == id);
+    // A re-placement is a reconfiguration by the journal's leader: while the
+    // members that serve hold no Phase-1 or no Phase-2 quorum, no leader can
+    // run it. A wiped member never serves again: the journal is lost. A down
+    // one may answer again later than the tail.
+    if let Some(placed) = placed(journal) {
+        let serving = |id: NodeId| {
+            if wiped.contains(&id.0) {
+                Member::Gone
+            } else {
+                member(machine(id.0))
+            }
+        };
+        let size = placed.members().len();
+        if judge(&placed, size, placed.quorum_system(), serving) == Word::Unavailable {
+            return true;
+        }
+    }
     if journal
         .acceptors
         .iter()

@@ -46,6 +46,70 @@ pub struct Rare {
 /// window seldom reaches, #485 the double fault, #486 the rest.
 pub const RARE: &[Rare] = &[
     Rare {
+        msg: "coordinator: a slot its journal's configuration left is released",
+        reason: "a gone machine back before its move ended: none in 2,000 hunt seeds; the gone-machine scenario's back-soon coin aims at it (#498 (moves in the sweep), #475 (re-place after the Down bound))",
+    },
+    Rare {
+        msg: "coordinator: a machine down past its bound is gone",
+        reason: "a gone-machine seed: 11 hits in 1,000 hunt seeds (#498 (moves in the sweep), #475 (re-place after the Down bound))",
+    },
+    Rare {
+        msg: "coordinator: a machine marked down rejoins in place",
+        reason: "a down machine back inside the bound: 19 hits in 1,000 hunt seeds (#498 (moves in the sweep), #475 (re-place after the Down bound))",
+    },
+    Rare {
+        msg: "coordinator: a maintenance window ended while its machine was down",
+        reason: "a gone-machine seed with a short window: 1 hit in 1,000 hunt seeds (#498 (moves in the sweep), #475 (re-place after the Down bound))",
+    },
+    Rare {
+        msg: "coordinator: a maintenance window holds a down machine's roles",
+        reason: "a gone-machine seed with a long window: 8 hits in 1,000 hunt seeds (#498 (moves in the sweep), #475 (re-place after the Down bound))",
+    },
+    Rare {
+        msg: "coordinator: a move leaves a machine down past its bound",
+        reason: "a gone-machine seed: 66 hits from 12 strikes in 1,000 hunt seeds (#498 (moves in the sweep), #475 (re-place after the Down bound))",
+    },
+    Rare {
+        msg: "coordinator: a re-placement is deferred",
+        reason: "a gone-machine seed and the defer coin: 6 hits in 1,000 hunt seeds (#498 (moves in the sweep), #475 (re-place after the Down bound))",
+    },
+    Rare {
+        msg: "coordinator: a set moved off a machine down past its bound",
+        reason: "a gone-machine seed whose machine held a set's slot: 1 hit in 1,000 hunt seeds (#498 (moves in the sweep), #475 (re-place after the Down bound))",
+    },
+    Rare {
+        msg: "drain: an operator opens a maintenance window",
+        reason: "a gone-machine seed: 4 hits in 1,000 hunt seeds (#498 (moves in the sweep), #475 (re-place after the Down bound))",
+    },
+    Rare {
+        msg: "drain: an operator picks a machine to take down",
+        reason: "a gone-machine seed: 12 hits in 1,000 hunt seeds (#498 (moves in the sweep), #475 (re-place after the Down bound))",
+    },
+    Rare {
+        msg: "drain: an operator puts a zone in maintenance",
+        reason: "a gone-machine seed with a zone window: 2 hits in 1,000 hunt seeds (#498 (moves in the sweep), #475 (re-place after the Down bound))",
+    },
+    Rare {
+        msg: "machine: a gone machine comes back soon after the bound",
+        reason: "a gone-machine seed: 4 hits in 1,000 hunt seeds (#498 (moves in the sweep), #475 (re-place after the Down bound))",
+    },
+    Rare {
+        msg: "machine: the scenario takes a machine holding a slot down",
+        reason: "a gone-machine seed: 12 hits in 1,000 hunt seeds (#498 (moves in the sweep), #475 (re-place after the Down bound))",
+    },
+    Rare {
+        msg: "placement: a maintenance window is judged after chaos",
+        reason: "a gone-machine seed with a long window: 2 hits in 1,000 hunt seeds (#498 (moves in the sweep), #475 (re-place after the Down bound))",
+    },
+    Rare {
+        msg: "status: a maintenance window excuses a journal",
+        reason: "a gone-machine seed with a long window: 2 hits in 1,000 hunt seeds (#498 (moves in the sweep), #475 (re-place after the Down bound))",
+    },
+    Rare {
+        msg: "system: a composer books a joiner's slot before it names it",
+        reason: "a reconfiguration onto a joiner on a registry seed: 12 hits in 1,000 hunt seeds (#477 (retire coordination moves into the control journals))",
+    },
+    Rare {
         msg: "a replica serves a read before its next apply page",
         reason: "rare: fired on 0 of 440 hunt seeds with the lagging-replica scenario; a run decides a dozen slots, so a read seldom lands while a rebooted replica pages its backlog (#550 (replica serves an unreported fold page), #486)",
     },
