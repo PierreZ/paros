@@ -164,7 +164,25 @@ pub async fn admit<P: Providers>(
     admission: &Admission,
     timeout: Duration,
 ) -> AdmitOutcome {
-    let request = admission.to_wire();
+    admit_at(providers, rpc, names, target, admission, 0, timeout).await
+}
+
+/// [`admit`], with the registry position `position` the admission's book is
+/// taken at: the cell coordinator's `Admit` sent again to an admitted
+/// machine whose registry fold is stuck (#505 (stranded admitted machine)).
+pub async fn admit_at<P: Providers>(
+    providers: &P,
+    rpc: &RpcHandle<P>,
+    names: &Names,
+    target: &Address,
+    admission: &Admission,
+    position: u64,
+    timeout: Duration,
+) -> AdmitOutcome {
+    let request = wire::Admit {
+        registry_position: position,
+        ..admission.to_wire()
+    };
     match call_once::<P, AdmitRpc>(providers, rpc, names, target, &request, timeout).await {
         Some(Ok(ack)) if ack.admitted => AdmitOutcome::Admitted,
         Some(Ok(ack)) => AdmitOutcome::Refused(ack.refusal),

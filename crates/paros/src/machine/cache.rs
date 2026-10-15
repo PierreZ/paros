@@ -223,6 +223,20 @@ impl CacheSink {
         assert_eq!(cache.check(), Ok(()), "an offered cache is checked");
         self.latest.send_replace(Some(cache));
     }
+
+    /// The latest book offered this incarnation, if any.
+    #[must_use]
+    pub fn latest(&self) -> Option<CachedRegistry> {
+        self.latest.borrow().clone()
+    }
+
+    /// A receiver that sees every book offered from now on: the follow and
+    /// the node loop dial their cell from the latest one (#505 (stranded
+    /// admitted machine)).
+    #[must_use]
+    pub fn subscribe(&self) -> watch::Receiver<Option<CachedRegistry>> {
+        self.latest.subscribe()
+    }
 }
 
 /// Start the writer of machine `node`'s cache on `disk`, which holds

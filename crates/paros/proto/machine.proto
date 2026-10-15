@@ -95,6 +95,12 @@ message IdentifyAck {
   // (idle, admitted). The address inside it is the bound one: a caller aims
   // it at `addr`, resolved, and keeps only its incarnation and token.
   bytes machine_interface = 11;
+  // An admitted machine's newest registry fold, by position (#505 (stranded
+  // admitted machine)): the book it dials its cell from holds every registry
+  // entry below it. 0 when it folded none, and on every other machine. The
+  // cell coordinator sends `Admit` again to a machine whose position stops
+  // below the registry's tail.
+  uint64 registry_position = 12;
 }
 
 // One member of a cell's bootstrap: its identity and address.
@@ -202,6 +208,12 @@ message Admit {
   // matchmakers. An admitted machine follows the control journals from them
   // and serves the journals placed on it with their matchmaker sets.
   repeated uint64 founders = 6;
+  // The registry position the caller's book of machines is taken at: every
+  // registry entry below it is in the book (0: unknown). The cell
+  // coordinator sends `Admit` again to an admitted machine whose registry
+  // fold is stuck (#505 (stranded admitted machine)); the machine adopts a
+  // book past its own fold's position, and dials the cell from it.
+  uint64 registry_position = 7;
 }
 
 message AdmitAck {

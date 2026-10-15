@@ -320,6 +320,7 @@ impl MachineFacts {
             incarnation_high: incarnation_halves(self.incarnation).0,
             incarnation_low: incarnation_halves(self.incarnation).1,
             machine_interface: self.machine_interface.clone(),
+            registry_position: 0,
         }
     }
 }
@@ -447,6 +448,7 @@ impl Admission {
                 })
                 .collect(),
             founders: self.founders.iter().map(|id| id.0).collect(),
+            registry_position: 0,
         }
     }
 }

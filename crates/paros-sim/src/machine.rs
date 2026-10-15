@@ -93,9 +93,6 @@ pub(crate) struct MachineBoard {
     /// The machines `cell add-machine` admitted (#216), still on their
     /// disks, by minted id: the cell each recorded.
     admitted: BTreeMap<u64, ControlJournals>,
-    /// Each admitted machine's admission book, by minted id (#501): the
-    /// founding members it dials when its cache names none.
-    admission_books: BTreeMap<u64, paros::machine::Admission>,
     /// The cells a vote named with a majority of its members wiped, by cell
     /// id: lost for the rest of the run, even once a later wipe takes the
     /// last such vote.
@@ -279,39 +276,6 @@ pub(crate) fn admitted_ids(state: &StateHandle) -> BTreeSet<u64> {
         .admitted
         .keys()
         .copied()
-        .collect()
-}
-
-/// The admitted machines cut off from the cell's control journals (#501):
-/// every founding member their durable book names (the cache, else the
-/// admission) is wiped, or renamed since under a name the book does not
-/// hold. Such a machine never folds the registry again (the static-stability
-/// limit of `docs/architecture.md` §3.2), so nothing booked on it can start.
-pub(crate) fn stranded_ids(state: &StateHandle) -> BTreeSet<u64> {
-    let board = machine_board(state);
-    let board = lock(&board);
-    let name_now = |founder: u64| -> Option<Address> {
-        board.renamed.iter().find_map(|(rank, name)| {
-            let addr = Address::parse(&format!("{}:{MACHINE_PORT}", machine_host(*rank))).ok()?;
-            (board.nodes.get(&addr) == Some(&founder)).then(|| name.clone())
-        })
-    };
-    board
-        .admission_books
-        .iter()
-        .filter(|(node, _)| board.admitted.contains_key(node))
-        .filter(|(node, admission)| {
-            let book: Vec<(NodeId, Address)> = board
-                .cached
-                .get(node)
-                .map_or_else(|| admission.members.clone(), |c| c.machines.clone());
-            !book.iter().any(|(id, addr)| {
-                admission.founders.contains(id)
-                    && !board.wiped.iter().any(|(_, old)| *old == id.0)
-                    && name_now(id.0).is_none_or(|now| now == *addr)
-            })
-        })
-        .map(|(node, _)| *node)
         .collect()
 }
 
@@ -1323,7 +1287,6 @@ pub(crate) fn recorded(board: &Mutex<MachineBoard>, addr: &Address, record: &Mac
             "machine: an admitted machine holds no vote and no promise",
             { "node" => node }
         );
-        board.admission_books.insert(node, admission.clone());
         if board.admitted.insert(node, admission.cell).is_none() {
             assert_reachable!("machine: a machine is admitted into the cell");
         }
