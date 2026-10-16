@@ -98,16 +98,24 @@ pub(crate) fn lock(board: &Mutex<TenantBoard>) -> MutexGuard<'_, TenantBoard> {
     board.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// #215 (zones): a created journal's placement that spans three zones was
-/// placed under the zone rule, so it survives any one.
+/// #215 (zones): a created journal's placement was placed under the zone
+/// rule where the rule binds, so it survives any one zone. The rule binds
+/// where a partition survives a failure (`F >= 1`: three acceptors per
+/// partition or more) and the placement spans three zones or more
+/// (`paros::placement::zone_rule_binds`).
 fn zone_spread(config: &paros::AcceptorConfig, lsn: u64) {
     let spread = config.distinct_domains().len();
+    let per_partition = match config.quorum_system() {
+        paros::QuorumSystem::Grid { rows, .. } => rows,
+        _ => config.members().len(),
+    };
+    let binds = per_partition >= 3 && spread >= 3;
     assert_always!(
-        spread < 3 || config.zone_rule().holds(),
+        !binds || config.zone_rule().holds(),
         "zones: a placed journal that spans three zones survives any one",
-        { "lsn" => lsn, "zones" => spread }
+        { "lsn" => lsn, "zones" => spread, "per_partition" => per_partition }
     );
-    if spread >= 3 {
+    if binds {
         assert_reachable!("zones: a journal is placed over three zones");
     }
 }
