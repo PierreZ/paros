@@ -190,6 +190,45 @@ impl LocalCell {
         }
     }
 
+    /// Every machine's node id and address, asked until all of them answer
+    /// or `patience` runs out. A machine serves its node-only `Inspect`
+    /// only once it joined the cell, a moment after `init` returns; a
+    /// client that misses one never reaches the journals placed on it.
+    ///
+    /// # Errors
+    ///
+    /// Some machine did not answer within `patience`.
+    pub async fn servers(
+        &self,
+        runtime: &Runtime,
+        timeout: Duration,
+        patience: Duration,
+    ) -> Result<Vec<(u64, Address)>, String> {
+        let deadline = tokio::time::Instant::now() + patience;
+        loop {
+            let found = paros::client::bootstrap::discover(
+                &runtime.providers,
+                &runtime.rpc,
+                &runtime.names,
+                &self.members,
+                timeout,
+            )
+            .await;
+            assert!(found.len() <= self.members.len(), "one answer per member");
+            if found.len() == self.members.len() {
+                return Ok(found);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(format!(
+                    "{} of {} local machines answered",
+                    found.len(),
+                    self.members.len()
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
+
     /// Stop every machine, wait for them, and delete the directory.
     ///
     /// # Errors
