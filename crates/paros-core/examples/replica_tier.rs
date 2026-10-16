@@ -171,7 +171,7 @@ impl Deployment {
             ready
                 .committed()
                 .iter()
-                .map(|(slot, command, _)| (*slot, command.clone())),
+                .map(|(slot, _, command, _)| (*slot, command.clone())),
         );
         let out = ready
             .messages()
