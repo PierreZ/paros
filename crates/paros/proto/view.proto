@@ -83,7 +83,7 @@ message ViewReply {
 }
 
 // One machine. A tenant scope sees only the machines its journals use, and
-// of each only its id, name, zone, rack and up/down state.
+// of each only its id, name, zone, rack and up, down or slow state.
 message MachineView {
   // 4 was `class` and 7 `failure_domain`, now reserved tags (#575 (key:value
   // tags)).
@@ -106,6 +106,9 @@ message MachineView {
   // `paros/rack`), then its user tags. A tenant scope sees only `paros/zone`
   // and `paros/rack`.
   repeated .paros.common.v1.Tag tags = 14;
+  // Whether the cell coordinator holds it slow (#361 (slow machines)): alive,
+  // but its journals move off it.
+  bool slow = 15;
 }
 
 message BookingView {

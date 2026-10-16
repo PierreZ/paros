@@ -134,6 +134,18 @@ pub enum SystemCommand {
         /// The incarnation the registry holds for it.
         incarnation: u128,
     },
+    /// The cell coordinator judged machine `id`, as `incarnation`, slow or
+    /// fast again (#361 (slow machines)), from `facts`.
+    MachineSlow {
+        /// The machine.
+        id: NodeId,
+        /// The incarnation the registry holds for it.
+        incarnation: u128,
+        /// Whether it is slow.
+        slow: bool,
+        /// The latency facts the judgement read.
+        facts: SlowFacts,
+    },
     /// The cell coordinator saw machine `id` answer as `incarnation`
     /// (#211, D6).
     MachineUp {
@@ -335,6 +347,23 @@ impl SystemCommand {
                     incarnation_low,
                 })
             }
+            SystemCommand::MachineSlow {
+                id,
+                incarnation,
+                slow,
+                facts,
+            } => {
+                let (incarnation_high, incarnation_low) = incarnation_halves(*incarnation);
+                Kind::MachineSlow(wire::MachineSlow {
+                    id: id.0,
+                    incarnation_high,
+                    incarnation_low,
+                    slow: *slow,
+                    rtt_us: facts.rtt_us,
+                    disk_busy_permille: facts.disk_busy_permille,
+                    cpu_busy_permille: facts.cpu_busy_permille,
+                })
+            }
             SystemCommand::MachineAdmitted { id } => {
                 Kind::MachineAdmitted(wire::MachineAdmitted { id: id.0 })
             }
@@ -443,6 +472,16 @@ impl SystemCommand {
             Kind::MachineUp(up) => SystemCommand::MachineUp {
                 id: NodeId(up.id),
                 incarnation: incarnation_from_halves(up.incarnation_high, up.incarnation_low),
+            },
+            Kind::MachineSlow(slow) => SystemCommand::MachineSlow {
+                id: NodeId(slow.id),
+                incarnation: incarnation_from_halves(slow.incarnation_high, slow.incarnation_low),
+                slow: slow.slow,
+                facts: SlowFacts {
+                    rtt_us: slow.rtt_us,
+                    disk_busy_permille: slow.disk_busy_permille,
+                    cpu_busy_permille: slow.cpu_busy_permille,
+                },
             },
             Kind::MachineAdmitted(admitted) => SystemCommand::MachineAdmitted {
                 id: NodeId(admitted.id),
@@ -753,6 +792,22 @@ pub struct Liveness {
     pub incarnation: u128,
     /// Whether it was answering.
     pub up: bool,
+    /// Whether it was judged slow (#361 (slow machines)): alive, but its
+    /// roles move off it like a drain's.
+    pub slow: bool,
+}
+
+/// The latency facts a slow judgement read (#361 (slow machines)): what the
+/// cell coordinator measured of one machine in one watch round.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SlowFacts {
+    /// Its `Identify` round trip, in microseconds, on the coordinator's
+    /// clock.
+    pub rtt_us: u64,
+    /// Its disk's busy ratio, in thousandths, from its last `Load` window.
+    pub disk_busy_permille: u32,
+    /// Its CPU's busy ratio, in thousandths, from its last `Load` window.
+    pub cpu_busy_permille: u32,
 }
 
 /// One capacity booking: a slot of `node` held for `role` of `target`.
@@ -836,6 +891,14 @@ pub enum RegistryEvent {
     MachineDown {
         /// The machine.
         id: NodeId,
+    },
+    /// The cell coordinator judged machine `id` slow, or fast again (#361
+    /// (slow machines)).
+    MachineSlow {
+        /// The machine.
+        id: NodeId,
+        /// Whether it is slow now.
+        slow: bool,
     },
     /// The cell coordinator marked machine `id` up as `incarnation`
     /// (#211): `was_down` when it was marked down before.
@@ -1138,6 +1201,12 @@ impl Registry {
             }) => self.book(booking, node, role, target),
             Some(SystemCommand::MachineDown { id, incarnation }) => self.down(id, incarnation),
             Some(SystemCommand::MachineUp { id, incarnation }) => self.up(id, incarnation),
+            Some(SystemCommand::MachineSlow {
+                id,
+                incarnation,
+                slow,
+                ..
+            }) => self.slow(id, incarnation, slow),
             Some(SystemCommand::MachineAdmitted { id }) => self.admitted(id),
             Some(SystemCommand::ReleaseCapacity { booking }) => {
                 match self.bookings.remove(&booking) {
@@ -1205,6 +1274,7 @@ impl Registry {
                     Liveness {
                         incarnation,
                         up: true,
+                        slow: false,
                     },
                 );
                 RegistryEvent::Reregistered { id, addr, capacity }
@@ -1231,6 +1301,7 @@ impl Registry {
                     Liveness {
                         incarnation,
                         up: true,
+                        slow: false,
                     },
                 );
                 RegistryEvent::Registered {
@@ -1528,6 +1599,7 @@ impl Registry {
             Liveness {
                 incarnation,
                 up: false,
+                slow: held.slow,
             },
         );
         assert!(!self.liveness(id).up, "a machine marked down is held down");
@@ -1569,11 +1641,13 @@ impl Registry {
         if let Some(node) = self.nodes.get_mut(&id) {
             node.incarnation = incarnation;
         }
+        // A slow judgement belongs to one incarnation: a new one starts fast.
         self.liveness.insert(
             id,
             Liveness {
                 incarnation,
                 up: true,
+                slow: held.slow && held.incarnation == incarnation,
             },
         );
         RegistryEvent::MachineUp {
@@ -1591,7 +1665,48 @@ impl Registry {
         self.liveness.get(&id).copied().unwrap_or(Liveness {
             incarnation: self.nodes.get(&id).map_or(0, |n| n.incarnation),
             up: true,
+            slow: false,
         })
+    }
+
+    /// `MachineSlow` (#361 (slow machines)): a change only. Refused for a
+    /// machine outside the pool, for an incarnation other than the one held,
+    /// and for the judgement held.
+    fn slow(&mut self, id: NodeId, incarnation: u128, slow: bool) -> RegistryEvent {
+        if !self.contains(id) {
+            return RegistryEvent::Refused(RegistryRefusal::NotInPool { id });
+        }
+        let held = self.liveness(id);
+        if held.incarnation != incarnation {
+            return RegistryEvent::Refused(RegistryRefusal::StaleIncarnation { id });
+        }
+        if held.slow == slow {
+            return RegistryEvent::Refused(RegistryRefusal::LivenessUnchanged { id });
+        }
+        self.liveness.insert(id, Liveness { slow, ..held });
+        assert!(self.liveness(id).slow == slow, "a slow judgement is held");
+        assert!(
+            self.liveness(id).up == held.up,
+            "a slow judgement leaves the up state alone"
+        );
+        RegistryEvent::MachineSlow { id, slow }
+    }
+
+    /// Whether the cell coordinator holds `id` slow (#361 (slow machines)).
+    #[must_use]
+    pub fn is_slow(&self, id: NodeId) -> bool {
+        self.contains(id) && self.liveness(id).slow
+    }
+
+    /// Whether `id` keeps the roles placed on it (#361 (slow machines)):
+    /// registered, neither draining nor retired, and not held slow. A role
+    /// on any other machine moves off it (`machine::moves`).
+    #[must_use]
+    pub fn keeps_roles(&self, id: NodeId) -> bool {
+        self.nodes
+            .get(&id)
+            .is_some_and(|n| n.standing == NodeStanding::Registered)
+            && !self.is_slow(id)
     }
 
     /// Whether `id` serves the cell (#511 (placement books machines that
@@ -1739,6 +1854,7 @@ impl Registry {
                     incarnation_high: incarnation_halves(l.incarnation).0,
                     incarnation_low: incarnation_halves(l.incarnation).1,
                     up: l.up,
+                    slow: l.slow,
                 })
                 .collect(),
             fleet_id: self.fleet.map_or(0, |f| f.fleet_id),
@@ -1838,6 +1954,7 @@ impl Checkpointable for Registry {
                 Liveness {
                     incarnation: incarnation_from_halves(l.incarnation_high, l.incarnation_low),
                     up: l.up,
+                    slow: l.slow,
                 },
             );
         }
@@ -1996,6 +2113,16 @@ mod tests {
             SystemCommand::MachineUp {
                 id: NodeId(100),
                 incarnation: 1,
+            },
+            SystemCommand::MachineSlow {
+                id: NodeId(100),
+                incarnation: 1,
+                slow: true,
+                facts: SlowFacts {
+                    rtt_us: 250_000,
+                    disk_busy_permille: 990,
+                    cpu_busy_permille: 12,
+                },
             },
             SystemCommand::ReleaseCapacity { booking: 7 },
             SystemCommand::JoinFleet {
@@ -2233,6 +2360,60 @@ mod tests {
             RegistryEvent::Refused(RegistryRefusal::NotInPool { id: NodeId(7) })
         );
         assert!(reg.seen_alive(NodeId(0)) && reg.seen_alive(NodeId(100)));
+    }
+
+    fn slow(id: u64, incarnation: u128, slow: bool) -> Vec<u8> {
+        SystemCommand::MachineSlow {
+            id: NodeId(id),
+            incarnation,
+            slow,
+            facts: SlowFacts::default(),
+        }
+        .encode()
+    }
+
+    #[test]
+    fn slow_marks_are_changes_only_and_move_roles() {
+        let mut reg = Registry::new([NodeId(0)]);
+        reg.fold(0, &register(100, Class::Storage, 1));
+        assert!(reg.keeps_roles(NodeId(100)) && !reg.is_slow(NodeId(100)));
+        // A registration starts fast.
+        assert_eq!(
+            reg.fold(1, &slow(100, 100, false)),
+            RegistryEvent::Refused(RegistryRefusal::LivenessUnchanged { id: NodeId(100) })
+        );
+        assert_eq!(
+            reg.fold(2, &slow(100, 5, true)),
+            RegistryEvent::Refused(RegistryRefusal::StaleIncarnation { id: NodeId(100) })
+        );
+        assert_eq!(
+            reg.fold(3, &slow(100, 100, true)),
+            RegistryEvent::MachineSlow {
+                id: NodeId(100),
+                slow: true
+            }
+        );
+        // Slow is alive, and its roles move.
+        assert!(reg.is_slow(NodeId(100)) && reg.seen_alive(NodeId(100)));
+        assert!(!reg.keeps_roles(NodeId(100)));
+        assert_eq!(
+            reg.fold(4, &slow(100, 100, true)),
+            RegistryEvent::Refused(RegistryRefusal::LivenessUnchanged { id: NodeId(100) })
+        );
+        // Down keeps the judgement; a new incarnation starts fast.
+        reg.fold(5, &liveness(100, 100, false));
+        assert!(reg.is_slow(NodeId(100)));
+        reg.fold(6, &liveness(100, 101, true));
+        assert!(!reg.is_slow(NodeId(100)) && reg.keeps_roles(NodeId(100)));
+        // A checkpoint keeps a slow mark.
+        reg.fold(7, &slow(100, 101, true));
+        let mut restored = Registry::new([NodeId(0)]);
+        restored.restore(7, &reg.checkpoint()).expect("restores");
+        assert!(restored.is_slow(NodeId(100)));
+        assert_eq!(
+            reg.fold(8, &slow(7, 1, true)),
+            RegistryEvent::Refused(RegistryRefusal::NotInPool { id: NodeId(7) })
+        );
     }
 
     #[test]

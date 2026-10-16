@@ -232,9 +232,14 @@ fn find_machine<'a>(
     }
 }
 
-/// `up` or `down`.
-pub(crate) fn state(up: bool) -> &'static str {
-    if up { "up" } else { "down" }
+/// `up`, `down`, or `slow` for a machine the cell coordinator holds slow
+/// (#361 (slow machines)).
+pub(crate) fn state(machine: &paros::wire::view::MachineView) -> &'static str {
+    match (machine.up, machine.slow) {
+        (false, _) => "down",
+        (true, true) => "slow",
+        (true, false) => "up",
+    }
 }
 
 /// `parosctl machine …`.
@@ -333,7 +338,7 @@ pub async fn machine(asker: &Asker<'_>, out: &Printer, args: MachineArgs) -> End
                         tag(&m.tags, paros::tags::reserved::RACK),
                         user_tags_text(&m.tags),
                         m.standing,
-                        state(m.up),
+                        state(m),
                         if m.founder { "yes" } else { "no" },
                         self::text(&reply.cell_name),
                     );
@@ -385,7 +390,7 @@ async fn machine_list(
                 format!("{}/{}", m.booked, m.capacity),
                 tag(&m.tags, paros::tags::reserved::ZONE),
                 m.standing.clone(),
-                state(m.up).to_string(),
+                state(m).to_string(),
                 cpu,
                 machine,
                 disk,
@@ -633,6 +638,7 @@ pub async fn cell_show(asker: &Asker<'_>, out: &Printer, cell: Option<&str>) -> 
         *standing.entry(m.standing.as_str()).or_default() += 1;
     }
     let down = reply.machines.iter().filter(|m| !m.up).count();
+    let slow = reply.machines.iter().filter(|m| m.up && m.slow).count();
     let users = reply.tenants.iter().filter(|t| t.kind == "users").count();
     let slot_rows: Vec<[String; 4]> = slots
         .iter()
@@ -648,7 +654,7 @@ pub async fn cell_show(asker: &Asker<'_>, out: &Printer, cell: Option<&str>) -> 
     out.emit(
         || {
             format!(
-                "cell:         {}\nuniverse:     {}\nstate:        {}\ncoordinator:  {}\nmachines:     {} ({}; {} down)\ntenants:      {users}\nslots:\n{}",
+                "cell:         {}\nuniverse:     {}\nstate:        {}\ncoordinator:  {}\nmachines:     {} ({}; {} down, {} slow)\ntenants:      {users}\nslots:\n{}",
                 text(&reply.cell_name),
                 text(&reply.universe_name),
                 if reply.cell_state.is_empty() { "-" } else { &reply.cell_state },
@@ -660,6 +666,7 @@ pub async fn cell_show(asker: &Asker<'_>, out: &Printer, cell: Option<&str>) -> 
                     .collect::<Vec<_>>()
                     .join(", "),
                 down,
+                slow,
                 indent(&table(["CLASS", "BOOKED", "FREE", "TOTAL"], &slot_rows)),
             )
         },
@@ -735,7 +742,7 @@ pub async fn tenant_show(asker: &Asker<'_>, out: &Printer, name: &str) -> Ending
             [
                 names[&m.node_id].clone(),
                 tag(&m.tags, paros::tags::reserved::ZONE),
-                state(m.up).to_string(),
+                state(m).to_string(),
                 footprint.get(&m.node_id).copied().unwrap_or(0).to_string(),
             ]
         })
@@ -917,6 +924,7 @@ fn machine_json(m: &wire::MachineView) -> Value {
         "booked": m.booked,
         "standing": m.standing,
         "up": m.up,
+        "slow": m.slow,
         "founder": m.founder,
         "incarnation": format!("{:016x}{:016x}", m.incarnation_high, m.incarnation_low),
         "bookings": m.bookings.iter().map(|b| json!({

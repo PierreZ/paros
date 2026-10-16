@@ -20,7 +20,7 @@
 //!    journal on it again, and a retired identity never comes back to its
 //!    journal. The release stops the journal there, its store kept.
 //!
-//! A journal with a slot on a draining machine is the move's, never a mode
+//! A journal with a slot on a draining or slow machine is the move's, never a mode
 //! change's: it waits until the move is done. A desired mode the cell cannot
 //! place waits: a configure judged it placeable when it was asked
 //! (`super::tenants`), and slots free up again.
@@ -39,7 +39,7 @@ use crate::client::journals::JournalAnswer;
 use crate::client::{Client, ReconfigureOutcome, Server};
 use crate::placement::{self, Step, Want};
 use crate::rpc::NodeClient;
-use crate::system::{Booking, BookingTarget, NodeStanding, Registry, Role};
+use crate::system::{Booking, BookingTarget, Registry, Role};
 use crate::tenant::Desired;
 use crate::{Address, Names};
 
@@ -90,11 +90,10 @@ struct Change {
     slots: Vec<(u64, Booking)>,
 }
 
-/// Whether the registry holds `node` registered (not draining, not retired).
+/// Whether `node` keeps its roles: registered (not draining, not retired)
+/// and not held slow (#361 (slow machines)).
 fn registered(registry: &Registry, node: NodeId) -> bool {
-    registry
-        .get(node)
-        .is_some_and(|n| n.standing == NodeStanding::Registered)
+    registry.keeps_roles(node)
 }
 
 /// The acceptor slots of `journal`.
@@ -274,7 +273,15 @@ impl Modes {
         slots: &[(u64, Booking)],
     ) -> Option<ModeStep> {
         let storage = desk.storage(cell.registry());
-        let machines = placement::machines(cell.registry(), storage.iter().copied());
+        // A slow machine keeps no role (#361 (slow machines)): it takes no
+        // new slot, as the slots it holds are left to the moves.
+        let machines = placement::machines(
+            cell.registry(),
+            storage
+                .iter()
+                .copied()
+                .filter(|node| cell.registry().keeps_roles(*node)),
+        );
         let Ok(steps) = placement::plan(want, &machines, slots, want.target.tenant().0) else {
             return Some(ModeStep::Waiting);
         };

@@ -408,6 +408,13 @@ impl NodeShape {
             // short end gives a run many windows, so `LOAD` meets a full
             // one early and often.
             load_interval: ms(buggify_knob!(5000_u64, 1000_u64..5001_u64)),
+            // The slow-machine judgement (#361 (slow machines)): a round trip
+            // bound above the slowest link's round trip, a busy bound from
+            // 70 % to all, one to four rounds of hysteresis.
+            slow_rtt: ms(buggify_knob!(1000_u64, 2 * ROUND_TRIP_FLOOR_MS..3001_u64)),
+            slow_busy_permille: u32::try_from(buggify_knob!(900_u64, 700_u64..1001_u64))
+                .unwrap_or(900),
+            slow_rounds: u32::try_from(buggify_knob!(3_u64, 1_u64..5_u64)).unwrap_or(3),
             // How long a new status word must hold before a member shows it
             // (#191 (status)). Floor 0 (no hold). The default is below the
             // chaos window, so a word changes inside a run; the extremes

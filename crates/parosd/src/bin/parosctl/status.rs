@@ -258,7 +258,7 @@ async fn tenant_status(asker: &Asker<'_>, out: &Printer, name: &str) -> Ending {
             [
                 names[&m.node_id].clone(),
                 crate::views::tag(&m.tags, paros::tags::reserved::ZONE),
-                state(m.up).to_string(),
+                state(m).to_string(),
                 footprint.get(&m.node_id).copied().unwrap_or(0).to_string(),
             ]
         })

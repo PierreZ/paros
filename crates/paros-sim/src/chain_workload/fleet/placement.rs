@@ -11,7 +11,9 @@
 //! live journal always holds at least as many slots as its create named
 //! members, and only a member that left the registered machines lost its
 //! slot. After chaos, every journal that has a machine to go to holds no
-//! slot on a draining machine: its move finished.
+//! slot on a draining machine: its move finished. The same holds for a
+//! machine the cell coordinator holds slow (#361 (slow machines)), as the
+//! final registry holds it.
 
 use std::collections::BTreeSet;
 use std::time::Duration;
@@ -44,9 +46,9 @@ pub(super) async fn placements_booked(
     while ctx.time().now() < deadline && !ctx.shutdown().is_cancelled() {
         let first = known.first(attempt);
         attempt += 1;
-        if let Some((tenants, registry)) = read(known, first, &learn).await {
+        if let Some((tenants, registry, slow_before)) = read(known, first, &learn).await {
             if !judged {
-                judge(&tenants, &registry);
+                judge(&tenants, &registry, &slow_before);
                 judged = true;
             }
             let stuck = unmoved(&tenants, &registry, &wiped);
@@ -56,11 +58,19 @@ pub(super) async fn placements_booked(
             // A move may still be on its way: read again until the deadline.
             if ctx.time().now() + Duration::from_millis(500) >= deadline {
                 let (journal, node) = stuck.unwrap_or_default();
-                assert_always!(
-                    crate::machine::cell_lost(ctx.state()),
-                    "placement: a journal with a machine to go to leaves a draining one after chaos",
-                    { "tenant" => journal, "node" => node }
-                );
+                if registry.is_slow(NodeId(node)) {
+                    assert_always!(
+                        crate::machine::cell_lost(ctx.state()),
+                        "placement: a journal with a machine to go to leaves a slow one after chaos",
+                        { "tenant" => journal, "node" => node }
+                    );
+                } else {
+                    assert_always!(
+                        crate::machine::cell_lost(ctx.state()),
+                        "placement: a journal with a machine to go to leaves a draining one after chaos",
+                        { "tenant" => journal, "node" => node }
+                    );
+                }
                 return;
             }
         }
@@ -76,7 +86,7 @@ async fn read(
     known: &Cell,
     first: usize,
     learn: &impl Fn(JournalIdentifier),
-) -> Option<(Vec<TenantControl>, Registry)> {
+) -> Option<(Vec<TenantControl>, Registry, BTreeSet<NodeId>)> {
     let mut cell = judged_cell(&known.members);
     let loaded =
         paros::client::checkpoint::load(&mut cell, known.journals.cell, &known.client, first, 0)
@@ -84,6 +94,16 @@ async fn read(
     if !matches!(loaded, LoadOutcome::Loaded { .. }) {
         return None;
     }
+    // The machines held slow before the tenants are read (#361 (slow
+    // machines)): a move off one records its placement, then releases its
+    // slot, and the mark may clear before the second read.
+    let slow_before: BTreeSet<NodeId> = cell
+        .state()
+        .registry()
+        .pool()
+        .into_iter()
+        .filter(|id| cell.state().registry().is_slow(*id))
+        .collect();
     let hosted: Vec<(TenantId, paros::JournalId)> = cell
         .state()
         .registry()
@@ -107,11 +127,12 @@ async fn read(
     if !matches!(loaded, LoadOutcome::Loaded { .. }) {
         return None;
     }
-    Some((tenants, after.state().registry().clone()))
+    Some((tenants, after.state().registry().clone(), slow_before))
 }
 
 /// The oracle itself, and the gate that a placement spread over zones.
-fn judge(tenants: &[TenantControl], registry: &Registry) {
+/// `slow_before` are the machines held slow when the reads began.
+fn judge(tenants: &[TenantControl], registry: &Registry, slow_before: &BTreeSet<NodeId>) {
     // Placement books only a machine that serves the cell: a founding
     // member, or one whose admission the coordinator saw (#511 (placement
     // books machines that never served)). A slot on a machine that never
@@ -140,11 +161,10 @@ fn judge(tenants: &[TenantControl], registry: &Registry) {
                 .filter(|(_, b)| b.role == Role::Acceptor && b.target == target)
                 .map(|(_, b)| b.node)
                 .collect();
-            let registered = |node: NodeId| {
-                registry
-                    .get(node)
-                    .is_some_and(|n| n.standing == NodeStanding::Registered)
-            };
+            // A slow machine's journals move off it like a draining one's
+            // (#361 (slow machines)).
+            let registered =
+                |node: NodeId| registry.keeps_roles(node) && !slow_before.contains(&node);
             // Only a member that left the registered machines moved off.
             let lost = members
                 .iter()
@@ -246,9 +266,10 @@ fn footprints(registry: &Registry) {
     }
 }
 
-/// A live journal that still holds a slot on a draining machine while it
-/// has a machine to go to for each such slot, as `(tenant, node)`: a
-/// registered storage machine that serves the cell, never wiped, up, with a free slot, that
+/// A live journal that still holds a slot on a draining or slow machine
+/// (#361 (slow machines)) while it has a machine to go to for each such
+/// slot, as `(tenant, node)`: a registered storage machine that serves the
+/// cell, never wiped, up and not slow, with a free slot, that
 /// holds no slot of it,
 /// while every machine it stays on was never wiped. `None` when every such
 /// move finished.
@@ -257,11 +278,7 @@ fn unmoved(
     registry: &Registry,
     wiped: &BTreeSet<u64>,
 ) -> Option<(u64, u64)> {
-    let registered = |node: NodeId| {
-        registry
-            .get(node)
-            .is_some_and(|n| n.standing == NodeStanding::Registered)
-    };
+    let registered = |node: NodeId| registry.keeps_roles(node);
     for control in tenants {
         let tenant = control.tenant();
         if registry.dropped(tenant) {
@@ -309,6 +326,7 @@ fn unmoved(
                     && registry.serves(*node)
                     && !wiped.contains(&node.0)
                     && registry.liveness(*node).up
+                    && !registry.liveness(*node).slow
                     && registry.available(*node) > 0
                     && !slots.contains(node)
             });

@@ -76,6 +76,7 @@ mod record;
 pub(crate) mod register;
 mod resolve;
 mod sets;
+pub mod slow;
 mod stores;
 mod tenants;
 mod universe;

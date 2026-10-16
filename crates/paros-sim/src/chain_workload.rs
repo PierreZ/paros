@@ -597,6 +597,12 @@ impl ChainWorkload {
             // gates wait on a `LOAD` while a machine is slow, so every
             // client asks as often as the weight family allows.
             config.weights[usize::from(LOAD)] = OP_WEIGHT_CEILING;
+            // A move off a slow machine (#361 (slow machines)) needs
+            // admitted storage machines, tenants and journals: every client
+            // runs each as often as the weight family allows.
+            for op in [ADMIT, TENANT, CREATE_JOURNAL] {
+                config.weights[usize::from(op)] = OP_WEIGHT_CEILING;
+            }
         }
         if crate::shape::drained_machine(ctx.state()) {
             // The drained-machine scenario (#474 (journals on admitted
@@ -755,8 +761,9 @@ impl ChainWorkload {
             operations.push(LOAD);
         }
         // Likewise the drained-machine scenario's ops (#474 (journals on
-        // admitted machines)).
-        if crate::shape::drained_machine(ctx.state()) {
+        // admitted machines)) and the slow-machine scenario's (#361 (slow
+        // machines)).
+        if crate::shape::drained_machine(ctx.state()) || crate::shape::slow_machine(ctx.state()) {
             for op in [ADMIT, TENANT, CREATE_JOURNAL] {
                 if !operations.contains(&op) {
                     operations.push(op);
