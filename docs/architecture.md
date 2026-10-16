@@ -2170,7 +2170,9 @@ but a crash between the two lands the batch without its metainfo. paros puts a b
 metainfo that depends on it in one commit, and orders the reverse across commits, each durable
 before the next (#264, #176): a node commits a raised promise alone (an entry never lands above
 its promise), then its entries with its floor and metainfo (a chosen index never lands ahead of
-the entry that makes its slot chosen); a matchmaker commits its new registrations with its
+the entry that makes its slot chosen; it rides the writes that happen anyway, and forces a
+metainfo write once it runs 64 slots ahead of the durable one, so a reboot recovers about one
+page, #602 (dark after a full restart)); a matchmaker commits its new registrations with its
 metainfo, then its clears, and a boot keeps only the registrations the durable metainfo vouches
 for (at or above its watermark, of its generation). Storage chaos on journal seeds is the
 local half of this contract: moonpool's crash damage, failed syncs, short transfers and lost

@@ -19,7 +19,9 @@ use paros_core::{
     NodeId, QuorumSystem, Registration, RegistryStorage, Seq, Slot, Storage, Value,
 };
 
-use super::{JournalMatchmakerStorage, JournalStorage, JournalStoreConfig, encode};
+use super::{
+    CHOSEN_INDEX_LAG, JournalMatchmakerStorage, JournalStorage, JournalStoreConfig, encode,
+};
 use crate::corruption::CorruptionVerdict;
 use crate::matchmaker::{MatchmakerStorage, matchmaker_storage_contract_suite};
 use crate::storage::{LogStorage, StorageError, StorageRecord, storage_contract_suite};
@@ -302,6 +304,47 @@ fn laggy_slots_and_the_floor_survive_a_reboot() {
             assert!(node.accepted(Slot(2)).is_none(), "below the floor");
             assert!(node.accepted(Slot(5)).is_some() && node.accepted(Slot(30)).is_some());
             assert_eq!(node.last_slot(), Slot(30));
+        })
+        .await;
+    });
+}
+
+/// A chosen index that advances with no other metainfo write is written once
+/// it runs `CHOSEN_INDEX_LAG` slots ahead of the durable one, so a reboot
+/// rewinds it by less than a page (#602 (dark after a full restart)).
+#[test]
+fn a_lagging_chosen_index_is_written_alone() {
+    runtime().block_on(async {
+        let mut sim = sim(7);
+        run(&mut sim, |provider| async move {
+            let store = JournalStoreConfig::small();
+            let mut node = open_node(provider.clone(), "lag", store)
+                .await
+                .expect("open");
+            node.format(&config()).await.expect("format");
+            node.persist_ballot(ballot(5)).await.expect("promise");
+            node.sync(MustSync::Sync).await.expect("sync");
+            let last = 3 * CHOSEN_INDEX_LAG + 10;
+            for slot in 0..=last {
+                node.append_accepted(Slot(slot), ballot(5), user(slot, 0x41))
+                    .await
+                    .expect("accept");
+                node.set_chosen_index(Slot(slot)).await.expect("chosen");
+                node.sync(MustSync::Sync).await.expect("sync");
+            }
+            drop(node);
+            let node = open_node(provider, "lag", store).await.expect("reboots");
+            let (hard, _) = node.initial_state();
+            let booted = hard.chosen_index.expect("a chosen index was written");
+            assert!(booted.0 <= last, "never ahead of the live index");
+            assert!(
+                last - booted.0 < CHOSEN_INDEX_LAG,
+                "rewound by less than a page: {booted:?} of {last}"
+            );
+            assert!(
+                last - booted.0 > 0,
+                "a lag below the bound writes nothing on its own"
+            );
         })
         .await;
     });

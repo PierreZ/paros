@@ -156,3 +156,12 @@ recovered chosen index is the node's whole walked prefix, and the boot report
 (`report_boot_state`, `crates/paros/src/driver/boot.rs`) hands it to the audit as one
 transition. The application is a client that reads the log, and it keeps its own
 place in it.
+
+A restart must also be short. A booted leader re-proposes every slot above its durable
+chosen index, one page at a time. The chosen index rides the metainfo writes that happen
+anyway, so in steady state it once stayed where the last election left it. After a full
+restart of a cell, each new leader then re-proposed its whole log, and the cell answered
+nothing for 30 to 90 s (#602). Now a sync writes the metainfo for the chosen index alone
+once it runs `CHOSEN_INDEX_LAG` (64) slots ahead of the durable one
+(`crates/paros/src/journal/node.rs`). The audit checks **"a reboot rewinds the chosen
+index by less than a page"** at every boot.
