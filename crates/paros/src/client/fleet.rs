@@ -906,7 +906,7 @@ impl FleetSession {
 
     /// Set the user tags of `target` to `tags` to the request's end (see
     /// [`FleetSession::tag_step`]), taking an interrupted step again for up
-    /// to `patience`.
+    /// to `patience` past the last written step.
     #[tracing::instrument(level = "debug", skip_all)]
     pub async fn set_tags<P: Providers>(
         &mut self,
@@ -917,11 +917,11 @@ impl FleetSession {
         tags: &UserTags,
         patience: Duration,
     ) -> Run<u64> {
-        let deadline = client.now() + patience;
+        let mut deadline = client.now() + patience;
         let mut steps = Vec::new();
         while steps.len() < MAX_STEPS {
             let step = self.tag_step(client, first, target, request, tags).await;
-            if retry(client, &step, deadline).await {
+            if retry(client, &step, &mut deadline, patience).await {
                 continue;
             }
             if let Some(end) = settle(step, &mut steps) {
