@@ -614,10 +614,13 @@ impl ChainWorkload {
             // The zone-outage scenario (#215 (zones)): its gates wait on a
             // tenant step and a created journal's append while a zone is
             // down, so every client runs both as often as the weight
-            // family allows.
+            // family allows. The outage waits on a created journal, which
+            // exists only late in a run: every client runs the steps knob's
+            // top, so a journal step still comes while the zone is down.
             for op in [TENANT, CREATE_JOURNAL] {
                 config.weights[usize::from(op)] = OP_WEIGHT_CEILING;
             }
+            config.steps = config.steps.max(64);
         }
         if crate::shape::changed_mode(ctx.state()) {
             // The changed-mode scenario (#214 (tenant modes)): a mode change
