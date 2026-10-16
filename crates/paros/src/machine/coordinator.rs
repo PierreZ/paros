@@ -1108,34 +1108,39 @@ async fn campaign<P: Providers>(
                                             "coordinator: a re-placement is deferred"
                                         );
                                     }
-                                    stepped = Some(match moves.step(ctx, session, desk, &gone).await {
-                                        None => None,
-                                        Some(step) => {
-                                            match changes.step(ctx, session, desk).await {
-                                                None => None,
-                                                Some(mode) => {
-                                                    let set = sets.step(ctx, session, desk, &gone).await;
-                                                    // Then one step of a footprint (#476):
-                                                    // a tenant coordinator placed, or a slot
-                                                    // moved off a draining machine.
-                                                    let footprint = match set {
-                                                        Some(_) => {
-                                                            footprints.step(&client, session).await
-                                                        }
-                                                        None => None,
-                                                    };
-                                                    // A set's move is left mid-way once
-                                                    // its handover started, so the next
-                                                    // term finds it running.
-                                                    set.zip(footprint).map(|(set, _)| {
-                                                        step.in_flight()
-                                                            || mode.in_flight()
-                                                            || set == SetStep::HandedOver
-                                                    })
+                                    stepped =
+                                        Some(match moves.step(ctx, session, desk, &gone).await {
+                                            None => None,
+                                            Some(step) => {
+                                                match changes.step(ctx, session, desk).await {
+                                                    None => None,
+                                                    Some(mode) => {
+                                                        let set = sets
+                                                            .step(ctx, session, desk, &gone)
+                                                            .await;
+                                                        // Then one step of a footprint (#476):
+                                                        // a tenant coordinator placed, or a slot
+                                                        // moved off a draining machine.
+                                                        let footprint = match set {
+                                                            Some(_) => {
+                                                                footprints
+                                                                    .step(&client, session)
+                                                                    .await
+                                                            }
+                                                            None => None,
+                                                        };
+                                                        // A set's move is left mid-way once
+                                                        // its handover started, so the next
+                                                        // term finds it running.
+                                                        set.zip(footprint).map(|(set, _)| {
+                                                            step.in_flight()
+                                                                || mode.in_flight()
+                                                                || set == SetStep::HandedOver
+                                                        })
+                                                    }
                                                 }
                                             }
-                                        }
-                                    });
+                                        });
                                 }
                             }
                             Ok(_) => {}
