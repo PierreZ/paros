@@ -9,13 +9,15 @@ use paros::client::fleet::{Step, read_directory};
 use paros::client::journals::{self, JournalAnswer, JournalOp, JournalRequest};
 use paros::client::{ClaimOutcome, Client, Writer};
 use paros::fleet::TenantState;
-use paros::tenant::{Desired, Survives};
+use paros::tenant::Survives;
 use paros::{JournalId, JournalIdentifier, TenantId, WriterMode};
 
 use crate::Runtime;
 use crate::fleet::{leader_seed, nonzero, refusal_text, session};
 use crate::labels::Labels;
 use crate::output::note;
+
+use super::topology::Topology;
 
 type ParosClient = Client<TokioProviders>;
 
@@ -26,9 +28,9 @@ pub struct Journal {
     pub id: JournalIdentifier,
 }
 
-/// The name of the bench's journal `index`.
-pub fn journal_name(index: usize) -> String {
-    format!("bench-{index}")
+/// The name of the bench's journal `index` of `topology`: `bench-3x2-0`.
+pub fn journal_name(topology: Topology, index: usize) -> String {
+    format!("bench-{topology}-{index}")
 }
 
 /// The tenant `name`, created (`users`, surviving a zone) when the universe
@@ -95,13 +97,13 @@ async fn lookup(
         .map(|(id, entry)| (id, entry.state)))
 }
 
-/// The journals `bench-0` to `bench-{count - 1}` of `tenant`, each
-/// created (single writer, in the `desired` mode) when missing.
+/// The journals `bench-T-0` to `bench-T-{count - 1}` of `tenant`, each
+/// created (single writer, in `topology`'s mode) when missing.
 pub async fn journals(
     runtime: &Runtime,
     client: &ParosClient,
     (tenant_name, tenant): (&str, TenantId),
-    (count, desired): (usize, Option<Desired>),
+    (count, topology): (usize, Topology),
     patience: Duration,
 ) -> Result<Vec<Journal>, String> {
     let cell = control_journals(client)
@@ -110,14 +112,14 @@ pub async fn journals(
     let election = cell.election.ok_or("the cell names no election journal")?;
     let mut out = Vec::with_capacity(count);
     for index in 0..count {
-        let name = journal_name(index);
+        let name = journal_name(topology, index);
         let request = JournalRequest {
             request: nonzero(&runtime.providers),
             tenant,
             op: JournalOp::Create {
                 name: name.clone().into_bytes(),
                 writer: WriterMode::Single,
-                desired,
+                desired: Some(topology.desired()),
                 tags: paros::tags::UserTags::none(),
             },
         };
