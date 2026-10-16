@@ -102,11 +102,18 @@ pub struct Shortfall {
 }
 
 /// Whether a footprint may be refused from `registry`: every founding
-/// member registered (#349). An unregistered founder offers no slot, so a
-/// refusal before then could refuse a tenant the cell can host.
+/// member registered (#349) or marked down. An unregistered founder that is
+/// up offers no slot yet, so a refusal before then could refuse a tenant the
+/// cell can host. A founder the coordinator marked down may never register
+/// (a wiped founder's old id never rejoins), so the cell answers from the
+/// registry as it stands, and the creation ends `ERROR` (#614 (a tenant
+/// waits for a wiped founder); witness 13017347449761959302 on 266a6af,
+/// recipe `469168:1407352323402923827,35122:7802532925377564957`).
 #[must_use]
 pub fn ready(registry: &Registry) -> bool {
-    registry.genesis().all(|node| registry.get(node).is_some())
+    registry
+        .genesis()
+        .all(|node| registry.get(node).is_some() || !registry.liveness(node).up)
 }
 
 /// The machines a footprint may book: registered, not draining, serving the

@@ -102,7 +102,7 @@ production (`parosd`) and in simulation (`paros-sim`). Stack: `paros-core` ← *
   fleet tenant and reads the cell control journal (`read_cell`): `init` waits for the coordinator's
   `JoinFleet` (`Interrupted::NotJoined`, #513 (fleet Init duel)), a creation for its footprint and
   its `HostTenant` (`Interrupted::NotHosted`; the cell refuses no footprint while a founder is
-  unregistered, so the creation waits), a refused footprint marking the tenant `ERROR`
+  unregistered and not marked down, so the creation waits; #614 (a tenant waits for a wiped founder)), a refused footprint marking the tenant `ERROR`
   (`NoFootprint`, #476 (tenant footprint)), and a removal for its `DropTenant`
   (`Interrupted::NotDropped`, #225). A run's patience counts from its last written step (#605 (init pending in the recovery tail)).
 - `tenant.rs` → `TenantCommand`, `ConfigureTarget`, `TenantControl`, `TenantEvent`, `Desired`, `Durability` (`failures_per_partition` over `partitions`, #523), `Survives`, `CellKind` → the pure fold of a tenant's control journal (#210): `Describe` once, `CreateJournal` (with its birth tags) / `DeleteJournal` / `SetJournalTags` (#575 (key:value tags)) / `Unplaceable` (#212 (placement); an empty name is a configure's refusal) / `Configure` (a live journal's desired mode or the tenant default, #214 (tenant modes)) per request id, `Placed` (the configuration in force, what views show; the create's `config` stays the bootstrap one), `IdTaken` records nothing, `Checkpointable`.
