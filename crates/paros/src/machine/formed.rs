@@ -461,7 +461,9 @@ impl Teacher {
         if ack.cell_id == self.cell.plan.cell_id {
             return Learner::Formed;
         }
-        if ack.cell_id != 0 || ack.class != Class::Storage.as_str() {
+        if ack.cell_id != 0
+            || super::identity_tags(ack).is_none_or(|(class, _)| class != Class::Storage)
+        {
             return Learner::Other;
         }
         Learner::Idle

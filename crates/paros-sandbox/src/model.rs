@@ -130,8 +130,9 @@ pub struct Topology {
 pub struct TenantPlace {
     /// Its name.
     pub name: String,
-    /// Its groups, as `paros` labels them (`internal,fleet`, `users`, …).
-    pub groups: String,
+    /// Its kind, its `paros/kind` tag (`universe`, `cell` or `users`,
+    /// #575 (key:value tags)).
+    pub kind: String,
     /// The cell it lives in (the cell's name).
     pub cell: String,
     /// Its journals, its control journal first.

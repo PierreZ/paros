@@ -36,7 +36,7 @@ use super::fleet::{
     FleetRefusal, Interrupted, Run, Stage, Step, append, going_round, open, retry, settle,
 };
 use crate::frontend::Denial;
-use crate::machine::{Admission, Class, ControlJournals};
+use crate::machine::{Admission, ControlJournals};
 use crate::system::{NodeStanding, Registry, SystemCommand};
 use crate::{Address, Names};
 
@@ -270,7 +270,7 @@ impl CellSession {
                 cell_id: identity.cell_id,
             });
         }
-        let Ok(class) = identity.class.parse::<Class>() else {
+        let Some((class, locality)) = crate::machine::identity_tags(&identity) else {
             return Step::Refused(FleetRefusal::Unset);
         };
         let Ok(advertised) = Address::parse(&identity.addr) else {
@@ -291,7 +291,7 @@ impl CellSession {
                     addr: advertised.to_string(),
                     class,
                     capacity: identity.capacity,
-                    failure_domain: identity.failure_domain,
+                    locality,
                     name: identity.name,
                     incarnation: crate::machine::incarnation_from_halves(
                         identity.incarnation_high,
@@ -437,6 +437,36 @@ impl CellSession {
         Ok(!registered(self))
     }
 
+    /// `machine tag` (#575 (key:value tags)): the registered machine
+    /// `node`'s user tags become `tags`, under the idempotency id
+    /// `request`, unless the registry applied that request already. Whether
+    /// the registry holds the request applied: a machine it does not hold,
+    /// or retired, is refused.
+    ///
+    /// # Errors
+    ///
+    /// The session did not open, or the write did not land (see
+    /// [`Interrupted`]).
+    pub async fn set_machine_tags<P: Providers>(
+        &mut self,
+        client: &Client<P>,
+        first: usize,
+        (node, request): (NodeId, u64),
+        tags: &crate::tags::UserTags,
+    ) -> Result<bool, Interrupted> {
+        self.open(client, first).await?;
+        if self.registry().tagged(request) {
+            return Ok(true);
+        }
+        let command = SystemCommand::SetMachineTags {
+            request,
+            id: node,
+            tags: tags.clone(),
+        };
+        self.record(client, first, &command).await?;
+        Ok(self.registry().tagged(request))
+    }
+
     /// Fold the cell control journal to its tail again, while the session
     /// holds it: another writer, an operator's `cell drain-machine`, appends
     /// to it between this session's own writes (#474 (journals on admitted
@@ -512,7 +542,7 @@ impl CellSession {
 
     /// Admit the machine at `target`, dialed through `names`, to its end (see
     /// [`CellSession::admit_step`]), taking an interrupted step again for up
-    /// to `patience`.
+    /// to `patience` past the last written step.
     // The session, the RPC runtime, the cell's client, the resolver, where
     // to start, the machine and the patience: each is the caller's.
     #[allow(clippy::too_many_arguments)]
@@ -527,13 +557,13 @@ impl CellSession {
         target: &Address,
         patience: Duration,
     ) -> Run<NodeId> {
-        let deadline = client.now() + patience;
+        let mut deadline = client.now() + patience;
         let mut steps = Vec::new();
         while steps.len() < MAX_STEPS {
             let step = self
                 .admit_step(providers, rpc, client, names, first, target)
                 .await;
-            if retry(client, &step, deadline).await {
+            if retry(client, &step, &mut deadline, patience).await {
                 continue;
             }
             if let Some(end) = settle(step, &mut steps) {

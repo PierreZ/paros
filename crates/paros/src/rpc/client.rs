@@ -12,15 +12,16 @@ use moonpool_rpc::{
 };
 
 use super::methods::{
-    FrontReadRpc, FrontSetLeaderRpc, FrontTruncateRpc, FrontWriteRpc, GarbageCollectRpc,
-    InspectRpc, MachineInterface, MatchmakeRpc, MatchmakerReconfigureRpc, ReadRpc,
-    ReconfigureMatchmakersRpc, ReconfigureRpc, RetireRpc, SetLeaderRpc, TruncateRpc,
+    FrontReadRpc, FrontSetJournalTagsRpc, FrontSetLeaderRpc, FrontTruncateRpc, FrontWriteRpc,
+    GarbageCollectRpc, InspectRpc, MachineInterface, MatchmakeRpc, MatchmakerReconfigureRpc,
+    ReadRpc, ReconfigureMatchmakersRpc, ReconfigureRpc, RetireRpc, SetLeaderRpc, TruncateRpc,
     WellKnownMethod, WriteRpc,
 };
 use super::{
-    Entry, FrontRead, FrontSetLeader, FrontTruncate, FrontWrite, InspectReply, InspectRequest,
-    Read, ReadAck, Reconfigure, ReconfigureAck, ReconfigureMatchmakers, ReconfigureMatchmakersAck,
-    RetireAck, RetireRequest, SetLeader, SetLeaderAck, Truncate, TruncateAck, Write, WriteAck,
+    Entry, FrontRead, FrontSetJournalTags, FrontSetLeader, FrontTruncate, FrontWrite, InspectReply,
+    InspectRequest, Read, ReadAck, Reconfigure, ReconfigureAck, ReconfigureMatchmakers,
+    ReconfigureMatchmakersAck, RetireAck, RetireRequest, SetJournalTagsAck, SetLeader,
+    SetLeaderAck, Truncate, TruncateAck, Write, WriteAck,
 };
 use crate::name::JournalName;
 use crate::{Address, Names};
@@ -421,6 +422,38 @@ impl<P: Providers> NodeClient<P> {
         self.call::<FrontSetLeaderRpc>(&FrontSetLeader {
             entry: Some(entry),
             call: Some(call),
+        })
+        .await
+    }
+
+    /// Set a `users` journal's user tags through a frontend (#575
+    /// (key:value tags)): the entry is the pass's token and `name`.
+    ///
+    /// # Errors
+    ///
+    /// The attempt's [`RpcError`].
+    ///
+    /// # Panics
+    ///
+    /// If this is not a client of a frontend.
+    pub async fn set_journal_tags(
+        &self,
+        name: &JournalName,
+        request: u64,
+        tags: Vec<crate::wire::common::Tag>,
+    ) -> Result<SetJournalTagsAck, RpcError> {
+        let pass = self
+            .pass
+            .as_ref()
+            .expect("a tag request goes through a frontend");
+        self.call::<FrontSetJournalTagsRpc>(&FrontSetJournalTags {
+            entry: Some(Entry {
+                token: pass.token.clone(),
+                tenant: name.tenant().to_string(),
+                journal: name.journal().to_string(),
+            }),
+            request,
+            tags,
         })
         .await
     }
