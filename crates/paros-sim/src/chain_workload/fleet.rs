@@ -953,11 +953,17 @@ impl FleetOps {
                             names.removed.insert((cell.fleet, tenant), name.to_vec())
                         });
                     }
+                    // A tenant of the second cell (#232 (multiple cells)) is
+                    // dropped on that cell's registry, which the removal read.
+                    let home = second_cell::cell_id(&self.state)
+                        .map(|id| session.registry_of(id))
+                        .filter(|registry| registry.hosts(tenant) || registry.dropped(tenant))
+                        .unwrap_or(session.cell());
                     assert_always!(
                         session.directory().named(name).is_none()
                             && session.directory().is_removed(tenant)
-                            && !session.cell().hosts(tenant)
-                            && session.cell().dropped(tenant),
+                            && !home.hosts(tenant)
+                            && home.dropped(tenant),
                         "fleet: a removed tenant is gone from the directory and tombstoned on its cell",
                         { "tenant" => tenant.0 }
                     );

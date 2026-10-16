@@ -515,6 +515,14 @@ impl FleetOps {
 
 /// Whether an operator formed the run's second cell (#232 (multiple
 /// cells)) and has not removed it: its later phases are due.
+/// The second cell's id, once formed: a tenant created there is dropped on
+/// its registry, not on the run's cell's.
+pub(super) fn cell_id(state: &moonpool_sim::StateHandle) -> Option<u64> {
+    with_second(state, |second| {
+        second.formed.as_ref().map(|formed| formed.journals.cell_id)
+    })
+}
+
 pub(super) fn started(state: &moonpool_sim::StateHandle) -> bool {
     with_second(state, |second| second.formed.is_some() && !second.removed)
 }
