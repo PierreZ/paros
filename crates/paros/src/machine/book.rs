@@ -92,7 +92,7 @@ mod tests {
             addr: addr.into(),
             class: Class::Storage,
             capacity: 1,
-            failure_domain: String::new(),
+            locality: crate::machine::Locality::default(),
             name: format!("m{id}"),
             incarnation: 1,
             machine_interface: Vec::new(),

@@ -166,7 +166,7 @@ fn judge(tenants: &[TenantControl], registry: &Registry) {
             }
             let zones: BTreeSet<&str> = members
                 .iter()
-                .filter_map(|m| registry.get(*m).map(|n| n.failure_domain.as_str()))
+                .filter_map(|m| registry.get(*m).map(|n| n.locality.zone.as_str()))
                 .collect();
             if members.len() > 1 {
                 assert_sometimes!(
@@ -267,7 +267,7 @@ fn unmoved(
         if registry.dropped(tenant) {
             continue;
         }
-        for (id, _) in control.live() {
+        for (id, journal) in control.live() {
             let target = BookingTarget::Journal(JournalIdentifier::new(tenant, id));
             let slots: Vec<NodeId> = registry
                 .bookings()
@@ -286,6 +286,21 @@ fn unmoved(
                 .iter()
                 .filter(|node| registered(**node))
                 .all(|node| !wiped.contains(&node.0));
+            // A move is a round change: it needs a leader, so a quorum of
+            // the journal's members. A wiped acceptor never rejoins, so a
+            // journal whose members never wiped hold no quorum never moves
+            // (a two-member journal that lost one, placed while the cell
+            // had two storage machines).
+            let alive: BTreeSet<NodeId> = slots
+                .iter()
+                .filter(|node| !wiped.contains(&node.0))
+                .copied()
+                .collect();
+            if !journal.config.has_phase1_quorum(&alive)
+                || !journal.config.has_phase2_quorum(&alive)
+            {
+                continue;
+            }
             // A move books every slot it lacks at once: a journal with two
             // slots on draining machines needs two machines to go to.
             let free = registry.nodes().filter(|(node, n)| {

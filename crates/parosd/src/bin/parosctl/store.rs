@@ -200,12 +200,13 @@ fn print_record(out: &Printer, labels: &Labels, record: &MachineRecord) {
     out.emit(
         || {
             format!(
-                "machine {}: class={} capacity={} failure_domain={} cell={} standing={} \
+                "machine {}: class={} capacity={} zone={} rack={} cell={} standing={} \
                  created={}",
                 labels.machine(record.node_id.0),
                 record.class.as_str(),
                 record.capacity,
-                record.failure_domain,
+                or_dash(&record.locality.zone),
+                or_dash(&record.locality.rack),
                 labels.cell(cell),
                 standing,
                 record.created.len(),
@@ -218,7 +219,8 @@ fn print_record(out: &Printer, labels: &Labels, record: &MachineRecord) {
                     "name": labels.machine(record.node_id.0),
                     "class": record.class.as_str(),
                     "capacity": record.capacity,
-                    "failure_domain": record.failure_domain,
+                    "zone": record.locality.zone,
+                    "rack": record.locality.rack,
                     "cell_id": cell,
                     "cell": labels.cell(cell),
                     "standing": standing,
@@ -520,4 +522,9 @@ fn preview(bytes: &[u8]) -> String {
     } else {
         format!("({} bytes)", bytes.len())
     }
+}
+
+/// `text`, or `-` when it is empty.
+fn or_dash(text: &str) -> &str {
+    if text.is_empty() { "-" } else { text }
 }

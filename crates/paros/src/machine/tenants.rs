@@ -72,7 +72,7 @@ use crate::system::{
     Booking, BookingTarget, GrantKey, NodeStanding, Registry, Role, SystemCommand,
 };
 use crate::tenant::{
-    CellKind, ConfigureTarget, Description, Desired, RequestOutcome, TenantCommand, TenantControl,
+    ConfigureTarget, Description, Desired, RequestOutcome, TenantCommand, TenantControl,
 };
 
 /// What `HostTenant` records of a tenant: its control journal, its name and
@@ -229,7 +229,6 @@ impl TenantDesk {
                 name,
                 survives,
                 cell_name: Vec::new(),
-                cell_kind: CellKind::default(),
                 desired: Desired::DEFAULT,
             };
             if let Err(answer) = self
@@ -255,17 +254,42 @@ impl TenantDesk {
                 name,
                 writer,
                 desired,
+                tags,
             } => {
                 // A create that names no mode takes the tenant's default
                 // (#214 (tenant modes)).
                 let desired =
                     desired.unwrap_or_else(|| self.desk(request.tenant).state().default_desired());
-                self.create(client, request, (name, *writer, desired), cell)
+                self.create(client, request, (name, *writer, desired), tags, cell)
                     .await
             }
             JournalOp::Configure { name, desired } => {
                 self.configure(client, request, name.as_deref(), *desired, cell)
                     .await
+            }
+            JournalOp::SetTags { name, tags } => {
+                let id = self
+                    .desk(request.tenant)
+                    .state()
+                    .named(name)
+                    .unwrap_or(JournalId(0));
+                let command = TenantCommand::SetJournalTags {
+                    request: request.request,
+                    id,
+                    tags: tags.clone(),
+                };
+                if let Err(answer) = self.append(client, request.tenant, &command).await {
+                    return answer;
+                }
+                match self.desk(request.tenant).state().outcome(request.request) {
+                    Some(outcome) => {
+                        moonpool_assertions::reachable!(
+                            "tenant coordinator: a tag request is judged at apply"
+                        );
+                        self.answer_of(request.tenant, outcome)
+                    }
+                    None => JournalAnswer::Unavailable,
+                }
             }
             JournalOp::Delete { name } => {
                 let id = self
@@ -308,11 +332,13 @@ impl TenantDesk {
     /// machines, founding or admitted (#474), book them, then write it. A
     /// create the cell has no slot for is recorded `Unplaceable`; one whose
     /// machines are not all registered yet answers unavailable.
+    #[allow(clippy::too_many_lines)] // placement, booking and the write, in order
     async fn create<P: Providers>(
         &mut self,
         client: &Client<P>,
         request: &JournalRequest,
         (name, writer, desired): (&[u8], paros_core::WriterMode, Desired),
+        tags: &crate::tags::UserTags,
         cell: Option<&mut CellSession>,
     ) -> JournalAnswer {
         let tenant = request.tenant;
@@ -402,6 +428,7 @@ impl TenantDesk {
                 writer,
                 desired,
                 config,
+                tags: tags.clone(),
             };
             moonpool_buggify::hint!("tenant create drawn, not written").await;
             if let Err(answer) = self.append(client, tenant, &command).await {
@@ -918,6 +945,7 @@ impl TenantDesk {
                 }
             }
             RequestOutcome::Deleted(id) => JournalAnswer::Deleted { id },
+            RequestOutcome::Tagged(id) => JournalAnswer::Tagged { id },
             RequestOutcome::NameTaken(id) => JournalAnswer::NameTaken { id },
             RequestOutcome::UnknownJournal => JournalAnswer::UnknownJournal,
             RequestOutcome::Unplaceable => JournalAnswer::Unplaceable,

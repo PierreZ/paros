@@ -128,7 +128,7 @@ async fn machine(
         // parosd's default (`PAROS_CAPACITY`): since #556 (tenant birth
         // footprint) a tenant's birth books slots before its first journal.
         capacity: 32,
-        failure_domain: format!("zone-{index}"),
+        locality: paros::machine::Locality::zone(format!("zone-{index}")),
         name: format!("local-{index}"),
         pin: AdminPin::open(),
         metrics: Metrics::on(),

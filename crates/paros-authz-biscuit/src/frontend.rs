@@ -49,6 +49,7 @@ pub fn operation(operation: frontend::Operation) -> Operation {
         frontend::Operation::SetLeader => Operation::JournalSetLeader,
         frontend::Operation::FormCell => Operation::CellForm,
         frontend::Operation::Admit => Operation::MachineAdmit,
+        frontend::Operation::SetTags => Operation::JournalTag,
     }
 }
 

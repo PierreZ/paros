@@ -221,7 +221,7 @@ async fn attempt<P: Providers>(
         let Some(identity) = &ack.identity else {
             return Attempt::Failed("malformed");
         };
-        if identity.class != Class::Storage.as_str() {
+        if super::identity_tags(identity).map(|(class, _)| class) != Some(Class::Storage) {
             return Attempt::Failed("stateless_member");
         }
         if identity.node_id == 0 {

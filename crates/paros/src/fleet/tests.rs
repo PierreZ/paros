@@ -1,4 +1,5 @@
 use super::*;
+use crate::tags::UserTags;
 
 const FLEET: u64 = 0xf1ee7;
 const CELL: u64 = 0xce11;
@@ -47,7 +48,8 @@ fn formed() -> FleetDirectory {
             &entry(FleetCommand::AddCell {
                 cell_id: CELL,
                 control: cell_control(),
-                name: Vec::new()
+                name: Vec::new(),
+                kind: CellKind::default(),
             })
         ),
         FleetEvent::CellAdded { cell_id: CELL }
@@ -74,6 +76,7 @@ fn register(tenant: u64, name: &[u8]) -> Vec<u8> {
         name: name.to_vec(),
         cell_id: CELL,
         survives: Survives::Az,
+        tags: UserTags::none(),
     })
 }
 
@@ -101,6 +104,7 @@ fn every_entry_round_trips() {
             cell_id: CELL,
             control: cell_control(),
             name: Vec::new(),
+            kind: CellKind::default(),
         },
         FleetCommand::MarkCell {
             cell_id: CELL,
@@ -111,10 +115,30 @@ fn every_entry_round_trips() {
             name: b"acme".to_vec(),
             cell_id: CELL,
             survives: Survives::Region,
+            tags: UserTags::none(),
         },
         FleetCommand::MarkTenant {
             tenant: TenantId(300),
             state: TenantState::UpdatingConfiguration,
+        },
+        FleetCommand::SetTenantTags {
+            request: 9,
+            tenant: TenantId(300),
+            tags: UserTags::parse(&["team:payments", "env:prod"]).unwrap(),
+        },
+        FleetCommand::SetCellTags {
+            request: 10,
+            cell_id: CELL,
+            tags: UserTags::none(),
+        },
+        FleetCommand::AddCell {
+            cell_id: CELL,
+            control: cell_control(),
+            name: b"west".to_vec(),
+            kind: CellKind::MultiRegion {
+                regions: vec!["w".into(), "c".into(), "n".into()],
+                witness: "n".into(),
+            },
         },
         FleetCommand::RemoveTenant {
             tenant: TenantId(300),
@@ -138,6 +162,7 @@ fn the_fleet_is_formed_once_with_the_fleet_tenant_as_its_first_internal_tenant()
         cell_id: CELL,
         control: cell_control(),
         name: Vec::new(),
+        kind: CellKind::default(),
     });
     // Nothing before the fleet; the fleet tenant's control journal must be named.
     assert_eq!(
@@ -169,8 +194,12 @@ fn the_fleet_is_formed_once_with_the_fleet_tenant_as_its_first_internal_tenant()
         .tenant(fleet_control().tenant)
         .expect("the fleet tenant is a tenant");
     assert_eq!(
-        (own.groups, own.control),
-        (Groups::FLEET_TENANT, fleet_control().journal)
+        (own.kind, own.movable, own.control),
+        (
+            TenantKind::Universe,
+            Movable::Movable,
+            fleet_control().journal
+        )
     );
     // A re-run of the same step changes nothing; another control journal for the fleet tenant, or
     // another fleet, is refused — for every later step too.
@@ -200,6 +229,7 @@ fn the_fleet_is_formed_once_with_the_fleet_tenant_as_its_first_internal_tenant()
             cell_id: CELL,
             control: cell_control(),
             name: Vec::new(),
+            kind: CellKind::default(),
         },
     )
     .encode();
@@ -247,6 +277,7 @@ fn a_cell_brings_its_cell_tenant_and_only_a_ready_cell_takes_tenants() {
         cell_id: CELL,
         control: cell_control(),
         name: Vec::new(),
+        kind: CellKind::default(),
     });
     assert_eq!(
         directory.fold(1, &add),
@@ -256,8 +287,8 @@ fn a_cell_brings_its_cell_tenant_and_only_a_ready_cell_takes_tenants() {
         .tenant(cell_control().tenant)
         .expect("the cell tenant");
     assert_eq!(
-        (cell_tenant.groups, cell_tenant.cell_id),
-        (Groups::CELL_TENANT, CELL)
+        (cell_tenant.kind, cell_tenant.movable, cell_tenant.cell_id),
+        (TenantKind::Cell, Movable::Pinned, CELL)
     );
     // The fleet's first cell hosts the fleet tenant.
     assert_eq!(
@@ -271,7 +302,8 @@ fn a_cell_brings_its_cell_tenant_and_only_a_ready_cell_takes_tenants() {
             &entry(FleetCommand::AddCell {
                 cell_id: CELL,
                 control: identifier(0xbad, 1),
-                name: Vec::new()
+                name: Vec::new(),
+                kind: CellKind::default(),
             })
         ),
         FleetEvent::Refused(FleetDirectoryRefusal::OtherCellTenant { cell_id: CELL })
@@ -283,7 +315,8 @@ fn a_cell_brings_its_cell_tenant_and_only_a_ready_cell_takes_tenants() {
             &entry(FleetCommand::AddCell {
                 cell_id: CELL + 1,
                 control: fleet_control(),
-                name: Vec::new()
+                name: Vec::new(),
+                kind: CellKind::default(),
             })
         ),
         FleetEvent::Refused(FleetDirectoryRefusal::TenantIdTaken {
@@ -336,6 +369,7 @@ fn a_users_tenant_id_and_name_are_checked_at_registration() {
                 name: b"acme".to_vec(),
                 cell_id: CELL,
                 survives: Survives::Az,
+                tags: UserTags::none(),
             })
         ),
         FleetEvent::Refused(FleetDirectoryRefusal::TenantIdTaken {
@@ -350,7 +384,7 @@ fn a_users_tenant_id_and_name_are_checked_at_registration() {
         }
     );
     let acme = directory.tenant(TenantId(3)).expect("registered");
-    assert_eq!((acme.groups, acme.control), (Groups::SERVED, JournalId(4)));
+    assert_eq!((acme.kind, acme.control), (TenantKind::Users, JournalId(4)));
     // The same registration again is a re-run; the id under another name is
     // taken; the name under another id is taken.
     assert_eq!(
@@ -536,31 +570,124 @@ fn a_checkpoint_restores_the_whole_directory() {
 }
 
 #[test]
-fn the_groups_decide_who_moves() {
-    // The three sets of §3.7, and the one rule that forbids a move.
-    assert!(Groups::FLEET_TENANT.contains(Group::Internal));
-    assert!(Groups::FLEET_TENANT.contains(Group::Fleet));
-    assert!(!Groups::FLEET_TENANT.contains(Group::Cell));
-    assert!(Groups::CELL_TENANT.contains(Group::Internal));
-    assert!(Groups::CELL_TENANT.contains(Group::Cell));
-    assert!(!Groups::SERVED.contains(Group::Internal));
-    assert!(Groups::SERVED.contains(Group::Users));
-    assert!(
-        Groups::FLEET_TENANT.may_move(),
-        "the fleet tenant moves with its coordinator"
+fn the_reserved_tags_decide_who_moves() {
+    // The three kinds of §3.7, and the one rule that pins a tenant.
+    let mut directory = formed();
+    directory.fold(3, &register(3, b"acme"));
+    let label = |tenant: TenantId| directory.tenant(tenant).unwrap().all_tags().label();
+    assert_eq!(
+        label(fleet_control().tenant),
+        "paros/kind:internal,paros/movable:true,paros/role:universe"
     );
-    assert!(Groups::SERVED.may_move(), "a served tenant moves");
-    assert!(!Groups::CELL_TENANT.may_move(), "a cell tenant is its cell");
-    assert_eq!(Groups::FLEET_TENANT.label(), "internal,fleet");
-    assert_eq!(Groups::CELL_TENANT.label(), "internal,cell");
-    assert_eq!(Groups::SERVED.label(), "users");
-    // The wire carries only the three sets.
-    for groups in [Groups::FLEET_TENANT, Groups::CELL_TENANT, Groups::SERVED] {
-        assert_eq!(Groups::from_wire(groups.to_wire()), Some(groups));
+    assert_eq!(
+        label(cell_control().tenant),
+        "paros/kind:internal,paros/movable:false,paros/role:cell"
+    );
+    assert_eq!(label(TenantId(3)), "paros/kind:users,paros/movable:true");
+    assert!(directory.tenant(fleet_control().tenant).unwrap().may_move());
+    assert!(directory.tenant(TenantId(3)).unwrap().may_move());
+    assert!(!directory.tenant(cell_control().tenant).unwrap().may_move());
+    assert!(TenantKind::Cell.is_internal() && TenantKind::Universe.is_internal());
+    assert!(!TenantKind::Users.is_internal());
+    // A checkpoint that unpins the cell tenant, or names a role a users
+    // tenant has not, is refused.
+    let mut state = wire::FleetDirectoryState::decode(directory.checkpoint().as_slice()).unwrap();
+    let cell = state
+        .tenants
+        .iter_mut()
+        .find(|t| t.tenant == cell_control().tenant.0)
+        .unwrap();
+    for tag in &mut cell.tags {
+        if tag.key == crate::tags::reserved::MOVABLE {
+            tag.value = "true".into();
+        }
     }
-    for bits in [0, 1, 2, 4, 6, 9, 15, 16] {
-        assert_eq!(Groups::from_wire(bits), None, "bits {bits} name no set");
+    assert!(
+        FleetDirectory::default()
+            .restore(0, &state.encode_to_vec())
+            .is_err()
+    );
+}
+
+#[test]
+fn user_tags_are_set_once_per_request_and_a_user_name_never_holds_a_colon() {
+    let mut directory = formed();
+    assert_eq!(
+        directory.fold(3, &register(3, b"cell:prod")),
+        FleetEvent::Refused(FleetDirectoryRefusal::NameRefused)
+    );
+    directory.fold(4, &register(3, b"acme"));
+    let tags = |texts: &[&str]| UserTags::parse(texts).unwrap();
+    let set = |request: u64, texts: &[&str]| {
+        entry(FleetCommand::SetTenantTags {
+            request,
+            tenant: TenantId(3),
+            tags: tags(texts),
+        })
+    };
+    assert_eq!(
+        directory.fold(5, &set(1, &["team:payments"])),
+        FleetEvent::TenantTagged {
+            tenant: TenantId(3)
+        }
+    );
+    assert_eq!(
+        directory.fold(6, &set(2, &["team:core", "env:prod"])),
+        FleetEvent::TenantTagged {
+            tenant: TenantId(3)
+        }
+    );
+    // A retry of the first request never undoes the second.
+    assert_eq!(
+        directory.fold(7, &set(1, &["team:payments"])),
+        FleetEvent::Unchanged
+    );
+    assert_eq!(
+        directory.tenant(TenantId(3)).unwrap().tags,
+        tags(&["team:core", "env:prod"])
+    );
+    assert_eq!(
+        directory.fold(
+            8,
+            &entry(FleetCommand::SetCellTags {
+                request: 3,
+                cell_id: CELL,
+                tags: tags(&["disk:nvme"]),
+            })
+        ),
+        FleetEvent::CellTagged { cell_id: CELL }
+    );
+    assert_eq!(
+        directory.cell(CELL).unwrap().all_tags().label(),
+        "disk:nvme,paros/kind:regional"
+    );
+    assert_eq!(
+        directory.fold(
+            9,
+            &entry(FleetCommand::SetCellTags {
+                request: 4,
+                cell_id: CELL + 1,
+                tags: tags(&[]),
+            })
+        ),
+        FleetEvent::Refused(FleetDirectoryRefusal::UnknownCell { cell_id: CELL + 1 })
+    );
+    // A reserved key on the wire is refused at apply, never applied.
+    let mut forged = wire::FleetEntry::decode(set(5, &["a:b"]).as_slice()).unwrap();
+    if let Some(wire::fleet_entry::Kind::SetTenantTags(set)) = &mut forged.kind {
+        set.tags[0].key = "paros/kind".into();
     }
+    assert_eq!(
+        directory.fold(10, &forged.encode_to_vec()),
+        FleetEvent::Refused(FleetDirectoryRefusal::Malformed)
+    );
+    assert!(!directory.tagged(5));
+    // The tags and the applied requests cross a checkpoint.
+    let mut restored = FleetDirectory::default();
+    restored.restore(10, &directory.checkpoint()).unwrap();
+    assert_eq!(restored.tenant(TenantId(3)), directory.tenant(TenantId(3)));
+    assert_eq!(restored.cell(CELL), directory.cell(CELL));
+    assert!(restored.tagged(1) && restored.tagged(2) && restored.tagged(3));
 }
 
 #[test]

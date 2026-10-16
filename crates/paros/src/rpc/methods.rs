@@ -300,3 +300,10 @@ well_known_method!(
     FrontSetLeaderRpc, 0x5041_0404, public::FrontSetLeader => public::SetLeaderAck,
     "paros.frontend.SetLeader"
 );
+well_known_method!(
+    /// A tenant sets its journal's user tags through a frontend (#575
+    /// (key:value tags)): checked, resolved and sent to the tenant
+    /// coordinator.
+    FrontSetJournalTagsRpc, 0x5041_0405, public::FrontSetJournalTags => public::SetJournalTagsAck,
+    "paros.frontend.SetJournalTags"
+);

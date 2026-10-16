@@ -63,8 +63,13 @@ use crate::driver::DriverTunables;
 use crate::driver::edge::{Plain, RpcEdge};
 use crate::name::JournalName;
 use crate::rpc::inbound::{Inbound, ReplySender, serve_well_known};
-use crate::rpc::methods::{FrontReadRpc, FrontSetLeaderRpc, FrontTruncateRpc, FrontWriteRpc};
-use crate::rpc::{Entry, FrontRead, FrontSetLeader, FrontTruncate, FrontWrite};
+use crate::rpc::methods::{
+    FrontReadRpc, FrontSetJournalTagsRpc, FrontSetLeaderRpc, FrontTruncateRpc, FrontWriteRpc,
+};
+use crate::rpc::{
+    Entry, FrontRead, FrontSetJournalTags, FrontSetLeader, FrontTruncate, FrontWrite,
+    FrontendVerdict, SetJournalTagsAck,
+};
 use crate::transport::Transport;
 use crate::{Address, Names};
 use forward::Forwarded;
@@ -123,12 +128,14 @@ impl Draws {
     }
 }
 
-/// The frontend's inbound queues: the four calls of its contract.
+/// The frontend's inbound queues: the four calls of its contract, and a
+/// tenant's tag request (#575 (key:value tags)).
 struct FrontendInbox {
     write: Plain<FrontWriteRpc>,
     read: Plain<FrontReadRpc>,
     truncate: Plain<FrontTruncateRpc>,
     set_leader: Plain<FrontSetLeaderRpc>,
+    set_tags: Plain<FrontSetJournalTagsRpc>,
 }
 
 /// What every call's task shares: the cache, the providers, the policy.
@@ -183,6 +190,7 @@ where
         read: Inbound::plain(serve_well_known(&rpc)?),
         truncate: Inbound::plain(serve_well_known(&rpc)?),
         set_leader: Inbound::plain(serve_well_known(&rpc)?),
+        set_tags: Inbound::plain(serve_well_known(&rpc)?),
     };
     tracing::info!(listen = %settings.listen, cell = settings.cell.len(), "frontend_starting");
     let shared = Arc::new(Shared {
@@ -208,6 +216,9 @@ where
             }
             Some((FrontSetLeader { entry, call }, reply)) = inbox.set_leader.recv() => {
                 spawn_call(&shared, &shutdown, entry, call, reply, Draws::draw(&providers));
+            }
+            Some((call, reply)) = inbox.set_tags.recv() => {
+                spawn_tags(&shared, &shutdown, call, reply, Draws::draw(&providers));
             }
         }
     }
@@ -300,6 +311,115 @@ where
         };
     }
     ack
+}
+
+/// Serve one tag request in its own task (#575 (key:value tags)), as
+/// [`spawn_call`] serves a journal call.
+fn spawn_tags<P, A>(
+    shared: &Arc<Shared<P, A>>,
+    shutdown: &CancellationToken,
+    call: FrontSetJournalTags,
+    reply: ReplySender<SetJournalTagsAck>,
+    draws: Draws,
+) where
+    P: Providers,
+    A: Audit + Clone + Send + Sync + 'static,
+{
+    let shutdown = shutdown.clone();
+    let task = shared.clone();
+    shared
+        .providers
+        .task()
+        .spawn_task("frontend-set-tags", async move {
+            moonpool_core::select! {
+                biased;
+                () = shutdown.cancelled() => {}
+                ack = serve_tags(&task, call, draws) => {
+                    let _ = reply.send(ack);
+                }
+            }
+        })
+        .detach();
+}
+
+/// A tag request's answer by the frontend itself.
+fn tags_denied(denial: Denial) -> SetJournalTagsAck {
+    let mut ack = SetJournalTagsAck::default();
+    ack.set_frontend(denial.verdict());
+    ack
+}
+
+/// A tag request (#575): admitted like a journal call, then sent to the
+/// tenant coordinator as a `SetJournalTags` of the journal the name
+/// resolved to. The caller's id rides through, so a retry acts once.
+#[tracing::instrument(level = "debug", skip_all)]
+async fn serve_tags<P, A>(
+    shared: &Shared<P, A>,
+    call: FrontSetJournalTags,
+    draws: Draws,
+) -> SetJournalTagsAck
+where
+    P: Providers,
+    A: Audit + Clone + Send + Sync + 'static,
+{
+    let unavailable = || SetJournalTagsAck {
+        outcome: "unavailable".into(),
+        ..SetJournalTagsAck::default()
+    };
+    let Some(entry) = call.entry else {
+        return tags_denied(Denial::Malformed);
+    };
+    // A user's journal only, by its names: an internal journal carries no
+    // user tag a tenant sets.
+    let tags = crate::tags::UserTags::from_wire(call.tags);
+    let (Ok(tags), false, true) = (tags, entry.tenant.is_empty(), call.request != 0) else {
+        moonpool_assertions::reachable!("frontend: a malformed tag request is denied");
+        return tags_denied(Denial::Malformed);
+    };
+    let unset = JournalIdentifier::new(paros_core::TenantId(0), paros_core::JournalId(0));
+    let (journal, name) = match admit(shared, &entry, unset, Operation::SetTags, draws).await {
+        Ok((journal, Some(name))) => (journal, name),
+        Ok((_, None)) => return tags_denied(Denial::Malformed),
+        Err(Refusal::Denied(denial)) => return tags_denied(denial),
+        Err(Refusal::Unknown) => {
+            return SetJournalTagsAck {
+                outcome: "unknown_journal".into(),
+                ..SetJournalTagsAck::default()
+            };
+        }
+        Err(Refusal::Unavailable) => return unavailable(),
+    };
+    assert!(journal.is_set(), "a tag request names a set journal");
+    let Some((election, client, rpc)) = routes::coordinator_route(shared).await else {
+        return unavailable();
+    };
+    let request = crate::client::journals::JournalRequest {
+        request: call.request,
+        tenant: journal.tenant,
+        op: crate::client::journals::JournalOp::SetTags {
+            name: name.journal().as_bytes().to_vec(),
+            tags,
+        },
+    };
+    let answer = crate::client::journals::request(
+        &shared.providers,
+        &rpc,
+        &shared.settings.names,
+        &client,
+        election,
+        &request,
+        shared.settings.client.request_timeout,
+    )
+    .await;
+    moonpool_assertions::reachable!("frontend: a tenant's tag request reaches its coordinator");
+    let ack = answer.to_wire();
+    let mut out = SetJournalTagsAck {
+        outcome: ack.outcome,
+        journal: ack.journal,
+        ..SetJournalTagsAck::default()
+    };
+    out.set_frontend(FrontendVerdict::None);
+    out
 }
 
 /// Why a call is answered by the frontend itself.

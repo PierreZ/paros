@@ -1155,7 +1155,7 @@ async fn run_machine_role(
     let settings = MachineSettings {
         class: draw.class,
         capacity: draw.capacity,
-        failure_domain: draw.failure_domain,
+        locality: draw.locality.clone(),
         name: format!("machine-{rank}"),
         pin: crate::frontend::machine_pin(ctx.state()),
         metrics: machine_metrics(ctx),

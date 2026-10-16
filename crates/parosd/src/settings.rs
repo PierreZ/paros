@@ -9,7 +9,8 @@
 //! | `PAROS_DATA_DIR` | where its identity and its stores live |
 //! | `PAROS_CLASS` | `storage` or `stateless` (fixed at format) |
 //! | `PAROS_CAPACITY` | its capacity, in role slots (default 32): one slot holds one acceptor of one journal |
-//! | `PAROS_FAILURE_DOMAIN` | its failure domain label (default empty) |
+//! | `PAROS_ZONE` | its zone, its failure domain: the reserved tag `paros/zone` (#575 (key:value tags); default none) |
+//! | `PAROS_RACK` | its rack inside the zone: the reserved tag `paros/rack` (default none) |
 //! | `PAROS_STORE_LAYOUT` | `default` (64 MiB segments) or `small` (laptops, tests) |
 //! | `PAROS_TLS_CERT` | its certificate chain, PEM (`parosctl tls`); with the next two, every session is TLS |
 //! | `PAROS_TLS_KEY` | the certificate's private key, PEM |
@@ -35,7 +36,7 @@ use paros::{JournalStoreConfig, Transport};
 use paros_authz_biscuit::{BiscuitAuthz, KeyRing, RootPublicKey};
 
 /// The variables this module reads.
-const VARIABLES: [&str; 18] = [
+const VARIABLES: [&str; 19] = [
     "PAROS_HTTP_LISTEN",
     "PAROS_OTLP_ENDPOINT",
     "PAROS_OTLP_TRACES_ENDPOINT",
@@ -47,7 +48,8 @@ const VARIABLES: [&str; 18] = [
     "PAROS_DATA_DIR",
     "PAROS_CLASS",
     "PAROS_CAPACITY",
-    "PAROS_FAILURE_DOMAIN",
+    "PAROS_ZONE",
+    "PAROS_RACK",
     "PAROS_STORE_LAYOUT",
     "PAROS_TLS_CERT",
     "PAROS_TLS_KEY",
@@ -98,9 +100,13 @@ pub struct Settings {
     /// Its capacity, in placement units.
     #[arg(long, env = "PAROS_CAPACITY", default_value = "32")]
     pub capacity: u64,
-    /// Its failure domain label.
-    #[arg(long, env = "PAROS_FAILURE_DOMAIN", default_value = "")]
-    pub failure_domain: String,
+    /// Its zone, its failure domain (#575 (key:value tags): the reserved
+    /// tag `paros/zone`).
+    #[arg(long, env = "PAROS_ZONE", default_value = "")]
+    pub zone: String,
+    /// Its rack inside the zone (the reserved tag `paros/rack`).
+    #[arg(long, env = "PAROS_RACK", default_value = "")]
+    pub rack: String,
     /// Its name, for people (#399): what `parosctl` prints and takes. The
     /// host of `PAROS_ADVERTISE` by default. A label, never its identity: it
     /// may change across starts.
