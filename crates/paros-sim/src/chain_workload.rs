@@ -610,6 +610,15 @@ impl ChainWorkload {
             // steps knob's top, so a drain still finds ops after them.
             config.steps = config.steps.max(64);
         }
+        if crate::shape::zone_outage(ctx.state()) {
+            // The zone-outage scenario (#215 (zones)): its gates wait on a
+            // tenant step and a created journal's append while a zone is
+            // down, so every client runs both as often as the weight
+            // family allows.
+            for op in [TENANT, CREATE_JOURNAL] {
+                config.weights[usize::from(op)] = OP_WEIGHT_CEILING;
+            }
+        }
         if crate::shape::downed_founder(ctx.state()) {
             // The downed-founder scenario (#213 (three founding members)):
             // its gates wait on a tenant step while a founder is down, so
@@ -753,6 +762,14 @@ impl ChainWorkload {
                 }
             }
         }
+        // Likewise the zone-outage scenario's ops (#215 (zones)).
+        if crate::shape::zone_outage(ctx.state()) {
+            for op in [TENANT, CREATE_JOURNAL] {
+                if !operations.contains(&op) {
+                    operations.push(op);
+                }
+            }
+        }
         // Likewise `TENANT` on a downed-founder seed (#213 (three founding
         // members)).
         if crate::shape::downed_founder(ctx.state()) && !operations.contains(&TENANT) {
@@ -798,7 +815,8 @@ impl ChainWorkload {
                 || crate::shape::replaced_founder(ctx.state())
                 || crate::shape::slow_machine(ctx.state())
                 || crate::shape::downed_founder(ctx.state())
-                || crate::shape::drained_machine(ctx.state()));
+                || crate::shape::drained_machine(ctx.state())
+                || crate::shape::zone_outage(ctx.state()));
         let mut successful_after_ambiguity = false;
         // The library's decisions as outcomes (#221): a write redirected
         // and written at the leader, an ambiguous write the session settled,

@@ -45,6 +45,21 @@ message AcceptorConfig {
   uint64 phase2_quorum = 4;
   uint64 rows = 5;
   uint64 cols = 6;
+  // Each member's failure domain, parallel to `members` (#215 (zones)).
+  // Empty is an unlabeled configuration, byte-identical to before the field
+  // existed; otherwise one per member, or the configuration is refused.
+  repeated FailureDomain domains = 7;
+  // The cell that owns the journal (#215 (zones), `docs/architecture.md`
+  // §3.7). Zero is none, byte-identical to before the field existed.
+  uint64 cell_id = 8;
+}
+
+// A failure domain (#215 (zones)): the region and the availability zone a
+// machine stands in, as the registry names them. Compared for equality
+// only. Each name is at most 64 bytes.
+message FailureDomain {
+  string region = 1;
+  string az = 2;
 }
 
 // A single-writer journal's leader uuid (#241, `docs/architecture.md`

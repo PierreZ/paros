@@ -663,6 +663,7 @@ impl FleetOps {
     async fn append_to_created(&mut self, cell: &Cell, journal: JournalIdentifier, draw: u64) {
         let first = cell.first(draw);
         let mut writer = Writer::new(journal, self.leader_seeds.next());
+        let started = self.time.now();
         let _ = writer.claim(&cell.client, first, false).await;
         if let WriterOutcome::Written { .. } = writer
             .write(
@@ -673,6 +674,11 @@ impl FleetOps {
             .await
         {
             assert_reachable!("system: a created journal commits an append");
+            // #215 (zones): its claim and its write were chosen without a
+            // whole zone, the journal placed under the zone rule.
+            if crate::machine::zone_down_through(&self.state, started, self.time.now()) {
+                assert_reachable!("zones: a created journal commits an append with a zone down");
+            }
         }
     }
 }

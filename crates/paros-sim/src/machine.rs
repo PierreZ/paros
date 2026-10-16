@@ -74,6 +74,11 @@ pub(crate) struct MachineBoard {
     /// Each machine's process IP, by advertised address: what a fault
     /// strikes.
     ips: BTreeMap<Address, String>,
+    /// Each machine's failure domain, by advertised address (#215 (zones)).
+    zones: BTreeMap<Address, String>,
+    /// The zone-outage scenario held a zone down from the first instant to
+    /// the second (#215 (zones)).
+    zone_down: Option<(Duration, Duration)>,
     /// Every durable vote of a machine still on its disk, by minted id: all
     /// of them name one cell. A wiped machine's vote is gone with its disk.
     voters: BTreeMap<u64, CellPlan>,
@@ -590,7 +595,7 @@ pub(crate) fn silent_target(state: &StateHandle, dead: impl Fn(&str) -> bool) ->
     // Drawn before the board's lock: the downed-founder scenario takes a
     // founder down itself, and two founders down leave a cell of three no
     // majority.
-    let downed = crate::shape::downed_founder(state);
+    let downed = crate::shape::downed_founder(state) || crate::shape::zone_outage(state);
     let board = machine_board(state);
     let board = lock(&board);
     let ip = |addr: &Address| board.ips.get(addr).filter(|ip| !dead(ip)).cloned();
@@ -670,6 +675,73 @@ pub(crate) fn note_downed(state: &StateHandle, from: Duration, until: Duration) 
 pub(crate) fn founder_down_through(state: &StateHandle, from: Duration, until: Duration) -> bool {
     lock(&machine_board(state))
         .downed
+        .is_some_and(|(down, up)| down <= from && until < up)
+}
+
+/// The machines the zone-outage scenario takes down now
+/// (`crate::world::zone_outage`, #215 (zones)): every live machine in
+/// `zone`, once an operator sent `init`, on a cell of three founding
+/// members or more, none wiped, every one alive and formed. The founders
+/// stand one per zone on a scenario seed, so the others keep a majority.
+/// `None` before that.
+pub(crate) fn zone_targets(
+    state: &StateHandle,
+    zone: &str,
+    dead: impl Fn(&str) -> bool,
+) -> Option<Vec<String>> {
+    let board = machine_board(state);
+    let board = lock(&board);
+    if !board.init_sent || board.founders.len() < 3 || !board.wiped.is_empty() {
+        return None;
+    }
+    let ready = board.founders.iter().all(|addr| {
+        board.ips.get(addr).is_some_and(|ip| !dead(ip))
+            && board
+                .nodes
+                .get(addr)
+                .is_some_and(|n| board.formed.contains(n))
+    });
+    if !ready {
+        return None;
+    }
+    let in_zone: Vec<&Address> = board
+        .zones
+        .iter()
+        .filter(|(_, z)| z.as_str() == zone)
+        .map(|(addr, _)| addr)
+        .collect();
+    let founders_in = in_zone
+        .iter()
+        .filter(|addr| board.founders.contains(**addr))
+        .count();
+    assert_always!(
+        founders_in * 2 < board.founders.len(),
+        "zones: a zone outage leaves the founding members a majority",
+        { "founders" => board.founders.len(), "in_zone" => founders_in }
+    );
+    let ips: Vec<String> = in_zone
+        .into_iter()
+        .filter_map(|addr| board.ips.get(addr).filter(|ip| !dead(ip)).cloned())
+        .collect();
+    (!ips.is_empty()).then_some(ips)
+}
+
+/// The zone-outage scenario holds a zone down from `from` to `until` (#215
+/// (zones)).
+pub(crate) fn note_zone_down(state: &StateHandle, from: Duration, until: Duration) {
+    assert_always!(
+        from < until,
+        "zones: a downed zone comes back after it went down"
+    );
+    lock(&machine_board(state)).zone_down = Some((from, until));
+}
+
+/// Whether the zone-outage scenario held a zone down for the whole of
+/// `from..=until` (#215 (zones)): every write chosen inside it was chosen
+/// without that zone's machines.
+pub(crate) fn zone_down_through(state: &StateHandle, from: Duration, until: Duration) -> bool {
+    lock(&machine_board(state))
+        .zone_down
         .is_some_and(|(down, up)| down <= from && until < up)
 }
 
@@ -1151,6 +1223,9 @@ async fn run_machine_role(
         let mut board = lock(&board);
         board.founders = addrs[..layout.founders].iter().cloned().collect();
         board.ips.insert(addrs[rank].clone(), my_ip.to_string());
+        board
+            .zones
+            .insert(addrs[rank].clone(), draw.failure_domain.clone());
     }
     let settings = MachineSettings {
         class: draw.class,

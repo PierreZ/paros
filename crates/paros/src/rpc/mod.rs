@@ -120,7 +120,7 @@ pub use codec::{
     journal_view_to_proto, leader_from_proto, leader_uuid_from_proto, leader_uuid_to_proto,
     quorum_system_from_proto, quorum_system_to_proto, writer_mode_from_proto, writer_mode_to_proto,
 };
-pub(crate) use codec::{config_from_proto, config_to_proto};
+pub(crate) use codec::{config_from_proto, config_to_proto, domain_to_proto, zoned_members};
 pub(crate) use consensus::{message_from_proto, message_to_proto};
 pub(crate) use matchmaker_codec::{
     Addressed, garbage_collect_ack_from_wire, garbage_collect_from_wire, match_reply_from_wire,

@@ -575,6 +575,13 @@ impl AuditState {
     pub(super) fn bind_config(&mut self, ballot: Ballot, config: &AcceptorConfig) {
         let key = (ballot.round, ballot.node.0);
         let bound = self.configs.entry(key).or_insert_with(|| config.clone());
+        // The labels are bound with the membership (#215 (zones)): two
+        // nodes never evaluate one membership under different labels.
+        assert_always!(
+            bound.members() != config.members() || bound.domains() == config.domains(),
+            "zones: a configuration's labels are bound to its ballot",
+            { "round" => ballot.round, "bnode" => ballot.node.0 }
+        );
         assert_always!(
             *bound == *config,
             "a configuration is bound to a ballot and never edited",

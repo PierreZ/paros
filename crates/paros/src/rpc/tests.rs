@@ -686,3 +686,62 @@ fn message_protobuf_round_trips() {
         );
     }
 }
+
+/// A labeled configuration owned by a cell (#215 (zones)) crosses the wire
+/// unchanged, and labels that are not one per member are refused, never a
+/// panic.
+#[test]
+fn a_labeled_configuration_round_trips_and_bad_labels_are_refused() {
+    use paros_core::{AcceptorConfig, FailureDomain, QuorumSystem};
+
+    use super::codec::{config_from_proto, config_to_proto};
+
+    let zone = |az: &str| FailureDomain::new("eu-west-1", az);
+    let config = AcceptorConfig::zoned(
+        vec![
+            (NodeId(9), zone("c")),
+            (NodeId(3), zone("a")),
+            (NodeId(5), zone("b")),
+        ],
+        QuorumSystem::Majority,
+    )
+    .with_cell(42);
+    let wire = config_to_proto(&config);
+    assert_eq!(wire.members, vec![3, 5, 9], "members go sorted");
+    assert_eq!(wire.domains.len(), 3, "one label per member");
+    assert_eq!(wire.cell_id, 42);
+    let back = config_from_proto(Some(wire.clone()))
+        .expect("decodes")
+        .expect("present");
+    assert_eq!(back, config);
+    assert!(back.zone_rule().holds());
+
+    // An unlabeled configuration stays byte-identical to before.
+    let plain = AcceptorConfig::new(
+        vec![NodeId(1), NodeId(2), NodeId(3)],
+        QuorumSystem::Majority,
+    );
+    let plain_wire = config_to_proto(&plain);
+    assert!(plain_wire.domains.is_empty() && plain_wire.cell_id == 0);
+    assert_eq!(
+        plain_wire.encode_to_vec(),
+        common::AcceptorConfig {
+            members: vec![1, 2, 3],
+            ..Default::default()
+        }
+        .encode_to_vec()
+    );
+
+    let mut short = wire.clone();
+    short.domains.pop();
+    assert!(config_from_proto(Some(short)).is_err(), "a missing label");
+    let mut twice = wire.clone();
+    twice.members = vec![3, 3, 9];
+    assert!(
+        config_from_proto(Some(twice)).is_err(),
+        "one member, two labels"
+    );
+    let mut long = wire;
+    long.domains[0].az = "z".repeat(paros_core::MAX_FAILURE_DOMAIN_BYTES + 1);
+    assert!(config_from_proto(Some(long)).is_err(), "a name too long");
+}

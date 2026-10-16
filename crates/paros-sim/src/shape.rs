@@ -33,8 +33,8 @@ use std::time::Duration;
 use moonpool_sim::{StateHandle, assert_always, assert_reachable, buggify_knob};
 
 use paros::{
-    DriverTunables, JournalId, JournalIdentifier, JournalStoreConfig, QuorumSystem, TenantId,
-    WriterMode,
+    DriverTunables, FailureDomain, JournalId, JournalIdentifier, JournalStoreConfig, NodeId,
+    QuorumSystem, TenantId, WriterMode,
 };
 
 /// Well-known [`StateHandle`] key of the per-iteration registry.
@@ -817,6 +817,12 @@ struct Registry {
     /// Run-level: whether the run draws the wide-grid scenario (see
     /// [`wide_grid`]), fixed by the first caller.
     wide_grid: Option<bool>,
+    /// Run-level: how many zones label the acceptor pool, 0 for none (see
+    /// [`acceptor_zones`]), fixed by the first caller.
+    acceptor_zones: Option<u64>,
+    /// Run-level: whether the run draws the zone-outage scenario (see
+    /// [`zone_outage`]), fixed by the first caller.
+    zone_outage: Option<bool>,
     /// Run-level: whether the run draws the moved-founder scenario (see
     /// [`moved_founder`]), fixed by the first caller.
     moved_founder: Option<bool>,
@@ -1237,6 +1243,39 @@ pub(crate) fn downed_founder(state: &StateHandle) -> bool {
         .get_or_insert_with(|| !other && moonpool_sim::buggify_with_prob!(1.0))
 }
 
+/// Whether the run draws the **zone-outage scenario** (#215 (zones)):
+/// drawn once per seed, its own BUGGIFY location, never with a scenario
+/// that takes a founding member down, wipes, moves or drains one. Proving
+/// zone survival needs a cell whose founders stand one per zone and a whole
+/// zone down while operators write; the machines' attrition kills one
+/// machine at a time and draws each machine's zone on its own, so it never
+/// lines this up. On a scenario seed the layout lists exactly three
+/// founding members where the machines allow it, machine `r` stands in
+/// zone `zone-<r % 3>` ([`machine_layout`]), client 0 runs `init` first and
+/// every client creates tenants and journals as often as the weight family
+/// allows (`crate::chain_workload`), and `crate::world::zone_outage` takes
+/// every machine of one zone down for 6–10 s once the cell formed. Each
+/// ingredient keeps its own coin on the other seeds. Rare-but-valid: a
+/// zone outage is the failure the zone rule exists for.
+#[tracing::instrument(level = "debug", skip_all)]
+pub(crate) fn zone_outage(state: &StateHandle) -> bool {
+    // Drawn before the lock: the scenarios take the registry's lock too.
+    let other = wiped_founder(state)
+        || moved_founder(state)
+        || replaced_founder(state)
+        || downed_founder(state)
+        || drained_machine(state);
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    *guard.zone_outage.get_or_insert_with(|| {
+        let outage = !other && moonpool_sim::buggify_with_prob!(1.0);
+        if outage {
+            assert_reachable!("zones: a run draws the zone-outage scenario");
+        }
+        outage
+    })
+}
+
 /// Whether the run draws the **drained-machine scenario** (#474 (journals
 /// on admitted machines)): drawn once per seed, its own BUGGIFY location,
 /// never with a scenario that needs three founding members. A move needs a
@@ -1452,6 +1491,64 @@ pub(crate) fn wide_grid(state: &StateHandle) -> bool {
         }
         wide
     })
+}
+
+/// How many zones label the acceptor pool (#215 (zones)): drawn once per
+/// seed, 0 (an unlabeled pool, the plain arm) on two seeds in three, else
+/// 2 or 3. On a labeled seed acceptor `n` stands in zone `zone-<n % zones>`
+/// ([`acceptor_domain`]): the bootstrap configuration and every
+/// configuration the composer proposes carry those labels, so a labeled
+/// configuration crosses the wire, the matchmakers and the stores like an
+/// unlabeled one. No tally reads a label, so the coin changes no outcome.
+#[tracing::instrument(level = "debug", skip_all)]
+pub(crate) fn acceptor_zones(state: &StateHandle) -> u64 {
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    *guard.acceptor_zones.get_or_insert_with(|| {
+        if moonpool_sim::sim_random_range(0_u32..3_u32) == 0 {
+            assert_reachable!("zones: a run labels its acceptor pool");
+            moonpool_sim::sim_random_range(2_u64..4_u64)
+        } else {
+            0
+        }
+    })
+}
+
+/// The failure domain of acceptor `node` on a labeled seed (#215 (zones)):
+/// `zone-<node % zones>`; `None` on an unlabeled seed.
+pub(crate) fn acceptor_domain(state: &StateHandle, node: NodeId) -> Option<FailureDomain> {
+    let zones = acceptor_zones(state);
+    (zones > 0).then(|| FailureDomain::new("", format!("zone-{}", node.0 % zones)))
+}
+
+/// The failure domains of `peers`, in order, on a labeled seed; empty on an
+/// unlabeled one: a [`paros::Config`]'s `peer_domains`.
+pub(crate) fn peer_domains(state: &StateHandle, peers: &[NodeId]) -> Vec<FailureDomain> {
+    peers
+        .iter()
+        .filter_map(|node| acceptor_domain(state, *node))
+        .collect()
+}
+
+/// `members` under `system`, labeled with their failure domains on a
+/// labeled seed (#215 (zones)): the one way the harness composes an
+/// acceptor configuration.
+pub(crate) fn acceptor_config(
+    state: &StateHandle,
+    members: Vec<NodeId>,
+    system: QuorumSystem,
+) -> paros::AcceptorConfig {
+    if acceptor_zones(state) == 0 {
+        return paros::AcceptorConfig::new(members, system);
+    }
+    let labeled = members
+        .into_iter()
+        .map(|node| {
+            let domain = acceptor_domain(state, node).expect("a labeled seed labels every node");
+            (node, domain)
+        })
+        .collect();
+    paros::AcceptorConfig::zoned(labeled, system)
 }
 
 /// Whether the run draws the **handoff-storm scenario** (#484 (silent driver
@@ -1823,6 +1920,7 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
     let replaced = replaced_founder(state);
     let downed = downed_founder(state);
     let drained = drained_machine(state);
+    let zoned = zone_outage(state);
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     guard
@@ -1841,8 +1939,13 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
             } else {
                 1
             };
+            // The zone-outage scenario (#215 (zones)): three founding
+            // members, one per zone, so a zone's loss leaves a majority.
+            let zoned = zoned && count >= 3;
             let founders = if count == 0 {
                 0
+            } else if zoned {
+                3
             } else if drained {
                 // The drained-machine scenario: one founding member, and
                 // every other machine admitted.
@@ -1896,10 +1999,11 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
                     MachineDraw {
                         class,
                         capacity,
-                        failure_domain: format!(
-                            "zone-{}",
-                            moonpool_sim::sim_random_range(0_u32..3_u32)
-                        ),
+                        failure_domain: if zoned {
+                            format!("zone-{}", rank % 3)
+                        } else {
+                            format!("zone-{}", moonpool_sim::sim_random_range(0_u32..3_u32))
+                        },
                     }
                 })
                 .collect();

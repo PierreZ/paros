@@ -122,8 +122,20 @@ impl TenantBoard {
                 request,
                 id,
                 writer,
+                config,
                 ..
             } => {
+                // #215 (zones): a placement that spans three zones was
+                // placed under the zone rule, so it survives any one.
+                let spread = config.distinct_domains().len();
+                assert_always!(
+                    spread < 3 || config.zone_rule().holds(),
+                    "zones: a placed journal that spans three zones survives any one",
+                    { "lsn" => lsn, "zones" => spread }
+                );
+                if spread >= 3 {
+                    assert_reachable!("zones: a journal is placed over three zones");
+                }
                 self.armed = true;
                 let journal = JournalIdentifier::new(control.tenant, *id);
                 self.modes.entry(journal).or_insert(*writer);

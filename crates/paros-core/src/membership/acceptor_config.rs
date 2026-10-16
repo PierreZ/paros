@@ -2,8 +2,8 @@ use std::collections::BTreeSet;
 
 #[cfg(doc)]
 use super::MatchmakerSet;
-use super::QuorumSystem;
 use super::quorum_system::counted;
+use super::{FailureDomain, QuorumSystem};
 use crate::types::{NodeId, Slot};
 
 /// An acceptor configuration as registered with a matchmaker: a membership
@@ -18,7 +18,8 @@ use crate::types::{NodeId, Slot};
 /// `AcceptorConfig<MatchmakerId>`. Nothing here depends on what an identity
 /// *is*, only that it sorts.
 ///
-/// **Both fields are private and [`AcceptorConfig::new`] is the only way to
+/// **Every field is private and [`AcceptorConfig::new`] (or its labeled
+/// form, [`AcceptorConfig::zoned`]) is the only way to
 /// build one**, deserialisation included (see `SerdeAcceptorConfig`). The
 /// membership is a sorted, deduplicated [`Vec`] that
 /// [`AcceptorConfig::contains`] and every quorum predicate binary-search:
@@ -44,6 +45,16 @@ pub struct AcceptorConfig<Id = NodeId> {
     members: Vec<Id>,
     /// The quorum system election and decide consult over `members`.
     quorum_system: QuorumSystem,
+    /// Each member's failure domain, parallel to `members` (#215 (zones)):
+    /// empty is the plain arm, an unlabeled configuration. No tally reads
+    /// it; [`AcceptorConfig::zone_rule`] does.
+    domains: Vec<FailureDomain>,
+    /// The cell that owns the journal this configuration runs (#215
+    /// (zones), #232 (multiple cells), `docs/architecture.md` §3.7): `0`
+    /// is none, the plain arm. The core never decides on it; it is bound to
+    /// the ballot like the rest, so the effective configuration names the
+    /// owning cell.
+    cell: u64,
 }
 
 /// The wire shape [`AcceptorConfig`] deserialises through, so a serialized
@@ -54,12 +65,24 @@ pub struct AcceptorConfig<Id = NodeId> {
 struct SerdeAcceptorConfig<Id> {
     members: Vec<Id>,
     quorum_system: QuorumSystem,
+    #[serde(default)]
+    domains: Vec<FailureDomain>,
+    #[serde(default)]
+    cell: u64,
 }
 
 #[cfg(feature = "serde")]
 impl<Id: Copy + Ord> From<SerdeAcceptorConfig<Id>> for AcceptorConfig<Id> {
     fn from(wire: SerdeAcceptorConfig<Id>) -> Self {
-        Self::new(wire.members, wire.quorum_system)
+        let config = if wire.domains.is_empty() {
+            Self::new(wire.members, wire.quorum_system)
+        } else {
+            Self::zoned(
+                wire.members.into_iter().zip(wire.domains).collect(),
+                wire.quorum_system,
+            )
+        };
+        config.with_cell(wire.cell)
     }
 }
 
@@ -79,13 +102,56 @@ impl<Id: Copy + Ord> AcceptorConfig<Id> {
     pub fn new(mut members: Vec<Id>, quorum_system: QuorumSystem) -> Self {
         members.sort_unstable();
         members.dedup();
+        Self::build(members, Vec::new(), quorum_system)
+    }
+
+    /// A **labeled** configuration (#215 (zones)): each member with its
+    /// failure domain, sorted by member and deduplicated here, under
+    /// `quorum_system`. The labels are bound to the configuration like the
+    /// membership: two configurations that differ only in a label are two
+    /// configurations.
+    ///
+    /// # Panics
+    ///
+    /// As [`AcceptorConfig::new`]; also if one member is named twice with
+    /// two domains, or a domain is not well formed
+    /// ([`FailureDomain::is_well_formed`]).
+    #[must_use]
+    pub fn zoned(mut members: Vec<(Id, FailureDomain)>, quorum_system: QuorumSystem) -> Self {
+        members.sort_by_key(|a| a.0);
+        for pair in members.windows(2) {
+            if pair[0].0 == pair[1].0 {
+                assert!(
+                    pair[0].1 == pair[1].1,
+                    "a member of a configuration has one failure domain"
+                );
+            }
+        }
+        members.dedup_by(|a, b| a.0 == b.0);
+        let (members, domains): (Vec<Id>, Vec<FailureDomain>) = members.into_iter().unzip();
+        assert!(
+            domains.iter().all(FailureDomain::is_well_formed),
+            "a configuration's failure domains are short labels"
+        );
+        Self::build(members, domains, quorum_system)
+    }
+
+    /// The one place a configuration is assembled, from a sorted and
+    /// deduplicated membership and its labels (empty, or one per member).
+    fn build(members: Vec<Id>, domains: Vec<FailureDomain>, quorum_system: QuorumSystem) -> Self {
         assert!(
             !members.is_empty(),
             "an acceptor configuration names at least one acceptor"
         );
+        assert!(
+            domains.is_empty() || domains.len() == members.len(),
+            "a configuration labels every member or none"
+        );
         let config = Self {
             members,
             quorum_system,
+            domains,
+            cell: 0,
         };
         assert!(
             config.is_well_formed(),
@@ -130,7 +196,9 @@ impl<Id: Copy + Ord> AcceptorConfig<Id> {
     #[must_use]
     pub fn is_well_formed(&self) -> bool {
         let n = self.members.len();
-        self.quorum_system.admits(n) && self.members.windows(2).all(|w| w[0] < w[1])
+        self.quorum_system.admits(n)
+            && self.members.windows(2).all(|w| w[0] < w[1])
+            && (self.domains.is_empty() || self.domains.len() == n)
     }
 
     /// Whether `voters` hold a **Phase-1** quorum of this configuration —
@@ -373,6 +441,71 @@ impl<Id: Copy + Ord> AcceptorConfig<Id> {
             "a configuration names an acceptor"
         );
         &self.members
+    }
+
+    /// Each member's failure domain, in the order of
+    /// [`AcceptorConfig::members`]; empty for an unlabeled configuration
+    /// (#215 (zones)).
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
+    #[must_use]
+    pub fn domains(&self) -> &[FailureDomain] {
+        assert!(
+            self.domains.is_empty() || self.domains.len() == self.members.len(),
+            "a configuration labels every member or none"
+        );
+        &self.domains
+    }
+
+    /// This configuration owned by cell `cell` (`0`: none), every other
+    /// field unchanged (#215 (zones), `docs/architecture.md` §3.7).
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
+    #[must_use]
+    pub fn with_cell(mut self, cell: u64) -> Self {
+        self.cell = cell;
+        assert!(
+            self.is_well_formed(),
+            "naming a cell keeps a configuration well formed"
+        );
+        self
+    }
+
+    /// The cell that owns the journal this configuration runs; `0` for
+    /// none.
+    #[must_use]
+    pub fn cell(&self) -> u64 {
+        self.cell
+    }
+
+    /// Whether this configuration carries failure domains.
+    #[must_use]
+    pub fn is_zoned(&self) -> bool {
+        !self.domains.is_empty()
+    }
+
+    /// The failure domain of `node`: `None` when it is no member or the
+    /// configuration is unlabeled.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
+    #[must_use]
+    pub fn domain_of(&self, node: Id) -> Option<&FailureDomain> {
+        let index = self.members.binary_search(&node).ok()?;
+        let domain = self.domains.get(index);
+        assert!(
+            domain.is_some() == self.is_zoned(),
+            "a member of a labeled configuration has a domain"
+        );
+        domain
     }
 
     /// The quorum system this configuration's tallies are judged under.

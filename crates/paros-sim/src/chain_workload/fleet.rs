@@ -706,6 +706,22 @@ impl FleetOps {
                 assert_reachable!("fleet: a tenant is created with a founding member down");
             }
         }
+        if !run.steps.is_empty()
+            && crate::machine::zone_down_through(&self.state, started, self.time.now())
+        {
+            // #215 (zones): the cell control journal and the fleet tenant
+            // chose this run's writes without a whole zone.
+            assert_reachable!("zones: a control-journal write is chosen with a zone down");
+            if matches!(
+                run.outcome,
+                Step::Done {
+                    last: Some(Stage::TenantReady),
+                    ..
+                }
+            ) {
+                assert_reachable!("zones: a tenant is created with a zone down");
+            }
+        }
         self.created(session, &name, &run);
         match run.outcome {
             Step::Done { result, .. } => {

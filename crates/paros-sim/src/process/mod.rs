@@ -85,7 +85,7 @@ pub(super) fn bootstrap_config(
         .collect();
     let policy = crate::shape::quorum_policy(ctx.state(), pool);
     let system = policy.system(bootstrap.len());
-    AcceptorConfig::new(bootstrap, system)
+    crate::shape::acceptor_config(ctx.state(), bootstrap, system)
 }
 
 /// The configuration `journal`, one of the run's static journals, runs
@@ -116,6 +116,7 @@ pub(super) fn journal_config(
         Config {
             journal,
             peers: main.pool().to_vec(),
+            peer_domains: Vec::new(),
             quorum_system: policy.system(main.pool().len()),
             matchmakers: Vec::new(),
             matchmaker_pool: Vec::new(),
@@ -154,6 +155,7 @@ pub(super) fn main_config(
             .collect();
     Config {
         peers: bootstrap.members().to_vec(),
+        peer_domains: bootstrap.domains().to_vec(),
         quorum_system: bootstrap.quorum_system(),
         nodes: members.iter().map(|(node, _)| *node).collect(),
         matchmakers,
