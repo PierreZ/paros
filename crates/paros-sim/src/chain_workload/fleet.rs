@@ -191,6 +191,9 @@ pub(super) struct FleetOps {
     /// Tenant identifiers this client had created: a deliberate reuse names one.
     ever_created: Vec<JournalIdentifier>,
     pending: Option<Pending>,
+    /// The cell this client forgot as unknown to its machines, until it
+    /// learns one: a lost cell, when the next one differs.
+    forgotten: Option<paros::machine::ControlJournals>,
     /// How long into an operation its target is killed, and how long it
     /// stays down (`ChainConfig::fleet_kill_delay_ms`, `fleet_kill_down_ms`).
     kill_ms: (u64, u64),
@@ -260,6 +263,7 @@ impl FleetOps {
             initialized: false,
             ever_created: Vec::new(),
             pending: None,
+            forgotten: None,
             kill_ms,
             killed: false,
             learned: super::system::Learned::default(),
@@ -567,19 +571,23 @@ impl FleetOps {
     /// pending any more.
     #[tracing::instrument(level = "debug", skip_all, fields(client = self.client_id))]
     async fn resume(&mut self, ctx: &SimContext, policy: CheckpointPolicy, draw: u64) -> bool {
-        let Some(pending) = self.pending.take() else {
+        if self.pending.is_none() {
             return true;
-        };
-        if matches!(pending, Pending::Initialize) {
+        }
+        if matches!(self.pending, Some(Pending::Initialize)) {
             if self.initialize(ctx, draw).await {
+                self.pending = None;
                 return true;
             }
-            self.pending = Some(pending);
             return false;
         }
         let Some(cell) = self.learn(ctx).await else {
-            self.pending = Some(pending);
             return false;
+        };
+        // Learning a lost cell's successor drops an operation of the lost
+        // universe (`forget_lost_universe`).
+        let Some(pending) = self.pending.take() else {
+            return true;
         };
         let client = cell.client.clone();
         let first = cell.first(draw);
@@ -946,7 +954,11 @@ impl FleetOps {
         } = interrupted
         {
             assert_reachable!("fleet: an operator forgets a cell its machines do not know");
-            self.cell = None;
+            self.forgotten = self
+                .cell
+                .take()
+                .map(|cell| cell.journals)
+                .or(self.forgotten);
             // The init this client saw end was that cell's: the cell it
             // learns next may still be initializing (#454 (control plane
             // meets chaos): witness 2649599687404826405, a cell lost after
