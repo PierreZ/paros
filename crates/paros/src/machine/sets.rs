@@ -44,7 +44,7 @@ use moonpool_core::Providers;
 use moonpool_rpc::RpcHandle;
 use paros_core::{JournalIdentifier, NodeId, TenantId};
 
-use super::moves::stays;
+use super::moves::{Leaving, stays};
 use super::tenants::TenantDesk;
 use crate::client::cell::CellSession;
 use crate::client::journals::JournalAnswer;
@@ -127,7 +127,7 @@ fn slots(registry: &Registry, tenant: TenantId) -> Vec<(u64, Booking)> {
 /// [`Sets::step`]).
 fn next_set(
     registry: &Registry,
-    gone: &BTreeSet<NodeId>,
+    gone: &Leaving,
     settled: &BTreeSet<TenantId>,
     last: Option<TenantId>,
 ) -> Option<TenantId> {
@@ -255,7 +255,7 @@ async fn desired_size<P: Providers>(
 fn gone_plan(
     registry: &Registry,
     desk: &TenantDesk,
-    (tenant, gone): (TenantId, &BTreeSet<NodeId>),
+    (tenant, gone): (TenantId, &Leaving),
     staying: &[(u64, Booking)],
     size: usize,
 ) -> Option<Vec<Step>> {
@@ -332,7 +332,7 @@ impl Sets {
         (providers, rpc, names, client): (&P, &RpcHandle<P>, &Names, &Client<P>),
         cell: &mut CellSession,
         desk: &mut TenantDesk,
-        gone: &BTreeSet<NodeId>,
+        gone: &Leaving,
     ) -> Option<SetStep> {
         let Some(tenant) = next_set(cell.registry(), gone, &self.settled, self.last) else {
             return Some(SetStep::Idle);
@@ -400,7 +400,16 @@ impl Sets {
             moonpool_assertions::reachable!("coordinator: a set has no machine to go to");
             staying = slots
                 .iter()
-                .filter(|(_, b)| stays(registry, &BTreeSet::new(), b.node))
+                .filter(|(_, b)| {
+                    stays(
+                        registry,
+                        &Leaving {
+                            gone: BTreeSet::new(),
+                            held: gone.held.clone(),
+                        },
+                        b.node,
+                    )
+                })
                 .copied()
                 .collect();
         }
@@ -498,7 +507,7 @@ impl Sets {
         &mut self,
         client: &Client<P>,
         cell: &mut CellSession,
-        (tenant, gone): (TenantId, &BTreeSet<NodeId>),
+        (tenant, gone): (TenantId, &Leaving),
         slots: &[(u64, Booking)],
         staying: &[(u64, Booking)],
     ) -> Option<SetStep> {
@@ -527,7 +536,7 @@ impl Sets {
         if !leaving.is_empty() {
             moonpool_assertions::reachable!("coordinator: a set moved off a draining machine");
         }
-        if leaving.iter().any(|(_, b)| gone.contains(&b.node)) {
+        if leaving.iter().any(|(_, b)| gone.gone.contains(&b.node)) {
             moonpool_assertions::reachable!(
                 "coordinator: a set moved off a machine down past its bound"
             );
@@ -554,7 +563,7 @@ impl Sets {
         client: &Client<P>,
         cell: &mut CellSession,
         desk: &mut TenantDesk,
-        (tenant, gone): (TenantId, &BTreeSet<NodeId>),
+        (tenant, gone): (TenantId, &Leaving),
         staying: &[(u64, Booking)],
         size: usize,
     ) -> Option<SetStep> {

@@ -61,7 +61,7 @@ pub(super) async fn placements_booked(
                 removed(ctx, registry.registry());
                 judged = true;
             }
-            let stuck = unmoved(&tenants, registry.registry(), &wiped);
+            let stuck = unmoved(&tenants, registry.registry(), (&wiped, ctx.time().now()));
             if stuck.is_none() {
                 return;
             }
@@ -290,9 +290,24 @@ fn footprints(registry: &Registry) {
 fn unmoved(
     tenants: &[TenantControl],
     registry: &Registry,
-    wiped: &BTreeSet<u64>,
+    (wiped, now): (&BTreeSet<u64>, Duration),
 ) -> Option<(u64, u64)> {
-    let registered = |node: NodeId| registry.keeps_roles(node);
+    // A maintenance window over a slow machine or its zone keeps its roles
+    // (#359, #361 (slow machines)), as it keeps a down machine's: a window
+    // longer than the run so far is open on any coordinator's clock.
+    let held = |node: NodeId| {
+        registry
+            .maintenance_of(node)
+            .any(|(_, window)| Duration::from_millis(window.for_ms) > now)
+    };
+    let registered = |node: NodeId| {
+        registry.keeps_roles(node)
+            || (registry.is_slow(node)
+                && registry
+                    .get(node)
+                    .is_some_and(|n| n.standing == NodeStanding::Registered)
+                && held(node))
+    };
     for control in tenants {
         let tenant = control.tenant();
         if registry.dropped(tenant) {

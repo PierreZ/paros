@@ -434,13 +434,8 @@ impl Watch {
             if now.saturating_sub(since) < self.replace_after {
                 continue;
             }
-            let mut windows = registry.maintenance_of(id).peekable();
-            let covered = windows.peek().is_some();
-            let held = windows.any(|(scope, window)| {
-                self.windows
-                    .get(scope)
-                    .is_some_and(|(_, seen)| now < *seen + Duration::from_millis(window.for_ms))
-            });
+            let covered = registry.maintenance_of(id).next().is_some();
+            let held = self.held_one(registry, id, now);
             if held {
                 if registry.booked(id) > 0 {
                     moonpool_assertions::reachable!(
@@ -471,6 +466,39 @@ impl Watch {
             );
         }
         gone
+    }
+
+    /// Whether an open maintenance window over `id` or its zone holds its
+    /// roles at `now` (#359), on this watch's clock.
+    fn held_one(&self, registry: &Registry, id: NodeId, now: Duration) -> bool {
+        registry.maintenance_of(id).any(|(scope, window)| {
+            self.windows
+                .get(scope)
+                .is_some_and(|(_, seen)| now < *seen + Duration::from_millis(window.for_ms))
+        })
+    }
+
+    /// The registered machines an open maintenance window holds at `now`
+    /// (#359): a slow mark moves none of their roles (#361 (slow
+    /// machines)). Read after [`Watch::gone`], which opens the windows.
+    ///
+    /// # Panics
+    ///
+    /// If it names a machine the registry does not hold.
+    #[must_use]
+    pub fn held(&self, registry: &Registry, now: Duration) -> std::collections::BTreeSet<NodeId> {
+        let held: std::collections::BTreeSet<NodeId> = registry
+            .nodes()
+            .filter(|(id, node)| {
+                node.standing == NodeStanding::Registered && self.held_one(registry, *id, now)
+            })
+            .map(|(id, _)| id)
+            .collect();
+        assert!(
+            held.iter().all(|id| registry.get(*id).is_some()),
+            "a held machine is registered"
+        );
+        held
     }
 
     /// Run one round if one is due at `now`, writing each change through
@@ -1223,10 +1251,13 @@ async fn campaign<P: Providers>(
                             Ok(_) if watch.ran() => {
                                 if let Some((_, desk)) = desk.as_mut() {
                                     let ctx = (&providers, &rpc, &names, &client);
-                                    let mut gone = watch.gone(session.registry(), client.now());
-                                    if defer && !gone.is_empty() {
+                                    let mut gone = super::moves::Leaving {
+                                        gone: watch.gone(session.registry(), client.now()),
+                                        held: watch.held(session.registry(), client.now()),
+                                    };
+                                    if defer && !gone.gone.is_empty() {
                                         defer = false;
-                                        gone.clear();
+                                        gone.gone.clear();
                                         moonpool_assertions::reachable!(
                                             "coordinator: a re-placement is deferred"
                                         );

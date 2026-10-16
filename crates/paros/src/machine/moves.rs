@@ -42,7 +42,7 @@ use crate::client::{Client, ReconfigureOutcome, RetireOutcome, Server};
 use crate::placement::{self, Want};
 use crate::rpc::common::Ballot;
 use crate::rpc::{InspectReply, NodeClient, RetireRequest};
-use crate::system::{Booking, BookingTarget, Registry, Role};
+use crate::system::{Booking, BookingTarget, NodeStanding, Registry, Role};
 use crate::{Address, Names};
 
 /// What one move step did.
@@ -84,11 +84,30 @@ pub(super) struct Moves {
     trimmed: Option<JournalIdentifier>,
 }
 
-/// Whether a slot on `node` stays where it is: the machine keeps its roles
-/// (registered, not draining, not retired, not held slow, #361 (slow
-/// machines)) and is not `gone` (down past the re-placement bound, #475).
-pub(super) fn stays(registry: &Registry, gone: &BTreeSet<NodeId>, node: NodeId) -> bool {
-    registry.keeps_roles(node) && !gone.contains(&node)
+/// What a watch round says of the machines a term's steps place on.
+#[derive(Clone, Debug, Default)]
+pub(super) struct Leaving {
+    /// Down past the re-placement bound (#475): their roles move.
+    pub(super) gone: BTreeSet<NodeId>,
+    /// Covered by an open maintenance window (#359): a slow mark (#361
+    /// (slow machines)) moves none of their roles, as a down mark does not.
+    pub(super) held: BTreeSet<NodeId>,
+}
+
+/// Whether a slot on `node` stays where it is: the machine is registered
+/// (not draining, not retired), not held slow outside an open maintenance
+/// window (#361 (slow machines), #359), and not `gone` (down past the
+/// re-placement bound, #475).
+pub(super) fn stays(registry: &Registry, leaving: &Leaving, node: NodeId) -> bool {
+    let registered = registry
+        .get(node)
+        .is_some_and(|n| n.standing == NodeStanding::Registered);
+    let slow = registry.is_slow(node) && !leaving.held.contains(&node);
+    assert!(
+        !registry.keeps_roles(node) || registered,
+        "a machine that keeps its roles is registered"
+    );
+    registered && !slow && !leaving.gone.contains(&node)
 }
 
 /// The next journal after `last`, in id order and wrapping, with an
@@ -96,7 +115,7 @@ pub(super) fn stays(registry: &Registry, gone: &BTreeSet<NodeId>, node: NodeId) 
 /// still hosts, with its slots.
 fn next_move(
     registry: &Registry,
-    gone: &BTreeSet<NodeId>,
+    gone: &Leaving,
     last: Option<JournalIdentifier>,
 ) -> Option<(JournalIdentifier, Vec<(u64, Booking)>)> {
     // A draining machine, one gone (#475) and one the coordinator holds
@@ -274,7 +293,7 @@ fn journal_nodes<P: Providers>(
 /// tenant the cell still hosts, with its slots.
 fn next_trim(
     registry: &Registry,
-    gone: &BTreeSet<NodeId>,
+    gone: &Leaving,
     last: Option<JournalIdentifier>,
 ) -> Option<(JournalIdentifier, Vec<(u64, Booking)>)> {
     let mut slots: BTreeMap<JournalIdentifier, Vec<(u64, Booking)>> = BTreeMap::new();
@@ -312,7 +331,7 @@ impl Moves {
         &mut self,
         ctx: (&P, &RpcHandle<P>, &Names, &Client<P>),
         (cell, desk): (&mut CellSession, &mut TenantDesk),
-        gone: &BTreeSet<NodeId>,
+        gone: &Leaving,
     ) -> Option<MoveStep> {
         let client = ctx.3;
         let Some((journal, slots)) = next_trim(cell.registry(), gone, self.trimmed) else {
@@ -363,7 +382,7 @@ impl Moves {
         (providers, rpc, names, client): (&P, &RpcHandle<P>, &Names, &Client<P>),
         cell: &mut CellSession,
         desk: &mut TenantDesk,
-        gone: &BTreeSet<NodeId>,
+        gone: &Leaving,
     ) -> Option<MoveStep> {
         // An operator drains through a session of its own: the term's fold
         // learns of it only by reading the journal's tail again.
@@ -394,7 +413,7 @@ impl Moves {
             .copied()
             .collect();
         assert!(!leaving.is_empty(), "a move leaves a draining machine");
-        if leaving.iter().any(|(_, b)| gone.contains(&b.node)) {
+        if leaving.iter().any(|(_, b)| gone.gone.contains(&b.node)) {
             moonpool_assertions::reachable!(
                 "coordinator: a move leaves a machine down past its bound"
             );
@@ -520,7 +539,7 @@ impl Moves {
         client: &Client<P>,
         cell: &mut CellSession,
         desk: &mut TenantDesk,
-        (journal, gone): (JournalIdentifier, &BTreeSet<NodeId>),
+        (journal, gone): (JournalIdentifier, &Leaving),
         staying: &[(u64, Booking)],
         size: usize,
     ) -> Option<MoveStep> {

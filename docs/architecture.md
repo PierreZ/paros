@@ -667,7 +667,9 @@ takes a quorum**: at most a minority of the pool is held slow (`SlowJudge::cap`)
 removes nothing by itself. A slow machine keeps no role, like a draining one
 (`Registry::keeps_roles`): the tenant coordinator moves each journal off it (book elsewhere,
 reconfigure, record the configuration in force as `Placed`, then release), placement books it last,
-as a down machine, and the mode changes leave its journals to the moves. A grid leader sends a
+as a down machine, and the mode changes leave its journals to the moves. An open maintenance
+window (#359) suspends this, as it suspends a down machine's re-placement: the mark stays
+written, but no slot moves off a machine the window covers. A grid leader sends a
 round's Phase 2 to a column with no slow acceptor when its own column holds one, and a quorum read
 asks such a row (`fast_column`, `fast_row` in `driver/mod.rs`); a majority already decides on the
 fastest replies. `parosctl` shows the machine `slow` (`MachineView.slow`). The simulation's
