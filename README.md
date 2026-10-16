@@ -57,6 +57,15 @@ A journal's durability can change while it runs: `parosctl configure --tenant ac
 orders --failures-per-partition 2` asks for five acceptors, and the tenant coordinator moves
 the journal there by reconfiguration, without losing a write (#214 (tenant modes)).
 
+Each machine serves Prometheus metrics and two probes (`/metrics`, `/healthz`, `/readyz`) when
+`PAROS_HTTP_LISTEN` is set. It pushes its spans and metrics to an OpenTelemetry collector when
+`PAROS_OTLP_ENDPOINT` is set. To measure throughput and latency on one machine, with no cell to
+start first:
+
+```sh
+parosctl bench --local 3 --duration 30s
+```
+
 The copy-paste demo, with Docker Compose or three local processes, is
 [`DEMO.md`](DEMO.md). The walkthrough — init, write and read, kill and restart a
 machine, supersede a writer, lose a disk — is

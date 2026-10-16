@@ -392,6 +392,27 @@ message LoadAck {
   double run_loop_busy = 12;
   // The data disk; absent when its device is not known.
   DiskLoad disk = 13;
+  // Whether the machine records metrics (#366 (metrics)): `usage` is
+  // empty when it does not.
+  bool metered = 14;
+  // What the machine counted per journal since its process started, from
+  // its metrics. Set whether or not `windowed` is.
+  repeated JournalUsage usage = 15;
+}
+
+// One journal's usage on one machine (#366 (metrics)).
+message JournalUsage {
+  uint64 tenant = 1;
+  uint64 journal = 2;
+  // The data-plane calls that reached the journal here.
+  uint64 writes = 3;
+  uint64 reads = 4;
+  uint64 set_leaders = 5;
+  uint64 truncates = 6;
+  // Bytes of records in the writes accepted here, and in the read pages
+  // answered here.
+  uint64 written_bytes = 7;
+  uint64 read_bytes = 8;
 }
 
 message DiskLoad {

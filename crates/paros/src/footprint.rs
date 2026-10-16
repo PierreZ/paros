@@ -249,7 +249,8 @@ pub enum Fix {
 /// - its coordinator slot: placed on a `stateless` machine that serves the
 ///   cell, is up and has a free slot, when it has none on a live machine
 ///   (registered, not draining, up); a slot on a machine that is not live is
-///   released once another one holds the coordinator;
+///   released once another one holds the coordinator, and so is every live
+///   slot but the first (a dead one whose machine came back up);
 /// - its `storage` slots: one booked for each the footprint lacks on a
 ///   registered machine that is not draining (a retired machine took its
 ///   slots with it), then a slot on a draining machine is released.
@@ -294,6 +295,11 @@ pub fn fix(registry: &Registry, tenant: TenantId, footprint: &Footprint) -> Opti
             }));
         }
     } else if let Some((booking, _)) = coordinators.iter().find(|(_, node)| !live(*node)) {
+        return Some(Fix::Release { booking: *booking });
+    } else if let Some((booking, _)) = coordinators.iter().filter(|(_, node)| live(*node)).nth(1) {
+        // A dead coordinator's machine came back up (same incarnation,
+        // `MachineUp`) after its re-placement and before its release: two
+        // live slots, and the release above sees none dead. Keep the first.
         return Some(Fix::Release { booking: *booking });
     }
     for (role, count) in footprint.by_role() {
@@ -459,5 +465,25 @@ mod tests {
                 booking: slot.booking
             })
         );
+        // It answers again before its release: two live coordinator slots,
+        // and the next step releases one of them.
+        let up = SystemCommand::MachineUp {
+            id: NodeId(5),
+            incarnation: 1,
+        };
+        assert!(matches!(
+            reg.fold(9, &up.encode()),
+            RegistryEvent::MachineUp { was_down: true, .. }
+        ));
+        let Some(Fix::Release { booking }) = fix(&reg, tenant, &Footprint::birth()) else {
+            panic!("a second live coordinator is released");
+        };
+        assert!(booking == slot.booking || booking == again.booking);
+        let release = SystemCommand::ReleaseCapacity { booking };
+        assert!(matches!(
+            reg.fold(10, &release.encode()),
+            RegistryEvent::Released { .. }
+        ));
+        assert_eq!(fix(&reg, tenant, &Footprint::birth()), None);
     }
 }

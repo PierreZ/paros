@@ -52,6 +52,7 @@ mod handover;
 mod journals;
 pub(crate) mod log_reads;
 mod matchmaking;
+mod metered;
 pub(crate) mod operator;
 pub(crate) mod ready;
 pub(crate) mod reply;
@@ -83,6 +84,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::audit::Audit;
 use crate::machine::{CellMachine, ControlJournals};
+use crate::metrics::{CallKind, Metrics};
 use crate::rpc::{
     InspectRefusal, InspectTarget, MatchmakerClient, MatchmakersRefusal, ReadAck,
     ReconfigureMatchmakersAck, ReplySender, RetireAck, RetireRefusal, SetLeaderAck, TruncateAck,
@@ -103,6 +105,7 @@ use matchmaking::{
     MatchmakerLinks, folded_answer, report_match_step, send_outbox, send_reconfigure_requests,
     surface_matchmaking,
 };
+use metered::{Meter, journal_names};
 use ready::{ClientWaiters, drain_ready, fold_head};
 use reply::maybe_duplicate;
 use report::{Deltas, HandoffContext, handoff_context, maintain};
@@ -621,6 +624,8 @@ struct Shared<'a, P: Providers> {
     out: &'a Outbound,
     self_id: u64,
     tunables: DriverTunables,
+    /// The machine's metrics (#366 (metrics)); off outside a machine.
+    metrics: &'a Metrics,
 }
 
 impl<P: Providers> Shared<'_, P> {
@@ -653,7 +658,17 @@ impl<P: Providers> Shared<'_, P> {
             last,
             ..
         } = rt;
-        self.with(audit).settle(node, storage, waiters, last).await
+        let began = self.providers.time().now();
+        self.with(audit)
+            .settle(node, storage, waiters, last)
+            .await?;
+        // Observation only (#366 (metrics)): read after the batch settled.
+        let applied = fold_head(node).map_or(0, |slot| slot.0 + 1);
+        let chosen = node.replica().chosen_index().map_or(0, |slot| slot.0 + 1);
+        let took = self.providers.time().now().saturating_sub(began);
+        self.metrics
+            .settled(node.config().journal, applied, chosen, took);
+        Ok(())
     }
 
     /// One journal's beat: the core's tick, the re-sends and their BUGGIFY
@@ -1331,6 +1346,12 @@ where
         )));
     }
     let cell: Option<ControlJournals> = machine.as_ref().map(CellMachine::control_journals);
+    // The machine's metrics (#366 (metrics)): off on a node outside a
+    // machine.
+    let metrics: Metrics = machine
+        .as_ref()
+        .map(|machine| machine.facts().metrics.clone())
+        .unwrap_or_default();
     // The cell every peer batch carries and every inbound one must name
     // (#216): `0` on a deployment without a cell plan.
     let cell_id = cell.map_or(0, |cell| cell.cell_id);
@@ -1648,9 +1669,16 @@ where
         out: &out,
         self_id,
         tunables,
+        metrics: &metrics,
+    };
+    let time = providers.time().clone();
+    let meter = Meter {
+        metrics: &metrics,
+        time: &time,
+        audit: &node_audit,
+        node: NodeId(self_id),
     };
 
-    let time = providers.time().clone();
     let mut ticks: u64 = 0;
     // The tick deadline is ABSOLUTE, not a fresh relative sleep per loop
     // iteration: `select!` drops and re-creates its futures every pass, so a
@@ -1684,6 +1712,13 @@ where
                     }
                     continue;
                 };
+                let reply = meter.call(
+                    journal,
+                    || journal_names(follower.as_ref(), cell.as_ref(), journal),
+                    (CallKind::Write, metered::request_bytes(&req.records)),
+                    reply,
+                    metered::write_answer,
+                );
                 // The batch limits (#241, §2.7) are judged here, at the edge:
                 // a batch over them never reaches consensus.
                 if let Some(ack) = calls::batch_too_large(&req.records, &tunables) {
@@ -1731,6 +1766,13 @@ where
                     }
                     continue;
                 };
+                let reply = meter.call(
+                    journal,
+                    || journal_names(follower.as_ref(), cell.as_ref(), journal),
+                    (CallKind::SetLeader, 0),
+                    reply,
+                    metered::set_leader_answer,
+                );
                 let new = leader_uuid_from_proto(req.new);
                 let old = leader_from_proto(req.old);
                 let delegation = delegation_choice(&rt.node);
@@ -1761,6 +1803,13 @@ where
                     }
                     continue;
                 };
+                let reply = meter.call(
+                    journal,
+                    || journal_names(follower.as_ref(), cell.as_ref(), journal),
+                    (CallKind::Truncate, 0),
+                    reply,
+                    metered::truncate_answer,
+                );
                 let up_to = Seq(req.up_to);
                 let leader = leader_uuid_from_proto(req.leader);
                 let delegation = delegation_choice(&rt.node);
@@ -1791,6 +1840,13 @@ where
                     }
                     continue;
                 };
+                let reply = meter.call(
+                    journal,
+                    || journal_names(follower.as_ref(), cell.as_ref(), journal),
+                    (CallKind::Read, 0),
+                    reply,
+                    metered::read_answer,
+                );
                 let ctx = rt.waiters.reads.next_ctx();
                 // The configuration the core reads over is its read basis
                 // (#260), not its belief; without one the core opens nothing

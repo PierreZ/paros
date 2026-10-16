@@ -41,6 +41,8 @@
 //! | 1 | [`RunError::Infra`]: bind, listen, address | fix the environment |
 //! | 2 | an invalid configuration | fix the variables |
 
+mod http;
+mod otel;
 mod resolve;
 mod settings;
 mod tunables;
@@ -51,9 +53,13 @@ use std::time::Duration;
 use clap::Parser;
 use moonpool_core::{TokioProviders, TokioResolver, TokioStorageProvider};
 use paros::machine::{MachineAddresses, MachineError, MachineSettings, ProviderDisk};
+use paros::metrics::Metrics;
 use paros::{Address, BootRefusal, Names, NoAudit, RunError};
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::Layer as _;
+use tracing_subscriber::layer::SubscriberExt as _;
+use tracing_subscriber::util::SubscriberInitExt as _;
 
 use crate::settings::Settings;
 
@@ -70,12 +76,6 @@ const RESOLVE_RETRY: Duration = Duration::from_millis(500);
 
 fn main() -> ExitCode {
     let settings = Settings::parse();
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn,parosd=info".into()),
-        )
-        .with_writer(std::io::stderr)
-        .init();
     if let Err(error) = settings::check_unknown(std::env::vars().map(|(name, _)| name)) {
         eprintln!("parosd: {error}");
         return ExitCode::from(2);
@@ -90,11 +90,36 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    runtime.block_on(Box::pin(run(settings)))
+    // Metrics are always recorded (#366 (metrics)); `PAROS_HTTP_LISTEN`
+    // serves them, with the probes, and `PAROS_OTLP_*` pushes them.
+    let metrics = Metrics::on();
+    let telemetry = {
+        let _entered = runtime.enter();
+        match otel::Telemetry::start(&settings, &metrics) {
+            Ok(telemetry) => telemetry,
+            Err(error) => {
+                eprintln!("parosd: {error}");
+                return ExitCode::from(2);
+            }
+        }
+    };
+    tracing_subscriber::registry()
+        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn,parosd=info".into()))
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
+        .with(telemetry.tracer().map(|tracer| {
+            tracing_opentelemetry::layer()
+                .with_tracer(tracer)
+                .with_filter(tracing_subscriber::filter::filter_fn(otel::exported))
+        }))
+        .init();
+    let code = runtime.block_on(Box::pin(run(settings, metrics)));
+    // The runtime's workers still run: the exporters flush over it.
+    telemetry.shutdown();
+    code
 }
 
 /// Run the machine: the library's lifecycle on this data directory.
-async fn run(settings: Settings) -> ExitCode {
+async fn run(settings: Settings, metrics: Metrics) -> ExitCode {
     let tunables = match tunables::from_env() {
         Ok(tunables) => tunables,
         Err(error) => return invalid(&error),
@@ -133,12 +158,24 @@ async fn run(settings: Settings) -> ExitCode {
             "parosd_pinned_root_keys"
         );
     }
+    let shutdown = shutdown_on_signal();
+    if let Some(http) = &settings.http_listen {
+        let addr = match patiently(|| resolve::resolve(http)) {
+            Ok(addr) => addr,
+            Err(error) => return invalid(&format!("PAROS_HTTP_LISTEN: {error}")),
+        };
+        if let Err(error) = http::serve(addr, metrics.clone(), shutdown.clone()).await {
+            eprintln!("parosd: PAROS_HTTP_LISTEN {addr}: {error}");
+            return ExitCode::FAILURE;
+        }
+    }
     let machine = MachineSettings {
         class: settings.class,
         capacity: settings.capacity,
         failure_domain: settings.failure_domain.clone(),
         name,
         pin,
+        metrics,
     };
     let disk = ProviderDisk::new(
         TokioStorageProvider::new(),
@@ -154,7 +191,7 @@ async fn run(settings: Settings) -> ExitCode {
         Names::new(TokioResolver::new()),
         tunables,
         transport,
-        shutdown_on_signal(),
+        shutdown,
     ))
     .await;
     match ran {

@@ -243,6 +243,9 @@ pub struct MachineFacts {
     /// Its last full busyness window (#424), which every phase's `Load`
     /// answers from.
     pub load: load::LoadBoard,
+    /// Its metrics and phase (#366 (metrics)): the settings' handle, shared
+    /// by every phase and the node loop.
+    pub metrics: crate::metrics::Metrics,
 }
 
 /// The incarnation of the RPC runtime `rpc`, or `0` once it stopped.

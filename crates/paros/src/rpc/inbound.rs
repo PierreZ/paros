@@ -76,6 +76,18 @@ impl<U> ReplySender<U> {
     }
 }
 
+impl<U: 'static> ReplySender<U> {
+    /// The same answer, with `observe` shown the reply just before it
+    /// leaves (#366 (metrics)): an observer only, it cannot change the
+    /// reply. A reply dropped unsent is never observed.
+    pub(crate) fn observed(self, observe: impl FnOnce(&U) + Send + 'static) -> Self {
+        Self(Box::new(move |reply| {
+            observe(&reply);
+            (self.0)(reply)
+        }))
+    }
+}
+
 /// One well-known endpoint's requests, decoded into what the loop steps
 /// (`T`) with a reply seam for what it answers (`U`). A request that does
 /// not decode is refused by dropping its reply handle (the caller sees a

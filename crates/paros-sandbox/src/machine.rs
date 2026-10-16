@@ -65,6 +65,7 @@ impl Process for MachineProcess {
             SimulationError::InvalidState(format!("{} is no machine IP", ctx.my_ip()))
         })?;
         let settings = MachineSettings {
+            metrics: paros::metrics::Metrics::off(),
             class: Class::Storage,
             // parosd's default: every tenant's footprint takes 7 slots
             // (#476 (tenant footprint)), the cell's and the universe's too.

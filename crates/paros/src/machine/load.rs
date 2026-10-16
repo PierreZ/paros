@@ -21,10 +21,12 @@ use moonpool_core::{
     Detach, Providers, SimulationResult, SystemProvider, SystemSample, TaskProvider, TimeProvider,
 };
 use moonpool_rpc::RpcHandle;
+use paros_core::{JournalId, JournalIdentifier, TenantId};
 use tokio_util::sync::CancellationToken;
 
 use super::MachineFacts;
 use crate::load::Busyness;
+use crate::metrics::{CallKind, JournalUsage, Metrics};
 use crate::rpc::machine as wire;
 use crate::rpc::methods::LoadRpc;
 use crate::rpc::{Inbound, serve_well_known};
@@ -88,12 +90,18 @@ pub(crate) fn spawn_monitor<P: Providers>(
     providers: &P,
     data_dir: String,
     interval: Duration,
-    board: LoadBoard,
+    (board, metrics): (LoadBoard, Metrics),
     skip_first: bool,
     shutdown: CancellationToken,
 ) {
     assert!(!interval.is_zero(), "a load interval is never zero");
-    let monitor = monitor(providers.clone(), data_dir, interval, board, skip_first);
+    let monitor = monitor(
+        providers.clone(),
+        data_dir,
+        interval,
+        (board, metrics),
+        skip_first,
+    );
     providers
         .task()
         .spawn_task("paros-machine-load", async move {
@@ -111,7 +119,7 @@ async fn monitor<P: Providers>(
     providers: P,
     data_dir: String,
     interval: Duration,
-    board: LoadBoard,
+    (board, metrics): (LoadBoard, Metrics),
     mut skip_first: bool,
 ) {
     let sample = || match providers.system().sample(&data_dir) {
@@ -141,12 +149,15 @@ async fn monitor<P: Providers>(
                     moonpool_assertions::reachable!("load: a machine skips its first window");
                     skip_first = false;
                 }
-                Some(busyness) => board.publish(Window {
-                    busyness,
-                    start_at: before.at,
-                    end_at: after.at,
-                    ended: providers.time().now(),
-                }),
+                Some(busyness) => {
+                    metrics.busyness(&busyness);
+                    board.publish(Window {
+                        busyness,
+                        start_at: before.at,
+                        end_at: after.at,
+                        ended: providers.time().now(),
+                    });
+                }
                 // A counter that went back (a wrap, a cgroup change): a
                 // production defence. The simulator's counters are
                 // monotone, so it has no gate (#446).
@@ -172,6 +183,7 @@ pub(crate) fn serve<P: Providers>(
     let mut requests = Inbound::plain(serve_well_known::<P, LoadRpc>(rpc)?);
     let time = providers.time().clone();
     let board = facts.load.clone();
+    let metrics = facts.metrics.clone();
     let (node_id, name) = (facts.node_id.0, facts.name.clone());
     providers
         .task()
@@ -181,7 +193,8 @@ pub(crate) fn serve<P: Providers>(
                     biased;
                     () = shutdown.cancelled() => return,
                     Some((_, reply)) = requests.recv() => {
-                        reply.send(answer(node_id, &name, board.window(), time.now()));
+                        let ack = answer(node_id, &name, board.window(), time.now());
+                        reply.send(with_usage(ack, &metrics));
                     }
                     else => return,
                 }
@@ -189,6 +202,56 @@ pub(crate) fn serve<P: Providers>(
         })
         .detach();
     Ok(())
+}
+
+/// `ack` with what `metrics` counted per journal (#366 (metrics)).
+///
+/// # Panics
+///
+/// When metrics that are off report usage.
+#[must_use]
+pub fn with_usage(ack: wire::LoadAck, metrics: &Metrics) -> wire::LoadAck {
+    let usage: Vec<wire::JournalUsage> = metrics.usage().iter().map(usage_to_wire).collect();
+    assert!(
+        metrics.is_on() || usage.is_empty(),
+        "a machine without metrics reports no usage"
+    );
+    wire::LoadAck {
+        metered: metrics.is_on(),
+        usage,
+        ..ack
+    }
+}
+
+/// One journal's usage on the wire.
+#[must_use]
+pub fn usage_to_wire(usage: &JournalUsage) -> wire::JournalUsage {
+    wire::JournalUsage {
+        tenant: usage.journal.tenant.0,
+        journal: usage.journal.journal.0,
+        writes: usage.calls_of(CallKind::Write),
+        reads: usage.calls_of(CallKind::Read),
+        set_leaders: usage.calls_of(CallKind::SetLeader),
+        truncates: usage.calls_of(CallKind::Truncate),
+        written_bytes: usage.written_bytes,
+        read_bytes: usage.read_bytes,
+    }
+}
+
+/// One journal's usage from the wire.
+#[must_use]
+pub fn usage_from_wire(usage: &wire::JournalUsage) -> JournalUsage {
+    JournalUsage {
+        journal: JournalIdentifier::new(TenantId(usage.tenant), JournalId(usage.journal)),
+        calls: [
+            usage.writes,
+            usage.reads,
+            usage.set_leaders,
+            usage.truncates,
+        ],
+        written_bytes: usage.written_bytes,
+        read_bytes: usage.read_bytes,
+    }
 }
 
 /// The answer of machine `node_id`, named `name`, with `window` at `now`.
