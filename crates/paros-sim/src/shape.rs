@@ -1389,9 +1389,9 @@ pub(crate) fn changed_mode(state: &StateHandle) -> bool {
 
 /// Whether the run draws the **second-cell scenario** (#232 (multiple
 /// cells)): drawn once per seed, its own BUGGIFY location, never with a
-/// scenario that needs the idle machines or the other cell for itself.
-/// With a scenario that needs three founders, it keeps a machine only on a
-/// layout of four.
+/// scenario that renames or wipes a founder (the other cell is the wiped
+/// one's). With a scenario that needs three founders, or a drain, it keeps
+/// a machine only on a layout of four.
 /// A second cell needs a `storage` machine `init` does not list, still idle
 /// when an operator forms the cell on it, and `TENANT` steps after that for
 /// its later phases (`crate::chain_workload::fleet::second_cell`). Each
@@ -1404,10 +1404,7 @@ pub(crate) fn changed_mode(state: &StateHandle) -> bool {
 #[tracing::instrument(level = "debug", skip_all)]
 pub(crate) fn second_cell(state: &StateHandle) -> bool {
     // Drawn before the lock: the scenarios take the registry's lock too.
-    let other = moved_founder(state)
-        || replaced_founder(state)
-        || drained_machine(state)
-        || wiped_founder(state);
+    let other = moved_founder(state) || wiped_founder(state);
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     *guard
@@ -2095,7 +2092,8 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
             let zoned = zoned && count >= 3;
             // The second-cell scenario keeps the last machine out of `init`,
             // for the second cell, when the founders it needs leave one.
-            let reserve = second && count > least;
+            // A drain needs two admitted machines besides it.
+            let reserve = second && count > if drained { 3 } else { least };
             let founders = if count == 0 {
                 0
             } else if zoned {

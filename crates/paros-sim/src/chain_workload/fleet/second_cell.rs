@@ -80,11 +80,7 @@ impl FleetOps {
         policy: CheckpointPolicy,
         draw: u64,
     ) -> bool {
-        // The scenarios that need every idle machine for themselves.
-        if !self.initialized
-            || crate::shape::drained_machine(ctx.state())
-            || crate::shape::replaced_founder(ctx.state())
-        {
+        if !self.initialized {
             return false;
         }
         let claimed = with_second(ctx.state(), |second| {
