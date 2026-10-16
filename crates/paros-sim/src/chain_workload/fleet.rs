@@ -213,6 +213,9 @@ pub(super) struct FleetOps {
     refused: BTreeSet<TenantId>,
     /// The replaced-founder scenario's steps this operator took (#423).
     replaced: replaced::Steps,
+    /// The single-writer journals this client created (#215 (zones)): on a
+    /// zone-outage seed, a journal step while a zone is down appends to one.
+    created_single: Vec<JournalIdentifier>,
     /// This client made its one frontend call before a tenant was `READY`
     /// (#446 (a gate that never fires cannot fail the sweep)).
     frontend_cold: bool,
@@ -263,6 +266,7 @@ impl FleetOps {
             journal_pending: None,
             journal_names: BTreeMap::new(),
             refused: BTreeSet::new(),
+            created_single: Vec::new(),
             replaced: replaced::Steps::default(),
             frontend_cold: false,
             state: ctx.state().clone(),

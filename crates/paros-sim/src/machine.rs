@@ -79,6 +79,9 @@ pub(crate) struct MachineBoard {
     /// The zone-outage scenario held a zone down from the first instant to
     /// the second (#215 (zones)).
     zone_down: Option<(Duration, Duration)>,
+    /// A client created a single-writer journal through the coordinator
+    /// (#215 (zones)): the zone outage waits for one while chaos lasts.
+    journal_created: bool,
     /// Every durable vote of a machine still on its disk, by minted id: all
     /// of them name one cell. A wiped machine's vote is gone with its disk.
     voters: BTreeMap<u64, CellPlan>,
@@ -724,6 +727,17 @@ pub(crate) fn zone_targets(
         .filter_map(|addr| board.ips.get(addr).filter(|ip| !dead(ip)).cloned())
         .collect();
     (!ips.is_empty()).then_some(ips)
+}
+
+/// A client created a single-writer journal through the coordinator (#215
+/// (zones)).
+pub(crate) fn note_journal_created(state: &StateHandle) {
+    lock(&machine_board(state)).journal_created = true;
+}
+
+/// Whether a client created a single-writer journal yet (#215 (zones)).
+pub(crate) fn journal_created(state: &StateHandle) -> bool {
+    lock(&machine_board(state)).journal_created
 }
 
 /// The zone-outage scenario holds a zone down from `from` to `until` (#215

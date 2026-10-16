@@ -110,6 +110,20 @@ impl FleetOps {
             return;
         };
         self.through_frontend(&label, control, payload).await;
+        // The zone-outage scenario (#215 (zones)): while a zone is down, a
+        // journal this client created before takes an append, so the
+        // append is chosen without the zone.
+        let now = self.time.now();
+        if crate::shape::zone_outage(ctx.state())
+            && crate::machine::zone_down_through(&self.state, now, now)
+            && !self.created_single.is_empty()
+        {
+            let pick =
+                usize::try_from(payload % self.created_single.len() as u64).unwrap_or_default();
+            let journal = self.created_single[pick];
+            assert_reachable!("zones: a client appends to its journal while a zone is down");
+            self.append_to_created(&cell, journal, payload).await;
+        }
         let request = if let Some(request) = self.journal_pending.take() {
             request
         } else {
@@ -444,6 +458,8 @@ impl FleetOps {
                 );
                 if *writer == WriterMode::Single {
                     self.note_journals([journal]);
+                    self.created_single.push(journal);
+                    crate::machine::note_journal_created(&self.state);
                     self.append_to_created(cell, journal, draw).await;
                 }
             }

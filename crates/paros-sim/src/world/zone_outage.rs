@@ -7,8 +7,9 @@
 //! journals and every journal whose durability survives a failure must keep
 //! committing without that zone (`crate::chain_workload::fleet`).
 //!
-//! The injector strikes once, once every founder formed, at the zone of
-//! the three with the most live machines. Every machine comes back by itself at its deadline.
+//! The injector strikes once, once every founder formed and a client
+//! created a journal (or at once in the tail), at the zone of the three
+//! with the most live machines. Every machine comes back by itself at its deadline.
 //! Like the downed founder (`super::downed_founder`), it may strike up to
 //! `LATE_WINDOW` into the recovery tail; the cell keeps a majority
 //! throughout, so the tail's liveness claims still hold.
@@ -61,7 +62,11 @@ impl FaultInjector for ZoneOutage {
                         best
                     }
                 });
-            if let Some(fullest) = fullest {
+            // While chaos lasts the outage waits for a created journal, so
+            // the clients have one to append to without the zone; in the
+            // tail it strikes at once.
+            let journal = crate::machine::journal_created(ctx.state()) || !crate::in_chaos();
+            if let Some(fullest) = fullest.filter(|_| journal) {
                 break fullest;
             }
             if time.sleep(POLL).await.is_err() {
