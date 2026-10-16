@@ -53,7 +53,11 @@ impl FleetOps {
             return;
         }
         let founders = self.layout.founders;
-        let outside = founders..self.machines.len();
+        // On a second-cell seed (#232 (multiple cells)) the last machine is
+        // the second cell's.
+        let reserved =
+            usize::from(crate::shape::second_cell(ctx.state()) && founders < self.machines.len());
+        let outside = founders..self.machines.len() - reserved;
         let mut at_founder = false;
         let fresh = self.admitting.is_none() && replaced.is_none();
         let mut target = match self.admitting.take().or(replaced) {

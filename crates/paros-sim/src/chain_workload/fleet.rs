@@ -499,7 +499,9 @@ impl FleetOps {
         // On its own location, the second cell's next phase instead (#232
         // (multiple cells)); more often once it is formed, so a run reaches
         // its later phases.
-        if ((second_cell::started(ctx.state()) && buggify_with_prob!(0.6))
+        let scenario = crate::shape::second_cell(ctx.state());
+        if (scenario && moonpool_sim::sim_random_bool(0.8)
+            || second_cell::started(ctx.state()) && buggify_with_prob!(0.6)
             || buggify_with_prob!(0.15))
             && self.second_cell(ctx, policy, payload).await
         {

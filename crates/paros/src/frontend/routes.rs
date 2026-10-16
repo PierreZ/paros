@@ -211,6 +211,7 @@ where
         let pointer = registry.state().universe().cloned();
         // An idle cell that joined no universe yet fronts nothing.
         let (LoadOutcome::Loaded { .. }, Some(pointer)) = (loaded, pointer) else {
+            moonpool_assertions::reachable!("frontend: the cell hosts no universe tenant yet");
             return None;
         };
         (pointer.directory, client.elsewhere(&pointer.hosts))

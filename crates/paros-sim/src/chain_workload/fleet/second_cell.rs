@@ -122,6 +122,13 @@ impl FleetOps {
             });
             return self.form_second(ctx, draw).await;
         };
+        // Any operator may take a phase: it learns the cell's journals
+        // from the run's record of the formation (#246).
+        self.note_journals(
+            [Some(formed.journals.cell), formed.journals.election]
+                .into_iter()
+                .flatten(),
+        );
         let Some(cell) = self.learn(ctx).await else {
             return false;
         };
@@ -375,8 +382,16 @@ impl FleetOps {
         if let Step::Refused(FleetRefusal::CellNotEmpty { .. }) = early.outcome {
             assert_reachable!("universe: a cell that hosts a tenant is not removed");
         }
+        // A phase an earlier step cut short may have removed the tenant
+        // already: then the cell is empty, and its removal is due.
         assert_always!(
-            !matches!(early.outcome, Step::Done { .. }),
+            !matches!(early.outcome, Step::Done { .. })
+                || !with_second(&self.state, |second| second.tenant).is_some_and(|tenant| {
+                    session
+                        .directory()
+                        .tenant(tenant)
+                        .is_some_and(|entry| entry.cell_id == cell_id)
+                }),
             "universe: a cell is removed only once it hosts no tenant",
             { "cell" => cell_id }
         );
@@ -460,7 +475,11 @@ impl FleetOps {
             );
         }
         for (tenant, entry) in directory.tenants() {
-            if entry.cell_id == cell_id && entry.state == paros::fleet::TenantState::Ready {
+            // The cell's own cell tenant is in the directory, never hosted.
+            if entry.cell_id == cell_id
+                && entry.groups == paros::fleet::Groups::SERVED
+                && entry.state == paros::fleet::TenantState::Ready
+            {
                 assert_always!(
                     registry.hosts(tenant),
                     "fleet: every READY tenant in the directory is hosted by its cell",

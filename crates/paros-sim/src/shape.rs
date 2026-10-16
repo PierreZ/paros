@@ -854,6 +854,9 @@ struct Registry {
     /// Run-level: whether the run draws the changed-mode scenario (see
     /// [`changed_mode`]), fixed by the first caller.
     changed_mode: Option<bool>,
+    /// Run-level: whether the run draws the second-cell scenario (see
+    /// [`second_cell`]), fixed by the first caller.
+    second_cell: Option<bool>,
     /// Run-level: whether the run draws the slow-link scenario (see
     /// [`slow_link`]), fixed by the first caller.
     slow_link: Option<bool>,
@@ -1382,6 +1385,35 @@ pub(crate) fn changed_mode(state: &StateHandle) -> bool {
     *guard
         .changed_mode
         .get_or_insert_with(|| !drained && moonpool_sim::buggify_with_prob!(1.0))
+}
+
+/// Whether the run draws the **second-cell scenario** (#232 (multiple
+/// cells)): drawn once per seed, its own BUGGIFY location, never with a
+/// scenario that needs the idle machines, the other cell or three founders
+/// for itself.
+/// A second cell needs a `storage` machine `init` does not list, still idle
+/// when an operator forms the cell on it, and several `TENANT` steps after
+/// that, one per phase (`crate::chain_workload::fleet::second_cell`). Each
+/// is a coin on its own, and `ADMIT` takes the idle machines first: no
+/// second cell formed in 400 hunt seeds without the scenario. On a
+/// scenario seed the layout leaves the last machine unlisted and `storage`,
+/// `ADMIT` never takes it, client 0 runs `init` first, and every client runs
+/// `TENANT` as often as the weight family allows, at the steps knob's top.
+/// Rare-but-valid: an operator may form and join a cell at any time.
+#[tracing::instrument(level = "debug", skip_all)]
+pub(crate) fn second_cell(state: &StateHandle) -> bool {
+    // Drawn before the lock: the scenarios take the registry's lock too.
+    let other = moved_founder(state)
+        || replaced_founder(state)
+        || downed_founder(state)
+        || drained_machine(state)
+        || wiped_founder(state)
+        || changed_mode(state);
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    *guard
+        .second_cell
+        .get_or_insert_with(|| !other && moonpool_sim::buggify_with_prob!(1.0))
 }
 
 /// Whether the run draws the **silent-machine scenario** (#211): drawn once
@@ -2038,6 +2070,7 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
     let drained = drained_machine(state);
     let zoned = zone_outage(state);
     let changed = changed_mode(state);
+    let second = second_cell(state);
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     guard
@@ -2069,14 +2102,24 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
                 // The drained-machine scenario: one founding member, and
                 // every other machine admitted.
                 1
+            } else if second && count >= 2 {
+                // The second-cell scenario: the last machine stays out of
+                // `init`, for the second cell.
+                moonpool_sim::sim_random_range(1..count)
             } else {
                 moonpool_sim::sim_random_range(least..count + 1)
             };
+            // The machines `init` may list: all but the second cell's.
+            let room = if second && count >= 2 {
+                count - 1
+            } else {
+                count
+            };
             // `init` lists more machines than found the cell only when the
             // founders are `2F+1`: it forms the cell on the first `2F+1`.
-            let listed = if founders % 2 == 1 && founders < count && !drained {
+            let listed = if founders % 2 == 1 && founders < room && !drained {
                 if moonpool_sim::sim_random_bool(0.5) {
-                    moonpool_sim::sim_random_range(founders + 1..count + 1)
+                    moonpool_sim::sim_random_range(founders + 1..room + 1)
                 } else {
                     founders
                 }
@@ -2114,13 +2157,14 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
             };
             let machines = (0..count)
                 .map(|rank| {
-                    let class =
-                        if rank >= founders && !drained && moonpool_sim::sim_random_bool(0.3) {
-                            assert_reachable!("machine: a machine outside the seeds is stateless");
-                            paros::machine::Class::Stateless
-                        } else {
-                            paros::machine::Class::Storage
-                        };
+                    // The founders, and the second cell's machine, store.
+                    let stores = rank < founders || rank >= room || drained;
+                    let class = if !stores && moonpool_sim::sim_random_bool(0.3) {
+                        assert_reachable!("machine: a machine outside the seeds is stateless");
+                        paros::machine::Class::Stateless
+                    } else {
+                        paros::machine::Class::Storage
+                    };
                     MachineDraw {
                         class,
                         capacity: founder_capacity(full_founder && rank == 0, floor, capacity),
