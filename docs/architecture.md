@@ -353,6 +353,19 @@ list and no rendezvous name. The same rule holds at two levels:
      a higher `init_id`, and is then formed. A majority of accepts chooses the plan. The receiver
      sends its own accept last, and only when the others can still choose the plan with it. A
      machine that receives a `FormCell` without being asked first treats it as both steps.
+  4. **Teach** (the decree's learner catch-up, #277 (cell decree)). The receiver sends
+     `FormCell` once, so a founding member that was down at that moment stays idle while the
+     plan names it. Each formed member asks every other member of its plan to `Identify` itself
+     at each election renewal period. It sends its own vote, the plan at the ballot it accepted
+     it at, to a member that answers idle. This is the same Phase 2a again, so it is safe at
+     any time. The idle member promised that ballot in step 1, so it accepts. The `FormCell`
+     carries the operator's token, the one that formed the teacher; the teacher keeps it in
+     memory only, never in its record. Teaching of a member ends when it answers in the cell,
+     answers as another machine (a wiped member), refuses the token, or the address book names
+     it at another address than the plan's. A member that restarted holds no token and teaches
+     nothing. Before, only a new `init` formed that member, and a cell with one more member down
+     had no quorum (seeds 7461995534021400970 on main 7feccc9 and 16403044264830861989 on
+     629aa62).
 
   A receiver that crashes midway leaves no lock: the next `cell init`, sent to any listed machine,
   finds the accepted plan in its ask and finishes it. A plain question ("is anything ongoing?")
@@ -415,8 +428,10 @@ list and no rendezvous name. The same rule holds at two levels:
   machine started with `PAROS_ROOT_PUBLIC_KEY` pins those keys (`paros::machine::AdminPin`) and,
   while it is idle, checks an `admin` token on `CellInit`, `PrepareCell`, `FormCell` and `Admit`
   (operations `form_cell` and `admit`, on an internal target). The proposer of `cell init` sends
-  the operator's token on to the other founding members. A refusal answers `invalid_token`,
-  `expired` or `forbidden`. A machine started without the variable trusts the network, as before.
+  the operator's token on to the other founding members, and a formed member that teaches the
+  decree (step 4 above) sends the same token. A refusal answers `invalid_token`, `expired` or
+  `forbidden`. A teacher with no token (it restarted) or with a refused one stops: the operator
+  runs `init` again with its token. A machine started without the variable trusts the network, as before.
   The cell coordinator that finishes an admission an operator left in flight has no token, so a
   pinned machine refuses it: the operator runs `cell add-machine` again with its token.
 
@@ -599,8 +614,12 @@ restart is supported:
   (below) lets a machine that restarts after others moved dial them where they are.
 - **The simulation.** On a seed whose machines advertise names, a cell machine's reboot comes
   back under a new name at a new IP (`rename_pct`). Its old name keeps the old IP, where
-  nobody listens. The operators' entry for the machine follows it. After chaos, the oracle
-  judges that the registry holds every renamed founding member at its new name.
+  nobody listens. The operators' entry for the machine follows it. A founding member is renamed
+  only once every renamed admitted machine is registered at its new name. Otherwise the run
+  passes the limit above: the admitted machine's book names only the founder's old name, and
+  the registry names the machine only at its old address (#501 (matchmaker sets off the
+  founders)). After chaos, the oracle judges that the registry holds every renamed founding
+  member and every renamed admitted machine at its new name.
 
 **Liveness** (decided on 2026-10-04). The cell coordinator watches the cell's machines with the
 transport's failure detector and writes only the *changes* into the cell control journal (`Down`,
@@ -819,13 +838,16 @@ coordinator is `paros::machine::coordinator`:
   duties run (decided on 2026-10-15, #542 (coordinator starves its lease while it
   installs)). So the lease covers one renewal's round trip, never an install: a slow cell
   kept no term before.
-- **Interim.** The admin calls are not yet requests to the coordinator (#212, #225). An
-  admin session still claims the cell control journal and fences the coordinator. The
-  coordinator does not fight back within its term: it resigns, and the next term installs
-  a fresh uuid (#349: a fenced term cannot register a moved machine). `parosctl init` claims
-  nothing on the cell control journal: it waits until the coordinator installed its uuid, then
-  runs the fleet steps, and the coordinator writes the cell's `JoinFleet` (#513 (fleet Init
-  duel)).
+- **Interim.** `cell add-machine` and `cell drain-machine` are not yet requests to the
+  coordinator (#212, #225). Their admin session still claims the cell control journal and
+  fences the coordinator. The coordinator does not fight back within its term: it resigns,
+  and the next term installs a fresh uuid (#349: a fenced term cannot register a moved
+  machine). The fleet operations claim nothing on the cell control journal. `parosctl init`
+  waits until the coordinator installed its uuid, then runs the fleet steps, and the
+  coordinator writes the cell's `JoinFleet` (#513 (fleet Init duel)). A tenant's creation
+  and removal write only the universe directory, and the coordinator writes the cell's
+  steps: the tenant's footprint, `HostTenant` and `DropTenant` (decided on 2026-10-15, #225,
+  section 3.7).
 - **Knobs.** `DriverTunables::election_lease`, `election_renew` and `election_compact_after`,
   each with a floor; `parosd` reads them as `PAROS_ELECTION_*` variables.
 
@@ -980,13 +1002,14 @@ request RPC and the placement of tenant coordinators.
   stateless machine serves with a free slot, the founding members host the coordinator and
   the footprint holds no coordinator slot.
 - **A host needs its footprint.** The fold refuses `HostTenant` (`NoFootprint`) for a tenant
-  with no granted footprint. The fleet state machines write the footprint as a step of its
-  own: a tenant creation books the tenant's before `HostTenant`. The cell coordinator books
-  the cell tenant's and the universe tenant's, since it also writes `JoinFleet` (#513 (fleet
-  Init duel)). A creation whose footprint the cell
-  refuses marks the tenant `ERROR` in the universe directory and answers `NoFootprint`; a
-  delete frees its name. The cell records a refusal only once every founding member is
-  registered, so a missing founder delays a creation and never refuses it.
+  with no granted footprint. The cell coordinator writes the footprint as a step of its own:
+  it books a `REGISTERING` tenant's footprint before its `HostTenant`, as it follows the
+  universe directory (decided on 2026-10-15, #225: no operator claims the cell control
+  journal). It books the cell tenant's and the universe tenant's too, since it also writes
+  `JoinFleet` (#513 (fleet Init duel)). A creation whose footprint the cell refuses marks the
+  tenant `ERROR` in the universe directory and answers `NoFootprint`; a delete frees its name.
+  The cell records a refusal only once every founding member is registered, so a missing
+  founder delays a creation and never refuses it.
 - **`init` waits for the founding members.** A founding member registers through the cell
   coordinator, and a fleet step's claim fences the coordinator. So `init` reads the cell
   control journal, without a claim, until it holds every founding member, before its fleet
@@ -1489,6 +1512,71 @@ uses FDB's key names.
   and a slow machine that reports more busyness than every healthy machine of its cell. paros adds no `cpu_charge` yet: the byte
   costs already charge sends and writes, and a charge goes only where a profile shows real work.
 
+**Metrics, probes and usage** (#366 (metrics, health and usage), landed 2026-10-15;
+`paros::metrics`). Every machine counts the data-plane calls it serves in a plain `prometheus`
+registry, provider-free and wasm-safe. The counters are for an operator, never for a decision:
+the code that serves never reads them.
+
+- **The rules** (decided on 2026-10-15, after
+  [the practical guide to application metrics](https://pierrezemb.fr/posts/practical-guide-to-application-metrics/)).
+  Counters and gauges only: no histogram. A time is a seconds counter beside its count, so
+  `rate(seconds) / rate(count)` is the mean over any window, and one slow call is found in the
+  traces. Every failure path is counted beside the successes. Each unit is in the name. A label
+  takes only a bounded value: a call, an outcome, a journal the machine runs; never a request,
+  a client or an address. A heartbeat shows that the numbers are fresh. The metrics are
+  recorded once, and every export reads that one registry.
+- **What it counts.** `paros_calls_total` per call, counted when the call reaches a journal
+  the machine runs; `paros_call_answers_total` per call and `outcome` (`ok`, `duplicate`,
+  `refused`, `wrong_mode`, `truncated`, `too_large`, `redirected`, `unknown_journal`,
+  `unserved`), counted when the answer leaves, and `paros_call_answer_seconds_total`, the time
+  of those answers; a call received and not answered is the difference.
+  `paros_written_bytes_total` (accepted `Write`s) and `paros_read_bytes_total` (`Read` pages);
+  `paros_applied_slot` and `paros_chosen_slot`, whose difference is the apply lag;
+  `paros_settles_total` and `paros_settle_seconds_total`, a batch persisted (sync included),
+  sent and applied; the last busyness window as `paros_machine_*` gauges, with
+  `paros_machine_load_windows_total` as the heartbeat; and `paros_machine_phase` (starting,
+  idle, serving). A journal's series carry four labels: `tenant` and `journal`, the names, as
+  every output gives them (§3.5): the cell's own journals are `cell/(control)`,
+  `cell/(election)` and `universe/(directory)`, and a tenant's control journal is
+  `<tenant>/(control)`. `tenant_id` and `journal_id` are the ids in hex. A journal whose names
+  the machine does not know is named by its ids in hex.
+- **Where it shows.** `parosd` serves the registry as Prometheus text on `/metrics` when
+  `PAROS_HTTP_LISTEN` is set, with two probes: `/healthz` (`200` while the process answers) and
+  `/readyz` (`200` once the machine serves its cell, `503` with its phase before). The HTTP
+  server is plain, holds no state and is not in the simulation.
+- **OpenTelemetry** (decided on 2026-10-15: OTLP beside Prometheus, never in place of it).
+  With `PAROS_OTLP_ENDPOINT` (or one signal's `PAROS_OTLP_TRACES_ENDPOINT`,
+  `PAROS_OTLP_METRICS_ENDPOINT`), `parosd` pushes over OTLP/gRPC. The spans are the `tracing`
+  spans, through `tracing-opentelemetry`. The metrics are the same registry: one observable
+  instrument per family reads it at each push (`PAROS_OTLP_INTERVAL_MS`), and a counter's
+  OpenTelemetry name drops its `_total`. Only `parosd` links OpenTelemetry: the library and the
+  simulation do not.
+- **Usage.** `Load` (above) also carries each journal's counts and bytes since the machine's
+  process started (`LoadAck.usage`), and `parosctl status --tenant t` sums them over the
+  machines of the cell into a usage table per journal. A machine that does not answer is left
+  out, and the table says how many machines answered.
+- **Simulation.** The same code runs there, and the harness keeps each machine's metrics for
+  its address, so a reboot finds its counters again. On some seeds every
+  machine runs with metrics off, and the same oracles judge the run: metrics never change an
+  outcome. The audit hears each counted call through `Audit::call_received` and
+  `Audit::call_answered`, in the same step as the counter, and the workload's `check()`
+  asserts that the counters (calls and answers per call, bytes) equal the audit's own fold of
+  the calls.
+- **Not yet.** A trace context carried in the RPC envelope (a span stops at its machine), an audit log that names each
+  caller, and a metric for the store's sync time alone stay open in follow-up issues.
+
+**The benchmark** (#194 (throughput benchmark), landed 2026-10-15). `parosctl bench` runs
+clients over `paros::client` against the servers (`--servers`) or against a cell of N machines
+it starts in its own process (`--local N`): the shipped `run_machine` on loopback, with its
+stores on a real filesystem with real syncs, formed by `paros::client::initialize`. The calls are
+`write`, `read-tail`, `read-start` and `set-leader`, drawn by `--mix` weights, and `truncate` on
+a schedule. The clients run closed loop, or open loop at `--rate` calls per second, where a
+call's latency counts from the moment it was due (no coordinated omission). `--json` prints one
+report: throughput (calls and bytes per second) and latency (mean, p50, p90, p99, p99.9, max)
+per call, with the commit, the command line, the CPU count, the kernel and the filesystem of a
+local cell's stores. CI only checks that `parosctl bench --local 3 --duration 5s` runs: numbers
+on shared runners are noise. The baseline is posted on #194.
+
 ### 3.7 The universe
 
 The universe runs from M9 with one cell (decided on 2026-10-02, #226).
@@ -1558,7 +1646,20 @@ of a name the universe tenant holds, in any state and whatever its placement, is
 merged into the first. Until #225 the client drives the steps, so an interrupted creation stays
 `REGISTERING` until it is deleted; with #225 the coordinator that owns the control journal
 finishes every `REGISTERING` and `REMOVING` entry it finds (decided on 2026-10-04: the entry is
-the work order, no client resumes another's creation). A tenant in any state may be removed; only a `READY` or
+the work order, no client resumes another's creation).
+*Landed in part* (2026-10-15, #225, the tenant half of #513 (fleet Init duel)): the cell
+coordinator writes the cell's step of each entry. At its install and at each watch round, it
+reads the universe directory. For each `users` tenant of its cell that is `REGISTERING` and not
+hosted, it books the tenant's footprint (`GrantCapacity`, section 3.3), then writes `HostTenant`
+once the footprint is granted. For each one that is `REMOVING` and not dropped, it writes
+`DropTenant`. The operator writes only the directory steps: it waits until the cell hosts the
+tenant before it marks it `READY` (or marks it `ERROR` when the cell refused its footprint), and
+until the cell dropped it before it removes it. So no operator claims the
+cell control journal for a tenant. Before, each claim fenced the coordinator and the next term
+fenced the operator in turn, the duel #513 removed from `init`. The sweep of 07424f8 left two
+creations `REGISTERING` after the recovery tail (seed 15189977391382984753, which did not replay
+red alone). The directory steps are still the operator's: the universe coordinator that
+finishes them is #225's remaining work. A tenant in any state may be removed; only a `READY` or
 `UPDATING_CONFIGURATION` tenant may be reconfigured. `init` follows the same rule. Cell entries
 carry a state too: `REGISTERING`, `READY`, `REMOVING` or `RESTORING`, and only a `READY` cell
 receives new tenants. In M9 the one cell goes `REGISTERING` → `READY` during `init`, and
@@ -1600,7 +1701,15 @@ metadata version lets a reader refuse a format it does not understand.
 the universe directory's tenant entry when the tenant is registered and never changed afterwards.
 Each group carries a rule, and a tenant obeys the rules of every group it is in. The set of
 groups is fixed by paros for now; operator-defined groups (rollout waves, co-location), as labels
-without rules, may come later (decided on 2026-10-04):
+without rules, may come later (decided on 2026-10-04). **Tags will replace the groups**
+(decided on 2026-10-15, #575 (key:value tags), ranked early so that features build on it as a
+primitive): tenants, journals, machines and cells carry `key:value` tags. Reserved `paros/` keys
+are written only by the control plane and parsed into typed policies (`paros/kind`, `paros/role`,
+`paros/movable`, `paros/group`, a machine's class and zone, a cell's kind). User keys are opaque
+to paros. **Internal names take no prefix** (decided on 2026-10-15, #575): an internal tenant
+shows as `<kind>:<name>` (`cell:paris`, or `cell` with no name), its journals as `(control)`,
+`(election)` and `(directory)`, in every output, the metrics included; a user tenant's name
+refuses `:`. The table below stays in force until #575 lands:
 
 | Group | Rule | Members |
 |---|---|---|
@@ -2312,7 +2421,9 @@ AGENTS.md.
   per seed. The counts stay boot data until the tenant coordinator applies them (#214).
 - The coordinators replace the operator's client (#212): admin calls become requests to the
   elected coordinator. Since #240, `parosctl init` no longer claims the cell control journal: the
-  elected cell coordinator installs its uuid there.
+  elected cell coordinator installs its uuid there. Since #513 and #225, no fleet operation
+  claims it: the coordinator writes the cell's `JoinFleet`, and each tenant's footprint,
+  `HostTenant` and `DropTenant`.
 
 ## 8. Milestones
 

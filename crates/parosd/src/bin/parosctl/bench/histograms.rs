@@ -28,22 +28,49 @@ use serde_json::json;
 /// The longest latency a histogram tracks: 100 s, in nanoseconds.
 const MAX_NANOS: u64 = 100_000_000_000;
 
-/// The calls the bench makes, by their stable names.
+/// How many calls the bench knows.
+pub const CALLS: usize = 5;
+
+/// The calls the bench makes, by their stable names (#194 (throughput
+/// benchmark)).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Call {
+    /// A `Write` at the journal's tail, as its writer.
     Write,
+    /// A `Read` of the last records the bench wrote.
     ReadTail,
+    /// A `Read` from a cursor that starts at the journal's first position:
+    /// a reader that catches up.
+    ReadStart,
+    /// A `SetLeader` under a fresh uuid: the writer takes a new term.
+    SetLeader,
+    /// A `Truncate` on the `--truncate-every` schedule.
+    Truncate,
 }
 
 impl Call {
-    pub const ALL: [Call; 2] = [Call::Write, Call::ReadTail];
+    pub const ALL: [Call; CALLS] = [
+        Call::Write,
+        Call::ReadTail,
+        Call::ReadStart,
+        Call::SetLeader,
+        Call::Truncate,
+    ];
 
-    /// The stable name: in the console and in the export.
+    /// The stable name: in the console, in `--mix` and in the export.
     pub fn name(self) -> &'static str {
         match self {
             Call::Write => "write",
             Call::ReadTail => "read-tail",
+            Call::ReadStart => "read-start",
+            Call::SetLeader => "set-leader",
+            Call::Truncate => "truncate",
         }
+    }
+
+    /// The call named `name`.
+    pub fn of_name(name: &str) -> Option<Call> {
+        Call::ALL.into_iter().find(|call| call.name() == name)
     }
 
     fn index(self) -> usize {
@@ -56,28 +83,32 @@ pub fn histogram() -> Histogram<u64> {
     Histogram::new_with_bounds(1, MAX_NANOS, 3).expect("1 ns to 100 s at 3 figures is valid")
 }
 
-/// What one client, or one interval, holds: a histogram and an error count
-/// per call.
+/// What one client, or one interval, holds: a histogram, an error count
+/// and the record bytes carried, per call.
 #[derive(Clone, Debug)]
 pub struct Calls {
-    pub histograms: [Histogram<u64>; 2],
-    pub errors: [u64; 2],
+    pub histograms: [Histogram<u64>; CALLS],
+    pub errors: [u64; CALLS],
+    pub bytes: [u64; CALLS],
 }
 
 impl Default for Calls {
     fn default() -> Self {
         Self {
-            histograms: [histogram(), histogram()],
-            errors: [0; 2],
+            histograms: std::array::from_fn(|_| histogram()),
+            errors: [0; CALLS],
+            bytes: [0; CALLS],
         }
     }
 }
 
 impl Calls {
-    /// A successful `call` that took `latency` (clamped into range).
-    pub fn record(&mut self, call: Call, latency: Duration) {
+    /// A successful `call` that took `latency` (clamped into range) and
+    /// carried `bytes` of records (written or read).
+    pub fn record(&mut self, call: Call, latency: Duration, bytes: u64) {
         let nanos = u64::try_from(latency.as_nanos()).unwrap_or(u64::MAX);
         self.histograms[call.index()].saturating_record(nanos.clamp(1, MAX_NANOS));
+        self.bytes[call.index()] += bytes;
     }
 
     /// A failed `call`.
@@ -93,6 +124,10 @@ impl Calls {
         self.errors[call.index()]
     }
 
+    pub fn bytes_of(&self, call: Call) -> u64 {
+        self.bytes[call.index()]
+    }
+
     /// Add `other` into this one.
     pub fn add(&mut self, other: &Calls) {
         for call in Call::ALL {
@@ -100,6 +135,7 @@ impl Calls {
                 .add(other.of(call))
                 .expect("histograms of the same bounds add");
             self.errors[call.index()] += other.errors_of(call);
+            self.bytes[call.index()] += other.bytes_of(call);
         }
     }
 }
@@ -163,21 +199,22 @@ impl Export {
         })
     }
 
-    /// One line per call for the interval that ended `elapsed` into the run
-    /// (`unix_ms`: the wall clock then).
+    /// One line per call of `calls` for the interval that ended `elapsed`
+    /// into the run (`unix_ms`: the wall clock then).
     pub fn tick(
         &mut self,
-        elapsed: Duration,
-        unix_ms: u64,
+        (elapsed, unix_ms): (Duration, u64),
+        calls: &[Call],
         interval: &Calls,
     ) -> std::io::Result<()> {
-        for call in Call::ALL {
+        for &call in calls {
             let line = json!({
                 "name": call.name(),
                 "seed": self.seed,
                 "unix_ms": unix_ms,
                 "elapsed_ms": u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
                 "errors": interval.errors_of(call),
+                "bytes": interval.bytes_of(call),
                 "histogram": encode(interval.of(call)),
             });
             writeln!(self.file, "{line}")?;
@@ -283,11 +320,15 @@ mod tests {
         for (second, ms) in latencies_ms.iter().enumerate() {
             client
                 .borrow_mut()
-                .record(Call::Write, Duration::from_millis(*ms));
+                .record(Call::Write, Duration::from_millis(*ms), 10);
             client.borrow_mut().error(Call::ReadTail);
             let interval = registry.tick();
             export
-                .tick(Duration::from_secs(second as u64 + 1), 0, &interval)
+                .tick(
+                    (Duration::from_secs(second as u64 + 1), 0),
+                    &[Call::Write, Call::ReadTail],
+                    &interval,
+                )
                 .unwrap();
         }
         export.finish().unwrap();
@@ -330,10 +371,10 @@ mod tests {
     fn a_tick_swaps_and_a_reset_clears() {
         let mut registry = Registry::default();
         let client = registry.client();
-        client.borrow_mut().record(Call::Write, Duration::ZERO);
+        client.borrow_mut().record(Call::Write, Duration::ZERO, 1);
         client
             .borrow_mut()
-            .record(Call::Write, Duration::from_secs(1_000));
+            .record(Call::Write, Duration::from_secs(1_000), 2);
         let interval = registry.tick();
         assert_eq!(
             interval.of(Call::Write).len(),
@@ -342,11 +383,15 @@ mod tests {
         );
         assert_eq!(client.borrow().of(Call::Write).len(), 0, "swapped out");
         assert_eq!(registry.total.of(Call::Write).len(), 2);
+        assert_eq!(registry.total.bytes_of(Call::Write), 3);
         registry.reset();
         assert_eq!(registry.total.of(Call::Write).len(), 0);
         let mut sum = Calls::default();
         sum.add(&interval);
         sum.add(&interval);
         assert_eq!(sum.of(Call::Write).len(), 4);
+        assert_eq!(sum.bytes_of(Call::Write), 6);
+        assert_eq!(Call::of_name("read-start"), Some(Call::ReadStart));
+        assert_eq!(Call::of_name("scan"), None);
     }
 }

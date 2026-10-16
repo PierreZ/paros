@@ -48,6 +48,10 @@ jobs:
       - uses: DeterminateSystems/magic-nix-cache-action@main
       - name: Run cargo nextest
         run: nix develop --command cargo nextest run
+      # #194 (throughput benchmark): the bench runs, on a local cell of three
+      # machines. A check that it works, never a number: shared runners are noise.
+      - name: Smoke the bench on a local cell
+        run: nix develop --command cargo run -p parosd --bin parosctl -- bench --local 3 --duration 5s
 
   # The teaching examples (`crates/paros-core/examples/`) drive the composable roles
   # by hand and assert the property each one teaches, so running them is a test of

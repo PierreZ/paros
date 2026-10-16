@@ -16,7 +16,7 @@ use paros_core::{AcceptorWrite, Ballot};
 use tokio_util::sync::CancellationToken;
 
 use super::admitted::AdmittedMachine;
-use super::formed::{FormedCell, vote_ballot};
+use super::formed::{FormationToken, FormedCell, vote_ballot};
 use super::{AdminPin, Admission, CellPlan, Class, MachineFacts, ballot_from_wire, ballot_to_wire};
 use crate::driver::edge::RpcEdge;
 use crate::driver::{DriverTunables, RunError};
@@ -142,13 +142,17 @@ pub async fn wait_for_cell<P: Providers, L: CellLedger>(
         "machine_waiting"
     );
     let mut proposal: Option<Proposal<'_>> = None;
-    let formed = |ledger: &L| {
+    // The token of the `FormCell` that formed this machine, kept in memory
+    // only (`FormedCell::token`): its teacher sends it on.
+    let mut formation: Option<FormationToken> = None;
+    let formed = |ledger: &L, token: Option<FormationToken>| {
         ledger.vote().map(|(ballot, plan)| {
             Joined::Founded(FormedCell {
                 facts: facts.clone(),
                 plan,
                 ballot,
                 cached: None,
+                token,
             })
         })
     };
@@ -200,11 +204,20 @@ pub async fn wait_for_cell<P: Providers, L: CellLedger>(
                     });
                     continue;
                 }
-                reply.send(answer_form(facts, ledger, &request).await);
+                let had_vote = ledger.vote().is_some();
+                let ack = answer_form(facts, ledger, &request).await;
+                if ack.formed && !had_vote {
+                    // This `FormCell` formed the machine: its token passed the
+                    // pin above (or the machine is not pinned).
+                    assert!(ledger.vote().is_some(), "a formed ack records the vote");
+                    assert!(formation.is_none(), "a machine forms once");
+                    formation = Some(FormationToken::new(request.token.clone()));
+                }
+                reply.send(ack);
                 // A decree this machine drives finishes before it stops
                 // waiting: its own accept is the decree's last.
                 if proposal.is_none()
-                    && let Some(cell) = formed(ledger)
+                    && let Some(cell) = formed(ledger, formation.clone())
                 {
                     flush(&providers, &mut edge).await;
                     return Ok(Some(cell));
@@ -243,7 +256,7 @@ pub async fn wait_for_cell<P: Providers, L: CellLedger>(
                         reply.send(refused(refusal));
                     }
                 }
-                if let Some(cell) = formed(ledger) {
+                if let Some(cell) = formed(ledger, formation.clone()) {
                     flush(&providers, &mut edge).await;
                     return Ok(Some(cell));
                 }
@@ -320,6 +333,7 @@ async fn answer_prepare<L: CellLedger>(
             plan,
             ballot: voted,
             cached: None,
+            token: None,
         }
         .prepare_ack();
     }
@@ -393,6 +407,7 @@ async fn answer_form<L: CellLedger>(
             plan: held,
             ballot: voted,
             cached: None,
+            token: None,
         }
         .form_ack(request);
     }

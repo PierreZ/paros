@@ -87,19 +87,21 @@ the fleet and adds the cell, `READY`. Every step is idempotent: re-running
 (`already_initialized`).
 
 **Tenants.** `parosctl tenant create acme` registers a `{users}` tenant in
-the fleet directory (`REGISTERING`, under a random id and a random control journal), has the
-cell host it, then marks it `READY`; the CLI never creates an `internal` tenant
+the fleet directory (`REGISTERING`, under a random id and a random control journal), waits
+until the cell coordinator books its footprint and hosts it, then marks it `READY`; the CLI never creates an `internal` tenant
 (the fleet tenant, `{internal, fleet}`, and the cell tenant, `{internal, cell}`, which
-`init` registers); `parosctl tenant delete acme` marks it `REMOVING`, has the cell drop
-it, then removes it; `parosctl tenant list` prints the fleet directory. An interrupted
+`init` registers); `parosctl tenant delete acme` marks it `REMOVING`, waits until the cell
+coordinator drops it, then removes it (#225: only the coordinator writes the cell control
+journal); `parosctl tenant list` prints the fleet directory. An interrupted
 delete is resumed by running it again. A tenant is created once: a second
 `create` of a name the fleet tenant holds is refused (`name_taken`), and an interrupted
 creation stays `REGISTERING` until it is deleted (the coordinator of #225 will
 finish it). `--survives az|region` sets what the tenant's journals survive
 (#252). Every tenant has its own **control journal** (#210): the cell's
 founding members serve it, and it holds the tenant's description (its name,
-what it survives, its cell) and every journal it created. A tenant's
-footprint is not booked yet (#212).
+what it survives, its cell) and every journal it created. The cell
+coordinator books a tenant's footprint before it hosts it (#476); a cell with
+too few free slots refuses the tenant (`no_footprint`).
 
 **Journals.** `parosctl journal create acme orders` sends a request to the
 **tenant coordinator** — until #212 and #225, the elected cell coordinator, at
@@ -198,6 +200,10 @@ error (exit 2), so a typo never silently keeps a default.
 | `PAROS_<FIELD>[_MS]` | one override per driver tunable (below) |
 | `PAROS_TLS_CERT`, `PAROS_TLS_KEY`, `PAROS_TLS_CA` | its certificate chain, its key and the universe's authority, PEM (`parosctl tls init`): all three turn TLS on for every session it serves and dials; only some is an error |
 | `PAROS_TLS_CLIENT_AUTH` | `required` (mutual TLS, the default), `optional` or `off` (server-authenticated TLS): what it asks of a caller |
+| `PAROS_HTTP_LISTEN` | `HOST:PORT` of the HTTP endpoint (#366 (metrics)): `/metrics` (Prometheus text), `/healthz` and `/readyz`; none when unset |
+| `PAROS_OTLP_ENDPOINT` | an OpenTelemetry collector's OTLP/gRPC URL: spans and metrics are pushed there; none when unset |
+| `PAROS_OTLP_TRACES_ENDPOINT`, `PAROS_OTLP_METRICS_ENDPOINT` | one signal's collector, in place of `PAROS_OTLP_ENDPOINT` |
+| `PAROS_OTLP_INTERVAL_MS` | how often the metrics are pushed (default `10000`, at least `100`) |
 | `RUST_LOG` | the log filter (default `warn,parosd=info`) |
 
 Every address is `HOST:PORT` with an explicit port; the host is an IP or a
@@ -313,7 +319,7 @@ required, with no default tenant and no fixed id (#235, #239, `docs/architecture
 | `parosctl inspect [--journal J]` | every server's view of journal `J`: leader, ballot, members and quorum system, chosen index, floor, fold, GC watermark, retirable nodes, matchmakers; without `--journal`, every server's own facts (node id, cell, control journals): no journal is inspected by default (#243) |
 | `parosctl reconfigure --journal J --members a,b,c [--quorum majority\|flexible:Q1:Q2\|partitions:F:P]` | asks the leader of journal `J` for a new acceptor set; no journal is the default (#439), and a machine that does not serve `J` refuses it (`unknown_journal`) |
 | `parosctl retire --journal J --node N [--gc-watermark ROUND.NODE]` | retires a machine from journal `J`, carrying the GC watermark (read from the `inspect` of `J`'s leader when absent); the machine keeps serving its other journals |
-| `parosctl bench [--tenant T] [--journals N] [--clients N] [--duration D] [--ramp D] [--read-percent P] [--histograms FILE]` | the load generator (#517 (`parosctl bench`)): closed-loop clients `write` and `read-tail` the journals `bench-0`… of tenant `T` (created when missing), print throughput and latency per call each second, then the totals; `--histograms` writes the raw HDR histograms as JSON lines; the site's bench page |
+| `parosctl bench [--local N [--local-dir DIR]] [--tenant T] [--journals N] [--clients N] [--duration D] [--ramp D] [--mix CALL=W,…] [--rate R] [--truncate-every D] [--histograms FILE]` | the load generator (#517 (`parosctl bench`), #194 (throughput benchmark)): clients `write`, `read-tail`, `read-start` and `set-leader` the journals `bench-0`… of tenant `T` (created when missing) by the `--mix` weights, closed loop or open loop at `--rate` calls per second, against the servers or a local cell of N machines; they print throughput and latency per call each second, then the totals; `--json` prints one report with the commit and the host; `--histograms` writes the raw HDR histograms as JSON lines; the site's bench page |
 | `parosctl store inspect <data-dir> [--records] [--layout default\|small] [--scratch DIR]` | offline (#365): reads a stopped machine's disk without `parosd`: the machine record, every journal store (format marker and its `Config`, promise, chosen index, floor, sealed journal state, faulty slots; `--records`: every accepted slot and its records) and every matchmaker set (marker, generation, phase, registrations). Read-only: each store is copied to a scratch directory (`--scratch`, by default a fresh one under the system's temporary directory, removed after) and the copy is opened. Names come from the cell's journals on the disk; exit 3 when the record or a store does not read |
 | `parosctl tls init --out DIR --machines a,b,c [--frontends f] [--admins admin] [--universe U] [--days N]` | offline: writes the authority (`ca.crt`, `ca.key`) and a certificate per machine, frontend and admin (`<name>.crt`, `<name>.key`, mode 0600), and prints the variables each process reads; never overwrites a file |
 | `parosctl tls ca`, `parosctl tls issue <name> --role machine\|frontend\|admin\|client --ca-dir DIR [--host h] [--ip a]` | one authority, or one more certificate from it (a new machine, a renewal) |

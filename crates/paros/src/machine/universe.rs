@@ -1,6 +1,7 @@
-//! **The cell's side of the universe** (#513 (fleet Init duel),
+//! **The cell's side of the universe** (#513 (fleet Init duel), #225,
 //! `docs/architecture.md` §3.1, §3.7): the cell coordinator writes the
-//! cell's `JoinFleet` into the cell control journal, its one writer.
+//! cell's `JoinFleet`, and each tenant's footprint, `HostTenant` and
+//! `DropTenant`, into the cell control journal, its one writer.
 //!
 //! `init`'s fleet half adds the cell to the universe directory (`AddCell`).
 //! The cell coordinator reads that directory, which the cell hosts, and
@@ -17,22 +18,38 @@
 //! `Superseded`, red on "fleet: an operation an operator stopped in ends in
 //! the recovery tail").
 //!
-//! The coordinator joins the cell at its install (an interrupted `init`) and
-//! at every watch round until the cell joined. A read of the directory that
-//! does not reach its tail writes nothing: the next round reads again.
+//! The coordinator follows the directory at its install (an interrupted
+//! operation) and at every watch round ([`follow`]). A read of the directory
+//! that does not reach its tail writes nothing: the next round reads again.
+//!
+//! **Tenant operations** (#225, decided on 2026-10-15). The same reading
+//! writes the cell's step of each tenant operation the directory holds in
+//! flight for this cell ([`tenant_steps`]). For a `REGISTERING` tenant the
+//! cell neither hosts nor dropped: its birth footprint first
+//! (`GrantCapacity`, #476 (tenant footprint)), then `HostTenant` once the
+//! footprint is granted. For a `REMOVING` tenant it has not dropped:
+//! `DropTenant`. The operator writes only the
+//! directory steps, and waits for the cell's step in between
+//! ([`crate::client::fleet`]). So a tenant's creation or removal never
+//! claims the cell control journal either. The directory entry is the work
+//! order: the coordinator acts on every entry, whoever registered it. A
+//! `HostTenant` decided from a stale directory, after a removal moved the
+//! entry to `REMOVING`, is refused at apply once the tombstone landed.
 //! A cell whose plan names no fleet journal (a cell that does not host the
 //! universe tenant, M12) is never joined here: `universe add-cell` owns
 //! that join.
 
 use moonpool_core::Providers;
+use paros_core::TenantId;
 
 use crate::client::Client;
 use crate::client::cell::CellSession;
 use crate::client::checkpoint::{Folder, LoadOutcome, load};
 use crate::client::fleet::Interrupted;
-use crate::fleet::{CellState, FleetDirectory, METADATA_VERSION};
+use crate::fleet::{CellState, FleetDirectory, Groups, METADATA_VERSION, TenantState};
+use crate::footprint::{self, Footprint};
 use crate::machine::ControlJournals;
-use crate::system::SystemCommand;
+use crate::system::{GrantKey, HostedTenant, Registry, SystemCommand};
 
 /// The `JoinFleet` the universe directory `directory` asks of the cell
 /// `journals` names: the directory holds a fleet and an entry for this
@@ -64,55 +81,215 @@ pub(crate) fn joining(
     })
 }
 
-/// Join the cell to the universe through the term's `session`, when the
-/// cell has not joined and the universe directory (folded into `directory`,
-/// from where it stands) holds this cell. Whether it wrote `JoinFleet`.
+/// The cell step of each tenant operation that the universe directory
+/// `directory` holds in flight for this cell (#225; the tenant half of #513
+/// (fleet Init duel)), at most one per tenant, from the cell `registry`.
+/// For each `users` tenant of cell `cell_id` that the cell has not dropped:
+///
+/// - `REGISTERING` and not hosted: first its birth footprint (#476), a
+///   `GrantCapacity` that books every slot [`footprint::plan`] finds, or a
+///   refusal when the slots do not fit. A refusal waits until every founding
+///   member registered ([`footprint::ready`]): an unregistered founder
+///   offers no slot yet. Then, once the footprint is granted, `HostTenant`.
+///   A refused footprint asks nothing more: the operator marks the tenant
+///   `ERROR`.
+/// - `REMOVING`: `DropTenant`.
+///
+/// The list is empty until the cell `registry` folds joined the directory's
+/// fleet under `cell_id`: before that, the fold refuses a tenant entry.
+#[must_use]
+pub(crate) fn tenant_steps(
+    directory: &FleetDirectory,
+    registry: &Registry,
+    cell_id: u64,
+) -> Vec<SystemCommand> {
+    let Some(fleet_id) = directory.fleet() else {
+        return Vec::new();
+    };
+    let joined = registry.fleet();
+    if joined.is_none_or(|f| (f.fleet_id, f.cell_id) != (fleet_id, cell_id)) {
+        return Vec::new();
+    }
+    let mut steps = Vec::new();
+    for (tenant, entry) in directory.tenants() {
+        if entry.cell_id != cell_id || entry.groups != Groups::SERVED {
+            continue;
+        }
+        assert!(tenant.is_set(), "a directory entry names a set tenant");
+        assert!(
+            entry.control.is_set(),
+            "a directory entry names a set control journal"
+        );
+        // A dropped tenant is never hosted again, and its tombstone holds.
+        if registry.dropped(tenant) {
+            continue;
+        }
+        match entry.state {
+            TenantState::Registering if !registry.hosts(tenant) => {
+                let step = match registry.footprint(tenant) {
+                    Some(grant) if grant.granted() => Some(SystemCommand::HostTenant {
+                        fleet_id,
+                        tenant,
+                        hosted: HostedTenant {
+                            control: entry.control,
+                            name: entry.name.clone(),
+                            survives: entry.survives,
+                        },
+                    }),
+                    // The operator marks the tenant ERROR.
+                    Some(_) => None,
+                    None => footprint_grant(registry, tenant),
+                };
+                steps.extend(step);
+            }
+            // The tombstone goes down whether the cell hosts the tenant or
+            // not: a stale host step can then never host it.
+            TenantState::Removing => {
+                steps.push(SystemCommand::DropTenant { fleet_id, tenant });
+            }
+            _ => {}
+        }
+    }
+    assert!(
+        steps.len() <= directory.tenants().count(),
+        "at most one step per tenant"
+    );
+    steps
+}
+
+/// The `GrantCapacity` that records `tenant`'s birth footprint from
+/// `registry` (#476): every slot when the plan fits, a refusal when it does
+/// not and every founding member registered, else `None` (a founder that
+/// registers later may offer the slots).
+fn footprint_grant(registry: &Registry, tenant: TenantId) -> Option<SystemCommand> {
+    assert!(
+        registry.footprint(tenant).is_none(),
+        "a footprint is recorded once"
+    );
+    let slots = match footprint::plan(registry, tenant, &Footprint::birth()) {
+        Ok(slots) => Some(slots),
+        Err(_) if !footprint::ready(registry) => return None,
+        Err(_) => None,
+    };
+    assert!(
+        slots.as_ref().is_none_or(|slots| !slots.is_empty()),
+        "a granted footprint books slots"
+    );
+    Some(SystemCommand::GrantCapacity {
+        key: GrantKey::Footprint(tenant),
+        tenant,
+        slots,
+    })
+}
+
+/// Follow the universe directory through the term's `session`. Fold the
+/// directory into `directory` from where it stands. Then join the cell to
+/// the universe when the cell has not joined and the directory holds it.
+/// Then write the cell step of each tenant operation the directory holds in
+/// flight ([`tenant_steps`]). Returns how many entries it wrote.
 ///
 /// # Errors
 ///
-/// The write did not land: the term writes nothing more.
+/// A write did not land: the term writes nothing more.
 ///
 /// # Panics
 ///
-/// If the session is not open (a programmer error), or a written join is
+/// If the session is not open (a programmer error), or a written entry is
 /// not in the session's fold.
-pub(crate) async fn join<P: Providers>(
+pub(crate) async fn follow<P: Providers>(
     client: &Client<P>,
     session: &mut CellSession,
     directory: &mut Folder<FleetDirectory>,
-) -> Result<bool, Interrupted> {
-    assert!(session.is_open(), "only an open session joins the cell");
+) -> Result<usize, Interrupted> {
+    assert!(
+        session.is_open(),
+        "only an open session follows the universe"
+    );
     let journals = session.journals();
     let Some(universe) = journals.fleet else {
-        return Ok(false);
+        return Ok(0);
     };
-    if session.registry().fleet().is_some() {
-        return Ok(false);
-    }
     if !matches!(
         load(directory, universe, client, 0, 0).await,
         LoadOutcome::Loaded { .. }
     ) {
-        return Ok(false);
+        return Ok(0);
     }
-    let Some(join) = joining(directory.state(), journals) else {
-        return Ok(false);
-    };
-    session.record(client, 0, &join).await?;
-    // The fold judges the join at apply: another fleet's id is refused, so
-    // the cell names this fleet or none.
-    let joined = session.registry().fleet();
-    assert!(
-        joined.is_none_or(|f| f.cell_id == journals.cell_id),
-        "a cell joins under its own id"
-    );
-    moonpool_assertions::reachable!("fleet: a step joins the cell to the fleet");
-    Ok(true)
+    let mut wrote = 0;
+    if session.registry().fleet().is_none()
+        && let Some(join) = joining(directory.state(), journals)
+    {
+        session.record(client, 0, &join).await?;
+        // The fold judges the join at apply: another fleet's id is refused,
+        // so the cell names this fleet or none.
+        let joined = session.registry().fleet();
+        assert!(
+            joined.is_none_or(|f| f.cell_id == journals.cell_id),
+            "a cell joins under its own id"
+        );
+        moonpool_assertions::reachable!("fleet: a step joins the cell to the fleet");
+        wrote += 1;
+    }
+    // A tenant's birth takes two steps, its footprint then its host: a
+    // second pass writes the host of a footprint the first one granted.
+    for _ in 0..TENANT_PASSES {
+        let steps = tenant_steps(directory.state(), session.registry(), journals.cell_id);
+        if steps.is_empty() {
+            break;
+        }
+        for step in steps {
+            session.record(client, 0, &step).await?;
+            note(session.registry(), &step);
+            wrote += 1;
+        }
+    }
+    Ok(wrote)
+}
+
+/// How many times one [`follow`] asks [`tenant_steps`]: a tenant's birth
+/// is a footprint, then a host. A step the fold refused is asked again at
+/// the next watch round, so the bound also ends a round.
+const TENANT_PASSES: usize = 2;
+
+/// Check that the recorded tenant `step` is in the fold `registry`.
+fn note(registry: &Registry, step: &SystemCommand) {
+    match *step {
+        SystemCommand::GrantCapacity {
+            key: GrantKey::Footprint(tenant),
+            ref slots,
+            ..
+        } => {
+            // The fold refuses a slot whose machine left meanwhile: the
+            // next round plans again from the fold.
+            if let Some(grant) = registry.footprint(tenant) {
+                assert_eq!(
+                    grant.granted(),
+                    slots.is_some(),
+                    "a recorded footprint is the one written"
+                );
+                moonpool_assertions::reachable!("fleet: a step records a tenant's footprint");
+            }
+        }
+        SystemCommand::HostTenant { tenant, .. } => {
+            // The fold refuses a tenant dropped meanwhile.
+            assert!(
+                registry.hosts(tenant) || registry.dropped(tenant),
+                "a hosted tenant is in the fold"
+            );
+            moonpool_assertions::reachable!("fleet: a step hosts a tenant on the cell");
+        }
+        SystemCommand::DropTenant { tenant, .. } => {
+            assert!(registry.dropped(tenant), "a dropped tenant is tombstoned");
+            assert!(!registry.hosts(tenant), "a dropped tenant is not hosted");
+            moonpool_assertions::reachable!("fleet: a step drops a tenant from the cell");
+        }
+        _ => unreachable!("a tenant step books, hosts or drops"),
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use paros_core::{JournalId, JournalIdentifier, TenantId};
+    use paros_core::{JournalId, JournalIdentifier, NodeId, TenantId};
 
     use super::*;
     use crate::client::checkpoint::Checkpointable;
@@ -196,5 +373,167 @@ mod tests {
             },
         );
         assert_eq!(joining(&directory, journals), None);
+    }
+
+    fn founder(capacity: u64) -> SystemCommand {
+        SystemCommand::RegisterNode {
+            id: NodeId(1),
+            addr: "n1".to_owned(),
+            class: crate::machine::Class::Storage,
+            capacity,
+            failure_domain: String::new(),
+            name: String::new(),
+            incarnation: 1,
+            machine_interface: Vec::new(),
+        }
+    }
+
+    /// A directory whose fleet holds this cell `READY` and the `users`
+    /// tenant 20 `REGISTERING` on it.
+    fn registering(journals: ControlJournals) -> FleetDirectory {
+        let mut directory = FleetDirectory::default();
+        let fleet = journals.fleet.expect("a fleet journal");
+        let commands = [
+            FleetCommand::FormFleet {
+                control: fleet,
+                name: Vec::new(),
+            },
+            FleetCommand::AddCell {
+                cell_id: journals.cell_id,
+                control: journals.cell,
+                name: Vec::new(),
+            },
+            FleetCommand::MarkCell {
+                cell_id: journals.cell_id,
+                state: CellState::Ready,
+            },
+            FleetCommand::RegisterTenant {
+                control: JournalIdentifier::new(TenantId(20), JournalId(21)),
+                name: b"a".to_vec(),
+                cell_id: journals.cell_id,
+                survives: crate::tenant::Survives::Az,
+            },
+        ];
+        for (seq, command) in (0..).zip(commands) {
+            apply(&mut directory, seq, command);
+        }
+        directory
+    }
+
+    #[test]
+    fn a_refused_footprint_asks_nothing_more_until_the_removal() {
+        let journals = journals();
+        let mut directory = registering(journals);
+        let tenant = TenantId(20);
+        let mut registry = Registry::new([NodeId(1)]);
+        let commands = [
+            joining(&directory, journals).expect("the directory asks the join"),
+            founder(1),
+        ];
+        for (seq, command) in (0..).zip(&commands) {
+            registry.apply(seq, &command.encode());
+        }
+        // One slot: the footprint does not fit, and every founder registered.
+        let steps = tenant_steps(&directory, &registry, journals.cell_id);
+        assert_eq!(
+            steps,
+            vec![SystemCommand::GrantCapacity {
+                key: GrantKey::Footprint(tenant),
+                tenant,
+                slots: None,
+            }]
+        );
+        registry.apply(2, &steps[0].encode());
+        assert!(registry.footprint(tenant).is_some_and(|g| !g.granted()));
+        // The operator marks the tenant ERROR: the cell never hosts it.
+        assert!(tenant_steps(&directory, &registry, journals.cell_id).is_empty());
+        apply(
+            &mut directory,
+            4,
+            FleetCommand::MarkTenant {
+                tenant,
+                state: TenantState::Removing,
+            },
+        );
+        assert_eq!(
+            tenant_steps(&directory, &registry, journals.cell_id),
+            vec![SystemCommand::DropTenant {
+                fleet_id: 42,
+                tenant
+            }]
+        );
+    }
+
+    #[test]
+    fn the_coordinator_hosts_a_registering_tenant_and_drops_a_removing_one() {
+        let journals = journals();
+        let mut directory = registering(journals);
+        let tenant = TenantId(20);
+        assert_eq!(
+            directory.tenant(tenant).map(|t| t.state),
+            Some(TenantState::Registering)
+        );
+        let mut registry = Registry::new([NodeId(1)]);
+        // Before the cell joined, it hosts nothing: its fold would refuse it.
+        assert!(tenant_steps(&directory, &registry, journals.cell_id).is_empty());
+        let mut seq = 0;
+        let mut write = |registry: &mut Registry, command: &SystemCommand| {
+            registry.apply(seq, &command.encode());
+            seq += 1;
+        };
+        write(
+            &mut registry,
+            &joining(&directory, journals).expect("the directory asks the join"),
+        );
+        // The founding member has not registered: it offers no slot, and
+        // the cell refuses no footprint before it does.
+        assert!(tenant_steps(&directory, &registry, journals.cell_id).is_empty());
+        write(&mut registry, &founder(16));
+        let steps = tenant_steps(&directory, &registry, journals.cell_id);
+        assert_eq!(steps.len(), 1);
+        assert!(matches!(
+            &steps[0],
+            SystemCommand::GrantCapacity { key: GrantKey::Footprint(t), slots: Some(_), .. }
+                if *t == tenant
+        ));
+        // Another cell's tenant asks nothing of this one.
+        assert!(tenant_steps(&directory, &registry, journals.cell_id + 1).is_empty());
+        write(&mut registry, &steps[0]);
+        assert!(
+            registry
+                .footprint(tenant)
+                .is_some_and(crate::system::Grant::granted)
+        );
+        let steps = tenant_steps(&directory, &registry, journals.cell_id);
+        assert_eq!(steps.len(), 1);
+        assert!(matches!(
+            &steps[0],
+            SystemCommand::HostTenant { fleet_id: 42, tenant: t, hosted }
+                if *t == tenant && hosted.control == JournalId(21) && hosted.name == b"a"
+        ));
+        write(&mut registry, &steps[0]);
+        assert!(registry.hosts(tenant));
+        assert!(tenant_steps(&directory, &registry, journals.cell_id).is_empty());
+        apply(
+            &mut directory,
+            4,
+            FleetCommand::MarkTenant {
+                tenant,
+                state: TenantState::Removing,
+            },
+        );
+        let steps = tenant_steps(&directory, &registry, journals.cell_id);
+        assert_eq!(
+            steps,
+            vec![SystemCommand::DropTenant {
+                fleet_id: 42,
+                tenant
+            }]
+        );
+        write(&mut registry, &steps[0]);
+        assert!(registry.dropped(tenant));
+        assert!(!registry.hosts(tenant));
+        // A dropped tenant asks nothing more, and is never hosted again.
+        assert!(tenant_steps(&directory, &registry, journals.cell_id).is_empty());
     }
 }

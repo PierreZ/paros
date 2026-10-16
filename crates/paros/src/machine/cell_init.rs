@@ -451,7 +451,7 @@ fn draw_plan<P: Providers>(
 /// within `patience`, and collect every answer in address order: `None`
 /// where nothing came back. Each address is resolved as it is dialed
 /// (#257): a name that does not resolve is an address that did not answer.
-async fn fan_out<P: Providers, M: WellKnownMethod>(
+pub(super) async fn fan_out<P: Providers, M: WellKnownMethod>(
     providers: &P,
     rpc: &RpcHandle<P>,
     names: &Names,

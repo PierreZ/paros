@@ -350,7 +350,10 @@ impl NodeShape {
             // re-sends (one per beat). Floor 1: a round moved after a single
             // re-send runs in a second column while the first may still
             // decide it, and the two verdicts must agree (one ballot, one
-            // value) — the state worth reaching. The ceiling leaves a stuck
+            // value) — the state worth reaching. The floor stays winnable
+            // because each move doubles the budget (`move_budget`): a round
+            // that flips between columns faster than one round trip gets a
+            // longer window after a few moves. The ceiling leaves a stuck
             // column's slots to the next leadership; the tail outlasts it.
             partition_move_resends: buggify_knob!(10_u64, 1_u64..4_u64),
             // A quarantined journal's re-open delay (#188), in ticks. Floor
@@ -793,6 +796,9 @@ struct Registry {
     /// Run-level: whether the run draws the slow-machine scenario (see
     /// [`slow_machine`]), fixed by the first caller.
     slow_machine: Option<bool>,
+    /// Run-level: whether the machines run without metrics (see
+    /// [`unmetered`]), fixed by the first caller.
+    unmetered: Option<bool>,
     /// Run-level: when the clients' operations end (see [`run_end`]), fixed
     /// by the first caller.
     run_end: Option<Duration>,
@@ -1311,6 +1317,20 @@ pub(crate) fn run_end(state: &StateHandle) -> Duration {
 }
 
 const _: () = assert!(120_000 <= crate::CHAOS_CAP.as_millis());
+
+/// Whether the run's machines record **no metrics** (#366 (metrics)): drawn
+/// once per seed, its own BUGGIFY location. Metrics are observation only,
+/// so a run without them must pass the same oracles as a run with them;
+/// on a metered run the counters must match the audit's own fold of the
+/// calls (`crate::chain_workload`'s check).
+#[tracing::instrument(level = "debug", skip_all)]
+pub(crate) fn unmetered(state: &StateHandle) -> bool {
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    *guard
+        .unmetered
+        .get_or_insert_with(|| moonpool_sim::buggify_with_prob!(1.0))
+}
 
 pub(crate) fn slow_machine(state: &StateHandle) -> bool {
     let registry = registry(state);

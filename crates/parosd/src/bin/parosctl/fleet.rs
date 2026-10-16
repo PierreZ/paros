@@ -216,6 +216,13 @@ pub fn interrupted(stop: &Interrupted) -> Ending {
             );
             Ending::Unreachable
         }
+        Interrupted::NotHosted { .. } | Interrupted::NotDropped { .. } => {
+            note(
+                "the cell coordinator has not written the cell's step for this tenant yet: \
+                 nothing was lost, run the same command again",
+            );
+            Ending::Unreachable
+        }
         _ => Ending::Unreachable,
     }
 }
