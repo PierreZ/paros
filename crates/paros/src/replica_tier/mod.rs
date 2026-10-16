@@ -134,7 +134,7 @@ async fn drain<S: LogStorage, A: Audit>(
             _ => None,
         })
         .collect();
-    let committed: Vec<(Slot, Command, Outcome)> = ready.committed().to_vec();
+    let committed: Vec<(Slot, Ballot, Command, Outcome)> = ready.committed().to_vec();
     let read_states: Vec<ReadState> = ready.read_states().to_vec();
     ready.advance();
 
@@ -151,13 +151,13 @@ async fn drain<S: LogStorage, A: Audit>(
         hinted.await;
     }
     send_messages(out, audit, replica.config().journal, messages);
-    for (slot, command, outcome) in &committed {
+    for (slot, _, command, outcome) in &committed {
         let outcome = (*outcome != Outcome::Noop).then_some(outcome);
         report_applied(audit, self_id, *slot, command, outcome);
     }
     let head = fold_head(replica);
     // Every slot this batch reported is in the fold it hands back.
-    if let Some((last, _, _)) = committed.last() {
+    if let Some((last, _, _, _)) = committed.last() {
         assert!(
             head.is_some_and(|head| head >= *last),
             "a drained batch's fold covers every slot it reported"

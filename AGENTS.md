@@ -73,7 +73,8 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
 - **Never merge on red; always fix** (decided on 2026-10-15). A PR merges only on green CI,
   and a red is fixed, not merged past, even when it is not the PR's own (a rare seed, a gate
   that missed). When several threads are red at once, ask the coordinator for one fix-main
-  thread advised by Fable, which makes main's sweep green for all of them.
+  thread advised by Fable, which makes main's sweep green for all of them. A fix-main PR
+  merges without review once every CI job is green (decided on 2026-10-16).
 - **Meta issue #69** (`meta: up next`) is the rolling backlog pointer, exactly ten issues (raised from three on 2026-10-04);
   update it in the session that merges a PR closing or advancing one (`meta-issue-upkeep` skill).
 - **Moonpool questions**: read <https://pierrez.github.io/moonpool/llms.html> before its source

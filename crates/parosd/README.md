@@ -87,19 +87,21 @@ the fleet and adds the cell, `READY`. Every step is idempotent: re-running
 (`already_initialized`).
 
 **Tenants.** `parosctl tenant create acme` registers a `{users}` tenant in
-the fleet directory (`REGISTERING`, under a random id and a random control journal), has the
-cell host it, then marks it `READY`; the CLI never creates an `internal` tenant
+the fleet directory (`REGISTERING`, under a random id and a random control journal), waits
+until the cell coordinator books its footprint and hosts it, then marks it `READY`; the CLI never creates an `internal` tenant
 (the fleet tenant, `{internal, fleet}`, and the cell tenant, `{internal, cell}`, which
-`init` registers); `parosctl tenant delete acme` marks it `REMOVING`, has the cell drop
-it, then removes it; `parosctl tenant list` prints the fleet directory. An interrupted
+`init` registers); `parosctl tenant delete acme` marks it `REMOVING`, waits until the cell
+coordinator drops it, then removes it (#225: only the coordinator writes the cell control
+journal); `parosctl tenant list` prints the fleet directory. An interrupted
 delete is resumed by running it again. A tenant is created once: a second
 `create` of a name the fleet tenant holds is refused (`name_taken`), and an interrupted
 creation stays `REGISTERING` until it is deleted (the coordinator of #225 will
 finish it). `--survives az|region` sets what the tenant's journals survive
 (#252). Every tenant has its own **control journal** (#210): the cell's
 founding members serve it, and it holds the tenant's description (its name,
-what it survives, its cell) and every journal it created. A tenant's
-footprint is not booked yet (#212).
+what it survives, its cell) and every journal it created. The cell
+coordinator books a tenant's footprint before it hosts it (#476); a cell with
+too few free slots refuses the tenant (`no_footprint`).
 
 **Journals.** `parosctl journal create acme orders` sends a request to the
 **tenant coordinator** — until #212 and #225, the elected cell coordinator, at

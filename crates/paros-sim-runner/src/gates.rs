@@ -114,6 +114,14 @@ pub const RARE: &[Rare] = &[
         reason: "a reconfiguration onto a joiner on a registry seed: 12 hits in 1,000 hunt seeds (#477 (retire coordination moves into the control journals))",
     },
     Rare {
+        msg: "driver: a call's slot decided an equal command at another ballot",
+        reason: "marginal: needs a handed-on leader that parks a re-sent multi-writer append on a slot its minter decided with the same bytes; fired on 1 of 300 hunt seeds, missed by PR #584's sweep (#570 (election duel), #486)",
+    },
+    Rare {
+        msg: "admit: a pinned machine denies a tenant token",
+        reason: "marginal: needs pinned machines and the 15% tenant-token draw on an admission; fired 4 times in main's sweep at 629aa62, missed by PR #584's sweep (#245 (Biscuit tokens), #486)",
+    },
+    Rare {
         msg: "footprint: a dead tenant coordinator is placed again",
         reason: "marginal: needs two admitted stateless machines and the one holding a tenant coordinator's slot marked down (#476 (tenant footprint)); missed by PR #556's sweep (#486)",
     },
@@ -148,10 +156,6 @@ pub const RARE: &[Rare] = &[
     Rare {
         msg: "grid: the driver skips a column when it moves a round",
         reason: "marginal: needs a three-column grid (a pool of six) and the skip's BUGGIFY location on the same seed; 55 checks in 600 hunt seeds, but the sweep missed it once (#533 (move a stuck round), #486)",
-    },
-    Rare {
-        msg: "fleet: a creation waits for its founders without claiming the cell",
-        reason: "marginal: needs a tenant creation while a founding member is still unregistered; missed by main's sweep at 629aa62 and by PR #588's sweep. PR #585 (the cell coordinator writes tenant cell steps) deletes the gate with the path it guards (#225, #486)",
     },
     Rare {
         msg: "phase1: a full promise page mixes readable and faulty entries",

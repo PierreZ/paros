@@ -171,7 +171,7 @@ impl Tier {
             ready
                 .committed()
                 .iter()
-                .map(|(slot, command, _)| (*slot, command.clone())),
+                .map(|(slot, _, command, _)| (*slot, command.clone())),
         );
         self.served[r].extend(ready.read_states().iter().copied());
         let out = ready

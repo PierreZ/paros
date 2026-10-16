@@ -26,15 +26,21 @@
 //!   footprints (#476 (tenant footprint)).
 //! - **Creating a tenant**: a `{users}` tenant only — the tenant API cannot
 //!   create an `internal` one. The fleet tenant registers it `REGISTERING` with its
-//!   identifier and its cell assignment (the one `READY` cell in M9), the cell
-//!   hosts it (`HostTenant`), the fleet tenant marks it `READY`. A
-//!   name the fleet tenant holds in `REGISTERING` — an earlier run's, whoever ran it — is
-//!   resumed under its id; a name held `READY` ends the operation at once.
-//!   Before `HostTenant` the cell books the tenant's footprint
-//!   ([`crate::footprint`], #476 (tenant footprint)); a footprint the cell
-//!   refuses marks the tenant `ERROR` and ends the creation `NoFootprint`.
-//! - **Removing a tenant**: the fleet tenant marks it `REMOVING`, the cell drops it (a
-//!   tombstone, written whether the cell hosted it or not), the fleet tenant removes it.
+//!   identifier and its cell assignment (the one `READY` cell in M9). The
+//!   cell coordinator reads the entry, books the tenant's footprint
+//!   (`GrantCapacity`, [`crate::footprint`], #476 (tenant footprint)) and
+//!   hosts the tenant (`HostTenant`, [`crate::machine`], #225). The operator
+//!   waits for both ([`Interrupted::NotHosted`]; while a founding member
+//!   is not registered, the cell refuses no footprint, so the creation
+//!   waits). Then the fleet tenant marks it `READY`. A footprint the cell refused makes the
+//!   operator mark the tenant `ERROR` and end the creation `NoFootprint`.
+//!   A creation is resumed only under its own identifier; a name held
+//!   `READY` under it ends the operation at once.
+//! - **Removing a tenant**: the fleet tenant marks it `REMOVING`. The cell
+//!   coordinator reads the entry and drops the tenant (`DropTenant`, a
+//!   tombstone, written whether the cell hosted it or not): the operator
+//!   waits for it ([`Interrupted::NotDropped`]). Then the fleet tenant
+//!   removes it.
 //! - **Root keys** (#245 (Biscuit tokens)): `init` writes its root public key
 //!   into the universe entry right after `FormFleet`, when the directory holds
 //!   no key yet ([`FleetSession::with_root_key`]); `universe key add` and
@@ -43,34 +49,38 @@
 //!
 //! **Every step checks it still talks to the same fleet and the same cell**
 //! (FDB's `MetaclusterOperationContext`): every entry names the fleet the fleet tenant
-//! formed, and both folds refuse another; before a cell step, the cell's own
-//! registration must name the fleet directory's fleet and the cell the tenant is assigned to
-//! ([`FleetRefusal::CellMismatch`]).
+//! formed, and both folds refuse another; before it waits on a cell step, the
+//! cell's own registration must name the fleet directory's fleet and the cell
+//! the tenant is assigned to ([`FleetRefusal::CellMismatch`]).
 //!
-//! **A cell step decided from a stale fleet directory fold is judged by the cell.** A
-//! step reads the fleet tenant, then writes the cell; between the two another operator
-//! may remove the tenant from the fleet directory (fencing this one's fleet directory fold, not its claim
-//! of the cell). Such a removal always tombstones the tenant on the cell
-//! first, and the cell refuses to host a tombstoned tenant at apply, so the
-//! stale `HostTenant` changes nothing ([`FleetRefusal::Removed`]).
+//! **A cell step decided from a stale fleet directory fold is judged by the cell.** The
+//! cell coordinator reads the fleet tenant, then writes the cell; between the two an
+//! operator may move the tenant to `REMOVING`. A removal always tombstones the
+//! tenant on the cell before the fleet tenant forgets it, and the cell
+//! refuses to host a tombstoned tenant at apply, so a stale `HostTenant`
+//! changes nothing ([`FleetRefusal::Removed`]).
 //!
-//! **Who writes.** Both journals are written by the session that last claimed
-//! them with `SetLeader`, under a leader uuid drawn from the session's seed
-//! (#241). Each journal has one
-//! leader per term, so two operators running at once fence each other: the
-//! loser's write is refused, its run is [`Step::Interrupted`], and running it
-//! again resumes from what the winner wrote. `init` claims only the fleet
-//! tenant's journal: it reads the cell control journal and never claims it
-//! (#513 (fleet Init duel)). A claim there fenced the elected cell
+//! **Who writes.** The fleet tenant's journal is written by the session that
+//! last claimed it with `SetLeader`, under a leader uuid drawn from the
+//! session's seed (#241). It has one leader per term, so two operators
+//! running at once fence each other: the loser's write is refused, its run
+//! is [`Step::Interrupted`], and running it again resumes from what the
+//! winner wrote. No fleet operation claims the cell control journal: it
+//! reads it, and the elected cell coordinator, its one writer, writes the
+//! cell's step of each operation (`JoinFleet`, #513 (fleet Init duel);
+//! a tenant's footprint, `HostTenant` and `DropTenant`, #225). A claim
+//! there fenced the
 //! coordinator, whose next term installed a fresh uuid and fenced the
 //! operator in turn; with slow links each claim lost to the next install,
 //! and `init` did not end (witness 1522711066683701314 on a0c4aa6, red on
-//! "fleet: an operation an operator stopped in ends in the recovery tail",
-//! green after). Tenant creation and removal still claim the cell control
-//! journal for their one cell step (#212, #225). The fleet tenant is checkpointed as its
-//! owner writes it ([`crate::client::checkpoint`], #227); the cell's journal
-//! is never checkpointed here — its owner's fold is the registry's, over a
-//! genesis pool only the deployment knows.
+//! "fleet: an operation an operator stopped in ends in the recovery
+//! tail"). A tenant's creation and removal claimed it the same way until
+//! #225; the sweep of 07424f8 left two creations `REGISTERING` on that
+//! oracle (seed 15189977391382984753, green when replayed alone). The
+//! fleet tenant is checkpointed as its owner writes it
+//! ([`crate::client::checkpoint`], #227); the cell's journal is never
+//! checkpointed here — its owner's fold is the registry's, over a genesis
+//! pool only the deployment knows.
 //!
 //! Like the rest of the client it draws no randomness: tenant identifiers are the
 //! caller's draws, and [`FleetSession::create_tenant`] moves to the next one
@@ -84,15 +94,14 @@ use paros_core::{JournalIdentifier, NodeId, TenantId};
 use super::Client;
 use super::checkpoint::{
     AppendOutcome, CheckpointOutcome, CheckpointPolicy, Checkpointer, Folder, LoadOutcome,
-    OpenOutcome,
+    OpenOutcome, load,
 };
 use super::outcome::ClaimOutcome;
 use super::writer::{Writer, WriterOutcome};
 use crate::fleet::RootKeyEntry;
 use crate::fleet::{CellState, FleetCommand, FleetDirectory, FleetEntry, TenantState};
-use crate::footprint::{self, Footprint};
 use crate::machine::ControlJournals;
-use crate::system::{FleetRegistration, GrantKey, HostedTenant, Registry, SystemCommand};
+use crate::system::{FleetRegistration, Registry};
 use crate::tenant::Survives;
 
 /// One step a fleet operation wrote.
@@ -107,10 +116,6 @@ pub enum Stage {
     CellReady,
     /// The fleet tenant registered the tenant, `REGISTERING`.
     RegisterTenant,
-    /// The cell hosts the tenant.
-    HostTenant,
-    /// The cell recorded a tenant's footprint (#476): booked, or refused.
-    Footprint,
     /// The fleet tenant marked the tenant `ERROR`: its cell refused its
     /// footprint (#476).
     TenantError,
@@ -118,8 +123,6 @@ pub enum Stage {
     TenantReady,
     /// The fleet tenant marked the tenant `REMOVING`.
     TenantRemoving,
-    /// The cell dropped the tenant.
-    DropTenant,
     /// The fleet tenant removed the tenant.
     RemoveTenant,
     /// The cell registered a machine it admits (`RegisterNode`, #216).
@@ -250,16 +253,30 @@ pub enum Interrupted {
         /// The cell control journal.
         journal: JournalIdentifier,
     },
+    /// The cell does not host the tenant being created yet: the directory
+    /// holds it `REGISTERING`, and the cell coordinator writes `HostTenant`
+    /// into `journal`, the cell control journal (#225). Nothing was written.
+    NotHosted {
+        /// The cell control journal.
+        journal: JournalIdentifier,
+        /// The tenant.
+        tenant: TenantId,
+    },
+    /// The cell has not dropped the tenant being removed yet: the directory
+    /// holds it `REMOVING`, and the cell coordinator writes `DropTenant`
+    /// into `journal`, the cell control journal (#225). Nothing was written.
+    NotDropped {
+        /// The cell control journal.
+        journal: JournalIdentifier,
+        /// The tenant.
+        tenant: TenantId,
+    },
     /// The machine being admitted did not answer, or failed to record its
     /// admission (#216). Its admission may have landed.
     MachineUnreachable {
         /// The machine's address.
         addr: crate::Address,
     },
-    /// A founding member is not registered in the cell control journal yet
-    /// (#349), and a footprint does not fit without it: it is refused only
-    /// once every founder offers its slots (#476).
-    FoundersUnregistered,
     /// The run took its step budget without ending: other operators keep
     /// moving the journals under it.
     GoingRound {
@@ -303,7 +320,8 @@ pub struct Run<T> {
 const MAX_STEPS: usize = 8;
 
 /// An operator's handle on the two control journals a fleet operation
-/// writes: the fleet tenant's, as `operator`, and the cell's, as its coordinator.
+/// uses: it writes the fleet tenant's as its owner, and it only reads the
+/// cell's, which the cell coordinator writes (#513 (fleet Init duel), #225).
 #[derive(Clone, Debug)]
 pub struct FleetSession {
     journals: ControlJournals,
@@ -311,9 +329,9 @@ pub struct FleetSession {
     /// construction: a session exists only over a cell that hosts it.
     fleet: JournalIdentifier,
     directory: Checkpointer<FleetDirectory>,
-    cell: Checkpointer<Registry>,
+    /// The cell control journal's fold, read as a reader that owns nothing.
+    cell: Folder<Registry>,
     directory_open: bool,
-    cell_open: bool,
     /// The first checkpoint a fold of this session found unequal to its own
     /// state, with its journal (see [`LoadOutcome::Loaded`]).
     diverged: Option<(JournalIdentifier, u64)>,
@@ -328,9 +346,9 @@ pub struct FleetSession {
 
 impl FleetSession {
     /// A session over `journals`, writing the fleet tenant (checkpointing it
-    /// under `policy`) and the cell's control journal under leader uuids
-    /// drawn from `seed` ([`Writer::new`]), folding the cell's journal into
-    /// `cell` — the empty registry over the deployment's genesis pool.
+    /// under `policy`) under leader uuids drawn from `seed`
+    /// ([`Writer::new`]), and folding the cell's journal into `cell` — the
+    /// empty registry over the deployment's genesis pool.
     /// `None` when `journals` names no fleet journal: a cell that does not
     /// host the fleet tenant runs no fleet operation (no identifier has a
     /// default, §3.8).
@@ -346,9 +364,8 @@ impl FleetSession {
             journals,
             fleet,
             directory: Checkpointer::new(fleet, seed, FleetDirectory::default(), policy),
-            cell: Checkpointer::new(journals.cell, seed, cell, policy),
+            cell: Folder::new(cell),
             directory_open: false,
-            cell_open: false,
             diverged: None,
             survives: Survives::Az,
             names: (Vec::new(), Vec::new()),
@@ -404,17 +421,18 @@ impl FleetSession {
         self.cell.state()
     }
 
-    /// The writers of the fleet tenant's and of the cell's control journal: the
-    /// uuid each leads under and the position it writes next.
+    /// The writer of the fleet tenant's control journal: the uuid it leads
+    /// under and the position it writes next.
     #[must_use]
-    pub fn writers(&self) -> (&Writer, &Writer) {
-        (self.directory.writer(), self.cell.writer())
+    pub fn writer(&self) -> &Writer {
+        self.directory.writer()
     }
 
-    /// Whether this session holds both journals, claimed and folded.
+    /// Whether this session holds the fleet tenant's journal, claimed and
+    /// folded.
     #[must_use]
-    pub fn holds_both(&self) -> bool {
-        self.directory_open && self.cell_open
+    pub fn holds_directory(&self) -> bool {
+        self.directory_open
     }
 
     /// One step of `init`'s fleet half. The fleet is formed under `fleet_id`
@@ -443,7 +461,7 @@ impl FleetSession {
         let Some(fleet) = self.directory.state().fleet() else {
             // The cell may have joined a fleet the fleet tenant lost (a recovery, #231):
             // its id is kept.
-            if let Err(stop) = self.look_cell(client, first).await {
+            if let Err(stop) = self.read_cell(client, first).await {
                 return Step::Interrupted(stop);
             }
             let fleet = self
@@ -491,7 +509,7 @@ impl FleetSession {
                 .write_directory(client, first, fleet, add, Stage::AddCell)
                 .await;
         };
-        if let Err(stop) = self.look_cell(client, first).await {
+        if let Err(stop) = self.read_cell(client, first).await {
             return Step::Interrupted(stop);
         }
         match self.cell.state().fleet() {
@@ -591,56 +609,46 @@ impl FleetSession {
                 return Step::Refused(FleetRefusal::NameTaken { tenant, state });
             }
         };
-        let hosted = HostedTenant {
-            control: entry.control,
-            name: entry.name.clone(),
-            survives: entry.survives,
-        };
-        if let Err(stop) = self.look_before_claim(client, first, tenant).await {
-            return Step::Interrupted(stop);
-        }
         if let Err(stop) = self.cell_of(client, first, fleet, cell_id).await {
             return stop;
         }
-        if self.cell.state().dropped(tenant) {
+        let cell = self.cell.state();
+        if cell.dropped(tenant) {
             // Removed under this operation: its fleet directory fold is stale.
             self.directory_open = false;
             return Step::Refused(FleetRefusal::Removed { tenant });
         }
-        if !self.cell.state().hosts(tenant) {
-            // The footprint first (#476): a cell hosts only a tenant it can
-            // run. A refusal ends the creation: the tenant is marked `ERROR`.
-            match self.footprint_step(client, first, tenant).await {
-                Some(Step::Refused(FleetRefusal::NoFootprint { .. })) => {
-                    let error = FleetCommand::MarkTenant {
-                        tenant,
-                        state: TenantState::Error,
-                    };
-                    return self
-                        .write_directory(client, first, fleet, error, Stage::TenantError)
-                        .await;
-                }
-                step => {
-                    if let Some(step) = step.and_then(relay) {
-                        return step;
-                    }
-                }
-            }
-            let host = SystemCommand::HostTenant {
-                fleet_id: fleet,
+        if cell.hosts(tenant) {
+            let ready = FleetCommand::MarkTenant {
                 tenant,
-                hosted,
+                state: TenantState::Ready,
             };
             return self
-                .write_cell(client, first, &host, Stage::HostTenant)
+                .finish_directory(client, first, fleet, ready, Stage::TenantReady, tenant)
                 .await;
         }
-        let ready = FleetCommand::MarkTenant {
-            tenant,
-            state: TenantState::Ready,
-        };
-        self.finish_directory(client, first, fleet, ready, Stage::TenantReady, tenant)
-            .await
+        // The cell coordinator, the cell control journal's one writer,
+        // books a `REGISTERING` tenant's footprint, then hosts it, once it
+        // reads it in the directory (#476, #225): the operator waits,
+        // claiming nothing. A refused footprint ends the creation: the
+        // tenant is marked `ERROR`.
+        match cell.footprint(tenant) {
+            Some(grant) if !grant.granted() => {
+                let error = FleetCommand::MarkTenant {
+                    tenant,
+                    state: TenantState::Error,
+                };
+                self.write_directory(client, first, fleet, error, Stage::TenantError)
+                    .await
+            }
+            _ => {
+                moonpool_assertions::reachable!("fleet: a creation waits for the cell to host it");
+                Step::Interrupted(Interrupted::NotHosted {
+                    journal: self.journals.cell,
+                    tenant,
+                })
+            }
+        }
     }
 
     /// One step of removing the `users` tenant `name`. Ends with its id once
@@ -679,16 +687,15 @@ impl FleetSession {
         if let Err(stop) = self.cell_of(client, first, fleet, cell_id).await {
             return stop;
         }
-        // The tombstone goes down whether the cell hosts the tenant or not:
-        // a creation still running from a stale fleet directory can then never host it.
+        // The cell coordinator tombstones a `REMOVING` tenant once it reads
+        // it in the directory, whether the cell hosts it or not (#225): wait
+        // for it, claiming nothing.
         if !self.cell.state().dropped(tenant) {
-            let drop = SystemCommand::DropTenant {
-                fleet_id: fleet,
+            moonpool_assertions::reachable!("fleet: a removal waits for the cell to drop it");
+            return Step::Interrupted(Interrupted::NotDropped {
+                journal: self.journals.cell,
                 tenant,
-            };
-            return self
-                .write_cell(client, first, &drop, Stage::DropTenant)
-                .await;
+            });
         }
         let remove = FleetCommand::RemoveTenant { tenant };
         self.finish_directory(
@@ -990,23 +997,6 @@ impl FleetSession {
         going_round(steps)
     }
 
-    /// Claim and fold both journals — the cell's, then the fleet tenant's — unless this
-    /// session holds them already: for a caller that reads the two folds
-    /// side by side (a consistency check).
-    ///
-    /// # Errors
-    ///
-    /// A claim or a fold that did not reach its tail.
-    #[tracing::instrument(level = "debug", skip_all)]
-    pub async fn open<P: Providers>(
-        &mut self,
-        client: &Client<P>,
-        first: usize,
-    ) -> Result<(), Interrupted> {
-        self.open_cell(client, first).await?;
-        self.open_directory(client, first).await
-    }
-
     /// Claim the fleet tenant and fold it to its tail, unless this session holds it.
     async fn open_directory<P: Providers>(
         &mut self,
@@ -1021,63 +1011,32 @@ impl FleetSession {
         Ok(())
     }
 
-    /// Claim the cell's control journal and fold it to its tail, unless
-    /// this session holds it.
-    async fn open_cell<P: Providers>(
-        &mut self,
-        client: &Client<P>,
-        first: usize,
-    ) -> Result<(), Interrupted> {
-        if !self.cell_open {
-            let diverged = open(&mut self.cell, client, first).await?;
-            self.note_diverged(self.journals.cell, diverged);
-            self.cell_open = true;
-        }
-        Ok(())
-    }
-
-    /// Look at the cell before a creation claims it (#513 (fleet Init
-    /// duel)): a creation that can only wait for its founders writes
-    /// nothing, so it must not fence the cell coordinator, the one writer
-    /// that registers them. A claim per resume fenced each new term before
-    /// it could, a livelock (witness seed 10781271886209970645 on PR #567
-    /// (observability)). A no-op while the session holds the cell.
-    async fn look_before_claim<P: Providers>(
-        &mut self,
-        client: &Client<P>,
-        first: usize,
-        tenant: TenantId,
-    ) -> Result<(), Interrupted> {
-        if self.cell_open {
-            return Ok(());
-        }
-        self.look_cell(client, first).await?;
-        if waits_on_founders(self.cell.state(), tenant) {
-            moonpool_assertions::reachable!(
-                "fleet: a creation waits for its founders without claiming the cell"
-            );
-            return Err(Interrupted::FoundersUnregistered);
-        }
-        Ok(())
-    }
-
     /// Fold the cell's control journal to its tail as a reader, claiming
-    /// nothing (#513 (fleet Init duel)): `init` only reads the cell's side,
-    /// which the cell coordinator writes. A claim here would fence the
-    /// coordinator, whose next term fences this session in turn.
-    async fn look_cell<P: Providers>(
+    /// nothing (#513 (fleet Init duel), #225): a fleet operation only reads
+    /// the cell's side, which the cell coordinator writes. A claim here
+    /// would fence the coordinator, whose next term fences this session in
+    /// turn.
+    ///
+    /// # Errors
+    ///
+    /// The fold did not reach the tail.
+    ///
+    /// # Panics
+    ///
+    /// Never on any input: the one assertion checks the fold's own report.
+    pub async fn read_cell<P: Providers>(
         &mut self,
         client: &Client<P>,
         first: usize,
     ) -> Result<(), Interrupted> {
         let journal = self.journals.cell;
-        match self.cell.load(client, first, 0).await {
+        match load(&mut self.cell, journal, client, first, 0).await {
             LoadOutcome::Loaded {
                 up_to, diverged, ..
             } => {
                 assert_eq!(
                     up_to,
-                    self.cell.folder().next_seq(),
+                    self.cell.next_seq(),
                     "a loaded fold stands at the position it reached"
                 );
                 self.note_diverged(journal, diverged);
@@ -1094,7 +1053,8 @@ impl FleetSession {
         }
     }
 
-    /// Open the cell's journal and check it is cell `cell_id` of `fleet`.
+    /// Read the cell's journal to its tail and check it is cell `cell_id`
+    /// of `fleet`.
     async fn cell_of<P: Providers, T>(
         &mut self,
         client: &Client<P>,
@@ -1102,7 +1062,7 @@ impl FleetSession {
         fleet: u64,
         cell_id: u64,
     ) -> Result<(), Step<T>> {
-        self.open_cell(client, first)
+        self.read_cell(client, first)
             .await
             .map_err(Step::Interrupted)?;
         let found = self.cell.state().fleet();
@@ -1175,73 +1135,6 @@ impl FleetSession {
         }
         Ok(())
     }
-
-    /// The footprint step of `tenant` (#476): `None` once the cell granted
-    /// it; [`FleetRefusal::NoFootprint`] once the cell refused it; else the
-    /// write of its grant (`paros::footprint::plan` over the session's
-    /// fold, at its tail), or its refusal when the slots do not fit. A
-    /// footprint is refused only once every founding member registered.
-    async fn footprint_step<P: Providers>(
-        &mut self,
-        client: &Client<P>,
-        first: usize,
-        tenant: TenantId,
-    ) -> Option<Step<()>> {
-        let registry = self.cell.state();
-        match registry.footprint(tenant) {
-            Some(grant) if grant.granted() => return None,
-            Some(_) => return Some(Step::Refused(FleetRefusal::NoFootprint { tenant })),
-            None => {}
-        }
-        let slots = match footprint::plan(registry, tenant, &Footprint::birth()) {
-            Ok(slots) => Some(slots),
-            // An unregistered founder offers no slot yet: no refusal before
-            // it registers.
-            Err(_) if !footprint::ready(registry) => {
-                return Some(Step::Interrupted(Interrupted::FoundersUnregistered));
-            }
-            Err(_) => None,
-        };
-        let grant = SystemCommand::GrantCapacity {
-            key: GrantKey::Footprint(tenant),
-            tenant,
-            slots,
-        };
-        Some(
-            self.write_cell(client, first, &grant, Stage::Footprint)
-                .await,
-        )
-    }
-
-    async fn write_cell<P: Providers, T>(
-        &mut self,
-        client: &Client<P>,
-        first: usize,
-        command: &SystemCommand,
-        stage: Stage,
-    ) -> Step<T> {
-        match append(&mut self.cell, client, first, command.encode()).await {
-            Ok(diverged) => {
-                self.note_diverged(self.journals.cell, diverged);
-                Step::Advanced(stage)
-            }
-            Err(stop) => {
-                self.cell_open = false;
-                Step::Interrupted(stop)
-            }
-        }
-    }
-}
-
-/// A footprint step as a step of another operation: `None` when it wrote
-/// nothing and the operation goes on.
-fn relay<T>(step: Step<()>) -> Option<Step<T>> {
-    match step {
-        Step::Refused(refusal) => Some(Step::Refused(refusal)),
-        Step::Advanced(stage) => Some(Step::Advanced(stage)),
-        Step::Interrupted(interrupted) => Some(Step::Interrupted(interrupted)),
-        Step::Done { .. } => None,
-    }
 }
 
 /// Whether a run takes `step` again: it was interrupted (a claim no server
@@ -1288,19 +1181,6 @@ pub(super) fn going_round<T>(steps: Vec<Stage>) -> Run<T> {
         outcome: Step::Interrupted(Interrupted::GoingRound { steps: steps.len() }),
         steps,
     }
-}
-
-/// Whether a creation of `tenant` can only wait on `registry`: the cell
-/// neither hosts nor dropped it, holds no footprint for it, and its birth
-/// footprint does not fit while a founding member is unregistered.
-/// [`FleetSession::footprint_step`] keeps the same arm for a fold that
-/// moved between the look and the claim.
-fn waits_on_founders(registry: &Registry, tenant: TenantId) -> bool {
-    !registry.hosts(tenant)
-        && !registry.dropped(tenant)
-        && registry.footprint(tenant).is_none()
-        && !footprint::ready(registry)
-        && footprint::plan(registry, tenant, &Footprint::birth()).is_err()
 }
 
 /// Claim `owner`'s journal and fold it to its tail: the first checkpoint
@@ -1368,7 +1248,7 @@ pub async fn read_directory<P: Providers>(
     journal: JournalIdentifier,
 ) -> Result<FleetDirectory, LoadOutcome> {
     let mut folder = Folder::new(FleetDirectory::default());
-    match super::checkpoint::load(&mut folder, journal, client, first, 0).await {
+    match load(&mut folder, journal, client, first, 0).await {
         LoadOutcome::Loaded { .. } => Ok(folder.state().clone()),
         outcome => Err(outcome),
     }

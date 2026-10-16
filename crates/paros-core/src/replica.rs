@@ -47,7 +47,7 @@
 use std::collections::BTreeMap;
 
 use crate::journal_state::{JournalState, JournalView, Outcome, WriterMode};
-use crate::types::{Command, Entry, Seq, Slot, Value};
+use crate::types::{Ballot, Command, Entry, Seq, Slot, Value};
 use crate::write::WriteOp;
 
 /// Maximum slots the contiguous apply walk releases in one batch — the
@@ -148,11 +148,13 @@ pub struct Replica {
     /// The last walk handed a folded `Truncate` to the caller: the caller's
     /// compaction is judged by [`Replica::assert_compacted`] (#342).
     compaction_due: bool,
-    /// Newly applied `(slot, command, verdict)` triples, in order, for the
-    /// caller's `Ready` batch. The verdict rides with the slot because a
-    /// `Truncate` folded later in the same walk may compact the slot — and
-    /// its [`Replica::outcome_at`] — before the caller reports it.
-    committed: Vec<(Slot, Command, Outcome)>,
+    /// Newly applied `(slot, ballot, command, verdict)` entries, in order,
+    /// for the caller's `Ready` batch. The ballot is the one the caller's
+    /// record of the slot held when the walk applied it. The ballot and the
+    /// verdict ride with the slot because a `Truncate` folded later in the
+    /// same walk may compact the slot — its record and its
+    /// [`Replica::outcome_at`] — before the caller reports it.
+    committed: Vec<(Slot, Ballot, Command, Outcome)>,
     /// The journal's writer mode (#241): configuration, fixed at creation,
     /// handed to every [`JournalState::apply`].
     mode: WriterMode,
@@ -186,7 +188,7 @@ impl Replica {
         chosen_index: Option<Slot>,
         floor: Slot,
         sealed: JournalState,
-        records: &BTreeMap<Slot, (crate::types::Ballot, Command)>,
+        records: &BTreeMap<Slot, (Ballot, Command)>,
     ) -> Self {
         let chosen: BTreeMap<Slot, Command> = records
             .iter()
@@ -542,15 +544,16 @@ impl Replica {
         outcome
     }
 
-    /// Newly applied entries this batch, in order, each with the verdict
-    /// the journal state machine gave it.
+    /// Newly applied entries this batch, in order, each with the ballot of
+    /// its record when the walk applied it and the verdict the journal
+    /// state machine gave it.
     ///
     /// # Panics
     ///
     /// If an assertion on its own invariants, preconditions or postconditions
     /// fails: a programmer error, never an operating condition.
     #[must_use]
-    pub fn committed(&self) -> &[(Slot, Command, Outcome)] {
+    pub fn committed(&self) -> &[(Slot, Ballot, Command, Outcome)] {
         assert!(
             self.committed.windows(2).all(|pair| pair[0].0 < pair[1].0),
             "a batch's applied entries ascend by slot"
@@ -558,7 +561,7 @@ impl Replica {
         assert!(
             self.committed
                 .last()
-                .is_none_or(|(slot, _, _)| *slot < self.first_unchosen()),
+                .is_none_or(|(slot, _, _, _)| *slot < self.first_unchosen()),
             "an applied entry lies inside the chosen prefix"
         );
         &self.committed
@@ -975,19 +978,21 @@ impl Replica {
     /// A fold stopped at a hole below the prefix **holds** the walk: nothing
     /// past the hole is judged until it heals.
     ///
-    /// `records_agree(slot, command)` answers "does the authoritative
-    /// accepted record for `slot` hold exactly this command?" — the coupling
-    /// assertion, and the only thing the walk needs to know about the
-    /// acceptor. A predicate, not the acceptor's map: the replica consumes
-    /// "slot chosen, value" and must not acquire the accepted log merely
-    /// because one deployment colocates the two roles.
+    /// `record_ballot(slot, command)` answers "at which ballot does the
+    /// authoritative record for `slot` hold exactly this command?" (`None`
+    /// when it holds another one or none). It is the coupling assertion, and
+    /// the only thing the walk needs to know about the acceptor. The walk
+    /// hands the ballot on with the slot ([`Replica::committed`]). A
+    /// function, not the acceptor's map: the replica consumes "slot chosen,
+    /// value" and must not acquire the accepted log merely because one
+    /// deployment colocates the two roles.
     ///
     /// # Panics
     ///
     /// If the walk's contiguity or the chosen/accepted coupling is broken.
     pub fn advance(
         &mut self,
-        records_agree: impl Fn(Slot, &Command) -> bool,
+        record_ballot: impl Fn(Slot, &Command) -> Option<Ballot>,
         writes: &mut Vec<WriteOp>,
     ) -> Option<Slot> {
         let chosen_before = self.chosen_index;
@@ -1007,14 +1012,13 @@ impl Replica {
                     "the chosen prefix advances one slot at a time"
                 );
                 // The chosen/accepted coupling, per applied slot.
-                assert!(
-                    records_agree(next, &command),
-                    "an applied slot's accepted record carries the applied command"
-                );
+                let Some(ballot) = record_ballot(next, &command) else {
+                    panic!("an applied slot's accepted record carries the applied command");
+                };
                 self.chosen_index = Some(next);
                 writes.push(WriteOp::SetChosenIndex(next));
                 let outcome = self.fold_one(next, &command);
-                self.committed.push((next, command, outcome));
+                self.committed.push((next, ballot, command, outcome));
                 next = Slot(next.0 + 1);
                 advanced += 1;
             }
@@ -1301,14 +1305,14 @@ mod tests {
         };
         assert_eq!(r.trim_to(Slot(2), base), base);
         r.learn(Slot(2), &commands[2]);
-        r.advance(|_, _| true, &mut Vec::new());
+        r.advance(|_, _| Some(Ballot::zero()), &mut Vec::new());
         assert_eq!(r.journal().first_seq, Seq(0));
         assert_eq!(r.read(Seq(0), 8, 64), LogRead::NotHeld);
         assert_eq!(bytes(&page(r.read(Seq(1), 8, 64))), vec![b"b".to_vec()]);
         // Once the fold passes the truncation, the gap is `Truncated`.
         r.learn(Slot(3), &commands[3]);
         r.learn(Slot(4), &commands[4]);
-        r.advance(|_, _| true, &mut Vec::new());
+        r.advance(|_, _| Some(Ballot::zero()), &mut Vec::new());
         assert_eq!(r.journal().first_seq, Seq(1));
         assert!(matches!(r.read(Seq(0), 8, 64), LogRead::Truncated(_)));
     }
