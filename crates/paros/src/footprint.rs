@@ -248,18 +248,12 @@ pub enum Fix {
 ///
 /// - its coordinator slot: placed on a `stateless` machine that serves the
 ///   cell, is up and has a free slot, when it has none on a live machine
-///   (registered, not draining, up); once one live slot holds it, every
-///   other slot is released, one on a machine that is not live first (a
-///   machine marked down may answer again after its replacement was
-///   placed);
+///   (registered, not draining, up); a slot on a machine that is not live is
+///   released once another one holds the coordinator, and so is every live
+///   slot but the first (a dead one whose machine came back up);
 /// - its `storage` slots: one booked for each the footprint lacks on a
 ///   registered machine that is not draining (a retired machine took its
 ///   slots with it), then a slot on a draining machine is released.
-///
-/// # Panics
-///
-/// If a placed coordinator still shares its footprint with another
-/// coordinator slot past the release step (a bug here).
 #[must_use]
 pub fn fix(registry: &Registry, tenant: TenantId, footprint: &Footprint) -> Option<Fix> {
     let target = BookingTarget::Tenant { tenant };
@@ -284,28 +278,7 @@ pub fn fix(registry: &Registry, tenant: TenantId, footprint: &Footprint) -> Opti
         .map(|(id, b)| (*id, b.node))
         .collect();
     let placed = coordinators.iter().any(|(_, node)| live(*node));
-    if placed {
-        // One live coordinator is kept and every other slot goes, a dead
-        // one first. A live extra is a machine marked down that answered
-        // again after its replacement was placed: liveness flips back, so
-        // a slot is never released only for being dead (witness seed
-        // 1637553012961148710, recipe `(222, 11909853672537708521)`, on
-        // PR #567 (observability)).
-        let kept = coordinators
-            .iter()
-            .find(|(_, node)| live(*node))
-            .map(|(id, _)| *id);
-        let mut extras = coordinators.iter().filter(|(id, _)| Some(*id) != kept);
-        let dead = extras.clone().find(|(_, node)| !live(*node));
-        if let Some((booking, _)) = dead.or_else(|| extras.next()) {
-            return Some(Fix::Release { booking: *booking });
-        }
-        assert_eq!(
-            coordinators.len(),
-            1,
-            "a placed footprint holds one coordinator slot"
-        );
-    } else {
+    if !placed {
         let dead = coordinators.first().map(|(_, node)| *node);
         let up: Vec<Machine> = machines.iter().filter(|m| m.up).cloned().collect();
         if let Some(node) = pick(&up, Class::Stateless, &taken, dead) {
@@ -321,6 +294,13 @@ pub fn fix(registry: &Registry, tenant: TenantId, footprint: &Footprint) -> Opti
                 target,
             }));
         }
+    } else if let Some((booking, _)) = coordinators.iter().find(|(_, node)| !live(*node)) {
+        return Some(Fix::Release { booking: *booking });
+    } else if let Some((booking, _)) = coordinators.iter().filter(|(_, node)| live(*node)).nth(1) {
+        // A dead coordinator's machine came back up (same incarnation,
+        // `MachineUp`) after its re-placement and before its release: two
+        // live slots, and the release above sees none dead. Keep the first.
+        return Some(Fix::Release { booking: *booking });
     }
     for (role, count) in footprint.by_role() {
         let of_role: Vec<(u64, NodeId)> = held
@@ -485,19 +465,25 @@ mod tests {
                 booking: slot.booking
             })
         );
-        // The dead machine answers again before its slot is released: two
-        // live coordinator slots, and one of them still goes.
+        // It answers again before its release: two live coordinator slots,
+        // and the next step releases one of them.
         let up = SystemCommand::MachineUp {
             id: NodeId(5),
             incarnation: 1,
         };
         assert!(matches!(
             reg.fold(9, &up.encode()),
-            RegistryEvent::MachineUp { .. }
+            RegistryEvent::MachineUp { was_down: true, .. }
         ));
         let Some(Fix::Release { booking }) = fix(&reg, tenant, &Footprint::birth()) else {
-            panic!("an extra live coordinator slot is released");
+            panic!("a second live coordinator is released");
         };
         assert!(booking == slot.booking || booking == again.booking);
+        let release = SystemCommand::ReleaseCapacity { booking };
+        assert!(matches!(
+            reg.fold(10, &release.encode()),
+            RegistryEvent::Released { .. }
+        ));
+        assert_eq!(fix(&reg, tenant, &Footprint::birth()), None);
     }
 }
