@@ -262,8 +262,10 @@ impl FleetOps {
             Step::Refused(FleetRefusal::InCellInit { .. }) => {
                 // Only a founding member takes part in `cell init`: one that
                 // promised and has no vote yet, mid-decree.
+                // Or the machine an operator founds the second cell on
+                // (#232 (multiple cells)).
                 assert_always!(
-                    founder,
+                    founder || crate::machine::is_other_founder(ctx.state(), &target),
                     "admit: only a founding member refuses an admission for cell init"
                 );
                 assert_reachable!("admit: a founding member mid cell init refuses an admission");
@@ -281,9 +283,11 @@ impl FleetOps {
             }
             Step::Refused(FleetRefusal::OtherCell { cell_id, .. }) => {
                 // One cell per run, unless a wiped one-founder cell formed
-                // again over the new machine (#246).
+                // again over the new machine (#246), or an operator founded
+                // a cell on the machine (#216, #232 (multiple cells)).
                 assert_always!(
-                    crate::machine::founder_wiped(ctx.state()),
+                    crate::machine::founder_wiped(ctx.state())
+                        || crate::machine::is_other_founder(ctx.state(), &target),
                     "admit: a machine of another cell exists only after a wipe",
                     { "cell" => cell_id }
                 );

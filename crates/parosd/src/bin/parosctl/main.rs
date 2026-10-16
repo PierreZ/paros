@@ -609,9 +609,7 @@ async fn administer(
         }
         Command::Universe(args) => {
             let ids: Vec<u64> = servers.iter().map(|(id, _)| *id).collect();
-            universe::run(&runtime.providers, &client, &ids, out, args)
-                .await
-                .into()
+            universe::run(asker, &client, &ids, out, args).await.into()
         }
         _ => unreachable!("only the admin commands are administered"),
     }

@@ -65,6 +65,10 @@ pub enum TenantCommand {
         /// `paros/` key is refused.
         #[arg(long = "tag")]
         tags: Vec<String>,
+        /// The cell it lives in, by name (#232 (multiple cells)): a `READY`
+        /// cell of the universe. The servers' own cell by default.
+        #[arg(long)]
+        cell: Option<String>,
     },
     /// Set a `users` tenant's user tags, whole: the tags given replace the
     /// ones it has, and none clears them (#575).
@@ -134,6 +138,7 @@ pub fn session(
 }
 
 /// A refusal's label and its meaning.
+#[allow(clippy::too_many_lines)] // one arm per refusal
 pub fn refusal_text(refusal: &FleetRefusal, labels: &Labels) -> String {
     match refusal {
         FleetRefusal::Unset => "unset: an id or an identifier of 0".into(),
@@ -157,6 +162,35 @@ pub fn refusal_text(refusal: &FleetRefusal, labels: &Labels) -> String {
             )
         ),
         FleetRefusal::CellRemoving => "cell_removing".into(),
+        FleetRefusal::CellNotReady { cell_id } => {
+            format!(
+                "cell_not_ready: cell {} is not READY",
+                labels.cell(*cell_id)
+            )
+        }
+        FleetRefusal::UnknownCell { cell_id } => {
+            format!(
+                "unknown_cell: the universe holds no cell {}",
+                labels.cell(*cell_id)
+            )
+        }
+        FleetRefusal::CellRemoved { cell_id } => format!(
+            "cell_removed: cell {} was removed from the universe, and never comes back",
+            labels.cell(*cell_id)
+        ),
+        FleetRefusal::CellNotEmpty { cell_id, tenant } => format!(
+            "cell_not_empty: cell {} hosts tenant {}: delete it first",
+            labels.cell(*cell_id),
+            labels.tenant(*tenant)
+        ),
+        FleetRefusal::HostsUniverse { cell_id } => format!(
+            "hosts_universe: cell {} hosts the universe tenant",
+            labels.cell(*cell_id)
+        ),
+        FleetRefusal::NoEndpoint { cell_id } => format!(
+            "no_endpoint: the universe records no machine of cell {}",
+            labels.cell(*cell_id)
+        ),
         FleetRefusal::NoFootprint { tenant } => format!(
             "no_footprint: the cell has too few free slots for tenant {}'s footprint \
              (it is marked ERROR: delete it to free its name)",
@@ -305,11 +339,32 @@ pub async fn run(
             name,
             survives,
             tags,
+            cell,
         } => {
             let tags = match crate::journal::user_tags(&tags) {
                 Ok(tags) => tags,
                 Err(ending) => return ending,
             };
+            if let Some(cell) = cell {
+                let directory = match paros::client::fleet::read_directory(
+                    client,
+                    0,
+                    fleet.directory_journal(),
+                )
+                .await
+                {
+                    Ok(directory) => directory,
+                    Err(outcome) => {
+                        note(&format!("the universe directory was not read: {outcome:?}"));
+                        return Ending::Unreachable;
+                    }
+                };
+                let Some(cell_id) = directory.cell_named(cell.as_bytes()) else {
+                    note(&format!("the universe holds no cell named {cell}"));
+                    return Ending::Refused;
+                };
+                fleet = fleet.with_cell(cell_id);
+            }
             // Random identifiers, the tenant's and its control journal's; the
             // library moves past one the fleet tenant holds already.
             let draws: Vec<JournalIdentifier> = (0..DRAWS)

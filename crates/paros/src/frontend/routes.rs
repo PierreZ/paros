@@ -25,6 +25,7 @@ use paros_core::{JournalIdentifier, TenantId};
 use super::{Shared, lock};
 use crate::audit::Audit;
 use crate::client::bootstrap::majority_cell;
+use crate::client::checkpoint::{Folder, LoadOutcome, load};
 use crate::client::fleet::read_directory;
 use crate::client::names::{
     JournalNames, JournalResolution, TenantResolution, Unreadable, resolve_journal, tenant_in,
@@ -33,6 +34,7 @@ use crate::client::{Client, Server};
 use crate::fleet::{FleetDirectory, RootKeyEntry};
 use crate::name::JournalName;
 use crate::rpc::NodeClient;
+use crate::system::Registry;
 
 /// What resolving a name came to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -54,7 +56,10 @@ pub(super) enum Resolved {
 }
 
 /// The cell the frontend fronts, as its founding members name it.
-struct Cell<P: Providers> {
+#[derive(Clone)]
+pub(super) struct Cell<P: Providers> {
+    /// The cell's id.
+    id: u64,
     /// The universe tenant's control journal: the universe directory.
     universe: JournalIdentifier,
     /// The cell's election journal: where the tenant coordinator publishes
@@ -62,6 +67,10 @@ struct Cell<P: Providers> {
     election: Option<JournalIdentifier>,
     /// A client over the founding members that answered.
     client: Client<P>,
+    /// A client that reads the universe directory: `client`, or one over
+    /// the machines of the cell that hosts it, which the cell's join
+    /// points at (#232 (multiple cells)).
+    reader: Client<P>,
 }
 
 /// The frontend's caches. Never held across an await.
@@ -150,7 +159,7 @@ impl<P: Providers> Routes<P> {
 
 /// The cell: cached, or learned from a majority of its founding members
 /// (`Inspect`, as an operator learns it, §3.8).
-async fn cell<P, A>(shared: &Shared<P, A>) -> Option<(JournalIdentifier, Client<P>)>
+async fn cell<P, A>(shared: &Shared<P, A>) -> Option<Cell<P>>
 where
     P: Providers,
     A: Audit,
@@ -158,7 +167,7 @@ where
     let rpc = {
         let routes = lock(&shared.routes);
         if let Some(cell) = &routes.cell {
-            return Some((cell.universe, cell.client.clone()));
+            return Some(cell.clone());
         }
         routes.rpc.clone()
     };
@@ -171,10 +180,6 @@ where
         settings.client.request_timeout,
     )
     .await?;
-    let Some(universe) = journals.fleet else {
-        moonpool_assertions::reachable!("frontend: the cell hosts no universe tenant yet");
-        return None;
-    };
     assert!(!servers.is_empty(), "a majority holds at least one server");
     let count = servers.len();
     // Each server through the machine interface its incarnation published
@@ -195,6 +200,21 @@ where
     if let Some(observer) = shared.audit.call_observer() {
         client = client.with_observer(observer);
     }
+    // The cell's own universe directory, else the one its join points at
+    // (#232 (multiple cells)): read from the cell control journal.
+    let (universe, reader) = if let Some(universe) = journals.fleet {
+        (universe, client.clone())
+    } else {
+        let genesis = servers_ids(&client);
+        let mut registry = Folder::new(Registry::new(genesis));
+        let loaded = load(&mut registry, journals.cell, &client, 0, 0).await;
+        let pointer = registry.state().universe().cloned();
+        // An idle cell that joined no universe yet fronts nothing.
+        let (LoadOutcome::Loaded { .. }, Some(pointer)) = (loaded, pointer) else {
+            return None;
+        };
+        (pointer.directory, client.elsewhere(&pointer.hosts))
+    };
     tracing::info!(
         cell = journals.cell_id,
         servers = count,
@@ -202,11 +222,21 @@ where
     );
     let mut routes = lock(&shared.routes);
     let cell = routes.cell.get_or_insert(Cell {
+        id: journals.cell_id,
         universe,
         election: journals.election,
         client,
+        reader,
     });
-    Some((cell.universe, cell.client.clone()))
+    Some(cell.clone())
+}
+
+/// The ids of `client`'s servers: the genesis pool a fold of the cell
+/// control journal starts from.
+fn servers_ids<P: Providers>(client: &Client<P>) -> Vec<paros_core::NodeId> {
+    (0..client.server_count())
+        .map(|i| paros_core::NodeId(client.id_of(i)))
+        .collect()
 }
 
 /// The cell's election journal, a client over its servers and the RPC
@@ -218,10 +248,10 @@ where
     P: Providers,
     A: Audit,
 {
-    let (_, client) = cell(shared).await?;
+    let cell = cell(shared).await?;
+    let election = cell.election?;
     let routes = lock(&shared.routes);
-    let election = routes.cell.as_ref()?.election?;
-    Some((election, client, routes.rpc.clone()))
+    Some((election, cell.client, routes.rpc.clone()))
 }
 
 /// `journal`'s own client: its own leader hint over the cell's servers.
@@ -233,7 +263,7 @@ where
     P: Providers,
     A: Audit,
 {
-    let (_, client) = cell(shared).await?;
+    let client = cell(shared).await?.client;
     let mut routes = lock(&shared.routes);
     let client = routes
         .leaders
@@ -250,10 +280,17 @@ where
     P: Providers,
     A: Audit,
 {
-    let Some((universe, client)) = cell(shared).await else {
+    let Some(Cell {
+        id: cell_id,
+        universe,
+        client,
+        reader,
+        ..
+    }) = cell(shared).await
+    else {
         return Resolved::Unavailable;
     };
-    let (tenant, control) = match tenant(shared, &client, universe, name).await {
+    let (tenant, control) = match tenant(shared, &reader, (universe, cell_id), name).await {
         Ok(held) => held,
         Err(resolved) => return resolved,
     };
@@ -308,7 +345,7 @@ where
 async fn tenant<P, A>(
     shared: &Shared<P, A>,
     client: &Client<P>,
-    universe: JournalIdentifier,
+    (universe, cell_id): (JournalIdentifier, u64),
     name: &JournalName,
 ) -> Result<(TenantId, JournalIdentifier), Resolved>
 where
@@ -340,6 +377,17 @@ where
                 control.tenant, tenant,
                 "a tenant's control journal is its own"
             );
+            if directory
+                .tenant(tenant)
+                .is_some_and(|t| t.cell_id != cell_id)
+            {
+                // Another cell hosts it (#232 (multiple cells)): this
+                // frontend fronts only its own cell.
+                moonpool_assertions::reachable!(
+                    "frontend: a tenant of another cell is unknown here"
+                );
+                return Err(Resolved::Unknown { read: None });
+            }
             routes
                 .tenants
                 .insert(name.tenant().to_string(), (tenant, control));
@@ -365,10 +413,13 @@ where
     if held.is_some() && !refresh {
         return held;
     }
-    let Some((universe, client)) = cell(shared).await else {
+    let Some(Cell {
+        universe, reader, ..
+    }) = cell(shared).await
+    else {
         return held;
     };
-    let read = read_directory(&client, 0, universe).await;
+    let read = read_directory(&reader, 0, universe).await;
     let mut routes = lock(&shared.routes);
     match read {
         Ok(directory) => {

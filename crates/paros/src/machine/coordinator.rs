@@ -105,11 +105,12 @@ use crate::client::checkpoint::{CheckpointPolicy, Folder, LoadOutcome, load};
 use crate::client::election::{Candidate, Election, ElectionTunables, Leader, Step, hand_off};
 use crate::client::fleet::{Interrupted, Stage, Step as FleetStep};
 use crate::client::journals::{JournalAnswer, JournalRequest};
+use crate::client::universe::{JoinAnswer, JoinRequest};
 use crate::client::{CallObserver, ClaimOutcome, Client, Server, bootstrap};
 use crate::fleet::FleetDirectory;
 use crate::rpc::machine as wire;
 use crate::rpc::methods::{
-    CapacityRequestRpc, CoordinatorInterface, JournalRequestRpc, RegisterRpc,
+    CapacityRequestRpc, CoordinatorInterface, JoinUniverseRpc, JournalRequestRpc, RegisterRpc,
 };
 use crate::rpc::{Inbound, NodeClient, ReplySender};
 use crate::system::{MaintenanceScope, NodeStanding, Registry, SystemCommand};
@@ -127,6 +128,9 @@ type Registers = Inbound<RegisterRpc, wire::Register, wire::RegisterAck>;
 /// The tenant coordinators' capacity requests' endpoint (#476).
 type Capacities = Inbound<CapacityRequestRpc, wire::CapacityRequest, wire::CapacityRequestAck>;
 
+/// `universe add-cell`'s join requests' endpoint (#232 (multiple cells)).
+type Joins = Inbound<JoinUniverseRpc, wire::JoinUniverse, wire::JoinUniverseAck>;
+
 /// A served term's dynamic endpoint (#404 (static vs dynamic endpoints)):
 /// one moonpool group serving `Register` and `JournalRequest`, published in
 /// the election journal. Dropping it destroys the endpoint: a request sent
@@ -139,6 +143,7 @@ struct TermGroup {
     registers: Registers,
     requests: Requests,
     capacities: Capacities,
+    joins: Joins,
 }
 
 impl TermGroup {
@@ -152,6 +157,7 @@ impl TermGroup {
         let registers = Inbound::plain(group.serve::<RegisterRpc>().ok()?);
         let requests = Inbound::plain(group.serve::<JournalRequestRpc>().ok()?);
         let capacities = Inbound::plain(group.serve::<CapacityRequestRpc>().ok()?);
+        let joins = Inbound::plain(group.serve::<JoinUniverseRpc>().ok()?);
         assert!(
             !group.endpoint().token().is_well_known(),
             "a term group is a dynamic endpoint"
@@ -162,6 +168,7 @@ impl TermGroup {
             registers,
             requests,
             capacities,
+            joins,
         })
     }
 
@@ -1315,13 +1322,14 @@ async fn answer_until<P: Providers>(
     shutdown: &CancellationToken,
 ) {
     loop {
-        let (registers, requests, capacities) = match group.as_deref_mut() {
+        let (registers, requests, capacities, joins) = match group.as_deref_mut() {
             Some(g) => (
                 Some(&mut g.registers),
                 Some(&mut g.requests),
                 Some(&mut g.capacities),
+                Some(&mut g.joins),
             ),
-            None => (None, None, None),
+            None => (None, None, None, None),
         };
         let left = until.saturating_sub(providers.time().now());
         if left.is_zero() || shutdown.is_cancelled() {
@@ -1374,6 +1382,25 @@ async fn answer_until<P: Providers>(
                                 desk.draw_booking()
                             })
                             .await;
+                            if !session.is_open() {
+                                *watching = None;
+                            }
+                            answer
+                        }
+                    },
+                };
+                reply.send(answer.to_wire());
+            }
+            Some((request, reply)) = next_request(joins) => {
+                // `universe add-cell` (#232 (multiple cells)): the cell
+                // half of a join, written through the term's session.
+                let answer = match (JoinRequest::from_wire(&request), desk.as_ref()) {
+                    (Err(_), _) => JoinAnswer::Malformed,
+                    (Ok(_), None) => JoinAnswer::NotCoordinator,
+                    (Ok(request), Some(_)) => match watching.as_mut() {
+                        None => JoinAnswer::Unavailable,
+                        Some((session, _)) => {
+                            let answer = super::universe::join(client, session, &request).await;
                             if !session.is_open() {
                                 *watching = None;
                             }

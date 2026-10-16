@@ -136,7 +136,7 @@ pub(super) async fn propose<P: Providers>(
             facts,
             &members,
             ballot,
-            &request.token,
+            (&request.token, request.idle),
             tunables,
         )
         .await
@@ -189,7 +189,7 @@ async fn attempt<P: Providers>(
     facts: &MachineFacts,
     members: &[Address],
     ballot: Ballot,
-    token: &[u8],
+    (token, idle): (&[u8], bool),
     tunables: &DriverTunables,
 ) -> Attempt {
     let patience = tunables.connection_timeout;
@@ -235,7 +235,7 @@ async fn attempt<P: Providers>(
         // One machine answering at two listed addresses.
         return Attempt::Failed("malformed");
     }
-    let Some(proposal) = draw_plan(providers, &identities) else {
+    let Some(proposal) = draw_plan(providers, &identities, !idle) else {
         return Attempt::Failed("malformed");
     };
     let n = members.len();
@@ -420,12 +420,13 @@ async fn attempt<P: Providers>(
 
 /// A fresh plan over the machines that answered: the cell's id and every
 /// identifier drawn (§3.8) — the cell tenant's control and election
-/// journals, and the fleet tenant's (this cell hosts it: the fleet's first).
-/// No user journal: a tenant creates its journals through its coordinator
-/// (#210).
+/// journals, and the fleet tenant's when `universe` (this cell hosts it: the
+/// fleet's first; an idle cell, #232 (multiple cells), hosts none). No user
+/// journal: a tenant creates its journals through its coordinator (#210).
 fn draw_plan<P: Providers>(
     providers: &P,
     identities: &BTreeMap<Address, NodeId>,
+    universe: bool,
 ) -> Option<CellPlan> {
     let mut members: Vec<(NodeId, Address)> = identities
         .iter()
@@ -434,13 +435,16 @@ fn draw_plan<P: Providers>(
     members.sort_unstable();
     let control = draw_identifier(providers);
     let election = JournalIdentifier::new(control.tenant, draw_identifier(providers).journal);
-    let fleet = draw_identifier(providers);
-    let journals: BTreeSet<JournalIdentifier> = [control, election, fleet].into_iter().collect();
+    let fleet = universe.then(|| draw_identifier(providers));
+    let journals: BTreeSet<JournalIdentifier> = [Some(control), Some(election), fleet]
+        .into_iter()
+        .flatten()
+        .collect();
     let plan = CellPlan {
         cell_id: draw_nonzero(providers),
         members,
         control,
-        fleet: Some(fleet),
+        fleet,
         election,
         journals: journals.into_iter().collect(),
     };

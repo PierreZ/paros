@@ -264,6 +264,7 @@ impl FleetOps {
                 token: token.clone(),
                 root_key: Some(crate::frontend::signing_entry(ctx.state())),
                 failures_per_partition,
+                idle: false,
             },
         );
         let run = if founders > 1 && buggify_with_prob!(0.25) {
@@ -278,7 +279,7 @@ impl FleetOps {
                 connector.names(),
                 &other,
                 &members,
-                &token,
+                (&token, false),
                 self.patience,
             );
             // Judged as it resolves, not once the whole `init` ends: wipes in
@@ -316,7 +317,7 @@ impl FleetOps {
             connector.names(),
             target,
             members,
-            &token,
+            (&token, false),
             self.patience.min(Duration::from_secs(5)),
         )
         .await;
@@ -427,7 +428,13 @@ impl FleetOps {
             self.connector.names(),
             &target,
             members,
-            &crate::frontend::operator_token(ctx.state(), self.connector.providers().time().now()),
+            (
+                &crate::frontend::operator_token(
+                    ctx.state(),
+                    self.connector.providers().time().now(),
+                ),
+                false,
+            ),
             self.patience,
         )
         .await;
