@@ -2219,10 +2219,10 @@ driver.
 
 The simulation proves it with the cold-rot scenario (`paros_sim::world::cold_rot`): a task
 beside a machine rots the entry of one cold record of a created journal on that machine's disk,
-at most one machine per journal, on journals of three members or more under a majority. Its
-runs last 120 s, the top of the `run_end` knob, because created journals come late in a run: in
-a 200-seed hunt, 6 seeds drew it, 5 rotted a record, and the scrubber repaired 4 that no client
-read. The
+at most one machine per journal and four records each, on journals of three members or more
+under a majority. Its runs last 120 s, the top of the `run_end` knob, because created journals
+come late in a run. In 200 seeds of the sweep's exploring campaign, the scrubber repaired 24
+records that no client read. The
 aim comes from the shipped store's own layout, read from a scratch copy of the store, never from
 a format the harness knows, and the bytes flip through the machine's own disk, as the boot-time
 injector's do. The issue asked for cold rot as a moonpool fault first. moonpool already damages

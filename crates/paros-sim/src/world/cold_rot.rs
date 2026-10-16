@@ -17,7 +17,8 @@
 //! entry fails its checksum and its persist record stays whole: the slot
 //! is CTRL's recoverable class, never a double fault.
 //!
-//! **Budget.** At most one machine rots each journal, once per run, and
+//! **Budget.** At most one machine rots each journal, at most
+//! `ROTS_PER_JOURNAL` of its records, and
 //! only a journal its tenant created on three members or more under a
 //! majority (the audit's tenant board): every slot keeps a clean copy on a
 //! quorum. The scenario's runs last to the top of the `run_end` knob, since
@@ -25,7 +26,7 @@
 //! a disk at random stay masked (#176): they would need a ledger of every
 //! machine store.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -44,9 +45,13 @@ const BUDGET_KEY: &str = "paros-cold-rot";
 /// How long the task waits between two tries, in milliseconds.
 const PAUSE_MS: std::ops::Range<u64> = 1_500..4_001;
 
-/// The run's rot budget: the journals a machine already rotted.
-fn budget(state: &StateHandle) -> Arc<Mutex<BTreeSet<JournalIdentifier>>> {
-    crate::state::published(state, BUDGET_KEY, BTreeSet::new)
+/// How many records the one machine that rots a journal may rot in it.
+const ROTS_PER_JOURNAL: u32 = 4;
+
+/// The run's rot budget: for each journal, the machine that rots it and
+/// how many of its records it rotted.
+fn budget(state: &StateHandle) -> Arc<Mutex<BTreeMap<JournalIdentifier, (usize, u32)>>> {
+    crate::state::published(state, BUDGET_KEY, BTreeMap::new)
 }
 
 /// The ids under `dir` that parse as a nonzero id.
@@ -139,7 +144,8 @@ pub(crate) async fn run<T: TimeProvider>(
                 let spent = budget(&state)
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
-                    .contains(&id);
+                    .get(&id)
+                    .is_some_and(|(by, rots)| *by != rank || *rots >= ROTS_PER_JOURNAL);
                 if created && !spent {
                     candidates.push(id);
                 }
@@ -201,13 +207,16 @@ async fn rot(
     let Some((slot, region)) = target else {
         return false;
     };
-    // The budget: one machine per journal, decided before a byte changes.
+    // The budget: one machine per journal, a few records each, decided
+    // before a byte changes.
     {
         let budget = budget(state);
         let mut spent = budget.lock().unwrap_or_else(PoisonError::into_inner);
-        if !spent.insert(journal) {
+        let (by, rots) = spent.entry(journal).or_insert((rank, 0));
+        if *by != rank || *rots >= ROTS_PER_JOURNAL {
             return false;
         }
+        *rots += 1;
     }
     let original = paros::journal::LayoutRegion {
         path: region.path.replacen(&copy, &dir, 1),
