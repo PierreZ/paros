@@ -144,6 +144,10 @@ jobs:
   # from the wall clock in nanoseconds, so two runs on two runners share a seed
   # only by a 64-bit hash collision. A red shard is a red CI: `fail-fast: false`
   # lets the other shard finish, so a red run reports every failing seed.
+  # A shard fails on its own on any safety, coverage or saturation defect, but
+  # not on a declared gate it never ran: it writes those to a file, and the
+  # `sim-gates` job fails only on a gate no shard ran. Judged per shard, a
+  # rare gate would miss twice as often as with one sweep.
   sim:
     name: sim (shard ${{ matrix.shard }}/2)
     runs-on: ubuntu-latest
@@ -162,4 +166,40 @@ jobs:
           # Both shards build the same thing; one saves the cache.
           save-if: ${{ matrix.shard == 1 }}
       - name: Run sancov simulation sweep
+        env:
+          PAROS_SIM_MISSING_GATES: ${{ runner.temp }}/missing-gates.txt
         run: nix develop --command cargo xtask sim run-all
+      - name: Keep the declared gates this shard never ran
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: missing-gates-${{ matrix.shard }}
+          path: ${{ runner.temp }}/missing-gates.txt
+          if-no-files-found: error
+
+  # The declared-gate check over both shards (#446 (a gate that never fires
+  # cannot fail the sweep)): a gate fails CI only when every shard missed it.
+  # A shard that wrote no file (it died before its verdict) fails this job.
+  sim-gates:
+    needs: sim
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: missing-gates-*
+          path: missing-gates
+      - name: Fail on a declared gate that no shard ran
+        run: |
+          set -euo pipefail
+          test -f missing-gates/missing-gates-1/missing-gates.txt
+          test -f missing-gates/missing-gates-2/missing-gates.txt
+          never=$(comm -12 \
+            <(sort missing-gates/missing-gates-1/missing-gates.txt) \
+            <(sort missing-gates/missing-gates-2/missing-gates.txt))
+          if [ -n "$never" ]; then
+            echo "declared gates that no shard ran:"
+            echo "$never"
+            exit 1
+          fi
+          echo "every declared gate ran in at least one shard"
