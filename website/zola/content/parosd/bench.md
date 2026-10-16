@@ -28,8 +28,29 @@ Against a running cell, such as the Compose cell (`DEMO.md` in the repository):
 docker compose run --rm parosctl bench --tenant bench --journals 4 --clients 8 --duration 60s --ramp 10s
 ```
 
-The bench creates the tenant and the journals `bench-0` to `bench-3` if they are missing. It
-names them by their string names. Ctrl-C stops the run and still prints the totals.
+The bench creates the tenant and the journals `bench-3x1-0` to `bench-3x1-3` if they are
+missing. It names them by their string names. Ctrl-C stops the run and still prints the totals.
+
+## Compare topologies
+
+`--topology` sets the shape of the journals the bench writes. A topology is `ROWSxCOLUMNS`:
+`COLUMNS` acceptor partitions of `ROWS` acceptors each. `ROWS` is odd, from 1 to 7. `3x1` is
+the plain majority of three, and it is the default. `3x3` is a grid of nine acceptors: two
+acceptors of one column decide each slot. Give several topologies to compare them:
+
+```sh
+parosctl bench --local 9 --topology 3x1,3x2,3x3 --clients 8 --journals 8 --duration 30s
+```
+
+The bench runs each topology in turn, with the same seed and the same load, on journals of
+its own (`bench-3x3-0`). With `--local`, each topology gets a new cell, so the journals of one
+run do not load the next run. Placement puts each acceptor on a different machine, so `--local`
+must start at least `ROWS × COLUMNS` machines (at most 15). At the end, the bench prints one
+total row for each topology and call. With `--json`, it prints one report for each topology.
+
+A grid writes each slot to one column, so it spreads the syncs over more disks. It also
+sends more messages per write. The grid wins only when each acceptor has its own disk and
+CPU. A local cell shares one host, so there the plain majority is faster.
 
 ## What it does
 
