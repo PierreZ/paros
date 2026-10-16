@@ -9,6 +9,13 @@
 //! machines)): mark a registered machine draining in the cell control
 //! journal. The cell coordinator then moves every journal off it.
 //!
+//! `parosctl cell remove-machine <machine>` (#359): retire a drained machine
+//! for good. Its `node_id` is tombstoned: it never registers again.
+//!
+//! `parosctl cell maintenance <machine> --for <duration>` (`--zone` for a
+//! failure domain, #359): the cell coordinator re-places no role of a
+//! machine the window covers while it is down. `--for 0s` ends the window.
+//!
 //! `parosctl cell tag <cell> [k:v…]` and `parosctl cell tag-machine
 //! <machine> [k:v…]` (#575 (key:value tags)): set a cell's user tags in the
 //! universe directory, or a registered machine's in the cell control
@@ -20,8 +27,9 @@ use clap::{Args, Subcommand};
 use moonpool_core::TokioProviders;
 use paros::client::Client;
 use paros::client::bootstrap::{cell_members, control_journals};
-use paros::client::cell::CellSession;
+use paros::client::cell::{CellSession, Removal};
 use paros::client::fleet::Step;
+use paros::system::MaintenanceScope;
 use paros::{Address, NodeId};
 use serde_json::json;
 
@@ -57,6 +65,27 @@ pub enum CellAdminCommand {
     DrainMachine {
         /// The machine's name, or its node id in full (16 hex digits).
         machine: String,
+    },
+    /// Remove a drained machine from the cell for good (#359): its node id
+    /// is tombstoned. Drain it first, and wait until it holds no slot.
+    RemoveMachine {
+        /// The machine's name, or its node id in full (16 hex digits).
+        machine: String,
+    },
+    /// Open a maintenance window over a machine or, with `--zone`, a
+    /// failure domain (#359): the cell coordinator re-places no role of a
+    /// machine it covers while the machine is down. `--for 0s` ends it.
+    Maintenance {
+        /// The machine's name or full node id, or the failure domain with
+        /// `--zone`.
+        target: String,
+        /// The target is a failure domain (a zone), not a machine.
+        #[arg(long)]
+        zone: bool,
+        /// How long the window lasts, from when the cell coordinator reads
+        /// it: `30s`, `10m`, `2h`; `0s` ends it.
+        #[arg(long = "for", value_parser = parse_window)]
+        window: Duration,
     },
     /// Set a registered machine's user tags, whole: the tags given replace
     /// the ones it has, and none clears them (#575). Its `paros/` tags come
@@ -106,6 +135,17 @@ pub async fn run(
         CellAdminCommand::AddMachine { addr } => addr,
         CellAdminCommand::DrainMachine { machine } => {
             return drain(asker, client, servers, labels, out, &machine).await;
+        }
+        CellAdminCommand::RemoveMachine { machine } => {
+            return remove(asker, client, servers, labels, out, &machine).await;
+        }
+        CellAdminCommand::Maintenance {
+            target,
+            zone,
+            window,
+        } => {
+            let ctx = (asker, client, servers);
+            return maintenance(ctx, labels, out, (&target, zone), window).await;
         }
         CellAdminCommand::TagMachine { machine, tags } => {
             return tag_machine(asker, client, servers, (labels, out), &machine, &tags).await;
@@ -222,6 +262,135 @@ async fn session(
     ))
 }
 
+/// A duration as `500ms`, `30s`, `10m` or `2h`.
+fn parse_window(text: &str) -> Result<Duration, String> {
+    let (digits, unit) = text
+        .find(|c: char| !c.is_ascii_digit())
+        .map_or((text, ""), |at| text.split_at(at));
+    let value: u64 = digits
+        .parse()
+        .map_err(|_| format!("{text:?}: a duration is a number and a unit (ms, s, m, h)"))?;
+    match unit {
+        "ms" => Ok(Duration::from_millis(value)),
+        "s" => Ok(Duration::from_secs(value)),
+        "m" => Ok(Duration::from_secs(value.saturating_mul(60))),
+        "h" => Ok(Duration::from_secs(value.saturating_mul(3600))),
+        _ => Err(format!("{text:?}: the unit is ms, s, m or h")),
+    }
+}
+
+/// An open session over the servers' cell, and the registered machine
+/// `machine` names in it.
+async fn open_on(
+    asker: &Asker<'_>,
+    client: &Client<TokioProviders>,
+    servers: &[(u64, Address)],
+    labels: &Labels,
+    machine: &str,
+) -> Result<(CellSession, NodeId), Ending> {
+    let mut session = session(asker, client, servers).await?;
+    if let Err(stop) = session.open(client, 0).await {
+        return Err(interrupted(&stop));
+    }
+    let Some(node) = registered_machine(&session, labels, machine) else {
+        note(&format!("no registered machine is named {machine}"));
+        return Err(Ending::Refused);
+    };
+    Ok((session, node))
+}
+
+/// `parosctl cell remove-machine <machine>` (#359): `RetireNode` for the
+/// drained machine `machine` names.
+async fn remove(
+    asker: &Asker<'_>,
+    client: &Client<TokioProviders>,
+    servers: &[(u64, Address)],
+    labels: &Labels,
+    out: &Printer,
+    machine: &str,
+) -> Ending {
+    let (mut session, node) = match open_on(asker, client, servers, labels, machine).await {
+        Ok(opened) => opened,
+        Err(ending) => return ending,
+    };
+    let name = labels.machine(node.0);
+    match session.remove(client, 0, node).await {
+        Ok(Removal::Removed | Removal::Unchanged) => {
+            out.emit(
+                || format!("removed machine={name}"),
+                || json!({ "outcome": "removed", "node": node.0 }),
+            );
+            Ending::Success
+        }
+        Ok(Removal::Unknown) => {
+            note(&format!("no registered machine is named {machine}"));
+            Ending::Refused
+        }
+        Ok(Removal::NotDraining) => {
+            note(&format!(
+                "machine {name} is not draining: run `parosctl cell drain-machine` first"
+            ));
+            Ending::Refused
+        }
+        Ok(Removal::NotDrained { slots }) => {
+            note(&format!(
+                "machine {name} still holds {slots} slot(s): wait until the drain ends"
+            ));
+            Ending::Refused
+        }
+        Err(stop) => interrupted(&stop),
+    }
+}
+
+/// `parosctl cell maintenance <machine|zone> --for <duration>` (#359).
+async fn maintenance(
+    (asker, client, servers): (&Asker<'_>, &Client<TokioProviders>, &[(u64, Address)]),
+    labels: &Labels,
+    out: &Printer,
+    (target, zone): (&str, bool),
+    window: Duration,
+) -> Ending {
+    let for_ms = u64::try_from(window.as_millis()).unwrap_or(u64::MAX);
+    let (mut session, scope, label) = if zone {
+        let mut session = match session(asker, client, servers).await {
+            Ok(session) => session,
+            Err(ending) => return ending,
+        };
+        if let Err(stop) = session.open(client, 0).await {
+            return interrupted(&stop);
+        }
+        (
+            session,
+            MaintenanceScope::Zone(target.to_string()),
+            format!("zone={target}"),
+        )
+    } else {
+        match open_on(asker, client, servers, labels, target).await {
+            Ok((session, node)) => (
+                session,
+                MaintenanceScope::Machine(node),
+                format!("machine={}", labels.machine(node.0)),
+            ),
+            Err(ending) => return ending,
+        }
+    };
+    match session.maintenance(client, 0, scope, for_ms).await {
+        Ok(true) => {
+            let outcome = if for_ms == 0 { "ended" } else { "maintenance" };
+            out.emit(
+                || format!("{outcome} {label} for_ms={for_ms}"),
+                || json!({ "outcome": outcome, "target": target, "zone": zone, "for_ms": for_ms }),
+            );
+            Ending::Success
+        }
+        Ok(false) => {
+            note(&format!("no machine of the cell is named {target}"));
+            Ending::Refused
+        }
+        Err(stop) => interrupted(&stop),
+    }
+}
+
 /// The registered machine `machine` names, by name or node id in full.
 fn registered_machine(session: &CellSession, labels: &Labels, machine: &str) -> Option<NodeId> {
     let registered: Vec<u64> = session.registry().nodes().map(|(id, _)| id.0).collect();
@@ -296,16 +465,9 @@ async fn drain(
     out: &Printer,
     machine: &str,
 ) -> Ending {
-    let mut session = match session(asker, client, servers).await {
-        Ok(session) => session,
+    let (mut session, node) = match open_on(asker, client, servers, labels, machine).await {
+        Ok(opened) => opened,
         Err(ending) => return ending,
-    };
-    if let Err(stop) = session.open(client, 0).await {
-        return interrupted(&stop);
-    }
-    let Some(node) = registered_machine(&session, labels, machine) else {
-        note(&format!("no registered machine is named {machine}"));
-        return Ending::Refused;
     };
     match session.drain(client, 0, node).await {
         Ok(wrote) => {

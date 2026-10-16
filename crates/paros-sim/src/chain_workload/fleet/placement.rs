@@ -14,6 +14,13 @@
 //! slot on a draining machine: its move finished. The same holds for a
 //! machine the cell coordinator holds slow (#361 (slow machines)), as the
 //! final registry holds it.
+//!
+//! A machine down past `machine_replace_after` is gone (#475 (re-place
+//! after the Down bound)): its slots move as a draining machine's do, so a
+//! member the registry may have marked down is excused from holding its
+//! slot. While a maintenance window an operator opened holds it, a down
+//! machine keeps every slot it held (#359). A machine an operator removed
+//! is retired and holds no slot (#359).
 
 use std::collections::BTreeSet;
 use std::time::Duration;
@@ -28,6 +35,7 @@ use paros::{JournalIdentifier, NodeId, TenantId};
 
 use super::cell::Cell;
 use super::judged_cell;
+use crate::audit::liveness::JudgedRegistry;
 
 /// Read every hosted tenant's control journal, then the cell's registry,
 /// and hold each live journal's members against the registry's bookings.
@@ -49,16 +57,18 @@ pub(super) async fn placements_booked(
         if let Some((tenants, registry, slow_before)) = read(known, first, &learn).await {
             if !judged {
                 judge(&tenants, &registry, &slow_before);
+                maintained(ctx, &tenants, registry.registry());
+                removed(ctx, registry.registry());
                 judged = true;
             }
-            let stuck = unmoved(&tenants, &registry, &wiped);
+            let stuck = unmoved(&tenants, registry.registry(), &wiped);
             if stuck.is_none() {
                 return;
             }
             // A move may still be on its way: read again until the deadline.
             if ctx.time().now() + Duration::from_millis(500) >= deadline {
                 let (journal, node) = stuck.unwrap_or_default();
-                if registry.is_slow(NodeId(node)) {
+                if registry.registry().is_slow(NodeId(node)) {
                     assert_always!(
                         crate::machine::cell_lost(ctx.state()),
                         "placement: a journal with a machine to go to leaves a slow one after chaos",
@@ -86,7 +96,7 @@ async fn read(
     known: &Cell,
     first: usize,
     learn: &impl Fn(JournalIdentifier),
-) -> Option<(Vec<TenantControl>, Registry, BTreeSet<NodeId>)> {
+) -> Option<(Vec<TenantControl>, JudgedRegistry, BTreeSet<NodeId>)> {
     let mut cell = judged_cell(&known.members);
     let loaded =
         paros::client::checkpoint::load(&mut cell, known.journals.cell, &known.client, first, 0)
@@ -127,12 +137,13 @@ async fn read(
     if !matches!(loaded, LoadOutcome::Loaded { .. }) {
         return None;
     }
-    Some((tenants, after.state().registry().clone(), slow_before))
+    Some((tenants, after.state().clone(), slow_before))
 }
 
 /// The oracle itself, and the gate that a placement spread over zones.
 /// `slow_before` are the machines held slow when the reads began.
-fn judge(tenants: &[TenantControl], registry: &Registry, slow_before: &BTreeSet<NodeId>) {
+fn judge(tenants: &[TenantControl], judged: &JudgedRegistry, slow_before: &BTreeSet<NodeId>) {
+    let registry = judged.registry();
     // Placement books only a machine that serves the cell: a founding
     // member, or one whose admission the coordinator saw (#511 (placement
     // books machines that never served)). A slot on a machine that never
@@ -165,10 +176,13 @@ fn judge(tenants: &[TenantControl], registry: &Registry, slow_before: &BTreeSet<
             // (#361 (slow machines)).
             let registered =
                 |node: NodeId| registry.keeps_roles(node) && !slow_before.contains(&node);
-            // Only a member that left the registered machines moved off.
+            // Only a member that left the registered machines, or one down
+            // past the re-placement bound (#475), moved off.
             let lost = members
                 .iter()
-                .filter(|member| registered(**member) && !slots.contains(member))
+                .filter(|member| {
+                    registered(**member) && !slots.contains(member) && !judged.maybe_down(**member)
+                })
                 .count();
             assert_always!(
                 lost == 0,
@@ -336,4 +350,75 @@ fn unmoved(
         }
     }
     None
+}
+
+/// Whether the tenant's journal or set `target` is live in `tenants`; a
+/// tenant-level slot never counts.
+fn live(tenants: &[TenantControl], registry: &Registry, target: BookingTarget) -> bool {
+    if registry.dropped(target.tenant()) {
+        return false;
+    }
+    match target {
+        BookingTarget::Journal(journal) => tenants
+            .iter()
+            .filter(|c| c.tenant() == journal.tenant)
+            .any(|c| c.live().any(|(id, _)| id == journal.journal)),
+        BookingTarget::Set { .. } => true,
+        // A tenant-level slot (#476 (tenant footprint)) holds no data: the
+        // footprint places a coordinator again once its machine is down,
+        // maintenance window or not, so no window keeps it.
+        BookingTarget::Tenant { .. } => false,
+    }
+}
+
+/// While a maintenance window an operator opened still holds (#359), every
+/// slot its machine held when the operator sent it is still booked, unless
+/// the machine left the registered machines or the slot's journal is gone.
+fn maintained(ctx: &SimContext, tenants: &[TenantControl], registry: &Registry) {
+    let now = ctx.time().now();
+    for note in crate::machine::maintenance_notes(ctx.state()) {
+        if now >= note.sent + note.length {
+            continue;
+        }
+        let node = NodeId(note.node);
+        if registry
+            .get(node)
+            .is_none_or(|n| n.standing != NodeStanding::Registered)
+        {
+            continue;
+        }
+        assert_reachable!("placement: a maintenance window is judged after chaos");
+        let booked: BTreeSet<u64> = registry
+            .bookings()
+            .filter(|(_, b)| b.node == node)
+            .map(|(id, _)| id)
+            .collect();
+        // A slot released with its journal is the journal's, not a move's.
+        let moved = note
+            .slots
+            .iter()
+            .filter(|(id, target)| !booked.contains(id) && live(tenants, registry, *target))
+            .count();
+        assert_always!(
+            moved == 0,
+            "placement: a maintenance window keeps its machine's slots",
+            { "node" => note.node, "moved" => moved }
+        );
+    }
+}
+
+/// Every machine an operator removed (#359) is retired and holds no slot.
+fn removed(ctx: &SimContext, registry: &Registry) {
+    for id in crate::machine::removed_ids(ctx.state()) {
+        let node = NodeId(id);
+        let retired = registry
+            .get(node)
+            .is_some_and(|n| n.standing == NodeStanding::Retired);
+        assert_always!(
+            retired && registry.booked(node) == 0,
+            "placement: a removed machine is retired and holds no slot",
+            { "node" => id, "booked" => registry.booked(node) }
+        );
+        assert_reachable!("placement: a removed machine is judged after chaos");
+    }
 }

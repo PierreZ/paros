@@ -805,7 +805,14 @@ impl<'f, F> Host<'f, F> {
                         generation,
                         applied: outcome != GcOutcome::Refused,
                         watermark: seat.matchmaker.gc_watermark(journal),
+                        newer: (outcome == GcOutcome::Refused)
+                            .then(|| seat.matchmaker.newer_set(generation))
+                            .flatten(),
                     };
+                    assert!(
+                        ack.applied || ack.newer.as_ref().is_none_or(|s| s.generation > generation),
+                        "a stopped matchmaker names a later generation"
+                    );
                     seat.port(journal).matchmaker_gc_replied(id, &ack);
                     match_answer(id, Reply::GcAck, reply, ack);
                 }

@@ -138,6 +138,17 @@ pub(crate) struct MachineBoard {
     /// (three founding members)): from its crash to its restart, in
     /// simulated time.
     downed: Option<(Duration, Duration)>,
+    /// The machine the gone-machine scenario takes down (#475 (re-place
+    /// after the Down bound)), by minted id, once an operator picked it, and
+    /// whether the injector struck it.
+    gone: Option<(u64, bool)>,
+    /// Every maintenance window an operator opened (#359).
+    maintenance: Vec<MaintenanceNote>,
+    /// The machines an operator removed (#359), by minted id.
+    removed: BTreeSet<u64>,
+    /// The machines an operator asked to remove (#359), by minted id: a
+    /// removal whose answer was lost may still have landed.
+    remove_asked: BTreeSet<u64>,
     /// The audit's fold of the calls every machine metered (#366
     /// (metrics)): what the machines' counters must add up to.
     metered: paros::metrics::Totals,
@@ -145,6 +156,23 @@ pub(crate) struct MachineBoard {
     /// reboot gets the metrics it had, as a real `/metrics` keeps counting
     /// on the same host, and the oracle reads every one.
     metrics: BTreeMap<String, paros::metrics::Metrics>,
+}
+
+/// A maintenance window an operator opened over a machine (#359), for the
+/// final oracle: no slot booked on it when the window opened is released
+/// while the window is open.
+#[derive(Clone, Debug)]
+pub(crate) struct MaintenanceNote {
+    /// The machine.
+    pub(crate) node: u64,
+    /// When the operator sent the entry, in simulated time: the window
+    /// opens no earlier.
+    pub(crate) sent: Duration,
+    /// The window's length.
+    pub(crate) length: Duration,
+    /// The bookings held on the machine when the operator sent it: each id
+    /// and its journal or set.
+    pub(crate) slots: Vec<(u64, paros::system::BookingTarget)>,
 }
 
 impl MachineBoard {
@@ -307,6 +335,71 @@ pub(crate) fn renamed_ids(state: &StateHandle) -> BTreeSet<u64> {
             board.nodes.get(&addr).copied()
         })
         .collect()
+}
+
+/// The gone-machine scenario's operator picked machine `node` to take down
+/// (#475): `false` when one was picked already.
+pub(crate) fn request_gone(state: &StateHandle, node: u64) -> bool {
+    let board = machine_board(state);
+    let mut board = lock(&board);
+    if board.gone.is_some() {
+        return false;
+    }
+    board.gone = Some((node, false));
+    true
+}
+
+/// Whether the gone-machine scenario's operator picked its machine.
+pub(crate) fn gone_requested(state: &StateHandle) -> bool {
+    lock(&machine_board(state)).gone.is_some()
+}
+
+/// The process IP of the machine the gone-machine scenario picked, once,
+/// while it is alive: the injector strikes it then (#475).
+pub(crate) fn gone_target(state: &StateHandle, dead: impl Fn(&str) -> bool) -> Option<String> {
+    let board = machine_board(state);
+    let mut board = lock(&board);
+    let (node, false) = board.gone? else {
+        return None;
+    };
+    let addr = board
+        .nodes
+        .iter()
+        .find(|(_, id)| **id == node)
+        .map(|(addr, _)| addr.clone())?;
+    let ip = board.ips.get(&addr).filter(|ip| !dead(ip)).cloned()?;
+    board.gone = Some((node, true));
+    Some(ip)
+}
+
+/// An operator opened a maintenance window (#359).
+pub(crate) fn note_maintenance(state: &StateHandle, note: MaintenanceNote) {
+    lock(&machine_board(state)).maintenance.push(note);
+}
+
+/// An operator removed machine `node` from the cell (#359).
+pub(crate) fn note_removed(state: &StateHandle, node: u64) {
+    lock(&machine_board(state)).removed.insert(node);
+}
+
+/// An operator asks to remove machine `node` from the cell (#359).
+pub(crate) fn note_remove_asked(state: &StateHandle, node: u64) {
+    lock(&machine_board(state)).remove_asked.insert(node);
+}
+
+/// Whether an operator asked to remove machine `node` (#359).
+pub(crate) fn remove_asked(state: &StateHandle, node: u64) -> bool {
+    lock(&machine_board(state)).remove_asked.contains(&node)
+}
+
+/// The machines an operator removed (#359).
+pub(crate) fn removed_ids(state: &StateHandle) -> BTreeSet<u64> {
+    lock(&machine_board(state)).removed.clone()
+}
+
+/// Every maintenance window an operator opened (#359).
+pub(crate) fn maintenance_notes(state: &StateHandle) -> Vec<MaintenanceNote> {
+    lock(&machine_board(state)).maintenance.clone()
 }
 
 /// Whether the machine at `addr` is a founding member `init` lists.

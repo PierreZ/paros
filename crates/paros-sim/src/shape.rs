@@ -222,6 +222,9 @@ impl NodeShape {
         };
         let floor_ticks = ROUND_TRIP_FLOOR_MS.div_ceil(tick_ms);
         let election_renew_ms = buggify_knob!(500_u64, 100_u64..1001_u64);
+        // The failure detector's timeout past a renewal period (#211); the
+        // re-placement bound adds to it (#475).
+        let down_after_ms = buggify_knob!(1000_u64, ROUND_TRIP_FLOOR_MS..3001_u64);
         let mut drawn = DriverTunables {
             tick_interval: ms(tick_ms),
             election_timeout_base: buggify_knob!(5_u64, 2_u64..13_u64).max(floor_ticks),
@@ -400,9 +403,16 @@ impl NodeShape {
             // never marks a machine down. The range crosses a machine's
             // reboot in both directions: a short one marks a rebooting
             // machine down, then up again.
-            machine_down_after: ms(
-                election_renew_ms + buggify_knob!(1000_u64, ROUND_TRIP_FLOOR_MS..3001_u64)
-            ),
+            machine_down_after: ms(election_renew_ms + down_after_ms),
+            // The re-placement bound (#475 (re-place after the Down bound)).
+            // Floor: a round trip past `machine_down_after`, so a machine is
+            // re-placed only once it is down. The range crosses a machine's
+            // reboot and the silent machine's 4.5–6.5 s outage both ways: a
+            // short bound re-places a machine that only rebooted, a long one
+            // lets it rejoin in place.
+            machine_replace_after: ms(election_renew_ms
+                + down_after_ms
+                + buggify_knob!(3000_u64, ROUND_TRIP_FLOOR_MS..8001_u64)),
             // A machine's busyness window (#424). Floor 1 s (the shipped
             // floor): shorter measures the sampler, not the machine. The
             // short end gives a run many windows, so `LOAD` meets a full
@@ -845,6 +855,9 @@ struct Registry {
     /// Run-level: whether the run draws the drained-machine scenario (see
     /// [`drained_machine`]), fixed by the first caller.
     drained_machine: Option<bool>,
+    /// Run-level: whether a drained-machine run takes its machine down for
+    /// good instead (see [`gone_machine`]), fixed by the first caller.
+    gone_machine: Option<bool>,
     /// Run-level: whether the run draws the changed-mode scenario (see
     /// [`changed_mode`]), fixed by the first caller.
     changed_mode: Option<bool>,
@@ -1327,6 +1340,30 @@ pub(crate) fn drained_machine(state: &StateHandle) -> bool {
         moonpool_sim::set_activation(paros::scenario::QUIT_MID_MOVE, drained);
         drained
     })
+}
+
+/// Whether a drained-machine run (see [`drained_machine`]) takes its
+/// machine down instead of draining it (#475 (re-place after the Down
+/// bound)): drawn once per seed, its own BUGGIFY location. The operator
+/// picks the machine as it would pick one to drain, one that holds a
+/// journal's slot another storage machine could take, and, on a coin,
+/// opens a maintenance window over it or its zone first (#359); then
+/// `crate::world::gone_machine` crashes it for longer than every
+/// `machine_replace_after` the knob draws. The cell coordinator must mark
+/// it down, then re-place its roles once the bound and any window passed.
+/// A machine down past the bound needs a journal on an admitted machine
+/// and a long outage at once, which no coin lines up alone.
+/// Rare-but-valid: a machine may die for good at any time.
+#[tracing::instrument(level = "debug", skip_all)]
+pub(crate) fn gone_machine(state: &StateHandle) -> bool {
+    if !drained_machine(state) {
+        return false;
+    }
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    *guard
+        .gone_machine
+        .get_or_insert_with(|| moonpool_sim::buggify_with_prob!(0.5))
 }
 
 /// Whether the run draws the **changed-mode scenario** (#214 (tenant
@@ -2531,11 +2568,26 @@ pub(crate) fn longest_election_lease(state: &StateHandle) -> Duration {
         .unwrap_or(Duration::ZERO)
 }
 
+/// The longest re-placement bound any node booted under so far (#475
+/// (re-place after the Down bound)): a cell coordinator may wait that long
+/// before it re-places a machine's roles. Zero before any boot.
+pub(crate) fn longest_replace_after(state: &StateHandle) -> Duration {
+    let registry = registry(state);
+    let guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    guard
+        .nodes
+        .values()
+        .map(|entry| entry.shape.tunables.machine_replace_after)
+        .max()
+        .unwrap_or(Duration::ZERO)
+}
+
 fn renew_at_floor(tunables: &mut DriverTunables) {
     let cut = tunables.election_renew.saturating_sub(ELECTION_RENEW_FLOOR);
     tunables.election_renew -= cut;
     tunables.election_lease -= cut;
     tunables.machine_down_after -= cut;
+    tunables.machine_replace_after -= cut;
 }
 
 /// The longest a machine of this campaign may take over one `Resolve`

@@ -639,7 +639,18 @@ watch writes only while its term's session holds the cell control journal; its f
 does not land ends the watch for the term. `RegisterNode` and `IdentifyAck` carry the machine's RPC
 incarnation and, since #404, its machine interface. Capacity bookings are keyed `(node, journal or matchmaker set, role)`,
 the role names the class, and a booking id is never booked twice, across checkpoints (the
-registry keeps the spent ids). The re-placement bound and the re-placement itself are #475.
+registry keeps the spent ids).
+
+Landed in #475 (re-place after the Down bound, 2026-10-15): the re-placement bound is
+`machine_replace_after` (a driver tunable, floor above `machine_down_after`; 300 s in the shipped
+profile). The watch names a registered machine *gone* when the registry holds it down and the
+watch did not hear it for that long. A machine that answers again inside the bound keeps its
+roles: a reboot rejoins in place. The tenant coordinator moves the journals and matchmaker sets
+off a gone machine as it moves them off a draining one, and a gone machine takes no new slot. A
+gone machine that answers again before its move ends keeps the slot the move did not release
+yet; at an idle round the coordinator releases each slot outside the configuration the
+journal's leader holds in force. The bound counts on the coordinator's own clock, so a new term
+counts again from its start.
 
 **Slow machines** (#361 (slow machines), 2026-10-16; gray failure). The failure detector above is
 binary, but a slow disk or a starved CPU answers, late, and slows every write of every journal
@@ -977,6 +988,29 @@ create.
   Oracles: a live journal holds at least as many slots as its create named, and only a member
   that left the registered machines loses its slot. After chaos, a journal that has a machine to
   go to holds no slot on a draining machine.
+- **Re-placement** (#475 (re-place after the Down bound)). A machine down past
+  `machine_replace_after` is gone (section 3.2). Its journals and sets move as a drain moves
+  them, and the machine stays registered. The simulation takes a machine that holds a slot down
+  for longer than the bound on a gone-machine seed (`paros_sim::world::gone_machine`). Oracle:
+  after chaos, every data journal that the cell can hold shows `healthy` in `parosctl status`.
+  The view judges a journal against the configuration its bookings place.
+- **Maintenance and removal** (#359). `cell maintenance <machine> --for <duration>` (or
+  `--zone <zone>`) writes a `Maintenance` entry: while the window is open, the coordinator
+  re-places no role of a down machine that it covers. `--for 0` ends the window. The window
+  counts on the coordinator's clock from the first time it folds the entry, so it is never
+  shorter than the operator asked. `cell remove-machine` retires a drained machine: it must be
+  draining and hold no slot. The registry then tombstones its `node_id`. `parosctl status`
+  shows `drained` for a draining machine that holds no slot, and `down, in maintenance` for a
+  down machine a window covers. Oracles: a window that is still open keeps every slot its
+  machine held, and a removed machine is retired and holds no slot. A graceful stop that hands
+  the leadership on before `parosd` exits is a follow-up issue.
+- **Retire coordination** (#477 (retire coordination moves into the control journals)). The
+  simulation's operators coordinate a joiner's retirement through the registry, not through a
+  harness ledger. A composer books an acceptor slot of the journal on a joiner before it names
+  the joiner in a configuration. A retirement needs a draining joiner that holds no such slot,
+  and the registry books no slot on a draining machine. So a joiner that a configuration names
+  is never retired. The acceptor pool's retirement keeps its ledger check
+  (`StorageWorld::retire`): that pool runs no control journal on half the seeds.
 - **Matchmaker sets** (decided on 2026-10-11, #501 (matchmaker sets off the founders)). Every
   tenant's set is born on the founding members, the bootstrap generation, without a booking. At
   each watch round, after the journal move step, the tenant coordinator takes one step of one
@@ -1006,10 +1040,8 @@ create.
   last journal it holds, and only a whole bootstrap activates. The page size is the matchmakers'
   `registry_page` (at most `REGISTRY_PAGE` journals). Pages of two reconstructions may mix in
   one member: each journal's registry is valid on its own, so the mix is safe.
-- **Still to do.** Re-placement after a `Down`
-  bound (#475), the operators' retire coordination in the control journals (#477), and the
-  tenant coordinator actor that runs on the stateless machine its slot books (a follow-up of
-  #476).
+- **Still to do.** The tenant coordinator actor that runs on the stateless machine its slot
+  books (a follow-up of #476).
 
 *Landed* (#476 (tenant footprint), 2026-10-15): the tenant birth footprint, the capacity
 request RPC and the placement of tenant coordinators.
@@ -2553,7 +2585,7 @@ toy is the end of M9. The epic is #184, the backlog pointer #69, the verificatio
 |---|---|---|
 | M7 | Journal API (#204, #205) | the four calls, the journal state machine in core, the wire and the driver, the chain workload's alphabet, the linearizability checker, the race knobs and BUGGIFY sites, the cut-over |
 | M8 | parosd deployable (#206 to #209, #221, #220, #196, #201) | Tokio providers linked, the stores on a real filesystem for the first time, the `JournalStores` opener, `Config` durable at `format`, `parosd provision` (replaced by `init` in M9), the uniform binary with class and capacity, Compose, `paros::client` (#221) and the `parosctl` CLI (#220), a tracing subscriber, exit codes |
-| M9 | The universe with one cell (#225, #226, #227 first; landed: #216 (PR #408), #192 (PR #412), #210 (PR #347), #211 (PR #352, PR #388), #239 (PR #464), #191, #390, #404, #228, #235, #229, #230, #176, #261, #263, #264 (PR #266), #267, #202, #213, #246, #247, #241, #243, #244, #240, #190, #212 (placement function and bookings), #474 (PR #499), #501, #257, #245 (PR #535), #476; still to do: #248, #475, #477, #252) | the control hierarchy and its decisions, the fenced `Truncate` on the wire, random ids and the `(TenantId, JournalId)` `JournalIdentifier`, the leader-uuid API and its two writer modes, `init` creating the universe with its matchmaker sets, the cell tenant and its machine registry with role slots and liveness, the universe tenant with its directory and tenant creation state machine, the election library and the coordinators it runs, requests to a leader, placement inside capacity granted by the cell, the checkpoint-and-truncate library, names at the frontend, the frontend with Biscuit `Authz` routing through the universe tenant, per-tenant matchmaker sets, `parosctl status` |
+| M9 | The universe with one cell (#225, #226, #227 first; landed: #216 (PR #408), #192 (PR #412), #210 (PR #347), #211 (PR #352, PR #388), #239 (PR #464), #191, #390, #404, #228, #235, #229, #230, #176, #261, #263, #264 (PR #266), #267, #202, #213, #246, #247, #241, #243, #244, #240, #190, #212 (placement function and bookings), #474 (PR #499), #501, #257, #245 (PR #535), #476, #475, #477; still to do: #248, #252) | the control hierarchy and its decisions, the fenced `Truncate` on the wire, random ids and the `(TenantId, JournalId)` `JournalIdentifier`, the leader-uuid API and its two writer modes, `init` creating the universe with its matchmaker sets, the cell tenant and its machine registry with role slots and liveness, the universe tenant with its directory and tenant creation state machine, the election library and the coordinators it runs, requests to a leader, placement inside capacity granted by the cell, the checkpoint-and-truncate library, names at the frontend, the frontend with Biscuit `Authz` routing through the universe tenant, per-tenant matchmaker sets, `parosctl status` |
 | M10 | Roles per tenant (#193, #214, #194, #145, #195) | journal-tagged proxy leaders and replicas, batchers and unbatchers for multi-writer journals, tenant modes (durability, role counts) applied by the tenant coordinator, quotas, the benchmark, then scale work |
 | M11 | Zones (#215) | `(region, az)` `FailureDomain`s in `AcceptorConfig` with its `cell_id` (one format bump), the two-predicate zone rule, zone round-robin placement, the `failures-per-partition=0` exemption, the leader following its writer's zone, zone-kill attrition and a zone-aware budget in the simulation, zone-spread matchmaker sets |
 | M12 | Multiple cells (#232, #233, then #253) | adding and removing cells with tombstones, placement across cells by `kind` and `survives` (both carried since M9 with the cell's entry endpoint), tenant locks, moving tenants and the universe tenant between cells, splitting the universe tenant by range, the resolver beside the frontend (section 3.5); last, multi-region cells: the `MultiRegion` cell kind with its witness region, the two-level zone rule, pools per `(tenant, region)`, the universe tenant hosted in a multi-region cell, the partition through the witness in the simulation, moving tenants between cell kinds |

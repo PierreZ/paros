@@ -368,25 +368,51 @@ impl ColocatedNode {
         effective
     }
 
-    /// Fold one matchmaker's GC ack. An ack for another generation, another
-    /// watermark, or a matchmaker outside the current set is ignored whole
-    /// (wire input, never asserted). A quorum makes the floor effective and
-    /// names the retirable acceptors.
+    /// Fold one matchmaker's GC ack. A refusal that names a later set
+    /// teaches it first (`learn_matchmakers`: the tally starts over and asks
+    /// the new set). An ack for another generation, another watermark, or a
+    /// matchmaker outside the current set is ignored whole (wire input,
+    /// never asserted). A quorum makes the floor effective and names the
+    /// retirable acceptors.
     ///
     /// # Panics
     ///
     /// If an internal invariant is broken.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, matchmaker = ack.matchmaker.0)))]
     pub fn on_gc_ack(&mut self, ack: &GcAck) -> GcStep {
-        let Some(matchmakers) = self.matchmakers.as_ref() else {
+        let Some(believed) = self.matchmakers.as_ref() else {
             return GcStep::Ignored;
         };
         if self.role != NodeRole::Leader
-            || !matchmakers.contains(ack.matchmaker)
+            || !believed.contains(ack.matchmaker)
             || ack.journal != self.config.journal.journal
         {
             return GcStep::Ignored;
         }
+        // A stopped generation's refusal names its successor, as a
+        // matchmaking refusal does: a stable leader learns a handover only
+        // here, and its GC would otherwise ask the stopped set for ever
+        // (#475 (re-place after the Down bound), witness
+        // 8294513438102428762 on 8986321: a set handed over while a
+        // journal's move waited on its GC watermark).
+        if !ack.applied
+            && let Some(newer) = &ack.newer
+            && newer.generation > ack.generation
+            && self.learn_matchmakers(newer)
+        {
+            probe!(reachable, "gc: a refused ack teaches the successor");
+            assert!(
+                self.matchmakers
+                    .as_ref()
+                    .is_some_and(|m| m.generation == newer.generation),
+                "a taught successor is believed"
+            );
+            self.assert_invariants();
+            return GcStep::Ignored;
+        }
+        let Some(matchmakers) = self.matchmakers.as_ref() else {
+            return GcStep::Ignored;
+        };
         let me = self.config.id;
         let acceptors = self.acceptors.clone();
         let ballot = self.ballot;

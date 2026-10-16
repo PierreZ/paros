@@ -94,8 +94,8 @@ message MachineView {
   string addr = 3;
   uint64 capacity = 5;
   uint64 booked = 6;
-  // "registered", "draining", "retired"; "founding" for a founding member
-  // the registry never held.
+  // "registered", "draining", "drained" (draining, no slot left, #359),
+  // "retired"; "founding" for a founding member the registry never held.
   string standing = 8;
   bool up = 9;
   fixed64 incarnation_high = 10;
@@ -106,9 +106,13 @@ message MachineView {
   // `paros/rack`), then its user tags. A tenant scope sees only `paros/zone`
   // and `paros/rack`.
   repeated .paros.common.v1.Tag tags = 14;
+  // The longest open maintenance window over the machine or its failure
+  // domain, in milliseconds, as the registry records it (#359); 0 when none
+  // is open. The window runs on the cell coordinator's clock.
+  uint64 maintenance_ms = 15;
   // Whether the cell coordinator holds it slow (#361 (slow machines)): alive,
   // but its journals move off it.
-  bool slow = 15;
+  bool slow = 16;
 }
 
 message BookingView {

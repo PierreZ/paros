@@ -299,10 +299,8 @@ impl ChainWorkload {
         // is never asked for, and is the first one moved out.
         let mut live = live_candidates(servers, &crate::world::parked_nodes(ctx.state(), journal));
         // The joiners the node registry admitted (#189): a
-        // successor may pull one in. Read here, before the
-        // composition and its ledger entry, which take no await
-        // between them — a retirement reserved in the meantime
-        // is re-checked at the ledger.
+        // successor may pull one in once it holds a slot in the
+        // registry (#477, `SystemOps::hold_joiners`).
         let joinable = system_ops.joinable(ctx, nodes, raw_payload).await;
         live.extend(joinable.iter().copied());
         // The adversarial draw (R5): compose from *every* rank
@@ -484,6 +482,15 @@ impl ChainWorkload {
             let malformed = malformed.is_some();
             tracing::info!(shape = name, members = ?next, ?system, "chain_reconfigure_request");
             *remove_next = false;
+            // A joiner is named only once the registry holds its
+            // slot (#477 (retire coordination moves into the
+            // control journals)).
+            if !system_ops
+                .hold_joiners(ctx, nodes, &next, raw_payload)
+                .await
+            {
+                return;
+            }
             // The operators' ledger (#198): filed before the
             // request leaves, answered below; a retirement reads
             // it (`StorageWorld::retire`).

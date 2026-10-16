@@ -87,6 +87,7 @@ impl DriverTunables {
     /// | `election_lease`, `election_renew` | 3 s, 1 s | a cell coordinator renews three times per lease (#240) |
     /// | `election_compact_after` | 64 | the election journal's log stays a few kilobytes |
     /// | `machine_down_after` | 10 s | a machine silent for ten renewal periods is down; a reboot is shorter (#211) |
+    /// | `machine_replace_after` | 5 min | a machine silent that long is gone: its roles move (#475); a reboot, even a slow one, is shorter |
     /// | `load_interval` | the default (5 s) | FDB's `WORKER_LOGGING_INTERVAL` (#424) |
     /// | `slow_rtt`, `slow_busy_permille`, `slow_rounds` | 2 s, 950, 5 | a machine slow for five renewal periods (one `Load` window) moves its journals off (#361 (slow machines)) |
     /// | `status_hold` | 20 s | two `machine_down_after`: a machine that reboots inside it never changes a word (#191 (status)) |
@@ -127,6 +128,7 @@ impl DriverTunables {
             slow_rtt: Duration::from_secs(2),
             slow_busy_permille: 950,
             slow_rounds: 5,
+            machine_replace_after: Duration::from_secs(300),
             status_hold: Duration::from_secs(20),
             internal_request_timeout: Duration::from_secs(2),
             ..defaults
@@ -155,8 +157,10 @@ impl DriverTunables {
         production
     }
 
-    /// Every checked field: its name, its value and its floor.
-    fn floor_table(&self) -> [(&'static str, u64, u64); 45] {
+    /// Every checked field: its name, its value and its floor. One row per
+    /// field, so it grows with the tunables.
+    #[allow(clippy::too_many_lines)]
+    fn floor_table(&self) -> [(&'static str, u64, u64); 46] {
         let ms = |d: Duration| u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
         let count = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
         [
@@ -229,6 +233,12 @@ impl DriverTunables {
                 "machine_down_after",
                 ms(self.machine_down_after),
                 ms(self.election_renew).saturating_add(1),
+            ),
+            // A machine is re-placed only once it is down (#475).
+            (
+                "machine_replace_after",
+                ms(self.machine_replace_after),
+                ms(self.machine_down_after).saturating_add(1),
             ),
             ("recovery_page", count(self.recovery_page), 1),
             ("promise_page", count(self.promise_page), 1),

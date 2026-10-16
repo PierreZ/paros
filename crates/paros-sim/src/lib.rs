@@ -420,6 +420,7 @@ fn chain_builder(digest: Option<DigestSink>) -> SimulationBuilder {
         .fault_factory(|| Box::new(crate::world::bare_outage::BareOutage))
         .fault_factory(|| Box::new(crate::world::wiped_founder::WipedFounder))
         .fault_factory(|| Box::new(crate::world::silent_machine::SilentMachine))
+        .fault_factory(|| Box::new(crate::world::gone_machine::GoneMachine))
         .fault_factory(|| Box::new(crate::world::slow_machine::SlowMachine))
         .fault_factory(|| Box::new(crate::world::downed_founder::DownedFounder))
         .fault_factory(|| Box::new(crate::world::zone_outage::ZoneOutage))

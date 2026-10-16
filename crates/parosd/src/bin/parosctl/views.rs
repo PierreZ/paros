@@ -242,6 +242,17 @@ pub(crate) fn state(machine: &paros::wire::view::MachineView) -> &'static str {
     }
 }
 
+/// A machine's state: `up`, `slow` (#361 (slow machines)) or `down`, and
+/// `in maintenance` while a maintenance window over it or its zone is open
+/// (#359).
+pub(crate) fn machine_state(m: &wire::MachineView) -> String {
+    if m.maintenance_ms > 0 {
+        format!("{}, in maintenance", state(m))
+    } else {
+        state(m).to_string()
+    }
+}
+
 /// `parosctl machine …`.
 /// The value of the tag `key` (#575 (key:value tags)), or `-`.
 pub(crate) fn tag(tags: &[paros::wire::common::Tag], key: &str) -> String {
@@ -338,7 +349,7 @@ pub async fn machine(asker: &Asker<'_>, out: &Printer, args: MachineArgs) -> End
                         tag(&m.tags, paros::tags::reserved::RACK),
                         user_tags_text(&m.tags),
                         m.standing,
-                        state(m),
+                        machine_state(m),
                         if m.founder { "yes" } else { "no" },
                         self::text(&reply.cell_name),
                     );
@@ -390,7 +401,7 @@ async fn machine_list(
                 format!("{}/{}", m.booked, m.capacity),
                 tag(&m.tags, paros::tags::reserved::ZONE),
                 m.standing.clone(),
-                state(m).to_string(),
+                machine_state(m),
                 cpu,
                 machine,
                 disk,
@@ -742,7 +753,7 @@ pub async fn tenant_show(asker: &Asker<'_>, out: &Printer, name: &str) -> Ending
             [
                 names[&m.node_id].clone(),
                 tag(&m.tags, paros::tags::reserved::ZONE),
-                state(m).to_string(),
+                machine_state(m),
                 footprint.get(&m.node_id).copied().unwrap_or(0).to_string(),
             ]
         })
@@ -925,6 +936,7 @@ fn machine_json(m: &wire::MachineView) -> Value {
         "standing": m.standing,
         "up": m.up,
         "slow": m.slow,
+        "maintenance_ms": m.maintenance_ms,
         "founder": m.founder,
         "incarnation": format!("{:016x}{:016x}", m.incarnation_high, m.incarnation_low),
         "bookings": m.bookings.iter().map(|b| json!({
