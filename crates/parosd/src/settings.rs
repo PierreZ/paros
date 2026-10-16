@@ -11,7 +11,6 @@
 //! | `PAROS_CAPACITY` | its capacity, in role slots (default 32): one slot holds one acceptor of one journal |
 //! | `PAROS_ZONE` | its zone, its failure domain: the reserved tag `paros/zone` (#575 (key:value tags); default none) |
 //! | `PAROS_RACK` | its rack inside the zone: the reserved tag `paros/rack` (default none) |
-//! | `PAROS_STORE_LAYOUT` | `default` (64 MiB segments) or `small` (laptops, tests) |
 //! | `PAROS_TLS_CERT` | its certificate chain, PEM (`parosctl tls`); with the next two, every session is TLS |
 //! | `PAROS_TLS_KEY` | the certificate's private key, PEM |
 //! | `PAROS_TLS_CA` | the universe's authority, PEM: the peers and callers it trusts |
@@ -29,14 +28,14 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use clap::{Parser, ValueEnum};
+use clap::Parser;
+use paros::Transport;
 use paros::machine::{AdminPin, Class};
 use paros::tls::{ClientCertificates, Files};
-use paros::{JournalStoreConfig, Transport};
 use paros_authz_biscuit::{BiscuitAuthz, KeyRing, RootPublicKey};
 
 /// The variables this module reads.
-const VARIABLES: [&str; 19] = [
+const VARIABLES: [&str; 18] = [
     "PAROS_HTTP_LISTEN",
     "PAROS_OTLP_ENDPOINT",
     "PAROS_OTLP_TRACES_ENDPOINT",
@@ -50,33 +49,12 @@ const VARIABLES: [&str; 19] = [
     "PAROS_CAPACITY",
     "PAROS_ZONE",
     "PAROS_RACK",
-    "PAROS_STORE_LAYOUT",
     "PAROS_TLS_CERT",
     "PAROS_TLS_KEY",
     "PAROS_TLS_CA",
     "PAROS_TLS_CLIENT_AUTH",
     "PAROS_ROOT_PUBLIC_KEY",
 ];
-
-/// The store layout a machine runs.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
-pub enum Layout {
-    /// The CLSTORE layout: 64 MiB segments.
-    Default,
-    /// 256 KiB segments and frequent checkpoints, for tests and laptops.
-    Small,
-}
-
-impl Layout {
-    /// The store configuration.
-    #[must_use]
-    pub fn config(self) -> JournalStoreConfig {
-        match self {
-            Layout::Default => JournalStoreConfig::default(),
-            Layout::Small => JournalStoreConfig::small(),
-        }
-    }
-}
 
 /// The paros daemon: one uniform binary any machine runs (#196).
 #[derive(Parser, Debug)]
@@ -130,14 +108,6 @@ pub struct Settings {
     /// How often the metrics are pushed, in milliseconds.
     #[arg(long, env = "PAROS_OTLP_INTERVAL_MS", default_value_t = 10_000, value_parser = clap::value_parser!(u64).range(100..))]
     pub otlp_interval_ms: u64,
-    /// The store layout.
-    #[arg(
-        long,
-        env = "PAROS_STORE_LAYOUT",
-        value_enum,
-        default_value = "default"
-    )]
-    pub layout: Layout,
     /// Its certificate chain, PEM, leaf first (`parosctl tls`). With the
     /// key and the authority, every session it serves and dials is TLS.
     #[arg(long, env = "PAROS_TLS_CERT")]

@@ -126,7 +126,7 @@ pub struct SetStoreImage {
 }
 
 /// Read the disk under `root` on `source`, a machine's data directory, with
-/// its stores laid out by `layout` (`PAROS_STORE_LAYOUT`). Every store is
+/// its stores laid out by `layout` (the default geometry in `parosd`). Every store is
 /// copied under `scratch_root` on `scratch` before it is opened, and the
 /// copy is deleted after (see the [module docs](self)): nothing under
 /// `root` is written.

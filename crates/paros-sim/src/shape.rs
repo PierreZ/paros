@@ -986,7 +986,7 @@ pub(crate) fn journal_layout(state: &StateHandle) -> JournalStoreConfig {
             },
             geometry: journal_geometry(),
             meta_chunk,
-            ..JournalStoreConfig::small()
+            ..JournalStoreConfig::default()
         }
     })
 }
@@ -1771,16 +1771,28 @@ const _: () = assert!(
 );
 const _: () = assert!(PERSIST_BLOCKS_FLOOR >= 1);
 
+/// A segment of a few blocks: 512 records and 64 KiB of entries, the base
+/// of the simulation's geometry draws and the matchmakers' fixed shape.
+pub(crate) const COMPACT_GEOMETRY: paros::journal::Geometry = paros::journal::Geometry {
+    persist_blocks: 8,
+    gap_blocks: 0,
+    entry_blocks: 16,
+};
+
 /// The journal stores' segment geometry (#176, folded from #202): a
 /// `buggify_knob!` per region, so segment rollover, prefix deletion and the
-/// batch-split path run under varied shapes. The default is the library's
-/// `Geometry::small()` persist log (512 records) with the entry log at its
-/// floor; the extremes shrink the persist log to [`PERSIST_BLOCKS_FLOOR`]
-/// or grow either region. The gap stays empty.
+/// batch-split path run under varied shapes. The default is
+/// [`COMPACT_GEOMETRY`]'s persist log (512 records) with the entry log at
+/// its floor; the extremes shrink the persist log to [`PERSIST_BLOCKS_FLOOR`]
+/// or grow either region. The gap stays empty. A deployment always runs
+/// the library's default geometry (#600 (drop the small layout)); only the
+/// simulation shrinks it, so a run crosses rollover often.
 fn journal_geometry() -> paros::journal::Geometry {
-    let small = paros::journal::Geometry::small();
     let geometry = paros::journal::Geometry {
-        persist_blocks: buggify_knob!(small.persist_blocks, PERSIST_BLOCKS_FLOOR..33_u32),
+        persist_blocks: buggify_knob!(
+            COMPACT_GEOMETRY.persist_blocks,
+            PERSIST_BLOCKS_FLOOR..33_u32
+        ),
         gap_blocks: 0,
         entry_blocks: buggify_knob!(ENTRY_BLOCKS_FLOOR, ENTRY_BLOCKS_FLOOR..65_u32),
     };
