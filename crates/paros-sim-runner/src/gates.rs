@@ -46,6 +46,14 @@ pub struct Rare {
 /// window seldom reaches, #485 the double fault, #486 the rest.
 pub const RARE: &[Rare] = &[
     Rare {
+        msg: "fleet: a tenant is hosted on a footprint an earlier round granted",
+        reason: "rare: fired on 0 of 300 hunt seeds; needs a coordinator that dies at its \"footprint booked, not hosted\" hint, or a write that fails between the two passes, while a tenant is born (#476 (tenant footprint), #225); the coordinator is a spawned task, so no BUGGIFY may split the passes (#486)",
+    },
+    Rare {
+        msg: "fleet: the fold refuses a footprint and the next round plans it again",
+        reason: "rare: fired on 0 of 300 hunt seeds; needs a founder to leave the registry between the footprint's plan and its apply (#476 (tenant footprint), #486)",
+    },
+    Rare {
         msg: "footprint: a dead tenant coordinator is placed again",
         reason: "marginal: needs two admitted stateless machines and the one holding a tenant coordinator's slot marked down (#476 (tenant footprint)); missed by PR #556's sweep (#486)",
     },

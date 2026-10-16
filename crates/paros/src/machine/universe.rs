@@ -232,17 +232,49 @@ pub(crate) async fn follow<P: Providers>(
     }
     // A tenant's birth takes two steps, its footprint then its host: a
     // second pass writes the host of a footprint the first one granted.
+    // The tenants whose footprint this call granted: a host for any other
+    // tenant finishes a birth that an earlier round or term started.
+    let mut granted: Vec<TenantId> = Vec::new();
     for _ in 0..TENANT_PASSES {
         let steps = tenant_steps(directory.state(), session.registry(), journals.cell_id);
         if steps.is_empty() {
             break;
         }
+        let mut booked = false;
         for step in steps {
             session.record(client, 0, &step).await?;
             note(session.registry(), &step);
+            match step {
+                SystemCommand::GrantCapacity {
+                    key: GrantKey::Footprint(tenant),
+                    ..
+                } if session
+                    .registry()
+                    .footprint(tenant)
+                    .is_some_and(crate::system::Grant::granted) =>
+                {
+                    granted.push(tenant);
+                    booked = true;
+                }
+                SystemCommand::HostTenant { tenant, .. } if !granted.contains(&tenant) => {
+                    moonpool_assertions::reachable!(
+                        "fleet: a tenant is hosted on a footprint an earlier round granted"
+                    );
+                }
+                _ => {}
+            }
             wrote += 1;
         }
+        if booked {
+            // The footprint is in the fold and the host is not written: a
+            // coordinator that dies here leaves the host to its successor.
+            moonpool_buggify::hint!("footprint booked, not hosted").await;
+        }
     }
+    assert!(
+        granted.len() <= wrote,
+        "a granted footprint is a written step"
+    );
     Ok(wrote)
 }
 
@@ -268,6 +300,10 @@ fn note(registry: &Registry, step: &SystemCommand) {
                     "a recorded footprint is the one written"
                 );
                 moonpool_assertions::reachable!("fleet: a step records a tenant's footprint");
+            } else {
+                moonpool_assertions::reachable!(
+                    "fleet: the fold refuses a footprint and the next round plans it again"
+                );
             }
         }
         SystemCommand::HostTenant { tenant, .. } => {
