@@ -23,6 +23,11 @@
 //!   against the generation read, track the generation and the next
 //!   position, write at the tail; superseded by a newer owner, it says so
 //!   and writes nothing more until its caller claims again.
+//! - **Several writes in flight** ([`Pipeline`], #597 (several writes in
+//!   flight per journal)): one writer's leadership shared by many callers,
+//!   each write at the next position without waiting for the answer of the
+//!   one in front of it. A write that arrives early waits and is sent again
+//!   unchanged; a failure stops new writes until the ones in flight settle.
 //! - **A reader** ([`Reader`]): a cursor, paged `Read`s with a long-poll at
 //!   the tail, and a `truncated` answer resumed at the floor it names and
 //!   reported as a [`ReaderOutcome::Gap`] — never skipped silently.
@@ -74,6 +79,7 @@ pub mod multi;
 pub mod names;
 mod observer;
 pub mod outcome;
+mod pipeline;
 mod reader;
 pub mod resolve;
 #[cfg(test)]
@@ -97,6 +103,7 @@ pub use outcome::{
     ReconfigureOutcome, RetireOutcome, RetireRefusal, SetLeaderOutcome, TruncateOutcome,
     WriteOutcome,
 };
+pub use pipeline::{Pipeline, Pipelined, Ticket};
 pub use reader::{Reader, ReaderOutcome};
 pub use writer::{Learned, Writer, WriterOutcome, leader_uuid, write_request};
 
