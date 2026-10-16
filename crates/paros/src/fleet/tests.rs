@@ -299,6 +299,7 @@ fn every_entry_round_trips() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn the_fleet_is_formed_once_with_the_fleet_tenant_as_its_first_internal_tenant() {
     let mut directory = FleetDirectory::default();
     let add = entry(FleetCommand::AddCell {

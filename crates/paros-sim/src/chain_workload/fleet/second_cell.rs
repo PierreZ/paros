@@ -495,7 +495,7 @@ impl FleetOps {
         for (tenant, entry) in directory.tenants() {
             // The cell's own cell tenant is in the directory, never hosted.
             if entry.cell_id == cell_id
-                && entry.groups == paros::fleet::Groups::SERVED
+                && entry.kind == paros::fleet::TenantKind::Users
                 && entry.state == paros::fleet::TenantState::Ready
             {
                 assert_always!(

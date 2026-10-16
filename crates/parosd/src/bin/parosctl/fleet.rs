@@ -346,24 +346,10 @@ pub async fn run(
                 Err(ending) => return ending,
             };
             if let Some(cell) = cell {
-                let directory = match paros::client::fleet::read_directory(
-                    client,
-                    0,
-                    fleet.directory_journal(),
-                )
-                .await
-                {
-                    Ok(directory) => directory,
-                    Err(outcome) => {
-                        note(&format!("the universe directory was not read: {outcome:?}"));
-                        return Ending::Unreachable;
-                    }
-                };
-                let Some(cell_id) = directory.cell_named(cell.as_bytes()) else {
-                    note(&format!("the universe holds no cell named {cell}"));
-                    return Ending::Refused;
-                };
-                fleet = fleet.with_cell(cell_id);
+                match cell_named(client, &fleet, &cell).await {
+                    Ok(cell_id) => fleet = fleet.with_cell(cell_id),
+                    Err(ending) => return ending,
+                }
             }
             // Random identifiers, the tenant's and its control journal's; the
             // library moves past one the fleet tenant holds already.
@@ -518,4 +504,21 @@ fn report(out: &Printer, done: &str, name: &str, run: Run<TenantId>, labels: &La
         Step::Interrupted(stop) => interrupted(&stop),
         Step::Advanced(_) => unreachable!("a run never ends advanced"),
     }
+}
+
+/// The id of the `READY` cell named `cell` (#232 (multiple cells)), read
+/// from the universe directory.
+async fn cell_named(client: &ParosClient, fleet: &FleetSession, cell: &str) -> Result<u64, Ending> {
+    let directory =
+        match paros::client::fleet::read_directory(client, 0, fleet.directory_journal()).await {
+            Ok(directory) => directory,
+            Err(outcome) => {
+                note(&format!("the universe directory was not read: {outcome:?}"));
+                return Err(Ending::Unreachable);
+            }
+        };
+    directory.cell_named(cell.as_bytes()).ok_or_else(|| {
+        note(&format!("the universe holds no cell named {cell}"));
+        Ending::Refused
+    })
 }

@@ -99,8 +99,8 @@ use super::checkpoint::{
 };
 use super::outcome::ClaimOutcome;
 use super::writer::{Writer, WriterOutcome};
-use crate::fleet::CellKind;
 use crate::Address;
+use crate::fleet::CellKind;
 use crate::fleet::RootKeyEntry;
 use crate::fleet::{CellState, FleetCommand, FleetDirectory, FleetEntry, TenantState};
 use crate::machine::ControlJournals;
