@@ -176,7 +176,7 @@ where
         settings.client.redirect_limit >= 1,
         "a frontend follows at least one redirect"
     );
-    let mut edge = RpcEdge::listen(
+    let edge = RpcEdge::listen(
         &providers,
         &settings.listen.to_string(),
         "frontend",
