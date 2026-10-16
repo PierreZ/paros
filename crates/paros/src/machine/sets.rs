@@ -206,22 +206,31 @@ fn kept(
 
 /// The size `tenant`'s set should have: `2F+1`, `F` the tenant's largest
 /// `failures_per_partition` (#214 (tenant modes)), at most every storage
-/// machine; `in_force`, the size in force, while its control journal
-/// `control` cannot be read. `None` once a later term fenced it.
+/// machine placement may book; the size in force or the slots `booked`,
+/// the larger, while its control journal `control` cannot be read. `None` once a later term fenced it.
 async fn desired_size<P: Providers>(
     client: &Client<P>,
     cell: &CellSession,
     desk: &mut TenantDesk,
     (tenant, control): (TenantId, paros_core::JournalId),
-    in_force: usize,
+    (in_force, booked): (usize, usize),
 ) -> Option<usize> {
     match desk.tenant(client, tenant, control).await {
         Ok(state) => {
             let largest = state.largest_failures();
-            Some(set_size(largest, desk.storage(cell.registry()).len()))
+            // Capped at the machines placement may book, never at every
+            // storage machine the desk names: a founding member the registry
+            // does not hold counts there, and a size placement cannot reach
+            // keeps the set in its book step for good.
+            let registry = cell.registry();
+            let storage = desk.storage(registry);
+            let eligible = placement::machines(registry, storage.iter().copied()).len();
+            Some(set_size(largest, eligible))
         }
         Err(JournalAnswer::NotCoordinator) => None,
-        Err(_) => Some(in_force),
+        // An unreadable control journal never shrinks the set: a set a
+        // frozen generation thinned keeps the size it was booked for.
+        Err(_) => Some(in_force.max(booked)),
     }
 }
 
@@ -313,7 +322,10 @@ impl Sets {
             cell,
             desk,
             (tenant, control),
-            reply.matchmakers.len(),
+            (
+                reply.matchmakers.len(),
+                slots(cell.registry(), tenant).len(),
+            ),
         )
         .await?;
         if size != reply.matchmakers.len() {

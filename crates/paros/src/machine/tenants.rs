@@ -445,8 +445,11 @@ impl TenantDesk {
             ),
         };
         let storage = self.storage(cell.registry());
-        let count = placed_count(&desired, storage.len());
-        if count > storage.len() {
+        // The machines placement may book, as the mode change counts them
+        // ([`super::modes`]): a mode wider than those never lands.
+        let eligible = placement::machines(cell.registry(), storage.iter().copied()).len();
+        let count = placed_count(&desired, eligible);
+        if count > eligible {
             moonpool_assertions::reachable!(
                 "tenant coordinator: a configure too wide for the cell is refused"
             );

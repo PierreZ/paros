@@ -505,10 +505,12 @@ impl FleetOps {
                 );
                 // The control journal records the new mode under the journal
                 // the answer names.
-                if let (Some(id), Some(tenant)) = (
-                    id,
-                    journals::list(&cell.client, control.tenant, control.journal).await,
-                ) && let Some(journal) = tenant.get(*id)
+                if control.tenant == request.tenant
+                    && let (Some(id), Some(tenant)) = (
+                        id,
+                        journals::list(&cell.client, control.tenant, control.journal).await,
+                    )
+                    && let Some(journal) = tenant.get(*id)
                     && journal.deleted_at.is_none()
                     && journal.desired == *desired
                 {
@@ -522,9 +524,13 @@ impl FleetOps {
             }
             JournalAnswer::Unplaceable => {
                 // A refused configure changes nothing: the control journal
-                // records the refusal under its id, and no new mode.
-                if let Some(tenant) =
-                    journals::list(&cell.client, control.tenant, control.journal).await
+                // records the refusal under its id, and no new mode. A
+                // pending request resent after its tenant left the
+                // directory's ready list goes out beside another tenant's
+                // control journal: that one does not hold it.
+                if control.tenant == request.tenant
+                    && let Some(tenant) =
+                        journals::list(&cell.client, control.tenant, control.journal).await
                 {
                     assert_always!(
                         tenant.outcome(request.request)

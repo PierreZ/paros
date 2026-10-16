@@ -171,7 +171,8 @@ impl Modes {
             return Some(ModeStep::Waiting);
         };
         let storage = desk.storage(cell.registry());
-        let count = placed_count(&change.desired, storage.len());
+        let eligible = placement::machines(cell.registry(), storage.iter().copied()).len();
+        let count = placed_count(&change.desired, eligible);
         let want = Want {
             role: Role::Acceptor,
             target: BookingTarget::Journal(journal),
@@ -220,7 +221,8 @@ impl Modes {
             .filter(|tenant| !registry.dropped(*tenant))
             .filter_map(|tenant| registry.hosted_tenant(tenant).map(|h| (tenant, h.control)))
             .collect();
-        let storage = desk.storage(registry).len();
+        // The machines placement may book, as every step counts them.
+        let storage = placement::machines(registry, desk.storage(registry).iter().copied()).len();
         let mut changes: BTreeMap<JournalIdentifier, Change> = BTreeMap::new();
         for (tenant, control) in hosted {
             let state = match desk.tenant(client, tenant, control).await {
