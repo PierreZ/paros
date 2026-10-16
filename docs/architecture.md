@@ -1006,11 +1006,13 @@ request RPC and the placement of tenant coordinators.
   tenant `ERROR` in the universe directory and answers `NoFootprint`; a delete frees its name.
   The cell records a refusal only once every founding member is registered, so a missing
   founder delays a creation and never refuses it.
-- **`init` waits for the founding members.** A founding member registers through the cell
-  coordinator, and a fleet step's claim fences the coordinator. So `init` reads the cell
-  control journal, without a claim, until it holds every founding member, before its fleet
-  steps. After its patience it goes on. The coordinator books the cell's and the universe's
-  footprints once they fit, and never refuses them.
+- **`init` does not wait for the founding members.** A founding member registers through the
+  cell coordinator. `init` claims nothing on the cell control journal (#513 (fleet Init
+  duel)), so it does not fence the coordinator, and it runs its fleet steps at once. The
+  coordinator books the cell's and the universe's footprints once they fit, and never
+  refuses them. Until 2026-10-16 `init` waited for the registry to hold every founding
+  member, a wait #476 (tenant footprint) added when the fleet steps claimed the cell. That
+  wait delayed a cell formed in the recovery tail past the fleet's settle bound.
 - **The capacity request RPC** (`CapacityRequest`, `0x5041_030C`, served in the
   `CoordinatorInterface` group). A request names its tenant, an idempotency id and its slots
   (node, role, target). The cell coordinator answers a decided id from its record, refuses a
