@@ -103,9 +103,10 @@ struct TenantNames {
     /// Each removed tenant, by the fleet whose directory removed it (the
     /// fleet tenant's control journal), to the name it held. An id is never
     /// reused inside one fleet directory, the authority that enforces it. A
-    /// fleet formed after its cell was lost knows nothing of the old one: a
-    /// create still pending there may register the same id again (witness
-    /// 10193140021688847625, PR #562 (acceptor partitions)).
+    /// fleet formed after its cell was lost knows nothing of the old one;
+    /// an operator drops a create still pending there rather than register
+    /// its id in the new one (witness 10193140021688847625, PR #562
+    /// (acceptor partitions); witness 11733514346007965914 for the drop).
     removed: BTreeMap<(JournalIdentifier, TenantId), Vec<u8>>,
     /// Each cell, to the name the first resolution through it gave
     /// (#239 (names at the edge)).
@@ -157,8 +158,11 @@ enum Pending {
     Initialize,
     /// `init`'s fleet half, on a cell this client knows.
     Init,
-    /// The name and the identifiers this client's creation drew.
-    Create(Vec<u8>, Vec<JournalIdentifier>),
+    /// The name and the identifiers this client's creation drew, and the
+    /// universe it started in (its fleet tenant's control journal): a
+    /// lost cell's successor is another universe, where the creation does
+    /// not resume.
+    Create(Vec<u8>, Vec<JournalIdentifier>, JournalIdentifier),
     Remove(Vec<u8>),
 }
 
@@ -189,14 +193,19 @@ pub(super) struct FleetOps {
     leader_seeds: super::LeaderSeeds,
     /// This client saw an `init` end on the cell it knows.
     initialized: bool,
-    /// Tenant identifiers this client had created: a deliberate reuse names one.
-    ever_created: Vec<JournalIdentifier>,
+    /// Tenant identifiers this client had created, each with the universe
+    /// it was created in (its fleet tenant's control journal): a deliberate
+    /// reuse names one of the universe the client knows now.
+    ever_created: Vec<(JournalIdentifier, JournalIdentifier)>,
     pending: Option<Pending>,
     /// How long into an operation its target is killed, and how long it
     /// stays down (`ChainConfig::fleet_kill_delay_ms`, `fleet_kill_down_ms`).
     kill_ms: (u64, u64),
     /// The pending operation was cut short by its target's kill.
     killed: bool,
+    /// The fleet steps this client held its pending creation for, on a
+    /// stranded-creation seed (`crate::shape::stranded_creation`).
+    held: u32,
     /// The journals this operator learned (#246): every call it makes at
     /// the cell names one of them.
     learned: super::system::Learned,
@@ -263,6 +272,7 @@ impl FleetOps {
             pending: None,
             kill_ms,
             killed: false,
+            held: 0,
             learned: super::system::Learned::default(),
             admitting: None,
             journal_pending: None,
@@ -304,7 +314,9 @@ impl FleetOps {
     #[tracing::instrument(level = "debug", skip_all, fields(client = self.client_id))]
     pub(super) async fn init(&mut self, ctx: &SimContext, policy: CheckpointPolicy, draw: u64) {
         if self.pending.is_some() {
-            let _ = self.resume(ctx, policy, draw).await;
+            if !self.hold(ctx) {
+                let _ = self.resume(ctx, policy, draw).await;
+            }
             return;
         }
         // On a replaced-founder seed, the re-run the scenario asked for.
@@ -418,6 +430,25 @@ impl FleetOps {
 
     /// Keep an operation that did not end as this client's pending one;
     /// `killed` when its target was killed under it.
+    /// Whether this step holds the pending creation instead of resuming it,
+    /// on a stranded-creation seed (`crate::shape::stranded_creation`): for
+    /// up to `HOLD_STEPS` steps while its cell is not lost, so a lost cell's
+    /// successor more often finds it pending. The settle tail never holds.
+    fn hold(&mut self, ctx: &SimContext) -> bool {
+        const HOLD_STEPS: u32 = 12;
+        let holding = matches!(self.pending, Some(Pending::Create(..)))
+            && crate::shape::stranded_creation(ctx.state())
+            && !crate::machine::cell_lost(ctx.state())
+            && self.held < HOLD_STEPS;
+        if holding {
+            self.held += 1;
+            assert_reachable!("fleet: an operator holds a pending creation");
+        } else {
+            self.held = 0;
+        }
+        holding
+    }
+
     fn stopped(&mut self, ended: bool, killed: bool, pending: Pending) {
         if !ended {
             if killed {
@@ -480,7 +511,9 @@ impl FleetOps {
         (class, payload): (u64, u64),
     ) {
         if self.pending.is_some() {
-            let _ = self.resume(ctx, policy, payload).await;
+            if !self.hold(ctx) {
+                let _ = self.resume(ctx, policy, payload).await;
+            }
             return;
         }
         let Some(cell) = self.learn(ctx).await else {
@@ -501,21 +534,21 @@ impl FleetOps {
             return;
         }
         if class % 2 == 0 {
-            if buggify_with_prob!(0.2) {
+            if crate::shape::stranded_creation(&self.state) || buggify_with_prob!(0.2) {
                 let identifier = tenant_identifier(payload);
                 let step = session.create_step(&client, first, &name, identifier).await;
                 match step {
                     Step::Advanced(stage) => {
                         assert_reachable!("fleet: a tenant creation stops after one step");
                         reach(stage);
-                        self.pending = Some(Pending::Create(name, vec![identifier]));
+                        self.pending = Some(Pending::Create(name, vec![identifier], cell.fleet));
                     }
                     // An interrupted step may have landed: a creation resumes
                     // only by its own identifier, so the operator keeps it
                     // (seed 17211107884392273235 left one `Registering`).
                     Step::Interrupted(interrupted) => {
                         self.forget_unknown(&interrupted);
-                        self.pending = Some(Pending::Create(name, vec![identifier]));
+                        self.pending = Some(Pending::Create(name, vec![identifier], cell.fleet));
                     }
                     _ => {}
                 }
@@ -527,7 +560,7 @@ impl FleetOps {
                 tenant_identifier(payload.rotate_left(23) ^ 0x7e57),
             ];
             let kill = self.killer(ctx, &cell, first);
-            let pending = Pending::Create(name.clone(), draws.clone());
+            let pending = Pending::Create(name.clone(), draws.clone(), cell.fleet);
             let (ended, cut_short) = futures::join!(
                 self.create(&client, &mut session, first, name, draws, payload),
                 kill
@@ -592,7 +625,19 @@ impl FleetOps {
             // Resumed above, before a cell is needed; `init` whole if ever here.
             Pending::Initialize => self.initialize(ctx, draw).await,
             Pending::Init => self.finish_init(&client, &mut session, first, draw).await,
-            Pending::Create(name, identifiers) => {
+            Pending::Create(_, _, started) if *started != cell.fleet => {
+                // The cell the creation started in was lost and another
+                // universe formed since: its identifiers belong to the lost
+                // universe, and the operator drops the creation there. A
+                // resumption in the new universe would create a tenant under
+                // the old one's identifiers (witness 11733514346007965914,
+                // recipe 291831:2268418964662283326: a one-machine cell
+                // wiped, and the new machine booted the tenant's control
+                // journal in the lost universe's audit world).
+                assert_reachable!("fleet: an operator drops a creation its lost universe started");
+                true
+            }
+            Pending::Create(name, identifiers, _) => {
                 // Only this creation's own identifiers resume it (a tenant is
                 // created once).
                 self.create(
@@ -715,10 +760,17 @@ impl FleetOps {
     ) -> bool {
         // An identifier this client had created — the collision a random u64 never
         // makes on its own — must be refused, and the creator redraws.
-        if !self.ever_created.is_empty() && buggify_with_prob!(0.2) {
+        // Only an id of this universe: another universe never held it.
+        let universe = self.cell.as_ref().map(|cell| cell.fleet);
+        let own: Vec<JournalIdentifier> = self
+            .ever_created
+            .iter()
+            .filter(|(at, _)| Some(*at) == universe)
+            .map(|(_, identifier)| *identifier)
+            .collect();
+        if !own.is_empty() && buggify_with_prob!(0.2) {
             assert_reachable!("fleet: a tenant creation reuses an id it created");
-            let reused = self.ever_created
-                [usize::try_from(draw % self.ever_created.len() as u64).unwrap_or(0)];
+            let reused = own[usize::try_from(draw % own.len() as u64).unwrap_or(0)];
             let step = session.create_step(client, first, &name, reused).await;
             assert_always!(
                 !matches!(step, Step::Advanced(Stage::RegisterTenant)),
@@ -883,8 +935,10 @@ impl FleetOps {
         assert_sometimes!(created, "fleet: a tenant is created READY");
         if let Some(entry) = session.directory().tenant(result) {
             let identifier = JournalIdentifier::new(result, entry.control);
-            if !self.ever_created.contains(&identifier) {
-                self.ever_created.push(identifier);
+            if let Some(universe) = self.cell.as_ref().map(|cell| cell.fleet)
+                && !self.ever_created.contains(&(universe, identifier))
+            {
+                self.ever_created.push((universe, identifier));
             }
         }
     }
