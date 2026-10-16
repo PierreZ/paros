@@ -1134,6 +1134,10 @@ pub const RARE: &[Rare] = &[
         reason: "a move off a drained machine: 1 to 2 checks a sweep on main, none in a 324-seed sweep (#498 (moves in the sweep))",
     },
     Rare {
+        msg: "driver: a journal's open is quarantined on a storage fault",
+        reason: "a created journal's provisioning hits a storage fault: 5 checks in 1,000 hunt seeds at PR #559 (#475 (re-place after the Down bound), #486)",
+    },
+    Rare {
         msg: "coordinator: a successor term finished a move",
         reason: "a move a successor term finishes: none of 4 finished moves in PR #559's sweep at b9999ed, none in a 324-seed sweep (#498 (moves in the sweep), #475 (re-place after the Down bound))",
     },

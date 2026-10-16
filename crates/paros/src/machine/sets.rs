@@ -236,6 +236,32 @@ async fn desired_size<P: Providers>(
     }
 }
 
+/// The steps that book `tenant`'s set up to `size` slots beside `staying`,
+/// on the cell's storage machines but the `gone` ones. A draining machine
+/// is not registered: it takes no new slot, and neither does one gone
+/// (#475 (re-place after the Down bound)). `None` when no machine can take
+/// a slot.
+fn gone_plan(
+    registry: &Registry,
+    desk: &TenantDesk,
+    (tenant, gone): (TenantId, &BTreeSet<NodeId>),
+    staying: &[(u64, Booking)],
+    size: usize,
+) -> Option<Vec<Step>> {
+    assert!(staying.len() < size, "a plan books a set that lacks slots");
+    let want = Want {
+        role: Role::Matchmaker,
+        target: set_of(tenant),
+        count: size,
+    };
+    let storage = desk.storage(registry);
+    let machines: Vec<placement::Machine> = placement::machines(registry, storage.iter().copied())
+        .into_iter()
+        .filter(|m| !gone.contains(&m.node))
+        .collect();
+    placement::plan(&want, &machines, staying, tenant.0).ok()
+}
+
 /// The set in force of `journal`'s tenant as the founding members of
 /// `nodes` believe it for `journal`: the answer with the latest generation,
 /// and which server gave it.
@@ -341,11 +367,30 @@ impl Sets {
             .filter(|(_, b)| stays(registry, gone, b.node))
             .copied()
             .collect();
+        if staying.len() < size
+            && gone_plan(registry, desk, (tenant, gone), &staying, size).is_none()
+        {
+            // A gone machine is left only for a machine to go to: with none,
+            // its slot stays, as a draining one's does, and the set is
+            // handed back onto it (#475 (re-place after the Down bound),
+            // witness 838622054030409282 on 757fa48: a set thinned off a
+            // gone machine waited in its book step for good).
+            moonpool_assertions::reachable!("coordinator: a set has no machine to go to");
+            staying = slots
+                .iter()
+                .filter(|(_, b)| stays(registry, &BTreeSet::new(), b.node))
+                .copied()
+                .collect();
+        }
         if staying.len() < size {
             return self
                 .book(client, cell, desk, (tenant, gone), &staying, size)
                 .await;
         }
+        assert!(
+            staying.len() >= size,
+            "a set books only where a machine can take the slot"
+        );
         let mut members = reply.matchmakers.clone();
         members.sort_unstable();
         if staying.len() > size {
@@ -496,15 +541,7 @@ impl Sets {
             target: set_of(tenant),
             count: size,
         };
-        let storage = desk.storage(cell.registry());
-        // A draining machine is not registered: it takes no new slot, and
-        // neither does one gone (#475).
-        let machines: Vec<placement::Machine> =
-            placement::machines(cell.registry(), storage.iter().copied())
-                .into_iter()
-                .filter(|m| !gone.contains(&m.node))
-                .collect();
-        let Ok(steps) = placement::plan(&want, &machines, staying, tenant.0) else {
+        let Some(steps) = gone_plan(cell.registry(), desk, (tenant, gone), staying, size) else {
             moonpool_assertions::reachable!("coordinator: a set has no machine to go to");
             return Some(SetStep::Waiting);
         };
