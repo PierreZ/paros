@@ -458,6 +458,9 @@ impl FleetOps {
         if !crate::machine::second_cell_alive(ctx.state()) || directory.cell(cell_id).is_none() {
             return;
         }
+        // This operator may have taken no phase: it learns the cell's
+        // journals from the run's record of the formation (#246).
+        self.note_journals([formed.journals.cell]);
         let client = self.connect(ctx, &formed.endpoint);
         let members = formed.endpoint.iter().map(|(id, _)| NodeId(*id));
         let mut fold = Folder::new(Registry::new(members));

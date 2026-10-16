@@ -1389,8 +1389,9 @@ pub(crate) fn changed_mode(state: &StateHandle) -> bool {
 
 /// Whether the run draws the **second-cell scenario** (#232 (multiple
 /// cells)): drawn once per seed, its own BUGGIFY location, never with a
-/// scenario that needs the idle machines, the other cell or three founders
-/// for itself.
+/// scenario that needs the idle machines or the other cell for itself.
+/// With a scenario that needs three founders, it keeps a machine only on a
+/// layout of four.
 /// A second cell needs a `storage` machine `init` does not list, still idle
 /// when an operator forms the cell on it, and several `TENANT` steps after
 /// that, one per phase (`crate::chain_workload::fleet::second_cell`). Each
@@ -1403,12 +1404,8 @@ pub(crate) fn changed_mode(state: &StateHandle) -> bool {
 #[tracing::instrument(level = "debug", skip_all)]
 pub(crate) fn second_cell(state: &StateHandle) -> bool {
     // Drawn before the lock: the scenarios take the registry's lock too.
-    let other = moved_founder(state)
-        || replaced_founder(state)
-        || downed_founder(state)
-        || drained_machine(state)
-        || wiped_founder(state)
-        || changed_mode(state);
+    let other =
+        moved_founder(state) || replaced_founder(state) || drained_machine(state) || wiped_founder(state);
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     *guard
@@ -2094,6 +2091,9 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
             // The zone-outage scenario (#215 (zones)): three founding
             // members, one per zone, so a zone's loss leaves a majority.
             let zoned = zoned && count >= 3;
+            // The second-cell scenario keeps the last machine out of `init`,
+            // for the second cell, when the founders it needs leave one.
+            let reserve = second && count > least;
             let founders = if count == 0 {
                 0
             } else if zoned {
@@ -2102,15 +2102,13 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
                 // The drained-machine scenario: one founding member, and
                 // every other machine admitted.
                 1
-            } else if second && count >= 2 {
-                // The second-cell scenario: the last machine stays out of
-                // `init`, for the second cell.
-                moonpool_sim::sim_random_range(1..count)
+            } else if reserve {
+                moonpool_sim::sim_random_range(least..count)
             } else {
                 moonpool_sim::sim_random_range(least..count + 1)
             };
             // The machines `init` may list: all but the second cell's.
-            let room = if second && count >= 2 {
+            let room = if reserve {
                 count - 1
             } else {
                 count
