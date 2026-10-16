@@ -580,13 +580,7 @@ impl<P: StorageProvider> LogStorage for JournalStorage<P> {
         // a long log after a reboot stages more than one holds (witness
         // 6142474209351073489, refused `BatchTooLarge` on every boot before
         // the split). Nothing is acknowledged before the whole sync returns.
-        // The journal's own shape: one created under an older default keeps
-        // it (PierreZ/moonpool#335); a store with no journal yet creates one
-        // with the configured shape.
-        let geometry = self
-            .journal
-            .as_ref()
-            .map_or(self.store.geometry, Journal::geometry);
+        let geometry = self.store.geometry;
         let mut staged = Batch::new();
         for (slot, (ballot, payload)) in entries {
             if !staged.is_empty() && !staged.fits_another(geometry, payload.len()) {

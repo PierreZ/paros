@@ -2186,8 +2186,8 @@ each red).
 (512 batches per segment)). Every deployment uses the library's default geometry. There is no
 `small` layout and no `PAROS_STORE_LAYOUT`. Every batch starts on a fresh 4 KiB block, so the
 geometry is balanced: about 7,900 blocks in the persist log and in the entry log of each
-segment. A store keeps the geometry its metainfo records, so a store made with another geometry
-still opens. Only tests and the browser sandbox use a compact geometry, to cross rollovers fast.
+segment. A store made with another geometry does not open: no store made with the old
+default is kept (decided on 2026-10-16). Only tests and the browser sandbox use a compact geometry, to cross rollovers fast.
 
 Zones are failure domains, and a cell spans enough of them for its quorums (section 3.7). What
 the WPaxos read (section 10) established for one region with several availability zones:
