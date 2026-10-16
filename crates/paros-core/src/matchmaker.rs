@@ -165,6 +165,84 @@ pub const REGISTRY_PAGE: usize = 64;
 // A registry page that carries nothing could never deliver a history.
 const _: () = assert!(REGISTRY_PAGE > 0);
 
+/// One bounded page of a registry window (`[from, ballot)` of one journal's
+/// registry, in ballot order): at most `limit` records, and the ballot the
+/// next page starts at, `None` when this page ends the answer.
+///
+/// A **belief** is left out when a later registration of the window carries
+/// the same configuration (#570 (election duel outlasts the recovery tail)).
+/// Every record the page keeps is the highest-ballot one of its
+/// configuration in the window, and every reconfiguration is kept, so the
+/// candidate's fold is unchanged: its union of the configurations above any
+/// watermark is the same (a configuration has a record at or above the
+/// watermark exactly when its highest one is), and its effective
+/// configuration (the highest reconfiguration) is the same. The criterion
+/// looks only forward, so a page asked from a cursor elides exactly what the
+/// whole answer elides. That cross-page claim rests on [`Matchmaker::step`]
+/// refusing a registration at or below the journal's highest ballot
+/// (`Stale`): nothing lands inside a window a candidate is still paging. A
+/// change that lets a lower ballot register must re-check it.
+///
+/// Without it, an answer cost one record per ballot ever registered above
+/// the watermark, and a leaderless cluster registers one per failed campaign
+/// while no leader can raise the watermark: on a one-record page, every
+/// campaign's matchmaking took a round trip per earlier campaign, outlasted
+/// the capped election timeout of every rival, and under `q1 = n` no Phase 1
+/// ever won again (witness seed 16302262455227242419 on c739108: 184
+/// campaigns, no leader through a 60 s recovery tail; green with it).
+fn history_page<'a>(
+    window: impl Iterator<Item = (&'a Ballot, &'a Registration)>,
+    limit: usize,
+) -> (BTreeMap<Ballot, Registration>, Option<Ballot>) {
+    assert!(
+        limit > 0,
+        "a registry page carries at least one registration"
+    );
+    let window: Vec<(&Ballot, &Registration)> = window.collect();
+    // Which records a later one repeats: one backward walk, remembering the
+    // configurations already seen above.
+    let mut above: Vec<&AcceptorConfig> = Vec::new();
+    let mut kept: Vec<bool> = vec![false; window.len()];
+    for (keep, (_, registration)) in kept.iter_mut().zip(&window).rev() {
+        let repeated = above.contains(&&registration.config);
+        *keep = registration.kind.is_reconfiguration() || !repeated;
+        if !repeated {
+            above.push(&registration.config);
+        }
+    }
+    let elided = kept.iter().filter(|keep| !**keep).count();
+    probe!(
+        sometimes,
+        elided > 0,
+        "matchmaker: a page leaves out a belief a later registration repeats"
+    );
+    let mut records = window
+        .iter()
+        .zip(&kept)
+        .filter(|(_, keep)| **keep)
+        .map(|((ballot, registration), _)| (**ballot, (*registration).clone()));
+    let page: BTreeMap<Ballot, Registration> = records.by_ref().take(limit).collect();
+    let cursor = records.next().map(|(ballot, _)| ballot);
+    // Postconditions: bounded, every configuration of the window still
+    // named, and the cursor strictly past the page after a full one.
+    assert!(page.len() <= limit, "a page honours its limit");
+    assert!(
+        cursor.is_none() || page.len() == limit,
+        "a continuation cursor follows a full page"
+    );
+    if let Some(cursor) = cursor {
+        assert!(
+            page.keys().next_back().is_none_or(|last| *last < cursor),
+            "the continuation lies past the page"
+        );
+    }
+    assert!(
+        window.len() == elided + kept.iter().filter(|keep| **keep).count(),
+        "every record is kept or left out"
+    );
+    (page, cursor)
+}
+
 /// What a GC request did at this matchmaker.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GcOutcome {
@@ -482,7 +560,8 @@ impl Matchmaker {
     ///   answered idempotently from the currently retained history, with no
     ///   write; anything else is [`MatchRefusal::Stale`];
     /// - otherwise the history of configurations registered in
-    ///   `[gc_watermark, ballot)` is computed, `config` is registered under
+    ///   `[gc_watermark, ballot)` is computed (less every belief a later
+    ///   registration repeats, `history_page`), `config` is registered under
     ///   `ballot` (a [`MatchmakerWriteOp::Register`] the driver must fsync
     ///   before the reply leaves), and the reply carries that history plus the
     ///   watermark.
@@ -833,7 +912,9 @@ impl Matchmaker {
     /// One `MatchB` page: at most the page size (#338) of registrations from
     /// `max(cursor, watermark)` up to (but not including) `ballot`, in
     /// ballot order, with the cursor the next page starts at when the
-    /// window did not fit.
+    /// window did not fit. A belief that a later registration of the window
+    /// repeats is left out ([`history_page`], #570 (election duel outlasts
+    /// the recovery tail)).
     fn page(&self, journal: JournalId, cursor: Option<Ballot>, ballot: Ballot) -> MatchOutcome {
         let watermark = self.hard_state.gc_watermark(journal);
         let from_ballot = cursor.unwrap_or(watermark).max(watermark);
@@ -841,7 +922,7 @@ impl Matchmaker {
         // below `ballot`, and the cursor the candidate re-asks with (`None`
         // means the answer is complete).
         let (history, next_from_ballot) = match self.registries.get(&journal) {
-            Some(window) => window.page(from_ballot, ballot, self.page),
+            Some(window) => history_page(window.range(from_ballot..ballot), self.page),
             None => (BTreeMap::new(), None),
         };
         assert!(
@@ -1417,8 +1498,9 @@ mod tests {
     #[test]
     fn a_request_below_the_watermark_is_refused_and_the_history_starts_at_it() {
         let mut mm = fresh(0);
+        // Each its own configuration: a page leaves out none of them.
         for round in 1..=4 {
-            mm.step(request(1, ballot(round, 1), &[0, 1, 2]));
+            mm.step(request(1, ballot(round, 1), &[0, 1, 1 + round]));
         }
         drain(&mut mm);
         assert_eq!(
@@ -1477,8 +1559,9 @@ mod tests {
     #[test]
     fn a_retry_after_gc_is_answered_from_the_retained_history() {
         let mut mm = fresh(0);
+        // Each its own configuration: a page leaves out none of them.
         for round in 1..=3 {
-            mm.step(request(1, ballot(round, 1), &[0, 1, 2]));
+            mm.step(request(1, ballot(round, 1), &[0, 1, 1 + round]));
         }
         let (_, replies) = drain(&mut mm);
         let (first, watermark) = registered(&replies[2]);
@@ -1494,7 +1577,7 @@ mod tests {
             GcOutcome::Raised
         );
         drain(&mut mm);
-        mm.step(request(1, ballot(3, 1), &[0, 1, 2]));
+        mm.step(request(1, ballot(3, 1), &[0, 1, 4]));
         let (writes, replies) = drain(&mut mm);
         assert!(writes.is_empty(), "a retry never re-registers");
         let (retry, watermark) = registered(&replies[0]);

@@ -923,40 +923,35 @@ impl FleetOps {
     }
 
     /// The fleet directory against the cell's tenant list, when the session's
-    /// two folds are one instant's: it holds both journals already (the
-    /// check claims nothing), and a fresh read of each finds this client
-    /// still the owner with nothing written past the fold.
-    async fn check_directory(&self, client: &ChainClient, session: &FleetSession, first: usize) {
+    /// two folds are one instant's: it holds the directory already (the
+    /// check claims nothing), the cell is read to its tail after the
+    /// directory's fold, and a fresh read of the directory then finds this
+    /// client still the owner with nothing written past the fold. The cell
+    /// coordinator writes the cell's side from the directory alone (#225),
+    /// so the directory stood still over the cell's read.
+    async fn check_directory(
+        &self,
+        client: &ChainClient,
+        session: &mut FleetSession,
+        first: usize,
+    ) {
         let Some(cell) = &self.cell else {
             return;
         };
-        if !session.holds_both() {
+        if !session.holds_directory() || session.read_cell(client, first).await.is_err() {
             return;
         }
-        let (directory_writer, cell_writer) = session.writers();
         let Some(directory_floor) = still(
             client,
             first,
             cell.fleet,
-            directory_writer,
+            session.writer(),
             session.directory().next_seq(),
         )
         .await
         else {
             return;
         };
-        if still(
-            client,
-            first,
-            cell.journals.cell,
-            cell_writer,
-            session.cell().next_seq(),
-        )
-        .await
-        .is_none()
-        {
-            return;
-        }
         // The two folds are of one instant. The fleet tenant's checkpoint and truncation
         // ran under its owner's policy on the way.
         if directory_floor > 0 {
@@ -1437,8 +1432,6 @@ fn reach(stage: Stage) {
         Stage::RegisterTenant => {
             assert_reachable!("fleet: a step registers a tenant in the directory");
         }
-        Stage::HostTenant => assert_reachable!("fleet: a step hosts a tenant on the cell"),
-        Stage::Footprint => assert_reachable!("fleet: a step records a tenant's footprint"),
         Stage::TenantError => {
             assert_reachable!("fleet: a tenant is refused for its footprint");
         }
@@ -1448,7 +1441,6 @@ fn reach(stage: Stage) {
         Stage::TenantRemoving => {
             assert_reachable!("fleet: a step marks a tenant REMOVING in the directory");
         }
-        Stage::DropTenant => assert_reachable!("fleet: a step drops a tenant from the cell"),
         Stage::RemoveTenant => {
             assert_reachable!("fleet: a step removes a tenant from the directory");
         }

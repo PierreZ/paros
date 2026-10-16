@@ -442,7 +442,8 @@ fn check_folded_union(
 }
 
 /// Invariant 4, per page (#P9): the page is the folded window
-/// `[from_ballot, ballot)` truncated to the matchmaker's own page size
+/// `[from_ballot, ballot)`, less every belief a later registration of the
+/// window repeats (#570), truncated to the matchmaker's own page size
 /// (`page_limit`, at most [`REGISTRY_PAGE`], #338) — nothing
 /// missing (under-reporting), nothing foreign — it starts at or above the
 /// durable watermark, and the continuation cursor is set exactly when the
@@ -467,13 +468,25 @@ fn check_page_window(
         "matchmaker: a page size lies under the registry page ceiling",
         { "matchmaker" => matchmaker.0, "limit" => page.page_limit }
     );
-    let mut window = entry.registered.range(page.from_ballot..ballot);
-    let expected: BTreeMap<Ballot, Registration> = window
+    // A belief a later registration of the window repeats is left out
+    // (#570 (election duel outlasts the recovery tail)): re-derived here from
+    // the folded ledger, never from the matchmaker's own page.
+    let window: Vec<(&Ballot, &Registration)> =
+        entry.registered.range(page.from_ballot..ballot).collect();
+    let mut seen = BTreeSet::new();
+    let mut kept: Vec<(Ballot, &Registration)> = Vec::new();
+    for (b, registration) in window.into_iter().rev() {
+        if seen.insert(&registration.config) || registration.kind.is_reconfiguration() {
+            kept.push((*b, registration));
+        }
+    }
+    let mut kept = kept.into_iter().rev();
+    let expected: BTreeMap<Ballot, Registration> = kept
         .by_ref()
         .take(page.page_limit)
-        .map(|(b, c)| (*b, c.clone()))
+        .map(|(b, c)| (b, c.clone()))
         .collect();
-    let expected_next = window.next().map(|(b, _)| *b);
+    let expected_next = kept.next().map(|(b, _)| b);
     assert_always!(
         *page.history == expected && page.next_from_ballot == expected_next,
         "matchmaker: a reply reports every registration below its ballot",

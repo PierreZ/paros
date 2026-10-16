@@ -133,6 +133,24 @@ tests pin the page shape and the end-to-end campaign against a real registry
 (`node/tests/matchmaking.rs`: `a_page_that_starts_at_a_raised_watermark_above_the_cursor_is_taken`,
 `a_floor_raised_over_the_cursor_between_two_pages_still_completes_the_campaign`).
 
+**What was wrong, second (#570 (election duel outlasts the recovery tail)).** An answer
+cost one record per ballot registered above the watermark. A leaderless cluster registers
+one record per failed campaign, and no leader raises the watermark. On a one-record page
+(the paged-handover scenario forces it on every matchmaker), each campaign's matchmaking
+took one round trip per earlier campaign. It outlasted the capped election timeout of
+every rival, a rival's campaign promised a higher ballot, and under `q1 = n` no Phase 1
+won again (witness seed 16302262455227242419: 184 campaigns, 23,909 match requests, no
+leader through the 60 s recovery tail).
+
+**The fix, second.** `history_page` (`matchmaker.rs`) leaves out a belief when a later
+registration of the window carries the same configuration. Every reconfiguration stays,
+and each configuration keeps its highest record. So the union above any watermark and the
+effective configuration are unchanged, and a page asked from a cursor leaves out exactly
+what the whole answer leaves out. The audit's page oracle re-derives the same rule from
+its own ledger, and the handover model's claim 4 checks each majority-held configuration
+at its ballot or a later one. The witness went green with 485 match requests; the node
+test `a_page_leaves_out_a_belief_a_later_registration_repeats` pins the mechanism.
+
 **Verification.** Model claim 4, two halves. Completeness: at closure `H_b` holds every
 registration below `b`, at or above the maximum reported watermark, that a majority of
 *any* generation up to the addressed one durably holds — pages, cursors, GC raises and

@@ -42,7 +42,10 @@ parosd
 
 While it is idle, a pinned machine checks the token of each call that puts it in a cell:
 `cell init` and `cell add-machine`. A call without an `admin` token is refused with
-`invalid_token`, `expired` or `forbidden`.
+`invalid_token`, `expired` or `forbidden`. A founding member that was down when `cell init` sent
+the plan learns it later from a formed member. That call carries the operator's token too, so the
+pinned machine checks it. The formed member keeps the token in memory only. After a restart, it
+holds no token and sends nothing: run `parosctl init` again with your token.
 
 ```sh
 parosctl --token-file admin.token init --root-public-key keys/prod-1.public

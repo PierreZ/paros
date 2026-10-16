@@ -405,7 +405,7 @@ pub(crate) fn maintain<P: Providers, A: Audit>(
             audit.waiters_cleared(NodeId(self_id), u64::try_from(calls).unwrap_or(u64::MAX));
             tracing::info!(node = self_id, calls, "waiters_cleared");
         }
-        for call in std::mem::take(&mut waiters.pending).into_values().flatten() {
+        for (_, call) in std::mem::take(&mut waiters.pending).into_values().flatten() {
             drop(call);
         }
         assert!(waiters.pending.is_empty(), "a deposed leader holds no call");

@@ -181,7 +181,12 @@ impl ColocatedNode {
         // by `tick_repair`, a trim-point jump, or this node's own election).
         let acceptor = &self.acceptor;
         let truncate_up_to = self.replica.advance(
-            |slot, command| acceptor.record(slot).map(|(_, c)| c) == Some(command),
+            |slot, command| {
+                acceptor
+                    .record(slot)
+                    .filter(|(_, recorded)| recorded == command)
+                    .map(|(ballot, _)| *ballot)
+            },
             &mut self.pending_writes,
         );
         if let Some(up_to) = truncate_up_to {
