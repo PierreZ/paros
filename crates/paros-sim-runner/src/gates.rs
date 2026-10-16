@@ -118,6 +118,10 @@ pub const RARE: &[Rare] = &[
         reason: "marginal: needs a handed-on leader that parks a re-sent multi-writer append on a slot its minter decided with the same bytes; fired on 1 of 300 hunt seeds, missed by PR #584's sweep (#570 (election duel), #486)",
     },
     Rare {
+        msg: "zones: a created journal commits an append with a zone down",
+        reason: "marginal: needs a whole zone down through a created journal's claim and write; fired in main's sweep at 0c66f34, missed by PR #559's sweep at bb2a3c2 (#215 (zones), #486)",
+    },
+    Rare {
         msg: "admit: a pinned machine denies a tenant token",
         reason: "marginal: needs pinned machines and the 15% tenant-token draw on an admission; fired 4 times in main's sweep at 629aa62, missed by PR #584's sweep (#245 (Biscuit tokens), #486)",
     },
