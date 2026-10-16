@@ -7,8 +7,8 @@
 //! journals and every journal whose durability survives a failure must keep
 //! committing without that zone (`crate::chain_workload::fleet`).
 //!
-//! The injector strikes once, once every founder formed, at a zone drawn
-//! from the three. Every machine comes back by itself at its deadline.
+//! The injector strikes once, once every founder formed, at the zone of
+//! the three with the most live machines. Every machine comes back by itself at its deadline.
 //! Like the downed founder (`super::downed_founder`), it may strike up to
 //! `LATE_WINDOW` into the recovery tail; the cell keeps a majority
 //! throughout, so the tail's liveness claims still hold.
@@ -40,16 +40,29 @@ impl FaultInjector for ZoneOutage {
         if !crate::shape::zone_outage(ctx.state()) {
             return Ok(());
         }
-        let zone = format!("zone-{}", moonpool_sim::sim_random_range(0_u32..3_u32));
+        // The zones are tried from a drawn one, and the outage takes the one
+        // with the most live machines: on a cell of four, the zone of two.
+        let first = moonpool_sim::sim_random_range(0_u32..3_u32);
         let time = ctx.time();
-        let targets = loop {
+        let (zone, targets) = loop {
             if crate::past_cutoff(time.now(), LATE_WINDOW) {
                 return Ok(());
             }
-            if let Some(targets) =
-                crate::machine::zone_targets(ctx.state(), &zone, |ip| ctx.is_dead(ip))
-            {
-                break targets;
+            let fullest = (0..3_u32)
+                .map(|i| format!("zone-{}", (first + i) % 3))
+                .filter_map(|zone| {
+                    crate::machine::zone_targets(ctx.state(), &zone, |ip| ctx.is_dead(ip))
+                        .map(|targets| (zone, targets))
+                })
+                .reduce(|best, next| {
+                    if next.1.len() > best.1.len() {
+                        next
+                    } else {
+                        best
+                    }
+                });
+            if let Some(fullest) = fullest {
+                break fullest;
             }
             if time.sleep(POLL).await.is_err() {
                 return Ok(());
