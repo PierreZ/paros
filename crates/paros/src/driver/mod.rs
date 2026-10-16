@@ -2626,7 +2626,7 @@ impl<P: Providers, J: JournalStores> SystemCtx<'_, '_, P, J> {
                         .start(
                             follower,
                             id,
-                            &founders,
+                            (&founders, &[], 0),
                             (
                                 paros_core::QuorumSystem::Majority,
                                 paros_core::WriterMode::Single,
@@ -2685,7 +2685,7 @@ impl<P: Providers, J: JournalStores> SystemCtx<'_, '_, P, J> {
                         self.start(
                             follower,
                             id,
-                            &founders,
+                            (&founders, &[], 0),
                             (
                                 paros_core::QuorumSystem::Majority,
                                 paros_core::WriterMode::Single,
@@ -2736,10 +2736,14 @@ impl<P: Providers, J: JournalStores> SystemCtx<'_, '_, P, J> {
         &mut self,
         follower: &ControlFollower<P>,
         id: JournalIdentifier,
-        members: &[NodeId],
+        (members, domains, cell_id): (&[NodeId], &[paros_core::FailureDomain], u64),
         (quorum_system, writer): (paros_core::QuorumSystem, paros_core::WriterMode),
         seat: Seat,
     ) -> bool {
+        assert!(
+            domains.is_empty() || domains.len() == members.len(),
+            "a started journal labels every member or none"
+        );
         let me = follower.self_id();
         let member = members.contains(&me);
         let spare = !member && seat == Seat::Spare && !follower.matchmakers().is_empty();
@@ -2762,6 +2766,10 @@ impl<P: Providers, J: JournalStores> SystemCtx<'_, '_, P, J> {
         };
         let journal_config = paros_core::Config {
             peers: members.to_vec(),
+            // The placed configuration's labels (#215 (zones)), bound to
+            // the journal's bootstrap like its membership.
+            peer_domains: domains.to_vec(),
+            cell_id,
             quorum_system,
             nodes,
             writer_mode: writer,
@@ -2854,7 +2862,11 @@ impl<P: Providers, J: JournalStores> SystemCtx<'_, '_, P, J> {
                 .start(
                     follower,
                     journal,
-                    created.config.members(),
+                    (
+                        created.config.members(),
+                        created.config.domains(),
+                        created.config.cell(),
+                    ),
                     systems,
                     Seat::Spare,
                 )

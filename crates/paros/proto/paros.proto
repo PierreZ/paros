@@ -208,6 +208,12 @@ message Reconfigure {
   // refused as `unknown_journal`.
   uint64 tenant = 7;
   uint64 journal = 8;
+  // Each member's failure domain, parallel to `members` (#215 (zones)):
+  // empty for an unlabeled configuration, else one per member, or the
+  // request is refused as `malformed`.
+  repeated .paros.common.v1.FailureDomain domains = 9;
+  // The cell that owns the journal (#215 (zones)); zero is none.
+  uint64 cell_id = 10;
 }
 
 message ReconfigureMatchmakers {

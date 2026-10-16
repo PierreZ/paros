@@ -102,8 +102,8 @@ pub use matchmaker::{
     Reconstruction, Registration, RegistrationKind, RegistryStorage, StartRefusal, SuccessorDecree,
 };
 pub use membership::{
-    AcceptorConfig, MatchmakerGeneration, MatchmakerId, MatchmakerSet, ProxyId, QuorumSystem,
-    ReplicaId,
+    AcceptorConfig, FailureDomain, MAX_FAILURE_DOMAIN_BYTES, MatchmakerGeneration, MatchmakerId,
+    MatchmakerSet, ProxyId, QuorumSystem, ReplicaId, ZoneRule,
 };
 pub use message::{Audience, Message, Party};
 pub use node::{

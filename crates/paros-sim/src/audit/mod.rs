@@ -1487,6 +1487,22 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         // forever.
         let fresh = st.faulty_staged.remove(&node.0).unwrap_or_default();
         st.reported_faulty.insert(node.0, fresh);
+        // A reboot rewinds the durable chosen index by less than a page
+        // (#602 (dark after a full restart)): the journal store writes its
+        // metainfo once the index runs `CHOSEN_INDEX_LAG` slots ahead of the
+        // durable one, so a booted leader re-proposes about one page, not its
+        // whole log. `decided_prefix` is one past the index the last
+        // incarnation reported durable.
+        let held = st.decided_prefix.get(&node.0).copied().unwrap_or(0);
+        let booted = chosen_index.map_or(0, |s| s.0 + 1);
+        assert_always!(
+            booted + paros::journal::CHOSEN_INDEX_LAG > held,
+            "a reboot rewinds the chosen index by less than a page",
+            { "node" => node.0, "booted" => booted, "held" => held }
+        );
+        if held > booted {
+            assert_reachable!("a reboot rewinds the chosen index");
+        }
         // Fresh incarnation: the durable chosen index legally rewinds across
         // a crash (its writes flush relaxed), so restart the within-boot
         // watermarks from what this boot actually recovered.

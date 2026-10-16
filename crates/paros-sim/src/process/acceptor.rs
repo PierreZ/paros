@@ -75,6 +75,8 @@ pub(super) async fn run_acceptor(
     let config = Config {
         journal: crate::shape::identifiers(ctx.state()).main,
         id: self_rank,
+        peer_domains: crate::shape::peer_domains(ctx.state(), &bootstrap),
+        cell_id: 0,
         peers: bootstrap,
         quorum_system,
         nodes: pool,
@@ -640,6 +642,8 @@ fn spare_template(ctx: &SimContext, deployment: &Deployment) -> Option<Config> {
         journal: crate::shape::identifiers(ctx.state()).main,
         id: NodeId(0),
         quorum_system: policy.system(bootstrap.len()),
+        peer_domains: crate::shape::peer_domains(ctx.state(), &bootstrap),
+        cell_id: 0,
         peers: bootstrap,
         nodes: (0..pool_len as u64).map(NodeId).collect(),
         matchmakers,

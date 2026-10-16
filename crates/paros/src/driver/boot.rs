@@ -4,7 +4,7 @@
 //! There is no application to replay (#186): the chosen prefix a node
 //! recovered is its whole state.
 
-use paros_core::{AcceptorConfig, Ballot, ColocatedNode, NodeId, Slot};
+use paros_core::{Ballot, ColocatedNode, NodeId, Slot};
 
 use crate::audit::{Audit, Deployment};
 use crate::storage::LogStorage;
@@ -146,7 +146,7 @@ pub(crate) fn report_boot_state<A: Audit>(node: &ColocatedNode, self_id: u64, au
     // checks, the size lets a checker do quorum arithmetic without guessing
     // the topology from partial boot observations.
     let deployment = Deployment {
-        bootstrap: AcceptorConfig::new(node.config().peers.clone(), node.config().quorum_system),
+        bootstrap: node.config().bootstrap(),
         pool: node.config().pool().to_vec(),
         matchmakers: node.config().matchmakers.clone(),
         matchmaker_pool: node.config().matchmaker_pool().to_vec(),

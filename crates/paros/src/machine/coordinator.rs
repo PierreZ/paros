@@ -806,7 +806,8 @@ pub(crate) fn spawn<P: Providers>(
         abandon: moonpool_buggify::buggify_with_prob!(0.3),
         lose_resign: moonpool_buggify::buggify_with_prob!(0.5),
         linger: moonpool_buggify::buggify_with_prob!(0.5),
-        quit_mid_move: moonpool_buggify::buggify_fault_with_prob!(0.5),
+        quit_mid_move: moonpool_buggify::buggify_fault_with_prob!(0.5)
+            || crate::scenario::quit_mid_move(),
         slow_install: moonpool_buggify::buggify_with_prob!(0.3),
         ask_again: moonpool_buggify::buggify_with_prob!(0.3),
     };

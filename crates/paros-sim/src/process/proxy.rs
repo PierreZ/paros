@@ -9,9 +9,7 @@ use super::replica_book;
 use super::{journal_config, main_config};
 use crate::audit::{NodeAudit, audit_world_for};
 use crate::roles::Deployment;
-use paros::{
-    AcceptorConfig, NodeId, ProxyConfig, ProxyId, ProxyJournal, RunError, parse_addr, run_proxy,
-};
+use paros::{NodeId, ProxyConfig, ProxyId, ProxyJournal, RunError, parse_addr, run_proxy};
 
 /// A proxy leader (#142): the provider-generic proxy driver, with no disk and
 /// no recovery loop — the only exit it has is an infrastructure failure or the
@@ -46,7 +44,7 @@ pub(super) async fn run_proxy_role(
                 let config = journal_config(&main, policy, &plan, journal);
                 ProxyJournal {
                     journal,
-                    acceptors: AcceptorConfig::new(config.peers, config.quorum_system),
+                    acceptors: config.bootstrap(),
                 }
             })
             .collect(),

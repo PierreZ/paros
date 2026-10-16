@@ -106,6 +106,22 @@ impl FleetOps {
         policy: CheckpointPolicy,
         (class, payload): (u64, u64),
     ) {
+        // The zone-outage scenario (#215 (zones)): while a zone is down, a
+        // journal this client created before takes an append first, so the
+        // append is chosen without the zone. It goes before the directory
+        // read, which may wait on a machine of the downed zone.
+        let now = self.time.now();
+        if crate::shape::zone_outage(ctx.state())
+            && crate::machine::zone_down_through(&self.state, now, now)
+            && !self.created_single.is_empty()
+            && let Some(cell) = self.learn(ctx).await
+        {
+            let pick =
+                usize::try_from(payload % self.created_single.len() as u64).unwrap_or_default();
+            let journal = self.created_single[pick];
+            assert_reachable!("zones: a client appends to its journal while a zone is down");
+            self.append_to_created(&cell, journal, payload).await;
+        }
         let Some((cell, tenant, control, label)) = self.journal_tenant(ctx, payload).await else {
             self.frontend_before_ready(payload).await;
             return;
@@ -459,6 +475,8 @@ impl FleetOps {
                 );
                 if *writer == WriterMode::Single {
                     self.note_journals([journal]);
+                    self.created_single.push(journal);
+                    crate::machine::note_journal_created(&self.state);
                     self.append_to_created(cell, journal, draw).await;
                 }
             }
@@ -856,6 +874,7 @@ impl FleetOps {
     async fn append_to_created(&mut self, cell: &Cell, journal: JournalIdentifier, draw: u64) {
         let first = cell.first(draw);
         let mut writer = Writer::new(journal, self.leader_seeds.next());
+        let started = self.time.now();
         let _ = writer.claim(&cell.client, first, false).await;
         if let WriterOutcome::Written { .. } = writer
             .write(
@@ -866,6 +885,11 @@ impl FleetOps {
             .await
         {
             assert_reachable!("system: a created journal commits an append");
+            // #215 (zones): its claim and its write were chosen without a
+            // whole zone, the journal placed under the zone rule.
+            if crate::machine::zone_down_through(&self.state, started, self.time.now()) {
+                assert_reachable!("zones: a created journal commits an append with a zone down");
+            }
         }
     }
 }

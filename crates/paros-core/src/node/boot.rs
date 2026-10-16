@@ -12,7 +12,7 @@ use super::{
     Acceptor, BTreeMap, Ballot, BeliefSource, ColocatedNode, Command, Config, Counters,
     HandoffCounters, LeadershipOrigin, NodeRole, Proposer, Replica, Slot, Storage,
 };
-use crate::membership::{AcceptorConfig, MatchmakerGeneration, MatchmakerSet};
+use crate::membership::{MatchmakerGeneration, MatchmakerSet};
 use crate::quorum_read::QuorumReads;
 
 impl ColocatedNode {
@@ -32,7 +32,7 @@ impl ColocatedNode {
     pub fn new<S: Storage>(storage: &S) -> Self {
         let (hard_state, config) = storage.initial_state();
         assert_config_shape(&config);
-        let acceptors = AcceptorConfig::new(config.peers.clone(), config.quorum_system);
+        let acceptors = config.bootstrap();
         // The `None` arm of the state machine: a plain deployment holds no
         // matchmaker set at all, never an empty one.
         let matchmakers = config

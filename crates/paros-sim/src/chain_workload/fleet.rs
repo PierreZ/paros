@@ -214,6 +214,9 @@ pub(super) struct FleetOps {
     refused: BTreeSet<TenantId>,
     /// The replaced-founder scenario's steps this operator took (#423).
     replaced: replaced::Steps,
+    /// The single-writer journals this client created (#215 (zones)): on a
+    /// zone-outage seed, a journal step while a zone is down appends to one.
+    created_single: Vec<JournalIdentifier>,
     /// This client made its one frontend call before a tenant was `READY`
     /// (#446 (a gate that never fires cannot fail the sweep)).
     frontend_cold: bool,
@@ -264,6 +267,7 @@ impl FleetOps {
             journal_pending: None,
             journal_names: BTreeMap::new(),
             refused: BTreeSet::new(),
+            created_single: Vec::new(),
             replaced: replaced::Steps::default(),
             frontend_cold: false,
             state: ctx.state().clone(),
@@ -657,6 +661,46 @@ impl FleetOps {
         }
     }
 
+    /// The gates of a tenant creation that ran while the downed-founder
+    /// (#213 (three founding members)) or zone-outage (#215 (zones))
+    /// scenario held machines down for the whole run.
+    fn outage_gates(&self, run: &paros::client::fleet::Run<TenantId>, started: Duration) {
+        if !run.steps.is_empty()
+            && crate::machine::founder_down_through(&self.state, started, self.time.now())
+        {
+            // #213 (three founding members): the cell control journal and
+            // the fleet tenant chose this run's writes without that member.
+            assert_reachable!(
+                "fleet: a control-journal write is chosen with a founding member down"
+            );
+            if matches!(
+                run.outcome,
+                Step::Done {
+                    last: Some(Stage::TenantReady),
+                    ..
+                }
+            ) {
+                assert_reachable!("fleet: a tenant is created with a founding member down");
+            }
+        }
+        if !run.steps.is_empty()
+            && crate::machine::zone_down_through(&self.state, started, self.time.now())
+        {
+            // #215 (zones): the cell control journal and the fleet tenant
+            // chose this run's writes without a whole zone.
+            assert_reachable!("zones: a control-journal write is chosen with a zone down");
+            if matches!(
+                run.outcome,
+                Step::Done {
+                    last: Some(Stage::TenantReady),
+                    ..
+                }
+            ) {
+                assert_reachable!("zones: a tenant is created with a zone down");
+            }
+        }
+    }
+
     /// Create `name` under the first of `draws` the fleet tenant does
     /// not hold, to its end; whether it ended.
     async fn create(
@@ -694,24 +738,7 @@ impl FleetOps {
             .create_tenant(client, first, &name, draws.clone(), Duration::ZERO)
             .await;
         run.steps.iter().copied().for_each(reach);
-        if !run.steps.is_empty()
-            && crate::machine::founder_down_through(&self.state, started, self.time.now())
-        {
-            // #213 (three founding members): the cell control journal and
-            // the fleet tenant chose this run's writes without that member.
-            assert_reachable!(
-                "fleet: a control-journal write is chosen with a founding member down"
-            );
-            if matches!(
-                run.outcome,
-                Step::Done {
-                    last: Some(Stage::TenantReady),
-                    ..
-                }
-            ) {
-                assert_reachable!("fleet: a tenant is created with a founding member down");
-            }
-        }
+        self.outage_gates(&run, started);
         self.created(session, &name, &run);
         match run.outcome {
             Step::Done { result, .. } => {
