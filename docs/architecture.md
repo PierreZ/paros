@@ -2410,8 +2410,10 @@ Simulation is the investment. Every milestone lands with its share of:
   seeds, and the canary after every new draw.
   **As built** (2026-10-16): the zone-outage scenario (`paros_sim::world::zone_outage`,
   `shape::zone_outage`) lists three founding members, machine `r` in zone `zone-<r % 3>`, and
-  crashes every machine of one zone for 6 to 10 s once the cell formed; gates "zones: a tenant is
-  created with a zone down" and "zones: a created journal commits an append with a zone down".
+  crashes every machine of the zone with the most live machines for 6 to 10 s, once the cell
+  formed and a client created a journal; while it is down, a client appends to a journal it
+  created. Gates "zones: a tenant is created with a zone down" and "zones: a created journal
+  commits an append with a zone down".
   The machines' stores sit outside the copy budget, so the zone outage spends none. On a third of
   the seeds the acceptor pool is labeled (`shape::acceptor_zones`, 2 or 3 zones) and the composer
   sends labeled configurations, each judged by the zone rule (a reachable per verdict). Oracles:
