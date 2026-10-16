@@ -17,7 +17,10 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use clap::Args;
+use paros::client::load::LoadOutcome;
 use paros::client::views::{ViewOutcome, ask, request};
+use paros::machine::load::usage_from_wire;
+use paros::metrics::{CallKind, JournalUsage};
 use paros::status::{Member, Summary, Word, member, summarize};
 use paros::view::Scope;
 use paros::wire::view::{self as wire, TenantQuery, UniverseQuery, view_request::Query};
@@ -238,6 +241,7 @@ async fn tenant_status(asker: &Asker<'_>, out: &Printer, name: &str) -> Ending {
     };
     let summary = summarize(&reply);
     let names = machine_names(&reply);
+    let usage = Usage::of(tenant, &asker.loads(&reply).await);
     let rows: Vec<[String; 6]> = tenant
         .journals
         .iter()
@@ -266,7 +270,7 @@ async fn tenant_status(asker: &Asker<'_>, out: &Printer, name: &str) -> Ending {
     out.emit(
         || {
             format!(
-                "tenant:       {} ({})\ncell:         {}\nsurvives:     {}\njournals:     {}\n{}\nmachines:\n{}",
+                "tenant:       {} ({})\ncell:         {}\nsurvives:     {}\njournals:     {}\n{}\nmachines:\n{}\n{}",
                 text(&tenant.name),
                 tenant.state,
                 text(&reply.cell_name),
@@ -274,13 +278,167 @@ async fn tenant_status(asker: &Asker<'_>, out: &Printer, name: &str) -> Ending {
                 words_text(&summary),
                 indent(&table(JOURNAL_HEADERS, &rows)),
                 indent(&table(["MACHINE", "DOMAIN", "STATE", "ACCEPTOR SLOTS"], &machine_rows)),
+                usage.text(tenant),
             )
         },
         || {
             let mut doc = reply_json(&reply);
             doc["status"] = summary_json(&summary);
+            doc["usage"] = usage.json(tenant);
             doc
         },
     );
     Ending::Success
+}
+
+/// A tenant's usage (#366 (metrics)): what the machines that answered
+/// `Load` counted per journal of the tenant, summed over the machines.
+/// Each machine counts since its process started; a machine that did not
+/// answer, or records no metrics, adds nothing and is counted out.
+struct Usage {
+    per_journal: BTreeMap<u64, JournalUsage>,
+    /// The machines asked, and those that answered with metrics.
+    asked: usize,
+    metered: usize,
+}
+
+impl Usage {
+    fn of(tenant: &wire::TenantView, loads: &BTreeMap<u64, LoadOutcome>) -> Self {
+        let mut per_journal: BTreeMap<u64, JournalUsage> = BTreeMap::new();
+        let mut metered = 0;
+        for outcome in loads.values() {
+            let LoadOutcome::Answered(ack) = outcome else {
+                continue;
+            };
+            if !ack.metered {
+                continue;
+            }
+            metered += 1;
+            for row in ack.usage.iter().filter(|row| row.tenant == tenant.tenant) {
+                let usage = usage_from_wire(row);
+                per_journal
+                    .entry(row.journal)
+                    .and_modify(|sum| sum.add(&usage))
+                    .or_insert(usage);
+            }
+        }
+        Self {
+            per_journal,
+            asked: loads.len(),
+            metered,
+        }
+    }
+
+    /// The tenant's total, over every journal.
+    fn total(&self) -> [u64; 6] {
+        self.per_journal.values().fold([0; 6], |mut sum, usage| {
+            for (at, call) in CallKind::ALL.into_iter().enumerate() {
+                sum[at] += usage.calls_of(call);
+            }
+            sum[4] += usage.written_bytes;
+            sum[5] += usage.read_bytes;
+            sum
+        })
+    }
+
+    fn text(&self, tenant: &wire::TenantView) -> String {
+        let header = format!(
+            "usage (since each machine started, {} of {} machines metered):",
+            self.metered, self.asked
+        );
+        if self.metered == 0 {
+            return format!("{header} no metrics");
+        }
+        let name_of = |id: u64| {
+            tenant
+                .journals
+                .iter()
+                .find(|j| j.journal == id)
+                .map_or_else(|| crate::output::short(id), journal_label)
+        };
+        let row = |name: String, counts: [u64; 6]| {
+            [
+                name,
+                counts[0].to_string(),
+                counts[1].to_string(),
+                counts[2].to_string(),
+                counts[3].to_string(),
+                bytes(counts[4]),
+                bytes(counts[5]),
+            ]
+        };
+        let mut rows: Vec<[String; 7]> = self
+            .per_journal
+            .iter()
+            .map(|(id, usage)| {
+                row(
+                    name_of(*id),
+                    [
+                        usage.calls_of(CallKind::Write),
+                        usage.calls_of(CallKind::Read),
+                        usage.calls_of(CallKind::SetLeader),
+                        usage.calls_of(CallKind::Truncate),
+                        usage.written_bytes,
+                        usage.read_bytes,
+                    ],
+                )
+            })
+            .collect();
+        rows.push(row("(total)".to_string(), self.total()));
+        format!(
+            "{header}\n{}",
+            indent(&table(
+                [
+                    "JOURNAL",
+                    "WRITES",
+                    "READS",
+                    "SET-LEADER",
+                    "TRUNCATE",
+                    "WRITTEN",
+                    "READ"
+                ],
+                &rows
+            ))
+        )
+    }
+
+    fn json(&self, tenant: &wire::TenantView) -> Value {
+        let [writes, reads, set_leaders, truncates, written, read] = self.total();
+        json!({
+            "machines": self.asked,
+            "metered": self.metered,
+            "calls": {
+                "write": writes,
+                "read": reads,
+                "set_leader": set_leaders,
+                "truncate": truncates,
+            },
+            "written_bytes": written,
+            "read_bytes": read,
+            "journals": self.per_journal.iter().map(|(id, usage)| json!({
+                "journal": id,
+                "name": tenant.journals.iter().find(|j| j.journal == *id).map(|j| text(&j.name)),
+                "calls": {
+                    "write": usage.calls_of(CallKind::Write),
+                    "read": usage.calls_of(CallKind::Read),
+                    "set_leader": usage.calls_of(CallKind::SetLeader),
+                    "truncate": usage.calls_of(CallKind::Truncate),
+                },
+                "written_bytes": usage.written_bytes,
+                "read_bytes": usage.read_bytes,
+            })).collect::<Vec<_>>(),
+        })
+    }
+}
+
+/// A byte count for people.
+fn bytes(count: u64) -> String {
+    const UNITS: [&str; 4] = ["B", "KiB", "MiB", "GiB"];
+    let mut value = count;
+    let mut unit = 0;
+    while value >= 10 * 1024 && unit + 1 < UNITS.len() {
+        value /= 1024;
+        unit += 1;
+    }
+    format!("{value} {}", UNITS[unit])
 }

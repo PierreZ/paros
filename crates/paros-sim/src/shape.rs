@@ -793,6 +793,9 @@ struct Registry {
     /// Run-level: whether the run draws the slow-machine scenario (see
     /// [`slow_machine`]), fixed by the first caller.
     slow_machine: Option<bool>,
+    /// Run-level: whether the machines run without metrics (see
+    /// [`unmetered`]), fixed by the first caller.
+    unmetered: Option<bool>,
     /// Run-level: when the clients' operations end (see [`run_end`]), fixed
     /// by the first caller.
     run_end: Option<Duration>,
@@ -1308,6 +1311,20 @@ pub(crate) fn run_end(state: &StateHandle) -> Duration {
 }
 
 const _: () = assert!(120_000 <= crate::CHAOS_CAP.as_millis());
+
+/// Whether the run's machines record **no metrics** (#366 (metrics)): drawn
+/// once per seed, its own BUGGIFY location. Metrics are observation only,
+/// so a run without them must pass the same oracles as a run with them;
+/// on a metered run the counters must match the audit's own fold of the
+/// calls (`crate::chain_workload`'s check).
+#[tracing::instrument(level = "debug", skip_all)]
+pub(crate) fn unmetered(state: &StateHandle) -> bool {
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    *guard
+        .unmetered
+        .get_or_insert_with(|| moonpool_sim::buggify_with_prob!(1.0))
+}
 
 pub(crate) fn slow_machine(state: &StateHandle) -> bool {
     let registry = registry(state);

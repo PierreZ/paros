@@ -1483,6 +1483,71 @@ uses FDB's key names.
   and a slow machine that reports more busyness than every healthy machine of its cell. paros adds no `cpu_charge` yet: the byte
   costs already charge sends and writes, and a charge goes only where a profile shows real work.
 
+**Metrics, probes and usage** (#366 (metrics, health and usage), landed 2026-10-15;
+`paros::metrics`). Every machine counts the data-plane calls it serves in a plain `prometheus`
+registry, provider-free and wasm-safe. The counters are for an operator, never for a decision:
+the code that serves never reads them.
+
+- **The rules** (decided on 2026-10-15, after
+  [the practical guide to application metrics](https://pierrezemb.fr/posts/practical-guide-to-application-metrics/)).
+  Counters and gauges only: no histogram. A time is a seconds counter beside its count, so
+  `rate(seconds) / rate(count)` is the mean over any window, and one slow call is found in the
+  traces. Every failure path is counted beside the successes. Each unit is in the name. A label
+  takes only a bounded value: a call, an outcome, a journal the machine runs; never a request,
+  a client or an address. A heartbeat shows that the numbers are fresh. The metrics are
+  recorded once, and every export reads that one registry.
+- **What it counts.** `paros_calls_total` per call, counted when the call reaches a journal
+  the machine runs; `paros_call_answers_total` per call and `outcome` (`ok`, `duplicate`,
+  `refused`, `wrong_mode`, `truncated`, `too_large`, `redirected`, `unknown_journal`,
+  `unserved`), counted when the answer leaves, and `paros_call_answer_seconds_total`, the time
+  of those answers; a call received and not answered is the difference.
+  `paros_written_bytes_total` (accepted `Write`s) and `paros_read_bytes_total` (`Read` pages);
+  `paros_applied_slot` and `paros_chosen_slot`, whose difference is the apply lag;
+  `paros_settles_total` and `paros_settle_seconds_total`, a batch persisted (sync included),
+  sent and applied; the last busyness window as `paros_machine_*` gauges, with
+  `paros_machine_load_windows_total` as the heartbeat; and `paros_machine_phase` (starting,
+  idle, serving). A journal's series carry four labels: `tenant` and `journal`, the names, as
+  every output gives them (§3.5): the cell's own journals are `cell/(control)`,
+  `cell/(election)` and `universe/(directory)`, and a tenant's control journal is
+  `<tenant>/(control)`. `tenant_id` and `journal_id` are the ids in hex. A journal whose names
+  the machine does not know is named by its ids in hex.
+- **Where it shows.** `parosd` serves the registry as Prometheus text on `/metrics` when
+  `PAROS_HTTP_LISTEN` is set, with two probes: `/healthz` (`200` while the process answers) and
+  `/readyz` (`200` once the machine serves its cell, `503` with its phase before). The HTTP
+  server is plain, holds no state and is not in the simulation.
+- **OpenTelemetry** (decided on 2026-10-15: OTLP beside Prometheus, never in place of it).
+  With `PAROS_OTLP_ENDPOINT` (or one signal's `PAROS_OTLP_TRACES_ENDPOINT`,
+  `PAROS_OTLP_METRICS_ENDPOINT`), `parosd` pushes over OTLP/gRPC. The spans are the `tracing`
+  spans, through `tracing-opentelemetry`. The metrics are the same registry: one observable
+  instrument per family reads it at each push (`PAROS_OTLP_INTERVAL_MS`), and a counter's
+  OpenTelemetry name drops its `_total`. Only `parosd` links OpenTelemetry: the library and the
+  simulation do not.
+- **Usage.** `Load` (above) also carries each journal's counts and bytes since the machine's
+  process started (`LoadAck.usage`), and `parosctl status --tenant t` sums them over the
+  machines of the cell into a usage table per journal. A machine that does not answer is left
+  out, and the table says how many machines answered.
+- **Simulation.** The same code runs there, and the harness keeps each machine's metrics for
+  its address, so a reboot finds its counters again. On some seeds every
+  machine runs with metrics off, and the same oracles judge the run: metrics never change an
+  outcome. The audit hears each counted call through `Audit::call_received` and
+  `Audit::call_answered`, in the same step as the counter, and the workload's `check()`
+  asserts that the counters (calls and answers per call, bytes) equal the audit's own fold of
+  the calls.
+- **Not yet.** A trace context carried in the RPC envelope (a span stops at its machine), an audit log that names each
+  caller, and a metric for the store's sync time alone stay open in follow-up issues.
+
+**The benchmark** (#194 (throughput benchmark), landed 2026-10-15). `parosctl bench` runs
+clients over `paros::client` against the servers (`--servers`) or against a cell of N machines
+it starts in its own process (`--local N`): the shipped `run_machine` on loopback, with its
+stores on a real filesystem with real syncs, formed by `paros::client::initialize`. The calls are
+`write`, `read-tail`, `read-start` and `set-leader`, drawn by `--mix` weights, and `truncate` on
+a schedule. The clients run closed loop, or open loop at `--rate` calls per second, where a
+call's latency counts from the moment it was due (no coordinated omission). `--json` prints one
+report: throughput (calls and bytes per second) and latency (mean, p50, p90, p99, p99.9, max)
+per call, with the commit, the command line, the CPU count, the kernel and the filesystem of a
+local cell's stores. CI only checks that `parosctl bench --local 3 --duration 5s` runs: numbers
+on shared runners are noise. The baseline is posted on #194.
+
 ### 3.7 The universe
 
 The universe runs from M9 with one cell (decided on 2026-10-02, #226).
@@ -1594,7 +1659,15 @@ metadata version lets a reader refuse a format it does not understand.
 the universe directory's tenant entry when the tenant is registered and never changed afterwards.
 Each group carries a rule, and a tenant obeys the rules of every group it is in. The set of
 groups is fixed by paros for now; operator-defined groups (rollout waves, co-location), as labels
-without rules, may come later (decided on 2026-10-04):
+without rules, may come later (decided on 2026-10-04). **Tags will replace the groups**
+(decided on 2026-10-15, #575 (key:value tags), ranked early so that features build on it as a
+primitive): tenants, journals, machines and cells carry `key:value` tags. Reserved `paros/` keys
+are written only by the control plane and parsed into typed policies (`paros/kind`, `paros/role`,
+`paros/movable`, `paros/group`, a machine's class and zone, a cell's kind). User keys are opaque
+to paros. **Internal names take no prefix** (decided on 2026-10-15, #575): an internal tenant
+shows as `<kind>:<name>` (`cell:paris`, or `cell` with no name), its journals as `(control)`,
+`(election)` and `(directory)`, in every output, the metrics included; a user tenant's name
+refuses `:`. The table below stays in force until #575 lands:
 
 | Group | Rule | Members |
 |---|---|---|
