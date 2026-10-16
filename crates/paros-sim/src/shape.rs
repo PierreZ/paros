@@ -2095,8 +2095,9 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
             // On half the seeds where BUGGIFY strikes, the first founder
             // holds only the floor, so the births fill it and a tenant
             // coordinator sizes a set past a full machine (recipe
-            // 122746:10910618044440912506 on 8668601583785772229).
-            let full_founder = founders > 0 && moonpool_sim::buggify_with_prob!(0.5);
+            // 122746:10910618044440912506 on 8668601583785772229). Never on
+            // a zone-outage seed: its tenants need every zone's room.
+            let full_founder = founders > 0 && !zoned && moonpool_sim::buggify_with_prob!(0.5);
             // On half the drained-machine seeds, the machines advertise
             // names and a reboot renames one at the knob's extreme, so a
             // drain meets a machine renamed since it took its slots (#504
