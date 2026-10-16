@@ -83,6 +83,9 @@ impl FleetOps {
             );
             return;
         };
+        // Every founding member, reached or not: an admission the term
+        // finishes names them all.
+        let members: Vec<NodeId> = cell.members.iter().copied().map(NodeId).collect();
         let founders: Vec<(NodeId, paros::Address)> = cell
             .servers
             .iter()
@@ -142,7 +145,7 @@ impl FleetOps {
                         &rpc,
                         &cell.client,
                         &names,
-                        (cell.journals, founders.clone()),
+                        (cell.journals, members.clone(), founders.clone()),
                         &leader,
                         policy,
                     )

@@ -344,11 +344,14 @@ pub(super) struct ChainConfig {
     /// reboot that comes straight back, its connections and unsynced writes
     /// still lost; ceiling 2 s, far inside the recovery budget.
     pub(super) fleet_kill_down_ms: u64,
-    /// How long one `init` may take (#246, `InitParams::patience`): the
-    /// seed forming the cell, its first leader, a fleet step taken again.
-    /// Floor 500 ms: a few round trips, so an `init` under chaos often
+    /// How long one wait of an `init` may take (#246, `InitParams::patience`):
+    /// the seed forming the cell, its first leader, a fleet step taken again
+    /// (counted from the run's last written step, #605 (init pending in the
+    /// recovery tail), so a run that keeps writing may take several times
+    /// this). Floor 500 ms: a few round trips, so an `init` under chaos often
     /// decides nothing and is run again; ceiling 10 s, inside the chaos
-    /// window's reach of the recovery tail.
+    /// window's reach of the recovery tail. A resume in the tail may run past
+    /// `FLEET_SETTLE`: that only lengthens the tail, and its operation ends.
     pub(super) init_patience_ms: u64,
     /// How long client 0 holds the control journals' seed down for the
     /// static-stability shape (#247). Floor 200 ms: a blip a tenant journal

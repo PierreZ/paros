@@ -128,7 +128,9 @@ pub enum Unreachable {
 #[derive(Clone, Debug)]
 pub struct InitParams {
     /// How long the decree may take to form the cell, the cell to elect its
-    /// first leader, and an interrupted fleet step to be taken again.
+    /// first leader, and an interrupted fleet step to be taken again. The
+    /// fleet steps' patience counts from the last written step: a run that
+    /// keeps writing is not stuck (#605 (init pending in the recovery tail)).
     pub patience: Duration,
     /// The fleet id a first run records; a re-run keeps the recorded one.
     pub fleet_id: u64,

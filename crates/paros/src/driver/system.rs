@@ -151,7 +151,17 @@ pub(crate) struct ControlFollower<P: Providers> {
     checkpoints: Vec<FoldedCheckpoint>,
     /// Control journals with a remote read in flight.
     outstanding: BTreeSet<JournalIdentifier>,
-    next_seed: usize,
+    /// Each followed journal's next seed, in turn: a journal's next read
+    /// asks the seed after the one its last read asked (#607 (set left on
+    /// its old machines)). One counter shared by every journal pinned each
+    /// journal to one seed whenever the remote journals were a multiple of
+    /// the seeds (witness 16710777052220853539 on a04c94d: three remote
+    /// journals over three seeds, an admitted machine read the registry
+    /// only from a founder that stayed down, never folded its matchmaker
+    /// booking and dropped every handover `Bootstrap` for the set, red on
+    /// "sets: every tenant's set in force is its booked machines after
+    /// chaos").
+    seed_turns: BTreeMap<JournalIdentifier, usize>,
     /// Journals a tenant deleted.
     tombstones: BTreeSet<JournalIdentifier>,
     spares: Vec<paros_core::Config>,
@@ -218,7 +228,7 @@ impl<P: Providers> ControlFollower<P> {
                 dropped: BTreeSet::new(),
                 checkpoints: Vec::new(),
                 outstanding: BTreeSet::new(),
-                next_seed: 0,
+                seed_turns: BTreeMap::new(),
                 tombstones: BTreeSet::new(),
                 spares: plan.spares.clone(),
                 replies,
@@ -611,15 +621,27 @@ impl<P: Providers> ControlFollower<P> {
     }
 
     /// Open a remote follow read of every followed journal `local` says
-    /// this node does not run and that has none in flight, each to the next
-    /// seed in turn.
+    /// this node does not run and that has none in flight, each to the seed
+    /// after the one its own last read asked.
     pub(crate) fn poll_remote(&mut self, providers: &P, local: impl Fn(JournalIdentifier) -> bool) {
-        for journal in self.followed() {
+        let followed = self.followed();
+        // A dropped tenant's journal keeps no turn.
+        self.seed_turns
+            .retain(|journal, _| followed.contains(journal));
+        for (index, journal) in followed.into_iter().enumerate() {
             if local(journal) || self.outstanding.contains(&journal) {
                 continue;
             }
-            let client = self.seeds[self.next_seed % self.seeds.len()].1.clone();
-            self.next_seed = self.next_seed.wrapping_add(1);
+            // Each journal starts at its own seed, so one tick's reads
+            // spread over the seeds.
+            let turn = self.seed_turns.entry(journal).or_insert(index);
+            let pick = *turn % self.seeds.len();
+            *turn = pick + 1;
+            assert!(
+                *turn <= self.seeds.len(),
+                "a journal's turn never outruns the seeds"
+            );
+            let client = self.seeds[pick].1.clone();
             self.outstanding.insert(journal);
             let request = Read {
                 journal: journal.journal.0,
