@@ -29,7 +29,7 @@ use paros::client::checkpoint::CheckpointPolicy;
 use paros::client::fleet::read_directory;
 use paros::client::journals::{self, JournalAnswer, JournalOp, JournalRequest};
 use paros::client::names::{JournalNames, JournalResolution};
-use paros::client::{ClaimOutcome, ReadOutcome};
+use paros::client::{ClaimOutcome, ReadOutcome, WriteOptions, WriteOutcome};
 use paros::client::{Writer, WriterOutcome};
 use paros::fleet::{TenantKind, TenantState};
 use paros::tenant::{Desired, Durability};
@@ -37,6 +37,7 @@ use paros::{JournalIdentifier, TenantId, Value, WriterMode};
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
+use std::time::Duration;
 
 use moonpool_sim::{Providers, TimeProvider};
 use paros::Pass;
@@ -479,6 +480,17 @@ impl FleetOps {
                     crate::machine::note_journal_created(&self.state);
                     self.append_to_created(cell, journal, draw).await;
                 }
+                // #451: on its own location, the whole data plane on the
+                // created journal, as on a genesis one.
+                if buggify_with_prob!(0.5) {
+                    assert_reachable!(
+                        "created: a client runs the data plane on a journal it created"
+                    );
+                    self.note_journals([journal]);
+                    let client = cell.client.clone();
+                    self.exercise_created(&client, journal, cell.first(draw))
+                        .await;
+                }
             }
             (JournalAnswer::Deleted { .. }, JournalOp::Delete { name }) => {
                 assert_reachable!("journals: a journal is deleted through the coordinator");
@@ -686,7 +698,9 @@ impl FleetOps {
     /// `tenant` (its control journal `control`) through a frontend (#192
     /// (the frontend)): a name from [`JOURNAL_NAMES`] and a token of the
     /// kind `draw` picks. A call in the token's rights is never denied; any
-    /// other is denied for its cause and never served.
+    /// other is denied for its cause and never served, and never reaches a
+    /// journal (#450). On a coin, a token that allows it then runs the
+    /// whole data plane on the journal the name holds (#451).
     async fn through_frontend(&mut self, tenant: &str, control: JournalIdentifier, draw: u64) {
         if self.frontends.is_empty() {
             return;
@@ -709,12 +723,14 @@ impl FleetOps {
         let internal = (draw >> 48).is_multiple_of(3);
         let now = self.connector.providers().time().now();
         let journal_name = String::from_utf8_lossy(name);
-        let pass = Arc::new(Pass::new(frontend::token(
+        let expires =
+            (presented == Presented::ShortLived).then(|| frontend::short_expiry(now, draw >> 8));
+        let pass = Arc::new(Pass::new(frontend::token_expiring(
             &self.state,
-            tenant,
-            &journal_name,
+            (tenant, &journal_name),
             presented,
             now,
+            expires,
         )));
         let journal = if internal {
             control
@@ -723,25 +739,63 @@ impl FleetOps {
             LOCAL
         };
         let writes = !internal && (draw >> 52).is_multiple_of(2);
+        let kind =
+            if writes && (draw >> 56).is_multiple_of(3) && !crate::shape::untagged(&self.state) {
+                Kind::Tag
+            } else if writes {
+                Kind::Write
+            } else {
+                Kind::Read
+            };
         let call = Call {
             presented,
-            expected: expected_denial(presented, internal, writes),
+            expected: expected_denial(presented, internal, kind),
+            expires,
+            sent: now,
         };
         let client = self.connector.through(&self.frontends, &pass);
         let first = usize::try_from(draw % self.frontends.len() as u64).unwrap_or(0);
-        if writes && (draw >> 56).is_multiple_of(3) && !crate::shape::untagged(&self.state) {
-            self.tag_through_frontend(&client, (control.tenant, &named), call)
-                .await;
-            return;
+        match kind {
+            Kind::Tag => {
+                self.tag_through_frontend(&client, (control.tenant, &named), call)
+                    .await;
+            }
+            Kind::Write => {
+                self.write_through_frontend(&client, journal, call, first, draw)
+                    .await;
+            }
+            Kind::Read => {
+                self.read_through_frontend(&client, (journal, internal), call, first)
+                    .await;
+            }
         }
-        if writes {
-            self.write_through_frontend(&client, journal, call, first, draw)
-                .await;
-            return;
+        // #451: the data plane through the frontend, by name, under a token
+        // whose rights hold every call of it.
+        if !internal
+            && matches!(
+                presented,
+                Presented::Own | Presented::Sealed | Presented::TenantBlock | Presented::Admin
+            )
+            && buggify_with_prob!(0.3)
+        {
+            assert_reachable!("created: a client runs the data plane through a frontend");
+            self.exercise_created(&client, LOCAL, first).await;
         }
+    }
+
+    /// One read through `client`, a frontend's.
+    async fn read_through_frontend(
+        &self,
+        client: &ChainClient,
+        (journal, internal): (JournalIdentifier, bool),
+        call: Call,
+        first: usize,
+    ) {
         let request = paros::client::Reader::new(journal, 0).request(1, 0);
-        match client.read_any(&request, first).await.outcome {
-            ReadOutcome::Denied(denial) if call.denied(denial) => {
+        let outcome = client.read_any(&request, first).await.outcome;
+        let answered = self.time.now();
+        match outcome {
+            ReadOutcome::Denied(denial) if call.denied(denial, answered) => {
                 assert_reachable!("frontend: a call outside its token's rights is denied");
             }
             ReadOutcome::Page { .. } | ReadOutcome::Truncated { .. }
@@ -811,6 +865,7 @@ impl FleetOps {
             self.patience,
         )
         .await;
+        let answered = self.time.now();
         if matches!(
             answer,
             journals::FrontTagged::Answered(JournalAnswer::Tagged { .. })
@@ -829,7 +884,7 @@ impl FleetOps {
             journals::FrontTagged::Answered(JournalAnswer::UnknownJournal) => {
                 assert_reachable!("frontend: a tag request for no live journal is unknown");
             }
-            journals::FrontTagged::Denied(denial) if call.denied(denial) => {
+            journals::FrontTagged::Denied(denial) if call.denied(denial, answered) => {
                 assert_reachable!("frontend: a tag request outside its token's rights is denied");
             }
             _ => {}
@@ -837,7 +892,10 @@ impl FleetOps {
     }
 
     /// A claim and one write through `client`, a frontend's: a tenant's
-    /// fenced writes by name (#192 (the frontend)).
+    /// fenced writes by name (#192 (the frontend)). A call the token must
+    /// deny (#450) carries a payload and a claim uuid the tenant board
+    /// holds, so no node may apply either; after its claim is denied, its
+    /// write is sent anyway, and must be denied too.
     async fn write_through_frontend(
         &mut self,
         client: &ChainClient,
@@ -847,23 +905,62 @@ impl FleetOps {
         draw: u64,
     ) {
         let mut writer = Writer::new(journal, self.leader_seeds.next());
+        let payload = if call.expected.is_some() {
+            let mut payload = b"denied:".to_vec();
+            payload.extend(moonpool_sim::sim_random_range(1..u64::MAX).to_le_bytes());
+            tenants::lock(&tenants::tenant_board(&self.state))
+                .must_deny(Some(payload.clone()), Some(writer.uuid().0));
+            payload
+        } else {
+            draw.to_le_bytes().to_vec()
+        };
         // A denied call is denied at the claim's state read: the write then
         // sends nothing (`NotOwner`), so the claim is where the denial is
         // judged (#446 (a gate that never fires cannot fail the sweep)).
         let outcome = match writer.claim(client, first, false).await {
-            ClaimOutcome::Denied(denial) => WriterOutcome::Denied(denial),
-            _ => {
-                writer
-                    .write(client, vec![Value(draw.to_le_bytes().to_vec())], first)
-                    .await
+            ClaimOutcome::Denied(denial) => {
+                if call.expected.is_some() {
+                    self.write_denied(client, &writer, call, (payload, first))
+                        .await;
+                }
+                WriterOutcome::Denied(denial)
             }
+            _ => writer.write(client, vec![Value(payload)], first).await,
         };
+        let answered = self.time.now();
         match outcome {
             WriterOutcome::Written { .. } if call.served(&self.state) => {
                 assert_reachable!("frontend: a tenant writes its journal by name");
             }
-            WriterOutcome::Denied(denial) if call.denied(denial) => {
+            WriterOutcome::Denied(denial) if call.denied(denial, answered) => {
                 assert_reachable!("frontend: a write outside its token's rights is denied");
+            }
+            _ => {}
+        }
+    }
+
+    /// The write of a call whose claim was denied, sent anyway as an
+    /// explicit misbehaviour (#450): the frontend must deny it as well, and
+    /// no node may apply its payload.
+    async fn write_denied(
+        &self,
+        client: &ChainClient,
+        writer: &Writer,
+        call: Call,
+        (payload, first): (Vec<u8>, usize),
+    ) {
+        let entry = writer.stale_entry(vec![Value(payload)]);
+        let outcome = client
+            .write(&writer.request(&entry), first, WriteOptions::default())
+            .await
+            .outcome;
+        let answered = self.time.now();
+        match outcome {
+            WriteOutcome::Denied(denial) if call.denied(denial, answered) => {
+                assert_reachable!("frontend: a write sent after its denied claim is denied");
+            }
+            WriteOutcome::Written { .. } => {
+                call.served(&self.state);
             }
             _ => {}
         }
@@ -894,22 +991,48 @@ impl FleetOps {
     }
 }
 
-/// One call through a frontend: the token presented and the denial its
-/// rights call for (`None`: it is served).
+/// What a call through a frontend does: read, write, or tag.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Read,
+    Write,
+    Tag,
+}
+
+/// One call through a frontend: the token presented, the denial its
+/// rights call for (`None`: it is served), the expiry of a short-lived
+/// token, and when the call was sent (each after the simulation's zero).
 #[derive(Clone, Copy)]
 struct Call {
     presented: Presented,
     expected: Option<Denial>,
+    expires: Option<Duration>,
+    sent: Duration,
 }
 
 impl Call {
-    /// Judge a denial; whether it was the one the token's rights call for.
-    /// A token the rotated key signed may also be `invalid_token` while the
-    /// frontend has not read that key yet (#245 (Biscuit tokens)).
-    fn denied(self, denial: Denial) -> bool {
+    /// Judge a denial answered at `answered`; whether it was the one the
+    /// token's rights call for. A token the rotated key signed may also be
+    /// `invalid_token` while the frontend has not read that key yet (#245
+    /// (Biscuit tokens)); a short-lived token may be `expired` once the
+    /// frontend's clock, skewed by at most `MAX_SKEW`, passed its expiry
+    /// (#450).
+    fn denied(self, denial: Denial, answered: Duration) -> bool {
         if denial == Denial::InvalidToken && self.presented.may_be_unknown() {
             assert_reachable!("frontend: a token signed by a key not read yet is refused");
             return false;
+        }
+        if let (Some(expires), Denial::Expired) = (self.expires, denial) {
+            assert_always!(
+                answered + frontend::MAX_SKEW > expires,
+                "frontend: a short-lived token is refused expired only past its expiry",
+                {
+                    "answered_ms" => answered.as_millis(),
+                    "expires_ms" => expires.as_millis()
+                }
+            );
+            assert_reachable!("frontend: a short-lived token is refused expired");
+            return true;
         }
         match self.expected {
             None => {
@@ -928,9 +1051,16 @@ impl Call {
                 );
                 if matches!(
                     self.presented,
-                    Presented::ReadOnly | Presented::OtherJournal
+                    Presented::ReadOnly
+                        | Presented::OtherJournal
+                        | Presented::ClassJournal
+                        | Presented::ForeignBlock
+                        | Presented::EarlierExpiry
                 ) {
                     assert_reachable!("frontend: a derived token's restriction denies a call");
+                }
+                if self.presented == Presented::DeepChain {
+                    assert_reachable!("frontend: a token past the block limit is refused");
                 }
                 true
             }
@@ -946,10 +1076,29 @@ impl Call {
         if self.presented.may_be_unknown() {
             assert_reachable!("frontend: a token signed by a rotated-in key is served");
         }
-        if matches!(self.presented, Presented::ReadOnly | Presented::OwnJournal)
-            && self.expected.is_none()
+        if matches!(
+            self.presented,
+            Presented::ReadOnly
+                | Presented::OwnJournal
+                | Presented::ClassJournal
+                | Presented::TenantBlock
+        ) && self.expected.is_none()
         {
             assert_reachable!("frontend: a derived token is served within its restriction");
+        }
+        if self.presented == Presented::Sealed && self.expected.is_none() {
+            assert_reachable!("frontend: a sealed token is served");
+        }
+        if let Some(expires) = self.expires {
+            assert_always!(
+                self.sent <= expires + frontend::MAX_SKEW,
+                "frontend: a short-lived token is served only before its expiry",
+                {
+                    "sent_ms" => self.sent.as_millis(),
+                    "expires_ms" => expires.as_millis()
+                }
+            );
+            assert_reachable!("frontend: a short-lived token is served");
         }
         if let Some(want) = self.expected {
             assert_always!(
@@ -965,20 +1114,27 @@ impl Call {
 
 /// The denial a call's token rights call for (`None`: it is served): a
 /// call by ids is to an internal journal, which only `admin` reaches; a
-/// derived token (#400) keeps its restriction.
-fn expected_denial(presented: Presented, internal: bool, writes: bool) -> Option<Denial> {
+/// derived token (#400, #450) keeps its restriction; an expiry fails
+/// first, and a token past the block limit is refused before any check.
+fn expected_denial(presented: Presented, internal: bool, kind: Kind) -> Option<Denial> {
     match presented {
         Presented::Admin => None,
-        Presented::Own | Presented::Rotated | Presented::OwnJournal if !internal => None,
-        Presented::ReadOnly if !internal && !writes => None,
+        Presented::Expired | Presented::EarlierExpiry => Some(Denial::Expired),
+        Presented::UnknownKey | Presented::Garbage | Presented::DeepChain => {
+            Some(Denial::InvalidToken)
+        }
+        Presented::OtherTenant | Presented::OtherJournal | Presented::ForeignBlock => {
+            Some(Denial::Forbidden)
+        }
+        _ if internal => Some(Denial::Forbidden),
         Presented::Own
         | Presented::Rotated
         | Presented::OwnJournal
-        | Presented::ReadOnly
-        | Presented::OtherTenant
-        | Presented::OtherJournal => Some(Denial::Forbidden),
-        Presented::Expired => Some(Denial::Expired),
-        Presented::UnknownKey | Presented::Garbage => Some(Denial::InvalidToken),
+        | Presented::Sealed
+        | Presented::TenantBlock
+        | Presented::ShortLived => None,
+        Presented::ReadOnly => (kind != Kind::Read).then_some(Denial::Forbidden),
+        Presented::ClassJournal => (kind != Kind::Tag).then_some(Denial::Forbidden),
     }
 }
 
