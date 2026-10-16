@@ -3048,7 +3048,8 @@ fn refuse_unknown<S, A: Audit, N: Audit, P: Providers>(
 
 /// Open `journal`'s store and boot it into `journals` (at boot, or when its
 /// quarantine is over at tick `now`): live on success, back in quarantine on
-/// a storage fault, down for good when the store refuses to open.
+/// a storage fault (its open's too, [`JournalStores::open_fault`]), down for
+/// good when the store refuses to open.
 async fn open_journal<P: Providers, J: JournalStores>(
     providers: &P,
     stores: &mut J,
@@ -3059,6 +3060,18 @@ async fn open_journal<P: Providers, J: JournalStores>(
 ) {
     let audit = stores.audit(journal);
     let Some((storage, boot)) = stores.open(journal).await else {
+        if let Some(fault) = stores.open_fault(journal) {
+            assert!(
+                matches!(fault, RunError::Storage(_)),
+                "an open quarantines only on a storage fault"
+            );
+            moonpool_assertions::reachable!(
+                "driver: a journal's open is quarantined on a storage fault"
+            );
+            tracing::info!(journal = %journal, "journal_open_quarantined");
+            journals.requarantine(journal, now, fault);
+            return;
+        }
         tracing::info!(journal = %journal, "journal_down");
         journals.park(journal, None);
         return;

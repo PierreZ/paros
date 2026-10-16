@@ -12,15 +12,27 @@
 //! journal create, and admits machines until then. On its own BUGGIFY
 //! location, the operator drains a machine renamed since it joined (#504
 //! (red drain seeds)).
+//!
+//! Once a drained machine holds no slot, the operator removes it on a coin
+//! (`CellSession::remove`, #359): its `node_id` is tombstoned for good.
+//!
+//! On a gone-machine seed (`crate::shape::gone_machine`, #475 (re-place
+//! after the Down bound)), the operator picks the machine the same way but
+//! does not drain it: `crate::world::gone_machine` takes it down for longer
+//! than the re-placement bound, so the cell coordinator must re-place its
+//! roles. On a coin it first opens a maintenance window over the machine
+//! or its zone (#359): a short one that ends while the machine is down, or
+//! one that outlasts the run, under which no slot it held may move.
 
 use std::collections::BTreeSet;
+use std::time::Duration;
 
-use moonpool_sim::{SimContext, assert_reachable, buggify_with_prob};
+use moonpool_sim::{RandomProvider, SimContext, TimeProvider, assert_reachable, buggify_with_prob};
 use paros::NodeId;
-use paros::client::cell::CellSession;
+use paros::client::cell::{CellSession, Removal};
 use paros::client::checkpoint::CheckpointPolicy;
 use paros::machine::Class;
-use paros::system::{BookingTarget, NodeStanding, Role};
+use paros::system::{BookingTarget, MaintenanceScope, NodeStanding, Registry, Role};
 
 use super::FleetOps;
 
@@ -67,49 +79,36 @@ impl FleetOps {
             .map(|(id, _)| id)
             .collect();
         let registry = session.registry();
-        // The storage machines a journal may go to: the founding members and
-        // every registered storage machine.
-        let storage: BTreeSet<NodeId> = cell
-            .members
-            .iter()
-            .map(|id| NodeId(*id))
-            .chain(
-                registry
-                    .nodes()
-                    .filter(|(_, n)| {
-                        n.standing == NodeStanding::Registered && n.class == Class::Storage
-                    })
-                    .map(|(id, _)| id),
-            )
-            .collect();
-        // Whether `node` holds a journal's slot, or a matchmaker set's (#501
-        // (matchmaker sets off the founders)), that another storage machine
-        // could take.
-        let movable = |node: NodeId| {
-            registry.bookings().any(|(_, b)| {
-                let holders: BTreeSet<NodeId> = registry
-                    .bookings()
-                    .filter(|(_, o)| o.target == b.target && o.role.class() == Class::Storage)
-                    .map(|(_, o)| o.node)
-                    .collect();
-                let moves = match b.target {
-                    BookingTarget::Journal(_) => b.role == Role::Acceptor,
-                    BookingTarget::Set { .. } => b.role == Role::Matchmaker,
-                    BookingTarget::Tenant { .. } => false,
-                };
-                b.node == node && moves && storage.iter().any(|m| !holders.contains(m))
-            })
-        };
         // The scenario drains one machine at a time, so a journal keeps
-        // machines to go to.
+        // machines to go to. A drained one, holding no slot, is removed on a
+        // coin (#359).
+        let drained: Vec<NodeId> = registry
+            .nodes()
+            .filter(|(id, n)| n.standing == NodeStanding::Draining && registry.booked(*id) == 0)
+            .map(|(id, _)| id)
+            .collect();
+        if let Some(node) = drained.first().copied()
+            && buggify_with_prob!(0.5)
+        {
+            return self
+                .remove_machine(ctx, &mut session, (&cell.client, first), node)
+                .await;
+        }
         let draining = registry
             .nodes()
             .any(|(_, n)| n.standing == NodeStanding::Draining);
         if loaded && draining {
             return false;
         }
+        let gone = crate::shape::gone_machine(ctx.state());
+        if gone && crate::machine::gone_requested(ctx.state()) {
+            return false;
+        }
         let mut admitted: Vec<NodeId> = if loaded {
-            admitted.into_iter().filter(|node| movable(*node)).collect()
+            admitted
+                .into_iter()
+                .filter(|node| movable(registry, &cell.members, *node))
+                .collect()
         } else {
             admitted
         };
@@ -127,10 +126,130 @@ impl FleetOps {
             return false;
         }
         let node = admitted[usize::try_from(draw % admitted.len() as u64).unwrap_or(0)];
+        if gone {
+            // A window first, on a coin, then the machine goes down (#475).
+            if buggify_with_prob!(0.75) {
+                self.maintain(ctx, &mut session, (&cell.client, first), node)
+                    .await;
+            }
+            if crate::machine::request_gone(ctx.state(), node.0) {
+                assert_reachable!("drain: an operator picks a machine to take down");
+                tracing::info!(node = node.0, "machine_gone_requested");
+            }
+            return true;
+        }
         if let Ok(true) = session.drain(&cell.client, first, node).await {
             assert_reachable!("drain: an operator drains an admitted machine");
             tracing::info!(node = node.0, "machine_drained");
         }
         true
     }
+
+    /// Remove the drained machine `node` (#359), through `session`. Whether
+    /// it ran.
+    async fn remove_machine(
+        &mut self,
+        ctx: &SimContext,
+        session: &mut CellSession,
+        (client, first): (&crate::client::ChainClient, usize),
+        node: NodeId,
+    ) -> bool {
+        crate::machine::note_remove_asked(ctx.state(), node.0);
+        match session.remove(client, first, node).await {
+            Ok(Removal::Removed) => {
+                assert_reachable!("drain: an operator removes a drained machine");
+                tracing::info!(node = node.0, "machine_removed");
+                crate::machine::note_removed(ctx.state(), node.0);
+                true
+            }
+            Ok(Removal::Unchanged) => true,
+            Ok(Removal::NotDrained { .. } | Removal::NotDraining | Removal::Unknown) | Err(_) => {
+                false
+            }
+        }
+    }
+
+    /// Open a maintenance window over machine `node` or its zone (#359),
+    /// through `session`: on a coin a short one, which ends while the
+    /// machine is down, else one that outlasts the run.
+    async fn maintain(
+        &mut self,
+        ctx: &SimContext,
+        session: &mut CellSession,
+        (client, first): (&crate::client::ChainClient, usize),
+        node: NodeId,
+    ) {
+        let registry = session.registry();
+        let Some(zone) = registry.get(node).map(|n| n.locality.zone.clone()) else {
+            return;
+        };
+        let slots: Vec<(u64, BookingTarget)> = registry
+            .bookings()
+            .filter(|(_, b)| b.node == node)
+            .map(|(id, b)| (id, b.target))
+            .collect();
+        let scope = if buggify_with_prob!(0.5) {
+            assert_reachable!("drain: an operator puts a zone in maintenance");
+            MaintenanceScope::Zone(zone)
+        } else {
+            MaintenanceScope::Machine(node)
+        };
+        let short = buggify_with_prob!(0.5);
+        let length = if short {
+            Duration::from_millis(1_000 + ctx.random().random_range(0..3_000))
+        } else {
+            LONG_WINDOW
+        };
+        let sent = ctx.time().now();
+        let for_ms = u64::try_from(length.as_millis()).unwrap_or(u64::MAX);
+        if let Ok(true) = session.maintenance(client, first, scope, for_ms).await {
+            assert_reachable!("drain: an operator opens a maintenance window");
+            tracing::info!(node = node.0, for_ms, "maintenance_opened");
+            // A zone window covers every machine of the zone; the oracle
+            // judges the one the operator watches.
+            crate::machine::note_maintenance(
+                ctx.state(),
+                crate::machine::MaintenanceNote {
+                    node: node.0,
+                    sent,
+                    length,
+                    slots,
+                },
+            );
+        }
+    }
+}
+
+/// A maintenance window that outlasts every run (#359).
+const LONG_WINDOW: Duration = Duration::from_secs(3_600);
+
+/// Whether `node` holds a journal's slot, or a matchmaker set's (#501
+/// (matchmaker sets off the founders)), that another storage machine could
+/// take: a founding member (`members`) or a registered storage machine.
+fn movable(registry: &Registry, members: &[u64], node: NodeId) -> bool {
+    let storage: BTreeSet<NodeId> = members
+        .iter()
+        .map(|id| NodeId(*id))
+        .chain(
+            registry
+                .nodes()
+                .filter(|(_, n)| {
+                    n.standing == NodeStanding::Registered && n.class == Class::Storage
+                })
+                .map(|(id, _)| id),
+        )
+        .collect();
+    registry.bookings().any(|(_, b)| {
+        let holders: BTreeSet<NodeId> = registry
+            .bookings()
+            .filter(|(_, o)| o.target == b.target && o.role.class() == Class::Storage)
+            .map(|(_, o)| o.node)
+            .collect();
+        let moves = match b.target {
+            BookingTarget::Journal(_) => b.role == Role::Acceptor,
+            BookingTarget::Set { .. } => b.role == Role::Matchmaker,
+            BookingTarget::Tenant { .. } => false,
+        };
+        b.node == node && moves && storage.iter().any(|m| !holders.contains(m))
+    })
 }

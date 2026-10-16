@@ -78,6 +78,7 @@ mod cell;
 mod converge;
 mod drain;
 mod election;
+mod healthy;
 mod journals;
 mod keys;
 mod load;
@@ -1133,6 +1134,10 @@ impl FleetOps {
             let learn = |journal| self.note_journals([journal]);
             placement::placements_booked(ctx, &cell, ctx.time().now() + FLEET_SETTLE, learn).await;
             sets::sets_booked(ctx, &cell, ctx.time().now() + FLEET_SETTLE).await;
+            // Every journal the cell can hold heals (#475 (re-place after
+            // the Down bound)).
+            self.journals_heal(ctx, &cell, ctx.time().now() + FLEET_SETTLE)
+                .await;
             // The machines' own `Resolve` folds escape after chaos (#457).
             self.resolve_answers(ctx, &cell, ctx.time().now() + FLEET_SETTLE)
                 .await;

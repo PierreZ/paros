@@ -366,6 +366,12 @@ pub struct GcAck {
     pub applied: bool,
     /// The journal's durable watermark after the request.
     pub watermark: Ballot,
+    /// On a refusal, the later set the leader should address instead: the
+    /// successor of the stopped generation, or the generation in force
+    /// here, as a matchmaking refusal names it. A stable leader learns a
+    /// handover only from here: it re-campaigns for none (#475 (re-place
+    /// after the Down bound)).
+    pub newer: Option<MatchmakerSet>,
 }
 
 /// A reconfigurer's message to a matchmaker (#125): one step of the

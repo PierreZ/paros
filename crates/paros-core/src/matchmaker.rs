@@ -767,6 +767,30 @@ impl Matchmaker {
         self.assert_invariants();
     }
 
+    /// The later set a request at `generation` should address instead, as
+    /// `Matchmaker::generation_refusal` names it: the successor of a
+    /// stopped generation, or the generation in force here. `None` when no
+    /// later set is known here (this matchmaker serves `generation`, or is
+    /// inactive for it).
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants fails: a programmer error,
+    /// never an operating condition.
+    #[must_use]
+    pub fn newer_set(&self, generation: MatchmakerGeneration) -> Option<MatchmakerSet> {
+        let newer = match self.judge_generation(generation)? {
+            MatchRefusal::Stopped { successor } => successor,
+            MatchRefusal::Generation { current } => Some(current),
+            _ => None,
+        };
+        assert!(
+            newer.as_ref().is_none_or(|set| set.generation > generation),
+            "a refusal names only a later generation"
+        );
+        newer
+    }
+
     /// The generation fence for a matchmaking or GC request: `None` when
     /// this matchmaker is active for exactly `generation`.
     fn generation_refusal(&self, generation: MatchmakerGeneration) -> Option<MatchRefusal> {

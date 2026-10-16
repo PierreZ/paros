@@ -197,6 +197,9 @@ impl MatchmakerProcess {
         self.persist();
         let role = self.role.as_mut()?;
         let watermark = role.hard_state().gc_watermark(request.journal);
+        let newer = (outcome == GcOutcome::Refused)
+            .then(|| role.newer_set(request.generation))
+            .flatten();
         role.ready().advance();
         Some(GcAck {
             matchmaker: self.config.id,
@@ -204,6 +207,7 @@ impl MatchmakerProcess {
             generation: request.generation,
             applied: outcome != GcOutcome::Refused,
             watermark,
+            newer,
         })
     }
 
