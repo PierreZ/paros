@@ -422,7 +422,13 @@ impl Moves {
         }
         let successor = !self.started.remove(&journal);
         moonpool_assertions::sometimes!(true, "coordinator: a move finished");
-        moonpool_assertions::sometimes!(successor, "coordinator: a successor term finished a move");
+        // A reachable, not a sometimes: the gone-machine scenario's moves
+        // (#475 (re-place after the Down bound)) check it often enough that
+        // a sweep with no successor finish reads as a 0% outcome; `RARE`
+        // covers a sweep that never reaches it.
+        if successor {
+            moonpool_assertions::reachable!("coordinator: a successor term finished a move");
+        }
         tracing::info!(journal = %journal, successor, "journal_moved");
         Some(MoveStep::Finished { successor })
     }
