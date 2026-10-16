@@ -347,6 +347,19 @@ list and no rendezvous name. The same rule holds at two levels:
      a higher `init_id`, and is then formed. A majority of accepts chooses the plan. The receiver
      sends its own accept last, and only when the others can still choose the plan with it. A
      machine that receives a `FormCell` without being asked first treats it as both steps.
+  4. **Teach** (the decree's learner catch-up, #277 (cell decree)). The receiver sends
+     `FormCell` once, so a founding member that was down at that moment stays idle while the
+     plan names it. Each formed member asks every other member of its plan to `Identify` itself
+     at each election renewal period. It sends its own vote, the plan at the ballot it accepted
+     it at, to a member that answers idle. This is the same Phase 2a again, so it is safe at
+     any time. The idle member promised that ballot in step 1, so it accepts. The `FormCell`
+     carries the operator's token, the one that formed the teacher; the teacher keeps it in
+     memory only, never in its record. Teaching of a member ends when it answers in the cell,
+     answers as another machine (a wiped member), refuses the token, or the address book names
+     it at another address than the plan's. A member that restarted holds no token and teaches
+     nothing. Before, only a new `init` formed that member, and a cell with one more member down
+     had no quorum (seeds 7461995534021400970 on main 7feccc9 and 16403044264830861989 on
+     629aa62).
 
   A receiver that crashes midway leaves no lock: the next `cell init`, sent to any listed machine,
   finds the accepted plan in its ask and finishes it. A plain question ("is anything ongoing?")
@@ -409,8 +422,10 @@ list and no rendezvous name. The same rule holds at two levels:
   machine started with `PAROS_ROOT_PUBLIC_KEY` pins those keys (`paros::machine::AdminPin`) and,
   while it is idle, checks an `admin` token on `CellInit`, `PrepareCell`, `FormCell` and `Admit`
   (operations `form_cell` and `admit`, on an internal target). The proposer of `cell init` sends
-  the operator's token on to the other founding members. A refusal answers `invalid_token`,
-  `expired` or `forbidden`. A machine started without the variable trusts the network, as before.
+  the operator's token on to the other founding members, and a formed member that teaches the
+  decree (step 4 above) sends the same token. A refusal answers `invalid_token`, `expired` or
+  `forbidden`. A teacher with no token (it restarted) or with a refused one stops: the operator
+  runs `init` again with its token. A machine started without the variable trusts the network, as before.
   The cell coordinator that finishes an admission an operator left in flight has no token, so a
   pinned machine refuses it: the operator runs `cell add-machine` again with its token.
 
@@ -595,8 +610,12 @@ restart is supported:
   (below) lets a machine that restarts after others moved dial them where they are.
 - **The simulation.** On a seed whose machines advertise names, a cell machine's reboot comes
   back under a new name at a new IP (`rename_pct`). Its old name keeps the old IP, where
-  nobody listens. The operators' entry for the machine follows it. After chaos, the oracle
-  judges that the registry holds every renamed founding member at its new name.
+  nobody listens. The operators' entry for the machine follows it. A founding member is renamed
+  only once every renamed admitted machine is registered at its new name. Otherwise the run
+  passes the limit above: the admitted machine's book names only the founder's old name, and
+  the registry names the machine only at its old address (#501 (matchmaker sets off the
+  founders)). After chaos, the oracle judges that the registry holds every renamed founding
+  member and every renamed admitted machine at its new name.
 
 **Liveness** (decided on 2026-10-04). The cell coordinator watches the cell's machines with the
 transport's failure detector and writes only the *changes* into the cell control journal (`Down`,
@@ -815,13 +834,16 @@ coordinator is `paros::machine::coordinator`:
   duties run (decided on 2026-10-15, #542 (coordinator starves its lease while it
   installs)). So the lease covers one renewal's round trip, never an install: a slow cell
   kept no term before.
-- **Interim.** The admin calls are not yet requests to the coordinator (#212, #225). An
-  admin session still claims the cell control journal and fences the coordinator. The
-  coordinator does not fight back within its term: it resigns, and the next term installs
-  a fresh uuid (#349: a fenced term cannot register a moved machine). `parosctl init` claims
-  nothing on the cell control journal: it waits until the coordinator installed its uuid, then
-  runs the fleet steps, and the coordinator writes the cell's `JoinFleet` (#513 (fleet Init
-  duel)).
+- **Interim.** `cell add-machine` and `cell drain-machine` are not yet requests to the
+  coordinator (#212, #225). Their admin session still claims the cell control journal and
+  fences the coordinator. The coordinator does not fight back within its term: it resigns,
+  and the next term installs a fresh uuid (#349: a fenced term cannot register a moved
+  machine). The fleet operations claim nothing on the cell control journal. `parosctl init`
+  waits until the coordinator installed its uuid, then runs the fleet steps, and the
+  coordinator writes the cell's `JoinFleet` (#513 (fleet Init duel)). A tenant's creation
+  and removal write only the universe directory, and the coordinator writes the cell's
+  steps: the tenant's footprint, `HostTenant` and `DropTenant` (decided on 2026-10-15, #225,
+  section 3.7).
 - **Knobs.** `DriverTunables::election_lease`, `election_renew` and `election_compact_after`,
   each with a floor; `parosd` reads them as `PAROS_ELECTION_*` variables.
 
@@ -976,13 +998,14 @@ request RPC and the placement of tenant coordinators.
   stateless machine serves with a free slot, the founding members host the coordinator and
   the footprint holds no coordinator slot.
 - **A host needs its footprint.** The fold refuses `HostTenant` (`NoFootprint`) for a tenant
-  with no granted footprint. The fleet state machines write the footprint as a step of its
-  own: a tenant creation books the tenant's before `HostTenant`. The cell coordinator books
-  the cell tenant's and the universe tenant's, since it also writes `JoinFleet` (#513 (fleet
-  Init duel)). A creation whose footprint the cell
-  refuses marks the tenant `ERROR` in the universe directory and answers `NoFootprint`; a
-  delete frees its name. The cell records a refusal only once every founding member is
-  registered, so a missing founder delays a creation and never refuses it.
+  with no granted footprint. The cell coordinator writes the footprint as a step of its own:
+  it books a `REGISTERING` tenant's footprint before its `HostTenant`, as it follows the
+  universe directory (decided on 2026-10-15, #225: no operator claims the cell control
+  journal). It books the cell tenant's and the universe tenant's too, since it also writes
+  `JoinFleet` (#513 (fleet Init duel)). A creation whose footprint the cell refuses marks the
+  tenant `ERROR` in the universe directory and answers `NoFootprint`; a delete frees its name.
+  The cell records a refusal only once every founding member is registered, so a missing
+  founder delays a creation and never refuses it.
 - **`init` waits for the founding members.** A founding member registers through the cell
   coordinator, and a fleet step's claim fences the coordinator. So `init` reads the cell
   control journal, without a claim, until it holds every founding member, before its fleet
@@ -1619,7 +1642,20 @@ of a name the universe tenant holds, in any state and whatever its placement, is
 merged into the first. Until #225 the client drives the steps, so an interrupted creation stays
 `REGISTERING` until it is deleted; with #225 the coordinator that owns the control journal
 finishes every `REGISTERING` and `REMOVING` entry it finds (decided on 2026-10-04: the entry is
-the work order, no client resumes another's creation). A tenant in any state may be removed; only a `READY` or
+the work order, no client resumes another's creation).
+*Landed in part* (2026-10-15, #225, the tenant half of #513 (fleet Init duel)): the cell
+coordinator writes the cell's step of each entry. At its install and at each watch round, it
+reads the universe directory. For each `users` tenant of its cell that is `REGISTERING` and not
+hosted, it books the tenant's footprint (`GrantCapacity`, section 3.3), then writes `HostTenant`
+once the footprint is granted. For each one that is `REMOVING` and not dropped, it writes
+`DropTenant`. The operator writes only the directory steps: it waits until the cell hosts the
+tenant before it marks it `READY` (or marks it `ERROR` when the cell refused its footprint), and
+until the cell dropped it before it removes it. So no operator claims the
+cell control journal for a tenant. Before, each claim fenced the coordinator and the next term
+fenced the operator in turn, the duel #513 removed from `init`. The sweep of 07424f8 left two
+creations `REGISTERING` after the recovery tail (seed 15189977391382984753, which did not replay
+red alone). The directory steps are still the operator's: the universe coordinator that
+finishes them is #225's remaining work. A tenant in any state may be removed; only a `READY` or
 `UPDATING_CONFIGURATION` tenant may be reconfigured. `init` follows the same rule. Cell entries
 carry a state too: `REGISTERING`, `READY`, `REMOVING` or `RESTORING`, and only a `READY` cell
 receives new tenants. In M9 the one cell goes `REGISTERING` → `READY` during `init`, and
@@ -2405,7 +2441,9 @@ AGENTS.md.
   per seed. The counts stay boot data until the tenant coordinator applies them (#214).
 - The coordinators replace the operator's client (#212): admin calls become requests to the
   elected coordinator. Since #240, `parosctl init` no longer claims the cell control journal: the
-  elected cell coordinator installs its uuid there.
+  elected cell coordinator installs its uuid there. Since #513 and #225, no fleet operation
+  claims it: the coordinator writes the cell's `JoinFleet`, and each tenant's footprint,
+  `HostTenant` and `DropTenant`.
 
 ## 8. Milestones
 

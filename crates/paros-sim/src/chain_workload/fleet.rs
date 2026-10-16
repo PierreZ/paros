@@ -65,7 +65,7 @@ use paros::client::names::{TenantResolution, resolve_tenant};
 use paros::client::{ClaimOutcome, Writer};
 use paros::fleet::{CellState, FleetDirectory, TenantKind, TenantState};
 use paros::machine::ControlJournals;
-use paros::system::Registry;
+use paros::system::{NodeStanding, Registry};
 use paros::{JournalId, JournalIdentifier, NodeId, TenantId};
 
 use crate::audit::liveness::JudgedRegistry;
@@ -929,40 +929,35 @@ impl FleetOps {
     }
 
     /// The fleet directory against the cell's tenant list, when the session's
-    /// two folds are one instant's: it holds both journals already (the
-    /// check claims nothing), and a fresh read of each finds this client
-    /// still the owner with nothing written past the fold.
-    async fn check_directory(&self, client: &ChainClient, session: &FleetSession, first: usize) {
+    /// two folds are one instant's: it holds the directory already (the
+    /// check claims nothing), the cell is read to its tail after the
+    /// directory's fold, and a fresh read of the directory then finds this
+    /// client still the owner with nothing written past the fold. The cell
+    /// coordinator writes the cell's side from the directory alone (#225),
+    /// so the directory stood still over the cell's read.
+    async fn check_directory(
+        &self,
+        client: &ChainClient,
+        session: &mut FleetSession,
+        first: usize,
+    ) {
         let Some(cell) = &self.cell else {
             return;
         };
-        if !session.holds_both() {
+        if !session.holds_directory() || session.read_cell(client, first).await.is_err() {
             return;
         }
-        let (directory_writer, cell_writer) = session.writers();
         let Some(directory_floor) = still(
             client,
             first,
             cell.fleet,
-            directory_writer,
+            session.writer(),
             session.directory().next_seq(),
         )
         .await
         else {
             return;
         };
-        if still(
-            client,
-            first,
-            cell.journals.cell,
-            cell_writer,
-            session.cell().next_seq(),
-        )
-        .await
-        .is_none()
-        {
-            return;
-        }
         // The two folds are of one instant. The fleet tenant's checkpoint and truncation
         // ran under its owner's policy on the way.
         if directory_floor > 0 {
@@ -1237,15 +1232,31 @@ impl FleetOps {
     /// machine no longer advertises. Witness: seed 1904763865968447698 on
     /// 2e959f3, founder 1 renamed `machine-1-1` then `machine-1-2` during
     /// the check; the registry held `machine-1-2`.
+    ///
+    /// The same read judges every renamed admitted machine (#501 (matchmaker
+    /// sets off the founders), #529 (sets oracles)): the registry holds it at
+    /// its new name, so the coordinator reaches it there and hands it a set
+    /// or a journal. A machine the registry retired or does not hold is not
+    /// judged here (`admit::admitted_registered` judges the second). Red
+    /// before `machine::renamed_outside_registered`: recipe
+    /// `6959312946067892202 110064:7756325629573379374` on b93880a, whose
+    /// founder was renamed before the admitted machine registered its new
+    /// name, so neither reached the other again.
     async fn renamed_registered(&self, ctx: &SimContext, known: &Cell, deadline: Duration) {
+        let cell_id = known.journals.cell_id;
         let mut renamed = crate::machine::renamed_founders(ctx.state(), self.layout.founders);
-        if renamed.is_empty() {
+        let mut admitted = crate::machine::renamed_admitted(ctx.state(), cell_id);
+        if renamed.is_empty() && admitted.is_empty() {
             return;
         }
         let mut attempt = 0_u64;
-        let mut held = false;
-        while !held && ctx.time().now() < deadline && !ctx.shutdown().is_cancelled() {
+        let (mut held, mut held_admitted) = (false, false);
+        while !(held && held_admitted)
+            && ctx.time().now() < deadline
+            && !ctx.shutdown().is_cancelled()
+        {
             renamed = crate::machine::renamed_founders(ctx.state(), self.layout.founders);
+            admitted = crate::machine::renamed_admitted(ctx.state(), cell_id);
             let first = known.first(attempt);
             attempt += 1;
             let mut cell = judged_cell(&known.members);
@@ -1257,23 +1268,42 @@ impl FleetOps {
                 0,
             )
             .await;
-            held = matches!(loaded, LoadOutcome::Loaded { .. })
-                && renamed.iter().all(|(node, name)| {
-                    cell.state().registry().address(NodeId(*node)) == Some(name.as_str())
+            let loaded = matches!(loaded, LoadOutcome::Loaded { .. });
+            let registry = cell.state().registry();
+            held = loaded
+                && renamed
+                    .iter()
+                    .all(|(node, name)| registry.address(NodeId(*node)) == Some(name.as_str()));
+            held_admitted = loaded
+                && admitted.iter().all(|(node, name)| {
+                    registry.get(NodeId(*node)).is_none_or(|entry| {
+                        entry.standing == NodeStanding::Retired || entry.addr == name.as_str()
+                    })
                 });
-            if !held && ctx.time().sleep(Duration::from_millis(100)).await.is_err() {
+            if !(held && held_admitted)
+                && ctx.time().sleep(Duration::from_millis(100)).await.is_err()
+            {
                 return;
             }
         }
         if ctx.shutdown().is_cancelled() {
             return;
         }
-        assert_always!(
-            held,
-            "machine: a renamed founding member is registered under its new name after chaos",
-            { "renamed" => renamed.len() }
-        );
-        assert_reachable!("machine: the cell heals around a renamed founding member");
+        if !renamed.is_empty() {
+            assert_always!(
+                held,
+                "machine: a renamed founding member is registered under its new name after chaos",
+                { "renamed" => renamed.len() }
+            );
+            assert_reachable!("machine: the cell heals around a renamed founding member");
+        }
+        if !admitted.is_empty() {
+            assert_always!(
+                held_admitted,
+                "machine: a renamed admitted machine is registered under its new name after chaos",
+                { "renamed" => admitted.len(), "cell" => cell_id }
+            );
+        }
     }
 
     /// [`FleetOps::final_check`]'s registry half (#189), on a seed that runs
@@ -1408,8 +1438,6 @@ fn reach(stage: Stage) {
         Stage::RegisterTenant => {
             assert_reachable!("fleet: a step registers a tenant in the directory");
         }
-        Stage::HostTenant => assert_reachable!("fleet: a step hosts a tenant on the cell"),
-        Stage::Footprint => assert_reachable!("fleet: a step records a tenant's footprint"),
         Stage::TenantError => {
             assert_reachable!("fleet: a tenant is refused for its footprint");
         }
@@ -1419,7 +1447,6 @@ fn reach(stage: Stage) {
         Stage::TenantRemoving => {
             assert_reachable!("fleet: a step marks a tenant REMOVING in the directory");
         }
-        Stage::DropTenant => assert_reachable!("fleet: a step drops a tenant from the cell"),
         Stage::RemoveTenant => {
             assert_reachable!("fleet: a step removes a tenant from the directory");
         }

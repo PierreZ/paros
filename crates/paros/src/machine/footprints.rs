@@ -9,7 +9,9 @@
 //! The cell tenant's and the universe tenant's footprints are booked
 //! here: the coordinator joins the cell to the fleet (#513 (fleet Init
 //! duel)), and `init` books neither. A step books them once they fit; the
-//! coordinator never records their refusal: they wait for room.
+//! coordinator never records their refusal: they wait for room. A `users`
+//! tenant's birth footprint is booked, or refused, as a step of its
+//! creation (`super::universe::tenant_steps`, #225).
 
 use std::collections::BTreeSet;
 use std::ops::Bound::{Excluded, Unbounded};

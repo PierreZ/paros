@@ -252,12 +252,16 @@ pub struct DriverTunables {
     /// before the leader **moves** it to another column
     /// (`ColocatedNode::move_round`, #533 (move a stuck round)): a column
     /// that cannot reach its quorum otherwise holds its slots, and the apply
-    /// walk stalls behind the first one. Driver policy, never a constant of
-    /// the state machine. Floor 1 — a move after a single re-send is always
-    /// safe (one ballot, one value; every Phase-1 quorum meets every
-    /// column), it merely spreads a slot over more acceptors; the ceiling is
-    /// unbounded and still winnable, a stuck round being recovered by the
-    /// next leadership's Phase 1. Meaningless under a majority or a flexible
+    /// walk stalls behind the first one. This is the budget of a round that
+    /// never moved: each move doubles it, up to 64 times this value
+    /// (`move_budget` in `driver/mod.rs`), so the new column of a moved round
+    /// has time to answer. Driver policy, never a constant of the state
+    /// machine. Floor 1 — a move after a single re-send is always safe (one
+    /// ballot, one value; every Phase-1 quorum meets every column), it merely
+    /// spreads a slot over more acceptors, and the doubling keeps it winnable
+    /// when a round trip is longer than one beat; the ceiling is unbounded
+    /// and still winnable, a stuck round being recovered by the next
+    /// leadership's Phase 1. Meaningless under a majority or a flexible
     /// split.
     pub partition_move_resends: u64,
     /// The most records one `Write` may carry (#241, `docs/architecture.md`

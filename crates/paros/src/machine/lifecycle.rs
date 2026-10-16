@@ -331,6 +331,8 @@ where
             plan: plan.clone(),
             ballot: *ballot,
             cached,
+            // Never written down (#245): a restarted member teaches nothing.
+            token: None,
         })
     } else if let Some(admission) = &record.admitted {
         let cached = read_cache(&disk, &audit, record.node_id).await;
@@ -630,7 +632,7 @@ where
         bootstrap: plan.matchmakers(),
     };
     let stores = MachineStores::new(disk, record, genesis, audits)
-        .with_cache(cache)
+        .with_cache(cache.clone())
         .with_matchmakers(matchmaker);
     // Bind where the machine is (#257), never at the address the plan
     // froze: a machine whose address changed across a restart still serves.
@@ -670,7 +672,10 @@ where
         Vec::new(),
         Vec::new(),
         Some(control),
-        Some(CellMachine::Founded(cell.clone())),
+        Some(CellMachine::Founded {
+            cell: cell.clone(),
+            cache,
+        }),
         *tunables,
         transport,
         shutdown,

@@ -7,17 +7,53 @@
 //! A formed member answers every ballot with its vote and moves no promise:
 //! it never accepts another plan, so any later proposer hears its vote, and
 //! P2c makes that proposer finish this plan or refuse (`other_cell_init`).
+//!
+//! **A formed member teaches the decree** (`Teacher`): the proposer sends
+//! `FormCell` once, so a member that was down at that moment never hears
+//! the plan from it, and stays idle while the plan names it. Every formed
+//! member asks each other member of its plan for its identity at every
+//! election renewal period. A member that answers idle gets this member's
+//! vote again, as a `FormCell` at the ballot this member accepted it at.
+//! That is a re-send of Phase 2a: the same plan at the same ballot, which an
+//! acceptor may take at any time. The idle member took the promise at that
+//! ballot in Phase 1 (every member answers Phase 1), so it accepts.
+//!
+//! The `FormCell` carries the operator's `admin` token, the one the
+//! `FormCell` that formed this member carried (#245 (Biscuit tokens)), so a
+//! pinned learner checks it as it checks any `FormCell`: the pin has no
+//! exception. The token stays in memory only (`FormedCell::token`), never in
+//! the record. A member that restarted holds none and teaches nothing, and
+//! a learner whose pin refuses the token is not asked again: in both cases
+//! the operator runs `init` again, as for an admission
+//! (`docs/architecture.md` §3.1, Trust).
+//!
+//! The teaching of a member ends once it answers in this cell, answers as
+//! another machine (a wiped member never forms), refuses the token, or the
+//! cell's address book names it at another address than the plan's (it
+//! registered there, so it formed; an idle member accepts the plan only at
+//! the plan's address). A member that does not answer (down, or gone) is
+//! asked again at the next period: one `Identify` a period costs little.
+//! Witnesses: a
+//! founding member that missed the proposer's `FormCell` waited idle until
+//! an operator ran `init` again, and with one more founder wiped the cell
+//! served no quorum (seed 7461995534021400970 on main 7feccc9, three
+//! founders; seed 16403044264830861989 on main 629aa62, four founders).
+//! With the teacher, the idle member formed 0.2 s after its peers.
 
-use moonpool_core::{Detach, Providers, SimulationResult, TaskProvider};
+use std::collections::BTreeMap;
+use std::time::Duration;
+
+use moonpool_core::{Detach, Providers, SimulationResult, TaskProvider, TimeProvider};
 use moonpool_rpc::RpcHandle;
 use paros_core::{Ballot, NodeId};
+use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use super::{Admission, CachedRegistry, CellPlan, Class, ControlJournals, MachineFacts};
 use crate::rpc::machine as wire;
 use crate::rpc::methods::{AdmitRpc, FormCellRpc, IdentifyRpc, PrepareCellRpc};
 use crate::rpc::{Inbound, serve_well_known};
-use crate::{Address, DriverTunables};
+use crate::{Address, DriverTunables, Names};
 
 /// A machine of a cell: what it knows of itself, the plan it accepted and
 /// the decree ballot it accepted it at — the record's commit point.
@@ -31,6 +67,29 @@ pub struct FormedCell {
     pub ballot: Ballot,
     /// The cached registry fold its disk held at start (#211), if any.
     pub cached: Option<CachedRegistry>,
+    /// The token of the `FormCell` that formed it in this incarnation (#245
+    /// (Biscuit tokens)), in memory only: never in the record, so no bearer
+    /// token rests on the disk. `None` after a restart.
+    pub token: Option<FormationToken>,
+}
+
+/// The operator's `admin` token a machine was formed with, sent on by its
+/// teacher (see the module doc). Its `Debug` never shows the bytes.
+#[derive(Clone, PartialEq, Eq)]
+pub struct FormationToken(Vec<u8>);
+
+impl FormationToken {
+    /// The token `bytes` (empty on a machine with no pin).
+    #[must_use]
+    pub fn new(bytes: Vec<u8>) -> Self {
+        Self(bytes)
+    }
+}
+
+impl std::fmt::Debug for FormationToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "FormationToken({} bytes)", self.0.len())
+    }
 }
 
 impl FormedCell {
@@ -147,6 +206,7 @@ impl FormedCell {
         providers: &P,
         rpc: &RpcHandle<P>,
         tunables: &DriverTunables,
+        books: watch::Receiver<Option<CachedRegistry>>,
         shutdown: CancellationToken,
     ) -> SimulationResult<()> {
         self.facts = self.facts.serving(rpc);
@@ -171,6 +231,26 @@ impl FormedCell {
             },
             shutdown.clone(),
         )?;
+        // Teach the decree to a member that missed it (see the module doc).
+        let teacher = Teacher {
+            cell: self.clone(),
+            names: self.facts.names.clone(),
+            books,
+            period: tunables.election_renew,
+            patience: tunables.connection_timeout,
+        };
+        let teach_rpc = rpc.clone();
+        let teach_providers = providers.clone();
+        let teach_shutdown = shutdown.clone();
+        providers
+            .task()
+            .spawn_task("paros-machine-teach", async move {
+                moonpool_core::select! {
+                    () = teach_shutdown.cancelled() => {}
+                    () = teacher.run(&teach_providers, &teach_rpc) => {}
+                }
+            })
+            .detach();
         providers
             .task()
             .spawn_task("paros-machine-formed", async move {
@@ -196,6 +276,197 @@ impl FormedCell {
             })
             .detach();
         Ok(())
+    }
+}
+
+/// The decree's learner catch-up on a formed member (see the module doc):
+/// what it teaches, and at which cadence.
+struct Teacher {
+    /// This member, with the plan, the ballot it voted at and the token of
+    /// the `FormCell` that formed it.
+    cell: FormedCell,
+    /// How the plan's addresses resolve.
+    names: Names,
+    /// The cell's address books the node loop offers its cache (#211).
+    books: watch::Receiver<Option<CachedRegistry>>,
+    /// The pause between two rounds.
+    period: Duration,
+    /// How long one call waits for its answer.
+    patience: Duration,
+}
+
+/// What a member's answer to `Identify` says about the decree there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Learner {
+    /// It formed this cell: nothing to teach.
+    Formed,
+    /// It is the member, idle: it missed the decree.
+    Idle,
+    /// Another machine answers at the member's address (a wiped member),
+    /// or the member is in another cell: it never forms this plan.
+    Other,
+    /// No answer: ask again.
+    Unknown,
+}
+
+/// A refusal of the teacher's token by the learner's pin (#245 (Biscuit
+/// tokens)): sending it again changes nothing.
+fn token_refused(refusal: &str) -> bool {
+    matches!(refusal, "invalid_token" | "expired" | "forbidden")
+}
+
+impl Teacher {
+    /// Teach every other member of the plan until each one formed, is
+    /// another machine, moved away from the plan's address, or refused the
+    /// token. Returns when nothing is left to teach.
+    ///
+    /// # Panics
+    ///
+    /// Never: the assertions check that a teacher re-sends its own vote, with
+    /// its own token, to the others only.
+    #[tracing::instrument(level = "debug", skip_all, fields(node = self.cell.facts.node_id.0, cell = self.cell.plan.cell_id))]
+    async fn run<P: Providers>(mut self, providers: &P, rpc: &RpcHandle<P>) {
+        let me = self.cell.facts.node_id;
+        // By address: an idle member accepts the plan only at the address
+        // the plan names (`not_a_member` otherwise).
+        let mut pending: BTreeMap<Address, NodeId> = self
+            .cell
+            .plan
+            .members
+            .iter()
+            .filter(|(id, _)| *id != me)
+            .map(|(id, addr)| (addr.clone(), *id))
+            .collect();
+        assert!(
+            pending.len() < self.cell.plan.members.len(),
+            "a teacher never teaches itself"
+        );
+        let Some(token) = self.cell.token.clone() else {
+            // A restart: the token was never written down. The operator
+            // runs `init` again for a member still idle.
+            tracing::debug!(
+                members = pending.len(),
+                "cell_decree_not_taught_without_token"
+            );
+            return;
+        };
+        let mut vote = self.cell.vote();
+        assert!(
+            vote_ballot(&vote) == Some(self.cell.ballot),
+            "a teacher re-sends its own vote at its own ballot"
+        );
+        assert!(vote.token.is_empty(), "a vote carries no token");
+        vote.token = token.0;
+        while !pending.is_empty() {
+            if providers.time().sleep(self.period).await.is_err() {
+                return;
+            }
+            self.moved_away(&mut pending);
+            if pending.is_empty() {
+                break;
+            }
+            let addrs: Vec<Address> = pending.keys().cloned().collect();
+            let answers = super::cell_init::fan_out::<P, IdentifyRpc>(
+                providers,
+                rpc,
+                &self.names,
+                &addrs,
+                &wire::Identify {},
+                self.patience,
+            )
+            .await;
+            let mut idle = Vec::new();
+            for (addr, answer) in answers {
+                match self.learner(pending[&addr], answer.as_ref()) {
+                    Learner::Formed | Learner::Other => {
+                        pending.remove(&addr);
+                    }
+                    Learner::Idle => idle.push(addr),
+                    Learner::Unknown => {}
+                }
+            }
+            if idle.is_empty() {
+                continue;
+            }
+            let answers = super::cell_init::fan_out::<P, FormCellRpc>(
+                providers,
+                rpc,
+                &self.names,
+                &idle,
+                &vote,
+                self.patience,
+            )
+            .await;
+            for (addr, answer) in answers {
+                let Some(ack) = answer else { continue };
+                let member = pending[&addr];
+                if ack.formed {
+                    tracing::info!(member = member.0, "cell_decree_taught");
+                    moonpool_assertions::reachable!(
+                        "machine: a founding member that missed the decree is formed by a peer"
+                    );
+                    pending.remove(&addr);
+                } else if token_refused(&ack.refusal) {
+                    // The learner's pin refuses the operator's token: the
+                    // operator runs `init` again with a valid one.
+                    tracing::warn!(member = member.0, refusal = %ack.refusal, "cell_decree_token_refused");
+                    pending.remove(&addr);
+                } else {
+                    // A higher promise (the `cell init` that holds it
+                    // finishes this plan there), or a disk that failed:
+                    // ask again at the next round.
+                    tracing::debug!(member = member.0, refusal = %ack.refusal, "cell_decree_not_taught");
+                }
+            }
+        }
+        tracing::debug!("cell_decree_known_everywhere");
+    }
+
+    /// Drop every member the latest address book names at another address
+    /// than the plan's: it registered there, so it formed, and an idle
+    /// member accepts the plan only at the plan's address.
+    fn moved_away(&mut self, pending: &mut BTreeMap<Address, NodeId>) {
+        let Some(book) = self.books.borrow_and_update().clone() else {
+            return;
+        };
+        assert!(
+            book.node == self.cell.facts.node_id,
+            "a teacher reads its own machine's book"
+        );
+        pending.retain(|planned, member| {
+            let moved = book
+                .machines
+                .iter()
+                .any(|(id, addr)| id == member && addr != planned);
+            if moved {
+                tracing::debug!(member = member.0, "cell_decree_learner_moved");
+            }
+            !moved
+        });
+    }
+
+    /// Classify `member`'s answer to `Identify`.
+    fn learner(&self, member: NodeId, answer: Option<&wire::IdentifyAck>) -> Learner {
+        assert!(
+            member != self.cell.facts.node_id,
+            "a teacher asks the others"
+        );
+        assert!(self.cell.plan.cell_id != 0, "a formed plan names its cell");
+        let Some(ack) = answer else {
+            return Learner::Unknown;
+        };
+        if ack.node_id != member.0 {
+            return Learner::Other;
+        }
+        if ack.cell_id == self.cell.plan.cell_id {
+            return Learner::Formed;
+        }
+        if ack.cell_id != 0
+            || super::identity_tags(ack).is_none_or(|(class, _)| class != Class::Storage)
+        {
+            return Learner::Other;
+        }
+        Learner::Idle
     }
 }
 

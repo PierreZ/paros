@@ -385,7 +385,7 @@ impl World {
             committed: ready
                 .committed()
                 .iter()
-                .map(|(slot, command, _)| (*slot, command.clone()))
+                .map(|(slot, _, command, _)| (*slot, command.clone()))
                 .collect(),
             read_states: ready.read_states().to_vec(),
             recovery: ready.recovery_batch(),

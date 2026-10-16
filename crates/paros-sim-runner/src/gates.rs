@@ -46,6 +46,14 @@ pub struct Rare {
 /// window seldom reaches, #485 the double fault, #486 the rest.
 pub const RARE: &[Rare] = &[
     Rare {
+        msg: "driver: a call's slot decided an equal command at another ballot",
+        reason: "marginal: needs a handed-on leader that parks a re-sent multi-writer append on a slot its minter decided with the same bytes; fired on 1 of 300 hunt seeds, missed by PR #584's sweep (#570 (election duel), #486)",
+    },
+    Rare {
+        msg: "admit: a pinned machine denies a tenant token",
+        reason: "marginal: needs pinned machines and the 15% tenant-token draw on an admission; fired 4 times in main's sweep at 629aa62, missed by PR #584's sweep (#245 (Biscuit tokens), #486)",
+    },
+    Rare {
         msg: "footprint: a dead tenant coordinator is placed again",
         reason: "marginal: needs two admitted stateless machines and the one holding a tenant coordinator's slot marked down (#476 (tenant footprint)); missed by PR #556's sweep (#486)",
     },
@@ -76,6 +84,10 @@ pub const RARE: &[Rare] = &[
     Rare {
         msg: "tenant coordinator: a create the cell has no slot for is refused",
         reason: "marginal: the server side of an unplaceable create, missed by the sweep on main (#486)",
+    },
+    Rare {
+        msg: "grid: the driver skips a column when it moves a round",
+        reason: "marginal: needs a three-column grid (a pool of six) and the skip's BUGGIFY location on the same seed; 55 checks in 600 hunt seeds, but the sweep missed it once (#533 (move a stuck round), #486)",
     },
     Rare {
         msg: "phase1: a full promise page mixes readable and faulty entries",
