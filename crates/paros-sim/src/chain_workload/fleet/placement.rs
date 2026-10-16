@@ -163,7 +163,7 @@ fn judge(tenants: &[TenantControl], registry: &Registry) {
             }
             let zones: BTreeSet<&str> = members
                 .iter()
-                .filter_map(|m| registry.get(*m).map(|n| n.failure_domain.as_str()))
+                .filter_map(|m| registry.get(*m).map(|n| n.locality.zone.as_str()))
                 .collect();
             if members.len() > 1 {
                 assert_sometimes!(

@@ -34,7 +34,7 @@ fn registry() -> Registry {
             addr: "10.0.0.1:4500".into(),
             class: Class::Storage,
             capacity: 2,
-            failure_domain: "zone-a".into(),
+            locality: crate::machine::Locality::zone("zone-a"),
             name: "alpha".into(),
             incarnation: 7,
             machine_interface: Vec::new(),
@@ -44,7 +44,7 @@ fn registry() -> Registry {
             addr: "10.0.0.3:4500".into(),
             class: Class::Storage,
             capacity: 2,
-            failure_domain: "zone-b".into(),
+            locality: crate::machine::Locality::zone("zone-b"),
             name: "gamma".into(),
             incarnation: 9,
             machine_interface: Vec::new(),
@@ -161,7 +161,14 @@ fn a_tenant_scope_sees_only_its_own_spread() {
     let used: Vec<u64> = reply.machines.iter().map(|m| m.node_id).collect();
     assert_eq!(used, [1, 2]);
     assert_eq!(reply.machines[0].name, "alpha");
-    assert_eq!(reply.machines[0].failure_domain, "zone-a");
+    assert_eq!(
+        crate::tags::value_of(&reply.machines[0].tags, crate::tags::reserved::ZONE),
+        Some("zone-a")
+    );
+    assert!(
+        crate::tags::value_of(&reply.machines[0].tags, crate::tags::reserved::CLASS).is_none(),
+        "a tenant scope sees no machine's class"
+    );
     // An admin asking the same view sees the addresses.
     let admin = tenant_view(&Scope::Admin, &facts, b"acme", words(&mut status));
     assert!(!within_tenant_scope(&admin, b"acme"));

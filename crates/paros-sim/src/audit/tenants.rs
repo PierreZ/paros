@@ -145,6 +145,18 @@ impl TenantBoard {
                 self.tombstoned.insert((node.0, journal));
                 self.answered(control, *request, RequestOutcome::Deleted(*id), lsn);
             }
+            TenantEvent::Tagged { request, id } => {
+                // #575 (key:value tags): a tag request names a live journal
+                // the tenant created before; a tag changes no outcome.
+                let journal = JournalIdentifier::new(control.tenant, *id);
+                assert_always!(
+                    self.created.get(&journal).is_some_and(|at| *at < lsn)
+                        && !self.tombstoned.contains(&(node.0, journal)),
+                    "tenant: a tagged journal is a live one the tenant created before",
+                    { "lsn" => lsn }
+                );
+                self.answered(control, *request, RequestOutcome::Tagged(*id), lsn);
+            }
             TenantEvent::Answered { request, outcome } => {
                 if let RequestOutcome::NameTaken(winner) = outcome {
                     let winner = JournalIdentifier::new(control.tenant, *winner);

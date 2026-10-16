@@ -172,7 +172,10 @@ async fn run(settings: Settings, metrics: Metrics) -> ExitCode {
     let machine = MachineSettings {
         class: settings.class,
         capacity: settings.capacity,
-        failure_domain: settings.failure_domain.clone(),
+        locality: paros::machine::Locality {
+            zone: settings.zone.clone(),
+            rack: settings.rack.clone(),
+        },
         name,
         pin,
         metrics,

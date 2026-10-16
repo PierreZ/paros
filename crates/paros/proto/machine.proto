@@ -70,11 +70,12 @@ service Machine {
 message Identify {}
 
 message IdentifyAck {
+  // 2 was `class` and 4 `failure_domain`, now reserved tags (#575 (key:value
+  // tags)).
+  reserved 2, 4;
+  reserved "class", "failure_domain";
   uint64 node_id = 1;
-  // `storage` or `stateless`.
-  string class = 2;
   uint64 capacity = 3;
-  string failure_domain = 4;
   // The address this machine serves at.
   string addr = 5;
   // 6 was `seed` (the rendezvous join list, retired by #277).
@@ -101,6 +102,9 @@ message IdentifyAck {
   // cell coordinator sends `Admit` again to a machine whose position stops
   // below the registry's tail.
   uint64 registry_position = 12;
+  // The machine's reserved tags, as it is configured (#575): `paros/class`
+  // (`storage` or `stateless`), `paros/zone` and `paros/rack`.
+  repeated paros.common.v1.Tag tags = 13;
 }
 
 // One member of a cell's bootstrap: its identity and address.
@@ -272,6 +276,7 @@ message JournalRequest {
   oneof op {
     CreateJournalOp create = 3;
     DeleteJournalOp delete = 4;
+    SetJournalTagsOp set_tags = 5;
   }
 }
 
@@ -288,6 +293,9 @@ message CreateJournalOp {
   uint32 replicas = 6;
   uint32 failures_per_partition = 7;
   uint32 partitions = 8;
+  // Its first user tags (#575 (key:value tags)): a reserved key or a set
+  // over the cap is `malformed`.
+  repeated paros.common.v1.Tag tags = 9;
 }
 
 // Delete the live journal named `name`: a tombstone, never a reuse.
@@ -295,15 +303,23 @@ message DeleteJournalOp {
   bytes name = 1;
 }
 
+// The live journal named `name`'s user tags become `tags`, all of them at
+// once (#575 (key:value tags)). A reserved key or a set over the cap is
+// `malformed`.
+message SetJournalTagsOp {
+  bytes name = 1;
+  repeated paros.common.v1.Tag tags = 2;
+}
+
 message JournalRequestAck {
-  // What the request folded to: "created", "deleted", "name_taken" (a live
-  // journal holds the name: `journal` is its id), "unknown_journal" (no live
-  // journal has the name). Or why it did not reach the fold, to retry with
+  // What the request folded to: "created", "deleted", "tagged" (#575),
+  // "name_taken" (a live journal holds the name: `journal` is its id),
+  // "unknown_journal" (no live journal has the name). Or why it did not reach the fold, to retry with
   // the same `request`: "not_coordinator", "unavailable". Or a refusal:
   // "unknown_tenant", "unplaceable" (too few machines for the desired mode),
   // "malformed".
   string outcome = 1;
-  // The journal's id, on "created", "deleted" and "name_taken".
+  // The journal's id, on "created", "deleted", "tagged" and "name_taken".
   uint64 journal = 2;
   // Its members, on "created".
   paros.common.v1.AcceptorConfig config = 3;

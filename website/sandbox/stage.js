@@ -41,8 +41,8 @@ export function index(run) {
   for (const topo of topos) {
     for (const tenant of topo.tenants) {
       if (!tenants.has(tenant.name)) {
-        const isInternal = tenant.groups.includes("internal");
-        const label = isInternal ? tenant.groups.split(",").find((g) => g !== "internal") : tenant.name;
+        const isInternal = tenant.kind !== "users";
+        const label = isInternal ? tenant.kind : tenant.name;
         tenants.set(tenant.name, {
           name: tenant.name, label, internal: isInternal,
           color: isInternal ? INTERNAL[internal++ % INTERNAL.length] : SERVED[served++ % SERVED.length],

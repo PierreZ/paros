@@ -51,7 +51,7 @@ use config::{
     ADMIT, BOOK_CAPACITY, CHECK_TAIL, CHECKPOINT, CREATE_JOURNAL, ChainConfig, DELETE_JOURNAL,
     DRAIN_NODE, DUAL_SUBMIT, DUP_WRITE, ELECTION, FLEET_INIT, LOAD, MATCH_GC, MATCHMAKE, OP_COUNT,
     OP_WEIGHT_CEILING, PAUSE, QUORUM_READ, READ, READ_INDEX, READ_STATE, RECONFIGURE,
-    RECONFIGURE_MATCHMAKERS, REGISTER_NODE, RETIRE, RETIRE_NODE, SET_LEADER, TENANT, TRUNCATE,
+    RECONFIGURE_MATCHMAKERS, REGISTER_NODE, RETIRE, RETIRE_NODE, SET_LEADER, TAG, TENANT, TRUNCATE,
     TRUNCATE_STORM, VIEW, WRITE, WRITE_TO_NON_LEADER, weighted_index,
 };
 pub(crate) use config::{MAX_BATCH_RECORDS, MAX_LARGE_COMMAND_BYTES};
@@ -1786,6 +1786,11 @@ impl ChainWorkload {
                 }
                 VIEW => fleet_ops.view(ctx, raw_payload).await,
                 LOAD => fleet_ops.load(ctx, raw_payload).await,
+                TAG => {
+                    fleet_ops
+                        .tag(ctx, config.tunables().checkpoint_policy(), raw_payload)
+                        .await;
+                }
                 _ => unreachable!("operation IDs are bounded by OP_COUNT"),
             }
         }

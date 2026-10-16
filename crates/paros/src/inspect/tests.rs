@@ -229,7 +229,7 @@ fn names_come_from_the_registry_prefix() {
                 addr: "10.0.0.1:4500".to_string(),
                 class: Class::Storage,
                 capacity: 4,
-                failure_domain: "zone-a".to_string(),
+                locality: crate::machine::Locality::zone("zone-a"),
                 name: name.to_string(),
                 incarnation: 0,
                 machine_interface: Vec::new(),
@@ -260,7 +260,7 @@ fn names_come_from_the_registry_prefix() {
             node_id: ME,
             class: Class::Storage,
             capacity: 4,
-            failure_domain: "zone-a".to_string(),
+            locality: crate::machine::Locality::zone("zone-a"),
             name: "alpha".to_string(),
             promised: ballot(1),
             plan: Some((

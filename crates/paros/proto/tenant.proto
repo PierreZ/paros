@@ -24,28 +24,23 @@ message TenantEntry {
     CreateJournal create_journal = 2;
     DeleteJournal delete_journal = 3;
     Unplaceable unplaceable = 4;
+    SetJournalTags set_journal_tags = 5;
   }
 }
 
 // The tenant's own description, written once by its first coordinator: its
-// id, its name, what it survives (1 az, 2 region), the name and kind of the
-// cell that hosts it, and its default desired mode. No rendezvous name.
+// id, its name, what it survives (1 az, 2 region), the name of the cell that
+// hosts it, and its default desired mode. No rendezvous name. 5 was the
+// cell's kind, now the cell's reserved tags in the universe directory
+// (#575 (key:value tags)).
 message Describe {
+  reserved 5;
+  reserved "cell_kind";
   uint64 tenant = 1;
   bytes name = 2;
   uint32 survives = 3;
   bytes cell_name = 4;
-  CellKind cell_kind = 5;
   Desired desired = 6;
-}
-
-// The kind of a cell (#253): regional (one region, `regions` holds it) or
-// multi-region (`regions` holds the three, `witness` the witness region).
-message CellKind {
-  // 1 regional, 2 multi-region.
-  uint32 kind = 1;
-  repeated string regions = 2;
-  string witness = 3;
 }
 
 // A desired mode (§3.4, #523): the durability, `failures_per_partition`
@@ -61,9 +56,10 @@ message Desired {
 
 // Request `request`: create journal `id` (drawn by the coordinator) named
 // `name`, written in `writer` mode, under `desired`, placed on `config` (the
-// coordinator's choice of members; a caller never names one). An id the
-// tenant already used is refused and the coordinator redraws; a live name
-// answers the request `name_taken`.
+// coordinator's choice of members; a caller never names one), with its
+// first user tags `tags` (#575 (key:value tags)). An id the tenant already
+// used is refused and the coordinator redraws; a live name answers the
+// request `name_taken`. A reserved tag or a set over the cap is refused.
 message CreateJournal {
   uint64 request = 1;
   uint64 id = 2;
@@ -71,6 +67,17 @@ message CreateJournal {
   paros.common.v1.WriterMode writer = 4;
   Desired desired = 5;
   paros.common.v1.AcceptorConfig config = 6;
+  repeated paros.common.v1.Tag tags = 7;
+}
+
+// Request `request`: live journal `id`'s user tags become `tags`, all of
+// them at once (#575 (key:value tags)). An id that names no live journal
+// answers `unknown_journal`. A reserved tag or a set over the cap is
+// refused. A journal stores no copy of its tenant's tags.
+message SetJournalTags {
+  uint64 request = 1;
+  uint64 id = 2;
+  repeated paros.common.v1.Tag tags = 3;
 }
 
 // Request `request`: delete journal `id`. An id that names no live journal
@@ -107,11 +114,14 @@ message JournalState {
   paros.common.v1.AcceptorConfig config = 5;
   // The position of the delete that tombstoned it, plus one; 0 while live.
   uint64 deleted_at = 6;
+  // Its user tags (#575).
+  repeated paros.common.v1.Tag tags = 7;
 }
 
 message OutcomeState {
   uint64 request = 1;
-  // 1 created, 2 deleted, 3 name taken, 4 unknown journal, 5 unplaceable.
+  // 1 created, 2 deleted, 3 name taken, 4 unknown journal, 5 unplaceable,
+  // 6 tagged (#575).
   uint32 kind = 2;
   uint64 id = 3;
 }

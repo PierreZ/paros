@@ -154,6 +154,7 @@ mod tests {
                 cell_id: 10,
                 control: JournalIdentifier::new(TenantId(11), JournalId(12)),
                 name: Vec::new(),
+                kind: crate::fleet::CellKind::default(),
             },
         );
         assert_eq!(joining(&other, journals), None);
@@ -166,6 +167,7 @@ mod tests {
                 cell_id: journals.cell_id,
                 control: JournalIdentifier::new(TenantId(5), JournalId(13)),
                 name: Vec::new(),
+                kind: crate::fleet::CellKind::default(),
             },
         );
         assert_eq!(joining(&moved, journals), None);
@@ -176,6 +178,7 @@ mod tests {
                 cell_id: journals.cell_id,
                 control: journals.cell,
                 name: Vec::new(),
+                kind: crate::fleet::CellKind::default(),
             },
         );
         assert_eq!(

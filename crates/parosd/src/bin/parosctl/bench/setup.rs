@@ -118,6 +118,7 @@ pub async fn journals(
                 name: name.clone().into_bytes(),
                 writer: WriterMode::Single,
                 desired,
+                tags: paros::tags::UserTags::none(),
             },
         };
         let answer = journals::request(

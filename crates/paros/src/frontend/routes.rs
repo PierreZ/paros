@@ -53,6 +53,9 @@ pub(super) enum Resolved {
 struct Cell<P: Providers> {
     /// The universe tenant's control journal: the universe directory.
     universe: JournalIdentifier,
+    /// The cell's election journal: where the tenant coordinator publishes
+    /// itself (#575 (key:value tags): a tag request goes to it).
+    election: Option<JournalIdentifier>,
     /// A client over the founding members that answered.
     client: Client<P>,
 }
@@ -194,8 +197,27 @@ where
         "frontend_learned_cell"
     );
     let mut routes = lock(&shared.routes);
-    let cell = routes.cell.get_or_insert(Cell { universe, client });
+    let cell = routes.cell.get_or_insert(Cell {
+        universe,
+        election: journals.election,
+        client,
+    });
     Some((cell.universe, cell.client.clone()))
+}
+
+/// The cell's election journal, a client over its servers and the RPC
+/// handle: what a request to the tenant coordinator needs (#575).
+pub(super) async fn coordinator_route<P, A>(
+    shared: &Shared<P, A>,
+) -> Option<(JournalIdentifier, Client<P>, RpcHandle<P>)>
+where
+    P: Providers,
+    A: Audit,
+{
+    let (_, client) = cell(shared).await?;
+    let routes = lock(&shared.routes);
+    let election = routes.cell.as_ref()?.election?;
+    Some((election, client, routes.rpc.clone()))
 }
 
 /// `journal`'s own client: its own leader hint over the cell's servers.

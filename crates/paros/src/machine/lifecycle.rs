@@ -45,7 +45,7 @@ use super::record::{MachineRecord, journal_config};
 use super::stores::{AuditScope, MachineStores};
 use super::{
     AdminPin, Admission, AdmittedMachine, CachedRegistry, CellLedger, CellMachine, CellPlan, Class,
-    FormedCell, Joined, MachineFacts, ProviderDisk,
+    FormedCell, Joined, Locality, MachineFacts, ProviderDisk,
 };
 use crate::ControlPlan;
 use crate::metrics::{Metrics, Phase};
@@ -59,8 +59,10 @@ pub struct MachineSettings {
     pub class: Class,
     /// Its capacity, in the placement's units; may change across starts.
     pub capacity: u64,
-    /// Its failure domain; may change across starts.
-    pub failure_domain: String,
+    /// Its zone and rack (#575: its reserved tags `paros/zone` and
+    /// `paros/rack`); may change across starts. A label no tag value may
+    /// hold is refused at start.
+    pub locality: Locality,
     /// Its name, for people (#399): a label, never its identity; may change
     /// across starts. `parosd` defaults it to the host of its advertised
     /// address.
@@ -441,6 +443,11 @@ async fn identity<P: Providers, S: StorageProvider + Clone, A: Audit>(
 ) -> Result<MachineRecord, MachineError> {
     let refused = |error: String| MachineError::Refused(format!("machine record: {error}"));
     let failed = |error: String| MachineError::Storage(format!("machine record: {error}"));
+    if !settings.locality.is_valid() {
+        return Err(MachineError::Refused(
+            "a zone or a rack is at most 255 bytes, with no control character and no ','".into(),
+        ));
+    }
     let read = disk.read_record().await.map_err(failed)?;
     let Some(text) = read else {
         // A disk with stores and no identity lost it: never a new machine
@@ -465,7 +472,7 @@ async fn identity<P: Providers, S: StorageProvider + Clone, A: Audit>(
             node_id,
             class: settings.class,
             capacity: settings.capacity,
-            failure_domain: settings.failure_domain.clone(),
+            locality: settings.locality.clone(),
             name: settings.name.clone(),
             promised: Ballot::default(),
             plan: None,
@@ -500,10 +507,10 @@ async fn identity<P: Providers, S: StorageProvider + Clone, A: Audit>(
         )));
     }
     let changed = record.capacity != settings.capacity
-        || record.failure_domain != settings.failure_domain
+        || record.locality != settings.locality
         || record.name != settings.name;
     record.capacity = settings.capacity;
-    record.failure_domain.clone_from(&settings.failure_domain);
+    record.locality.clone_from(&settings.locality);
     record.name.clone_from(&settings.name);
     if changed {
         disk.write_record(&record.render()).await.map_err(failed)?;
@@ -550,7 +557,7 @@ fn facts_of(
         node_id: record.node_id,
         class: record.class,
         capacity: record.capacity,
-        failure_domain: record.failure_domain.clone(),
+        locality: record.locality.clone(),
         name: record.name.clone(),
         addr,
         listen,

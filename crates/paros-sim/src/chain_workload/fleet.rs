@@ -63,7 +63,7 @@ use paros::client::checkpoint::{CheckpointPolicy, Checkpointer, Folder, LoadOutc
 use paros::client::fleet::{FleetRefusal, FleetSession, Interrupted, Run, Stage, Step};
 use paros::client::names::{TenantResolution, resolve_tenant};
 use paros::client::{ClaimOutcome, Writer};
-use paros::fleet::{CellState, FleetDirectory, Groups, TenantState};
+use paros::fleet::{CellState, FleetDirectory, TenantKind, TenantState};
 use paros::machine::ControlJournals;
 use paros::system::Registry;
 use paros::{JournalId, JournalIdentifier, NodeId, TenantId};
@@ -86,6 +86,7 @@ mod placement;
 mod replaced;
 mod resolve;
 mod sets;
+mod tags;
 mod view;
 
 use cell::Cell;
@@ -683,6 +684,11 @@ impl FleetOps {
                 assert_reachable!("fleet: a duplicate tenant id is refused");
             }
         }
+        let tags = tags::drawn(&self.state);
+        for draw in &draws {
+            tags::note(&self.state, tags::Target::Tenant(draw.tenant), &tags);
+        }
+        session.use_tags(tags);
         let started = self.time.now();
         let run = session
             .create_tenant(client, first, &name, draws.clone(), Duration::ZERO)
@@ -826,7 +832,7 @@ impl FleetOps {
             assert_always!(
                 entry.is_some_and(|t| t.state == TenantState::Ready
                     && t.name == name
-                    && t.groups == Groups::SERVED)
+                    && t.kind == TenantKind::Users)
                     && session.cell().hosts(result),
                 "fleet: a created tenant is READY in the directory and hosted by its cell",
                 { "tenant" => result.0 }
@@ -1336,7 +1342,7 @@ fn judged_cell(members: &[u64]) -> Folder<JudgedRegistry> {
 /// or `ERROR` once its cell refused its footprint (#476).
 fn no_tenant_mid_operation(directory: &FleetDirectory, cell: &Registry) {
     for (tenant, entry) in directory.tenants() {
-        if entry.groups == Groups::SERVED {
+        if entry.kind == TenantKind::Users {
             // A creation its cell refused for its footprint ends `ERROR`
             // (#476): that is an end, not the middle of an operation.
             let refused = cell.footprint(tenant).is_some_and(|g| !g.granted());
@@ -1365,7 +1371,7 @@ fn directory_equals_cell(directory: &FleetDirectory, cell: &Registry) {
         assert_always!(
             directory
                 .tenant(tenant)
-                .is_some_and(|t| t.groups == Groups::SERVED && t.cell_id == joined.cell_id),
+                .is_some_and(|t| t.kind == TenantKind::Users && t.cell_id == joined.cell_id),
             "fleet: every tenant the cell hosts is in the directory under that cell",
             { "tenant" => tenant.0 }
         );
@@ -1380,7 +1386,7 @@ fn directory_equals_cell(directory: &FleetDirectory, cell: &Registry) {
                 { "tenant" => tenant.0 }
             );
         }
-        if entry.groups == Groups::SERVED && entry.state == TenantState::Ready {
+        if entry.kind == TenantKind::Users && entry.state == TenantState::Ready {
             assert_always!(
                 cell.hosts(tenant),
                 "fleet: every READY tenant in the directory is hosted by its cell",
@@ -1424,6 +1430,7 @@ fn reach(stage: Stage) {
         Stage::AddRootKey => {
             assert_reachable!("fleet: a step adds a root key to the universe entry");
         }
+        Stage::SetTags => assert_reachable!("fleet: a step sets an entity's tags"),
         Stage::RemoveRootKey => {
             assert_reachable!("fleet: a step removes a root key from the universe entry");
         }

@@ -1,5 +1,5 @@
-//! `parosctl journal create|delete|list` (#210): a tenant's journals, over
-//! `paros::client::journals`.
+//! `parosctl journal create|delete|tag|list` (#210): a tenant's journals,
+//! over `paros::client::journals`.
 //!
 //! The tenant is named; its id and its control journal come from the fleet
 //! directory. A create or a delete is a request to the tenant coordinator
@@ -7,6 +7,10 @@
 //! until an answer decides it, so a request acts once. The coordinator draws
 //! the journal's id and picks its members: a caller names a desired mode,
 //! never members. A list folds the tenant's control journal.
+//!
+//! A journal carries user tags (#575 (key:value tags)): `create --tag` sets
+//! them at birth, `tag` sets them again, whole. A list takes a selector
+//! (`-l`) over the journal's tags and its tenant's (`tenant.<key>`).
 
 use std::time::Duration;
 
@@ -18,6 +22,7 @@ use paros::client::bootstrap::control_journals;
 use paros::client::fleet::read_directory;
 use paros::client::journals::{self, JournalAnswer, JournalOp, JournalRequest};
 use paros::fleet::TenantState;
+use paros::tags::{Tags, UserTags};
 use paros::tenant::{Desired, Durability, MAX_FAILURES_PER_PARTITION};
 use paros::{JournalIdentifier, Names, TenantId, WriterMode};
 use serde_json::json;
@@ -57,6 +62,20 @@ enum JournalCommand {
         /// Its durability.
         #[command(flatten)]
         durability: DurabilityArgs,
+        /// A user tag, `key:value`, repeated (#575). A `paros/` key is
+        /// refused.
+        #[arg(long = "tag")]
+        tags: Vec<String>,
+    },
+    /// Set a journal's user tags, whole: the tags given replace the ones
+    /// it has, and none clears them (#575).
+    Tag {
+        /// The tenant's name.
+        tenant: String,
+        /// The journal's name.
+        name: String,
+        /// The tags, `key:value` each.
+        tags: Vec<String>,
     },
     /// Delete a tenant's live journal by name: a tombstone, its id never
     /// used again.
@@ -70,7 +89,88 @@ enum JournalCommand {
     List {
         /// The tenant's name.
         tenant: String,
+        /// Only the journals whose tags match: `key`, `key:value`, comma
+        /// separated, all of them; `tenant.<key>` reads the tenant's tags
+        /// (#575).
+        #[arg(short = 'l', long)]
+        selector: Option<String>,
     },
+}
+
+impl JournalCommand {
+    /// The tenant's name and the journal's (empty for a list).
+    fn names(&self) -> (String, String) {
+        match self {
+            JournalCommand::Create { tenant, name, .. }
+            | JournalCommand::Delete { tenant, name }
+            | JournalCommand::Tag { tenant, name, .. } => (tenant.clone(), name.clone()),
+            JournalCommand::List { tenant, .. } => (tenant.clone(), String::new()),
+        }
+    }
+}
+
+impl JournalArgs {
+    /// Whether it is `journal tag`, which goes through the frontends when
+    /// they are given (#575 (key:value tags)).
+    pub fn is_tag(&self) -> bool {
+        matches!(self.command, JournalCommand::Tag { .. })
+    }
+}
+
+/// `parosctl journal tag` through the frontends (#575 (key:value tags)):
+/// the tenant's own token sets its journal's user tags. One idempotency id
+/// per run, sent to each frontend in turn until an answer decides it.
+pub async fn tag_through_frontends(
+    providers: &TokioProviders,
+    frontends: &ParosClient,
+    out: &Printer,
+    args: JournalArgs,
+) -> Ending {
+    let JournalCommand::Tag { tenant, name, tags } = args.command else {
+        unreachable!("only journal tag goes through the frontends");
+    };
+    let Ok(tags) = user_tags(&tags) else {
+        return Ending::Refused;
+    };
+    let Ok(journal) = paros::name::JournalName::new(&tenant, &name) else {
+        note(&format!("bad journal name {tenant}/{name}"));
+        return Ending::Refused;
+    };
+    let answer = journals::tag_through(
+        providers,
+        frontends,
+        (&journal, nonzero(providers)),
+        &tags,
+        Duration::from_millis(args.patience_ms),
+    )
+    .await;
+    match answer {
+        journals::FrontTagged::Denied(denial) => {
+            out.emit(
+                || format!("denied: {}", denial.as_str()),
+                || json!({ "outcome": "denied", "denial": denial.as_str() }),
+            );
+            Ending::Refused
+        }
+        journals::FrontTagged::Answered(JournalAnswer::Tagged { id }) => {
+            out.emit(
+                || format!("tagged journal={journal}"),
+                || json!({ "outcome": "tagged", "journal": journal.to_string(), "id": id.0 }),
+            );
+            Ending::Success
+        }
+        journals::FrontTagged::Answered(answer) if !answer.is_retryable() => {
+            out.emit(
+                || format!("refused: {}", answer.as_str()),
+                || json!({ "outcome": answer.as_str() }),
+            );
+            Ending::Refused
+        }
+        _ => {
+            note("no frontend decided the request: run the same command again");
+            Ending::Ambiguous
+        }
+    }
 }
 
 /// A writer mode as given on the command line (`--writers`, #523).
@@ -139,11 +239,7 @@ pub async fn run(
             return Ending::Unreachable;
         }
     };
-    let tenant_name = match &args.command {
-        JournalCommand::Create { tenant, .. }
-        | JournalCommand::Delete { tenant, .. }
-        | JournalCommand::List { tenant } => tenant.clone(),
-    };
+    let (tenant_name, journal_name) = args.command.names();
     let Some((tenant, entry)) = directory.named(tenant_name.as_bytes()) else {
         out.emit(
             || format!("no tenant named {tenant_name}"),
@@ -159,23 +255,39 @@ pub async fn run(
         return Ending::Refused;
     }
     let control = entry.control;
-    let journal_name = match &args.command {
-        JournalCommand::Create { name, .. } | JournalCommand::Delete { name, .. } => name.clone(),
-        JournalCommand::List { .. } => String::new(),
-    };
+    let tenant_tags = entry.all_tags();
     let op = match args.command {
-        JournalCommand::List { .. } => {
-            return list(client, (&tenant_name, tenant, control), labels, out).await;
+        JournalCommand::List { selector, .. } => {
+            return list(
+                client,
+                (&tenant_name, tenant, control),
+                (selector.as_deref(), &tenant_tags),
+                labels,
+                out,
+            )
+            .await;
         }
         JournalCommand::Create {
             name,
             writers,
             durability,
+            tags,
             ..
         } => JournalOp::Create {
             name: name.into_bytes(),
             writer: writers,
             desired: durability.desired(),
+            tags: match user_tags(&tags) {
+                Ok(tags) => tags,
+                Err(ending) => return ending,
+            },
+        },
+        JournalCommand::Tag { name, tags, .. } => JournalOp::SetTags {
+            name: name.into_bytes(),
+            tags: match user_tags(&tags) {
+                Ok(tags) => tags,
+                Err(ending) => return ending,
+            },
         },
         JournalCommand::Delete { name, .. } => JournalOp::Delete {
             name: name.into_bytes(),
@@ -198,6 +310,14 @@ pub async fn run(
     .await;
     let full_name = format!("{tenant_name}/{journal_name}");
     report(out, (tenant, &full_name), labels, &answer)
+}
+
+/// The user tags given on the command line, or a refusal printed.
+pub(crate) fn user_tags(texts: &[String]) -> Result<UserTags, Ending> {
+    UserTags::parse(texts).map_err(|error| {
+        note(&format!("refused: {}: {error}", error.label()));
+        Ending::Refused
+    })
 }
 
 /// Print what a request for the journal `named` came to.
@@ -227,6 +347,14 @@ fn report(
             let journal = JournalIdentifier::new(tenant, *id);
             out.emit(
                 || format!("deleted journal={named}"),
+                || json!({ "outcome": label, "journal": journal.to_string() }),
+            );
+            Ending::Success
+        }
+        JournalAnswer::Tagged { id } => {
+            let journal = JournalIdentifier::new(tenant, *id);
+            out.emit(
+                || format!("tagged journal={named}"),
                 || json!({ "outcome": label, "journal": journal.to_string() }),
             );
             Ending::Success
@@ -262,17 +390,26 @@ fn report(
 async fn list(
     client: &ParosClient,
     (name, tenant, control): (&str, TenantId, paros::JournalId),
+    (selector, tenant_tags): (Option<&str>, &Tags),
     labels: &Labels,
     out: &Printer,
 ) -> Ending {
+    let selector = match crate::views::selector(selector) {
+        Ok(selector) => selector,
+        Err(ending) => return ending,
+    };
     let Some(fold) = journals::list(client, tenant, control).await else {
         note("the tenant's control journal could not be read to its tail");
         return Ending::Unreachable;
     };
+    let chosen: Vec<_> = fold
+        .journals()
+        .filter(|(_, journal)| selector.matches(journal.tags.tags(), Some(tenant_tags)))
+        .collect();
     out.emit(
         || {
-            let rows: Vec<[String; 5]> = fold
-                .journals()
+            let rows: Vec<[String; 6]> = chosen
+                .iter()
                 .map(|(_, journal)| {
                     let members: Vec<u64> = journal.config.members().iter().map(|m| m.0).collect();
                     [
@@ -286,11 +423,16 @@ async fn list(
                             "live"
                         }
                         .to_string(),
+                        if journal.tags.is_empty() {
+                            "-".to_string()
+                        } else {
+                            journal.tags.tags().label()
+                        },
                     ]
                 })
                 .collect();
             table(
-                ["JOURNAL", "WRITER", "DESIRED", "ACCEPTORS", "STATE"],
+                ["JOURNAL", "WRITER", "DESIRED", "ACCEPTORS", "STATE", "TAGS"],
                 &rows,
             )
         },
@@ -298,13 +440,14 @@ async fn list(
             json!({
                 "tenant": tenant.0,
                 "control": JournalIdentifier::new(tenant, control).to_string(),
-                "journals": fold.journals().map(|(id, journal)| json!({
-                    "journal": JournalIdentifier::new(tenant, id).to_string(),
+                "journals": chosen.iter().map(|(id, journal)| json!({
+                    "journal": JournalIdentifier::new(tenant, *id).to_string(),
                     "name": record_text(&journal.name),
                     "mode": mode_label(journal.writer),
                     "desired": journal.desired.label(),
                     "members": journal.config.members().iter().map(|m| m.0).collect::<Vec<_>>(),
                     "deleted": journal.deleted_at.is_some(),
+                    "tags": journal.tags.tags().iter().collect::<std::collections::BTreeMap<_, _>>(),
                 })).collect::<Vec<_>>(),
             })
         },

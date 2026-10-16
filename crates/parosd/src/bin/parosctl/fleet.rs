@@ -1,4 +1,4 @@
-//! `parosctl tenant create|delete|list` (#229): the fleet operations of
+//! `parosctl tenant create|delete|tag|list` (#229): the fleet operations of
 //! `paros::client::fleet` against the fleet directory and the cell's control
 //! journal, and what `init` shares with them (the session, the outcomes'
 //! endings and labels).
@@ -20,7 +20,7 @@ use clap::{Args, Subcommand};
 use moonpool_core::{Providers, RandomProvider, TokioProviders};
 use paros::client::Client;
 use paros::client::bootstrap::control_journals;
-use paros::client::fleet::{FleetRefusal, FleetSession, Interrupted, Run, Stage, Step};
+use paros::client::fleet::{FleetRefusal, FleetSession, Interrupted, Run, Stage, Step, TagTarget};
 use paros::fleet::TenantState;
 use paros::machine::ControlJournals;
 use paros::system::Registry;
@@ -61,6 +61,18 @@ pub enum TenantCommand {
         /// `region` (#252). Fixed at creation.
         #[arg(long, default_value = "az")]
         survives: paros::tenant::Survives,
+        /// A user tag, `key:value`, repeated (#575 (key:value tags)). A
+        /// `paros/` key is refused.
+        #[arg(long = "tag")]
+        tags: Vec<String>,
+    },
+    /// Set a `users` tenant's user tags, whole: the tags given replace the
+    /// ones it has, and none clears them (#575).
+    Tag {
+        /// The tenant's name.
+        name: String,
+        /// The tags, `key:value` each.
+        tags: Vec<String>,
     },
     /// Remove a `users` tenant (`REMOVING`, dropped by the cell, then
     /// removed). A re-run resumes.
@@ -69,7 +81,12 @@ pub enum TenantCommand {
         name: String,
     },
     /// List the universe's tenants, the internal ones included (#399).
-    List,
+    List {
+        /// Only the tenants whose tags match: `key`, `key:value`, comma
+        /// separated, all of them (#575).
+        #[arg(short = 'l', long)]
+        selector: Option<String>,
+    },
     /// Show a tenant: its cell, state, journals, their acceptors and the
     /// machines they use (#399).
     Show {
@@ -121,6 +138,11 @@ pub fn refusal_text(refusal: &FleetRefusal, labels: &Labels) -> String {
     match refusal {
         FleetRefusal::Unset => "unset: an id or an identifier of 0".into(),
         FleetRefusal::NotInitialized => "not_initialized: run parosctl init first".into(),
+        FleetRefusal::NameRefused => {
+            "name_refused: a tenant name holds no ':' (an internal tenant shows as <kind>:<name>)"
+                .into()
+        }
+        FleetRefusal::Unknown => "unknown: no tenant or cell holds the name".into(),
         FleetRefusal::CellMismatch { expected, found } => format!(
             "cell_mismatch: expected universe={} cell={}, the cell records {}",
             labels.universe(expected.0),
@@ -272,7 +294,15 @@ pub async fn run(
     };
     let patience = Duration::from_millis(args.patience_ms);
     match args.command {
-        TenantCommand::Create { name, survives } => {
+        TenantCommand::Create {
+            name,
+            survives,
+            tags,
+        } => {
+            let tags = match crate::journal::user_tags(&tags) {
+                Ok(tags) => tags,
+                Err(ending) => return ending,
+            };
             // Random identifiers, the tenant's and its control journal's; the
             // library moves past one the fleet tenant holds already.
             let draws: Vec<JournalIdentifier> = (0..DRAWS)
@@ -283,7 +313,7 @@ pub async fn run(
                     )
                 })
                 .collect();
-            let mut fleet = fleet.with_survives(survives);
+            let mut fleet = fleet.with_survives(survives).with_tags(tags);
             let run = fleet
                 .create_tenant(client, 0, name.as_bytes(), draws, patience)
                 .await;
@@ -322,9 +352,66 @@ pub async fn run(
                 Step::Advanced(_) => unreachable!("a run never ends advanced"),
             }
         }
-        TenantCommand::List | TenantCommand::Show { .. } => {
+        TenantCommand::Tag { name, tags } => {
+            set_tags(
+                providers,
+                client,
+                (out, labels),
+                (&mut fleet, patience),
+                TagTarget::Tenant(name.as_bytes()),
+                &name,
+                &tags,
+            )
+            .await
+        }
+        TenantCommand::List { .. } | TenantCommand::Show { .. } => {
             unreachable!("the views are answered in crate::views")
         }
+    }
+}
+
+/// `tenant tag` and `cell tag` (#575 (key:value tags)): set `target`'s user
+/// tags to `texts`, under an idempotency id drawn for this run.
+pub async fn set_tags(
+    providers: &TokioProviders,
+    client: &ParosClient,
+    (out, labels): (&Printer, &Labels),
+    (fleet, patience): (&mut FleetSession, Duration),
+    target: TagTarget<'_>,
+    name: &str,
+    texts: &[String],
+) -> Ending {
+    let tags = match crate::journal::user_tags(texts) {
+        Ok(tags) => tags,
+        Err(ending) => return ending,
+    };
+    let kind = match target {
+        TagTarget::Tenant(_) => "tenant",
+        TagTarget::Cell(_) => "cell",
+    };
+    let run = fleet
+        .set_tags(client, 0, target, nonzero(providers), &tags, patience)
+        .await;
+    match run.outcome {
+        Step::Done { result, .. } => {
+            out.emit(
+                || format!("tagged {kind}={name} tags={}", tags_label(&tags)),
+                || json!({ "outcome": "tagged", kind: result, "name": name, "tags": tags_label(&tags) }),
+            );
+            Ending::Success
+        }
+        Step::Refused(refusal) => refused(out, &refusal, labels),
+        Step::Interrupted(stop) => interrupted(&stop),
+        Step::Advanced(_) => unreachable!("a run never ends advanced"),
+    }
+}
+
+/// User tags as `k:v,…`, or `-` for none.
+pub fn tags_label(tags: &paros::tags::UserTags) -> String {
+    if tags.is_empty() {
+        "-".to_string()
+    } else {
+        tags.tags().label()
     }
 }
 

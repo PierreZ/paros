@@ -25,7 +25,7 @@ use paros::client::journals::{self, JournalAnswer, JournalOp, JournalRequest};
 use paros::client::{
     ClaimOutcome, Client, ClientTunables, Reader, ReaderOutcome, Server, Writer, WriterOutcome,
 };
-use paros::fleet::Group;
+use paros::fleet::TenantKind;
 use paros::system::Registry;
 use paros::tenant::Desired;
 use paros::{
@@ -356,6 +356,7 @@ impl Desk {
                 name: name.as_bytes().to_vec(),
                 writer: WriterMode::Single,
                 desired,
+                tags: paros::tags::UserTags::none(),
             },
         };
         let answer = journals::request(
@@ -596,7 +597,7 @@ impl Desk {
             }
             let control = JournalIdentifier::new(tenant, entry.control);
             let mut list = vec![("control".to_owned(), control)];
-            if entry.groups.contains(Group::Users)
+            if entry.kind == TenantKind::Users
                 && let Some(state) = journals::list(&client, tenant, entry.control).await
             {
                 let mut live: Vec<(String, JournalIdentifier)> = state
@@ -619,16 +620,16 @@ impl Desk {
             let name = String::from_utf8_lossy(&entry.name).into_owned();
             tenants.push(TenantPlace {
                 name: if name.is_empty() {
-                    entry.groups.label()
+                    entry.kind.as_str().to_owned()
                 } else {
                     name
                 },
-                groups: entry.groups.label(),
+                kind: entry.kind.as_str().to_owned(),
                 cell: String::from_utf8_lossy(directory.cell_name(entry.cell_id)).into_owned(),
                 journals,
             });
         }
-        tenants.sort_by_key(|t| (!t.groups.contains("internal"), t.name.clone()));
+        tenants.sort_by_key(|t| (t.kind == "users", t.name.clone()));
         Some((machines, nodes, tenants))
     }
 

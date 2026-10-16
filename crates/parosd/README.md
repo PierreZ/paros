@@ -32,7 +32,7 @@ docker compose run --rm parosctl read acme/orders
 `docker-compose.yml` runs one cell of five `parosd` machines over three failure
 domains, every one the same image configured by `PAROS_*` variables alone:
 
-| machine | class | failure domain | role today |
+| machine | class | zone | role today |
 |---|---|---|---|
 | `node1`, `node2`, `node3` | `storage` | `zone-a`, `zone-b`, `zone-c` | the founding members: one network alias, `members`, resolves to the three |
 | `storage4` | `storage` | `zone-a` | waits for placement (M9, #211, #212) |
@@ -40,7 +40,7 @@ domains, every one the same image configured by `PAROS_*` variables alone:
 
 **Start and wait.** A machine starts with its listen address (every
 interface), its advertised address (its service name), its data
-directory (a named volume), its class, capacity and failure domain. It is
+directory (a named volume), its class, capacity and zone. It is
 configured with **no peer**: no seed, no join list. On its first start it
 **mints its `node_id`** at random and records it in its data directory (there
 is no `PAROS_ID`), then waits, idle. A machine never forms a cell on its own.
@@ -193,7 +193,8 @@ error (exit 2), so a typo never silently keeps a default.
 | `PAROS_DATA_DIR` | its identity (`machine`) and its stores |
 | `PAROS_CLASS` | `storage` (default) or `stateless`; fixed at format |
 | `PAROS_CAPACITY` | its capacity, in role slots (default 32): one slot holds one acceptor of one journal |
-| `PAROS_FAILURE_DOMAIN` | its failure domain label |
+| `PAROS_ZONE` | its zone, the `paros/zone` tag placement spreads over (#575 (key:value tags)) |
+| `PAROS_RACK` | its rack, the `paros/rack` tag (optional) |
 | `PAROS_STORE_LAYOUT` | `default` (64 MiB segments) or `small` (laptops, tests) |
 | `PAROS_<FIELD>[_MS]` | one override per driver tunable (below) |
 | `PAROS_TLS_CERT`, `PAROS_TLS_KEY`, `PAROS_TLS_CA` | its certificate chain, its key and the universe's authority, PEM (`parosctl tls init`): all three turn TLS on for every session it serves and dials; only some is an error |

@@ -31,6 +31,7 @@ use crate::rpc::methods::{CoordinatorInterface, JournalRequestRpc};
 use crate::rpc::{
     config_from_proto, config_to_proto, writer_mode_from_proto, writer_mode_to_proto,
 };
+use crate::tags::UserTags;
 use crate::tenant::{Desired, TenantControl};
 use crate::{Address, Names};
 
@@ -45,11 +46,20 @@ pub enum JournalOp {
         writer: WriterMode,
         /// The desired mode: the coordinator picks the members.
         desired: Desired,
+        /// Its first user tags (#575).
+        tags: UserTags,
     },
     /// Delete the live journal named `name`.
     Delete {
         /// Its name.
         name: Vec<u8>,
+    },
+    /// The live journal named `name`'s user tags become `tags` (#575).
+    SetTags {
+        /// Its name.
+        name: Vec<u8>,
+        /// Its user tags, all of them.
+        tags: UserTags,
     },
 }
 
@@ -74,14 +84,20 @@ impl JournalRequest {
                 name,
                 writer,
                 desired,
+                tags,
             } => Op::Create(wire::CreateJournalOp {
                 name: name.clone(),
                 writer: writer_mode_to_proto(*writer).into(),
                 replicas: desired.replicas,
                 failures_per_partition: desired.durability.failures_per_partition,
                 partitions: desired.durability.partitions,
+                tags: tags.to_wire(),
             }),
             JournalOp::Delete { name } => Op::Delete(wire::DeleteJournalOp { name: name.clone() }),
+            JournalOp::SetTags { name, tags } => Op::SetTags(wire::SetJournalTagsOp {
+                name: name.clone(),
+                tags: tags.to_wire(),
+            }),
         };
         wire::JournalRequest {
             request: self.request,
@@ -95,7 +111,8 @@ impl JournalRequest {
     /// # Errors
     ///
     /// An unset request id or tenant, an empty name, no op, or a field out
-    /// of range.
+    /// of range: a malformed or reserved tag, or a set over the cap (#575),
+    /// included.
     pub fn from_wire(request: &wire::JournalRequest) -> Result<Self, &'static str> {
         use wire::journal_request::Op;
         if request.request == 0 {
@@ -113,12 +130,19 @@ impl JournalRequest {
                     failures_per_partition: create.failures_per_partition,
                     partitions: create.partitions,
                 }))?,
+                tags: UserTags::from_wire(create.tags.clone()).map_err(|_| "malformed tags")?,
             },
             Op::Delete(delete) => JournalOp::Delete {
                 name: delete.name.clone(),
             },
+            Op::SetTags(set) => JournalOp::SetTags {
+                name: set.name.clone(),
+                tags: UserTags::from_wire(set.tags.clone()).map_err(|_| "malformed tags")?,
+            },
         };
-        let (JournalOp::Create { name, .. } | JournalOp::Delete { name }) = &op;
+        let (JournalOp::Create { name, .. }
+        | JournalOp::Delete { name }
+        | JournalOp::SetTags { name, .. }) = &op;
         if name.is_empty() {
             return Err("a journal has a name");
         }
@@ -142,6 +166,11 @@ pub enum JournalAnswer {
     },
     /// The journal `id` is a tombstone.
     Deleted {
+        /// Its id.
+        id: JournalId,
+    },
+    /// The journal `id`'s user tags are the request's (#575).
+    Tagged {
         /// Its id.
         id: JournalId,
     },
@@ -181,6 +210,7 @@ impl JournalAnswer {
         match self {
             JournalAnswer::Created { .. } => "created",
             JournalAnswer::Deleted { .. } => "deleted",
+            JournalAnswer::Tagged { .. } => "tagged",
             JournalAnswer::NameTaken { .. } => "name_taken",
             JournalAnswer::UnknownJournal => "unknown_journal",
             JournalAnswer::UnknownTenant => "unknown_tenant",
@@ -196,7 +226,9 @@ impl JournalAnswer {
     pub fn to_wire(&self) -> wire::JournalRequestAck {
         let (journal, config) = match self {
             JournalAnswer::Created { id, config } => (id.0, Some(config_to_proto(config))),
-            JournalAnswer::Deleted { id } | JournalAnswer::NameTaken { id } => (id.0, None),
+            JournalAnswer::Deleted { id }
+            | JournalAnswer::Tagged { id }
+            | JournalAnswer::NameTaken { id } => (id.0, None),
             _ => (0, None),
         };
         wire::JournalRequestAck {
@@ -217,6 +249,7 @@ impl JournalAnswer {
                 _ => JournalAnswer::Unavailable,
             },
             "deleted" if id.is_set() => JournalAnswer::Deleted { id },
+            "tagged" if id.is_set() => JournalAnswer::Tagged { id },
             "name_taken" if id.is_set() => JournalAnswer::NameTaken { id },
             "unknown_journal" => JournalAnswer::UnknownJournal,
             "unknown_tenant" => JournalAnswer::UnknownTenant,
@@ -225,6 +258,46 @@ impl JournalAnswer {
             "not_coordinator" => JournalAnswer::NotCoordinator,
             _ => JournalAnswer::Unavailable,
         }
+    }
+}
+
+/// What a tag request through a frontend came to (#575 (key:value tags)):
+/// one attempt.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FrontTagged {
+    /// The frontend refused the call itself: no machine saw it.
+    Denied(crate::frontend::Denial),
+    /// The tenant coordinator's answer, as the frontend relayed it.
+    /// `Unavailable` and `NotCoordinator` decide nothing: send the same
+    /// request again.
+    Answered(JournalAnswer),
+    /// No answer came: the request may have acted. Send the same request
+    /// again, which acts once.
+    Lost,
+}
+
+/// Set the user tags of the journal `name` to `tags` through the frontend
+/// `frontend`, under the idempotency id `request`: one attempt (#575).
+pub async fn tag_through_frontend<P: Providers>(
+    frontend: &crate::rpc::NodeClient<P>,
+    name: &crate::name::JournalName,
+    request: u64,
+    tags: &UserTags,
+) -> FrontTagged {
+    match frontend
+        .set_journal_tags(name, request, tags.to_wire())
+        .await
+    {
+        Err(_) => FrontTagged::Lost,
+        Ok(ack) => match crate::frontend::Denial::of(ack.frontend()) {
+            Some(denial) => FrontTagged::Denied(denial),
+            None if ack.frontend() == crate::rpc::FrontendVerdict::Unanswered => FrontTagged::Lost,
+            None => FrontTagged::Answered(JournalAnswer::from_wire(wire::JournalRequestAck {
+                outcome: ack.outcome,
+                journal: ack.journal,
+                config: None,
+            })),
+        },
     }
 }
 
@@ -349,6 +422,37 @@ pub async fn request<P: Providers>(
     }
 }
 
+/// Set the user tags of the journal `name` through the frontends
+/// `frontends` (#575 (key:value tags)): the same request id sent to each in
+/// turn until an answer decides it or `patience` runs out. A denial ends
+/// it at once.
+#[tracing::instrument(level = "debug", skip_all, fields(request))]
+pub async fn tag_through<P: Providers>(
+    providers: &P,
+    frontends: &Client<P>,
+    (name, request): (&crate::name::JournalName, u64),
+    tags: &UserTags,
+    patience: Duration,
+) -> FrontTagged {
+    assert!(frontends.server_count() > 0, "a tag request has a frontend");
+    let deadline = providers.time().now() + patience;
+    let mut index = 0;
+    loop {
+        let frontend = frontends.node(index % frontends.server_count());
+        index += 1;
+        let got = tag_through_frontend(frontend, name, request, tags).await;
+        let decided = match &got {
+            FrontTagged::Denied(_) => true,
+            FrontTagged::Answered(answer) => !answer.is_retryable(),
+            FrontTagged::Lost => false,
+        };
+        if decided || providers.time().now() >= deadline {
+            return got;
+        }
+        let _ = providers.time().sleep(RETRY_PAUSE).await;
+    }
+}
+
 /// Fold tenant `tenant`'s control journal `control` to its tail: every
 /// journal it created, and its description. `None` when no page could be
 /// read to the tail.
@@ -380,6 +484,7 @@ mod tests {
                 desired: "failures-per-partition=0,partitions=3"
                     .parse()
                     .expect("a durability"),
+                tags: UserTags::parse(&["team:payments"]).expect("a tag"),
             },
         };
         let wire = request.to_wire();
