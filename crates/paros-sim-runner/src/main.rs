@@ -62,6 +62,14 @@ fn main() {
     let declared = gates::judge(&slots);
     gates::print(&declared, "  ");
     gates::print_rarest(&slots, RAREST);
+    // A CI shard hands its missing gates to the job that judges every shard's
+    // together (`.github/workflows/rust.yml`): a gate fails CI only when no
+    // shard ran it.
+    let shard_out = std::env::var_os(MISSING_GATES_OUT);
+    if let Some(path) = &shard_out {
+        write_missing(std::path::Path::new(path), &declared.missing);
+    }
+    let gates_ok = shard_out.is_some() || declared.missing.is_empty();
     if let Some(more) = top_up.as_ref().filter(|more| !is_clean(more)) {
         print_failed_runs(more);
         println!(
@@ -76,7 +84,7 @@ fn main() {
     }
     if is_clean(&report)
         && report.coverage_violations.is_empty()
-        && declared.missing.is_empty()
+        && gates_ok
         && !report.convergence_timeout
     {
         println!("  Chain safety, recovery, coverage, and saturation gates are green");
@@ -95,6 +103,28 @@ fn main() {
         );
         // This runner is the coverage-guided sweep gate (`cargo xtask sim`):
         // any correctness, coverage, or saturation defect must fail CI.
+        std::process::exit(1);
+    }
+}
+
+/// The environment variable that makes this run a CI shard: the path where
+/// it writes the declared gates it never ran, one per line, and no longer
+/// fails on them. Every other defect still fails the shard.
+const MISSING_GATES_OUT: &str = "PAROS_SIM_MISSING_GATES";
+
+/// Write each missing declared gate's message, sorted, one per line (the
+/// `Debug` form, so a line holds exactly one message).
+fn write_missing(path: &std::path::Path, missing: &[(&str, &str)]) {
+    let mut lines: Vec<String> = missing
+        .iter()
+        .map(|(msg, _)| format!("{msg:?}\n"))
+        .collect();
+    lines.sort();
+    if let Err(error) = std::fs::write(path, lines.concat()) {
+        println!(
+            "  cannot write the missing gates to {}: {error}",
+            path.display()
+        );
         std::process::exit(1);
     }
 }

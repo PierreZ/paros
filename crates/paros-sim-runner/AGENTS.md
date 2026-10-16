@@ -3,8 +3,8 @@
 Two native binaries over `paros_sim`'s entry points (`publish = false`, `autobins = false`),
 and the mutation hunt's test target.
 Top of the stack: `paros-core` ← `paros` ← `paros-sim` ← **`paros-sim-runner`**. The
-binaries read no environment variables and take no flags beyond the positional arguments below;
-the `mutants` test reads `PAROS_MUTANT_SEEDS`.
+binaries take no flags beyond the positional arguments below and read one environment variable,
+`PAROS_SIM_MISSING_GATES` (below); the `mutants` test reads `PAROS_MUTANT_SEEDS`.
 
 ## Map
 
@@ -30,7 +30,10 @@ the `mutants` test reads `PAROS_MUTANT_SEEDS`.
   saturated-vs-cap, saturation signal, exploration stats and bug recipes, guidance watermarks
   and the gates that never fired, the declared gates that never ran, and the ten rarest
   declared gates that fired. Exits 1 on any assertion violation, failed run, coverage violation,
-  declared gate that never ran (unless listed in `gates::RARE`) or convergence timeout.
+  declared gate that never ran (unless listed in `gates::RARE`) or convergence timeout. With
+  `PAROS_SIM_MISSING_GATES=<path>` the run is a CI shard: it writes the declared gates it never
+  ran to `<path>` and does not fail on them; CI's `sim-gates` job fails on a gate missing from
+  every shard.
 - `sim-paros-hunt [main|canary] [iterations] [gate-filter]` (default 2000, the normal evidence
   budget; root *Simulation rules*): prints seed counts, assertion slots used and dropped, gates
   that never fired, the declared gates that never ran, the 25 rarest declared gates, and with a filter every gate whose name contains it, with its successes and
