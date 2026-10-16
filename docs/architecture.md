@@ -347,6 +347,19 @@ list and no rendezvous name. The same rule holds at two levels:
      a higher `init_id`, and is then formed. A majority of accepts chooses the plan. The receiver
      sends its own accept last, and only when the others can still choose the plan with it. A
      machine that receives a `FormCell` without being asked first treats it as both steps.
+  4. **Teach** (the decree's learner catch-up, #277 (cell decree)). The receiver sends
+     `FormCell` once, so a founding member that was down at that moment stays idle while the
+     plan names it. Each formed member asks every other member of its plan to `Identify` itself
+     at each election renewal period. It sends its own vote, the plan at the ballot it accepted
+     it at, to a member that answers idle. This is the same Phase 2a again, so it is safe at
+     any time. The idle member promised that ballot in step 1, so it accepts. The `FormCell`
+     carries the operator's token, the one that formed the teacher; the teacher keeps it in
+     memory only, never in its record. Teaching of a member ends when it answers in the cell,
+     answers as another machine (a wiped member), refuses the token, or the address book names
+     it at another address than the plan's. A member that restarted holds no token and teaches
+     nothing. Before, only a new `init` formed that member, and a cell with one more member down
+     had no quorum (seeds 7461995534021400970 on main 7feccc9 and 16403044264830861989 on
+     629aa62).
 
   A receiver that crashes midway leaves no lock: the next `cell init`, sent to any listed machine,
   finds the accepted plan in its ask and finishes it. A plain question ("is anything ongoing?")
@@ -409,8 +422,10 @@ list and no rendezvous name. The same rule holds at two levels:
   machine started with `PAROS_ROOT_PUBLIC_KEY` pins those keys (`paros::machine::AdminPin`) and,
   while it is idle, checks an `admin` token on `CellInit`, `PrepareCell`, `FormCell` and `Admit`
   (operations `form_cell` and `admit`, on an internal target). The proposer of `cell init` sends
-  the operator's token on to the other founding members. A refusal answers `invalid_token`,
-  `expired` or `forbidden`. A machine started without the variable trusts the network, as before.
+  the operator's token on to the other founding members, and a formed member that teaches the
+  decree (step 4 above) sends the same token. A refusal answers `invalid_token`, `expired` or
+  `forbidden`. A teacher with no token (it restarted) or with a refused one stops: the operator
+  runs `init` again with its token. A machine started without the variable trusts the network, as before.
   The cell coordinator that finishes an admission an operator left in flight has no token, so a
   pinned machine refuses it: the operator runs `cell add-machine` again with its token.
 
