@@ -272,12 +272,13 @@ message JournalRequest {
   oneof op {
     CreateJournalOp create = 3;
     DeleteJournalOp delete = 4;
+    ConfigureOp configure = 5;
   }
 }
 
 // Create journal `name`, written in `writer` mode, under a desired mode:
 // `failures_per_partition` (0 to 3) over `partitions` acceptor partitions (at
-// least 1, #523). `replicas` is the replica count. The coordinator draws the
+// least 1, #523). `partitions` 0 takes the tenant's default mode (#214). `replicas` is the replica count. The coordinator draws the
 // id and picks the members: a caller never names one. Tags 3 to 5 held the
 // retired redundancy and grid.
 message CreateJournalOp {
@@ -295,15 +296,27 @@ message DeleteJournalOp {
   bytes name = 1;
 }
 
+// Change a desired mode (#214 (tenant modes)): of the live journal named
+// `name`, or the tenant's default when `name` is empty. The coordinator
+// applies a journal's new mode by reconfiguration; the answer says it is
+// recorded, not that it is in force.
+message ConfigureOp {
+  bytes name = 1;
+  uint32 replicas = 2;
+  uint32 failures_per_partition = 3;
+  uint32 partitions = 4;
+}
+
 message JournalRequestAck {
-  // What the request folded to: "created", "deleted", "name_taken" (a live
+  // What the request folded to: "created", "deleted", "configured", "name_taken" (a live
   // journal holds the name: `journal` is its id), "unknown_journal" (no live
   // journal has the name). Or why it did not reach the fold, to retry with
   // the same `request`: "not_coordinator", "unavailable". Or a refusal:
   // "unknown_tenant", "unplaceable" (too few machines for the desired mode),
   // "malformed".
   string outcome = 1;
-  // The journal's id, on "created", "deleted" and "name_taken".
+  // The journal's id, on "created", "deleted", "name_taken" and
+  // "configured" (0: the tenant default).
   uint64 journal = 2;
   // Its members, on "created".
   paros.common.v1.AcceptorConfig config = 3;

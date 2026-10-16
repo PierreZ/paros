@@ -94,6 +94,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::capacity;
 use super::footprints::Footprints;
+use super::modes::Modes;
 use super::moves::Moves;
 use super::sets::{SetStep, Sets};
 use super::tenants::TenantDesk;
@@ -926,6 +927,8 @@ async fn campaign<P: Providers>(
     // matchmaker sets' placements and moves (#501 (matchmaker sets off the
     // founders)).
     let mut moves = Moves::default();
+    // Its journals' changes to their desired modes (#214 (tenant modes)).
+    let mut changes = Modes::default();
     let mut sets = Sets::new(ask_again);
     // The served term's footprint steps (#476).
     let internal: Vec<TenantId> = std::iter::once(journals.cell.tenant)
@@ -1002,6 +1005,7 @@ async fn campaign<P: Providers>(
                     (session, watch)
                 });
                 moves = Moves::default();
+                changes = Modes::default();
                 sets = Sets::new(ask_again);
                 footprints = Footprints::new(internal.clone());
                 match duty {
@@ -1088,9 +1092,11 @@ async fn campaign<P: Providers>(
                             // watch: never fight the session that fenced it.
                             Err(_) => watching = None,
                             // A round ran: the tenant coordinator takes one step
-                            // of a move off a draining machine (#474), then one
-                            // step of a matchmaker set's placement or move (#501
-                            // (matchmaker sets off the founders)).
+                            // of a move off a draining machine (#474), one step
+                            // of a journal's change to its desired mode (#214
+                            // (tenant modes)), then one step of a matchmaker
+                            // set's placement or move (#501 (matchmaker sets off
+                            // the founders)).
                             Ok(_) if watch.ran() => {
                                 if let Some((_, desk)) = desk.as_mut() {
                                     let ctx = (&providers, &rpc, &names, &client);
@@ -1102,29 +1108,34 @@ async fn campaign<P: Providers>(
                                             "coordinator: a re-placement is deferred"
                                         );
                                     }
-                                    stepped =
-                                        Some(match moves.step(ctx, session, desk, &gone).await {
-                                            None => None,
-                                            Some(step) => {
-                                                let set =
-                                                    sets.step(ctx, session, desk, &gone).await;
-                                                // Then one step of a footprint (#476): a
-                                                // tenant coordinator placed, or a slot
-                                                // moved off a draining machine.
-                                                let footprint = match set {
-                                                    Some(_) => {
-                                                        footprints.step(&client, session).await
-                                                    }
-                                                    None => None,
-                                                };
-                                                // A set's move is left mid-way once its
-                                                // handover started, so the next term
-                                                // finds it running.
-                                                set.zip(footprint).map(|(set, _)| {
-                                                    step.in_flight() || set == SetStep::HandedOver
-                                                })
+                                    stepped = Some(match moves.step(ctx, session, desk, &gone).await {
+                                        None => None,
+                                        Some(step) => {
+                                            match changes.step(ctx, session, desk).await {
+                                                None => None,
+                                                Some(mode) => {
+                                                    let set = sets.step(ctx, session, desk, &gone).await;
+                                                    // Then one step of a footprint (#476):
+                                                    // a tenant coordinator placed, or a slot
+                                                    // moved off a draining machine.
+                                                    let footprint = match set {
+                                                        Some(_) => {
+                                                            footprints.step(&client, session).await
+                                                        }
+                                                        None => None,
+                                                    };
+                                                    // A set's move is left mid-way once
+                                                    // its handover started, so the next
+                                                    // term finds it running.
+                                                    set.zip(footprint).map(|(set, _)| {
+                                                        step.in_flight()
+                                                            || mode.in_flight()
+                                                            || set == SetStep::HandedOver
+                                                    })
+                                                }
                                             }
-                                        });
+                                        }
+                                    });
                                 }
                             }
                             Ok(_) => {}

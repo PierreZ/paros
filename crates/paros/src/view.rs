@@ -245,7 +245,7 @@ impl CellFacts<'_> {
             vec![self.founders_journal(hosted.control, "control", WriterMode::Single)];
         if let Some(control) = self.tenants.iter().find(|c| c.tenant() == tenant) {
             journals.extend(control.live().map(|(id, journal)| {
-                let placed = self.placed(JournalIdentifier::new(tenant, id), &journal.config);
+                let placed = self.placed(JournalIdentifier::new(tenant, id), &journal.placed);
                 wire::JournalView {
                     journal: id.0,
                     name: journal.name.clone(),

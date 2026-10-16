@@ -27,8 +27,12 @@
 //! answered its freeze, so a set in force can leave its booked machines
 //! after its move finished.
 //!
-//! The set keeps its size: the bootstrap generation's. No step names a
-//! draining machine in a set. A released member keeps its frozen store: it
+//! The set has `2F+1` matchmakers, `F` the largest `failures_per_partition`
+//! of its tenant (its default and every live journal, at least 1), on at
+//! most every storage machine (#214 (tenant modes)): a set grows by booking
+//! the slots it lacks and shrinks by handing over onto the slots placement
+//! keeps, releasing the others once the smaller set is in force. No step
+//! names a draining machine in a set. A released member keeps its frozen store: it
 //! answers a late proposer with its successor (`crate::machine::matchmakers`).
 //! The cell tenant's own set never moves: the registry's elections need it
 //! before any coordinator runs.
@@ -43,8 +47,9 @@ use paros_core::{JournalIdentifier, NodeId, TenantId};
 use super::moves::stays;
 use super::tenants::TenantDesk;
 use crate::client::cell::CellSession;
+use crate::client::journals::JournalAnswer;
 use crate::client::{Client, ReconfigureMatchmakersOutcome, Server};
-use crate::placement::{self, Want};
+use crate::placement::{self, Step, Want};
 use crate::rpc::{InspectReply, NodeClient};
 use crate::system::{Booking, BookingTarget, Registry, Role};
 use crate::{Address, Names};
@@ -152,6 +157,85 @@ fn next_set(
         .copied()
 }
 
+/// The size of a tenant's matchmaker set (§3.4, #214 (tenant modes)):
+/// `2F+1` matchmakers, `F` its largest `failures_per_partition` and at
+/// least 1 (its control journal's), on at most `storage` machines.
+fn set_size(largest_failures: u32, storage: usize) -> usize {
+    let f = usize::try_from(largest_failures.max(1)).unwrap_or(usize::MAX);
+    f.saturating_mul(2).saturating_add(1).min(storage).max(1)
+}
+
+/// The machines a set shrunk to `size` keeps, of its slots on machines that
+/// stay `staying`: its members in force `members` when they are booked and
+/// the size, else the slots placement does not release (a down machine
+/// first, then the most loaded). `None` when placement finds no plan.
+fn kept(
+    registry: &Registry,
+    storage: &BTreeSet<NodeId>,
+    tenant: TenantId,
+    (staying, members): (&[(u64, Booking)], &[u64]),
+    size: usize,
+) -> Option<BTreeSet<NodeId>> {
+    if members.len() == size
+        && members
+            .iter()
+            .all(|m| staying.iter().any(|(_, b)| b.node.0 == *m))
+    {
+        return Some(members.iter().copied().map(NodeId).collect());
+    }
+    let want = Want {
+        role: Role::Matchmaker,
+        target: set_of(tenant),
+        count: size,
+    };
+    let machines = placement::machines(registry, storage.iter().copied());
+    let steps = placement::plan(&want, &machines, staying, tenant.0).ok()?;
+    let released: BTreeSet<NodeId> = steps
+        .iter()
+        .filter_map(|step| match *step {
+            Step::Release { node, .. } => Some(node),
+            Step::Book { .. } => None,
+        })
+        .collect();
+    Some(
+        staying
+            .iter()
+            .map(|(_, b)| b.node)
+            .filter(|node| !released.contains(node))
+            .collect(),
+    )
+}
+
+/// The size `tenant`'s set should have: `2F+1`, `F` the tenant's largest
+/// `failures_per_partition` (#214 (tenant modes)), at most every storage
+/// machine placement may book; the size in force or the slots `booked`,
+/// the larger, while its control journal `control` cannot be read. `None` once a later term fenced it.
+async fn desired_size<P: Providers>(
+    client: &Client<P>,
+    cell: &CellSession,
+    desk: &mut TenantDesk,
+    (tenant, control): (TenantId, paros_core::JournalId),
+    (in_force, booked): (usize, usize),
+) -> Option<usize> {
+    match desk.tenant(client, tenant, control).await {
+        Ok(state) => {
+            let largest = state.largest_failures();
+            // Capped at the machines placement may book, never at every
+            // storage machine the desk names: a founding member the registry
+            // does not hold counts there, and a size placement cannot reach
+            // keeps the set in its book step for good.
+            let registry = cell.registry();
+            let storage = desk.storage(registry);
+            let eligible = placement::machines(registry, storage.iter().copied()).len();
+            Some(set_size(largest, eligible))
+        }
+        Err(JournalAnswer::NotCoordinator) => None,
+        // An unreadable control journal never shrinks the set: a set a
+        // frozen generation thinned keeps the size it was booked for.
+        Err(_) => Some(in_force.max(booked)),
+    }
+}
+
 /// The set in force of `journal`'s tenant as the founding members of
 /// `nodes` believe it for `journal`: the answer with the latest generation,
 /// and which server gave it.
@@ -193,6 +277,7 @@ impl Sets {
     /// `cell` (its bookings drawn by `desk`), calling the founding members
     /// where the cell's address book says they are. `None` when a write did
     /// not land: the term writes nothing more.
+    #[allow(clippy::too_many_lines)]
     #[tracing::instrument(level = "debug", skip_all)]
     pub(super) async fn step<P: Providers>(
         &mut self,
@@ -235,10 +320,23 @@ impl Sets {
             self.settled.insert(tenant);
             return Some(SetStep::Waiting);
         }
-        let size = reply.matchmakers.len();
+        let size = desired_size(
+            client,
+            cell,
+            desk,
+            (tenant, control),
+            (
+                reply.matchmakers.len(),
+                slots(cell.registry(), tenant).len(),
+            ),
+        )
+        .await?;
+        if size != reply.matchmakers.len() {
+            moonpool_assertions::reachable!("coordinator: a set is resized to its tenant's modes");
+        }
         let registry = cell.registry();
         let slots = slots(registry, tenant);
-        let staying: Vec<(u64, Booking)> = slots
+        let mut staying: Vec<(u64, Booking)> = slots
             .iter()
             .filter(|(_, b)| stays(registry, gone, b.node))
             .copied()
@@ -248,10 +346,20 @@ impl Sets {
                 .book(client, cell, desk, (tenant, gone), &staying, size)
                 .await;
         }
-        let mut target: Vec<u64> = staying.iter().map(|(_, b)| b.node.0).collect();
-        target.sort_unstable();
         let mut members = reply.matchmakers.clone();
         members.sort_unstable();
+        if staying.len() > size {
+            let storage = desk.storage(registry);
+            let Some(kept) = kept(registry, &storage, tenant, (&staying, &members), size) else {
+                return Some(SetStep::Waiting);
+            };
+            staying.retain(|(_, b)| kept.contains(&b.node));
+            if staying.len() != size {
+                return Some(SetStep::Waiting);
+            }
+        }
+        let mut target: Vec<u64> = staying.iter().map(|(_, b)| b.node.0).collect();
+        target.sort_unstable();
         // A handover an earlier term started may still land on a machine
         // this release frees: the founders' belief is no fence. Release
         // only once a handover this term started is in force, even onto
@@ -411,6 +519,16 @@ impl Sets {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_set_has_two_f_plus_one_members_on_the_storage_machines() {
+        assert_eq!(set_size(0, 5), 3, "a control journal has F = 1");
+        assert_eq!(set_size(1, 5), 3);
+        assert_eq!(set_size(2, 5), 5);
+        assert_eq!(set_size(3, 5), 5, "at most every storage machine");
+        assert_eq!(set_size(3, 9), 7);
+        assert_eq!(set_size(1, 1), 1, "a cell of one machine");
+    }
 
     #[test]
     fn a_set_is_named_by_its_tenant() {

@@ -175,9 +175,37 @@ impl TenantBoard {
                 );
                 self.id_taken = true;
             }
+            TenantEvent::Configured { request, id, .. } => {
+                // A journal's mode changes only for a journal its tenant
+                // created before (#214 (tenant modes)).
+                if let Some(id) = id {
+                    let journal = JournalIdentifier::new(control.tenant, *id);
+                    assert_always!(
+                        self.created.get(&journal).is_some_and(|at| *at < lsn),
+                        "tenant: a configured journal is one the tenant created before",
+                        { "lsn" => lsn }
+                    );
+                    assert_reachable!("tenant: a journal's desired mode is configured");
+                } else {
+                    assert_reachable!("tenant: a tenant's default mode is configured");
+                }
+                self.answered(control, *request, RequestOutcome::Configured(*id), lsn);
+            }
+            TenantEvent::Placed { id } => {
+                let journal = JournalIdentifier::new(control.tenant, *id);
+                assert_always!(
+                    self.created.get(&journal).is_some_and(|at| *at < lsn),
+                    "tenant: a placement is recorded only for a journal created before",
+                    { "lsn" => lsn }
+                );
+            }
             TenantEvent::Described
             | TenantEvent::Checkpoint { .. }
-            | TenantEvent::Refused(TenantRefusal::Malformed | TenantRefusal::Redescribed) => {}
+            | TenantEvent::Refused(
+                TenantRefusal::Malformed
+                | TenantRefusal::Redescribed
+                | TenantRefusal::NotPlaceable { .. },
+            ) => {}
         }
     }
 

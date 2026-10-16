@@ -1,5 +1,7 @@
 //! `parosctl journal create|delete|list` (#210): a tenant's journals, over
-//! `paros::client::journals`.
+//! `paros::client::journals`; and `parosctl configure` (#214 (tenant
+//! modes)), FDB's `configure`: a new desired mode for a journal or the
+//! tenant's default, which the tenant coordinator applies.
 //!
 //! The tenant is named; its id and its control journal come from the fleet
 //! directory. A create or a delete is a request to the tenant coordinator
@@ -54,7 +56,7 @@ enum JournalCommand {
         /// `multi` (unfenced appends, #241). Fixed for the journal's life.
         #[arg(long, default_value = "single", value_parser = parse_writers)]
         writers: WriterMode,
-        /// Its durability.
+        /// Its durability; none named takes the tenant's default mode.
         #[command(flatten)]
         durability: DurabilityArgs,
     },
@@ -83,33 +85,63 @@ fn parse_writers(text: &str) -> Result<WriterMode, String> {
 }
 
 /// A journal's durability on the command line (§3.4, #523): each acceptor
-/// partition has `2F+1` acceptors.
+/// partition has `2F+1` acceptors. A field not named takes its default
+/// (`F=1`, `P=1`); none named is no mode at all.
 #[derive(Args, Debug, Clone, Copy)]
 pub struct DurabilityArgs {
-    /// `F`: the failures each acceptor partition survives, 0 to 3. Each
-    /// acceptor partition has `2F+1` acceptors.
-    #[arg(long, default_value = "1", value_parser = clap::value_parser!(u32).range(0..=i64::from(MAX_FAILURES_PER_PARTITION)))]
-    failures_per_partition: u32,
+    /// `F`: the failures each acceptor partition survives, 0 to 3 (default
+    /// 1). Each acceptor partition has `2F+1` acceptors.
+    #[arg(long, value_parser = clap::value_parser!(u32).range(0..=i64::from(MAX_FAILURES_PER_PARTITION)))]
+    failures_per_partition: Option<u32>,
     /// `P`: the acceptor partitions a journal's writes spread over, at least
-    /// 1 (the plain majority).
-    #[arg(long, default_value = "1", value_parser = clap::value_parser!(u32).range(1..))]
-    partitions: u32,
+    /// 1 (default 1, the plain majority).
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+    partitions: Option<u32>,
 }
 
 impl DurabilityArgs {
-    /// The desired mode it names.
+    /// The desired mode it names: `None` when it names neither field.
     ///
     /// # Panics
     ///
     /// Never: clap bounds both values.
-    pub fn desired(self) -> Desired {
-        let durability = Durability::new(self.failures_per_partition, self.partitions)
-            .expect("clap bounds the durability");
-        Desired {
+    pub fn desired(self) -> Option<Desired> {
+        if self.failures_per_partition.is_none() && self.partitions.is_none() {
+            return None;
+        }
+        let durability = Durability::new(
+            self.failures_per_partition
+                .unwrap_or(Durability::DEFAULT.failures_per_partition),
+            self.partitions.unwrap_or(Durability::DEFAULT.partitions),
+        )
+        .expect("clap bounds the durability");
+        Some(Desired {
             durability,
             replicas: 0,
-        }
+        })
     }
+}
+
+/// `parosctl configure` (#214 (tenant modes)): FDB's `configure`.
+#[derive(Args, Debug)]
+pub struct ConfigureArgs {
+    /// The tenant's name.
+    #[arg(long)]
+    tenant: String,
+    /// The journal whose mode changes; none changes the tenant's default,
+    /// which a create that names no mode takes.
+    #[arg(long)]
+    journal: Option<String>,
+    /// The new durability: a field not named takes its default.
+    #[command(flatten)]
+    durability: DurabilityArgs,
+    /// The replicas per journal (recorded).
+    #[arg(long)]
+    replicas: Option<u32>,
+    /// How long the request is sent again while no coordinator decides it,
+    /// in milliseconds.
+    #[arg(long, default_value = "30000")]
+    patience_ms: u64,
 }
 
 /// `parosctl journal …`.
@@ -122,43 +154,15 @@ pub async fn run(
     out: &Printer,
     args: JournalArgs,
 ) -> Ending {
-    let Some(cell) = control_journals(client).await else {
-        note("no server named its cell's control journals: is the cell initialized?");
-        return Ending::Unreachable;
-    };
-    let (Some(fleet), Some(election)) = (cell.fleet, cell.election) else {
-        note("the cell names no fleet journal or no election journal");
-        return Ending::Refused;
-    };
-    let directory = match read_directory(client, 0, fleet).await {
-        Ok(directory) => directory,
-        Err(outcome) => {
-            note(&format!(
-                "the fleet directory could not be read to its tail: {outcome:?}"
-            ));
-            return Ending::Unreachable;
-        }
-    };
     let tenant_name = match &args.command {
         JournalCommand::Create { tenant, .. }
         | JournalCommand::Delete { tenant, .. }
         | JournalCommand::List { tenant } => tenant.clone(),
     };
-    let Some((tenant, entry)) = directory.named(tenant_name.as_bytes()) else {
-        out.emit(
-            || format!("no tenant named {tenant_name}"),
-            || json!({ "outcome": "unknown_tenant", "tenant": tenant_name }),
-        );
-        return Ending::Refused;
+    let (tenant, control, election) = match ready_tenant(client, out, &tenant_name).await {
+        Ok(found) => found,
+        Err(ending) => return ending,
     };
-    if entry.state != TenantState::Ready {
-        out.emit(
-            || format!("tenant {tenant_name} is {}", entry.state.as_str()),
-            || json!({ "outcome": "not_ready", "tenant": tenant_name, "state": entry.state.as_str() }),
-        );
-        return Ending::Refused;
-    }
-    let control = entry.control;
     let journal_name = match &args.command {
         JournalCommand::Create { name, .. } | JournalCommand::Delete { name, .. } => name.clone(),
         JournalCommand::List { .. } => String::new(),
@@ -198,6 +202,121 @@ pub async fn run(
     .await;
     let full_name = format!("{tenant_name}/{journal_name}");
     report(out, (tenant, &full_name), labels, &answer)
+}
+
+/// The `READY` tenant named `tenant_name`, with its control journal, and the
+/// cell's election journal, where the tenant coordinator publishes itself.
+async fn ready_tenant(
+    client: &ParosClient,
+    out: &Printer,
+    tenant_name: &str,
+) -> Result<(TenantId, paros::JournalId, JournalIdentifier), Ending> {
+    let Some(cell) = control_journals(client).await else {
+        note("no server named its cell's control journals: is the cell initialized?");
+        return Err(Ending::Unreachable);
+    };
+    let (Some(fleet), Some(election)) = (cell.fleet, cell.election) else {
+        note("the cell names no fleet journal or no election journal");
+        return Err(Ending::Refused);
+    };
+    let directory = match read_directory(client, 0, fleet).await {
+        Ok(directory) => directory,
+        Err(outcome) => {
+            note(&format!(
+                "the fleet directory could not be read to its tail: {outcome:?}"
+            ));
+            return Err(Ending::Unreachable);
+        }
+    };
+    let Some((tenant, entry)) = directory.named(tenant_name.as_bytes()) else {
+        out.emit(
+            || format!("no tenant named {tenant_name}"),
+            || json!({ "outcome": "unknown_tenant", "tenant": tenant_name }),
+        );
+        return Err(Ending::Refused);
+    };
+    if entry.state != TenantState::Ready {
+        out.emit(
+            || format!("tenant {tenant_name} is {}", entry.state.as_str()),
+            || json!({ "outcome": "not_ready", "tenant": tenant_name, "state": entry.state.as_str() }),
+        );
+        return Err(Ending::Refused);
+    }
+    Ok((tenant, entry.control, election))
+}
+
+/// `parosctl configure` (#214 (tenant modes)): record a new desired mode
+/// for a journal or the tenant's default. The answer says it is recorded;
+/// the tenant coordinator then applies a journal's mode by reconfiguration
+/// (`parosctl status` shows it degraded until then).
+pub async fn configure(
+    providers: &TokioProviders,
+    rpc: &RpcHandle<TokioProviders>,
+    names: &Names,
+    client: &ParosClient,
+    out: &Printer,
+    args: ConfigureArgs,
+) -> Ending {
+    let Some(mut desired) = args
+        .durability
+        .desired()
+        .or_else(|| args.replicas.map(|_| Desired::DEFAULT))
+    else {
+        note("name a mode: --failures-per-partition, --partitions or --replicas");
+        return Ending::Refused;
+    };
+    desired.replicas = args.replicas.unwrap_or(0);
+    let (tenant, _, election) = match ready_tenant(client, out, &args.tenant).await {
+        Ok(found) => found,
+        Err(ending) => return ending,
+    };
+    let request = JournalRequest {
+        request: nonzero(providers),
+        tenant,
+        op: JournalOp::Configure {
+            name: args.journal.as_ref().map(|j| j.clone().into_bytes()),
+            desired,
+        },
+    };
+    let answer = journals::request(
+        providers,
+        rpc,
+        names,
+        client,
+        election,
+        &request,
+        Duration::from_millis(args.patience_ms),
+    )
+    .await;
+    let target = args.journal.as_ref().map_or_else(
+        || format!("{} (default)", args.tenant),
+        |j| format!("{}/{j}", args.tenant),
+    );
+    let label = answer.as_str();
+    match answer {
+        JournalAnswer::Configured { .. } => {
+            out.emit(
+                || format!("configured {target}: {}", desired.label()),
+                || json!({ "outcome": label, "target": target, "mode": desired.label() }),
+            );
+            Ending::Success
+        }
+        JournalAnswer::NotCoordinator | JournalAnswer::Unavailable => {
+            note("no coordinator decided the request: run the same command again");
+            out.emit(
+                || format!("undecided: {label}"),
+                || json!({ "outcome": label }),
+            );
+            Ending::Ambiguous
+        }
+        _ => {
+            out.emit(
+                || format!("refused: {label}"),
+                || json!({ "outcome": label, "target": target }),
+            );
+            Ending::Refused
+        }
+    }
 }
 
 /// Print what a request for the journal `named` came to.
