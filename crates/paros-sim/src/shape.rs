@@ -1301,7 +1301,10 @@ pub(crate) fn zone_outage(state: &StateHandle) -> bool {
 /// at the steps knob's top (`crate::chain_workload`). Draining at `ADMIT`
 /// alone, 8 moves finished in 800 hunt seeds: most drains came before any
 /// journal. With the drain after a create, 11 finished in 400. Four move
-/// gates stay in `gates::RARE` until #498 (moves in the sweep).
+/// gates stay in `gates::RARE` until #498 (moves in the sweep). Every
+/// coordinator term of a scenario seed resigns once mid-move
+/// (`paros::scenario::QUIT_MID_MOVE`), so a successor term finishes a move
+/// on most seeds that finish one (#215 (zones)).
 /// Rare-but-valid: an operator may drain a machine at any time.
 #[tracing::instrument(level = "debug", skip_all)]
 pub(crate) fn drained_machine(state: &StateHandle) -> bool {
@@ -1312,9 +1315,11 @@ pub(crate) fn drained_machine(state: &StateHandle) -> bool {
         || zone_outage(state);
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
-    *guard
-        .drained_machine
-        .get_or_insert_with(|| !other && moonpool_sim::buggify_with_prob!(1.0))
+    *guard.drained_machine.get_or_insert_with(|| {
+        let drained = !other && moonpool_sim::buggify_with_prob!(1.0);
+        moonpool_sim::set_activation(paros::scenario::QUIT_MID_MOVE, drained);
+        drained
+    })
 }
 
 /// Whether the run draws the **changed-mode scenario** (#214 (tenant
