@@ -266,11 +266,22 @@ fn gone_plan(
         count: size,
     };
     let storage = desk.storage(registry);
+    // A draining, gone (#475) or slow (#361 (slow machines)) machine takes
+    // no new slot: the machines a set may go to are the ones whose slots
+    // stay, so a set never books a machine it is leaving (the registry
+    // refuses the duplicate booking, and the refused grant ends the term).
     let machines: Vec<placement::Machine> = placement::machines(registry, storage.iter().copied())
         .into_iter()
-        .filter(|m| !gone.contains(&m.node))
+        .filter(|m| stays(registry, gone, m.node))
         .collect();
-    placement::plan(&want, &machines, staying, tenant.0).ok()
+    let steps = placement::plan(&want, &machines, staying, tenant.0).ok()?;
+    assert!(
+        placement::booked(&steps)
+            .iter()
+            .all(|node| stays(registry, gone, *node)),
+        "a set never books a machine it is leaving"
+    );
+    Some(steps)
 }
 
 /// The set in force of `journal`'s tenant as the founding members of
