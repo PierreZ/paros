@@ -152,7 +152,7 @@ checkpoint, common, fleet, public, internal, matchmaker, system, machine, view}`
 
 - `paros-core` with `tracing` + `serde` (`:17`); `prost` (`:34`), `postcard` (`:37`), `serde`
   (`:38`), `crc32c` (`:39`), `tracing` (`:42`), `tokio` `sync` (`:45`), `tokio-util` (`:48`).
-- moonpool, rev `43deaf5` (moonpool#334 (journal replay reads runs): a replay reads runs of entries at once, #602 (dark after a full restart); after moonpool#323's `SystemProvider` and moonpool#318's `buggify_named!` and `set_activation`): `moonpool-core` (`select`, `:26`), `moonpool-rpc` (`prost`, `:28`),
+- moonpool, rev `a0c1993` (moonpool#336 (balanced geometry): a balanced default geometry, and a journal keeps the geometry it was created with; after moonpool#334 (journal replay reads runs), moonpool#323's `SystemProvider` and moonpool#318's `buggify_named!` and `set_activation`): `moonpool-core` (`select`, `:26`), `moonpool-rpc` (`prost`, `:28`),
   `moonpool-journal` (`:32`), `moonpool-buggify` (`:36`), `moonpool-assertions` (`:37`), dev `moonpool-sim` (`:61`).
 - Dev: `futures` executor (`:53`), `tokio` `rt`+`macros` (`:57`). Build: `prost-build` (`:60`).
 - `prometheus` without default features: the machine's metrics (#366 (metrics)), wasm-safe.
