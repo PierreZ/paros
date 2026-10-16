@@ -593,8 +593,12 @@ restart is supported:
   (below) lets a machine that restarts after others moved dial them where they are.
 - **The simulation.** On a seed whose machines advertise names, a cell machine's reboot comes
   back under a new name at a new IP (`rename_pct`). Its old name keeps the old IP, where
-  nobody listens. The operators' entry for the machine follows it. After chaos, the oracle
-  judges that the registry holds every renamed founding member at its new name.
+  nobody listens. The operators' entry for the machine follows it. A founding member is renamed
+  only once every renamed admitted machine is registered at its new name. Otherwise the run
+  passes the limit above: the admitted machine's book names only the founder's old name, and
+  the registry names the machine only at its old address (#501 (matchmaker sets off the
+  founders)). After chaos, the oracle judges that the registry holds every renamed founding
+  member and every renamed admitted machine at its new name.
 
 **Liveness** (decided on 2026-10-04). The cell coordinator watches the cell's machines with the
 transport's failure detector and writes only the *changes* into the cell control journal (`Down`,
