@@ -7,13 +7,14 @@
 //! are the same structure over different keys, and they had the same four
 //! rules written out twice — the floor never moves backward, nothing below it
 //! survives, a query below it is refused rather than answered, and what is
-//! retained is handed out one bounded page at a time.
+//! retained is read one range at a time.
 //!
 //! So the rules live here once, and the *decisions* stay with their owners: a
 //! below-floor `Prepare` and a collected ballot are refused differently, and
-//! the acceptor's tri-state promise page interleaves two windows (the
-//! readable records and the faulty entries), which [`RetainedWindow::page`]
-//! deliberately does not try to express.
+//! each owner cuts its own pages from [`RetainedWindow::range`]: the
+//! acceptor's tri-state promise page interleaves two windows (the readable
+//! records and the faulty entries), and the matchmaker's history page leaves
+//! out a belief a later registration repeats.
 
 use std::collections::BTreeMap;
 use std::collections::btree_map::Range;
@@ -218,45 +219,6 @@ impl<K: Copy + Ord, V> RetainedWindow<K, V> {
             "the floor lands where it was raised to"
         );
         self.assert_invariants();
-    }
-
-    /// One bounded page of the retained entries: at most `limit` of them from
-    /// `max(from, floor)` up to (but not including) `upper`, plus the key the
-    /// next page starts at when the window did not fit. `None` there means
-    /// the answer is complete.
-    ///
-    /// # Panics
-    ///
-    /// If an assertion on its own invariants, preconditions or postconditions
-    /// fails: a programmer error, never an operating condition.
-    #[must_use]
-    pub fn page(&self, from: K, upper: K, limit: usize) -> (BTreeMap<K, V>, Option<K>)
-    where
-        V: Clone,
-    {
-        let from = from.max(self.floor);
-        let mut window = self.entries.range(from..upper);
-        let page: BTreeMap<K, V> = window
-            .by_ref()
-            .take(limit)
-            .map(|(k, v)| (*k, v.clone()))
-            .collect();
-        let cursor = window.next().map(|(k, _)| *k);
-        // Postconditions: bounded, inside `[from, upper)`, and the cursor
-        // strictly past everything the page carried.
-        assert!(page.len() <= limit, "a page honours its limit");
-        assert!(
-            page.keys().next().is_none_or(|k| *k >= from),
-            "a page starts at its cursor"
-        );
-        if let Some(cursor) = cursor {
-            assert!(cursor < upper, "a continuation lies below the upper bound");
-            assert!(
-                page.keys().next_back().is_none_or(|k| *k < cursor),
-                "the continuation lies past the page"
-            );
-        }
-        (page, cursor)
     }
 
     /// The window's own invariant: nothing below the floor. A bounded

@@ -2368,16 +2368,25 @@ impl ColocatedNode {
         &self.pending_messages
     }
 
-    pub(crate) fn pending_committed(&self) -> &[(Slot, Command, crate::Outcome)] {
+    pub(crate) fn pending_committed(&self) -> &[(Slot, Ballot, Command, crate::Outcome)] {
         let committed = self.replica.committed();
         // Persist-before-apply: every surfaced entry is inside the chosen
         // index this same batch makes durable.
         assert!(
-            committed.last().is_none_or(|(slot, _, _)| self
+            committed.last().is_none_or(|(slot, _, _, _)| self
                 .replica
                 .chosen_index()
                 .is_some_and(|ci| *slot <= ci)),
             "an applied entry lies inside the chosen index"
+        );
+        // The walk's ballot, read back: a record still retained only rose
+        // since the walk read it (a compacted one is gone).
+        assert!(
+            committed.iter().all(|(slot, ballot, _, _)| self
+                .acceptor
+                .record(*slot)
+                .is_none_or(|(recorded, _)| recorded >= ballot)),
+            "an applied entry's record ballot never falls after the walk"
         );
         committed
     }

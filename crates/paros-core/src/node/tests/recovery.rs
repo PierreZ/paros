@@ -337,7 +337,7 @@ fn a_faulty_chosen_record_holds_the_walk_until_the_fold_heals() {
     let (_, committed) = drain_with(&mut n, |r| {
         r.committed()
             .iter()
-            .map(|(slot, command, _)| (*slot, command.clone()))
+            .map(|(slot, _, command, _)| (*slot, command.clone()))
             .collect::<Vec<_>>()
     });
     assert_eq!(

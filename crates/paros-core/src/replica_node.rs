@@ -163,6 +163,9 @@ pub struct ReplicaNode {
     /// unreadable (value lost, identity kept): pulled from the acceptors on
     /// the tick until a catch-up replay heals them.
     faulty: BTreeSet<Slot>,
+    /// The ballot of each learned record the walk has not applied yet: the
+    /// walk hands it on with the slot ([`ReplicaReady::committed`]).
+    unwalked: BTreeMap<Slot, Ballot>,
     /// The node whose beat this replica heard last — where it pulls from.
     leader: Option<NodeId>,
     /// The acceptor configuration this replica believes in force — the one
@@ -257,6 +260,7 @@ impl ReplicaNode {
             replica,
             floor,
             faulty,
+            unwalked: BTreeMap::new(),
             leader: None,
             acceptors,
             acceptors_since: Ballot::zero(),
@@ -269,7 +273,8 @@ impl ReplicaNode {
             pending_read_states: Vec::new(),
             counters: ReplicaCounters::default(),
         };
-        for (slot, (_, command)) in above {
+        for (slot, (ballot, command)) in above {
+            node.unwalked.insert(slot, ballot);
             node.replica.learn(slot, &command);
         }
         node.advance();
@@ -713,6 +718,7 @@ impl ReplicaNode {
             ballot,
             command: command.clone(),
         });
+        self.unwalked.insert(slot, ballot);
         self.replica.learn(slot, command);
         self.faulty.remove(&slot);
         self.counters.learned += 1;
@@ -740,13 +746,25 @@ impl ReplicaNode {
         // record carries the applied command" — holds here by construction:
         // the record is `WriteOp::Learned` from the very command `learn`
         // handed the replica, and the boot scan reads the prefix back from
-        // those records.
+        // those records. Its ballot is the one `unwalked` kept for it.
         let chosen = self.replica.chosen_index();
-        let truncate_up_to = self.replica.advance(|_, _| true, &mut self.pending_writes);
+        let unwalked = &self.unwalked;
+        let truncate_up_to = self.replica.advance(
+            |slot, _| unwalked.get(&slot).copied(),
+            &mut self.pending_writes,
+        );
+        // The walk applied every slot below the prefix: drop their ballots.
+        self.unwalked = self.unwalked.split_off(&self.replica.first_unchosen());
         if let Some(up_to) = truncate_up_to {
             self.compact(up_to);
         }
         self.replica.assert_compacted();
+        assert!(
+            self.unwalked
+                .first_key_value()
+                .is_none_or(|(slot, _)| *slot >= self.replica.first_unchosen()),
+            "a replica keeps a ballot only for a slot the walk has not applied"
+        );
         assert!(
             self.replica.chosen_index() >= chosen,
             "a replica's walk never retreats"
@@ -830,6 +848,16 @@ impl ReplicaNode {
             "a replica's floor never outruns its chosen prefix"
         );
         self.replica.assert_invariants(self.floor);
+        assert!(
+            self.unwalked
+                .first_key_value()
+                .is_none_or(|(s, _)| *s >= self.replica.first_unchosen()),
+            "an unwalked ballot sits at or above the chosen prefix"
+        );
+        assert!(
+            self.unwalked.keys().all(|s| self.replica.is_chosen(*s)),
+            "an unwalked ballot belongs to a slot this replica learned chosen"
+        );
         assert!(
             self.faulty.first().is_none_or(|s| *s >= self.floor),
             "no faulty record survives below a replica's floor"
@@ -1053,11 +1081,12 @@ impl ReplicaReady<'_> {
         reads
     }
 
-    /// The `(slot, command)` pairs the prefix just walked over, in
-    /// contiguous slot order, after the writes are durable — the node's
-    /// [`crate::Ready::committed`] contract.
+    /// The `(slot, ballot, command, outcome)` entries the prefix just
+    /// walked over, in contiguous slot order, after the writes are durable —
+    /// the node's [`crate::Ready::committed`] contract. `ballot` is the one
+    /// this replica's learned record holds.
     #[must_use]
-    pub fn committed(&self) -> &[(Slot, Command, crate::Outcome)] {
+    pub fn committed(&self) -> &[(Slot, Ballot, Command, crate::Outcome)] {
         self.node.replica.committed()
     }
 

@@ -473,8 +473,8 @@ impl World {
         let mut clone = node.replica().clone();
         clone.learn(slot, command);
         let mut writes: Vec<WriteOp> = Vec::new();
-        clone.advance(|_, _| true, &mut writes);
-        let applies_now = clone.committed().iter().any(|(at, _, _)| *at == slot);
+        clone.advance(|_, _| Some(Ballot::zero()), &mut writes);
+        let applies_now = clone.committed().iter().any(|(at, _, _, _)| *at == slot);
         let id = self.take_prompt_id();
         Some(Prompt::replica_apply(
             id,

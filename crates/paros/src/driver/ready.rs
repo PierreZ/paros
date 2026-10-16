@@ -24,8 +24,9 @@ use super::transport::{Outbound, send_messages};
 /// wait on their slot's verdict (#204), and the journal reads that wait on
 /// their quorum read or at the tail.
 pub(crate) struct ClientWaiters {
-    /// The calls proposed at each slot, answered once it applies.
-    pub(crate) pending: BTreeMap<Slot, Vec<Call>>,
+    /// The calls proposed at each slot, answered once it applies, each with
+    /// the ballot its proposal was opened under.
+    pub(crate) pending: BTreeMap<Slot, Vec<(Ballot, Call)>>,
     /// Journal reads (#204).
     pub(crate) reads: super::log_reads::JournalReads,
 }
@@ -68,10 +69,32 @@ pub(crate) fn fold_head(node: &ColocatedNode) -> Option<Slot> {
 /// it. The reply may be deliberately dropped at the reply seam
 /// (`reply::answer`, #318): the journal moved either way, and
 /// the client's retry is answered from the log.
+///
+/// **A slot decided this call's proposal only at the call's ballot.** An
+/// equal command is not enough: two unfenced appends of the same bytes to a
+/// multi-writer journal are one `Command` and two writes (a single-writer
+/// retry, the same write, still owes `Duplicate`). A leader deposed without
+/// knowing it opens a fresh slot another leader already decided, then
+/// learns the decision; when the decided command equals its own, the old
+/// rule answered its call with the other write's position (hunt seed
+/// 10919941540472574501 on the #570 fix (election duel outlasts the
+/// recovery tail): a handoff successor still leading at the inherited
+/// (29, n) parked a re-sent append on slot 158, decided at (30, n) with an
+/// identical earlier copy, and acked it `seq 150` while that copy was acked
+/// `150` and a later one `151`; the linearizability search refuted it).
+/// The node's authoritative record of a decided slot holds the decided
+/// command at a ballot at or above the choosing one (`mark_chosen`), and a
+/// fresh proposal at `(slot, b)` is never preceded by a decision below `b`
+/// (its Phase 1 would have recovered it). So a record at exactly the call's
+/// ballot means its own proposal was chosen; any other ballot leaves the
+/// call without a verdict: ambiguous, never false. The ballot is the one
+/// the walk read and handed on with the slot
+/// ([`paros_core::Ready::committed`]), so a slot a `Truncate` compacts
+/// later in the same walk still gets its verdict.
 #[tracing::instrument(level = "trace", skip_all, fields(node = self_id))]
 fn answer_applied_calls<A>(
     node: &ColocatedNode,
-    walked: &[(Slot, Command, Outcome)],
+    walked: &[(Slot, Ballot, Command, Outcome)],
     waiters: &mut ClientWaiters,
     audit: &A,
     self_id: u64,
@@ -85,19 +108,40 @@ fn answer_applied_calls<A>(
             continue;
         };
         let batch = walked
-            .binary_search_by_key(&slot, |(at, _, _)| *at)
+            .binary_search_by_key(&slot, |(at, _, _, _)| *at)
             .ok()
             .map(|i| &walked[i]);
         let decided = batch
-            .map(|(_, command, _)| command)
+            .map(|(_, _, command, _)| command)
             .or_else(|| node.replica().chosen_at(slot));
         let outcome = batch
-            .map(|(_, _, outcome)| outcome)
+            .map(|(_, _, _, outcome)| outcome)
             .filter(|outcome| **outcome != Outcome::Noop)
             .or_else(|| node.replica().outcome_at(slot));
-        for call in calls {
+        // The ballot the node's authoritative record of the slot held when
+        // the walk applied it: the batch's, else the record a walk of an
+        // earlier batch left.
+        let recorded = batch
+            .map(|(_, ballot, _, _)| *ballot)
+            .or_else(|| node.acceptor().record(slot).map(|(ballot, _)| *ballot));
+        for (ballot, call) in calls {
+            assert!(
+                ballot > Ballot::default(),
+                "a parked call was proposed under a leadership's ballot"
+            );
+            let same = decided.is_some_and(|command| *command == call.command());
+            let own = same && recorded == Some(ballot);
+            if same && !own {
+                moonpool_assertions::reachable!(
+                    "driver: a call's slot decided an equal command at another ballot"
+                );
+            }
             match (decided, outcome) {
-                (Some(command), Some(outcome)) if *command == call.command() => {
+                (Some(command), Some(outcome)) if own => {
+                    assert!(
+                        *command == call.command(),
+                        "a call is answered only by its own command's slot"
+                    );
                     audit.answered(NodeId(self_id), slot, command, outcome);
                     tracing::info!(node = self_id, slot = slot.0, ?outcome, "call_answered");
                     call.answer(outcome, self_id, audit);
@@ -219,7 +263,7 @@ where
                 .map(move |to| (to, msg.clone()))
         })
         .collect();
-    let committed: Vec<(Slot, Command, Outcome)> = ready.committed().to_vec();
+    let committed: Vec<(Slot, Ballot, Command, Outcome)> = ready.committed().to_vec();
     let read_states: Vec<ReadState> = ready.read_states().to_vec();
     let recovery_batch = ready.recovery_batch();
     // The matchmaking requests ride the same persist-before-send edge as the
@@ -273,7 +317,7 @@ where
     //    contiguous order) — surface them and the journal state machine's
     //    verdicts to the oracles and answer every call waiting on a slot the
     //    fold now covers (a held reply fires only now that its slot applied).
-    for (slot, command, outcome) in &committed {
+    for (slot, _, command, outcome) in &committed {
         let outcome = (*outcome != Outcome::Noop).then_some(outcome);
         report_applied(audit, self_id, *slot, command, outcome);
     }

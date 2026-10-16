@@ -139,18 +139,22 @@ impl<'a> Ready<'a> {
         self.node.pending_messages()
     }
 
-    /// The `(slot, command)` pairs the contiguous chosen prefix just walked
-    /// over, **after** they are durable (step 3), in slot order (no gaps). A
-    /// #94 duplicate surfaces as the `Noop` the walk executed it as. The
-    /// driver acks the clients waiting on these slots and reports them; there
-    /// is no application to hand them to (#186).
+    /// The `(slot, ballot, command, outcome)` entries the contiguous chosen
+    /// prefix just walked over, **after** they are durable (step 3), in slot
+    /// order (no gaps). `ballot` is the ballot of this node's record of the
+    /// slot when the walk applied it; `outcome` is the journal state
+    /// machine's verdict. Both ride with the slot, so a slot a `Truncate`
+    /// compacts later in the same walk still carries them. A #94 duplicate
+    /// surfaces as the `Noop` the walk executed it as. The driver acks the
+    /// clients waiting on these slots and reports them; there is no
+    /// application to hand them to (#186).
     ///
     /// # Panics
     ///
     /// If an assertion on its own invariants, preconditions or postconditions
     /// fails: a programmer error, never an operating condition.
     #[must_use]
-    pub fn committed(&self) -> &[(Slot, Command, crate::Outcome)] {
+    pub fn committed(&self) -> &[(Slot, Ballot, Command, crate::Outcome)] {
         let committed = self.node.pending_committed();
         // The walk moves forward: each slot once, in slot order.
         assert!(
