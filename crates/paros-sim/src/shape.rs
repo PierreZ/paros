@@ -1273,7 +1273,7 @@ pub(crate) fn downed_founder(state: &StateHandle) -> bool {
 /// zone `zone-<r % 3>` ([`machine_layout`]), client 0 runs `init` first and
 /// every client creates tenants and journals as often as the weight family
 /// allows (`crate::chain_workload`), and `crate::world::zone_outage` takes
-/// every machine of one zone down for 6–10 s once the cell formed. Each
+/// every machine of one zone down for 10–16 s (6–10 s in the tail) once the cell formed. Each
 /// ingredient keeps its own coin on the other seeds. Rare-but-valid: a
 /// zone outage is the failure the zone rule exists for.
 #[tracing::instrument(level = "debug", skip_all)]
