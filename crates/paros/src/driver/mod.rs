@@ -1509,7 +1509,7 @@ where
     // while it serves its cell (#277). A founding member's peers are dialed
     // where the registry fold says (#349), from the plan's addresses on.
     let mut peer_book = match &machine {
-        Some(CellMachine::Founded(formed)) => Some(book::PeerBook::new(formed)),
+        Some(CellMachine::Founded { cell, .. }) => Some(book::PeerBook::new(cell)),
         _ => None,
     };
     // A founding member that came back at another address than the one its
@@ -1541,7 +1541,11 @@ where
             incarnation_shutdown.clone(),
         )?;
     }
-    if let Some(CellMachine::Founded(formed)) = machine {
+    if let Some(CellMachine::Founded {
+        cell: formed,
+        cache,
+    }) = machine
+    {
         // Every founding member answers the cell's views (#399).
         crate::machine::views::spawn(
             &providers,
@@ -1598,6 +1602,7 @@ where
             &providers,
             &rpc_handle,
             &tunables,
+            cache.subscribe(),
             incarnation_shutdown.clone(),
         )?;
     }
