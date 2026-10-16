@@ -44,6 +44,15 @@ const SHAPE_KEY: &str = "paros-node-shapes";
 /// production's 80 ticks of 100 ms (`DriverTunables::production`).
 const QUARANTINE_CEILING_MS: u64 = 8_000;
 
+/// The longest capped base election timeout a drawn backoff reaches, in
+/// milliseconds: production's `8 × T` (`DriverTunables::production`). A
+/// node waits up to twice it, and one that learns a new matchmaker set
+/// waits a second timeout to ask it: both fit the shortest recovery budget
+/// (45 s, `ChainConfig::recovery_budget_ms`), even at the floor's 9.6 s.
+const BACKOFF_CEILING_MS: u64 = 8_000;
+const _: () = assert!(BACKOFF_CEILING_MS <= (12 * SLOWEST_TICK_MS) << 2);
+const _: () = assert!(4 * ((12 * SLOWEST_TICK_MS) << 2) < 45_000);
+
 /// The wall-clock floor of every driver timeout that races the network: one
 /// Phase-1 round trip over moonpool's default cross-datacenter link plus one
 /// delivery batch, i.e. production's `5 ticks × 50 ms`. See [`NodeShape::draw`]
@@ -457,6 +466,7 @@ impl NodeShape {
                 ms(buggify_knob!(2000_u64, RESOLVE_FLOOR_MS..2001_u64))
             },
         };
+        cap_backoff(&mut drawn, tick_ms);
         // The handover re-send cadence stays under the shortest stall
         // budget, one base election timeout per election (`check_floors`):
         // the freeze closes only on a re-send beat, so a budget that ends on
@@ -2705,6 +2715,30 @@ const _: () = assert!(
     INTERNAL_CALL_FLOOR_MS < 2000,
     "the floor sits under production's"
 );
+
+/// The election backoff's ceiling is wall-clock too: a capped base
+/// election timeout (`base << doublings` ticks) stays within
+/// `BACKOFF_CEILING_MS`, production's 8 s, unless the floor of two
+/// doublings alone passes it (12 ticks of 200 ms: 9.6 s). At a slow
+/// tick, six doublings held two leaderless nodes for 27 to 77 s
+/// each, and a node that learned a new matchmaker set waited one
+/// more capped timeout to ask it, past the recovery budget (witness:
+/// seed 12451707706557626383, #232 (multiple cells)'s sweep).
+fn cap_backoff(drawn: &mut DriverTunables, tick_ms: u64) {
+    let base_ms = drawn.election_timeout_base * tick_ms;
+    let capped = |doublings: u32| base_ms << doublings;
+    while drawn.election_backoff_doublings > 2
+        && capped(drawn.election_backoff_doublings) > BACKOFF_CEILING_MS
+    {
+        drawn.election_backoff_doublings -= 1;
+    }
+    assert_always!(
+        drawn.election_backoff_doublings == 2
+            || capped(drawn.election_backoff_doublings) <= BACKOFF_CEILING_MS,
+        "node: a capped election backoff fits the recovery tail",
+        { "capped_ms" => capped(drawn.election_backoff_doublings) }
+    );
+}
 
 #[cfg(test)]
 mod tests {
