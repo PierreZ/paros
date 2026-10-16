@@ -715,13 +715,14 @@ pub async fn tenant_show(asker: &Asker<'_>, out: &Printer, name: &str) -> Ending
             .collect::<Vec<_>>()
             .join(",")
     };
-    let journal_rows: Vec<[String; 5]> = tenant
+    let journal_rows: Vec<[String; 6]> = tenant
         .journals
         .iter()
         .map(|j| {
             [
                 journal_label(j),
                 j.writer.clone(),
+                j.store_durability.clone(),
                 j.desired.clone(),
                 members(&j.acceptors),
                 if j.matchmakers.is_empty() {
@@ -760,7 +761,10 @@ pub async fn tenant_show(asker: &Asker<'_>, out: &Printer, name: &str) -> Ending
                 tags_text(&tenant.tags),
                 tenant.survives,
                 coordinator_text(&reply, &names),
-                indent(&table(["JOURNAL", "WRITER", "DESIRED", "ACCEPTORS", "MATCHMAKERS"], &journal_rows)),
+                indent(&table(
+                    ["JOURNAL", "WRITER", "STORE", "DESIRED", "ACCEPTORS", "MATCHMAKERS"],
+                    &journal_rows
+                )),
                 indent(&table(["MACHINE", "ZONE", "STATE", "ACCEPTOR SLOTS"], &machine_rows)),
             )
         },
@@ -963,6 +967,7 @@ pub(crate) fn reply_json(reply: &wire::ViewReply) -> Value {
                 "name": record_text(&j.name),
                 "kind": j.kind,
                 "writer": j.writer,
+                "store_durability": j.store_durability,
                 "desired": j.desired,
                 "acceptors": j.acceptors,
                 "matchmakers": j.matchmakers,

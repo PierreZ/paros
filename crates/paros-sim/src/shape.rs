@@ -812,6 +812,9 @@ struct Registry {
     /// Whether the run sets no user tag (#575 (key:value tags), [`untagged`]),
     /// fixed by the first caller.
     untagged: Option<bool>,
+    /// Whether the run's creates draw batched stores (#599 (durability mode
+    /// per journal), [`batched_journals`]), fixed by the first caller.
+    batched_journals: Option<bool>,
     /// Run-level: when the clients' operations end (see [`run_end`]), fixed
     /// by the first caller.
     run_end: Option<Duration>,
@@ -1462,6 +1465,30 @@ pub(crate) fn untagged(state: &StateHandle) -> bool {
         .get_or_insert_with(|| moonpool_sim::buggify_with_prob!(0.2))
 }
 
+/// Whether the run's journal creates draw **batched stores** (#599
+/// (durability mode per journal)): drawn once per seed, its own BUGGIFY
+/// location. On such a seed a create asks for `Batched` on three draws in
+/// four, so a cell serves journals of both modes side by side; on every
+/// other seed each create is `Ordered`, production's default. The
+/// machines' cut budget (`crate::world::cut`) lets a power loss strike
+/// inside a batched commit, so its last batch may come back faulty. That
+/// needs a batched journal that tolerates a loss and takes many commits:
+/// without more, a 100-seed hunt opened 4 batched commits, none with a
+/// loss to spare. So on a scenario seed the layout lists three founders or
+/// more where the machines allow it ([`machine_layout`]), client 0 runs
+/// `init` first, every client runs `TENANT` and `CREATE_JOURNAL` as often
+/// as the weight family allows at the steps knob's top, and each create
+/// first appends to journals the client created before
+/// (`crate::chain_workload`).
+#[tracing::instrument(level = "debug", skip_all)]
+pub(crate) fn batched_journals(state: &StateHandle) -> bool {
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    *guard
+        .batched_journals
+        .get_or_insert_with(|| moonpool_sim::buggify_with_prob!(1.0))
+}
+
 pub(crate) fn slow_machine(state: &StateHandle) -> bool {
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
@@ -2014,6 +2041,7 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
     let drained = drained_machine(state);
     let zoned = zone_outage(state);
     let changed = changed_mode(state);
+    let batched = batched_journals(state);
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     guard
@@ -2029,7 +2057,11 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
             // only in a cell of three or more.
             // So does the changed-mode scenario (#214 (tenant modes)): on a
             // cell of one, every mode places the same one slot.
-            let least = if (replaced || moved || downed || changed) && count >= 3 {
+            // So does the batched-journals scenario (#599 (durability mode
+            // per journal)): a cut may strike a batched commit only where
+            // the journal tolerates a loss, which one or two members never
+            // place.
+            let least = if (replaced || moved || downed || changed || batched) && count >= 3 {
                 3
             } else {
                 1

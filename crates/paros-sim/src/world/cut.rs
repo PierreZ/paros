@@ -21,6 +21,16 @@
 //! matchmaker's one-sync registry commit outside its budget (#454 (control
 //! plane meets chaos), witness seed 6698767524067190541).
 //!
+//! A machine's journals run on a bare disk, with no store to register
+//! through (#294). A created journal stores `Batched` when its create asked
+//! for it (#599 (durability mode per journal)), so the driver's own report
+//! of each commit registers it ([`open_machine_commit`] from
+//! `Audit::commit_started`, [`close_machine_commit`] from
+//! `Audit::commit_ended`), under the journal's budget: at most as many
+//! distinct machines cut inside its commits over the run as copies of one
+//! slot its configurations may lose (the tenant board's `cut_budget`). A
+//! permitted kill closes every commit the dead process had in flight.
+//!
 //! A correlated outage kills every acceptor and proxy leader at one instant
 //! (#332): moonpool's `Chaos::Outage` asks the published [`OutageVeto`],
 //! and the harness's own outages ask [`outage_permitted`] before they
@@ -32,8 +42,10 @@
 //! tick later, has no completed write yet, so the kill leaves it absent,
 //! never ambiguous.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
+
+use paros::JournalIdentifier;
 
 use moonpool_sim::{HintVeto, OutageVeto, StateHandle, assert_always, assert_reachable};
 
@@ -100,6 +112,12 @@ struct Commit {
 pub(crate) struct Commits {
     next: u64,
     open: BTreeMap<u64, Commit>,
+    /// A machine's commit in flight of a `Batched` journal a tenant created
+    /// (#599 (durability mode per journal)), by `(ip, journal)`: the copies
+    /// of a slot the journal may lose.
+    machine: BTreeMap<(String, JournalIdentifier), usize>,
+    /// Per `Batched` journal, the machines a kill cut inside its commits.
+    machine_cuts: BTreeMap<JournalIdentifier, BTreeSet<String>>,
 }
 
 /// The run's [`Commits`], publishing the veto that reads them on the first
@@ -157,7 +175,8 @@ impl Commits {
             .values()
             .filter(|commit| victims.contains(&commit.ip))
             .filter(|commit| commit.world.strong_count() > 0)
-            .any(|commit| commit.budget.spends());
+            .any(|commit| commit.budget.spends())
+            || self.machine.keys().any(|(ip, _)| victims.contains(ip));
         if blocked {
             assert_reachable!("outage: a commit in flight holds an outage back");
         }
@@ -166,7 +185,7 @@ impl Commits {
 
     /// Whether the process at `ip` may die now, spending the budget of every
     /// commit it has in flight if so.
-    fn permit_kill(&self, ip: &str) -> bool {
+    fn permit_kill(&mut self, ip: &str) -> bool {
         let open: Vec<(&Commit, Arc<Mutex<StorageWorld>>)> = self
             .open
             .values()
@@ -191,10 +210,37 @@ impl Commits {
                 }),
             }
         });
-        if !fits {
+        let machine: Vec<(JournalIdentifier, usize)> = self
+            .machine
+            .iter()
+            .filter(|((at, _), _)| at == ip)
+            .map(|((_, journal), tolerated)| (*journal, *tolerated))
+            .collect();
+        // The machines cut with this one fit the journal's budget, as it
+        // stands now (a configure may have lowered it).
+        let machine_fits = machine.iter().all(|(journal, tolerated)| {
+            let cut = self.machine_cuts.get(journal);
+            let counted = cut.map_or(0, BTreeSet::len);
+            let fresh = usize::from(!cut.is_some_and(|cut| cut.contains(ip)));
+            counted + fresh <= *tolerated
+        });
+        if !fits || !machine_fits {
             assert_reachable!("journal store: the copy budget refuses a cut mid-commit");
             return false;
         }
+        for (journal, tolerated) in machine {
+            let cut = self.machine_cuts.entry(journal).or_default();
+            cut.insert(ip.to_string());
+            assert_always!(
+                cut.len() <= tolerated,
+                "journal store: a batched journal's cut machines fit its loss budget"
+            );
+            // Paired with the faulty boot the journal then reports
+            // (`TenantBoard::note_faulty`).
+            assert_reachable!("journal store: a machine loses power inside a batched commit");
+        }
+        // The process dies: none of its commits is in flight any more.
+        self.machine.retain(|(at, _), _| at != ip);
         for (commit, world) in &open {
             let mut world = world.lock().unwrap_or_else(PoisonError::into_inner);
             match &commit.budget {
@@ -264,6 +310,33 @@ impl InFlight {
             id
         };
         Self { commits, id }
+    }
+}
+
+/// Register `ip`'s commit of `journal` in flight (#599 (durability mode per
+/// journal)): a `Batched` journal a tenant created, whose slots may each
+/// lose `tolerated` copies. A machine commits one batch of a journal at a
+/// time, so a registration left by a kill the veto never saw (a scenario's
+/// crash) is replaced here.
+pub(crate) fn open_machine_commit(
+    state: &StateHandle,
+    ip: &str,
+    journal: JournalIdentifier,
+    tolerated: usize,
+) {
+    let commits = commits(state);
+    let mut guard = commits.lock().unwrap_or_else(PoisonError::into_inner);
+    guard.machine.insert((ip.to_string(), journal), tolerated);
+}
+
+/// `ip`'s commit of `journal` returned: nothing of it is in flight (#599).
+pub(crate) fn close_machine_commit(state: &StateHandle, ip: &str, journal: JournalIdentifier) {
+    if let Some(commits) = state.get::<Arc<Mutex<Commits>>>(COMMITS_KEY) {
+        commits
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .machine
+            .remove(&(ip.to_string(), journal));
     }
 }
 

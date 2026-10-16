@@ -632,6 +632,16 @@ impl ChainWorkload {
             }
             config.steps = config.steps.max(64);
         }
+        if crate::shape::batched_journals(ctx.state()) {
+            // The batched-journals scenario (#599 (durability mode per
+            // journal)): a cut strikes a batched commit only where batched
+            // journals exist and take appends, so every client creates them
+            // as often as the weight family allows, at the steps knob's top.
+            for op in [TENANT, CREATE_JOURNAL] {
+                config.weights[usize::from(op)] = OP_WEIGHT_CEILING;
+            }
+            config.steps = config.steps.max(64);
+        }
         if crate::shape::downed_founder(ctx.state()) {
             // The downed-founder scenario (#213 (three founding members)):
             // its gates wait on a tenant step while a founder is down, so
@@ -775,9 +785,13 @@ impl ChainWorkload {
                 }
             }
         }
-        // Likewise the changed-mode (#214 (tenant modes)) and zone-outage
-        // (#215 (zones)) scenarios' ops.
-        if crate::shape::changed_mode(ctx.state()) || crate::shape::zone_outage(ctx.state()) {
+        // Likewise the changed-mode (#214 (tenant modes)), zone-outage
+        // (#215 (zones)) and batched-journals (#599 (durability mode per
+        // journal)) scenarios' ops.
+        if crate::shape::changed_mode(ctx.state())
+            || crate::shape::zone_outage(ctx.state())
+            || crate::shape::batched_journals(ctx.state())
+        {
             for op in [TENANT, CREATE_JOURNAL] {
                 if !operations.contains(&op) {
                     operations.push(op);
@@ -822,9 +836,10 @@ impl ChainWorkload {
         let mut reconfigure_next = false;
         // The wiped-founder (#246), replaced-founder (#423), slow-machine
         // (#424), downed-founder (#213 (three founding members)),
-        // drained-machine (#474) and changed-mode (#214 (tenant modes))
-        // scenarios: client 0 runs `init` first, so the cell decree runs
-        // inside the chaos window.
+        // drained-machine (#474), changed-mode (#214 (tenant modes)) and
+        // batched-journals (#599 (durability mode per journal)) scenarios:
+        // client 0 runs `init` first, so the cell decree runs inside the
+        // chaos window.
         let mut init_first = self.client_id == 0
             && (crate::shape::wiped_founder(ctx.state())
                 || crate::shape::replaced_founder(ctx.state())
@@ -832,7 +847,8 @@ impl ChainWorkload {
                 || crate::shape::downed_founder(ctx.state())
                 || crate::shape::drained_machine(ctx.state())
                 || crate::shape::changed_mode(ctx.state())
-                || crate::shape::zone_outage(ctx.state()));
+                || crate::shape::zone_outage(ctx.state())
+                || crate::shape::batched_journals(ctx.state()));
         let mut successful_after_ambiguity = false;
         // The library's decisions as outcomes (#221): a write redirected
         // and written at the leader, an ambiguous write the session settled,

@@ -102,6 +102,85 @@ impl std::str::FromStr for Survives {
     }
 }
 
+/// How a journal's stores commit a batch (#599 (durability mode per
+/// journal)): chosen at its create, like its writer mode, recorded in its
+/// `CreateJournal` entry, and fixed for its life. Every machine that serves
+/// the journal opens its store under it.
+///
+/// Both are safe: a store reports an ambiguous entry faulty, like a corrupt
+/// one, and the journal repairs it from its peers. `Batched` saves one sync
+/// per commit, and a crash inside a commit can then leave the last batch
+/// ambiguous. A journal repairs a lost batch only while each slot keeps a
+/// Phase-1 quorum of clean copies, so a `Batched` journal with one acceptor
+/// per partition (`failures_per_partition` 0) can stop for good after a
+/// power loss inside a commit.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub enum StoreDurability {
+    /// Write the entries, sync, write the persist records, sync: a crash
+    /// never leaves a batch ambiguous. The default.
+    #[default]
+    Ordered,
+    /// Write the entries and the persist records, sync once (CLSTORE's
+    /// protocol): a crash inside a commit can leave its batch ambiguous.
+    Batched,
+}
+
+impl StoreDurability {
+    /// Every mode, in wire order.
+    pub const ALL: [StoreDurability; 2] = [StoreDurability::Ordered, StoreDurability::Batched];
+
+    /// The store's commit protocol.
+    #[must_use]
+    pub fn journal(self) -> crate::journal::Durability {
+        match self {
+            StoreDurability::Ordered => crate::journal::Durability::Ordered,
+            StoreDurability::Batched => crate::journal::Durability::Batched,
+        }
+    }
+
+    /// The wire value (`0` is `Ordered`, the default).
+    #[must_use]
+    pub fn to_proto(self) -> crate::rpc::common::StoreDurability {
+        match self {
+            StoreDurability::Ordered => crate::rpc::common::StoreDurability::Ordered,
+            StoreDurability::Batched => crate::rpc::common::StoreDurability::Batched,
+        }
+    }
+
+    /// From the wire. An unknown value is refused, never read as ordered.
+    ///
+    /// # Errors
+    ///
+    /// The value names no store durability.
+    pub fn from_proto(value: i32) -> Result<Self, &'static str> {
+        match crate::rpc::common::StoreDurability::try_from(value) {
+            Ok(crate::rpc::common::StoreDurability::Ordered) => Ok(StoreDurability::Ordered),
+            Ok(crate::rpc::common::StoreDurability::Batched) => Ok(StoreDurability::Batched),
+            Err(_) => Err("an unknown store durability"),
+        }
+    }
+
+    /// Its label.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            StoreDurability::Ordered => "ordered",
+            StoreDurability::Batched => "batched",
+        }
+    }
+}
+
+impl std::str::FromStr for StoreDurability {
+    type Err = &'static str;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        StoreDurability::ALL
+            .into_iter()
+            .find(|mode| mode.as_str() == s)
+            .ok_or("store durability is ordered or batched")
+    }
+}
+
 /// The largest `failures_per_partition` a journal may ask for: seven
 /// acceptors per acceptor partition (#523, decided on 2026-10-14).
 pub const MAX_FAILURES_PER_PARTITION: u32 = 3;
@@ -345,6 +424,8 @@ pub enum TenantCommand {
         config: AcceptorConfig,
         /// Its first user tags (#575).
         tags: UserTags,
+        /// How its stores commit a batch (#599), fixed for its life.
+        store: StoreDurability,
     },
     /// Request `request`: delete journal `id` (`0`: the name named none).
     DeleteJournal {
@@ -418,6 +499,7 @@ impl TenantCommand {
                 desired,
                 config,
                 tags,
+                store,
             } => Kind::CreateJournal(wire::CreateJournal {
                 request: *request,
                 id: id.0,
@@ -426,6 +508,7 @@ impl TenantCommand {
                 desired: Some(desired.to_wire()),
                 config: Some(config_to_proto(config)),
                 tags: tags.to_wire(),
+                store_durability: store.to_proto().into(),
             }),
             TenantCommand::DeleteJournal { request, id } => {
                 Kind::DeleteJournal(wire::DeleteJournal {
@@ -489,6 +572,7 @@ impl TenantCommand {
                 config: config_from_proto(create.config)?
                     .ok_or("a created journal names no configuration")?,
                 tags: user_tags(create.tags)?,
+                store: StoreDurability::from_proto(create.store_durability)?,
             },
             Kind::DeleteJournal(delete) => TenantCommand::DeleteJournal {
                 request: delete.request,
@@ -548,6 +632,8 @@ pub struct TenantJournal {
     pub deleted_at: Option<u64>,
     /// Its user tags (#575): never a copy of its tenant's.
     pub tags: UserTags,
+    /// How its stores commit a batch (#599), fixed at its create.
+    pub store: StoreDurability,
 }
 
 /// What a request came to, recorded under its idempotency id.
@@ -616,6 +702,8 @@ pub enum TenantEvent {
         config: AcceptorConfig,
         /// Who may write it.
         writer: WriterMode,
+        /// How its stores commit a batch (#599).
+        store: StoreDurability,
     },
     /// A journal was tombstoned.
     Deleted {
@@ -645,6 +733,8 @@ pub enum TenantEvent {
     Placed {
         /// The journal.
         id: JournalId,
+        /// Its members and quorum system now.
+        config: AcceptorConfig,
     },
     /// A request was answered with a refusal, recorded.
     Answered {
@@ -856,7 +946,8 @@ impl TenantControl {
                 desired,
                 config,
                 tags,
-            }) => self.create(request, id, name, (writer, desired, config), tags),
+                store,
+            }) => self.create(request, id, name, (writer, desired, config, store), tags),
             Ok(TenantCommand::DeleteJournal { request, id }) => self.delete(seq, request, id),
             Ok(TenantCommand::Unplaceable { request, name }) => self.refuse(request, &name),
             Ok(TenantCommand::SetJournalTags { request, id, tags }) => {
@@ -894,7 +985,7 @@ impl TenantControl {
         request: u64,
         id: JournalId,
         name: Vec<u8>,
-        (writer, desired, config): (WriterMode, Desired, AcceptorConfig),
+        (writer, desired, config, store): (WriterMode, Desired, AcceptorConfig, StoreDurability),
         tags: UserTags,
     ) -> TenantEvent {
         if request == 0 || !id.is_set() {
@@ -922,6 +1013,7 @@ impl TenantControl {
                 placed: config.clone(),
                 deleted_at: None,
                 tags,
+                store,
             },
         );
         self.outcomes.insert(request, RequestOutcome::Created(id));
@@ -931,6 +1023,7 @@ impl TenantControl {
             name,
             config,
             writer,
+            store,
         }
     }
 
@@ -1051,8 +1144,8 @@ impl TenantControl {
         else {
             return TenantEvent::Refused(TenantRefusal::NotPlaceable { id });
         };
-        journal.placed = config;
-        TenantEvent::Placed { id }
+        journal.placed = config.clone();
+        TenantEvent::Placed { id, config }
     }
 
     /// The fold's invariants: every live name maps to a live journal of that
@@ -1096,6 +1189,7 @@ impl TenantControl {
                     deleted_at: j.deleted_at.map_or(0, |at| at + 1),
                     tags: j.tags.to_wire(),
                     placed: (j.placed != j.config).then(|| config_to_proto(&j.placed)),
+                    store_durability: j.store.to_proto().into(),
                 })
                 .collect(),
             outcomes: self
@@ -1153,6 +1247,7 @@ impl Checkpointable for TenantControl {
                     placed,
                     deleted_at,
                     tags: user_tags(j.tags)?,
+                    store: StoreDurability::from_proto(j.store_durability)?,
                 },
             );
         }
@@ -1199,6 +1294,7 @@ mod tests {
             desired: Desired::DEFAULT,
             config: config(&[1, 2, 3]),
             tags: UserTags::none(),
+            store: StoreDurability::Ordered,
         }
         .encode()
     }
@@ -1239,6 +1335,7 @@ mod tests {
                 desired: Desired::DEFAULT,
                 config: config(&[1, 2, 3]),
                 tags: UserTags::parse(&["team:payments"]).unwrap(),
+                store: StoreDurability::Batched,
             },
             TenantCommand::SetJournalTags {
                 request: 12,
@@ -1358,6 +1455,58 @@ mod tests {
         assert!(t.get(JournalId(12)).is_none());
     }
 
+    /// #599 (durability mode per journal): a create records its store
+    /// durability, a configure keeps it, and a checkpoint carries it.
+    #[test]
+    fn a_store_durability_is_fixed_at_create() {
+        let mut t = fold();
+        let batched = TenantCommand::CreateJournal {
+            request: 1,
+            id: JournalId(11),
+            name: b"fast".to_vec(),
+            writer: WriterMode::Single,
+            desired: Desired::DEFAULT,
+            config: config(&[1, 2, 3]),
+            tags: UserTags::none(),
+            store: StoreDurability::Batched,
+        };
+        assert!(matches!(
+            t.fold(0, &batched.encode()),
+            TenantEvent::Created {
+                store: StoreDurability::Batched,
+                ..
+            }
+        ));
+        t.fold(1, &create(2, 12, b"plain"));
+        t.fold(
+            2,
+            &configure(3, ConfigureTarget::Journal(JournalId(11)), "partitions=2"),
+        );
+        assert_eq!(
+            t.get(JournalId(11)).unwrap().store,
+            StoreDurability::Batched
+        );
+        assert_eq!(
+            t.get(JournalId(12)).unwrap().store,
+            StoreDurability::Ordered
+        );
+        let mut restored = fold();
+        restored.restore(3, &t.checkpoint()).unwrap();
+        assert_eq!(restored.checkpoint(), t.checkpoint());
+        assert_eq!(
+            restored.get(JournalId(11)).unwrap().store,
+            StoreDurability::Batched
+        );
+        // Ordered is the zero value: a create that names none is ordered.
+        assert_eq!(StoreDurability::default(), StoreDurability::Ordered);
+        assert_eq!(StoreDurability::from_proto(0), Ok(StoreDurability::Ordered));
+        assert!(StoreDurability::from_proto(7).is_err());
+        for mode in StoreDurability::ALL {
+            assert_eq!(mode.as_str().parse(), Ok(mode));
+        }
+        assert!("fast".parse::<StoreDurability>().is_err());
+    }
+
     fn configure(request: u64, target: ConfigureTarget, desired: &str) -> Vec<u8> {
         TenantCommand::Configure {
             request,
@@ -1444,7 +1593,10 @@ mod tests {
         };
         assert_eq!(
             t.fold(1, &placed.encode()),
-            TenantEvent::Placed { id: JournalId(11) }
+            TenantEvent::Placed {
+                id: JournalId(11),
+                config: config(&[1, 2, 4]),
+            }
         );
         assert_eq!(
             t.get(JournalId(11)).expect("created").placed,

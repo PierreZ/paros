@@ -26,7 +26,7 @@ use paros::client::fleet::read_directory;
 use paros::client::journals::{self, JournalAnswer, JournalOp, JournalRequest};
 use paros::fleet::TenantState;
 use paros::tags::{Tags, UserTags};
-use paros::tenant::{Desired, Durability, MAX_FAILURES_PER_PARTITION};
+use paros::tenant::{Desired, Durability, MAX_FAILURES_PER_PARTITION, StoreDurability};
 use paros::{JournalIdentifier, Names, TenantId, WriterMode};
 use serde_json::json;
 
@@ -65,6 +65,12 @@ enum JournalCommand {
         /// Its durability; none named takes the tenant's default mode.
         #[command(flatten)]
         durability: DurabilityArgs,
+        /// How its stores commit a batch (#599): `ordered` (two syncs per
+        /// commit, the default) or `batched` (one sync; a crash inside a
+        /// commit can lose the last batch, which the journal repairs from
+        /// its peers). Fixed for the journal's life.
+        #[arg(long, default_value = "ordered", value_parser = parse_store_durability)]
+        store_durability: StoreDurability,
         /// A user tag, `key:value`, repeated (#575). A `paros/` key is
         /// refused.
         #[arg(long = "tag")]
@@ -185,6 +191,11 @@ fn parse_writers(text: &str) -> Result<WriterMode, String> {
     }
 }
 
+/// `--store-durability` (#599 (durability mode per journal)).
+pub(crate) fn parse_store_durability(text: &str) -> Result<StoreDurability, String> {
+    text.parse().map_err(|why: &str| why.to_string())
+}
+
 /// A journal's durability on the command line (§3.4, #523): each acceptor
 /// partition has `2F+1` acceptors. A field not named takes its default
 /// (`F=1`, `P=1`); none named is no mode at all.
@@ -276,6 +287,7 @@ pub async fn run(
             name,
             writers,
             durability,
+            store_durability,
             tags,
             ..
         } => JournalOp::Create {
@@ -286,6 +298,7 @@ pub async fn run(
                 Ok(tags) => tags,
                 Err(ending) => return ending,
             },
+            store: store_durability,
         },
         JournalCommand::Tag { name, tags, .. } => JournalOp::SetTags {
             name: name.into_bytes(),
@@ -529,13 +542,14 @@ async fn list(
         .collect();
     out.emit(
         || {
-            let rows: Vec<[String; 6]> = chosen
+            let rows: Vec<[String; 7]> = chosen
                 .iter()
                 .map(|(_, journal)| {
                     let members: Vec<u64> = journal.config.members().iter().map(|m| m.0).collect();
                     [
                         format!("{name}/{}", record_text(&journal.name)),
                         mode_label(journal.writer).to_string(),
+                        journal.store.as_str().to_string(),
                         journal.desired.label(),
                         labels.machines(&members),
                         if journal.deleted_at.is_some() {
@@ -553,7 +567,9 @@ async fn list(
                 })
                 .collect();
             table(
-                ["JOURNAL", "WRITER", "DESIRED", "ACCEPTORS", "STATE", "TAGS"],
+                [
+                    "JOURNAL", "WRITER", "STORE", "DESIRED", "ACCEPTORS", "STATE", "TAGS",
+                ],
                 &rows,
             )
         },
@@ -565,6 +581,7 @@ async fn list(
                     "journal": JournalIdentifier::new(tenant, *id).to_string(),
                     "name": record_text(&journal.name),
                     "mode": mode_label(journal.writer),
+                    "store_durability": journal.store.as_str(),
                     "desired": journal.desired.label(),
                     "members": journal.config.members().iter().map(|m| m.0).collect::<Vec<_>>(),
                     "deleted": journal.deleted_at.is_some(),

@@ -59,9 +59,11 @@ message Desired {
 // Request `request`: create journal `id` (drawn by the coordinator) named
 // `name`, written in `writer` mode, under `desired`, placed on `config` (the
 // coordinator's choice of members; a caller never names one), with its
-// first user tags `tags` (#575 (key:value tags)). An id the tenant already
-// used is refused and the coordinator redraws; a live name answers the
-// request `name_taken`. A reserved tag or a set over the cap is refused.
+// first user tags `tags` (#575 (key:value tags)), its stores committing
+// under `store_durability` (#599 (durability mode per journal)). An id the
+// tenant already used is refused and the coordinator redraws; a live name
+// answers the request `name_taken`. A reserved tag or a set over the cap is
+// refused.
 message CreateJournal {
   uint64 request = 1;
   uint64 id = 2;
@@ -70,6 +72,7 @@ message CreateJournal {
   Desired desired = 5;
   paros.common.v1.AcceptorConfig config = 6;
   repeated paros.common.v1.Tag tags = 7;
+  paros.common.v1.StoreDurability store_durability = 8;
 }
 
 // Request `request`: live journal `id`'s user tags become `tags`, all of
@@ -107,7 +110,7 @@ message Unplaceable {
 // changes (an id that names no live journal, `0` included, answers the
 // request `unknown_journal`). The coordinator applies a journal's new mode
 // by reconfiguration and placement, then records `Placed`. The writer mode
-// never changes.
+// and the store durability never change.
 message Configure {
   uint64 request = 1;
   uint64 id = 2;
@@ -148,6 +151,8 @@ message JournalState {
   // The configuration in force the coordinator last recorded (#214); unset
   // while it is the create's `config`.
   paros.common.v1.AcceptorConfig placed = 7;
+  // How its stores commit a batch (#599), fixed at its create.
+  paros.common.v1.StoreDurability store_durability = 9;
 }
 
 message OutcomeState {

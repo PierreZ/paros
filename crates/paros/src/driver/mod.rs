@@ -2552,6 +2552,7 @@ impl<P: Providers, J: JournalStores> SystemCtx<'_, '_, P, J> {
                             (
                                 paros_core::QuorumSystem::Majority,
                                 paros_core::WriterMode::Single,
+                                crate::tenant::StoreDurability::Ordered,
                             ),
                             Seat::Member,
                         )
@@ -2611,6 +2612,7 @@ impl<P: Providers, J: JournalStores> SystemCtx<'_, '_, P, J> {
                             (
                                 paros_core::QuorumSystem::Majority,
                                 paros_core::WriterMode::Single,
+                                crate::tenant::StoreDurability::Ordered,
                             ),
                             Seat::Member,
                         )
@@ -2645,7 +2647,8 @@ impl<P: Providers, J: JournalStores> SystemCtx<'_, '_, P, J> {
 
 impl<P: Providers, J: JournalStores> SystemCtx<'_, '_, P, J> {
     /// Start journal `id` on this node, bootstrapped over `members` under
-    /// `quorum_system`, written in `writer` mode — unless the journal is
+    /// `quorum_system`, written in `writer` mode, its store committing under
+    /// `store` (#599 (durability mode per journal)) — unless the journal is
     /// gone for good, already served here, this machine takes no storage
     /// work (a `stateless` machine never serves a journal, #211), or this
     /// node is no member and `seat` takes members only. A node outside
@@ -2659,7 +2662,11 @@ impl<P: Providers, J: JournalStores> SystemCtx<'_, '_, P, J> {
         follower: &ControlFollower<P>,
         id: JournalIdentifier,
         (members, domains, cell_id): (&[NodeId], &[paros_core::FailureDomain], u64),
-        (quorum_system, writer): (paros_core::QuorumSystem, paros_core::WriterMode),
+        (quorum_system, writer, store): (
+            paros_core::QuorumSystem,
+            paros_core::WriterMode,
+            crate::tenant::StoreDurability,
+        ),
         seat: Seat,
     ) -> bool {
         assert!(
@@ -2703,7 +2710,7 @@ impl<P: Providers, J: JournalStores> SystemCtx<'_, '_, P, J> {
             journal_config.pool().contains(&me),
             "a started journal's pool holds this node"
         );
-        if !self.stores.create(id, journal_config) {
+        if !self.stores.create(id, journal_config, store.journal()) {
             return false;
         }
         open_journal(
@@ -2779,7 +2786,11 @@ impl<P: Providers, J: JournalStores> SystemCtx<'_, '_, P, J> {
             else {
                 continue;
             };
-            let systems = (created.config.quorum_system(), created.writer);
+            let systems = (
+                created.config.quorum_system(),
+                created.writer,
+                created.store,
+            );
             if self
                 .start(
                     follower,
@@ -2949,7 +2960,12 @@ impl<P: Providers, J: JournalStores> SystemCtx<'_, '_, P, J> {
                 nodes,
                 ..template.clone()
             };
-            if !self.stores.create(journal, config) {
+            // A spare of the static plan: ordered, like every journal no
+            // tenant created.
+            if !self
+                .stores
+                .create(journal, config, crate::journal::Durability::Ordered)
+            {
                 continue;
             }
             open_journal(

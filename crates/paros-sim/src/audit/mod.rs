@@ -100,6 +100,10 @@ pub(crate) struct NodeAudit<T> {
     /// coordinator's, #240), handed to `paros` through
     /// [`Audit::call_observer`].
     calls: Option<Arc<dyn paros::client::CallObserver>>,
+    /// The run's state and the machine's process IP, on a machine's journal
+    /// port: a commit of a `Batched` journal registers there for the cut
+    /// budget (#599 (durability mode per journal), `crate::world::cut`).
+    cut: Option<(moonpool_sim::StateHandle, String)>,
 }
 
 impl<T: TimeProvider> NodeAudit<T> {
@@ -146,7 +150,16 @@ impl<T: TimeProvider> NodeAudit<T> {
             tenants: None,
             machines: None,
             calls: None,
+            cut: None,
         }
+    }
+
+    /// This port registers each commit of a `Batched` journal its machine
+    /// at `ip` runs in `state`'s cut budget (#599 (durability mode per
+    /// journal)).
+    pub(crate) fn with_cut_budget(mut self, state: moonpool_sim::StateHandle, ip: String) -> Self {
+        self.cut = Some((state, ip));
+        self
     }
 
     /// This port also reports the tenant control journals' folds and the
@@ -437,6 +450,23 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         }
         if !accepted.is_empty() {
             self.world.note_in_flight(node.0, &accepted);
+        }
+        // A machine's commit of a `Batched` journal that writes entries:
+        // a power loss inside it may leave them faulty (#599).
+        let writes_entries = !accepted.is_empty() || !dropped.is_empty();
+        if let (Some((state, ip)), Some((journal, _)), Some(tenants), true) =
+            (&self.cut, &self.journal, &self.tenants, writes_entries)
+        {
+            let budget = tenants::lock(tenants).cut_budget(*journal);
+            if let Some(tolerated) = budget {
+                crate::world::cut::open_machine_commit(state, ip, *journal, tolerated);
+            }
+        }
+    }
+
+    fn commit_ended(&self, _node: NodeId) {
+        if let (Some((state, ip)), Some((journal, _))) = (&self.cut, &self.journal) {
+            crate::world::cut::close_machine_commit(state, ip, *journal);
         }
     }
 
@@ -1996,6 +2026,13 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             staged.insert(slot.0);
             st.faulty_ballots
                 .insert((node.0, slot.0), (ballot.round, ballot.node.0));
+        }
+        // A machine's `Batched` journal booted with its last batch lost
+        // (#599 (durability mode per journal)).
+        if let (Some((journal, _)), Some(tenants), false) =
+            (&self.journal, &self.tenants, entries.is_empty())
+        {
+            tenants::lock(tenants).note_faulty(*journal);
         }
     }
 

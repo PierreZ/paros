@@ -16,7 +16,11 @@
 //! - **one outcome per request** — a request id the fold answered once is
 //!   answered the same way every time after (a retry acts once);
 //! - **tombstones** — a machine that folded a journal's tombstone
-//!   acknowledges no append to it afterwards.
+//!   acknowledges no append to it afterwards;
+//! - **store durability** — a created journal keeps the store durability
+//!   its create recorded (#599 (durability mode per journal)); the board
+//!   holds it, with the copies a power loss may cost each slot, for the
+//!   machines' cut budget (`crate::world::cut`).
 //!
 //! The gates are outcomes the run must reach once it created a journal: a
 //! name taken by a live journal, and an id redrawn after `IdTaken`. A retry
@@ -27,8 +31,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use moonpool_sim::{StateHandle, assert_always, assert_reachable, assert_sometimes};
-use paros::tenant::{RequestOutcome, TenantEvent, TenantRefusal};
-use paros::{JournalId, JournalIdentifier, NodeId, TenantId, WriterMode};
+use paros::tenant::{RequestOutcome, StoreDurability, TenantEvent, TenantRefusal};
+use paros::{
+    AcceptorConfig, JournalId, JournalIdentifier, NodeId, QuorumSystem, TenantId, WriterMode,
+};
 
 const TENANT_BOARD_KEY: &str = "paros-tenant-board";
 
@@ -60,6 +66,16 @@ pub(crate) struct TenantBoard {
     created: BTreeMap<JournalIdentifier, u64>,
     /// Every created journal's writer mode (#241).
     modes: BTreeMap<JournalIdentifier, WriterMode>,
+    /// Every created journal's store durability (#599 (durability mode per
+    /// journal)).
+    stores: BTreeMap<JournalIdentifier, StoreDurability>,
+    /// Per created journal: the fewest copies of a slot its configurations
+    /// may lose and still repair it, over its create and every configure
+    /// (#599): the machines' cut budget.
+    tolerated: BTreeMap<JournalIdentifier, usize>,
+    /// Batched journals a machine booted with faulty entries: a lost last
+    /// batch (#599).
+    batch_lost: BTreeSet<JournalIdentifier>,
     /// Every request's first outcome, by control journal and request id.
     outcomes: BTreeMap<(JournalIdentifier, u64), RequestOutcome>,
     /// `(machine, journal)`: the machine folded the journal's tombstone.
@@ -124,6 +140,22 @@ fn zone_spread(config: &paros::AcceptorConfig, lsn: u64) {
     }
 }
 
+/// The copies of one slot `config` may lose and still repair it (#599
+/// (durability mode per journal)): a lost copy is a faulty vote, and CTRL
+/// decides the slot only while every Phase-1 quorum keeps a clean copy and
+/// a Phase-1 quorum still answers. A majority of `n` loses `⌊(n-1)/2⌋`; a
+/// column of `rows` deciding on `acks` loses `min(acks - 1, rows - acks)`.
+fn tolerated_loss(config: &AcceptorConfig) -> usize {
+    let n = config.members().len();
+    match config.quorum_system() {
+        QuorumSystem::Majority => n.saturating_sub(1) / 2,
+        QuorumSystem::Flexible { q1, q2 } => n.saturating_sub(q1).min(q2.saturating_sub(1)),
+        QuorumSystem::Grid { rows, acks, .. } => {
+            acks.saturating_sub(1).min(rows.saturating_sub(acks))
+        }
+    }
+}
+
 impl TenantBoard {
     /// #575 (key:value tags): a tag request names a live journal the
     /// tenant created before; a tag changes no outcome.
@@ -162,12 +194,14 @@ impl TenantBoard {
                 id,
                 writer,
                 config,
+                store,
                 ..
             } => {
                 zone_spread(config, lsn);
                 self.armed = true;
                 let journal = JournalIdentifier::new(control.tenant, *id);
                 self.modes.entry(journal).or_insert(*writer);
+                self.created_store(journal, (*store, config), lsn);
                 let at = *self.created.entry(journal).or_insert(lsn);
                 assert_always!(
                     id.is_set() && *id != control.journal && at == lsn,
@@ -218,24 +252,14 @@ impl TenantBoard {
                 );
                 self.id_taken = true;
             }
-            TenantEvent::Configured { request, id, .. } => {
-                // A journal's mode changes only for a journal its tenant
-                // created before (#214 (tenant modes)).
-                if let Some(id) = id {
-                    let journal = JournalIdentifier::new(control.tenant, *id);
-                    assert_always!(
-                        self.created.get(&journal).is_some_and(|at| *at < lsn),
-                        "tenant: a configured journal is one the tenant created before",
-                        { "lsn" => lsn }
-                    );
-                    assert_reachable!("tenant: a journal's desired mode is configured");
-                } else {
-                    assert_reachable!("tenant: a tenant's default mode is configured");
-                }
-                self.answered(control, *request, RequestOutcome::Configured(*id), lsn);
-            }
-            TenantEvent::Placed { id } => {
+            TenantEvent::Configured {
+                request,
+                id,
+                desired,
+            } => self.configured(control, (*request, *id, desired), lsn),
+            TenantEvent::Placed { id, config } => {
                 let journal = JournalIdentifier::new(control.tenant, *id);
+                self.tolerate(journal, tolerated_loss(config));
                 assert_always!(
                     self.created.get(&journal).is_some_and(|at| *at < lsn),
                     "tenant: a placement is recorded only for a journal created before",
@@ -316,6 +340,88 @@ impl TenantBoard {
             "tenant: a request folds to one outcome",
             { "lsn" => lsn }
         );
+    }
+
+    /// A configure of `control`'s tenant folded at `lsn`: of journal `id`,
+    /// or of the tenant default (`None`).
+    fn configured(
+        &mut self,
+        control: JournalIdentifier,
+        (request, id, desired): (u64, Option<JournalId>, &paros::tenant::Desired),
+        lsn: u64,
+    ) {
+        // A journal's mode changes only for a journal its tenant created
+        // before (#214 (tenant modes)).
+        if let Some(id) = id {
+            let journal = JournalIdentifier::new(control.tenant, id);
+            // Its new placement survives `F` failures per partition (#599:
+            // the cut budget takes the smallest of its life).
+            let failures = desired.durability.failures_per_partition;
+            self.tolerate(journal, usize::try_from(failures).unwrap_or(0));
+            assert_always!(
+                self.created.get(&journal).is_some_and(|at| *at < lsn),
+                "tenant: a configured journal is one the tenant created before",
+                { "lsn" => lsn }
+            );
+            assert_reachable!("tenant: a journal's desired mode is configured");
+        } else {
+            assert_reachable!("tenant: a tenant's default mode is configured");
+        }
+        self.answered(control, request, RequestOutcome::Configured(id), lsn);
+    }
+
+    /// A create of `journal` folded with `store` on `config` (#599): every
+    /// fold of it names the same mode, and its placement sets the cut
+    /// budget.
+    fn created_store(
+        &mut self,
+        journal: JournalIdentifier,
+        (store, config): (StoreDurability, &AcceptorConfig),
+        lsn: u64,
+    ) {
+        let held = *self.stores.entry(journal).or_insert(store);
+        assert_always!(
+            held == store,
+            "tenant: a created journal keeps the store durability of its create",
+            { "lsn" => lsn }
+        );
+        self.tolerate(journal, tolerated_loss(config));
+    }
+
+    /// `journal`'s cut budget falls to `loss` when that is smaller (#599).
+    fn tolerate(&mut self, journal: JournalIdentifier, loss: usize) {
+        let held = self.tolerated.entry(journal).or_insert(loss);
+        *held = (*held).min(loss);
+    }
+
+    /// The store durability `journal` was created with, when a tenant
+    /// created it (#599 (durability mode per journal)).
+    pub(crate) fn store(&self, journal: JournalIdentifier) -> Option<StoreDurability> {
+        self.stores.get(&journal).copied()
+    }
+
+    /// The distinct machines a power loss may cut inside a commit of
+    /// `journal`, a `Batched` journal a tenant created: the fewest copies
+    /// of a slot its configurations may lose (#599). `None` for a journal
+    /// that stores ordered or that no tenant created: its cut costs no copy.
+    pub(crate) fn cut_budget(&self, journal: JournalIdentifier) -> Option<usize> {
+        (self.store(journal)? == StoreDurability::Batched)
+            .then(|| self.tolerated.get(&journal).copied().unwrap_or(0))
+    }
+
+    /// A machine booted `journal` with faulty entries: on a `Batched`
+    /// journal, its last batch came back ambiguous (#599).
+    pub(crate) fn note_faulty(&mut self, journal: JournalIdentifier) {
+        if self.store(journal) == Some(StoreDurability::Batched) {
+            assert_reachable!("journal store: a batched journal boots with its last batch lost");
+            self.batch_lost.insert(journal);
+        }
+    }
+
+    /// Whether a machine booted `journal`, a `Batched` journal, with its
+    /// last batch lost (#599).
+    pub(crate) fn batch_lost(&self, journal: JournalIdentifier) -> bool {
+        self.batch_lost.contains(&journal)
     }
 
     /// The writer mode `journal` was created in, when a tenant created it.

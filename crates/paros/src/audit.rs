@@ -207,6 +207,13 @@ pub trait Audit {
     /// chaos)).
     fn commit_started(&self, node: NodeId, writes: &[WriteOp]) {}
 
+    /// The sync of the batch [`Audit::commit_started`] named returned, durable
+    /// or failed: nothing of it is in flight any more (#599 (durability mode
+    /// per journal)). A harness that budgets a power loss inside a commit
+    /// (a `Batched` store's last batch may come back ambiguous) closes the
+    /// commit here.
+    fn commit_ended(&self, node: NodeId) {}
+
     /// This node durably truncated its log prefix; `first` is the new
     /// compaction floor (the first slot still retained).
     fn truncated(&self, node: NodeId, first: Slot) {}

@@ -826,6 +826,18 @@ pub const RARE: &[Rare] = &[
         reason: "marginal: fired on none of 810 hunt seeds (#486)",
     },
     Rare {
+        msg: "journal store: a machine loses power inside a batched commit",
+        reason: "a kill asked while a machine's batched commit is open: none of 400 hunt seeds, with 331 batched commits in 100 batched-journals seeds and 4,029 kills asked (#599 (durability mode per journal))",
+    },
+    Rare {
+        msg: "journal store: a batched journal boots with its last batch lost",
+        reason: "follows a machine cut inside a batched commit: none of 400 hunt seeds (#599 (durability mode per journal))",
+    },
+    Rare {
+        msg: "journal store: a batched journal converges after it lost its last batch",
+        reason: "follows a batched journal booted with its last batch lost: none of 400 hunt seeds (#599 (durability mode per journal))",
+    },
+    Rare {
         msg: "machine: the scenario wipes a founder after another founder voted",
         reason: "marginal: fired on 6 of 810 hunt seeds (#486)",
     },

@@ -55,6 +55,8 @@ docker compose run --rm parosctl tenant list
 # tombstone, and the list shows both.
 docker compose run --rm parosctl journal create acme events --writers multi
 docker compose run --rm parosctl journal create acme events
+# A journal whose stores sync once per commit instead of twice (#599): fixed at create.
+docker compose run --rm parosctl journal create acme clicks --store-durability batched
 docker compose run --rm parosctl journal delete acme events
 docker compose run --rm parosctl journal list acme
 

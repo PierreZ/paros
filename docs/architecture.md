@@ -292,6 +292,38 @@ point, matchmaker reconfiguration. Every proof paros has holds per journal; the 
 prove is the control state machine's rules, and they are judged in the simulation like every
 other rule.
 
+### 2.9 Store durability
+
+Decided on 2026-10-16 (#599 (durability mode per journal)): the store durability is a property
+of each journal. The operator chooses it at create, like the writer mode. It cannot change
+after the create. There are two modes:
+
+- `ordered`, the default: each commit writes the entries, syncs, writes the persist records
+  and syncs again. A crash never leaves a batch ambiguous.
+- `batched`: each commit writes the entries and the persist records, then syncs once
+  (CLSTORE's protocol). One client write costs one sync less on the leader and on the
+  follower. A crash inside a commit can leave the last batch ambiguous: the store reports its
+  entries faulty, like corrupt entries, and the journal repairs them from its peers.
+
+Both modes are safe. A faulty entry was never acknowledged, so no decided value is lost. A
+`batched` journal repairs a lost batch only while each slot keeps a Phase-1 quorum of clean
+copies. A `batched` journal with `failures-per-partition 0` (one acceptor per partition) can
+stop for good after a power loss inside a commit. Choose `batched` only with `F >= 1`.
+
+How it is built. The mode is a field of the journal's `CreateJournal` entry in the tenant
+control journal (`paros::tenant::StoreDurability`, `store_durability` on the wire, `ordered`
+is the zero value). `Configure` never changes it. Each machine that serves the journal opens
+its store with that mode (`JournalStores::create`). The control journals, the plan journals
+and the matchmaker sets stay `ordered`. The store records the protocol per batch, so a store
+opens under either mode. `parosctl journal create --store-durability ordered|batched` sets
+the mode, `parosctl bench --store-durability` creates its journals with it, and `journal
+list` and `tenant show` print it. The simulation draws `batched` for three creates in four on
+some seeds (`shape::batched_journals`). A machine's power loss inside a `batched` commit
+spends the journal's cut budget: at most as many machines as copies of one slot its
+configurations may lose (`world/cut.rs`). The gate "journal store: a batched journal
+converges after it lost its last batch" judges the repair. It is in `gates::RARE`: in 400 hunt
+seeds no kill struck while a machine's batched commit was open.
+
 ## 3. The control plane
 
 ### 3.1 The cell tenant and bootstrap
