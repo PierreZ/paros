@@ -20,10 +20,13 @@
 //!    journal on it again, and a retired identity never comes back to its
 //!    journal. The release stops the journal there, its store kept.
 //!
-//! A journal with a slot on a draining machine is the move's, never a mode
-//! change's: it waits until the move is done. A desired mode the cell cannot
-//! place waits: a configure judged it placeable when it was asked
-//! (`super::tenants`), and slots free up again.
+//! A journal with a slot on a draining machine, or on one gone (down past
+//! the re-placement bound, #475 (re-place after the Down bound)), is the
+//! move's, never a mode change's: it waits until the move is done. Else the
+//! change releases the slot the move booked, a slot outside the
+//! configuration in force, at every round, and the move never ends. A
+//! desired mode the cell cannot place waits: a configure judged it
+//! placeable when it was asked (`super::tenants`), and slots free up again.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound::{Excluded, Unbounded};
@@ -32,14 +35,14 @@ use moonpool_core::Providers;
 use moonpool_rpc::RpcHandle;
 use paros_core::{AcceptorConfig, JournalIdentifier, NodeId, QuorumSystem, TenantId};
 
-use super::moves::{at_or_above, leader_of};
+use super::moves::{at_or_above, leader_of, stays};
 use super::tenants::{TenantDesk, placed_count};
 use crate::client::cell::CellSession;
 use crate::client::journals::JournalAnswer;
 use crate::client::{Client, ReconfigureOutcome, Server};
 use crate::placement::{self, Step, Want};
 use crate::rpc::NodeClient;
-use crate::system::{Booking, BookingTarget, NodeStanding, Registry, Role};
+use crate::system::{Booking, BookingTarget, Registry, Role};
 use crate::tenant::Desired;
 use crate::{Address, Names};
 
@@ -90,13 +93,6 @@ struct Change {
     slots: Vec<(u64, Booking)>,
 }
 
-/// Whether the registry holds `node` registered (not draining, not retired).
-fn registered(registry: &Registry, node: NodeId) -> bool {
-    registry
-        .get(node)
-        .is_some_and(|n| n.standing == NodeStanding::Registered)
-}
-
 /// The acceptor slots of `journal`.
 fn slots(registry: &Registry, journal: JournalIdentifier) -> Vec<(u64, Booking)> {
     registry
@@ -125,16 +121,18 @@ impl Modes {
     /// Take one step of the next journal's mode change, through the term's
     /// session `cell` (its bookings drawn by `desk`, which holds the tenant
     /// control journals), calling the journal's machines where the cell's
-    /// address book says they are. `None` when a write did not land: the
-    /// term writes nothing more.
+    /// address book says they are. A journal with a slot on a machine
+    /// `gone` is the move's. `None` when a write did not land: the term
+    /// writes nothing more.
     #[tracing::instrument(level = "debug", skip_all)]
     pub(super) async fn step<P: Providers>(
         &mut self,
         (providers, rpc, names, client): (&P, &RpcHandle<P>, &Names, &Client<P>),
         cell: &mut CellSession,
         desk: &mut TenantDesk,
+        gone: &BTreeSet<NodeId>,
     ) -> Option<ModeStep> {
-        let Some(change) = self.next(client, cell, desk).await? else {
+        let Some(change) = self.next(client, cell, desk, gone).await? else {
             return Some(ModeStep::Idle);
         };
         let journal = change.journal;
@@ -213,13 +211,15 @@ impl Modes {
 
     /// The next journal after the last one, in id order and wrapping, whose
     /// placement differs from its desired mode: a live journal of a tenant
-    /// the cell hosts, with no slot on a draining machine. `None` when a
-    /// later term fenced a tenant control journal: the term is over.
+    /// the cell hosts, with no slot on a draining machine or one `gone`.
+    /// `None` when a later term fenced a tenant control journal: the term
+    /// is over.
     async fn next<P: Providers>(
         &self,
         client: &Client<P>,
         cell: &CellSession,
         desk: &mut TenantDesk,
+        gone: &BTreeSet<NodeId>,
     ) -> Option<Option<Change>> {
         let registry = cell.registry();
         let hosted: Vec<(TenantId, paros_core::JournalId)> = registry
@@ -239,9 +239,10 @@ impl Modes {
             for (id, journal) in state.live() {
                 let identifier = JournalIdentifier::new(tenant, id);
                 let slots = slots(registry, identifier);
-                // A journal on a draining machine is the move's; one with no
-                // slot was never placed by this cell.
-                if slots.is_empty() || slots.iter().any(|(_, b)| !registered(registry, b.node)) {
+                // A journal on a draining machine, or on one gone, is the
+                // move's (`super::moves`, the same `stays`); one with no slot
+                // was never placed by this cell.
+                if slots.is_empty() || slots.iter().any(|(_, b)| !stays(registry, gone, b.node)) {
                     continue;
                 }
                 let count = placed_count(&journal.desired, storage);

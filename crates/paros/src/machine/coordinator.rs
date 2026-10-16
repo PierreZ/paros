@@ -1123,7 +1123,8 @@ async fn campaign<P: Providers>(
                                         Some(match moves.step(ctx, session, desk, &gone).await {
                                             None => None,
                                             Some(step) => {
-                                                match changes.step(ctx, session, desk).await {
+                                                match changes.step(ctx, session, desk, &gone).await
+                                                {
                                                     None => None,
                                                     Some(mode) => {
                                                         let set = sets
