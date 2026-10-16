@@ -20,6 +20,11 @@
 //! `truncate` runs on its own schedule (`--truncate-every`): each journal
 //! keeps its last `--truncate-keep` records. A read checks every byte.
 //!
+//! `--topology` names the journals' shapes (`topology.rs`): `3x1`, the
+//! plain majority of three, by default. With several (`3x1,3x2,3x3`), the
+//! bench runs each in turn, under the same seed and load, on journals of
+//! its own (`bench-3x2-K`), then prints one row per topology and call.
+//!
 //! The clients run closed loop by default: a call starts when the last one
 //! ends. With `--rate`, they run open loop: the calls start on a fixed
 //! schedule, and a call's latency counts from the moment it was due, so a
@@ -35,6 +40,7 @@ mod mix;
 mod records;
 mod setup;
 mod summary;
+mod topology;
 
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
@@ -48,13 +54,13 @@ use paros::client::{Client, Reader, ReaderOutcome, TruncateOutcome, Writer, Writ
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
-use crate::journal::DurabilityArgs;
 use crate::output::note;
 use crate::{Ending, Runtime};
 
 use histograms::{Call, Calls, Export, Registry};
 use mix::Mix;
 use records::{HEADER, Rng};
+use topology::{Topologies, Topology};
 
 type ParosClient = Client<TokioProviders>;
 
@@ -67,13 +73,15 @@ pub struct BenchArgs {
     /// The tenant to write in, by name; created when missing.
     #[arg(long, default_value = "bench")]
     tenant: String,
-    /// How many journals: `bench-0` to `bench-{N-1}`, created when missing
-    /// (single writer).
+    /// How many journals per topology: `bench-T-0` to `bench-T-{N-1}`,
+    /// created when missing (single writer).
     #[arg(long, default_value = "4", value_parser = clap::value_parser!(u64).range(1..))]
     journals: u64,
-    /// The durability of a journal the bench creates.
-    #[command(flatten)]
-    durability: DurabilityArgs,
+    /// The journal topologies, each run in turn on journals of its own:
+    /// `ROWSxCOLUMNS`, comma-separated. `3x1` is the plain majority of
+    /// three; `3x3` is nine acceptors in three partitions of three.
+    #[arg(long, default_value = "3x1")]
+    topology: Topologies,
     /// How many concurrent clients, each one call at a time.
     #[arg(long, default_value = "8", value_parser = clap::value_parser!(u64).range(1..))]
     clients: u64,
@@ -112,7 +120,7 @@ pub struct BenchArgs {
     /// Start a cell of N machines in this process, on loopback, and run
     /// against it: `--servers` is not needed. The stores go in a new
     /// directory under `--local-dir`, deleted after the run.
-    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u64).range(1..=9))]
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u64).range(1..=MAX_LOCAL))]
     pub local: Option<u64>,
     /// Where a local cell's stores go: the filesystem the numbers measure.
     /// The system's temporary directory by default.
@@ -147,7 +155,32 @@ impl BenchArgs {
     pub fn patience_ms(&self) -> u64 {
         self.patience_ms
     }
+
+    /// Refuse a run its arguments cannot hold: a topology wider than the
+    /// local cell (placement puts each acceptor on its own machine), or
+    /// one histogram file for several topologies.
+    ///
+    /// # Errors
+    ///
+    /// The refusal, to print.
+    pub fn check(&self) -> Result<(), String> {
+        let widest = self.topology.widest();
+        if let Some(machines) = self.local
+            && widest as u64 > machines
+        {
+            return Err(format!(
+                "--topology needs {widest} machines, and --local starts {machines}"
+            ));
+        }
+        if self.histograms.is_some() && self.topology.all().len() > 1 {
+            return Err("--histograms takes one topology".into());
+        }
+        Ok(())
+    }
 }
+
+/// The most machines `--local` starts: a 3x5 or a 5x3 grid.
+const MAX_LOCAL: u64 = 15;
 
 /// A rate in calls per second, above zero.
 fn parse_rate(text: &str) -> Result<f64, String> {
@@ -200,10 +233,11 @@ impl Failure {
     }
 }
 
-/// What every client shares.
+/// What every client of one topology's run shares.
 struct Shared {
-    args: BenchArgs,
+    args: Rc<BenchArgs>,
     seed: u64,
+    topology: Topology,
     /// Print one JSON report, and no tick.
     json: bool,
     slots: Vec<Rc<Slot>>,
@@ -214,59 +248,158 @@ struct Shared {
     mismatches: Cell<u64>,
 }
 
+/// One topology's totals, for the comparison.
+pub struct Measured {
+    topology: Topology,
+    elapsed: Duration,
+    calls: Vec<Call>,
+    total: Calls,
+}
+
+/// A checked bench: its arguments and its seed, shared by every topology.
+pub struct Plan {
+    args: Rc<BenchArgs>,
+    seed: u64,
+}
+
+impl Plan {
+    /// Check `args` and draw the seed when they name none.
+    ///
+    /// # Errors
+    ///
+    /// The arguments cannot hold a run ([`BenchArgs::check`]).
+    pub fn new(runtime: &Runtime, args: BenchArgs) -> Result<Self, String> {
+        args.check()?;
+        let seed = args
+            .seed
+            .unwrap_or_else(|| runtime.providers.random().random());
+        note(&format!("bench seed={seed}"));
+        Ok(Self {
+            args: Rc::new(args),
+            seed,
+        })
+    }
+
+    /// The topologies, in the order given.
+    pub fn topologies(&self) -> Vec<Topology> {
+        self.args.topology.all().to_vec()
+    }
+
+    /// One topology's run against the cell `client` reaches (`servers`,
+    /// their ids): its journals, its clients, its totals.
+    ///
+    /// # Errors
+    ///
+    /// What the bench ends with: the setup failed, or a call stopped it.
+    pub async fn run_one(
+        &self,
+        runtime: &Runtime,
+        (client, servers): (&ParosClient, &[u64]),
+        topology: Topology,
+        (json, local): (bool, Option<&Path>),
+    ) -> Result<Measured, Ending> {
+        let (args, seed) = (&self.args, self.seed);
+        note(&format!("topology {topology}: {}", topology.label()));
+        let patience = Duration::from_millis(args.patience_ms);
+        let slots = match prepare(runtime, client, servers, args, (seed, topology), patience).await
+        {
+            Ok(slots) => slots,
+            Err(error) => {
+                note(&error);
+                return Err(Ending::Unreachable);
+            }
+        };
+        let export = match &args.histograms {
+            Some(path) => match Export::create(path, seed) {
+                Ok(export) => Some(export),
+                Err(error) => {
+                    note(&format!("{}: {error}", path.display()));
+                    return Err(Ending::Refused);
+                }
+            },
+            None => None,
+        };
+        let shared = Rc::new(Shared {
+            args: args.clone(),
+            seed,
+            topology,
+            json,
+            slots,
+            stop: CancellationToken::new(),
+            failure: RefCell::new(None),
+            mismatches: Cell::new(0),
+        });
+        let (elapsed, calls, total) = tokio::task::LocalSet::new()
+            .run_until(drive(client.clone(), shared.clone(), export, local))
+            .await;
+        let mismatches = shared.mismatches.get();
+        if let Some(failure) = shared.failure.borrow_mut().take() {
+            note(&failure.message);
+            return Err(failure.ending);
+        }
+        if mismatches > 0 {
+            note(&format!("read-tail found {mismatches} wrong records"));
+            return Err(Ending::Refused);
+        }
+        Ok(Measured {
+            topology,
+            elapsed,
+            calls,
+            total,
+        })
+    }
+}
+
+/// End a bench whose topologies all ran: with several, and no `--json`,
+/// print them side by side.
+pub fn finish(runs: &[Measured], json: bool) -> Ending {
+    if runs.len() > 1 && !json {
+        compare(runs);
+    }
+    Ending::Success
+}
+
 /// `parosctl bench` against the cell `client` reaches (`servers`, their
-/// ids); `local` is a local cell's directory. `json` prints one report.
+/// ids): each topology in turn on the same cell, under the same seed. The
+/// first that fails ends the bench. `json` prints one report per topology.
 pub async fn run(
     runtime: &Runtime,
     client: &ParosClient,
     servers: &[u64],
     args: BenchArgs,
-    (json, local): (bool, Option<&Path>),
+    json: bool,
 ) -> Ending {
-    let seed = args
-        .seed
-        .unwrap_or_else(|| runtime.providers.random().random());
-    note(&format!("bench seed={seed}"));
-    let patience = Duration::from_millis(args.patience_ms);
-    let slots = match prepare(runtime, client, servers, &args, seed, patience).await {
-        Ok(slots) => slots,
+    let plan = match Plan::new(runtime, args) {
+        Ok(plan) => plan,
         Err(error) => {
             note(&error);
-            return Ending::Unreachable;
+            return Ending::Refused;
         }
     };
-    let export = match &args.histograms {
-        Some(path) => match Export::create(path, seed) {
-            Ok(export) => Some(export),
-            Err(error) => {
-                note(&format!("{}: {error}", path.display()));
-                return Ending::Refused;
-            }
-        },
-        None => None,
-    };
-    let shared = Rc::new(Shared {
-        args,
-        seed,
-        json,
-        slots,
-        stop: CancellationToken::new(),
-        failure: RefCell::new(None),
-        mismatches: Cell::new(0),
-    });
-    tokio::task::LocalSet::new()
-        .run_until(drive(client.clone(), shared.clone(), export, local))
-        .await;
-    let mismatches = shared.mismatches.get();
-    if let Some(failure) = shared.failure.borrow_mut().take() {
-        note(&failure.message);
-        return failure.ending;
+    let mut runs = Vec::new();
+    for topology in plan.topologies() {
+        match plan
+            .run_one(runtime, (client, servers), topology, (json, None))
+            .await
+        {
+            Ok(run) => runs.push(run),
+            Err(ending) => return ending,
+        }
     }
-    if mismatches > 0 {
-        note(&format!("read-tail found {mismatches} wrong records"));
-        return Ending::Refused;
+    finish(&runs, json)
+}
+
+/// One row per topology and call: the totals side by side.
+fn compare(runs: &[Measured]) {
+    assert!(runs.len() > 1, "a comparison needs two runs");
+    println!();
+    println!("{}", total_header("topology"));
+    for run in runs {
+        for call in &run.calls {
+            let name = format!("{} {}", run.topology, call.name());
+            println!("{}", total_row(run.elapsed, &name, &run.total, *call));
+        }
     }
-    Ending::Success
 }
 
 /// The tenant, the journals, and a claimed writer on each.
@@ -275,7 +408,7 @@ async fn prepare(
     client: &ParosClient,
     servers: &[u64],
     args: &BenchArgs,
-    seed: u64,
+    (seed, topology): (u64, Topology),
     patience: Duration,
 ) -> Result<Vec<Rc<Slot>>, String> {
     let providers = &runtime.providers;
@@ -285,7 +418,7 @@ async fn prepare(
         runtime,
         client,
         (&args.tenant, tenant),
-        (count, args.durability.desired()),
+        (count, topology),
         patience,
     )
     .await?;
@@ -318,13 +451,14 @@ async fn prepare(
 }
 
 /// Start the clients and the truncations, tick every second until the run
-/// ends, then print the totals (or the report, with `--json`).
+/// ends, then print the totals (or the report, with `--json`). The time
+/// measured, the calls drawn and their totals.
 async fn drive(
     client: ParosClient,
     shared: Rc<Shared>,
     mut export: Option<Export>,
     local: Option<&Path>,
-) {
+) -> (Duration, Vec<Call>, Calls) {
     let args = &shared.args;
     let mut registry = Registry::default();
     let start = Instant::now();
@@ -423,6 +557,7 @@ async fn drive(
     {
         note(&format!("histograms: {error}"));
     }
+    (measured, calls, std::mem::take(&mut registry.total))
 }
 
 /// The totals as text, or as one JSON report with `--json`.
@@ -443,6 +578,8 @@ fn report(
             Some(_) => serde_json::json!({ "local": args.local }),
             None => serde_json::json!("servers"),
         },
+        "topology": shared.topology.to_string(),
+        "acceptors": shared.topology.acceptors(),
         "clients": args.clients,
         "journals": args.journals,
         "record_size": args.record_size,

@@ -1670,7 +1670,10 @@ call's latency counts from the moment it was due (no coordinated omission). `--j
 report: throughput (calls and bytes per second) and latency (mean, p50, p90, p99, p99.9, max)
 per call, with the commit, the command line, the CPU count, the kernel and the filesystem of a
 local cell's stores. CI only checks that `parosctl bench --local 3 --duration 5s` runs: numbers
-on shared runners are noise. The baseline is posted on #194.
+on shared runners are noise. The baseline is posted on #194. `--topology 3x1,3x3` compares
+journal shapes (decided on 2026-10-16, asked to see whether a grid behaves better): each
+`ROWSxCOLUMNS` runs in turn under one seed on journals of its own, on a new local cell for
+each topology, then one total row per topology and call.
 
 ### 3.7 The universe
 

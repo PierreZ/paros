@@ -781,7 +781,13 @@ impl Matchmaker {
     pub fn newer_set(&self, generation: MatchmakerGeneration) -> Option<MatchmakerSet> {
         let newer = match self.judge_generation(generation)? {
             MatchRefusal::Stopped { successor } => successor,
-            MatchRefusal::Generation { current } => Some(current),
+            // An active matchmaker behind the request (a member of the
+            // requester's generation too, not yet bootstrapped there)
+            // refuses with the set it serves, an earlier one: that names
+            // no later set (seed 4434657833621076437 of PR #625).
+            MatchRefusal::Generation { current } if current.generation > generation => {
+                Some(current)
+            }
             _ => None,
         };
         assert!(
