@@ -411,3 +411,50 @@ message InspectReply {
   // here.
   bytes machine_interface = 27;
 }
+
+// A scrub of one journal's durable records on the node that answers (#362
+// (background scrubbing), `docs/architecture.md` §5): the tenant's elected
+// scrubber reads each acceptor's own copy, never a quorum read. The node
+// reads up to `limit` records (and about `max_bytes` of payload) from
+// `from_slot` up back from its device and checks each one locally. It
+// answers each record's ballot and value fingerprint, so the scrubber
+// compares copies across acceptors without moving the values. A record that
+// fails its checksum goes to the node's protocol as CTRL's faulty, which
+// writes it again from the node's own copy before the answer leaves. No
+// identifier has a default: an unset journal, or one the node does not
+// serve, is refused `unknown_journal`.
+message ScrubRequest {
+  uint64 tenant = 1;
+  uint64 journal = 2;
+  uint64 from_slot = 3;
+  uint32 limit = 4;
+  uint64 max_bytes = 5;
+}
+
+// One slot of a scrub page.
+message ScrubbedSlot {
+  uint64 slot = 1;
+  .paros.common.v1.Ballot ballot = 2;
+  // The `paros_core::command_fingerprint` of the value; 0 when damaged.
+  uint64 digest = 3;
+  // The record failed its check here.
+  bool damaged = 4;
+  // A damaged record this answer wrote again from the node's own copy.
+  bool repaired = 5;
+}
+
+message ScrubReply {
+  // Empty when the page was read; else why not: `unknown_journal`,
+  // `malformed`, `unavailable` (the device read failed; nothing changed).
+  string refusal = 1;
+  repeated ScrubbedSlot slots = 2;
+  // Where the next page starts; absent at the end of the store.
+  optional uint64 next_slot = 3;
+  // The bytes the page read from the device.
+  uint64 bytes = 4;
+  // The first slot this node has not seen chosen: a scrubber compares
+  // values only below every answer's own.
+  uint64 first_unchosen = 5;
+  // The node's floor: nothing below it is held.
+  uint64 first_slot = 6;
+}

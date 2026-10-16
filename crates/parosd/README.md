@@ -260,6 +260,9 @@ Each field has an environment override named after it, `_MS` for a duration:
 | `PAROS_MAX_BATCH_RECORDS` | 1024 | 1 |
 | `PAROS_MAX_BATCH_BYTES` | 1048576 | 1 |
 | `PAROS_MACHINE_DOWN_AFTER_MS` (the cell coordinator marks a silent machine down, #211) | 10000 | `PAROS_ELECTION_RENEW_MS` + 1 |
+| `PAROS_SCRUB_RATE` (bytes per second the scrubber reads from each journal, #362 (background scrubbing)) | 4194304 | 1024 |
+| `PAROS_SCRUB_PASS_WITHIN_MS` (a full scrub pass starts no sooner, and is late after it) | 604800000 | 1000 |
+| `PAROS_SCRUB_PAGE` (records per scrub request to one acceptor) | 64 | 1 |
 
 An override below its floor, or one that does not parse, stops the process
 before it binds (exit 2). The floors are the ones no network makes valid; the

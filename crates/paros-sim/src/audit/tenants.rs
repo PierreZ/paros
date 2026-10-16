@@ -63,6 +63,10 @@ pub(crate) struct TenantBoard {
     /// Every journal a tenant created, with the control journal's LSN that
     /// created it.
     created: BTreeMap<JournalIdentifier, u64>,
+    /// Every created journal's acceptor configuration at its create (#362
+    /// (background scrubbing): the cold-rot scenario rots only a journal
+    /// that keeps a clean copy on a quorum).
+    configs: BTreeMap<JournalIdentifier, paros::AcceptorConfig>,
     /// Every created journal's writer mode (#241).
     modes: BTreeMap<JournalIdentifier, WriterMode>,
     /// Every request's first outcome, by control journal and request id.
@@ -136,6 +140,16 @@ fn zone_spread(config: &paros::AcceptorConfig, lsn: u64) {
 }
 
 impl TenantBoard {
+    /// The acceptor configuration a tenant created `journal` with, while it
+    /// is not deleted (#362 (background scrubbing): the journals the
+    /// cold-rot scenario may rot).
+    pub(crate) fn live_config(&self, journal: JournalIdentifier) -> Option<&paros::AcceptorConfig> {
+        if self.deleted.contains_key(&journal) {
+            return None;
+        }
+        self.configs.get(&journal)
+    }
+
     /// #575 (key:value tags): a tag request names a live journal the
     /// tenant created before; a tag changes no outcome.
     fn tagged(&mut self, control: JournalIdentifier, request: u64, id: JournalId, lsn: u64) {
@@ -174,6 +188,30 @@ impl TenantBoard {
         self.answered(control, request, RequestOutcome::Deleted(id), lsn);
     }
 
+    /// Tenant control journal `control` folded a `Configured` of journal
+    /// `id` (or of the tenant's default) at `lsn`: a journal's mode changes
+    /// only for a journal its tenant created before (#214 (tenant modes)).
+    fn configured(
+        &mut self,
+        control: JournalIdentifier,
+        request: u64,
+        id: Option<JournalId>,
+        lsn: u64,
+    ) {
+        if let Some(id) = id {
+            let journal = JournalIdentifier::new(control.tenant, id);
+            assert_always!(
+                self.created.get(&journal).is_some_and(|at| *at < lsn),
+                "tenant: a configured journal is one the tenant created before",
+                { "lsn" => lsn }
+            );
+            assert_reachable!("tenant: a journal's desired mode is configured");
+        } else {
+            assert_reachable!("tenant: a tenant's default mode is configured");
+        }
+        self.answered(control, request, RequestOutcome::Configured(id), lsn);
+    }
+
     /// `node` folded LSN `lsn` of tenant control journal `control` to
     /// `event`.
     #[tracing::instrument(level = "trace", skip(self, event), fields(node = node.0, journal = %control, lsn))]
@@ -204,6 +242,9 @@ impl TenantBoard {
                 self.armed = true;
                 let journal = JournalIdentifier::new(control.tenant, *id);
                 self.modes.entry(journal).or_insert(*writer);
+                self.configs
+                    .entry(journal)
+                    .or_insert_with(|| config.clone());
                 let at = *self.created.entry(journal).or_insert(lsn);
                 assert_always!(
                     id.is_set() && *id != control.journal && at == lsn,
@@ -247,20 +288,7 @@ impl TenantBoard {
                 self.id_taken = true;
             }
             TenantEvent::Configured { request, id, .. } => {
-                // A journal's mode changes only for a journal its tenant
-                // created before (#214 (tenant modes)).
-                if let Some(id) = id {
-                    let journal = JournalIdentifier::new(control.tenant, *id);
-                    assert_always!(
-                        self.created.get(&journal).is_some_and(|at| *at < lsn),
-                        "tenant: a configured journal is one the tenant created before",
-                        { "lsn" => lsn }
-                    );
-                    assert_reachable!("tenant: a journal's desired mode is configured");
-                } else {
-                    assert_reachable!("tenant: a tenant's default mode is configured");
-                }
-                self.answered(control, *request, RequestOutcome::Configured(*id), lsn);
+                self.configured(control, *request, *id, lsn);
             }
             TenantEvent::Placed { id } => {
                 let journal = JournalIdentifier::new(control.tenant, *id);
@@ -270,12 +298,14 @@ impl TenantBoard {
                     { "lsn" => lsn }
                 );
             }
+            TenantEvent::Scrubbed(progress) => scrubbed(lsn, progress),
             TenantEvent::Described
             | TenantEvent::Checkpoint { .. }
             | TenantEvent::Refused(
                 TenantRefusal::Malformed
                 | TenantRefusal::Redescribed
-                | TenantRefusal::NotPlaceable { .. },
+                | TenantRefusal::NotPlaceable { .. }
+                | TenantRefusal::ScrubBehind,
             ) => {}
         }
     }
@@ -478,4 +508,15 @@ impl TenantBoard {
             "names: a journal name is created again after a completed delete"
         );
     }
+}
+
+/// A scrub record folded at `lsn` (#362 (background scrubbing)). The
+/// scrubber compares the copies of one slot under one ballot: Paxos accepts
+/// one value per slot per ballot, so they never differ.
+fn scrubbed(lsn: u64, progress: &paros::tenant::ScrubProgress) {
+    assert_always!(
+        progress.mismatched_total == 0,
+        "scrub: the copies of a slot under one ballot hold one value",
+        { "lsn" => lsn, "mismatched" => progress.mismatched_total }
+    );
 }

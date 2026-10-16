@@ -57,6 +57,7 @@ pub(crate) mod operator;
 pub(crate) mod ready;
 pub(crate) mod reply;
 mod report;
+pub(crate) mod scrub;
 mod system;
 pub(crate) mod transport;
 mod tunables;
@@ -2235,6 +2236,32 @@ where
                 // as `not_leader` while it runs, then `unchanged` once done).
                 shared.with(&node_audit).answer(Reply::Reconfigure, reply, ack);
                 journals.fold(journal, outcome, ticks, self_id)?;
+            }
+            Some((req, reply)) = rpc.scrub.recv() => {
+                // A scrub page (#362 (background scrubbing)): read back and
+                // checked here; a damaged record goes to the core, and the
+                // settle tail makes its rewrite durable before the answer
+                // leaves. No journal has a default: an unset one, or one not
+                // live here, is refused.
+                let asked = JournalIdentifier::new(TenantId(req.tenant), paros_core::JournalId(req.journal));
+                let Some((&journal, rt)) = journals.named(asked) else {
+                    let _ = reply.send(scrub::refused("unknown_journal"));
+                    continue;
+                };
+                let mut served = scrub::serve(&mut rt.node, &mut rt.storage, &req).await;
+                if served.repairs > 0 {
+                    let outcome = shared.settle(rt).await;
+                    if outcome.is_err() {
+                        // The rewrite did not land: the store's next
+                        // append of the slot writes it again.
+                        for slot in &mut served.reply.slots {
+                            slot.repaired = false;
+                        }
+                    }
+                    journals.fold(journal, outcome, ticks, self_id)?;
+                }
+                metrics.scrubbed(journal, &served.reply);
+                let _ = reply.send(served.reply);
             }
             Some((req, reply)) = rpc.inspect.recv() => {
                 // No settle tail: an inspect is a pure read of the core, so it

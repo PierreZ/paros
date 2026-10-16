@@ -93,6 +93,9 @@ impl DriverTunables {
     /// | `internal_request_timeout` | 2 s | a coordinator's slow call ends before its lease runs out, so it renews in time (#457) |
     /// | `internal_retry_budget`, `internal_retry_backoff` | the defaults (4, 100 ms) | the library client's |
     /// | `resolve_answer_within` | the default (2 s) | a `Resolve` is a hint read from folds that go on from where they stopped |
+    /// | `scrub_rate` | 4 MiB/s | a few percent of one disk, per tenant (#362 (background scrubbing)) |
+    /// | `scrub_pass_within` | 7 days | every record is read again each week, so rot is found long before a second copy rots |
+    /// | `scrub_page` | the default (64) | a page bounds one acceptor's read burst |
     ///
     /// # Panics
     ///
@@ -127,6 +130,8 @@ impl DriverTunables {
             machine_replace_after: Duration::from_secs(300),
             status_hold: Duration::from_secs(20),
             internal_request_timeout: Duration::from_secs(2),
+            scrub_rate: 4 * 1024 * 1024,
+            scrub_pass_within: Duration::from_hours(7 * 24),
             ..defaults
         };
         // What `parosd` ships is a profile the simulation could have drawn:
@@ -154,7 +159,8 @@ impl DriverTunables {
     }
 
     /// Every checked field: its name, its value and its floor.
-    fn floor_table(&self) -> [(&'static str, u64, u64); 43] {
+    #[allow(clippy::too_many_lines)]
+    fn floor_table(&self) -> [(&'static str, u64, u64); 46] {
         let ms = |d: Duration| u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
         let count = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
         [
@@ -257,6 +263,17 @@ impl DriverTunables {
             ),
             ("internal_retry_backoff", ms(self.internal_retry_backoff), 0),
             ("resolve_answer_within", ms(self.resolve_answer_within), 1),
+            (
+                "scrub_rate",
+                self.scrub_rate,
+                super::config::SCRUB_RATE_FLOOR,
+            ),
+            (
+                "scrub_pass_within",
+                ms(self.scrub_pass_within),
+                ms(super::config::SCRUB_PASS_WITHIN_FLOOR),
+            ),
+            ("scrub_page", count(self.scrub_page), 1),
         ]
     }
 

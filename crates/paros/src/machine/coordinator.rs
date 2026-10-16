@@ -96,6 +96,7 @@ use super::capacity;
 use super::footprints::Footprints;
 use super::modes::Modes;
 use super::moves::Moves;
+use super::scrub::{ScrubPace, Scrubs};
 use super::sets::{SetStep, Sets};
 use super::tenants::TenantDesk;
 use super::{CellPlan, ControlJournals, FormedCell, incarnation_from_halves};
@@ -785,6 +786,9 @@ struct Candidacy {
     /// #501 (matchmaker sets off the founders)): the set may then leave its
     /// booked machines, and the term must move it back.
     ask_again: bool,
+    /// How fast the term's tenant scrubbers read (#362 (background
+    /// scrubbing)).
+    scrub: ScrubPace,
 }
 
 /// Start the candidacy of the founding member `formed` for the cell
@@ -826,6 +830,7 @@ pub(crate) fn spawn<P: Providers>(
             || crate::scenario::quit_mid_move(),
         slow_install: moonpool_buggify::buggify_with_prob!(0.3),
         ask_again: moonpool_buggify::buggify_with_prob!(0.3),
+        scrub: ScrubPace::of(tunables),
     };
     let mut client = cell_client(providers, rpc, formed, tunables).with_shutdown(shutdown.clone());
     if let Some(observer) = observer {
@@ -906,6 +911,7 @@ async fn campaign<P: Providers>(
         mut quit_mid_move,
         mut slow_install,
         ask_again,
+        scrub,
     } = candidacy;
     let founder_ids: Vec<NodeId> = plan.members.iter().map(|(id, _)| *id).collect();
     let journals = plan.control_journals();
@@ -953,6 +959,8 @@ async fn campaign<P: Providers>(
         .chain(journals.fleet.map(|fleet| fleet.tenant))
         .collect();
     let mut footprints = Footprints::new(internal.clone());
+    // The served term's scrubbers (#362 (background scrubbing)).
+    let mut scrubs = Scrubs::new(scrub);
     // The served term's dynamic endpoint (#404).
     let mut group: Option<TermGroup> = None;
     // The term whose install was slowed, until the next step judges it.
@@ -1026,6 +1034,7 @@ async fn campaign<P: Providers>(
                 changes = Modes::default();
                 sets = Sets::new(ask_again);
                 footprints = Footprints::new(internal.clone());
+                scrubs = Scrubs::new(scrub);
                 match duty {
                     TermDuty::Served { .. } => {
                         served = Some(leader.term);
@@ -1148,14 +1157,27 @@ async fn campaign<P: Providers>(
                                                             }
                                                             None => None,
                                                         };
+                                                        // Then one step of a tenant's
+                                                        // scrub pass (#362 (background
+                                                        // scrubbing)).
+                                                        let scrubbed = match footprint {
+                                                            Some(_) => {
+                                                                scrubs
+                                                                    .step(ctx, session, desk)
+                                                                    .await
+                                                            }
+                                                            None => None,
+                                                        };
                                                         // A set's move is left mid-way once
                                                         // its handover started, so the next
                                                         // term finds it running.
-                                                        set.zip(footprint).map(|(set, _)| {
-                                                            step.in_flight()
-                                                                || mode.in_flight()
-                                                                || set == SetStep::HandedOver
-                                                        })
+                                                        set.zip(footprint).zip(scrubbed).map(
+                                                            |((set, _), _)| {
+                                                                step.in_flight()
+                                                                    || mode.in_flight()
+                                                                    || set == SetStep::HandedOver
+                                                            },
+                                                        )
                                                     }
                                                 }
                                             }

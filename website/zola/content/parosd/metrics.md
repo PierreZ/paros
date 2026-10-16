@@ -35,6 +35,8 @@ When `PAROS_HTTP_LISTEN` is not set, the machine does not listen for HTTP. It st
 | `paros_machine_cpu_cores`, `paros_machine_cpu_ratio`, `paros_machine_disk_busy_ratio`, `paros_machine_disk_queue_depth` | gauge | | the last busyness window (the `Load` call) |
 | `paros_machine_load_windows_total` | counter | | the busyness windows: when it stops, the numbers are old |
 | `paros_machine_phase` | gauge | | `0` starting, `1` idle, `2` serving |
+| `paros_scrub_records_total`, `paros_scrub_bytes_total` | counter | | the records and payload bytes the machine read back for a scrub |
+| `paros_scrub_damaged_total`, `paros_scrub_repaired_total` | counter | | the records a scrub found damaged on the disk of the machine, and those it wrote again from its own copy |
 
 The `outcome` label is one of `ok`, `duplicate`, `refused`, `wrong_mode`, `truncated`,
 `too_large`, `redirected`, `unknown_journal` and `unserved`. A refusal or a call the machine did
@@ -81,6 +83,16 @@ in its OpenTelemetry name: `paros_calls_total` is `paros_calls`. The spans are t
 asks every machine of the cell with the `Load` call and adds the counts. A machine that does not
 answer is not in the sum, and the table says how many machines answered. `--json` gives the same
 numbers in a `usage` block.
+
+## Scrub progress
+
+`parosctl status --tenant <name>` shows a `scrub:` line. The scrubber of the tenant reads every
+record of every journal of the tenant again, one pass after the other. The line gives the pass,
+where it is (`done`, or a journal and a slot), and what it found: the records it checked, those
+it found damaged, those it repaired and those whose copies do not agree. A pass that took longer
+than `PAROS_SCRUB_PASS_WITHIN_MS` shows `late`. `--json` gives the same numbers in a `scrub`
+object for each tenant. The scrubber is described on the
+[Beyond Multi-Paxos](@/paxos/beyond-multi-paxos.md#background-scrubbing) page.
 
 ## In the simulation
 

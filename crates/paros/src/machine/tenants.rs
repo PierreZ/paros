@@ -601,6 +601,27 @@ impl TenantDesk {
         written
     }
 
+    /// Record the tenant scrubber's `progress` in `tenant`'s control
+    /// journal (#362 (background scrubbing)).
+    ///
+    /// # Errors
+    ///
+    /// The write did not land, or a later term fenced the journal.
+    pub(super) async fn record_scrub<P: Providers>(
+        &mut self,
+        client: &Client<P>,
+        tenant: TenantId,
+        progress: crate::tenant::ScrubProgress,
+    ) -> Result<(), JournalAnswer> {
+        let command = TenantCommand::Scrubbed(progress);
+        let written = self.append(client, tenant, &command).await;
+        if matches!(written, Err(JournalAnswer::NotCoordinator)) {
+            self.superseded = true;
+            self.tenants.clear();
+        }
+        written
+    }
+
     /// The cell's storage machines a create may be placed on (#474): the
     /// founding members, registered or not, and every registered machine
     /// whose class stores. A draining or retired machine takes no new

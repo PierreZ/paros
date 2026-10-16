@@ -633,6 +633,64 @@ impl<V: Clone + PartialEq> Acceptor<V> {
         );
         repaired
     }
+
+    /// The scrub's in-place repair (#362 (background scrubbing)): write the
+    /// record this acceptor holds at `slot` again, at the same ballot and
+    /// value, because its durable copy failed its checksum when a scrub read
+    /// it back. The value is the one this acceptor voted for (loaded and
+    /// checked at boot, or recorded in this incarnation), so the write
+    /// changes no vote and no watermark: it is CTRL's repair of a faulty
+    /// entry, served from this node's own copy. Counted with the other
+    /// in-place repairs ([`Acceptor::faulty_repaired`]).
+    ///
+    /// `None`, and no write, when the acceptor holds no readable record at
+    /// `slot`: below the floor, never voted, or already faulty (the boot
+    /// found it, and CTRL's catch-up or election repairs it from a peer).
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
+    pub fn rewrite<W: From<AcceptorWrite<V>>>(
+        &mut self,
+        slot: Slot,
+        writes: &mut Vec<W>,
+    ) -> Option<Ballot> {
+        let (ballot, value) = self.record(slot).cloned()?;
+        let watermark_before = self.vote_watermark();
+        let promised_before = self.promised;
+        let writes_before = writes.len();
+        self.faulty_repaired += 1;
+        writes.push(
+            AcceptorWrite::AppendAccepted {
+                slot,
+                ballot,
+                value: value.clone(),
+            }
+            .into(),
+        );
+        // The rewrite is one write of the record held, and moves nothing
+        // else: the same record, the same promise, the same watermark.
+        assert!(
+            writes.len() == writes_before + 1,
+            "a rewrite emits exactly one write"
+        );
+        assert!(
+            self.records
+                .get(slot)
+                .is_some_and(|(b, v)| *b == ballot && *v == value),
+            "a rewrite keeps the record it writes"
+        );
+        assert!(
+            self.promised == promised_before,
+            "a rewrite never moves the promise"
+        );
+        assert!(
+            self.vote_watermark() == watermark_before,
+            "a rewrite never moves the vote watermark"
+        );
+        Some(ballot)
+    }
 }
 
 #[cfg(test)]
@@ -741,5 +799,41 @@ mod tests {
             writes.iter().all(WriteOp::needs_sync),
             "every write an acceptor emits is safety-critical"
         );
+    }
+
+    /// The scrub's rewrite (#362 (background scrubbing)) writes the record
+    /// held, at its own ballot, and nothing else; a slot with no readable
+    /// record (never voted, faulty, below the floor) writes nothing.
+    #[test]
+    fn a_rewrite_writes_the_record_held_and_moves_nothing() {
+        let mut faulty = BTreeMap::new();
+        faulty.insert(Slot(3), ballot(1));
+        let mut acceptor = Acceptor::new(ballot(2), BTreeMap::new(), Slot(1), faulty);
+        let mut writes: Vec<WriteOp> = Vec::new();
+        acceptor.record_accepted(Slot(1), ballot(1), command(1), &mut writes);
+        let (promised, watermark, repaired) = (
+            acceptor.promised(),
+            acceptor.vote_watermark(),
+            acceptor.faulty_repaired(),
+        );
+        writes.clear();
+        assert_eq!(acceptor.rewrite(Slot(1), &mut writes), Some(ballot(1)));
+        assert!(
+            matches!(
+                writes.as_slice(),
+                [WriteOp::Acceptor(AcceptorWrite::AppendAccepted { slot, ballot: b, value })]
+                    if *slot == Slot(1) && *b == ballot(1) && *value == command(1)
+            ),
+            "the rewrite is the record held"
+        );
+        assert_eq!(acceptor.promised(), promised);
+        assert_eq!(acceptor.vote_watermark(), watermark);
+        assert_eq!(acceptor.faulty_repaired(), repaired + 1);
+        writes.clear();
+        // Never voted, faulty, below the floor: nothing to write.
+        for slot in [Slot(2), Slot(3), Slot(0)] {
+            assert_eq!(acceptor.rewrite(slot, &mut writes), None);
+        }
+        assert!(writes.is_empty(), "a slot with no record writes nothing");
     }
 }

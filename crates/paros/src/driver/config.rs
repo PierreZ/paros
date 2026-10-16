@@ -381,6 +381,22 @@ pub struct DriverTunables {
     /// tail), a wall-clock floor the operator keeps: below it, no answer ever
     /// comes back.
     pub resolve_answer_within: Duration,
+    /// How many bytes per second the tenant coordinator's scrubber reads from
+    /// each journal's acceptors (#362 (background scrubbing)): a token
+    /// bucket per tenant, refilled on the term's own clock. Floor 1 KiB/s
+    /// ([`SCRUB_RATE_FLOOR`]): one small record per second still moves a
+    /// pass forward; below it a pass never ends.
+    pub scrub_rate: u64,
+    /// The full-pass bound of the scrubber (#362): a pass starts no sooner
+    /// than this after the previous pass started, and a pass still running
+    /// when it runs out is late (shown in `parosctl status` and the
+    /// metrics). Floor 1 s ([`SCRUB_PASS_WITHIN_FLOOR`]): a shorter bound
+    /// only re-reads the same records back to back.
+    pub scrub_pass_within: Duration,
+    /// How many records one scrub request asks of one acceptor (#362).
+    /// Floor 1; the acceptor cuts a page at `paros::driver` `SCRUB_PAGE`
+    /// records and 1 MiB whatever the scrubber asks.
+    pub scrub_page: usize,
 }
 
 impl Default for DriverTunables {
@@ -429,6 +445,9 @@ impl Default for DriverTunables {
             internal_retry_budget: INTERNAL_RETRY_BUDGET,
             internal_retry_backoff: INTERNAL_RETRY_BACKOFF,
             resolve_answer_within: RESOLVE_ANSWER_WITHIN,
+            scrub_rate: SCRUB_RATE,
+            scrub_pass_within: SCRUB_PASS_WITHIN,
+            scrub_page: SCRUB_PAGE,
         };
         // The simulation's baseline is itself a winnable profile.
         assert!(
@@ -528,6 +547,28 @@ const RESOLVE_ANSWER_WITHIN: Duration = Duration::from_secs(2);
 const _: () = assert!(INTERNAL_REQUEST_TIMEOUT.as_millis() > 0);
 const _: () = assert!(INTERNAL_RETRY_BUDGET > 0);
 const _: () = assert!(RESOLVE_ANSWER_WITHIN.as_millis() > 0);
+
+/// Default [`DriverTunables::scrub_rate`]: 256 KiB/s, so the simulation's
+/// small journals see several passes in one run.
+const SCRUB_RATE: u64 = 256 * 1024;
+
+/// The floor of [`DriverTunables::scrub_rate`].
+pub const SCRUB_RATE_FLOOR: u64 = 1024;
+
+/// Default [`DriverTunables::scrub_pass_within`]: 10 s, a few passes in one
+/// simulated run.
+const SCRUB_PASS_WITHIN: Duration = Duration::from_secs(10);
+
+/// The floor of [`DriverTunables::scrub_pass_within`].
+pub const SCRUB_PASS_WITHIN_FLOOR: Duration = Duration::from_secs(1);
+
+/// Default [`DriverTunables::scrub_page`].
+const SCRUB_PAGE: usize = 64;
+
+const _: () = assert!(SCRUB_RATE >= SCRUB_RATE_FLOOR);
+const _: () = assert!(SCRUB_PASS_WITHIN.as_millis() >= SCRUB_PASS_WITHIN_FLOOR.as_millis());
+const _: () = assert!(SCRUB_PAGE >= 1);
+const _: () = assert!(SCRUB_PAGE <= super::scrub::SCRUB_PAGE);
 
 impl DriverTunables {
     /// The library client tunables of a machine's own clients (#457): the

@@ -1,6 +1,6 @@
 //! [`JournalStorage`]: the node's [`LogStorage`] on `moonpool-journal`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use moonpool_buggify::hint::Strike;
 use moonpool_core::StorageProvider;
@@ -12,7 +12,9 @@ use super::{
     JournalStoreConfig, ballot_id, commit_error, decode, encode, id_ballot, open_error, store_id,
     undecodable,
 };
-use crate::storage::{LogStorage, StorageError, StorageRecord, WriteOutcome};
+use crate::storage::{
+    LogStorage, ScrubPage, ScrubbedSlot, StorageError, StorageRecord, WriteOutcome, command_bytes,
+};
 
 /// The kind byte of an accepted (or learned) entry's identity.
 const ACCEPTED: u8 = 1;
@@ -87,6 +89,10 @@ pub struct JournalStorage<P: StorageProvider> {
     staged: BTreeMap<Slot, (Ballot, Vec<u8>)>,
     /// A floor raised since the last sync.
     staged_floor: Option<Slot>,
+    /// Slots whose durable copy a scrub found damaged (#362 (background
+    /// scrubbing)): the next append of the slot writes it, even when it is
+    /// the record held.
+    damaged: BTreeSet<Slot>,
     boot_facts: JournalBootFacts,
 }
 
@@ -139,6 +145,7 @@ impl<P: StorageProvider> JournalStorage<P> {
             faulty: BTreeMap::new(),
             staged: BTreeMap::new(),
             staged_floor: None,
+            damaged: BTreeSet::new(),
             boot_facts: JournalBootFacts::default(),
         }
     }
@@ -305,6 +312,7 @@ impl<P: StorageProvider> JournalStorage<P> {
         let floor = self.first;
         self.accepted = self.accepted.split_off(&floor);
         self.faulty = self.faulty.split_off(&floor);
+        self.damaged = self.damaged.split_off(&floor);
         assert!(
             self.accepted.keys().next().is_none_or(|s| *s >= floor),
             "no accepted record survives below the floor"
@@ -489,10 +497,14 @@ impl<P: StorageProvider> LogStorage for JournalStorage<P> {
         // acceptor's disk busy with copies while its tally crawled
         // (witness 5953348164786240469: 1,073 re-sends of one slot before
         // its quorum, the cluster stalled past the recovery tail).
-        if self
-            .accepted
-            .get(&slot)
-            .is_some_and(|(held, cmd)| *held == ballot && *cmd == command)
+        // A scrub found the durable copy damaged (#362 (background
+        // scrubbing)): the same record is written again.
+        let damaged = self.damaged.remove(&slot);
+        if !damaged
+            && self
+                .accepted
+                .get(&slot)
+                .is_some_and(|(held, cmd)| *held == ballot && *cmd == command)
         {
             assert!(
                 !self.faulty.contains_key(&slot),
@@ -644,5 +656,97 @@ impl<P: StorageProvider> LogStorage for JournalStorage<P> {
         self.staged_floor = Some(self.staged_floor.map_or(point, |f| f.max(point)));
         self.meta_dirty = true;
         Ok(())
+    }
+
+    /// Read a page of entries back from the journal's segments and judge
+    /// each against its persist record (#362 (background scrubbing)): the
+    /// slots held from `from` up, faulty ones included, none staged. An
+    /// entry the journal reads intact but that is not the record held
+    /// (another ballot or value) is damaged too.
+    #[tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, from = from.0))]
+    async fn scrub(
+        &mut self,
+        from: Slot,
+        limit: usize,
+        max_bytes: u64,
+    ) -> Result<ScrubPage, StorageError> {
+        let start = from.max(self.first);
+        let mut held: BTreeMap<Slot, (Ballot, u64)> = BTreeMap::new();
+        let mut page = ScrubPage::default();
+        let mut bytes = 0_u64;
+        let slots = self
+            .accepted
+            .range(start..)
+            .map(|(slot, (ballot, command))| (*slot, (*ballot, command_bytes(command))))
+            .chain(
+                self.faulty
+                    .range(start..)
+                    .map(|(slot, ballot)| (*slot, (*ballot, 1))),
+            );
+        let mut ordered: BTreeMap<Slot, (Ballot, u64)> = slots.collect();
+        ordered.retain(|slot, _| !self.staged.contains_key(slot));
+        for (slot, (ballot, size)) in ordered {
+            if held.len() >= limit.max(1) || (bytes >= max_bytes && !held.is_empty()) {
+                page.next = Some(slot);
+                break;
+            }
+            bytes += size;
+            held.insert(slot, (ballot, size));
+        }
+        let (Some(first), Some(last)) = (held.keys().next(), held.keys().next_back()) else {
+            return Ok(page);
+        };
+        let Some(journal) = self.journal.as_ref() else {
+            return Ok(page);
+        };
+        let replay = journal
+            .replay(first.0..=last.0)
+            .await
+            .map_err(|_| StorageError::Io {
+                record: StorageRecord::Store,
+                outcome: WriteOutcome::Unknown,
+            })?;
+        for (position, read) in replay {
+            let slot = Slot(position);
+            let Some((ballot, size)) = held.get(&slot).copied() else {
+                continue;
+            };
+            let own = self.accepted.get(&slot);
+            let intact = match (&read, own) {
+                (Ok(entry), Some((own_ballot, own_command))) => {
+                    id_ballot(&entry.id).0 == *own_ballot
+                        && decode::<Command>(&entry.payload).as_ref() == Some(own_command)
+                }
+                _ => false,
+            };
+            page.bytes += size;
+            let scrubbed = match own {
+                Some((own_ballot, own_command)) if intact => ScrubbedSlot::Intact {
+                    ballot: *own_ballot,
+                    digest: paros_core::command_fingerprint(own_command),
+                },
+                _ => {
+                    if own.is_some() {
+                        // The durable copy is gone: the next append of the
+                        // slot writes the record held again.
+                        self.damaged.insert(slot);
+                    }
+                    moonpool_assertions::reachable!("journal: a scrub reads a damaged entry");
+                    ScrubbedSlot::Damaged { ballot }
+                }
+            };
+            page.slots.insert(slot, scrubbed);
+        }
+        // Pair of the read: every slot judged was one the store held.
+        assert!(
+            page.slots.keys().all(|s| held.contains_key(s)),
+            "a scrub judges only the slots it asked for"
+        );
+        assert!(
+            page.next
+                .is_none_or(|next| page.slots.keys().all(|s| *s < next)),
+            "a scrub page ends below its next slot"
+        );
+        Ok(page)
     }
 }
