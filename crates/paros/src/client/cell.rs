@@ -542,7 +542,7 @@ impl CellSession {
 
     /// Admit the machine at `target`, dialed through `names`, to its end (see
     /// [`CellSession::admit_step`]), taking an interrupted step again for up
-    /// to `patience`.
+    /// to `patience` past the last written step.
     // The session, the RPC runtime, the cell's client, the resolver, where
     // to start, the machine and the patience: each is the caller's.
     #[allow(clippy::too_many_arguments)]
@@ -557,13 +557,13 @@ impl CellSession {
         target: &Address,
         patience: Duration,
     ) -> Run<NodeId> {
-        let deadline = client.now() + patience;
+        let mut deadline = client.now() + patience;
         let mut steps = Vec::new();
         while steps.len() < MAX_STEPS {
             let step = self
                 .admit_step(providers, rpc, client, names, first, target)
                 .await;
-            if retry(client, &step, deadline).await {
+            if retry(client, &step, &mut deadline, patience).await {
                 continue;
             }
             if let Some(end) = settle(step, &mut steps) {

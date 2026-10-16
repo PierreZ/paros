@@ -906,7 +906,7 @@ impl FleetSession {
 
     /// Set the user tags of `target` to `tags` to the request's end (see
     /// [`FleetSession::tag_step`]), taking an interrupted step again for up
-    /// to `patience`.
+    /// to `patience` past the last written step.
     #[tracing::instrument(level = "debug", skip_all)]
     pub async fn set_tags<P: Providers>(
         &mut self,
@@ -917,11 +917,11 @@ impl FleetSession {
         tags: &UserTags,
         patience: Duration,
     ) -> Run<u64> {
-        let deadline = client.now() + patience;
+        let mut deadline = client.now() + patience;
         let mut steps = Vec::new();
         while steps.len() < MAX_STEPS {
             let step = self.tag_step(client, first, target, request, tags).await;
-            if retry(client, &step, deadline).await {
+            if retry(client, &step, &mut deadline, patience).await {
                 continue;
             }
             if let Some(end) = settle(step, &mut steps) {
@@ -949,7 +949,7 @@ impl FleetSession {
 
     /// Add `key` to the universe entry to its end (see
     /// [`FleetSession::add_key_step`]), taking an interrupted step again for
-    /// up to `patience`.
+    /// up to `patience` past the last written step.
     #[tracing::instrument(level = "debug", skip_all)]
     pub async fn add_root_key<P: Providers>(
         &mut self,
@@ -958,11 +958,11 @@ impl FleetSession {
         key: &RootKeyEntry,
         patience: Duration,
     ) -> Run<u32> {
-        let deadline = client.now() + patience;
+        let mut deadline = client.now() + patience;
         let mut steps = Vec::new();
         while steps.len() < MAX_STEPS {
             let step = self.add_key_step(client, first, key).await;
-            if retry(client, &step, deadline).await {
+            if retry(client, &step, &mut deadline, patience).await {
                 continue;
             }
             if let Some(end) = settle(step, &mut steps) {
@@ -974,7 +974,7 @@ impl FleetSession {
 
     /// Remove the root key `label` from the universe entry to its end (see
     /// [`FleetSession::remove_key_step`]), taking an interrupted step again
-    /// for up to `patience`.
+    /// for up to `patience` past the last written step.
     #[tracing::instrument(level = "debug", skip_all)]
     pub async fn remove_root_key<P: Providers>(
         &mut self,
@@ -983,11 +983,11 @@ impl FleetSession {
         label: &str,
         patience: Duration,
     ) -> Run<Option<u32>> {
-        let deadline = client.now() + patience;
+        let mut deadline = client.now() + patience;
         let mut steps = Vec::new();
         while steps.len() < MAX_STEPS {
             let step = self.remove_key_step(client, first, label).await;
-            if retry(client, &step, deadline).await {
+            if retry(client, &step, &mut deadline, patience).await {
                 continue;
             }
             if let Some(end) = settle(step, &mut steps) {
@@ -998,8 +998,9 @@ impl FleetSession {
     }
 
     /// Run `init`'s fleet half to its end (see [`FleetSession::init_step`]),
-    /// taking an interrupted step again for up to `patience` (a cell still
-    /// electing its leaders, an operator racing this one).
+    /// taking an interrupted step again for up to `patience` past the last
+    /// written step (a cell still electing its leaders, an operator racing
+    /// this one, the coordinator's join).
     #[tracing::instrument(level = "debug", skip_all, fields(cell = self.journals.cell_id))]
     pub async fn init<P: Providers>(
         &mut self,
@@ -1008,11 +1009,11 @@ impl FleetSession {
         fleet_id: u64,
         patience: Duration,
     ) -> Run<u64> {
-        let deadline = client.now() + patience;
+        let mut deadline = client.now() + patience;
         let mut steps = Vec::new();
         while steps.len() < MAX_STEPS {
             let step = self.init_step(client, first, fleet_id).await;
-            if retry(client, &step, deadline).await {
+            if retry(client, &step, &mut deadline, patience).await {
                 continue;
             }
             if let Some(end) = settle(step, &mut steps) {
@@ -1025,7 +1026,8 @@ impl FleetSession {
     /// Create the `users` tenant `name` to its end (see
     /// [`FleetSession::create_step`]), under the first of `draws` the fleet tenant does
     /// not hold: a draw the fleet tenant holds already is skipped for the next one. An
-    /// interrupted step is taken again for up to `patience`.
+    /// interrupted step is taken again for up to `patience` past the last
+    /// written step.
     ///
     /// The creation is named by its whole draw set, so a resume passes the same
     /// `draws` and picks up under whichever of them the last run reached: a name
@@ -1050,7 +1052,7 @@ impl FleetSession {
         draws: impl IntoIterator<Item = JournalIdentifier>,
         patience: Duration,
     ) -> Run<TenantId> {
-        let deadline = client.now() + patience;
+        let mut deadline = client.now() + patience;
         let draws: Vec<JournalIdentifier> = draws.into_iter().collect();
         let mut at = 0;
         let mut draw = draws.first().copied().unwrap_or(JournalIdentifier::UNSET);
@@ -1080,7 +1082,7 @@ impl FleetSession {
                 draw = draws[at];
                 continue;
             }
-            if retry(client, &step, deadline).await {
+            if retry(client, &step, &mut deadline, patience).await {
                 continue;
             }
             if let Some(end) = settle(step, &mut steps) {
@@ -1092,7 +1094,7 @@ impl FleetSession {
 
     /// Remove the `users` tenant `name` to its end (see
     /// [`FleetSession::remove_step`]), taking an interrupted step again for
-    /// up to `patience`.
+    /// up to `patience` past the last written step.
     #[tracing::instrument(level = "debug", skip_all)]
     pub async fn remove_tenant<P: Providers>(
         &mut self,
@@ -1101,11 +1103,11 @@ impl FleetSession {
         name: &[u8],
         patience: Duration,
     ) -> Run<Option<TenantId>> {
-        let deadline = client.now() + patience;
+        let mut deadline = client.now() + patience;
         let mut steps = Vec::new();
         while steps.len() < MAX_STEPS {
             let step = self.remove_step(client, first, name).await;
-            if retry(client, &step, deadline).await {
+            if retry(client, &step, &mut deadline, patience).await {
                 continue;
             }
             if let Some(end) = settle(step, &mut steps) {
@@ -1256,16 +1258,33 @@ impl FleetSession {
 }
 
 /// Whether a run takes `step` again: it was interrupted (a claim no server
-/// decided, a leader not ready yet, a write fenced by another operator) and
-/// the run's patience allows one more `retry_backoff`. The step is decided
-/// afresh from the journals, so a retry is always a resumption.
+/// decided, a leader not ready yet, a write fenced by another operator, a
+/// wait for the cell coordinator's step) and the run's patience allows one
+/// more `retry_backoff`. The step is decided afresh from the journals, so a
+/// retry is always a resumption.
+///
+/// The patience counts from the run's last written step: a step that
+/// advanced moves `deadline` to `patience` from now (#605 (init pending in
+/// the recovery tail)). A run that keeps writing is not stuck. Before, a
+/// run that spent its patience on a slow claim wrote its last step and gave
+/// up at once on the coordinator's join it waits for next (witness
+/// 7296292548829778466 on cc14730: client 0's `init` wrote `FormFleet`,
+/// `AddRootKey` and `AddCell` 17 s into a slow recovery tail, ended
+/// `NotJoined` 0.2 s before the coordinator's `JoinFleet`, and stayed
+/// pending, red on "fleet: an operation an operator stopped in ends in the
+/// recovery tail").
 pub(super) async fn retry<P: Providers, T>(
     client: &Client<P>,
     step: &Step<T>,
-    deadline: Duration,
+    deadline: &mut Duration,
+    patience: Duration,
 ) -> bool {
+    if matches!(step, Step::Advanced(_)) {
+        *deadline = client.now() + patience;
+        return false;
+    }
     matches!(step, Step::Interrupted(_))
-        && client.now() < deadline
+        && client.now() < *deadline
         && client.pause(client.tunables().retry_backoff).await
 }
 
