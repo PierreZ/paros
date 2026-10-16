@@ -849,6 +849,16 @@ impl ReplicaNode {
         );
         self.replica.assert_invariants(self.floor);
         assert!(
+            self.unwalked
+                .first_key_value()
+                .is_none_or(|(s, _)| *s >= self.replica.first_unchosen()),
+            "an unwalked ballot sits at or above the chosen prefix"
+        );
+        assert!(
+            self.unwalked.keys().all(|s| self.replica.is_chosen(*s)),
+            "an unwalked ballot belongs to a slot this replica learned chosen"
+        );
+        assert!(
             self.faulty.first().is_none_or(|s| *s >= self.floor),
             "no faulty record survives below a replica's floor"
         );
