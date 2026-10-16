@@ -254,7 +254,7 @@ impl ReplicaNode {
             storage.sealed_state(),
             &below,
         );
-        let acceptors = AcceptorConfig::new(config.peers.clone(), config.quorum_system);
+        let acceptors = config.bootstrap();
         let mut node = Self {
             config,
             replica,

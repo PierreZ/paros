@@ -216,7 +216,10 @@ fn id_ballot(id: &Id) -> (Ballot, u8) {
 }
 
 /// Bumped when an encoding changes; bytes of another version do not decode.
-const FORMAT_VERSION: u8 = 4;
+/// Version 5: an acceptor configuration carries its members' failure
+/// domains, in the format marker's `Config` and in every registration
+/// (#215 (zones)).
+const FORMAT_VERSION: u8 = 5;
 
 /// A version byte and the value's `postcard` encoding.
 fn encode<T: Serialize + DeserializeOwned + PartialEq>(value: &T) -> Vec<u8> {

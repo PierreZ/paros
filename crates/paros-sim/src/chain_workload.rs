@@ -610,6 +610,18 @@ impl ChainWorkload {
             // steps knob's top, so a drain still finds ops after them.
             config.steps = config.steps.max(64);
         }
+        if crate::shape::zone_outage(ctx.state()) {
+            // The zone-outage scenario (#215 (zones)): its gates wait on a
+            // tenant step and a created journal's append while a zone is
+            // down, so every client runs both as often as the weight
+            // family allows. The outage waits on a created journal, which
+            // exists only late in a run: every client runs the steps knob's
+            // top, so a journal step still comes while the zone is down.
+            for op in [TENANT, CREATE_JOURNAL] {
+                config.weights[usize::from(op)] = OP_WEIGHT_CEILING;
+            }
+            config.steps = config.steps.max(64);
+        }
         if crate::shape::changed_mode(ctx.state()) {
             // The changed-mode scenario (#214 (tenant modes)): a mode change
             // needs tenants and their journals, and time to finish, so every
@@ -763,8 +775,9 @@ impl ChainWorkload {
                 }
             }
         }
-        // Likewise the changed-mode scenario's ops (#214 (tenant modes)).
-        if crate::shape::changed_mode(ctx.state()) {
+        // Likewise the changed-mode (#214 (tenant modes)) and zone-outage
+        // (#215 (zones)) scenarios' ops.
+        if crate::shape::changed_mode(ctx.state()) || crate::shape::zone_outage(ctx.state()) {
             for op in [TENANT, CREATE_JOURNAL] {
                 if !operations.contains(&op) {
                     operations.push(op);
@@ -818,7 +831,8 @@ impl ChainWorkload {
                 || crate::shape::slow_machine(ctx.state())
                 || crate::shape::downed_founder(ctx.state())
                 || crate::shape::drained_machine(ctx.state())
-                || crate::shape::changed_mode(ctx.state()));
+                || crate::shape::changed_mode(ctx.state())
+                || crate::shape::zone_outage(ctx.state()));
         let mut successful_after_ambiguity = false;
         // The library's decisions as outcomes (#221): a write redirected
         // and written at the leader, an ambiguous write the session settled,

@@ -2226,6 +2226,26 @@ so plain Multi-Paxos is unchanged. The configuration's `cell_id` rides the same 
 The rule is valid for `Majority`, `Flexible` and `Grid` alike. It is one pure function in
 `membership/`, shared by the tenant coordinator's placement and the simulation's composer.
 
+**As built** (2026-10-16, #215 (zones)). `paros_core::FailureDomain { region, az }` and
+`AcceptorConfig::zoned` carry the labels; `AcceptorConfig::zone_rule` is the rule, answered
+`Unlabeled`, `Holds`, `LosesQuorum(d)` or `CommitsAlone(d)`. The configuration's `cell` rides
+with the labels (`AcceptorConfig::with_cell`, `Config::cell_id`), and both are in the wire's
+`paros.common.v1.AcceptorConfig` (fields 7 and 8, absent when empty) and in the stores' format
+version 5: a store of version 4 does not open. The registry's `failure_domain` is the `az`; the
+`region` stays empty, the cell's own region, until multi-region cells (#253). Under acceptor
+partitions the rule applies per partition (#532 (acceptor partitions)), because the grid's own
+predicates do. The tenant coordinator's create (`machine/tenants.rs`) labels the planned members
+from the registry and owns the configuration with its cell; a move (`machine/moves.rs`) does the
+same for the machines that stay. **Where the rule binds** (the open question of #215, default
+taken on 2026-10-16): a durability with `failures-per-partition` 1 or more, over storage machines
+that span three zones or more (`paros::placement::zone_rule_binds`). Over one or two zones no
+configuration can meet it, so the create is placed as before, without zone survival. Where it
+binds, a plan that breaks it is planned again under another tie-break draw, up to
+`placement::ZONE_DRAWS` (8), and the create is recorded `Unplaceable` when none holds (a
+four-member majority over three zones, 2/1/1, is one). Not yet built: the rule on a move's
+replacement (the degraded trap above), the leader that follows its writer (#581), and the
+zone-pair latency model.
+
 **The shape of a regional cell.** A regional cell spans at least three zones (section 3.7). Its
 minimum production shape is two `storage` machines and one `stateless` machine per zone, nine
 machines: `failures-per-partition=2` needs five acceptors on five distinct machines and survives
@@ -2233,8 +2253,8 @@ a zone only when spread 2/2/1.
 
 - **Acceptors**: `failures-per-partition=2` 2/2/1, the lone acceptor preferably in the zone that
   writes least (a later reconfiguration adjusts it); `failures-per-partition=1` 1/1/1;
-  `failures-per-partition=0` none (section 3.4); the grid (`partitions` above 1) is unchanged and
-  outside the rule, the risk its tenant states when it picks it (section 3.4).
+  `failures-per-partition=0` none (section 3.4); with `partitions` above 1 the rule applies to
+  each partition (amended on 2026-10-14, #532 (acceptor partitions)).
 - **Matchmakers**: 1/1/1 or 2/2/1, majorities only; a tenant's matchmaker preferably never
   shares a machine with its acceptors, while capacity permits.
 - **Stateless roles**: once a tenant's pool has three instances, at least one frontend and one
@@ -2390,6 +2410,17 @@ Simulation is the investment. Every milestone lands with its share of:
   `Accepted` and the failure domains into O(1) audit state; every journal kept committing through
   a one-zone kill (`sometimes`); a two-zone kill is a safety-only shape. M11 is a fault-model change: 10,000
   seeds, and the canary after every new draw.
+  **As built** (2026-10-16): the zone-outage scenario (`paros_sim::world::zone_outage`,
+  `shape::zone_outage`) lists three founding members, machine `r` in zone `zone-<r % 3>`, and
+  crashes every machine of the zone with the most live machines for 6 to 10 s, once the cell
+  formed and a client created a journal; while it is down, a client appends to a journal it
+  created. Gates "zones: a tenant is created with a zone down" and "zones: a created journal
+  commits an append with a zone down".
+  The machines' stores sit outside the copy budget, so the zone outage spends none. On a third of
+  the seeds the acceptor pool is labeled (`shape::acceptor_zones`, 2 or 3 zones) and the composer
+  sends labeled configurations, each judged by the zone rule (a reachable per verdict). Oracles:
+  a configuration's labels are bound to its ballot, and a placed journal that spans three zones
+  holds the zone rule. Still to come: the Phase-2 voters oracle and the zone-pair latency model.
 - Regions and the resolver (decided on 2026-10-07, #253): the copy budget counts a region as one fault;
   in a multi-region cell every chosen slot's Phase-2 voters span two regions; a partition through
   the witness region, after which leadership settles (a liveness oracle in recovery mode); a

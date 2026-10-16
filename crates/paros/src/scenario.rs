@@ -94,6 +94,15 @@ pub const RESIGN_DELEGATING: &str = "paros: a leader resigns while it holds dele
 /// handed over more than once in a run".
 pub const HAND_OFF: &str = "paros: a leader hands off in a handoff storm";
 
+/// The cell coordinator's term resigns once in the middle of a move, so the
+/// next term finds the move where this one left it and finishes it (#215
+/// (zones), #498 (moves in the sweep)). Always safe: a resignation costs
+/// only the time of an election, and a move is resumed from the cell
+/// control journal. The simulation couples it to the drained-machine
+/// scenario, whose moves are few: off it, the term's own coin decides.
+/// Recovery gate: "coordinator: a successor term finished a move".
+pub const QUIT_MID_MOVE: &str = "paros: a coordinator term resigns mid-move";
+
 /// Whether this transferable leadership hands itself off on this beat
 /// ([`HAND_OFF`]).
 pub(crate) fn hand_off() -> bool {
@@ -102,6 +111,12 @@ pub(crate) fn hand_off() -> bool {
         moonpool_assertions::reachable!("handoff: a handoff-storm seed hands leadership on");
     }
     handed
+}
+
+/// Whether this coordinator term resigns once in the middle of a move
+/// ([`QUIT_MID_MOVE`]).
+pub(crate) fn quit_mid_move() -> bool {
+    moonpool_buggify::buggify_named!(QUIT_MID_MOVE, 1.0)
 }
 
 /// Whether this leader, which holds delegated rounds, resigns on this beat

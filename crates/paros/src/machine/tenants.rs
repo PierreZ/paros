@@ -374,9 +374,10 @@ impl TenantDesk {
                 target: BookingTarget::Journal(journal),
                 count,
             };
-            let members = if named || self.desk(tenant).state().is_taken(id) {
+            let config = if named || self.desk(tenant).state().is_taken(id) {
                 // Refused at apply (`NameTaken` or `IdTaken`): any members do.
-                storage.iter().copied().take(count).collect()
+                let members: Vec<NodeId> = storage.iter().copied().take(count).collect();
+                AcceptorConfig::new(members, desired.quorum_system())
             } else {
                 let machines = placement::machines(cell.registry(), storage.iter().copied());
                 let current: Vec<(u64, Booking)> = cell
@@ -385,7 +386,7 @@ impl TenantDesk {
                     .filter(|(_, b)| b.target == want.target)
                     .map(|(id, b)| (id, *b))
                     .collect();
-                match placement::plan(&want, &machines, &current, tenant.0) {
+                match zone_plan(&want, &machines, &current, tenant.0, desired) {
                     Ok(steps) => {
                         if let Err(answer) = self.book(client, cell, &want, &steps).await {
                             return answer;
@@ -397,30 +398,22 @@ impl TenantDesk {
                             );
                             return JournalAnswer::Unavailable;
                         }
-                        placement::booked(&steps)
+                        // Owned by this cell (#215 (zones), §3.7).
+                        placement::zoned(
+                            &placement::booked(&steps),
+                            &machines,
+                            desired.quorum_system(),
+                        )
+                        .with_cell(cell.journals().cell_id)
                     }
-                    Err(Shortfall::Capacity { .. }) => {
-                        moonpool_assertions::reachable!(
-                            "tenant coordinator: a create the cell has no slot for is refused"
-                        );
-                        return self.refuse(client, request, name).await;
-                    }
-                    Err(Shortfall::Machines { .. }) => {
-                        moonpool_assertions::reachable!(
-                            "tenant coordinator: a create waits for its founding members to register"
-                        );
-                        return JournalAnswer::Unavailable;
-                    }
+                    Err(why) => return self.unplaced(client, request, name, why).await,
                 }
             };
             assert_eq!(
-                members.len(),
+                config.members().len(),
                 count,
                 "a create names as many members as it asked"
             );
-            let mut chosen = members;
-            chosen.sort_unstable();
-            let config = AcceptorConfig::new(chosen, desired.quorum_system());
             let command = TenantCommand::CreateJournal {
                 request: request.request,
                 id,
@@ -440,6 +433,37 @@ impl TenantDesk {
             moonpool_assertions::reachable!("tenant coordinator: an id taken is drawn again");
         }
         JournalAnswer::Unavailable
+    }
+
+    /// A create placed nothing: refused and recorded `Unplaceable` when the
+    /// cell has no slot for it or the zone rule refuses every draw (#215
+    /// (zones)); unavailable while its founding members register.
+    async fn unplaced<P: Providers>(
+        &mut self,
+        client: &Client<P>,
+        request: &JournalRequest,
+        name: &[u8],
+        why: ZonePlan,
+    ) -> JournalAnswer {
+        match why {
+            ZonePlan::Refused => {
+                moonpool_assertions::reachable!(
+                    "tenant coordinator: a create the zone rule refuses is unplaceable"
+                );
+            }
+            ZonePlan::Short(Shortfall::Capacity { .. }) => {
+                moonpool_assertions::reachable!(
+                    "tenant coordinator: a create the cell has no slot for is refused"
+                );
+            }
+            ZonePlan::Short(Shortfall::Machines { .. }) => {
+                moonpool_assertions::reachable!(
+                    "tenant coordinator: a create waits for its founding members to register"
+                );
+                return JournalAnswer::Unavailable;
+            }
+        }
+        self.refuse(client, request, name).await
     }
 
     /// A configure (#214 (tenant modes)): record a new desired mode for the
@@ -996,4 +1020,52 @@ pub(crate) async fn release<P: Providers>(
         released += 1;
     }
     Ok(released)
+}
+
+/// Why [`zone_plan`] placed nothing.
+enum ZonePlan {
+    /// The machines cannot hold the count.
+    Short(Shortfall),
+    /// The zone rule binds and no draw met it (#215 (zones)).
+    Refused,
+}
+
+/// The placement of a create (#212 (placement)) under the zone rule (#215
+/// (zones)): where the rule binds ([`placement::zone_rule_binds`]), a plan
+/// whose labeled configuration breaks it is planned again under another
+/// draw, up to [`placement::ZONE_DRAWS`], and the shape is refused when
+/// none holds. Where it does not bind, the first plan stands.
+fn zone_plan(
+    want: &Want,
+    machines: &[placement::Machine],
+    current: &[(u64, Booking)],
+    seed: u64,
+    desired: Desired,
+) -> Result<Vec<Step>, ZonePlan> {
+    let first = placement::plan(want, machines, current, seed).map_err(ZonePlan::Short)?;
+    if !placement::zone_rule_binds(
+        desired.durability.failures_per_partition,
+        crate::machine::Class::Storage,
+        machines,
+    ) {
+        return Ok(first);
+    }
+    let holds = |steps: &[Step]| {
+        placement::zoned(&placement::booked(steps), machines, desired.quorum_system())
+            .zone_rule()
+            .holds()
+    };
+    if holds(&first) {
+        moonpool_assertions::reachable!("tenant coordinator: a create meets the zone rule");
+        return Ok(first);
+    }
+    for draw in 1..placement::ZONE_DRAWS {
+        let reseeded = seed ^ draw.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        if let Ok(steps) = placement::plan(want, machines, current, reseeded)
+            && holds(&steps)
+        {
+            return Ok(steps);
+        }
+    }
+    Err(ZonePlan::Refused)
 }
