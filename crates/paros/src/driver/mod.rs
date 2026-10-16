@@ -457,7 +457,8 @@ impl<P: Providers, A: Audit> NodeLoop<'_, P, A> {
         // and the freeze, the bootstrap and the votes are all idempotent or
         // durable elsewhere), and it is what puts a *second* reconfigurer on
         // a half-replaced generation.
-        if handover.is_busy() && abandon_early(handover.phase()) && handover.abandon() {
+        let bootstrap = handover.old().is_some_and(|old| old.generation.0 == 0);
+        if handover.is_busy() && abandon_early(handover.phase(), bootstrap) && handover.abandon() {
             audit.reconfigurer_aborted(NodeId(self_id));
             tracing::info!(node = self_id, early = true, "reconfigurer_aborted");
         }
@@ -934,8 +935,11 @@ fn trace_received(self_id: u64, msg: &Message) {
 /// far above the bootstrap's (#484 (silent driver fault sites)): at 0.02 the
 /// freeze's fired on 5 of 810 hunt seeds and the decree's on none; at 0.25,
 /// with the early-handover scenario on twice as many seeds, on 15 and 6 of
-/// 1,000.
-fn abandon_early(phase: &ReconfigurerPhase) -> bool {
+/// 1,000. `bootstrap` says the handover replaces a set at generation 0:
+/// the frozen-set scenario's named location (#611 (a drain misses its
+/// settle window), `crate::scenario::FREEZE_BOOTSTRAP_SET`) is drawn after
+/// the phase's own, on those alone, so the phase keeps its gate.
+fn abandon_early(phase: &ReconfigurerPhase, bootstrap: bool) -> bool {
     let fired = match phase {
         ReconfigurerPhase::Stopping { .. } => moonpool_buggify::buggify_fault_with_prob!(0.25),
         ReconfigurerPhase::Bootstrapping { .. } => {
@@ -944,6 +948,13 @@ fn abandon_early(phase: &ReconfigurerPhase) -> bool {
         ReconfigurerPhase::Deciding { .. } => moonpool_buggify::buggify_fault_with_prob!(0.25),
         ReconfigurerPhase::Idle | ReconfigurerPhase::Publishing { .. } => false,
     };
+    let running = matches!(
+        phase,
+        ReconfigurerPhase::Stopping { .. }
+            | ReconfigurerPhase::Bootstrapping { .. }
+            | ReconfigurerPhase::Deciding { .. }
+    );
+    let fired = fired || (running && bootstrap && crate::scenario::freeze_bootstrap_set());
     if fired {
         // BUGGIFY pairing, one gate per location.
         match phase {

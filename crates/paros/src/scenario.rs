@@ -103,6 +103,34 @@ pub const HAND_OFF: &str = "paros: a leader hands off in a handoff storm";
 /// Recovery gate: "coordinator: a successor term finished a move".
 pub const QUIT_MID_MOVE: &str = "paros: a coordinator term resigns mid-move";
 
+/// The node abandons the handovers of a bootstrap matchmaker set (#611 (a
+/// drain misses its settle window)): on about half the ticks a handover
+/// that replaces a set at generation 0 runs here, on top of the driver's
+/// own per-phase rates (2 to 25 %). The first handover freezes the set, and
+/// every node that then meets its `Stopped { successor: None }` starts a
+/// finishing handover and abandons it too, so the set stays frozen for the
+/// chaos window, and a journal it serves campaigns against a frozen set
+/// until the recovery tail. Always safe: abandoning a handover is (the
+/// reconfigurer holds no durable state), and a slow matchmaker set is
+/// within the model. The simulation couples it to the drained-machine
+/// scenario, where the cell's one founding member serves every tenant's
+/// control journal alone, and a drain waits on that journal. Recovery
+/// gates: "driver: a sole acceptor's failed campaign adds no backoff",
+/// "generation: a node finishes a handover whose reconfigurer died".
+pub const FREEZE_BOOTSTRAP_SET: &str = "paros: a node abandons the handovers of a bootstrap set";
+
+/// Whether this node abandons, on this tick, the handover of a bootstrap
+/// matchmaker set it runs ([`FREEZE_BOOTSTRAP_SET`]).
+pub(crate) fn freeze_bootstrap_set() -> bool {
+    let abandoned = moonpool_buggify::buggify_named!(FREEZE_BOOTSTRAP_SET, 0.5);
+    if abandoned {
+        moonpool_assertions::reachable!(
+            "generation: a frozen-set seed abandons a bootstrap set's handover"
+        );
+    }
+    abandoned
+}
+
 /// Whether this transferable leadership hands itself off on this beat
 /// ([`HAND_OFF`]).
 pub(crate) fn hand_off() -> bool {
@@ -270,5 +298,6 @@ mod tests {
         assert!(!resign_delegating());
         assert!(!late_admitter());
         assert!(!hand_off());
+        assert!(!freeze_bootstrap_set());
     }
 }

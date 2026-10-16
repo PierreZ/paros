@@ -1317,7 +1317,13 @@ pub(crate) fn zone_outage(state: &StateHandle) -> bool {
 /// gates stay in `gates::RARE` until #498 (moves in the sweep). Every
 /// coordinator term of a scenario seed resigns once mid-move
 /// (`paros::scenario::QUIT_MID_MOVE`), so a successor term finishes a move
-/// on most seeds that finish one (#215 (zones)).
+/// on most seeds that finish one (#215 (zones)). A scenario seed also
+/// turns on the driver's frozen-set location
+/// (`paros::scenario::FREEZE_BOOTSTRAP_SET`, #611 (a drain misses its
+/// settle window)): every handover of a tenant's bootstrap matchmaker set
+/// is abandoned on about half its ticks, so the one founding member's
+/// control journals campaign against a frozen set for the chaos window
+/// while a drain waits on them.
 /// Rare-but-valid: an operator may drain a machine at any time.
 #[tracing::instrument(level = "debug", skip_all)]
 pub(crate) fn drained_machine(state: &StateHandle) -> bool {
@@ -1331,6 +1337,13 @@ pub(crate) fn drained_machine(state: &StateHandle) -> bool {
     *guard.drained_machine.get_or_insert_with(|| {
         let drained = !other && moonpool_sim::buggify_with_prob!(1.0);
         moonpool_sim::set_activation(paros::scenario::QUIT_MID_MOVE, drained);
+        // The frozen-set location (#611 (a drain misses its settle
+        // window)): on a scenario seed, every handover of a tenant's
+        // bootstrap set is abandoned on about half its ticks, so the one
+        // founding member's control journals campaign against a frozen set
+        // for the chaos window while a drain waits on them. Its fired gate
+        // sits at the driver's named location.
+        moonpool_sim::set_activation(paros::scenario::FREEZE_BOOTSTRAP_SET, drained);
         drained
     })
 }

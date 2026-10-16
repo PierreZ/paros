@@ -259,23 +259,37 @@ pub(crate) fn maintain<P: Providers, A: Audit>(
     if node.leader().is_some_and(|leader| leader.0 != self_id) {
         *failed_campaigns = 0;
     }
-    // A leader that is the only acceptor of its configuration has no
-    // rival to duel: no other node's promise can depose it, so its
-    // leadership is the settlement. Without this, such a node never hears
-    // another lead, so each resignation of the whole run adds to one
-    // streak, and the recovery tail waits out the capped backoff with no
-    // leader (#454 (control plane meets chaos): witness seed
-    // 7347777281636261941, an explored timeline, and hunt seed
-    // 11256698287555884936, a one-member cell leaderless for 29 s and
-    // 33 s of its tail).
-    if *failed_campaigns > 0 && node.is_leader() && node.acceptors().members() == [NodeId(self_id)]
-    {
+    // A matchmaker generation learned since the last batch ends the streak
+    // too (#611 (a drain misses its settle window)): the campaigns a frozen
+    // generation refused (`MatchRefusal::Stopped`, then a `Generation`
+    // refusal that taught the successor) failed against the matchmakers,
+    // never against a rival's promise, so they were no duel. Read before the
+    // timeout draw below: the refusal that taught the generation reset the
+    // election clock in the same batch.
+    let learned = node
+        .matchmaker_set()
+        .is_some_and(|set| set.generation.0 > *last_generation);
+    if learned && *failed_campaigns > 0 {
         moonpool_assertions::reachable!(
-            "driver: a sole node's leadership ends its election backoff"
+            "driver: a learned matchmaker generation ends the election backoff"
         );
         *failed_campaigns = 0;
     }
     if node.needs_election_timeout() {
+        // The only acceptor of its configuration has no rival to duel: no
+        // other node's promise can depose it, so a round of its own that
+        // failed (a matchmaker refusal, a slow matchmaker) never adds to a
+        // streak, and a streak it built in a wider configuration ends when
+        // the configuration shrinks to it alone. Before #611 (a drain misses
+        // its settle window) only its *leadership* ended the streak (#454
+        // (control plane meets chaos): witness seed 7347777281636261941, an
+        // explored timeline, and hunt seed 11256698287555884936, a
+        // one-member cell leaderless for 29 s and 33 s of its tail), so a
+        // sole acceptor whose matchmaker set stayed frozen for the chaos
+        // window backed off to the cap, probed the set 12 to 16 s apart,
+        // and was elected 18 s into the recovery tail, after the drain that
+        // waited on it had missed its settle window.
+        let sole = node.acceptors().members() == [NodeId(self_id)];
         // The election backoff: a clock that reset with no leader known —
         // a campaign that failed, or a leadership a rival's `Prepare`
         // deposed — is one more round in a streak, and each consecutive
@@ -289,10 +303,27 @@ pub(crate) fn maintain<P: Providers, A: Audit>(
         // quiet tail (witness seed 14889077543971178620 of the coverage
         // sweep that landed #204).
         if node.role() != NodeRole::Leader && node.leader().is_none() {
-            *failed_campaigns = failed_campaigns.saturating_add(1);
+            if sole {
+                moonpool_assertions::reachable!(
+                    "driver: a sole acceptor's failed campaign adds no backoff"
+                );
+            } else {
+                *failed_campaigns = failed_campaigns.saturating_add(1);
+            }
         }
+        if sole {
+            *failed_campaigns = 0;
+        }
+        assert!(
+            !sole || *failed_campaigns == 0,
+            "a sole acceptor holds no election backoff"
+        );
         let doublings = failed_campaigns.saturating_sub(1).min(backoff_doublings);
         assert!(doublings <= backoff_doublings, "the backoff is capped");
+        assert!(
+            !sole || doublings == 0,
+            "a sole acceptor draws its base timeout"
+        );
         let base = election_base.saturating_mul(1_u64 << doublings.min(16));
         if doublings > 0 {
             tracing::info!(node = self_id, doublings, base, "election_backoff");
