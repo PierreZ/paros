@@ -90,10 +90,6 @@ pub const RARE: &[Rare] = &[
         reason: "marginal: needs a three-column grid (a pool of six) and the skip's BUGGIFY location on the same seed; 55 checks in 600 hunt seeds, but the sweep missed it once (#533 (move a stuck round), #486)",
     },
     Rare {
-        msg: "fleet: a creation waits for its founders without claiming the cell",
-        reason: "marginal: needs a tenant creation while a founding member is still unregistered; missed by main's sweep at 629aa62 and by PR #588's sweep. PR #585 (the cell coordinator writes tenant cell steps) deletes the gate with the path it guards (#225, #486)",
-    },
-    Rare {
         msg: "phase1: a full promise page mixes readable and faulty entries",
         reason: "marginal: fired on 8 of 810 hunt seeds (#486)",
     },
