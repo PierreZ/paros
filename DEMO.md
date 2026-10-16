@@ -92,11 +92,12 @@ docker compose run --rm parosctl cell drain-machine storage4
 docker compose run --rm parosctl machine list
 docker compose run --rm parosctl cell remove-machine storage4
 
-# Bench (#517): closed-loop clients write the journals bench-0..bench-3 of tenant
+# Bench (#517, #194): closed-loop clients write the journals bench-0..bench-3 of tenant
 # `bench` (both created when missing) and print throughput and latency per call each
 # second, then the totals. Ctrl-C stops it and still prints the totals. Add
-# `--read-percent 20` for reads that check every byte, `--histograms /tmp/h.json` for the
-# raw histograms. Numbers compare runs on the same machine; they are not a baseline.
+# `--mix write=80,read-tail=20` for reads that check every byte, `--rate 200` for an open
+# loop, `--histograms /tmp/h.json` for the raw histograms. Numbers compare runs on the same
+# machine. `parosctl bench --local 3` runs without Compose, on a cell in its own process.
 docker compose run --rm parosctl bench --tenant bench --journals 4 --clients 8 --duration 60s --ramp 10s
 
 # Logs, and tear everything down (volumes included).
@@ -131,7 +132,9 @@ done
 # Every parosctl command talks to the three machines.
 export PAROSCTL_SERVERS=127.0.0.1:4501,127.0.0.1:4502,127.0.0.1:4503
 
-# `cell init` over the three, every one of them needed (the servers, by default).
+# `cell init` over the three, every one of them needed (the servers, by default). The first
+# 2F+1 listed machines found the cell (`--failures-per-partition`, default 1): `init` admits
+# any others, and the control journals keep three acceptors.
 parosctl init --members "$PAROSCTL_SERVERS"
 parosctl tenant create acme
 parosctl journal create acme orders | tee /tmp/paros-demo/create.out

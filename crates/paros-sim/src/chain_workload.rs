@@ -526,6 +526,9 @@ impl Workload for ChainWorkload {
                 crate::audit::check_control_history(attempts, mode);
             }
         }
+        if self.client_id == 0 {
+            crate::machine::check_metrics(ctx);
+        }
         if let Some(sink) = &self.digest {
             *sink
                 .lock()

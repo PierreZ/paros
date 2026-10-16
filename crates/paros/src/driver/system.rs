@@ -529,7 +529,14 @@ impl<P: Providers> ControlFollower<P> {
                     RegistryEvent::Checkpoint { .. } => self.rehost(),
                     // A seed registered at another address (#349): the next
                     // read dials it there, unless an adopted book is newer.
-                    RegistryEvent::Reregistered { id, addr, .. }
+                    // A founding member the registry never held yet (it
+                    // moved before its first registration landed) moves
+                    // with a `Registered`, not a `Reregistered`: the
+                    // moved-founder scenario's moves reached no follower's
+                    // seeds through the fold until both counted (PR #543
+                    // (stranded admitted machine)).
+                    RegistryEvent::Registered { id, addr, .. }
+                    | RegistryEvent::Reregistered { id, addr, .. }
                         if *id != self.self_id && seq >= self.adopted =>
                     {
                         if let Ok(addr) = crate::Address::parse(addr) {

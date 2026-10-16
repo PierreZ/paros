@@ -1696,6 +1696,30 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         }
     }
 
+    fn call_received(
+        &self,
+        _node: NodeId,
+        _journal: JournalIdentifier,
+        call: paros::metrics::CallKind,
+    ) {
+        if let Some((board, _)) = &self.machines {
+            crate::machine::metered_call(board, call);
+        }
+    }
+
+    fn call_answered(
+        &self,
+        _node: NodeId,
+        _journal: JournalIdentifier,
+        (call, _): (paros::metrics::CallKind, paros::metrics::CallOutcome),
+        written: u64,
+        read: u64,
+    ) {
+        if let Some((board, _)) = &self.machines {
+            crate::machine::metered_answer(board, call, written, read);
+        }
+    }
+
     fn machine_recorded(&self, record: &paros::machine::MachineRecord) {
         if let Some((board, addr)) = &self.machines {
             crate::machine::recorded(board, addr, record);

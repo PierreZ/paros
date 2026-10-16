@@ -803,6 +803,9 @@ struct Registry {
     /// Run-level: whether the run draws the slow-machine scenario (see
     /// [`slow_machine`]), fixed by the first caller.
     slow_machine: Option<bool>,
+    /// Run-level: whether the machines run without metrics (see
+    /// [`unmetered`]), fixed by the first caller.
+    unmetered: Option<bool>,
     /// Run-level: when the clients' operations end (see [`run_end`]), fixed
     /// by the first caller.
     run_end: Option<Duration>,
@@ -1346,6 +1349,20 @@ pub(crate) fn run_end(state: &StateHandle) -> Duration {
 
 const _: () = assert!(120_000 <= crate::CHAOS_CAP.as_millis());
 
+/// Whether the run's machines record **no metrics** (#366 (metrics)): drawn
+/// once per seed, its own BUGGIFY location. Metrics are observation only,
+/// so a run without them must pass the same oracles as a run with them;
+/// on a metered run the counters must match the audit's own fold of the
+/// calls (`crate::chain_workload`'s check).
+#[tracing::instrument(level = "debug", skip_all)]
+pub(crate) fn unmetered(state: &StateHandle) -> bool {
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    *guard
+        .unmetered
+        .get_or_insert_with(|| moonpool_sim::buggify_with_prob!(1.0))
+}
+
 pub(crate) fn slow_machine(state: &StateHandle) -> bool {
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
@@ -1764,6 +1781,12 @@ pub(crate) struct MachineLayout {
     /// How many machines, the lowest ranks, are the founding members:
     /// `cell init` lists them, and forms the cell over them (#277).
     pub(crate) founders: usize,
+    /// How many machines, the lowest ranks, `init` lists: the founders,
+    /// and on a coin more when the founders are `2F+1` (one or three). The
+    /// listed machines past the founders are admitted by `init` itself, so
+    /// the control journals keep `2F+1` acceptors on a cell with more
+    /// machines (decided on 2026-10-15).
+    pub(crate) listed: usize,
     /// Each machine's settings, in rank order.
     pub(crate) machines: Vec<MachineDraw>,
     /// The machines advertise names, not literal addresses (#257): every
@@ -1834,6 +1857,17 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
             } else {
                 moonpool_sim::sim_random_range(least..count + 1)
             };
+            // `init` lists more machines than found the cell only when the
+            // founders are `2F+1`: it forms the cell on the first `2F+1`.
+            let listed = if founders % 2 == 1 && founders < count && !drained {
+                if moonpool_sim::sim_random_bool(0.5) {
+                    moonpool_sim::sim_random_range(founders + 1..count + 1)
+                } else {
+                    founders
+                }
+            } else {
+                founders
+            };
             // Every live journal holds one slot on each of its members
             // (#212 (placement)), so the default fits the run's few tenants
             // of three journal names each, and the extreme fills the cell.
@@ -1881,8 +1915,14 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
                 "machine: a layout's founding members are machines of it",
                 { "count" => count, "founders" => founders }
             );
+            assert_always!(
+                founders <= listed && listed <= count,
+                "machine: init lists the founding members and machines past them",
+                { "count" => count, "founders" => founders, "listed" => listed }
+            );
             MachineLayout {
                 founders,
+                listed,
                 machines,
                 named,
                 move_pct,

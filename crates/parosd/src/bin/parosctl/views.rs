@@ -77,7 +77,7 @@ impl Asker<'_> {
     }
 
     /// Every machine of `reply` that has an address, asked for its `Load`.
-    async fn loads(&self, reply: &wire::ViewReply) -> BTreeMap<u64, LoadOutcome> {
+    pub(crate) async fn loads(&self, reply: &wire::ViewReply) -> BTreeMap<u64, LoadOutcome> {
         let machines: Vec<(u64, Address)> = reply
             .machines
             .iter()
