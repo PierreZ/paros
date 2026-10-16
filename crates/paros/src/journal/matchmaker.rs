@@ -845,7 +845,13 @@ impl<P: StorageProvider> MatchmakerStorage for JournalMatchmakerStorage<P> {
         let split =
             !puts.is_empty() && self.meta_dirty && moonpool_buggify::buggify_fault_with_prob!(0.5);
         // The registrations, packed into batches that each fit one segment.
-        let geometry = self.store.geometry;
+        // The journal's own shape: one created under an older default keeps
+        // it (PierreZ/moonpool#335); a store with no journal yet creates one
+        // with the configured shape.
+        let geometry = self
+            .journal
+            .as_ref()
+            .map_or(self.store.geometry, Journal::geometry);
         let mut batch = Batch::new();
         for (position, (id, payload)) in puts {
             if !batch.is_empty() && !batch.fits_another(geometry, payload.len()) {
