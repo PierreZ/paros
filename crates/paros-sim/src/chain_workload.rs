@@ -638,8 +638,8 @@ impl ChainWorkload {
             config.steps = config.steps.max(64);
         }
         if crate::shape::second_cell(ctx.state()) {
-            // The second-cell scenario (#232 (multiple cells)): one phase
-            // per `TENANT` step, so every client runs it as often as the
+            // The second-cell scenario (#232 (multiple cells)): its phases
+            // run in `TENANT` steps, so every client runs it as often as the
             // weight family allows, at the steps knob's top.
             config.weights[usize::from(TENANT)] = OP_WEIGHT_CEILING;
             config.steps = config.steps.max(64);

@@ -4,8 +4,9 @@
 //! the run's cell hosts (`parosctl universe add-cell`). Its later steps
 //! create a tenant in it, resolve that tenant through the run's machines,
 //! and, on a coin, remove the tenant and the cell, and try to add the cell
-//! again, which must be refused. One phase per step, so a phase the chaos
-//! cuts short is taken again at the next one; one operator at a time.
+//! again, which must be refused. A phase the chaos cuts short is taken
+//! again at the next step, and one that ends goes on to the next one up to
+//! the tenant's creation; one operator at a time.
 //!
 //! Oracles: an idle cell holds no universe tenant; a tenant created in the
 //! second cell is hosted there and resolves there from the run's machines;
@@ -96,7 +97,25 @@ impl FleetOps {
         if !claimed {
             return false;
         }
-        let ran = self.second_phase(ctx, policy, draw).await;
+        // A phase that ends goes on to the next one in the same step, up
+        // to the tenant's creation: a run's chaos window holds few steps.
+        let progress = |second: &mut SecondCell| {
+            (
+                second.formed.is_some(),
+                second.joined,
+                second.tenant.is_some(),
+            )
+        };
+        let mut ran = false;
+        loop {
+            let before = with_second(ctx.state(), progress);
+            let step = self.second_phase(ctx, policy, draw).await;
+            ran |= step;
+            let after = with_second(ctx.state(), progress);
+            if !step || after == before || after.2 {
+                break;
+            }
+        }
         with_second(ctx.state(), |second| second.busy = false);
         ran
     }

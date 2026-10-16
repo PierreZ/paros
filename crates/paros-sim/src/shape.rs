@@ -1393,8 +1393,8 @@ pub(crate) fn changed_mode(state: &StateHandle) -> bool {
 /// With a scenario that needs three founders, it keeps a machine only on a
 /// layout of four.
 /// A second cell needs a `storage` machine `init` does not list, still idle
-/// when an operator forms the cell on it, and several `TENANT` steps after
-/// that, one per phase (`crate::chain_workload::fleet::second_cell`). Each
+/// when an operator forms the cell on it, and `TENANT` steps after that for
+/// its later phases (`crate::chain_workload::fleet::second_cell`). Each
 /// is a coin on its own, and `ADMIT` takes the idle machines first: no
 /// second cell formed in 400 hunt seeds without the scenario. On a
 /// scenario seed the layout leaves the last machine unlisted and `storage`,
