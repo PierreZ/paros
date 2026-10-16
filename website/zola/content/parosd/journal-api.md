@@ -115,6 +115,30 @@ A `Read` with `limit` 0 gets the full page. A `Read` with `wait_ms` 0 never wait
 split the batch. An operator sets each limit with a `PAROS_*` variable, for example
 `PAROS_MAX_READ_RECORDS` or `PAROS_MAX_WAIT_MS`.
 
+## Durability and configure
+
+A journal's durability is `--failures-per-partition F` and `--partitions P`. Each acceptor
+partition has `2F+1` acceptors. The default is `F=1` and `P=1`: three acceptors and a plain
+majority. The tenant coordinator picks the machines; a caller never names them.
+
+`parosctl configure` changes a durability after the create. It is the `configure` command of
+FoundationDB:
+
+- `parosctl configure --tenant acme --journal orders --failures-per-partition 2` asks for five
+  acceptors for `acme/orders`.
+- `parosctl configure --tenant acme --partitions 3` changes the tenant's default. A create that
+  names no durability takes the default.
+
+The answer `configured` means that the tenant's control journal holds the new durability. The
+tenant coordinator then applies it. It books slots on new machines, asks the journal's leader to
+reconfigure, and releases the slots that the journal does not use any more. The journal keeps
+all its records during the change, and writes continue. A durability that the cell cannot place
+is refused with `unplaceable`, and nothing changes. The writer mode never changes.
+
+A tenant's matchmaker set has `2F+1` matchmakers, with `F` the largest `failures-per-partition`
+of the tenant: its default and each of its journals. The coordinator grows or shrinks the set
+when that number changes.
+
 ## Ids
 
 Every journal call names its journal by the pair `(tenant, journal)`. Each half is a random

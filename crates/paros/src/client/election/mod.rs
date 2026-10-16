@@ -593,7 +593,10 @@ impl<P: Providers> Election<P> {
 /// names the cell's first coordinator with it). `None` when the tail was not
 /// reached. It reads until the tail while each page moves it forward: a
 /// fixed page count leaves the tail out of reach of a long journal read in
-/// small pages.
+/// small pages. The tail it reads to is the one the first page reported: a
+/// leader that renews as fast as the reader pages keeps moving the live
+/// tail, and a read chasing it never ends (#574 (tenant modes), hunt seed
+/// 7429615914361011660: one read from 89 s to 319 s).
 pub async fn read_election<P: Providers>(
     client: &Client<P>,
     journal: JournalIdentifier,
@@ -601,6 +604,7 @@ pub async fn read_election<P: Providers>(
 ) -> Option<ElectionFold> {
     let mut fold = ElectionFold::new();
     let mut first = first;
+    let mut target: Option<u64> = None;
     loop {
         let from = fold.next();
         let request = Read {
@@ -621,7 +625,8 @@ pub async fn read_election<P: Providers>(
                 for (seq, record) in (from..).zip(&records) {
                     fold.absorb(seq, record);
                 }
-                if fold.next() >= state.next_seq.0 {
+                let tail = *target.get_or_insert(state.next_seq.0);
+                if fold.next() >= tail {
                     return Some(fold);
                 }
                 if records.is_empty() {

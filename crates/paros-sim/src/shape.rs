@@ -829,6 +829,9 @@ struct Registry {
     /// Run-level: whether the run draws the drained-machine scenario (see
     /// [`drained_machine`]), fixed by the first caller.
     drained_machine: Option<bool>,
+    /// Run-level: whether the run draws the changed-mode scenario (see
+    /// [`changed_mode`]), fixed by the first caller.
+    changed_mode: Option<bool>,
     /// Run-level: whether the run draws the slow-link scenario (see
     /// [`slow_link`]), fixed by the first caller.
     slow_link: Option<bool>,
@@ -1265,6 +1268,31 @@ pub(crate) fn drained_machine(state: &StateHandle) -> bool {
     *guard
         .drained_machine
         .get_or_insert_with(|| !other && moonpool_sim::buggify_with_prob!(1.0))
+}
+
+/// Whether the run draws the **changed-mode scenario** (#214 (tenant
+/// modes)): drawn once per seed, its own BUGGIFY location, never on a
+/// drained-machine seed (that one founds the cell on one member). A mode
+/// change needs a tenant journal, a configure that names it, and a cell of
+/// three storage machines or more, where a mode can change the journal's
+/// slots or its quorum system. Each is a coin on its own: on a cell of one,
+/// every mode places the same one slot. In 300 hunt seeds without the
+/// scenario, a mode change reconfigured a journal on 0 to 6 seeds. On a
+/// scenario seed the layout lists three founders or more where the machines
+/// allow it ([`machine_layout`]), client 0 runs `init` first, every client
+/// runs `TENANT` and `CREATE_JOURNAL` as often as the weight family allows
+/// at the steps knob's top, and half the journal creates are configures
+/// (`crate::chain_workload`). Each ingredient keeps its own coin on the
+/// other seeds. Rare-but-valid: an operator may configure at any time.
+#[tracing::instrument(level = "debug", skip_all)]
+pub(crate) fn changed_mode(state: &StateHandle) -> bool {
+    // Drawn before the lock: the scenarios take the registry's lock too.
+    let drained = drained_machine(state);
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    *guard
+        .changed_mode
+        .get_or_insert_with(|| !drained && moonpool_sim::buggify_with_prob!(1.0))
 }
 
 /// Whether the run draws the **silent-machine scenario** (#211): drawn once
@@ -1823,6 +1851,7 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
     let replaced = replaced_founder(state);
     let downed = downed_founder(state);
     let drained = drained_machine(state);
+    let changed = changed_mode(state);
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     guard
@@ -1836,7 +1865,9 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
             // 58. The downed-founder scenario (#213 (three founding
             // members)) holds one founder down: the others keep a majority
             // only in a cell of three or more.
-            let least = if (replaced || moved || downed) && count >= 3 {
+            // So does the changed-mode scenario (#214 (tenant modes)): on a
+            // cell of one, every mode places the same one slot.
+            let least = if (replaced || moved || downed || changed) && count >= 3 {
                 3
             } else {
                 1

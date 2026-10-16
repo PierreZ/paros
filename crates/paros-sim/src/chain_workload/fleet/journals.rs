@@ -84,7 +84,7 @@ impl FleetOps {
                 JournalOp::Create {
                     name: name.clone(),
                     writer: drawn_mode(),
-                    desired: drawn_desired(draw),
+                    desired: Some(drawn_desired(draw)),
                 }
             }
             _ => return,
@@ -119,14 +119,46 @@ impl FleetOps {
             if self.cached_name(tenant, &name).is_some() && buggify_with_prob!(0.5) {
                 self.read_through_name(&cell, control, &name, payload).await;
             }
+            // FDB's `configure` (#214 (tenant modes)) on a draw in four, on
+            // a draw in two on a changed-mode seed, and on a BUGGIFY coin
+            // besides.
+            let every = if crate::shape::changed_mode(ctx.state()) {
+                2
+            } else {
+                4
+            };
+            let configure = (payload >> 56).is_multiple_of(every) || buggify_with_prob!(0.3);
+            let op = if configure {
+                // A new desired mode for a journal of the tenant, or on a
+                // draw in four for the tenant's default. The coordinator
+                // applies a journal's by reconfiguration, under this
+                // client's load.
+                // On a coin, the widest mode of one partition: it grows the
+                // journal onto every storage machine of the cell, so one full
+                // machine refuses it for want of slots.
+                let desired = if buggify_with_prob!(0.3) {
+                    assert_reachable!("journals: a configure asks for every machine");
+                    widest_configure()
+                } else {
+                    drawn_configure(payload)
+                };
+                JournalOp::Configure {
+                    name: (!(payload >> 12).is_multiple_of(4)).then_some(name),
+                    desired,
+                }
+            } else {
+                JournalOp::Create {
+                    name,
+                    writer: drawn_mode(),
+                    // On a draw in four the create names no mode: it takes the
+                    // tenant's default (#214 (tenant modes)).
+                    desired: (!(payload >> 20).is_multiple_of(4)).then(|| drawn_desired(payload)),
+                }
+            };
             JournalRequest {
                 request: ctx.random().random_range(1..u64::MAX),
                 tenant,
-                op: JournalOp::Create {
-                    name,
-                    writer: drawn_mode(),
-                    desired: drawn_desired(payload),
-                },
+                op,
             }
         };
         self.send_journal_request(ctx, &cell, control, request, (payload, policy))
@@ -357,6 +389,12 @@ impl FleetOps {
         answer: &JournalAnswer,
         draw: u64,
     ) {
+        if let JournalOp::Configure { name, desired } = &request.op
+            && !matches!(answer, JournalAnswer::UnknownTenant)
+        {
+            Self::judge_configure(cell, control, request, answer, (name.as_deref(), desired)).await;
+            return;
+        }
         match (answer, &request.op) {
             (
                 JournalAnswer::Created { id, config },
@@ -380,8 +418,14 @@ impl FleetOps {
                         "journals: a create refused for capacity is asked again and placed"
                     );
                 }
+                // A create that named no mode took the tenant's default, which
+                // this client does not know.
+                let wanted = desired.map_or(usize::MAX, |d| d.acceptors().max(1));
+                if desired.is_none() {
+                    assert_reachable!("journals: a create takes its tenant's default mode");
+                }
                 assert_always!(
-                    config.members().len() <= desired.acceptors().max(1)
+                    config.members().len() <= wanted
                         && config
                             .members()
                             .iter()
@@ -417,7 +461,7 @@ impl FleetOps {
                 assert_reachable!("journals: a delete of an unknown name is answered");
             }
             (JournalAnswer::Unplaceable, JournalOp::Create { desired, .. }) => {
-                if desired_fits(desired, cell.members.len()) {
+                if desired.is_none_or(|desired| desired_fits(&desired, cell.members.len())) {
                     // Enough founding members, no free slot (#212
                     // (placement)): the refusal is recorded, and the client
                     // asks again under a new id on a later step.
@@ -431,6 +475,73 @@ impl FleetOps {
                 assert_reachable!("journals: a request for a tenant the cell dropped is refused");
             }
             (answer, _) => {
+                assert_always!(
+                    false,
+                    "journals: a request is answered for its own op",
+                    { "answer" => answer.as_str() }
+                );
+            }
+        }
+    }
+
+    /// The client's oracles of a decided configure (#214 (tenant modes)).
+    async fn judge_configure(
+        cell: &Cell,
+        control: JournalIdentifier,
+        request: &JournalRequest,
+        answer: &JournalAnswer,
+        (name, desired): (Option<&[u8]>, &Desired),
+    ) {
+        match answer {
+            JournalAnswer::Configured { id } => {
+                assert_sometimes!(
+                    true,
+                    "journals: a desired mode is configured through the coordinator"
+                );
+                assert_always!(
+                    id.is_some() == name.is_some(),
+                    "journals: a configure answers the journal it named",
+                    { "tenant" => request.tenant.0 }
+                );
+                // The control journal records the new mode under the journal
+                // the answer names.
+                if control.tenant == request.tenant
+                    && let (Some(id), Some(tenant)) = (
+                        id,
+                        journals::list(&cell.client, control.tenant, control.journal).await,
+                    )
+                    && let Some(journal) = tenant.get(*id)
+                    && journal.deleted_at.is_none()
+                    && journal.desired == *desired
+                {
+                    assert_reachable!(
+                        "journals: a configured journal's control journal holds its new mode"
+                    );
+                }
+            }
+            JournalAnswer::UnknownJournal => {
+                assert_reachable!("journals: a configure of an unknown name is answered");
+            }
+            JournalAnswer::Unplaceable => {
+                // A refused configure changes nothing: the control journal
+                // records the refusal under its id, and no new mode. A
+                // pending request resent after its tenant left the
+                // directory's ready list goes out beside another tenant's
+                // control journal: that one does not hold it.
+                if control.tenant == request.tenant
+                    && let Some(tenant) =
+                        journals::list(&cell.client, control.tenant, control.journal).await
+                {
+                    assert_always!(
+                        tenant.outcome(request.request)
+                            == Some(paros::tenant::RequestOutcome::Unplaceable),
+                        "journals: a refused configure changes nothing",
+                        { "tenant" => request.tenant.0 }
+                    );
+                }
+                assert_reachable!("journals: a configure the cell cannot place is refused");
+            }
+            answer => {
                 assert_always!(
                     false,
                     "journals: a request is answered for its own op",
@@ -791,6 +902,45 @@ fn drawn_desired(draw: u64) -> Desired {
             durability,
             replicas: 0,
         }
+    })
+}
+
+/// The desired mode a configure draws (#214 (tenant modes)): the default,
+/// no failure, two failures, or two to four acceptor partitions of one
+/// acceptor each (on the founding members, the same machines under another
+/// quorum system), or of three acceptors each, which a cell of four
+/// machines cannot place, or three failures in one partition, which takes
+/// every storage machine.
+fn drawn_configure(draw: u64) -> Desired {
+    // On three storage machines most modes place the same three slots, so
+    // the draw leans to the ones that change them: one acceptor (a shrink)
+    // and acceptor partitions (another quorum system on the same machines).
+    let (failures_per_partition, partitions) = match (draw >> 24) % 10 {
+        0 => (1, 1),
+        1 | 2 => (0, 1),
+        3 => (2, 1),
+        4 => (0, 2),
+        5 | 6 => (0, 3),
+        7 => (0, 4),
+        8 => (1, 2),
+        // The widest mode of one partition grows a journal onto every
+        // storage machine: on a full cell it is refused for want of slots.
+        _ => (3, 1),
+    };
+    Durability::new(failures_per_partition, partitions).map_or(Desired::DEFAULT, |durability| {
+        Desired {
+            durability,
+            replicas: 0,
+        }
+    })
+}
+
+/// The widest mode of one acceptor partition, `F = 3`: one partition takes
+/// at most every storage machine, so the cell never finds it too wide.
+fn widest_configure() -> Desired {
+    Durability::new(3, 1).map_or(Desired::DEFAULT, |durability| Desired {
+        durability,
+        replicas: 0,
     })
 }
 
