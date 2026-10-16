@@ -224,7 +224,18 @@ async fn desired_size<P: Providers>(
             // keeps the set in its book step for good.
             let registry = cell.registry();
             let storage = desk.storage(registry);
-            let eligible = placement::machines(registry, storage.iter().copied()).len();
+            // Only a machine that can hold one of the set's slots counts:
+            // one that holds a slot already, or has a free one. A full
+            // machine counted here keeps a set booked short in its book
+            // step for good. Witness 7532087542125135385 on 2017028.
+            let held: BTreeSet<NodeId> = slots(registry, tenant)
+                .iter()
+                .map(|(_, b)| b.node)
+                .collect();
+            let eligible = placement::machines(registry, storage.iter().copied())
+                .iter()
+                .filter(|m| m.free() > 0 || held.contains(&m.node))
+                .count();
             Some(set_size(largest, eligible))
         }
         Err(JournalAnswer::NotCoordinator) => None,
