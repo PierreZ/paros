@@ -34,10 +34,19 @@
 //!
 //! A release goes the other way: a machine that is down first, then the
 //! most loaded.
+//!
+//! **The zone rule** (#215 (zones), §5) judges a planned membership, not a
+//! machine: [`zoned`] labels the members with their machines' zones, and
+//! the configuration's own [`AcceptorConfig::zone_rule`] says whether it
+//! survives the loss of any one zone and no zone commits alone. The rule
+//! binds a placement only where it can hold ([`zone_rule_binds`]): a
+//! durability that survives a failure, over machines that span three zones
+//! or more. A plan the rule refuses is planned again under another draw
+//! ([`ZONE_DRAWS`]), and refused when none holds.
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use paros_core::NodeId;
+use paros_core::{AcceptorConfig, FailureDomain, NodeId, QuorumSystem};
 
 use crate::machine::Class;
 use crate::system::{Booking, BookingTarget, NodeStanding, Registry, Role};
@@ -93,13 +102,73 @@ pub fn machines(registry: &Registry, nodes: impl IntoIterator<Item = NodeId>) ->
             Some(Machine {
                 node,
                 class: held.class,
-                zone: held.failure_domain.clone(),
+                zone: held.locality.zone.clone(),
                 capacity: held.capacity,
                 booked: registry.booked(node),
                 up: registry.liveness(node).up,
             })
         })
         .collect()
+}
+
+/// How many draws a placement under the zone rule tries before it refuses
+/// the shape: each draw orders the tied zones and machines another way.
+pub const ZONE_DRAWS: u64 = 8;
+
+/// The failure domain of a machine in `zone` (#215 (zones)): the registry's
+/// `failure_domain` name is the zone, inside the cell's own region (one
+/// cell is one region until #253 (multi-region cells)). `None` for a
+/// machine with no zone, or one too long to be a label.
+#[must_use]
+pub fn domain(zone: &str) -> Option<FailureDomain> {
+    let domain = FailureDomain {
+        region: String::new(),
+        az: zone.to_string(),
+    };
+    (!zone.is_empty() && domain.is_well_formed()).then_some(domain)
+}
+
+/// The configuration of `members` under `system`, labeled with each
+/// member's zone when every member has one on `machines` (#215 (zones)),
+/// else unlabeled: the configuration a coordinator proposes for a plan.
+///
+/// # Panics
+///
+/// As [`AcceptorConfig::new`].
+#[must_use]
+pub fn zoned(members: &[NodeId], machines: &[Machine], system: QuorumSystem) -> AcceptorConfig {
+    let labeled: Option<Vec<(NodeId, FailureDomain)>> = members
+        .iter()
+        .map(|node| {
+            let machine = machines.iter().find(|m| m.node == *node)?;
+            Some((*node, domain(&machine.zone)?))
+        })
+        .collect();
+    let config = match labeled {
+        Some(labeled) if !labeled.is_empty() => AcceptorConfig::zoned(labeled, system),
+        _ => AcceptorConfig::new(members.to_vec(), system),
+    };
+    assert_eq!(
+        config.members().len(),
+        members.iter().collect::<BTreeSet<_>>().len(),
+        "a planned configuration names each member once"
+    );
+    config
+}
+
+/// Whether the zone rule binds a placement of `class` over `machines`
+/// (#215 (zones)): the durability survives a failure (`F >= 1`; `F = 0` is
+/// exempt, a majority over one acceptor survives no zone), and the
+/// machines of the class span three zones or more (over two zones, no
+/// configuration survives one zone while no zone commits alone).
+#[must_use]
+pub fn zone_rule_binds(failures_per_partition: u32, class: Class, machines: &[Machine]) -> bool {
+    let zones: BTreeSet<&str> = machines
+        .iter()
+        .filter(|m| m.class == class && domain(&m.zone).is_some())
+        .map(|m| m.zone.as_str())
+        .collect();
+    failures_per_partition >= 1 && zones.len() >= 3
 }
 
 /// What a placement asks for: `count` instances of `role` for `target`.
@@ -622,7 +691,7 @@ mod tests {
             addr: format!("n{id}"),
             class: Class::Storage,
             capacity: 2,
-            failure_domain: "z".into(),
+            locality: crate::machine::Locality::zone("z"),
             name: format!("m{id}"),
             incarnation: u128::from(id),
             machine_interface: Vec::new(),
@@ -644,5 +713,44 @@ mod tests {
             &SystemCommand::MachineAdmitted { id: NodeId(2) }.encode(),
         );
         assert_eq!(offered(&registry), [NodeId(1), NodeId(2)]);
+    }
+
+    /// The zone rule binds only where it can hold, and a round-robin plan
+    /// over three zones meets it (#215 (zones)).
+    #[test]
+    fn the_zone_rule_binds_over_three_zones_and_a_spread_plan_meets_it() {
+        let two = vec![machine(1, "a", 4), machine(2, "b", 4), machine(3, "b", 4)];
+        assert!(
+            !zone_rule_binds(1, Class::Storage, &two),
+            "two zones never bind"
+        );
+        let three = vec![
+            machine(1, "a", 4),
+            machine(2, "b", 4),
+            machine(3, "c", 4),
+            machine(4, "a", 4),
+        ];
+        assert!(zone_rule_binds(1, Class::Storage, &three));
+        assert!(
+            !zone_rule_binds(0, Class::Storage, &three),
+            "F = 0 is exempt"
+        );
+        let three_of = want(journal(1), 3);
+        let steps = plan(&three_of, &three, &[], 7).expect("fits");
+        let config = zoned(&booked(&steps), &three, QuorumSystem::Majority);
+        assert!(config.is_zoned());
+        assert!(config.zone_rule().holds(), "zone round robin spreads 1/1/1");
+        // Four members over three zones is 2/1/1: it loses its majority.
+        let four = plan(&want(journal(2), 4), &three, &[], 7).expect("fits");
+        let config = zoned(&booked(&four), &three, QuorumSystem::Majority);
+        assert!(!config.zone_rule().holds());
+        // A machine with no zone leaves the configuration unlabeled.
+        let bare = vec![machine(1, "", 4), machine(2, "b", 4), machine(3, "c", 4)];
+        let config = zoned(
+            &[NodeId(1), NodeId(2), NodeId(3)],
+            &bare,
+            QuorumSystem::Majority,
+        );
+        assert!(!config.is_zoned());
     }
 }

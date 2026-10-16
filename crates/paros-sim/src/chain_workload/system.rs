@@ -764,7 +764,7 @@ impl SystemOps {
                     addr,
                     class,
                     capacity: machine.capacity,
-                    failure_domain: format!("zone-{}", id.0 % 2),
+                    locality: paros::machine::Locality::zone(format!("zone-{}", id.0 % 2)),
                     name: format!("joiner-{}", id.0 % 100),
                     // A joiner's registration names a fresh incarnation:
                     // each one is a (re)boot.

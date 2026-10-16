@@ -33,6 +33,8 @@ pub enum Operation {
     FormCell,
     /// An idle machine's admission into a cell (#245): `Admit`.
     Admit,
+    /// A journal's user tags, set by its tenant (#575 (key:value tags)).
+    SetTags,
 }
 
 impl Operation {
@@ -52,6 +54,7 @@ impl Operation {
             Self::SetLeader => "set_leader",
             Self::FormCell => "form_cell",
             Self::Admit => "admit",
+            Self::SetTags => "set_tags",
         }
     }
 }

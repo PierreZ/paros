@@ -337,7 +337,7 @@ mod tests {
             addr: format!("n{id}"),
             class,
             capacity,
-            failure_domain: String::new(),
+            locality: crate::machine::Locality::default(),
             name: String::new(),
             incarnation: 1,
             machine_interface: Vec::new(),

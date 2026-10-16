@@ -25,11 +25,13 @@ use paros_core::{
 use std::time::Duration;
 
 use crate::Address;
-use crate::fleet::{FleetDirectory, Group};
+use crate::fleet::{FleetDirectory, TenantKind};
+use crate::machine::{Class, Locality, machine_tags};
 use crate::rpc::config_to_proto;
 use crate::rpc::view as wire;
 use crate::status::{Hysteresis, fill};
 use crate::system::{NodeStanding, Registry};
+use crate::tags::{Tag, reserved};
 use crate::tenant::TenantControl;
 
 /// Who asks, as the cell decided it.
@@ -182,15 +184,17 @@ impl CellFacts<'_> {
             Some(node) => wire::MachineView {
                 name: node.name.clone(),
                 addr: node.addr.clone(),
-                class: node.class.as_str().to_string(),
                 capacity: node.capacity,
-                failure_domain: node.failure_domain.clone(),
+                tags: node.all_tags().to_wire(),
                 standing: standing(node.standing, self.registry.booked(id)).to_string(),
                 ..base
             },
             None => wire::MachineView {
                 addr: founder.map_or_else(String::new, |(_, addr)| addr.to_string()),
-                class: crate::machine::Class::Storage.as_str().to_string(),
+                tags: machine_tags(Class::Storage, &Locality::default())
+                    .iter()
+                    .map(Tag::to_wire)
+                    .collect(),
                 standing: "founding".to_string(),
                 ..base
             },
@@ -209,9 +213,9 @@ impl CellFacts<'_> {
         let mut cell = wire::TenantView {
             tenant: self.control.tenant.0,
             name: directory.map_or_else(Vec::new, |d| d.cell_name(self.cell_id).to_vec()),
-            kind: "cell".to_string(),
+            kind: TenantKind::Cell.as_str().to_string(),
             state: "ready".to_string(),
-            groups: "internal,cell".to_string(),
+            tags: self.tenant_tags(self.control.tenant, TenantKind::Cell),
             survives: String::new(),
             cell_id: self.cell_id,
             journals: vec![journal(self.control, "control", WriterMode::Single)],
@@ -225,9 +229,9 @@ impl CellFacts<'_> {
             tenants.push(wire::TenantView {
                 tenant: universe.tenant.0,
                 name: directory.map_or_else(Vec::new, |d| d.universe_name().to_vec()),
-                kind: "universe".to_string(),
+                kind: TenantKind::Universe.as_str().to_string(),
                 state: "ready".to_string(),
-                groups: "internal,fleet".to_string(),
+                tags: self.tenant_tags(universe.tenant, TenantKind::Universe),
                 survives: String::new(),
                 cell_id: self.cell_id,
                 journals: vec![journal(universe, "directory", WriterMode::Single)],
@@ -256,6 +260,7 @@ impl CellFacts<'_> {
                     matchmakers: Vec::new(),
                     desired_acceptors: journal.desired.acceptors() as u64,
                     placed: Some(config_to_proto(&placed)),
+                    tags: journal.tags.to_wire(),
                     ..wire::JournalView::default()
                 }
             }));
@@ -263,9 +268,9 @@ impl CellFacts<'_> {
         Some(wire::TenantView {
             tenant: tenant.0,
             name: hosted.name.clone(),
-            kind: "users".to_string(),
+            kind: TenantKind::Users.as_str().to_string(),
             state: entry.map_or_else(|| "hosted".to_string(), |e| e.state.as_str().to_string()),
-            groups: entry.map_or_else(|| "users".to_string(), |e| e.groups.label()),
+            tags: self.tenant_tags(tenant, TenantKind::Users),
             survives: hosted.survives.as_str().to_string(),
             cell_id: self.cell_id,
             journals,
@@ -297,6 +302,16 @@ impl CellFacts<'_> {
         };
         assert!(!placed.members().is_empty(), "a placed journal has members");
         placed
+    }
+
+    /// The tags of `tenant`, a tenant of `kind`: the universe directory's
+    /// entry's, else the reserved tags its kind is registered with (a cell
+    /// that does not host the directory, or did not read it).
+    fn tenant_tags(&self, tenant: TenantId, kind: TenantKind) -> Vec<crate::rpc::common::Tag> {
+        self.directory
+            .and_then(|d| d.tenant(tenant))
+            .map_or_else(|| kind.default_tags(), crate::fleet::TenantEntry::all_tags)
+            .to_wire()
     }
 
     /// A journal the cell made on its founding members (a control journal,
@@ -460,15 +475,22 @@ pub fn tenant_view(
     reply
 }
 
+/// The machine tags a tenant scope sees (#575): where a machine stands,
+/// never its class or its user tags.
+const TENANT_MACHINE_TAGS: [&str; 2] = [reserved::ZONE, reserved::RACK];
+
 /// What a tenant scope may see of a tenant view: of each machine its id,
-/// name, failure domain and up/down state; no address, no incarnation, no
-/// capacity, no booking, no standing; and no other cell detail.
+/// name, zone, rack and up/down state; no address, no incarnation, no
+/// capacity, no booking, no standing, no class, no user tag; and no other
+/// cell detail.
 fn narrow(reply: &mut wire::ViewReply) {
     for machine in &mut reply.machines {
+        let mut tags = std::mem::take(&mut machine.tags);
+        tags.retain(|tag| TENANT_MACHINE_TAGS.contains(&tag.key.as_str()));
         *machine = wire::MachineView {
             node_id: machine.node_id,
             name: std::mem::take(&mut machine.name),
-            failure_domain: std::mem::take(&mut machine.failure_domain),
+            tags,
             up: machine.up,
             ..wire::MachineView::default()
         };
@@ -498,8 +520,9 @@ pub fn universe_view(
             state: entry.state.as_str().to_string(),
             tenants: directory
                 .tenants()
-                .filter(|(_, t)| t.cell_id == cell_id && t.groups.contains(Group::Users))
+                .filter(|(_, t)| t.cell_id == cell_id && t.kind == TenantKind::Users)
                 .count() as u64,
+            tags: entry.all_tags().to_wire(),
         })
         .collect();
     reply.tenants = directory
@@ -507,16 +530,9 @@ pub fn universe_view(
         .map(|(tenant, entry)| wire::TenantView {
             tenant: tenant.0,
             name: entry.name.clone(),
-            kind: if entry.groups.contains(Group::Users) {
-                "users"
-            } else if entry.groups.contains(Group::Fleet) {
-                "universe"
-            } else {
-                "cell"
-            }
-            .to_string(),
+            kind: entry.kind.as_str().to_string(),
             state: entry.state.as_str().to_string(),
-            groups: entry.groups.label(),
+            tags: entry.all_tags().to_wire(),
             survives: entry.survives.as_str().to_string(),
             cell_id: entry.cell_id,
             journals: Vec::new(),
@@ -540,7 +556,9 @@ pub fn within_tenant_scope(reply: &wire::ViewReply, name: &[u8]) -> bool {
                 && m.booked == 0
                 && m.bookings.is_empty()
                 && m.standing.is_empty()
-                && m.class.is_empty()
+                && m.tags
+                    .iter()
+                    .all(|tag| TENANT_MACHINE_TAGS.contains(&tag.key.as_str()))
         })
 }
 

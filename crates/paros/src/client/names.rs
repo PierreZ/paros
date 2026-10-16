@@ -36,7 +36,7 @@ use paros_core::{JournalIdentifier, TenantId};
 use super::Client;
 use super::checkpoint::{Folder, LoadOutcome, load};
 use super::fleet::read_directory;
-use crate::fleet::{FleetDirectory, Group, TenantState};
+use crate::fleet::{FleetDirectory, TenantKind, TenantState};
 use crate::name::JournalName;
 use crate::tenant::TenantControl;
 
@@ -115,14 +115,14 @@ pub enum NameResolution {
 ///
 /// # Panics
 ///
-/// If the directory's fold breaks its own invariants (a name held by a tenant of another name or group).
+/// If the directory's fold breaks its own invariants (a name held by a tenant of another name or kind).
 #[must_use]
 pub fn tenant_in(directory: &FleetDirectory, name: &[u8], at: u64) -> TenantResolution {
     if let Some((tenant, entry)) = directory.named(name) {
-        if entry.groups.contains(Group::Internal) {
+        if entry.kind.is_internal() {
             return TenantResolution::Internal;
         }
-        assert!(entry.groups.contains(Group::Users));
+        assert_eq!(entry.kind, TenantKind::Users);
         assert_eq!(entry.name, name);
         if entry.state != TenantState::Ready {
             return TenantResolution::NotReady {
@@ -381,6 +381,7 @@ mod tests {
             writer: WriterMode::Single,
             desired: Desired::DEFAULT,
             config: AcceptorConfig::new(vec![NodeId(1)], QuorumSystem::Majority),
+            tags: crate::tags::UserTags::none(),
         }
         .encode()
     }

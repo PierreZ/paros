@@ -180,7 +180,7 @@ impl FleetOps {
         node: NodeId,
     ) {
         let registry = session.registry();
-        let Some(zone) = registry.get(node).map(|n| n.failure_domain.clone()) else {
+        let Some(zone) = registry.get(node).map(|n| n.locality.zone.clone()) else {
             return;
         };
         let slots: Vec<(u64, BookingTarget)> = registry

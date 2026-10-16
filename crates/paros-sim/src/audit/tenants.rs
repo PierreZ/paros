@@ -64,6 +64,10 @@ pub(crate) struct TenantBoard {
     outcomes: BTreeMap<(JournalIdentifier, u64), RequestOutcome>,
     /// `(machine, journal)`: the machine folded the journal's tombstone.
     tombstoned: BTreeSet<(u64, JournalIdentifier)>,
+    /// The LSN each journal's tombstone folded at. A node that re-folds
+    /// after a reboot meets a tag request below a tombstone it folded
+    /// before, so a tag is judged by LSN, not by what a node folded.
+    deleted: BTreeMap<JournalIdentifier, u64>,
     /// A tenant created a journal.
     armed: bool,
     /// A create was answered `name_taken` by a journal created before.
@@ -98,7 +102,42 @@ pub(crate) fn lock(board: &Mutex<TenantBoard>) -> MutexGuard<'_, TenantBoard> {
     board.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// #215 (zones): a created journal's placement was placed under the zone
+/// rule where the rule binds, so it survives any one zone. The rule binds
+/// where a partition survives a failure (`F >= 1`: three acceptors per
+/// partition or more) and the placement spans three zones or more
+/// (`paros::placement::zone_rule_binds`).
+fn zone_spread(config: &paros::AcceptorConfig, lsn: u64) {
+    let spread = config.distinct_domains().len();
+    let per_partition = match config.quorum_system() {
+        paros::QuorumSystem::Grid { rows, .. } => rows,
+        _ => config.members().len(),
+    };
+    let binds = per_partition >= 3 && spread >= 3;
+    assert_always!(
+        !binds || config.zone_rule().holds(),
+        "zones: a placed journal that spans three zones survives any one",
+        { "lsn" => lsn, "zones" => spread, "per_partition" => per_partition }
+    );
+    if binds {
+        assert_reachable!("zones: a journal is placed over three zones");
+    }
+}
+
 impl TenantBoard {
+    /// #575 (key:value tags): a tag request names a live journal the
+    /// tenant created before; a tag changes no outcome.
+    fn tagged(&mut self, control: JournalIdentifier, request: u64, id: JournalId, lsn: u64) {
+        let journal = JournalIdentifier::new(control.tenant, id);
+        assert_always!(
+            self.created.get(&journal).is_some_and(|at| *at < lsn)
+                && self.deleted.get(&journal).is_none_or(|at| *at > lsn),
+            "tenant: a tagged journal is a live one the tenant created before",
+            { "lsn" => lsn }
+        );
+        self.answered(control, request, RequestOutcome::Tagged(id), lsn);
+    }
+
     /// `node` folded LSN `lsn` of tenant control journal `control` to
     /// `event`.
     #[tracing::instrument(level = "trace", skip(self, event), fields(node = node.0, journal = %control, lsn))]
@@ -122,8 +161,10 @@ impl TenantBoard {
                 request,
                 id,
                 writer,
+                config,
                 ..
             } => {
+                zone_spread(config, lsn);
                 self.armed = true;
                 let journal = JournalIdentifier::new(control.tenant, *id);
                 self.modes.entry(journal).or_insert(*writer);
@@ -143,8 +184,10 @@ impl TenantBoard {
                     { "lsn" => lsn }
                 );
                 self.tombstoned.insert((node.0, journal));
+                self.deleted.entry(journal).or_insert(lsn);
                 self.answered(control, *request, RequestOutcome::Deleted(*id), lsn);
             }
+            TenantEvent::Tagged { request, id } => self.tagged(control, *request, *id, lsn),
             TenantEvent::Answered { request, outcome } => {
                 if let RequestOutcome::NameTaken(winner) = outcome {
                     let winner = JournalIdentifier::new(control.tenant, *winner);

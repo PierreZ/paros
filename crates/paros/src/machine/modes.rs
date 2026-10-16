@@ -174,8 +174,8 @@ impl Modes {
             return Some(ModeStep::Waiting);
         };
         let storage = desk.storage(cell.registry());
-        let eligible = placement::machines(cell.registry(), storage.iter().copied()).len();
-        let count = placed_count(&change.desired, eligible);
+        let machines = placement::machines(cell.registry(), storage.iter().copied());
+        let count = placed_count(&change.desired, machines.len());
         let want = Want {
             role: Role::Acceptor,
             target: BookingTarget::Journal(journal),
@@ -202,7 +202,11 @@ impl Modes {
             cell,
             desk,
             &change,
-            (AcceptorConfig::new(members, system), &reply),
+            // Labeled and owned like a create's (#215 (zones)).
+            (
+                placement::zoned(&members, &machines, system).with_cell(cell.journals().cell_id),
+                &reply,
+            ),
         )
         .await
     }
@@ -327,11 +331,12 @@ impl Modes {
         if target.len() != want.count || !system.admits(target.len()) {
             return ModeStep::Waiting;
         }
-        let members: Vec<u64> = target.iter().map(|n| n.0).collect();
-        match nodes
-            .reconfigure(change.journal, &members, system, at)
-            .await
-        {
+        // The new configuration is labeled with its members' zones and
+        // owned by this cell, like a create's (#215 (zones)).
+        let machines = placement::machines(cell.registry(), target.iter().copied());
+        let composed =
+            placement::zoned(&target, &machines, system).with_cell(cell.journals().cell_id);
+        match nodes.reconfigure_to(change.journal, &composed, at).await {
             ReconfigureOutcome::Started { .. } => {
                 moonpool_assertions::reachable!(
                     "coordinator: a mode change reconfigures its journal"

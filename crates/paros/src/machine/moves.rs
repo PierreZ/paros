@@ -368,18 +368,21 @@ impl Moves {
             let Ok(system) = crate::rpc::quorum_system_from_proto(&(&reply).into()) else {
                 return Some(MoveStep::Waiting);
             };
-            return Some(
-                match nodes.reconfigure(journal, &target, system, at).await {
-                    ReconfigureOutcome::Started { .. } => {
-                        moonpool_assertions::reachable!(
-                            "coordinator: a move reconfigures its journal"
-                        );
-                        self.started.insert(journal);
-                        MoveStep::Reconfigured
-                    }
-                    _ => MoveStep::Waiting,
-                },
-            );
+            // The machines that stay, labeled with their zones as the
+            // registry names them and owned by this cell (#215 (zones)): a
+            // move composes a new configuration like a create.
+            let staying_nodes: Vec<NodeId> = target.iter().copied().map(NodeId).collect();
+            let machines = placement::machines(registry, staying_nodes.iter().copied());
+            let composed = placement::zoned(&staying_nodes, &machines, system)
+                .with_cell(cell.journals().cell_id);
+            return Some(match nodes.reconfigure_to(journal, &composed, at).await {
+                ReconfigureOutcome::Started { .. } => {
+                    moonpool_assertions::reachable!("coordinator: a move reconfigures its journal");
+                    self.started.insert(journal);
+                    MoveStep::Reconfigured
+                }
+                _ => MoveStep::Waiting,
+            });
         }
         self.finish(client, cell, (&nodes, &ids), journal, &leaving, &reply)
             .await

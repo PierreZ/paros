@@ -63,7 +63,7 @@ use paros::client::checkpoint::{CheckpointPolicy, Checkpointer, Folder, LoadOutc
 use paros::client::fleet::{FleetRefusal, FleetSession, Interrupted, Run, Stage, Step};
 use paros::client::names::{TenantResolution, resolve_tenant};
 use paros::client::{ClaimOutcome, Writer};
-use paros::fleet::{CellState, FleetDirectory, Groups, TenantState};
+use paros::fleet::{CellState, FleetDirectory, TenantKind, TenantState};
 use paros::machine::ControlJournals;
 use paros::system::{NodeStanding, Registry};
 use paros::{JournalId, JournalIdentifier, NodeId, TenantId};
@@ -87,6 +87,7 @@ mod placement;
 mod replaced;
 mod resolve;
 mod sets;
+mod tags;
 mod view;
 
 use cell::Cell;
@@ -214,6 +215,9 @@ pub(super) struct FleetOps {
     refused: BTreeSet<TenantId>,
     /// The replaced-founder scenario's steps this operator took (#423).
     replaced: replaced::Steps,
+    /// The single-writer journals this client created (#215 (zones)): on a
+    /// zone-outage seed, a journal step while a zone is down appends to one.
+    created_single: Vec<JournalIdentifier>,
     /// This client made its one frontend call before a tenant was `READY`
     /// (#446 (a gate that never fires cannot fail the sweep)).
     frontend_cold: bool,
@@ -264,6 +268,7 @@ impl FleetOps {
             journal_pending: None,
             journal_names: BTreeMap::new(),
             refused: BTreeSet::new(),
+            created_single: Vec::new(),
             replaced: replaced::Steps::default(),
             frontend_cold: false,
             state: ctx.state().clone(),
@@ -657,6 +662,46 @@ impl FleetOps {
         }
     }
 
+    /// The gates of a tenant creation that ran while the downed-founder
+    /// (#213 (three founding members)) or zone-outage (#215 (zones))
+    /// scenario held machines down for the whole run.
+    fn outage_gates(&self, run: &paros::client::fleet::Run<TenantId>, started: Duration) {
+        if !run.steps.is_empty()
+            && crate::machine::founder_down_through(&self.state, started, self.time.now())
+        {
+            // #213 (three founding members): the cell control journal and
+            // the fleet tenant chose this run's writes without that member.
+            assert_reachable!(
+                "fleet: a control-journal write is chosen with a founding member down"
+            );
+            if matches!(
+                run.outcome,
+                Step::Done {
+                    last: Some(Stage::TenantReady),
+                    ..
+                }
+            ) {
+                assert_reachable!("fleet: a tenant is created with a founding member down");
+            }
+        }
+        if !run.steps.is_empty()
+            && crate::machine::zone_down_through(&self.state, started, self.time.now())
+        {
+            // #215 (zones): the cell control journal and the fleet tenant
+            // chose this run's writes without a whole zone.
+            assert_reachable!("zones: a control-journal write is chosen with a zone down");
+            if matches!(
+                run.outcome,
+                Step::Done {
+                    last: Some(Stage::TenantReady),
+                    ..
+                }
+            ) {
+                assert_reachable!("zones: a tenant is created with a zone down");
+            }
+        }
+    }
+
     /// Create `name` under the first of `draws` the fleet tenant does
     /// not hold, to its end; whether it ended.
     async fn create(
@@ -684,29 +729,17 @@ impl FleetOps {
                 assert_reachable!("fleet: a duplicate tenant id is refused");
             }
         }
+        let tags = tags::drawn(&self.state);
+        for draw in &draws {
+            tags::note(&self.state, tags::Target::Tenant(draw.tenant), &tags);
+        }
+        session.use_tags(tags);
         let started = self.time.now();
         let run = session
             .create_tenant(client, first, &name, draws.clone(), Duration::ZERO)
             .await;
         run.steps.iter().copied().for_each(reach);
-        if !run.steps.is_empty()
-            && crate::machine::founder_down_through(&self.state, started, self.time.now())
-        {
-            // #213 (three founding members): the cell control journal and
-            // the fleet tenant chose this run's writes without that member.
-            assert_reachable!(
-                "fleet: a control-journal write is chosen with a founding member down"
-            );
-            if matches!(
-                run.outcome,
-                Step::Done {
-                    last: Some(Stage::TenantReady),
-                    ..
-                }
-            ) {
-                assert_reachable!("fleet: a tenant is created with a founding member down");
-            }
-        }
+        self.outage_gates(&run, started);
         self.created(session, &name, &run);
         match run.outcome {
             Step::Done { result, .. } => {
@@ -827,7 +860,7 @@ impl FleetOps {
             assert_always!(
                 entry.is_some_and(|t| t.state == TenantState::Ready
                     && t.name == name
-                    && t.groups == Groups::SERVED)
+                    && t.kind == TenantKind::Users)
                     && session.cell().hosts(result),
                 "fleet: a created tenant is READY in the directory and hosted by its cell",
                 { "tenant" => result.0 }
@@ -1374,7 +1407,7 @@ fn judged_cell(members: &[u64]) -> Folder<JudgedRegistry> {
 /// or `ERROR` once its cell refused its footprint (#476).
 fn no_tenant_mid_operation(directory: &FleetDirectory, cell: &Registry) {
     for (tenant, entry) in directory.tenants() {
-        if entry.groups == Groups::SERVED {
+        if entry.kind == TenantKind::Users {
             // A creation its cell refused for its footprint ends `ERROR`
             // (#476): that is an end, not the middle of an operation.
             let refused = cell.footprint(tenant).is_some_and(|g| !g.granted());
@@ -1416,7 +1449,7 @@ fn directory_equals_cell(directory: &FleetDirectory, cell: &Registry) {
         assert_always!(
             directory
                 .tenant(tenant)
-                .is_some_and(|t| t.groups == Groups::SERVED && t.cell_id == joined.cell_id),
+                .is_some_and(|t| t.kind == TenantKind::Users && t.cell_id == joined.cell_id),
             "fleet: every tenant the cell hosts is in the directory under that cell",
             { "tenant" => tenant.0 }
         );
@@ -1431,7 +1464,7 @@ fn directory_equals_cell(directory: &FleetDirectory, cell: &Registry) {
                 { "tenant" => tenant.0 }
             );
         }
-        if entry.groups == Groups::SERVED && entry.state == TenantState::Ready {
+        if entry.kind == TenantKind::Users && entry.state == TenantState::Ready {
             assert_always!(
                 cell.hosts(tenant),
                 "fleet: every READY tenant in the directory is hosted by its cell",
@@ -1472,6 +1505,7 @@ fn reach(stage: Stage) {
         Stage::AddRootKey => {
             assert_reachable!("fleet: a step adds a root key to the universe entry");
         }
+        Stage::SetTags => assert_reachable!("fleet: a step sets an entity's tags"),
         Stage::RemoveRootKey => {
             assert_reachable!("fleet: a step removes a root key from the universe entry");
         }

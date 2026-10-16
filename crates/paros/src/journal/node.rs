@@ -17,6 +17,21 @@ use crate::storage::{LogStorage, StorageError, StorageRecord, WriteOutcome};
 /// The kind byte of an accepted (or learned) entry's identity.
 const ACCEPTED: u8 = 1;
 
+/// How far the chosen index may run ahead of the durable one before a sync
+/// writes the metainfo for it alone (#602 (dark after a full restart)).
+///
+/// A booted node recovers every slot above its durable chosen index: a
+/// leader re-proposes them all, one page at a time. Before #602 the chosen
+/// index rode only the writes that happened anyway (a promise, a format, a
+/// floor), so in steady state it stayed where the leader's election left
+/// it. After a full-cell restart every journal's new leader re-proposed its
+/// whole log: a Compose cell answered nothing for 30 s at a 100 ms tick and
+/// for 90 s at a 10 ms tick, where elections deposed leaders mid-recovery.
+/// Now a reboot rewinds a node's chosen index by less than this many slots,
+/// so a recovery is about one page; the simulation judges that bound at
+/// every boot ("a reboot rewinds the chosen index by less than a page").
+pub const CHOSEN_INDEX_LAG: u64 = 64;
+
 /// The node-unique scalars, kept in the journal's two-copy metainfo: the
 /// ones whose loss no peer can repair, and the ones that must move with the
 /// floor.
@@ -28,7 +43,8 @@ struct NodeMeta {
     /// The promised ballot.
     promise: Ballot,
     /// The chosen index as of the last metainfo write (relaxed: it rides
-    /// the writes that happen anyway).
+    /// the writes that happen anyway, and forces one only once it lags
+    /// [`CHOSEN_INDEX_LAG`] slots, #602 (dark after a full restart)).
     chosen_index: Option<Slot>,
     /// What the slots below the floor folded to (#204).
     sealed: JournalState,
@@ -315,6 +331,30 @@ impl<P: StorageProvider> JournalStorage<P> {
         }
     }
 
+    /// Whether the chosen index runs at least [`CHOSEN_INDEX_LAG`] slots
+    /// ahead of the durable one, so the next sync writes the metainfo for it
+    /// (#602 (dark after a full restart)).
+    ///
+    /// # Panics
+    ///
+    /// If the durable chosen index is ahead of the live one: a programmer
+    /// error, never an operating condition.
+    fn chosen_lags(&self) -> bool {
+        let durable = self.durable_meta.chosen_index;
+        let Some(live) = self.chosen_index else {
+            assert!(durable.is_none(), "a durable chosen index has a live one");
+            return false;
+        };
+        // One past the durable index: how many slots a boot already knows
+        // are chosen.
+        let known = durable.map_or(0, |slot| slot.0 + 1);
+        assert!(
+            known <= live.0 + 1,
+            "the live chosen index never trails the durable one"
+        );
+        live.0 + 1 - known >= CHOSEN_INDEX_LAG
+    }
+
     /// Commit `batch`, creating the journal first if none is on disk yet
     /// (its first metainfo is [`Self::early_meta`]: a creation lands before
     /// the batch it opens for).
@@ -475,12 +515,17 @@ impl<P: StorageProvider> LogStorage for JournalStorage<P> {
     /// Up to three kinds of journal commit, each durable before the next: a
     /// raised promise alone, so it is durable before any entry it covers;
     /// the entries; then the floor and the metainfo, alone, so neither is
-    /// durable before the entries under it. The chosen index is never a
-    /// reason to write: a [`MustSync::Relaxed`] flush holding nothing else
-    /// writes nothing, and the next metainfo write carries it.
+    /// durable before the entries under it. The chosen index is a reason to
+    /// write only once it runs [`CHOSEN_INDEX_LAG`] slots ahead of the
+    /// durable one (#602 (dark after a full restart)): below that, a
+    /// [`MustSync::Relaxed`] flush holding nothing else writes nothing, and
+    /// the next metainfo write carries it.
     #[tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0))]
     async fn sync(&mut self, must_sync: MustSync) -> Result<(), StorageError> {
         let _ = must_sync;
+        if self.chosen_lags() {
+            self.meta_dirty = true;
+        }
         if !self.meta_dirty && self.staged.is_empty() {
             return Ok(());
         }

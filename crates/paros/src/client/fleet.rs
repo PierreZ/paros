@@ -98,10 +98,12 @@ use super::checkpoint::{
 };
 use super::outcome::ClaimOutcome;
 use super::writer::{Writer, WriterOutcome};
+use crate::fleet::CellKind;
 use crate::fleet::RootKeyEntry;
 use crate::fleet::{CellState, FleetCommand, FleetDirectory, FleetEntry, TenantState};
 use crate::machine::ControlJournals;
 use crate::system::{FleetRegistration, Registry};
+use crate::tags::UserTags;
 use crate::tenant::Survives;
 
 /// One step a fleet operation wrote.
@@ -133,6 +135,8 @@ pub enum Stage {
     AddRootKey,
     /// A root public key left the universe entry (#245).
     RemoveRootKey,
+    /// A tenant's or a cell's user tags changed (#575).
+    SetTags,
 }
 
 /// Why a fleet operation cannot go on: running it again changes nothing
@@ -210,6 +214,11 @@ pub enum FleetRefusal {
     /// The root key is not one: an unset id, no label, or a text that is
     /// not an Ed25519 public key (#245).
     MalformedRootKey,
+    /// A user tenant's name holds a `:` (#575): an internal tenant shows as
+    /// `<role>:<name>`, so a user's never does.
+    NameRefused,
+    /// No tenant holds the name, or no cell (#575).
+    Unknown,
     /// The machine being admitted checks an `admin` token against its
     /// pinned root key, and refused the one sent (#245).
     Denied {
@@ -315,6 +324,16 @@ pub struct Run<T> {
     pub steps: Vec<Stage>,
 }
 
+/// What a tag request names (#575): a `users` tenant by its name, or a
+/// cell by its name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TagTarget<'a> {
+    /// The tenant named so.
+    Tenant(&'a [u8]),
+    /// The cell named so.
+    Cell(&'a [u8]),
+}
+
 /// The most steps one run takes: the longest operation is four writes, and
 /// every step is decided afresh, so a run that needs more is going round.
 const MAX_STEPS: usize = 8;
@@ -337,6 +356,8 @@ pub struct FleetSession {
     diverged: Option<(JournalIdentifier, u64)>,
     /// What a tenant this session registers survives (#252).
     survives: Survives,
+    /// The user tags a tenant this session registers starts with (#575).
+    tags: UserTags,
     /// The names `init` gives the universe and the cell (#252, #399):
     /// empty is unnamed.
     names: (Vec<u8>, Vec<u8>),
@@ -368,6 +389,7 @@ impl FleetSession {
             directory_open: false,
             diverged: None,
             survives: Survives::Az,
+            tags: UserTags::none(),
             names: (Vec::new(), Vec::new()),
             root_key: None,
         })
@@ -397,6 +419,21 @@ impl FleetSession {
     pub fn with_survives(mut self, survives: Survives) -> Self {
         self.survives = survives;
         self
+    }
+
+    /// Register every tenant this session creates with the user tags
+    /// `tags` (#575; none otherwise). A resumed creation keeps the tags its
+    /// first registration wrote.
+    #[must_use]
+    pub fn with_tags(mut self, tags: UserTags) -> Self {
+        self.tags = tags;
+        self
+    }
+
+    /// The user tags a tenant this session creates from now on is born
+    /// with (#575 (key:value tags)), as [`FleetSession::with_tags`].
+    pub fn use_tags(&mut self, tags: UserTags) {
+        self.tags = tags;
     }
 
     /// The first checkpoint any fold of this session — the fleet
@@ -491,7 +528,7 @@ impl FleetSession {
                 .write_directory(client, first, fleet, add, Stage::AddRootKey)
                 .await;
         }
-        let Some(cell) = self.directory.state().cell(cell_id) else {
+        let Some(cell) = self.directory.state().cell(cell_id).cloned() else {
             // The cell tenant is the fleet tenant's already, under another cell: this
             // operation names the wrong cell (the fleet tenant would refuse the entry).
             if self.directory.state().tenant(control.tenant).is_some() {
@@ -504,6 +541,7 @@ impl FleetSession {
                 cell_id,
                 control,
                 name: self.names.1.clone(),
+                kind: CellKind::default(),
             };
             return self
                 .write_directory(client, first, fleet, add, Stage::AddCell)
@@ -552,6 +590,7 @@ impl FleetSession {
     /// (`docs/architecture.md` §3.7). Ends with the tenant's id once the directory
     /// holds it `READY`.
     #[tracing::instrument(level = "trace", skip_all, fields(tenant = draw.tenant.0))]
+    #[allow(clippy::too_many_lines)] // one look per refusal, in order
     pub async fn create_step<P: Providers>(
         &mut self,
         client: &Client<P>,
@@ -570,6 +609,9 @@ impl FleetSession {
             if !draw.is_set() {
                 return Step::Refused(FleetRefusal::Unset);
             }
+            if name.contains(&b':') {
+                return Step::Refused(FleetRefusal::NameRefused);
+            }
             if directory.tenant(draw.tenant).is_some() || directory.is_removed(draw.tenant) {
                 return Step::Refused(FleetRefusal::IdTaken);
             }
@@ -582,6 +624,7 @@ impl FleetSession {
                 name: name.to_vec(),
                 cell_id,
                 survives: self.survives,
+                tags: self.tags.clone(),
             };
             return self
                 .write_directory(client, first, fleet, register, Stage::RegisterTenant)
@@ -797,6 +840,97 @@ impl FleetSession {
         })
     }
 
+    /// One step of a tag request (#575): the user tags of the tenant named
+    /// `tenant`, or of the cell named `cell` when `tenant` is `None`,
+    /// become `tags`, under the idempotency id `request`. Ends with the
+    /// entity's id once the directory applied `request`. A retry under the
+    /// same id after it applied writes nothing, so a later change stays.
+    #[tracing::instrument(level = "trace", skip_all)]
+    pub async fn tag_step<P: Providers>(
+        &mut self,
+        client: &Client<P>,
+        first: usize,
+        target: TagTarget<'_>,
+        request: u64,
+        tags: &UserTags,
+    ) -> Step<u64> {
+        if request == 0 {
+            return Step::Refused(FleetRefusal::Unset);
+        }
+        if let Err(stop) = self.open_directory(client, first).await {
+            return Step::Interrupted(stop);
+        }
+        let directory = self.directory.state();
+        let Some(fleet) = directory.fleet() else {
+            return Step::Refused(FleetRefusal::NotInitialized);
+        };
+        let (id, command) = match target {
+            TagTarget::Tenant(name) => {
+                let Some((tenant, _)) = directory.named(name) else {
+                    return Step::Refused(FleetRefusal::Unknown);
+                };
+                let command = FleetCommand::SetTenantTags {
+                    request,
+                    tenant,
+                    tags: tags.clone(),
+                };
+                (tenant.0, command)
+            }
+            TagTarget::Cell(name) => {
+                let Some(cell_id) = directory.cell_named(name) else {
+                    return Step::Refused(FleetRefusal::Unknown);
+                };
+                let command = FleetCommand::SetCellTags {
+                    request,
+                    cell_id,
+                    tags: tags.clone(),
+                };
+                (cell_id, command)
+            }
+        };
+        if directory.tagged(request) {
+            return Step::Done {
+                result: id,
+                last: None,
+            };
+        }
+        let step = self
+            .finish_directory(client, first, fleet, command, Stage::SetTags, id)
+            .await;
+        if matches!(step, Step::Done { .. }) && !self.directory.state().tagged(request) {
+            // The entity left the directory between the look and the write.
+            return Step::Refused(FleetRefusal::Unknown);
+        }
+        step
+    }
+
+    /// Set the user tags of `target` to `tags` to the request's end (see
+    /// [`FleetSession::tag_step`]), taking an interrupted step again for up
+    /// to `patience` past the last written step.
+    #[tracing::instrument(level = "debug", skip_all)]
+    pub async fn set_tags<P: Providers>(
+        &mut self,
+        client: &Client<P>,
+        first: usize,
+        target: TagTarget<'_>,
+        request: u64,
+        tags: &UserTags,
+        patience: Duration,
+    ) -> Run<u64> {
+        let mut deadline = client.now() + patience;
+        let mut steps = Vec::new();
+        while steps.len() < MAX_STEPS {
+            let step = self.tag_step(client, first, target, request, tags).await;
+            if retry(client, &step, &mut deadline, patience).await {
+                continue;
+            }
+            if let Some(end) = settle(step, &mut steps) {
+                return end;
+            }
+        }
+        going_round(steps)
+    }
+
     /// A key step the fold refused although the session's look allowed it
     /// (another operator's key landed between): the step is refused for the
     /// key with `refusal`, as the directory now stands.
@@ -815,7 +949,7 @@ impl FleetSession {
 
     /// Add `key` to the universe entry to its end (see
     /// [`FleetSession::add_key_step`]), taking an interrupted step again for
-    /// up to `patience`.
+    /// up to `patience` past the last written step.
     #[tracing::instrument(level = "debug", skip_all)]
     pub async fn add_root_key<P: Providers>(
         &mut self,
@@ -824,11 +958,11 @@ impl FleetSession {
         key: &RootKeyEntry,
         patience: Duration,
     ) -> Run<u32> {
-        let deadline = client.now() + patience;
+        let mut deadline = client.now() + patience;
         let mut steps = Vec::new();
         while steps.len() < MAX_STEPS {
             let step = self.add_key_step(client, first, key).await;
-            if retry(client, &step, deadline).await {
+            if retry(client, &step, &mut deadline, patience).await {
                 continue;
             }
             if let Some(end) = settle(step, &mut steps) {
@@ -840,7 +974,7 @@ impl FleetSession {
 
     /// Remove the root key `label` from the universe entry to its end (see
     /// [`FleetSession::remove_key_step`]), taking an interrupted step again
-    /// for up to `patience`.
+    /// for up to `patience` past the last written step.
     #[tracing::instrument(level = "debug", skip_all)]
     pub async fn remove_root_key<P: Providers>(
         &mut self,
@@ -849,11 +983,11 @@ impl FleetSession {
         label: &str,
         patience: Duration,
     ) -> Run<Option<u32>> {
-        let deadline = client.now() + patience;
+        let mut deadline = client.now() + patience;
         let mut steps = Vec::new();
         while steps.len() < MAX_STEPS {
             let step = self.remove_key_step(client, first, label).await;
-            if retry(client, &step, deadline).await {
+            if retry(client, &step, &mut deadline, patience).await {
                 continue;
             }
             if let Some(end) = settle(step, &mut steps) {
@@ -864,19 +998,9 @@ impl FleetSession {
     }
 
     /// Run `init`'s fleet half to its end (see [`FleetSession::init_step`]),
-    /// taking an interrupted step again for up to `patience` (a cell still
-    /// electing its leaders, an operator racing this one).
-    ///
-    /// The wait for the cell coordinator's `JoinFleet`
-    /// ([`Interrupted::NotJoined`], #513 (fleet Init duel)) has a patience of
-    /// its own, counted from the first time the run meets it, as
-    /// [`crate::client::initialize`] waits for the coordinator with its own.
-    /// The join is another writer's step: a run whose own writes took its
-    /// patience gave up at the first look, one watch round before the join
-    /// landed, and its operator ran `init` whole again (witness
-    /// 16841472241737394111 on 39b2782: `AddCell` landed 4 s into a 3 s
-    /// patience, the join 1.3 s later, and the recovery tail's settle had
-    /// run out by then).
+    /// taking an interrupted step again for up to `patience` past the last
+    /// written step (a cell still electing its leaders, an operator racing
+    /// this one, the coordinator's join).
     #[tracing::instrument(level = "debug", skip_all, fields(cell = self.journals.cell_id))]
     pub async fn init<P: Providers>(
         &mut self,
@@ -886,15 +1010,10 @@ impl FleetSession {
         patience: Duration,
     ) -> Run<u64> {
         let mut deadline = client.now() + patience;
-        let mut joining = false;
         let mut steps = Vec::new();
         while steps.len() < MAX_STEPS {
             let step = self.init_step(client, first, fleet_id).await;
-            if !joining && matches!(step, Step::Interrupted(Interrupted::NotJoined { .. })) {
-                joining = true;
-                deadline = deadline.max(client.now() + patience);
-            }
-            if retry(client, &step, deadline).await {
+            if retry(client, &step, &mut deadline, patience).await {
                 continue;
             }
             if let Some(end) = settle(step, &mut steps) {
@@ -907,7 +1026,8 @@ impl FleetSession {
     /// Create the `users` tenant `name` to its end (see
     /// [`FleetSession::create_step`]), under the first of `draws` the fleet tenant does
     /// not hold: a draw the fleet tenant holds already is skipped for the next one. An
-    /// interrupted step is taken again for up to `patience`.
+    /// interrupted step is taken again for up to `patience` past the last
+    /// written step.
     ///
     /// The creation is named by its whole draw set, so a resume passes the same
     /// `draws` and picks up under whichever of them the last run reached: a name
@@ -932,7 +1052,7 @@ impl FleetSession {
         draws: impl IntoIterator<Item = JournalIdentifier>,
         patience: Duration,
     ) -> Run<TenantId> {
-        let deadline = client.now() + patience;
+        let mut deadline = client.now() + patience;
         let draws: Vec<JournalIdentifier> = draws.into_iter().collect();
         let mut at = 0;
         let mut draw = draws.first().copied().unwrap_or(JournalIdentifier::UNSET);
@@ -962,7 +1082,7 @@ impl FleetSession {
                 draw = draws[at];
                 continue;
             }
-            if retry(client, &step, deadline).await {
+            if retry(client, &step, &mut deadline, patience).await {
                 continue;
             }
             if let Some(end) = settle(step, &mut steps) {
@@ -974,7 +1094,7 @@ impl FleetSession {
 
     /// Remove the `users` tenant `name` to its end (see
     /// [`FleetSession::remove_step`]), taking an interrupted step again for
-    /// up to `patience`.
+    /// up to `patience` past the last written step.
     #[tracing::instrument(level = "debug", skip_all)]
     pub async fn remove_tenant<P: Providers>(
         &mut self,
@@ -983,11 +1103,11 @@ impl FleetSession {
         name: &[u8],
         patience: Duration,
     ) -> Run<Option<TenantId>> {
-        let deadline = client.now() + patience;
+        let mut deadline = client.now() + patience;
         let mut steps = Vec::new();
         while steps.len() < MAX_STEPS {
             let step = self.remove_step(client, first, name).await;
-            if retry(client, &step, deadline).await {
+            if retry(client, &step, &mut deadline, patience).await {
                 continue;
             }
             if let Some(end) = settle(step, &mut steps) {
@@ -1138,16 +1258,33 @@ impl FleetSession {
 }
 
 /// Whether a run takes `step` again: it was interrupted (a claim no server
-/// decided, a leader not ready yet, a write fenced by another operator) and
-/// the run's patience allows one more `retry_backoff`. The step is decided
-/// afresh from the journals, so a retry is always a resumption.
+/// decided, a leader not ready yet, a write fenced by another operator, a
+/// wait for the cell coordinator's step) and the run's patience allows one
+/// more `retry_backoff`. The step is decided afresh from the journals, so a
+/// retry is always a resumption.
+///
+/// The patience counts from the run's last written step: a step that
+/// advanced moves `deadline` to `patience` from now (#605 (init pending in
+/// the recovery tail)). A run that keeps writing is not stuck. Before, a
+/// run that spent its patience on a slow claim wrote its last step and gave
+/// up at once on the coordinator's join it waits for next (witness
+/// 7296292548829778466 on cc14730: client 0's `init` wrote `FormFleet`,
+/// `AddRootKey` and `AddCell` 17 s into a slow recovery tail, ended
+/// `NotJoined` 0.2 s before the coordinator's `JoinFleet`, and stayed
+/// pending, red on "fleet: an operation an operator stopped in ends in the
+/// recovery tail").
 pub(super) async fn retry<P: Providers, T>(
     client: &Client<P>,
     step: &Step<T>,
-    deadline: Duration,
+    deadline: &mut Duration,
+    patience: Duration,
 ) -> bool {
+    if matches!(step, Step::Advanced(_)) {
+        *deadline = client.now() + patience;
+        return false;
+    }
     matches!(step, Step::Interrupted(_))
-        && client.now() < deadline
+        && client.now() < *deadline
         && client.pause(client.tunables().retry_backoff).await
 }
 

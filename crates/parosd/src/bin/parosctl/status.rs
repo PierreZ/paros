@@ -257,11 +257,7 @@ async fn tenant_status(asker: &Asker<'_>, out: &Printer, name: &str) -> Ending {
         .map(|m| {
             [
                 names[&m.node_id].clone(),
-                if m.failure_domain.is_empty() {
-                    "-".to_string()
-                } else {
-                    m.failure_domain.clone()
-                },
+                crate::views::tag(&m.tags, paros::tags::reserved::ZONE),
                 machine_state(m),
                 footprint.get(&m.node_id).copied().unwrap_or(0).to_string(),
             ]

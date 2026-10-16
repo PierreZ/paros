@@ -1199,6 +1199,50 @@ impl<P: Providers> Client<P> {
         quorum_system: QuorumSystem,
         target: usize,
     ) -> ReconfigureOutcome {
+        self.reconfigure_wire(journal, members, (Vec::new(), 0), quorum_system, target)
+            .await
+    }
+
+    /// [`Client::reconfigure`] onto a composed `config`, its failure
+    /// domains and its cell included (#215 (zones)): what a coordinator's
+    /// move and the simulation's composer send.
+    pub async fn reconfigure_to(
+        &self,
+        journal: JournalIdentifier,
+        config: &paros_core::AcceptorConfig,
+        target: usize,
+    ) -> ReconfigureOutcome {
+        let members: Vec<u64> = config.members().iter().map(|n| n.0).collect();
+        let domains = config
+            .domains()
+            .iter()
+            .map(crate::rpc::domain_to_proto)
+            .collect();
+        self.reconfigure_wire(
+            journal,
+            &members,
+            (domains, config.cell()),
+            config.quorum_system(),
+            target,
+        )
+        .await
+    }
+
+    /// The reconfiguration as the wire carries it: `members` with their
+    /// labels (empty, or one per member) and the configuration's cell (`0`:
+    /// none).
+    async fn reconfigure_wire(
+        &self,
+        journal: JournalIdentifier,
+        members: &[u64],
+        (domains, cell_id): (Vec<crate::rpc::common::FailureDomain>, u64),
+        quorum_system: QuorumSystem,
+        target: usize,
+    ) -> ReconfigureOutcome {
+        assert!(
+            domains.is_empty() || domains.len() == members.len(),
+            "a reconfiguration labels every member or none"
+        );
         let mut server = target % self.servers.len();
         let wire = quorum_system_to_proto(quorum_system);
         for _ in 0..self.tunables.retry_budget.max(1) {
@@ -1211,6 +1255,8 @@ impl<P: Providers> Client<P> {
                 cols: wire.cols,
                 tenant: journal.tenant.0,
                 journal: journal.journal.0,
+                domains: domains.clone(),
+                cell_id,
             };
             let node = self.node(server).clone();
             let attempt =

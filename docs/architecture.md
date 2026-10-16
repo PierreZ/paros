@@ -482,9 +482,11 @@ restart, lease renewals flooded the cluster until liveness heartbeats timed out)
 identity for exactly this reason.
 
 At start a machine registers in the cell control journal with
-`RegisterNode { node_id, addr, machine_interface, class, capacity, failure_domain }`, publishing
+`RegisterNode { node_id, addr, machine_interface, capacity, tags }`, publishing
 its machine interface (moonpool-rpc's incarnation-bearing `InterfaceRef`, #404), and it starts the driver
-for every `(tenant, journal, role)` assigned to it. A `RegisterNode` for an existing `node_id`
+for every `(tenant, journal, role)` assigned to it. Its `tags` are its reserved tags only:
+`paros/class`, `paros/zone` and `paros/rack` (section 3.7, #575 (key:value tags)). A
+`RegisterNode` for an existing `node_id`
 with a new incarnation is the reboot signal: the cell coordinator learns at publication time, not
 after a heartbeat window (Akka identifies nodes by `host:port:uid`, and a new incarnation joining
 at the same address removes the old member). Peers holding the old reference learn on their next
@@ -1173,7 +1175,7 @@ once five `storage` machines span three zones.
 `survives: az | region`, recorded at `REGISTERING` and mirrored into the tenant's control journal
 (rebuild from below, section 3.3). It constrains the kind of cell the tenant may live in, a
 regional cell for `az` and a multi-region cell for `region` (section 3.7), never whether it may
-move: the groups alone decide that.
+move: its `paros/movable` tag alone decides that (section 3.7).
 
 **How roles are sized** (decided on 2026-10-04). Stateless roles (frontends, proxy leaders,
 batchers) are **per-tenant pools**: one pool per role, shared by all the tenant's journals and
@@ -1334,7 +1336,7 @@ git-style (e.g. `cell=2c94f1`), widened when a prefix is ambiguous within the li
 keeps the full id beside the name, and a command that takes an id accepts a unique prefix.
 `Resolve` gives the universe's and the cell's names with their ids (#239), and the machine
 lifecycle logs name the machine (`machine=<name>`). An internal tenant (section 3.7)
-shows a display label derived from its groups (`universe`, `cell` with its cell), display only,
+shows as `<kind>:<name>` from its `paros/role` tag (`universe:acme`, `cell:paris`), display only,
 never a resolvable name or an id: section 3.8's no-well-known-id rule stands.
 
 **Where names stand** (#239, landed on 2026-10-10). The library parses and prints
@@ -1535,7 +1537,7 @@ nothing. The RPC is `View` (`paros.view.View`, method `0x5041_0309`), with three
 
 **The server filters by scope; the caller never filters.** An `admin` sees every detail. A
 `tenant` caller sees only its own tenant, and of each machine that the tenant uses only its name,
-its failure domain and whether it is up. Any other query from a `tenant` caller is refused
+its `paros/zone` and `paros/rack` tags and whether it is up. Any other query from a `tenant` caller is refused
 `forbidden`. The frontend checks tokens on the four data-plane calls since #192 (the frontend),
 but a `View` does not go through it yet: the caller states its scope and
 `paros::view::authorize` takes it as given. That function is the seam where the Biscuit roles of
@@ -1753,7 +1755,7 @@ metadata version lets a reader refuse a format it does not understand.
   of the tenant's cell, #210).
 - The universe directory's tenant entries carry the universe-unique `TenantId`, the `JournalIdentifier` of the tenant's control
   journal, the cell assignment, the state, a configuration sequence number, the tenant's
-  **group**; the universe directory's cell entries carry the cell id, the cell tenant's `JournalIdentifier`, the state and
+  **tags** (section 3.7); the universe directory's cell entries carry the cell id, the cell tenant's `JournalIdentifier`, the state and
   the metadata version. No id is well known (section 3.8): a second cell learns the universe tenant's `JournalIdentifier`
   when it is admitted, from the universe tenant, and records it in its cell plan.
 - The universe entry carries the universe's name; the cell entries also carry the cell's `kind`, its
@@ -1765,35 +1767,59 @@ metadata version lets a reader refuse a format it does not understand.
   state is bounded by one batch.
 - No component assumes there is only one cell: every lookup goes through the universe directory.
 
-**Tenant groups** (decided on 2026-10-04). A tenant belongs to a **set of groups**, recorded in
-the universe directory's tenant entry when the tenant is registered and never changed afterwards.
-Each group carries a rule, and a tenant obeys the rules of every group it is in. The set of
-groups is fixed by paros for now; operator-defined groups (rollout waves, co-location), as labels
-without rules, may come later (decided on 2026-10-04). **Tags will replace the groups**
-(decided on 2026-10-15, #575 (key:value tags), ranked early so that features build on it as a
-primitive): tenants, journals, machines and cells carry `key:value` tags. Reserved `paros/` keys
-are written only by the control plane and parsed into typed policies (`paros/kind`, `paros/role`,
-`paros/movable`, `paros/group`, a machine's class and zone, a cell's kind). User keys are opaque
-to paros. **Internal names take no prefix** (decided on 2026-10-15, #575): an internal tenant
-shows as `<kind>:<name>` (`cell:paris`, or `cell` with no name), its journals as `(control)`,
-`(election)` and `(directory)`, in every output, the metrics included; a user tenant's name
-refuses `:`. The table below stays in force until #575 lands:
+**Tags** (decided on 2026-10-15, landed on 2026-10-16, #575 (key:value tags); they replace the
+tenant groups of 2026-10-04). Tenants, journals, machines and cells carry `key:value` tags. A tag
+is a key of at most 63 bytes and a value of at most 255 bytes, and an entity carries at most 32
+tags. A key that starts with `paros/` is **reserved**: only the control plane writes it, through
+the command that owns it, and paros parses it into a typed policy. Every other key is a **user
+tag**: opaque to paros, and no code reads one to decide. A user tag never changes an outcome.
 
-| Group | Rule | Members |
-|---|---|---|
-| `internal` | created only by paros's own operations (`init`, adding a cell), never through the tenant API; reached only for administration, through the universe tenant's frontends | the universe tenant, every cell tenant |
-| `cell` | **never leaves its cell**: it *is* its cell (section 1); reconfigured only within it | each cell's cell tenant |
-| `universe` | holds the universe directory; moves with its coordinator | the universe tenant |
-| `users` | created by the tenant API (`parosctl tenant create`, through the universe tenant's frontends); served by its own frontends | every served tenant |
+| Reserved tag | On | Written by | Means |
+|---|---|---|---|
+| `paros/kind` | tenant | `RegisterTenant`, `init`, adding a cell | `internal` or `users` |
+| `paros/role` | internal tenant | the same | `universe` or `cell` |
+| `paros/movable` | tenant | the same | `true` or `false`; a cell tenant is always `false` |
+| `paros/class` | machine | `RegisterNode`, from `PAROS_CLASS` | `storage` or `stateless` |
+| `paros/zone`, `paros/rack` | machine | `RegisterNode`, from `PAROS_ZONE`, `PAROS_RACK` | where it runs; placement spreads over zones |
+| `paros/kind` | cell | `AddCell` | `regional` or `multi-region` |
+| `paros/region`, `paros/regions`, `paros/witness` | cell | `AddCell` | the regions of its kind |
 
-So the universe tenant is `{internal, universe}`, a cell tenant `{internal, cell}` and a served tenant
-`{users}`. **The groups alone decide whether a tenant moves**: it moves unless one of its groups
-forbids it, and today only `cell` does. There is no per-tenant movability flag (a
-`movable`/`pinned` placement was dropped the same day); the universe tenant refuses a move of a
-tenant in `cell` when it applies the move's first entry, so no step of the move runs. The tenant
-API creates tenants in `users` only, and the universe tenant refuses any other group from it.
+So the universe tenant is `paros/kind:internal, paros/role:universe, paros/movable:true`, a cell
+tenant `paros/kind:internal, paros/role:cell, paros/movable:false`, and a served tenant
+`paros/kind:users, paros/movable:true`. The capacity stays a typed field.
+The decisions (Pierre, 2026-10-15):
 
-**Moving a tenant (M12)**, any tenant outside the `cell` group, reconfigures its journals and matchmaker set onto the target cell, then
+1. **No stored inheritance.** A journal stores no copy of its tenant's tags. A selector
+   matches a tenant's tag with `tenant.<key>` (`parosctl journal list -l tenant.team:x`).
+2. **The tenant writes the user tags of its journals**, with its token, through the frontend
+   (`FrontSetJournalTags`, Biscuit operation `journal.tag`, class `journal`). An admin can write
+   them too, through the tenant coordinator.
+3. **Reserved tags change only through their own commands**: the tag commands refuse a
+   `paros/` key at decode, so a reserved tag is enforced at apply. The cell tenant is always
+   pinned.
+4. **The machine class is a reserved tag** (`paros/class:storage`).
+5. **The caps** are 32 tags per entity, keys of at most 63 bytes, values of at most 255 bytes.
+6. **Authorization by tag** (Biscuit `tag(...)` facts) is a follow-up.
+7. **No prefix marks an internal name.** An internal tenant shows as `<kind>:<name>`, its
+   journals as `(control)`, `(election)` and `(directory)`, in every output. A user tenant's
+   name refuses `:` (`name_refused`), so a user tenant never looks like an internal one.
+
+**Setting user tags.** Each entity's user tags are set whole: a request names the full set,
+and an empty set clears it. Every request has an idempotency id, judged at apply in the journal
+that owns the entity, and acts once:
+
+- a tenant's and a cell's in the universe directory (`SetTenantTags`, `SetCellTags`;
+  `parosctl tenant tag`, `parosctl cell tag`);
+- a machine's in the cell control journal (`SetMachineTags`; `parosctl cell tag-machine`);
+- a journal's in its tenant's control journal (`SetJournalTags`, sent to the tenant coordinator;
+  `parosctl journal tag`, through the frontends when `--frontends` is given).
+
+A create carries the birth tags (`--tag` on `tenant create` and `journal create`). The views
+show every tag, filtered by scope: a tenant scope sees only the `paros/zone` and `paros/rack`
+tags of the machines it uses. A selector (`-l key`, `-l key:value`, comma-separated, all must
+match) narrows `machine list`, `cell list`, `tenant list` and `journal list`.
+
+**Moving a tenant (M12)**, any tenant tagged `paros/movable:true`, reconfigures its journals and matchmaker set onto the target cell, then
 transfers ownership with `SetLeader` on the tenant's control journal (the one moment ownership
 changes), then flips the directory pointer, then the old cell forgets the tenant: the AWS
 guidance's four migration phases, copy, flip, redirect, forget. The directory entry is a pointer,
@@ -1897,7 +1923,7 @@ refused.
   journal keeps no history of past uuids and does not refuse one that led before: it trusts its
   clients to draw fresh uuids (decision C, section 2.3, #241).
 - **Failure domains** are not identifiers: `AcceptorConfig` carries the registry's
-  `failure_domain` names unchanged (section 5).
+  `paros/zone` names unchanged (section 5).
 - **Tombstones** (removed tenant ids, dropped tenants, deleted journal ids) are kept forever, a
   `u64` each. They are the one part of control state bounded by history rather than by live
   entities (section 3.9), accepted as such (decided on 2026-10-04). Names are not tombstoned
@@ -1908,7 +1934,7 @@ refused.
   cell tenant gets a random id at the cell's `init` (so two cells' cell tenants differ), and the
   universe tenant gets one when `init` creates the universe, kept when the universe tenant moves. The universe tenant records both
   (its own in its first entry, each cell tenant in that cell's entry), so its duplicate check
-  covers them too. The universe tenant records each tenant's groups beside its id
+  covers them too. The universe tenant records each tenant's tags beside its id
   (section 3.7). FDB gave each metacluster an id prefix for the same goal; a random draw
   checked by the universe tenant needs no prefix.
 - `JournalId(u64)`: random, unique within its tenant, recorded and checked at apply by the tenant
@@ -2176,7 +2202,9 @@ but a crash between the two lands the batch without its metainfo. paros puts a b
 metainfo that depends on it in one commit, and orders the reverse across commits, each durable
 before the next (#264, #176): a node commits a raised promise alone (an entry never lands above
 its promise), then its entries with its floor and metainfo (a chosen index never lands ahead of
-the entry that makes its slot chosen); a matchmaker commits its new registrations with its
+the entry that makes its slot chosen; it rides the writes that happen anyway, and forces a
+metainfo write once it runs 64 slots ahead of the durable one, so a reboot recovers about one
+page, #602 (dark after a full restart)); a matchmaker commits its new registrations with its
 metainfo, then its clears, and a boot keeps only the registrations the durable metainfo vouches
 for (at or above its watermark, of its generation). Storage chaos on journal seeds is the
 local half of this contract: moonpool's crash damage, failed syncs, short transfers and lost
@@ -2207,14 +2235,14 @@ the WPaxos read (section 10) established for one region with several availabilit
 
 **Failure domains in the configuration.** `AcceptorConfig` carries a vector of
 `FailureDomain { region, az }` parallel to its sorted members, holding the names copied from the
-registry's `failure_domain` (`RegisterNode`, section 3.2, e.g. `("eu-west-1", "eu-west-1a")`):
+registry's `paros/region` and `paros/zone` tags (`RegisterNode`, section 3.2, e.g. `("eu-west-1", "eu-west-1a")`):
 short bounded strings, compared for equality only, never parsed or ordered by the core. Names mean
 the same thing universe-wide, so a move between cells (section 3.7) compares domains correctly; a
 cell-scoped pair of integers would let one cell's `az 2` equal another's and the zone rule could
 accept a placement that does not survive a zone. The cost is a few dozen bytes per member in a
 configuration of at most nine members. The vector is bound to the ballot with the
 configuration, because two nodes that disagree on a member's failure domain evaluate different
-quorums; the registry's `failure_domain` is the composer's input, copied when it composes, never
+quorums; the registry's zone tag is the composer's input, copied when it composes, never
 read live by a tally. An empty vector is the plain arm, byte-identical to today's configuration,
 so plain Multi-Paxos is unchanged. The configuration's `cell_id` rides the same single format bump
 (section 3.7).
@@ -2230,6 +2258,26 @@ so plain Multi-Paxos is unchanged. The configuration's `cell_id` rides the same 
 The rule is valid for `Majority`, `Flexible` and `Grid` alike. It is one pure function in
 `membership/`, shared by the tenant coordinator's placement and the simulation's composer.
 
+**As built** (2026-10-16, #215 (zones)). `paros_core::FailureDomain { region, az }` and
+`AcceptorConfig::zoned` carry the labels; `AcceptorConfig::zone_rule` is the rule, answered
+`Unlabeled`, `Holds`, `LosesQuorum(d)` or `CommitsAlone(d)`. The configuration's `cell` rides
+with the labels (`AcceptorConfig::with_cell`, `Config::cell_id`), and both are in the wire's
+`paros.common.v1.AcceptorConfig` (fields 7 and 8, absent when empty) and in the stores' format
+version 5: a store of version 4 does not open. The registry's `failure_domain` is the `az`; the
+`region` stays empty, the cell's own region, until multi-region cells (#253). Under acceptor
+partitions the rule applies per partition (#532 (acceptor partitions)), because the grid's own
+predicates do. The tenant coordinator's create (`machine/tenants.rs`) labels the planned members
+from the registry and owns the configuration with its cell; a move (`machine/moves.rs`) does the
+same for the machines that stay. **Where the rule binds** (the open question of #215, default
+taken on 2026-10-16): a durability with `failures-per-partition` 1 or more, over storage machines
+that span three zones or more (`paros::placement::zone_rule_binds`). Over one or two zones no
+configuration can meet it, so the create is placed as before, without zone survival. Where it
+binds, a plan that breaks it is planned again under another tie-break draw, up to
+`placement::ZONE_DRAWS` (8), and the create is recorded `Unplaceable` when none holds (a
+four-member majority over three zones, 2/1/1, is one). Not yet built: the rule on a move's
+replacement (the degraded trap above), the leader that follows its writer (#581), and the
+zone-pair latency model.
+
 **The shape of a regional cell.** A regional cell spans at least three zones (section 3.7). Its
 minimum production shape is two `storage` machines and one `stateless` machine per zone, nine
 machines: `failures-per-partition=2` needs five acceptors on five distinct machines and survives
@@ -2237,8 +2285,8 @@ a zone only when spread 2/2/1.
 
 - **Acceptors**: `failures-per-partition=2` 2/2/1, the lone acceptor preferably in the zone that
   writes least (a later reconfiguration adjusts it); `failures-per-partition=1` 1/1/1;
-  `failures-per-partition=0` none (section 3.4); the grid (`partitions` above 1) is unchanged and
-  outside the rule, the risk its tenant states when it picks it (section 3.4).
+  `failures-per-partition=0` none (section 3.4); with `partitions` above 1 the rule applies to
+  each partition (amended on 2026-10-14, #532 (acceptor partitions)).
 - **Matchmakers**: 1/1/1 or 2/2/1, majorities only; a tenant's matchmaker preferably never
   shares a machine with its acceptors, while capacity permits.
 - **Stateless roles**: once a tenant's pool has three instances, at least one frontend and one
@@ -2394,6 +2442,17 @@ Simulation is the investment. Every milestone lands with its share of:
   `Accepted` and the failure domains into O(1) audit state; every journal kept committing through
   a one-zone kill (`sometimes`); a two-zone kill is a safety-only shape. M11 is a fault-model change: 10,000
   seeds, and the canary after every new draw.
+  **As built** (2026-10-16): the zone-outage scenario (`paros_sim::world::zone_outage`,
+  `shape::zone_outage`) lists three founding members, machine `r` in zone `zone-<r % 3>`, and
+  crashes every machine of the zone with the most live machines for 6 to 10 s, once the cell
+  formed and a client created a journal; while it is down, a client appends to a journal it
+  created. Gates "zones: a tenant is created with a zone down" and "zones: a created journal
+  commits an append with a zone down".
+  The machines' stores sit outside the copy budget, so the zone outage spends none. On a third of
+  the seeds the acceptor pool is labeled (`shape::acceptor_zones`, 2 or 3 zones) and the composer
+  sends labeled configurations, each judged by the zone rule (a reachable per verdict). Oracles:
+  a configuration's labels are bound to its ballot, and a placed journal that spans three zones
+  holds the zone rule. Still to come: the Phase-2 voters oracle and the zone-pair latency model.
 - Regions and the resolver (decided on 2026-10-07, #253): the copy budget counts a region as one fault;
   in a multi-region cell every chosen slot's Phase-2 voters span two regions; a partition through
   the witness region, after which leadership settles (a liveness oracle in recovery mode); a
@@ -2698,7 +2757,7 @@ Compartmentalized Paxos and Matchmaker Paxos are in `docs/references/papers/`.
   changes `paros-core`'s read semantics; the decision is #227.
 - **A `pinned` flag per tenant** (2026-10-04, dropped the same day). A creator's pin would block
   rolling a cell out by evacuation; the only tenant that must stay is a cell tenant, and its
-  `cell` group says so (section 3.7).
+  `paros/movable:false` tag, which only paros writes, says so (section 3.7).
 - **A provisioning step that names the seeds to each other**, a cluster file, gossip discovery and
   the frontend as the rendezvous: #216.
 - **Seeds, a join list and a rendezvous name** (2026-10-02 to 2026-10-09, #216). Every machine

@@ -98,7 +98,7 @@ use super::modes::Modes;
 use super::moves::Moves;
 use super::sets::{SetStep, Sets};
 use super::tenants::TenantDesk;
-use super::{CellPlan, Class, ControlJournals, FormedCell, incarnation_from_halves};
+use super::{CellPlan, ControlJournals, FormedCell, incarnation_from_halves};
 use crate::client::capacity::{CapacityAnswer, CapacityRequest};
 use crate::client::cell::CellSession;
 use crate::client::checkpoint::{CheckpointPolicy, Folder, LoadOutcome, load};
@@ -191,6 +191,8 @@ pub enum TermDuty {
 /// Serve the duties of the term `leader` (this actor's) on the cell's
 /// control journals: install the term's uuid, fold the cell control journal
 /// to its tail, then finish every admission in flight, through `client`.
+/// `cell` is the control journals, every founding member, and the founders
+/// the caller can dial.
 /// The cell coordinator runs it for every term it wins; a harness candidate
 /// runs the very same code.
 ///
@@ -204,7 +206,7 @@ pub async fn serve_term<P: Providers>(
     rpc: &RpcHandle<P>,
     client: &Client<P>,
     names: &Names,
-    cell: (ControlJournals, Vec<(NodeId, Address)>),
+    cell: (ControlJournals, Vec<NodeId>, Vec<(NodeId, Address)>),
     leader: &Leader,
     policy: CheckpointPolicy,
 ) -> TermDuty {
@@ -220,13 +222,21 @@ async fn open_term<P: Providers>(
     rpc: &RpcHandle<P>,
     client: &Client<P>,
     names: &Names,
-    (journals, founders): (ControlJournals, Vec<(NodeId, Address)>),
+    (journals, members, founders): (ControlJournals, Vec<NodeId>, Vec<(NodeId, Address)>),
     leader: &Leader,
     policy: CheckpointPolicy,
 ) -> (TermDuty, Option<CellSession>) {
     assert!(leader.uuid.is_set(), "a term's uuid is set");
-    // The coordinator is a founding member: its book names every founder.
-    let members: Vec<NodeId> = founders.iter().map(|(id, _)| *id).collect();
+    // `members` are every founding member, reached or not; `founders` the
+    // ones the caller can dial. An admission names every founding member,
+    // so every journal of the admitted machine is born with the same
+    // matchmaker set as the founders' (#608 (an admission names only the
+    // reached founders)). The term once read the founding members out of
+    // the book: a harness candidate that reached two founders of three
+    // admitted a machine with a two-member set (witness
+    // 16600285087896190261 on a04c94d, red on "matchmaker: every node
+    // derives the same matchmaker set").
+    // `with_leader` keeps only the reached founders that are members.
     let mut session = CellSession::with_leader(journals, &members, founders, leader.uuid, policy);
     match session.open(client, 0).await {
         Ok(()) => {}
@@ -578,7 +588,7 @@ impl Watch {
             Some(node) if node.incarnation != incarnation => {
                 // A reboot of a registered machine: it registers again, as
                 // the incarnation that answered (up, by its registration).
-                let class = ack.class.parse::<Class>().ok()?;
+                let (class, locality) = super::identity_tags(ack)?;
                 if class != node.class {
                     return None;
                 }
@@ -588,7 +598,7 @@ impl Watch {
                     addr: addr.to_string(),
                     class,
                     capacity: ack.capacity,
-                    failure_domain: ack.failure_domain.clone(),
+                    locality,
                     name: ack.name.clone(),
                     incarnation,
                     machine_interface: ack.machine_interface.clone(),
@@ -805,7 +815,8 @@ pub(crate) fn spawn<P: Providers>(
         abandon: moonpool_buggify::buggify_with_prob!(0.3),
         lose_resign: moonpool_buggify::buggify_with_prob!(0.5),
         linger: moonpool_buggify::buggify_with_prob!(0.5),
-        quit_mid_move: moonpool_buggify::buggify_fault_with_prob!(0.5),
+        quit_mid_move: moonpool_buggify::buggify_fault_with_prob!(0.5)
+            || crate::scenario::quit_mid_move(),
         slow_install: moonpool_buggify::buggify_with_prob!(0.3),
         ask_again: moonpool_buggify::buggify_with_prob!(0.3),
     };
@@ -980,7 +991,7 @@ async fn campaign<P: Providers>(
                         &rpc,
                         &client,
                         &names,
-                        (journals, founders.clone()),
+                        (journals, founder_ids.clone(), founders.clone()),
                         &leader,
                         policy,
                     )
@@ -1399,9 +1410,9 @@ async fn register<P: Providers>(
     let Some(identity) = request.identity else {
         return refuse("malformed");
     };
-    let (Ok(addr), Ok(class)) = (
+    let (Ok(addr), Some((class, locality))) = (
         Address::parse(&identity.addr),
-        identity.class.parse::<Class>(),
+        super::identity_tags(&identity),
     ) else {
         return refuse("malformed");
     };
@@ -1476,7 +1487,7 @@ async fn register<P: Providers>(
         addr: addr.to_string(),
         class,
         capacity: identity.capacity,
-        failure_domain: identity.failure_domain,
+        locality,
         name: identity.name,
         incarnation,
         machine_interface: identity.machine_interface,

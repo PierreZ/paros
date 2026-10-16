@@ -16,7 +16,7 @@ use crate::machine::ControlJournals;
 use crate::rpc::{
     InspectReply, MatchmakersRefusal, Reconfigure, ReconfigureAck, RetireAck, RetireRefusal,
     RetireRequest, WireQuorumSystem, common, journal_state_to_proto, quorum_system_from_proto,
-    quorum_system_to_proto,
+    quorum_system_to_proto, zoned_members,
 };
 
 use super::events::reconfigure_outcome;
@@ -40,11 +40,19 @@ pub(crate) fn reconfigure<A: Audit>(
     // *refused* here — the one place it is validated — where
     // `AcceptorConfig::new` would panic on it.
     let quorum_system = quorum_system_from_proto(&WireQuorumSystem::from(req));
+    // The labels ride beside the members (#215 (zones)): absent, or one per
+    // member, else the request is malformed.
+    let zoned = zoned_members(&req.members, req.domains.clone());
     let distinct = members.iter().collect::<BTreeSet<_>>().len();
-    let result = match quorum_system {
+    let result = match (quorum_system, zoned) {
         _ if members.is_empty() => ReconfigureResult::Refused(ReconfigureRefusal::UnknownMember),
-        Ok(quorum_system) if quorum_system.admits(distinct) => {
-            node.reconfigure(&AcceptorConfig::new(members.clone(), quorum_system))
+        (Ok(quorum_system), Ok(zoned)) if quorum_system.admits(distinct) => {
+            let config = match zoned {
+                Some(zoned) => AcceptorConfig::zoned(zoned, quorum_system),
+                None => AcceptorConfig::new(members.clone(), quorum_system),
+            }
+            .with_cell(req.cell_id);
+            node.reconfigure(&config)
         }
         _ => ReconfigureResult::Refused(ReconfigureRefusal::Malformed),
     };

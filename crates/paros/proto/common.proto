@@ -45,6 +45,21 @@ message AcceptorConfig {
   uint64 phase2_quorum = 4;
   uint64 rows = 5;
   uint64 cols = 6;
+  // Each member's failure domain, parallel to `members` (#215 (zones)).
+  // Empty is an unlabeled configuration, byte-identical to before the field
+  // existed; otherwise one per member, or the configuration is refused.
+  repeated FailureDomain domains = 7;
+  // The cell that owns the journal (#215 (zones), `docs/architecture.md`
+  // §3.7). Zero is none, byte-identical to before the field existed.
+  uint64 cell_id = 8;
+}
+
+// A failure domain (#215 (zones)): the region and the availability zone a
+// machine stands in, as the registry names them. Compared for equality
+// only. Each name is at most 64 bytes.
+message FailureDomain {
+  string region = 1;
+  string az = 2;
 }
 
 // A single-writer journal's leader uuid (#241, `docs/architecture.md`
@@ -82,4 +97,14 @@ message JournalView {
   LeaderUuid leader = 1;
   uint64 next_seq = 2;
   uint64 first_seq = 3;
+}
+
+// One `key:value` tag (#575 (key:value tags), `docs/architecture.md` §3.9).
+// A key is `[prefix/]name` of lowercase ASCII letters, digits, `-` and `_`,
+// at most 63 bytes; a key under the reserved prefix `paros/` is written only
+// by the control plane. A value is printable UTF-8 without `,`, at most 255
+// bytes. An entity's tags travel in key order, each key once.
+message Tag {
+  string key = 1;
+  string value = 2;
 }

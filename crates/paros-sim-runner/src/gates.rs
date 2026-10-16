@@ -482,6 +482,10 @@ pub const RARE: &[Rare] = &[
         reason: "marginal: fired on 6 of 810 hunt seeds (#486)",
     },
     Rare {
+        msg: "admit: an admission names a founder the operator did not reach",
+        reason: "marginal: needs a fresh admission through ADMIT on a cell of three founders, one unreached; fired on 4 of 400 sweep seeds at a04c94d, missed by PR #606's sweep (#486)",
+    },
+    Rare {
         msg: "init: an operator sends init to a machine outside the seeds",
         reason: "marginal: fired on 4 of 810 hunt seeds (#486)",
     },

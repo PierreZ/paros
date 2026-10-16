@@ -15,6 +15,11 @@
 //! `parosctl cell maintenance <machine> --for <duration>` (`--zone` for a
 //! failure domain, #359): the cell coordinator re-places no role of a
 //! machine the window covers while it is down. `--for 0s` ends the window.
+//!
+//! `parosctl cell tag <cell> [k:v…]` and `parosctl cell tag-machine
+//! <machine> [k:v…]` (#575 (key:value tags)): set a cell's user tags in the
+//! universe directory, or a registered machine's in the cell control
+//! journal, whole, under an idempotency id drawn for the run.
 
 use std::time::Duration;
 
@@ -82,8 +87,29 @@ pub enum CellAdminCommand {
         #[arg(long = "for", value_parser = parse_window)]
         window: Duration,
     },
+    /// Set a registered machine's user tags, whole: the tags given replace
+    /// the ones it has, and none clears them (#575). Its `paros/` tags come
+    /// from its own settings.
+    TagMachine {
+        /// The machine's name, or its node id in full (16 hex digits).
+        machine: String,
+        /// The tags, `key:value` each.
+        tags: Vec<String>,
+    },
+    /// Set a cell's user tags in the universe directory, whole (#575).
+    Tag {
+        /// The cell's name.
+        cell: String,
+        /// The tags, `key:value` each.
+        tags: Vec<String>,
+    },
     /// List the universe's cells and their state (#399).
-    List,
+    List {
+        /// Only the cells whose tags match: `key`, `key:value`, comma
+        /// separated, all of them (#575).
+        #[arg(short = 'l', long)]
+        selector: Option<String>,
+    },
     /// Show a cell: its state, its coordinator, its slots per class and
     /// its machines by standing (#399). The servers' cell; a name checks
     /// that the servers are that cell's.
@@ -120,6 +146,26 @@ pub async fn run(
         } => {
             let ctx = (asker, client, servers);
             return maintenance(ctx, labels, out, (&target, zone), window).await;
+        }
+        CellAdminCommand::TagMachine { machine, tags } => {
+            return tag_machine(asker, client, servers, (labels, out), &machine, &tags).await;
+        }
+        CellAdminCommand::Tag { cell, tags } => {
+            let ids: Vec<u64> = servers.iter().map(|(id, _)| *id).collect();
+            let mut fleet = match crate::fleet::open_session(asker.providers, client, &ids).await {
+                Ok(fleet) => fleet,
+                Err(ending) => return ending,
+            };
+            return crate::fleet::set_tags(
+                asker.providers,
+                client,
+                (out, labels),
+                (&mut fleet, Duration::from_millis(args.patience_ms)),
+                paros::client::fleet::TagTarget::Cell(cell.as_bytes()),
+                &cell,
+                &tags,
+            )
+            .await;
         }
         _ => unreachable!("the views are answered in crate::views"),
     };
@@ -246,16 +292,9 @@ async fn open_on(
     if let Err(stop) = session.open(client, 0).await {
         return Err(interrupted(&stop));
     }
-    let registered: Vec<u64> = session.registry().nodes().map(|(id, _)| id.0).collect();
-    let node = match labels.machine_named(machine, &registered) {
-        Some(id) => NodeId(id),
-        None => match paros::name::parse_full(machine) {
-            Some(id) if registered.contains(&id) => NodeId(id),
-            _ => {
-                note(&format!("no registered machine is named {machine}"));
-                return Err(Ending::Refused);
-            }
-        },
+    let Some(node) = registered_machine(&session, labels, machine) else {
+        note(&format!("no registered machine is named {machine}"));
+        return Err(Ending::Refused);
     };
     Ok((session, node))
 }
@@ -346,6 +385,70 @@ async fn maintenance(
         }
         Ok(false) => {
             note(&format!("no machine of the cell is named {target}"));
+            Ending::Refused
+        }
+        Err(stop) => interrupted(&stop),
+    }
+}
+
+/// The registered machine `machine` names, by name or node id in full.
+fn registered_machine(session: &CellSession, labels: &Labels, machine: &str) -> Option<NodeId> {
+    let registered: Vec<u64> = session.registry().nodes().map(|(id, _)| id.0).collect();
+    match labels.machine_named(machine, &registered) {
+        Some(id) => Some(NodeId(id)),
+        None => match paros::name::parse_full(machine) {
+            Some(id) if registered.contains(&id) => Some(NodeId(id)),
+            _ => None,
+        },
+    }
+}
+
+/// `parosctl cell tag-machine <machine> [k:v…]` (#575 (key:value tags)).
+async fn tag_machine(
+    asker: &Asker<'_>,
+    client: &Client<TokioProviders>,
+    servers: &[(u64, Address)],
+    (labels, out): (&Labels, &Printer),
+    machine: &str,
+    texts: &[String],
+) -> Ending {
+    let tags = match crate::journal::user_tags(texts) {
+        Ok(tags) => tags,
+        Err(ending) => return ending,
+    };
+    let mut session = match session(asker, client, servers).await {
+        Ok(session) => session,
+        Err(ending) => return ending,
+    };
+    if let Err(stop) = session.open(client, 0).await {
+        return interrupted(&stop);
+    }
+    let Some(node) = registered_machine(&session, labels, machine) else {
+        note(&format!("no registered machine is named {machine}"));
+        return Ending::Refused;
+    };
+    let request = crate::fleet::nonzero(asker.providers);
+    match session
+        .set_machine_tags(client, 0, (node, request), &tags)
+        .await
+    {
+        Ok(true) => {
+            out.emit(
+                || {
+                    format!(
+                        "tagged machine={} tags={}",
+                        labels.machine(node.0),
+                        crate::fleet::tags_label(&tags)
+                    )
+                },
+                || json!({ "outcome": "tagged", "node": node.0, "tags": crate::fleet::tags_label(&tags) }),
+            );
+            Ending::Success
+        }
+        Ok(false) => {
+            note(&format!(
+                "refused: the registry does not hold {machine}, or it is retired"
+            ));
             Ending::Refused
         }
         Err(stop) => interrupted(&stop),

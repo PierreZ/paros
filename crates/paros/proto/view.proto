@@ -83,15 +83,17 @@ message ViewReply {
 }
 
 // One machine. A tenant scope sees only the machines its journals use, and
-// of each only its id, name, failure domain and up/down state.
+// of each only its id, name, zone, rack and up/down state.
 message MachineView {
+  // 4 was `class` and 7 `failure_domain`, now reserved tags (#575 (key:value
+  // tags)).
+  reserved 4, 7;
+  reserved "class", "failure_domain";
   uint64 node_id = 1;
   string name = 2;
   string addr = 3;
-  string class = 4;
   uint64 capacity = 5;
   uint64 booked = 6;
-  string failure_domain = 7;
   // "registered", "draining", "drained" (draining, no slot left, #359),
   // "retired"; "founding" for a founding member the registry never held.
   string standing = 8;
@@ -100,10 +102,14 @@ message MachineView {
   fixed64 incarnation_low = 11;
   bool founder = 12;
   repeated BookingView bookings = 13;
+  // Its tags (#575): its reserved tags (`paros/class`, `paros/zone`,
+  // `paros/rack`), then its user tags. A tenant scope sees only `paros/zone`
+  // and `paros/rack`.
+  repeated .paros.common.v1.Tag tags = 14;
   // The longest open maintenance window over the machine or its failure
   // domain, in milliseconds, as the registry records it (#359); 0 when none
   // is open. The window runs on the cell coordinator's clock.
-  uint64 maintenance_ms = 14;
+  uint64 maintenance_ms = 15;
 }
 
 message BookingView {
@@ -128,10 +134,15 @@ message TenantView {
   // "users", "universe" or "cell".
   string kind = 3;
   string state = 4;
-  string groups = 5;
+  // 5 was `groups`, now the reserved tags (#575 (key:value tags)).
+  reserved 5;
+  reserved "groups";
   string survives = 6;
   uint64 cell_id = 7;
   repeated JournalView journals = 8;
+  // Its tags (#575): its reserved tags (`paros/kind`, `paros/role`,
+  // `paros/movable`), then its user tags.
+  repeated .paros.common.v1.Tag tags = 9;
 }
 
 message JournalView {
@@ -160,6 +171,8 @@ message JournalView {
   // The word the cell shows: `observed` once it held for the cell's
   // `status_hold`, else the word shown before (hysteresis).
   string word = 11;
+  // Its user tags (#575); a journal the cell made carries none.
+  repeated .paros.common.v1.Tag tags = 12;
 }
 
 // One cell of the universe directory.
@@ -169,4 +182,6 @@ message CellView {
   string state = 3;
   // How many tenants it hosts.
   uint64 tenants = 4;
+  // Its tags (#575): its reserved kind tags, then its user tags.
+  repeated .paros.common.v1.Tag tags = 5;
 }

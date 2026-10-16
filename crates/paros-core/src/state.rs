@@ -1,7 +1,7 @@
 //! Durable state ([`HardState`]) and static node configuration ([`Config`]).
 
 use crate::journal_state::WriterMode;
-use crate::membership::{MatchmakerId, QuorumSystem, ReplicaId};
+use crate::membership::{AcceptorConfig, FailureDomain, MatchmakerId, QuorumSystem, ReplicaId};
 use crate::types::{Ballot, JournalIdentifier, NodeId, Slot};
 
 /// The small, persisted-whole durable scalars of Multi-Paxos: the state that has
@@ -123,6 +123,18 @@ pub struct Config {
     /// decode: a store formatted before this field is not migrated.
     #[cfg_attr(feature = "serde", serde(default))]
     pub writer_mode: WriterMode,
+    /// The failure domain of each of `peers`, in the same order (#215
+    /// (zones)): the labels of the bootstrap configuration
+    /// ([`Config::bootstrap`]). **Empty is the plain arm**, an unlabeled
+    /// configuration. Recorded in the format marker with the rest, so a
+    /// restart never changes a label.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub peer_domains: Vec<FailureDomain>,
+    /// The cell that owns the journal (#215 (zones), `docs/architecture.md`
+    /// §3.7): the bootstrap configuration's `cell`. `0` is none, the plain
+    /// arm.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub cell_id: u64,
 }
 
 impl Config {
@@ -149,6 +161,8 @@ impl Config {
             replica_count: 0,
             journal,
             writer_mode: WriterMode::Single,
+            peer_domains: Vec::new(),
+            cell_id: 0,
         };
         // A fresh configuration is the plain deployment: every opt-in is off.
         assert!(
@@ -161,6 +175,37 @@ impl Config {
             "a fresh configuration runs no replica tier"
         );
         config
+    }
+
+    /// The bootstrap acceptor configuration: `peers` under `quorum_system`,
+    /// each labeled with its failure domain when `peer_domains` names them,
+    /// owned by `cell_id` (#215 (zones)).
+    ///
+    /// # Panics
+    ///
+    /// If `peer_domains` is neither empty nor one label per peer, or as
+    /// [`AcceptorConfig::new`].
+    #[must_use]
+    pub fn bootstrap(&self) -> AcceptorConfig {
+        if self.peer_domains.is_empty() {
+            return AcceptorConfig::new(self.peers.clone(), self.quorum_system)
+                .with_cell(self.cell_id);
+        }
+        assert_eq!(
+            self.peer_domains.len(),
+            self.peers.len(),
+            "a configuration labels every bootstrap member or none"
+        );
+        let config = AcceptorConfig::zoned(
+            self.peers
+                .iter()
+                .copied()
+                .zip(self.peer_domains.iter().cloned())
+                .collect(),
+            self.quorum_system,
+        );
+        assert!(config.is_zoned(), "a labeled bootstrap stays labeled");
+        config.with_cell(self.cell_id)
     }
 
     /// The addressable pool: `nodes`, or `peers` when `nodes` is empty.

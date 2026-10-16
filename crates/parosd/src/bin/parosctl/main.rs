@@ -72,7 +72,7 @@ struct Global {
     #[arg(long, env = "PAROSCTL_SERVERS", value_delimiter = ',', global = true)]
     servers: Vec<ServerArg>,
     /// The frontends to send the journal calls (`write`, `read`, `tail`,
-    /// `truncate`, `set-leader`) through, comma-separated `HOST:PORT`
+    /// `truncate`, `set-leader`, `journal tag`) through, comma-separated `HOST:PORT`
     /// (#192 (the frontend)): each call carries the token (`--token`) and
     /// names its journal by name. The other commands still ask the
     /// servers.
@@ -381,7 +381,7 @@ fn through_frontend(command: &CellCommand) -> bool {
             | CellCommand::Tail(_)
             | CellCommand::Truncate(_)
             | CellCommand::SetLeader(_)
-    )
+    ) || matches!(command, CellCommand::Journal(args) if args.is_tag())
 }
 
 /// The servers `global` names, each with its node id: an explicit one, or
@@ -473,10 +473,12 @@ fn is_view(command: &Command) -> bool {
                 | cell::CellAdminCommand::DrainMachine { .. }
                 | cell::CellAdminCommand::RemoveMachine { .. }
                 | cell::CellAdminCommand::Maintenance { .. }
+                | cell::CellAdminCommand::TagMachine { .. }
+                | cell::CellAdminCommand::Tag { .. }
         ),
         Command::Cell(CellCommand::Tenant(args)) => matches!(
             args.command,
-            fleet::TenantCommand::List | fleet::TenantCommand::Show { .. }
+            fleet::TenantCommand::List { .. } | fleet::TenantCommand::Show { .. }
         ),
         _ => false,
     }
@@ -502,18 +504,25 @@ async fn run_view(asker: &views::Asker<'_>, out: &Printer, command: Command) -> 
         Command::Roles(args) => views::roles_cmd(asker, out, args).await,
         Command::Status(args) => status::run(asker, out, args).await,
         Command::CellAdmin(args) => match args.command {
-            cell::CellAdminCommand::List => views::cell_list(asker, out).await,
+            cell::CellAdminCommand::List { selector } => {
+                views::cell_list(asker, out, selector.as_deref()).await
+            }
             cell::CellAdminCommand::Show { cell } => {
                 views::cell_show(asker, out, cell.as_deref()).await
             }
             cell::CellAdminCommand::AddMachine { .. }
             | cell::CellAdminCommand::DrainMachine { .. }
             | cell::CellAdminCommand::RemoveMachine { .. }
-            | cell::CellAdminCommand::Maintenance { .. } => unreachable!("not a view"),
+            | cell::CellAdminCommand::Maintenance { .. }
+            | cell::CellAdminCommand::TagMachine { .. }
+            | cell::CellAdminCommand::Tag { .. } => unreachable!("not a view"),
         },
         Command::Cell(CellCommand::Tenant(args)) => match args.command {
             fleet::TenantCommand::Show { name } => views::tenant_show(asker, out, &name).await,
-            _ => views::tenant_list(asker, out).await,
+            fleet::TenantCommand::List { selector } => {
+                views::tenant_list(asker, out, selector.as_deref()).await
+            }
+            _ => unreachable!("not a view"),
         },
         _ => unreachable!("only the views"),
     }
@@ -725,6 +734,9 @@ async fn online(global: Global, command: Command) -> ExitCode {
         }
         CellCommand::Bench(args) => {
             bench::run(&runtime, &client, &ids, args, (cli.global.json, None)).await
+        }
+        CellCommand::Journal(args) if fronted => {
+            journal::tag_through_frontends(&runtime.providers, &client, &out, args).await
         }
         CellCommand::Configure(args) => {
             journal::configure(

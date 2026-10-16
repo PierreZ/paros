@@ -423,6 +423,7 @@ fn chain_builder(digest: Option<DigestSink>) -> SimulationBuilder {
         .fault_factory(|| Box::new(crate::world::gone_machine::GoneMachine))
         .fault_factory(|| Box::new(crate::world::slow_machine::SlowMachine))
         .fault_factory(|| Box::new(crate::world::downed_founder::DownedFounder))
+        .fault_factory(|| Box::new(crate::world::zone_outage::ZoneOutage))
         .fault_factory(|| Box::new(crate::world::moved_founder::MovedFounder))
         .fault_factory(|| Box::new(crate::world::replaced_founder::ReplacedFounder))
         .fault_factory(|| Box::new(crate::world::lagging_acceptor::LaggingAcceptor))

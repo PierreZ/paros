@@ -4,8 +4,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use paros_core::{
-    AcceptorConfig, Ballot, Command, Control, Entry, JournalState, JournalView, LeaderUuid, NodeId,
-    Party, ProxyId, QuorumSystem, Seq, Value, WriterMode,
+    AcceptorConfig, Ballot, Command, Control, Entry, FailureDomain, JournalState, JournalView,
+    LeaderUuid, NodeId, Party, ProxyId, QuorumSystem, Seq, Value, WriterMode,
 };
 
 use super::{InspectReply, Reconfigure, common, internal};
@@ -174,7 +174,58 @@ pub(crate) fn config_to_proto(config: &AcceptorConfig) -> common::AcceptorConfig
         phase2_quorum,
         rows,
         cols,
+        domains: config.domains().iter().map(domain_to_proto).collect(),
+        cell_id: config.cell(),
     }
+}
+
+/// A failure domain on the wire (#215 (zones)).
+pub(crate) fn domain_to_proto(domain: &FailureDomain) -> common::FailureDomain {
+    common::FailureDomain {
+        region: domain.region.clone(),
+        az: domain.az.clone(),
+    }
+}
+
+/// A failure domain from the wire, refused when a name is too long.
+pub(crate) fn domain_from_proto(
+    domain: common::FailureDomain,
+) -> Result<FailureDomain, &'static str> {
+    let domain = FailureDomain {
+        region: domain.region,
+        az: domain.az,
+    };
+    if domain.is_well_formed() {
+        Ok(domain)
+    } else {
+        Err("failure domain name too long")
+    }
+}
+
+/// The labeled members of a wire configuration (#215 (zones)): `members`
+/// with `domains` beside them, refused when the labels are neither absent
+/// nor one per member, or one member carries two labels. `None` when it is
+/// unlabeled.
+pub(crate) fn zoned_members(
+    members: &[u64],
+    domains: Vec<common::FailureDomain>,
+) -> Result<Option<Vec<(NodeId, FailureDomain)>>, &'static str> {
+    if domains.is_empty() {
+        return Ok(None);
+    }
+    if domains.len() != members.len() {
+        return Err("failure domains do not label every member");
+    }
+    let mut labeled: BTreeMap<NodeId, FailureDomain> = BTreeMap::new();
+    for (member, domain) in members.iter().zip(domains) {
+        let domain = domain_from_proto(domain)?;
+        if let Some(held) = labeled.insert(NodeId(*member), domain.clone())
+            && held != domain
+        {
+            return Err("a member carries two failure domains");
+        }
+    }
+    Ok(Some(labeled.into_iter().collect()))
 }
 
 /// Decode a wire configuration, **refusing** what `AcceptorConfig::new`
@@ -193,14 +244,19 @@ pub(crate) fn config_from_proto(
     if config.members.is_empty() {
         return Err("empty acceptor configuration");
     }
+    let zoned = zoned_members(&config.members, config.domains)?;
+    let cell = config.cell_id;
     let members: BTreeSet<NodeId> = config.members.into_iter().map(NodeId).collect();
     if !quorum_system.admits(members.len()) {
         return Err("acceptor configuration does not admit its quorum system");
     }
-    Ok(Some(AcceptorConfig::new(
-        members.into_iter().collect(),
-        quorum_system,
-    )))
+    Ok(Some(
+        match zoned {
+            Some(zoned) => AcceptorConfig::zoned(zoned, quorum_system),
+            None => AcceptorConfig::new(members.into_iter().collect(), quorum_system),
+        }
+        .with_cell(cell),
+    ))
 }
 
 pub(super) fn command_to_proto(command: &Command) -> internal::Command {

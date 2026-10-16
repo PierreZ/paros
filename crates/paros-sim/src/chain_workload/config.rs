@@ -131,7 +131,12 @@ pub(super) const VIEW: u8 = 29;
 /// through `paros::client::load`: the columns `parosctl machine list`
 /// prints, judged against the simulator's own counters.
 pub(super) const LOAD: u8 = 30;
-pub(super) const OP_COUNT: u8 = 31;
+/// Set the user tags of a journal, a tenant, a cell or a machine (#575
+/// (key:value tags)) through the tenant coordinator, the universe directory
+/// or the cell control journal: the calls `parosctl journal|tenant|cell
+/// tag` print. A no-op on an untagged seed.
+pub(super) const TAG: u8 = 31;
+pub(super) const OP_COUNT: u8 = 32;
 
 /// The highest weight an operation's knob draws (`ChainConfig`'s
 /// `weights`, each `0..41`). The lagging-acceptor scenario (#340) sets
@@ -339,11 +344,14 @@ pub(super) struct ChainConfig {
     /// reboot that comes straight back, its connections and unsynced writes
     /// still lost; ceiling 2 s, far inside the recovery budget.
     pub(super) fleet_kill_down_ms: u64,
-    /// How long one `init` may take (#246, `InitParams::patience`): the
-    /// seed forming the cell, its first leader, a fleet step taken again.
-    /// Floor 500 ms: a few round trips, so an `init` under chaos often
+    /// How long one wait of an `init` may take (#246, `InitParams::patience`):
+    /// the seed forming the cell, its first leader, a fleet step taken again
+    /// (counted from the run's last written step, #605 (init pending in the
+    /// recovery tail), so a run that keeps writing may take several times
+    /// this). Floor 500 ms: a few round trips, so an `init` under chaos often
     /// decides nothing and is run again; ceiling 10 s, inside the chaos
-    /// window's reach of the recovery tail.
+    /// window's reach of the recovery tail. A resume in the tail may run past
+    /// `FLEET_SETTLE`: that only lengthens the tail, and its operation ends.
     pub(super) init_patience_ms: u64,
     /// How long client 0 holds the control journals' seed down for the
     /// static-stability shape (#247). Floor 200 ms: a blip a tenant journal
@@ -444,7 +452,7 @@ impl ChainConfig {
             // QUORUM_READ (retired), READ, CHECK_TAIL (retired),
             // CREATE_JOURNAL, DELETE_JOURNAL, REGISTER_NODE, DRAIN_NODE,
             // RETIRE_NODE, SET_LEADER, CHECKPOINT, BOOK_CAPACITY, FLEET_INIT,
-            // TENANT, ADMIT, ELECTION, VIEW, LOAD
+            // TENANT, ADMIT, ELECTION, VIEW, LOAD, TAG
             weights: [
                 buggify_knob!(20_u64, 0_u64..41_u64),
                 buggify_knob!(10_u64, 0_u64..41_u64),
@@ -518,6 +526,10 @@ impl ChainConfig {
                 // A load asks for one view, then every machine once, and
                 // writes nothing; the ceiling is an operator that mostly
                 // watches its machines.
+                buggify_knob!(3_u64, 0_u64..21_u64),
+                // A tag request is one write to a control journal; the
+                // ceiling is an operator that mostly retags, fencing the
+                // other operators of the universe directory.
                 buggify_knob!(3_u64, 0_u64..21_u64),
             ],
             // grow, shrink, replace, remove-leader, rotate

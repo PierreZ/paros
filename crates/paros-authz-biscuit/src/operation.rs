@@ -108,6 +108,8 @@ operations! {
     JournalCreate = "journal.create", Journal, Write;
     /// Delete a journal.
     JournalDelete = "journal.delete", Journal, Write;
+    /// Set a journal's user tags (#575 (key:value tags)).
+    JournalTag = "journal.tag", Journal, Write;
     /// List a tenant's journals.
     JournalList = "journal.list", Journal, Read;
     /// Show one journal.

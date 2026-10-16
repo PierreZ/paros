@@ -29,6 +29,7 @@ pub(crate) mod split_floor;
 pub(crate) mod thin_sets;
 pub(crate) mod wipe;
 pub(crate) mod wiped_founder;
+pub(crate) mod zone_outage;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, PoisonError};

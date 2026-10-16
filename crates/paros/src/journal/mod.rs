@@ -21,7 +21,10 @@
 //!
 //! The chosen index is relaxed (re-derivable after a crash): it rides the
 //! next commit that writes the metainfo for another reason, a promise, a
-//! truncation or a format, and is never a reason to write it on its own.
+//! truncation or a format. It is a reason to write on its own only once it
+//! runs [`CHOSEN_INDEX_LAG`] slots ahead of the durable one, so a reboot
+//! recovers about one page, not the whole log (#602 (dark after a full
+//! restart)).
 //!
 //! # Ordering: a commit is atomic one way only
 //!
@@ -83,7 +86,7 @@ pub use matchmaker::JournalMatchmakerStorage;
 /// caller configures it without depending on `moonpool-journal`.
 pub use moonpool_core::LayoutRegion;
 pub use moonpool_journal::{BLOCK, Durability, Geometry, Layout};
-pub use node::{JournalBootFacts, JournalStorage};
+pub use node::{CHOSEN_INDEX_LAG, JournalBootFacts, JournalStorage};
 pub use settle::settle;
 pub(crate) use settle::sync_names;
 
@@ -213,7 +216,10 @@ fn id_ballot(id: &Id) -> (Ballot, u8) {
 }
 
 /// Bumped when an encoding changes; bytes of another version do not decode.
-const FORMAT_VERSION: u8 = 4;
+/// Version 5: an acceptor configuration carries its members' failure
+/// domains, in the format marker's `Config` and in every registration
+/// (#215 (zones)).
+const FORMAT_VERSION: u8 = 5;
 
 /// A version byte and the value's `postcard` encoding.
 fn encode<T: Serialize + DeserializeOwned + PartialEq>(value: &T) -> Vec<u8> {

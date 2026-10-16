@@ -104,6 +104,7 @@ pub use wait::{CellLedger, Joined, wait_for_cell};
 use crate::Address;
 use crate::Names;
 use crate::rpc::machine as wire;
+use crate::tags::{Tag, TagError, Tags, UserTags, reserved};
 
 /// A machine of a cell as its node loop serves it (#474): a founding
 /// member, or a machine `cell add-machine` admitted, with the cache its
@@ -212,6 +213,89 @@ impl core::str::FromStr for Class {
     }
 }
 
+/// Where a machine stands (#575 (key:value tags)): its reserved tags
+/// `paros/zone` (its failure domain, what placement spreads over) and
+/// `paros/rack`, inside the zone. Both are opaque labels; an empty one is no
+/// tag.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Locality {
+    /// Its zone (`paros/zone`).
+    pub zone: String,
+    /// Its rack (`paros/rack`).
+    pub rack: String,
+}
+
+impl Locality {
+    /// A machine in zone `zone`, with no rack.
+    #[must_use]
+    pub fn zone(zone: impl Into<String>) -> Self {
+        Self {
+            zone: zone.into(),
+            rack: String::new(),
+        }
+    }
+
+    /// Whether both labels are valid tag values (#575): what a machine's
+    /// configuration must hold.
+    #[must_use]
+    pub fn is_valid(&self) -> bool {
+        [&self.zone, &self.rack]
+            .into_iter()
+            .all(|label| Tag::new(reserved::ZONE, label.as_str()).is_ok())
+    }
+}
+
+/// A machine's reserved tags (#575): its class, zone and rack.
+///
+/// # Panics
+///
+/// If the locality holds a label no tag value may hold (a programmer error:
+/// a machine refuses such a configuration at start, [`Locality::is_valid`]).
+#[must_use]
+pub fn machine_tags(class: Class, locality: &Locality) -> Vec<Tag> {
+    let mut tags = vec![Tag::reserved(reserved::CLASS, class.as_str())];
+    if !locality.zone.is_empty() {
+        tags.push(Tag::reserved(reserved::ZONE, locality.zone.clone()));
+    }
+    if !locality.rack.is_empty() {
+        tags.push(Tag::reserved(reserved::RACK, locality.rack.clone()));
+    }
+    tags
+}
+
+/// A machine's class and locality from its reserved tags, and its user
+/// tags (#575).
+///
+/// # Errors
+///
+/// No class, a class no machine has, a reserved key no machine carries, or
+/// user tags over the cap.
+pub fn parse_machine_tags(tags: Tags) -> Result<(Class, Locality, UserTags), TagError> {
+    let (mut held, user) = tags.split()?;
+    let class = held
+        .remove(reserved::CLASS)
+        .and_then(|class| class.parse::<Class>().ok())
+        .ok_or_else(|| TagError::UnknownReserved(reserved::CLASS.into()))?;
+    let locality = Locality {
+        zone: held.remove(reserved::ZONE).unwrap_or_default(),
+        rack: held.remove(reserved::RACK).unwrap_or_default(),
+    };
+    match held.into_keys().next() {
+        Some(key) => Err(TagError::UnknownReserved(key)),
+        None => Ok((class, locality, user)),
+    }
+}
+
+/// A machine's class and locality as its `IdentifyAck` names them (#575):
+/// `None` when its tags are malformed, name no class, or carry a key no
+/// machine reports.
+#[must_use]
+pub fn identity_tags(ack: &wire::IdentifyAck) -> Option<(Class, Locality)> {
+    let tags = Tags::from_wire(ack.tags.clone()).ok()?;
+    let (class, locality, user) = parse_machine_tags(tags).ok()?;
+    user.is_empty().then_some((class, locality))
+}
+
 /// What a machine knows of itself before it has a cell.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MachineFacts {
@@ -221,8 +305,8 @@ pub struct MachineFacts {
     pub class: Class,
     /// Its capacity, in the placement's units (opaque here).
     pub capacity: u64,
-    /// Its failure domain (opaque here).
-    pub failure_domain: String,
+    /// Its zone and rack (#575: reserved tags).
+    pub locality: Locality,
     /// Its name, for people (#399): a label, never its identity.
     pub name: String,
     /// The address it advertises (`PAROS_ADVERTISE`, #257): what its peers
@@ -327,9 +411,11 @@ impl MachineFacts {
     fn identify_ack(&self, cell_id: u64) -> wire::IdentifyAck {
         wire::IdentifyAck {
             node_id: self.node_id.0,
-            class: self.class.as_str().into(),
             capacity: self.capacity,
-            failure_domain: self.failure_domain.clone(),
+            tags: machine_tags(self.class, &self.locality)
+                .iter()
+                .map(Tag::to_wire)
+                .collect(),
             addr: self.addr.to_string(),
             name: self.name.clone(),
             cell_id,

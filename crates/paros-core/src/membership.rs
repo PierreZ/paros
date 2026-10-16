@@ -42,6 +42,16 @@
 //! election's `Prepare` still goes to the whole membership and any full row
 //! completes it.
 //!
+//! **Zones are labels, judged through the same predicates** (#215 (zones)).
+//! A configuration may carry a [`FailureDomain`] beside each member, bound
+//! to the ballot with the membership; an unlabeled configuration is the
+//! plain arm, byte-identical to before. No tally reads a label. The **zone
+//! rule** ([`AcceptorConfig::zone_rule`]) is two predicates over the
+//! labels, each asked through `has_phase1_quorum` / `has_phase2_quorum`,
+//! never a count: the configuration survives the loss of any one domain,
+//! and no domain commits alone. A placement asks it before it proposes a
+//! configuration.
+//!
 //! Matchmaker quorums are deliberately **not** parameterized
 //! ([`MatchmakerSet::has_quorum`] is a majority by construction): the
 //! generation handover's safety argument is made under the majority model
@@ -49,11 +59,15 @@
 //! count either.
 
 mod acceptor_config;
+mod failure_domain;
 mod ids;
 mod matchmaker_set;
 mod quorum_system;
+mod zone_rule;
 
 pub use acceptor_config::AcceptorConfig;
+pub use failure_domain::{FailureDomain, MAX_FAILURE_DOMAIN_BYTES};
 pub use ids::{MatchmakerId, ProxyId, ReplicaId};
 pub use matchmaker_set::{MatchmakerGeneration, MatchmakerSet};
 pub use quorum_system::QuorumSystem;
+pub use zone_rule::ZoneRule;

@@ -46,7 +46,7 @@ use crate::client::Client;
 use crate::client::cell::CellSession;
 use crate::client::checkpoint::{Folder, LoadOutcome, load};
 use crate::client::fleet::Interrupted;
-use crate::fleet::{CellState, FleetDirectory, Groups, METADATA_VERSION, TenantState};
+use crate::fleet::{CellState, FleetDirectory, METADATA_VERSION, TenantKind, TenantState};
 use crate::footprint::{self, Footprint};
 use crate::machine::ControlJournals;
 use crate::system::{GrantKey, HostedTenant, Registry, SystemCommand};
@@ -112,7 +112,7 @@ pub(crate) fn tenant_steps(
     }
     let mut steps = Vec::new();
     for (tenant, entry) in directory.tenants() {
-        if entry.cell_id != cell_id || entry.groups != Groups::SERVED {
+        if entry.cell_id != cell_id || entry.kind != TenantKind::Users {
             continue;
         }
         assert!(tenant.is_set(), "a directory entry names a set tenant");
@@ -331,6 +331,7 @@ mod tests {
                 cell_id: 10,
                 control: JournalIdentifier::new(TenantId(11), JournalId(12)),
                 name: Vec::new(),
+                kind: crate::fleet::CellKind::default(),
             },
         );
         assert_eq!(joining(&other, journals), None);
@@ -343,6 +344,7 @@ mod tests {
                 cell_id: journals.cell_id,
                 control: JournalIdentifier::new(TenantId(5), JournalId(13)),
                 name: Vec::new(),
+                kind: crate::fleet::CellKind::default(),
             },
         );
         assert_eq!(joining(&moved, journals), None);
@@ -353,6 +355,7 @@ mod tests {
                 cell_id: journals.cell_id,
                 control: journals.cell,
                 name: Vec::new(),
+                kind: crate::fleet::CellKind::default(),
             },
         );
         assert_eq!(
@@ -381,7 +384,7 @@ mod tests {
             addr: "n1".to_owned(),
             class: crate::machine::Class::Storage,
             capacity,
-            failure_domain: String::new(),
+            locality: crate::machine::Locality::default(),
             name: String::new(),
             incarnation: 1,
             machine_interface: Vec::new(),
@@ -402,6 +405,7 @@ mod tests {
                 cell_id: journals.cell_id,
                 control: journals.cell,
                 name: Vec::new(),
+                kind: crate::fleet::CellKind::default(),
             },
             FleetCommand::MarkCell {
                 cell_id: journals.cell_id,
@@ -412,6 +416,7 @@ mod tests {
                 name: b"a".to_vec(),
                 cell_id: journals.cell_id,
                 survives: crate::tenant::Survives::Az,
+                tags: crate::tags::UserTags::none(),
             },
         ];
         for (seq, command) in (0..).zip(commands) {
