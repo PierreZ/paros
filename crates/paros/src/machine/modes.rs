@@ -14,8 +14,11 @@
 //!    Phase 1 handles two quorum systems;
 //! 3. once that configuration is in force, record it in the tenant control
 //!    journal (`Placed`, what views show), then, once the leader's GC
-//!    watermark has reached it, retire each member it left and release its
-//!    slot, as a move off a draining machine does (`super::moves`).
+//!    watermark has reached it, release the slot of each member it left.
+//!    Unlike a move off a draining machine (`super::moves`), it retires no
+//!    member: the machine stays bookable, a later mode may place the
+//!    journal on it again, and a retired identity never comes back to its
+//!    journal. The release stops the journal there, its store kept.
 //!
 //! A journal with a slot on a draining machine is the move's, never a mode
 //! change's: it waits until the move is done. A desired mode the cell cannot
@@ -29,7 +32,7 @@ use moonpool_core::Providers;
 use moonpool_rpc::RpcHandle;
 use paros_core::{AcceptorConfig, JournalIdentifier, NodeId, QuorumSystem, TenantId};
 
-use super::moves::{at_or_above, leader_of, retire};
+use super::moves::{at_or_above, leader_of};
 use super::tenants::{TenantDesk, placed_count};
 use crate::client::cell::CellSession;
 use crate::client::journals::JournalAnswer;
@@ -198,7 +201,6 @@ impl Modes {
             client,
             cell,
             desk,
-            (&nodes, &ids),
             &change,
             (AcceptorConfig::new(members, system), &reply),
         )
@@ -347,15 +349,14 @@ impl Modes {
     }
 
     /// The last step of a change: the new mode is in force as `in_force`.
-    /// Record it, then, once the leader's floor reached it, retire each
-    /// member it left and release every slot it does not name. `None` when
-    /// a write did not land.
+    /// Record it, then, once the leader's floor reached it, release every
+    /// slot it does not name (no member is retired: see the module doc).
+    /// `None` when a write did not land.
     async fn finish<P: Providers>(
         &mut self,
         client: &Client<P>,
         cell: &mut CellSession,
         desk: &mut TenantDesk,
-        (nodes, ids): (&Client<P>, &[NodeId]),
         change: &Change,
         (in_force, reply): (AcceptorConfig, &crate::rpc::InspectReply),
     ) -> Option<ModeStep> {
@@ -385,10 +386,6 @@ impl Modes {
             moonpool_assertions::reachable!("coordinator: a mode change records its placement");
         }
         for &(booking, slot) in &leaving {
-            if reply.retirable.contains(&slot.node.0) {
-                let index = ids.iter().position(|id| *id == slot.node);
-                retire(nodes, index, journal, reply).await;
-            }
             super::tenants::release(client, cell, |b| *b == slot)
                 .await
                 .ok()?;

@@ -1083,8 +1083,9 @@ tenant's default.
   slots: book the slots the mode lacks; ask the leader to reconfigure onto the new members under
   the new quorum system (a smaller mode keeps the slots placement does not release); once in
   force, write `Placed` with the configuration in force, then, once the leader's GC watermark
-  reached it, retire the members it left and release their slots. A journal with a slot on a
-  draining machine is the move's until the move is done. One acceptor partition is a majority
+  reached it, release the slots of the members it left. It retires none, unlike a move: the
+  machine stays bookable, and a later mode may place the journal on it again, where a retired
+  identity never comes back. A journal with a slot on a draining machine is the move's until the move is done. One acceptor partition is a majority
   over at most every storage machine, so a mode the cell grew into is applied later. Each step
   starts from what the registry, the tenant control journal and the leader hold, so a later
   term finishes a change an earlier one started. The create's configuration stays the journal's
