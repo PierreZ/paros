@@ -814,6 +814,9 @@ struct Registry {
     /// Run-level: whether the run draws the handoff-storm scenario (see
     /// [`handoff_storm`]), fixed by the first caller.
     handoff_storm: Option<bool>,
+    /// Run-level: whether the run draws the wide-grid scenario (see
+    /// [`wide_grid`]), fixed by the first caller.
+    wide_grid: Option<bool>,
     /// Run-level: whether the run draws the moved-founder scenario (see
     /// [`moved_founder`]), fixed by the first caller.
     moved_founder: Option<bool>,
@@ -1427,6 +1430,30 @@ pub(crate) fn stalled_proxy(state: &StateHandle) -> bool {
     })
 }
 
+/// Whether the run draws the **wide-grid scenario** (#533 (move a stuck
+/// round)): drawn once per seed, its own BUGGIFY location. A stuck grid
+/// round skips a column only on a grid of three columns or more, which the
+/// pool tiles only at six acceptors (`2 × 3`), and only once the grid knob
+/// and the layout pick both line up: the gate "grid: the driver skips a
+/// column when it moves a round" fired 57 times in 500 hunt seeds and never
+/// in the CI sweep's 400. On a scenario seed `quorum_policy` runs the
+/// widest grid of three columns or more the pool tiles, with full columns,
+/// and every node moves a stuck round after 1 to 3 re-sends (the
+/// `partition_move_resends` extreme). Each ingredient keeps its own coin on the other seeds.
+/// Rare-but-valid: both are configurations an operator may choose.
+#[tracing::instrument(level = "debug", skip_all)]
+pub(crate) fn wide_grid(state: &StateHandle) -> bool {
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    *guard.wide_grid.get_or_insert_with(|| {
+        let wide = moonpool_sim::buggify_with_prob!(0.5);
+        if wide {
+            assert_reachable!("a run draws the wide-grid scenario");
+        }
+        wide
+    })
+}
+
 /// Whether the run draws the **handoff-storm scenario** (#484 (silent driver
 /// fault sites)): drawn once per seed, its own BUGGIFY location. A
 /// cooperative handoff fires on 0.2 to 3 % of a leader's beats, silent in
@@ -2003,6 +2030,7 @@ pub(crate) fn boot(state: &StateHandle, ip: &str) -> Incarnation {
     // Drawn before the lock: the scenarios take the registry's lock too.
     let slow_machine = slow_machine(state);
     let moved_founder = moved_founder(state);
+    let wide_grid = wide_grid(state);
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     let entry = guard.nodes.entry(ip.to_string()).or_insert_with(|| {
@@ -2019,6 +2047,11 @@ pub(crate) fn boot(state: &StateHandle, ip: &str) -> Incarnation {
             // cache that follows the move inside its window: at the drawn
             // period it struck on 1 of 22 moves in 1,000 hunt seeds.
             renew_at_floor(&mut shape.tunables);
+        }
+        if wide_grid {
+            // The wide-grid scenario: a stuck round moves after 1 to 3
+            // re-sends, the knob's extreme.
+            shape.tunables.partition_move_resends = moonpool_sim::sim_random_range(1_u64..4);
         }
         Entry {
             shape,
@@ -2057,6 +2090,7 @@ pub(crate) fn boot(state: &StateHandle, ip: &str) -> Incarnation {
 pub(crate) fn quorum_policy(state: &StateHandle, pool: usize) -> QuorumPolicy {
     let stalled = stalled_proxy(state);
     let slow = slow_link(state);
+    let wide = wide_grid(state);
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     *guard.quorum.get_or_insert_with(|| {
@@ -2075,6 +2109,27 @@ pub(crate) fn quorum_policy(state: &StateHandle, pool: usize) -> QuorumPolicy {
                 rows,
                 cols,
                 slack: grid_slack(),
+            };
+        }
+        // The wide-grid scenario (#533 (move a stuck round)) runs the
+        // widest grid of three columns or more, so a stuck round may skip
+        // a column. Never on a slow-link seed, which reads from every
+        // acceptor.
+        let widest = layouts
+            .iter()
+            .filter(|(_, cols)| *cols >= 3)
+            .max_by_key(|(_, cols)| *cols);
+        if wide
+            && !slow
+            && let Some(&(rows, cols)) = widest
+        {
+            assert_reachable!("a run draws an acceptor grid");
+            // Full columns: a column with one acceptor down holds its
+            // rounds until they move.
+            return QuorumPolicy::Grid {
+                rows,
+                cols,
+                slack: 0,
             };
         }
         let q2 = buggify_knob!(majority, 1_usize..(pool / 2 + 1));
