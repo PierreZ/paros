@@ -791,9 +791,6 @@ struct Registry {
     /// Run-level: whether the run draws the reused-name scenario (see
     /// [`reused_name`]), fixed by the first caller.
     reused_name: Option<bool>,
-    /// Run-level: whether the run draws the stranded-creation scenario (see
-    /// [`stranded_creation`]), fixed by the first caller.
-    stranded_creation: Option<bool>,
     /// Run-level: whether the run draws the lost-verdict scenario (see
     /// [`lost_verdict`]), fixed by the first caller.
     lost_verdict: Option<bool>,
@@ -1071,26 +1068,6 @@ pub(crate) fn reused_name(state: &StateHandle) -> bool {
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     *guard
         .reused_name
-        .get_or_insert_with(|| moonpool_sim::buggify_with_prob!(1.0))
-}
-
-/// Whether the run draws the **stranded-creation scenario**: drawn once per
-/// seed, its own BUGGIFY location. A tenant creation outlives its universe
-/// only when it stops after one step, its cell is lost to wipes, and the
-/// operator then learns the cell another `init` formed: three coins that
-/// lined up once in a sweep (witness 11733514346007965914, recipe
-/// 291831:2268418964662283326). On a scenario seed, a tenant creation
-/// always stops after its first step, and the operator holds it for up to
-/// `HOLD_STEPS` fleet steps while its cell is not lost, so a lost cell's
-/// successor finds it pending (`crate::chain_workload::fleet`). The recovery
-/// tail resumes it at once. Each ingredient keeps its own coin on the other
-/// seeds. Rare-but-valid: an operator may resume a creation late.
-#[tracing::instrument(level = "debug", skip_all)]
-pub(crate) fn stranded_creation(state: &StateHandle) -> bool {
-    let registry = registry(state);
-    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
-    *guard
-        .stranded_creation
         .get_or_insert_with(|| moonpool_sim::buggify_with_prob!(1.0))
 }
 

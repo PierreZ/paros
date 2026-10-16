@@ -203,9 +203,6 @@ pub(super) struct FleetOps {
     kill_ms: (u64, u64),
     /// The pending operation was cut short by its target's kill.
     killed: bool,
-    /// The fleet steps this client held its pending creation for, on a
-    /// stranded-creation seed (`crate::shape::stranded_creation`).
-    held: u32,
     /// The journals this operator learned (#246): every call it makes at
     /// the cell names one of them.
     learned: super::system::Learned,
@@ -272,7 +269,6 @@ impl FleetOps {
             pending: None,
             kill_ms,
             killed: false,
-            held: 0,
             learned: super::system::Learned::default(),
             admitting: None,
             journal_pending: None,
@@ -314,9 +310,7 @@ impl FleetOps {
     #[tracing::instrument(level = "debug", skip_all, fields(client = self.client_id))]
     pub(super) async fn init(&mut self, ctx: &SimContext, policy: CheckpointPolicy, draw: u64) {
         if self.pending.is_some() {
-            if !self.hold(ctx) {
-                let _ = self.resume(ctx, policy, draw).await;
-            }
+            let _ = self.resume(ctx, policy, draw).await;
             return;
         }
         // On a replaced-founder seed, the re-run the scenario asked for.
@@ -430,25 +424,6 @@ impl FleetOps {
 
     /// Keep an operation that did not end as this client's pending one;
     /// `killed` when its target was killed under it.
-    /// Whether this step holds the pending creation instead of resuming it,
-    /// on a stranded-creation seed (`crate::shape::stranded_creation`): for
-    /// up to `HOLD_STEPS` steps while its cell is not lost, so a lost cell's
-    /// successor more often finds it pending. The settle tail never holds.
-    fn hold(&mut self, ctx: &SimContext) -> bool {
-        const HOLD_STEPS: u32 = 12;
-        let holding = matches!(self.pending, Some(Pending::Create(..)))
-            && crate::shape::stranded_creation(ctx.state())
-            && !crate::machine::cell_lost(ctx.state())
-            && self.held < HOLD_STEPS;
-        if holding {
-            self.held += 1;
-            assert_reachable!("fleet: an operator holds a pending creation");
-        } else {
-            self.held = 0;
-        }
-        holding
-    }
-
     fn stopped(&mut self, ended: bool, killed: bool, pending: Pending) {
         if !ended {
             if killed {
@@ -511,9 +486,7 @@ impl FleetOps {
         (class, payload): (u64, u64),
     ) {
         if self.pending.is_some() {
-            if !self.hold(ctx) {
-                let _ = self.resume(ctx, policy, payload).await;
-            }
+            let _ = self.resume(ctx, policy, payload).await;
             return;
         }
         let Some(cell) = self.learn(ctx).await else {
@@ -534,7 +507,7 @@ impl FleetOps {
             return;
         }
         if class % 2 == 0 {
-            if crate::shape::stranded_creation(&self.state) || buggify_with_prob!(0.2) {
+            if buggify_with_prob!(0.2) {
                 let identifier = tenant_identifier(payload);
                 let step = session.create_step(&client, first, &name, identifier).await;
                 match step {
@@ -633,7 +606,10 @@ impl FleetOps {
                 // the old one's identifiers (witness 11733514346007965914,
                 // recipe 291831:2268418964662283326: a one-machine cell
                 // wiped, and the new machine booted the tenant's control
-                // journal in the lost universe's audit world).
+                // journal in the lost universe's audit world). No scenario
+                // amplifies it: the drop fired on 36 of 1,000 hunt seeds
+                // as is, and 34 of 1,000 with a scenario that held every
+                // creation pending until its cell was lost.
                 assert_reachable!("fleet: an operator drops a creation its lost universe started");
                 true
             }
