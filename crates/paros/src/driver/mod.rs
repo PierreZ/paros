@@ -48,6 +48,7 @@ mod calls;
 mod config;
 pub(crate) mod edge;
 pub(crate) mod events;
+mod flight;
 mod handover;
 mod journals;
 pub(crate) mod log_reads;
@@ -99,6 +100,7 @@ use reply::Reply;
 use calls::Call;
 use edge::{NodeInbox, RpcEdge, edge_reporter};
 use events::message_route;
+use flight::{Flight, Input};
 use handover::{HandoverDriver, TenantAudits};
 use journals::{JournalRt, Journals, SingleStore, boot_journal};
 use matchmaking::{
@@ -106,7 +108,7 @@ use matchmaking::{
     surface_matchmaking,
 };
 use metered::{Meter, journal_names};
-use ready::{ClientWaiters, drain_ready, fold_head};
+use ready::{ClientWaiters, Taken, finish_ready, fold_head, take_ready};
 use reply::maybe_duplicate;
 use report::{Deltas, HandoffContext, handoff_context, maintain};
 use system::{ControlFollower, Followed, follow_local};
@@ -120,62 +122,35 @@ struct NodeLoop<'a, P: Providers, A: Audit> {
     providers: &'a P,
     links: &'a MatchmakerLinks<P>,
     out: &'a Outbound,
-    /// The incarnation's RPC runtime, polled through every flush
-    /// ([`RpcEdge::alongside`], #578 (leader sends Accept before its own
-    /// fsync)).
-    edge: &'a RpcEdge<P>,
     audit: &'a A,
     self_id: u64,
     tunables: DriverTunables,
 }
 
 impl<P: Providers, A: Audit> NodeLoop<'_, P, A> {
-    /// The **settle tail**: every arm that feeds the core ends here, in this
-    /// order — drain the `Ready` batch (persist → send → apply), surface a
-    /// matchmaking phase it opened *before* the requests leave, put the
-    /// batch's matchmaker-wire requests on the wire, then run the post-batch
-    /// upkeep. The order is the contract; the arms differ only in what they
-    /// fed the core beforehand.
-    ///
-    /// # Errors
-    ///
-    /// Propagates the drain's typed exit ([`RunError`]): a durability-seam
-    /// crash or a storage fault the driver decided to crash on.
-    async fn settle<S: LogStorage>(
+    /// The **settle tail**'s second half, once the batch [`take_ready`] took
+    /// is durable: finish the batch (send → apply), surface a matchmaking
+    /// phase it opened *before* the requests leave, put the batch's
+    /// matchmaker-wire requests on the wire, run the post-batch upkeep, and
+    /// on a tick the read expiry: `expiry` carries the tick count and
+    /// whether every confirming read expires early. The expired long-polls
+    /// are answered from the fold the batch reported, before the next page
+    /// is released. The order is the contract; the arms differ only in what
+    /// they fed the core beforehand.
+    async fn finish(
         &self,
         node: &mut ColocatedNode,
-        storage: &mut S,
         waiters: &mut ClientWaiters,
         last: &mut Deltas,
-    ) -> Result<(), RunError> {
-        self.settle_expiring(node, storage, waiters, last, None)
-            .await
-    }
-
-    /// [`Self::settle`], and on a tick the read expiry: `expiry` carries the
-    /// tick count and whether every confirming read expires early. The
-    /// expired long-polls are answered from the fold the batch reported,
-    /// before the next page is released.
-    ///
-    /// # Errors
-    ///
-    /// As [`Self::settle`].
-    async fn settle_expiring<S: LogStorage>(
-        &self,
-        node: &mut ColocatedNode,
-        storage: &mut S,
-        waiters: &mut ClientWaiters,
-        last: &mut Deltas,
+        taken: Taken,
         expiry: Option<(u64, bool)>,
-    ) -> Result<(), RunError> {
+    ) {
         assert!(
             node.config().id.0 == self.self_id,
             "a node loop settles its own node"
         );
-        let promised = node.hard_state().max_promised_ballot;
-        let chosen = node.hard_state().chosen_index;
-        let mut outbox =
-            drain_ready(node, storage, self.out, self.edge, waiters, self.audit).await?;
+        let (promised, chosen) = (taken.promised_before, taken.chosen_before);
+        let mut outbox = finish_ready(node, self.out, waiters, self.audit, taken).await;
         let reported = fold_head(node);
         if !outbox.gc_requests.is_empty() && crate::scenario::withhold_gc() {
             tracing::info!(node = self.self_id, "gc_requests_withheld");
@@ -253,7 +228,6 @@ impl<P: Providers, A: Audit> NodeLoop<'_, P, A> {
             node.hard_state().chosen_index >= chosen,
             "a settled batch never rewinds the chosen index"
         );
-        Ok(())
     }
 
     /// Answer one client-facing reply through the reply seam
@@ -641,67 +615,288 @@ impl<P: Providers> Shared<'_, P> {
             providers: self.providers,
             links: self.links,
             out: self.out,
-            edge: self.edge,
             audit,
             self_id: self.self_id,
             tunables: self.tunables,
         }
     }
 
-    /// The settle tail ([`NodeLoop::settle`]) for one journal.
+    /// The settle tail for one journal (#613 (settle off the node loop)):
+    /// take the core's batch, then either finish it at once (no durable
+    /// write) or launch its flush and return, the journal flying until
+    /// [`Shared::landed`] finishes it. Called only on a journal that does
+    /// not fly: a flying journal's inputs wait in its backlog.
+    async fn settle<S, A>(&self, rt: &mut JournalRt<S, A>)
+    where
+        S: LogStorage + Send + 'static,
+        A: Audit + Clone + Send + Sync + 'static,
+    {
+        assert!(rt.flight.is_none(), "a flying journal takes no other batch");
+        assert!(
+            rt.backlog.is_empty(),
+            "a journal that does not fly holds nothing back"
+        );
+        let began = self.providers.time().now();
+        let taken = take_ready(&mut rt.node, self.out, &rt.audit).await;
+        let expiry = rt.expiry.take();
+        if taken.writes.is_empty() {
+            self.with(&rt.audit)
+                .finish(&mut rt.node, &mut rt.waiters, &mut rt.last, taken, expiry)
+                .await;
+            self.settled(rt, began);
+            return;
+        }
+        let Some(storage) = rt.storage.take() else {
+            unreachable!("a journal that does not fly holds its store");
+        };
+        rt.flight = Some(Flight::launch(
+            storage,
+            taken,
+            (&rt.audit, self.self_id),
+            expiry,
+            began,
+        ));
+        assert!(
+            rt.storage.is_none(),
+            "a flying journal's store is in its flush"
+        );
+    }
+
+    /// Record a finished batch's metrics (observation only, #366 (metrics)).
+    fn settled<S, A>(&self, rt: &JournalRt<S, A>, began: std::time::Duration) {
+        let applied = fold_head(&rt.node).map_or(0, |slot| slot.0 + 1);
+        let chosen = rt
+            .node
+            .replica()
+            .chosen_index()
+            .map_or(0, |slot| slot.0 + 1);
+        let took = self.providers.time().now().saturating_sub(began);
+        self.metrics
+            .settled(rt.node.config().journal, applied, chosen, took);
+    }
+
+    /// Step `input` into the journal's core and settle, or hold it back
+    /// while the journal's batch flies (#613 (settle off the node loop)). A
+    /// full backlog waits for the flight here first.
     ///
     /// # Errors
     ///
-    /// As [`NodeLoop::settle`].
-    async fn settle<S: LogStorage, A: Audit>(
-        &self,
-        rt: &mut JournalRt<S, A>,
-    ) -> Result<(), RunError> {
-        let JournalRt {
-            node,
-            storage,
-            audit,
-            waiters,
-            last,
-            ..
-        } = rt;
-        let began = self.providers.time().now();
-        self.with(audit)
-            .settle(node, storage, waiters, last)
-            .await?;
-        // Observation only (#366 (metrics)): read after the batch settled.
-        let applied = fold_head(node).map_or(0, |slot| slot.0 + 1);
-        let chosen = node.replica().chosen_index().map_or(0, |slot| slot.0 + 1);
-        let took = self.providers.time().now().saturating_sub(began);
-        self.metrics
-            .settled(node.config().journal, applied, chosen, took);
+    /// The landed flush's fault ([`Shared::land`]).
+    async fn input<S, A>(&self, rt: &mut JournalRt<S, A>, input: Input) -> Result<(), RunError>
+    where
+        S: LogStorage + Send + 'static,
+        A: Audit + Clone + Send + Sync + 'static,
+    {
+        if rt.flight.is_some() && rt.backlog.len() < flight::BACKLOG {
+            hold(&mut rt.backlog, input);
+            assert!(
+                rt.backlog.len() <= flight::BACKLOG,
+                "a backlog stays bounded"
+            );
+            return Ok(());
+        }
+        self.land(rt).await?;
+        assert!(rt.flight.is_none(), "a landed journal flies nothing");
+        self.apply(rt, input);
+        self.settle(rt).await;
         Ok(())
     }
 
-    /// One journal's beat: the core's tick, the re-sends and their BUGGIFY
-    /// sites, the handover's pacing (`handover`: the tenant's set, paced on
-    /// one journal of the tenant per tick, reporting to every journal it
-    /// serves, #190), the leadership's give-up, the read expiries, the settle
-    /// tail, and the stranded-slot report.
+    /// Wait here for the journal's flight, if one flies, and finish it
+    /// ([`Shared::landed`]); the runtime runs through the wait. For the
+    /// rare inputs that do not wait in the backlog, and a full backlog.
     ///
     /// # Errors
     ///
-    /// As [`NodeLoop::settle`].
-    async fn beat<S: LogStorage, A: Audit + Clone>(
+    /// The flush's storage fault, or the runtime's exit.
+    async fn land<S, A>(&self, rt: &mut JournalRt<S, A>) -> Result<(), RunError>
+    where
+        S: LogStorage + Send + 'static,
+        A: Audit + Clone + Send + Sync + 'static,
+    {
+        let Some(flight) = rt.flight.take() else {
+            return Ok(());
+        };
+        let (storage, done) = self.edge.alongside(flight.flush).await?;
+        let landing = flight::Landing {
+            storage,
+            done,
+            taken: flight.taken,
+            expiry: flight.expiry,
+            began: flight.began,
+        };
+        self.landed(rt, landing).await?;
+        assert!(rt.backlog.is_empty(), "a landed journal holds nothing back");
+        Ok(())
+    }
+
+    /// Finish a landed flight: give the store back, finish the batch, then
+    /// step every input held back meanwhile. Returns whether any was: the
+    /// caller settles them as one batch (group commit).
+    ///
+    /// # Errors
+    ///
+    /// The flush's storage fault: the batch is not finished, nothing it
+    /// held leaves.
+    async fn landed<S, A>(
         &self,
         rt: &mut JournalRt<S, A>,
-        handover: Option<(&mut HandoverDriver, &TenantAudits<A>)>,
-        ticks: u64,
-    ) -> Result<(), RunError> {
+        landing: flight::Landing<S>,
+    ) -> Result<bool, RunError>
+    where
+        S: LogStorage + Send + 'static,
+        A: Audit + Clone + Send + Sync + 'static,
+    {
+        assert!(rt.flight.is_none(), "a landing ends the journal's flight");
+        assert!(rt.storage.is_none(), "a landing gives the store back");
+        rt.storage = Some(landing.storage);
+        landing.done?;
+        self.with(&rt.audit)
+            .finish(
+                &mut rt.node,
+                &mut rt.waiters,
+                &mut rt.last,
+                landing.taken,
+                landing.expiry,
+            )
+            .await;
+        self.settled(rt, landing.began);
+        let backlog = std::mem::take(&mut rt.backlog);
+        if backlog.len() > 1 {
+            moonpool_assertions::reachable!(
+                "driver: one flush carries the inputs that waited on the last one"
+            );
+        }
+        let stepped = !backlog.is_empty();
+        for input in backlog {
+            self.apply(rt, input);
+        }
+        assert!(rt.backlog.is_empty(), "a landing steps its whole backlog");
+        Ok(stepped)
+    }
+
+    /// Step one input into the journal's core (no settle).
+    fn apply<S, A>(&self, rt: &mut JournalRt<S, A>, input: Input)
+    where
+        A: Audit + Clone,
+    {
+        assert!(rt.flight.is_none(), "nothing steps a flying journal's core");
+        let self_id = self.self_id;
+        match input {
+            Input::Propose(call) => {
+                let delegation = delegation_choice(&rt.node);
+                let result = match &call {
+                    Call::Write { entry, .. } => {
+                        // The column override (#141): drawn only where it
+                        // can have an effect (this node leads and its
+                        // configuration is a grid), on the loop. Otherwise
+                        // the core's `slot % cols` stands.
+                        let column = match rt.node.acceptors().quorum_system() {
+                            QuorumSystem::Grid { cols, .. } if rt.node.is_leader() => {
+                                phase2_column(rt.node.proposer().next_slot(), cols)
+                            }
+                            _ => None,
+                        };
+                        rt.node.propose_in(entry.clone(), column, delegation)
+                    }
+                    Call::SetLeader { new, old, .. } => rt.node.propose_control_in(
+                        Control::SetLeader {
+                            new: *new,
+                            old: *old,
+                        },
+                        delegation,
+                    ),
+                    Call::Truncate { leader, up_to, .. } => rt.node.propose_control_in(
+                        Control::Truncate {
+                            leader: *leader,
+                            up_to: *up_to,
+                        },
+                        delegation,
+                    ),
+                };
+                park_call(rt, result, call, self);
+            }
+            Input::Read { req, reply } => {
+                let ctx = rt.waiters.reads.next_ctx();
+                // The configuration the core reads over is its read basis
+                // (#260), not its belief; without one the core opens nothing
+                // and the read is answered unserved by the retry sweep — so
+                // neither the row hook nor the audit hears of it.
+                let basis = rt.node.read_basis();
+                // The row override (the Phase-1 twin of `phase2_column`) is
+                // drawn only where it can have an effect: under a grid. Its
+                // own location; the replica tier has the other. Otherwise the
+                // core's `ctx % rows` stands.
+                let row = basis.as_ref().and_then(|b| match b.config.quorum_system() {
+                    QuorumSystem::Grid { rows, acks, .. }
+                        if rows >= 2
+                            && acks == rows
+                            && moonpool_buggify::buggify_fault_with_prob!(0.10) =>
+                    {
+                        moonpool_assertions::reachable!(
+                            "grid: the driver overrides a quorum read's row"
+                        );
+                        Some(log_reads::next_row(ctx, rows))
+                    }
+                    _ => None,
+                });
+                // The row the core will ask, resolved exactly as it resolves
+                // it, for the audit's report of what served it.
+                let row = basis.as_ref().and_then(|b| b.config.read_row(ctx, row));
+                let opened = fold_head(&rt.node);
+                if basis.is_some() {
+                    rt.audit.quorum_read_opened(NodeId(self_id), ctx);
+                }
+                rt.node.quorum_read_in(ctx, row);
+                rt.waiters.reads.park(
+                    &req,
+                    reply,
+                    log_reads::ReadLimits::of(&self.tunables),
+                    row,
+                    opened,
+                );
+            }
+            Input::Deliver(msg) => {
+                trace_received(self_id, &msg);
+                // Canary: a Prepare whose from_slot is below our floor is the
+                // dangerous "campaign against a truncated acceptor" case.
+                // Record it so the sweep can assert the interleaving stays
+                // reachable once the acceptor floor guard is in place.
+                if let Message::Prepare { from_slot, .. } = &msg
+                    && *from_slot < rt.node.acceptor().first_slot()
+                {
+                    let floor = rt.node.acceptor().first_slot();
+                    rt.audit
+                        .prepare_below_floor(NodeId(self_id), *from_slot, floor);
+                    tracing::info!(
+                        node = self_id,
+                        from_slot = from_slot.0,
+                        floor = floor.0,
+                        "prepare_below_floor"
+                    );
+                }
+                contest_overwrite(&mut rt.node, &mut rt.contested, &msg, self_id);
+                rt.node.step(msg);
+            }
+            Input::Tick(ticks) => self.beat_step(rt, ticks),
+        }
+    }
+
+    /// One journal's beat, stepped into its core (#613 (settle off the node
+    /// loop): a beat of a flying journal waits in its backlog): the core's
+    /// tick, the re-sends and their BUGGIFY sites, the leadership's give-up,
+    /// the read expiry it owes the next settle, and the stranded-slot
+    /// report. The tenant's handover is paced apart ([`NodeLoop::pace_handover`]),
+    /// at the tick itself.
+    fn beat_step<S, A: Audit + Clone>(&self, rt: &mut JournalRt<S, A>, ticks: u64) {
         let (self_id, tunables) = (self.self_id, self.tunables);
         let JournalRt {
             node,
-            storage,
             audit,
             waiters,
-            last,
             match_resend,
             gc_resend,
+            expiry,
             ..
         } = rt;
         assert!(
@@ -775,15 +970,6 @@ impl<P: Providers> Shared<'_, P> {
                 node.resend_gc();
             }
         }
-        // The handover belongs to the tenant's matchmaker set; on a plain
-        // journal it stays idle.
-        if let Some((handover, audits)) = handover {
-            assert!(
-                node.config().has_matchmakers(),
-                "only a matchmaker journal paces a handover"
-            );
-            self.with(audits).pace_handover(node, handover);
-        }
         lp.offer_handoff(node);
         // Expire the reads whose quorum read is overdue (a row that never
         // answered whole, a fold that has not reached the watermark) and
@@ -798,8 +984,9 @@ impl<P: Providers> Shared<'_, P> {
         // unreported fold page)).
         let expire_all =
             waiters.reads.has_confirming() && moonpool_buggify::buggify_fault_with_prob!(0.05);
-        lp.settle_expiring(node, storage, waiters, last, Some((ticks, expire_all)))
-            .await?;
+        // A beat replaces a waiting expiry: the later tick's deadline holds.
+        let owed = expiry.is_some_and(|(_, all)| all);
+        *expiry = Some((ticks, expire_all || owed));
         // Surface a chosen slot stranded above the applied prefix. The
         // `Ready` handshake only ever hands out the *contiguous* prefix, so a
         // hole below a chosen slot is otherwise invisible from outside the
@@ -810,7 +997,6 @@ impl<P: Providers> Shared<'_, P> {
             tracing::info!(node = self_id, hole = hole.0, above = above.0, "chosen_gap");
         }
         audit.ticked(NodeId(self_id));
-        Ok(())
     }
 }
 
@@ -1182,6 +1368,29 @@ fn stretch_tick() -> bool {
     stretched
 }
 
+/// Hold `input` back while its journal's batch flies (#613 (settle off the
+/// node loop)): in arrival order, except that a beat replaces the one
+/// already waiting (a slow node's clock, never a burst of ticks).
+fn hold(backlog: &mut Vec<Input>, input: Input) {
+    let before = backlog.len();
+    if let Input::Tick(ticks) = input
+        && let Some(waiting) = backlog.iter_mut().find_map(|held| match held {
+            Input::Tick(at) => Some(at),
+            _ => None,
+        })
+    {
+        assert!(*waiting <= ticks, "a later beat replaces an earlier one");
+        *waiting = ticks;
+        assert!(backlog.len() == before, "a replaced beat holds no more");
+        return;
+    }
+    backlog.push(input);
+    assert!(
+        backlog.len() == before + 1,
+        "a held input waits in the backlog"
+    );
+}
+
 /// Park `call` on the slot its proposal took (`result`), with the ballot
 /// it was proposed under, to be answered when that slot applies, or
 /// redirect it at once when this node does not lead.
@@ -1301,7 +1510,7 @@ pub async fn run_node<P, S, A>(
 ) -> Result<(), RunError>
 where
     P: Providers,
-    S: LogStorage,
+    S: LogStorage + Send + 'static,
     // `Clone + Send + Sync + 'static` because each peer-delivery task carries
     // its own handle to the audit: the bounded-mailbox drops happen inside
     // those tasks, and reporting them (`Audit::dropped_at_mailbox`) is part of
@@ -1771,6 +1980,17 @@ where
         moonpool_core::select! {
             // The runtime's future is persistent across passes: see `RpcEdge`.
             error = edge.run() => return Err(error.into()),
+            (journal, landing) = journals.next_landing() => {
+                // A journal's flush landed (#613 (settle off the node loop)):
+                // finish its batch, step what it held back, and settle that
+                // as the next batch.
+                let Some(rt) = journals.live.get_mut(&journal) else { continue };
+                match shared.landed(rt, landing).await {
+                    Ok(true) => shared.settle(rt).await,
+                    Ok(false) => {}
+                    Err(fault) => journals.fold(journal, Err(fault), ticks, self_id)?,
+                }
+            }
             Some((req, reply)) = rpc.write.recv() => {
                 // A journal `Write` (#204) → the named journal's leader. The
                 // leader proposes it into the next slot without judging it:
@@ -1808,25 +2028,7 @@ where
                     seq: Seq(req.seq),
                     records: req.records.into_iter().map(Value).collect(),
                 };
-                // The column override (#141): drawn only where it can have
-                // an effect (this node leads and its configuration is a
-                // grid), on the loop. Otherwise the core's `slot % cols`
-                // stands.
-                let column = match rt.node.acceptors().quorum_system() {
-                    QuorumSystem::Grid { cols, .. } if rt.node.is_leader() => {
-                        phase2_column(rt.node.proposer().next_slot(), cols)
-                    }
-                    _ => None,
-                };
-                // The delegation override (#142), under the same gate: only
-                // a leader of a deployment with proxies is asked, first
-                // whether to run this round colocated, then which proxy to
-                // hand it to; otherwise `Delegation::Auto`, the core's
-                // `slot % proxy_count`, stands.
-                let delegation = delegation_choice(&rt.node);
-                let result = rt.node.propose_in(entry.clone(), column, delegation);
-                park_call(rt, result, Call::Write { entry, reply }, &shared);
-                let outcome = shared.settle(rt).await;
+                let outcome = shared.input(rt, Input::Propose(Call::Write { entry, reply })).await;
                 journals.fold(journal, outcome, ticks, self_id)?;
             }
             Some((req, reply)) = rpc.set_leader.recv() => {
@@ -1852,12 +2054,7 @@ where
                 );
                 let new = leader_uuid_from_proto(req.new);
                 let old = leader_from_proto(req.old);
-                let delegation = delegation_choice(&rt.node);
-                let result = rt
-                    .node
-                    .propose_control_in(Control::SetLeader { new, old }, delegation);
-                park_call(rt, result, Call::SetLeader { new, old, reply }, &shared);
-                let outcome = shared.settle(rt).await;
+                let outcome = shared.input(rt, Input::Propose(Call::SetLeader { new, old, reply })).await;
                 journals.fold(journal, outcome, ticks, self_id)?;
             }
             Some((req, reply)) = rpc.truncate.recv() => {
@@ -1889,13 +2086,7 @@ where
                 );
                 let up_to = Seq(req.up_to);
                 let leader = leader_uuid_from_proto(req.leader);
-                let delegation = delegation_choice(&rt.node);
-                let result = rt.node.propose_control_in(
-                    Control::Truncate { leader, up_to },
-                    delegation,
-                );
-                park_call(rt, result, Call::Truncate { leader, up_to, reply }, &shared);
-                let outcome = shared.settle(rt).await;
+                let outcome = shared.input(rt, Input::Propose(Call::Truncate { leader, up_to, reply })).await;
                 journals.fold(journal, outcome, ticks, self_id)?;
             }
             Some((req, reply)) = rpc.log_read.recv() => {
@@ -1924,35 +2115,7 @@ where
                     reply,
                     metered::read_answer,
                 );
-                let ctx = rt.waiters.reads.next_ctx();
-                // The configuration the core reads over is its read basis
-                // (#260), not its belief; without one the core opens nothing
-                // and the read is answered unserved by the retry sweep — so
-                // neither the row hook nor the audit hears of it.
-                let basis = rt.node.read_basis();
-                // The row override (the Phase-1 twin of `phase2_column`) is
-                // drawn only where it can have an effect: under a grid. Its
-                // own location; the replica tier has the other. Otherwise the
-                // core's `ctx % rows` stands.
-                let row = basis.as_ref().and_then(|b| match b.config.quorum_system() {
-                    QuorumSystem::Grid { rows, acks, .. }
-                        if rows >= 2 && acks == rows && moonpool_buggify::buggify_fault_with_prob!(0.10) =>
-                    {
-                        moonpool_assertions::reachable!("grid: the driver overrides a quorum read's row");
-                        Some(log_reads::next_row(ctx, rows))
-                    }
-                    _ => None,
-                });
-                // The row the core will ask, resolved exactly as it resolves
-                // it, for the audit's report of what served it.
-                let row = basis.as_ref().and_then(|b| b.config.read_row(ctx, row));
-                let opened = fold_head(&rt.node);
-                if basis.is_some() {
-                    rt.audit.quorum_read_opened(NodeId(self_id), ctx);
-                }
-                rt.node.quorum_read_in(ctx, row);
-                rt.waiters.reads.park(&req, reply, log_reads::ReadLimits::of(&tunables), row, opened);
-                let outcome = shared.settle(rt).await;
+                let outcome = shared.input(rt, Input::Read { req, reply }).await;
                 journals.fold(journal, outcome, ticks, self_id)?;
             }
             Some((journal, msg)) = rpc.deliver.recv() => {
@@ -1979,31 +2142,13 @@ where
                     tracing::info!(node = self_id, journal = %journal, held, "journal_message_dropped");
                     continue;
                 };
-                trace_received(self_id, &msg);
                 // An ack at the inbox, whatever the core makes of it: what
                 // refills a leader's `CheckQuorum` window, and what the
                 // deposed-leader oracle measures its clock from.
                 if let Message::HeartbeatAck { from, ballot, .. } = &msg {
                     rt.audit.heartbeat_ack_received(NodeId(self_id), *from, *ballot);
                 }
-                // Canary: a Prepare whose from_slot is below our floor is the
-                // dangerous "campaign against a truncated acceptor" case. Record it
-                // so the sweep can assert the interleaving stays reachable once the
-                // acceptor floor guard is in place.
-                if let Message::Prepare { from_slot, .. } = &msg
-                    && *from_slot < rt.node.acceptor().first_slot()
-                {
-                    rt.audit.prepare_below_floor(NodeId(self_id), *from_slot, rt.node.acceptor().first_slot());
-                    tracing::info!(
-                        node = self_id,
-                        from_slot = from_slot.0,
-                        floor = rt.node.acceptor().first_slot().0,
-                        "prepare_below_floor"
-                    );
-                }
-                contest_overwrite(&mut rt.node, &mut rt.contested, &msg, self_id);
-                rt.node.step(msg);
-                let outcome = shared.settle(rt).await;
+                let outcome = shared.input(rt, Input::Deliver(msg)).await;
                 journals.fold(journal, outcome, ticks, self_id)?;
             }
             Some((tenant, reply)) = match_replies.recv() => {
@@ -2014,6 +2159,10 @@ where
                 let journal = JournalIdentifier::new(tenant, reply.journal);
                 let audits = tenant_audits(&journals, &stores, tenant);
                 let Some(rt) = journals.live.get_mut(&journal) else { continue };
+                if let Err(fault) = shared.land(rt).await {
+                    journals.fold(journal, Err(fault), ticks, self_id)?;
+                    continue;
+                }
                 let (matchmaker, ballot) = (reply.matchmaker, reply.ballot);
                 // The duplicate seam (the mirror of the matchmaker driver's
                 // reply drop): what it tests is the idempotency the
@@ -2032,8 +2181,7 @@ where
                 report_match_step(&rt.audit, self_id, matchmaker, ballot, folded, &step);
                 let handover = handovers.entry(tenant).or_insert_with(|| HandoverDriver::new(NodeId(self_id), registry_page));
                 shared.with(&audits).on_match_refusal(&rt.node, handover, matchmaker, &step);
-                let outcome = shared.settle(rt).await;
-                journals.fold(journal, outcome, ticks, self_id)?;
+                shared.settle(rt).await;
             }
             Some((tenant, ack)) = gc_acks.recv() => {
                 // A matchmaker's answer to this leader's GC request (#123):
@@ -2042,6 +2190,10 @@ where
                 // (reported in the step).
                 let journal = JournalIdentifier::new(tenant, ack.journal);
                 let Some(rt) = journals.live.get_mut(&journal) else { continue };
+                if let Err(fault) = shared.land(rt).await {
+                    journals.fold(journal, Err(fault), ticks, self_id)?;
+                    continue;
+                }
                 maybe_duplicate(NodeId(self_id), Reply::GcAck, &links.gc_acks, &(tenant, ack.clone()));
                 let step = rt.node.on_gc_ack(&ack);
                 rt.audit.gc_step(NodeId(self_id), ack.matchmaker, &ack, &step);
@@ -2054,8 +2206,7 @@ where
                     step = ?step,
                     "gc_ack_received"
                 );
-                let outcome = shared.settle(rt).await;
-                journals.fold(journal, outcome, ticks, self_id)?;
+                shared.settle(rt).await;
             }
             Some((tenant, reply)) = reconfigure_replies.recv() => {
                 // A matchmaker's answer to this node's handover step of
@@ -2104,9 +2255,12 @@ where
                         .collect();
                     for journal in served {
                         let Some(rt) = journals.live.get_mut(&journal) else { continue };
+                        if let Err(fault) = shared.land(rt).await {
+                            journals.fold(journal, Err(fault), ticks, self_id)?;
+                            continue;
+                        }
                         rt.node.learn_matchmakers(successor);
-                        let outcome = shared.settle(rt).await;
-                        journals.fold(journal, outcome, ticks, self_id)?;
+                        shared.settle(rt).await;
                     }
                 }
             }
@@ -2214,13 +2368,16 @@ where
                     shared.with(&node_audit).answer(Reply::Reconfigure, reply, operator::unknown_journal());
                     continue;
                 };
+                if let Err(fault) = shared.land(rt).await {
+                    journals.fold(journal, Err(fault), ticks, self_id)?;
+                    continue;
+                }
                 let ack = operator::reconfigure(&mut rt.node, &rt.audit, self_id, &req);
-                let outcome = shared.settle(rt).await;
+                shared.settle(rt).await;
                 // A lost reconfiguration ack is ambiguous to the client, which
                 // re-asks; a started reconfiguration stands (a retry is refused
                 // as `not_leader` while it runs, then `unchanged` once done).
                 shared.with(&node_audit).answer(Reply::Reconfigure, reply, ack);
-                journals.fold(journal, outcome, ticks, self_id)?;
             }
             Some((req, reply)) = rpc.inspect.recv() => {
                 // No settle tail: an inspect is a pure read of the core, so it
@@ -2334,14 +2491,14 @@ where
                         tracing::info!(node = self_id, journal = %journal, "journal_held");
                         continue;
                     }
-                    let takes_handover = rt.node.config().has_matchmakers() && paced.insert(journal.tenant);
-                    let handover = takes_handover.then(|| {
-                        (
-                            handovers.entry(journal.tenant).or_insert_with(|| HandoverDriver::new(NodeId(self_id), registry_page)),
-                            &audits,
-                        )
-                    });
-                    let outcome = shared.beat(rt, handover, ticks).await;
+                    // The handover belongs to the tenant's matchmaker set; on
+                    // a plain journal it stays idle. Paced at the tick, flying
+                    // or not: it only reads the core.
+                    if rt.node.config().has_matchmakers() && paced.insert(journal.tenant) {
+                        let handover = handovers.entry(journal.tenant).or_insert_with(|| HandoverDriver::new(NodeId(self_id), registry_page));
+                        shared.with(&audits).pace_handover(&rt.node, handover);
+                    }
+                    let outcome = shared.input(rt, Input::Tick(ticks)).await;
                     journals.fold(journal, outcome, ticks, self_id)?;
                 }
                 // The peer book (#349): a peer the registry moved is dialed
@@ -3066,6 +3223,9 @@ async fn open_journal<P: Providers, J: JournalStores>(
     now: u64,
     tunables: &DriverTunables,
 ) {
+    // A batch the journal's last runtime left flying lands first: one
+    // handle writes a store at a time (#613 (settle off the node loop)).
+    journals.land_orphan(journal).await;
     let audit = stores.audit(journal);
     let Some((storage, boot)) = stores.open(journal).await else {
         if let Some(fault) = stores.open_fault(journal) {

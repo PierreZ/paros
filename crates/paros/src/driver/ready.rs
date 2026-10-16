@@ -12,13 +12,11 @@ use paros_core::{
 
 use crate::audit::{Audit, StorageFaultDecision};
 use moonpool_buggify::hint::Strike;
-use moonpool_core::Providers;
 
 use crate::storage::{LogStorage, StorageError};
 
 use super::calls::Call;
 use super::config::RunError;
-use super::edge::RpcEdge;
 use super::events::command_hash;
 use super::transport::{Outbound, send_messages};
 
@@ -203,32 +201,57 @@ fn report_recovery_batch<A: Audit>(
     }
 }
 
-/// Run the [`paros_core::Ready`] handshake once, honoring persist-before-send:
-/// persist `hard_state`, *then* send the addressed messages, *then* surface the
-/// chosen entries — and emit the observability events the safety oracle reads.
-// One linear durability pipeline: every step is ordered against its neighbors
-// (persist → send → learn → acks), so slicing it into helpers would scatter
-// the ordering contract this function *is*.
+/// One batch the core handed out, carried from [`take_ready`] across its
+/// flush to [`finish_ready`] (#613 (settle off the node loop)): what the
+/// flush persists, and everything that may leave or answer only once it is
+/// durable.
+pub(crate) struct Taken {
+    /// The durable writes, in the order the core queued them; the flush
+    /// takes them.
+    pub(crate) writes: Vec<WriteOp>,
+    /// Whether the flush must fsync ([`paros_core::MustSync`]).
+    pub(crate) must_sync: paros_core::MustSync,
+    /// The node's promise once the batch was taken: no write of the batch
+    /// lies above it.
+    pub(crate) promised: Ballot,
+    /// Whether the batch carried a durable write.
+    wrote: bool,
+    /// The messages that wait for the flush (the early `Accept`s left).
+    messages: Outgoing,
+    committed: Vec<(Slot, Ballot, Command, Outcome)>,
+    read_states: Vec<ReadState>,
+    recovery_batch: Option<(usize, usize, usize)>,
+    match_requests: Vec<(MatchmakerId, MatchRequest)>,
+    gc_requests: Vec<(MatchmakerId, GcRequest)>,
+    gc_fence: Option<Slot>,
+    /// A reconfiguring campaign's `Prepare` is among the messages (#260).
+    sent_prepare: bool,
+    /// The promise and the chosen index before the batch was taken: a
+    /// settled batch never lowers either.
+    pub(crate) promised_before: Ballot,
+    pub(crate) chosen_before: Option<Slot>,
+}
+
+/// The first half of the [`paros_core::Ready`] handshake: copy the batch
+/// out of the core, advance it, and send the `Accept`s that may leave
+/// before the flush (#578 (leader sends Accept before its own fsync)). The
+/// caller persists [`Taken::writes`], then calls [`finish_ready`]
+/// (persist-before-send). Between the two, the node loop steps nothing into
+/// this journal's core (#613 (settle off the node loop)): it holds the
+/// journal's inputs back until the batch is finished.
 #[tracing::instrument(level = "trace", skip_all, fields(node = node.config().id.0))]
-pub(crate) async fn drain_ready<P, S, A>(
+pub(crate) async fn take_ready<A: Audit>(
     node: &mut ColocatedNode,
-    storage: &mut S,
     out: &Outbound,
-    edge: &RpcEdge<P>,
-    waiters: &mut ClientWaiters,
     audit: &A,
-) -> Result<Outbox, RunError>
-where
-    P: Providers,
-    S: LogStorage,
-    A: Audit,
-{
+) -> Taken {
     let self_id = out.self_node().0;
     assert!(
         self_id == node.config().id.0,
         "a batch is drained by the node that queued it"
     );
     let chosen_before = node.hard_state().chosen_index;
+    let promised_before = node.hard_state().max_promised_ballot;
     // The replica tier serves one journal (#188): a journal with no replica
     // in its configuration never addresses one.
     let with_learners = node.config().replica_count > 0;
@@ -238,7 +261,7 @@ where
     // Copy the batch out of the borrow guard, advance to release the gate, then
     // perform I/O — persist → send → apply. Advancing before the I/O is the
     // documented async pattern; persist-before-send still holds because the
-    // persist loop below precedes the send loop.
+    // persist precedes the send of everything but the early `Accept`s.
     let ready = node.ready();
     // One flush for the whole batch, truncates included: the split that held
     // a `Truncate` behind the application fsync protected an application
@@ -291,25 +314,70 @@ where
     //    (leader sends Accept before its own fsync), Paxos Made Live §4.2):
     //    an `Accept` is a request, never a promise or a vote, and nothing an
     //    acceptor does with it rests on this node's disk. The leader's own
-    //    vote still counts only once durable: the node loop steps no message
-    //    of this journal before the flush below returns, and every reply,
+    //    vote still counts only once durable: the node loop steps no input
+    //    of this journal before the batch is finished, and every reply,
     //    `Commit` and apply derived from the vote leaves only after it. A
     //    batch that raises this node's promise keeps every message behind
     //    its flush, as before: an `Accept` never outruns the durable promise
     //    of its own ballot.
     let messages = send_early(node, out, audit, &writes, messages).await;
-
-    // 1. Persist durable writes, each op in order, flush per MustSync, and
-    //    surface the persisted state for the safety + recovery oracles. The
-    //    staged-not-synced hint lives inside `persist_writes`.
     let promised = node.hard_state().max_promised_ballot;
-    // The runtime runs through the flush (`RpcEdge::alongside`): the early
-    // `Accept`s above reach the wire, and every lane's ack is read, while
-    // this node's own vote syncs.
-    edge.alongside(persist_writes(
-        storage, &writes, must_sync, promised, self_id, audit,
-    ))
-    .await??;
+    let wrote = !writes.is_empty();
+    Taken {
+        writes,
+        must_sync,
+        promised,
+        wrote,
+        messages,
+        committed,
+        read_states,
+        recovery_batch,
+        match_requests,
+        gc_requests,
+        gc_fence,
+        sent_prepare,
+        promised_before,
+        chosen_before,
+    }
+}
+
+/// The second half of the [`paros_core::Ready`] handshake, once the batch's
+/// writes are durable: send the rest of its messages, learn the slots it
+/// walked, answer the calls and reads it decided, and hand the matchmaker
+/// wire's requests back to the loop.
+// One linear durability pipeline: every step is ordered against its neighbors
+// (persist → send → learn → acks), so slicing it into helpers would scatter
+// the ordering contract this function *is*.
+#[tracing::instrument(level = "trace", skip_all, fields(node = node.config().id.0))]
+pub(crate) async fn finish_ready<A: Audit>(
+    node: &mut ColocatedNode,
+    out: &Outbound,
+    waiters: &mut ClientWaiters,
+    audit: &A,
+    taken: Taken,
+) -> Outbox {
+    let self_id = out.self_node().0;
+    assert!(
+        self_id == node.config().id.0,
+        "a batch is finished by the node that queued it"
+    );
+    assert!(
+        taken.writes.is_empty(),
+        "a batch is finished once its flush took its writes"
+    );
+    let Taken {
+        wrote,
+        messages,
+        committed,
+        read_states,
+        recovery_batch,
+        match_requests,
+        gc_requests,
+        gc_fence,
+        sent_prepare,
+        chosen_before,
+        ..
+    } = taken;
 
     if let Some(batch) = recovery_batch {
         report_recovery_batch(audit, self_id, batch, node.recovery_page());
@@ -319,11 +387,7 @@ where
     // keeps the durable writes and drops the batch's messages, so a
     // restarted node must re-derive them. Only meaningful when there is
     // durable work or a message to lose.
-    if !writes.is_empty()
-        || !messages.is_empty()
-        || !match_requests.is_empty()
-        || !gc_requests.is_empty()
-    {
+    if wrote || !messages.is_empty() || !match_requests.is_empty() || !gc_requests.is_empty() {
         let hinted = moonpool_buggify::hint!("batch durable, not sent");
         if hinted.strike() == Strike::Killed {
             moonpool_assertions::reachable!(
@@ -381,7 +445,7 @@ where
 
     // The next bounded Ready page is not released here: the caller releases it
     // (`advance_recovery`) once the reads parked at the tail and the overdue
-    // ones are answered from the fold this batch reported (`NodeLoop::settle`,
+    // ones are answered from the fold this batch reported (`NodeLoop::finish`,
     // #550 (replica serves an unreported fold page)).
     // The batch only ever moved the prefix forward.
     assert!(
@@ -389,11 +453,11 @@ where
         "a drained batch never rewinds the chosen index"
     );
 
-    Ok(Outbox {
+    Outbox {
         match_requests,
         gc_requests,
         gc_fence,
-    })
+    }
 }
 
 /// Send a batch's early half ([`split_early`]) before its flush, and return
