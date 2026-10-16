@@ -44,8 +44,9 @@ pub enum JournalOp {
         name: Vec<u8>,
         /// Who may write it (#241), fixed for its life.
         writer: WriterMode,
-        /// The desired mode: the coordinator picks the members.
-        desired: Desired,
+        /// The desired mode: the coordinator picks the members. `None`
+        /// takes the tenant's default (#214 (tenant modes)).
+        desired: Option<Desired>,
         /// Its first user tags (#575).
         tags: UserTags,
     },
@@ -60,6 +61,15 @@ pub enum JournalOp {
         name: Vec<u8>,
         /// Its user tags, all of them.
         tags: UserTags,
+    },
+    /// Change a desired mode (#214 (tenant modes)): of the live journal
+    /// named `name`, or the tenant's default when `None`. The coordinator
+    /// applies a journal's new mode by reconfiguration and placement.
+    Configure {
+        /// The journal's name; `None` for the tenant's default.
+        name: Option<Vec<u8>>,
+        /// The new mode.
+        desired: Desired,
     },
 }
 
@@ -88,15 +98,22 @@ impl JournalRequest {
             } => Op::Create(wire::CreateJournalOp {
                 name: name.clone(),
                 writer: writer_mode_to_proto(*writer).into(),
-                replicas: desired.replicas,
-                failures_per_partition: desired.durability.failures_per_partition,
-                partitions: desired.durability.partitions,
+                replicas: desired.map_or(0, |d| d.replicas),
+                failures_per_partition: desired.map_or(0, |d| d.durability.failures_per_partition),
+                // 0: the tenant's default.
+                partitions: desired.map_or(0, |d| d.durability.partitions),
                 tags: tags.to_wire(),
             }),
             JournalOp::Delete { name } => Op::Delete(wire::DeleteJournalOp { name: name.clone() }),
             JournalOp::SetTags { name, tags } => Op::SetTags(wire::SetJournalTagsOp {
                 name: name.clone(),
                 tags: tags.to_wire(),
+            }),
+            JournalOp::Configure { name, desired } => Op::Configure(wire::ConfigureOp {
+                name: name.clone().unwrap_or_default(),
+                replicas: desired.replicas,
+                failures_per_partition: desired.durability.failures_per_partition,
+                partitions: desired.durability.partitions,
             }),
         };
         wire::JournalRequest {
@@ -125,11 +142,18 @@ impl JournalRequest {
             Op::Create(create) => JournalOp::Create {
                 name: create.name.clone(),
                 writer: writer_mode_from_proto(create.writer)?,
-                desired: Desired::from_wire(Some(crate::rpc::tenant::Desired {
-                    replicas: create.replicas,
-                    failures_per_partition: create.failures_per_partition,
-                    partitions: create.partitions,
-                }))?,
+                desired: if create.partitions == 0
+                    && create.failures_per_partition == 0
+                    && create.replicas == 0
+                {
+                    None
+                } else {
+                    Some(Desired::from_wire(Some(crate::rpc::tenant::Desired {
+                        replicas: create.replicas,
+                        failures_per_partition: create.failures_per_partition,
+                        partitions: create.partitions,
+                    }))?)
+                },
                 tags: UserTags::from_wire(create.tags.clone()).map_err(|_| "malformed tags")?,
             },
             Op::Delete(delete) => JournalOp::Delete {
@@ -139,11 +163,20 @@ impl JournalRequest {
                 name: set.name.clone(),
                 tags: UserTags::from_wire(set.tags.clone()).map_err(|_| "malformed tags")?,
             },
+            Op::Configure(configure) => JournalOp::Configure {
+                name: (!configure.name.is_empty()).then(|| configure.name.clone()),
+                desired: Desired::from_wire(Some(crate::rpc::tenant::Desired {
+                    replicas: configure.replicas,
+                    failures_per_partition: configure.failures_per_partition,
+                    partitions: configure.partitions,
+                }))?,
+            },
         };
-        let (JournalOp::Create { name, .. }
+        if let JournalOp::Create { name, .. }
         | JournalOp::Delete { name }
-        | JournalOp::SetTags { name, .. }) = &op;
-        if name.is_empty() {
+        | JournalOp::SetTags { name, .. } = &op
+            && name.is_empty()
+        {
             return Err("a journal has a name");
         }
         Ok(Self {
@@ -179,6 +212,13 @@ pub enum JournalAnswer {
         /// The live journal's id.
         id: JournalId,
     },
+    /// A desired mode is recorded (#214 (tenant modes)): the journal `id`'s,
+    /// or the tenant default's (`None`). The coordinator applies a journal's
+    /// mode afterwards.
+    Configured {
+        /// The journal, or `None` for the tenant's default.
+        id: Option<JournalId>,
+    },
     /// No live journal has the name.
     UnknownJournal,
     /// The cell hosts no such tenant.
@@ -212,6 +252,7 @@ impl JournalAnswer {
             JournalAnswer::Deleted { .. } => "deleted",
             JournalAnswer::Tagged { .. } => "tagged",
             JournalAnswer::NameTaken { .. } => "name_taken",
+            JournalAnswer::Configured { .. } => "configured",
             JournalAnswer::UnknownJournal => "unknown_journal",
             JournalAnswer::UnknownTenant => "unknown_tenant",
             JournalAnswer::Unplaceable => "unplaceable",
@@ -229,6 +270,7 @@ impl JournalAnswer {
             JournalAnswer::Deleted { id }
             | JournalAnswer::Tagged { id }
             | JournalAnswer::NameTaken { id } => (id.0, None),
+            JournalAnswer::Configured { id } => (id.map_or(0, |id| id.0), None),
             _ => (0, None),
         };
         wire::JournalRequestAck {
@@ -251,6 +293,9 @@ impl JournalAnswer {
             "deleted" if id.is_set() => JournalAnswer::Deleted { id },
             "tagged" if id.is_set() => JournalAnswer::Tagged { id },
             "name_taken" if id.is_set() => JournalAnswer::NameTaken { id },
+            "configured" => JournalAnswer::Configured {
+                id: id.is_set().then_some(id),
+            },
             "unknown_journal" => JournalAnswer::UnknownJournal,
             "unknown_tenant" => JournalAnswer::UnknownTenant,
             "unplaceable" => JournalAnswer::Unplaceable,
@@ -481,14 +526,60 @@ mod tests {
             op: JournalOp::Create {
                 name: b"orders".to_vec(),
                 writer: WriterMode::Multi,
-                desired: "failures-per-partition=0,partitions=3"
-                    .parse()
-                    .expect("a durability"),
+                desired: Some(
+                    "failures-per-partition=0,partitions=3"
+                        .parse()
+                        .expect("a durability"),
+                ),
                 tags: UserTags::parse(&["team:payments"]).expect("a tag"),
             },
         };
         let wire = request.to_wire();
         assert_eq!(JournalRequest::from_wire(&wire), Ok(request));
+        // A create that names no mode takes the tenant's default (#214).
+        let defaulted = JournalRequest {
+            request: 9,
+            tenant: TenantId(3),
+            op: JournalOp::Create {
+                name: b"events".to_vec(),
+                writer: WriterMode::Single,
+                desired: None,
+                tags: UserTags::none(),
+            },
+        };
+        assert_eq!(
+            JournalRequest::from_wire(&defaulted.to_wire()),
+            Ok(defaulted)
+        );
+        // A configure names a journal, or none for the tenant default.
+        for name in [Some(b"orders".to_vec()), None] {
+            let configure = JournalRequest {
+                request: 10,
+                tenant: TenantId(3),
+                op: JournalOp::Configure {
+                    name,
+                    desired: "failures-per-partition=2".parse().expect("a durability"),
+                },
+            };
+            assert_eq!(
+                JournalRequest::from_wire(&configure.to_wire()),
+                Ok(configure)
+            );
+        }
+        let mut no_partition = JournalRequest {
+            request: 11,
+            tenant: TenantId(3),
+            op: JournalOp::Configure {
+                name: None,
+                desired: Desired::DEFAULT,
+            },
+        }
+        .to_wire();
+        if let Some(crate::rpc::machine::journal_request::Op::Configure(op)) = &mut no_partition.op
+        {
+            op.partitions = 0;
+        }
+        assert!(JournalRequest::from_wire(&no_partition).is_err());
         let mut unset = wire.clone();
         unset.request = 0;
         assert!(JournalRequest::from_wire(&unset).is_err());

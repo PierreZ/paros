@@ -1130,13 +1130,7 @@ impl FleetOps {
             }
             return;
         }
-        if crate::machine::cell_lost(ctx.state()) {
-            // A majority of the founding members wiped after a vote named
-            // them (#246): no `init` forms the cell, and its control plane
-            // owes nothing.
-            assert_reachable!(
-                "machine: a run whose founding member was wiped during init ends without its cell"
-            );
+        if lost_cell(ctx) {
             return;
         }
         // The cell is learned again when its machines do not know the cached
@@ -1144,7 +1138,13 @@ impl FleetOps {
         let mut learned = None;
         let mut folds = None;
         let mut attempt = 0_u64;
-        while folds.is_none() && ctx.time().now() < deadline && !ctx.shutdown().is_cancelled() {
+        // A founding member wiped during the read may lose the cell too:
+        // the excuse above holds whenever the cell is lost, not only on entry.
+        while folds.is_none()
+            && ctx.time().now() < deadline
+            && !ctx.shutdown().is_cancelled()
+            && !crate::machine::cell_lost(ctx.state())
+        {
             if learned.is_none() {
                 learned = self.learn(ctx).await;
             }
@@ -1185,6 +1185,9 @@ impl FleetOps {
             }
         }
         if ctx.shutdown().is_cancelled() {
+            return;
+        }
+        if lost_cell(ctx) {
             return;
         }
         assert_always!(
@@ -1384,6 +1387,19 @@ fn no_tenant_mid_operation(directory: &FleetDirectory, cell: &Registry) {
             );
         }
     }
+}
+
+/// Whether the cell is lost: a majority of the founding members wiped
+/// after a vote named them (#246), so its control plane owes nothing. Asked
+/// again after the final read, since a wipe may land during it.
+fn lost_cell(ctx: &SimContext) -> bool {
+    let lost = crate::machine::cell_lost(ctx.state());
+    if lost {
+        assert_reachable!(
+            "machine: a run whose founding member was wiped during init ends without its cell"
+        );
+    }
+    lost
 }
 
 fn directory_equals_cell(directory: &FleetDirectory, cell: &Registry) {

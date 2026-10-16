@@ -198,9 +198,19 @@ impl CallObserver for CallLog {
     }
 
     fn resolved(&self, token: u64, report: &ResolveReport) {
-        if !matches!(report.resolution, Resolution::NotWritten { .. }) {
-            return;
-        }
+        // A write a read-back alone proved written is a claim the history
+        // judges (#564): the write in the journal at its position, as a
+        // re-send answered from the log would be. A write a re-send proved
+        // written is that re-send's own answer, logged already.
+        let seen = match report.resolution {
+            Resolution::NotWritten { .. } => Seen::NotWritten,
+            Resolution::Written { seq, count } if report.by_read_back => Seen::Written {
+                seq,
+                count,
+                duplicate: true,
+            },
+            _ => return,
+        };
         let Some((call, started)) = usize::try_from(token).ok().and_then(|id| {
             self.settling
                 .lock()
@@ -210,9 +220,11 @@ impl CallObserver for CallLog {
         }) else {
             return;
         };
-        assert_reachable!("client: resolve proves a write not written");
-        if !report.by_read_back {
-            assert_reachable!("client: a re-send proves a write not written");
+        if seen == Seen::NotWritten {
+            assert_reachable!("client: resolve proves a write not written");
+            if !report.by_read_back {
+                assert_reachable!("client: a re-send proves a write not written");
+            }
         }
         let now = self.now();
         self.attempts
@@ -222,7 +234,7 @@ impl CallObserver for CallLog {
                 client: self.client,
                 inv: started,
                 call,
-                seen: Some((now.max(started), Seen::NotWritten)),
+                seen: Some((now.max(started), seen)),
             });
     }
 }

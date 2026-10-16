@@ -69,6 +69,7 @@ mod formed;
 mod lifecycle;
 pub mod load;
 mod matchmakers;
+mod modes;
 mod moves;
 mod pin;
 mod record;

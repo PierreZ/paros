@@ -121,7 +121,13 @@ Retries are answered from the log itself: a `Write` with `expected_seq < next_se
 the write accepted at that `seq` — the same leader uuid and batch — is an idempotent ack;
 anything else is refused. A retry whose `expected_seq < first_seq` is answered `Truncated`, and
 the leader treats it as ambiguous and reads the tail. The log is the deduplication table: there
-is no per-client session ledger and nothing to expire. One slot holds one single-writer `Write`;
+is no per-client session ledger and nothing to expire. The client settles an ambiguous `Write`
+with a read-back before each identical re-send (`Client::resolve`): a position below the floor is
+`Truncated`; a tail short of it under another leader proves it not written; a page that holds
+exactly the batch at its position, ending at the tail, while the journal's leader is still the
+write's uuid, at or above a position where the writer saw that uuid lead (`Writer::led_from`),
+proves it written (decided on 2026-10-15, #564), so a client whose deadline is shorter than the
+commit path still settles. Both proofs rest on fresh uuids (§2.3). One slot holds one single-writer `Write`;
 a single-writer journal batches in its client (`paros::client::Writer`), never in a batcher.
 
 A leader may refuse a `Write` from its own fold at propose time, so a superseded leader's
@@ -1083,13 +1089,47 @@ copies; in paros each acceptor stores a copy, so `double` stored three. The new 
 - **The writer mode flag** is `--writers single|multi` (it was `--mode`), so `single` never
   stands beside the durability flags. The type stays `WriterMode`.
 - **A tenant's matchmaker set** has `2F+1` matchmakers, `F` the largest `failures-per-partition`
-  of the tenant (its default and every journal); `partitions` plays no part, since the set stores
-  configurations, not slots. Today the set keeps its birth size of 3, which caps a journal's
-  election and GC at one matchmaker failure; the tenant coordinator grows or shrinks the set by
-  handover with #214 (tenant modes).
+  of the tenant (its default and every live journal, at least 1 for its control journal), on at
+  most every storage machine; `partitions` plays no part, since the set stores configurations,
+  not slots. The tenant coordinator grows or shrinks the set by handover (landed with #214
+  (tenant modes), `machine/sets.rs`): it books the slots a larger set lacks, or hands a smaller
+  set over onto the slots placement keeps and releases the others once it is in force.
 - **Flexible quorums** (`QuorumSystem::Flexible`) stay core- and simulation-only; the CLI does
   not expose them. Changing a live journal's durability is an ordinary reconfiguration through
   `configure` (#214).
+
+*Landed* (#214 (tenant modes), 2026-10-15): `configure` for a journal's durability and the
+tenant's default.
+
+- **The request.** `parosctl configure --tenant t [--journal j] [--failures-per-partition F]
+  [--partitions P] [--replicas R]` sends a `JournalRequest` with a `ConfigureOp`
+  (`paros::client::journals::JournalOp::Configure`) and an idempotency id. The tenant
+  coordinator judges whether the cell can place the mode now (as many storage machines as a
+  grid needs, a free slot for each new acceptor: `paros::placement::plan`), and writes
+  `Configure` to the tenant's control journal, or records the refusal (`Unplaceable` with no
+  name, so a retry reads it back). The fold changes the journal's `desired`, or the tenant's
+  default, which a create that names no mode takes (`partitions` 0 on the wire). The answer
+  `configured` says the mode is recorded, not in force. The writer mode never changes.
+- **The application** (`machine/modes.rs`). At each watch round, after the move step, the
+  coordinator takes one step of one journal whose recorded placement (`TenantJournal::placed`,
+  the create's configuration until a `Placed` entry) is not its desired shape on exactly its
+  slots: book the slots the mode lacks; ask the leader to reconfigure onto the new members under
+  the new quorum system (a smaller mode keeps the slots placement does not release); once in
+  force, write `Placed` with the configuration in force, then, once the leader's GC watermark
+  reached it, release the slots of the members it left. It retires none, unlike a move: the
+  machine stays bookable, and a later mode may place the journal on it again, where a retired
+  identity never comes back. A journal with a slot on a draining machine is the move's until the move is done. One acceptor partition is a majority
+  over at most every storage machine, so a mode the cell grew into is applied later. Each step
+  starts from what the registry, the tenant control journal and the leader hold, so a later
+  term finishes a change an earlier one started. The create's configuration stays the journal's
+  bootstrap configuration for life; views show `placed`.
+- **The simulation.** `CREATE_JOURNAL` sends a configure on a BUGGIFY decision (a journal of
+  the tenant or its default, a durability from the default to four acceptor partitions), and a
+  create names no mode on one draw in four. Oracles: a refused configure records `Unplaceable`
+  and no new mode, a configured journal is one its tenant created before, a placement is recorded
+  only for a journal created before, and the placed members hold their slots after chaos.
+- **Still to do.** Role counts (`frontends=`, `proxy_leaders=`, `batchers=`, `replicas=`)
+  are recorded (`replicas`) but not applied: the cell does not place those roles yet.
 
 **`failures-per-partition=0` survives no zone** (decided on 2026-10-07, #215): a majority over one
 acceptor cannot meet the zone rule of section 5. It stays a mode without zone survival, for
@@ -2440,7 +2480,8 @@ AGENTS.md.
   one store per journal, demuxed by `JournalIdentifier`. A node whose `Config::proxy_count`
   differs from its peers' (a rolling change of the count) changes which proxy runs a round, or
   makes the leader take the round back, never what is chosen; the simulation draws such nodes
-  per seed. The counts stay boot data until the tenant coordinator applies them (#214).
+  per seed. The counts stay boot data until the cell places those roles; #214 (tenant modes)
+  applies the durability only.
 - The coordinators replace the operator's client (#212): admin calls become requests to the
   elected coordinator. Since #240, `parosctl init` no longer claims the cell control journal: the
   elected cell coordinator installs its uuid there. Since #513 and #225, no fleet operation

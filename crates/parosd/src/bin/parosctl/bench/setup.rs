@@ -101,7 +101,7 @@ pub async fn journals(
     runtime: &Runtime,
     client: &ParosClient,
     (tenant_name, tenant): (&str, TenantId),
-    (count, desired): (usize, Desired),
+    (count, desired): (usize, Option<Desired>),
     patience: Duration,
 ) -> Result<Vec<Journal>, String> {
     let cell = control_journals(client)

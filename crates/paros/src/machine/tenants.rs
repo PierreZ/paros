@@ -71,7 +71,9 @@ use crate::placement::{self, Shortfall, Step, Want};
 use crate::system::{
     Booking, BookingTarget, GrantKey, NodeStanding, Registry, Role, SystemCommand,
 };
-use crate::tenant::{Description, Desired, RequestOutcome, TenantCommand, TenantControl};
+use crate::tenant::{
+    ConfigureTarget, Description, Desired, RequestOutcome, TenantCommand, TenantControl,
+};
 
 /// What `HostTenant` records of a tenant: its control journal, its name and
 /// what it survives.
@@ -254,7 +256,15 @@ impl TenantDesk {
                 desired,
                 tags,
             } => {
-                self.create(client, request, (name, *writer, *desired), tags, cell)
+                // A create that names no mode takes the tenant's default
+                // (#214 (tenant modes)).
+                let desired =
+                    desired.unwrap_or_else(|| self.desk(request.tenant).state().default_desired());
+                self.create(client, request, (name, *writer, desired), tags, cell)
+                    .await
+            }
+            JournalOp::Configure { name, desired } => {
+                self.configure(client, request, name.as_deref(), *desired, cell)
                     .await
             }
             JournalOp::SetTags { name, tags } => {
@@ -341,14 +351,7 @@ impl TenantDesk {
             storage.len() >= self.founders.len(),
             "every founding member stores"
         );
-        let wanted = desired.acceptors();
-        // One partition is a majority: it takes at most every storage
-        // machine. More partitions lay out a grid that needs all its cells.
-        let count = if desired.durability.partitions == 1 {
-            wanted.max(1).min(storage.len())
-        } else {
-            wanted
-        };
+        let count = placed_count(&desired, storage.len());
         if count > storage.len() {
             moonpool_assertions::reachable!("tenant coordinator: a create is unplaceable");
             return self.refuse(client, request, name).await;
@@ -439,6 +442,141 @@ impl TenantDesk {
         JournalAnswer::Unavailable
     }
 
+    /// A configure (#214 (tenant modes)): record a new desired mode for the
+    /// live journal `name` names, or for the tenant's default when `None`.
+    /// A mode the cell cannot place now is refused and the refusal recorded
+    /// (`Unplaceable` with no name), so it changes nothing and a retry reads
+    /// it back; the coordinator's watch applies a recorded mode
+    /// ([`super::modes`]).
+    async fn configure<P: Providers>(
+        &mut self,
+        client: &Client<P>,
+        request: &JournalRequest,
+        name: Option<&[u8]>,
+        desired: Desired,
+        cell: Option<&mut CellSession>,
+    ) -> JournalAnswer {
+        let tenant = request.tenant;
+        let Some(cell) = cell else {
+            // The term's cell session ended: no placement can be judged.
+            return JournalAnswer::Unavailable;
+        };
+        let target = match name {
+            None => ConfigureTarget::TenantDefault,
+            // A name no live journal holds is recorded `UnknownJournal`.
+            Some(name) => ConfigureTarget::Journal(
+                self.desk(tenant)
+                    .state()
+                    .named(name)
+                    .unwrap_or(JournalId(0)),
+            ),
+        };
+        let storage = self.storage(cell.registry());
+        // The machines placement may book, as the mode change counts them
+        // ([`super::modes`]): a mode wider than those never lands.
+        let eligible = placement::machines(cell.registry(), storage.iter().copied()).len();
+        let count = placed_count(&desired, eligible);
+        if count > eligible {
+            moonpool_assertions::reachable!(
+                "tenant coordinator: a configure too wide for the cell is refused"
+            );
+            return self.refuse(client, request, &[]).await;
+        }
+        if let ConfigureTarget::Journal(id) = target
+            && id.is_set()
+        {
+            let journal = JournalIdentifier::new(tenant, id);
+            let want = Want {
+                role: Role::Acceptor,
+                target: BookingTarget::Journal(journal),
+                count,
+            };
+            let machines = placement::machines(cell.registry(), storage.iter().copied());
+            let current: Vec<(u64, Booking)> = cell
+                .registry()
+                .bookings()
+                .filter(|(_, b)| b.role == Role::Acceptor && b.target == want.target)
+                .map(|(id, b)| (id, *b))
+                .collect();
+            match placement::plan(&want, &machines, &current, tenant.0) {
+                Ok(_) => {}
+                Err(Shortfall::Capacity { .. }) => {
+                    moonpool_assertions::reachable!(
+                        "tenant coordinator: a configure refused for want of slots"
+                    );
+                    return self.refuse(client, request, &[]).await;
+                }
+                Err(Shortfall::Machines { .. }) => return JournalAnswer::Unavailable,
+            }
+        }
+        let command = TenantCommand::Configure {
+            request: request.request,
+            target,
+            desired,
+        };
+        if let Err(answer) = self.append(client, tenant, &command).await {
+            return answer;
+        }
+        match self.desk(tenant).state().outcome(request.request) {
+            Some(outcome) => {
+                moonpool_assertions::reachable!("tenant coordinator: a configure is recorded");
+                self.answer_of(tenant, outcome)
+            }
+            None => JournalAnswer::Unavailable,
+        }
+    }
+
+    /// The fold of `tenant`'s control journal `control`, claimed under the
+    /// term's uuid and folded to its tail first when the desk does not hold
+    /// it yet: the coordinator's watch reads a tenant's desired modes here
+    /// ([`super::modes`], [`super::sets`]).
+    ///
+    /// # Errors
+    ///
+    /// `NotCoordinator` once a later term fenced the journal (the desk is
+    /// then superseded), `Unavailable` when it could not be claimed or read.
+    pub(super) async fn tenant<P: Providers>(
+        &mut self,
+        client: &Client<P>,
+        tenant: TenantId,
+        control: JournalId,
+    ) -> Result<&TenantControl, JournalAnswer> {
+        if self.superseded {
+            return Err(JournalAnswer::NotCoordinator);
+        }
+        if let Err(answer) = self.open(client, tenant, control).await {
+            if matches!(answer, JournalAnswer::NotCoordinator) {
+                self.superseded = true;
+                self.tenants.clear();
+            }
+            return Err(answer);
+        }
+        Ok(self.desk(tenant).state())
+    }
+
+    /// Record `config` as journal `id`'s configuration in force in
+    /// `tenant`'s control journal, once the watch applied its desired mode
+    /// (#214 (tenant modes)).
+    ///
+    /// # Errors
+    ///
+    /// The write did not land, or a later term fenced the journal.
+    pub(super) async fn record_placed<P: Providers>(
+        &mut self,
+        client: &Client<P>,
+        tenant: TenantId,
+        id: JournalId,
+        config: AcceptorConfig,
+    ) -> Result<(), JournalAnswer> {
+        let command = TenantCommand::Placed { id, config };
+        let written = self.append(client, tenant, &command).await;
+        if matches!(written, Err(JournalAnswer::NotCoordinator)) {
+            self.superseded = true;
+            self.tenants.clear();
+        }
+        written
+    }
+
     /// The cell's storage machines a create may be placed on (#474): the
     /// founding members, registered or not, and every registered machine
     /// whose class stores. A draining or retired machine takes no new
@@ -494,7 +632,8 @@ impl TenantDesk {
 
     /// Record `request`, a create of `name`, as unplaceable (or name taken,
     /// when a live journal holds the name), and answer what the fold
-    /// recorded.
+    /// recorded. A configure's refusal names no journal: no live journal
+    /// holds the empty name.
     async fn refuse<P: Providers>(
         &mut self,
         client: &Client<P>,
@@ -810,7 +949,22 @@ impl TenantDesk {
             RequestOutcome::NameTaken(id) => JournalAnswer::NameTaken { id },
             RequestOutcome::UnknownJournal => JournalAnswer::UnknownJournal,
             RequestOutcome::Unplaceable => JournalAnswer::Unplaceable,
+            RequestOutcome::Configured(id) => JournalAnswer::Configured { id },
         }
+    }
+}
+
+/// How many acceptors a journal under `desired` is placed on, in a cell of
+/// `storage` storage machines (#212 (placement), #214 (tenant modes)): one
+/// acceptor partition is a majority, so it takes at most every storage
+/// machine; more acceptor partitions lay out a grid that needs all its
+/// acceptors.
+pub(crate) fn placed_count(desired: &Desired, storage: usize) -> usize {
+    let wanted = desired.acceptors();
+    if desired.durability.partitions == 1 {
+        wanted.max(1).min(storage)
+    } else {
+        wanted
     }
 }
 

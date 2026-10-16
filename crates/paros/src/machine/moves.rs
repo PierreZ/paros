@@ -109,7 +109,7 @@ fn next_move(
 
 /// The first of the `count` servers of `nodes` that answers an `Inspect` of
 /// `journal` as its leader, with its answer.
-async fn leader_of<P: Providers>(
+pub(super) async fn leader_of<P: Providers>(
     nodes: &Client<P>,
     count: usize,
     journal: JournalIdentifier,
@@ -127,7 +127,7 @@ async fn leader_of<P: Providers>(
 /// Retire the old member at server `index` of `nodes` from `journal`, with
 /// the GC watermark of the leader's answer `reply` as its evidence. Its
 /// answer changes nothing: the watermark already proves it is forgotten.
-async fn retire<P: Providers>(
+pub(super) async fn retire<P: Providers>(
     nodes: &Client<P>,
     index: Option<usize>,
     journal: JournalIdentifier,
@@ -163,7 +163,7 @@ async fn live<P: Providers>(
 }
 
 /// Whether ballot `a` is at or above ballot `b`.
-fn at_or_above(a: Option<&Ballot>, b: Option<&Ballot>) -> bool {
+pub(super) fn at_or_above(a: Option<&Ballot>, b: Option<&Ballot>) -> bool {
     let key = |ballot: &Ballot| (ballot.round, ballot.node);
     match (a, b) {
         (Some(a), Some(b)) => key(a) >= key(b),

@@ -294,14 +294,15 @@ pub enum Resolution {
     Unresolved,
 }
 
-/// What [`Client::resolve`] did: the resolution, and whether the read-back
-/// settled it on its own (without an identical re-send).
+/// What [`Client::resolve`] did: the resolution, and whether a read-back
+/// settled it on its own (without an identical re-send answering).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResolveReport {
     /// What the write resolved to.
     pub resolution: Resolution,
-    /// The read-back answered on its own: the write was fenced before the
-    /// journal reached its position.
+    /// A read-back answered on its own: the position is below the floor,
+    /// the write was fenced before the journal reached its position, or the
+    /// position holds exactly the write under its leader (#564).
     pub by_read_back: bool,
 }
 
@@ -796,61 +797,60 @@ impl<P: Providers> Client<P> {
 
     /// Settle a write whose answer never came. First read the position
     /// back: a journal whose tail has not reached it under another leader
-    /// proves the write fenced for good. Otherwise re-send the
+    /// proves the write fenced for good, and a page that holds exactly the
+    /// write at the tail under its leader, at or above `led_from`, proves it
+    /// written (#564). Otherwise re-send the
     /// identical write — the journal answers a write it holds from the log
     /// (`Duplicate`) and refuses one whose position another write took —
-    /// up to `retry_budget` times, `retry_backoff` apart.
+    /// up to `retry_budget` times, `retry_backoff` apart, each after a new
+    /// read-back.
     ///
     /// The observer hears the settlement ([`CallObserver::resolving`],
     /// [`CallObserver::resolved`]): a write resolved not written is one a
     /// history checker holds to never landing in the leadership it was
     /// sent under (#444).
+    ///
+    /// `led_from` is a position from which the caller knows the request's
+    /// uuid leads: the `next_seq` of a view that named it the leader
+    /// ([`Writer::led_from`]). Only with it, and only for a request at or
+    /// above it, does a read-back prove the write written; `None` leaves
+    /// that proof to the re-sends.
     pub async fn resolve(
         &self,
         request: &Write,
         first: usize,
         retarget: Retarget,
+        led_from: Option<u64>,
     ) -> ResolveReport {
         let token = self.observer.resolving(request);
-        let report = self.settle(request, first, retarget).await;
+        let report = self.settle(request, first, retarget, led_from).await;
         if let Some(token) = token {
             self.observer.resolved(token, &report);
         }
         report
     }
 
-    /// [`Client::resolve`]'s read-back and re-sends.
-    async fn settle(&self, request: &Write, first: usize, retarget: Retarget) -> ResolveReport {
-        let count = request.records.len() as u64;
-        let leader = leader_uuid_from_proto(request.leader);
-        let back = self
-            .read_any(
-                &Read {
-                    journal: request.journal,
-                    tenant: request.tenant,
-                    from_seq: request.seq,
-                    limit: count.max(1),
-                    wait_ms: 0,
-                },
-                first,
-            )
-            .await;
-        if let Some(state) = back.outcome.state() {
-            if state.first_seq.0 > request.seq {
-                return ResolveReport {
-                    resolution: Resolution::Truncated { state },
-                    by_read_back: true,
-                };
-            }
-            if state.next_seq.0 <= request.seq && state.leader != Some(leader) {
-                return ResolveReport {
-                    resolution: Resolution::NotWritten { state },
-                    by_read_back: true,
-                };
-            }
-        }
+    /// [`Client::resolve`]'s read-backs and re-sends: a read-back before
+    /// every re-send, so a first attempt that lands while the re-sends
+    /// time out still settles (#564).
+    async fn settle(
+        &self,
+        request: &Write,
+        first: usize,
+        retarget: Retarget,
+        led_from: Option<u64>,
+    ) -> ResolveReport {
         let mut server = first;
-        for _ in 0..self.tunables.retry_budget.max(1) {
+        for attempt in 0..self.tunables.retry_budget.max(1) {
+            if let Some(resolution) = self
+                .read_back(request, server, led_from, attempt == 0)
+                .await
+            {
+                return ResolveReport {
+                    resolution,
+                    by_read_back: true,
+                };
+            }
             let report = self
                 .write(
                     request,
@@ -862,6 +862,7 @@ impl<P: Providers> Client<P> {
                 )
                 .await;
             server = report.server;
+            let leader = leader_uuid_from_proto(request.leader);
             let resolution = match report.outcome {
                 WriteOutcome::Written { seq, count, .. } => Resolution::Written { seq, count },
                 WriteOutcome::Truncated { state } => Resolution::Truncated { state },
@@ -904,6 +905,85 @@ impl<P: Providers> Client<P> {
             resolution: Resolution::Unresolved,
             by_read_back: false,
         }
+    }
+
+    /// Read `request`'s position back, from server `first` on, and settle
+    /// it when the page proves its fate; `None` when it does not.
+    ///
+    /// - Below the journal's floor: [`Resolution::Truncated`].
+    /// - Not reached under another leader: [`Resolution::NotWritten`], for
+    ///   good, since the fenced uuid never leads again.
+    /// - Exactly the request's records at its position, at or above
+    ///   `led_from`, ending at the journal's tail, read while the journal's
+    ///   leader is still the request's uuid: [`Resolution::Written`]
+    ///   (#564). The uuid led from `led_from` and leads still, and a uuid
+    ///   never leads twice, so every position from `led_from` on was
+    ///   written under it. A page shows no batch boundaries, so the tail
+    ///   bounds the batch: nothing follows the records, so the journal
+    ///   holds a write with this uuid and exactly these records at this
+    ///   position, one the journal itself answers as this write
+    ///   (`Duplicate`). A re-send
+    ///   would take a new slot that may time out like the first attempt,
+    ///   so without this a client whose deadline is shorter than the commit
+    ///   path never settles. The bytes alone prove nothing (two writers'
+    ///   one-byte records are equal), nor does the leader alone: a request
+    ///   below `led_from` can find a predecessor's identical bytes (a
+    ///   writer that wrote before its claim's answer came back, hunt seed
+    ///   10942456551287199571). The position, the length, the records, the
+    ///   leader, the tail and `led_from` must all match.
+    ///
+    /// Both proofs rest on fresh uuids, the precondition the journal
+    /// already trusts its clients with (`docs/architecture.md` §2.3).
+    ///
+    /// The first read-back walks the server list ([`Client::read_any`]); a
+    /// later one, before each further re-send, asks `first` alone within
+    /// `read_timeout`, so the read-backs add at most one read timeout per
+    /// re-send to a resolve.
+    async fn read_back(
+        &self,
+        request: &Write,
+        first: usize,
+        led_from: Option<u64>,
+        whole: bool,
+    ) -> Option<Resolution> {
+        let count = request.records.len() as u64;
+        let leader = leader_uuid_from_proto(request.leader);
+        let read = Read {
+            journal: request.journal,
+            tenant: request.tenant,
+            from_seq: request.seq,
+            limit: count.max(1),
+            wait_ms: 0,
+        };
+        let back = if whole {
+            self.read_any(&read, first).await.outcome
+        } else {
+            let attempt = self.read_attempt(first % self.servers.len(), read);
+            self.bounded(self.tunables.read_timeout, ReadOutcome::Ambiguous, attempt)
+                .await
+        };
+        let state = back.state()?;
+        if state.first_seq.0 > request.seq {
+            return Some(Resolution::Truncated { state });
+        }
+        if state.next_seq.0 <= request.seq && state.leader != Some(leader) {
+            return Some(Resolution::NotWritten { state });
+        }
+        if let ReadOutcome::Page { from, records, .. } = &back
+            && count > 0
+            && led_from.is_some_and(|from| from <= request.seq)
+            && *from == request.seq
+            && state.next_seq.0 == request.seq + count
+            && state.leader == Some(leader)
+            && records.len() as u64 == count
+            && *records == request.records
+        {
+            return Some(Resolution::Written {
+                seq: request.seq,
+                count,
+            });
+        }
+        None
     }
 
     /// Read `request`, starting at server `first` and moving on through the

@@ -817,6 +817,9 @@ struct Registry {
     /// Run-level: whether the run draws the handoff-storm scenario (see
     /// [`handoff_storm`]), fixed by the first caller.
     handoff_storm: Option<bool>,
+    /// Run-level: whether the run draws the wide-grid scenario (see
+    /// [`wide_grid`]), fixed by the first caller.
+    wide_grid: Option<bool>,
     /// Run-level: whether the run draws the moved-founder scenario (see
     /// [`moved_founder`]), fixed by the first caller.
     moved_founder: Option<bool>,
@@ -829,6 +832,9 @@ struct Registry {
     /// Run-level: whether the run draws the drained-machine scenario (see
     /// [`drained_machine`]), fixed by the first caller.
     drained_machine: Option<bool>,
+    /// Run-level: whether the run draws the changed-mode scenario (see
+    /// [`changed_mode`]), fixed by the first caller.
+    changed_mode: Option<bool>,
     /// Run-level: whether the run draws the slow-link scenario (see
     /// [`slow_link`]), fixed by the first caller.
     slow_link: Option<bool>,
@@ -1267,6 +1273,31 @@ pub(crate) fn drained_machine(state: &StateHandle) -> bool {
         .get_or_insert_with(|| !other && moonpool_sim::buggify_with_prob!(1.0))
 }
 
+/// Whether the run draws the **changed-mode scenario** (#214 (tenant
+/// modes)): drawn once per seed, its own BUGGIFY location, never on a
+/// drained-machine seed (that one founds the cell on one member). A mode
+/// change needs a tenant journal, a configure that names it, and a cell of
+/// three storage machines or more, where a mode can change the journal's
+/// slots or its quorum system. Each is a coin on its own: on a cell of one,
+/// every mode places the same one slot. In 300 hunt seeds without the
+/// scenario, a mode change reconfigured a journal on 0 to 6 seeds. On a
+/// scenario seed the layout lists three founders or more where the machines
+/// allow it ([`machine_layout`]), client 0 runs `init` first, every client
+/// runs `TENANT` and `CREATE_JOURNAL` as often as the weight family allows
+/// at the steps knob's top, and half the journal creates are configures
+/// (`crate::chain_workload`). Each ingredient keeps its own coin on the
+/// other seeds. Rare-but-valid: an operator may configure at any time.
+#[tracing::instrument(level = "debug", skip_all)]
+pub(crate) fn changed_mode(state: &StateHandle) -> bool {
+    // Drawn before the lock: the scenarios take the registry's lock too.
+    let drained = drained_machine(state);
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    *guard
+        .changed_mode
+        .get_or_insert_with(|| !drained && moonpool_sim::buggify_with_prob!(1.0))
+}
+
 /// Whether the run draws the **silent-machine scenario** (#211): drawn once
 /// per seed, its own BUGGIFY location. The cell coordinator marks a machine
 /// down only when it is silent past `machine_down_after`, while a
@@ -1440,6 +1471,30 @@ pub(crate) fn stalled_proxy(state: &StateHandle) -> bool {
         moonpool_sim::set_activation(paros::scenario::STALL_PROXY, stall);
         moonpool_sim::set_activation(paros::scenario::RESIGN_DELEGATING, stall);
         stall
+    })
+}
+
+/// Whether the run draws the **wide-grid scenario** (#533 (move a stuck
+/// round)): drawn once per seed, its own BUGGIFY location. A stuck grid
+/// round skips a column only on a grid of three columns or more, which the
+/// pool tiles only at six acceptors (`2 × 3`), and only once the grid knob
+/// and the layout pick both line up: the gate "grid: the driver skips a
+/// column when it moves a round" fired 57 times in 500 hunt seeds and never
+/// in the CI sweep's 400. On a scenario seed `quorum_policy` runs the
+/// widest grid of three columns or more the pool tiles, with full columns,
+/// and every node moves a stuck round after 1 to 3 re-sends (the
+/// `partition_move_resends` extreme). Each ingredient keeps its own coin on the other seeds.
+/// Rare-but-valid: both are configurations an operator may choose.
+#[tracing::instrument(level = "debug", skip_all)]
+pub(crate) fn wide_grid(state: &StateHandle) -> bool {
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    *guard.wide_grid.get_or_insert_with(|| {
+        let wide = moonpool_sim::buggify_with_prob!(0.5);
+        if wide {
+            assert_reachable!("a run draws the wide-grid scenario");
+        }
+        wide
     })
 }
 
@@ -1813,6 +1868,7 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
     let replaced = replaced_founder(state);
     let downed = downed_founder(state);
     let drained = drained_machine(state);
+    let changed = changed_mode(state);
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     guard
@@ -1826,7 +1882,9 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
             // 58. The downed-founder scenario (#213 (three founding
             // members)) holds one founder down: the others keep a majority
             // only in a cell of three or more.
-            let least = if (replaced || moved || downed) && count >= 3 {
+            // So does the changed-mode scenario (#214 (tenant modes)): on a
+            // cell of one, every mode places the same one slot.
+            let least = if (replaced || moved || downed || changed) && count >= 3 {
                 3
             } else {
                 1
@@ -2024,6 +2082,7 @@ pub(crate) fn boot(state: &StateHandle, ip: &str) -> Incarnation {
     // Drawn before the lock: the scenarios take the registry's lock too.
     let slow_machine = slow_machine(state);
     let moved_founder = moved_founder(state);
+    let wide_grid = wide_grid(state);
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     let entry = guard.nodes.entry(ip.to_string()).or_insert_with(|| {
@@ -2040,6 +2099,11 @@ pub(crate) fn boot(state: &StateHandle, ip: &str) -> Incarnation {
             // cache that follows the move inside its window: at the drawn
             // period it struck on 1 of 22 moves in 1,000 hunt seeds.
             renew_at_floor(&mut shape.tunables);
+        }
+        if wide_grid {
+            // The wide-grid scenario: a stuck round moves after 1 to 3
+            // re-sends, the knob's extreme.
+            shape.tunables.partition_move_resends = moonpool_sim::sim_random_range(1_u64..4);
         }
         Entry {
             shape,
@@ -2078,6 +2142,7 @@ pub(crate) fn boot(state: &StateHandle, ip: &str) -> Incarnation {
 pub(crate) fn quorum_policy(state: &StateHandle, pool: usize) -> QuorumPolicy {
     let stalled = stalled_proxy(state);
     let slow = slow_link(state);
+    let wide = wide_grid(state);
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     *guard.quorum.get_or_insert_with(|| {
@@ -2096,6 +2161,27 @@ pub(crate) fn quorum_policy(state: &StateHandle, pool: usize) -> QuorumPolicy {
                 rows,
                 cols,
                 slack: grid_slack(),
+            };
+        }
+        // The wide-grid scenario (#533 (move a stuck round)) runs the
+        // widest grid of three columns or more, so a stuck round may skip
+        // a column. Never on a slow-link seed, which reads from every
+        // acceptor.
+        let widest = layouts
+            .iter()
+            .filter(|(_, cols)| *cols >= 3)
+            .max_by_key(|(_, cols)| *cols);
+        if wide
+            && !slow
+            && let Some(&(rows, cols)) = widest
+        {
+            assert_reachable!("a run draws an acceptor grid");
+            // Full columns: a column with one acceptor down holds its
+            // rounds until they move.
+            return QuorumPolicy::Grid {
+                rows,
+                cols,
+                slack: 0,
             };
         }
         let q2 = buggify_knob!(majority, 1_usize..(pool / 2 + 1));

@@ -103,6 +103,19 @@ pub(crate) fn lock(board: &Mutex<TenantBoard>) -> MutexGuard<'_, TenantBoard> {
 }
 
 impl TenantBoard {
+    /// #575 (key:value tags): a tag request names a live journal the
+    /// tenant created before; a tag changes no outcome.
+    fn tagged(&mut self, control: JournalIdentifier, request: u64, id: JournalId, lsn: u64) {
+        let journal = JournalIdentifier::new(control.tenant, id);
+        assert_always!(
+            self.created.get(&journal).is_some_and(|at| *at < lsn)
+                && self.deleted.get(&journal).is_none_or(|at| *at > lsn),
+            "tenant: a tagged journal is a live one the tenant created before",
+            { "lsn" => lsn }
+        );
+        self.answered(control, request, RequestOutcome::Tagged(id), lsn);
+    }
+
     /// `node` folded LSN `lsn` of tenant control journal `control` to
     /// `event`.
     #[tracing::instrument(level = "trace", skip(self, event), fields(node = node.0, journal = %control, lsn))]
@@ -150,18 +163,7 @@ impl TenantBoard {
                 self.deleted.entry(journal).or_insert(lsn);
                 self.answered(control, *request, RequestOutcome::Deleted(*id), lsn);
             }
-            TenantEvent::Tagged { request, id } => {
-                // #575 (key:value tags): a tag request names a live journal
-                // the tenant created before; a tag changes no outcome.
-                let journal = JournalIdentifier::new(control.tenant, *id);
-                assert_always!(
-                    self.created.get(&journal).is_some_and(|at| *at < lsn)
-                        && self.deleted.get(&journal).is_none_or(|at| *at > lsn),
-                    "tenant: a tagged journal is a live one the tenant created before",
-                    { "lsn" => lsn }
-                );
-                self.answered(control, *request, RequestOutcome::Tagged(*id), lsn);
-            }
+            TenantEvent::Tagged { request, id } => self.tagged(control, *request, *id, lsn),
             TenantEvent::Answered { request, outcome } => {
                 if let RequestOutcome::NameTaken(winner) = outcome {
                     let winner = JournalIdentifier::new(control.tenant, *winner);
@@ -192,9 +194,37 @@ impl TenantBoard {
                 );
                 self.id_taken = true;
             }
+            TenantEvent::Configured { request, id, .. } => {
+                // A journal's mode changes only for a journal its tenant
+                // created before (#214 (tenant modes)).
+                if let Some(id) = id {
+                    let journal = JournalIdentifier::new(control.tenant, *id);
+                    assert_always!(
+                        self.created.get(&journal).is_some_and(|at| *at < lsn),
+                        "tenant: a configured journal is one the tenant created before",
+                        { "lsn" => lsn }
+                    );
+                    assert_reachable!("tenant: a journal's desired mode is configured");
+                } else {
+                    assert_reachable!("tenant: a tenant's default mode is configured");
+                }
+                self.answered(control, *request, RequestOutcome::Configured(*id), lsn);
+            }
+            TenantEvent::Placed { id } => {
+                let journal = JournalIdentifier::new(control.tenant, *id);
+                assert_always!(
+                    self.created.get(&journal).is_some_and(|at| *at < lsn),
+                    "tenant: a placement is recorded only for a journal created before",
+                    { "lsn" => lsn }
+                );
+            }
             TenantEvent::Described
             | TenantEvent::Checkpoint { .. }
-            | TenantEvent::Refused(TenantRefusal::Malformed | TenantRefusal::Redescribed) => {}
+            | TenantEvent::Refused(
+                TenantRefusal::Malformed
+                | TenantRefusal::Redescribed
+                | TenantRefusal::NotPlaceable { .. },
+            ) => {}
         }
     }
 
