@@ -38,6 +38,7 @@ message SystemEntry {
     MachineAdmitted machine_admitted = 13;
     GrantCapacity grant_capacity = 14;
     SetMachineTags set_machine_tags = 15;
+    Maintenance maintenance = 16;
   }
 }
 
@@ -138,6 +139,19 @@ message MachineAdmitted {
   uint64 id = 1;
 }
 
+// An operator's maintenance window (#359): for `for_ms` milliseconds the
+// cell coordinator re-places no role of the machine `node`, or of every
+// machine of the failure domain `zone` (exactly one of them is set), while
+// it is down. `for_ms` 0 ends the window. A later entry for the same machine
+// or zone replaces the window, which starts again. The window is measured on
+// the coordinator's own clock from when it first folds the entry: a new
+// coordinator starts it again, so a window lasts at least `for_ms`.
+message Maintenance {
+  uint64 node = 1;
+  string zone = 2;
+  uint64 for_ms = 3;
+}
+
 // Release booking `booking`: its slot is free again.
 message ReleaseCapacity {
   uint64 booking = 1;
@@ -199,6 +213,17 @@ message RegistryState {
   repeated GrantState grants = 11;
   // Every tag request applied (#575), in id order: never applied twice.
   repeated uint64 tagged = 12;
+  // The open maintenance windows (#359), machines in id order, then zones
+  // in name order.
+  repeated MaintenanceState maintenance = 13;
+}
+
+message MaintenanceState {
+  uint64 node = 1;
+  string zone = 2;
+  uint64 for_ms = 3;
+  // The position of the entry that opened the window.
+  uint64 seq = 4;
 }
 
 message HostedTenantState {

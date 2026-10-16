@@ -311,6 +311,7 @@ pub(crate) fn wire_garbage_collect_ack(ack: &GcAck) -> WireGarbageCollectAck {
         generation: ack.generation.0,
         applied: ack.applied,
         journal: ack.journal.0,
+        newer: ack.newer.as_ref().map(mm_set_to_proto),
     }
 }
 
@@ -327,6 +328,7 @@ pub(crate) fn garbage_collect_ack_from_wire(
         generation: MatchmakerGeneration(ack.generation),
         applied: ack.applied,
         watermark: ballot_from_proto(ack.watermark)?,
+        newer: ack.newer.map(mm_set_value).transpose()?,
     })
 }
 

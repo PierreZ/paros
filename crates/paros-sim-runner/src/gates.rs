@@ -46,8 +46,80 @@ pub struct Rare {
 /// window seldom reaches, #485 the double fault, #486 the rest.
 pub const RARE: &[Rare] = &[
     Rare {
+        msg: "admit: a removed machine is refused admission",
+        reason: "an ADMIT that draws a machine an operator removed: one CI sweep seed (#359 (drain, remove and maintenance for machines))",
+    },
+    Rare {
+        msg: "coordinator: a slot its journal's configuration left is released",
+        reason: "a gone machine back before its move ended: none in 2,000 hunt seeds; the gone-machine scenario's back-soon coin aims at it (#498 (moves in the sweep), #475 (re-place after the Down bound))",
+    },
+    Rare {
+        msg: "coordinator: a machine down past its bound is gone",
+        reason: "a gone-machine seed: 11 hits in 1,000 hunt seeds (#498 (moves in the sweep), #475 (re-place after the Down bound))",
+    },
+    Rare {
+        msg: "coordinator: a machine marked down rejoins in place",
+        reason: "a down machine back inside the bound: 19 hits in 1,000 hunt seeds (#498 (moves in the sweep), #475 (re-place after the Down bound))",
+    },
+    Rare {
+        msg: "coordinator: a maintenance window ended while its machine was down",
+        reason: "a gone-machine seed with a short window: 1 hit in 1,000 hunt seeds (#498 (moves in the sweep), #475 (re-place after the Down bound))",
+    },
+    Rare {
+        msg: "coordinator: a maintenance window holds a down machine's roles",
+        reason: "a gone-machine seed with a long window: 8 hits in 1,000 hunt seeds (#498 (moves in the sweep), #475 (re-place after the Down bound))",
+    },
+    Rare {
+        msg: "coordinator: a move leaves a machine down past its bound",
+        reason: "a gone-machine seed: 66 hits from 12 strikes in 1,000 hunt seeds (#498 (moves in the sweep), #475 (re-place after the Down bound))",
+    },
+    Rare {
+        msg: "coordinator: a re-placement is deferred",
+        reason: "a gone-machine seed and the defer coin: 6 hits in 1,000 hunt seeds (#498 (moves in the sweep), #475 (re-place after the Down bound))",
+    },
+    Rare {
+        msg: "coordinator: a set moved off a machine down past its bound",
+        reason: "a gone-machine seed whose machine held a set's slot: 1 hit in 1,000 hunt seeds (#498 (moves in the sweep), #475 (re-place after the Down bound))",
+    },
+    Rare {
+        msg: "drain: an operator opens a maintenance window",
+        reason: "a gone-machine seed: 4 hits in 1,000 hunt seeds (#498 (moves in the sweep), #475 (re-place after the Down bound))",
+    },
+    Rare {
+        msg: "drain: an operator picks a machine to take down",
+        reason: "a gone-machine seed: 12 hits in 1,000 hunt seeds (#498 (moves in the sweep), #475 (re-place after the Down bound))",
+    },
+    Rare {
+        msg: "drain: an operator puts a zone in maintenance",
+        reason: "a gone-machine seed with a zone window: 2 hits in 1,000 hunt seeds (#498 (moves in the sweep), #475 (re-place after the Down bound))",
+    },
+    Rare {
+        msg: "machine: a gone machine comes back soon after the bound",
+        reason: "a gone-machine seed: 4 hits in 1,000 hunt seeds (#498 (moves in the sweep), #475 (re-place after the Down bound))",
+    },
+    Rare {
+        msg: "machine: the scenario takes a machine holding a slot down",
+        reason: "a gone-machine seed: 12 hits in 1,000 hunt seeds (#498 (moves in the sweep), #475 (re-place after the Down bound))",
+    },
+    Rare {
+        msg: "placement: a maintenance window is judged after chaos",
+        reason: "a gone-machine seed with a long window: 2 hits in 1,000 hunt seeds (#498 (moves in the sweep), #475 (re-place after the Down bound))",
+    },
+    Rare {
+        msg: "status: a maintenance window excuses a journal",
+        reason: "a gone-machine seed with a long window: 2 hits in 1,000 hunt seeds (#498 (moves in the sweep), #475 (re-place after the Down bound))",
+    },
+    Rare {
+        msg: "system: a composer books a joiner's slot before it names it",
+        reason: "a reconfiguration onto a joiner on a registry seed: 12 hits in 1,000 hunt seeds (#477 (retire coordination moves into the control journals))",
+    },
+    Rare {
         msg: "driver: a call's slot decided an equal command at another ballot",
         reason: "marginal: needs a handed-on leader that parks a re-sent multi-writer append on a slot its minter decided with the same bytes; fired on 1 of 300 hunt seeds, missed by PR #584's sweep (#570 (election duel), #486)",
+    },
+    Rare {
+        msg: "zones: a created journal commits an append with a zone down",
+        reason: "marginal: needs a whole zone down through a created journal's claim and write; fired in main's sweep at 0c66f34, missed by PR #559's sweep at bb2a3c2 (#215 (zones), #486)",
     },
     Rare {
         msg: "admit: a pinned machine denies a tenant token",
@@ -1070,8 +1142,12 @@ pub const RARE: &[Rare] = &[
         reason: "a move off a drained machine: 1 to 2 checks a sweep on main, none in a 324-seed sweep (#498 (moves in the sweep))",
     },
     Rare {
+        msg: "driver: a journal's open is quarantined on a storage fault",
+        reason: "a created journal's provisioning hits a storage fault: 5 checks in 1,000 hunt seeds at PR #559 (#475 (re-place after the Down bound), #486)",
+    },
+    Rare {
         msg: "coordinator: a successor term finished a move",
-        reason: "a move off a drained machine: 1 to 2 checks a sweep on main, none in a 324-seed sweep (#498 (moves in the sweep))",
+        reason: "a move a successor term finishes: none of 4 finished moves in PR #559's sweep at b9999ed, none in a 324-seed sweep (#498 (moves in the sweep), #475 (re-place after the Down bound))",
     },
     Rare {
         msg: "coordinator: a move books its journal's new slot",

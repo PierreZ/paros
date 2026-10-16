@@ -471,6 +471,8 @@ fn is_view(command: &Command) -> bool {
             args.command,
             cell::CellAdminCommand::AddMachine { .. }
                 | cell::CellAdminCommand::DrainMachine { .. }
+                | cell::CellAdminCommand::RemoveMachine { .. }
+                | cell::CellAdminCommand::Maintenance { .. }
                 | cell::CellAdminCommand::TagMachine { .. }
                 | cell::CellAdminCommand::Tag { .. }
         ),
@@ -510,6 +512,8 @@ async fn run_view(asker: &views::Asker<'_>, out: &Printer, command: Command) -> 
             }
             cell::CellAdminCommand::AddMachine { .. }
             | cell::CellAdminCommand::DrainMachine { .. }
+            | cell::CellAdminCommand::RemoveMachine { .. }
+            | cell::CellAdminCommand::Maintenance { .. }
             | cell::CellAdminCommand::TagMachine { .. }
             | cell::CellAdminCommand::Tag { .. } => unreachable!("not a view"),
         },
