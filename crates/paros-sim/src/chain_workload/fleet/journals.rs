@@ -661,6 +661,18 @@ impl FleetOps {
             super::tags::Target::Journal(tenant, named.journal().as_bytes().to_vec()),
             &tags,
         );
+        // An explicit misbehaviour first: a tag request with no idempotency
+        // id, which the frontend denies as malformed before it admits it.
+        // Every tag call sends one: the frontend's tag path runs a few
+        // times a sweep, and a coin would leave its gate unfired.
+        let ack = journals::tag_through_frontend(client.node(0), named, 0, &tags).await;
+        assert_always!(
+            !matches!(ack, journals::FrontTagged::Answered(_)),
+            "frontend: a tag request with no id is never served"
+        );
+        if matches!(ack, journals::FrontTagged::Denied(Denial::Malformed)) {
+            assert_reachable!("frontend: a tag request with no id is denied malformed");
+        }
         let request = moonpool_sim::sim_random_range(1..u64::MAX);
         let answer = journals::tag_through(
             self.connector.providers(),
