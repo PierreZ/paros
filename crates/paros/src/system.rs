@@ -66,7 +66,10 @@ use prost::Message as _;
 
 use crate::client::checkpoint::{Checkpointable, Folded};
 pub use crate::machine::Class;
-use crate::machine::{incarnation_from_halves, incarnation_halves};
+use crate::machine::{
+    Locality, incarnation_from_halves, incarnation_halves, machine_tags, parse_machine_tags,
+};
+use crate::tags::{Tag, Tags, UserTags};
 
 use crate::rpc::system as wire;
 
@@ -88,8 +91,9 @@ pub enum SystemCommand {
         class: Class,
         /// The role slots of its class it advertises.
         capacity: u64,
-        /// Its failure domain (opaque; placement reads it).
-        failure_domain: String,
+        /// Its zone and rack (#575: reserved tags; placement reads the
+        /// zone).
+        locality: Locality,
         /// Its name, for people (#399): a label, never its identity.
         name: String,
         /// Its RPC incarnation (`0` unknown): with `addr`, its
@@ -189,6 +193,16 @@ pub enum SystemCommand {
         /// The slots, or `None` for a refusal.
         slots: Option<Vec<Slot>>,
     },
+    /// Request `request`: registered machine `id`'s user tags become `tags`
+    /// (#575), all of them at once.
+    SetMachineTags {
+        /// The caller's idempotency id: applied once.
+        request: u64,
+        /// The machine.
+        id: NodeId,
+        /// Its user tags, all of them.
+        tags: UserTags,
+    },
 }
 
 /// One slot a grant books (#476): what one `BookCapacity` names.
@@ -263,6 +277,7 @@ impl Grant {
 impl SystemCommand {
     /// The record a client writes: exactly one per position.
     #[must_use]
+    #[allow(clippy::too_many_lines)] // one arm per command
     pub fn encode(&self) -> Vec<u8> {
         use wire::system_entry::Kind;
         let kind = match self {
@@ -271,16 +286,18 @@ impl SystemCommand {
                 addr,
                 class,
                 capacity,
-                failure_domain,
+                locality,
                 name,
                 incarnation,
                 machine_interface,
             } => Kind::RegisterNode(wire::RegisterNode {
                 id: id.0,
                 addr: addr.clone(),
-                failure_domain: failure_domain.clone(),
                 name: name.clone(),
-                class: class.as_str().into(),
+                tags: machine_tags(*class, locality)
+                    .iter()
+                    .map(Tag::to_wire)
+                    .collect(),
                 capacity: *capacity,
                 incarnation_high: incarnation_halves(*incarnation).0,
                 incarnation_low: incarnation_halves(*incarnation).1,
@@ -320,6 +337,13 @@ impl SystemCommand {
             }
             SystemCommand::MachineAdmitted { id } => {
                 Kind::MachineAdmitted(wire::MachineAdmitted { id: id.0 })
+            }
+            SystemCommand::SetMachineTags { request, id, tags } => {
+                Kind::SetMachineTags(wire::SetMachineTags {
+                    request: *request,
+                    id: id.0,
+                    tags: tags.to_wire(),
+                })
             }
             SystemCommand::ReleaseCapacity { booking } => {
                 Kind::ReleaseCapacity(wire::ReleaseCapacity { booking: *booking })
@@ -371,23 +395,32 @@ impl SystemCommand {
     ///
     /// The record is not a system entry, names no kind, or carries a
     /// configuration that does not admit its quorum system.
+    #[allow(clippy::too_many_lines)] // one arm per command
     pub fn decode(record: &[u8]) -> Result<Self, &'static str> {
         use wire::system_entry::Kind;
         let entry = wire::SystemEntry::decode(record).map_err(|_| "not a system entry")?;
         Ok(match entry.kind.ok_or("a system entry names no kind")? {
-            Kind::RegisterNode(register) => SystemCommand::RegisterNode {
-                id: NodeId(register.id),
-                addr: register.addr,
-                class: register.class.parse()?,
-                capacity: register.capacity,
-                failure_domain: register.failure_domain,
-                name: register.name,
-                incarnation: incarnation_from_halves(
-                    register.incarnation_high,
-                    register.incarnation_low,
-                ),
-                machine_interface: register.machine_interface,
-            },
+            Kind::RegisterNode(register) => {
+                let (class, locality, user) = Tags::from_wire(register.tags)
+                    .and_then(parse_machine_tags)
+                    .map_err(|_| "a registration's tags are malformed or unknown")?;
+                if !user.is_empty() {
+                    return Err("a registration carries its reserved tags only");
+                }
+                SystemCommand::RegisterNode {
+                    id: NodeId(register.id),
+                    addr: register.addr,
+                    class,
+                    capacity: register.capacity,
+                    locality,
+                    name: register.name,
+                    incarnation: incarnation_from_halves(
+                        register.incarnation_high,
+                        register.incarnation_low,
+                    ),
+                    machine_interface: register.machine_interface,
+                }
+            }
             Kind::DrainNode(drain) => SystemCommand::DrainNode {
                 id: NodeId(drain.id),
             },
@@ -413,6 +446,12 @@ impl SystemCommand {
             },
             Kind::MachineAdmitted(admitted) => SystemCommand::MachineAdmitted {
                 id: NodeId(admitted.id),
+            },
+            Kind::SetMachineTags(set) => SystemCommand::SetMachineTags {
+                request: set.request,
+                id: NodeId(set.id),
+                tags: UserTags::from_wire(set.tags)
+                    .map_err(|_| "a user tag set is malformed, reserved or over the cap")?,
             },
             Kind::ReleaseCapacity(release) => SystemCommand::ReleaseCapacity {
                 booking: release.booking,
@@ -667,8 +706,8 @@ impl NodeStanding {
 pub struct RegisteredNode {
     /// Its address (the latest registration's).
     pub addr: String,
-    /// Its failure domain.
-    pub failure_domain: String,
+    /// Its zone and rack (the latest registration's; #575: reserved tags).
+    pub locality: Locality,
     /// Its name, for people (#399; the latest registration's): a label,
     /// never its identity.
     pub name: String,
@@ -691,6 +730,19 @@ pub struct RegisteredNode {
     /// (`MachineAdmitted`, #511 (placement books machines that never
     /// served)). A registration comes before the `Admit` it may never win.
     pub admitted: bool,
+    /// Its user tags (#575): a re-registration keeps them.
+    pub tags: UserTags,
+}
+
+impl RegisteredNode {
+    /// Every tag it carries: its reserved tags and its user tags.
+    #[must_use]
+    pub fn all_tags(&self) -> Tags {
+        self.tags
+            .tags()
+            .clone()
+            .with(machine_tags(self.class, &self.locality))
+    }
 }
 
 /// What the cell coordinator last wrote of one machine's liveness (#211,
@@ -769,6 +821,16 @@ pub enum RegistryEvent {
     MachineAdmitted {
         /// The machine.
         id: NodeId,
+    },
+    /// Machine `id`'s user tags changed (#575).
+    Tagged {
+        /// The machine.
+        id: NodeId,
+    },
+    /// A tag request applied already: nothing changed (#575).
+    TagRepeated {
+        /// The request.
+        request: u64,
     },
     /// The cell coordinator marked machine `id` down (#211).
     MachineDown {
@@ -974,6 +1036,8 @@ pub struct Registry {
     /// Every grant recorded (#476): its outcome stays, so a retry under its
     /// key reads it back.
     grants: BTreeMap<GrantKey, Grant>,
+    /// Every tag request applied (#575): a retry never applies one again.
+    tagged: BTreeSet<u64>,
     next_seq: u64,
 }
 
@@ -1033,7 +1097,7 @@ impl Registry {
                 addr,
                 class,
                 capacity,
-                failure_domain,
+                locality,
                 name,
                 incarnation,
                 machine_interface,
@@ -1042,8 +1106,11 @@ impl Registry {
                 addr,
                 class,
                 (capacity, incarnation, machine_interface),
-                (failure_domain, name),
+                (locality, name),
             ),
+            Some(SystemCommand::SetMachineTags { request, id, tags }) => {
+                self.set_tags(request, id, tags)
+            }
             Some(SystemCommand::DrainNode { id }) => match self.nodes.get_mut(&id) {
                 // A genesis node is never drained, registered or not.
                 Some(node)
@@ -1111,7 +1178,7 @@ impl Registry {
         addr: String,
         class: Class,
         (capacity, incarnation, machine_interface): (u64, u128, Vec<u8>),
-        (failure_domain, name): (String, String),
+        (locality, name): (Locality, String),
     ) -> RegistryEvent {
         // A genesis node (a founding member) registers too (#349): its
         // entry is the address peers dial, which may change across its
@@ -1126,7 +1193,7 @@ impl Registry {
             Some(node) => {
                 node.addr.clone_from(&addr);
                 node.capacity = capacity;
-                node.failure_domain = failure_domain;
+                node.locality = locality;
                 node.name = name;
                 node.registrations += 1;
                 node.incarnation = incarnation;
@@ -1147,7 +1214,7 @@ impl Registry {
                     id,
                     RegisteredNode {
                         addr: addr.clone(),
-                        failure_domain,
+                        locality,
                         name,
                         class,
                         capacity,
@@ -1156,6 +1223,7 @@ impl Registry {
                         incarnation,
                         machine_interface,
                         admitted: false,
+                        tags: UserTags::none(),
                     },
                 );
                 self.liveness.insert(
@@ -1173,6 +1241,32 @@ impl Registry {
                 }
             }
         }
+    }
+
+    /// A tag request (#575): judged at apply, applied at most once, for a
+    /// machine the registry holds and did not retire. The tags were judged
+    /// at decode: no reserved key, within the cap.
+    fn set_tags(&mut self, request: u64, id: NodeId, tags: UserTags) -> RegistryEvent {
+        if request == 0 {
+            return RegistryEvent::Refused(RegistryRefusal::Malformed);
+        }
+        if self.tagged.contains(&request) {
+            return RegistryEvent::TagRepeated { request };
+        }
+        match self.nodes.get_mut(&id) {
+            Some(node) if node.standing != NodeStanding::Retired => {
+                node.tags = tags;
+                self.tagged.insert(request);
+                RegistryEvent::Tagged { id }
+            }
+            _ => RegistryEvent::Refused(RegistryRefusal::NotRegistered { id }),
+        }
+    }
+
+    /// Whether the tag request `request` was applied (#575).
+    #[must_use]
+    pub fn tagged(&self, request: u64) -> bool {
+        self.tagged.contains(&request)
     }
 
     fn join_fleet(&mut self, joined: FleetRegistration) -> RegistryEvent {
@@ -1609,9 +1703,8 @@ impl Registry {
                 .map(|(id, n)| wire::RegisteredNodeState {
                     id: id.0,
                     addr: n.addr.clone(),
-                    failure_domain: n.failure_domain.clone(),
+                    tags: n.all_tags().to_wire(),
                     name: n.name.clone(),
-                    class: n.class.as_str().into(),
                     capacity: n.capacity,
                     standing: n.standing.to_wire(),
                     registrations: n.registrations,
@@ -1679,6 +1772,7 @@ impl Registry {
                     }
                 })
                 .collect(),
+            tagged: self.tagged.iter().copied().collect(),
         }
     }
 }
@@ -1702,19 +1796,23 @@ impl Checkpointable for Registry {
             // A genesis node registers too (#349): its entry is the address
             // peers dial, and it crosses a checkpoint like any other (#211).
             let id = NodeId(n.id);
+            let (class, locality, tags) = Tags::from_wire(n.tags)
+                .and_then(parse_machine_tags)
+                .map_err(|_| "a registry state node's tags are malformed or unknown")?;
             nodes.insert(
                 id,
                 RegisteredNode {
                     addr: n.addr,
-                    failure_domain: n.failure_domain,
+                    locality,
                     name: n.name,
-                    class: n.class.parse()?,
+                    class,
                     capacity: n.capacity,
                     standing: NodeStanding::from_wire(n.standing)?,
                     registrations: n.registrations,
                     incarnation: incarnation_from_halves(n.incarnation_high, n.incarnation_low),
                     machine_interface: n.machine_interface,
                     admitted: n.admitted,
+                    tags,
                 },
             );
         }
@@ -1782,6 +1880,7 @@ impl Checkpointable for Registry {
         self.fleet = fleet;
         self.hosted = hosted;
         self.dropped = dropped;
+        self.tagged = state.tagged.into_iter().collect();
         self.next_seq = covers_up_to + 1;
         Ok(())
     }
@@ -1864,7 +1963,7 @@ mod tests {
                 addr: "10.0.5.1:4500".into(),
                 class: Class::Storage,
                 capacity: 3,
-                failure_domain: "rack-a".into(),
+                locality: crate::machine::Locality::zone("rack-a"),
                 name: "storage-7".into(),
                 incarnation: (7_u128 << 64) | 9,
                 machine_interface: vec![1, 2, 3],
@@ -1992,7 +2091,7 @@ mod tests {
             addr: format!("n{id}"),
             class,
             capacity,
-            failure_domain: String::new(),
+            locality: crate::machine::Locality::default(),
             name: format!("m{id}"),
             incarnation: u128::from(id),
             machine_interface: Vec::new(),
@@ -2199,6 +2298,76 @@ mod tests {
             reg.fold(2, &register(100, Class::Stateless, 5)),
             RegistryEvent::Refused(RegistryRefusal::ClassChanged { id: NodeId(100) })
         );
+    }
+
+    #[test]
+    fn a_machine_carries_its_reserved_tags_and_its_user_tags_once_per_request() {
+        let mut reg = Registry::new([NodeId(0)]);
+        let placed = |zone: &str| {
+            one(&SystemCommand::RegisterNode {
+                id: NodeId(100),
+                addr: "n100".into(),
+                class: Class::Storage,
+                capacity: 2,
+                locality: Locality {
+                    zone: zone.into(),
+                    rack: "r1".into(),
+                },
+                name: "m100".into(),
+                incarnation: 100,
+                machine_interface: Vec::new(),
+            })
+        };
+        reg.fold(0, &placed("zone-a"));
+        let tags = |texts: &[&str]| UserTags::parse(texts).unwrap();
+        let set = |request: u64, id: u64, texts: &[&str]| {
+            one(&SystemCommand::SetMachineTags {
+                request,
+                id: NodeId(id),
+                tags: tags(texts),
+            })
+        };
+        assert_eq!(
+            reg.fold(1, &set(1, 100, &["disk:nvme"])),
+            RegistryEvent::Tagged { id: NodeId(100) }
+        );
+        assert_eq!(
+            reg.fold(2, &set(2, 100, &["disk:ssd"])),
+            RegistryEvent::Tagged { id: NodeId(100) }
+        );
+        // A retry of the first request never undoes the second.
+        assert_eq!(
+            reg.fold(3, &set(1, 100, &["disk:nvme"])),
+            RegistryEvent::TagRepeated { request: 1 }
+        );
+        assert_eq!(
+            reg.fold(4, &set(3, 999, &["disk:ssd"])),
+            RegistryEvent::Refused(RegistryRefusal::NotRegistered { id: NodeId(999) })
+        );
+        // A reboot in another zone moves its reserved tags and keeps its user
+        // tags.
+        reg.fold(5, &placed("zone-b"));
+        let node = reg.get(NodeId(100)).unwrap();
+        assert_eq!(
+            node.all_tags().label(),
+            "disk:ssd,paros/class:storage,paros/rack:r1,paros/zone:zone-b"
+        );
+        // A registration carrying a user tag, or no class, is malformed.
+        let mut forged = wire::SystemEntry::decode(placed("z").as_slice()).unwrap();
+        if let Some(wire::system_entry::Kind::RegisterNode(register)) = &mut forged.kind {
+            register
+                .tags
+                .retain(|tag| tag.key != crate::tags::reserved::CLASS);
+        }
+        assert_eq!(
+            reg.fold(6, &forged.encode_to_vec()),
+            RegistryEvent::Refused(RegistryRefusal::Malformed)
+        );
+        // Both cross a checkpoint.
+        let mut restored = Registry::new([NodeId(0)]);
+        restored.restore(6, &reg.checkpoint()).unwrap();
+        assert_eq!(restored.get(NodeId(100)), reg.get(NodeId(100)));
+        assert!(restored.tagged(1) && restored.tagged(2) && !restored.tagged(3));
     }
 
     #[test]

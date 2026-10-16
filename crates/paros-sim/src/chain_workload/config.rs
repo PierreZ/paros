@@ -131,7 +131,12 @@ pub(super) const VIEW: u8 = 29;
 /// through `paros::client::load`: the columns `parosctl machine list`
 /// prints, judged against the simulator's own counters.
 pub(super) const LOAD: u8 = 30;
-pub(super) const OP_COUNT: u8 = 31;
+/// Set the user tags of a journal, a tenant, a cell or a machine (#575
+/// (key:value tags)) through the tenant coordinator, the universe directory
+/// or the cell control journal: the calls `parosctl journal|tenant|cell
+/// tag` print. A no-op on an untagged seed.
+pub(super) const TAG: u8 = 31;
+pub(super) const OP_COUNT: u8 = 32;
 
 /// The highest weight an operation's knob draws (`ChainConfig`'s
 /// `weights`, each `0..41`). The lagging-acceptor scenario (#340) sets
@@ -444,7 +449,7 @@ impl ChainConfig {
             // QUORUM_READ (retired), READ, CHECK_TAIL (retired),
             // CREATE_JOURNAL, DELETE_JOURNAL, REGISTER_NODE, DRAIN_NODE,
             // RETIRE_NODE, SET_LEADER, CHECKPOINT, BOOK_CAPACITY, FLEET_INIT,
-            // TENANT, ADMIT, ELECTION, VIEW, LOAD
+            // TENANT, ADMIT, ELECTION, VIEW, LOAD, TAG
             weights: [
                 buggify_knob!(20_u64, 0_u64..41_u64),
                 buggify_knob!(10_u64, 0_u64..41_u64),
@@ -518,6 +523,10 @@ impl ChainConfig {
                 // A load asks for one view, then every machine once, and
                 // writes nothing; the ceiling is an operator that mostly
                 // watches its machines.
+                buggify_knob!(3_u64, 0_u64..21_u64),
+                // A tag request is one write to a control journal; the
+                // ceiling is an operator that mostly retags, fencing the
+                // other operators of the universe directory.
                 buggify_knob!(3_u64, 0_u64..21_u64),
             ],
             // grow, shrink, replace, remove-leader, rotate

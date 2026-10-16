@@ -257,6 +257,10 @@ service Frontend {
   rpc FrontRead(.paros.v1.FrontRead) returns (.paros.v1.ReadAck);
   rpc FrontTruncate(.paros.v1.FrontTruncate) returns (.paros.v1.TruncateAck);
   rpc FrontSetLeader(.paros.v1.FrontSetLeader) returns (.paros.v1.SetLeaderAck);
+  // A tenant sets its journal's user tags (#575 (key:value tags)): the
+  // frontend checks the token, resolves the names, and sends the request
+  // to the tenant coordinator.
+  rpc FrontSetJournalTags(.paros.v1.FrontSetJournalTags) returns (.paros.v1.SetJournalTagsAck);
 }
 
 // Who calls, and which journal the call names.
@@ -289,6 +293,27 @@ message FrontTruncate {
 message FrontSetLeader {
   Entry entry = 1;
   .paros.v1.SetLeader call = 2;
+}
+
+// Set a `users` journal's user tags, whole (#575 (key:value tags)). The
+// entry names the journal by its names; a call by ids is malformed.
+message FrontSetJournalTags {
+  Entry entry = 1;
+  // The idempotency id the caller draws: the same id acts once.
+  uint64 request = 2;
+  // The user tags: no `paros/` key, at most 32.
+  repeated .paros.common.v1.Tag tags = 3;
+}
+
+message SetJournalTagsAck {
+  // Why the frontend answered itself, if it did.
+  FrontendVerdict frontend = 1;
+  // The tenant coordinator's answer, as `JournalRequestAck.outcome`
+  // (`tagged`, `unknown_journal`, ...); `unavailable` when no answer
+  // decided the request, to send again with the same `request`.
+  string outcome = 2;
+  // The journal tagged, when `outcome` is `tagged`.
+  uint64 journal = 3;
 }
 
 // Why a frontend answered a call itself. Every value but `NONE` and

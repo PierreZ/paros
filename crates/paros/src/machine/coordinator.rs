@@ -94,7 +94,7 @@ use super::modes::Modes;
 use super::moves::Moves;
 use super::sets::{SetStep, Sets};
 use super::tenants::TenantDesk;
-use super::{CellPlan, Class, ControlJournals, FormedCell, incarnation_from_halves};
+use super::{CellPlan, ControlJournals, FormedCell, incarnation_from_halves};
 use crate::client::capacity::{CapacityAnswer, CapacityRequest};
 use crate::client::cell::CellSession;
 use crate::client::checkpoint::{CheckpointPolicy, Folder, LoadOutcome, load};
@@ -467,7 +467,7 @@ impl Watch {
             Some(node) if node.incarnation != incarnation => {
                 // A reboot of a registered machine: it registers again, as
                 // the incarnation that answered (up, by its registration).
-                let class = ack.class.parse::<Class>().ok()?;
+                let (class, locality) = super::identity_tags(ack)?;
                 if class != node.class {
                     return None;
                 }
@@ -477,7 +477,7 @@ impl Watch {
                     addr: addr.to_string(),
                     class,
                     capacity: ack.capacity,
-                    failure_domain: ack.failure_domain.clone(),
+                    locality,
                     name: ack.name.clone(),
                     incarnation,
                     machine_interface: ack.machine_interface.clone(),
@@ -1257,9 +1257,9 @@ async fn register<P: Providers>(
     let Some(identity) = request.identity else {
         return refuse("malformed");
     };
-    let (Ok(addr), Ok(class)) = (
+    let (Ok(addr), Some((class, locality))) = (
         Address::parse(&identity.addr),
-        identity.class.parse::<Class>(),
+        super::identity_tags(&identity),
     ) else {
         return refuse("malformed");
     };
@@ -1334,7 +1334,7 @@ async fn register<P: Providers>(
         addr: addr.to_string(),
         class,
         capacity: identity.capacity,
-        failure_domain: identity.failure_domain,
+        locality,
         name: identity.name,
         incarnation,
         machine_interface: identity.machine_interface,

@@ -63,7 +63,7 @@ use paros::client::checkpoint::{CheckpointPolicy, Checkpointer, Folder, LoadOutc
 use paros::client::fleet::{FleetRefusal, FleetSession, Interrupted, Run, Stage, Step};
 use paros::client::names::{TenantResolution, resolve_tenant};
 use paros::client::{ClaimOutcome, Writer};
-use paros::fleet::{CellState, FleetDirectory, Groups, TenantState};
+use paros::fleet::{CellState, FleetDirectory, TenantKind, TenantState};
 use paros::machine::ControlJournals;
 use paros::system::{NodeStanding, Registry};
 use paros::{JournalId, JournalIdentifier, NodeId, TenantId};
@@ -86,6 +86,7 @@ mod placement;
 mod replaced;
 mod resolve;
 mod sets;
+mod tags;
 mod view;
 
 use cell::Cell;
@@ -660,38 +661,10 @@ impl FleetOps {
         }
     }
 
-    /// Create `name` under the first of `draws` the fleet tenant does
-    /// not hold, to its end; whether it ended.
-    async fn create(
-        &mut self,
-        client: &ChainClient,
-        session: &mut FleetSession,
-        first: usize,
-        name: Vec<u8>,
-        draws: Vec<JournalIdentifier>,
-        draw: u64,
-    ) -> bool {
-        // An identifier this client had created — the collision a random u64 never
-        // makes on its own — must be refused, and the creator redraws.
-        if !self.ever_created.is_empty() && buggify_with_prob!(0.2) {
-            assert_reachable!("fleet: a tenant creation reuses an id it created");
-            let reused = self.ever_created
-                [usize::try_from(draw % self.ever_created.len() as u64).unwrap_or(0)];
-            let step = session.create_step(client, first, &name, reused).await;
-            assert_always!(
-                !matches!(step, Step::Advanced(Stage::RegisterTenant)),
-                "fleet: a reused tenant id is never registered again",
-                { "tenant" => reused.tenant.0 }
-            );
-            if step == Step::Refused(FleetRefusal::IdTaken) {
-                assert_reachable!("fleet: a duplicate tenant id is refused");
-            }
-        }
-        let started = self.time.now();
-        let run = session
-            .create_tenant(client, first, &name, draws.clone(), Duration::ZERO)
-            .await;
-        run.steps.iter().copied().for_each(reach);
+    /// The gates of a tenant creation that ran while the downed-founder
+    /// (#213 (three founding members)) or zone-outage (#215 (zones))
+    /// scenario held machines down for the whole run.
+    fn outage_gates(&self, run: &paros::client::fleet::Run<TenantId>, started: Duration) {
         if !run.steps.is_empty()
             && crate::machine::founder_down_through(&self.state, started, self.time.now())
         {
@@ -726,6 +699,46 @@ impl FleetOps {
                 assert_reachable!("zones: a tenant is created with a zone down");
             }
         }
+    }
+
+    /// Create `name` under the first of `draws` the fleet tenant does
+    /// not hold, to its end; whether it ended.
+    async fn create(
+        &mut self,
+        client: &ChainClient,
+        session: &mut FleetSession,
+        first: usize,
+        name: Vec<u8>,
+        draws: Vec<JournalIdentifier>,
+        draw: u64,
+    ) -> bool {
+        // An identifier this client had created — the collision a random u64 never
+        // makes on its own — must be refused, and the creator redraws.
+        if !self.ever_created.is_empty() && buggify_with_prob!(0.2) {
+            assert_reachable!("fleet: a tenant creation reuses an id it created");
+            let reused = self.ever_created
+                [usize::try_from(draw % self.ever_created.len() as u64).unwrap_or(0)];
+            let step = session.create_step(client, first, &name, reused).await;
+            assert_always!(
+                !matches!(step, Step::Advanced(Stage::RegisterTenant)),
+                "fleet: a reused tenant id is never registered again",
+                { "tenant" => reused.tenant.0 }
+            );
+            if step == Step::Refused(FleetRefusal::IdTaken) {
+                assert_reachable!("fleet: a duplicate tenant id is refused");
+            }
+        }
+        let tags = tags::drawn(&self.state);
+        for draw in &draws {
+            tags::note(&self.state, tags::Target::Tenant(draw.tenant), &tags);
+        }
+        session.use_tags(tags);
+        let started = self.time.now();
+        let run = session
+            .create_tenant(client, first, &name, draws.clone(), Duration::ZERO)
+            .await;
+        run.steps.iter().copied().for_each(reach);
+        self.outage_gates(&run, started);
         self.created(session, &name, &run);
         match run.outcome {
             Step::Done { result, .. } => {
@@ -846,7 +859,7 @@ impl FleetOps {
             assert_always!(
                 entry.is_some_and(|t| t.state == TenantState::Ready
                     && t.name == name
-                    && t.groups == Groups::SERVED)
+                    && t.kind == TenantKind::Users)
                     && session.cell().hosts(result),
                 "fleet: a created tenant is READY in the directory and hosted by its cell",
                 { "tenant" => result.0 }
@@ -1389,7 +1402,7 @@ fn judged_cell(members: &[u64]) -> Folder<JudgedRegistry> {
 /// or `ERROR` once its cell refused its footprint (#476).
 fn no_tenant_mid_operation(directory: &FleetDirectory, cell: &Registry) {
     for (tenant, entry) in directory.tenants() {
-        if entry.groups == Groups::SERVED {
+        if entry.kind == TenantKind::Users {
             // A creation its cell refused for its footprint ends `ERROR`
             // (#476): that is an end, not the middle of an operation.
             let refused = cell.footprint(tenant).is_some_and(|g| !g.granted());
@@ -1431,7 +1444,7 @@ fn directory_equals_cell(directory: &FleetDirectory, cell: &Registry) {
         assert_always!(
             directory
                 .tenant(tenant)
-                .is_some_and(|t| t.groups == Groups::SERVED && t.cell_id == joined.cell_id),
+                .is_some_and(|t| t.kind == TenantKind::Users && t.cell_id == joined.cell_id),
             "fleet: every tenant the cell hosts is in the directory under that cell",
             { "tenant" => tenant.0 }
         );
@@ -1446,7 +1459,7 @@ fn directory_equals_cell(directory: &FleetDirectory, cell: &Registry) {
                 { "tenant" => tenant.0 }
             );
         }
-        if entry.groups == Groups::SERVED && entry.state == TenantState::Ready {
+        if entry.kind == TenantKind::Users && entry.state == TenantState::Ready {
             assert_always!(
                 cell.hosts(tenant),
                 "fleet: every READY tenant in the directory is hosted by its cell",
@@ -1487,6 +1500,7 @@ fn reach(stage: Stage) {
         Stage::AddRootKey => {
             assert_reachable!("fleet: a step adds a root key to the universe entry");
         }
+        Stage::SetTags => assert_reachable!("fleet: a step sets an entity's tags"),
         Stage::RemoveRootKey => {
             assert_reachable!("fleet: a step removes a root key from the universe entry");
         }

@@ -11,10 +11,13 @@
 //! machine and every reader runs over the chosen entries in position order.
 //!
 //! - **Describe.** The first coordinator writes the tenant's id, name,
-//!   [`Survives`], the name and [`CellKind`] of its cell and its default
-//!   [`Desired`] mode. It is written once; a repeat with the same value
+//!   [`Survives`], the name of its cell and its default [`Desired`] mode
+//!   (the cell's kind is the cell's reserved tags in the universe
+//!   directory, #575 (key:value tags)). It is written once; a repeat with the same value
 //!   changes nothing and any other one is refused.
-//! - **Requests.** A create or a delete carries the caller's idempotency id.
+//! - **Requests.** A create, a delete or a tag request (`SetJournalTags`,
+//!   #575: the journal's user tags, all at once; a journal stores no copy of
+//!   its tenant's tags) carries the caller's idempotency id.
 //!   The fold judges it at apply and records its [`RequestOutcome`] under
 //!   that id; a later entry with an answered id changes nothing and folds to
 //!   [`TenantEvent::Repeated`] with the recorded outcome. So a retry that
@@ -41,6 +44,7 @@ use crate::rpc::tenant as wire;
 use crate::rpc::{
     config_from_proto, config_to_proto, writer_mode_from_proto, writer_mode_to_proto,
 };
+use crate::tags::UserTags;
 
 /// What a tenant survives (#252, §3.4): it picks the kind of cell the tenant
 /// may live in.
@@ -94,65 +98,6 @@ impl std::str::FromStr for Survives {
             "az" => Ok(Survives::Az),
             "region" => Ok(Survives::Region),
             _ => Err("survives is az or region"),
-        }
-    }
-}
-
-/// The kind of a cell (#253, §3.7).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum CellKind {
-    /// One region, across at least three zones.
-    Regional {
-        /// The region's label (empty while the cell has none).
-        region: String,
-    },
-    /// Three regions, one of them the witness (M12).
-    MultiRegion {
-        /// The regions.
-        regions: Vec<String>,
-        /// The witness region.
-        witness: String,
-    },
-}
-
-impl Default for CellKind {
-    fn default() -> Self {
-        CellKind::Regional {
-            region: String::new(),
-        }
-    }
-}
-
-impl CellKind {
-    fn to_wire(&self) -> wire::CellKind {
-        match self {
-            CellKind::Regional { region } => wire::CellKind {
-                kind: 1,
-                regions: vec![region.clone()],
-                witness: String::new(),
-            },
-            CellKind::MultiRegion { regions, witness } => wire::CellKind {
-                kind: 2,
-                regions: regions.clone(),
-                witness: witness.clone(),
-            },
-        }
-    }
-
-    fn from_wire(kind: Option<wire::CellKind>) -> Result<Self, &'static str> {
-        let kind = kind.ok_or("a description names no cell kind")?;
-        match kind.kind {
-            1 => match kind.regions.as_slice() {
-                [region] => Ok(CellKind::Regional {
-                    region: region.clone(),
-                }),
-                _ => Err("a regional cell names one region"),
-            },
-            2 => Ok(CellKind::MultiRegion {
-                regions: kind.regions,
-                witness: kind.witness,
-            }),
-            _ => Err("a cell kind is regional or multi-region"),
         }
     }
 }
@@ -350,8 +295,6 @@ pub struct Description {
     pub survives: Survives,
     /// The name of the cell that hosts it (empty while the cell has none).
     pub cell_name: Vec<u8>,
-    /// The kind of that cell.
-    pub cell_kind: CellKind,
     /// The default desired mode of its journals.
     pub desired: Desired,
 }
@@ -363,7 +306,6 @@ impl Description {
             name: self.name.clone(),
             survives: self.survives.to_wire(),
             cell_name: self.cell_name.clone(),
-            cell_kind: Some(self.cell_kind.to_wire()),
             desired: Some(self.desired.to_wire()),
         }
     }
@@ -377,7 +319,6 @@ impl Description {
             name: describe.name,
             survives: Survives::from_wire(describe.survives)?,
             cell_name: describe.cell_name,
-            cell_kind: CellKind::from_wire(describe.cell_kind)?,
             desired: Desired::from_wire(describe.desired)?,
         })
     }
@@ -402,6 +343,8 @@ pub enum TenantCommand {
         desired: Desired,
         /// The members the coordinator picked.
         config: AcceptorConfig,
+        /// Its first user tags (#575).
+        tags: UserTags,
     },
     /// Request `request`: delete journal `id` (`0`: the name named none).
     DeleteJournal {
@@ -418,6 +361,16 @@ pub enum TenantCommand {
         request: u64,
         /// The name the create asked for.
         name: Vec<u8>,
+    },
+    /// Request `request`: live journal `id`'s user tags become `tags`
+    /// (#575; `0`: the name named none).
+    SetJournalTags {
+        /// The caller's idempotency id.
+        request: u64,
+        /// The journal.
+        id: JournalId,
+        /// Its user tags, all of them.
+        tags: UserTags,
     },
     /// Request `request`: change a desired mode (#214 (tenant modes)), the
     /// tenant's default or a live journal's. A journal target that names no
@@ -464,6 +417,7 @@ impl TenantCommand {
                 writer,
                 desired,
                 config,
+                tags,
             } => Kind::CreateJournal(wire::CreateJournal {
                 request: *request,
                 id: id.0,
@@ -471,6 +425,7 @@ impl TenantCommand {
                 writer: writer_mode_to_proto(*writer).into(),
                 desired: Some(desired.to_wire()),
                 config: Some(config_to_proto(config)),
+                tags: tags.to_wire(),
             }),
             TenantCommand::DeleteJournal { request, id } => {
                 Kind::DeleteJournal(wire::DeleteJournal {
@@ -482,6 +437,13 @@ impl TenantCommand {
                 request: *request,
                 name: name.clone(),
             }),
+            TenantCommand::SetJournalTags { request, id, tags } => {
+                Kind::SetJournalTags(wire::SetJournalTags {
+                    request: *request,
+                    id: id.0,
+                    tags: tags.to_wire(),
+                })
+            }
             TenantCommand::Configure {
                 request,
                 target,
@@ -511,7 +473,8 @@ impl TenantCommand {
     /// # Errors
     ///
     /// The record is not a tenant entry, names no kind, or carries a field
-    /// out of range.
+    /// out of range: a malformed or reserved user tag, or a set over the cap
+    /// (#575), included.
     pub fn decode(record: &[u8]) -> Result<Self, &'static str> {
         use wire::tenant_entry::Kind;
         let entry = wire::TenantEntry::decode(record).map_err(|_| "not a tenant entry")?;
@@ -525,6 +488,7 @@ impl TenantCommand {
                 desired: Desired::from_wire(create.desired)?,
                 config: config_from_proto(create.config)?
                     .ok_or("a created journal names no configuration")?,
+                tags: user_tags(create.tags)?,
             },
             Kind::DeleteJournal(delete) => TenantCommand::DeleteJournal {
                 request: delete.request,
@@ -533,6 +497,11 @@ impl TenantCommand {
             Kind::Unplaceable(refused) => TenantCommand::Unplaceable {
                 request: refused.request,
                 name: refused.name,
+            },
+            Kind::SetJournalTags(set) => TenantCommand::SetJournalTags {
+                request: set.request,
+                id: JournalId(set.id),
+                tags: user_tags(set.tags)?,
             },
             Kind::Configure(configure) => TenantCommand::Configure {
                 request: configure.request,
@@ -555,6 +524,11 @@ impl TenantCommand {
     }
 }
 
+/// A wire list of user tags, judged (#575).
+fn user_tags(tags: Vec<crate::rpc::common::Tag>) -> Result<UserTags, &'static str> {
+    UserTags::from_wire(tags).map_err(|_| "a user tag set is malformed, reserved or over the cap")
+}
+
 /// A journal the tenant created.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TenantJournal {
@@ -572,6 +546,8 @@ pub struct TenantJournal {
     pub placed: AcceptorConfig,
     /// The position of the delete that tombstoned it, if any.
     pub deleted_at: Option<u64>,
+    /// Its user tags (#575): never a copy of its tenant's.
+    pub tags: UserTags,
 }
 
 /// What a request came to, recorded under its idempotency id.
@@ -587,6 +563,8 @@ pub enum RequestOutcome {
     UnknownJournal,
     /// The cell could not place the create (#212 (placement)).
     Unplaceable,
+    /// The journal's user tags were set (#575).
+    Tagged(JournalId),
     /// A desired mode changed (#214 (tenant modes)): a journal's, or the
     /// tenant default's (`None`).
     Configured(Option<JournalId>),
@@ -601,6 +579,7 @@ impl RequestOutcome {
             RequestOutcome::UnknownJournal => (4, 0),
             RequestOutcome::Unplaceable => (5, 0),
             RequestOutcome::Configured(id) => (6, id.map_or(0, |id| id.0)),
+            RequestOutcome::Tagged(id) => (7, id.0),
         };
         wire::OutcomeState { request, kind, id }
     }
@@ -612,6 +591,7 @@ impl RequestOutcome {
             (3, id) if id != 0 => RequestOutcome::NameTaken(JournalId(id)),
             (4, 0) => RequestOutcome::UnknownJournal,
             (5, 0) => RequestOutcome::Unplaceable,
+            (7, id) if id != 0 => RequestOutcome::Tagged(JournalId(id)),
             (6, 0) => RequestOutcome::Configured(None),
             (6, id) => RequestOutcome::Configured(Some(JournalId(id))),
             _ => return Err("an outcome state is out of range"),
@@ -639,6 +619,13 @@ pub enum TenantEvent {
     },
     /// A journal was tombstoned.
     Deleted {
+        /// The request.
+        request: u64,
+        /// The journal.
+        id: JournalId,
+    },
+    /// A journal's user tags were set (#575).
+    Tagged {
         /// The request.
         request: u64,
         /// The journal.
@@ -868,9 +855,13 @@ impl TenantControl {
                 writer,
                 desired,
                 config,
-            }) => self.create(request, id, name, writer, desired, config),
+                tags,
+            }) => self.create(request, id, name, (writer, desired, config), tags),
             Ok(TenantCommand::DeleteJournal { request, id }) => self.delete(seq, request, id),
             Ok(TenantCommand::Unplaceable { request, name }) => self.refuse(request, &name),
+            Ok(TenantCommand::SetJournalTags { request, id, tags }) => {
+                self.set_tags(request, id, tags)
+            }
             Ok(TenantCommand::Configure {
                 request,
                 target,
@@ -903,9 +894,8 @@ impl TenantControl {
         request: u64,
         id: JournalId,
         name: Vec<u8>,
-        writer: WriterMode,
-        desired: Desired,
-        config: AcceptorConfig,
+        (writer, desired, config): (WriterMode, Desired, AcceptorConfig),
+        tags: UserTags,
     ) -> TenantEvent {
         if request == 0 || !id.is_set() {
             return TenantEvent::Refused(TenantRefusal::Malformed);
@@ -931,6 +921,7 @@ impl TenantControl {
                 config: config.clone(),
                 placed: config.clone(),
                 deleted_at: None,
+                tags,
             },
         );
         self.outcomes.insert(request, RequestOutcome::Created(id));
@@ -964,6 +955,29 @@ impl TenantControl {
         self.names.remove(&name);
         self.outcomes.insert(request, RequestOutcome::Deleted(id));
         TenantEvent::Deleted { request, id }
+    }
+
+    /// A tag request (#575): judged at apply like a create, its outcome
+    /// recorded under its id. The tags were judged at decode.
+    fn set_tags(&mut self, request: u64, id: JournalId, tags: UserTags) -> TenantEvent {
+        if request == 0 {
+            return TenantEvent::Refused(TenantRefusal::Malformed);
+        }
+        if let Some(outcome) = self.outcome(request) {
+            return TenantEvent::Repeated { request, outcome };
+        }
+        let Some(journal) = self
+            .journals
+            .get_mut(&id)
+            .filter(|j| j.deleted_at.is_none())
+        else {
+            let outcome = RequestOutcome::UnknownJournal;
+            self.outcomes.insert(request, outcome);
+            return TenantEvent::Answered { request, outcome };
+        };
+        journal.tags = tags;
+        self.outcomes.insert(request, RequestOutcome::Tagged(id));
+        TenantEvent::Tagged { request, id }
     }
 
     /// A create the cell could not place: recorded `Unplaceable`, or
@@ -1080,6 +1094,7 @@ impl TenantControl {
                     desired: Some(j.desired.to_wire()),
                     config: Some(config_to_proto(&j.config)),
                     deleted_at: j.deleted_at.map_or(0, |at| at + 1),
+                    tags: j.tags.to_wire(),
                     placed: (j.placed != j.config).then(|| config_to_proto(&j.placed)),
                 })
                 .collect(),
@@ -1137,6 +1152,7 @@ impl Checkpointable for TenantControl {
                     config,
                     placed,
                     deleted_at,
+                    tags: user_tags(j.tags)?,
                 },
             );
         }
@@ -1182,6 +1198,7 @@ mod tests {
             writer: WriterMode::Single,
             desired: Desired::DEFAULT,
             config: config(&[1, 2, 3]),
+            tags: UserTags::none(),
         }
         .encode()
     }
@@ -1206,10 +1223,6 @@ mod tests {
                 name: b"acme".to_vec(),
                 survives: Survives::Region,
                 cell_name: b"west-1".to_vec(),
-                cell_kind: CellKind::MultiRegion {
-                    regions: vec!["w".into(), "c".into(), "n".into()],
-                    witness: "n".into(),
-                },
                 desired: Desired {
                     durability: Durability {
                         failures_per_partition: 2,
@@ -1225,6 +1238,12 @@ mod tests {
                 writer: WriterMode::Multi,
                 desired: Desired::DEFAULT,
                 config: config(&[1, 2, 3]),
+                tags: UserTags::parse(&["team:payments"]).unwrap(),
+            },
+            TenantCommand::SetJournalTags {
+                request: 12,
+                id: JournalId(0x9e37),
+                tags: UserTags::parse(&["env:prod", "app:orders"]).unwrap(),
             },
             TenantCommand::DeleteJournal {
                 request: 10,
@@ -1255,6 +1274,69 @@ mod tests {
             assert_eq!(TenantCommand::decode(&command.encode()), Ok(command));
         }
         assert!(TenantCommand::decode(b"\xff\xff").is_err());
+    }
+
+    #[test]
+    fn a_tag_request_is_judged_at_apply_and_acts_once() {
+        let mut t = fold();
+        t.fold(0, &create(1, 11, b"a"));
+        let set = |request: u64, id: u64, texts: &[&str]| {
+            TenantCommand::SetJournalTags {
+                request,
+                id: JournalId(id),
+                tags: UserTags::parse(texts).unwrap(),
+            }
+            .encode()
+        };
+        assert_eq!(
+            t.fold(1, &set(2, 11, &["team:payments"])),
+            TenantEvent::Tagged {
+                request: 2,
+                id: JournalId(11)
+            }
+        );
+        assert_eq!(
+            t.fold(2, &set(3, 11, &[])),
+            TenantEvent::Tagged {
+                request: 3,
+                id: JournalId(11)
+            }
+        );
+        // The first request again changes nothing: the later one stays.
+        assert!(matches!(
+            t.fold(3, &set(2, 11, &["team:payments"])),
+            TenantEvent::Repeated { .. }
+        ));
+        assert!(t.get(JournalId(11)).unwrap().tags.is_empty());
+        assert_eq!(
+            t.fold(4, &set(4, 12, &["a:b"])),
+            TenantEvent::Answered {
+                request: 4,
+                outcome: RequestOutcome::UnknownJournal
+            }
+        );
+        // A reserved key is refused at apply and records nothing.
+        let mut forged = wire::TenantEntry::decode(set(5, 11, &["a:b"]).as_slice()).unwrap();
+        if let Some(wire::tenant_entry::Kind::SetJournalTags(set)) = &mut forged.kind {
+            set.tags[0].key = "paros/movable".into();
+        }
+        assert_eq!(
+            t.fold(5, &forged.encode_to_vec()),
+            TenantEvent::Refused(TenantRefusal::Malformed)
+        );
+        assert_eq!(t.outcome(5), None);
+        // A deleted journal is unknown to a tag request.
+        t.fold(6, &delete(6, 11));
+        assert_eq!(
+            t.fold(7, &set(7, 11, &["a:b"])),
+            TenantEvent::Answered {
+                request: 7,
+                outcome: RequestOutcome::UnknownJournal
+            }
+        );
+        let mut restored = fold();
+        restored.restore(7, &t.checkpoint()).unwrap();
+        assert_eq!(restored, t);
     }
 
     #[test]
@@ -1497,7 +1579,6 @@ mod tests {
             name: b"acme".to_vec(),
             survives: Survives::Az,
             cell_name: Vec::new(),
-            cell_kind: CellKind::default(),
             desired: Desired::DEFAULT,
         };
         let entry = TenantCommand::Describe(description.clone()).encode();

@@ -19,15 +19,23 @@
 //!   previous step did changes nothing (FDB's `MetaclusterOperationContext`).
 //!   An entry whose version this fold does not understand is refused
 //!   ([`FleetDirectoryRefusal::UnknownVersion`]).
-//! - **Every tenant belongs to a set of groups** ([`Groups`]), fixed when it
-//!   is registered (§3.7, decided on 2026-10-04): the fleet tenant is `{internal, fleet}`
-//!   (registered by `FormFleet`), each cell's cell tenant `{internal, cell}`
-//!   (registered by `AddCell`), and a served tenant `{users}`.
-//!   `RegisterTenant` — the tenant API's entry — cannot express another
-//!   set, and an `internal` tenant is never marked or removed through it
-//!   ([`FleetDirectoryRefusal::Internal`]). The groups alone decide whether a tenant
-//!   may move ([`Groups::may_move`]): only `cell` forbids it. There is no
-//!   per-tenant placement flag.
+//! - **Every tenant has a kind, a reserved tag** ([`TenantKind`], #575
+//!   (key:value tags)), fixed when it is registered (§3.7, decided on
+//!   2026-10-04, as groups until #575): the universe tenant is
+//!   `paros/kind:internal`, `paros/role:universe` (registered by
+//!   `FormFleet`), each cell's cell tenant `paros/kind:internal`,
+//!   `paros/role:cell` (registered by `AddCell`), and a served tenant
+//!   `paros/kind:users`. `RegisterTenant` — the tenant API's entry — cannot
+//!   express another kind, and an internal tenant is never marked or
+//!   removed through it ([`FleetDirectoryRefusal::Internal`]). Whether a
+//!   tenant may move is its reserved tag `paros/movable` ([`Movable`]): a
+//!   cell tenant is always pinned. A user tenant's name never holds a `:`
+//!   ([`FleetDirectoryRefusal::NameRefused`]): an internal tenant shows as
+//!   `<role>:<name>`.
+//! - **Tenants and cells carry user tags** (#575): `RegisterTenant` sets a
+//!   tenant's first ones, `SetTenantTags` and `SetCellTags` replace them,
+//!   each a request applied at most once under its idempotency id. A
+//!   reserved key or a set over the cap is refused at apply.
 //! - **Every fleet operation is an idempotent state machine.** A tenant is
 //!   written in `REGISTERING` with its cell assignment, created in the cell,
 //!   then marked `READY` ([`crate::client::fleet`]); `init` takes its cell
@@ -59,6 +67,7 @@ use prost::Message as _;
 
 use crate::client::checkpoint::{Checkpointable, Folded};
 use crate::rpc::fleet as wire;
+use crate::tags::{Tag, TagError, Tags, UserTags, reserved};
 pub use crate::tenant::Survives;
 
 mod keys;
@@ -70,107 +79,213 @@ use keys::{KeyChange, RootKeys};
 /// into the cell's side of the registration (`crate::system`). `2` since
 /// the tenant entry carries a set of groups and no placement (#243); `3`
 /// since the universe entry holds root public keys (#245 (Biscuit
-/// tokens)).
-pub const METADATA_VERSION: u32 = 3;
+/// tokens)); `4` since tenants and cells carry tags and the tenant
+/// entry's groups became reserved tags (#575 (key:value tags)).
+pub const METADATA_VERSION: u32 = 4;
 
-/// One tenant group (§3.7): a rule every member obeys. The set of groups is
-/// fixed by paros for now.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Group {
-    /// Created only by paros's own operations (`init`, adding a cell), never
-    /// through the tenant API: the fleet tenant and every cell tenant.
-    Internal,
-    /// Never leaves its cell: it *is* its cell. Each cell's cell tenant.
+/// What a tenant is (§3.7, #575 (key:value tags)): its reserved tags
+/// `paros/kind` and `paros/role`, fixed when it is registered and never
+/// changed. Only paros's own operations create an internal tenant; the
+/// tenant API creates only a [`TenantKind::Users`] one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum TenantKind {
+    /// The universe tenant (`paros/kind:internal`, `paros/role:universe`):
+    /// it holds the universe directory and moves with its coordinator.
+    /// Registered by `FormFleet`.
+    Universe,
+    /// A cell's cell tenant (`paros/kind:internal`, `paros/role:cell`): it
+    /// *is* its cell, so it is always pinned. Registered by `AddCell`.
     Cell,
-    /// Holds the fleet directory and moves with its coordinator: the fleet tenant.
-    Fleet,
-    /// Created by the tenant API and served by its own proxies: every
-    /// served tenant.
+    /// A tenant the tenant API created (`paros/kind:users`), served by its
+    /// own proxies.
     Users,
 }
 
-impl Group {
-    /// Every group, in label order.
-    pub const ALL: [Group; 4] = [Group::Internal, Group::Cell, Group::Fleet, Group::Users];
-
-    /// The group's bit in a [`Groups`] set (and on the wire).
-    const fn bit(self) -> u32 {
-        match self {
-            Group::Internal => 1,
-            Group::Cell => 2,
-            Group::Fleet => 4,
-            Group::Users => 8,
-        }
+impl TenantKind {
+    /// Whether paros's own operations created it (`paros/kind:internal`):
+    /// never moved, marked or removed through the tenant API, never
+    /// resolved by name.
+    #[must_use]
+    pub fn is_internal(self) -> bool {
+        self != TenantKind::Users
     }
 
-    /// The group's label (`internal`, `cell`, `fleet`, `users`).
+    /// The kind's label: `universe`, `cell` or `users`. An internal
+    /// tenant shows as `<label>:<name>` (#575).
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
-            Group::Internal => "internal",
-            Group::Cell => "cell",
-            Group::Fleet => "fleet",
-            Group::Users => "users",
+            TenantKind::Universe => "universe",
+            TenantKind::Cell => "cell",
+            TenantKind::Users => "users",
+        }
+    }
+
+    /// The movability its kind imposes, if any: a cell tenant is pinned.
+    #[must_use]
+    pub fn forced(self) -> Option<Movable> {
+        (self == TenantKind::Cell).then_some(Movable::Pinned)
+    }
+
+    /// Its reserved tags, with the movability a tenant of this kind is
+    /// registered with (a view of a tenant the directory does not hold).
+    #[must_use]
+    pub fn default_tags(self) -> Tags {
+        let movable = self.forced().unwrap_or(Movable::Movable);
+        let mut tags = self.tags();
+        tags.push(movable.tag());
+        Tags::new().with(tags)
+    }
+
+    /// Its reserved tags.
+    fn tags(self) -> Vec<Tag> {
+        match self {
+            TenantKind::Users => vec![Tag::reserved(reserved::KIND, "users")],
+            internal => vec![
+                Tag::reserved(reserved::KIND, "internal"),
+                Tag::reserved(reserved::ROLE, internal.as_str()),
+            ],
+        }
+    }
+
+    /// Parse the kind from reserved tags, taking the keys it reads.
+    fn take(held: &mut BTreeMap<String, String>) -> Result<Self, TagError> {
+        let kind = held.remove(reserved::KIND);
+        let role = held.remove(reserved::ROLE);
+        match (kind.as_deref(), role.as_deref()) {
+            (Some("users"), None) => Ok(TenantKind::Users),
+            (Some("internal"), Some("universe")) => Ok(TenantKind::Universe),
+            (Some("internal"), Some("cell")) => Ok(TenantKind::Cell),
+            (_, Some(_)) => Err(TagError::UnknownReserved(reserved::ROLE.into())),
+            _ => Err(TagError::UnknownReserved(reserved::KIND.into())),
         }
     }
 }
 
-/// The **set of groups** a tenant belongs to (§3.7, decided on 2026-10-04):
-/// recorded when the tenant is registered and never changed. A tenant obeys
-/// the rule of every group it is in. Only three sets exist —
-/// [`Groups::FLEET_TENANT`], [`Groups::CELL_TENANT`] and
-/// [`Groups::SERVED`] — and the wire refuses any other.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Groups(u32);
+/// Whether a tenant may move to another cell (M12, #575): its reserved tag
+/// `paros/movable`. A cell tenant is always [`Movable::Pinned`]; every
+/// other tenant is [`Movable::Movable`] until a command pins it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Movable {
+    /// It may move (`paros/movable:true`).
+    Movable,
+    /// It never leaves its cell (`paros/movable:false`).
+    Pinned,
+}
 
-impl Groups {
-    /// The fleet tenant: `{internal, fleet}`.
-    pub const FLEET_TENANT: Self = Self(Group::Internal.bit() | Group::Fleet.bit());
-    /// A cell tenant: `{internal, cell}`.
-    pub const CELL_TENANT: Self = Self(Group::Internal.bit() | Group::Cell.bit());
-    /// A served tenant: `{users}`.
-    pub const SERVED: Self = Self(Group::Users.bit());
-
-    /// Whether the set holds `group`.
-    #[must_use]
-    pub fn contains(self, group: Group) -> bool {
-        self.0 & group.bit() != 0
+impl Movable {
+    fn tag(self) -> Tag {
+        Tag::reserved(
+            reserved::MOVABLE,
+            match self {
+                Movable::Movable => "true",
+                Movable::Pinned => "false",
+            },
+        )
     }
 
-    /// Whether a tenant with these groups may move to another cell (M12):
-    /// it moves unless one of its groups forbids it, and only `cell` does.
-    #[must_use]
-    pub fn may_move(self) -> bool {
-        !self.contains(Group::Cell)
-    }
-
-    /// The groups, in label order.
-    pub fn iter(self) -> impl Iterator<Item = Group> {
-        Group::ALL
-            .into_iter()
-            .filter(move |group| self.contains(*group))
-    }
-
-    /// The set's label, its groups comma-separated (`internal,fleet`).
-    #[must_use]
-    pub fn label(self) -> String {
-        self.iter().map(Group::as_str).collect::<Vec<_>>().join(",")
-    }
-
-    fn to_wire(self) -> u32 {
-        self.0
-    }
-
-    /// One of the three sets paros defines; `None` for any other bits.
-    fn from_wire(bits: u32) -> Option<Self> {
-        [Self::FLEET_TENANT, Self::CELL_TENANT, Self::SERVED]
-            .into_iter()
-            .find(|groups| groups.0 == bits)
+    fn take(held: &mut BTreeMap<String, String>) -> Result<Self, TagError> {
+        match held.remove(reserved::MOVABLE).as_deref() {
+            Some("true") => Ok(Movable::Movable),
+            Some("false") => Ok(Movable::Pinned),
+            _ => Err(TagError::UnknownReserved(reserved::MOVABLE.into())),
+        }
     }
 }
 
-const _: () = assert!(Groups::FLEET_TENANT.0 & Groups::CELL_TENANT.0 == Group::Internal.bit());
-const _: () = assert!(Groups::SERVED.0 & (Groups::FLEET_TENANT.0 | Groups::CELL_TENANT.0) == 0);
+/// The kind of a cell (#253, §3.7): its reserved tags (#575) `paros/kind`
+/// and its regions.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CellKind {
+    /// One region, across at least three zones (`paros/kind:regional`,
+    /// `paros/region`).
+    Regional {
+        /// The region's label (empty while the cell has none: no
+        /// `paros/region` tag).
+        region: String,
+    },
+    /// Three regions, one of them the witness (M12;
+    /// `paros/kind:multi-region`, `paros/regions`, `paros/witness`).
+    MultiRegion {
+        /// The regions.
+        regions: Vec<String>,
+        /// The witness region.
+        witness: String,
+    },
+}
+
+impl Default for CellKind {
+    fn default() -> Self {
+        CellKind::Regional {
+            region: String::new(),
+        }
+    }
+}
+
+impl CellKind {
+    /// Its reserved tags.
+    ///
+    /// # Panics
+    ///
+    /// If a region holds a character no tag value may hold (a programmer
+    /// error: [`CellKind::from_tags`] refuses one).
+    #[must_use]
+    pub fn tags(&self) -> Vec<Tag> {
+        match self {
+            CellKind::Regional { region } => {
+                let mut tags = vec![Tag::reserved(reserved::KIND, "regional")];
+                if !region.is_empty() {
+                    tags.push(Tag::reserved(reserved::REGION, region.clone()));
+                }
+                tags
+            }
+            CellKind::MultiRegion { regions, witness } => vec![
+                Tag::reserved(reserved::KIND, "multi-region"),
+                Tag::reserved(reserved::REGIONS, regions.join("+")),
+                Tag::reserved(reserved::WITNESS, witness.clone()),
+            ],
+        }
+    }
+
+    /// Parse the kind from a cell's reserved tags.
+    ///
+    /// # Errors
+    ///
+    /// A key no cell carries, or a kind no cell has.
+    pub fn from_tags(mut held: BTreeMap<String, String>) -> Result<Self, TagError> {
+        let kind = match held.remove(reserved::KIND).as_deref() {
+            Some("regional") => CellKind::Regional {
+                region: held.remove(reserved::REGION).unwrap_or_default(),
+            },
+            Some("multi-region") => {
+                let regions = held
+                    .remove(reserved::REGIONS)
+                    .ok_or_else(|| TagError::UnknownReserved(reserved::REGIONS.into()))?;
+                let witness = held
+                    .remove(reserved::WITNESS)
+                    .ok_or_else(|| TagError::UnknownReserved(reserved::WITNESS.into()))?;
+                CellKind::MultiRegion {
+                    regions: regions.split('+').map(str::to_string).collect(),
+                    witness,
+                }
+            }
+            _ => return Err(TagError::UnknownReserved(reserved::KIND.into())),
+        };
+        match held.into_keys().next() {
+            Some(key) => Err(TagError::UnknownReserved(key)),
+            None => Ok(kind),
+        }
+    }
+
+    /// The kind's label (`regional`, `multi-region`).
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            CellKind::Regional { .. } => "regional",
+            CellKind::MultiRegion { .. } => "multi-region",
+        }
+    }
+}
 
 /// Where a cell entry stands (§3.7). Only a [`CellState::Ready`] cell
 /// receives new tenants.
@@ -308,8 +423,8 @@ impl CellState {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FleetCommand {
     /// `init`: record the entry's fleet as the fleet tenant's, once, and
-    /// register the fleet tenant itself (`{internal, fleet}`) under its own
-    /// identifier.
+    /// register the fleet tenant itself ([`TenantKind::Universe`]) under its
+    /// own identifier.
     FormFleet {
         /// The fleet tenant's control journal: its tenant is the fleet
         /// tenant's id.
@@ -318,8 +433,9 @@ pub enum FleetCommand {
         name: Vec<u8>,
     },
     /// `init` (and adding a cell, M12): cell `cell_id` joins the directory,
-    /// `REGISTERING`, and its cell tenant is registered (`{internal,
-    /// cell}`) under the identifier of its control journal.
+    /// `REGISTERING`, and its cell tenant is registered
+    /// ([`TenantKind::Cell`], pinned) under the identifier of its control
+    /// journal.
     AddCell {
         /// The cell's id (random, minted at `init`).
         cell_id: u64,
@@ -327,6 +443,8 @@ pub enum FleetCommand {
         control: JournalIdentifier,
         /// The cell's name, for people (#252, #399; empty: unnamed).
         name: Vec<u8>,
+        /// The cell's kind: its reserved tags (#575).
+        kind: CellKind,
     },
     /// Move cell `cell_id` to `state`.
     MarkCell {
@@ -347,6 +465,8 @@ pub enum FleetCommand {
         cell_id: u64,
         /// What it survives (#252).
         survives: Survives,
+        /// Its first user tags (#575).
+        tags: UserTags,
     },
     /// Move `tenant` to `state`.
     MarkTenant {
@@ -368,6 +488,24 @@ pub enum FleetCommand {
         /// The key's label.
         label: String,
     },
+    /// Request `request`: `tenant`'s user tags become `tags` (#575).
+    SetTenantTags {
+        /// The caller's idempotency id: applied once.
+        request: u64,
+        /// The tenant.
+        tenant: TenantId,
+        /// Its user tags, all of them.
+        tags: UserTags,
+    },
+    /// Request `request`: cell `cell_id`'s user tags become `tags` (#575).
+    SetCellTags {
+        /// The caller's idempotency id: applied once.
+        request: u64,
+        /// The cell.
+        cell_id: u64,
+        /// Its user tags, all of them.
+        tags: UserTags,
+    },
 }
 
 /// One fleet entry: a command, stamped with the fleet it was written for and
@@ -380,6 +518,12 @@ pub struct FleetEntry {
     pub version: u32,
     /// What it asks for.
     pub command: FleetCommand,
+}
+
+/// A wire list of user tags, judged: a malformed or reserved tag, or a set
+/// over the cap, is refused (#575).
+fn user_tags(tags: Vec<crate::rpc::common::Tag>) -> Result<UserTags, &'static str> {
+    UserTags::from_wire(tags).map_err(|_| "a user tag set is malformed, reserved or over the cap")
 }
 
 fn identifier(tenant: u64, journal: u64) -> JournalIdentifier {
@@ -411,11 +555,13 @@ impl FleetEntry {
                 cell_id,
                 control,
                 name,
+                kind,
             } => Kind::AddCell(wire::AddCell {
                 cell_id: *cell_id,
                 control_tenant: control.tenant.0,
                 control_journal: control.journal.0,
                 name: name.clone(),
+                tags: kind.tags().iter().map(Tag::to_wire).collect(),
             }),
             FleetCommand::MarkCell { cell_id, state } => Kind::MarkCell(wire::MarkCell {
                 cell_id: *cell_id,
@@ -426,12 +572,14 @@ impl FleetEntry {
                 name,
                 cell_id,
                 survives,
+                tags,
             } => Kind::RegisterTenant(wire::RegisterTenant {
                 tenant: control.tenant.0,
                 name: name.clone(),
                 cell_id: *cell_id,
                 control_journal: control.journal.0,
                 survives: survives.to_wire(),
+                tags: tags.to_wire(),
             }),
             FleetCommand::MarkTenant { tenant, state } => Kind::MarkTenant(wire::MarkTenant {
                 tenant: tenant.0,
@@ -448,6 +596,24 @@ impl FleetEntry {
             FleetCommand::RemoveRootKey { label } => Kind::RemoveRootKey(wire::RemoveRootKey {
                 label: label.clone(),
             }),
+            FleetCommand::SetTenantTags {
+                request,
+                tenant,
+                tags,
+            } => Kind::SetTenantTags(wire::SetTenantTags {
+                request: *request,
+                tenant: tenant.0,
+                tags: tags.to_wire(),
+            }),
+            FleetCommand::SetCellTags {
+                request,
+                cell_id,
+                tags,
+            } => Kind::SetCellTags(wire::SetCellTags {
+                request: *request,
+                cell_id: *cell_id,
+                tags: tags.to_wire(),
+            }),
         };
         wire::FleetEntry {
             fleet_id: self.fleet_id,
@@ -461,8 +627,9 @@ impl FleetEntry {
     ///
     /// # Errors
     ///
-    /// The record is not a fleet entry, names no kind, or names a state no
-    /// version knows.
+    /// The record is not a fleet entry, names no kind, names a state no
+    /// version knows, or carries a malformed or reserved user tag, a set
+    /// over the cap, or a reserved tag its entity does not carry (#575).
     pub fn decode(record: &[u8]) -> Result<Self, &'static str> {
         use wire::fleet_entry::Kind;
         let entry = wire::FleetEntry::decode(record).map_err(|_| "not a fleet entry")?;
@@ -471,11 +638,20 @@ impl FleetEntry {
                 control: identifier(form.fleet_tenant, form.fleet_journal),
                 name: form.name,
             },
-            Kind::AddCell(add) => FleetCommand::AddCell {
-                cell_id: add.cell_id,
-                control: identifier(add.control_tenant, add.control_journal),
-                name: add.name,
-            },
+            Kind::AddCell(add) => {
+                let (held, user) = Tags::from_wire(add.tags)
+                    .and_then(Tags::split)
+                    .map_err(|_| "a cell's tags are malformed")?;
+                if !user.is_empty() {
+                    return Err("a cell is added with its reserved tags only");
+                }
+                FleetCommand::AddCell {
+                    cell_id: add.cell_id,
+                    control: identifier(add.control_tenant, add.control_journal),
+                    name: add.name,
+                    kind: CellKind::from_tags(held).map_err(|_| "an unknown cell kind")?,
+                }
+            }
             Kind::MarkCell(mark) => FleetCommand::MarkCell {
                 cell_id: mark.cell_id,
                 state: CellState::from_wire(mark.state).ok_or("an unknown cell state")?,
@@ -485,6 +661,7 @@ impl FleetEntry {
                 name: register.name,
                 cell_id: register.cell_id,
                 survives: Survives::from_wire(register.survives)?,
+                tags: user_tags(register.tags)?,
             },
             Kind::MarkTenant(mark) => FleetCommand::MarkTenant {
                 tenant: TenantId(mark.tenant),
@@ -501,6 +678,16 @@ impl FleetEntry {
             Kind::RemoveRootKey(remove) => FleetCommand::RemoveRootKey {
                 label: remove.label,
             },
+            Kind::SetTenantTags(set) => FleetCommand::SetTenantTags {
+                request: set.request,
+                tenant: TenantId(set.tenant),
+                tags: user_tags(set.tags)?,
+            },
+            Kind::SetCellTags(set) => FleetCommand::SetCellTags {
+                request: set.request,
+                cell_id: set.cell_id,
+                tags: user_tags(set.tags)?,
+            },
         };
         Ok(Self {
             fleet_id: entry.fleet_id,
@@ -511,14 +698,26 @@ impl FleetEntry {
 }
 
 /// A cell entry.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CellEntry {
     /// Where it stands.
     pub state: CellState,
     /// The metadata version it was added under.
     pub version: u32,
-    /// Its cell tenant (a `{internal, cell}` tenant entry).
+    /// Its cell tenant (a [`TenantKind::Cell`] tenant entry).
     pub control_tenant: TenantId,
+    /// Its kind: its reserved tags, fixed when it was added (#575).
+    pub kind: CellKind,
+    /// Its user tags (#575).
+    pub tags: UserTags,
+}
+
+impl CellEntry {
+    /// Every tag it carries: its reserved kind tags and its user tags.
+    #[must_use]
+    pub fn all_tags(&self) -> Tags {
+        self.tags.tags().clone().with(self.kind.tags())
+    }
 }
 
 /// How a person reads a tenant ([`FleetDirectory::label`], #239).
@@ -549,11 +748,47 @@ pub struct TenantEntry {
     /// Its configuration sequence number: moved each time it enters
     /// `UPDATING_CONFIGURATION`.
     pub config_seq: u64,
-    /// Its groups, fixed at registration.
-    pub groups: Groups,
+    /// What it is, fixed at registration (#575: `paros/kind`,
+    /// `paros/role`).
+    pub kind: TenantKind,
+    /// Whether it may move to another cell (`paros/movable`): a cell
+    /// tenant is always pinned.
+    pub movable: Movable,
     /// What it survives (#252), recorded at `REGISTERING` and mirrored into
     /// its control journal (#210). An `internal` tenant survives a zone.
     pub survives: Survives,
+    /// Its user tags (#575).
+    pub tags: UserTags,
+}
+
+impl TenantEntry {
+    /// Every tag it carries: its reserved tags and its user tags.
+    #[must_use]
+    pub fn all_tags(&self) -> Tags {
+        let mut reserved = self.kind.tags();
+        reserved.push(self.movable.tag());
+        self.tags.tags().clone().with(reserved)
+    }
+
+    /// Whether it may move to another cell (M12).
+    #[must_use]
+    pub fn may_move(&self) -> bool {
+        self.movable == Movable::Movable
+    }
+
+    /// The reserved tags and user tags of a checkpointed entry.
+    fn from_tags(tags: Tags) -> Result<(TenantKind, Movable, UserTags), TagError> {
+        let (mut held, user) = tags.split()?;
+        let kind = TenantKind::take(&mut held)?;
+        let movable = Movable::take(&mut held)?;
+        if let Some(key) = held.into_keys().next() {
+            return Err(TagError::UnknownReserved(key));
+        }
+        if kind.forced().is_some_and(|forced| forced != movable) {
+            return Err(TagError::UnknownReserved(reserved::MOVABLE.into()));
+        }
+        Ok((kind, movable, user))
+    }
 }
 
 /// What one fleet record folded to.
@@ -604,6 +839,16 @@ pub enum FleetEvent {
     RootKeyRemoved {
         /// Its key id.
         key_id: u32,
+    },
+    /// A tenant's user tags changed (#575).
+    TenantTagged {
+        /// The tenant.
+        tenant: TenantId,
+    },
+    /// A cell's user tags changed (#575).
+    CellTagged {
+        /// The cell.
+        cell_id: u64,
     },
     /// The entry asked for what the directory already holds: a re-run step.
     Unchanged,
@@ -669,6 +914,9 @@ pub enum FleetDirectoryRefusal {
         /// The id asked for.
         tenant: TenantId,
     },
+    /// A `users` tenant's name holds a `:`: an internal tenant shows as
+    /// `<role>:<name>` (#575), so a user's never does.
+    NameRefused,
     /// A live tenant already holds the name.
     NameTaken {
         /// The tenant holding it.
@@ -714,6 +962,13 @@ pub enum FleetDirectoryRefusal {
     },
 }
 
+/// What a tag request names (#575).
+#[derive(Clone, Copy, Debug)]
+enum Tagged {
+    Tenant(TenantId),
+    Cell(u64),
+}
+
 /// The fleet as the fleet tenant recorded it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Formed {
@@ -735,6 +990,8 @@ pub struct FleetDirectory {
     removed: BTreeSet<TenantId>,
     /// The universe entry's root public keys (#245).
     keys: RootKeys,
+    /// Every tag request applied (#575): a retry never applies one again.
+    tagged: BTreeSet<u64>,
     next_seq: u64,
 }
 
@@ -759,13 +1016,19 @@ impl FleetDirectory {
 
     /// The cell entry `cell_id`.
     #[must_use]
-    pub fn cell(&self, cell_id: u64) -> Option<CellEntry> {
-        self.cells.get(&cell_id).copied()
+    pub fn cell(&self, cell_id: u64) -> Option<&CellEntry> {
+        self.cells.get(&cell_id)
     }
 
     /// Every cell entry, in id order.
-    pub fn cells(&self) -> impl Iterator<Item = (u64, CellEntry)> + '_ {
-        self.cells.iter().map(|(id, c)| (*id, *c))
+    pub fn cells(&self) -> impl Iterator<Item = (u64, &CellEntry)> + '_ {
+        self.cells.iter().map(|(id, c)| (*id, c))
+    }
+
+    /// Whether the tag request `request` was applied (#575).
+    #[must_use]
+    pub fn tagged(&self, request: u64) -> bool {
+        self.tagged.contains(&request)
     }
 
     /// The tenant entry `tenant`.
@@ -827,27 +1090,17 @@ impl FleetDirectory {
     }
 
     /// How a person reads `tenant` (#239): a `users` tenant by its name, an
-    /// `internal` one by the group that makes it internal, `fleet` or `cell`
-    /// with its cell. A label is display only: never a name a caller can
-    /// resolve, and never an id (§3.8: no well-known names).
-    ///
-    /// # Panics
-    ///
-    /// If a tenant's groups are none of the three sets the wire admits.
+    /// internal one by its kind, the universe's or a cell's, with its cell.
+    /// A label is display only: never a name a caller can resolve, and
+    /// never an id (§3.8: no well-known names).
     #[must_use]
     pub fn label(&self, tenant: TenantId) -> Option<TenantLabel<'_>> {
         let entry = self.tenants.get(&tenant)?;
-        if !entry.groups.contains(Group::Internal) {
-            assert!(entry.groups.contains(Group::Users));
-            return Some(TenantLabel::Named(&entry.name));
+        match entry.kind {
+            TenantKind::Users => return Some(TenantLabel::Named(&entry.name)),
+            TenantKind::Universe => return Some(TenantLabel::Fleet),
+            TenantKind::Cell => {}
         }
-        if entry.groups.contains(Group::Fleet) {
-            return Some(TenantLabel::Fleet);
-        }
-        assert!(
-            entry.groups.contains(Group::Cell),
-            "an internal tenant is the fleet's or a cell's"
-        );
         let cell = self
             .cells
             .iter()
@@ -913,19 +1166,67 @@ impl FleetDirectory {
                 cell_id,
                 control,
                 name,
-            } => self.add_cell(*cell_id, *control, name, entry.version),
+                kind,
+            } => self.add_cell(*cell_id, *control, name, kind, entry.version),
             FleetCommand::MarkCell { cell_id, state } => self.mark_cell(*cell_id, *state),
             FleetCommand::RegisterTenant {
                 control,
                 name,
                 cell_id,
                 survives,
-            } => self.register_tenant(*control, name, *cell_id, *survives),
+                tags,
+            } => self.register_tenant(*control, name, *cell_id, *survives, tags),
             FleetCommand::MarkTenant { tenant, state } => self.mark_tenant(*tenant, *state),
             FleetCommand::RemoveTenant { tenant } => self.remove_tenant(*tenant),
             FleetCommand::AddRootKey(key) => Ok(self.keys.add(key)?.into()),
             FleetCommand::RemoveRootKey { label } => Ok(self.keys.remove(label)?.into()),
+            FleetCommand::SetTenantTags {
+                request,
+                tenant,
+                tags,
+            } => self.set_tags(*request, Tagged::Tenant(*tenant), tags),
+            FleetCommand::SetCellTags {
+                request,
+                cell_id,
+                tags,
+            } => self.set_tags(*request, Tagged::Cell(*cell_id), tags),
         }
+    }
+
+    /// A tag request (#575): judged at apply, applied at most once, all the
+    /// user tags at once. The tags were judged at decode: no reserved key,
+    /// within the cap.
+    fn set_tags(
+        &mut self,
+        request: u64,
+        target: Tagged,
+        tags: &UserTags,
+    ) -> Result<FleetEvent, FleetDirectoryRefusal> {
+        if request == 0 {
+            return Err(FleetDirectoryRefusal::Malformed);
+        }
+        if self.tagged.contains(&request) {
+            return Ok(FleetEvent::Unchanged);
+        }
+        let (held, event) = match target {
+            Tagged::Tenant(tenant) => {
+                let entry = self
+                    .tenants
+                    .get_mut(&tenant)
+                    .ok_or(FleetDirectoryRefusal::UnknownTenant { tenant })?;
+                (&mut entry.tags, FleetEvent::TenantTagged { tenant })
+            }
+            Tagged::Cell(cell_id) => {
+                let entry = self
+                    .cells
+                    .get_mut(&cell_id)
+                    .ok_or(FleetDirectoryRefusal::UnknownCell { cell_id })?;
+                (&mut entry.tags, FleetEvent::CellTagged { cell_id })
+            }
+        };
+        held.clone_from(tags);
+        self.tagged.insert(request);
+        Ok(event)
     }
 
     fn form_fleet(
@@ -953,8 +1254,10 @@ impl FleetDirectory {
                         control: control.journal,
                         state: TenantState::Ready,
                         config_seq: 0,
-                        groups: Groups::FLEET_TENANT,
+                        kind: TenantKind::Universe,
+                        movable: Movable::Movable,
                         survives: Survives::Az,
+                        tags: UserTags::none(),
                     },
                 );
                 Ok(FleetEvent::FleetFormed { fleet_id })
@@ -971,6 +1274,7 @@ impl FleetDirectory {
         cell_id: u64,
         control: JournalIdentifier,
         name: &[u8],
+        kind: &CellKind,
         version: u32,
     ) -> Result<FleetEvent, FleetDirectoryRefusal> {
         if cell_id == 0 || !control.is_set() {
@@ -978,6 +1282,7 @@ impl FleetDirectory {
         }
         if let Some(cell) = self.cells.get(&cell_id) {
             let same = cell.control_tenant == control.tenant
+                && cell.kind == *kind
                 && self
                     .tenants
                     .get(&control.tenant)
@@ -1002,6 +1307,8 @@ impl FleetDirectory {
                 state: CellState::Registering,
                 version,
                 control_tenant: control.tenant,
+                kind: kind.clone(),
+                tags: UserTags::none(),
             },
         );
         self.tenants.insert(
@@ -1012,8 +1319,10 @@ impl FleetDirectory {
                 control: control.journal,
                 state: TenantState::Ready,
                 config_seq: 0,
-                groups: Groups::CELL_TENANT,
+                kind: TenantKind::Cell,
+                movable: Movable::Pinned,
                 survives: Survives::Az,
+                tags: UserTags::none(),
             },
         );
         // The fleet's first cell hosts the fleet tenant (#226).
@@ -1054,14 +1363,20 @@ impl FleetDirectory {
         name: &[u8],
         cell_id: u64,
         survives: Survives,
+        tags: &UserTags,
     ) -> Result<FleetEvent, FleetDirectoryRefusal> {
         let tenant = control.tenant;
         if !control.is_set() {
             return Err(FleetDirectoryRefusal::Malformed);
         }
+        if name.contains(&b':') {
+            return Err(FleetDirectoryRefusal::NameRefused);
+        }
         if let Some(existing) = self.tenants.get(&tenant) {
-            // The same registration again: a re-run of the first step.
-            let same = existing.groups == Groups::SERVED
+            // The same registration again: a re-run of the first step. Its
+            // tags are the first ones only: a later `SetTenantTags` may
+            // have changed them since.
+            let same = existing.kind == TenantKind::Users
                 && existing.name == name
                 && existing.cell_id == cell_id
                 && existing.control == control.journal
@@ -1090,8 +1405,10 @@ impl FleetDirectory {
                 control: control.journal,
                 state: TenantState::Registering,
                 config_seq: 0,
-                groups: Groups::SERVED,
+                kind: TenantKind::Users,
+                movable: Movable::Movable,
                 survives,
+                tags: tags.clone(),
             },
         );
         Ok(FleetEvent::TenantRegistered { tenant, cell_id })
@@ -1106,7 +1423,7 @@ impl FleetDirectory {
             .tenants
             .get_mut(&tenant)
             .ok_or(FleetDirectoryRefusal::UnknownTenant { tenant })?;
-        if entry.groups.contains(Group::Internal) {
+        if entry.kind.is_internal() {
             return Err(FleetDirectoryRefusal::Internal { tenant });
         }
         if entry.state == state {
@@ -1133,7 +1450,7 @@ impl FleetDirectory {
             .tenants
             .get(&tenant)
             .ok_or(FleetDirectoryRefusal::UnknownTenant { tenant })?;
-        if entry.groups.contains(Group::Internal) {
+        if entry.kind.is_internal() {
             return Err(FleetDirectoryRefusal::Internal { tenant });
         }
         if entry.state != TenantState::Removing {
@@ -1167,6 +1484,7 @@ impl FleetDirectory {
                     state: c.state.to_wire(),
                     version: c.version,
                     control_tenant: c.control_tenant.0,
+                    tags: c.all_tags().to_wire(),
                 })
                 .collect(),
             tenants: self
@@ -1179,11 +1497,12 @@ impl FleetDirectory {
                     state: t.state.to_wire(),
                     config_seq: t.config_seq,
                     control_journal: t.control.0,
-                    groups: t.groups.to_wire(),
                     survives: t.survives.to_wire(),
+                    tags: t.all_tags().to_wire(),
                 })
                 .collect(),
             removed: self.removed.iter().map(|id| id.0).collect(),
+            tagged: self.tagged.iter().copied().collect(),
         }
     }
 }
@@ -1219,12 +1538,17 @@ impl Checkpointable for FleetDirectory {
         let mut cells = BTreeMap::new();
         for c in state.cells {
             let cell_state = CellState::from_wire(c.state).ok_or("an unknown cell state")?;
+            let (held, tags) = Tags::from_wire(c.tags)
+                .and_then(Tags::split)
+                .map_err(|_| "a cell entry's tags are malformed")?;
             cells.insert(
                 c.cell_id,
                 CellEntry {
                     state: cell_state,
                     version: c.version,
                     control_tenant: TenantId(c.control_tenant),
+                    kind: CellKind::from_tags(held).map_err(|_| "an unknown cell kind")?,
+                    tags,
                 },
             );
         }
@@ -1232,11 +1556,13 @@ impl Checkpointable for FleetDirectory {
         let mut names = BTreeMap::new();
         for t in state.tenants {
             let id = TenantId(t.tenant);
-            let groups = Groups::from_wire(t.groups).ok_or("an unknown set of tenant groups")?;
+            let (kind, movable, tags) = Tags::from_wire(t.tags)
+                .and_then(TenantEntry::from_tags)
+                .map_err(|_| "a tenant entry's tags are malformed or unknown")?;
             if !id.is_set() || t.control_journal == 0 {
                 return Err("a fleet directory state names an unset tenant identifier");
             }
-            if groups.contains(Group::Users) && names.insert(t.name.clone(), id).is_some() {
+            if kind == TenantKind::Users && names.insert(t.name.clone(), id).is_some() {
                 return Err("a fleet directory state names one tenant name twice");
             }
             tenants.insert(
@@ -1247,8 +1573,10 @@ impl Checkpointable for FleetDirectory {
                     control: JournalId(t.control_journal),
                     state: TenantState::from_wire(t.state).ok_or("an unknown tenant state")?,
                     config_seq: t.config_seq,
-                    groups,
+                    kind,
+                    movable,
                     survives: Survives::from_wire(t.survives)?,
+                    tags,
                 },
             );
         }
@@ -1263,6 +1591,7 @@ impl Checkpointable for FleetDirectory {
         self.names = names;
         self.removed = removed;
         self.keys = keys;
+        self.tagged = state.tagged.into_iter().collect();
         self.next_seq = covers_up_to + 1;
         Ok(())
     }

@@ -64,6 +64,10 @@ pub(crate) struct TenantBoard {
     outcomes: BTreeMap<(JournalIdentifier, u64), RequestOutcome>,
     /// `(machine, journal)`: the machine folded the journal's tombstone.
     tombstoned: BTreeSet<(u64, JournalIdentifier)>,
+    /// The LSN each journal's tombstone folded at. A node that re-folds
+    /// after a reboot meets a tag request below a tombstone it folded
+    /// before, so a tag is judged by LSN, not by what a node folded.
+    deleted: BTreeMap<JournalIdentifier, u64>,
     /// A tenant created a journal.
     armed: bool,
     /// A create was answered `name_taken` by a journal created before.
@@ -121,6 +125,19 @@ fn zone_spread(config: &paros::AcceptorConfig, lsn: u64) {
 }
 
 impl TenantBoard {
+    /// #575 (key:value tags): a tag request names a live journal the
+    /// tenant created before; a tag changes no outcome.
+    fn tagged(&mut self, control: JournalIdentifier, request: u64, id: JournalId, lsn: u64) {
+        let journal = JournalIdentifier::new(control.tenant, id);
+        assert_always!(
+            self.created.get(&journal).is_some_and(|at| *at < lsn)
+                && self.deleted.get(&journal).is_none_or(|at| *at > lsn),
+            "tenant: a tagged journal is a live one the tenant created before",
+            { "lsn" => lsn }
+        );
+        self.answered(control, request, RequestOutcome::Tagged(id), lsn);
+    }
+
     /// `node` folded LSN `lsn` of tenant control journal `control` to
     /// `event`.
     #[tracing::instrument(level = "trace", skip(self, event), fields(node = node.0, journal = %control, lsn))]
@@ -167,8 +184,10 @@ impl TenantBoard {
                     { "lsn" => lsn }
                 );
                 self.tombstoned.insert((node.0, journal));
+                self.deleted.entry(journal).or_insert(lsn);
                 self.answered(control, *request, RequestOutcome::Deleted(*id), lsn);
             }
+            TenantEvent::Tagged { request, id } => self.tagged(control, *request, *id, lsn),
             TenantEvent::Answered { request, outcome } => {
                 if let RequestOutcome::NameTaken(winner) = outcome {
                     let winner = JournalIdentifier::new(control.tenant, *winner);

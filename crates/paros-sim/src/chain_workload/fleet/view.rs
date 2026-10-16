@@ -197,6 +197,7 @@ fn judge_answer(
             { "cell" => journals.cell_id, "named" => reply.cell_id }
         );
         forward(ctx, reply, client);
+        super::tags::judge_view(ctx.state(), reply, matches!(scope, Scope::Admin));
     } else {
         // A founding member's address that now serves another cell (#216).
         assert_reachable!("view: a view answered by another cell's machine");
@@ -339,7 +340,13 @@ fn judge_status(ctx: &SimContext, reply: &ViewReply, admin: bool, client: u64) {
         // `parosctl status`'s slots per class are the bookings listed.
         let mut listed: BTreeMap<String, u64> = BTreeMap::new();
         for m in reply.machines.iter().filter(|m| m.standing != "retired") {
-            *listed.entry(m.class.clone()).or_default() += m.bookings.len() as u64;
+            *listed
+                .entry(
+                    paros::tags::value_of(&m.tags, paros::tags::reserved::CLASS)
+                        .unwrap_or("-")
+                        .to_string(),
+                )
+                .or_default() += m.bookings.len() as u64;
         }
         let summary = summarize(reply);
         assert_always!(

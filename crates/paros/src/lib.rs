@@ -53,6 +53,7 @@ pub mod scenario;
 pub mod status;
 mod storage;
 pub mod system;
+pub mod tags;
 pub mod tenant;
 #[cfg(feature = "tls")]
 pub mod tls;

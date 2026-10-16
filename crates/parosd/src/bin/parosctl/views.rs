@@ -145,11 +145,15 @@ pub struct MachineArgs {
 #[derive(Subcommand, Debug)]
 enum MachineCommand {
     /// List the cell's machines: name, address, class, slots booked of
-    /// total, failure domain, standing, up or down.
+    /// total, zone, standing, up or down, load and user tags.
     List {
         /// The cell: refused unless the servers are its machines.
         #[arg(long)]
         cell: Option<String>,
+        /// Only the machines whose tags match: `key`, `key:value`, comma
+        /// separated, all of them (#575 (key:value tags)).
+        #[arg(short = 'l', long)]
+        selector: Option<String>,
     },
     /// Show one machine: its details, its bookings and the journals it
     /// serves.
@@ -234,9 +238,67 @@ pub(crate) fn state(up: bool) -> &'static str {
 }
 
 /// `parosctl machine …`.
+/// The value of the tag `key` (#575 (key:value tags)), or `-`.
+pub(crate) fn tag(tags: &[paros::wire::common::Tag], key: &str) -> String {
+    paros::tags::value_of(tags, key).map_or_else(|| "-".to_string(), str::to_string)
+}
+
+/// Every tag as `k:v`, comma-joined, or `-` (#575 (key:value tags)).
+pub(crate) fn tags_text(tags: &[paros::wire::common::Tag]) -> String {
+    if tags.is_empty() {
+        "-".to_string()
+    } else {
+        paros::tags::Tags::from_wire(tags.to_vec()).map_or_else(|_| "?".to_string(), |t| t.label())
+    }
+}
+
+/// The user tags only, as `k:v`, comma-joined, or `-`.
+pub(crate) fn user_tags_text(tags: &[paros::wire::common::Tag]) -> String {
+    let user: Vec<paros::wire::common::Tag> = tags
+        .iter()
+        .filter(|t| !paros::tags::is_reserved(&t.key))
+        .cloned()
+        .collect();
+    tags_text(&user)
+}
+
+/// The selector `-l` gives, empty without one; else the command's end
+/// (#575 (key:value tags)).
+pub(crate) fn selector(text: Option<&str>) -> Result<paros::tags::Selector, Ending> {
+    text.map(str::parse::<paros::tags::Selector>)
+        .transpose()
+        .map(Option::unwrap_or_default)
+        .map_err(|error| {
+            note(&format!("bad selector: {error}"));
+            Ending::Refused
+        })
+}
+
+/// Whether `tags` (a view's) match `selector`. Tags a view cannot parse
+/// match no term.
+pub(crate) fn selected(
+    selector: &paros::tags::Selector,
+    tags: &[paros::wire::common::Tag],
+) -> bool {
+    selector.is_empty()
+        || paros::tags::Tags::from_wire(tags.to_vec())
+            .is_ok_and(|tags| selector.matches(&tags, None))
+}
+
+/// Tags as a JSON object, key to value.
+pub(crate) fn tags_json(tags: &[paros::wire::common::Tag]) -> Value {
+    Value::Object(
+        tags.iter()
+            .map(|t| (t.key.clone(), Value::String(t.value.clone())))
+            .collect(),
+    )
+}
+
 pub async fn machine(asker: &Asker<'_>, out: &Printer, args: MachineArgs) -> Ending {
     match args.command {
-        MachineCommand::List { cell } => machine_list(asker, out, cell.as_deref()).await,
+        MachineCommand::List { cell, selector } => {
+            machine_list(asker, out, (cell.as_deref(), selector.as_deref())).await
+        }
         MachineCommand::Show { machine } => {
             let reply = match asker.cell(None).await {
                 Ok(reply) => reply,
@@ -261,13 +323,15 @@ pub async fn machine(asker: &Asker<'_>, out: &Printer, args: MachineArgs) -> End
             out.emit(
                 || {
                     let mut text = format!(
-                        "name:            {}\naddress:         {}\nclass:           {}\nslots:           {} booked of {}\nfailure domain:  {}\nstanding:        {}\nstate:           {}\nfounding member: {}\ncell:            {}",
+                        "name:            {}\naddress:         {}\nclass:           {}\nslots:           {} booked of {}\nzone:            {}\nrack:            {}\ntags:            {}\nstanding:        {}\nstate:           {}\nfounding member: {}\ncell:            {}",
                         machine_names(&reply)[&m.node_id],
                         m.addr,
-                        m.class,
+                        tag(&m.tags, paros::tags::reserved::CLASS),
                         m.booked,
                         m.capacity,
-                        if m.failure_domain.is_empty() { "-" } else { &m.failure_domain },
+                        tag(&m.tags, paros::tags::reserved::ZONE),
+                        tag(&m.tags, paros::tags::reserved::RACK),
+                        user_tags_text(&m.tags),
                         m.standing,
                         state(m.up),
                         if m.founder { "yes" } else { "no" },
@@ -294,13 +358,22 @@ pub async fn machine(asker: &Asker<'_>, out: &Printer, args: MachineArgs) -> End
 }
 
 /// `parosctl machine list`: the cell's machines, with how busy each is.
-async fn machine_list(asker: &Asker<'_>, out: &Printer, cell: Option<&str>) -> Ending {
-    let reply = match asker.cell(cell).await {
+async fn machine_list(
+    asker: &Asker<'_>,
+    out: &Printer,
+    (cell, chosen): (Option<&str>, Option<&str>),
+) -> Ending {
+    let chosen = match selector(chosen) {
+        Ok(chosen) => chosen,
+        Err(ending) => return ending,
+    };
+    let mut reply = match asker.cell(cell).await {
         Ok(reply) => reply,
         Err(ending) => return ending,
     };
+    reply.machines.retain(|m| selected(&chosen, &m.tags));
     let loads = asker.loads(&reply).await;
-    let rows: Vec<[String; 10]> = reply
+    let rows: Vec<[String; 11]> = reply
         .machines
         .iter()
         .map(|m| {
@@ -308,18 +381,15 @@ async fn machine_list(asker: &Asker<'_>, out: &Printer, cell: Option<&str>) -> E
             [
                 machine_names(&reply)[&m.node_id].clone(),
                 m.addr.clone(),
-                m.class.clone(),
+                tag(&m.tags, paros::tags::reserved::CLASS),
                 format!("{}/{}", m.booked, m.capacity),
-                if m.failure_domain.is_empty() {
-                    "-".to_string()
-                } else {
-                    m.failure_domain.clone()
-                },
+                tag(&m.tags, paros::tags::reserved::ZONE),
                 m.standing.clone(),
                 state(m.up).to_string(),
                 cpu,
                 machine,
                 disk,
+                user_tags_text(&m.tags),
             ]
         })
         .collect();
@@ -327,8 +397,8 @@ async fn machine_list(asker: &Asker<'_>, out: &Printer, cell: Option<&str>) -> E
         || {
             table(
                 [
-                    "NAME", "ADDRESS", "CLASS", "SLOTS", "DOMAIN", "STANDING", "STATE", "CPU",
-                    "MACHINE", "DISK",
+                    "NAME", "ADDRESS", "CLASS", "SLOTS", "ZONE", "STANDING", "STATE", "CPU",
+                    "MACHINE", "DISK", "TAGS",
                 ],
                 &rows,
             )
@@ -461,22 +531,35 @@ pub(crate) fn indent(text: &str) -> String {
 }
 
 /// `parosctl cell list`: the universe's cells.
-pub async fn cell_list(asker: &Asker<'_>, out: &Printer) -> Ending {
-    let reply = match asker.ask(Query::Universe(UniverseQuery {})).await {
+pub async fn cell_list(asker: &Asker<'_>, out: &Printer, chosen: Option<&str>) -> Ending {
+    let chosen = match selector(chosen) {
+        Ok(chosen) => chosen,
+        Err(ending) => return ending,
+    };
+    let mut reply = match asker.ask(Query::Universe(UniverseQuery {})).await {
         Ok(reply) => reply,
         Err(ending) => return ending,
     };
-    let rows: Vec<[String; 3]> = reply
+    reply.cells.retain(|c| selected(&chosen, &c.tags));
+    let rows: Vec<[String; 5]> = reply
         .cells
         .iter()
-        .map(|c| [text(&c.name), c.state.clone(), c.tenants.to_string()])
+        .map(|c| {
+            [
+                text(&c.name),
+                tag(&c.tags, paros::tags::reserved::KIND),
+                c.state.clone(),
+                c.tenants.to_string(),
+                user_tags_text(&c.tags),
+            ]
+        })
         .collect();
     out.emit(
         || {
             format!(
                 "universe {}\n{}",
                 text(&reply.universe_name),
-                table(["CELL", "STATE", "TENANTS"], &rows)
+                table(["CELL", "KIND", "STATE", "TENANTS", "TAGS"], &rows)
             )
         },
         || reply_json(&reply),
@@ -486,11 +569,16 @@ pub async fn cell_list(asker: &Asker<'_>, out: &Printer) -> Ending {
 
 /// `parosctl tenant list`: the universe's tenants, the internal ones (the
 /// universe tenant, the cell tenants) included.
-pub async fn tenant_list(asker: &Asker<'_>, out: &Printer) -> Ending {
-    let reply = match asker.ask(Query::Universe(UniverseQuery {})).await {
+pub async fn tenant_list(asker: &Asker<'_>, out: &Printer, chosen: Option<&str>) -> Ending {
+    let chosen = match selector(chosen) {
+        Ok(chosen) => chosen,
+        Err(ending) => return ending,
+    };
+    let mut reply = match asker.ask(Query::Universe(UniverseQuery {})).await {
         Ok(reply) => reply,
         Err(ending) => return ending,
     };
+    reply.tenants.retain(|t| selected(&chosen, &t.tags));
     let cells: BTreeMap<u64, String> = reply
         .cells
         .iter()
@@ -508,15 +596,15 @@ pub async fn tenant_list(asker: &Asker<'_>, out: &Printer) -> Ending {
                     .cloned()
                     .unwrap_or_else(|| "-".to_string()),
                 t.state.clone(),
-                t.groups.clone(),
                 t.survives.clone(),
+                user_tags_text(&t.tags),
             ]
         })
         .collect();
     out.emit(
         || {
             table(
-                ["TENANT", "KIND", "CELL", "STATE", "GROUPS", "SURVIVES"],
+                ["TENANT", "KIND", "CELL", "STATE", "SURVIVES", "TAGS"],
                 &rows,
             )
         },
@@ -537,7 +625,8 @@ pub async fn cell_show(asker: &Asker<'_>, out: &Printer, cell: Option<&str>) -> 
     let mut standing: BTreeMap<&str, usize> = BTreeMap::new();
     for m in &reply.machines {
         if m.standing != "retired" {
-            let entry = slots.entry(m.class.as_str()).or_default();
+            let class = paros::tags::value_of(&m.tags, paros::tags::reserved::CLASS).unwrap_or("-");
+            let entry = slots.entry(class).or_default();
             entry.0 += m.booked;
             entry.1 += m.capacity;
         }
@@ -645,11 +734,7 @@ pub async fn tenant_show(asker: &Asker<'_>, out: &Printer, name: &str) -> Ending
         .map(|m| {
             [
                 names[&m.node_id].clone(),
-                if m.failure_domain.is_empty() {
-                    "-".to_string()
-                } else {
-                    m.failure_domain.clone()
-                },
+                tag(&m.tags, paros::tags::reserved::ZONE),
                 state(m.up).to_string(),
                 footprint.get(&m.node_id).copied().unwrap_or(0).to_string(),
             ]
@@ -658,15 +743,15 @@ pub async fn tenant_show(asker: &Asker<'_>, out: &Printer, name: &str) -> Ending
     out.emit(
         || {
             format!(
-                "tenant:       {}\ncell:         {}\nstate:        {}\ngroups:       {}\nsurvives:     {}\ncoordinator:  {}\njournals:\n{}\nmachines:\n{}",
+                "tenant:       {}\ncell:         {}\nstate:        {}\ntags:         {}\nsurvives:     {}\ncoordinator:  {}\njournals:\n{}\nmachines:\n{}",
                 text(&tenant.name),
                 text(&reply.cell_name),
                 tenant.state,
-                tenant.groups,
+                tags_text(&tenant.tags),
                 tenant.survives,
                 coordinator_text(&reply, &names),
                 indent(&table(["JOURNAL", "WRITER", "DESIRED", "ACCEPTORS", "MATCHMAKERS"], &journal_rows)),
-                indent(&table(["MACHINE", "DOMAIN", "STATE", "ACCEPTOR SLOTS"], &machine_rows)),
+                indent(&table(["MACHINE", "ZONE", "STATE", "ACCEPTOR SLOTS"], &machine_rows)),
             )
         },
         || reply_json(&reply),
@@ -827,10 +912,9 @@ fn machine_json(m: &wire::MachineView) -> Value {
         "node_id": m.node_id,
         "name": m.name,
         "addr": m.addr,
-        "class": m.class,
+        "tags": tags_json(&m.tags),
         "capacity": m.capacity,
         "booked": m.booked,
-        "failure_domain": m.failure_domain,
         "standing": m.standing,
         "up": m.up,
         "founder": m.founder,
@@ -860,7 +944,7 @@ pub(crate) fn reply_json(reply: &wire::ViewReply) -> Value {
             "name": record_text(&t.name),
             "kind": t.kind,
             "state": t.state,
-            "groups": t.groups,
+            "tags": tags_json(&t.tags),
             "survives": t.survives,
             "cell": t.cell_id,
             "journals": t.journals.iter().map(|j| json!({
@@ -874,6 +958,7 @@ pub(crate) fn reply_json(reply: &wire::ViewReply) -> Value {
                 "desired_acceptors": j.desired_acceptors,
                 "observed": j.observed,
                 "word": j.word,
+                "tags": tags_json(&j.tags),
             })).collect::<Vec<_>>(),
         })).collect::<Vec<_>>(),
         "cells": reply.cells.iter().map(|c| json!({
@@ -881,6 +966,7 @@ pub(crate) fn reply_json(reply: &wire::ViewReply) -> Value {
             "name": record_text(&c.name),
             "state": c.state,
             "tenants": c.tenants,
+            "tags": tags_json(&c.tags),
         })).collect::<Vec<_>>(),
     })
 }

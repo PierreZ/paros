@@ -799,6 +799,9 @@ struct Registry {
     /// Run-level: whether the machines run without metrics (see
     /// [`unmetered`]), fixed by the first caller.
     unmetered: Option<bool>,
+    /// Whether the run sets no user tag (#575 (key:value tags), [`untagged`]),
+    /// fixed by the first caller.
+    untagged: Option<bool>,
     /// Run-level: when the clients' operations end (see [`run_end`]), fixed
     /// by the first caller.
     run_end: Option<Duration>,
@@ -1273,7 +1276,7 @@ pub(crate) fn zone_outage(state: &StateHandle) -> bool {
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     *guard.zone_outage.get_or_insert_with(|| {
-        let outage = !other && moonpool_sim::buggify_with_prob!(1.0);
+        let outage = !other && moonpool_sim::buggify_with_prob!(0.5);
         if outage {
             assert_reachable!("zones: a run draws the zone-outage scenario");
         }
@@ -1402,6 +1405,19 @@ pub(crate) fn unmetered(state: &StateHandle) -> bool {
     *guard
         .unmetered
         .get_or_insert_with(|| moonpool_sim::buggify_with_prob!(1.0))
+}
+
+/// Whether the run sets **no user tag** (#575 (key:value tags)): drawn once
+/// per seed, its own BUGGIFY location. No code reads a user tag to decide,
+/// so a run without them must pass the same oracles as a run with them; on
+/// a tagged run, creates draw tags and `TAG` sets them again.
+#[tracing::instrument(level = "debug", skip_all)]
+pub(crate) fn untagged(state: &StateHandle) -> bool {
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    *guard
+        .untagged
+        .get_or_insert_with(|| moonpool_sim::buggify_with_prob!(0.2))
 }
 
 pub(crate) fn slow_machine(state: &StateHandle) -> bool {
@@ -1892,8 +1908,9 @@ pub(crate) struct MachineDraw {
     pub(crate) class: paros::machine::Class,
     /// Its capacity.
     pub(crate) capacity: u64,
-    /// Its failure domain.
-    pub(crate) failure_domain: String,
+    /// Its zone and rack (`paros/zone`, `paros/rack`, #575 (key:value
+    /// tags)): a zone always, a rack on half the machines.
+    pub(crate) locality: paros::machine::Locality,
 }
 
 /// The run's machines (#246): the layout an operator gives a fleet before
@@ -2035,10 +2052,19 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
                     MachineDraw {
                         class,
                         capacity,
-                        failure_domain: if zoned {
-                            format!("zone-{}", rank % 3)
-                        } else {
-                            format!("zone-{}", moonpool_sim::sim_random_range(0_u32..3_u32))
+                        locality: paros::machine::Locality {
+                            // The zone-outage scenario stands machine `r` in
+                            // `zone-<r % 3>` (#215 (zones)).
+                            zone: if zoned {
+                                format!("zone-{}", rank % 3)
+                            } else {
+                                format!("zone-{}", moonpool_sim::sim_random_range(0_u32..3_u32))
+                            },
+                            rack: if moonpool_sim::sim_random_bool(0.5) {
+                                format!("rack-{}", moonpool_sim::sim_random_range(0_u32..4_u32))
+                            } else {
+                                String::new()
+                            },
                         },
                     }
                 })

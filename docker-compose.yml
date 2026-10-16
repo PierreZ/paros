@@ -47,7 +47,7 @@ services:
       PAROS_LISTEN: 0.0.0.0:4500
       PAROS_ADVERTISE: node1:4500
       PAROS_CLASS: storage
-      PAROS_FAILURE_DOMAIN: zone-a
+      PAROS_ZONE: zone-a
     volumes: [node1:/var/lib/paros]
     networks: { default: { aliases: [members] } }
 
@@ -59,7 +59,7 @@ services:
       PAROS_LISTEN: 0.0.0.0:4500
       PAROS_ADVERTISE: node2:4500
       PAROS_CLASS: storage
-      PAROS_FAILURE_DOMAIN: zone-b
+      PAROS_ZONE: zone-b
     volumes: [node2:/var/lib/paros]
     networks: { default: { aliases: [members] } }
 
@@ -71,7 +71,7 @@ services:
       PAROS_LISTEN: 0.0.0.0:4500
       PAROS_ADVERTISE: node3:4500
       PAROS_CLASS: storage
-      PAROS_FAILURE_DOMAIN: zone-c
+      PAROS_ZONE: zone-c
     volumes: [node3:/var/lib/paros]
     networks: { default: { aliases: [members] } }
 
@@ -83,7 +83,7 @@ services:
       PAROS_LISTEN: 0.0.0.0:4500
       PAROS_ADVERTISE: storage4:4500
       PAROS_CLASS: storage
-      PAROS_FAILURE_DOMAIN: zone-a
+      PAROS_ZONE: zone-a
     volumes: [storage4:/var/lib/paros]
 
   stateless1:
@@ -94,7 +94,7 @@ services:
       PAROS_LISTEN: 0.0.0.0:4500
       PAROS_ADVERTISE: stateless1:4500
       PAROS_CLASS: stateless
-      PAROS_FAILURE_DOMAIN: zone-b
+      PAROS_ZONE: zone-b
     volumes: [stateless1:/var/lib/paros]
 
   # `init`, once, after `up`: `cell init` over the three nodes, every one of

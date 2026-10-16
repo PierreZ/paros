@@ -31,7 +31,7 @@ use paros::client::journals::{self, JournalAnswer, JournalOp, JournalRequest};
 use paros::client::names::{JournalNames, JournalResolution};
 use paros::client::{ClaimOutcome, ReadOutcome};
 use paros::client::{Writer, WriterOutcome};
-use paros::fleet::{Groups, TenantState};
+use paros::fleet::{TenantKind, TenantState};
 use paros::tenant::{Desired, Durability};
 use paros::{JournalIdentifier, TenantId, Value, WriterMode};
 
@@ -85,6 +85,7 @@ impl FleetOps {
                     name: name.clone(),
                     writer: drawn_mode(),
                     desired: Some(drawn_desired(draw)),
+                    tags: self.birth_tags(request.tenant, name),
                 }
             }
             _ => return,
@@ -164,6 +165,7 @@ impl FleetOps {
                 }
             } else {
                 JournalOp::Create {
+                    tags: self.birth_tags(tenant, &name),
                     name,
                     writer: drawn_mode(),
                     // On a draw in four the create names no mode: it takes the
@@ -219,10 +221,22 @@ impl FleetOps {
             .await;
     }
 
+    /// The user tags a create of `name` in `tenant` is born with (#575
+    /// (key:value tags)), recorded on the run's tag board.
+    fn birth_tags(&self, tenant: TenantId, name: &[u8]) -> paros::tags::UserTags {
+        let tags = super::tags::drawn(&self.state);
+        super::tags::note(
+            &self.state,
+            super::tags::Target::Journal(tenant, name.to_vec()),
+            &tags,
+        );
+        tags
+    }
+
     /// The cell and a `READY` served tenant of its fleet directory, with
     /// its control journal (learned from the directory). `None` while there
     /// is no cell or no such tenant.
-    async fn journal_tenant(
+    pub(super) async fn journal_tenant(
         &mut self,
         ctx: &SimContext,
         draw: u64,
@@ -236,7 +250,7 @@ impl FleetOps {
             .ok()?;
         let ready: Vec<(TenantId, JournalIdentifier, String)> = directory
             .tenants()
-            .filter(|(_, t)| t.state == TenantState::Ready && t.groups == Groups::SERVED)
+            .filter(|(_, t)| t.state == TenantState::Ready && t.kind == TenantKind::Users)
             .map(|(id, t)| {
                 let name = String::from_utf8_lossy(&t.name).into_owned();
                 (id, JournalIdentifier::new(id, t.control), name)
@@ -343,7 +357,7 @@ impl FleetOps {
 
     /// One journal request through the library, to the coordinator the
     /// election journal `election` publishes.
-    async fn ask_coordinator(
+    pub(super) async fn ask_coordinator(
         &self,
         cell: &Cell,
         election: JournalIdentifier,
@@ -418,6 +432,7 @@ impl FleetOps {
                     name,
                     writer,
                     desired,
+                    ..
                 },
             ) => {
                 assert_sometimes!(
@@ -704,7 +719,7 @@ impl FleetOps {
         let journal = if internal {
             control
         } else {
-            pass.bind(LOCAL, named);
+            pass.bind(LOCAL, named.clone());
             LOCAL
         };
         let writes = !internal && (draw >> 52).is_multiple_of(2);
@@ -714,6 +729,11 @@ impl FleetOps {
         };
         let client = self.connector.through(&self.frontends, &pass);
         let first = usize::try_from(draw % self.frontends.len() as u64).unwrap_or(0);
+        if writes && (draw >> 56).is_multiple_of(3) && !crate::shape::untagged(&self.state) {
+            self.tag_through_frontend(&client, (control.tenant, &named), call)
+                .await;
+            return;
+        }
         if writes {
             self.write_through_frontend(&client, journal, call, first, draw)
                 .await;
@@ -752,6 +772,68 @@ impl FleetOps {
             super::NAMES[usize::try_from((draw >> 32) % super::NAMES.len() as u64).unwrap_or(0)];
         self.through_frontend(&String::from_utf8_lossy(tenant), LOCAL, draw)
             .await;
+    }
+
+    /// A tenant sets its journal's user tags through `client`, a
+    /// frontend's (#575 (key:value tags)), with the call's token: served
+    /// within the token's rights, denied outside them. A name no live
+    /// journal holds is `unknown_journal`.
+    async fn tag_through_frontend(
+        &mut self,
+        client: &ChainClient,
+        (tenant, named): (TenantId, &JournalName),
+        call: Call,
+    ) {
+        let tags = super::tags::drawn(&self.state);
+        super::tags::note(
+            &self.state,
+            super::tags::Target::Journal(tenant, named.journal().as_bytes().to_vec()),
+            &tags,
+        );
+        // An explicit misbehaviour first: a tag request with no idempotency
+        // id, which the frontend denies as malformed before it admits it.
+        // Every tag call sends one: the frontend's tag path runs a few
+        // times a sweep, and a coin would leave its gate unfired.
+        let ack = journals::tag_through_frontend(client.node(0), named, 0, &tags).await;
+        assert_always!(
+            !matches!(ack, journals::FrontTagged::Answered(_)),
+            "frontend: a tag request with no id is never served"
+        );
+        if matches!(ack, journals::FrontTagged::Denied(Denial::Malformed)) {
+            assert_reachable!("frontend: a tag request with no id is denied malformed");
+        }
+        let request = moonpool_sim::sim_random_range(1..u64::MAX);
+        let answer = journals::tag_through(
+            self.connector.providers(),
+            client,
+            (named, request),
+            &tags,
+            self.patience,
+        )
+        .await;
+        if matches!(
+            answer,
+            journals::FrontTagged::Answered(JournalAnswer::Tagged { .. })
+        ) {
+            assert_always!(
+                call.expected.is_none(),
+                "frontend: a tag request outside its token's rights is never served"
+            );
+        }
+        match answer {
+            journals::FrontTagged::Answered(JournalAnswer::Tagged { .. })
+                if call.served(&self.state) =>
+            {
+                assert_reachable!("frontend: a tenant tags its journal by name");
+            }
+            journals::FrontTagged::Answered(JournalAnswer::UnknownJournal) => {
+                assert_reachable!("frontend: a tag request for no live journal is unknown");
+            }
+            journals::FrontTagged::Denied(denial) if call.denied(denial) => {
+                assert_reachable!("frontend: a tag request outside its token's rights is denied");
+            }
+            _ => {}
+        }
     }
 
     /// A claim and one write through `client`, a frontend's: a tenant's

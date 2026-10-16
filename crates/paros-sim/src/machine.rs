@@ -1239,12 +1239,12 @@ async fn run_machine_role(
         board.ips.insert(addrs[rank].clone(), my_ip.to_string());
         board
             .zones
-            .insert(addrs[rank].clone(), draw.failure_domain.clone());
+            .insert(addrs[rank].clone(), draw.locality.zone.clone());
     }
     let settings = MachineSettings {
         class: draw.class,
         capacity: draw.capacity,
-        failure_domain: draw.failure_domain,
+        locality: draw.locality.clone(),
         name: format!("machine-{rank}"),
         pin: crate::frontend::machine_pin(ctx.state()),
         metrics: machine_metrics(ctx),

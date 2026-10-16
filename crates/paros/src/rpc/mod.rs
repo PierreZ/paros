@@ -109,9 +109,10 @@ pub(crate) use matchmaker::{
     ReconfigureReply as WireReconfigureReply, ReconfigureRequest as WireReconfigureRequest,
 };
 pub use public::{
-    Entry, FrontRead, FrontSetLeader, FrontTruncate, FrontWrite, FrontendVerdict, Read, ReadAck,
-    Reconfigure, ReconfigureAck, ReconfigureMatchmakers, ReconfigureMatchmakersAck, SetLeader,
-    SetLeaderAck, Truncate, TruncateAck, Write, WriteAck, WriteOutcome,
+    Entry, FrontRead, FrontSetJournalTags, FrontSetLeader, FrontTruncate, FrontWrite,
+    FrontendVerdict, Read, ReadAck, Reconfigure, ReconfigureAck, ReconfigureMatchmakers,
+    ReconfigureMatchmakersAck, SetJournalTagsAck, SetLeader, SetLeaderAck, Truncate, TruncateAck,
+    Write, WriteAck, WriteOutcome,
 };
 pub use refusal::{MatchmakersRefusal, RetireRefusal};
 

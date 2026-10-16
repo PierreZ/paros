@@ -32,7 +32,8 @@
 //! node_id 6150928431937019931
 //! class storage
 //! capacity 1
-//! failure_domain zone-a
+//! zone zone-a
+//! rack rack-1
 //! name parosd-1
 //! promised 4417/6150928431937019931
 //! plan 912873 4417/6150928431937019931
@@ -51,7 +52,7 @@ use std::fmt::Write as _;
 
 use paros_core::{Ballot, Config, JournalIdentifier, NodeId, QuorumSystem, WriterMode};
 
-use super::{Admission, CellPlan, Class, ControlJournals};
+use super::{Admission, CellPlan, Class, ControlJournals, Locality};
 use crate::Address;
 
 /// Parse a journal identifier written `<tenant>/<journal>` (#235).
@@ -117,8 +118,9 @@ pub struct MachineRecord {
     pub class: Class,
     /// Its capacity.
     pub capacity: u64,
-    /// Its failure domain.
-    pub failure_domain: String,
+    /// Its zone and rack (#575: its reserved tags `paros/zone` and
+    /// `paros/rack`); an empty label has no line.
+    pub locality: Locality,
     /// Its name, for people (#399): a label, never its identity; may change
     /// across starts. A record written before names has none (empty) until
     /// its next start writes the configured one.
@@ -157,12 +159,17 @@ impl MachineRecord {
     #[must_use]
     pub fn render(&self) -> String {
         let mut text = format!(
-            "node_id {}\nclass {}\ncapacity {}\nfailure_domain {}\n",
+            "node_id {}\nclass {}\ncapacity {}\n",
             self.node_id.0,
             self.class.as_str(),
             self.capacity,
-            self.failure_domain,
         );
+        if !self.locality.zone.is_empty() {
+            let _ = writeln!(text, "zone {}", self.locality.zone);
+        }
+        if !self.locality.rack.is_empty() {
+            let _ = writeln!(text, "rack {}", self.locality.rack);
+        }
         if !self.name.is_empty() {
             let _ = writeln!(text, "name {}", self.name);
         }
@@ -235,7 +242,7 @@ impl MachineRecord {
             let identifier =
                 || parse_identifier(value).ok_or_else(|| format!("bad {key} {value:?}"));
             match key {
-                "node_id" | "class" | "capacity" | "failure_domain" | "name" => {
+                "node_id" | "class" | "capacity" | "zone" | "rack" | "name" => {
                     fields.insert(key, value);
                 }
                 "promised" => {
@@ -313,7 +320,10 @@ impl MachineRecord {
             capacity: field("capacity")?
                 .parse()
                 .map_err(|e| format!("bad capacity: {e}"))?,
-            failure_domain: field("failure_domain")?.to_string(),
+            locality: Locality {
+                zone: fields.get("zone").copied().unwrap_or_default().to_string(),
+                rack: fields.get("rack").copied().unwrap_or_default().to_string(),
+            },
             name: fields.get("name").copied().unwrap_or_default().to_string(),
             promised,
             plan,
@@ -362,7 +372,10 @@ mod tests {
             node_id: NodeId(u64::MAX - 3),
             class: Class::Storage,
             capacity: 4,
-            failure_domain: "zone-a".into(),
+            locality: Locality {
+                zone: "zone-a".into(),
+                rack: "rack-1".into(),
+            },
             name: "m-1".into(),
             promised,
             plan,

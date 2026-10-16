@@ -102,7 +102,7 @@ pub fn machines(registry: &Registry, nodes: impl IntoIterator<Item = NodeId>) ->
             Some(Machine {
                 node,
                 class: held.class,
-                zone: held.failure_domain.clone(),
+                zone: held.locality.zone.clone(),
                 capacity: held.capacity,
                 booked: registry.booked(node),
                 up: registry.liveness(node).up,
@@ -691,7 +691,7 @@ mod tests {
             addr: format!("n{id}"),
             class: Class::Storage,
             capacity: 2,
-            failure_domain: "z".into(),
+            locality: crate::machine::Locality::zone("z"),
             name: format!("m{id}"),
             incarnation: u128::from(id),
             machine_interface: Vec::new(),
