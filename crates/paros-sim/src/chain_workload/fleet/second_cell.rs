@@ -509,8 +509,6 @@ impl FleetOps {
     }
 }
 
-/// Whether an operator formed the run's second cell (#232 (multiple
-/// cells)) and has not removed it: its later phases are due.
 /// The second cell's id, once formed: a tenant created there is dropped on
 /// its registry, not on the run's cell's.
 pub(super) fn cell_id(state: &moonpool_sim::StateHandle) -> Option<u64> {
@@ -519,6 +517,21 @@ pub(super) fn cell_id(state: &moonpool_sim::StateHandle) -> Option<u64> {
     })
 }
 
+/// The second cell's control journal, once it joined the universe: every
+/// operator learns it from the directory's cell entry. A removal of a
+/// tenant there reads it (`FleetSession::remove_tenant`).
+pub(super) fn joined_journal(state: &moonpool_sim::StateHandle) -> Option<JournalIdentifier> {
+    with_second(state, |second| {
+        second
+            .formed
+            .as_ref()
+            .filter(|_| second.joined)
+            .map(|formed| formed.journals.cell)
+    })
+}
+
+/// Whether an operator formed the run's second cell (#232 (multiple
+/// cells)) and has not removed it: its later phases are due.
 pub(super) fn started(state: &moonpool_sim::StateHandle) -> bool {
     with_second(state, |second| second.formed.is_some() && !second.removed)
 }

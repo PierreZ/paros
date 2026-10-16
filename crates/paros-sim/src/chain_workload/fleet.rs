@@ -940,6 +940,11 @@ impl FleetOps {
         first: usize,
         name: &[u8],
     ) -> bool {
+        // A tenant of the second cell (#232 (multiple cells)) is dropped on
+        // that cell's registry: the removal reads it, as the directory names it.
+        if let Some(journal) = second_cell::joined_journal(&self.state) {
+            self.note_journals([journal]);
+        }
         let run = session
             .remove_tenant(client, first, name, Duration::ZERO)
             .await;
