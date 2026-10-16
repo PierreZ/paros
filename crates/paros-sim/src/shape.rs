@@ -350,7 +350,10 @@ impl NodeShape {
             // re-sends (one per beat). Floor 1: a round moved after a single
             // re-send runs in a second column while the first may still
             // decide it, and the two verdicts must agree (one ballot, one
-            // value) — the state worth reaching. The ceiling leaves a stuck
+            // value) — the state worth reaching. The floor stays winnable
+            // because each move doubles the budget (`move_budget`): a round
+            // that flips between columns faster than one round trip gets a
+            // longer window after a few moves. The ceiling leaves a stuck
             // column's slots to the next leadership; the tail outlasts it.
             partition_move_resends: buggify_knob!(10_u64, 1_u64..4_u64),
             // A quarantined journal's re-open delay (#188), in ticks. Floor
