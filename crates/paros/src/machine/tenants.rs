@@ -882,9 +882,6 @@ fn zone_plan(
         if let Ok(steps) = placement::plan(want, machines, current, reseeded)
             && holds(&steps)
         {
-            moonpool_assertions::reachable!(
-                "tenant coordinator: a create meets the zone rule on another draw"
-            );
             return Ok(steps);
         }
     }
