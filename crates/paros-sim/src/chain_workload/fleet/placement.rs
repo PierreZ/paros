@@ -334,9 +334,19 @@ fn unmoved(
     None
 }
 
-/// Whether the tenant's journal or set `target` is live in `tenants`; a
-/// tenant-level slot never counts.
-fn live(tenants: &[TenantControl], registry: &Registry, target: BookingTarget) -> bool {
+/// Whether the slot `target` on `node` is still the window's to keep: a
+/// live journal whose recorded placement names `node`, or a set. Only a
+/// tenant's own mode change records `Placed` (#214 (tenant modes)); a move
+/// records nothing, so a re-placement is still judged. A shrink the tenant
+/// asked may release the machine while it is up, which no window forbids
+/// (#359: the window holds the roles of a down machine; witness
+/// 15801232642831952797 on 58e72ec).
+fn kept(
+    tenants: &[TenantControl],
+    registry: &Registry,
+    target: BookingTarget,
+    node: NodeId,
+) -> bool {
     if registry.dropped(target.tenant()) {
         return false;
     }
@@ -344,7 +354,10 @@ fn live(tenants: &[TenantControl], registry: &Registry, target: BookingTarget) -
         BookingTarget::Journal(journal) => tenants
             .iter()
             .filter(|c| c.tenant() == journal.tenant)
-            .any(|c| c.live().any(|(id, _)| id == journal.journal)),
+            .any(|c| {
+                c.live()
+                    .any(|(id, j)| id == journal.journal && j.placed.contains(node))
+            }),
         BookingTarget::Set { .. } => true,
         // A tenant-level slot (#476 (tenant footprint)) holds no data: the
         // footprint places a coordinator again once its machine is down,
@@ -355,7 +368,8 @@ fn live(tenants: &[TenantControl], registry: &Registry, target: BookingTarget) -
 
 /// While a maintenance window an operator opened still holds (#359), every
 /// slot its machine held when the operator sent it is still booked, unless
-/// the machine left the registered machines or the slot's journal is gone.
+/// the machine left the registered machines, the slot's journal is gone, or
+/// the tenant's own mode change placed the journal off the machine.
 fn maintained(ctx: &SimContext, tenants: &[TenantControl], registry: &Registry) {
     let now = ctx.time().now();
     for note in crate::machine::maintenance_notes(ctx.state()) {
@@ -375,11 +389,12 @@ fn maintained(ctx: &SimContext, tenants: &[TenantControl], registry: &Registry) 
             .filter(|(_, b)| b.node == node)
             .map(|(id, _)| id)
             .collect();
-        // A slot released with its journal is the journal's, not a move's.
+        // A slot released with its journal, or by the tenant's own mode
+        // change, is the tenant's, not a move's.
         let moved = note
             .slots
             .iter()
-            .filter(|(id, target)| !booked.contains(id) && live(tenants, registry, *target))
+            .filter(|(id, target)| !booked.contains(id) && kept(tenants, registry, *target, node))
             .count();
         assert_always!(
             moved == 0,
