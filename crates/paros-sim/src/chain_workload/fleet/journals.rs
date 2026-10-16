@@ -499,8 +499,22 @@ impl FleetOps {
                 // never fires cannot fail the sweep)).
                 self.read_through_name(cell, control, name, draw).await;
             }
-            (JournalAnswer::NameTaken { .. }, JournalOp::Create { .. }) => {
+            (JournalAnswer::NameTaken { id }, JournalOp::Create { .. }) => {
                 assert_reachable!("journals: a create is answered name_taken");
+                // #449: a request the control journal recorded as created
+                // (a retry of a pending one) reads back that outcome, never
+                // `name_taken` by the journal it created itself.
+                if control.tenant == request.tenant
+                    && let Some(tenant) =
+                        journals::list(&cell.client, control.tenant, control.journal).await
+                {
+                    let recorded = tenant.outcome(request.request);
+                    assert_always!(
+                        !matches!(recorded, Some(paros::tenant::RequestOutcome::Created(_))),
+                        "tenant: a retried request is answered with its recorded outcome",
+                        { "tenant" => request.tenant.0, "taken_by" => id.0 }
+                    );
+                }
             }
             (JournalAnswer::UnknownJournal, JournalOp::Delete { .. }) => {
                 assert_reachable!("journals: a delete of an unknown name is answered");
