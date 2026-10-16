@@ -240,8 +240,14 @@ impl FleetOps {
                         );
                     }
                 } else {
+                    // A wiped machine formats again under a new id: when
+                    // another operator admitted that incarnation after this
+                    // one registered the old, the run ends at its `Identify`
+                    // and the session's fold holds only the old id (sweep
+                    // recipe 58744:11730001353845939891 on 112134043898220002).
                     assert_always!(
-                        session.registry().get(result).is_some(),
+                        session.registry().get(result).is_some()
+                            || crate::machine::was_wiped(ctx.state(), &target),
                         "admit: an admission registers the machine before it admits it",
                         { "node" => result.0 }
                     );
