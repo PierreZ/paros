@@ -131,7 +131,10 @@ fn judge(tenants: &[TenantControl], registry: &Registry) {
         }
         for (id, journal) in control.live() {
             let target = BookingTarget::Journal(JournalIdentifier::new(tenant, id));
-            let members = journal.config.members();
+            // The configuration in force the coordinator recorded: the
+            // create's until a mode change (#214 (tenant modes)), whose
+            // slots it books before it records it and releases after.
+            let members = journal.placed.members();
             let slots: Vec<NodeId> = registry
                 .bookings()
                 .filter(|(_, b)| b.role == Role::Acceptor && b.target == target)

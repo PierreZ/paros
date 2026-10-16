@@ -98,6 +98,20 @@ pub(crate) fn lock(board: &Mutex<TenantBoard>) -> MutexGuard<'_, TenantBoard> {
     board.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// #215 (zones): a created journal's placement that spans three zones was
+/// placed under the zone rule, so it survives any one.
+fn zone_spread(config: &paros::AcceptorConfig, lsn: u64) {
+    let spread = config.distinct_domains().len();
+    assert_always!(
+        spread < 3 || config.zone_rule().holds(),
+        "zones: a placed journal that spans three zones survives any one",
+        { "lsn" => lsn, "zones" => spread }
+    );
+    if spread >= 3 {
+        assert_reachable!("zones: a journal is placed over three zones");
+    }
+}
+
 impl TenantBoard {
     /// `node` folded LSN `lsn` of tenant control journal `control` to
     /// `event`.
@@ -125,17 +139,7 @@ impl TenantBoard {
                 config,
                 ..
             } => {
-                // #215 (zones): a placement that spans three zones was
-                // placed under the zone rule, so it survives any one.
-                let spread = config.distinct_domains().len();
-                assert_always!(
-                    spread < 3 || config.zone_rule().holds(),
-                    "zones: a placed journal that spans three zones survives any one",
-                    { "lsn" => lsn, "zones" => spread }
-                );
-                if spread >= 3 {
-                    assert_reachable!("zones: a journal is placed over three zones");
-                }
+                zone_spread(config, lsn);
                 self.armed = true;
                 let journal = JournalIdentifier::new(control.tenant, *id);
                 self.modes.entry(journal).or_insert(*writer);
@@ -187,9 +191,37 @@ impl TenantBoard {
                 );
                 self.id_taken = true;
             }
+            TenantEvent::Configured { request, id, .. } => {
+                // A journal's mode changes only for a journal its tenant
+                // created before (#214 (tenant modes)).
+                if let Some(id) = id {
+                    let journal = JournalIdentifier::new(control.tenant, *id);
+                    assert_always!(
+                        self.created.get(&journal).is_some_and(|at| *at < lsn),
+                        "tenant: a configured journal is one the tenant created before",
+                        { "lsn" => lsn }
+                    );
+                    assert_reachable!("tenant: a journal's desired mode is configured");
+                } else {
+                    assert_reachable!("tenant: a tenant's default mode is configured");
+                }
+                self.answered(control, *request, RequestOutcome::Configured(*id), lsn);
+            }
+            TenantEvent::Placed { id } => {
+                let journal = JournalIdentifier::new(control.tenant, *id);
+                assert_always!(
+                    self.created.get(&journal).is_some_and(|at| *at < lsn),
+                    "tenant: a placement is recorded only for a journal created before",
+                    { "lsn" => lsn }
+                );
+            }
             TenantEvent::Described
             | TenantEvent::Checkpoint { .. }
-            | TenantEvent::Refused(TenantRefusal::Malformed | TenantRefusal::Redescribed) => {}
+            | TenantEvent::Refused(
+                TenantRefusal::Malformed
+                | TenantRefusal::Redescribed
+                | TenantRefusal::NotPlaceable { .. },
+            ) => {}
         }
     }
 

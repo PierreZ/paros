@@ -355,7 +355,7 @@ impl Desk {
             op: JournalOp::Create {
                 name: name.as_bytes().to_vec(),
                 writer: WriterMode::Single,
-                desired,
+                desired: Some(desired),
             },
         };
         let answer = journals::request(

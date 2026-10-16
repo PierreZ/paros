@@ -58,6 +58,13 @@ docker compose run --rm parosctl journal create acme events
 docker compose run --rm parosctl journal delete acme events
 docker compose run --rm parosctl journal list acme
 
+# Change a journal's durability after its create (#214 (tenant modes)): FDB's `configure`.
+# The tenant coordinator books the new slots, reconfigures the journal and releases the old
+# ones; `parosctl tenant show acme` shows the new acceptors once it is done. Without
+# `--journal`, it changes the tenant's default, which a create with no durability takes.
+docker compose run --rm parosctl configure --tenant acme --journal orders --partitions 3 --failures-per-partition 0
+docker compose run --rm parosctl configure --tenant acme --failures-per-partition 1
+
 # Admit the two idle machines into the cell (#216): each is registered in the cell
 # control journal, then records its cell. A re-run prints `unchanged`.
 docker compose run --rm parosctl cell add-machine storage4:4500
