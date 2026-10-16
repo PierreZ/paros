@@ -64,6 +64,10 @@ pub(crate) struct TenantBoard {
     outcomes: BTreeMap<(JournalIdentifier, u64), RequestOutcome>,
     /// `(machine, journal)`: the machine folded the journal's tombstone.
     tombstoned: BTreeSet<(u64, JournalIdentifier)>,
+    /// The LSN each journal's tombstone folded at. A node that re-folds
+    /// after a reboot meets a tag request below a tombstone it folded
+    /// before, so a tag is judged by LSN, not by what a node folded.
+    deleted: BTreeMap<JournalIdentifier, u64>,
     /// A tenant created a journal.
     armed: bool,
     /// A create was answered `name_taken` by a journal created before.
@@ -143,6 +147,7 @@ impl TenantBoard {
                     { "lsn" => lsn }
                 );
                 self.tombstoned.insert((node.0, journal));
+                self.deleted.entry(journal).or_insert(lsn);
                 self.answered(control, *request, RequestOutcome::Deleted(*id), lsn);
             }
             TenantEvent::Tagged { request, id } => {
@@ -151,7 +156,7 @@ impl TenantBoard {
                 let journal = JournalIdentifier::new(control.tenant, *id);
                 assert_always!(
                     self.created.get(&journal).is_some_and(|at| *at < lsn)
-                        && !self.tombstoned.contains(&(node.0, journal)),
+                        && self.deleted.get(&journal).is_none_or(|at| *at > lsn),
                     "tenant: a tagged journal is a live one the tenant created before",
                     { "lsn" => lsn }
                 );
