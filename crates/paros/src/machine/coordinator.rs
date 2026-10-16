@@ -187,6 +187,8 @@ pub enum TermDuty {
 /// Serve the duties of the term `leader` (this actor's) on the cell's
 /// control journals: install the term's uuid, fold the cell control journal
 /// to its tail, then finish every admission in flight, through `client`.
+/// `cell` is the control journals, every founding member, and the founders
+/// the caller can dial.
 /// The cell coordinator runs it for every term it wins; a harness candidate
 /// runs the very same code.
 ///
@@ -200,7 +202,7 @@ pub async fn serve_term<P: Providers>(
     rpc: &RpcHandle<P>,
     client: &Client<P>,
     names: &Names,
-    cell: (ControlJournals, Vec<(NodeId, Address)>),
+    cell: (ControlJournals, Vec<NodeId>, Vec<(NodeId, Address)>),
     leader: &Leader,
     policy: CheckpointPolicy,
 ) -> TermDuty {
@@ -216,13 +218,21 @@ async fn open_term<P: Providers>(
     rpc: &RpcHandle<P>,
     client: &Client<P>,
     names: &Names,
-    (journals, founders): (ControlJournals, Vec<(NodeId, Address)>),
+    (journals, members, founders): (ControlJournals, Vec<NodeId>, Vec<(NodeId, Address)>),
     leader: &Leader,
     policy: CheckpointPolicy,
 ) -> (TermDuty, Option<CellSession>) {
     assert!(leader.uuid.is_set(), "a term's uuid is set");
-    // The coordinator is a founding member: its book names every founder.
-    let members: Vec<NodeId> = founders.iter().map(|(id, _)| *id).collect();
+    // `members` are every founding member, reached or not; `founders` the
+    // ones the caller can dial. An admission names every founding member,
+    // so every journal of the admitted machine is born with the same
+    // matchmaker set as the founders' (#608 (an admission names only the
+    // reached founders)). The term once read the founding members out of
+    // the book: a harness candidate that reached two founders of three
+    // admitted a machine with a two-member set (witness
+    // 16600285087896190261 on a04c94d, red on "matchmaker: every node
+    // derives the same matchmaker set").
+    // `with_leader` keeps only the reached founders that are members.
     let mut session = CellSession::with_leader(journals, &members, founders, leader.uuid, policy);
     match session.open(client, 0).await {
         Ok(()) => {}
@@ -860,7 +870,7 @@ async fn campaign<P: Providers>(
                         &rpc,
                         &client,
                         &names,
-                        (journals, founders.clone()),
+                        (journals, founder_ids.clone(), founders.clone()),
                         &leader,
                         policy,
                     )
