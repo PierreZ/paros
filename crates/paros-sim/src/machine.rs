@@ -533,6 +533,7 @@ pub(crate) fn founder_to_move(state: &StateHandle, dead: impl Fn(&str) -> bool) 
     // registers its new name, that machine's cache can name it there.
     let (rank, ip) = (0..layout.founders)
         .filter(|rank| may_rename(&board, &layout, *rank))
+        .filter(|_| renamed_outside_registered(&board, &layout))
         .find_map(|rank| {
             let addr = Address::parse(&format!("{}:{MACHINE_PORT}", machine_host(rank))).ok()?;
             let node = board.nodes.get(&addr)?;
@@ -885,6 +886,11 @@ async fn on_disk<S: moonpool_sim::StorageProvider + Clone>(
 /// name, so the founders its admission names still answer. On a seed whose
 /// founding members keep their names (`MachineLayout::founders_keep_names`),
 /// only a machine outside them is renamed.
+///
+/// Its callers also rename a founding member only once every renamed machine
+/// outside them is registered at its new name ([`renamed_outside_registered`]).
+/// That gate applies after the rename draws, so the draw schedule does not
+/// change.
 fn may_rename(board: &MachineBoard, layout: &crate::shape::MachineLayout, rank: usize) -> bool {
     let founder_renamed = board.renamed.keys().any(|r| *r < layout.founders);
     if rank >= layout.founders {
@@ -900,6 +906,38 @@ fn may_rename(board: &MachineBoard, layout: &crate::shape::MachineLayout, rank: 
             .all(|r| *r == rank || *r >= layout.founders)
 }
 
+/// Whether every machine outside the founding members that came back under a
+/// new name is registered there: its own durable cached registry fold names
+/// it at that name (#501 (matchmaker sets off the founders), #529 (sets
+/// oracles)). A founding member is renamed only then. An admitted machine
+/// finds its coordinator only through the founding members its book names,
+/// and the coordinator reaches it only at the address the registry holds. If
+/// a founding member is renamed before the machine registers, the machine's
+/// book names only the founder's dead old name and the registry names the
+/// machine only at its dead old address: neither side reaches the other
+/// again, and no set or journal moves onto the machine. This is the limit
+/// `docs/architecture.md` lists for a moved machine; the harness never puts
+/// a run past it. Witness: recipe `6959312946067892202
+/// 110064:7756325629573379374` on b93880a, a one-founder cell whose admitted
+/// machine was renamed at 37.3 s and whose founder was renamed at 38.1 s.
+fn renamed_outside_registered(board: &MachineBoard, layout: &crate::shape::MachineLayout) -> bool {
+    board
+        .renamed
+        .iter()
+        .filter(|(rank, _)| **rank >= layout.founders)
+        .all(|(rank, name)| {
+            let Ok(rank_addr) = Address::parse(&format!("{}:{MACHINE_PORT}", machine_host(*rank)))
+            else {
+                return false;
+            };
+            board
+                .nodes
+                .get(&rank_addr)
+                .and_then(|id| board.cached.get(id).map(|cache| (id, cache)))
+                .is_some_and(|(id, cache)| cache.address(NodeId(*id)) == Some(name))
+        })
+}
+
 /// Whether every founding member formed its cell.
 fn all_founders_formed(board: &MachineBoard) -> bool {
     board.founders.iter().all(|addr| {
@@ -908,6 +946,28 @@ fn all_founders_formed(board: &MachineBoard) -> bool {
             .get(addr)
             .is_some_and(|n| board.formed.contains(n))
     })
+}
+
+/// The machines admitted into cell `cell_id` that were renamed this run and
+/// are still on their disks (#349, #501 (matchmaker sets off the founders)):
+/// each one's id and the name it advertises now.
+pub(crate) fn renamed_admitted(state: &StateHandle, cell_id: u64) -> Vec<(u64, Address)> {
+    let board = machine_board(state);
+    let board = lock(&board);
+    board
+        .renamed
+        .iter()
+        .filter_map(|(rank, name)| {
+            let rank_addr =
+                Address::parse(&format!("{}:{MACHINE_PORT}", machine_host(*rank))).ok()?;
+            let node = *board.nodes.get(&rank_addr)?;
+            board
+                .admitted
+                .get(&node)
+                .filter(|cell| cell.cell_id == cell_id)
+                .map(|_| (node, name.clone()))
+        })
+        .collect()
 }
 
 /// The founding members renamed this run and still on their disks (#349):
@@ -974,7 +1034,8 @@ fn boot_listen(
     let renames = rebooted
         && disk == OnDisk::InCell
         && may_rename(&board, layout, rank)
-        && (forced || moonpool_sim::sim_random_range(0_u32..100_u32) < layout.rename_pct);
+        && (forced || moonpool_sim::sim_random_range(0_u32..100_u32) < layout.rename_pct)
+        && (rank >= layout.founders || renamed_outside_registered(&board, layout));
     let moves =
         renames || (rebooted && moonpool_sim::sim_random_range(0_u32..100_u32) < layout.move_pct);
     let ip = if moves {

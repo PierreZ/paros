@@ -383,7 +383,10 @@ configuration must be in force for the very election that installs it.
 first **registers** its ballot and the configuration it intends to use with a
 matchmaker set. It sends no `Prepare` until a matchmaker quorum has answered. The
 replies carry the registrations they hold, and the union of those above the
-maximum watermark is the campaign's history `H_b`. Phase 1 then fans out to
+maximum watermark is the campaign's history `H_b`. A reply leaves out a belief
+when a later registration repeats its configuration, so the union stays the same.
+A registry that failed campaigns fill with one configuration then fits in one
+reply. Phase 1 then fans out to
 `H_b ∪ C_b`, and it completes only with a promise quorum of **every**
 configuration in `H_b`. It is never a quorum of the union, and the core's tests
 pin that negative case.

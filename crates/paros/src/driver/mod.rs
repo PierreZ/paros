@@ -1044,11 +1044,55 @@ fn delegation_choice(node: &ColocatedNode) -> Delegation {
     choice
 }
 
-/// Move every colocated grid round re-sent at least `after` times without
-/// a decision to another column (#533 (move a stuck round)): the next column
+/// The most doublings of a moved round's budget (#533 (move a stuck
+/// round)): a round that moved `m` times waits
+/// `after * 2^min(m, MOVE_BACKOFF_CAP)` re-sends before its next move. The
+/// cap keeps the wait finite, so a round in a column that stays stuck
+/// still moves. At the cap, production's budget (20 beats) becomes 1,280
+/// beats. Not a tunable: the liveness argument of [`move_budget`] rests on
+/// it.
+const MOVE_BACKOFF_CAP: u64 = 6;
+const _: () = assert!(
+    MOVE_BACKOFF_CAP >= 1,
+    "a moved round waits longer than a new one"
+);
+const _: () = assert!(
+    MOVE_BACKOFF_CAP < 63,
+    "the back-off shift stays inside a u64"
+);
+
+/// The re-sends a round that moved `moves` times waits before its next
+/// move: `after` for a round that never moved, doubled for each move up to
+/// [`MOVE_BACKOFF_CAP`] doublings, saturating.
+///
+/// Why: a move resets the round's tally, so the new column must collect
+/// all its acks inside the budget. Under load the `Accept` flood makes the
+/// round trip longer than a budget of one or two re-sends. Then the round
+/// flips between columns without end, and no column decides it. Red on
+/// main (CI run 38823114601, `replay-recipe 7816651028622460903
+/// 216:14501162423016305769` at 629aa62): a `Grid { rows: 3, cols: 2 }`
+/// leader with a budget of 1 to 3 moved its rounds 9,844 times, and the
+/// apply walk stalled at slot 14 of 19 decided. With the doubling the same
+/// recipe is green: each new column gets a longer window, so after a few
+/// moves the round trip fits.
+fn move_budget(after: u64, moves: u64) -> u64 {
+    let shift = moves.min(MOVE_BACKOFF_CAP);
+    assert!(shift <= MOVE_BACKOFF_CAP, "the back-off is capped");
+    let budget = after.saturating_mul(1_u64 << shift);
+    assert!(
+        budget >= after,
+        "a moved round never waits less than a new one"
+    );
+    budget
+}
+
+/// Move every colocated grid round re-sent at least its budget without a
+/// decision to another column (#533 (move a stuck round)): the next column
 /// round-robin, or on a BUGGIFY decision the one after it, so a slot may
-/// skip a column. A no-op on a node that is not the leader and under a
-/// majority or a flexible split. Drawn on the node loop.
+/// skip a column. The budget is `after` for a round that never moved, and
+/// it doubles with each move ([`move_budget`]). A no-op on a node that is
+/// not the leader and under a majority or a flexible split. Drawn on the
+/// node loop.
 fn move_stuck_rounds(node: &mut ColocatedNode, after: u64, self_id: u64) {
     let QuorumSystem::Grid { cols, .. } = node.acceptors().quorum_system() else {
         return;
@@ -1061,6 +1105,18 @@ fn move_stuck_rounds(node: &mut ColocatedNode, after: u64, self_id: u64) {
         .rounds()
         .iter()
         .filter(|(_, round)| round.proxy().is_none() && round.resends() >= after)
+        .filter(|(_, round)| {
+            let due = round.resends() >= move_budget(after, round.moves());
+            if !due {
+                // Only a moved round has a budget above `after`.
+                assert!(
+                    round.moves() > 0,
+                    "only a moved round waits past the budget"
+                );
+                moonpool_assertions::reachable!("grid: the driver backs off a moved round");
+            }
+            due
+        })
         .filter_map(|(slot, round)| round.column().map(|column| (*slot, column)))
         .collect();
     for (slot, column) in stuck {
@@ -1119,9 +1175,9 @@ fn stretch_tick() -> bool {
     stretched
 }
 
-/// Park `call` on the slot its proposal took (`result`), to be answered
-/// when that slot applies, or redirect it at once when this node does not
-/// lead.
+/// Park `call` on the slot its proposal took (`result`), with the ballot
+/// it was proposed under, to be answered when that slot applies, or
+/// redirect it at once when this node does not lead.
 fn park_call<S, A: Audit, P: Providers>(
     rt: &mut JournalRt<S, A>,
     result: ProposeResult,
@@ -1140,7 +1196,15 @@ fn park_call<S, A: Audit, P: Providers>(
                 slot < rt.node.proposer().next_slot(),
                 "a call waits on an allocated slot"
             );
-            rt.waiters.pending.entry(slot).or_default().push(call);
+            // The proposal's ballot: only a decision at it is this call's
+            // (`answer_applied_calls`).
+            let ballot = rt.node.ballot();
+            assert!(rt.node.is_leader(), "only a leader parks a call");
+            rt.waiters
+                .pending
+                .entry(slot)
+                .or_default()
+                .push((ballot, call));
             assert!(
                 rt.waiters.pending.contains_key(&slot),
                 "a held call is parked on its slot"
@@ -1509,7 +1573,7 @@ where
     // while it serves its cell (#277). A founding member's peers are dialed
     // where the registry fold says (#349), from the plan's addresses on.
     let mut peer_book = match &machine {
-        Some(CellMachine::Founded(formed)) => Some(book::PeerBook::new(formed)),
+        Some(CellMachine::Founded { cell, .. }) => Some(book::PeerBook::new(cell)),
         _ => None,
     };
     // A founding member that came back at another address than the one its
@@ -1541,7 +1605,11 @@ where
             incarnation_shutdown.clone(),
         )?;
     }
-    if let Some(CellMachine::Founded(formed)) = machine {
+    if let Some(CellMachine::Founded {
+        cell: formed,
+        cache,
+    }) = machine
+    {
         // Every founding member answers the cell's views (#399).
         crate::machine::views::spawn(
             &providers,
@@ -1598,6 +1666,7 @@ where
             &providers,
             &rpc_handle,
             &tunables,
+            cache.subscribe(),
             incarnation_shutdown.clone(),
         )?;
     }

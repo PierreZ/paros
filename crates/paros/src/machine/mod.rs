@@ -93,7 +93,7 @@ pub use book::{address_book, cell_book};
 pub use cache::{CacheSink, CachedRegistry, spawn_writer, starting_book};
 pub use disk::ProviderDisk;
 pub(crate) use disk::{read_all, write_all};
-pub use formed::FormedCell;
+pub use formed::{FormationToken, FormedCell};
 pub use lifecycle::{MachineAddresses, MachineError, MachineSettings, run_machine};
 pub use pin::AdminPin;
 pub use record::{MachineRecord, journal_config};
@@ -113,7 +113,13 @@ use crate::rpc::machine as wire;
 #[derive(Clone, Debug)]
 pub enum CellMachine {
     /// A founding member.
-    Founded(FormedCell),
+    Founded {
+        /// The machine.
+        cell: FormedCell,
+        /// Its cached registry fold's writer: the node loop offers it each
+        /// address book, which the decree's teacher reads.
+        cache: CacheSink,
+    },
     /// An admitted machine.
     Admitted {
         /// The machine.
@@ -128,7 +134,7 @@ impl CellMachine {
     #[must_use]
     pub fn control_journals(&self) -> ControlJournals {
         match self {
-            CellMachine::Founded(formed) => formed.control_journals(),
+            CellMachine::Founded { cell, .. } => cell.control_journals(),
             CellMachine::Admitted { machine, .. } => machine.admission.cell,
         }
     }
@@ -137,7 +143,7 @@ impl CellMachine {
     #[must_use]
     pub fn facts(&self) -> &MachineFacts {
         match self {
-            CellMachine::Founded(formed) => &formed.facts,
+            CellMachine::Founded { cell, .. } => &cell.facts,
             CellMachine::Admitted { machine, .. } => &machine.facts,
         }
     }
@@ -145,7 +151,7 @@ impl CellMachine {
     /// What the machine knows of itself, to update once it serves.
     pub(crate) fn facts_mut(&mut self) -> &mut MachineFacts {
         match self {
-            CellMachine::Founded(formed) => &mut formed.facts,
+            CellMachine::Founded { cell, .. } => &mut cell.facts,
             CellMachine::Admitted { machine, .. } => &mut machine.facts,
         }
     }

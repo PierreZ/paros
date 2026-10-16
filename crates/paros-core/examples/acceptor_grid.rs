@@ -222,7 +222,7 @@ impl Node {
         self.replica.learn(slot, command);
         let acceptor = &self.acceptor;
         self.replica.advance(
-            |s, c| acceptor.record(s).map(|(_, r)| r) == Some(c),
+            |s, c| acceptor.record(s).filter(|(_, r)| r == c).map(|(b, _)| *b),
             &mut self.disk,
         );
     }

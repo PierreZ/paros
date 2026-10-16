@@ -999,7 +999,8 @@ fn a_paged_answer_counts_only_once_its_last_page_lands() {
 
 /// The matchmaker side: a registry larger than one page answers a prefix
 /// and names the cursor the rest starts at, and the cursor request answers
-/// the remainder without registering anything twice.
+/// the remainder without registering anything twice. Every registration
+/// names its own configuration, so none is left out.
 #[test]
 fn a_registry_larger_than_a_page_answers_a_prefix_and_a_cursor() {
     let mut mm = registries(1);
@@ -1010,7 +1011,7 @@ fn a_registry_larger_than_a_page_answers_a_prefix_and_a_cursor() {
             J,
             NodeId(1),
             ballot(round as u64, 1),
-            cfg(&[0, 1, 2]),
+            cfg(&[0, 1, 2 + round as u64]),
             MatchmakerGeneration(0),
         ));
         mm.ready().advance();
@@ -1060,6 +1061,105 @@ fn a_registry_larger_than_a_page_answers_a_prefix_and_a_cursor() {
     assert_eq!(from_ballot, ballot(page as u64 + 1, 1));
     assert_eq!(history.len(), 1);
     assert_eq!(next_from_ballot, None);
+}
+
+/// The matchmaker side (#570 (election duel outlasts the recovery tail)):
+/// a belief a later registration repeats is left out of the history, so a
+/// registry that a leaderless cluster filled with failed campaigns of one
+/// configuration answers in one page, even on a one-record page. Every
+/// reconfiguration is kept, and each configuration keeps its highest record,
+/// so the candidate's union and effective configuration are unchanged.
+/// Before, the answer took one round trip per earlier campaign: witness
+/// seed 16302262455227242419 on c739108, where every campaign's
+/// matchmaking outlasted its rivals' capped election timeouts and no
+/// `q1 = n` Phase 1 won through the recovery tail.
+#[test]
+fn a_page_leaves_out_a_belief_a_later_registration_repeats() {
+    let mut mm = registries(1);
+    let mm = &mut mm[0];
+    mm.set_registry_page(1);
+    // Rounds 1..=40: one belief repeated by every failed campaign, a
+    // reconfiguration to the same members at 20, and a second belief at 30.
+    for round in 1..=40_u64 {
+        let request = match round {
+            20 => MatchRequest::reconfigure(
+                J,
+                NodeId(1),
+                ballot(round, 1),
+                cfg(&[0, 1, 2]),
+                MatchmakerGeneration(0),
+            ),
+            30 => MatchRequest::new(
+                J,
+                NodeId(2),
+                ballot(round, 2),
+                cfg(&[1, 2, 3]),
+                MatchmakerGeneration(0),
+            ),
+            _ => MatchRequest::new(
+                J,
+                NodeId(1),
+                ballot(round, 1),
+                cfg(&[0, 1, 2]),
+                MatchmakerGeneration(0),
+            ),
+        };
+        mm.step(request);
+        mm.ready().advance();
+    }
+    let top = ballot(50, 3);
+    let ask = |from: Option<Ballot>| {
+        let request =
+            MatchRequest::new(J, NodeId(3), top, cfg(&[0, 1, 2]), MatchmakerGeneration(0));
+        match from {
+            Some(cursor) => request.from_page(cursor),
+            None => request,
+        }
+    };
+    let answer = |mm: &mut Matchmaker, from: Option<Ballot>| {
+        mm.step(ask(from));
+        let ready = mm.ready();
+        let outcome = ready.replies()[0].outcome.clone();
+        ready.advance();
+        let MatchOutcome::Registered {
+            history,
+            next_from_ballot,
+            ..
+        } = outcome
+        else {
+            panic!("expected a registration: {outcome:?}");
+        };
+        (history, next_from_ballot)
+    };
+    let mut from = None;
+    let mut pages = Vec::new();
+    loop {
+        let (history, next) = answer(mm, from);
+        assert!(history.len() <= 1, "a one-record page: {history:?}");
+        pages.extend(history);
+        from = next;
+        if from.is_none() {
+            break;
+        }
+    }
+    // Three records over three round trips, not forty: the reconfiguration,
+    // the second belief, and the highest record of the repeated belief.
+    let kept: Vec<Ballot> = pages.iter().map(|(b, _)| *b).collect();
+    assert_eq!(kept, vec![ballot(20, 1), ballot(30, 2), ballot(40, 1)]);
+    assert!(
+        pages[0].1.kind.is_reconfiguration(),
+        "a reconfiguration is kept"
+    );
+    assert_eq!(pages[1].1.config, cfg(&[1, 2, 3]));
+    assert_eq!(pages[2].1.config, cfg(&[0, 1, 2]));
+    // A page asked from a cursor inside the repeated run leaves out the same
+    // records: the criterion looks only forward.
+    let (history, next) = answer(mm, Some(ballot(21, 1)));
+    assert_eq!(
+        history.keys().copied().collect::<Vec<_>>(),
+        vec![ballot(30, 2)]
+    );
+    assert_eq!(next, Some(ballot(40, 1)));
 }
 
 /// A GC raise between two pages of one answer collects the cursor itself:
@@ -1124,7 +1224,8 @@ fn a_page_that_starts_at_a_raised_watermark_above_the_cursor_is_taken() {
 /// The same wedge end to end against a real registry: a registry larger
 /// than a page answers a prefix and a cursor, its floor rises over that
 /// cursor before the re-ask lands, and the re-asked page starts at the new
-/// floor. The candidate's campaign completes anyway.
+/// floor. The candidate's campaign completes anyway. Every registration
+/// names its own configuration, so none is left out of a page.
 #[test]
 fn a_floor_raised_over_the_cursor_between_two_pages_still_completes_the_campaign() {
     let page = crate::matchmaker::REGISTRY_PAGE as u64;
@@ -1134,7 +1235,7 @@ fn a_floor_raised_over_the_cursor_between_two_pages_still_completes_the_campaign
             J,
             NodeId(1),
             ballot(round, 1),
-            cfg(&[0, 1, 2]),
+            cfg(&[0, 1, 2 + round]),
             MatchmakerGeneration(0),
         ));
         mms[0].ready().advance();
