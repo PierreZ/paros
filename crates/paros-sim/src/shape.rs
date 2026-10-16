@@ -1404,8 +1404,10 @@ pub(crate) fn changed_mode(state: &StateHandle) -> bool {
 #[tracing::instrument(level = "debug", skip_all)]
 pub(crate) fn second_cell(state: &StateHandle) -> bool {
     // Drawn before the lock: the scenarios take the registry's lock too.
-    let other =
-        moved_founder(state) || replaced_founder(state) || drained_machine(state) || wiped_founder(state);
+    let other = moved_founder(state)
+        || replaced_founder(state)
+        || drained_machine(state)
+        || wiped_founder(state);
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     *guard
@@ -2108,11 +2110,7 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
                 moonpool_sim::sim_random_range(least..count + 1)
             };
             // The machines `init` may list: all but the second cell's.
-            let room = if reserve {
-                count - 1
-            } else {
-                count
-            };
+            let room = if reserve { count - 1 } else { count };
             // `init` lists more machines than found the cell only when the
             // founders are `2F+1`: it forms the cell on the first `2F+1`.
             let listed = if founders % 2 == 1 && founders < room && !drained {
