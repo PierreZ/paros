@@ -55,8 +55,7 @@ impl FleetOps {
         let founders = self.layout.founders;
         // On a second-cell seed (#232 (multiple cells)) the last machine is
         // the second cell's.
-        let reserved =
-            usize::from(crate::shape::second_cell(ctx.state()) && founders < self.machines.len());
+        let reserved = usize::from(self.layout.reserved);
         let outside = founders..self.machines.len() - reserved;
         let mut at_founder = false;
         let fresh = self.admitting.is_none() && replaced.is_none();
@@ -167,7 +166,8 @@ impl FleetOps {
         policy: CheckpointPolicy,
         draw: u64,
     ) -> bool {
-        let outside = self.layout.founders..self.machines.len();
+        let reserved = usize::from(self.layout.reserved);
+        let outside = self.layout.founders..self.machines.len() - reserved;
         if outside.is_empty() {
             return false;
         }

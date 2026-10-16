@@ -2037,6 +2037,10 @@ pub(crate) struct MachineLayout {
     /// renamed, so the lone founder never strands them (#505 (stranded
     /// admitted machine)).
     pub(crate) founders_keep_names: bool,
+    /// On a second-cell seed (#232 (multiple cells)), the last machine is
+    /// kept for the second cell: `init` never lists it and `ADMIT` never
+    /// takes it.
+    pub(crate) reserved: bool,
 }
 
 /// The capacity of one machine: the floor on the full founder, else the
@@ -2102,8 +2106,9 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
             let zoned = zoned && count >= 3;
             // The second-cell scenario keeps the last machine out of `init`,
             // for the second cell, when the founders it needs leave one.
-            // A drain needs two admitted machines besides it.
-            let reserve = second && count > if drained { 3 } else { least };
+            // A drain needs two admitted machines besides it, and a zone
+            // outage its three founders.
+            let reserve = second && count > if drained || zoned { 3 } else { least };
             let founders = if count == 0 {
                 0
             } else if zoned {
@@ -2207,6 +2212,7 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
                 move_pct,
                 rename_pct,
                 founders_keep_names: renamed_drain,
+                reserved: reserve,
             }
         })
         .clone()
