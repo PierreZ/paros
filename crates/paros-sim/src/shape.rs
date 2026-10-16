@@ -1221,9 +1221,9 @@ pub(crate) fn replaced_founder(state: &StateHandle) -> bool {
 
 /// Whether the run draws the **downed-founder scenario** (#213 (three
 /// founding members)): drawn once per seed, its own BUGGIFY location, never
-/// on a wiped-founder, moved-founder or replaced-founder seed (each takes a
-/// founder away too, and two founders down leave a cell of three no
-/// majority; on a silent-machine seed that scenario holds down only an
+/// on a wiped-founder, moved-founder, replaced-founder or zone-outage seed
+/// (each takes a founder away too, and two founders down leave a cell of
+/// three no majority; on a silent-machine seed that scenario holds down only an
 /// admitted machine, `crate::machine::silent_target`). The control plane must keep choosing with one
 /// founding member down: `init`'s steps, a tenant's creation and every
 /// control-journal write. The machines' attrition seldom kills a founder of
@@ -1238,7 +1238,10 @@ pub(crate) fn replaced_founder(state: &StateHandle) -> bool {
 #[tracing::instrument(level = "debug", skip_all)]
 pub(crate) fn downed_founder(state: &StateHandle) -> bool {
     // Drawn before the lock: the scenarios take the registry's lock too.
-    let other = wiped_founder(state) || moved_founder(state) || replaced_founder(state);
+    let other = wiped_founder(state)
+        || moved_founder(state)
+        || replaced_founder(state)
+        || zone_outage(state);
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     *guard
@@ -1248,7 +1251,10 @@ pub(crate) fn downed_founder(state: &StateHandle) -> bool {
 
 /// Whether the run draws the **zone-outage scenario** (#215 (zones)):
 /// drawn once per seed, its own BUGGIFY location, never with a scenario
-/// that takes a founding member down, wipes, moves or drains one. Proving
+/// that wipes, moves or replaces a founding member; the downed-founder and
+/// drained-machine scenarios give way to it. Drawn after those two, it was
+/// left 6 seeds in 200 even with its coin forced on, and the sweep never
+/// saw an append while a zone was down. Proving
 /// zone survival needs a cell whose founders stand one per zone and a whole
 /// zone down while operators write; the machines' attrition kills one
 /// machine at a time and draws each machine's zone on its own, so it never
@@ -1263,11 +1269,7 @@ pub(crate) fn downed_founder(state: &StateHandle) -> bool {
 #[tracing::instrument(level = "debug", skip_all)]
 pub(crate) fn zone_outage(state: &StateHandle) -> bool {
     // Drawn before the lock: the scenarios take the registry's lock too.
-    let other = wiped_founder(state)
-        || moved_founder(state)
-        || replaced_founder(state)
-        || downed_founder(state)
-        || drained_machine(state);
+    let other = wiped_founder(state) || moved_founder(state) || replaced_founder(state);
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     *guard.zone_outage.get_or_insert_with(|| {
@@ -1301,7 +1303,10 @@ pub(crate) fn zone_outage(state: &StateHandle) -> bool {
 #[tracing::instrument(level = "debug", skip_all)]
 pub(crate) fn drained_machine(state: &StateHandle) -> bool {
     // Drawn before the lock: the scenarios take the registry's lock too.
-    let other = moved_founder(state) || replaced_founder(state) || downed_founder(state);
+    let other = moved_founder(state)
+        || replaced_founder(state)
+        || downed_founder(state)
+        || zone_outage(state);
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     *guard
