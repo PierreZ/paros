@@ -159,6 +159,9 @@ message GarbageCollectAck {
   bool applied = 4;
   // The request's journal, echoed (#190).
   uint64 journal = 5;
+  // On a refusal, the later set to address instead: a stopped generation's
+  // successor, or the generation in force (#475).
+  optional MatchmakerSet newer = 6;
 }
 
 // ---- matchmaker-set reconfiguration (#125) ----------------------------------
