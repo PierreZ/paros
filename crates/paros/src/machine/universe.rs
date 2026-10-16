@@ -89,8 +89,8 @@ pub(crate) fn joining(
 /// - `REGISTERING` and not hosted: first its birth footprint (#476), a
 ///   `GrantCapacity` that books every slot [`footprint::plan`] finds, or a
 ///   refusal when the slots do not fit. A refusal waits until every founding
-///   member registered ([`footprint::ready`]): an unregistered founder
-///   offers no slot yet. Then, once the footprint is granted, `HostTenant`.
+///   member registered or was marked down ([`footprint::ready`]): an
+///   unregistered founder that is up offers no slot yet. Then, once the footprint is granted, `HostTenant`.
 ///   A refused footprint asks nothing more: the operator marks the tenant
 ///   `ERROR`.
 /// - `REMOVING`: `DropTenant`.
@@ -159,8 +159,8 @@ pub(crate) fn tenant_steps(
 
 /// The `GrantCapacity` that records `tenant`'s birth footprint from
 /// `registry` (#476): every slot when the plan fits, a refusal when it does
-/// not and every founding member registered, else `None` (a founder that
-/// registers later may offer the slots).
+/// not and every founding member registered or was marked down, else
+/// `None` (a founder that registers later may offer the slots).
 fn footprint_grant(registry: &Registry, tenant: TenantId) -> Option<SystemCommand> {
     assert!(
         registry.footprint(tenant).is_none(),
@@ -169,8 +169,21 @@ fn footprint_grant(registry: &Registry, tenant: TenantId) -> Option<SystemComman
     let slots = match footprint::plan(registry, tenant, &Footprint::birth()) {
         Ok(slots) => Some(slots),
         Err(_) if !footprint::ready(registry) => return None,
-        Err(_) => None,
+        Err(_) => {
+            if registry.genesis().any(|node| registry.get(node).is_none()) {
+                moonpool_assertions::reachable!(
+                    "footprint: a founder marked down is counted absent"
+                );
+            }
+            None
+        }
     };
+    // The negative space: a footprint is withheld only for a founder that
+    // may still register.
+    assert!(
+        slots.is_some() || footprint::ready(registry),
+        "a footprint is refused only once no founder may still register"
+    );
     assert!(
         slots.as_ref().is_none_or(|slots| !slots.is_empty()),
         "a granted footprint books slots"
@@ -465,6 +478,38 @@ mod tests {
             vec![SystemCommand::DropTenant {
                 fleet_id: 42,
                 tenant
+            }]
+        );
+    }
+
+    #[test]
+    fn a_founder_marked_down_lets_the_cell_refuse_a_footprint() {
+        let journals = journals();
+        let directory = registering(journals);
+        let tenant = TenantId(20);
+        let mut registry = Registry::new([NodeId(1), NodeId(2)]);
+        let commands = [
+            joining(&directory, journals).expect("the directory asks the join"),
+            founder(1),
+        ];
+        for (seq, command) in (0..).zip(&commands) {
+            registry.apply(seq, &command.encode());
+        }
+        // Founder 2 never registered and is up: the cell withholds its answer.
+        assert!(tenant_steps(&directory, &registry, journals.cell_id).is_empty());
+        let down = SystemCommand::MachineDown {
+            id: NodeId(2),
+            incarnation: 0,
+        };
+        registry.apply(2, &down.encode());
+        assert!(!registry.liveness(NodeId(2)).up);
+        // Founder 2 is marked down: the footprint is refused as it stands.
+        assert_eq!(
+            tenant_steps(&directory, &registry, journals.cell_id),
+            vec![SystemCommand::GrantCapacity {
+                key: GrantKey::Footprint(tenant),
+                tenant,
+                slots: None,
             }]
         );
     }

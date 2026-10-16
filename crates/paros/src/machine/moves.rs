@@ -21,6 +21,12 @@
 //! No step names the draining machine in a configuration, so the operator's
 //! half of the retirement rule holds: no reconfiguration the coordinator
 //! asks for above the floor names the node it retires.
+//!
+//! A machine the coordinator marked down and has not heard from for
+//! `machine_replace_after` is left the same way (#475 (re-place after the
+//! Down bound)): the watch names it gone ([`super::coordinator::Watch`]), and
+//! its slots move as a draining machine's do. It stays registered, so it
+//! takes new slots again once it answers.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound::{Excluded, Unbounded};
@@ -73,20 +79,29 @@ pub(super) struct Moves {
     /// The journal the last step took: the next step takes the next one,
     /// so a move that waits holds no other back.
     last: Option<JournalIdentifier>,
+    /// The journal the last trim looked at (#475).
+    trimmed: Option<JournalIdentifier>,
+}
+
+/// Whether a slot on `node` stays where it is: the machine is registered
+/// (not draining, not retired) and not `gone` (down past the re-placement
+/// bound, #475).
+pub(super) fn stays(registry: &Registry, gone: &BTreeSet<NodeId>, node: NodeId) -> bool {
+    registry
+        .get(node)
+        .is_some_and(|n| n.standing == NodeStanding::Registered)
+        && !gone.contains(&node)
 }
 
 /// The next journal after `last`, in id order and wrapping, with an
-/// acceptor slot on a draining machine, of a tenant the cell still hosts,
-/// with its slots.
+/// acceptor slot on a draining machine or one `gone`, of a tenant the cell
+/// still hosts, with its slots.
 fn next_move(
     registry: &Registry,
+    gone: &BTreeSet<NodeId>,
     last: Option<JournalIdentifier>,
 ) -> Option<(JournalIdentifier, Vec<(u64, Booking)>)> {
-    let leaving = |node: NodeId| {
-        registry
-            .get(node)
-            .is_none_or(|n| n.standing != NodeStanding::Registered)
-    };
+    let leaving = |node: NodeId| !stays(registry, gone, node);
     let moving: BTreeSet<JournalIdentifier> = registry
         .bookings()
         .filter(|(_, b)| b.role == Role::Acceptor && leaving(b.node))
@@ -172,25 +187,139 @@ pub(super) fn at_or_above(a: Option<&Ballot>, b: Option<&Ballot>) -> bool {
     }
 }
 
+/// A client of the machines that hold `slots`, each where the cell's
+/// address book says it is, with their ids in the client's order. `None`
+/// when the book names none of them.
+fn journal_nodes<P: Providers>(
+    (providers, rpc, names, client): (&P, &RpcHandle<P>, &Names, &Client<P>),
+    cell: &CellSession,
+    slots: &[(u64, Booking)],
+) -> Option<(Client<P>, Vec<NodeId>)> {
+    let book: BTreeMap<NodeId, Address> = super::cell_book(cell.founders(), cell.registry())
+        .into_iter()
+        .collect();
+    let servers: Vec<(NodeId, Server<P>)> = slots
+        .iter()
+        .filter_map(|(_, b)| {
+            let addr = book.get(&b.node)?;
+            Some((
+                b.node,
+                Server {
+                    id: b.node.0,
+                    node: NodeClient::named(rpc, names.clone(), addr.clone()),
+                },
+            ))
+        })
+        .collect();
+    if servers.is_empty() {
+        return None;
+    }
+    let ids: Vec<NodeId> = servers.iter().map(|(id, _)| *id).collect();
+    let nodes = Client::new(
+        providers,
+        servers.into_iter().map(|(_, s)| s).collect(),
+        *client.tunables(),
+    );
+    assert_eq!(ids.len(), nodes.server_count(), "one id per server");
+    Some((nodes, ids))
+}
+
+/// The next journal after `last`, in id order and wrapping, with more than
+/// one acceptor slot, every one on a machine that stays and is up, of a
+/// tenant the cell still hosts, with its slots.
+fn next_trim(
+    registry: &Registry,
+    gone: &BTreeSet<NodeId>,
+    last: Option<JournalIdentifier>,
+) -> Option<(JournalIdentifier, Vec<(u64, Booking)>)> {
+    let mut slots: BTreeMap<JournalIdentifier, Vec<(u64, Booking)>> = BTreeMap::new();
+    for (id, b) in registry.bookings() {
+        if let BookingTarget::Journal(journal) = b.target
+            && b.role == Role::Acceptor
+            && !registry.dropped(journal.tenant)
+        {
+            slots.entry(journal).or_default().push((id, *b));
+        }
+    }
+    slots.retain(|_, held| {
+        // A machine down, maybe under a maintenance window, keeps its slot
+        // until it answers or is gone (#359).
+        held.len() > 1
+            && held
+                .iter()
+                .all(|(_, b)| stays(registry, gone, b.node) && registry.liveness(b.node).up)
+    });
+    let journal = last
+        .and_then(|last| slots.range((Excluded(last), Unbounded)).next())
+        .or_else(|| slots.iter().next())
+        .map(|(journal, _)| *journal)?;
+    slots.remove(&journal).map(|held| (journal, held))
+}
+
 impl Moves {
+    /// With no move to take, look at the next journal whose machines all
+    /// stay: a slot outside the configuration its leader holds in force is
+    /// the end of a move an earlier term started off a machine that was
+    /// gone and answered again before the move ended (#475 (re-place after
+    /// the Down bound)). Release it as a move's last step does. One journal
+    /// per round, so the sweep costs one `Inspect` round per watch round.
+    async fn trim<P: Providers>(
+        &mut self,
+        ctx: (&P, &RpcHandle<P>, &Names, &Client<P>),
+        cell: &mut CellSession,
+        gone: &BTreeSet<NodeId>,
+    ) -> Option<MoveStep> {
+        let client = ctx.3;
+        let Some((journal, slots)) = next_trim(cell.registry(), gone, self.trimmed) else {
+            return Some(MoveStep::Idle);
+        };
+        self.trimmed = Some(journal);
+        let Some((nodes, ids)) = journal_nodes(ctx, cell, &slots) else {
+            return Some(MoveStep::Idle);
+        };
+        let Some((_, reply)) = leader_of(&nodes, ids.len(), journal).await else {
+            return Some(MoveStep::Idle);
+        };
+        if slots.len() <= reply.members.len() {
+            return Some(MoveStep::Idle);
+        }
+        let extra: Vec<(u64, Booking)> = slots
+            .iter()
+            .filter(|(_, b)| !reply.members.contains(&b.node.0))
+            .copied()
+            .collect();
+        // A journal its tenant deleted is its next create's to release.
+        if extra.is_empty() || !live(client, cell.registry(), journal).await {
+            return Some(MoveStep::Idle);
+        }
+        moonpool_assertions::reachable!(
+            "coordinator: a slot its journal's configuration left is released"
+        );
+        self.finish(client, cell, (&nodes, &ids), journal, &extra, &reply)
+            .await
+    }
+
     /// Take one step of the next move, through the term's session `cell`
     /// (its bookings drawn by `desk`), calling the journal's machines where
-    /// the cell's address book says they are. `None` when a write did not
-    /// land: the term writes nothing more.
+    /// the cell's address book says they are. A slot on a machine `gone`
+    /// (down past the re-placement bound, #475) moves as a draining
+    /// machine's does. `None` when a write did not land: the term writes
+    /// nothing more.
     #[tracing::instrument(level = "debug", skip_all)]
     pub(super) async fn step<P: Providers>(
         &mut self,
         (providers, rpc, names, client): (&P, &RpcHandle<P>, &Names, &Client<P>),
         cell: &mut CellSession,
         desk: &mut TenantDesk,
+        gone: &BTreeSet<NodeId>,
     ) -> Option<MoveStep> {
         // An operator drains through a session of its own: the term's fold
         // learns of it only by reading the journal's tail again.
         if !cell.refresh(client, 0).await {
             return Some(MoveStep::Waiting);
         }
-        let Some((journal, slots)) = next_move(cell.registry(), self.last) else {
-            return Some(MoveStep::Idle);
+        let Some((journal, slots)) = next_move(cell.registry(), gone, self.last) else {
+            return self.trim((providers, rpc, names, client), cell, gone).await;
         };
         self.last = Some(journal);
         // Only a journal its tenant holds live moves: a deleted one's slots
@@ -202,11 +331,7 @@ impl Moves {
         let registry = cell.registry();
         let staying: Vec<(u64, Booking)> = slots
             .iter()
-            .filter(|(_, b)| {
-                registry
-                    .get(b.node)
-                    .is_some_and(|n| n.standing == NodeStanding::Registered)
-            })
+            .filter(|(_, b)| stays(registry, gone, b.node))
             .copied()
             .collect();
         let leaving: Vec<(u64, Booking)> = slots
@@ -215,32 +340,15 @@ impl Moves {
             .copied()
             .collect();
         assert!(!leaving.is_empty(), "a move leaves a draining machine");
-        // The journal's machines, each where the cell's address book says.
-        let book: BTreeMap<NodeId, Address> = super::cell_book(cell.founders(), registry)
-            .into_iter()
-            .collect();
-        let servers: Vec<(NodeId, Server<P>)> = slots
-            .iter()
-            .filter_map(|(_, b)| {
-                let addr = book.get(&b.node)?;
-                Some((
-                    b.node,
-                    Server {
-                        id: b.node.0,
-                        node: NodeClient::named(rpc, names.clone(), addr.clone()),
-                    },
-                ))
-            })
-            .collect();
-        if servers.is_empty() {
-            return Some(MoveStep::Waiting);
+        if leaving.iter().any(|(_, b)| gone.contains(&b.node)) {
+            moonpool_assertions::reachable!(
+                "coordinator: a move leaves a machine down past its bound"
+            );
         }
-        let ids: Vec<NodeId> = servers.iter().map(|(id, _)| *id).collect();
-        let nodes = Client::new(
-            providers,
-            servers.into_iter().map(|(_, s)| s).collect(),
-            *client.tunables(),
-        );
+        let Some((nodes, ids)) = journal_nodes((providers, rpc, names, client), cell, &slots)
+        else {
+            return Some(MoveStep::Waiting);
+        };
         // The leader's view: its configuration, its GC watermark.
         let leader = leader_of(&nodes, ids.len(), journal).await;
         let Some((at, reply)) = leader else {
@@ -248,7 +356,9 @@ impl Moves {
         };
         let size = reply.members.len();
         if staying.len() < size {
-            return self.book(client, cell, desk, journal, &staying, size).await;
+            return self
+                .book(client, cell, desk, (journal, gone), &staying, size)
+                .await;
         }
         let mut target: Vec<u64> = staying.iter().map(|(_, b)| b.node.0).collect();
         target.sort_unstable();
@@ -315,7 +425,13 @@ impl Moves {
         }
         let successor = !self.started.remove(&journal);
         moonpool_assertions::sometimes!(true, "coordinator: a move finished");
-        moonpool_assertions::sometimes!(successor, "coordinator: a successor term finished a move");
+        // A reachable, not a sometimes: the gone-machine scenario's moves
+        // (#475 (re-place after the Down bound)) check it often enough that
+        // a sweep with no successor finish reads as a 0% outcome; `RARE`
+        // covers a sweep that never reaches it.
+        if successor {
+            moonpool_assertions::reachable!("coordinator: a successor term finished a move");
+        }
         tracing::info!(journal = %journal, successor, "journal_moved");
         Some(MoveStep::Finished { successor })
     }
@@ -328,7 +444,7 @@ impl Moves {
         client: &Client<P>,
         cell: &mut CellSession,
         desk: &mut TenantDesk,
-        journal: JournalIdentifier,
+        (journal, gone): (JournalIdentifier, &BTreeSet<NodeId>),
         staying: &[(u64, Booking)],
         size: usize,
     ) -> Option<MoveStep> {
@@ -338,8 +454,13 @@ impl Moves {
             count: size,
         };
         let storage = desk.storage(cell.registry());
-        // A draining machine is not registered: it takes no new slot.
-        let machines = placement::machines(cell.registry(), storage.iter().copied());
+        // A draining machine is not registered: it takes no new slot, and
+        // neither does one gone (#475).
+        let machines: Vec<placement::Machine> =
+            placement::machines(cell.registry(), storage.iter().copied())
+                .into_iter()
+                .filter(|m| !gone.contains(&m.node))
+                .collect();
         let Ok(steps) = placement::plan(&want, &machines, staying, journal.tenant.0) else {
             moonpool_assertions::reachable!("coordinator: a move has no machine to go to");
             return Some(MoveStep::Waiting);

@@ -124,6 +124,16 @@ pub trait JournalStores {
         let _ = journal;
     }
 
+    /// Why the last [`JournalStores::open`] of `journal` answered `None`,
+    /// when it was a storage fault a later open may get past (a created
+    /// journal's provisioning on a failing disk): the driver quarantines the
+    /// journal instead of taking it down for good. Taken once. The default:
+    /// never.
+    fn open_fault(&mut self, journal: JournalIdentifier) -> Option<RunError> {
+        let _ = journal;
+        None
+    }
+
     /// `journal` was just quarantined on this node: a storage fault ended its
     /// incarnation, and the driver re-opens it after
     /// [`DriverTunables::quarantine_ticks`]. An opener that already knows

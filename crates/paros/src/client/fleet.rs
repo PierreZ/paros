@@ -31,8 +31,8 @@
 //!   (`GrantCapacity`, [`crate::footprint`], #476 (tenant footprint)) and
 //!   hosts the tenant (`HostTenant`, [`crate::machine`], #225). The operator
 //!   waits for both ([`Interrupted::NotHosted`]; while a founding member
-//!   is not registered, the cell refuses no footprint, so the creation
-//!   waits). Then the fleet tenant marks it `READY`. A footprint the cell refused makes the
+//!   is not registered and not marked down, the cell refuses no footprint,
+//!   so the creation waits). Then the fleet tenant marks it `READY`. A footprint the cell refused makes the
 //!   operator mark the tenant `ERROR` and end the creation `NoFootprint`.
 //!   A creation is resumed only under its own identifier; a name held
 //!   `READY` under it ends the operation at once.
