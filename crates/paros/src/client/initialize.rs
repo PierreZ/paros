@@ -25,6 +25,15 @@
 //! side of the join, and the run waits for it (#513 (fleet Init duel)), so
 //! `init` never fences the coordinator. Every step is idempotent: `init` is
 //! refused only when it found nothing left to do.
+//!
+//! `init` does not wait for the registry to hold the founding members: the
+//! coordinator registers them and books the cell's and the universe's
+//! footprints (#476 (tenant footprint), [`crate::machine`]'s `footprints`).
+//! That wait came with #476, when the fleet steps claimed the cell control
+//! journal; once they claimed nothing (#513 (fleet Init duel)) it only
+//! delayed a cell formed in the recovery tail past the fleet's settle bound
+//! (red on "fleet: a started init leaves the cell READY and joined after
+//! chaos", green after it went).
 
 use std::time::Duration;
 
@@ -35,7 +44,6 @@ use paros_core::NodeId;
 use super::Client;
 use super::bootstrap::{self, InitOutcome};
 use super::cell::CellSession;
-use super::checkpoint::{self, Folder, LoadOutcome};
 use super::election::read_election;
 use super::fleet::{FleetRefusal, FleetSession, Interrupted, Stage, Step};
 use crate::fleet::RootKeyEntry;
@@ -260,36 +268,6 @@ async fn coordinator<P: Providers>(
     }
 }
 
-/// Wait up to `patience` until the registry holds every founding member
-/// (#476 (tenant footprint)). A founding member registers through the cell
-/// coordinator (`Register`), and the fleet steps claim the cell control
-/// journal, which fences the coordinator: the cell's and the universe's
-/// footprints are booked over registered machines only. The wait reads the
-/// journal and claims nothing. After `patience` the fleet steps go on: the
-/// coordinator books what they could not.
-async fn registered<P: Providers>(
-    client: &Client<P>,
-    journals: &ControlJournals,
-    founders: &[u64],
-    patience: Duration,
-) {
-    assert!(!founders.is_empty(), "a cell has founding members");
-    let deadline = client.now() + patience;
-    loop {
-        let mut folder = Folder::new(Registry::new(founders.iter().copied().map(NodeId)));
-        if let LoadOutcome::Loaded { .. } =
-            checkpoint::load(&mut folder, journals.cell, client, 0, 0).await
-            && crate::footprint::ready(folder.state())
-        {
-            return;
-        }
-        if client.now() >= deadline || !client.pause(client.tunables().retry_backoff).await {
-            moonpool_assertions::reachable!("init: a founding member is not registered in time");
-            return;
-        }
-    }
-}
-
 /// Run `init` whole: form the cell over the founding members (or learn it,
 /// when every member already serves it), wait for its coordinator, run the
 /// fleet steps, then admit the other listed machines, through a client
@@ -383,7 +361,6 @@ pub async fn initialize<P: Providers>(
         Ok(node) => node,
         Err(unreachable) => return InitRun::Unreachable(unreachable),
     };
-    registered(&client, &journals, &members, patience).await;
     let Some(fleet) = FleetSession::new(
         journals,
         params.leader_seed,

@@ -144,6 +144,10 @@ pub struct Writer {
     last: Option<LeaderUuid>,
     /// The position it writes next.
     next_seq: u64,
+    /// The lowest `next_seq` of a view that named `mine` the leader: `mine`
+    /// led from there on, so every position at or above it holds only
+    /// writes under `mine` (#564). `None` until such a view.
+    led_from: Option<u64>,
 }
 
 /// The `Write` request carrying `entry` to `journal`.
@@ -171,6 +175,7 @@ impl Writer {
             owned: false,
             last: None,
             next_seq: 0,
+            led_from: None,
         }
     }
 
@@ -226,6 +231,19 @@ impl Writer {
         self.next_seq
     }
 
+    /// A position from which the uuid it leads with is known to lead: a
+    /// view naming it the leader showed this `next_seq` (#564). What
+    /// [`Client::resolve`] needs to read a write back as written.
+    #[must_use]
+    pub fn led_from(&self) -> Option<u64> {
+        if self.owned { self.led_from } else { None }
+    }
+
+    /// Note a view that names `mine` the leader at `next_seq`.
+    fn saw_leading(&mut self, next_seq: u64) {
+        self.led_from = Some(self.led_from.map_or(next_seq, |from| from.min(next_seq)));
+    }
+
     /// Move the next position up to `next` (never back).
     pub fn advance_to(&mut self, next: u64) {
         self.next_seq = self.next_seq.max(next);
@@ -237,6 +255,7 @@ impl Writer {
         self.last = Some(self.mine);
         self.terms += 1;
         self.mine = leader_uuid(self.seed, self.terms);
+        self.led_from = None;
         assert!(
             Some(self.mine) != self.last,
             "a writer's next uuid is not its last"
@@ -261,6 +280,7 @@ impl Writer {
         if state.leader == Some(self.mine) {
             self.owned = true;
             self.next_seq = state.next_seq.0;
+            self.saw_leading(state.next_seq.0);
             Learned::Owner
         } else if self.owned {
             self.owned = false;
@@ -284,6 +304,7 @@ impl Writer {
         );
         self.owned = true;
         self.next_seq = state.next_seq.0;
+        self.saw_leading(state.next_seq.0);
     }
 
     /// Fold a claim's outcome into the belief; what it learned, when the
@@ -482,7 +503,12 @@ impl Writer {
             WriteOutcome::Denied(denial) => WriterOutcome::Denied(denial),
             WriteOutcome::Ambiguous => {
                 let resolved = client
-                    .resolve(&request, report.server, super::Retarget::FollowHint)
+                    .resolve(
+                        &request,
+                        report.server,
+                        super::Retarget::FollowHint,
+                        self.led_from(),
+                    )
                     .await;
                 match resolved.resolution {
                     Resolution::Written { seq, count } => {
