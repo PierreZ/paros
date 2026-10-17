@@ -119,6 +119,8 @@ impl ColocatedNode {
             leader: None,
             ballot,
             election_elapsed: 0,
+            pull_index: None,
+            pull_beats: 0,
             election_timeout: 0,
             needs_election_timeout: true,
             counters: Counters::default(),

@@ -65,6 +65,19 @@ pub const REPAIR_TIMEOUT_ELECTIONS: u64 = 3;
 // A zero budget would resign every leader that opens a probe on its first tick.
 const _: () = assert!(REPAIR_TIMEOUT_ELECTIONS > 0);
 
+/// The fewest beats a follower pulls its decided-prefix gap from the beat's
+/// sender alone before it asks the whole pool; the driver's election timeout
+/// sets the count when it is longer. A pull only the leader can answer fails
+/// for good when the follower's lane to the leader is dead (a renamed machine
+/// at an address the follower never learned, #349) while the leader's beats
+/// still arrive: the election clock never fires its own broadcast probe, so
+/// a pull stalled for one election timeout asks the pool as that probe does.
+/// A slow pull that crosses the count costs a pool-wide page, never safety.
+const PULL_FALLBACK_BEATS: u64 = 3;
+
+// A zero fallback would broadcast every pull, a fan-out per beat.
+const _: () = assert!(PULL_FALLBACK_BEATS > 0);
+
 /// This node's role in the cluster. A read-only view for drivers / oracles.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -326,6 +339,11 @@ pub struct ColocatedNode {
     /// Ticks since the last leader contact (reset on `Prepare`/`Accept`/
     /// `Heartbeat`/`Commit` at a ballot `>=` ours, and on becoming Leader).
     election_elapsed: u64,
+    /// The chosen index of this node's last beat-triggered pull, and how
+    /// many beats in a row pulled from it with no progress
+    /// ([`PULL_FALLBACK_BEATS`]). `0` beats is a fresh pull.
+    pull_index: Option<Slot>,
+    pull_beats: u64,
     /// Driver-supplied randomized election timeout, in ticks. `0` disables the
     /// election clock (the sentinel until the driver seeds one).
     election_timeout: u64,
