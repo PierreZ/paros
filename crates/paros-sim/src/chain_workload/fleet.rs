@@ -135,17 +135,17 @@ fn with_names<R>(state: &StateHandle, f: impl FnOnce(&mut TenantNames) -> R) -> 
 
 const TENANT_NAMES_KEY: &str = "paros-tenant-names";
 
-/// Run `f` over the operator whose turn it is to finish an `init` in the
-/// recovery tail ([`FleetOps::take_init_turn`]).
-fn with_init_turn<R>(state: &StateHandle, f: impl FnOnce(&mut Option<u64>) -> R) -> R {
-    let turn = crate::state::published(state, INIT_TURN_KEY, || None::<u64>);
+/// Run `f` over the operator whose turn it is to finish its pending
+/// operation in the recovery tail ([`FleetOps::take_turn`]).
+fn with_turn<R>(state: &StateHandle, f: impl FnOnce(&mut Option<u64>) -> R) -> R {
+    let turn = crate::state::published(state, TURN_KEY, || None::<u64>);
     let mut turn = turn
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     f(&mut turn)
 }
 
-const INIT_TURN_KEY: &str = "paros-init-turn";
+const TURN_KEY: &str = "paros-fleet-turn";
 
 /// An operation this client stopped in the middle of — the crash shape, or
 /// a run that did not end (interrupted, its target killed under it, going
@@ -1047,8 +1047,7 @@ impl FleetOps {
         if self.pending.is_none() {
             return;
         }
-        let initializing = matches!(self.pending, Some(Pending::Initialize | Pending::Init));
-        if initializing && !self.take_init_turn(ctx, beat).await {
+        if !self.take_turn(ctx, beat).await {
             return;
         }
         let deadline = ctx.time().now() + FLEET_SETTLE;
@@ -1078,13 +1077,16 @@ impl FleetOps {
             { "client" => self.client_id, "pending" => format!("{:?}", self.pending) }
         );
         assert_reachable!("fleet: a pending operation is finished in the recovery tail");
-        if initializing {
-            with_init_turn(ctx.state(), |turn| *turn = None);
-        }
+        with_turn(ctx.state(), |turn| *turn = None);
     }
 
-    /// Wait for this operator's turn to finish an `init` in the recovery
-    /// tail (#513 (fleet Init duel)): one operator at a time. Two operators
+    /// Wait for this operator's turn to finish its pending operation in the
+    /// recovery tail (#513 (fleet Init duel)): one operator at a time. A
+    /// tenant removal two operators resume at once duels the same way
+    /// (#361 (slow machines), witness 11003452246573997144 on 16c59ae: two
+    /// clients resuming one `Remove` superseded each other's claim on the
+    /// fleet tenant until [`FLEET_SETTLE`]), so every operation takes the
+    /// turn. Two operators
     /// that finish one `init` at once each claim its journals, so each
     /// supersedes the other's steps; with the tail's slow links one step
     /// takes seconds, and neither ended in [`FLEET_SETTLE`] (witness
@@ -1094,9 +1096,9 @@ impl FleetOps {
     /// in the chaos window, where nothing owes an end. The next operator
     /// starts its own deadline once the first is done, and finds the
     /// `init` ended. False when the run shut down first.
-    async fn take_init_turn(&self, ctx: &SimContext, beat: Duration) -> bool {
+    async fn take_turn(&self, ctx: &SimContext, beat: Duration) -> bool {
         loop {
-            let mine = with_init_turn(ctx.state(), |turn| match turn {
+            let mine = with_turn(ctx.state(), |turn| match turn {
                 Some(holder) if *holder != self.client_id => false,
                 _ => {
                     *turn = Some(self.client_id);
