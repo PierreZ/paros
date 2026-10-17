@@ -120,6 +120,10 @@ struct NodeLoop<'a, P: Providers, A: Audit> {
     providers: &'a P,
     links: &'a MatchmakerLinks<P>,
     out: &'a Outbound,
+    /// The incarnation's RPC runtime, polled through every flush
+    /// ([`RpcEdge::alongside`], #578 (leader sends Accept before its own
+    /// fsync)).
+    edge: &'a RpcEdge<P>,
     audit: &'a A,
     self_id: u64,
     tunables: DriverTunables,
@@ -170,7 +174,8 @@ impl<P: Providers, A: Audit> NodeLoop<'_, P, A> {
         );
         let promised = node.hard_state().max_promised_ballot;
         let chosen = node.hard_state().chosen_index;
-        let mut outbox = drain_ready(node, storage, self.out, waiters, self.audit).await?;
+        let mut outbox =
+            drain_ready(node, storage, self.out, self.edge, waiters, self.audit).await?;
         let reported = fold_head(node);
         if !outbox.gc_requests.is_empty() && crate::scenario::withhold_gc() {
             tracing::info!(node = self.self_id, "gc_requests_withheld");
@@ -622,6 +627,7 @@ struct Shared<'a, P: Providers> {
     providers: &'a P,
     links: &'a MatchmakerLinks<P>,
     out: &'a Outbound,
+    edge: &'a RpcEdge<P>,
     self_id: u64,
     tunables: DriverTunables,
     /// The machine's metrics (#366 (metrics)); off outside a machine.
@@ -635,6 +641,7 @@ impl<P: Providers> Shared<'_, P> {
             providers: self.providers,
             links: self.links,
             out: self.out,
+            edge: self.edge,
             audit,
             self_id: self.self_id,
             tunables: self.tunables,
@@ -1482,7 +1489,7 @@ where
     // polled by the loop below. Its handlers are the typed queues the loop
     // selects on, so the loop remains the sole owner of every journal's core.
     let me = Party::Node(NodeId(self_id));
-    let mut edge = RpcEdge::listen(&providers, &local_addr, "node", &tunables, &transport).await?;
+    let edge = RpcEdge::listen(&providers, &local_addr, "node", &tunables, &transport).await?;
     // A founding member's machine interface (#404 (static vs dynamic
     // endpoints)): a dynamic group serving `Deliver` for this incarnation,
     // published in its `IdentifyAck` and kept in the registry by `node_id`.
@@ -1736,6 +1743,7 @@ where
         providers: &providers,
         links: &links,
         out: &out,
+        edge: &edge,
         self_id,
         tunables,
         metrics: &metrics,

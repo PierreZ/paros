@@ -50,10 +50,6 @@ pub const RARE: &[Rare] = &[
         reason: "an ADMIT that draws a machine an operator removed: one CI sweep seed (#359 (drain, remove and maintenance for machines))",
     },
     Rare {
-        msg: "coordinator: a slot its journal's configuration left is released",
-        reason: "a gone machine back before its move ended: none in 2,000 hunt seeds; the gone-machine scenario's back-soon coin aims at it (#498 (moves in the sweep), #475 (re-place after the Down bound))",
-    },
-    Rare {
         msg: "coordinator: a machine down past its bound is gone",
         reason: "a gone-machine seed: 11 hits in 1,000 hunt seeds (#498 (moves in the sweep), #475 (re-place after the Down bound))",
     },
@@ -1164,6 +1160,14 @@ pub const RARE: &[Rare] = &[
     Rare {
         msg: "coordinator: a successor term finished a move",
         reason: "a move a successor term finishes: none of 4 finished moves in PR #559's sweep at b9999ed, none in a 324-seed sweep (#498 (moves in the sweep), #475 (re-place after the Down bound))",
+    },
+    Rare {
+        msg: "coordinator: a move books no slot its desired mode would release",
+        reason: "a move off a gone machine whose journal's desired mode is smaller: 3 checks in a 300-seed hunt (PR #626 (Accepts before own sync), #475 (re-place after the Down bound))",
+    },
+    Rare {
+        msg: "coordinator: a move records the configuration it shrank to",
+        reason: "a move that shrank its journal, past its GC watermark: 1 check in a 300-seed hunt (PR #626 (Accepts before own sync), #475 (re-place after the Down bound))",
     },
     Rare {
         msg: "coordinator: a move books its journal's new slot",

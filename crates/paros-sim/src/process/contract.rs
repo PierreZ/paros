@@ -19,7 +19,10 @@ async fn journal_contract_suites(provider: SimStorageProvider) {
         peers: vec![NodeId(0)],
         ..Config::new(NodeId(0), paros::JournalIdentifier::UNSET)
     };
-    let store = JournalStoreConfig::small();
+    let store = JournalStoreConfig {
+        geometry: crate::shape::COMPACT_GEOMETRY,
+        ..JournalStoreConfig::default()
+    };
     let open_node = |provider: SimStorageProvider, dir: String, config: Config| async move {
         let mut node = JournalStorage::new(provider, dir, config, store);
         node.boot_scan().await.expect("a clean journal store boots");
@@ -110,7 +113,10 @@ impl moonpool_sim::Workload for ContractSuiteWorkload {
                     ctx.storage().clone(),
                     "journal-contract/mm-unsynced",
                     paros::JournalIdentifier::UNSET,
-                    JournalStoreConfig::small(),
+                    JournalStoreConfig {
+                        geometry: crate::shape::COMPACT_GEOMETRY,
+                        ..JournalStoreConfig::default()
+                    },
                 )
             };
             let mut store = open();

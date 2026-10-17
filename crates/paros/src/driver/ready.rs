@@ -12,11 +12,13 @@ use paros_core::{
 
 use crate::audit::{Audit, StorageFaultDecision};
 use moonpool_buggify::hint::Strike;
+use moonpool_core::Providers;
 
 use crate::storage::{LogStorage, StorageError};
 
 use super::calls::Call;
 use super::config::RunError;
+use super::edge::RpcEdge;
 use super::events::command_hash;
 use super::transport::{Outbound, send_messages};
 
@@ -208,14 +210,16 @@ fn report_recovery_batch<A: Audit>(
 // (persist → send → learn → acks), so slicing it into helpers would scatter
 // the ordering contract this function *is*.
 #[tracing::instrument(level = "trace", skip_all, fields(node = node.config().id.0))]
-pub(crate) async fn drain_ready<S, A>(
+pub(crate) async fn drain_ready<P, S, A>(
     node: &mut ColocatedNode,
     storage: &mut S,
     out: &Outbound,
+    edge: &RpcEdge<P>,
     waiters: &mut ClientWaiters,
     audit: &A,
 ) -> Result<Outbox, RunError>
 where
+    P: Providers,
     S: LogStorage,
     A: Audit,
 {
@@ -276,11 +280,36 @@ where
     ready.advance();
     let gc_fence = node.gc_fence();
 
-    // 1. Persist durable writes FIRST, each op in order, flush per MustSync, and
+    // A reconfiguring campaign's `Prepare` carries a configuration other
+    // than the one this node believes in force (its leadership adopts it only
+    // on winning): the campaign whose death the #260 seam is about.
+    let sent_prepare = messages.iter().any(|(_, msg)| {
+        matches!(msg, Message::Prepare { config: Some(config), .. } if config != node.acceptors())
+    });
+
+    // 0. The Phase-2 requests leave before this node's own flush (#578
+    //    (leader sends Accept before its own fsync), Paxos Made Live §4.2):
+    //    an `Accept` is a request, never a promise or a vote, and nothing an
+    //    acceptor does with it rests on this node's disk. The leader's own
+    //    vote still counts only once durable: the node loop steps no message
+    //    of this journal before the flush below returns, and every reply,
+    //    `Commit` and apply derived from the vote leaves only after it. A
+    //    batch that raises this node's promise keeps every message behind
+    //    its flush, as before: an `Accept` never outruns the durable promise
+    //    of its own ballot.
+    let messages = send_early(node, out, audit, &writes, messages).await;
+
+    // 1. Persist durable writes, each op in order, flush per MustSync, and
     //    surface the persisted state for the safety + recovery oracles. The
     //    staged-not-synced hint lives inside `persist_writes`.
     let promised = node.hard_state().max_promised_ballot;
-    persist_writes(storage, &writes, must_sync, promised, self_id, audit).await?;
+    // The runtime runs through the flush (`RpcEdge::alongside`): the early
+    // `Accept`s above reach the wire, and every lane's ack is read, while
+    // this node's own vote syncs.
+    edge.alongside(persist_writes(
+        storage, &writes, must_sync, promised, self_id, audit,
+    ))
+    .await??;
 
     if let Some(batch) = recovery_batch {
         report_recovery_batch(audit, self_id, batch, node.recovery_page());
@@ -304,13 +333,7 @@ where
         hinted.await;
     }
 
-    // 2. Send messages — only after (1) is durable.
-    // A reconfiguring campaign's `Prepare` carries a configuration other
-    // than the one this node believes in force (its leadership adopts it only
-    // on winning): the campaign whose death the #260 seam is about.
-    let sent_prepare = messages.iter().any(|(_, msg)| {
-        matches!(msg, Message::Prepare { config: Some(config), .. } if config != node.acceptors())
-    });
+    // 2. Send the rest — only after (1) is durable.
     send_batch(node, out, audit, messages);
 
     // 3. Learn the entries the chosen prefix walked over (already durable, in
@@ -371,6 +394,70 @@ where
         gc_requests,
         gc_fence,
     })
+}
+
+/// Send a batch's early half ([`split_early`]) before its flush, and return
+/// the rest, which waits for the flush (#578 (leader sends Accept before its
+/// own fsync)).
+async fn send_early<A: Audit>(
+    node: &mut ColocatedNode,
+    out: &Outbound,
+    audit: &A,
+    writes: &[WriteOp],
+    messages: Outgoing,
+) -> Outgoing {
+    let (early, late) = split_early(writes, messages);
+    if early.is_empty() {
+        return late;
+    }
+    send_batch(node, out, audit, early);
+    // Hint: the `Accept`s are out and this node's own vote is not
+    // durable. A crash here loses the leader's copy, never a decision:
+    // a slot is chosen only by a quorum of durable votes, and the
+    // restarted node campaigns under a fresh ballot.
+    let hinted = moonpool_buggify::hint!("accepts sent, own vote not durable");
+    if hinted.strike() == Strike::Killed {
+        moonpool_assertions::reachable!(
+            "the driver crashes with its Accepts out before its own vote is durable"
+        );
+    }
+    hinted.await;
+    assert!(
+        late.iter()
+            .all(|(_, msg)| !matches!(msg, Message::Accept { .. })),
+        "every Accept of the batch left before its flush"
+    );
+    late
+}
+
+/// A batch's addressed messages, in the order the core queued them.
+type Outgoing = Vec<(Party, Message)>;
+
+/// Split a batch's messages into the ones that may leave before its flush
+/// and the rest (#578 (leader sends Accept before its own fsync)): only the
+/// Phase-2 `Accept`s, and only from a batch that does not raise the
+/// promise. Order inside each half is the batch's.
+fn split_early(writes: &[WriteOp], messages: Outgoing) -> (Outgoing, Outgoing) {
+    let raises_promise = writes
+        .iter()
+        .any(|op| matches!(op, WriteOp::Acceptor(AcceptorWrite::SetPromise(_))));
+    if raises_promise {
+        return (Vec::new(), messages);
+    }
+    let total = messages.len();
+    let (early, late): (Vec<_>, Vec<_>) = messages
+        .into_iter()
+        .partition(|(_, msg)| matches!(msg, Message::Accept { .. }));
+    assert!(
+        early.len() + late.len() == total,
+        "the split keeps every message"
+    );
+    assert!(
+        late.iter()
+            .all(|(_, msg)| !matches!(msg, Message::Accept { .. })),
+        "no Accept waits behind a flush that keeps the promise"
+    );
+    (early, late)
 }
 
 /// Report one slot the contiguous walk moved over — "applied" names the walk,
