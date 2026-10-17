@@ -50,6 +50,10 @@ pub const RARE: &[Rare] = &[
         reason: "an ADMIT that draws a machine an operator removed: one CI sweep seed (#359 (drain, remove and maintenance for machines))",
     },
     Rare {
+        msg: "coordinator: a served term follows a renamed founder",
+        reason: "a founder renamed (the rename_pct knob's extreme, #349) while a served term runs: one witness on PR #643's sweep",
+    },
+    Rare {
         msg: "coordinator: a machine down past its bound is gone",
         reason: "a gone-machine seed: 11 hits in 1,000 hunt seeds (#498 (moves in the sweep), #475 (re-place after the Down bound))",
     },
@@ -192,6 +196,10 @@ pub const RARE: &[Rare] = &[
     Rare {
         msg: "acceptor: an Accept below the compaction floor is ignored, not nacked",
         reason: "marginal: fired on 6 of 810 hunt seeds (#486)",
+    },
+    Rare {
+        msg: "an Accepted leaves for a slot its own batch compacted",
+        reason: "a heal-path accept and a floor raised past it in one batch, the lowest floor of the cell: one CI sweep seed (6657126035707192045 on 25d00a7)",
     },
     Rare {
         msg: "acceptor: an Accept inside the chosen prefix heals a faulty chosen record",

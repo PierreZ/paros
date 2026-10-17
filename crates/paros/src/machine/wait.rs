@@ -482,7 +482,18 @@ async fn answer_admit<L: CellLedger>(
             None,
         )
     };
-    assert!(ledger.vote().is_none(), "an idle machine holds no vote");
+    // A machine that drives its own decree accepts its plan before the
+    // decree finishes (`wait_for_cell` returns only once it does), so it may
+    // hold a vote while `in_init`: it refuses below. Witness recipe
+    // 128295:9515285717494050093 on seed 8912241431472991803 (dd6fbed).
+    assert!(
+        in_init || ledger.vote().is_none(),
+        "an idle machine holds no vote"
+    );
+    assert!(
+        ledger.vote().is_none() || ledger.promised() != Ballot::default(),
+        "a vote follows a promise"
+    );
     let Ok(admission) = Admission::from_wire(request) else {
         return refuse("malformed");
     };
