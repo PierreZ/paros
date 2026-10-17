@@ -2101,6 +2101,17 @@ fn founder_capacity(full: bool, floor: u64, capacity: u64) -> u64 {
     }
 }
 
+/// Whether the batched-journals scenario shapes a layout of `count`
+/// machines (#599 (durability mode per journal)): the run's own draw when
+/// the count is not known yet, else the draw among `count` machines.
+fn batched_layout(state: &StateHandle, count: usize) -> bool {
+    if count == 0 {
+        batched_journals(state)
+    } else {
+        batched_journals_among(state, count)
+    }
+}
+
 /// The run's machine layout (#246), drawn once per seed by whoever asks
 /// first, for `count` machines in rank order. The founder count is uniform
 /// over `1..=count` (`3..=count` on a replaced-founder, moved-founder or
@@ -2127,11 +2138,7 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
     let drained = drained_machine(state);
     let zoned = zone_outage(state);
     let changed = changed_mode(state);
-    let batched = if count == 0 {
-        batched_journals(state)
-    } else {
-        batched_journals_among(state, count)
-    };
+    let batched = batched_layout(state, count);
     let second = second_cell(state);
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
