@@ -153,7 +153,7 @@ checkpoint, common, fleet, public, internal, matchmaker, system, machine, view}`
 
 - `paros-core` with `tracing` + `serde` (`:17`); `prost` (`:34`), `postcard` (`:37`), `serde`
   (`:38`), `crc32c` (`:39`), `tracing` (`:42`), `tokio` `sync` (`:45`), `tokio-util` (`:48`).
-- moonpool, rev `c742acd` (moonpool#338 (spare segment prepared off the commit path) and moonpool#339 (one durable write per ordered-commit step, `RWF_DSYNC`); after moonpool#336 (balanced geometry) and moonpool#337: a balanced default geometry, refused when it differs from the store's own; after moonpool#334 (journal replay reads runs), moonpool#323's `SystemProvider` and moonpool#318's `buggify_named!` and `set_activation`): `moonpool-core` (`select`, `:26`), `moonpool-rpc` (`prost`, `:28`),
+- moonpool, rev `4bab77e` (moonpool#341 (no bounce buffer on O_DIRECT), moonpool#338 (spare segment prepared off the commit path) and moonpool#339 (one durable write per ordered-commit step, `RWF_DSYNC`); after moonpool#336 (balanced geometry) and moonpool#337: a balanced default geometry, refused when it differs from the store's own; after moonpool#334 (journal replay reads runs), moonpool#323's `SystemProvider` and moonpool#318's `buggify_named!` and `set_activation`): `moonpool-core` (`select`, `:26`), `moonpool-rpc` (`prost`, `:28`),
   `moonpool-journal` (`:32`), `moonpool-buggify` (`:36`), `moonpool-assertions` (`:37`), dev `moonpool-sim` (`:61`).
 - Dev: `futures` executor (`:53`), `tokio` `rt`+`macros` (`:57`). Build: `prost-build` (`:60`).
 - `prometheus` without default features: the machine's metrics (#366 (metrics)), wasm-safe.
