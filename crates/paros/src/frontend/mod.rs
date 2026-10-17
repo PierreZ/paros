@@ -541,7 +541,12 @@ where
                     shared.audit.frontend_resolved(&name, journal, control, at);
                     Ok((journal, Some(name)))
                 }
-                Resolved::Unknown => Err(Refusal::Unknown),
+                Resolved::Unknown { read } => {
+                    if let Some((control, at)) = read {
+                        shared.audit.frontend_unknown(&name, control, at);
+                    }
+                    Err(Refusal::Unknown)
+                }
                 Resolved::Unavailable => Err(Refusal::Unavailable),
             }
         }
