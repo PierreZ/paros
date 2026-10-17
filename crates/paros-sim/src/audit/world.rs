@@ -16,6 +16,7 @@ const TENANT_STOPS_KEY: &str = "paros-audit-tenant-stops";
 /// The published key of a tenant's held bootstraps (#501 (matchmaker sets off
 /// the founders)).
 const TENANT_BOOTSTRAPS_KEY: &str = "paros-audit-tenant-bootstraps";
+const TENANT_RECONSTRUCTIONS_KEY: &str = "paros-audit-tenant-reconstructions";
 
 /// Well-known [`StateHandle`] key under which the single per-iteration
 /// [`AuditWorld`] is published (shared by every node and every workload).
@@ -111,6 +112,15 @@ fn published_world(state: &StateHandle, journal: paros::JournalIdentifier) -> Ar
                             paros::JournalIdentifier::new(journal.tenant, paros::JournalId::UNSET),
                         ),
                         super::matchmaker::TenantBootstraps::default,
+                    ))
+                    .clone();
+                    state.matchmaker.reconstructions = (*crate::state::published_arc(
+                        state_handle,
+                        &crate::state::journal_key(
+                            TENANT_RECONSTRUCTIONS_KEY,
+                            paros::JournalIdentifier::new(journal.tenant, paros::JournalId::UNSET),
+                        ),
+                        super::matchmaker::TenantReconstructions::default,
                     ))
                     .clone();
                     state

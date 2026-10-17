@@ -299,11 +299,14 @@ pub(super) struct MatchmakerAudit {
     /// rather than from any reconfigurer's own tally.
     decree_voters: BTreeMap<(u64, Ballot), BTreeSet<u64>>,
     /// Per proposed `(generation, members)`: the reconstructions bootstrapped
-    /// for it, as `(watermark, history)`. More than one reconfigurer may
-    /// bootstrap the same members from a different stop quorum, so the claim
-    /// an activation is judged against is existential — the registry it
-    /// activates must be one of these, not merely a subset of one.
-    bootstrap_histories: BTreeMap<(u64, Vec<u64>), Vec<Reconstruction>>,
+    /// for it, as `(watermark, history)` per journal. More than one
+    /// reconfigurer may bootstrap the same members from a different stop
+    /// quorum, so the claim an activation is judged against is existential —
+    /// the registry it activates must be one of these, not merely a subset
+    /// of one. Shared by every journal of the tenant: a handover reports to
+    /// the journals its node hosts, and the reconfigurer whose bootstrap the
+    /// members activate may host none of this journal.
+    pub(super) reconstructions: TenantReconstructions,
     /// The highest GC floor proven effective at a matchmaker quorum.
     effective_floor: Ballot,
     /// Nodes an effective floor named retirable.
@@ -691,6 +694,44 @@ impl TenantBootstraps {
         self.lock()
             .get(proposed)
             .is_some_and(|h| h.contains(&matchmaker))
+    }
+}
+
+/// Per proposed `(generation, members)`: every reconstruction a handover
+/// bootstrapped for it, per journal. Shared by the audits of every journal of
+/// one tenant, since a reconstruction is set-wide.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct TenantReconstructions(Arc<Mutex<Reconstructions>>);
+
+/// What [`TenantReconstructions`] holds.
+type Reconstructions = BTreeMap<(u64, Vec<u64>), Vec<BTreeMap<JournalId, Reconstruction>>>;
+
+impl TenantReconstructions {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Reconstructions> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// A handover bootstrapped `proposed` with `whole`, every journal's piece.
+    fn record(&self, proposed: (u64, Vec<u64>), whole: BTreeMap<JournalId, Reconstruction>) {
+        let mut held = self.lock();
+        let candidates = held.entry(proposed).or_default();
+        if !candidates.contains(&whole) {
+            candidates.push(whole);
+        }
+    }
+
+    /// `journal`'s piece of every reconstruction bootstrapped for
+    /// `proposed`; a journal a reconstruction holds nothing for reads as
+    /// blank, as the activation installs it.
+    fn of(&self, proposed: &(u64, Vec<u64>), journal: JournalId) -> Option<Vec<Reconstruction>> {
+        self.lock().get(proposed).map(|candidates| {
+            candidates
+                .iter()
+                .map(|whole| whole.get(&journal).cloned().unwrap_or_default())
+                .collect()
+        })
     }
 }
 
@@ -2450,14 +2491,14 @@ impl MatchmakerAudit {
         // otherwise be invisible and every later check would compare
         // against the corrupted state.
         let proposed: Vec<u64> = bootstrap.set.members().iter().map(|m| m.0).collect();
-        let candidates = self
-            .bootstrap_histories
-            .entry((bootstrap.set.generation.0, proposed))
-            .or_default();
-        let candidate = (mine.gc_watermark, mine.history.clone());
-        if !candidates.contains(&candidate) {
-            candidates.push(candidate);
-        }
+        self.reconstructions.record(
+            (bootstrap.set.generation.0, proposed),
+            bootstrap
+                .registries
+                .iter()
+                .map(|(journal, r)| (*journal, (r.gc_watermark, r.history.clone())))
+                .collect(),
+        );
         if !mine.history.is_empty() {
             reach_once!(
                 self.handover_with_prior_registrations,
@@ -2663,6 +2704,7 @@ impl MatchmakerAudit {
             );
         }
         self.bind_set(set.generation.0, &members, "activated");
+        let journal = self.journal();
         let entry = self.registries.entry(matchmaker.0).or_default();
         // Invariant 4: the watermark never regresses across a generation.
         assert_always!(
@@ -2685,8 +2727,8 @@ impl MatchmakerAudit {
         // was chosen with, whole — checked *before* the fold below adopts the
         // reported registry as the audit's own.
         if let Some(candidates) = self
-            .bootstrap_histories
-            .get(&(set.generation.0, members.clone()))
+            .reconstructions
+            .of(&(set.generation.0, members.clone()), journal)
         {
             let reported = registry;
             // The registry may legitimately have been *pruned* since the
