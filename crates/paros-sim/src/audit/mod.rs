@@ -591,6 +591,10 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         st.any_chosen = true;
         st.observe_applied_index(node.0, slot.0);
         drop(st);
+        // #450: a call a frontend had to deny never reaches a journal.
+        if let Some(board) = &self.tenants {
+            tenants::lock(board).applied(node, command);
+        }
         self.journal_applied(node, command.write().map(|_| vhash));
     }
 
@@ -1109,11 +1113,21 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
 
     fn answered(&self, node: NodeId, slot: Slot, command: &Command, outcome: &paros::Outcome) {
         // #189, #210: a node acknowledges no write to a journal after
-        // folding its tombstone.
-        if command.write().is_some()
-            && let (Some(board), Some((journal, _))) = (&self.tenants, &self.journal)
-        {
-            tenants::lock(board).acked(node, *journal);
+        // folding its tombstone; nor any other call (#449).
+        if let (Some(board), Some((journal, _))) = (&self.tenants, &self.journal) {
+            if command.write().is_some() {
+                tenants::lock(board).acked(node, *journal);
+            } else {
+                tenants::lock(board).served(node, *journal);
+            }
+        }
+        // #449: a quarantined journal answers no call, as it sends nothing.
+        if let Some((journal, board)) = &self.journal {
+            assert_always!(
+                !journals::lock(board).is_quarantined(node.0, *journal),
+                "journal: a quarantined journal answers no call",
+                { "node" => node.0, "journal" => journal.to_string() }
+            );
         }
         let mut st = self.state();
         st.any_ack_checked = true;
@@ -1310,9 +1324,14 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         }
     }
 
-    fn journal_started(&self, node: NodeId, _journal: JournalIdentifier) {
+    fn journal_started(&self, node: NodeId, journal: JournalIdentifier) {
         if let Some(mut board) = self.system_board() {
             board.started(node);
+        }
+        // #449: a machine starts only a genesis journal or one a tenant
+        // created.
+        if let Some(board) = &self.tenants {
+            tenants::lock(board).started(node, journal);
         }
     }
 

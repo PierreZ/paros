@@ -22,6 +22,11 @@
 //!
 //! On half the seeds every machine pins the signing key ([`machine_pin`]):
 //! `init` and `cell add-machine` then present an `admin` token.
+//!
+//! A frontend's clock may be skewed from the minter's by up to
+//! [`MAX_SKEW`] either way (#450, a knob per frontend boot), so a token
+//! near its expiry ([`Presented::ShortLived`]) is judged by the frontend's
+//! own clock; the client judges the answer against that bound.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -40,7 +45,8 @@ use paros::machine::AdminPin;
 use paros::name::JournalName;
 use paros::{Address, Audit, DriverTunables, JournalIdentifier};
 use paros_authz_biscuit::{
-    BiscuitAuthz, Entropy, Grant, KeyRing, Restriction, Role, RootKey, Token, derive, mint,
+    BiscuitAuthz, Class, Entropy, Grant, KeyRing, MAX_BLOCKS, Restriction, Role, RootKey, Token,
+    derive, mint, seal,
 };
 
 use crate::process::dispatch;
@@ -55,6 +61,29 @@ pub(crate) const EPOCH: Duration = Duration::from_secs(1_790_000_000);
 
 /// How long a token the workload mints stays valid.
 const TOKEN_LIFE: Duration = Duration::from_secs(3_600);
+
+/// The most a frontend's clock is skewed from the minter's, either way
+/// (#450): the extreme of its `frontend_clock_skew_ms` knob. A token's
+/// expiry is judged against it, never buggified.
+pub(crate) const MAX_SKEW: Duration = Duration::from_millis(2_000);
+
+/// How far a short-lived token's expiry lies from its minting, either way:
+/// beyond [`MAX_SKEW`], so some are expired for every frontend, some valid
+/// for every frontend, and some judged by the skew alone.
+const SHORT_SPREAD_MS: u64 = 6_000;
+
+const _: () = assert!(
+    SHORT_SPREAD_MS as u128 > MAX_SKEW.as_millis(),
+    "a short-lived token's spread passes the skew"
+);
+
+/// The expiry of a short-lived token minted at `elapsed` (#450): drawn by
+/// `draw` within [`SHORT_SPREAD_MS`] of it, either way.
+pub(crate) fn short_expiry(elapsed: Duration, draw: u64) -> Duration {
+    let spread = Duration::from_millis(SHORT_SPREAD_MS);
+    let offset = Duration::from_millis(draw % (2 * SHORT_SPREAD_MS + 1));
+    (elapsed + spread).saturating_sub(offset)
+}
 
 /// How long a frontend waits for one machine's answer. Below the
 /// workload's own timeout, so a frontend that moves on to the next server
@@ -202,12 +231,29 @@ pub(crate) enum Presented {
     OwnJournal,
     /// The tenant's own token, derived to another journal.
     OtherJournal,
+    /// The tenant's own token, sealed: nothing derives from it (#450).
+    Sealed,
+    /// The tenant's own token, derived to the journal class only: a data
+    /// call is denied, a tag served (#450).
+    ClassJournal,
+    /// The tenant's own token, derived to its own tenant: served (#450).
+    TenantBlock,
+    /// The tenant's own token, derived to another tenant (#450).
+    ForeignBlock,
+    /// The tenant's own token, derived with an expiry already past (#450).
+    EarlierExpiry,
+    /// The tenant's own token, derived past `MAX_BLOCKS` blocks: refused
+    /// before any check (#450).
+    DeepChain,
+    /// The tenant's own token, expiring near its minting, either way: the
+    /// frontend's clock decides (#450).
+    ShortLived,
 }
 
 impl Presented {
     /// The kind `draw` picks: the tenant's own token most of the time.
     pub(crate) fn drawn(draw: u64) -> Self {
-        match draw % 13 {
+        match draw % 20 {
             0 => Self::OtherTenant,
             1 => Self::Expired,
             2 => Self::UnknownKey,
@@ -217,6 +263,13 @@ impl Presented {
             6 => Self::ReadOnly,
             7 => Self::OwnJournal,
             8 => Self::OtherJournal,
+            9 => Self::Sealed,
+            10 => Self::ClassJournal,
+            11 => Self::TenantBlock,
+            12 => Self::ForeignBlock,
+            13 => Self::EarlierExpiry,
+            14 => Self::DeepChain,
+            15 => Self::ShortLived,
             _ => Self::Own,
         }
     }
@@ -244,8 +297,16 @@ pub(crate) fn token(
     presented: Presented,
     elapsed: Duration,
 ) -> Vec<u8> {
-    let keys = root_keys(state);
-    let now = wall(elapsed);
+    token_expiring(state, (tenant, journal), presented, elapsed, None)
+}
+
+/// The derived block of `presented` for `tenant` and `journal`; `None` for
+/// a token derived from nothing.
+fn restriction(
+    presented: Presented,
+    (tenant, journal): (&str, &str),
+    now: SystemTime,
+) -> Option<Restriction> {
     let restriction = match presented {
         Presented::ReadOnly => Restriction {
             read_only: true,
@@ -259,12 +320,59 @@ pub(crate) fn token(
             journal: Some(format!("{journal}-other")),
             ..Restriction::default()
         },
-        _ => Restriction::default(),
+        Presented::ClassJournal => Restriction {
+            classes: Some(vec![Class::Journal]),
+            ..Restriction::default()
+        },
+        Presented::TenantBlock | Presented::DeepChain => Restriction {
+            tenant: Some(tenant.into()),
+            ..Restriction::default()
+        },
+        Presented::ForeignBlock => Restriction {
+            tenant: Some(format!("{tenant}-other")),
+            ..Restriction::default()
+        },
+        // Past for every frontend's clock, however skewed.
+        Presented::EarlierExpiry => Restriction {
+            expires: Some(now.checked_sub(MAX_SKEW * 3).unwrap_or(now)),
+            ..Restriction::default()
+        },
+        _ => return None,
     };
+    Some(restriction)
+}
+
+/// [`token`], with the expiry of a [`Presented::ShortLived`] token:
+/// `expires` after the simulation's zero.
+pub(crate) fn token_expiring(
+    state: &StateHandle,
+    (tenant, journal): (&str, &str),
+    presented: Presented,
+    elapsed: Duration,
+    expires: Option<Duration>,
+) -> Vec<u8> {
+    let keys = root_keys(state);
+    let now = wall(elapsed);
+    let derived = restriction(presented, (tenant, journal), now);
     let (key, role, minted) = match presented {
-        Presented::Own | Presented::ReadOnly | Presented::OwnJournal | Presented::OtherJournal => {
-            (&keys.signing, Role::Tenant(tenant.into()), now)
-        }
+        Presented::Own
+        | Presented::ReadOnly
+        | Presented::OwnJournal
+        | Presented::OtherJournal
+        | Presented::Sealed
+        | Presented::ClassJournal
+        | Presented::TenantBlock
+        | Presented::ForeignBlock
+        | Presented::EarlierExpiry
+        | Presented::DeepChain => (&keys.signing, Role::Tenant(tenant.into()), now),
+        // Minted well before its earliest expiry, so the expiry is after
+        // its minting.
+        Presented::ShortLived => (
+            &keys.signing,
+            Role::Tenant(tenant.into()),
+            now.checked_sub(Duration::from_millis(SHORT_SPREAD_MS) * 2)
+                .unwrap_or(now),
+        ),
         Presented::Rotated => (&keys.rotated, Role::Tenant(tenant.into()), now),
         Presented::OtherTenant => (&keys.signing, Role::Tenant(format!("{tenant}-other")), now),
         Presented::Expired => (
@@ -279,17 +387,32 @@ pub(crate) fn token(
     let grant = Grant {
         role,
         subject: "sim".into(),
-        expires: minted + TOKEN_LIFE,
+        expires: expires.map_or(minted + TOKEN_LIFE, wall),
     };
-    let minted = mint(key, &grant, minted, &entropy()).and_then(|token| {
-        if matches!(
-            presented,
-            Presented::ReadOnly | Presented::OwnJournal | Presented::OtherJournal
-        ) {
-            derive(&token, &restriction, &entropy())
-        } else {
-            Ok(token)
+    let minted = mint(key, &grant, minted, &entropy()).and_then(|token| match &derived {
+        // Past `MAX_BLOCKS` blocks: the authority block and one more
+        // derived block than the limit allows.
+        Some(block) if presented == Presented::DeepChain => {
+            (0..MAX_BLOCKS).try_fold(token, |token, _| derive(&token, block, &entropy()))
         }
+        Some(block) => derive(&token, block, &entropy()),
+        None if presented == Presented::Sealed => {
+            let sealed = seal(&token)?;
+            assert_always!(
+                derive(
+                    &sealed,
+                    &Restriction {
+                        read_only: true,
+                        ..Restriction::default()
+                    },
+                    &entropy()
+                )
+                .is_err(),
+                "frontend: nothing derives from a sealed token"
+            );
+            Ok(sealed)
+        }
+        None => Ok(token),
     });
     minted.map_or_else(
         |error| {
@@ -355,6 +478,20 @@ async fn run_frontend_role(
         "frontend: a frontend fronts a founding member"
     );
     let keys = root_keys(ctx.state());
+    // #450: this frontend's clock is skewed from the minter's, a knob drawn
+    // at each boot (default none; extreme up to `MAX_SKEW`, either way).
+    let skew = Duration::from_millis(moonpool_sim::buggify_knob!(
+        0_u64,
+        1_u64..u64::try_from(MAX_SKEW.as_millis()).unwrap_or(0) + 1
+    ));
+    let epoch = if moonpool_sim::sim_random_range(0_u32..2) == 0 {
+        EPOCH + skew
+    } else {
+        EPOCH.saturating_sub(skew)
+    };
+    if !skew.is_zero() {
+        assert_reachable!("frontend: a frontend runs with a skewed clock");
+    }
     // The pin: the key `init` writes. A key rotated in later is trusted
     // once the frontend read the universe entry again (#245).
     let ring = KeyRing::new([keys.signing.public()])
@@ -363,7 +500,7 @@ async fn run_frontend_role(
         listen: SocketAddr::new(ip, FRONTEND_PORT),
         cell,
         names: crate::machine::names(ctx.state()),
-        epoch: EPOCH,
+        epoch,
         tunables: DriverTunables::default(),
         transport: crate::tls::serving(ctx, paros::tls::Role::Frontend, my_ip)?,
         client: ClientTunables {
@@ -436,6 +573,20 @@ impl Audit for FrontendAudit {
                 }
             );
             assert_reachable!("frontend: a resolution is judged against the directory");
+        }
+    }
+
+    fn frontend_unknown(&self, name: &JournalName, control: JournalIdentifier, at: u64) {
+        let board = crate::audit::tenants::tenant_board(&self.state);
+        let recorded =
+            crate::audit::tenants::lock(&board).named_at(control, name.journal().as_bytes(), at);
+        if let Ok(recorded) = recorded {
+            assert_always!(
+                recorded.is_none(),
+                "frontend: a name is answered unknown only where its directory holds no journal",
+                { "at" => at, "recorded" => recorded.map_or(0, |j| j.0) }
+            );
+            assert_reachable!("frontend: an unknown name is judged against the directory");
         }
     }
 }

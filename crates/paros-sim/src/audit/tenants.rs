@@ -16,7 +16,12 @@
 //! - **one outcome per request** — a request id the fold answered once is
 //!   answered the same way every time after (a retry acts once);
 //! - **tombstones** — a machine that folded a journal's tombstone
-//!   acknowledges no append to it afterwards.
+//!   acknowledges no append to it afterwards, and answers no other call of
+//!   it either (#449); a journal is deleted once;
+//! - **starts** — a machine starts only a tenant's control journal or a
+//!   journal the tenant created (#449);
+//! - **denials** — a call a frontend must deny never reaches a journal: no
+//!   node applies its payload or its leader uuid (#450).
 //!
 //! The gates are outcomes the run must reach once it created a journal: a
 //! name taken by a live journal, and an id redrawn after `IdTaken`. A retry
@@ -90,6 +95,12 @@ pub(crate) struct TenantBoard {
     /// it stops each journal of the tenant, a lagging one included, so none
     /// owes convergence (#529 (sets oracles after PR #515)).
     dropped: BTreeSet<TenantId>,
+    /// The payloads of the writes a frontend must deny (#450): no node
+    /// ever applies one.
+    denied_payloads: BTreeSet<Vec<u8>>,
+    /// The leader uuids of the claims a frontend must deny (#450): no
+    /// node ever applies a `SetLeader` to one.
+    denied_leaders: BTreeSet<u128>,
 }
 
 /// The run's [`TenantBoard`] (`crate::state::published`).
@@ -138,6 +149,31 @@ impl TenantBoard {
         self.answered(control, request, RequestOutcome::Tagged(id), lsn);
     }
 
+    /// `node` folded LSN `lsn` of `control`, the delete `request` of
+    /// journal `id`: a journal the tenant created before, deleted once.
+    fn deleted(
+        &mut self,
+        node: NodeId,
+        control: JournalIdentifier,
+        (request, id): (u64, JournalId),
+        lsn: u64,
+    ) {
+        let journal = JournalIdentifier::new(control.tenant, id);
+        assert_always!(
+            self.created.get(&journal).is_some_and(|at| *at < lsn),
+            "tenant: a deleted journal is one the tenant created before",
+            { "lsn" => lsn }
+        );
+        self.tombstoned.insert((node.0, journal));
+        let first = *self.deleted.entry(journal).or_insert(lsn);
+        assert_always!(
+            first == lsn,
+            "tenant: a journal is deleted once",
+            { "lsn" => lsn, "first" => first }
+        );
+        self.answered(control, request, RequestOutcome::Deleted(id), lsn);
+    }
+
     /// `node` folded LSN `lsn` of tenant control journal `control` to
     /// `event`.
     #[tracing::instrument(level = "trace", skip(self, event), fields(node = node.0, journal = %control, lsn))]
@@ -177,15 +213,7 @@ impl TenantBoard {
                 self.answered(control, *request, RequestOutcome::Created(*id), lsn);
             }
             TenantEvent::Deleted { request, id } => {
-                let journal = JournalIdentifier::new(control.tenant, *id);
-                assert_always!(
-                    self.created.get(&journal).is_some_and(|at| *at < lsn),
-                    "tenant: a deleted journal is one the tenant created before",
-                    { "lsn" => lsn }
-                );
-                self.tombstoned.insert((node.0, journal));
-                self.deleted.entry(journal).or_insert(lsn);
-                self.answered(control, *request, RequestOutcome::Deleted(*id), lsn);
+                self.deleted(node, control, (*request, *id), lsn);
             }
             TenantEvent::Tagged { request, id } => self.tagged(control, *request, *id, lsn),
             TenantEvent::Answered { request, outcome } => {
@@ -370,6 +398,65 @@ impl TenantBoard {
             !self.tombstoned.contains(&(node.0, journal)),
             "system: a node acknowledges no append to a journal after folding its tombstone",
             { "node" => node.0, "journal" => journal.to_string() }
+        );
+    }
+
+    /// `node` answered a `SetLeader` or a `Truncate` of `journal` (#449):
+    /// never after it folded the journal's tombstone.
+    pub(crate) fn served(&self, node: NodeId, journal: JournalIdentifier) {
+        assert_always!(
+            !self.tombstoned.contains(&(node.0, journal)),
+            "system: a node serves no call of a journal after folding its tombstone",
+            { "node" => node.0, "journal" => journal.to_string() }
+        );
+    }
+
+    /// `node` started serving `journal` (#449): a tenant's control journal,
+    /// or a journal its tenant created, which the node folded before it
+    /// started it. A journal of a tenant whose control journal no machine
+    /// folded yet is not judged: the board does not know the tenant.
+    pub(crate) fn started(&self, node: NodeId, journal: JournalIdentifier) {
+        let controls = self.controls();
+        let Some(control) = controls.iter().find(|c| c.tenant == journal.tenant) else {
+            return;
+        };
+        if *control == journal {
+            return;
+        }
+        assert_always!(
+            self.created.contains_key(&journal),
+            "system: a node starts only a genesis journal or one a tenant created",
+            { "node" => node.0, "journal" => journal.to_string() }
+        );
+        assert_reachable!("system: a node starts a journal its tenant created");
+    }
+
+    /// A frontend must deny a write carrying `payload`, or a claim under
+    /// `leader` (#450): noted before the call is sent.
+    pub(crate) fn must_deny(&mut self, payload: Option<Vec<u8>>, leader: Option<u128>) {
+        self.denied_payloads.extend(payload);
+        self.denied_leaders.extend(leader);
+    }
+
+    /// `node` applied `command` (#450): never a call a frontend had to deny.
+    pub(crate) fn applied(&self, node: NodeId, command: &paros::Command) {
+        if self.denied_payloads.is_empty() && self.denied_leaders.is_empty() {
+            return;
+        }
+        let denied = match command {
+            paros::Command::Write(entry) => entry
+                .records
+                .iter()
+                .any(|record| self.denied_payloads.contains(&record.0)),
+            paros::Command::Control(paros::Control::SetLeader { new, .. }) => {
+                self.denied_leaders.contains(&new.0)
+            }
+            paros::Command::Control(_) => false,
+        };
+        assert_always!(
+            !denied,
+            "frontend: a denied call never changes a journal",
+            { "node" => node.0 }
         );
     }
 

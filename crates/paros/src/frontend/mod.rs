@@ -176,7 +176,7 @@ where
         settings.client.redirect_limit >= 1,
         "a frontend follows at least one redirect"
     );
-    let mut edge = RpcEdge::listen(
+    let edge = RpcEdge::listen(
         &providers,
         &settings.listen.to_string(),
         "frontend",
@@ -541,7 +541,12 @@ where
                     shared.audit.frontend_resolved(&name, journal, control, at);
                     Ok((journal, Some(name)))
                 }
-                Resolved::Unknown => Err(Refusal::Unknown),
+                Resolved::Unknown { read } => {
+                    if let Some((control, at)) = read {
+                        shared.audit.frontend_unknown(&name, control, at);
+                    }
+                    Err(Refusal::Unknown)
+                }
                 Resolved::Unavailable => Err(Refusal::Unavailable),
             }
         }

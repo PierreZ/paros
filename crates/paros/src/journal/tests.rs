@@ -72,7 +72,25 @@ fn config() -> Config {
 fn store(durability: Durability) -> JournalStoreConfig {
     JournalStoreConfig {
         durability,
-        ..JournalStoreConfig::small()
+        ..compact()
+    }
+}
+
+/// A store with segments of a few blocks, so a short test crosses segment
+/// rollover and prefix deletion. Tests only: a deployment keeps the
+/// default geometry (#600 (drop the small layout)).
+fn compact() -> JournalStoreConfig {
+    JournalStoreConfig {
+        geometry: compact_geometry(),
+        ..JournalStoreConfig::default()
+    }
+}
+
+fn compact_geometry() -> crate::journal::Geometry {
+    crate::journal::Geometry {
+        persist_blocks: 8,
+        gap_blocks: 0,
+        entry_blocks: 16,
     }
 }
 
@@ -93,7 +111,7 @@ async fn open_registry(provider: SimStorageProvider, dir: &str) -> Result<Regist
         provider,
         dir,
         paros_core::JournalIdentifier::UNSET,
-        JournalStoreConfig::small(),
+        compact(),
     );
     registry.boot_scan().await?;
     Ok(registry)
@@ -273,7 +291,7 @@ fn laggy_slots_and_the_floor_survive_a_reboot() {
     runtime().block_on(async {
         let mut sim = sim(4);
         run(&mut sim, |provider| async move {
-            let store = JournalStoreConfig::small();
+            let store = compact();
             let mut node = open_node(provider.clone(), "f", store).await.expect("open");
             node.format(&config()).await.expect("format");
             node.persist_ballot(ballot(9)).await.expect("promise");
@@ -317,7 +335,7 @@ fn a_lagging_chosen_index_is_written_alone() {
     runtime().block_on(async {
         let mut sim = sim(7);
         run(&mut sim, |provider| async move {
-            let store = JournalStoreConfig::small();
+            let store = compact();
             let mut node = open_node(provider.clone(), "lag", store)
                 .await
                 .expect("open");
@@ -357,7 +375,7 @@ fn a_held_entry_re_accepted_writes_nothing() {
     runtime().block_on(async {
         let mut sim = sim(6);
         run(&mut sim, |provider| async move {
-            let store = JournalStoreConfig::small();
+            let store = compact();
             let mut node = open_node(provider.clone(), "re", store)
                 .await
                 .expect("open");
@@ -455,7 +473,7 @@ fn peek_formatted_reads_the_marker_without_opening_the_store() {
                 !provider.exists("p").await.expect("exists"),
                 "nothing created"
             );
-            let store = JournalStoreConfig::small();
+            let store = compact();
             let mut node = open_node(provider.clone(), "p", store).await.expect("open");
             node.format(&config()).await.expect("format");
             node.persist_ballot(ballot(5)).await.expect("promise");
@@ -478,7 +496,7 @@ fn a_lost_segment_is_a_crash_verdict() {
     runtime().block_on(async {
         let mut sim = sim(5);
         run(&mut sim, |provider| async move {
-            let store = JournalStoreConfig::small();
+            let store = compact();
             let mut node = open_node(provider.clone(), "g", store).await.expect("open");
             node.format(&config()).await.expect("format");
             for slot in 0..4 {
@@ -609,7 +627,7 @@ async fn open_chunked(
         paros_core::JournalIdentifier::UNSET,
         JournalStoreConfig {
             meta_chunk,
-            ..JournalStoreConfig::small()
+            ..compact()
         },
     );
     registry.boot_scan().await?;

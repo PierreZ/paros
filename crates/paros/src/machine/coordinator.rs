@@ -302,9 +302,14 @@ pub struct Watch {
     /// what it covers, with the position of the entry that opened it
     /// (#359): the window runs on this watch's clock from then.
     windows: BTreeMap<MaintenanceScope, (u64, Duration)>,
-    /// The machines this watch named gone: they stay gone for the term
-    /// while a slot is booked on them, so a move started off one finishes
-    /// even when it answers again before the move ends.
+    /// The machines this watch named gone: they stay gone while a slot is
+    /// booked on them and the registry still holds them down, so a watch
+    /// that hears one again does not undo a move before the registry
+    /// records it up. Once it is up, it is bookable again: a slot a move
+    /// left outside the configuration in force is the mode change's
+    /// (`super::modes`), as it is for a later term, and a journal a move
+    /// shrank grows back onto it. A slot no move releases (a deleted
+    /// journal's, a tenant's) must not keep it gone for the term.
     departed: std::collections::BTreeSet<NodeId>,
     /// How often a round runs.
     every: Duration,
@@ -389,8 +394,9 @@ impl Watch {
     /// after the Down bound)): registered machines `registry` holds down
     /// that this watch has not heard for `replace_after`, outside every open
     /// maintenance window over them or their zone (#359), and every machine
-    /// named gone before that still holds a slot. A machine that answers
-    /// again inside the bound keeps its roles: a reboot rejoins in place.
+    /// named gone before that still holds a slot and is still down. A
+    /// machine that answers again inside the bound keeps its roles: a
+    /// reboot rejoins in place.
     ///
     /// # Panics
     ///
@@ -411,7 +417,8 @@ impl Watch {
         for (scope, seq) in open {
             self.windows.entry(scope).or_insert((seq, now));
         }
-        self.departed.retain(|node| registry.booked(*node) > 0);
+        self.departed
+            .retain(|node| registry.booked(*node) > 0 && !registry.liveness(*node).up);
         let mut gone = self.departed.clone();
         for (id, node) in registry.nodes() {
             if node.standing != NodeStanding::Registered

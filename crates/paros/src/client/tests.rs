@@ -466,3 +466,146 @@ fn a_reader_resumes_at_the_floor_and_reports_the_gap() {
     );
     assert_eq!(reader.cursor(), 10);
 }
+
+/// A pipeline over a writer that won `journal` at position `next`.
+fn leading_lanes(next: u64) -> (super::pipeline::Lanes, LeaderUuid) {
+    let journal = JournalIdentifier::new(paros_core::TenantId(7), paros_core::JournalId(9));
+    let mut writer = Writer::new(journal, 11);
+    let uuid = writer.uuid();
+    writer.won(&state(Some(uuid), next, 0));
+    (super::pipeline::Lanes::new(writer), uuid)
+}
+
+fn one(byte: u8) -> Vec<Value> {
+    vec![Value(vec![byte])]
+}
+
+#[test]
+fn a_pipeline_gives_consecutive_positions_and_waits_out_an_early_write() {
+    use super::WriterOutcome;
+    use super::pipeline::{Admit, Folded, Lanes, Resumed};
+
+    let journal = JournalIdentifier::new(paros_core::TenantId(7), paros_core::JournalId(9));
+    let idle = Lanes::new(Writer::new(journal, 3));
+    assert_eq!(idle.admit(), Admit::NotOwner);
+
+    let (mut lanes, uuid) = leading_lanes(10);
+    assert_eq!(lanes.admit(), Admit::At(10));
+    let a = lanes.open(one(1));
+    let b = lanes.open(vec![Value(vec![2]), Value(vec![3])]);
+    let c = lanes.open(one(4));
+    let seqs: Vec<u64> = [&a, &b, &c].iter().map(|t| t.entry().seq.0).collect();
+    assert_eq!(seqs, [10, 11, 13]);
+    assert!([&a, &b, &c].iter().all(|t| t.entry().leader == uuid));
+
+    // `c` arrives first: refused at a tail below it, under its own uuid.
+    let early = state(Some(uuid), 10, 0);
+    assert_eq!(
+        lanes.fold(2, WriterOutcome::Refused { state: early }),
+        Folded::Early
+    );
+    assert_eq!(lanes.resume(2), Resumed::Wait);
+    let written = |seq, count| WriterOutcome::Written {
+        seq,
+        count,
+        duplicate: false,
+        resolved: false,
+    };
+    assert_eq!(lanes.fold(0, written(10, 1)), Folded::Done(written(10, 1)));
+    assert_eq!(lanes.resume(2), Resumed::Wait);
+    assert_eq!(lanes.fold(1, written(11, 2)), Folded::Done(written(11, 2)));
+    // Every write in front of it is written: the identical write again.
+    assert_eq!(lanes.resume(2), Resumed::Send(c.entry().clone()));
+    assert_eq!(lanes.fold(2, written(13, 1)), Folded::Done(written(13, 1)));
+    assert_eq!(lanes.admit(), Admit::At(14));
+    assert_eq!(lanes.writer.next_seq(), 14);
+}
+
+#[test]
+fn a_failed_write_strands_the_writes_behind_it_until_the_pipeline_drains() {
+    use super::WriterOutcome;
+    use super::pipeline::{Admit, Folded, Resumed};
+
+    let (mut lanes, uuid) = leading_lanes(0);
+    let _a = lanes.open(one(1));
+    let _b = lanes.open(one(2));
+    let _c = lanes.open(one(3));
+    // `b` arrived before `a`, then `a` is not written.
+    let early = state(Some(uuid), 0, 0);
+    assert_eq!(
+        lanes.fold(1, WriterOutcome::Refused { state: early }),
+        Folded::Early
+    );
+    assert_eq!(
+        lanes.fold(0, WriterOutcome::Ambiguous),
+        Folded::Done(WriterOutcome::Ambiguous)
+    );
+    // No write opens while the failure's writes are in flight.
+    assert_eq!(lanes.admit(), Admit::Drain);
+    // `b`'s position is never reached: its one verdict is the refusal.
+    assert_eq!(
+        lanes.resume(1),
+        Resumed::Done(WriterOutcome::Refused { state: early })
+    );
+    assert_eq!(lanes.admit(), Admit::Drain);
+    assert_eq!(
+        lanes.fold(2, WriterOutcome::Refused { state: early }),
+        Folded::Early
+    );
+    assert_eq!(
+        lanes.resume(2),
+        Resumed::Done(WriterOutcome::Refused { state: early })
+    );
+    // Drained: the next write opens at the tail the writer knows.
+    assert_eq!(lanes.admit(), Admit::At(0));
+}
+
+#[test]
+fn a_new_term_opens_at_its_view_while_the_old_one_drains() {
+    use super::WriterOutcome;
+    use super::pipeline::{Admit, Folded};
+
+    let (mut lanes, old) = leading_lanes(5);
+    let _a = lanes.open(one(1));
+    let _b = lanes.open(one(2));
+    let new = lanes.begin_claim(true);
+    assert_ne!(new, old);
+    assert_eq!(lanes.admit(), Admit::NotOwner);
+    // The claim lands after `a`: the journal stands at 6 under `new`.
+    lanes.claimed(
+        new,
+        &ClaimOutcome::Won {
+            state: state(Some(new), 6, 0),
+        },
+    );
+    assert_eq!(lanes.admit(), Admit::At(6));
+    let c = lanes.open(one(3));
+    assert_eq!((c.entry().leader, c.entry().seq.0), (new, 6));
+    // The old term's writes settle without stopping the new term.
+    let written = WriterOutcome::Written {
+        seq: 5,
+        count: 1,
+        duplicate: false,
+        resolved: false,
+    };
+    assert_eq!(lanes.fold(0, written.clone()), Folded::Done(written));
+    let fenced = WriterOutcome::Superseded {
+        state: state(Some(new), 7, 0),
+    };
+    assert_eq!(lanes.fold(1, fenced.clone()), Folded::Done(fenced));
+    assert_eq!(lanes.admit(), Admit::At(7));
+    assert_eq!(lanes.writer.owned(), Some(new));
+}
+
+#[test]
+fn an_abandoned_write_stops_the_pipeline_until_it_drains() {
+    use super::pipeline::Admit;
+
+    let (mut lanes, _) = leading_lanes(3);
+    let _a = lanes.open(one(1));
+    let _b = lanes.open(one(2));
+    lanes.abandon(0);
+    assert_eq!(lanes.admit(), Admit::Drain);
+    lanes.abandon(1);
+    assert_eq!(lanes.admit(), Admit::At(3));
+}

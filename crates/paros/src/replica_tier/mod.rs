@@ -495,8 +495,7 @@ where
 
     let me_id = NodeId(self_id);
     let me = Party::Node(me_id);
-    let mut edge =
-        RpcEdge::listen(&providers, &local_addr, "replica", &tunables, &transport).await?;
+    let edge = RpcEdge::listen(&providers, &local_addr, "replica", &tunables, &transport).await?;
     let ReplicaInbox {
         inspect: mut inspects,
         log_read: mut log_reads,

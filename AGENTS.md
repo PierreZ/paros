@@ -22,6 +22,10 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
 - `cargo xtask sim run-all`: the sancov-guided sweep (`scripts/sancov-rustc.sh` is the
   `RUSTC_WRAPPER`, gated by `SANCOV_CRATES`; the flake `shellHook` exports it). The registered
   campaign is `paros-chain` (binary `sim-paros-chain`; `cargo xtask sim run paros-chain`).
+  CI runs it as two parallel shards (decided on 2026-10-16): each draws its own seeds from
+  a wall-clock base seed, so a PR gets twice the seeds. A red in either shard blocks the merge.
+  Gates are judged over both shards: CI's `sim-gates` job fails only on a gate no shard ran
+  or fired (`PAROS_SIM_MISSING_GATES`).
 
 CI also runs the `paros-core` examples, the `paros-play` web build and the sandbox's wasm check. Rust 2024 edition,
 toolchain pinned in `rust-toolchain.toml` (incl. `wasm32-unknown-unknown`), clippy pedantic on
