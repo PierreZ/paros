@@ -149,6 +149,18 @@ fn with_turn<R>(state: &StateHandle, f: impl FnOnce(&mut Option<u64>) -> R) -> R
 
 const TURN_KEY: &str = "paros-fleet-turn";
 
+/// How many operators wait to finish an `init` in the recovery tail: a
+/// tenant operation yields the turn to them (see [`FleetOps::take_turn`]).
+fn with_init_waiting<R>(state: &StateHandle, f: impl FnOnce(&mut usize) -> R) -> R {
+    let waiting = crate::state::published(state, INIT_WAITING_KEY, || 0_usize);
+    let mut waiting = waiting
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    f(&mut waiting)
+}
+
+const INIT_WAITING_KEY: &str = "paros-fleet-init-waiting";
+
 /// An operation this client stopped in the middle of — the crash shape, or
 /// a run that did not end (interrupted, its target killed under it, going
 /// round) — to resume on its next fleet step, and at the latest in the
@@ -1110,13 +1122,42 @@ impl FleetOps {
         if self.pending.is_none() {
             return;
         }
-        if !self.take_turn(ctx, beat).await {
+        // An `init` goes first: a tenant operation ends only on a cell
+        // whose `init` ended (the fleet tenant's journal has a quorum only
+        // once every founder is formed, and only `cell init` forms one).
+        let heals = matches!(self.pending, Some(Pending::Initialize | Pending::Init));
+        if heals {
+            with_init_waiting(ctx.state(), |n| *n += 1);
+        }
+        let took = self.take_turn(ctx, beat, heals).await;
+        if heals {
+            with_init_waiting(ctx.state(), |n| *n -= 1);
+        }
+        if !took {
             return;
         }
-        let deadline = ctx.time().now() + FLEET_SETTLE;
+        assert_always!(
+            heals || with_init_waiting(ctx.state(), |n| *n) == 0,
+            "fleet: a tenant operation takes the tail's turn only once no init waits",
+            { "client" => self.client_id }
+        );
+        let mut deadline = ctx.time().now() + FLEET_SETTLE;
         let mut draw = self.client_id;
         let mut attempt = 0_u32;
         while !self.resume(ctx, policy, draw).await {
+            // An operator that came to finish an `init` while this tenant
+            // operation ran gets the turn first: the operation ends only on
+            // a cell whose `init` ended. The deadline restarts with the turn.
+            if !heals && with_init_waiting(ctx.state(), |n| *n) > 0 {
+                assert_reachable!("fleet: a tenant operation yields the tail's turn to an init");
+                with_turn(ctx.state(), |turn| *turn = None);
+                if !self.take_turn(ctx, beat, heals).await {
+                    return;
+                }
+                deadline = ctx.time().now() + FLEET_SETTLE;
+                attempt = 0;
+                continue;
+            }
             if ctx.time().now() >= deadline
                 || ctx.shutdown().is_cancelled()
                 || ctx
@@ -1159,10 +1200,13 @@ impl FleetOps {
     /// in the chaos window, where nothing owes an end. The next operator
     /// starts its own deadline once the first is done, and finds the
     /// `init` ended. False when the run shut down first.
-    async fn take_turn(&self, ctx: &SimContext, beat: Duration) -> bool {
+    async fn take_turn(&self, ctx: &SimContext, beat: Duration, heals: bool) -> bool {
         loop {
+            // A free turn is an init's while one waits (`heals`).
+            let yields = !heals && with_init_waiting(ctx.state(), |n| *n) > 0;
             let mine = with_turn(ctx.state(), |turn| match turn {
                 Some(holder) if *holder != self.client_id => false,
+                None if yields => false,
                 _ => {
                     *turn = Some(self.client_id);
                     true

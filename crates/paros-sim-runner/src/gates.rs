@@ -462,6 +462,10 @@ pub const RARE: &[Rare] = &[
         reason: "marginal: fired on 4 of 810 hunt seeds (#486)",
     },
     Rare {
+        msg: "fleet: a tenant operation yields the tail's turn to an init",
+        reason: "a tenant operation and an unfinished init both pending in the recovery tail: one CI sweep recipe (7055015848769212717 61039:14521030017544360724 on 22b931d)",
+    },
+    Rare {
         msg: "fleet: an init stops after one step",
         reason: "marginal: fired on 1 of 810 hunt seeds (#486)",
     },
