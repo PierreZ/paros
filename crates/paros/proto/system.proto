@@ -39,6 +39,7 @@ message SystemEntry {
     GrantCapacity grant_capacity = 14;
     SetMachineTags set_machine_tags = 15;
     Maintenance maintenance = 16;
+    MachineSlow machine_slow = 17;
   }
 }
 
@@ -129,6 +130,22 @@ message MachineUp {
   uint64 id = 1;
   fixed64 incarnation_high = 2;
   fixed64 incarnation_low = 3;
+}
+
+// The cell coordinator judged machine `id`, as incarnation `incarnation`,
+// slow (`slow`) or fast again (#361 (slow machines)): written only on a
+// change, with the latency facts the judgement read.
+message MachineSlow {
+  uint64 id = 1;
+  fixed64 incarnation_high = 2;
+  fixed64 incarnation_low = 3;
+  bool slow = 4;
+  // Its `Identify` round trip, in microseconds, as the coordinator timed it.
+  uint64 rtt_us = 5;
+  // Its disk's busy ratio, in thousandths, from its last `Load` window.
+  uint32 disk_busy_permille = 6;
+  // Its CPU's busy ratio, in thousandths, from its last `Load` window.
+  uint32 cpu_busy_permille = 7;
 }
 
 // The cell coordinator saw registered machine `id` answer `Identify` as a
@@ -256,6 +273,8 @@ message LivenessState {
   fixed64 incarnation_high = 2;
   fixed64 incarnation_low = 3;
   bool up = 4;
+  // Whether the cell coordinator holds it slow (#361 (slow machines)).
+  bool slow = 5;
 }
 
 message RegisteredNodeState {

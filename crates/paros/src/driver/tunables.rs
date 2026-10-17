@@ -89,6 +89,7 @@ impl DriverTunables {
     /// | `machine_down_after` | 10 s | a machine silent for ten renewal periods is down; a reboot is shorter (#211) |
     /// | `machine_replace_after` | 5 min | a machine silent that long is gone: its roles move (#475); a reboot, even a slow one, is shorter |
     /// | `load_interval` | the default (5 s) | FDB's `WORKER_LOGGING_INTERVAL` (#424) |
+    /// | `slow_rtt`, `slow_busy_permille`, `slow_rounds` | 2 s, 950, 5 | a machine slow for five renewal periods (one `Load` window) moves its journals off (#361 (slow machines)) |
     /// | `status_hold` | 20 s | two `machine_down_after`: a machine that reboots inside it never changes a word (#191 (status)) |
     /// | `internal_request_timeout` | 2 s | a coordinator's slow call ends before its lease runs out, so it renews in time (#457) |
     /// | `internal_retry_budget`, `internal_retry_backoff` | the defaults (4, 100 ms) | the library client's |
@@ -124,6 +125,9 @@ impl DriverTunables {
             election_renew: Duration::from_secs(1),
             election_compact_after: 64,
             machine_down_after: Duration::from_secs(10),
+            slow_rtt: Duration::from_secs(2),
+            slow_busy_permille: 950,
+            slow_rounds: 5,
             machine_replace_after: Duration::from_secs(300),
             status_hold: Duration::from_secs(20),
             internal_request_timeout: Duration::from_secs(2),
@@ -153,8 +157,10 @@ impl DriverTunables {
         production
     }
 
-    /// Every checked field: its name, its value and its floor.
-    fn floor_table(&self) -> [(&'static str, u64, u64); 43] {
+    /// Every checked field: its name, its value and its floor. One row per
+    /// field, so it grows with the tunables.
+    #[allow(clippy::too_many_lines)]
+    fn floor_table(&self) -> [(&'static str, u64, u64); 46] {
         let ms = |d: Duration| u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
         let count = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
         [
@@ -244,6 +250,14 @@ impl DriverTunables {
                 ms(self.load_interval),
                 ms(super::config::LOAD_INTERVAL_FLOOR),
             ),
+            ("slow_rtt", ms(self.slow_rtt), 1),
+            // A busy bound leaves room to lean fast again (#361).
+            (
+                "slow_busy_permille",
+                u64::from(self.slow_busy_permille),
+                u64::from(crate::machine::slow::BUSY_MARGIN) + 1,
+            ),
+            ("slow_rounds", u64::from(self.slow_rounds), 1),
             ("status_hold", ms(self.status_hold), 0),
             (
                 "internal_request_timeout",

@@ -43,7 +43,12 @@
 //!    the Down bound)): the term's moves re-place its roles as a draining
 //!    machine's, unless an operator's maintenance window over it or its
 //!    zone is open (#359). Only changes are
-//!    written, never a heartbeat. Each round also follows the universe
+//!    written, never a heartbeat. Each round also times each `Identify`
+//!    and asks every machine that answered for its `Load`, and judges from
+//!    those facts which machines are alive but slow ([`super::slow`], #361
+//!    (slow machines)): a change of judgement is written `MachineSlow`,
+//!    and the moves take each journal off a slow machine like off a
+//!    draining one. Each round also follows the universe
 //!    directory, as in step 2. The watch ends with the term, or at the
 //!    term's first write that does not land: a coordinator an admin session
 //!    fenced does not fight back. It resigns the term instead, so that the
@@ -97,6 +102,7 @@ use super::footprints::Footprints;
 use super::modes::Modes;
 use super::moves::Moves;
 use super::sets::{SetStep, Sets};
+use super::slow::{Sample, SlowBounds, SlowJudge};
 use super::tenants::TenantDesk;
 use super::{CellPlan, ControlJournals, FormedCell, incarnation_from_halves};
 use crate::client::capacity::{CapacityAnswer, CapacityRequest};
@@ -337,6 +343,8 @@ pub struct Watch {
     /// The universe directory's fold, read at each round: the cell's join
     /// (#513 (fleet Init duel)) and the tenant operations in flight (#225).
     directory: Folder<FleetDirectory>,
+    /// The slow-machine judgement (#361 (slow machines)).
+    slow: SlowJudge,
 }
 
 /// One `Identify` check of a machine's new address, run off the renewal
@@ -351,8 +359,8 @@ struct Probe {
 
 impl Watch {
     /// A watch started `now`, running a round `every` period, marking a
-    /// machine down after `down_after` of silence and naming it gone after
-    /// `replace_after` (#475).
+    /// machine down after `down_after` of silence, naming it gone after
+    /// `replace_after` (#475), and slow by `slow` (#361 (slow machines)).
     ///
     /// # Panics
     ///
@@ -365,6 +373,7 @@ impl Watch {
         now: Duration,
         every: Duration,
         (down_after, replace_after): (Duration, Duration),
+        slow: SlowBounds,
     ) -> Self {
         assert!(!every.is_zero(), "a watch round has a period");
         assert!(
@@ -388,6 +397,7 @@ impl Watch {
             probes: BTreeMap::new(),
             positions: BTreeMap::new(),
             directory: Folder::new(FleetDirectory::default()),
+            slow: SlowJudge::new(slow),
         }
     }
 
@@ -438,13 +448,8 @@ impl Watch {
             if now.saturating_sub(since) < self.replace_after {
                 continue;
             }
-            let mut windows = registry.maintenance_of(id).peekable();
-            let covered = windows.peek().is_some();
-            let held = windows.any(|(scope, window)| {
-                self.windows
-                    .get(scope)
-                    .is_some_and(|(_, seen)| now < *seen + Duration::from_millis(window.for_ms))
-            });
+            let covered = registry.maintenance_of(id).next().is_some();
+            let held = self.held_one(registry, id, now);
             if held {
                 if registry.booked(id) > 0 {
                     moonpool_assertions::reachable!(
@@ -475,6 +480,39 @@ impl Watch {
             );
         }
         gone
+    }
+
+    /// Whether an open maintenance window over `id` or its zone holds its
+    /// roles at `now` (#359), on this watch's clock.
+    fn held_one(&self, registry: &Registry, id: NodeId, now: Duration) -> bool {
+        registry.maintenance_of(id).any(|(scope, window)| {
+            self.windows
+                .get(scope)
+                .is_some_and(|(_, seen)| now < *seen + Duration::from_millis(window.for_ms))
+        })
+    }
+
+    /// The registered machines an open maintenance window holds at `now`
+    /// (#359): a slow mark moves none of their roles (#361 (slow
+    /// machines)). Read after [`Watch::gone`], which opens the windows.
+    ///
+    /// # Panics
+    ///
+    /// If it names a machine the registry does not hold.
+    #[must_use]
+    pub fn held(&self, registry: &Registry, now: Duration) -> std::collections::BTreeSet<NodeId> {
+        let held: std::collections::BTreeSet<NodeId> = registry
+            .nodes()
+            .filter(|(id, node)| {
+                node.standing == NodeStanding::Registered && self.held_one(registry, *id, now)
+            })
+            .map(|(id, _)| id)
+            .collect();
+        assert!(
+            held.iter().all(|id| registry.get(*id).is_some()),
+            "a held machine is registered"
+        );
+        held
     }
 
     /// Run one round if one is due at `now`, writing each change through
@@ -523,10 +561,20 @@ impl Watch {
                     .await?;
             moonpool_assertions::reachable!("coordinator: a dropped tenant's slots are released");
         }
+        let watched: Vec<NodeId> = machines
+            .keys()
+            .copied()
+            .filter(|id| session.registry().contains(*id))
+            .collect();
+        let mut answered: Vec<(NodeId, Address, Duration)> = Vec::new();
         for (id, addr) in machines {
+            let asked = client.now();
             let answer = bootstrap::identify(providers, rpc, names, &addr, timeout)
                 .await
                 .filter(|ack| ack.node_id == id.0);
+            if answer.is_some() {
+                answered.push((id, addr.clone(), client.now().saturating_sub(asked)));
+            }
             let command = match &answer {
                 Some(ack) => {
                     self.heard.insert(id, client.now());
@@ -555,6 +603,90 @@ impl Watch {
                     "machine_readmitted"
                 );
             }
+        }
+        wrote += self
+            .judge_slow(
+                providers,
+                rpc,
+                names,
+                client,
+                session,
+                (&answered, &watched),
+            )
+            .await?;
+        Ok(wrote)
+    }
+
+    /// The slow-machine half of a round (#361 (slow machines)): ask every
+    /// machine that answered `Identify` for its `Load`, judge the round's
+    /// facts, and write each change of judgement `MachineSlow`, for the
+    /// incarnation the registry holds. How many entries it wrote.
+    async fn judge_slow<P: Providers>(
+        &mut self,
+        providers: &P,
+        rpc: &RpcHandle<P>,
+        names: &Names,
+        client: &Client<P>,
+        session: &mut CellSession,
+        (answered, watched): (&[(NodeId, Address, Duration)], &[NodeId]),
+    ) -> Result<usize, Interrupted> {
+        // Only a machine of the pool is judged: the registry refuses a mark
+        // of any other.
+        let judged: Vec<&(NodeId, Address, Duration)> = answered
+            .iter()
+            .filter(|(id, _, _)| watched.contains(id))
+            .collect();
+        let asks: Vec<(u64, Address)> = judged
+            .iter()
+            .map(|(id, addr, _)| (id.0, addr.clone()))
+            .collect();
+        let loads = crate::client::load::ask_all(
+            providers,
+            rpc,
+            names,
+            &asks,
+            client.tunables().request_timeout,
+        )
+        .await;
+        let samples: BTreeMap<NodeId, Sample> = judged
+            .iter()
+            .map(|(id, _, rtt)| {
+                let ack = match loads.get(&id.0) {
+                    Some(crate::client::load::LoadOutcome::Answered(ack)) => Some(ack),
+                    _ => None,
+                };
+                (*id, Sample::of(*rtt, ack))
+            })
+            .collect();
+        let registry = session.registry();
+        let changes = self
+            .slow
+            .round(&samples, |id| registry.is_slow(id), watched);
+        let mut wrote = 0;
+        for change in changes {
+            let held = session.registry().liveness(change.id);
+            moonpool_assertions::reachable!("coordinator: a machine's slow judgement changes");
+            if change.slow {
+                moonpool_assertions::reachable!("coordinator: a slow machine is marked slow");
+            } else {
+                moonpool_assertions::reachable!("coordinator: a slow machine is fast again");
+            }
+            tracing::info!(
+                machine = change.id.0,
+                slow = change.slow,
+                rtt_us = change.facts.rtt_us,
+                disk = change.facts.disk_busy_permille,
+                cpu = change.facts.cpu_busy_permille,
+                "machine_slow"
+            );
+            let command = SystemCommand::MachineSlow {
+                id: change.id,
+                incarnation: held.incarnation,
+                slow: change.slow,
+                facts: change.facts,
+            };
+            session.record(client, 0, &command).await?;
+            wrote += 1;
         }
         Ok(wrote)
     }
@@ -748,6 +880,8 @@ struct Candidacy {
     /// one round (a BUGGIFY decision, #475 (re-place after the Down
     /// bound)): the machine must still move at the next.
     defer: bool,
+    /// The slow-machine judgement's bounds (#361 (slow machines)).
+    slow: SlowBounds,
     /// The leader stops renewing for one lease and a half after its first
     /// term's duties (a BUGGIFY decision: the takeover's way in). A fault:
     /// never in the recovery tail ([`chaos`]), like `hand_off` and
@@ -822,6 +956,11 @@ pub(crate) fn spawn<P: Providers>(
         tunables: election,
         down_after: (tunables.machine_down_after, tunables.machine_replace_after),
         defer: moonpool_buggify::buggify_with_prob!(0.5),
+        slow: SlowBounds {
+            rtt: tunables.slow_rtt,
+            busy_permille: tunables.slow_busy_permille,
+            rounds: tunables.slow_rounds,
+        },
         stall: moonpool_buggify::buggify_fault_with_prob!(0.3),
         hand_off: formed.plan.members.len() > 1 && moonpool_buggify::buggify_fault_with_prob!(0.25),
         reuse: moonpool_buggify::buggify_with_prob!(0.3),
@@ -903,6 +1042,7 @@ async fn campaign<P: Providers>(
         tunables,
         down_after,
         mut defer,
+        slow,
         mut stall,
         hand_off: mut handing,
         reuse,
@@ -1026,7 +1166,7 @@ async fn campaign<P: Providers>(
                 };
                 let (duty, session) = renewing(&providers, &mut election, install).await;
                 watching = session.map(|session| {
-                    let watch = Watch::new(client.now(), tunables.renew_every, down_after);
+                    let watch = Watch::new(client.now(), tunables.renew_every, down_after, slow);
                     (session, watch)
                 });
                 moves = Moves::default();
@@ -1125,10 +1265,13 @@ async fn campaign<P: Providers>(
                             Ok(_) if watch.ran() => {
                                 if let Some((_, desk)) = desk.as_mut() {
                                     let ctx = (&providers, &rpc, &names, &client);
-                                    let mut gone = watch.gone(session.registry(), client.now());
-                                    if defer && !gone.is_empty() {
+                                    let mut gone = super::moves::Leaving {
+                                        gone: watch.gone(session.registry(), client.now()),
+                                        held: watch.held(session.registry(), client.now()),
+                                    };
+                                    if defer && !gone.gone.is_empty() {
                                         defer = false;
-                                        gone.clear();
+                                        gone.gone.clear();
                                         moonpool_assertions::reachable!(
                                             "coordinator: a re-placement is deferred"
                                         );

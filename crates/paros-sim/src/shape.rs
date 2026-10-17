@@ -427,6 +427,13 @@ impl NodeShape {
             // short end gives a run many windows, so `LOAD` meets a full
             // one early and often.
             load_interval: ms(buggify_knob!(5000_u64, 1000_u64..5001_u64)),
+            // The slow-machine judgement (#361 (slow machines)): a round trip
+            // bound above the slowest link's round trip, a busy bound from
+            // 70 % to all, one to four rounds of hysteresis.
+            slow_rtt: ms(buggify_knob!(1000_u64, 2 * ROUND_TRIP_FLOOR_MS..3001_u64)),
+            slow_busy_permille: u32::try_from(buggify_knob!(900_u64, 700_u64..1001_u64))
+                .unwrap_or(900),
+            slow_rounds: u32::try_from(buggify_knob!(3_u64, 1_u64..5_u64)).unwrap_or(3),
             // How long a new status word must hold before a member shows it
             // (#191 (status)). Floor 0 (no hold). The default is below the
             // chaos window, so a word changes inside a run; the extremes
@@ -449,22 +456,7 @@ impl NodeShape {
             // Floor 0: re-sends back to back, a retry storm on the internal
             // journals; the ceiling spreads them over a second.
             internal_retry_backoff: ms(buggify_knob!(100_u64, 0_u64..1001_u64)),
-            // How long one `Resolve` answer may take. Floor four round trips:
-            // every answer reads two tails in sequence (the registry, then
-            // the directory), and a read served by a peer under chaos takes
-            // up to about two (witness 7489717366062895407: 259 ms fit one
-            // read and the machine never answered). A fold from position 0
-            // then takes several answers, each going on from where the last
-            // one stopped (#457). The final resolve check holds every
-            // founding member to an answer after chaos. On a slow-link seed,
-            // half the time the floor itself: a fold then spans several
-            // answers, and an answer is cut short with its folds kept (that
-            // gate missed the sweep of PR #551, #446).
-            resolve_answer_within: if slow_link && moonpool_sim::buggify_with_prob!(0.5) {
-                ms(RESOLVE_FLOOR_MS)
-            } else {
-                ms(buggify_knob!(2000_u64, RESOLVE_FLOOR_MS..2001_u64))
-            },
+            resolve_answer_within: resolve_answer_within(slow_link),
         };
         cap_backoff(&mut drawn, tick_ms);
         // The handover re-send cadence stays under the shortest stall
@@ -1292,7 +1284,7 @@ pub(crate) fn downed_founder(state: &StateHandle) -> bool {
 /// zone `zone-<r % 3>` ([`machine_layout`]), client 0 runs `init` first and
 /// every client creates tenants and journals as often as the weight family
 /// allows (`crate::chain_workload`), and `crate::world::zone_outage` takes
-/// every machine of one zone down for 6–10 s once the cell formed. Each
+/// every machine of one zone down for 10–16 s (6–10 s in the tail) once the cell formed. Each
 /// ingredient keeps its own coin on the other seeds. Rare-but-valid: a
 /// zone outage is the failure the zone rule exists for.
 #[tracing::instrument(level = "debug", skip_all)]
@@ -2719,6 +2711,25 @@ const _: () = assert!(
     INTERNAL_CALL_FLOOR_MS < 2000,
     "the floor sits under production's"
 );
+
+/// How long one `Resolve` answer may take. Floor four round trips:
+/// every answer reads two tails in sequence (the registry, then
+/// the directory), and a read served by a peer under chaos takes
+/// up to about two (witness 7489717366062895407: 259 ms fit one
+/// read and the machine never answered). A fold from position 0
+/// then takes several answers, each going on from where the last
+/// one stopped (#457). The final resolve check holds every
+/// founding member to an answer after chaos. On a slow-link seed,
+/// half the time the floor itself: a fold then spans several
+/// answers, and an answer is cut short with its folds kept (that
+/// gate missed the sweep of PR #551, #446).
+fn resolve_answer_within(slow_link: bool) -> Duration {
+    if slow_link && moonpool_sim::buggify_with_prob!(0.5) {
+        Duration::from_millis(RESOLVE_FLOOR_MS)
+    } else {
+        Duration::from_millis(buggify_knob!(2000_u64, RESOLVE_FLOOR_MS..2001_u64))
+    }
+}
 
 /// The election backoff's ceiling is wall-clock too: a capped base
 /// election timeout (`base << doublings` ticks) stays within

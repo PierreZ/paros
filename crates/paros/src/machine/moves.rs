@@ -1,6 +1,6 @@
 //! The tenant coordinator's moves (#474 (journals on admitted machines),
-//! §3.4): a journal that holds an acceptor slot on a draining machine moves
-//! off it, one step per watch round, so every step starts from what the
+//! §3.4): a journal that holds an acceptor slot on a draining machine, or on
+//! one the cell coordinator holds slow (#361 (slow machines)), moves off it, one step per watch round, so every step starts from what the
 //! registry and the journal hold now and any later term finishes a move an
 //! earlier one started:
 //!
@@ -96,14 +96,30 @@ pub(super) struct Moves {
     last: Option<JournalIdentifier>,
 }
 
+/// What a watch round says of the machines a term's steps place on.
+#[derive(Clone, Debug, Default)]
+pub(super) struct Leaving {
+    /// Down past the re-placement bound (#475): their roles move.
+    pub(super) gone: BTreeSet<NodeId>,
+    /// Covered by an open maintenance window (#359): a slow mark (#361
+    /// (slow machines)) moves none of their roles, as a down mark does not.
+    pub(super) held: BTreeSet<NodeId>,
+}
+
 /// Whether a slot on `node` stays where it is: the machine is registered
-/// (not draining, not retired) and not `gone` (down past the re-placement
-/// bound, #475).
-pub(super) fn stays(registry: &Registry, gone: &BTreeSet<NodeId>, node: NodeId) -> bool {
-    registry
+/// (not draining, not retired), not held slow outside an open maintenance
+/// window (#361 (slow machines), #359), and not `gone` (down past the
+/// re-placement bound, #475).
+pub(super) fn stays(registry: &Registry, leaving: &Leaving, node: NodeId) -> bool {
+    let registered = registry
         .get(node)
-        .is_some_and(|n| n.standing == NodeStanding::Registered)
-        && !gone.contains(&node)
+        .is_some_and(|n| n.standing == NodeStanding::Registered);
+    let slow = registry.is_slow(node) && !leaving.held.contains(&node);
+    assert!(
+        !registry.keeps_roles(node) || registered,
+        "a machine that keeps its roles is registered"
+    );
+    registered && !slow && !leaving.gone.contains(&node)
 }
 
 /// The next journal after `last`, in id order and wrapping, with an
@@ -111,9 +127,11 @@ pub(super) fn stays(registry: &Registry, gone: &BTreeSet<NodeId>, node: NodeId) 
 /// still hosts, with its slots.
 fn next_move(
     registry: &Registry,
-    gone: &BTreeSet<NodeId>,
+    gone: &Leaving,
     last: Option<JournalIdentifier>,
 ) -> Option<(JournalIdentifier, Vec<(u64, Booking)>)> {
+    // A draining machine, one gone (#475) and one the coordinator holds
+    // slow (#361 (slow machines)) keep no role.
     let leaving = |node: NodeId| !stays(registry, gone, node);
     let moving: BTreeSet<JournalIdentifier> = registry
         .bookings()
@@ -202,6 +220,92 @@ pub(super) fn bookable(
         .collect()
 }
 
+/// Record the configuration in force of the leader's answer `reply` as
+/// `journal`'s placement (`Placed`, what views show) when its tenant
+/// control journal holds another. `Some(true)` once it is recorded,
+/// `Some(false)` when it could not be (no tenant, a write that did not
+/// land), `None` when a later term fenced the tenant control journal.
+async fn record_in_force<P: Providers>(
+    client: &Client<P>,
+    registry: &Registry,
+    desk: &mut TenantDesk,
+    journal: JournalIdentifier,
+    reply: &InspectReply,
+) -> Option<bool> {
+    let Some(control) = registry.hosted_tenant(journal.tenant).map(|h| h.control) else {
+        return Some(false);
+    };
+    let Ok(system) = crate::rpc::quorum_system_from_proto(&reply.into()) else {
+        return Some(false);
+    };
+    let mut members: Vec<NodeId> = reply.members.iter().copied().map(NodeId).collect();
+    members.sort_unstable();
+    if members.is_empty() || !system.admits(members.len()) {
+        return Some(false);
+    }
+    let in_force = AcceptorConfig::new(members, system);
+    let placed = match desk.tenant(client, journal.tenant, control).await {
+        Ok(state) => state.get(journal.journal).map(|j| j.placed.clone()),
+        Err(JournalAnswer::NotCoordinator) => return None,
+        Err(_) => return Some(false),
+    };
+    if placed.as_ref() == Some(&in_force) {
+        return Some(true);
+    }
+    match desk
+        .record_placed(client, journal.tenant, journal.journal, in_force)
+        .await
+    {
+        Ok(()) => {
+            moonpool_assertions::reachable!("coordinator: a move records its placement");
+            Some(true)
+        }
+        Err(JournalAnswer::NotCoordinator) => None,
+        Err(_) => Some(false),
+    }
+}
+
+/// Record the configuration `composed` a move shrank `journal` to as its
+/// placement, once the leader's floor reached it. `None` when it is
+/// recorded, else the step's answer: `Some(None)` when a later term fenced
+/// the tenant control journal, `Some(Some(Waiting))` when it waits.
+async fn record_shrunk<P: Providers>(
+    client: &Client<P>,
+    cell: &CellSession,
+    desk: &mut TenantDesk,
+    journal: JournalIdentifier,
+    reply: &InspectReply,
+    composed: AcceptorConfig,
+) -> Option<Option<MoveStep>> {
+    if !at_or_above(reply.gc_watermark.as_ref(), reply.config_ballot.as_ref()) {
+        return Some(Some(MoveStep::Waiting));
+    }
+    let Some(control) = cell
+        .registry()
+        .hosted_tenant(journal.tenant)
+        .map(|h| h.control)
+    else {
+        return Some(Some(MoveStep::Waiting));
+    };
+    let recorded = match desk.tenant(client, journal.tenant, control).await {
+        Ok(_) => {
+            desk.record_placed(client, journal.tenant, journal.journal, composed)
+                .await
+        }
+        Err(answer) => Err(answer),
+    };
+    match recorded {
+        Ok(()) => {
+            moonpool_assertions::reachable!(
+                "coordinator: a move records the configuration it shrank to"
+            );
+            None
+        }
+        Err(JournalAnswer::NotCoordinator) => Some(None),
+        Err(_) => Some(Some(MoveStep::Waiting)),
+    }
+}
+
 /// Whether ballot `a` is at or above ballot `b`.
 pub(super) fn at_or_above(a: Option<&Ballot>, b: Option<&Ballot>) -> bool {
     let key = |ballot: &Ballot| (ballot.round, ballot.node);
@@ -262,7 +366,7 @@ impl Moves {
         (providers, rpc, names, client): (&P, &RpcHandle<P>, &Names, &Client<P>),
         cell: &mut CellSession,
         desk: &mut TenantDesk,
-        gone: &BTreeSet<NodeId>,
+        gone: &Leaving,
     ) -> Option<MoveStep> {
         // An operator drains through a session of its own: the term's fold
         // learns of it only by reading the journal's tail again.
@@ -291,7 +395,7 @@ impl Moves {
             .copied()
             .collect();
         assert!(!leaving.is_empty(), "a move leaves a draining machine");
-        if leaving.iter().any(|(_, b)| gone.contains(&b.node)) {
+        if leaving.iter().any(|(_, b)| gone.gone.contains(&b.node)) {
             moonpool_assertions::reachable!(
                 "coordinator: a move leaves a machine down past its bound"
             );
@@ -311,7 +415,7 @@ impl Moves {
         };
         // The machines that stay hold as many members as the desired mode
         // asks for: the move books none (the mode change shrinks the rest).
-        let wanted = placed_count(&desired, bookable(cell.registry(), desk, gone).len());
+        let wanted = placed_count(&desired, bookable(cell.registry(), desk, &gone.gone).len());
         let kept = staying.len() >= wanted.max(1) && system.admits(staying.len());
         if staying.len() < size && !kept {
             return self
@@ -348,34 +452,21 @@ impl Moves {
         // journal names members: it records the configuration in force
         // first, as a mode change's last step does, so the journal never
         // holds fewer slots than its recorded members.
-        if placed.members().len() > staying.len() {
-            if !at_or_above(reply.gc_watermark.as_ref(), reply.config_ballot.as_ref()) {
-                return Some(MoveStep::Waiting);
-            }
-            let Some(control) = cell
-                .registry()
-                .hosted_tenant(journal.tenant)
-                .map(|h| h.control)
-            else {
-                return Some(MoveStep::Waiting);
-            };
-            let recorded = match desk.tenant(client, journal.tenant, control).await {
-                Ok(_) => {
-                    desk.record_placed(client, journal.tenant, journal.journal, composed)
-                        .await
-                }
-                Err(answer) => Err(answer),
-            };
-            match recorded {
-                Ok(()) => moonpool_assertions::reachable!(
-                    "coordinator: a move records the configuration it shrank to"
-                ),
-                Err(JournalAnswer::NotCoordinator) => return None,
-                Err(_) => return Some(MoveStep::Waiting),
-            }
+        if placed.members().len() > staying.len()
+            && let Some(waiting) =
+                record_shrunk(client, cell, desk, journal, &reply, composed).await
+        {
+            return waiting;
         }
-        self.finish(client, cell, (&nodes, &ids), journal, &leaving, &reply)
-            .await
+        self.finish(
+            client,
+            (cell, desk),
+            (&nodes, &ids),
+            journal,
+            &leaving,
+            &reply,
+        )
+        .await
     }
 
     /// The last step of a move: once the leader's floor reached the
@@ -384,7 +475,7 @@ impl Moves {
     async fn finish<P: Providers>(
         &mut self,
         client: &Client<P>,
-        cell: &mut CellSession,
+        (cell, desk): (&mut CellSession, &mut TenantDesk),
         (nodes, ids): (&Client<P>, &[NodeId]),
         journal: JournalIdentifier,
         leaving: &[(u64, Booking)],
@@ -394,6 +485,13 @@ impl Moves {
         // earlier configuration is forgotten once the leader's floor reached
         // this one's ballot: no leader can ask a leaving member again.
         if !at_or_above(reply.gc_watermark.as_ref(), reply.config_ballot.as_ref()) {
+            return Some(MoveStep::Waiting);
+        }
+        // The configuration in force is recorded before a slot is released
+        // (#361 (slow machines)): a slow machine is registered again once
+        // it is fast, so no reader may take its released slot for a lost
+        // member of the placement views show.
+        if !record_in_force(client, cell.registry(), desk, journal, reply).await? {
             return Some(MoveStep::Waiting);
         }
         for &(booking, slot) in leaving {
@@ -411,6 +509,14 @@ impl Moves {
             assert!(
                 cell.registry().booking(booking).is_none(),
                 "a move's old slot is released"
+            );
+        }
+        if leaving
+            .iter()
+            .any(|(_, slot)| cell.registry().is_slow(slot.node))
+        {
+            moonpool_assertions::reachable!(
+                "coordinator: a move takes a journal off a slow machine"
             );
         }
         let successor = !self.started.remove(&journal);
@@ -434,7 +540,7 @@ impl Moves {
         client: &Client<P>,
         cell: &mut CellSession,
         desk: &mut TenantDesk,
-        (journal, gone): (JournalIdentifier, &BTreeSet<NodeId>),
+        (journal, gone): (JournalIdentifier, &Leaving),
         staying: &[(u64, Booking)],
         size: usize,
     ) -> Option<MoveStep> {
@@ -443,13 +549,23 @@ impl Moves {
             target: BookingTarget::Journal(journal),
             count: size,
         };
-        // A draining machine is not registered: it takes no new slot, and
-        // neither does one gone (#475).
-        let machines = bookable(cell.registry(), desk, gone);
+        // A draining or gone (#475) machine is not bookable, and a slow one
+        // (#361 (slow machines)) takes no new slot: a move never books the
+        // machine it leaves.
+        let machines: Vec<placement::Machine> = bookable(cell.registry(), desk, &gone.gone)
+            .into_iter()
+            .filter(|m| stays(cell.registry(), gone, m.node))
+            .collect();
         let Ok(steps) = placement::plan(&want, &machines, staying, journal.tenant.0) else {
             moonpool_assertions::reachable!("coordinator: a move has no machine to go to");
             return Some(MoveStep::Waiting);
         };
+        assert!(
+            placement::booked(&steps)
+                .iter()
+                .all(|node| stays(cell.registry(), gone, *node)),
+            "a move never books a machine it is leaving"
+        );
         desk.book(client, cell, &want, &steps).await.ok()?;
         moonpool_assertions::reachable!("coordinator: a move books its journal's new slot");
         self.started.insert(journal);

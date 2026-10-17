@@ -12,7 +12,7 @@ reads the cell's own journals and answers. A view changes nothing.
 
 | Command | What it shows | Scope |
 |---|---|---|
-| `parosctl machine list [-l <selector>]` | every machine of the cell: name, address, class, zone, capacity, bookings, standing, up or down, tags | admin |
+| `parosctl machine list [-l <selector>]` | every machine of the cell: name, address, class, zone, capacity, bookings, standing, up, down or slow (#361), tags | admin |
 | `parosctl machine show <name>` | one machine and the roles it holds | admin |
 | `parosctl cell list [-l <selector>]` | the cells of the universe and their tags | admin |
 | `parosctl cell show [<name>]` | the cell, its coordinator, its machines and its tenants | admin |

@@ -144,7 +144,9 @@ impl FleetOps {
         if self
             .cell
             .as_ref()
-            .is_some_and(|known| known.journals != journals)
+            .map(|known| known.journals)
+            .or(self.forgotten.take())
+            .is_some_and(|known| known != journals)
         {
             // The init this client saw end was another cell's: a lost
             // cell's successor may still be initializing (#304's shape,
@@ -152,6 +154,7 @@ impl FleetOps {
             // refusal; witness 9648373582943959266 of #529 (sets oracles
             // after PR #515), recipe 188857:3339894226954213537).
             self.initialized = false;
+            self.forget_lost_universe();
         }
         self.cell = Some(Cell {
             journals,
@@ -161,6 +164,22 @@ impl FleetOps {
             servers,
         });
         self.cell.clone()
+    }
+
+    /// The cell this operator knew is lost and another formed at its
+    /// founders' addresses: a new universe. A tenant operation it stopped
+    /// in, and the identifiers it created, named the lost one's fleet
+    /// directory; resumed here they would register an identifier a lost
+    /// journal holds, which the audit keys journals by.
+    fn forget_lost_universe(&mut self) {
+        if matches!(
+            self.pending,
+            Some(super::Pending::Create(..) | super::Pending::Remove(_))
+        ) {
+            self.pending = None;
+            self.killed = false;
+        }
+        self.ever_created.clear();
     }
 
     /// The cell an `init` came to (#246).
@@ -188,6 +207,15 @@ impl FleetOps {
             );
             return;
         };
+        if self
+            .cell
+            .as_ref()
+            .map(|known| known.journals)
+            .or(self.forgotten.take())
+            .is_some_and(|known| known != journals)
+        {
+            self.forget_lost_universe();
+        }
         self.cell = Some(Cell {
             journals,
             fleet,
