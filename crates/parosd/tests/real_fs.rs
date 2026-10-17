@@ -34,12 +34,30 @@ fn config() -> Config {
     }
 }
 
-/// A small layout with a short checkpoint cadence, so the suites cross
+/// A compact store with a short checkpoint cadence, so the suites cross
 /// segment rollovers, checkpoints and prefix drops on the real disk.
 fn layout(durability: Durability) -> JournalStoreConfig {
     JournalStoreConfig {
         durability,
-        ..JournalStoreConfig::small()
+        ..compact()
+    }
+}
+
+/// A store with segments of a few blocks, so a short test crosses segment
+/// rollover and prefix deletion. Tests only: a deployment keeps the
+/// default geometry (#600 (drop the small layout)).
+fn compact() -> JournalStoreConfig {
+    JournalStoreConfig {
+        geometry: compact_geometry(),
+        ..JournalStoreConfig::default()
+    }
+}
+
+fn compact_geometry() -> paros::journal::Geometry {
+    paros::journal::Geometry {
+        persist_blocks: 8,
+        gap_blocks: 0,
+        entry_blocks: 16,
     }
 }
 
@@ -195,7 +213,7 @@ fn the_machine_record_is_absent_then_read_back_whole() {
     let disk = paros::machine::ProviderDisk::new(
         TokioStorageProvider::new(),
         dir(&root, "machine"),
-        JournalStoreConfig::small(),
+        compact(),
     );
     runtime().block_on(async {
         assert_eq!(disk.read_record().await, Ok(None));

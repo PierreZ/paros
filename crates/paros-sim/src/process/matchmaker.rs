@@ -93,11 +93,11 @@ pub(super) async fn run_matchmaker_role(
         NodeAudit::new(time.clone(), audit_world_for(ctx.state(), journal))
     };
     // The store (#176): the library's `JournalMatchmakerStorage` on the
-    // simulated disk, with the seed's commit protocol and the library's
-    // small geometry (a registry's installs carry every live registration
-    // in one batch; the acceptors' geometry knob is not theirs to shrink).
+    // simulated disk, with the seed's commit protocol and the compact
+    // geometry (a registry's installs carry every live registration in one
+    // batch; the acceptors' geometry knob is not theirs to shrink).
     let layout = paros::JournalStoreConfig {
-        geometry: paros::journal::Geometry::small(),
+        geometry: crate::shape::COMPACT_GEOMETRY,
         ..crate::shape::journal_layout(ctx.state())
     };
     if incarnation.is_restart()
