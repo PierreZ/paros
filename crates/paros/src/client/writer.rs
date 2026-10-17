@@ -428,6 +428,13 @@ impl Writer {
     /// Claim the journal under this writer's uuid (see [`Client::claim`])
     /// and fold the outcome. `fresh` asks for a new term on purpose: a
     /// writer that leads spends its uuid first, so it supersedes itself.
+    /// Without `fresh`, a writer that leads only re-claims its uuid
+    /// ([`Client::reclaim`]): a uuid never leads twice, so a writer another
+    /// leader superseded learns it and claims again under a fresh uuid.
+    ///
+    /// # Panics
+    ///
+    /// If a fresh claim still leads a term (a broken `begin_term`).
     pub async fn claim<P: Providers>(
         &mut self,
         client: &Client<P>,
@@ -436,8 +443,13 @@ impl Writer {
     ) -> ClaimOutcome {
         if fresh {
             self.begin_term();
+            assert!(!self.owned, "a fresh claim leads no term yet");
         }
-        let outcome = client.claim(self.journal, self.mine, first).await;
+        let outcome = if self.owned {
+            client.reclaim(self.journal, self.mine, first).await
+        } else {
+            client.claim(self.journal, self.mine, first).await
+        };
         self.claimed(&outcome);
         outcome
     }

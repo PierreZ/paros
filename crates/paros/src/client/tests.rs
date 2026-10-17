@@ -568,8 +568,9 @@ fn a_new_term_opens_at_its_view_while_the_old_one_drains() {
     let (mut lanes, old) = leading_lanes(5);
     let _a = lanes.open(one(1));
     let _b = lanes.open(one(2));
-    let new = lanes.begin_claim(true);
+    let (new, led) = lanes.begin_claim(true);
     assert_ne!(new, old);
+    assert!(!led);
     assert_eq!(lanes.admit(), Admit::NotOwner);
     // The claim lands after `a`: the journal stands at 6 under `new`.
     lanes.claimed(

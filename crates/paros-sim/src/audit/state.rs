@@ -207,6 +207,12 @@ pub(super) struct AuditState {
     /// below-floor pruning of `decided` never lowers, so the cross-restart
     /// frontier check stays sound after the whole prefix compacts away.
     pub(super) decided_max: Option<u64>,
+    /// The highest cluster floor a prune applied: monotone, unlike
+    /// [`AuditState::cluster_min_floor`], which falls back when a node boots
+    /// a journal for the first time at floor 0. Below it the per-slot
+    /// tallies are gone for good, so a slot there is judged against the
+    /// decided witness (`decided_below_floor`), never a live tally.
+    pub(super) pruned_floor: u64,
     /// Per node: the last durably reported chosen index, reset each boot
     /// (`SetChosenIndex` flushes relaxed, so a crash may legally rewind it
     /// across incarnations — within one it only advances).
@@ -1188,14 +1194,16 @@ impl AuditState {
         if min_floor == 0 {
             return;
         }
-        let kept = self.decided.split_off(&min_floor);
+        let floor = self.pruned_floor.max(min_floor);
+        self.pruned_floor = floor;
+        let kept = self.decided.split_off(&floor);
         let pruned = std::mem::replace(&mut self.decided, kept);
         self.decided_below_floor.extend(
             pruned
                 .into_iter()
                 .map(|(slot, (_, _, vhash))| (slot, vhash)),
         );
-        self.accept_sets = self.accept_sets.split_off(&(min_floor, 0, 0));
+        self.accept_sets = self.accept_sets.split_off(&(floor, 0, 0));
     }
 
     /// The vhash the durable-accept quorum decided for `slot`, wherever the
@@ -1379,7 +1387,13 @@ impl AuditState {
         vhash: u64,
     ) {
         let key = (slot, ballot.round, ballot.node.0);
-        if slot >= self.cluster_min_floor() {
+        // The pruned floor, not the cluster floor: a node that boots the
+        // journal late lowers the cluster floor, but its late votes cannot
+        // restore a tally the prune reclaimed. Seed 3160462911042799115 on
+        // 55b319d: two acceptors accepted and compacted slots 1..12, the
+        // third booted the created journal at floor 0 and voted, and the
+        // live tally there held only its own vote.
+        if slot >= self.pruned_floor {
             let voters: BTreeSet<paros::NodeId> = self
                 .accept_sets
                 .get(&key)

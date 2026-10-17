@@ -122,6 +122,42 @@ pub(super) fn stays(registry: &Registry, leaving: &Leaving, node: NodeId) -> boo
     registered && !slow && !leaving.gone.contains(&node)
 }
 
+/// The machines a move keeps for a journal whose leader names `members`
+/// (sorted) and whose registry slots that stay are `staying`: at most `size`
+/// of them, the members that stay first, then the booked spares. A mode
+/// change that booked its new slots and was then handed to the move by a
+/// machine that left (#361 (slow machines), #475) leaves the registry more
+/// slots than the configuration in force names; the slots left over stay
+/// booked for the mode change. Under a grid or a flexible split the composed
+/// count must be one the quorum system admits (`AcceptorConfig::build`
+/// asserts it): `size` is, and so is a smaller `staying` the caller checked.
+fn move_target(members: &[u64], staying: &[(u64, Booking)], size: usize) -> Vec<u64> {
+    let staying_ids: BTreeSet<u64> = staying.iter().map(|(_, b)| b.node.0).collect();
+    let mut target: Vec<u64> = members
+        .iter()
+        .copied()
+        .filter(|m| staying_ids.contains(m))
+        .collect();
+    target.extend(
+        staying_ids
+            .iter()
+            .copied()
+            .filter(|n| !members.contains(n))
+            .take(size.saturating_sub(target.len())),
+    );
+    target.sort_unstable();
+    target.dedup();
+    assert!(
+        target.len() <= size,
+        "a move's target never exceeds the configuration's size"
+    );
+    assert!(
+        target.iter().all(|n| staying_ids.contains(n)),
+        "a move's target is drawn from the slots that stay"
+    );
+    target
+}
+
 /// The next journal after `last`, in id order and wrapping, with an
 /// acceptor slot on a draining machine or one `gone`, of a tenant the cell
 /// still hosts, with its slots.
@@ -415,7 +451,14 @@ impl Moves {
         };
         // The machines that stay hold as many members as the desired mode
         // asks for: the move books none (the mode change shrinks the rest).
-        let wanted = placed_count(&desired, bookable(cell.registry(), desk, &gone.gone).len());
+        // A machine `gone` (#475) still counts: it may answer again, and a
+        // configuration shrunk off it with no spare to take its place loses
+        // that member for good, so the move waits for a spare instead.
+        // Seed 8716878275573457412 on 492ac54: a move shrank a journal to its
+        // two staying members, attrition wiped one, and no Phase-1 quorum
+        // was left.
+        let storage = placement::machines(cell.registry(), desk.storage(cell.registry()));
+        let wanted = placed_count(&desired, storage.len());
         let kept = staying.len() >= wanted.max(1) && system.admits(staying.len());
         if staying.len() < size && !kept {
             return self
@@ -427,10 +470,18 @@ impl Moves {
                 "coordinator: a move books no slot its desired mode would release"
             );
         }
-        let mut target: Vec<u64> = staying.iter().map(|(_, b)| b.node.0).collect();
-        target.sort_unstable();
         let mut members = reply.members.clone();
         members.sort_unstable();
+        let target = move_target(&members, &staying, size);
+        if staying.len() > size {
+            moonpool_assertions::reachable!(
+                "coordinator: a move leaves a mode change's extra slots booked"
+            );
+        }
+        assert!(
+            system.admits(target.len()),
+            "a move composes a configuration its quorum system admits"
+        );
         // The machines that stay, labeled with their zones as the registry
         // names them and owned by this cell (#215 (zones)): a move composes
         // a new configuration like a create.
@@ -499,7 +550,24 @@ impl Moves {
             // named retirable. A floor that rose past an earlier one names
             // none, and the released slot stops the journal there all the
             // same (`driver::SystemCtx::place`).
-            if reply.retirable.contains(&slot.node.0) {
+            //
+            // And only a machine that leaves for good, a draining one: a
+            // slow (#361) or gone (#475) machine stays registered and takes
+            // slots again, so its member is released, never retired, as a
+            // mode change's is (`super::modes`). A retired identity booked
+            // again is a member lost for good. Recipe 8829326179751023212
+            // 4788036:12833132764577949844 on a063911: "gc: a leader never
+            // runs a grid configuration naming a retired identity".
+            let draining = cell
+                .registry()
+                .get(slot.node)
+                .is_some_and(|n| n.standing == NodeStanding::Draining);
+            if !draining && reply.retirable.contains(&slot.node.0) {
+                moonpool_assertions::reachable!(
+                    "coordinator: a move releases a member it does not retire"
+                );
+            }
+            if draining && reply.retirable.contains(&slot.node.0) {
                 let index = ids.iter().position(|id| *id == slot.node);
                 retire(nodes, index, journal, reply).await;
             }
