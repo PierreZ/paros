@@ -338,7 +338,7 @@ impl Process for MatchmakerProcess {
                 Role::Matchmaker(id) => Some(id),
                 _ => None,
             },
-            |_, id, my_ip| async move { run_matchmaker_role(ctx, id, &my_ip).await },
+            |_, id, my_ip| async move { Box::pin(run_matchmaker_role(ctx, id, &my_ip)).await },
         )
         .await
     }
