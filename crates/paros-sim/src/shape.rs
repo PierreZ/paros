@@ -2159,12 +2159,9 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
             let renamed_drain = drained && moonpool_sim::sim_random_bool(0.5);
             let named = moonpool_sim::sim_random_bool(0.5) || moved || renamed_drain;
             let move_pct = buggify_knob!(0_u32, 20_u32..81_u32);
-            let rename_pct = buggify_knob!(0_u32, 20_u32..61_u32);
-            let rename_pct = if renamed_drain {
-                rename_pct.max(moonpool_sim::sim_random_range(20_u32..61_u32))
-            } else {
-                rename_pct
-            };
+            let rename_pct_knob = buggify_knob!(0_u32, 20_u32..61_u32);
+            let rename_pct = renamed_drain.then(|| moonpool_sim::sim_random_range(20_u32..61_u32));
+            let rename_pct = rename_pct.map_or(rename_pct_knob, |drawn| rename_pct_knob.max(drawn));
             let machines = (0..count)
                 .map(|rank| {
                     // The founders, and the second cell's machine, store.
