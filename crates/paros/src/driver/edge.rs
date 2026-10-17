@@ -10,16 +10,17 @@
 //! connection and every pending call go with it on the spot, so a restart
 //! at the same address never meets its predecessor's socket.
 //!
-//! **Polled through a flush too.** An arm body that awaits the durability
-//! pipeline's storage calls (`drain_ready`) polls the runtime beside them
-//! ([`RpcEdge::alongside`]), so a flush does not stop the network. Without
-//! it, an outbound lane waits for the ack of its previous batch, and the
-//! ack is read only once the flush returns: a leader's `Accept` left only
-//! after its own flush, however early it was queued (#578 (leader sends
-//! Accept before its own fsync), measured at one flush of added latency
-//! per write). The runtime still belongs to the incarnation, so the
-//! crash-cleanliness above holds. Inbound calls that arrive during a flush
-//! wait in their bounded queues until the loop takes them.
+//! **Polled through a flush too.** A journal's flush flies off the loop
+//! (#613 (settle off the node loop), `super::flight`), so the loop's own
+//! `select!` arm keeps the runtime running while a store syncs. The one
+//! flush an arm body still waits for (a rare input on a flying journal, a
+//! full backlog) polls the runtime beside it ([`RpcEdge::alongside`]).
+//! Without it, an outbound lane waits for the ack of its previous batch,
+//! and the ack is read only once the flush returns: a leader's `Accept`
+//! left only after its own flush, however early it was queued (#578
+//! (leader sends Accept before its own fsync), measured at one flush of
+//! added latency per write). The runtime still belongs to the incarnation,
+//! so the crash-cleanliness above holds.
 
 use std::sync::Arc;
 
@@ -66,7 +67,7 @@ pub(crate) type Plain<M> =
 pub(crate) struct RpcEdge<P: Providers> {
     handle: RpcHandle<P>,
     /// Locked by the one poller at a time: the loop's `select!` arm, or an
-    /// arm body's flush ([`RpcEdge::alongside`]). Never contended: both run
+    /// arm body's wait for a flush ([`RpcEdge::alongside`]). Never contended: both run
     /// on the loop, one after the other.
     run: tokio::sync::Mutex<RuntimeFuture>,
     role: &'static str,

@@ -9,7 +9,7 @@
 //! fold gave its slot. This driver checks nothing early: the node proposes it
 //! ([`ColocatedNode::propose_in`](paros_core::ColocatedNode::propose_in),
 //! [`propose_control_in`](paros_core::ColocatedNode::propose_control_in)),
-//! parks the reply on the slot, and `drain_ready` answers it from the fold.
+//! parks the reply on the slot, and `finish_ready` answers it from the fold.
 //! A call whose slot decided another command, or that never applies here,
 //! gets no verdict ([`Call::no_verdict`]) — ambiguous to the client, which
 //! retries, and a retried `Write` is answered from the log itself.

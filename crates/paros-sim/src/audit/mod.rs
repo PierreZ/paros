@@ -259,6 +259,20 @@ impl<T: TimeProvider> NodeAudit<T> {
     /// that value. Checked against `decided`, never the apply-fed `chosen`
     /// map: a #94 re-chosen identity applies as a `Noop` everywhere while its
     /// commit honestly carries the decided user command.
+    ///
+    /// Below the cluster-wide compaction floor the per-node tally is pruned
+    /// (`AuditState::prune_below_floor`), and the witness there is a
+    /// durable accept of that `(slot, ballot)` (`AuditState::accepted`,
+    /// never pruned): the slot is decided on every node by then. One batch
+    /// can carry an acceptor's re-answered `Accept`, the `Commit` that
+    /// decides the slot and the `Truncate` its walk then reaches: its durable
+    /// report raises the last floor past the slot and prunes the tally just
+    /// before its `Accepted` leaves. Group commit (#613 (settle off the node
+    /// loop)) makes that batch common: an `Accept` and its `Commit` held
+    /// back during one flush are stepped together. Witness
+    /// 5484246127051667688: node 0 sent `Accepted` for slot 60 at round 14
+    /// from a batch `[AppendAccepted(60), SetChosenIndex(60), Truncate(61)]`
+    /// whose accept was reported durable first.
     fn observe_durable_send(&self, from: Party, msg: &Message) {
         if let Message::Accepted { ballot, slot, .. } = msg {
             let st = self.state();

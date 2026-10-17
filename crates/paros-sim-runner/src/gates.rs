@@ -131,11 +131,11 @@ pub const RARE: &[Rare] = &[
     },
     Rare {
         msg: "zones: a control-journal write is chosen with a zone down",
-        reason: "marginal: needs the zone-outage scenario and a control-journal write inside its hold; fired on 1 of 300 hunt seeds, missed by shard 2 of main's sweep at e1062fe (#215 (zones), #486)",
+        reason: "marginal: needs the zone-outage scenario and a control-journal write inside its hold; fired on 1 of 300 hunt seeds, missed by shard 2 of main's sweep at e1062fe; a whole fleet run inside a zone outage, where the outage struck on 4 of 300 (#215 (zones), #486, #623 (zone-down gates in the sweep))",
     },
     Rare {
         msg: "zones: a tenant is created with a zone down",
-        reason: "marginal: needs the zone-outage scenario and a whole tenant creation inside its hold; fired on 1 of 300 hunt seeds at 2a5997b, missed by shard 2 of main's sweep at e1062fe (#215 (zones), #486)",
+        reason: "marginal: needs the zone-outage scenario and a whole tenant creation inside its hold; fired on 1 of 300 hunt seeds at 2a5997b, missed by shard 2 of main's sweep at e1062fe (#215 (zones), #486); also a whole tenant creation inside a zone outage: 1 of 300 hunt seeds with the 10–16 s hold, where the outage struck on 4 (#623 (zone-down gates in the sweep))",
     },
     Rare {
         msg: "admit: a pinned machine denies a tenant token",
@@ -1228,14 +1228,6 @@ pub const RARE: &[Rare] = &[
     Rare {
         msg: "gc: an operator probes the members' beliefs before a retirement",
         reason: "missed by the sweep of PR #510 (whole-run chaos): it needs an effective GC floor at a retirement step, rarer under whole-run chaos (#454 (control plane meets chaos), #486)",
-    },
-    Rare {
-        msg: "zones: a control-journal write is chosen with a zone down",
-        reason: "a whole fleet run inside a zone outage: 1 of 300 hunt seeds with the 10–16 s hold, where the outage struck on 4 (#623 (zone-down gates in the sweep))",
-    },
-    Rare {
-        msg: "zones: a tenant is created with a zone down",
-        reason: "a whole tenant creation inside a zone outage: 1 of 300 hunt seeds with the 10–16 s hold, where the outage struck on 4 (#623 (zone-down gates in the sweep))",
     },
     Rare {
         msg: "coordinator: a move records its placement",

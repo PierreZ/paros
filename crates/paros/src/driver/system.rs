@@ -709,7 +709,9 @@ pub(crate) fn follow_local<P: Providers, S, A>(
     let page_records = usize::try_from(FOLLOW_READ_RECORDS).unwrap_or(usize::MAX);
     let mut moved = Vec::new();
     for journal in follower.followed() {
-        let Some(rt) = journals.live.get(&journal) else {
+        // A flying journal's fold is not yet durable (`JournalRt::settled`):
+        // it is read once its batch landed.
+        let Some(rt) = journals.live.get(&journal).filter(|rt| rt.settled()) else {
             continue;
         };
         let mut events = Vec::new();
