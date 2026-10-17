@@ -38,6 +38,7 @@ mod fold;
 mod foreign;
 mod multi;
 mod owner;
+mod pipelined;
 mod races;
 mod reads;
 mod reconfigure;
@@ -130,6 +131,10 @@ struct AdversarialCoverage {
     /// Race 1 (#205): a claim landed inside an owner's burst — writes ahead
     /// of it written, the rest fenced by the generation it minted.
     burst_fenced: bool,
+    /// A write through the library's pipeline arrived before the write in
+    /// front of it, waited, and was written when sent again (#597 (several
+    /// writes in flight per journal)).
+    pipeline_resent_written: bool,
     /// Race 3 (#205): a read raced past by a truncation was refused, and the
     /// reader resumed at the floor the refusal named.
     reader_resumed: bool,
@@ -1869,6 +1874,10 @@ impl ChainWorkload {
         assert_sometimes!(
             self.adversarial.burst_fenced,
             "journal: a claim fences the rest of an owner's burst"
+        );
+        assert_sometimes!(
+            self.adversarial.pipeline_resent_written,
+            "client: a pipelined write that arrived early is written"
         );
         assert_sometimes!(
             self.adversarial.reader_resumed,
