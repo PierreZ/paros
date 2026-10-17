@@ -72,7 +72,7 @@ impl DriverTunables {
     /// | `connection_timeout` | 3 s | a connect and its handshake across zones, a lost SYN included (retransmitted at 1 s) |
     /// | `delivery_timeout` | 2 s | an enqueue on the peer, never its processing |
     /// | `read_retry_ticks` | 20 (2 s) | a quorum read's confirmation, inside `parosctl`'s 5 s deadline |
-    /// | `max_wait_ms` | 1 s | a tail wait, inside the client's read deadline |
+    /// | `max_wait_ms` | 1 s | a tail wait, inside the client's read deadline; at least one election renewal period when the election truncates at every renewal |
     /// | `min_wait_ms` | 0 | a client may ask to answer at once |
     /// | `max_read_records`, `max_read_bytes`, `max_batch_*` | the defaults | bounded by bytes, not by time |
     /// | `recovery_page` | the default (64) | the ceiling; a page bounds one `Ready`'s burst |
