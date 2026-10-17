@@ -532,12 +532,21 @@ impl AuditState {
         );
     }
 
-    /// The nodes down for good: they answer no Phase 1.
+    /// The nodes down for good: they answer no Phase 1 and serve no
+    /// catch-up. A joiner the registry retired (`left_pool`) stopped the
+    /// journal for good, so a clean copy it holds is as gone as a wiped
+    /// one: counted as a live holder, its copy made a slot every member
+    /// lost look recoverable, and nothing excused the frozen journal
+    /// (witness 17224784884607636197: slot 4 lost on all five members by
+    /// the outage's `keep: 0` plan, the retired joiner 100 the only clean
+    /// holder; red on "every quorum-decided slot is applied by the end of
+    /// the tail", green with it counted down).
     fn down_for_good(&self) -> BTreeSet<u64> {
         self.storage_dead
             .iter()
             .chain(&self.wiped)
             .chain(&self.retired)
+            .chain(&self.left_pool)
             .copied()
             .collect()
     }

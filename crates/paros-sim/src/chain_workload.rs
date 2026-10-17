@@ -349,7 +349,44 @@ async fn claim(
     target: usize,
     uuid: LeaderUuid,
 ) -> ClaimOutcome {
-    let outcome = nodes.claim(journal, uuid, target).await;
+    claim_as(nodes, journal, target, uuid, false).await
+}
+
+/// [`claim`] for a writer: one that leads only re-claims its uuid
+/// ([`Client::reclaim`](paros::client::Client::reclaim)), since a uuid never
+/// leads twice (#564). Seed 10049596354545064005 on e1062fe: a writer that
+/// never saw its successor re-claimed its own uuid and led it a second term,
+/// so its read-back resolved the successor's write at the same position as
+/// its own duplicate.
+async fn claim_for(
+    nodes: &ChainClient,
+    journal: JournalIdentifier,
+    target: usize,
+    writer: &Writer,
+) -> ClaimOutcome {
+    claim_as(
+        nodes,
+        journal,
+        target,
+        writer.uuid(),
+        writer.owned().is_some(),
+    )
+    .await
+}
+
+/// [`claim`] (`led` false) or a re-claim of a uuid that leads (`led` true).
+async fn claim_as(
+    nodes: &ChainClient,
+    journal: JournalIdentifier,
+    target: usize,
+    uuid: LeaderUuid,
+    led: bool,
+) -> ClaimOutcome {
+    let outcome = if led {
+        nodes.reclaim(journal, uuid, target).await
+    } else {
+        nodes.claim(journal, uuid, target).await
+    };
     assert_always!(
         outcome != ClaimOutcome::Malformed,
         "chain: a node answers a well-formed journal state"
@@ -1426,7 +1463,7 @@ impl ChainWorkload {
                         }
                         continue;
                     }
-                    let outcome = claim(&nodes, journal, via, writer.uuid()).await;
+                    let outcome = claim_for(&nodes, journal, via, &writer).await;
                     writer.claimed(&outcome);
                     match outcome {
                         ClaimOutcome::Won { state } => {

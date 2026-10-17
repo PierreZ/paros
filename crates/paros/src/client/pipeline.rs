@@ -237,11 +237,15 @@ impl Pipeline {
         first: usize,
         fresh: bool,
     ) -> ClaimOutcome {
-        let (journal, uuid) = {
+        let (journal, (uuid, led)) = {
             let mut lanes = self.lanes();
             (lanes.writer.journal(), lanes.begin_claim(fresh))
         };
-        let outcome = client.claim(journal, uuid, first).await;
+        let outcome = if led {
+            client.reclaim(journal, uuid, first).await
+        } else {
+            client.claim(journal, uuid, first).await
+        };
         self.lanes().claimed(uuid, &outcome);
         self.wake();
         outcome
@@ -570,13 +574,18 @@ impl Lanes {
     }
 
     /// Start a claim: `fresh` spends the uuid the writer leads with. The
-    /// uuid the claim asks for.
-    pub(crate) fn begin_claim(&mut self, fresh: bool) -> LeaderUuid {
+    /// uuid the claim asks for, and whether that uuid already leads (a
+    /// re-claim, [`Client::reclaim`]: a uuid never leads twice).
+    pub(crate) fn begin_claim(&mut self, fresh: bool) -> (LeaderUuid, bool) {
         if fresh {
             self.writer.begin_term();
+            assert!(
+                self.writer.owned().is_none(),
+                "a fresh claim leads no term yet"
+            );
         }
         self.assert_invariants();
-        self.writer.uuid()
+        (self.writer.uuid(), self.writer.owned().is_some())
     }
 
     /// Fold the outcome of a claim under `uuid`. A claim a later one

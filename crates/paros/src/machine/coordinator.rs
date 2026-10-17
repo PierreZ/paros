@@ -844,7 +844,18 @@ async fn follow_book<P: Providers>(
     if !matches!(loaded, LoadOutcome::Loaded { .. }) {
         return None;
     }
-    let book = super::with_own(&super::address_book(&plan.members, folder.state()), me, own);
+    let book = followed_book(plan, folder.state(), (me, own));
+    Some(dial_book(rpc, client, names, &book))
+}
+
+/// The founding members where `registry` holds them, this member at the
+/// address it advertises (#349).
+fn followed_book(
+    plan: &CellPlan,
+    registry: &Registry,
+    (me, own): (NodeId, &Address),
+) -> Vec<(NodeId, Address)> {
+    let book = super::with_own(&super::address_book(&plan.members, registry), me, own);
     assert_eq!(
         book.len(),
         plan.members.len(),
@@ -854,14 +865,29 @@ async fn follow_book<P: Providers>(
         book.iter().any(|(id, addr)| *id == me && addr == own),
         "a followed book dials this member where it advertises"
     );
-    let servers = book
+    book
+}
+
+/// `client` over `book`, each member dialed by its address.
+fn dial_book<P: Providers>(
+    rpc: &RpcHandle<P>,
+    client: &Client<P>,
+    names: &Names,
+    book: &[(NodeId, Address)],
+) -> Client<P> {
+    let servers: Vec<_> = book
         .iter()
         .map(|(id, addr)| Server {
             id: id.0,
             node: NodeClient::named(rpc, names.clone(), addr.clone()),
         })
         .collect();
-    Some(client.with_servers(servers))
+    assert_eq!(
+        servers.len(),
+        book.len(),
+        "every member of the book is dialed"
+    );
+    client.with_servers(servers)
 }
 
 /// A founding member's candidacy, as the node loop hands it to the task.
@@ -1077,6 +1103,9 @@ async fn campaign<P: Providers>(
     );
     // The term whose duties are done.
     let mut served: Option<u64> = None;
+    // The founders' addresses a served term last dialed from its session's
+    // registry; `None` until its first watch round.
+    let mut dialed: Option<Vec<(NodeId, Address)>> = None;
     // The tenant coordinator of the term served, while it leads it.
     let mut desk: Option<(u64, TenantDesk)> = None;
     let open_desk = |term: u64, uuid: LeaderUuid, reuse: bool| {
@@ -1202,6 +1231,7 @@ async fn campaign<P: Providers>(
                         let follow = follow_book(&rpc, &client, &names, &plan, (me, &addr));
                         if let Some(followed) = renewing(&providers, &mut election, follow).await {
                             client = followed;
+                            dialed = None;
                         }
                     }
                 }
@@ -1255,6 +1285,27 @@ async fn campaign<P: Providers>(
                 continue;
             }
             Step::Leading { .. } if watching.is_some() => {
+                // A served term dials the founders where its session's
+                // registry holds them now: a founder renamed while the term
+                // runs (#349) is reached at its new name. Without it, a
+                // term that opened Served kept the old name for its whole
+                // run, every desk write to a tenant control journal led
+                // there came back ambiguous, and a mode change waited on
+                // its `Placed` record for good (#529's class on the desk
+                // path: witness recipe 13334306166441940671
+                // 77:327766447974513469 on PR #643 (durability mode)).
+                if let Some((session, _)) = watching.as_ref() {
+                    let book = followed_book(&plan, session.registry(), (me, &addr));
+                    if dialed.as_ref() != Some(&book) {
+                        if dialed.is_some() {
+                            moonpool_assertions::reachable!(
+                                "coordinator: a served term follows a renamed founder"
+                            );
+                        }
+                        client = dial_book(&rpc, &client, &names, &book);
+                        dialed = Some(book);
+                    }
+                }
                 let duties = async {
                     let mut stepped = None;
                     if let Some((session, watch)) = watching.as_mut() {

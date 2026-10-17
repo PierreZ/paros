@@ -69,6 +69,64 @@ const P_HEADER_ROT: f64 = 0.15;
 const FLIPPED: u64 = 8;
 const FLIPPED_AT: u64 = 8;
 
+/// The other slots whose bytes share a sector with a flip: moonpool's crash
+/// damage resolves a dirty sector whole (`SECTOR_SIZE`), so a process killed
+/// between a flip's write and its sync may damage every slot that sector
+/// holds, not only the flipped one. Records are 64 bytes and entries are
+/// packed, so a sector holds several of each.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Exposure {
+    /// The slots whose persist record shares a flipped sector.
+    records: BTreeSet<u64>,
+    /// The slots whose entry shares a flipped sector.
+    entries: BTreeSet<u64>,
+}
+
+impl Exposure {
+    /// The sector neighbours of a flip of `regions` in `custody`, `slot`
+    /// (the flipped slot, if any) aside.
+    fn of(custody: &Custody, slot: Option<u64>, regions: &[LayoutRegion]) -> Self {
+        let sector = moonpool_sim::SECTOR_SIZE as u64;
+        let spans: Vec<(&str, std::ops::Range<u64>)> = regions
+            .iter()
+            .map(|region| {
+                let at = region.bytes.start + FLIPPED_AT;
+                let span = (at / sector * sector)..(at + FLIPPED).div_ceil(sector) * sector;
+                (region.path.as_str(), span)
+            })
+            .collect();
+        let hit = |region: &LayoutRegion| {
+            spans.iter().any(|(path, span)| {
+                *path == region.path
+                    && region.bytes.start < span.end
+                    && span.start < region.bytes.end
+            })
+        };
+        let mut exposure = Exposure::default();
+        for (held, layout) in custody.records.iter().filter(|(s, _)| Some(**s) != slot) {
+            if hit(&layout.record) {
+                exposure.records.insert(*held);
+            }
+            if hit(&layout.entry) {
+                exposure.entries.insert(*held);
+            }
+        }
+        // Every span covers its own flipped bytes.
+        assert_always!(
+            spans
+                .iter()
+                .all(|(_, span)| span.end - span.start >= FLIPPED),
+            "journal store: a flipped sector span covers its flip"
+        );
+        exposure
+    }
+
+    /// Every slot the flip may damage besides its own.
+    fn slots(&self) -> impl Iterator<Item = u64> + '_ {
+        self.records.union(&self.entries).copied()
+    }
+}
+
 /// How many times the damage's own write and sync are retried: moonpool's
 /// storage chaos fails a sync or shortens a transfer now and then, never for
 /// long. An injection that never confirms is uncertain and not judged.
@@ -143,6 +201,16 @@ pub(crate) struct Injection {
 }
 
 impl Injection {
+    /// The slot the injection aims at, for a family that aims at one.
+    fn slot(&self) -> Option<u64> {
+        match self.family {
+            Family::EntryRot(slot) | Family::RecordRot(slot) | Family::DoubleFault(slot) => {
+                Some(slot)
+            }
+            Family::MetaRot | Family::HeaderRot => None,
+        }
+    }
+
     /// The slot a double fault damages, if this is one.
     pub(crate) fn double_fault(&self) -> Option<u64> {
         match self.family {
@@ -277,6 +345,27 @@ impl StorageWorld {
         }
         let damaged: Vec<u64> = faulty.iter().copied().filter(|s| *s >= first).collect();
         self.settle_cut_marks(key, faulty);
+        // A flip that never synced may have taken its whole sector: its
+        // neighbours' records may be damaged on disk (rebuilt in memory
+        // only, as a record rot's), and an entry the open reports faulty is
+        // a lost copy. Witness 13922779119779744936 (recipe
+        // 531950:9726856619194462578) on 47ce75b: an entry rot killed before
+        // its sync damaged the entry of a slot whose record a released
+        // double fault had left rotted, so the journal refused to open.
+        if let Some(exposure) = self.exposed.remove(key) {
+            assert_reachable!("journal store: a flip that never synced exposes its sector");
+            let lost: Vec<u64> = exposure
+                .entries
+                .iter()
+                .copied()
+                .filter(|slot| *slot >= first && faulty.contains(slot))
+                .collect();
+            self.marks.entry(key.to_string()).or_default().extend(lost);
+            self.rotted
+                .entry(key.to_string())
+                .or_default()
+                .extend(exposure.slots().filter(|slot| *slot >= first));
+        }
         if !damaged.is_empty() {
             self.rotted
                 .entry(key.to_string())
@@ -320,8 +409,42 @@ impl StorageWorld {
         if let Some(custody) = custody {
             custody.settled = false;
             custody.injected = true;
+            let exposure = Exposure::of(custody, injection.slot(), &injection.regions);
+            self.exposed.insert(key.to_string(), exposure);
         }
         Some(injection)
+    }
+
+    /// `key`'s planned flip synced: its sector neighbours are as they were.
+    pub(crate) fn note_flip_synced(&mut self, key: &str) {
+        self.exposed.remove(key);
+    }
+
+    /// Whether a flip of `regions` aimed at `slot` of `key` may damage its
+    /// sector neighbours too (see [`Exposure`]): none has a lost entry or a
+    /// rotted record already, so no neighbour becomes a double fault no
+    /// budget permitted, and the budget permits each entry it may lose.
+    fn sectors_permit(
+        &self,
+        key: &str,
+        custody: &Custody,
+        slot: u64,
+        regions: &[LayoutRegion],
+    ) -> bool {
+        let exposure = Exposure::of(custody, Some(slot), regions);
+        let marked = self.marks.get(key);
+        let rotted = self.rotted.get(key);
+        let permitted = exposure.slots().all(|neighbour| {
+            !marked.is_some_and(|m| m.contains(&neighbour))
+                && !rotted.is_some_and(|r| r.contains(&neighbour))
+        }) && exposure
+            .entries
+            .iter()
+            .all(|neighbour| self.may_corrupt_record(key, *neighbour));
+        if !permitted {
+            assert_reachable!("journal store: a flip's sector neighbour refuses it");
+        }
+        permitted
     }
 
     /// [`Self::plan_boot_damage`]'s choice, before it unsettles the custody.
@@ -816,6 +939,7 @@ impl StorageWorld {
         if buggify_with_prob!(P_ENTRY_ROT)
             && let Some(slot) = aim(&whole)
             && self.may_corrupt_record(key, slot)
+            && self.sectors_permit(key, &custody, slot, &[custody.records[&slot].entry.clone()])
         {
             self.marks.entry(key.to_string()).or_default().insert(slot);
             // The budget's own claim, at injection: the copy left behind is
@@ -833,6 +957,12 @@ impl StorageWorld {
         }
         if buggify_with_prob!(P_RECORD_ROT)
             && let Some(slot) = pick(&whole)
+            && self.sectors_permit(
+                key,
+                &custody,
+                slot,
+                &[custody.records[&slot].record.clone()],
+            )
         {
             self.rotted.entry(key.to_string()).or_default().insert(slot);
             return Some(Injection {
@@ -883,6 +1013,15 @@ impl StorageWorld {
             .iter()
             .copied()
             .filter(|slot| !custody.last_batch.contains(slot))
+            .filter(|slot| {
+                let layout = &custody.records[slot];
+                self.sectors_permit(
+                    key,
+                    custody,
+                    *slot,
+                    &[layout.record.clone(), layout.entry.clone()],
+                )
+            })
             .collect();
         if settled.is_empty() || !self.may_park(key) {
             return None;

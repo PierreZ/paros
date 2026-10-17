@@ -1008,7 +1008,9 @@ create.
   go to holds no slot on a draining machine.
 - **Re-placement** (#475 (re-place after the Down bound)). A machine down past
   `machine_replace_after` is gone (section 3.2). Its journals and sets move as a drain moves
-  them, and the machine stays registered. The simulation takes a machine that holds a slot down
+  them, and the machine stays registered. A move with no spare machine for a gone machine's slot
+  waits: it never shrinks a configuration off a gone machine, because that machine can answer
+  again. The simulation takes a machine that holds a slot down
   for longer than the bound on a gone-machine seed (`paros_sim::world::gone_machine`). Oracle:
   after chaos, every data journal that the cell can hold shows `healthy` in `parosctl status`.
   The view judges a journal against the configuration its bookings place.
@@ -1020,7 +1022,7 @@ create.
   draining and hold no slot. The registry then tombstones its `node_id`. `parosctl status`
   shows `drained` for a draining machine that holds no slot, and `down, in maintenance` for a
   down machine a window covers. Oracles: a window that is still open keeps every slot its
-  machine held, and a removed machine is retired and holds no slot. A graceful stop that hands
+  machine held, unless the tenant's own mode change placed the journal elsewhere, and a removed machine is retired and holds no slot. A graceful stop that hands
   the leadership on before `parosd` exits is a follow-up issue.
 - **Retire coordination** (#477 (retire coordination moves into the control journals)). The
   simulation's operators coordinate a joiner's retirement through the registry, not through a
@@ -1189,8 +1191,8 @@ tenant's default.
   slots: book the slots the mode lacks; ask the leader to reconfigure onto the new members under
   the new quorum system (a smaller mode keeps the slots placement does not release); once in
   force, write `Placed` with the configuration in force, then, once the leader's GC watermark
-  reached it, release the slots of the members it left. It retires none, unlike a move: the
-  machine stays bookable, and a later mode may place the journal on it again, where a retired
+  reached it, release the slots of the members it left. It retires none, unlike a move off a
+  draining machine (a move off a slow or gone machine retires none either): the machine stays bookable, and a later mode may place the journal on it again, where a retired
   identity never comes back. A journal with a slot on a draining machine is the move's until the move is done. One acceptor partition is a majority
   over at most every storage machine, so a mode the cell grew into is applied later. Each step
   starts from what the registry, the tenant control journal and the leader hold, so a later

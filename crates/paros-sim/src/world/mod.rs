@@ -215,6 +215,10 @@ pub(crate) struct StorageWorld {
     /// node's next open says which of them came back faulty: the open keeps
     /// those marks and clears the rest.
     cut_marks: BTreeMap<String, BTreeSet<u64>>,
+    /// The sector neighbours of each node's planned flip, until its apply
+    /// syncs (`injector::Exposure`): a kill before the sync may resolve every
+    /// sector the flip dirtied, so the next open taints them.
+    exposed: BTreeMap<String, injector::Exposure>,
     /// The matchmaker (#176) a `Batched` commit's cut may have left with an
     /// ambiguous registration, a crash verdict: the run's one matchmaker
     /// loss (see [`StorageWorld::permit_matchmaker_power_cut`]).
@@ -375,6 +379,7 @@ impl StorageWorld {
         self.marks.remove(key);
         self.cut_marks.remove(key);
         self.rotted.remove(key);
+        self.exposed.remove(key);
         self.custody.remove(key);
         // A copy an outage planned to lose goes with the whole disk.
         self.pending.remove(key);
