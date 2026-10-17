@@ -11,7 +11,8 @@
 //! On a coin the machine comes back soon after the longest bound instead
 //! (`BACK_SOON_MS` past it): the coordinator may have started a move, and
 //! the machine answers before the move ends. The coordinator then releases
-//! the slot the journal's configuration left (`machine::moves`' trim).
+//! the slot the journal's configuration left (`machine::modes`, which
+//! records the configuration in force first).
 //! When a node drew the production bound (5 min), that return would
 //! outlast the run: the machine then only reboots, inside `GONE_MS`.
 //!

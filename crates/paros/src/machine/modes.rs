@@ -20,14 +20,18 @@
 //!    journal on it again, and a retired identity never comes back to its
 //!    journal. The release stops the journal there, its store kept.
 //!
-//! A journal with a slot on a draining machine, on one held slow (#361 (slow
-//! machines)), or on one gone (down past the re-placement bound, #475
-//! (re-place after the Down bound)), is the move's, never a mode change's: it
-//! waits until the move is done. Else the change releases the slot the move
-//! booked, a slot outside the configuration in force, at every round, and the
-//! move never ends. A desired mode the cell cannot place waits: a configure
-//! judged it placeable when it was asked (`super::tenants`), and slots free up
-//! again.
+//! A journal with a slot on a draining machine, on one held slow (#361
+//! (slow machines)), or on one gone (down past the re-placement bound, #475 (re-place after the Down bound)), is the
+//! move's, never a mode change's: it waits until the move is done. Else the
+//! change releases the slot the move booked, a slot outside the
+//! configuration in force, at every round, and the move never ends. A gone
+//! machine takes no new slot of a mode change either, and counts as no
+//! machine to place on: the move would release it at once. A slot outside
+//! the configuration in force on a journal whose machines all stay is the
+//! change's alone: its last step records the configuration, then releases
+//! it (`super::moves` releases none). A desired mode the cell cannot place
+//! waits: a configure judged it placeable when it was asked
+//! (`super::tenants`), and slots free up again.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound::{Excluded, Unbounded};
@@ -36,7 +40,7 @@ use moonpool_core::Providers;
 use moonpool_rpc::RpcHandle;
 use paros_core::{AcceptorConfig, JournalIdentifier, NodeId, QuorumSystem, TenantId};
 
-use super::moves::{at_or_above, leader_of, stays};
+use super::moves::{at_or_above, bookable, leader_of, stays};
 use super::tenants::{TenantDesk, placed_count};
 use crate::client::cell::CellSession;
 use crate::client::journals::JournalAnswer;
@@ -172,8 +176,9 @@ impl Modes {
         let Ok(system) = crate::rpc::quorum_system_from_proto(&(&reply).into()) else {
             return Some(ModeStep::Waiting);
         };
-        let storage = desk.storage(cell.registry());
-        let machines = placement::machines(cell.registry(), storage.iter().copied());
+        // A gone machine takes no new slot: a move would release it at
+        // once (#475), and the change would book it again at every round.
+        let machines = bookable(cell.registry(), desk, &gone.gone);
         let count = placed_count(&change.desired, machines.len());
         let want = Want {
             role: Role::Acceptor,
@@ -181,7 +186,9 @@ impl Modes {
             count,
         };
         if change.slots.len() < count {
-            return self.book(client, cell, desk, &want, &change.slots).await;
+            return self
+                .book(client, cell, (desk, &gone.gone), &want, &change.slots)
+                .await;
         }
         let slot_nodes = nodes_of(&change.slots);
         let mut members: Vec<NodeId> = reply.members.iter().copied().map(NodeId).collect();
@@ -229,7 +236,7 @@ impl Modes {
             .filter_map(|tenant| registry.hosted_tenant(tenant).map(|h| (tenant, h.control)))
             .collect();
         // The machines placement may book, as every step counts them.
-        let storage = placement::machines(registry, desk.storage(registry).iter().copied()).len();
+        let storage = bookable(registry, desk, &gone.gone).len();
         let mut changes: BTreeMap<JournalIdentifier, Change> = BTreeMap::new();
         for (tenant, control) in hosted {
             let state = match desk.tenant(client, tenant, control).await {
@@ -270,25 +277,21 @@ impl Modes {
     }
 
     /// Book the slots the new mode lacks, so the journal holds `want`'s
-    /// count. `None` when a booking did not land.
+    /// count, on no machine `gone`. `None` when a booking did not land.
     async fn book<P: Providers>(
         &mut self,
         client: &Client<P>,
         cell: &mut CellSession,
-        desk: &mut TenantDesk,
+        (desk, gone): (&mut TenantDesk, &BTreeSet<NodeId>),
         want: &Want,
         slots: &[(u64, Booking)],
     ) -> Option<ModeStep> {
-        let storage = desk.storage(cell.registry());
         // A slow machine keeps no role (#361 (slow machines)): it takes no
         // new slot, as the slots it holds are left to the moves.
-        let machines = placement::machines(
-            cell.registry(),
-            storage
-                .iter()
-                .copied()
-                .filter(|node| cell.registry().keeps_roles(*node)),
-        );
+        let machines: Vec<placement::Machine> = bookable(cell.registry(), desk, gone)
+            .into_iter()
+            .filter(|m| cell.registry().keeps_roles(m.node))
+            .collect();
         let Ok(steps) = placement::plan(want, &machines, slots, want.target.tenant().0) else {
             return Some(ModeStep::Waiting);
         };

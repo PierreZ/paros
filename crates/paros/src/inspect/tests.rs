@@ -95,12 +95,7 @@ async fn write_store(
         peers: vec![ME],
         ..Config::new(ME, journal)
     };
-    let mut store = JournalStorage::new(
-        provider.clone(),
-        dir,
-        config.clone(),
-        JournalStoreConfig::small(),
-    );
+    let mut store = JournalStorage::new(provider.clone(), dir, config.clone(), compact());
     store.boot_scan().await.expect("boot");
     store.format(&config).await.expect("format");
     store.persist_ballot(ballot(4)).await.expect("promise");
@@ -130,7 +125,7 @@ async fn append(
         peers: vec![ME],
         ..Config::new(ME, journal)
     };
-    let mut store = JournalStorage::new(provider.clone(), dir, config, JournalStoreConfig::small());
+    let mut store = JournalStorage::new(provider.clone(), dir, config, compact());
     store.boot_scan().await.expect("boot");
     store
         .append_accepted(Slot(slot), ballot(4), command)
@@ -167,12 +162,8 @@ fn inspection_reads_a_store_and_writes_nothing() {
         ];
         write_store(&provider, "disk", journal, &commands, Some(1)).await;
         let set = JournalIdentifier::new(TenantId(5), JournalId::UNSET);
-        let mut mm = JournalMatchmakerStorage::new(
-            provider.clone(),
-            "disk/matchmakers/5",
-            set,
-            JournalStoreConfig::small(),
-        );
+        let mut mm =
+            JournalMatchmakerStorage::new(provider.clone(), "disk/matchmakers/5", set, compact());
         mm.boot_scan().await.expect("boot");
         let mm_config = MatchmakerConfig {
             id: MatchmakerId(ME.0),
@@ -183,15 +174,9 @@ fn inspection_reads_a_store_and_writes_nothing() {
         drop(mm);
 
         let before = snapshot(&provider, "disk").await;
-        let image = inspect(
-            &provider,
-            "disk",
-            JournalStoreConfig::small(),
-            &provider,
-            "scratch",
-        )
-        .await
-        .expect("inspects");
+        let image = inspect(&provider, "disk", compact(), &provider, "scratch")
+            .await
+            .expect("inspects");
         assert_eq!(snapshot(&provider, "disk").await, before, "nothing written");
 
         assert!(image.record.is_none(), "no machine record on this disk");
@@ -286,15 +271,9 @@ fn names_come_from_the_registry_prefix() {
             .expect("write");
         drop(file);
 
-        let image = inspect(
-            &provider,
-            "disk",
-            JournalStoreConfig::small(),
-            &provider,
-            "scratch",
-        )
-        .await
-        .expect("inspects");
+        let image = inspect(&provider, "disk", compact(), &provider, "scratch")
+            .await
+            .expect("inspects");
         assert!(
             matches!(image.record, Some(Ok(_))),
             "the record reads: {:?}",
@@ -314,4 +293,22 @@ fn names_come_from_the_registry_prefix() {
             "a slot past a hole names nothing"
         );
     }));
+}
+
+/// A store with segments of a few blocks, so a short test crosses segment
+/// rollover and prefix deletion. Tests only: a deployment keeps the
+/// default geometry (#600 (drop the small layout)).
+fn compact() -> JournalStoreConfig {
+    JournalStoreConfig {
+        geometry: compact_geometry(),
+        ..JournalStoreConfig::default()
+    }
+}
+
+fn compact_geometry() -> crate::journal::Geometry {
+    crate::journal::Geometry {
+        persist_blocks: 8,
+        gap_blocks: 0,
+        entry_blocks: 16,
+    }
 }

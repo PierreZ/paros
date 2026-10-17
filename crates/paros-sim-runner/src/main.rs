@@ -62,6 +62,21 @@ fn main() {
     let declared = gates::judge(&slots);
     gates::print(&declared, "  ");
     gates::print_rarest(&slots, RAREST);
+    // A CI shard hands its gate defects (a declared gate that never ran, a
+    // gate that never fired) to the job that judges every shard's together
+    // (`.github/workflows/rust.yml`): such a defect fails CI only when every
+    // shard has it. Judged per shard, a rare gate would miss twice as often as
+    // with one sweep.
+    let shard_out = std::env::var_os(MISSING_GATES_OUT);
+    if let Some(path) = &shard_out {
+        write_gate_defects(std::path::Path::new(path), &declared.missing, &report);
+    }
+    let shard = shard_out.is_some();
+    // A gate that never fired keeps the sweep from saturating, so a shard
+    // with a gate defect also hits the cap: that timeout is the gate's, and
+    // the judging job owns it. A shard whose every gate fired and that still
+    // hit the cap fails on its own.
+    let gate_defect = !report.coverage_violations.is_empty() || !declared.missing.is_empty();
     if let Some(more) = top_up.as_ref().filter(|more| !is_clean(more)) {
         print_failed_runs(more);
         println!(
@@ -75,9 +90,9 @@ fn main() {
         std::process::exit(1);
     }
     if is_clean(&report)
-        && report.coverage_violations.is_empty()
-        && declared.missing.is_empty()
-        && !report.convergence_timeout
+        && (shard || report.coverage_violations.is_empty())
+        && (shard || declared.missing.is_empty())
+        && (!report.convergence_timeout || (shard && gate_defect))
     {
         println!("  Chain safety, recovery, coverage, and saturation gates are green");
     } else {
@@ -97,6 +112,44 @@ fn main() {
         // any correctness, coverage, or saturation defect must fail CI.
         std::process::exit(1);
     }
+}
+
+/// The environment variable that makes this run a CI shard: the path where
+/// it writes its gate defects, one per line, and no longer fails on them. A
+/// safety violation, a failed run or a convergence timeout with every gate
+/// fired still fails the shard.
+const MISSING_GATES_OUT: &str = "PAROS_SIM_MISSING_GATES";
+
+/// Write the shard's gate defects, sorted, one per line: each declared gate
+/// that never ran and each gate moonpool reports as never fired, by its slot
+/// name (the `Debug` form, so a line holds exactly one message). Two shards
+/// name one gate alike, so the judging job can intersect their files.
+fn write_gate_defects(path: &std::path::Path, missing: &[(&str, &str)], report: &SimulationReport) {
+    let never_fired = report.coverage_violations.iter().map(|v| violated_gate(v));
+    let mut lines: Vec<String> = missing
+        .iter()
+        .map(|&(msg, _)| gates::slot_name(msg))
+        .chain(never_fired)
+        .map(|msg| format!("{msg:?}\n"))
+        .collect();
+    lines.sort();
+    lines.dedup();
+    if let Err(error) = std::fs::write(path, lines.concat()) {
+        println!(
+            "  cannot write the gate defects to {}: {error}",
+            path.display()
+        );
+        std::process::exit(1);
+    }
+}
+
+/// The gate a moonpool coverage violation names: every one quotes its slot
+/// name as `('<name>')`. A violation in another shape is kept whole.
+fn violated_gate(violation: &str) -> &str {
+    violation
+        .split_once("('")
+        .and_then(|(_, rest)| rest.rsplit_once("')"))
+        .map_or(violation, |(name, _)| name)
 }
 
 /// The seeds the declared gates are judged over, at least. The coverage
@@ -164,5 +217,29 @@ fn print_guidance(report: &SimulationReport) {
             "  buckets {:?}: {} discovered, {} hits",
             bucket.msg, bucket.buckets_discovered, bucket.total_hits,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::violated_gate;
+
+    #[test]
+    fn a_coverage_violation_names_its_gate() {
+        assert_eq!(
+            violated_gate(
+                "assert_sometimes!('journal read: a wake') has 0% success rate (4 checks)"
+            ),
+            "journal read: a wake"
+        );
+        assert_eq!(
+            violated_gate("assert_reachable!('a crash's site') was never reached"),
+            "a crash's site"
+        );
+        assert_eq!(
+            violated_gate("numeric assert_sometimes ('a gap') has 0% success rate (1 checks)"),
+            "a gap"
+        );
+        assert_eq!(violated_gate("something else"), "something else");
     }
 }

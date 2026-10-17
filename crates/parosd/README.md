@@ -171,7 +171,6 @@ The same three machines on one host, configured by the environment (each
 variable also has its `--flag`, see `parosd --help`), each with no peer:
 
 ```sh
-export PAROS_STORE_LAYOUT=small
 for i in 1 2 3; do
   PAROS_LISTEN=127.0.0.1:450$i PAROS_DATA_DIR=node$i parosd &
 done
@@ -197,7 +196,6 @@ error (exit 2), so a typo never silently keeps a default.
 | `PAROS_CAPACITY` | its capacity, in role slots (default 32): one slot holds one acceptor of one journal |
 | `PAROS_ZONE` | its zone, the `paros/zone` tag placement spreads over (#575 (key:value tags)) |
 | `PAROS_RACK` | its rack, the `paros/rack` tag (optional) |
-| `PAROS_STORE_LAYOUT` | `default` (64 MiB segments) or `small` (laptops, tests) |
 | `PAROS_<FIELD>[_MS]` | one override per driver tunable (below) |
 | `PAROS_TLS_CERT`, `PAROS_TLS_KEY`, `PAROS_TLS_CA` | its certificate chain, its key and the universe's authority, PEM (`parosctl tls init`): all three turn TLS on for every session it serves and dials; only some is an error |
 | `PAROS_TLS_CLIENT_AUTH` | `required` (mutual TLS, the default), `optional` or `off` (server-authenticated TLS): what it asks of a caller |
@@ -324,7 +322,7 @@ required, with no default tenant and no fixed id (#235, #239, `docs/architecture
 | `parosctl reconfigure --journal J --members a,b,c [--quorum majority\|flexible:Q1:Q2\|partitions:F:P]` | asks the leader of journal `J` for a new acceptor set; no journal is the default (#439), and a machine that does not serve `J` refuses it (`unknown_journal`) |
 | `parosctl retire --journal J --node N [--gc-watermark ROUND.NODE]` | retires a machine from journal `J`, carrying the GC watermark (read from the `inspect` of `J`'s leader when absent); the machine keeps serving its other journals |
 | `parosctl bench [--local N [--local-dir DIR]] [--tenant T] [--journals N] [--topology RxC,…] [--clients N] [--duration D] [--ramp D] [--mix CALL=W,…] [--rate R] [--truncate-every D] [--histograms FILE]` | the load generator (#517 (`parosctl bench`), #194 (throughput benchmark)): clients `write`, `read-tail`, `read-start` and `set-leader` the journals `bench-RxC-0`… of tenant `T` (created when missing), one set per `--topology` (`3x1` by default; several run in turn and print side by side, each on a new local cell) by the `--mix` weights, closed loop or open loop at `--rate` calls per second, against the servers or a local cell of N machines; the clients of one journal keep their writes in flight on it at once, through `paros::client::Pipeline` (#597 (several writes in flight per journal)); they print throughput and latency per call each second, then the totals; `--json` prints one report with the commit and the host; `--histograms` writes the raw HDR histograms as JSON lines; the site's bench page |
-| `parosctl store inspect <data-dir> [--records] [--layout default\|small] [--scratch DIR]` | offline (#365): reads a stopped machine's disk without `parosd`: the machine record, every journal store (format marker and its `Config`, promise, chosen index, floor, sealed journal state, faulty slots; `--records`: every accepted slot and its records) and every matchmaker set (marker, generation, phase, registrations). Read-only: each store is copied to a scratch directory (`--scratch`, by default a fresh one under the system's temporary directory, removed after) and the copy is opened. Names come from the cell's journals on the disk; exit 3 when the record or a store does not read |
+| `parosctl store inspect <data-dir> [--records] [--scratch DIR]` | offline (#365): reads a stopped machine's disk without `parosd`: the machine record, every journal store (format marker and its `Config`, promise, chosen index, floor, sealed journal state, faulty slots; `--records`: every accepted slot and its records) and every matchmaker set (marker, generation, phase, registrations). Read-only: each store is copied to a scratch directory (`--scratch`, by default a fresh one under the system's temporary directory, removed after) and the copy is opened. Names come from the cell's journals on the disk; exit 3 when the record or a store does not read |
 | `parosctl tls init --out DIR --machines a,b,c [--frontends f] [--admins admin] [--universe U] [--days N]` | offline: writes the authority (`ca.crt`, `ca.key`) and a certificate per machine, frontend and admin (`<name>.crt`, `<name>.key`, mode 0600), and prints the variables each process reads; never overwrites a file |
 | `parosctl tls ca`, `parosctl tls issue <name> --role machine\|frontend\|admin\|client --ca-dir DIR [--host h] [--ip a]` | one authority, or one more certificate from it (a new machine, a renewal) |
 | `parosctl tls show <file>…`, `parosctl tls verify <file> --ca ca.crt` | what a file holds (identity, names, use, validity, days left); checks a certificate as a handshake would |
