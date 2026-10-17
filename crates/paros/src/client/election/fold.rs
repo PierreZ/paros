@@ -369,6 +369,35 @@ impl ElectionFold {
         assert!(!self.known, "a fold past a gap knows nothing yet");
     }
 
+    /// The floor outran a reader (#640 (election reader livelock)): the
+    /// fold resumes at the journal's `tail`, past the floor `floor`, and
+    /// knows nothing until a renewal there names the leader. Unlike
+    /// [`ElectionFold::gap`], no campaign or hand-off anchors it: only the
+    /// record at a leader's truncation floor began a term, and a record
+    /// written at the tail may be a campaign that lost (witness
+    /// 1055341407506467323 on 9d93679: an operator's late campaign for a
+    /// taken term). A tail at or below the floor is the floor itself, a
+    /// [`ElectionFold::gap`].
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own postconditions fails: a programmer error.
+    pub fn resume_at_tail(&mut self, floor: u64, tail: u64) {
+        if tail <= floor {
+            self.gap(floor);
+            return;
+        }
+        if tail <= self.next {
+            return;
+        }
+        self.next = tail;
+        self.known = false;
+        self.floor = None;
+        self.leader = None;
+        assert!(!self.known, "a fold at the tail knows nothing yet");
+        assert!(self.floor.is_none(), "the tail is no truncation floor");
+    }
+
     /// Fold the record at position `seq`.
     ///
     /// # Panics
@@ -695,6 +724,25 @@ mod tests {
         assert!(!cut.is_known());
         assert_eq!(cut.leader(), None);
         assert_eq!(cut.term(), 3, "terms never go back past a gap");
+    }
+
+    #[test]
+    fn a_fold_at_the_tail_anchors_only_on_a_renewal() {
+        // 1 leads term 3 and truncated to its renewal at 4; a reader the
+        // floor outran resumes at the tail, 6, where 2's campaign for the
+        // taken term 3 lost.
+        let mut cut = ElectionFold::new();
+        cut.resume_at_tail(4, 6);
+        assert_eq!(cut.next(), 6);
+        assert_eq!(cut.absorb(6, &campaign(3, 2)), Change::Ignored);
+        assert!(!cut.is_known(), "a campaign at the tail anchors nothing");
+        assert_eq!(cut.leader(), None);
+        assert_eq!(cut.absorb(7, &renew(3, 1)), Change::Adopted);
+        assert_eq!(cut.leader().map(|l| (l.term, l.candidate.id)), Some((3, 1)));
+        // A tail at the floor is the floor: its record anchors.
+        let mut at_floor = ElectionFold::new();
+        at_floor.resume_at_tail(4, 4);
+        assert_eq!(at_floor.absorb(4, &campaign(5, 9)), Change::Adopted);
     }
 
     #[test]
