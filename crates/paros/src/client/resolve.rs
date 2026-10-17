@@ -93,14 +93,49 @@ pub async fn resolve<P: Providers>(
     let request = wire::Resolve {
         tenant: tenant.to_vec(),
     };
+    let first = ask(providers, rpc, names, entry, &request, timeout).await;
+    // Another cell hosts the tenant (#232 (multiple cells)): ask once more,
+    // at the entry endpoint the universe directory records for it. One hop
+    // only, so a redirect never loops.
+    let Some(ack) = &first else {
+        return Resolution::Unavailable;
+    };
+    if ack.refusal != "other_cell" || ack.tenant_cell_endpoint.is_empty() {
+        return from_wire(ack);
+    }
+    let Ok(endpoint) = ack
+        .tenant_cell_endpoint
+        .iter()
+        .map(|member| Address::parse(&member.addr))
+        .collect::<Result<Vec<_>, _>>()
+    else {
+        return Resolution::Malformed;
+    };
+    moonpool_assertions::reachable!("resolve: a client follows a tenant to its other cell");
+    match ask(providers, rpc, names, &endpoint, &request, timeout).await {
+        Some(second) => from_wire(&second),
+        _ => Resolution::Unavailable,
+    }
+}
+
+/// Ask each address of `entry` in turn: the first answer that is a
+/// verdict (anything but `unavailable`), else `None`.
+async fn ask<P: Providers>(
+    providers: &P,
+    rpc: &RpcHandle<P>,
+    names: &Names,
+    entry: &[Address],
+    request: &wire::Resolve,
+    timeout: Duration,
+) -> Option<wire::ResolveAck> {
     for target in entry {
-        match call_once::<P, ResolveRpc>(providers, rpc, names, target, &request, timeout).await {
+        match call_once::<P, ResolveRpc>(providers, rpc, names, target, request, timeout).await {
             Some(Ok(ack)) if ack.refusal == "unavailable" => {}
-            Some(Ok(ack)) => return from_wire(&ack),
+            Some(Ok(ack)) => return Some(ack),
             _ => {}
         }
     }
-    Resolution::Unavailable
+    None
 }
 
 impl Resolved {

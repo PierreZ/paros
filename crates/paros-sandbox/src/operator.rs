@@ -256,6 +256,7 @@ impl Desk {
             token: Vec::new(),
             root_key: None,
             failures_per_partition: paros::client::initialize::FAILURES_PER_PARTITION,
+            idle: false,
         };
         let run = initialize(
             &self.providers,

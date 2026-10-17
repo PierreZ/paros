@@ -153,6 +153,19 @@ parosctl read "$J"
 parosctl tenant list
 parosctl journal list acme
 
+# A second cell (#232 (multiple cells)): one more machine, formed as an idle cell (no
+# universe), then added to the universe the first cell hosts. A tenant goes into it with
+# `--cell`, and any machine resolves it there.
+PAROS_LISTEN=127.0.0.1:4504 PAROS_DATA_DIR=/tmp/paros-demo/node4 \
+  parosd > /tmp/paros-demo/node4.log 2>&1 &
+parosctl --servers 127.0.0.1:4504 init --idle --members 127.0.0.1:4504
+parosctl universe add-cell --members 127.0.0.1:4504 --name second
+parosctl tenant create globex --cell second
+parosctl resolve globex
+# A cell leaves the universe only once it hosts no tenant; its id never comes back.
+parosctl tenant delete globex
+parosctl universe remove-cell second
+
 # Stop: SIGTERM shuts each machine down cleanly; remove the data to start over.
 pkill parosd
 rm -rf /tmp/paros-demo

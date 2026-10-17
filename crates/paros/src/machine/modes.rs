@@ -20,8 +20,8 @@
 //!    journal on it again, and a retired identity never comes back to its
 //!    journal. The release stops the journal there, its store kept.
 //!
-//! A journal with a slot on a draining machine, or on one gone (down past
-//! the re-placement bound, #475 (re-place after the Down bound)), is the
+//! A journal with a slot on a draining machine, on one held slow (#361
+//! (slow machines)), or on one gone (down past the re-placement bound, #475 (re-place after the Down bound)), is the
 //! move's, never a mode change's: it waits until the move is done. Else the
 //! change releases the slot the move booked, a slot outside the
 //! configuration in force, at every round, and the move never ends. A gone
@@ -135,7 +135,7 @@ impl Modes {
         (providers, rpc, names, client): (&P, &RpcHandle<P>, &Names, &Client<P>),
         cell: &mut CellSession,
         desk: &mut TenantDesk,
-        gone: &BTreeSet<NodeId>,
+        gone: &super::moves::Leaving,
     ) -> Option<ModeStep> {
         let Some(change) = self.next(client, cell, desk, gone).await? else {
             return Some(ModeStep::Idle);
@@ -178,7 +178,7 @@ impl Modes {
         };
         // A gone machine takes no new slot: a move would release it at
         // once (#475), and the change would book it again at every round.
-        let machines = bookable(cell.registry(), desk, gone);
+        let machines = bookable(cell.registry(), desk, &gone.gone);
         let count = placed_count(&change.desired, machines.len());
         let want = Want {
             role: Role::Acceptor,
@@ -187,7 +187,7 @@ impl Modes {
         };
         if change.slots.len() < count {
             return self
-                .book(client, cell, (desk, gone), &want, &change.slots)
+                .book(client, cell, (desk, &gone.gone), &want, &change.slots)
                 .await;
         }
         let slot_nodes = nodes_of(&change.slots);
@@ -219,7 +219,7 @@ impl Modes {
 
     /// The next journal after the last one, in id order and wrapping, whose
     /// placement differs from its desired mode: a live journal of a tenant
-    /// the cell hosts, with no slot on a draining machine or one `gone`.
+    /// the cell hosts, with no slot on a draining, slow or `gone` machine.
     /// `None` when a later term fenced a tenant control journal: the term
     /// is over.
     async fn next<P: Providers>(
@@ -227,7 +227,7 @@ impl Modes {
         client: &Client<P>,
         cell: &CellSession,
         desk: &mut TenantDesk,
-        gone: &BTreeSet<NodeId>,
+        gone: &super::moves::Leaving,
     ) -> Option<Option<Change>> {
         let registry = cell.registry();
         let hosted: Vec<(TenantId, paros_core::JournalId)> = registry
@@ -236,7 +236,7 @@ impl Modes {
             .filter_map(|tenant| registry.hosted_tenant(tenant).map(|h| (tenant, h.control)))
             .collect();
         // The machines placement may book, as every step counts them.
-        let storage = bookable(registry, desk, gone).len();
+        let storage = bookable(registry, desk, &gone.gone).len();
         let mut changes: BTreeMap<JournalIdentifier, Change> = BTreeMap::new();
         for (tenant, control) in hosted {
             let state = match desk.tenant(client, tenant, control).await {
@@ -247,7 +247,7 @@ impl Modes {
             for (id, journal) in state.live() {
                 let identifier = JournalIdentifier::new(tenant, id);
                 let slots = slots(registry, identifier);
-                // A journal on a draining machine, or on one gone, is the
+                // A journal on a draining, slow or gone machine is the
                 // move's (`super::moves`, the same `stays`); one with no slot
                 // was never placed by this cell.
                 if slots.is_empty() || slots.iter().any(|(_, b)| !stays(registry, gone, b.node)) {
@@ -286,7 +286,12 @@ impl Modes {
         want: &Want,
         slots: &[(u64, Booking)],
     ) -> Option<ModeStep> {
-        let machines = bookable(cell.registry(), desk, gone);
+        // A slow machine keeps no role (#361 (slow machines)): it takes no
+        // new slot, as the slots it holds are left to the moves.
+        let machines: Vec<placement::Machine> = bookable(cell.registry(), desk, gone)
+            .into_iter()
+            .filter(|m| cell.registry().keeps_roles(m.node))
+            .collect();
         let Ok(steps) = placement::plan(want, &machines, slots, want.target.tenant().0) else {
             return Some(ModeStep::Waiting);
         };

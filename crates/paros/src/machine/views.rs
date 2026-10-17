@@ -139,9 +139,11 @@ impl<P: Providers> Desk<P> {
         let coordinator = read_election(&self.client, self.plan.election, 0)
             .await
             .and_then(|fold| fold.leader().map(|l| (l.candidate.id, l.term)));
-        let directory = self
+        let universe = self
             .plan
             .fleet
+            .or_else(|| self.registry.state().universe().map(|p| p.directory));
+        let directory = universe
             .is_some()
             .then(|| self.directory.state().clone())
             .filter(|d| d.fleet().is_some());
@@ -156,7 +158,7 @@ impl<P: Providers> Desk<P> {
             founders: &self.founders,
             control: self.plan.control,
             election: self.plan.election,
-            universe: self.plan.fleet,
+            universe,
             registry: self.registry.state(),
             directory: directory.as_ref(),
             tenants: &tenants,
@@ -194,9 +196,16 @@ impl<P: Providers> Desk<P> {
             self.registry = Folder::new(Registry::new(self.founders.iter().map(|(id, _)| *id)));
             return false;
         }
-        if let Some(universe) = self.plan.fleet
+        // The cell's own universe directory, else the one its join points
+        // at (#232 (multiple cells)), through that cell's machines.
+        let reader = match (self.plan.fleet, self.registry.state().universe()) {
+            (_, Some(pointer)) => Some((pointer.directory, self.client.elsewhere(&pointer.hosts))),
+            (Some(universe), None) => Some((universe, self.client.clone())),
+            (None, None) => None,
+        };
+        if let Some((universe, reader)) = reader
             && !matches!(
-                load(&mut self.directory, universe, &self.client, 0, 0).await,
+                load(&mut self.directory, universe, &reader, 0, 0).await,
                 LoadOutcome::Loaded { .. }
             )
         {

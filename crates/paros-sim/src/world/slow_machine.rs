@@ -8,7 +8,10 @@
 //! its slow time (`crate::chain_workload::fleet`).
 //!
 //! The injector strikes once, when the cell formed, then makes the machine
-//! healthy again. `init` mostly runs in the recovery tail, so like the
+//! healthy again. Half the strikes inside the chaos window last 10–16 s, cut
+//! at `LATE_WINDOW` into the tail (#361 (slow machines)): the cell
+//! coordinator judges the machine slow and moves its journals off it.
+//! `init` mostly runs in the recovery tail, so like the
 //! silent machine (`super::silent_machine`) it may strike up to
 //! `LATE_WINDOW` into the tail. A slow machine is not a dead one: the cell
 //! keeps every member, and the slowness ends long before the tail's
@@ -27,6 +30,14 @@ use super::outage::POLL;
 /// How long the machine stays slow, in milliseconds: several `Load`
 /// windows at the scenario's 1 s `load_interval`.
 const SLOW_MS: std::ops::Range<u64> = 4_000..6_001;
+
+/// How long the machine stays slow on a long strike, in milliseconds (#361
+/// (slow machines)): long enough for the cell coordinator to judge it slow
+/// over its rounds and move a journal off it, a few steps per journal.
+const LONG_SLOW_MS: std::ops::Range<u64> = 10_000..16_001;
+
+/// How often a long strike checks whether the tail went past its window.
+const STEP: Duration = Duration::from_millis(100);
 
 /// The CPU factor range: the top of the gray failures' `10..=1000`, so a
 /// member's ordinary work (about a thousandth of a core) fills its core.
@@ -81,10 +92,26 @@ impl FaultInjector for SlowMachine {
         assert_reachable!("load: the scenario slows a machine of the cell");
         tracing::info!(%target, cpu = slowness.cpu, disk = slowness.disk, "slow_machine_strikes");
         ctx.set_slowness(&target, slowness)?;
-        let hold = Duration::from_millis(moonpool_sim::sim_random_range(SLOW_MS));
-        // A sleep cut short ends the run: the machine is healthy either way
-        // once nobody runs.
-        let _ = time.sleep(hold).await;
+        // Half the strikes inside the chaos window are long (#361 (slow
+        // machines)): the machine is judged slow and its journals move off
+        // it. A long strike still ends at most `LATE_WINDOW` into the tail.
+        let long = crate::in_chaos() && moonpool_sim::sim_random_range(0..2_u64) == 0;
+        if long {
+            assert_reachable!("slow: the scenario slows a machine long enough to move");
+        }
+        let range = if long { LONG_SLOW_MS } else { SLOW_MS };
+        let until = time.now() + Duration::from_millis(moonpool_sim::sim_random_range(range));
+        while time.now() < until && !(long && crate::past_cutoff(time.now(), LATE_WINDOW)) {
+            // A sleep cut short ends the run: the machine is healthy either
+            // way once nobody runs.
+            if time
+                .sleep(STEP.min(until.saturating_sub(time.now())))
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
         ctx.set_slowness(&target, Slowness::HEALTHY)
     }
 }

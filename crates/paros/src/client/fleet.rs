@@ -86,6 +86,7 @@
 //! caller's draws, and [`FleetSession::create_tenant`] moves to the next one
 //! when the fleet tenant holds a draw already.
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use moonpool_core::Providers;
@@ -98,6 +99,7 @@ use super::checkpoint::{
 };
 use super::outcome::ClaimOutcome;
 use super::writer::{Writer, WriterOutcome};
+use crate::Address;
 use crate::fleet::CellKind;
 use crate::fleet::RootKeyEntry;
 use crate::fleet::{CellState, FleetCommand, FleetDirectory, FleetEntry, TenantState};
@@ -105,6 +107,19 @@ use crate::machine::ControlJournals;
 use crate::system::{FleetRegistration, Registry};
 use crate::tags::UserTags;
 use crate::tenant::Survives;
+
+/// An idle cell that `universe add-cell` joins to the universe (#232
+/// (multiple cells)): learned from its machines' node-only `Inspect`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CellJoin {
+    /// Its control journals: its cell tenant's and its election journal
+    /// (an idle cell hosts no universe tenant).
+    pub journals: ControlJournals,
+    /// Its entry endpoint: its founding members by id and address.
+    pub endpoint: Vec<(u64, Address)>,
+    /// Its name, for people (empty: unnamed).
+    pub name: Vec<u8>,
+}
 
 /// One step a fleet operation wrote.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -116,6 +131,10 @@ pub enum Stage {
     AddCell,
     /// The fleet tenant marked the cell `READY`.
     CellReady,
+    /// The fleet tenant marked the cell `REMOVING` (#232).
+    CellRemoving,
+    /// The fleet tenant removed the cell and tombstoned its id (#232).
+    RemoveCell,
     /// The fleet tenant registered the tenant, `REGISTERING`.
     RegisterTenant,
     /// The fleet tenant marked the tenant `ERROR`: its cell refused its
@@ -158,6 +177,43 @@ pub enum FleetRefusal {
     },
     /// The fleet tenant's entry for the cell is being removed.
     CellRemoving,
+    /// The cell named is not `READY` (#232 (multiple cells)): no tenant is
+    /// assigned to it.
+    CellNotReady {
+        /// The cell.
+        cell_id: u64,
+    },
+    /// The directory holds no entry for the cell (#232).
+    UnknownCell {
+        /// The cell.
+        cell_id: u64,
+    },
+    /// The cell was removed from the universe (#232): its id is tombstoned
+    /// and never added again.
+    CellRemoved {
+        /// The cell.
+        cell_id: u64,
+    },
+    /// The cell hosts a tenant other than its cell tenant (#232): remove or
+    /// move it first.
+    CellNotEmpty {
+        /// The cell.
+        cell_id: u64,
+        /// A tenant it hosts.
+        tenant: TenantId,
+    },
+    /// The cell hosts the universe tenant, or is the cell this session
+    /// talks to (#232): it is not removed.
+    HostsUniverse {
+        /// The cell.
+        cell_id: u64,
+    },
+    /// The directory records no entry endpoint for the cell (#232): no
+    /// machine of it can be reached.
+    NoEndpoint {
+        /// The cell.
+        cell_id: u64,
+    },
     /// Every tenant identifier drawn is held by an entry or was removed: draw
     /// more.
     IdTaken,
@@ -363,6 +419,15 @@ pub struct FleetSession {
     names: (Vec<u8>, Vec<u8>),
     /// The root public key `init` writes into the universe entry (#245).
     root_key: Option<RootKeyEntry>,
+    /// This cell's entry endpoint, which `init` writes into its cell entry
+    /// (#232 (multiple cells)): its founding members by id and address.
+    endpoint: Vec<(u64, Address)>,
+    /// The cell a tenant this session creates is assigned to (#232); this
+    /// session's own cell, else the first `READY` one, by default.
+    target: Option<u64>,
+    /// The control journals of the other cells this session read, each
+    /// folded as a reader (#232), by cell id.
+    others: BTreeMap<u64, Folder<Registry>>,
 }
 
 impl FleetSession {
@@ -392,7 +457,28 @@ impl FleetSession {
             tags: UserTags::none(),
             names: (Vec::new(), Vec::new()),
             root_key: None,
+            endpoint: Vec::new(),
+            target: None,
+            others: BTreeMap::new(),
         })
+    }
+
+    /// Give this session's cell entry `endpoint`, its founding members by id
+    /// and address, when `init` adds it (#232 (multiple cells)): where a
+    /// caller that reached another cell is pointed, and where another
+    /// cell reads the universe directory.
+    #[must_use]
+    pub fn with_endpoint(mut self, endpoint: Vec<(u64, Address)>) -> Self {
+        self.endpoint = endpoint;
+        self
+    }
+
+    /// Assign every tenant this session creates to cell `cell_id` (#232
+    /// (multiple cells)): it must be `READY`.
+    #[must_use]
+    pub fn with_cell(mut self, cell_id: u64) -> Self {
+        self.target = Some(cell_id);
+        self
     }
 
     /// Give the universe `key` as its first root public key when `init`
@@ -444,6 +530,12 @@ impl FleetSession {
     #[must_use]
     pub fn diverged(&self) -> Option<(JournalIdentifier, u64)> {
         self.diverged
+    }
+
+    /// The universe tenant's control journal: the universe directory.
+    #[must_use]
+    pub fn directory_journal(&self) -> JournalIdentifier {
+        self.fleet
     }
 
     /// The fleet directory as this session last folded it.
@@ -542,6 +634,7 @@ impl FleetSession {
                 control,
                 name: self.names.1.clone(),
                 kind: CellKind::default(),
+                endpoint: self.endpoint.clone(),
             };
             return self
                 .write_directory(client, first, fleet, add, Stage::AddCell)
@@ -615,9 +708,18 @@ impl FleetSession {
             if directory.tenant(draw.tenant).is_some() || directory.is_removed(draw.tenant) {
                 return Step::Refused(FleetRefusal::IdTaken);
             }
-            let Some((cell_id, _)) = directory.cells().find(|(_, c)| c.state == CellState::Ready)
-            else {
-                return Step::Refused(FleetRefusal::NotInitialized);
+            let ready = |id: &u64| directory.cell(*id).map(|c| c.state) == Some(CellState::Ready);
+            let cell_id = if let Some(cell_id) = self.target {
+                if !ready(&cell_id) {
+                    return Step::Refused(FleetRefusal::CellNotReady { cell_id });
+                }
+                cell_id
+            } else {
+                let first = directory.cells().map(|(id, _)| id).find(|id| ready(id));
+                let Some(cell_id) = Some(self.journals.cell_id).filter(ready).or(first) else {
+                    return Step::Refused(FleetRefusal::NotInitialized);
+                };
+                cell_id
             };
             let register = FleetCommand::RegisterTenant {
                 control: draw,
@@ -655,7 +757,8 @@ impl FleetSession {
         if let Err(stop) = self.cell_of(client, first, fleet, cell_id).await {
             return stop;
         }
-        let cell = self.cell.state();
+        let cell_journal = self.cell_journal(cell_id);
+        let cell = self.registry_of(cell_id);
         if cell.dropped(tenant) {
             // Removed under this operation: its fleet directory fold is stale.
             self.directory_open = false;
@@ -687,7 +790,7 @@ impl FleetSession {
             _ => {
                 moonpool_assertions::reachable!("fleet: a creation waits for the cell to host it");
                 Step::Interrupted(Interrupted::NotHosted {
-                    journal: self.journals.cell,
+                    journal: cell_journal,
                     tenant,
                 })
             }
@@ -733,10 +836,10 @@ impl FleetSession {
         // The cell coordinator tombstones a `REMOVING` tenant once it reads
         // it in the directory, whether the cell hosts it or not (#225): wait
         // for it, claiming nothing.
-        if !self.cell.state().dropped(tenant) {
+        if !self.registry_of(cell_id).dropped(tenant) {
             moonpool_assertions::reachable!("fleet: a removal waits for the cell to drop it");
             return Step::Interrupted(Interrupted::NotDropped {
-                journal: self.journals.cell,
+                journal: self.cell_journal(cell_id),
                 tenant,
             });
         }
@@ -750,6 +853,266 @@ impl FleetSession {
             Some(tenant),
         )
         .await
+    }
+
+    /// One step of `universe add-cell` (#232 (multiple cells)): the idle
+    /// cell `joining` joins this universe. The fleet tenant adds it,
+    /// `REGISTERING`, with its entry endpoint; the idle cell's coordinator
+    /// joins it, which [`crate::client::universe::join`] asks for (the step
+    /// is then [`Interrupted::NotJoined`]); the fleet tenant marks it `READY`.
+    /// Ends with the cell's id once the directory holds it `READY` and the
+    /// cell names this universe.
+    #[tracing::instrument(level = "trace", skip_all, fields(cell = joining.journals.cell_id))]
+    pub async fn add_cell_step<P: Providers>(
+        &mut self,
+        client: &Client<P>,
+        first: usize,
+        joining: &CellJoin,
+    ) -> Step<u64> {
+        let cell_id = joining.journals.cell_id;
+        let control = joining.journals.cell;
+        if cell_id == 0 || !control.is_set() || joining.endpoint.is_empty() {
+            return Step::Refused(FleetRefusal::Unset);
+        }
+        if let Err(stop) = self.open_directory(client, first).await {
+            return Step::Interrupted(stop);
+        }
+        let directory = self.directory.state();
+        let Some(fleet) = directory.fleet() else {
+            return Step::Refused(FleetRefusal::NotInitialized);
+        };
+        if directory.is_cell_removed(cell_id) {
+            moonpool_assertions::reachable!("universe: a removed cell is refused on rejoin");
+            return Step::Refused(FleetRefusal::CellRemoved { cell_id });
+        }
+        if cell_id == self.journals.cell_id || joining.journals.fleet.is_some() {
+            // The universe's own cell, or a cell `init` formed with a
+            // universe tenant of its own.
+            return Step::Refused(FleetRefusal::CellMismatch {
+                expected: (fleet, cell_id),
+                found: None,
+            });
+        }
+        if let Err(stop) = self
+            .read_other(client, cell_id, control, &joining.endpoint)
+            .await
+        {
+            return Step::Interrupted(stop);
+        }
+        let found = self.registry_of(cell_id).fleet();
+        if let Some(found) = found
+            && (found.fleet_id, found.cell_id) != (fleet, cell_id)
+        {
+            return Step::Refused(FleetRefusal::CellMismatch {
+                expected: (fleet, cell_id),
+                found: Some(found),
+            });
+        }
+        let directory = self.directory.state();
+        let Some(cell) = directory.cell(cell_id) else {
+            if directory.tenant(control.tenant).is_some() {
+                return Step::Refused(FleetRefusal::CellMismatch {
+                    expected: (fleet, cell_id),
+                    found,
+                });
+            }
+            let add = FleetCommand::AddCell {
+                cell_id,
+                control,
+                name: joining.name.clone(),
+                kind: CellKind::default(),
+                endpoint: joining.endpoint.clone(),
+            };
+            return self
+                .write_directory(client, first, fleet, add, Stage::AddCell)
+                .await;
+        };
+        if cell.control_tenant != control.tenant {
+            return Step::Refused(FleetRefusal::CellMismatch {
+                expected: (fleet, cell_id),
+                found,
+            });
+        }
+        if found.is_none() {
+            moonpool_assertions::reachable!("universe: an add-cell waits for the cell to join");
+            return Step::Interrupted(Interrupted::NotJoined { journal: control });
+        }
+        match cell.state {
+            CellState::Ready => Step::Done {
+                result: cell_id,
+                last: None,
+            },
+            CellState::Removing => Step::Refused(FleetRefusal::CellRemoving),
+            CellState::Registering | CellState::Restoring => {
+                let ready = FleetCommand::MarkCell {
+                    cell_id,
+                    state: CellState::Ready,
+                };
+                self.finish_directory(client, first, fleet, ready, Stage::CellReady, cell_id)
+                    .await
+            }
+        }
+    }
+
+    /// The universe pointer an idle cell joining this universe records
+    /// (#232 (multiple cells)): the directory's journal and the machines of
+    /// the cell that hosts it, from its entry endpoint (this session's own
+    /// endpoint while the directory records none). `None` before the
+    /// directory is folded, or with no machine to name.
+    #[must_use]
+    pub fn universe_pointer(&self) -> Option<crate::system::UniversePointer> {
+        let directory = self.directory.state();
+        directory.fleet()?;
+        let hosts = directory
+            .universe_cell()
+            .map(|cell| directory.endpoint(cell).to_vec())
+            .filter(|hosts| !hosts.is_empty())
+            .unwrap_or_else(|| self.endpoint.clone());
+        (!hosts.is_empty()).then_some(crate::system::UniversePointer {
+            directory: self.fleet,
+            hosts,
+        })
+    }
+
+    /// One step of `universe remove-cell` (#232 (multiple cells)): the
+    /// fleet tenant marks cell `cell_id` `REMOVING`, then removes it and
+    /// tombstones its id. Refused while the cell hosts a tenant other than
+    /// its cell tenant, and for the cell that hosts the universe tenant.
+    /// Ends with the cell's id once the directory tombstoned it.
+    #[tracing::instrument(level = "trace", skip_all, fields(cell = cell_id))]
+    pub async fn remove_cell_step<P: Providers>(
+        &mut self,
+        client: &Client<P>,
+        first: usize,
+        cell_id: u64,
+    ) -> Step<u64> {
+        if let Err(stop) = self.open_directory(client, first).await {
+            return Step::Interrupted(stop);
+        }
+        let directory = self.directory.state();
+        let Some(fleet) = directory.fleet() else {
+            return Step::Refused(FleetRefusal::NotInitialized);
+        };
+        if directory.is_cell_removed(cell_id) {
+            return Step::Done {
+                result: cell_id,
+                last: None,
+            };
+        }
+        let Some(cell) = directory.cell(cell_id) else {
+            return Step::Refused(FleetRefusal::UnknownCell { cell_id });
+        };
+        if cell_id == self.journals.cell_id || directory.universe_cell() == Some(cell_id) {
+            return Step::Refused(FleetRefusal::HostsUniverse { cell_id });
+        }
+        if let Some((tenant, _)) = directory
+            .tenants()
+            .find(|(id, t)| t.cell_id == cell_id && *id != cell.control_tenant)
+        {
+            return Step::Refused(FleetRefusal::CellNotEmpty { cell_id, tenant });
+        }
+        if cell.state != CellState::Removing {
+            let removing = FleetCommand::MarkCell {
+                cell_id,
+                state: CellState::Removing,
+            };
+            return self
+                .write_directory(client, first, fleet, removing, Stage::CellRemoving)
+                .await;
+        }
+        let remove = FleetCommand::RemoveCell { cell_id };
+        match self
+            .finish_directory(client, first, fleet, remove, Stage::RemoveCell, cell_id)
+            .await
+        {
+            Step::Done { .. } if !self.directory.state().is_cell_removed(cell_id) => {
+                // The fold refused it: a tenant was registered there before
+                // the cell left `READY`. The next step names it.
+                Step::Advanced(Stage::CellRemoving)
+            }
+            step => {
+                if matches!(step, Step::Done { .. }) {
+                    moonpool_assertions::reachable!("universe: a cell is removed and tombstoned");
+                }
+                step
+            }
+        }
+    }
+
+    /// Run `universe add-cell` to its end (see [`FleetSession::add_cell_step`]),
+    /// asking the idle cell's coordinator to join whenever the step waits for
+    /// it, through `providers`, `rpc` and `names`. An interrupted step is
+    /// taken again for up to `patience`.
+    #[allow(clippy::too_many_arguments)]
+    #[tracing::instrument(level = "debug", skip_all, fields(cell = joining.journals.cell_id))]
+    pub async fn add_cell<P: Providers>(
+        &mut self,
+        providers: &P,
+        rpc: &moonpool_rpc::RpcHandle<P>,
+        names: &crate::Names,
+        client: &Client<P>,
+        first: usize,
+        joining: &CellJoin,
+        patience: Duration,
+    ) -> Run<u64> {
+        let mut deadline = client.now() + patience;
+        let mut steps = Vec::new();
+        while steps.len() < MAX_STEPS {
+            let step = self.add_cell_step(client, first, joining).await;
+            if matches!(step, Step::Interrupted(Interrupted::NotJoined { .. }))
+                && let (Some(pointer), Some(election)) =
+                    (self.universe_pointer(), joining.journals.election)
+                && let Some(fleet_id) = self.directory.state().fleet()
+            {
+                let request = super::universe::JoinRequest { fleet_id, pointer };
+                let cell = client.elsewhere(&joining.endpoint);
+                let left = deadline.saturating_sub(client.now());
+                let answer =
+                    super::universe::join(providers, rpc, names, &cell, election, &request, left)
+                        .await;
+                if answer == super::universe::JoinAnswer::OtherUniverse {
+                    return Run {
+                        outcome: Step::Refused(FleetRefusal::CellMismatch {
+                            expected: (fleet_id, joining.journals.cell_id),
+                            found: None,
+                        }),
+                        steps,
+                    };
+                }
+            }
+            if retry(client, &step, &mut deadline, patience).await {
+                continue;
+            }
+            if let Some(end) = settle(step, &mut steps) {
+                return end;
+            }
+        }
+        going_round(steps)
+    }
+
+    /// Run `universe remove-cell` to its end (see
+    /// [`FleetSession::remove_cell_step`]), taking an interrupted step again
+    /// for up to `patience`.
+    #[tracing::instrument(level = "debug", skip_all, fields(cell = cell_id))]
+    pub async fn remove_cell<P: Providers>(
+        &mut self,
+        client: &Client<P>,
+        first: usize,
+        cell_id: u64,
+        patience: Duration,
+    ) -> Run<u64> {
+        let mut deadline = client.now() + patience;
+        let mut steps = Vec::new();
+        while steps.len() < MAX_STEPS {
+            let step = self.remove_cell_step(client, first, cell_id).await;
+            if retry(client, &step, &mut deadline, patience).await {
+                continue;
+            }
+            if let Some(end) = settle(step, &mut steps) {
+                return end;
+            }
+        }
+        going_round(steps)
     }
 
     /// One step of `universe key add` (#245): ends once the universe entry
@@ -1173,8 +1536,65 @@ impl FleetSession {
         }
     }
 
-    /// Read the cell's journal to its tail and check it is cell `cell_id`
-    /// of `fleet`.
+    /// The control journal of cell `cell_id`: this session's own, else the
+    /// one the directory records for its cell tenant (unset when unknown).
+    fn cell_journal(&self, cell_id: u64) -> JournalIdentifier {
+        if cell_id == self.journals.cell_id {
+            return self.journals.cell;
+        }
+        let directory = self.directory.state();
+        directory
+            .cell(cell_id)
+            .and_then(|cell| {
+                let entry = directory.tenant(cell.control_tenant)?;
+                Some(JournalIdentifier::new(cell.control_tenant, entry.control))
+            })
+            .unwrap_or(JournalIdentifier::UNSET)
+    }
+
+    /// Cell `cell_id`'s control journal as this session last folded it
+    /// (#232 (multiple cells)): empty for a cell it never read.
+    #[must_use]
+    pub fn registry_of(&self, cell_id: u64) -> &Registry {
+        static EMPTY: std::sync::OnceLock<Registry> = std::sync::OnceLock::new();
+        if cell_id == self.journals.cell_id {
+            return self.cell.state();
+        }
+        self.others
+            .get(&cell_id)
+            .map_or_else(|| EMPTY.get_or_init(Registry::default), Folder::state)
+    }
+
+    /// Fold another cell's control journal `journal` to its tail as a
+    /// reader, through the machines of its `endpoint` (#232 (multiple
+    /// cells)), claiming nothing.
+    async fn read_other<P: Providers>(
+        &mut self,
+        client: &Client<P>,
+        cell_id: u64,
+        journal: JournalIdentifier,
+        endpoint: &[(u64, Address)],
+    ) -> Result<(), Interrupted> {
+        assert!(
+            !endpoint.is_empty(),
+            "another cell is read through its endpoint"
+        );
+        let reader = client.elsewhere(endpoint);
+        let fold = self.others.entry(cell_id).or_insert_with(|| {
+            Folder::new(Registry::new(endpoint.iter().map(|(id, _)| NodeId(*id))))
+        });
+        match load(fold, journal, &reader, 0, 0).await {
+            LoadOutcome::Loaded { diverged, .. } => {
+                self.note_diverged(journal, diverged);
+                Ok(())
+            }
+            outcome => Err(Interrupted::Behind { journal, outcome }),
+        }
+    }
+
+    /// Read the journal of cell `cell_id` (this session's own, or another
+    /// one through the endpoint the directory records, #232) to its tail and
+    /// check it is cell `cell_id` of `fleet`.
     async fn cell_of<P: Providers, T>(
         &mut self,
         client: &Client<P>,
@@ -1182,10 +1602,21 @@ impl FleetSession {
         fleet: u64,
         cell_id: u64,
     ) -> Result<(), Step<T>> {
-        self.read_cell(client, first)
-            .await
-            .map_err(Step::Interrupted)?;
-        let found = self.cell.state().fleet();
+        if cell_id == self.journals.cell_id {
+            self.read_cell(client, first)
+                .await
+                .map_err(Step::Interrupted)?;
+        } else {
+            let journal = self.cell_journal(cell_id);
+            let endpoint = self.directory.state().endpoint(cell_id).to_vec();
+            if !journal.is_set() || endpoint.is_empty() {
+                return Err(Step::Refused(FleetRefusal::NoEndpoint { cell_id }));
+            }
+            self.read_other(client, cell_id, journal, &endpoint)
+                .await
+                .map_err(Step::Interrupted)?;
+        }
+        let found = self.registry_of(cell_id).fleet();
         if found.is_none_or(|f| (f.fleet_id, f.cell_id) != (fleet, cell_id)) {
             return Err(Step::Refused(FleetRefusal::CellMismatch {
                 expected: (fleet, cell_id),

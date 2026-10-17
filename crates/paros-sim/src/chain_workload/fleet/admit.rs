@@ -53,7 +53,10 @@ impl FleetOps {
             return;
         }
         let founders = self.layout.founders;
-        let outside = founders..self.machines.len();
+        // On a second-cell seed (#232 (multiple cells)) the last machine is
+        // the second cell's.
+        let reserved = usize::from(self.layout.reserved);
+        let outside = founders..self.machines.len() - reserved;
         let mut at_founder = false;
         let fresh = self.admitting.is_none() && replaced.is_none();
         let mut target = match self.admitting.take().or(replaced) {
@@ -163,7 +166,8 @@ impl FleetOps {
         policy: CheckpointPolicy,
         draw: u64,
     ) -> bool {
-        let outside = self.layout.founders..self.machines.len();
+        let reserved = usize::from(self.layout.reserved);
+        let outside = self.layout.founders..self.machines.len() - reserved;
         if outside.is_empty() {
             return false;
         }
@@ -236,8 +240,14 @@ impl FleetOps {
                         );
                     }
                 } else {
+                    // A wiped machine formats again under a new id: when
+                    // another operator admitted that incarnation after this
+                    // one registered the old, the run ends at its `Identify`
+                    // and the session's fold holds only the old id (sweep
+                    // recipe 58744:11730001353845939891 on 112134043898220002).
                     assert_always!(
-                        session.registry().get(result).is_some(),
+                        session.registry().get(result).is_some()
+                            || crate::machine::was_wiped(ctx.state(), &target),
                         "admit: an admission registers the machine before it admits it",
                         { "node" => result.0 }
                     );
@@ -262,8 +272,10 @@ impl FleetOps {
             Step::Refused(FleetRefusal::InCellInit { .. }) => {
                 // Only a founding member takes part in `cell init`: one that
                 // promised and has no vote yet, mid-decree.
+                // Or the machine an operator founds the second cell on
+                // (#232 (multiple cells)).
                 assert_always!(
-                    founder,
+                    founder || crate::machine::is_other_founder(ctx.state(), &target),
                     "admit: only a founding member refuses an admission for cell init"
                 );
                 assert_reachable!("admit: a founding member mid cell init refuses an admission");
@@ -281,9 +293,11 @@ impl FleetOps {
             }
             Step::Refused(FleetRefusal::OtherCell { cell_id, .. }) => {
                 // One cell per run, unless a wiped one-founder cell formed
-                // again over the new machine (#246).
+                // again over the new machine (#246), or an operator founded
+                // a cell on the machine (#216, #232 (multiple cells)).
                 assert_always!(
-                    crate::machine::founder_wiped(ctx.state()),
+                    crate::machine::founder_wiped(ctx.state())
+                        || crate::machine::is_other_founder(ctx.state(), &target),
                     "admit: a machine of another cell exists only after a wipe",
                     { "cell" => cell_id }
                 );

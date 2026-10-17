@@ -220,11 +220,17 @@ impl Folds {
         if !self.fold_registry(&client, resolver).await {
             return refused(resolver, "unavailable");
         }
-        let Some(universe) = resolver.cell.fleet else {
-            return refused(resolver, "no_universe");
+        // The cell's own universe directory, else the one its join points
+        // at (#232 (multiple cells)), read through that cell's machines.
+        let registry = self.registry.as_ref().map(|(_, folder)| folder.state());
+        let pointer = registry.and_then(Registry::universe).cloned();
+        let (universe, reader, first) = match (resolver.cell.fleet, pointer) {
+            (_, Some(pointer)) => (pointer.directory, client.elsewhere(&pointer.hosts), 0),
+            (Some(fleet), None) => (fleet, client.clone(), self.first),
+            (None, None) => return refused(resolver, "no_universe"),
         };
         let LoadOutcome::Loaded { .. } =
-            load(&mut self.directory, universe, &client, self.first, 0).await
+            load(&mut self.directory, universe, &reader, first, 0).await
         else {
             // Kept (#457): a fold that stopped is a prefix the next answer
             // goes on from; only a fold with a hole starts again.
@@ -283,7 +289,19 @@ impl Folds {
                         "every machine of the book is answered"
                     );
                 } else {
+                    moonpool_assertions::reachable!(
+                        "resolve: a machine points at the tenant's other cell"
+                    );
                     ack.refusal = "other_cell".into();
+                    ack.tenant_cell_endpoint = directory
+                        .endpoint(entry.cell_id)
+                        .iter()
+                        .map(|(id, addr)| wire::Member {
+                            node_id: *id,
+                            addr: addr.to_string(),
+                            machine_interface: Vec::new(),
+                        })
+                        .collect();
                 }
             }
             TenantResolution::NotReady { tenant, .. } => {

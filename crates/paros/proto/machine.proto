@@ -185,6 +185,10 @@ message CellInit {
   // receiver and every member with a pinned root key, and sent on in the
   // decree's `PrepareCell` and `FormCell`.
   bytes token = 2;
+  // Form an idle cell (#232 (multiple cells)): its plan names no universe
+  // tenant, so `universe add-cell` can join it to a universe another cell
+  // hosts. Read only when the decree draws a fresh plan.
+  bool idle = 3;
 }
 
 message CellInitAck {
@@ -377,6 +381,10 @@ message ResolveAck {
   bytes universe_name = 9;
   bytes cell_name = 10;
   bytes tenant_cell_name = 11;
+  // On "other_cell" (#232 (multiple cells)): the entry endpoint the
+  // universe directory records for `tenant_cell`, where the client asks
+  // again. Empty when the directory records none.
+  repeated Member tenant_cell_endpoint = 12;
 }
 
 message Load {}
@@ -479,4 +487,26 @@ message CapacityRequestAck {
   // refusal: "unknown_tenant", "malformed".
   string outcome = 1;
   repeated uint64 bookings = 2;
+}
+
+// `universe add-cell` (#232 (multiple cells)) asks an idle cell's
+// coordinator to join a universe another cell hosts. The coordinator reads
+// the universe directory at `hosts`; once it holds this cell under its cell
+// tenant's control journal, it writes `JoinFleet` with the universe pointer
+// into the cell control journal, its one writer. A re-send is harmless.
+message JoinUniverse {
+  uint64 fleet_id = 1;
+  // The universe directory: the universe tenant's control journal.
+  uint64 directory_tenant = 2;
+  uint64 directory_journal = 3;
+  // Machines of the cell that hosts the universe tenant.
+  repeated Member hosts = 4;
+}
+
+message JoinUniverseAck {
+  // "joined": the cell joined this universe. To retry: "not_coordinator",
+  // "unavailable", "not_listed" (the directory does not hold this cell
+  // yet). Refusals: "other_universe" (the cell joined another universe),
+  // "malformed".
+  string outcome = 1;
 }

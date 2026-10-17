@@ -41,6 +41,12 @@
 //! together. A commit a victim opens after the yes, before its kill one
 //! tick later, has no completed write yet, so the kill leaves it absent,
 //! never ambiguous.
+//!
+//! A failed sync does not end its commit: on moonpool's disk the batch
+//! stays in the file image, volatile, until a later sync makes it durable.
+//! A kill can still tear it into an ambiguous last batch. So a store whose
+//! sync failed parks its commit ([`InFlight::park`]) until the store opens
+//! or syncs again ([`release_parked`]), and the veto keeps judging it.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
@@ -118,6 +124,9 @@ pub(crate) struct Commits {
     machine: BTreeMap<(String, JournalIdentifier), usize>,
     /// Per `Batched` journal, the machines a kill cut inside its commits.
     machine_cuts: BTreeMap<JournalIdentifier, BTreeSet<String>>,
+    /// The commits a failed sync left in the file image, by store key: in
+    /// flight until that store opens or syncs again.
+    parked: BTreeMap<String, u64>,
 }
 
 /// The run's [`Commits`], publishing the veto that reads them on the first
@@ -302,8 +311,12 @@ impl Commits {
     }
 }
 
+/// The id of a guard whose commit is parked: its drop removes nothing.
+const PARKED: u64 = u64::MAX;
+
 /// A commit registered in flight until this guard drops: when the sync
-/// returns, or when a kill drops the task that awaited it.
+/// returns, or when a kill drops the task that awaited it. A failed sync
+/// parks it instead ([`InFlight::park`]).
 pub(crate) struct InFlight {
     commits: Arc<Mutex<Commits>>,
     id: u64,
@@ -336,6 +349,30 @@ impl InFlight {
             id
         };
         Self { commits, id }
+    }
+
+    /// Keep this commit in flight past its guard, under the store `key`:
+    /// its sync failed, so its batch stays volatile in the file image (see
+    /// the module doc). It replaces the store's earlier parked commit.
+    pub(crate) fn park(mut self, key: &str) {
+        let mut guard = self.commits.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(earlier) = guard.parked.insert(key.to_string(), self.id) {
+            guard.open.remove(&earlier);
+        }
+        drop(guard);
+        assert_reachable!("journal store: a failed registry sync keeps its commit in flight");
+        self.id = PARKED;
+    }
+}
+
+/// End the commit the store `key` parked, if any: the store opened or
+/// synced again, so what the batch held is durable or gone.
+pub(crate) fn release_parked(state: &StateHandle, key: &str) {
+    if let Some(commits) = state.get::<Arc<Mutex<Commits>>>(COMMITS_KEY) {
+        let mut guard = commits.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(id) = guard.parked.remove(key) {
+            guard.open.remove(&id);
+        }
     }
 }
 

@@ -219,12 +219,18 @@ pub(super) async fn run_matchmaker_role(
                 // verdict): the matchmaker is the run's one matchmaker loss,
                 // down for the run and replaced by a handover, like a wiped
                 // one.
-                if matches!(failure, paros::StorageError::Corruption { .. })
-                    && world
+                if matches!(failure, paros::StorageError::Corruption { .. }) {
+                    // Only the budgeted cut may leave a registry this way;
+                    // any other is a fault beyond the budget.
+                    let cut = world
                         .lock()
                         .unwrap_or_else(PoisonError::into_inner)
-                        .is_cut_matchmaker(my_ip)
-                {
+                        .is_cut_matchmaker(my_ip);
+                    assert_always!(
+                        cut,
+                        "matchmaker: only the budgeted cut loses a registry for good",
+                        { "matchmaker" => id.0 }
+                    );
                     assert_reachable!(
                         "journal store: a cut matchmaker's registry is lost for good"
                     );

@@ -184,7 +184,7 @@ piggybacking. Here is the list, and where paros stands:
 | Piggybacking | ride data on messages already in flight (accepted values on `Promise`, commit index on `Heartbeat`) | yes |
 | Pipelining | propose slot `i+1` before slot `i` is chosen | yes, the leader streams `Accept`s |
 | Randomized backoff | jittered election timeout plus step-down on `Nack`, to break the proposer duel | yes, `draw_election_timeout` |
-| Catch-up | a lagging node relearns missed values by resend and piggyback | yes: heartbeat resend, election recovery, commit-replay catch-up, *and* a trim-point jump (`TrimmedTo`) once it falls below the floor |
+| Catch-up | a lagging node relearns missed values by resend and piggyback | yes: heartbeat resend, election recovery, commit-replay catch-up (from the leader, or from the whole pool once a pull stalls for an election timeout), *and* a trim-point jump (`TrimmedTo`) once it falls below the floor |
 | No-op gap fill | fill a hole with a no-op so the log can advance past a dead leader | yes: recovered slots are re-proposed, and every slot the promise quorum reported nothing for is filled with a `Control::Noop` |
 | Command batching | pack many client commands into one slot | not yet |
 | Read-index reads | linearizable reads at the leader with no log write, one heartbeat-ack round | retired (#243): every read is a quorum read |

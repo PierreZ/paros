@@ -1167,6 +1167,70 @@ fn phase2_column(slot: paros_core::Slot, cols: usize) -> Option<usize> {
     Some(column)
 }
 
+/// The column of a grid this leader's Phase 2 goes to when the core's own
+/// column holds an acceptor the cell holds slow (#361 (slow machines)) and
+/// another column holds none: the first such column after the core's. Every
+/// column is a Phase-2 quorum, so the choice is always valid; it only
+/// prefers fast acceptors. `None` keeps the core's choice.
+fn fast_column(
+    config: &paros_core::AcceptorConfig,
+    slot: paros_core::Slot,
+    is_slow: impl Fn(NodeId) -> bool,
+) -> Option<usize> {
+    let QuorumSystem::Grid { cols, .. } = config.quorum_system() else {
+        return None;
+    };
+    let own = config.column_of(slot)?;
+    let holds_slow = |column: usize| {
+        config
+            .phase2_addressees(Some(column))
+            .into_iter()
+            .any(&is_slow)
+    };
+    if !holds_slow(own) {
+        return None;
+    }
+    let column = (1..cols)
+        .map(|step| (own + step) % cols)
+        .find(|column| !holds_slow(*column))?;
+    assert!(column != own, "a fast column is another column");
+    assert!(column < cols, "a fast column is one the grid has");
+    moonpool_assertions::reachable!("grid: a round's column avoids a slow acceptor");
+    Some(column)
+}
+
+/// The row of a grid a quorum read asks when the core's own row holds an
+/// acceptor the cell holds slow (#361 (slow machines)) and another row
+/// holds none: the twin of [`fast_column`], under the same condition as the
+/// row override (a full column, so every row is a read quorum).
+fn fast_row(
+    config: &paros_core::AcceptorConfig,
+    ctx: u64,
+    slow: impl Fn(NodeId) -> bool,
+) -> Option<usize> {
+    let QuorumSystem::Grid { rows, acks, .. } = config.quorum_system() else {
+        return None;
+    };
+    if rows < 2 || acks != rows {
+        return None;
+    }
+    let own = config.row_of(ctx)?;
+    let holds_slow = |row: usize| config.phase1_addressees(Some(row)).into_iter().any(&slow);
+    if !holds_slow(own) {
+        return None;
+    }
+    let row = (1..rows)
+        .map(|step| (own + step) % rows)
+        .find(|row| !holds_slow(*row))?;
+    assert!(row != own, "a fast row is another row");
+    assert!(
+        config.admits_read_row(Some(row)),
+        "a fast row is a read row"
+    );
+    moonpool_assertions::reachable!("grid: a quorum read's row avoids a slow acceptor");
+    Some(row)
+}
+
 /// Whether the next tick waits twice the normal interval. Always safe: every
 /// timeout the core owns counts ticks, so a node that ticks slower is a slow
 /// node, which the cell must tolerate. Deliberately shy: a node that
@@ -1812,9 +1876,18 @@ where
                 // an effect (this node leads and its configuration is a
                 // grid), on the loop. Otherwise the core's `slot % cols`
                 // stands.
+                // Else a leader prefers a column with no acceptor the cell
+                // holds slow (#361 (slow machines)), as the registry fold
+                // says.
                 let column = match rt.node.acceptors().quorum_system() {
                     QuorumSystem::Grid { cols, .. } if rt.node.is_leader() => {
-                        phase2_column(rt.node.proposer().next_slot(), cols)
+                        let slot = rt.node.proposer().next_slot();
+                        phase2_column(slot, cols).or_else(|| {
+                            let registry = follower.as_ref().map(system::ControlFollower::registry);
+                            fast_column(rt.node.acceptors(), slot, |id| {
+                                registry.is_some_and(|r| r.is_slow(id))
+                            })
+                        })
                     }
                     _ => None,
                 };
@@ -1941,7 +2014,12 @@ where
                         moonpool_assertions::reachable!("grid: the driver overrides a quorum read's row");
                         Some(log_reads::next_row(ctx, rows))
                     }
-                    _ => None,
+                    // Else a row with no acceptor the cell holds slow (#361
+                    // (slow machines)).
+                    _ => {
+                        let registry = follower.as_ref().map(system::ControlFollower::registry);
+                        fast_row(&b.config, ctx, |id| registry.is_some_and(|r| r.is_slow(id)))
+                    }
                 });
                 // The row the core will ask, resolved exactly as it resolves
                 // it, for the audit's report of what served it.
