@@ -640,7 +640,16 @@ impl FleetOps {
         };
         judge_folds(&session);
         if !ended {
-            self.pending = Some(pending);
+            // An operator re-runs `init` whole (`parosctl init` has no fleet
+            // half alone): a founder that an abandoned `cell init` left
+            // promised higher, its peers' tokens lost to restarts, forms only
+            // through a new `cell init` (witness 17754553933206564732 on
+            // db7c456: client 1 resumed the fleet half alone for the whole
+            // tail, refused `NotClaimed` with no fleet quorum).
+            self.pending = Some(match pending {
+                Pending::Init => Pending::Initialize,
+                other => other,
+            });
             return false;
         }
         if std::mem::take(&mut self.killed) {
