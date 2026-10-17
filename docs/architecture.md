@@ -1008,7 +1008,9 @@ create.
   go to holds no slot on a draining machine.
 - **Re-placement** (#475 (re-place after the Down bound)). A machine down past
   `machine_replace_after` is gone (section 3.2). Its journals and sets move as a drain moves
-  them, and the machine stays registered. The simulation takes a machine that holds a slot down
+  them, and the machine stays registered. A move with no spare machine for a gone machine's slot
+  waits: it never shrinks a configuration off a gone machine, because that machine can answer
+  again. The simulation takes a machine that holds a slot down
   for longer than the bound on a gone-machine seed (`paros_sim::world::gone_machine`). Oracle:
   after chaos, every data journal that the cell can hold shows `healthy` in `parosctl status`.
   The view judges a journal against the configuration its bookings place.

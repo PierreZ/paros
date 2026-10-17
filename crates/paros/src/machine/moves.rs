@@ -451,7 +451,14 @@ impl Moves {
         };
         // The machines that stay hold as many members as the desired mode
         // asks for: the move books none (the mode change shrinks the rest).
-        let wanted = placed_count(&desired, bookable(cell.registry(), desk, &gone.gone).len());
+        // A machine `gone` (#475) still counts: it may answer again, and a
+        // configuration shrunk off it with no spare to take its place loses
+        // that member for good, so the move waits for a spare instead.
+        // Seed 8716878275573457412 on 492ac54: a move shrank a journal to its
+        // two staying members, attrition wiped one, and no Phase-1 quorum
+        // was left.
+        let storage = placement::machines(cell.registry(), desk.storage(cell.registry()));
+        let wanted = placed_count(&desired, storage.len());
         let kept = staying.len() >= wanted.max(1) && system.admits(staying.len());
         if staying.len() < size && !kept {
             return self
