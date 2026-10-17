@@ -165,7 +165,7 @@ impl DriverTunables {
     /// Every checked field: its name, its value and its floor. One row per
     /// field, so it grows with the tunables.
     #[allow(clippy::too_many_lines)]
-    fn floor_table(&self) -> [(&'static str, u64, u64); 46] {
+    fn floor_table(&self) -> [(&'static str, u64, u64); 49] {
         let ms = |d: Duration| u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
         let count = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
         [

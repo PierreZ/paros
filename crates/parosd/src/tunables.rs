@@ -19,7 +19,7 @@ enum Field {
 }
 
 /// Every field of [`DriverTunables`], each overridable.
-const FIELDS: [Field; 46] = [
+const FIELDS: [Field; 49] = [
     Field::Millis("tick_interval", |t, v| t.tick_interval = v),
     Field::Count("election_timeout_base", |t, v| t.election_timeout_base = v),
     Field::Millis("keep_alive_interval", |t, v| t.keep_alive_interval = v),
