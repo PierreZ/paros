@@ -1254,7 +1254,8 @@ impl FleetOps {
                 .await;
             let learn = |journal| self.note_journals([journal]);
             placement::placements_booked(ctx, &cell, ctx.time().now() + FLEET_SETTLE, learn).await;
-            sets::sets_booked(ctx, &cell, ctx.time().now() + FLEET_SETTLE).await;
+            let connect = |servers: &[(u64, paros::Address)]| self.connect(ctx, servers);
+            sets::sets_booked(ctx, &cell, ctx.time().now() + FLEET_SETTLE, connect).await;
             // Every journal the cell can hold heals (#475 (re-place after
             // the Down bound)).
             self.journals_heal(ctx, &cell, ctx.time().now() + FLEET_SETTLE)
