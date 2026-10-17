@@ -31,10 +31,10 @@ binaries take no flags beyond the positional arguments below and read one enviro
   and the gates that never fired, the declared gates that never ran, and the ten rarest
   declared gates that fired. Exits 1 on any assertion violation, failed run, coverage violation,
   declared gate that never ran (unless listed in `gates::RARE`) or convergence timeout. With
-  `PAROS_SIM_MISSING_GATES=<path>` the run is a CI shard: it writes its coverage defects (a
-  declared gate it never ran, a gate it never fired, a convergence timeout) to `<path>` and does
-  not fail on them; CI's `sim-gates` job fails on a defect every shard has. A safety violation
-  or a failed run still fails the shard.
+  `PAROS_SIM_MISSING_GATES=<path>` the run is a CI shard: it writes its gate defects (a declared
+  gate it never ran, a gate it never fired) to `<path>` and does not fail on them; CI's
+  `sim-gates` job fails on a gate every shard missed. A safety violation, a failed run, or a
+  convergence timeout with every gate fired still fails the shard.
 - `sim-paros-hunt [main|canary] [iterations] [gate-filter]` (default 2000, the normal evidence
   budget; root *Simulation rules*): prints seed counts, assertion slots used and dropped, gates
   that never fired, the declared gates that never ran, the 25 rarest declared gates, and with a filter every gate whose name contains it, with its successes and

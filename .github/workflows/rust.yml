@@ -144,11 +144,12 @@ jobs:
   # from the wall clock in nanoseconds, so two runs on two runners share a seed
   # only by a 64-bit hash collision. A red shard is a red CI: `fail-fast: false`
   # lets the other shard finish, so a red run reports every failing seed.
-  # A shard fails on its own on a safety violation or a failed run. It writes
-  # its coverage defects to a file instead of failing on them: a declared gate
-  # it never ran, a gate it never fired, a sweep that did not saturate. The
-  # `sim-gates` job fails only on a defect both shards have. Judged per shard,
-  # a rare gate would miss twice as often as with one sweep.
+  # A shard fails on its own on a safety violation, a failed run, or a sweep
+  # that did not saturate although every gate fired. It writes its gate
+  # defects to a file instead of failing on them: a declared gate it never ran,
+  # a gate it never fired. The `sim-gates` job fails only on a gate both
+  # shards missed. Judged per shard, a rare gate would miss twice as often as
+  # with one sweep.
   sim:
     name: sim (shard ${{ matrix.shard }}/2)
     runs-on: ubuntu-latest
@@ -170,7 +171,7 @@ jobs:
         env:
           PAROS_SIM_MISSING_GATES: ${{ runner.temp }}/missing-gates.txt
         run: nix develop --command cargo xtask sim run-all
-      - name: Keep this shard's coverage defects
+      - name: Keep this shard's gate defects
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
@@ -178,9 +179,8 @@ jobs:
           path: ${{ runner.temp }}/missing-gates.txt
           if-no-files-found: error
 
-  # The coverage check over both shards (#446 (a gate that never fires cannot
-  # fail the sweep)): a gate fails CI only when every shard missed it, and the
-  # sweep only when no shard saturated.
+  # The gate check over both shards (#446 (a gate that never fires cannot
+  # fail the sweep)): a gate fails CI only when every shard missed it.
   # A shard that wrote no file (it died before its verdict) fails this job.
   sim-gates:
     needs: sim
@@ -191,7 +191,7 @@ jobs:
         with:
           pattern: missing-gates-*
           path: missing-gates
-      - name: Fail on a coverage defect that every shard has
+      - name: Fail on a gate that every shard missed
         run: |
           set -euo pipefail
           test -f missing-gates/missing-gates-1/missing-gates.txt
@@ -200,8 +200,8 @@ jobs:
             <(sort missing-gates/missing-gates-1/missing-gates.txt) \
             <(sort missing-gates/missing-gates-2/missing-gates.txt))
           if [ -n "$never" ]; then
-            echo "coverage defects that every shard has:"
+            echo "gates that every shard missed:"
             echo "$never"
             exit 1
           fi
-          echo "every gate fired, and a sweep saturated, in at least one shard"
+          echo "every gate ran and fired in at least one shard"
