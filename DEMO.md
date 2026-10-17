@@ -129,7 +129,6 @@ nix develop --command cargo build --release -p parosd
 export PATH=$PWD/target/release:$PATH
 
 # The three machines, each with its own data directory, configured with no peer.
-export PAROS_STORE_LAYOUT=small
 mkdir -p /tmp/paros-demo
 for i in 1 2 3; do
   PAROS_LISTEN=127.0.0.1:450$i PAROS_DATA_DIR=/tmp/paros-demo/node$i \

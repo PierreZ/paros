@@ -140,19 +140,6 @@ impl Default for JournalStoreConfig {
 }
 
 impl JournalStoreConfig {
-    /// A small layout for simulation and tests: 512 records and 64 KiB of
-    /// entries per segment, so rollover and segment deletion happen within
-    /// a short run.
-    #[must_use]
-    pub fn small() -> Self {
-        let config = Self {
-            geometry: Geometry::small(),
-            ..Self::default()
-        };
-        config.assert_layout();
-        config
-    }
-
     /// A shipped layout is one the journal opens.
     fn assert_layout(self) {
         assert!(self.geometry.is_valid(), "a shipped geometry is valid");

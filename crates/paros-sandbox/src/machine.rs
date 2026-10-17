@@ -79,9 +79,17 @@ impl Process for MachineProcess {
             .ok_or_else(|| SimulationError::InvalidState("a literal address".into()))?;
         let addresses = MachineAddresses::new(listen, Some(machine_addr(index)))
             .map_err(SimulationError::InvalidState)?;
+        // Segments of a few blocks: a browser holds every simulated disk
+        // in memory, and the default 64 MiB segment per journal would not
+        // fit. The protocol and every commit are the shipped ones.
         let layout = paros::JournalStoreConfig {
             durability: paros::journal::Durability::Ordered,
-            ..paros::JournalStoreConfig::small()
+            geometry: paros::journal::Geometry {
+                persist_blocks: 8,
+                gap_blocks: 0,
+                entry_blocks: 16,
+            },
+            ..paros::JournalStoreConfig::default()
         };
         // parosd's supervisor: a run that ended on a storage failure starts
         // again on the same disk.
