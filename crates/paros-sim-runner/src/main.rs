@@ -62,14 +62,16 @@ fn main() {
     let declared = gates::judge(&slots);
     gates::print(&declared, "  ");
     gates::print_rarest(&slots, RAREST);
-    // A CI shard hands its missing gates to the job that judges every shard's
-    // together (`.github/workflows/rust.yml`): a gate fails CI only when no
-    // shard ran it.
+    // A CI shard hands its coverage defects (a declared gate that never ran,
+    // a gate that never fired, a sweep that never saturated) to the job that
+    // judges every shard's together (`.github/workflows/rust.yml`): such a
+    // defect fails CI only when every shard has it. Judged per shard, a rare
+    // gate would miss twice as often as with one sweep.
     let shard_out = std::env::var_os(MISSING_GATES_OUT);
     if let Some(path) = &shard_out {
-        write_missing(std::path::Path::new(path), &declared.missing);
+        write_coverage_defects(std::path::Path::new(path), &declared.missing, &report);
     }
-    let gates_ok = shard_out.is_some() || declared.missing.is_empty();
+    let shard = shard_out.is_some();
     if let Some(more) = top_up.as_ref().filter(|more| !is_clean(more)) {
         print_failed_runs(more);
         println!(
@@ -83,9 +85,9 @@ fn main() {
         std::process::exit(1);
     }
     if is_clean(&report)
-        && report.coverage_violations.is_empty()
-        && gates_ok
-        && !report.convergence_timeout
+        && (shard || report.coverage_violations.is_empty())
+        && (shard || declared.missing.is_empty())
+        && (shard || !report.convergence_timeout)
     {
         println!("  Chain safety, recovery, coverage, and saturation gates are green");
     } else {
@@ -108,25 +110,51 @@ fn main() {
 }
 
 /// The environment variable that makes this run a CI shard: the path where
-/// it writes the declared gates it never ran, one per line, and no longer
-/// fails on them. Every other defect still fails the shard.
+/// it writes its coverage defects, one per line, and no longer fails on
+/// them. A safety violation or a failed run still fails the shard.
 const MISSING_GATES_OUT: &str = "PAROS_SIM_MISSING_GATES";
 
-/// Write each missing declared gate's message, sorted, one per line (the
-/// `Debug` form, so a line holds exactly one message).
-fn write_missing(path: &std::path::Path, missing: &[(&str, &str)]) {
+/// The line a shard writes when its sweep hit the iteration cap.
+const NOT_SATURATED: &str = "<the sweep did not saturate>";
+
+/// Write the shard's coverage defects, sorted, one per line: each declared
+/// gate that never ran and each gate moonpool reports as never fired, by its
+/// slot name (the `Debug` form, so a line holds exactly one message), and
+/// [`NOT_SATURATED`] on a convergence timeout. Two shards name one gate
+/// alike, so the judging job can intersect their files.
+fn write_coverage_defects(
+    path: &std::path::Path,
+    missing: &[(&str, &str)],
+    report: &SimulationReport,
+) {
+    let never_fired = report.coverage_violations.iter().map(|v| violated_gate(v));
     let mut lines: Vec<String> = missing
         .iter()
-        .map(|(msg, _)| format!("{msg:?}\n"))
+        .map(|&(msg, _)| gates::slot_name(msg))
+        .chain(never_fired)
+        .map(|msg| format!("{msg:?}\n"))
         .collect();
+    if report.convergence_timeout {
+        lines.push(format!("{NOT_SATURATED}\n"));
+    }
     lines.sort();
+    lines.dedup();
     if let Err(error) = std::fs::write(path, lines.concat()) {
         println!(
-            "  cannot write the missing gates to {}: {error}",
+            "  cannot write the coverage defects to {}: {error}",
             path.display()
         );
         std::process::exit(1);
     }
+}
+
+/// The gate a moonpool coverage violation names: every one quotes its slot
+/// name as `('<name>')`. A violation in another shape is kept whole.
+fn violated_gate(violation: &str) -> &str {
+    violation
+        .split_once("('")
+        .and_then(|(_, rest)| rest.rsplit_once("')"))
+        .map_or(violation, |(name, _)| name)
 }
 
 /// The seeds the declared gates are judged over, at least. The coverage
@@ -194,5 +222,29 @@ fn print_guidance(report: &SimulationReport) {
             "  buckets {:?}: {} discovered, {} hits",
             bucket.msg, bucket.buckets_discovered, bucket.total_hits,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::violated_gate;
+
+    #[test]
+    fn a_coverage_violation_names_its_gate() {
+        assert_eq!(
+            violated_gate(
+                "assert_sometimes!('journal read: a wake') has 0% success rate (4 checks)"
+            ),
+            "journal read: a wake"
+        );
+        assert_eq!(
+            violated_gate("assert_reachable!('a crash's site') was never reached"),
+            "a crash's site"
+        );
+        assert_eq!(
+            violated_gate("numeric assert_sometimes ('a gap') has 0% success rate (1 checks)"),
+            "a gap"
+        );
+        assert_eq!(violated_gate("something else"), "something else");
     }
 }
