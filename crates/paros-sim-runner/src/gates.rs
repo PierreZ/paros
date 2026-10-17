@@ -118,6 +118,22 @@ pub const RARE: &[Rare] = &[
         reason: "marginal: needs a whole zone down through a created journal's claim and write; fired in main's sweep at 0c66f34, missed by PR #559's sweep at bb2a3c2 (#215 (zones), #486)",
     },
     Rare {
+        msg: "zones: a zone outage takes several machines down at once",
+        reason: "marginal: needs the zone-outage scenario on a cell with two machines in one zone; fired on 4 and 5 of 300 hunt seeds at 88f803f and 2a5997b, missed by both shards of PR #636's sweep (#215 (zones), #486)",
+    },
+    Rare {
+        msg: "zones: a client appends to its journal while a zone is down",
+        reason: "marginal: needs the zone-outage scenario and a client append inside its hold; fired on 1 and 4 of 300 hunt seeds at 2a5997b and 88f803f, missed by both shards of PR #636's sweep (#215 (zones), #486)",
+    },
+    Rare {
+        msg: "zones: a control-journal write is chosen with a zone down",
+        reason: "marginal: needs the zone-outage scenario and a control-journal write inside its hold; fired on 1 of 300 hunt seeds, missed by shard 2 of main's sweep at e1062fe (#215 (zones), #486)",
+    },
+    Rare {
+        msg: "zones: a tenant is created with a zone down",
+        reason: "marginal: needs the zone-outage scenario and a whole tenant creation inside its hold; fired on 1 of 300 hunt seeds at 2a5997b, missed by shard 2 of main's sweep at e1062fe (#215 (zones), #486)",
+    },
+    Rare {
         msg: "admit: a pinned machine denies a tenant token",
         reason: "marginal: needs pinned machines and the 15% tenant-token draw on an admission; fired 4 times in main's sweep at 629aa62, missed by PR #584's sweep (#245 (Biscuit tokens), #486)",
     },
