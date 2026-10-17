@@ -43,7 +43,7 @@
 //!   cell's founding members gave it, and `Resolve` answers them. Each of
 //!   these methods keeps its well-known endpoint: plain Multi-Paxos, with no
 //!   registry, reaches its peers by address alone.
-//! - [`CoordinatorInterface`]: `Register`, `JournalRequest` and `CapacityRequest` (#476), one group
+//! - [`CoordinatorInterface`]: `Register`, `JournalRequest`, `CapacityRequest` (#476) and `JoinUniverse` (#232), one group
 //!   per coordinator term, published in the election journal. A request to
 //!   an ended term fails at the transport. These methods have no
 //!   well-known endpoint.
@@ -101,6 +101,7 @@ impl InterfaceMethod<MachineInterface> for ReconfigureMatchmakersRpc {}
 impl InterfaceMethod<CoordinatorInterface> for RegisterRpc {}
 impl InterfaceMethod<CoordinatorInterface> for JournalRequestRpc {}
 impl InterfaceMethod<CoordinatorInterface> for CapacityRequestRpc {}
+impl InterfaceMethod<CoordinatorInterface> for JoinUniverseRpc {}
 
 /// A method served only in a dynamic group: it has a method id, and no
 /// well-known endpoint.
@@ -259,6 +260,12 @@ dynamic_method!(
     /// coordinator (#476).
     CapacityRequestRpc, 0x5041_030C, machine::CapacityRequest => machine::CapacityRequestAck,
     "paros.machine.CapacityRequest"
+);
+dynamic_method!(
+    /// `universe add-cell` asks an idle cell's coordinator to join a
+    /// universe another cell hosts (#232 (multiple cells)).
+    JoinUniverseRpc, 0x5041_030D, machine::JoinUniverse => machine::JoinUniverseAck,
+    "paros.machine.JoinUniverse"
 );
 well_known_method!(
     /// An administrative view of the cell (#399): answered by a founding

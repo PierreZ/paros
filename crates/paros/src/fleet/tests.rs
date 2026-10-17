@@ -17,6 +17,138 @@ fn cell_control() -> JournalIdentifier {
     identifier(0xc0de, 0x52)
 }
 
+const OTHER: u64 = 0x0ce2;
+
+fn other_control() -> JournalIdentifier {
+    identifier(0xc1de, 0x53)
+}
+
+fn other_endpoint() -> Vec<(u64, Address)> {
+    vec![
+        (21, Address::parse("10.0.2.1:4500").unwrap()),
+        (22, Address::parse("machine-2.paros:4500").unwrap()),
+    ]
+}
+
+/// The universe of [`formed`] with a second cell, `OTHER`, added `READY`
+/// with its endpoint (#232 (multiple cells)).
+fn two_cells() -> FleetDirectory {
+    let mut directory = formed();
+    let add = entry(FleetCommand::AddCell {
+        cell_id: OTHER,
+        control: other_control(),
+        name: b"west".to_vec(),
+        kind: CellKind::default(),
+        endpoint: other_endpoint(),
+    });
+    assert_eq!(
+        directory.fold(3, &add),
+        FleetEvent::CellAdded { cell_id: OTHER }
+    );
+    let ready = entry(FleetCommand::MarkCell {
+        cell_id: OTHER,
+        state: CellState::Ready,
+    });
+    assert!(matches!(
+        directory.fold(4, &ready),
+        FleetEvent::CellMarked { .. }
+    ));
+    directory
+}
+
+#[test]
+fn a_second_cell_keeps_its_endpoint_and_the_universe_its_host() {
+    let directory = two_cells();
+    assert_eq!(directory.endpoint(OTHER), other_endpoint().as_slice());
+    assert!(directory.endpoint(CELL).is_empty());
+    assert_eq!(directory.universe_cell(), Some(CELL));
+    assert_eq!(directory.cell_named(b"west"), Some(OTHER));
+    // A checkpoint keeps the endpoint.
+    let mut restored = FleetDirectory::default();
+    restored.restore(4, &directory.checkpoint()).unwrap();
+    assert_eq!(restored.endpoint(OTHER), other_endpoint().as_slice());
+}
+
+#[test]
+fn a_cell_is_removed_only_empty_and_removing_and_never_comes_back() {
+    let mut directory = two_cells();
+    let remove_cell = entry(FleetCommand::RemoveCell { cell_id: OTHER });
+    // Not REMOVING yet.
+    assert!(matches!(
+        directory.fold(5, &remove_cell),
+        FleetEvent::Refused(FleetDirectoryRefusal::CellTransition { .. })
+    ));
+    // A tenant lives there: not empty.
+    let tenant = entry(FleetCommand::RegisterTenant {
+        control: identifier(0x700, 0x701),
+        name: b"acme".to_vec(),
+        cell_id: OTHER,
+        survives: Survives::Az,
+        tags: UserTags::none(),
+    });
+    assert!(matches!(
+        directory.fold(6, &tenant),
+        FleetEvent::TenantRegistered { .. }
+    ));
+    let removing = entry(FleetCommand::MarkCell {
+        cell_id: OTHER,
+        state: CellState::Removing,
+    });
+    assert!(matches!(
+        directory.fold(7, &removing),
+        FleetEvent::CellMarked { .. }
+    ));
+    assert_eq!(
+        directory.fold(8, &remove_cell),
+        FleetEvent::Refused(FleetDirectoryRefusal::CellNotEmpty {
+            cell_id: OTHER,
+            tenant: TenantId(0x700)
+        })
+    );
+    assert_eq!(
+        directory.fold(9, &mark(0x700, TenantState::Removing)),
+        FleetEvent::TenantMarked {
+            tenant: TenantId(0x700),
+            state: TenantState::Removing
+        }
+    );
+    assert_eq!(
+        directory.fold(10, &remove(0x700)),
+        FleetEvent::TenantRemoved {
+            tenant: TenantId(0x700)
+        }
+    );
+    assert_eq!(
+        directory.fold(11, &remove_cell),
+        FleetEvent::CellRemoved { cell_id: OTHER }
+    );
+    assert!(directory.cell(OTHER).is_none());
+    assert!(directory.is_cell_removed(OTHER));
+    assert!(directory.is_removed(other_control().tenant));
+    assert!(directory.endpoint(OTHER).is_empty());
+    // A re-run changes nothing; a rejoin is refused.
+    assert_eq!(directory.fold(12, &remove_cell), FleetEvent::Unchanged);
+    let rejoin = entry(FleetCommand::AddCell {
+        cell_id: OTHER,
+        control: identifier(0xc2de, 0x54),
+        name: Vec::new(),
+        kind: CellKind::default(),
+        endpoint: Vec::new(),
+    });
+    assert_eq!(
+        directory.fold(13, &rejoin),
+        FleetEvent::Refused(FleetDirectoryRefusal::CellTombstoned { cell_id: OTHER })
+    );
+    // A checkpoint keeps the tombstone.
+    let mut restored = FleetDirectory::default();
+    restored.restore(13, &directory.checkpoint()).unwrap();
+    assert!(restored.is_cell_removed(OTHER));
+    assert_eq!(
+        restored.fold(14, &rejoin),
+        FleetEvent::Refused(FleetDirectoryRefusal::CellTombstoned { cell_id: OTHER })
+    );
+}
+
 fn root_key(key_id: u32, label: &str) -> RootKeyEntry {
     RootKeyEntry {
         key_id,
@@ -50,6 +182,7 @@ fn formed() -> FleetDirectory {
                 control: cell_control(),
                 name: Vec::new(),
                 kind: CellKind::default(),
+                endpoint: Vec::new(),
             })
         ),
         FleetEvent::CellAdded { cell_id: CELL }
@@ -105,6 +238,7 @@ fn every_entry_round_trips() {
             control: cell_control(),
             name: Vec::new(),
             kind: CellKind::default(),
+            endpoint: Vec::new(),
         },
         FleetCommand::MarkCell {
             cell_id: CELL,
@@ -139,6 +273,7 @@ fn every_entry_round_trips() {
                 regions: vec!["w".into(), "c".into(), "n".into()],
                 witness: "n".into(),
             },
+            endpoint: Vec::new(),
         },
         FleetCommand::RemoveTenant {
             tenant: TenantId(300),
@@ -147,6 +282,14 @@ fn every_entry_round_trips() {
         FleetCommand::RemoveRootKey {
             label: "current".into(),
         },
+        FleetCommand::AddCell {
+            cell_id: OTHER,
+            control: other_control(),
+            name: b"west".to_vec(),
+            kind: CellKind::default(),
+            endpoint: other_endpoint(),
+        },
+        FleetCommand::RemoveCell { cell_id: OTHER },
     ];
     for command in commands {
         let entry = FleetEntry::new(FLEET, command);
@@ -156,6 +299,7 @@ fn every_entry_round_trips() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn the_fleet_is_formed_once_with_the_fleet_tenant_as_its_first_internal_tenant() {
     let mut directory = FleetDirectory::default();
     let add = entry(FleetCommand::AddCell {
@@ -163,6 +307,7 @@ fn the_fleet_is_formed_once_with_the_fleet_tenant_as_its_first_internal_tenant()
         control: cell_control(),
         name: Vec::new(),
         kind: CellKind::default(),
+        endpoint: Vec::new(),
     });
     // Nothing before the fleet; the fleet tenant's control journal must be named.
     assert_eq!(
@@ -230,6 +375,7 @@ fn the_fleet_is_formed_once_with_the_fleet_tenant_as_its_first_internal_tenant()
             control: cell_control(),
             name: Vec::new(),
             kind: CellKind::default(),
+            endpoint: Vec::new(),
         },
     )
     .encode();
@@ -278,6 +424,7 @@ fn a_cell_brings_its_cell_tenant_and_only_a_ready_cell_takes_tenants() {
         control: cell_control(),
         name: Vec::new(),
         kind: CellKind::default(),
+        endpoint: Vec::new(),
     });
     assert_eq!(
         directory.fold(1, &add),
@@ -304,6 +451,7 @@ fn a_cell_brings_its_cell_tenant_and_only_a_ready_cell_takes_tenants() {
                 control: identifier(0xbad, 1),
                 name: Vec::new(),
                 kind: CellKind::default(),
+                endpoint: Vec::new(),
             })
         ),
         FleetEvent::Refused(FleetDirectoryRefusal::OtherCellTenant { cell_id: CELL })
@@ -317,6 +465,7 @@ fn a_cell_brings_its_cell_tenant_and_only_a_ready_cell_takes_tenants() {
                 control: fleet_control(),
                 name: Vec::new(),
                 kind: CellKind::default(),
+                endpoint: Vec::new(),
             })
         ),
         FleetEvent::Refused(FleetDirectoryRefusal::TenantIdTaken {

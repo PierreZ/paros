@@ -1,6 +1,8 @@
 //! `parosctl universe key list|add|remove` (#245 (Biscuit tokens)): the
 //! universe entry's root public keys, which every entry role checks a token
-//! against.
+//! against. `parosctl universe add-cell|remove-cell` (#232 (multiple
+//! cells)): an idle cell (`parosctl init --idle`) joins the universe, and an
+//! empty cell leaves it for good.
 //!
 //! A rotation is two commands: `key add` the next key, then, once the
 //! tokens signed with the old one expired, `key remove` it. Each is one
@@ -14,9 +16,10 @@ use std::time::Duration;
 
 use clap::{Args, Subcommand};
 use moonpool_core::TokioProviders;
+use paros::Address;
 use paros::client::Client;
-use paros::client::bootstrap::control_journals;
-use paros::client::fleet::{Step, read_directory};
+use paros::client::bootstrap::{control_journals, majority_cell};
+use paros::client::fleet::{CellJoin, Step, read_directory};
 use paros::fleet::RootKeyEntry;
 use paros_authz_biscuit::RootPublicKey;
 use serde_json::json;
@@ -25,6 +28,7 @@ use crate::Ending;
 use crate::fleet::{interrupted, open_session, refused, steps};
 use crate::labels::Labels;
 use crate::output::{Printer, note};
+use crate::views::Asker;
 
 /// `parosctl universe`.
 #[derive(Args, Debug)]
@@ -43,6 +47,24 @@ enum UniverseCommand {
     Key {
         #[command(subcommand)]
         command: KeyCommand,
+    },
+    /// Join an idle cell (formed with `parosctl init --idle`) to the
+    /// universe the servers' cell hosts (#232 (multiple cells)). A re-run
+    /// resumes.
+    AddCell {
+        /// The idle cell's founding members, comma-separated `HOST:PORT`s,
+        /// each by the address it advertises.
+        #[arg(long, value_delimiter = ',', required = true)]
+        members: Vec<String>,
+        /// The cell's name, for people: unique among the universe's cells.
+        #[arg(long)]
+        name: String,
+    },
+    /// Remove a cell that hosts no tenant from the universe, for good: its
+    /// id is never added again (#232 (multiple cells)). A re-run resumes.
+    RemoveCell {
+        /// The cell's name.
+        name: String,
     },
 }
 
@@ -80,14 +102,23 @@ pub fn read_key(path: &Path) -> Result<RootKeyEntry, String> {
 
 /// `parosctl universe …`.
 pub async fn run(
-    providers: &TokioProviders,
+    asker: &Asker<'_>,
     client: &Client<TokioProviders>,
     servers: &[u64],
     out: &Printer,
     args: UniverseArgs,
 ) -> Ending {
-    let UniverseCommand::Key { command } = args.command;
+    let providers = asker.providers;
     let patience = Duration::from_millis(args.patience_ms);
+    let command = match args.command {
+        UniverseCommand::Key { command } => command,
+        UniverseCommand::AddCell { members, name } => {
+            return add_cell(asker, client, servers, out, &members, &name, patience).await;
+        }
+        UniverseCommand::RemoveCell { name } => {
+            return remove_cell(asker, client, servers, out, &name, patience).await;
+        }
+    };
     match command {
         KeyCommand::List => list(client, out).await,
         KeyCommand::Add { file } => {
@@ -160,6 +191,145 @@ pub async fn run(
                 Step::Advanced(_) => unreachable!("a run never ends advanced"),
             }
         }
+    }
+}
+
+/// `parosctl universe add-cell` (#232 (multiple cells)): learn the idle
+/// cell from a majority of `members`, then run the join through
+/// `paros::client::fleet`.
+async fn add_cell(
+    asker: &Asker<'_>,
+    client: &Client<TokioProviders>,
+    servers: &[u64],
+    out: &Printer,
+    members: &[String],
+    name: &str,
+    patience: Duration,
+) -> Ending {
+    if let Err(error) = paros::name::check_label(name) {
+        note(&format!("bad cell name {name:?}: {error}"));
+        return Ending::Refused;
+    }
+    let mut addrs = Vec::new();
+    for member in members.iter().map(|m| m.trim()).filter(|m| !m.is_empty()) {
+        match Address::parse(member) {
+            Ok(addr) => addrs.push(addr),
+            Err(error) => {
+                note(&format!("bad member {member:?}: {error}"));
+                return Ending::Refused;
+            }
+        }
+    }
+    let Some((journals, cell_servers)) = majority_cell(
+        asker.providers,
+        asker.rpc,
+        asker.names,
+        &addrs,
+        asker.timeout,
+    )
+    .await
+    else {
+        note(
+            "no cell answered inspect from a majority of the members: is it formed (init --idle)?",
+        );
+        return Ending::Unreachable;
+    };
+    let joining = CellJoin {
+        journals,
+        endpoint: cell_servers
+            .iter()
+            .map(|server| (server.id, server.address.clone()))
+            .collect(),
+        name: name.as_bytes().to_vec(),
+    };
+    let mut fleet = match open_session(asker.providers, client, servers).await {
+        Ok(fleet) => fleet,
+        Err(ending) => return ending,
+    };
+    let run = fleet
+        .add_cell(
+            asker.providers,
+            asker.rpc,
+            asker.names,
+            client,
+            0,
+            &joining,
+            patience,
+        )
+        .await;
+    match run.outcome {
+        Step::Done { result, .. } => {
+            let outcome = if run.steps.is_empty() {
+                "unchanged"
+            } else {
+                "added"
+            };
+            out.emit(
+                || format!("{outcome} cell={name}"),
+                || {
+                    json!({
+                        "outcome": outcome,
+                        "cell": result,
+                        "name": name,
+                        "steps": steps(&run.steps),
+                    })
+                },
+            );
+            Ending::Success
+        }
+        Step::Refused(refusal) => refused(out, &refusal, &Labels::default()),
+        Step::Interrupted(stop) => interrupted(&stop),
+        Step::Advanced(_) => unreachable!("a run never ends advanced"),
+    }
+}
+
+/// `parosctl universe remove-cell` (#232 (multiple cells)): the cell
+/// named `name` leaves the universe, its id tombstoned.
+async fn remove_cell(
+    asker: &Asker<'_>,
+    client: &Client<TokioProviders>,
+    servers: &[u64],
+    out: &Printer,
+    name: &str,
+    patience: Duration,
+) -> Ending {
+    let mut fleet = match open_session(asker.providers, client, servers).await {
+        Ok(fleet) => fleet,
+        Err(ending) => return ending,
+    };
+    let directory = match read_directory(client, 0, fleet.directory_journal()).await {
+        Ok(directory) => directory,
+        Err(outcome) => {
+            note(&format!("the universe directory was not read: {outcome:?}"));
+            return Ending::Unreachable;
+        }
+    };
+    let Some(cell_id) = directory.cell_named(name.as_bytes()) else {
+        out.emit(
+            || format!("no cell named {name}"),
+            || json!({ "outcome": "not_found", "name": name }),
+        );
+        return Ending::Refused;
+    };
+    let run = fleet.remove_cell(client, 0, cell_id, patience).await;
+    match run.outcome {
+        Step::Done { .. } => {
+            out.emit(
+                || format!("removed cell={name}"),
+                || {
+                    json!({
+                        "outcome": "removed",
+                        "cell": cell_id,
+                        "name": name,
+                        "steps": steps(&run.steps),
+                    })
+                },
+            );
+            Ending::Success
+        }
+        Step::Refused(refusal) => refused(out, &refusal, &Labels::default()),
+        Step::Interrupted(stop) => interrupted(&stop),
+        Step::Advanced(_) => unreachable!("a run never ends advanced"),
     }
 }
 

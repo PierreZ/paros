@@ -350,6 +350,20 @@ pub struct DriverTunables {
     /// is 5 s. Floor 1 s: a shorter window measures the sampler's own
     /// jitter, not the machine.
     pub load_interval: Duration,
+    /// The `Identify` round trip at or above which the cell coordinator
+    /// leans a machine slow (#361 (slow machines), `crate::machine::slow`),
+    /// when it is also four times the round's median. Floor 1 ms; it should
+    /// stay well above an ordinary round trip, or every machine leans slow
+    /// and only the cap on marks holds the cell together.
+    pub slow_rtt: Duration,
+    /// The disk or CPU busy ratio, in thousandths, at or above which the
+    /// cell coordinator leans a machine slow (#361 (slow machines)). Floor
+    /// 201 (one above the fast margin), ceiling 1000.
+    pub slow_busy_permille: u32,
+    /// How many watch rounds in a row must lean the other way before the
+    /// cell coordinator marks a machine slow, or fast again (#361 (slow
+    /// machines)): the hysteresis. Floor 1.
+    pub slow_rounds: u32,
     /// How long a journal's new status word must hold before a founding
     /// member shows it (#191 (status), `crate::status::Hysteresis`).
     /// Floor 0: every answer shows its own word. A hold shorter than the
@@ -424,6 +438,9 @@ impl Default for DriverTunables {
             apply_page: paros_core::APPLY_BATCH,
             registry_page: paros_core::REGISTRY_PAGE,
             load_interval: LOAD_INTERVAL,
+            slow_rtt: SLOW_RTT,
+            slow_busy_permille: SLOW_BUSY_PERMILLE,
+            slow_rounds: SLOW_ROUNDS,
             status_hold: STATUS_HOLD,
             internal_request_timeout: INTERNAL_REQUEST_TIMEOUT,
             internal_retry_budget: INTERNAL_RETRY_BUDGET,
@@ -506,6 +523,19 @@ const LOAD_INTERVAL: Duration = Duration::from_secs(5);
 pub const LOAD_INTERVAL_FLOOR: Duration = Duration::from_secs(1);
 
 const _: () = assert!(LOAD_INTERVAL.as_millis() >= LOAD_INTERVAL_FLOOR.as_millis());
+
+/// Default [`DriverTunables::slow_rtt`]: a second, far above a healthy
+/// `Identify` on any link the simulation draws.
+const SLOW_RTT: Duration = Duration::from_secs(1);
+
+/// Default [`DriverTunables::slow_busy_permille`]: 90 % busy.
+const SLOW_BUSY_PERMILLE: u32 = 900;
+
+/// Default [`DriverTunables::slow_rounds`]: three watch rounds.
+const SLOW_ROUNDS: u32 = 3;
+
+const _: () = assert!(SLOW_BUSY_PERMILLE > crate::machine::slow::BUSY_MARGIN);
+const _: () = assert!(SLOW_BUSY_PERMILLE <= 1000);
 
 /// Default [`DriverTunables::status_hold`]: two failure-detector periods.
 const STATUS_HOLD: Duration = Duration::from_millis(3000);

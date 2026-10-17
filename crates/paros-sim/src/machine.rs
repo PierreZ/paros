@@ -115,6 +115,10 @@ pub(crate) struct MachineBoard {
     others: BTreeMap<u64, CellPlan>,
     /// How many of those votes a wipe took ([`founder_in_other_cell`]).
     others_wiped: u64,
+    /// The other cell is the run's second cell (#232 (multiple cells)): an
+    /// idle cell an operator founded on a machine `init` does not list, to
+    /// join it to the universe ([`second_cell_target`]).
+    second: bool,
     /// The IP each machine binds now, by rank (#257): its process IP, or the
     /// address it moved to.
     listens: BTreeMap<usize, std::net::IpAddr>,
@@ -421,6 +425,9 @@ pub(crate) fn founder_wiped(state: &StateHandle) -> bool {
 pub(crate) fn other_cell_target(state: &StateHandle) -> Option<Address> {
     let board = machine_board(state);
     let board = lock(&board);
+    if board.second {
+        return None;
+    }
     if let Some(addr) = &board.other_founder {
         return board.others.is_empty().then(|| addr.clone());
     }
@@ -446,6 +453,61 @@ pub(crate) fn note_other_cell(state: &StateHandle, addr: &Address) {
         "machine: an operator founds at most one other cell"
     );
     board.other_founder = Some(addr.clone());
+}
+
+/// The machine an operator may found the run's second cell on (#232
+/// (multiple cells)), among `unlisted` (the machines `init` does not list):
+/// one that holds no vote and no admission, while no other cell was
+/// founded, or again at the address the second cell was founded on until
+/// it forms (a wipe or an admission may have taken the machine there).
+pub(crate) fn second_cell_target(state: &StateHandle, unlisted: &[Address]) -> Option<Address> {
+    let board = machine_board(state);
+    let board = lock(&board);
+    let idle = |addr: &Address| {
+        board.nodes.get(addr).is_some_and(|node| {
+            !board.voters.contains_key(node)
+                && !board.admitted.contains_key(node)
+                && !board.others.contains_key(node)
+        })
+    };
+    match &board.other_founder {
+        Some(addr) if board.second => (board.others.is_empty() && idle(addr)).then(|| addr.clone()),
+        Some(_) => None,
+        None => unlisted.iter().find(|addr| idle(addr)).cloned(),
+    }
+}
+
+/// An operator is about to found the run's second cell on the machine at
+/// `addr` (#232 (multiple cells)), alone.
+pub(crate) fn note_second_cell(state: &StateHandle, addr: &Address) {
+    let board = machine_board(state);
+    let mut board = lock(&board);
+    assert_always!(
+        board.other_founder.is_none() || board.second && board.other_founder.as_ref() == Some(addr),
+        "machine: an operator founds at most one other cell"
+    );
+    board.other_founder = Some(addr.clone());
+    board.second = true;
+}
+
+/// Whether the machine at `addr` is where an operator founded another cell
+/// (#216, #232 (multiple cells)): it may answer for that cell.
+pub(crate) fn is_other_founder(state: &StateHandle, addr: &Address) -> bool {
+    lock(&machine_board(state)).other_founder.as_ref() == Some(addr)
+}
+
+/// Whether an operator founded the run's second cell (#232 (multiple
+/// cells)), or set out to: a machine of the run may answer for another cell.
+pub(crate) fn second_cell_founded(state: &StateHandle) -> bool {
+    lock(&machine_board(state)).second
+}
+
+/// Whether the vote of the second cell (#232 (multiple cells)) is still on
+/// its machine's disk.
+pub(crate) fn second_cell_alive(state: &StateHandle) -> bool {
+    let board = machine_board(state);
+    let board = lock(&board);
+    board.second && !board.others.is_empty()
 }
 
 /// Whether `plan` is the other cell an operator founded at `addr` (#216): a
@@ -1595,9 +1657,15 @@ pub(crate) fn recorded(board: &Mutex<MachineBoard>, addr: &Address, record: &Mac
             { "node" => node, "cell" => plan.cell_id }
         );
         if board.others.insert(node, plan.clone()).is_none() {
-            assert_reachable!(
-                "machine: an operator founds another cell on a wiped member's address"
-            );
+            if board.second {
+                assert_reachable!(
+                    "machine: an operator founds a second cell on an unlisted machine"
+                );
+            } else {
+                assert_reachable!(
+                    "machine: an operator founds another cell on a wiped member's address"
+                );
+            }
         }
         board.votes.entry(plan.cell_id).or_default().insert(*ballot);
         return;
