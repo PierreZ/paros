@@ -208,42 +208,58 @@ fn kept(
 
 /// The size `tenant`'s set should have: `2F+1`, `F` the tenant's largest
 /// `failures_per_partition` (#214 (tenant modes)), at most every storage
-/// machine placement may book; the size in force or the slots `booked`,
-/// the larger, while its control journal `control` cannot be read. `None` once a later term fenced it.
+/// machine placement may book that can hold the set: one that holds a slot
+/// of it, or has a free slot. While its control journal `control` cannot be
+/// read: the size in force or the slots `booked`, the larger, once the set
+/// holds a slot; `Some(None)`, wait, while it holds none. `None` once a
+/// later term fenced it.
 async fn desired_size<P: Providers>(
     client: &Client<P>,
     cell: &CellSession,
     desk: &mut TenantDesk,
     (tenant, control): (TenantId, paros_core::JournalId),
     (in_force, booked): (usize, usize),
-) -> Option<usize> {
+) -> Option<Option<usize>> {
     match desk.tenant(client, tenant, control).await {
         Ok(state) => {
             let largest = state.largest_failures();
             // Capped at the machines placement may book, never at every
             // storage machine the desk names: a founding member the registry
             // does not hold counts there, and a size placement cannot reach
-            // keeps the set in its book step for good.
+            // keeps the set in its book step for good. A full machine is no
+            // more reachable, unless it holds a slot of the set already
+            // (sweep recipe 122746:10910618044440912506 on
+            // 8668601583785772229: a set of two over a full founder and one
+            // machine with room never left the founder).
             let registry = cell.registry();
             let storage = desk.storage(registry);
-            // Only a machine that can hold one of the set's slots counts:
-            // one that holds a slot already, or has a free one. A full
-            // machine counted here keeps a set booked short in its book
-            // step for good. Witness 7532087542125135385 on 2017028.
             let held: BTreeSet<NodeId> = slots(registry, tenant)
                 .iter()
                 .map(|(_, b)| b.node)
                 .collect();
-            let eligible = placement::machines(registry, storage.iter().copied())
+            let machines = placement::machines(registry, storage.iter().copied());
+            let eligible = machines
                 .iter()
-                .filter(|m| m.free() > 0 || held.contains(&m.node))
+                .filter(|m| held.contains(&m.node) || m.booked < m.capacity)
                 .count();
-            Some(set_size(largest, eligible))
+            assert!(
+                eligible <= machines.len(),
+                "a set's machines are machines placement may book"
+            );
+            if eligible < machines.len() {
+                moonpool_assertions::reachable!(
+                    "coordinator: a set's size passes over a full machine"
+                );
+            }
+            Some(Some(set_size(largest, eligible)))
         }
         Err(JournalAnswer::NotCoordinator) => None,
         // An unreadable control journal never shrinks the set: a set a
-        // frozen generation thinned keeps the size it was booked for.
-        Err(_) => Some(in_force.max(booked)),
+        // frozen generation thinned keeps the size it was booked for. A set
+        // that holds no slot yet waits for a read: a guess below its modes'
+        // size booked a slot the next read could never hand over to.
+        Err(_) if booked == 0 => Some(None),
+        Err(_) => Some(Some(in_force.max(booked))),
     }
 }
 
@@ -379,6 +395,10 @@ impl Sets {
             ),
         )
         .await?;
+        let Some(size) = size else {
+            return Some(SetStep::Waiting);
+        };
+        assert!(size > 0, "a set keeps at least one matchmaker");
         if size != reply.matchmakers.len() {
             moonpool_assertions::reachable!("coordinator: a set is resized to its tenant's modes");
         }

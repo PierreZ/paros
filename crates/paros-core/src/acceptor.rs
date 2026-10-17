@@ -118,6 +118,12 @@ pub struct Acceptor<V> {
     faulty: RetainedWindow<Slot, Ballot>,
     /// Faulty entries healed in place by a fresh record, this incarnation.
     faulty_repaired: u64,
+    /// An upper bound on the ballot of every record and every faulty entry
+    /// held: raised at each record, never lowered (a floor raise only drops
+    /// entries). `ceiling <= promised` then proves "the promise dominates
+    /// every record" in O(1), where a scan of the log grew with it (#619
+    /// (O(n) invariants)).
+    ceiling: Ballot,
 }
 
 impl<V: Clone + PartialEq> Acceptor<V> {
@@ -147,20 +153,29 @@ impl<V: Clone + PartialEq> Acceptor<V> {
             faulty.keys().next().is_none_or(|s| *s >= first_slot),
             "no faulty entry survives below the compaction floor"
         );
+        // The boot seam scans once; every later check reads the bound.
+        let ceiling = records
+            .values()
+            .map(|(ballot, _)| *ballot)
+            .chain(faulty.values().copied())
+            .max()
+            .unwrap_or_else(Ballot::zero);
         let acceptor = Self {
             promised,
             records: RetainedWindow::new(records, first_slot),
             faulty: RetainedWindow::new(faulty, first_slot),
             faulty_repaired: 0,
+            ceiling,
         };
         acceptor.assert_invariants();
         acceptor
     }
 
     /// The acceptor's own cross-field invariants: min-key probes against the
-    /// floor, and bounded structural scans over the retained log and the
-    /// faulty set (always-on by choice — the maps are small and crash beats
-    /// corruption).
+    /// floor, a scan of the faulty set (small: only damage fills it), and the
+    /// promise against the ballot ceiling. Nothing here walks the retained
+    /// log, so the check costs the same however long the log grows (#619
+    /// (O(n) invariants)).
     ///
     /// # Panics
     ///
@@ -198,19 +213,29 @@ impl<V: Clone + PartialEq> Acceptor<V> {
         // covers — so nothing this acceptor holds may stand above it. The
         // faulty half says the same about a record whose value was lost: its
         // identity survived, and so did the promise that covered it.
+        // `ceiling` bounds every record and faulty ballot (raised at each
+        // record, scanned once at boot), so these hold for all of them in
+        // O(1). The first and last records are checked against the bound
+        // itself, its read-back pair.
         assert!(
-            self.records
-                .entries()
-                .values()
-                .all(|(ballot, _)| *ballot <= self.promised),
+            self.ceiling <= self.promised,
             "the promise dominates every accepted record"
         );
         assert!(
-            self.faulty
-                .entries()
-                .values()
-                .all(|ballot| *ballot <= self.promised),
-            "the promise dominates every faulty record"
+            [self.records.first_key(), self.records.last_key()]
+                .into_iter()
+                .flatten()
+                .filter_map(|slot| self.records.get(slot))
+                .all(|(ballot, _)| *ballot <= self.ceiling),
+            "the ballot ceiling bounds every accepted record"
+        );
+        assert!(
+            [self.faulty.first_key(), self.faulty.last_key()]
+                .into_iter()
+                .flatten()
+                .filter_map(|slot| self.faulty.get(slot))
+                .all(|ballot| *ballot <= self.ceiling),
+            "the ballot ceiling bounds every faulty record"
         );
     }
 
@@ -603,6 +628,7 @@ impl<V: Clone + PartialEq> Acceptor<V> {
             "an accepted record's ballot never falls"
         );
         self.records.insert(slot, (ballot, command.clone()));
+        self.ceiling = self.ceiling.max(ballot);
         writes.push(
             AcceptorWrite::AppendAccepted {
                 slot,

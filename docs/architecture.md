@@ -2266,6 +2266,16 @@ geometry is balanced: about 7,900 blocks in the persist log and in the entry log
 segment. A store made with another geometry does not open: no store made with the old
 default is kept (decided on 2026-10-16). Only tests and the browser sandbox use a compact geometry, to cross rollovers fast.
 
+**Spare segments and durable writes** (#600 (journal commit stalls), moonpool#338, moonpool#339).
+A journal store that a machine serves prepares its next segment in the background
+(`paros::journal::Spares`, on the machine's own task provider). When the active segment is half
+full, a task creates, zero-fills and syncs a spare. The commit that fills the segment then rolls
+onto the spare with a header write and a rename. It does not zero-fill a whole segment on the
+commit path. A spare is never evidence: every open deletes the spares it finds. A matchmaker
+store prepares no spare, because its registrations fill a segment rarely. Each step of an
+ordered commit is one durable write (`pwritev2(RWF_DSYNC)` on Linux), not a write and an
+`fsync`. The simulation runs the same path: the spare is a task of the machine's process.
+
 Zones are failure domains, and a cell spans enough of them for its quorums (section 3.7). What
 the WPaxos read (section 10) established for one region with several availability zones:
 
