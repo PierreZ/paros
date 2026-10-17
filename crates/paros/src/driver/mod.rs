@@ -631,11 +631,23 @@ impl<P: Providers> Shared<'_, P> {
         S: LogStorage + Send + 'static,
         A: Audit + Clone + Send + Sync + 'static,
     {
-        assert!(rt.flight.is_none(), "a flying journal takes no other batch");
         assert!(
             rt.backlog.is_empty(),
             "a journal that does not fly holds nothing back"
         );
+        self.take(rt).await;
+    }
+
+    /// Take the core's batch: finish it at once (no durable write) or
+    /// launch its flush. [`Shared::settle`], and the backlog's own settles
+    /// ([`Shared::step_backlog`]), which may leave inputs held behind the
+    /// flight it launches.
+    async fn take<S, A>(&self, rt: &mut JournalRt<S, A>)
+    where
+        S: LogStorage + Send + 'static,
+        A: Audit + Clone + Send + Sync + 'static,
+    {
+        assert!(rt.flight.is_none(), "a flying journal takes no other batch");
         let began = self.providers.time().now();
         let taken = take_ready(&mut rt.node, self.out, &rt.audit).await;
         let expiry = rt.expiry.take();
@@ -714,25 +726,27 @@ impl<P: Providers> Shared<'_, P> {
         S: LogStorage + Send + 'static,
         A: Audit + Clone + Send + Sync + 'static,
     {
-        let Some(flight) = rt.flight.take() else {
-            return Ok(());
-        };
-        let (storage, done) = self.edge.alongside(flight.flush).await?;
-        let landing = flight::Landing {
-            storage,
-            done,
-            taken: flight.taken,
-            expiry: flight.expiry,
-            began: flight.began,
-        };
-        self.landed(rt, landing).await?;
+        // The backlog's batches may fly in turn: wait for each, so the
+        // caller's input steps after every input held before it.
+        while let Some(flight) = rt.flight.take() {
+            let (storage, done) = self.edge.alongside(flight.flush).await?;
+            let landing = flight::Landing {
+                storage,
+                done,
+                taken: flight.taken,
+                expiry: flight.expiry,
+                began: flight.began,
+            };
+            self.landed(rt, landing).await?;
+        }
+        assert!(rt.flight.is_none(), "a landed journal flies nothing");
         assert!(rt.backlog.is_empty(), "a landed journal holds nothing back");
         Ok(())
     }
 
     /// Finish a landed flight: give the store back, finish the batch, then
-    /// step every input held back meanwhile. Returns whether any was: the
-    /// caller settles them as one batch (group commit).
+    /// step and settle the inputs held back meanwhile
+    /// ([`Shared::step_backlog`]).
     ///
     /// # Errors
     ///
@@ -742,7 +756,7 @@ impl<P: Providers> Shared<'_, P> {
         &self,
         rt: &mut JournalRt<S, A>,
         landing: flight::Landing<S>,
-    ) -> Result<bool, RunError>
+    ) -> Result<(), RunError>
     where
         S: LogStorage + Send + 'static,
         A: Audit + Clone + Send + Sync + 'static,
@@ -761,18 +775,52 @@ impl<P: Providers> Shared<'_, P> {
             )
             .await;
         self.settled(rt, landing.began);
-        let backlog = std::mem::take(&mut rt.backlog);
-        if backlog.len() > 1 {
-            moonpool_assertions::reachable!(
-                "driver: one flush carries the inputs that waited on the last one"
-            );
+        self.step_backlog(rt).await;
+        Ok(())
+    }
+
+    /// Step the inputs held back during a flight and settle them, as few
+    /// batches as the core's phase allows (group commit): the inputs of one
+    /// phase share one batch, and an input that moves the phase
+    /// ([`Phase`]) ends its batch. Every per-batch observer
+    /// (`surface_matchmaking`, `maintain`) reads the core once, after the
+    /// batch, and reports what it sees under the core's ballot, so a batch
+    /// holds at most one phase change, as one input per batch did before
+    /// #613 (settle off the node loop). Witnesses on PR #639 (sync
+    /// hand-off): 4250574494756084282, a beat opened a campaign at round 33
+    /// and a later message of the same batch abandoned it, so its requests
+    /// left unsurfaced; 12321567722382338258, a re-asked campaign was
+    /// reported under a ballot a later input had moved. Stops when the
+    /// backlog is empty, or when a batch flies: the rest waits for it.
+    async fn step_backlog<S, A>(&self, rt: &mut JournalRt<S, A>)
+    where
+        S: LogStorage + Send + 'static,
+        A: Audit + Clone + Send + Sync + 'static,
+    {
+        while rt.flight.is_none() && !rt.backlog.is_empty() {
+            let mut held = std::mem::take(&mut rt.backlog).into_iter();
+            let mut stepped = 0_usize;
+            for input in held.by_ref() {
+                let before = Phase::of(&rt.node);
+                self.apply(rt, input);
+                stepped += 1;
+                if Phase::of(&rt.node) != before {
+                    break;
+                }
+            }
+            rt.backlog = held.collect();
+            assert!(stepped > 0, "a batch of the backlog steps an input");
+            if stepped > 1 {
+                moonpool_assertions::reachable!(
+                    "driver: one flush carries the inputs that waited on the last one"
+                );
+            }
+            self.take(rt).await;
         }
-        let stepped = !backlog.is_empty();
-        for input in backlog {
-            self.apply(rt, input);
-        }
-        assert!(rt.backlog.is_empty(), "a landing steps its whole backlog");
-        Ok(stepped)
+        assert!(
+            rt.backlog.is_empty() || rt.flight.is_some(),
+            "a journal holds inputs back only while it flies"
+        );
     }
 
     /// Step one input into the journal's core (no settle).
@@ -1366,6 +1414,58 @@ fn stretch_tick() -> bool {
         moonpool_assertions::reachable!("a node stretches its tick interval");
     }
     stretched
+}
+
+/// What the per-batch observers read of a core (#613 (settle off the node
+/// loop)): an input that moves any of it ends a group-commit batch
+/// ([`Shared::step_backlog`]). The role, ballot and leader (`maintain`'s
+/// role report and election clock), the open matchmaking campaign and
+/// membership probe (`surface_matchmaking`), and the counters `maintain`
+/// reports under the core's ballot. Inputs that move none of it (the
+/// steady traffic of one leadership) still share one flush.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Phase {
+    role: NodeRole,
+    ballot: paros_core::Ballot,
+    leader: Option<NodeId>,
+    campaign: Option<paros_core::Ballot>,
+    probe: Option<paros_core::Ballot>,
+    reasks: u64,
+    quorum_lost: u64,
+    watermark_fills: u64,
+    repair: paros_core::RepairCounters,
+    handoff: paros_core::HandoffCounters,
+    generation: u64,
+    needs_timeout: bool,
+}
+
+impl Phase {
+    fn of(node: &ColocatedNode) -> Self {
+        let phase = Self {
+            role: node.role(),
+            ballot: node.ballot(),
+            leader: node.leader(),
+            campaign: node
+                .matchmaking_role()
+                .map(paros_core::matchmaking::Matchmaking::ballot),
+            probe: node
+                .membership_probe()
+                .map(paros_core::matchmaking::MembershipProbe::ballot),
+            reasks: node.matchmaking_timeouts(),
+            quorum_lost: node.quorum_lost_step_downs(),
+            watermark_fills: node.watermark_fills(),
+            repair: node.repair_counters(),
+            handoff: node.handoff_counters(),
+            generation: node.matchmaker_set().map_or(0, |set| set.generation.0),
+            needs_timeout: node.needs_election_timeout(),
+        };
+        // A probe and a campaign never coexist (`surface_matchmaking`).
+        assert!(
+            phase.campaign.is_none() || phase.probe.is_none(),
+            "a phase holds a campaign or a probe, never both"
+        );
+        phase
+    }
 }
 
 /// Hold `input` back while its journal's batch flies (#613 (settle off the
@@ -1985,10 +2085,8 @@ where
                 // finish its batch, step what it held back, and settle that
                 // as the next batch.
                 let Some(rt) = journals.live.get_mut(&journal) else { continue };
-                match shared.landed(rt, landing).await {
-                    Ok(true) => shared.settle(rt).await,
-                    Ok(false) => {}
-                    Err(fault) => journals.fold(journal, Err(fault), ticks, self_id)?,
+                if let Err(fault) = shared.landed(rt, landing).await {
+                    journals.fold(journal, Err(fault), ticks, self_id)?;
                 }
             }
             Some((req, reply)) = rpc.write.recv() => {

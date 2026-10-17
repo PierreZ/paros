@@ -8,12 +8,15 @@
 //! batch flies, the loop steps nothing into that journal's core: a message,
 //! a call, a read or a tick for it waits in the journal's backlog
 //! ([`Input`]). Once the flush lands and the batch is finished, the loop
-//! steps the whole backlog, then takes one batch for all of it: the writes
-//! that arrived during one flush share the next one (group commit). The core
-//! therefore sees exactly what it saw before: inputs, then one `Ready`, then
-//! its finish. Nothing that rests on the batch's durable writes (a vote
-//! counted, a reply, a `Commit`, a read served) reaches the core or the wire
-//! before the flush.
+//! steps the backlog and takes one batch for the inputs of one phase: the
+//! writes that arrived during one flush share the next one (group commit),
+//! and an input that moves the core's phase (a campaign opened, a ballot
+//! moved, a leader learned) ends its batch, so every per-batch observer
+//! still sees at most one phase change (`Shared::step_backlog`). The core
+//! therefore sees what it saw before: inputs, then one `Ready`, then its
+//! finish. Nothing that rests on the batch's durable writes (a vote
+//! counted, a reply, a `Commit`, a read served, a control journal's fold)
+//! reaches the core, the wire or a reader before the flush.
 //!
 //! **A flight outlives its journal's runtime.** A journal parked or forgotten
 //! while its batch flies leaves the flight behind as an orphan

@@ -231,6 +231,25 @@ pub(crate) struct JournalRt<S, A> {
     pub(crate) contested: BTreeSet<(Slot, u64, u64)>,
 }
 
+impl<S, A> JournalRt<S, A> {
+    /// Whether the core holds only durable state: no batch flies. While one
+    /// does, the core already holds that batch's effects (a slot its own
+    /// unsynced vote decided, a fold walked past it, a `Truncate` applied),
+    /// and a crash before the flush lands undoes them. A reader that acts
+    /// on the fold (the control-journal follow, the peer book and its
+    /// durable cache) reads only a settled core (#613 (settle off the node
+    /// loop)): witness 16790173632859305817 on PR #639 (sync hand-off)
+    /// folded registry positions 32 to 34 from a flying batch that its
+    /// crash then lost, and every other node folded another event there.
+    pub(crate) fn settled(&self) -> bool {
+        let settled = self.flight.is_none();
+        if settled {
+            assert!(self.storage.is_some(), "a settled journal holds its store");
+        }
+        settled
+    }
+}
+
 /// Boot `journal` from `storage`: the scan, the format marker (#147), the
 /// core, the boot report and the first election timeout.
 ///

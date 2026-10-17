@@ -95,7 +95,9 @@ impl PeerBook {
         &mut self,
         journals: &Journals<S, A>,
     ) -> (Vec<(NodeId, PeerTarget)>, Option<CachedRegistry>) {
-        let Some(rt) = journals.live.get(&self.registry) else {
+        // A flying registry's fold is not yet durable (`JournalRt::settled`):
+        // the book and its durable cache wait for its batch to land.
+        let Some(rt) = journals.live.get(&self.registry).filter(|rt| rt.settled()) else {
             return (Vec::new(), None);
         };
         let before = self.fold.next_seq();
