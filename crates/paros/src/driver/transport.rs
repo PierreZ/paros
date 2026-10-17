@@ -426,7 +426,7 @@ fn is_cumulative(kind: &str) -> bool {
 /// mailbox (#142; empty on a deployment without proxies), and the sender's
 /// identity for the observability events — a node, or a proxy leader running
 /// [`run_proxy`](crate::run_proxy), which sends through exactly this handle.
-/// Bundled so `drain_ready` takes one handle.
+/// Bundled so `take_ready` and `finish_ready` take one handle.
 pub(crate) struct Outbound {
     /// Every peer's lane, by node: one lane carries every class, since
     /// nothing bulky travels between peers (#186: a laggard below the trim

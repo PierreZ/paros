@@ -114,7 +114,7 @@ struct Drained {
 /// confirmed with the fold head it reported. It does not release the next
 /// page of a deferred walk: [`serve_and_advance`] does, after the reads are
 /// answered from the fold this batch reported (the node's order,
-/// `drain_ready` step 3b, then `advance_recovery`; #550 (replica serves an
+/// `finish_ready` step 3b, then `advance_recovery`; #550 (replica serves an
 /// unreported fold page)).
 #[tracing::instrument(level = "trace", skip_all, fields(replica = self_id))]
 async fn drain<S: LogStorage, A: Audit>(
@@ -172,7 +172,7 @@ async fn drain<S: LogStorage, A: Audit>(
 /// Serve the reads a drained batch confirmed from the fold that batch
 /// reported, then release the next page of a deferred walk (#550 (replica
 /// serves an unreported fold page)). The order is the node driver's
-/// (`drain_ready`: step 3b, then `advance_recovery`): released first, the
+/// (`finish_ready`: step 3b, then `advance_recovery`): released first, the
 /// core folds the next page at once, while its writes and its `committed`
 /// report wait for the next batch, and a read would be served from slots the
 /// replica has neither persisted nor reported. Witness 147148122662988833
