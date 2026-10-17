@@ -19,7 +19,7 @@ enum Field {
 }
 
 /// Every field of [`DriverTunables`], each overridable.
-const FIELDS: [Field; 43] = [
+const FIELDS: [Field; 46] = [
     Field::Millis("tick_interval", |t, v| t.tick_interval = v),
     Field::Count("election_timeout_base", |t, v| t.election_timeout_base = v),
     Field::Millis("keep_alive_interval", |t, v| t.keep_alive_interval = v),
@@ -92,6 +92,13 @@ const FIELDS: [Field; 43] = [
         t.registry_page = usize::try_from(v).unwrap_or(usize::MAX);
     }),
     Field::Millis("load_interval", |t, v| t.load_interval = v),
+    Field::Millis("slow_rtt", |t, v| t.slow_rtt = v),
+    Field::Count("slow_busy_permille", |t, v| {
+        t.slow_busy_permille = u32::try_from(v).unwrap_or(u32::MAX).min(1000);
+    }),
+    Field::Count("slow_rounds", |t, v| {
+        t.slow_rounds = u32::try_from(v).unwrap_or(u32::MAX);
+    }),
     Field::Millis("status_hold", |t, v| t.status_hold = v),
     Field::Millis("internal_request_timeout", |t, v| {
         t.internal_request_timeout = v;
@@ -262,6 +269,9 @@ mod tests {
             apply_page: _,
             registry_page: _,
             load_interval: _,
+            slow_rtt: _,
+            slow_busy_permille: _,
+            slow_rounds: _,
             status_hold: _,
             internal_request_timeout: _,
             internal_retry_budget: _,

@@ -229,6 +229,11 @@ pub(crate) struct JournalRt<S, A> {
     /// column-mates of a grid never duel forever over one slot. Volatile; a
     /// key below the acceptor's floor is forgotten.
     pub(crate) contested: BTreeSet<(Slot, u64, u64)>,
+    /// The members of this journal's configuration the cell holds slow
+    /// (#361 (slow machines)), as the registry fold said at the last call
+    /// the node loop took: a hint for a grid's column and row, read when
+    /// the call steps, which may be after a flight lands.
+    pub(crate) slow: BTreeSet<NodeId>,
 }
 
 impl<S, A> JournalRt<S, A> {
@@ -339,6 +344,7 @@ pub(crate) async fn boot_journal<P: Providers, S: LogStorage, A: Audit>(
         match_resend: Cadence::default(),
         gc_resend: Cadence::default(),
         contested: BTreeSet::new(),
+        slow: BTreeSet::new(),
     })
 }
 

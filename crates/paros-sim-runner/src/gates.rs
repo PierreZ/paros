@@ -50,6 +50,10 @@ pub const RARE: &[Rare] = &[
         reason: "an ADMIT that draws a machine an operator removed: one CI sweep seed (#359 (drain, remove and maintenance for machines))",
     },
     Rare {
+        msg: "coordinator: a served term follows a renamed founder",
+        reason: "a founder renamed (the rename_pct knob's extreme, #349) while a served term runs: one witness on PR #643's sweep",
+    },
+    Rare {
         msg: "coordinator: a machine down past its bound is gone",
         reason: "a gone-machine seed: 11 hits in 1,000 hunt seeds (#498 (moves in the sweep), #475 (re-place after the Down bound))",
     },
@@ -118,6 +122,22 @@ pub const RARE: &[Rare] = &[
         reason: "marginal: needs a whole zone down through a created journal's claim and write; fired in main's sweep at 0c66f34, missed by PR #559's sweep at bb2a3c2 (#215 (zones), #486)",
     },
     Rare {
+        msg: "zones: a zone outage takes several machines down at once",
+        reason: "marginal: needs the zone-outage scenario on a cell with two machines in one zone; fired on 4 and 5 of 300 hunt seeds at 88f803f and 2a5997b, missed by both shards of PR #636's sweep (#215 (zones), #486)",
+    },
+    Rare {
+        msg: "zones: a client appends to its journal while a zone is down",
+        reason: "marginal: needs the zone-outage scenario and a client append inside its hold; fired on 1 and 4 of 300 hunt seeds at 2a5997b and 88f803f, missed by both shards of PR #636's sweep (#215 (zones), #486)",
+    },
+    Rare {
+        msg: "zones: a control-journal write is chosen with a zone down",
+        reason: "marginal: needs the zone-outage scenario and a control-journal write inside its hold; fired on 1 of 300 hunt seeds, missed by shard 2 of main's sweep at e1062fe; a whole fleet run inside a zone outage, where the outage struck on 4 of 300 (#215 (zones), #486, #623 (zone-down gates in the sweep))",
+    },
+    Rare {
+        msg: "zones: a tenant is created with a zone down",
+        reason: "marginal: needs the zone-outage scenario and a whole tenant creation inside its hold; fired on 1 of 300 hunt seeds at 2a5997b, missed by shard 2 of main's sweep at e1062fe (#215 (zones), #486); also a whole tenant creation inside a zone outage: 1 of 300 hunt seeds with the 10–16 s hold, where the outage struck on 4 (#623 (zone-down gates in the sweep))",
+    },
+    Rare {
         msg: "admit: a pinned machine denies a tenant token",
         reason: "marginal: needs pinned machines and the 15% tenant-token draw on an admission; fired 4 times in main's sweep at 629aa62, missed by PR #584's sweep (#245 (Biscuit tokens), #486)",
     },
@@ -162,6 +182,10 @@ pub const RARE: &[Rare] = &[
         reason: "marginal: needs a three-column grid (a pool of six) and the skip's BUGGIFY location on the same seed; 55 checks in 600 hunt seeds, but the sweep missed it once (#533 (move a stuck round), #486)",
     },
     Rare {
+        msg: "phase2: a stuck round whose slot is chosen elsewhere is not moved",
+        reason: "marginal: a grid round must outlast its own resend budget and see its slot chosen by a `Commit` or a catch-up before its tally closes, inside one beat; the sweep at 2e88949 fired it and the sweep at d7071df missed it (#533 (move a stuck round), #486)",
+    },
+    Rare {
         msg: "tenant coordinator: a configure refused for want of slots",
         reason: "marginal: the configure twin of an unplaceable create, needs a full machine; fired on 0 of 300 hunt seeds even with a widest-mode draw, while configures were recorded on 36 (#486)",
     },
@@ -172,6 +196,10 @@ pub const RARE: &[Rare] = &[
     Rare {
         msg: "acceptor: an Accept below the compaction floor is ignored, not nacked",
         reason: "marginal: fired on 6 of 810 hunt seeds (#486)",
+    },
+    Rare {
+        msg: "an Accepted leaves for a slot its own batch compacted",
+        reason: "a heal-path accept and a floor raised past it in one batch, the lowest floor of the cell: one CI sweep seed (6657126035707192045 on 25d00a7)",
     },
     Rare {
         msg: "acceptor: an Accept inside the chosen prefix heals a faulty chosen record",
@@ -1200,6 +1228,22 @@ pub const RARE: &[Rare] = &[
     Rare {
         msg: "gc: an operator probes the members' beliefs before a retirement",
         reason: "missed by the sweep of PR #510 (whole-run chaos): it needs an effective GC floor at a retirement step, rarer under whole-run chaos (#454 (control plane meets chaos), #486)",
+    },
+    Rare {
+        msg: "coordinator: a move records its placement",
+        reason: "a move that finishes with the journal's recorded placement behind its members: fired on 1 of 2 sweeps; moves are rare in the sweep (#609 (slow moves in the sweep), #498 (moves in the sweep))",
+    },
+    Rare {
+        msg: "coordinator: a move takes a journal off a slow machine",
+        reason: "a move off a slow machine: 0 of 300 hunt seeds, where a machine was marked slow on 22 checks; a mark needs three machines, a move a journal on it and a free storage machine (#609 (slow moves in the sweep), #498 (moves in the sweep))",
+    },
+    Rare {
+        msg: "grid: a round's column avoids a slow acceptor",
+        reason: "needs a grid journal on the machines with a member marked slow: 0 of 300 hunt seeds (#609 (slow moves in the sweep))",
+    },
+    Rare {
+        msg: "grid: a quorum read's row avoids a slow acceptor",
+        reason: "needs a grid journal on the machines with a member marked slow: 0 of 300 hunt seeds (#609 (slow moves in the sweep))",
     },
     Rare {
         msg: "coordinator: a settled set left its booked machines",

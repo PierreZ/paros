@@ -70,7 +70,7 @@ pub enum InitRun {
 /// What an initialized fleet is, as one `init` saw it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Initialized {
-    /// The fleet's id.
+    /// The fleet's id; `0` for an idle cell (#232 (multiple cells)).
     pub fleet_id: u64,
     /// The cell coordinator: the candidate the election journal named
     /// leader once the cell control journal had one.
@@ -97,6 +97,9 @@ pub enum InitRefusal {
     Formation(String),
     /// The formed cell hosts no fleet tenant.
     NoFleet,
+    /// An idle cell was asked for, and the cell formed hosts a universe
+    /// tenant (#232 (multiple cells)).
+    NotIdle,
     /// A fleet step refused.
     Fleet(FleetRefusal),
 }
@@ -152,6 +155,10 @@ pub struct InitParams {
     /// failures. `init` admits every other listed machine. The default is
     /// [`FAILURES_PER_PARTITION`].
     pub failures_per_partition: u32,
+    /// Form an idle cell (`cell init`, #232 (multiple cells)): no universe
+    /// tenant and no fleet steps. `universe add-cell` joins it to a
+    /// universe later. The run's fleet id is then `0`.
+    pub idle: bool,
 }
 
 /// The default `F` of the cell's control journals: three founding members,
@@ -202,6 +209,7 @@ async fn found<P: Providers>(
     names: &Names,
     addrs: &[Address],
     connect: &impl Fn(&[(u64, Address)]) -> Client<P>,
+    idle: bool,
     patience: Duration,
 ) -> Result<Found, Unreachable> {
     let (journals, servers) = bootstrap::majority_cell(providers, rpc, names, addrs, patience)
@@ -211,7 +219,7 @@ async fn found<P: Providers>(
         .into_iter()
         .map(|server| (server.id, server.address))
         .collect();
-    if journals.fleet.is_none() {
+    if journals.fleet.is_none() && !idle {
         return Err(Unreachable::NoControlJournals);
     }
     let client = connect(&servers);
@@ -309,8 +317,9 @@ pub async fn initialize<P: Providers>(
     let patience = params.patience;
     let mut formation = None;
     for target in members {
-        let token = &params.token;
-        match bootstrap::cell_init(providers, rpc, names, target, members, token, patience).await {
+        let request = (params.token.as_slice(), params.idle);
+        match bootstrap::cell_init(providers, rpc, names, target, members, request, patience).await
+        {
             InitOutcome::Formed(plan) => {
                 formation = Some(plan);
                 break;
@@ -341,18 +350,31 @@ pub async fn initialize<P: Providers>(
                 .map(|(id, addr)| (id.0, addr.clone()))
                 .collect();
             let ids = servers.iter().map(|(id, _)| *id).collect();
-            let Some(fleet_control) = plan.fleet else {
-                return InitRun::Refused(InitRefusal::NoFleet);
-            };
-            assert!(
-                plan.journals.contains(&fleet_control),
-                "the plan serves its fleet journal"
-            );
+            match plan.fleet {
+                Some(fleet_control) => assert!(
+                    plan.journals.contains(&fleet_control),
+                    "the plan serves its fleet journal"
+                ),
+                // A cell formed idle by another run (#232): it is not this
+                // run's to give a universe.
+                None if !params.idle => return InitRun::Refused(InitRefusal::NoFleet),
+                None => {}
+            }
             (servers, ids, plan.control_journals())
         }
         // Every listed machine is formed (a re-run after its formation):
         // learn the cell from them.
-        None => match found(providers, rpc, names, members, &connect, patience).await {
+        None => match found(
+            providers,
+            rpc,
+            names,
+            members,
+            &connect,
+            params.idle,
+            patience,
+        )
+        .await
+        {
             Ok(cell) => cell,
             Err(unreachable) => return InitRun::Unreachable(unreachable),
         },
@@ -363,6 +385,40 @@ pub async fn initialize<P: Providers>(
         Ok(node) => node,
         Err(unreachable) => return InitRun::Unreachable(unreachable),
     };
+    if params.idle {
+        if journals.fleet.is_some() {
+            // A cell `init` formed with a universe: not an idle cell.
+            return InitRun::Refused(InitRefusal::NotIdle);
+        }
+        let mut steps = Vec::new();
+        let admission = Admission {
+            journals,
+            members: &members,
+            servers: &servers,
+            seed: params.leader_seed.rotate_left(64),
+            token: params.token,
+            patience,
+        };
+        let admitted = match admission
+            .admit(providers, rpc, names, &client, others, &mut steps)
+            .await
+        {
+            Step::Done { result, .. } => result,
+            Step::Refused(refusal) => return InitRun::Refused(InitRefusal::Fleet(refusal)),
+            Step::Interrupted(stop) => return InitRun::Interrupted(stop),
+            Step::Advanced(_) => unreachable!("a run never ends advanced"),
+        };
+        moonpool_assertions::reachable!("init: an idle cell forms with no universe");
+        return InitRun::Initialized(Initialized {
+            fleet_id: 0,
+            coordinator,
+            members,
+            servers,
+            admitted,
+            journals,
+            steps,
+        });
+    }
     let Some(fleet) = FleetSession::new(
         journals,
         params.leader_seed,
@@ -371,7 +427,9 @@ pub async fn initialize<P: Providers>(
     ) else {
         return InitRun::Refused(InitRefusal::NoFleet);
     };
-    let mut fleet = fleet.with_names(params.names.0.as_bytes(), params.names.1.as_bytes());
+    let mut fleet = fleet
+        .with_names(params.names.0.as_bytes(), params.names.1.as_bytes())
+        .with_endpoint(servers.clone());
     if let Some(key) = params.root_key {
         fleet = fleet.with_root_key(key);
     }

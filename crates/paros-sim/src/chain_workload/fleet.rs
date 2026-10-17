@@ -87,6 +87,7 @@ mod other_cell;
 mod placement;
 mod replaced;
 mod resolve;
+mod second_cell;
 mod sets;
 mod tags;
 mod view;
@@ -136,17 +137,17 @@ fn with_names<R>(state: &StateHandle, f: impl FnOnce(&mut TenantNames) -> R) -> 
 
 const TENANT_NAMES_KEY: &str = "paros-tenant-names";
 
-/// Run `f` over the operator whose turn it is to finish an `init` in the
-/// recovery tail ([`FleetOps::take_init_turn`]).
-fn with_init_turn<R>(state: &StateHandle, f: impl FnOnce(&mut Option<u64>) -> R) -> R {
-    let turn = crate::state::published(state, INIT_TURN_KEY, || None::<u64>);
+/// Run `f` over the operator whose turn it is to finish its pending
+/// operation in the recovery tail ([`FleetOps::take_turn`]).
+fn with_turn<R>(state: &StateHandle, f: impl FnOnce(&mut Option<u64>) -> R) -> R {
+    let turn = crate::state::published(state, TURN_KEY, || None::<u64>);
     let mut turn = turn
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     f(&mut turn)
 }
 
-const INIT_TURN_KEY: &str = "paros-init-turn";
+const TURN_KEY: &str = "paros-fleet-turn";
 
 /// An operation this client stopped in the middle of — the crash shape, or
 /// a run that did not end (interrupted, its target killed under it, going
@@ -197,6 +198,9 @@ pub(super) struct FleetOps {
     /// operation: the one fleet its tenant identifiers belong to.
     tenants_fleet: Option<JournalIdentifier>,
     pending: Option<Pending>,
+    /// The cell this client forgot as unknown to its machines, until it
+    /// learns one: a lost cell, when the next one differs.
+    forgotten: Option<paros::machine::ControlJournals>,
     /// How long into an operation its target is killed, and how long it
     /// stays down (`ChainConfig::fleet_kill_delay_ms`, `fleet_kill_down_ms`).
     kill_ms: (u64, u64),
@@ -267,6 +271,7 @@ impl FleetOps {
             ever_created: Vec::new(),
             tenants_fleet: None,
             pending: None,
+            forgotten: None,
             kill_ms,
             killed: false,
             learned: super::system::Learned::default(),
@@ -495,6 +500,17 @@ impl FleetOps {
             return;
         };
         self.same_fleet(cell.fleet);
+        // On its own location, the second cell's next phase instead (#232
+        // (multiple cells)); more often once it is formed, so a run reaches
+        // its later phases.
+        let scenario = crate::shape::second_cell(ctx.state());
+        if (scenario && moonpool_sim::sim_random_bool(0.8)
+            || second_cell::started(ctx.state()) && buggify_with_prob!(0.6)
+            || buggify_with_prob!(0.15))
+            && self.second_cell(ctx, policy, payload).await
+        {
+            return;
+        }
         let name = NAMES[usize::try_from(class % NAMES.len() as u64).unwrap_or(0)].to_vec();
         let client = cell.client.clone();
         let first = cell.first(payload);
@@ -594,19 +610,23 @@ impl FleetOps {
     /// pending any more.
     #[tracing::instrument(level = "debug", skip_all, fields(client = self.client_id))]
     async fn resume(&mut self, ctx: &SimContext, policy: CheckpointPolicy, draw: u64) -> bool {
-        let Some(pending) = self.pending.take() else {
+        if self.pending.is_none() {
             return true;
-        };
-        if matches!(pending, Pending::Initialize) {
+        }
+        if matches!(self.pending, Some(Pending::Initialize)) {
             if self.initialize(ctx, draw).await {
+                self.pending = None;
                 return true;
             }
-            self.pending = Some(pending);
             return false;
         }
         let Some(cell) = self.learn(ctx).await else {
-            self.pending = Some(pending);
             return false;
+        };
+        // Learning a lost cell's successor drops an operation of the lost
+        // universe (`forget_lost_universe`).
+        let Some(pending) = self.pending.take() else {
+            return true;
         };
         if !self.same_fleet(cell.fleet) && matches!(pending, Pending::Create(..)) {
             // A creation pending in a lost cell's fleet ends with it: see
@@ -937,6 +957,11 @@ impl FleetOps {
         first: usize,
         name: &[u8],
     ) -> bool {
+        // A tenant of the second cell (#232 (multiple cells)) is dropped on
+        // that cell's registry: the removal reads it, as the directory names it.
+        if let Some(journal) = second_cell::joined_journal(&self.state) {
+            self.note_journals([journal]);
+        }
         let run = session
             .remove_tenant(client, first, name, Duration::ZERO)
             .await;
@@ -950,11 +975,17 @@ impl FleetOps {
                             names.removed.insert((cell.fleet, tenant), name.to_vec())
                         });
                     }
+                    // A tenant of the second cell (#232 (multiple cells)) is
+                    // dropped on that cell's registry, which the removal read.
+                    let home = second_cell::cell_id(&self.state)
+                        .map(|id| session.registry_of(id))
+                        .filter(|registry| registry.hosts(tenant) || registry.dropped(tenant))
+                        .unwrap_or(session.cell());
                     assert_always!(
                         session.directory().named(name).is_none()
                             && session.directory().is_removed(tenant)
-                            && !session.cell().hosts(tenant)
-                            && session.cell().dropped(tenant),
+                            && !home.hosts(tenant)
+                            && home.dropped(tenant),
                         "fleet: a removed tenant is gone from the directory and tombstoned on its cell",
                         { "tenant" => tenant.0 }
                     );
@@ -987,7 +1018,11 @@ impl FleetOps {
         } = interrupted
         {
             assert_reachable!("fleet: an operator forgets a cell its machines do not know");
-            self.cell = None;
+            self.forgotten = self
+                .cell
+                .take()
+                .map(|cell| cell.journals)
+                .or(self.forgotten);
             // The init this client saw end was that cell's: the cell it
             // learns next may still be initializing (#454 (control plane
             // meets chaos): witness 2649599687404826405, a cell lost after
@@ -1075,8 +1110,7 @@ impl FleetOps {
         if self.pending.is_none() {
             return;
         }
-        let initializing = matches!(self.pending, Some(Pending::Initialize | Pending::Init));
-        if initializing && !self.take_init_turn(ctx, beat).await {
+        if !self.take_turn(ctx, beat).await {
             return;
         }
         let deadline = ctx.time().now() + FLEET_SETTLE;
@@ -1106,13 +1140,16 @@ impl FleetOps {
             { "client" => self.client_id, "pending" => format!("{:?}", self.pending) }
         );
         assert_reachable!("fleet: a pending operation is finished in the recovery tail");
-        if initializing {
-            with_init_turn(ctx.state(), |turn| *turn = None);
-        }
+        with_turn(ctx.state(), |turn| *turn = None);
     }
 
-    /// Wait for this operator's turn to finish an `init` in the recovery
-    /// tail (#513 (fleet Init duel)): one operator at a time. Two operators
+    /// Wait for this operator's turn to finish its pending operation in the
+    /// recovery tail (#513 (fleet Init duel)): one operator at a time. A
+    /// tenant removal two operators resume at once duels the same way
+    /// (#361 (slow machines), witness 11003452246573997144 on 16c59ae: two
+    /// clients resuming one `Remove` superseded each other's claim on the
+    /// fleet tenant until [`FLEET_SETTLE`]), so every operation takes the
+    /// turn. Two operators
     /// that finish one `init` at once each claim its journals, so each
     /// supersedes the other's steps; with the tail's slow links one step
     /// takes seconds, and neither ended in [`FLEET_SETTLE`] (witness
@@ -1122,9 +1159,9 @@ impl FleetOps {
     /// in the chaos window, where nothing owes an end. The next operator
     /// starts its own deadline once the first is done, and finds the
     /// `init` ended. False when the run shut down first.
-    async fn take_init_turn(&self, ctx: &SimContext, beat: Duration) -> bool {
+    async fn take_turn(&self, ctx: &SimContext, beat: Duration) -> bool {
         loop {
-            let mine = with_init_turn(ctx.state(), |turn| match turn {
+            let mine = with_turn(ctx.state(), |turn| match turn {
                 Some(holder) if *holder != self.client_id => false,
                 _ => {
                     *turn = Some(self.client_id);
@@ -1290,8 +1327,9 @@ impl FleetOps {
             );
             assert_reachable!("fleet: a run ends with the cell READY in the directory");
         }
-        no_tenant_mid_operation(&directory, cell);
+        no_tenant_mid_operation(&directory, cell, cell_id);
         directory_equals_cell(&directory, cell);
+        self.final_second(ctx, &directory).await;
     }
 
     /// The cell heals around a renamed founding member (#349): once chaos
@@ -1445,9 +1483,11 @@ fn judged_cell(members: &[u64]) -> Folder<JudgedRegistry> {
 /// under that cell, every `READY` `users` tenant in the directory hosted.
 /// After chaos, no served tenant is left mid-operation: each is `READY`,
 /// or `ERROR` once its cell refused its footprint (#476).
-fn no_tenant_mid_operation(directory: &FleetDirectory, cell: &Registry) {
+fn no_tenant_mid_operation(directory: &FleetDirectory, cell: &Registry, cell_id: u64) {
     for (tenant, entry) in directory.tenants() {
-        if entry.kind == TenantKind::Users {
+        // Another cell's tenant (#232 (multiple cells)) is judged with its
+        // cell (`second_cell::final_second`).
+        if entry.kind == TenantKind::Users && entry.cell_id == cell_id {
             // A creation its cell refused for its footprint ends `ERROR`
             // (#476): that is an end, not the middle of an operation.
             let refused = cell.footprint(tenant).is_some_and(|g| !g.granted());
@@ -1494,7 +1534,12 @@ fn directory_equals_cell(directory: &FleetDirectory, cell: &Registry) {
             { "tenant" => tenant.0 }
         );
     }
-    for (tenant, entry) in directory.tenants() {
+    // Another cell's tenants (#232 (multiple cells)) are another cell
+    // control journal's.
+    let own = directory
+        .tenants()
+        .filter(|(_, entry)| entry.cell_id == joined.cell_id);
+    for (tenant, entry) in own {
         // A tenant is marked `ERROR` only once its cell refused its
         // footprint (#476), and such a tenant is never hosted.
         if entry.state == TenantState::Error {
@@ -1522,6 +1567,12 @@ fn reach(stage: Stage) {
         Stage::AddCell => assert_reachable!("fleet: a step adds the cell to the directory"),
         Stage::CellReady => {
             assert_reachable!("fleet: a step marks the cell READY in the directory");
+        }
+        Stage::CellRemoving => {
+            assert_reachable!("universe: a step marks a cell REMOVING in the directory");
+        }
+        Stage::RemoveCell => {
+            assert_reachable!("universe: a step removes a cell from the directory");
         }
         Stage::RegisterTenant => {
             assert_reachable!("fleet: a step registers a tenant in the directory");

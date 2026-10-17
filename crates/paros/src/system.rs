@@ -134,6 +134,18 @@ pub enum SystemCommand {
         /// The incarnation the registry holds for it.
         incarnation: u128,
     },
+    /// The cell coordinator judged machine `id`, as `incarnation`, slow or
+    /// fast again (#361 (slow machines)), from `facts`.
+    MachineSlow {
+        /// The machine.
+        id: NodeId,
+        /// The incarnation the registry holds for it.
+        incarnation: u128,
+        /// Whether it is slow.
+        slow: bool,
+        /// The latency facts the judgement read.
+        facts: SlowFacts,
+    },
     /// The cell coordinator saw machine `id` answer as `incarnation`
     /// (#211, D6).
     MachineUp {
@@ -173,6 +185,9 @@ pub enum SystemCommand {
         cell_id: u64,
         /// The metadata version.
         version: u32,
+        /// Where the universe directory is, when this cell does not host
+        /// the universe tenant (#232 (multiple cells)): `universe add-cell`.
+        universe: Option<UniversePointer>,
     },
     /// Tenant creation's cell step (#229): the cell hosts `tenant`, whose
     /// control journal is `control` (#210).
@@ -365,6 +380,23 @@ impl SystemCommand {
                     incarnation_low,
                 })
             }
+            SystemCommand::MachineSlow {
+                id,
+                incarnation,
+                slow,
+                facts,
+            } => {
+                let (incarnation_high, incarnation_low) = incarnation_halves(*incarnation);
+                Kind::MachineSlow(wire::MachineSlow {
+                    id: id.0,
+                    incarnation_high,
+                    incarnation_low,
+                    slow: *slow,
+                    rtt_us: facts.rtt_us,
+                    disk_busy_permille: facts.disk_busy_permille,
+                    cpu_busy_permille: facts.cpu_busy_permille,
+                })
+            }
             SystemCommand::MachineAdmitted { id } => {
                 Kind::MachineAdmitted(wire::MachineAdmitted { id: id.0 })
             }
@@ -390,11 +422,13 @@ impl SystemCommand {
                 fleet_id,
                 cell_id,
                 version,
-            } => Kind::JoinFleet(wire::JoinFleet {
-                fleet_id: *fleet_id,
-                cell_id: *cell_id,
-                version: *version,
-            }),
+                universe,
+            } => Kind::JoinFleet(join_to_wire(
+                *fleet_id,
+                *cell_id,
+                *version,
+                universe.as_ref(),
+            )),
             SystemCommand::HostTenant {
                 fleet_id,
                 tenant,
@@ -472,6 +506,16 @@ impl SystemCommand {
                 id: NodeId(up.id),
                 incarnation: incarnation_from_halves(up.incarnation_high, up.incarnation_low),
             },
+            Kind::MachineSlow(slow) => SystemCommand::MachineSlow {
+                id: NodeId(slow.id),
+                incarnation: incarnation_from_halves(slow.incarnation_high, slow.incarnation_low),
+                slow: slow.slow,
+                facts: SlowFacts {
+                    rtt_us: slow.rtt_us,
+                    disk_busy_permille: slow.disk_busy_permille,
+                    cpu_busy_permille: slow.cpu_busy_permille,
+                },
+            },
             Kind::MachineAdmitted(admitted) => SystemCommand::MachineAdmitted {
                 id: NodeId(admitted.id),
             },
@@ -492,6 +536,11 @@ impl SystemCommand {
                 fleet_id: join.fleet_id,
                 cell_id: join.cell_id,
                 version: join.version,
+                universe: pointer_from_wire(
+                    join.directory_tenant,
+                    join.directory_journal,
+                    join.hosts,
+                )?,
             },
             Kind::HostTenant(host) => SystemCommand::HostTenant {
                 fleet_id: host.fleet_id,
@@ -833,6 +882,22 @@ pub struct Liveness {
     pub incarnation: u128,
     /// Whether it was answering.
     pub up: bool,
+    /// Whether it was judged slow (#361 (slow machines)): alive, but its
+    /// roles move off it like a drain's.
+    pub slow: bool,
+}
+
+/// The latency facts a slow judgement read (#361 (slow machines)): what the
+/// cell coordinator measured of one machine in one watch round.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SlowFacts {
+    /// Its `Identify` round trip, in microseconds, on the coordinator's
+    /// clock.
+    pub rtt_us: u64,
+    /// Its disk's busy ratio, in thousandths, from its last `Load` window.
+    pub disk_busy_permille: u32,
+    /// Its CPU's busy ratio, in thousandths, from its last `Load` window.
+    pub cpu_busy_permille: u32,
 }
 
 /// One capacity booking: a slot of `node` held for `role` of `target`.
@@ -916,6 +981,14 @@ pub enum RegistryEvent {
     MachineDown {
         /// The machine.
         id: NodeId,
+    },
+    /// The cell coordinator judged machine `id` slow, or fast again (#361
+    /// (slow machines)).
+    MachineSlow {
+        /// The machine.
+        id: NodeId,
+        /// Whether it is slow now.
+        slow: bool,
     },
     /// The cell coordinator marked machine `id` up as `incarnation`
     /// (#211): `was_down` when it was marked down before.
@@ -1108,6 +1181,9 @@ pub struct Registry {
     bookings: BTreeMap<u64, Booking>,
     /// The fleet registration (#229): `(fleet_id, cell_id, version)`.
     fleet: Option<FleetRegistration>,
+    /// The universe pointer its join recorded (#232 (multiple cells)):
+    /// `None` for the universe's own cell.
+    universe: Option<UniversePointer>,
     /// The tenants the cell hosts (#229), with what it records of each
     /// (#210).
     hosted: BTreeMap<TenantId, HostedTenant>,
@@ -1142,6 +1218,79 @@ pub struct HostedTenant {
     pub name: Vec<u8>,
     /// What it survives (#252).
     pub survives: crate::tenant::Survives,
+}
+
+/// The **universe pointer** (#232 (multiple cells), §3.7): where a cell
+/// that does not host the universe tenant reads the universe directory.
+/// Recorded by its join; its readers dial `hosts`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UniversePointer {
+    /// The universe directory: the universe tenant's control journal.
+    pub directory: JournalIdentifier,
+    /// Machines of the cell that hosts it, by node id and address.
+    pub hosts: Vec<(u64, crate::Address)>,
+}
+
+type PointerWire = (u64, u64, Vec<wire::UniverseHost>);
+
+/// A `JoinFleet` on the wire, its universe pointer flattened.
+fn join_to_wire(
+    fleet_id: u64,
+    cell_id: u64,
+    version: u32,
+    universe: Option<&UniversePointer>,
+) -> wire::JoinFleet {
+    let (directory_tenant, directory_journal, hosts) = pointer_to_wire(universe);
+    wire::JoinFleet {
+        fleet_id,
+        cell_id,
+        version,
+        directory_tenant,
+        directory_journal,
+        hosts,
+    }
+}
+
+fn pointer_to_wire(pointer: Option<&UniversePointer>) -> PointerWire {
+    pointer.map_or((0, 0, Vec::new()), |p| {
+        (
+            p.directory.tenant.0,
+            p.directory.journal.0,
+            p.hosts
+                .iter()
+                .map(|(node_id, addr)| wire::UniverseHost {
+                    node_id: *node_id,
+                    addr: addr.to_string(),
+                })
+                .collect(),
+        )
+    })
+}
+
+fn pointer_from_wire(
+    tenant: u64,
+    journal: u64,
+    hosts: Vec<wire::UniverseHost>,
+) -> Result<Option<UniversePointer>, &'static str> {
+    if tenant == 0 && journal == 0 && hosts.is_empty() {
+        return Ok(None);
+    }
+    let directory = JournalIdentifier::new(TenantId(tenant), JournalId(journal));
+    if !directory.is_set() || hosts.is_empty() {
+        return Err("a universe pointer names no directory or no host");
+    }
+    let hosts = hosts
+        .into_iter()
+        .map(|h| {
+            let addr = crate::Address::parse(&h.addr)
+                .map_err(|_| "a universe host's address does not parse")?;
+            if h.node_id == 0 {
+                return Err("a universe host names no node");
+            }
+            Ok((h.node_id, addr))
+        })
+        .collect::<Result<_, _>>()?;
+    Ok(Some(UniversePointer { directory, hosts }))
 }
 
 /// The cell side of the fleet's registration (#229, §3.7).
@@ -1229,6 +1378,12 @@ impl Registry {
             }) => self.book(booking, node, role, target),
             Some(SystemCommand::MachineDown { id, incarnation }) => self.down(id, incarnation),
             Some(SystemCommand::MachineUp { id, incarnation }) => self.up(id, incarnation),
+            Some(SystemCommand::MachineSlow {
+                id,
+                incarnation,
+                slow,
+                ..
+            }) => self.slow(id, incarnation, slow),
             Some(SystemCommand::MachineAdmitted { id }) => self.admitted(id),
             Some(SystemCommand::Maintenance { scope, for_ms }) => {
                 self.open_maintenance(seq, scope, for_ms)
@@ -1246,11 +1401,15 @@ impl Registry {
                 fleet_id,
                 cell_id,
                 version,
-            }) => self.join_fleet(FleetRegistration {
-                fleet_id,
-                cell_id,
-                version,
-            }),
+                universe,
+            }) => self.join_fleet(
+                FleetRegistration {
+                    fleet_id,
+                    cell_id,
+                    version,
+                },
+                universe,
+            ),
             Some(SystemCommand::HostTenant {
                 fleet_id,
                 tenant,
@@ -1299,6 +1458,7 @@ impl Registry {
                     Liveness {
                         incarnation,
                         up: true,
+                        slow: false,
                     },
                 );
                 RegistryEvent::Reregistered { id, addr, capacity }
@@ -1325,6 +1485,7 @@ impl Registry {
                     Liveness {
                         incarnation,
                         up: true,
+                        slow: false,
                     },
                 );
                 RegistryEvent::Registered {
@@ -1413,7 +1574,11 @@ impl Registry {
         self.tagged.contains(&request)
     }
 
-    fn join_fleet(&mut self, joined: FleetRegistration) -> RegistryEvent {
+    fn join_fleet(
+        &mut self,
+        joined: FleetRegistration,
+        universe: Option<UniversePointer>,
+    ) -> RegistryEvent {
         if joined.fleet_id == 0 || joined.cell_id == 0 {
             return RegistryEvent::Refused(RegistryRefusal::Malformed);
         }
@@ -1423,6 +1588,7 @@ impl Registry {
         match self.fleet {
             None => {
                 self.fleet = Some(joined);
+                self.universe = universe;
                 RegistryEvent::JoinedFleet {
                     fleet_id: joined.fleet_id,
                     cell_id: joined.cell_id,
@@ -1491,6 +1657,13 @@ impl Registry {
     #[must_use]
     pub fn fleet(&self) -> Option<FleetRegistration> {
         self.fleet
+    }
+
+    /// Where the universe directory is, when the cell joined a universe
+    /// another cell hosts (#232 (multiple cells)).
+    #[must_use]
+    pub fn universe(&self) -> Option<&UniversePointer> {
+        self.universe.as_ref()
     }
 
     /// Whether the cell hosts `tenant` (#229).
@@ -1672,6 +1845,7 @@ impl Registry {
             Liveness {
                 incarnation,
                 up: false,
+                slow: held.slow,
             },
         );
         assert!(!self.liveness(id).up, "a machine marked down is held down");
@@ -1713,11 +1887,13 @@ impl Registry {
         if let Some(node) = self.nodes.get_mut(&id) {
             node.incarnation = incarnation;
         }
+        // A slow judgement belongs to one incarnation: a new one starts fast.
         self.liveness.insert(
             id,
             Liveness {
                 incarnation,
                 up: true,
+                slow: held.slow && held.incarnation == incarnation,
             },
         );
         RegistryEvent::MachineUp {
@@ -1735,7 +1911,48 @@ impl Registry {
         self.liveness.get(&id).copied().unwrap_or(Liveness {
             incarnation: self.nodes.get(&id).map_or(0, |n| n.incarnation),
             up: true,
+            slow: false,
         })
+    }
+
+    /// `MachineSlow` (#361 (slow machines)): a change only. Refused for a
+    /// machine outside the pool, for an incarnation other than the one held,
+    /// and for the judgement held.
+    fn slow(&mut self, id: NodeId, incarnation: u128, slow: bool) -> RegistryEvent {
+        if !self.contains(id) {
+            return RegistryEvent::Refused(RegistryRefusal::NotInPool { id });
+        }
+        let held = self.liveness(id);
+        if held.incarnation != incarnation {
+            return RegistryEvent::Refused(RegistryRefusal::StaleIncarnation { id });
+        }
+        if held.slow == slow {
+            return RegistryEvent::Refused(RegistryRefusal::LivenessUnchanged { id });
+        }
+        self.liveness.insert(id, Liveness { slow, ..held });
+        assert!(self.liveness(id).slow == slow, "a slow judgement is held");
+        assert!(
+            self.liveness(id).up == held.up,
+            "a slow judgement leaves the up state alone"
+        );
+        RegistryEvent::MachineSlow { id, slow }
+    }
+
+    /// Whether the cell coordinator holds `id` slow (#361 (slow machines)).
+    #[must_use]
+    pub fn is_slow(&self, id: NodeId) -> bool {
+        self.contains(id) && self.liveness(id).slow
+    }
+
+    /// Whether `id` keeps the roles placed on it (#361 (slow machines)):
+    /// registered, neither draining nor retired, and not held slow. A role
+    /// on any other machine moves off it (`machine::moves`).
+    #[must_use]
+    pub fn keeps_roles(&self, id: NodeId) -> bool {
+        self.nodes
+            .get(&id)
+            .is_some_and(|n| n.standing == NodeStanding::Registered)
+            && !self.is_slow(id)
     }
 
     /// Whether `id` serves the cell (#511 (placement books machines that
@@ -1883,11 +2100,15 @@ impl Registry {
                     incarnation_high: incarnation_halves(l.incarnation).0,
                     incarnation_low: incarnation_halves(l.incarnation).1,
                     up: l.up,
+                    slow: l.slow,
                 })
                 .collect(),
             fleet_id: self.fleet.map_or(0, |f| f.fleet_id),
             cell_id: self.fleet.map_or(0, |f| f.cell_id),
             version: self.fleet.map_or(0, |f| f.version),
+            directory_tenant: pointer_to_wire(self.universe.as_ref()).0,
+            directory_journal: pointer_to_wire(self.universe.as_ref()).1,
+            hosts: pointer_to_wire(self.universe.as_ref()).2,
             hosted: self
                 .hosted
                 .iter()
@@ -1988,16 +2209,7 @@ impl Checkpointable for Registry {
                 },
             );
         }
-        let mut liveness = BTreeMap::new();
-        for l in state.liveness {
-            liveness.insert(
-                NodeId(l.id),
-                Liveness {
-                    incarnation: incarnation_from_halves(l.incarnation_high, l.incarnation_low),
-                    up: l.up,
-                },
-            );
-        }
+        let liveness = liveness_from_wire(state.liveness);
         let fleet = match (state.fleet_id, state.cell_id) {
             (0, 0) => None,
             (0, _) | (_, 0) => return Err("a registry state names half a fleet registration"),
@@ -2007,6 +2219,11 @@ impl Checkpointable for Registry {
                 version: state.version,
             }),
         };
+        let universe =
+            pointer_from_wire(state.directory_tenant, state.directory_journal, state.hosts)?;
+        if universe.is_some() && fleet.is_none() {
+            return Err("a registry state points at a universe it did not join");
+        }
         let mut hosted = BTreeMap::new();
         for h in state.hosted {
             if h.control_journal == 0 {
@@ -2037,12 +2254,31 @@ impl Checkpointable for Registry {
         self.maintenance = maintenance;
         self.liveness = liveness;
         self.fleet = fleet;
+        self.universe = universe;
         self.hosted = hosted;
         self.dropped = dropped;
         self.tagged = state.tagged.into_iter().collect();
         self.next_seq = covers_up_to + 1;
         Ok(())
     }
+}
+
+/// The liveness marks of a registry checkpoint: each machine's incarnation,
+/// down or up, and slow or not (#361 (slow machines)).
+fn liveness_from_wire(states: Vec<wire::LivenessState>) -> BTreeMap<NodeId, Liveness> {
+    states
+        .into_iter()
+        .map(|l| {
+            (
+                NodeId(l.id),
+                Liveness {
+                    incarnation: incarnation_from_halves(l.incarnation_high, l.incarnation_low),
+                    up: l.up,
+                    slow: l.slow,
+                },
+            )
+        })
+        .collect()
 }
 
 /// The open maintenance windows of a registry checkpoint (#359), each
@@ -2178,11 +2414,31 @@ mod tests {
                 id: NodeId(100),
                 incarnation: 1,
             },
+            SystemCommand::MachineSlow {
+                id: NodeId(100),
+                incarnation: 1,
+                slow: true,
+                facts: SlowFacts {
+                    rtt_us: 250_000,
+                    disk_busy_permille: 990,
+                    cpu_busy_permille: 12,
+                },
+            },
+            SystemCommand::JoinFleet {
+                fleet_id: 11,
+                cell_id: 13,
+                version: 4,
+                universe: Some(UniversePointer {
+                    directory: JournalIdentifier::new(TenantId(5), JournalId(6)),
+                    hosts: vec![(7, crate::Address::parse("10.0.0.7:4500").unwrap())],
+                }),
+            },
             SystemCommand::ReleaseCapacity { booking: 7 },
             SystemCommand::JoinFleet {
                 fleet_id: 11,
                 cell_id: 12,
                 version: 1,
+                universe: None,
             },
             SystemCommand::HostTenant {
                 fleet_id: 11,
@@ -2414,6 +2670,60 @@ mod tests {
             RegistryEvent::Refused(RegistryRefusal::NotInPool { id: NodeId(7) })
         );
         assert!(reg.seen_alive(NodeId(0)) && reg.seen_alive(NodeId(100)));
+    }
+
+    fn slow(id: u64, incarnation: u128, slow: bool) -> Vec<u8> {
+        SystemCommand::MachineSlow {
+            id: NodeId(id),
+            incarnation,
+            slow,
+            facts: SlowFacts::default(),
+        }
+        .encode()
+    }
+
+    #[test]
+    fn slow_marks_are_changes_only_and_move_roles() {
+        let mut reg = Registry::new([NodeId(0)]);
+        reg.fold(0, &register(100, Class::Storage, 1));
+        assert!(reg.keeps_roles(NodeId(100)) && !reg.is_slow(NodeId(100)));
+        // A registration starts fast.
+        assert_eq!(
+            reg.fold(1, &slow(100, 100, false)),
+            RegistryEvent::Refused(RegistryRefusal::LivenessUnchanged { id: NodeId(100) })
+        );
+        assert_eq!(
+            reg.fold(2, &slow(100, 5, true)),
+            RegistryEvent::Refused(RegistryRefusal::StaleIncarnation { id: NodeId(100) })
+        );
+        assert_eq!(
+            reg.fold(3, &slow(100, 100, true)),
+            RegistryEvent::MachineSlow {
+                id: NodeId(100),
+                slow: true
+            }
+        );
+        // Slow is alive, and its roles move.
+        assert!(reg.is_slow(NodeId(100)) && reg.seen_alive(NodeId(100)));
+        assert!(!reg.keeps_roles(NodeId(100)));
+        assert_eq!(
+            reg.fold(4, &slow(100, 100, true)),
+            RegistryEvent::Refused(RegistryRefusal::LivenessUnchanged { id: NodeId(100) })
+        );
+        // Down keeps the judgement; a new incarnation starts fast.
+        reg.fold(5, &liveness(100, 100, false));
+        assert!(reg.is_slow(NodeId(100)));
+        reg.fold(6, &liveness(100, 101, true));
+        assert!(!reg.is_slow(NodeId(100)) && reg.keeps_roles(NodeId(100)));
+        // A checkpoint keeps a slow mark.
+        reg.fold(7, &slow(100, 101, true));
+        let mut restored = Registry::new([NodeId(0)]);
+        restored.restore(7, &reg.checkpoint()).expect("restores");
+        assert!(restored.is_slow(NodeId(100)));
+        assert_eq!(
+            reg.fold(8, &slow(7, 1, true)),
+            RegistryEvent::Refused(RegistryRefusal::NotInPool { id: NodeId(7) })
+        );
     }
 
     #[test]
@@ -2701,6 +3011,7 @@ mod tests {
                 fleet_id,
                 cell_id,
                 version,
+                universe: None,
             })
         };
         let host = |fleet_id, tenant: u64| {
@@ -2842,6 +3153,7 @@ mod tests {
                 fleet_id: fleet,
                 cell_id: 0xce11,
                 version: 1,
+                universe: None,
             }),
         );
         let host = one(&SystemCommand::HostTenant {

@@ -44,14 +44,14 @@ use moonpool_core::Providers;
 use moonpool_rpc::RpcHandle;
 use paros_core::{JournalIdentifier, NodeId, TenantId};
 
-use super::moves::stays;
+use super::moves::{Leaving, stays};
 use super::tenants::TenantDesk;
 use crate::client::cell::CellSession;
 use crate::client::journals::JournalAnswer;
 use crate::client::{Client, ReconfigureMatchmakersOutcome, Server};
 use crate::placement::{self, Step, Want};
 use crate::rpc::{InspectReply, NodeClient};
-use crate::system::{Booking, BookingTarget, Registry, Role};
+use crate::system::{Booking, BookingTarget, NodeStanding, Registry, Role};
 use crate::{Address, Names};
 
 /// The id of a tenant's one matchmaker set inside its tenant (§3.4: one set
@@ -127,7 +127,7 @@ fn slots(registry: &Registry, tenant: TenantId) -> Vec<(u64, Booking)> {
 /// [`Sets::step`]).
 fn next_set(
     registry: &Registry,
-    gone: &BTreeSet<NodeId>,
+    gone: &Leaving,
     settled: &BTreeSet<TenantId>,
     last: Option<TenantId>,
 ) -> Option<TenantId> {
@@ -271,7 +271,7 @@ async fn desired_size<P: Providers>(
 fn gone_plan(
     registry: &Registry,
     desk: &TenantDesk,
-    (tenant, gone): (TenantId, &BTreeSet<NodeId>),
+    (tenant, gone): (TenantId, &Leaving),
     staying: &[(u64, Booking)],
     size: usize,
 ) -> Option<Vec<Step>> {
@@ -282,11 +282,22 @@ fn gone_plan(
         count: size,
     };
     let storage = desk.storage(registry);
+    // A draining, gone (#475) or slow (#361 (slow machines)) machine takes
+    // no new slot: the machines a set may go to are the ones whose slots
+    // stay, so a set never books a machine it is leaving (the registry
+    // refuses the duplicate booking, and the refused grant ends the term).
     let machines: Vec<placement::Machine> = placement::machines(registry, storage.iter().copied())
         .into_iter()
-        .filter(|m| !gone.contains(&m.node))
+        .filter(|m| stays(registry, gone, m.node))
         .collect();
-    placement::plan(&want, &machines, staying, tenant.0).ok()
+    let steps = placement::plan(&want, &machines, staying, tenant.0).ok()?;
+    assert!(
+        placement::booked(&steps)
+            .iter()
+            .all(|node| stays(registry, gone, *node)),
+        "a set never books a machine it is leaving"
+    );
+    Some(steps)
 }
 
 /// The set in force of `journal`'s tenant as the founding members of
@@ -337,7 +348,7 @@ impl Sets {
         (providers, rpc, names, client): (&P, &RpcHandle<P>, &Names, &Client<P>),
         cell: &mut CellSession,
         desk: &mut TenantDesk,
-        gone: &BTreeSet<NodeId>,
+        gone: &Leaving,
     ) -> Option<SetStep> {
         let Some(tenant) = next_set(cell.registry(), gone, &self.settled, self.last) else {
             return Some(SetStep::Idle);
@@ -405,13 +416,29 @@ impl Sets {
             // its slot stays, as a draining one's does, and the set is
             // handed back onto it (#475 (re-place after the Down bound),
             // witness 838622054030409282 on 757fa48: a set thinned off a
-            // gone machine waited in its book step for good).
+            // gone machine waited in its book step for good). A slow
+            // machine's slot stays too (#361 (slow machines)): else the set
+            // waits in its book step and is never handed back onto it.
             moonpool_assertions::reachable!("coordinator: a set has no machine to go to");
+            let kept = Leaving {
+                gone: BTreeSet::new(),
+                held: slots
+                    .iter()
+                    .map(|(_, b)| b.node)
+                    .filter(|node| registry.is_slow(*node))
+                    .collect(),
+            };
             staying = slots
                 .iter()
-                .filter(|(_, b)| stays(registry, &BTreeSet::new(), b.node))
+                .filter(|(_, b)| stays(registry, &kept, b.node))
                 .copied()
                 .collect();
+            assert!(
+                staying.iter().all(|(_, b)| registry
+                    .get(b.node)
+                    .is_some_and(|n| n.standing == NodeStanding::Registered)),
+                "a set with no machine to go to keeps its registered slots"
+            );
         }
         if staying.len() < size {
             return self
@@ -507,7 +534,7 @@ impl Sets {
         &mut self,
         client: &Client<P>,
         cell: &mut CellSession,
-        (tenant, gone): (TenantId, &BTreeSet<NodeId>),
+        (tenant, gone): (TenantId, &Leaving),
         slots: &[(u64, Booking)],
         staying: &[(u64, Booking)],
     ) -> Option<SetStep> {
@@ -536,7 +563,7 @@ impl Sets {
         if !leaving.is_empty() {
             moonpool_assertions::reachable!("coordinator: a set moved off a draining machine");
         }
-        if leaving.iter().any(|(_, b)| gone.contains(&b.node)) {
+        if leaving.iter().any(|(_, b)| gone.gone.contains(&b.node)) {
             moonpool_assertions::reachable!(
                 "coordinator: a set moved off a machine down past its bound"
             );
@@ -563,7 +590,7 @@ impl Sets {
         client: &Client<P>,
         cell: &mut CellSession,
         desk: &mut TenantDesk,
-        (tenant, gone): (TenantId, &BTreeSet<NodeId>),
+        (tenant, gone): (TenantId, &Leaving),
         staying: &[(u64, Booking)],
         size: usize,
     ) -> Option<SetStep> {

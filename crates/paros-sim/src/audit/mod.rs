@@ -276,17 +276,36 @@ impl<T: TimeProvider> NodeAudit<T> {
     fn observe_durable_send(&self, from: Party, msg: &Message) {
         if let Message::Accepted { ballot, slot, .. } = msg {
             let st = self.state();
-            let key = (slot.0, ballot.round, ballot.node.0);
-            let pruned = slot.0 < st.cluster_min_floor();
-            let holds = if pruned {
-                st.accepted.contains_key(&key)
-            } else {
-                st.accept_sets
-                    .get(&key)
-                    .is_some_and(|holders| from.node().is_some_and(|n| holders.contains(&n.0)))
-            };
+            let node = from.node().map(|n| n.0);
+            let holds = st
+                .accept_sets
+                .get(&(slot.0, ballot.round, ballot.node.0))
+                .is_some_and(|holders| node.is_some_and(|n| holders.contains(&n)));
+            // Below the cluster-wide floor the tally is pruned
+            // (`AuditState::prune_below_floor`), so it cannot name the
+            // record. A batch can accept a slot, walk its chosen index past
+            // it and compact it, all before its `Accepted` leaves: the batch
+            // reports the accept, then the truncation that prunes it (seed
+            // 6657126035707192045 on 25d00a7: a heal-path accept of slot 3
+            // and a floor raised to 5 in one batch). The record was durable;
+            // the witnesses left are the ones pruning keeps: a decided slot
+            // the sender's own floor passed, a durable accept reported at
+            // exactly this ballot, and a durable copy on the sender.
+            let compacted = !holds
+                && slot.0 < st.cluster_min_floor()
+                && st.decided_vhash(slot.0).is_some()
+                && st
+                    .accepted
+                    .contains_key(&(slot.0, ballot.round, ballot.node.0))
+                && node.is_some_and(|n| {
+                    st.floor.get(&n).is_some_and(|f| f.now > slot.0)
+                        && st.persisted.contains_key(&(n, slot.0))
+                });
+            if compacted {
+                assert_reachable!("an Accepted leaves for a slot its own batch compacted");
+            }
             assert_always!(
-                holds,
+                holds || compacted,
                 "an outgoing Accepted names a durably accepted record",
                 { "from" => from.to_string(), "slot" => slot.0, "round" => ballot.round }
             );

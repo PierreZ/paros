@@ -8,8 +8,12 @@
 //!   no `Up` of the incarnation held up, and a `Down` names the incarnation
 //!   held. The fold refuses each of them, so a refusal in the log is a
 //!   coordinator that wrote one.
+//! - **A slow mark never takes a quorum** (#361 (slow machines)): when the
+//!   coordinator marks a machine slow, at most a minority of the pool is
+//!   held slow (`paros::machine::slow::SlowJudge::cap`).
 //! - **Gates** — a machine marked down, a machine back up without
-//!   re-placement, a rebooted machine registered again.
+//!   re-placement, a rebooted machine registered again, a machine marked
+//!   slow and one fast again.
 //!
 //! It also remembers which machines the coordinator ever marked down in
 //! the history it folded (#475 (re-place after the Down bound)): only such
@@ -21,6 +25,7 @@ use std::collections::BTreeSet;
 use moonpool_sim::{assert_always, assert_reachable};
 use paros::NodeId;
 use paros::client::checkpoint::Checkpointable;
+use paros::machine::slow::SlowJudge;
 use paros::system::{Registry, RegistryEvent, RegistryRefusal};
 
 /// The cell's registry fold, with every event judged as it is folded.
@@ -54,8 +59,21 @@ impl JudgedRegistry {
         &self.registry
     }
 
-    fn judge(event: &RegistryEvent) {
+    fn judge(registry: &Registry, event: &RegistryEvent) {
         match event {
+            RegistryEvent::MachineSlow { slow: true, .. } => {
+                let pool = registry.pool();
+                let slow = pool.iter().filter(|id| registry.is_slow(**id)).count();
+                assert_always!(
+                    slow <= SlowJudge::cap(pool.len()),
+                    "slow: the slow marks never take a quorum",
+                    { "slow" => slow, "pool" => pool.len() }
+                );
+                assert_reachable!("registry: the cell coordinator marks a machine slow");
+            }
+            RegistryEvent::MachineSlow { slow: false, .. } => {
+                assert_reachable!("registry: a slow machine is fast again");
+            }
             RegistryEvent::Refused(RegistryRefusal::LivenessUnchanged { id }) => {
                 assert_always!(
                     false,
@@ -89,7 +107,7 @@ impl Checkpointable for JudgedRegistry {
 
     fn apply(&mut self, seq: u64, record: &[u8]) -> RegistryEvent {
         let event = self.registry.apply(seq, record);
-        Self::judge(&event);
+        Self::judge(&self.registry, &event);
         if let RegistryEvent::MachineDown { id } = &event {
             self.ever_down.insert(*id);
         }

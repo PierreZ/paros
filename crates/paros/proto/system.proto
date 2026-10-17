@@ -39,6 +39,7 @@ message SystemEntry {
     GrantCapacity grant_capacity = 14;
     SetMachineTags set_machine_tags = 15;
     Maintenance maintenance = 16;
+    MachineSlow machine_slow = 17;
   }
 }
 
@@ -131,6 +132,22 @@ message MachineUp {
   fixed64 incarnation_low = 3;
 }
 
+// The cell coordinator judged machine `id`, as incarnation `incarnation`,
+// slow (`slow`) or fast again (#361 (slow machines)): written only on a
+// change, with the latency facts the judgement read.
+message MachineSlow {
+  uint64 id = 1;
+  fixed64 incarnation_high = 2;
+  fixed64 incarnation_low = 3;
+  bool slow = 4;
+  // Its `Identify` round trip, in microseconds, as the coordinator timed it.
+  uint64 rtt_us = 5;
+  // Its disk's busy ratio, in thousandths, from its last `Load` window.
+  uint32 disk_busy_permille = 6;
+  // Its CPU's busy ratio, in thousandths, from its last `Load` window.
+  uint32 cpu_busy_permille = 7;
+}
+
 // The cell coordinator saw registered machine `id` answer `Identify` as a
 // machine of this cell (#511 (placement books machines that never served)):
 // its admission landed, so placement may book it. Written once, never for a
@@ -165,6 +182,19 @@ message JoinFleet {
   uint64 fleet_id = 1;
   uint64 cell_id = 2;
   uint32 version = 3;
+  // The universe pointer (#232 (multiple cells)), when the cell does not
+  // host the universe tenant: the universe directory's journal and the
+  // machines of the cell that hosts it. Unset (0) for the universe's own
+  // cell, which reads the directory from its plan.
+  uint64 directory_tenant = 4;
+  uint64 directory_journal = 5;
+  repeated UniverseHost hosts = 6;
+}
+
+// One machine of the cell that hosts the universe tenant (#232).
+message UniverseHost {
+  uint64 node_id = 1;
+  string addr = 2;
 }
 
 // Tenant creation's cell step: the cell hosts tenant `tenant` (#229). The
@@ -216,6 +246,11 @@ message RegistryState {
   // The open maintenance windows (#359), machines in id order, then zones
   // in name order.
   repeated MaintenanceState maintenance = 13;
+  // The universe pointer the join recorded (#232): 0 and empty for the
+  // universe's own cell.
+  uint64 directory_tenant = 14;
+  uint64 directory_journal = 15;
+  repeated UniverseHost hosts = 16;
 }
 
 message MaintenanceState {
@@ -238,6 +273,8 @@ message LivenessState {
   fixed64 incarnation_high = 2;
   fixed64 incarnation_low = 3;
   bool up = 4;
+  // Whether the cell coordinator holds it slow (#361 (slow machines)).
+  bool slow = 5;
 }
 
 message RegisteredNodeState {

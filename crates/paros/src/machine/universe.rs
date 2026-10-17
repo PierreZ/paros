@@ -35,17 +35,26 @@
 //! order: the coordinator acts on every entry, whoever registered it. A
 //! `HostTenant` decided from a stale directory, after a removal moved the
 //! entry to `REMOVING`, is refused at apply once the tombstone landed.
-//! A cell whose plan names no fleet journal (a cell that does not host the
-//! universe tenant, M12) is never joined here: `universe add-cell` owns
-//! that join.
+//!
+//! **Another cell's universe** (#232 (multiple cells)). A cell whose plan
+//! names no fleet journal (an idle cell, formed by `init --idle`) is never
+//! joined by [`follow`]: `universe add-cell` asks its coordinator to join
+//! with `JoinUniverse` ([`join`]). The request carries the universe
+//! pointer: the directory's journal and the machines of the cell that hosts
+//! it. The coordinator reads the directory there, with a client over those
+//! machines, and writes `JoinFleet` with the pointer once the directory
+//! holds this cell under its cell tenant's control journal. From then on
+//! [`follow`] reads the directory at the pointer ([`directory_reader`]),
+//! and the tenant steps above run as in the cell that hosts the universe.
 
 use moonpool_core::Providers;
-use paros_core::TenantId;
+use paros_core::{JournalIdentifier, TenantId};
 
 use crate::client::Client;
 use crate::client::cell::CellSession;
 use crate::client::checkpoint::{Folder, LoadOutcome, load};
 use crate::client::fleet::Interrupted;
+use crate::client::universe::{JoinAnswer, JoinRequest};
 use crate::fleet::{CellState, FleetDirectory, METADATA_VERSION, TenantKind, TenantState};
 use crate::footprint::{self, Footprint};
 use crate::machine::ControlJournals;
@@ -78,6 +87,7 @@ pub(crate) fn joining(
         fleet_id,
         cell_id: journals.cell_id,
         version: METADATA_VERSION,
+        universe: None,
     })
 }
 
@@ -219,11 +229,11 @@ pub(crate) async fn follow<P: Providers>(
         "only an open session follows the universe"
     );
     let journals = session.journals();
-    let Some(universe) = journals.fleet else {
+    let Some((universe, reader)) = directory_reader(client, journals, session.registry()) else {
         return Ok(0);
     };
     if !matches!(
-        load(directory, universe, client, 0, 0).await,
+        load(directory, universe, &reader, 0, 0).await,
         LoadOutcome::Loaded { .. }
     ) {
         return Ok(0);
@@ -257,6 +267,91 @@ pub(crate) async fn follow<P: Providers>(
         }
     }
     Ok(wrote)
+}
+
+/// Where this cell reads the universe directory, and a client that reads
+/// it: its own fleet journal through its own machines when it hosts the
+/// universe tenant, else the universe pointer its join recorded (#232
+/// (multiple cells)), through the machines the pointer names. `None` while
+/// the cell knows no universe.
+pub(crate) fn directory_reader<P: Providers>(
+    client: &Client<P>,
+    journals: ControlJournals,
+    registry: &Registry,
+) -> Option<(JournalIdentifier, Client<P>)> {
+    if let Some(pointer) = registry.universe() {
+        return Some((pointer.directory, client.elsewhere(&pointer.hosts)));
+    }
+    journals.fleet.map(|fleet| (fleet, client.clone()))
+}
+
+/// Answer `universe add-cell`'s join request (#232 (multiple cells)) as the
+/// cell coordinator, through the term's `session`: read the universe
+/// directory at the request's pointer, and once it holds this cell under
+/// its cell tenant's control journal, write `JoinFleet` with the pointer.
+/// A cell that joined this universe answers `Joined` at once; one that
+/// joined another, or hosts a universe tenant of its own, `OtherUniverse`.
+///
+/// # Panics
+///
+/// If the session is not open (a programmer error).
+pub(crate) async fn join<P: Providers>(
+    client: &Client<P>,
+    session: &mut CellSession,
+    request: &JoinRequest,
+) -> JoinAnswer {
+    assert!(session.is_open(), "only an open session joins a universe");
+    let journals = session.journals();
+    match session.registry().fleet() {
+        Some(joined)
+            if joined.fleet_id == request.fleet_id && joined.cell_id == journals.cell_id =>
+        {
+            return JoinAnswer::Joined;
+        }
+        Some(_) => return JoinAnswer::OtherUniverse,
+        None => {}
+    }
+    if journals.fleet.is_some() {
+        // A cell `init` formed hosts a universe tenant of its own.
+        return JoinAnswer::OtherUniverse;
+    }
+    let reader = client.elsewhere(&request.pointer.hosts);
+    let mut directory = Folder::new(FleetDirectory::default());
+    if !matches!(
+        load(&mut directory, request.pointer.directory, &reader, 0, 0).await,
+        LoadOutcome::Loaded { .. }
+    ) {
+        return JoinAnswer::Unavailable;
+    }
+    if directory.state().fleet() != Some(request.fleet_id) {
+        return JoinAnswer::NotListed;
+    }
+    let Some(SystemCommand::JoinFleet {
+        fleet_id,
+        cell_id,
+        version,
+        ..
+    }) = joining(directory.state(), journals)
+    else {
+        return JoinAnswer::NotListed;
+    };
+    let join = SystemCommand::JoinFleet {
+        fleet_id,
+        cell_id,
+        version,
+        universe: Some(request.pointer.clone()),
+    };
+    if session.record(client, 0, &join).await.is_err() {
+        return JoinAnswer::Unavailable;
+    }
+    match session.registry().fleet() {
+        Some(joined) if joined.fleet_id == request.fleet_id => {
+            moonpool_assertions::reachable!("universe: a cell joins a universe another cell hosts");
+            JoinAnswer::Joined
+        }
+        Some(_) => JoinAnswer::OtherUniverse,
+        None => JoinAnswer::Unavailable,
+    }
 }
 
 /// How many times one [`follow`] asks [`tenant_steps`]: a tenant's birth
@@ -345,6 +440,7 @@ mod tests {
                 control: JournalIdentifier::new(TenantId(11), JournalId(12)),
                 name: Vec::new(),
                 kind: crate::fleet::CellKind::default(),
+                endpoint: Vec::new(),
             },
         );
         assert_eq!(joining(&other, journals), None);
@@ -358,6 +454,7 @@ mod tests {
                 control: JournalIdentifier::new(TenantId(5), JournalId(13)),
                 name: Vec::new(),
                 kind: crate::fleet::CellKind::default(),
+                endpoint: Vec::new(),
             },
         );
         assert_eq!(joining(&moved, journals), None);
@@ -369,6 +466,7 @@ mod tests {
                 control: journals.cell,
                 name: Vec::new(),
                 kind: crate::fleet::CellKind::default(),
+                endpoint: Vec::new(),
             },
         );
         assert_eq!(
@@ -377,6 +475,7 @@ mod tests {
                 fleet_id: 42,
                 cell_id: journals.cell_id,
                 version: METADATA_VERSION,
+                universe: None,
             })
         );
         // A cell being removed is not joined again.
@@ -419,6 +518,7 @@ mod tests {
                 control: journals.cell,
                 name: Vec::new(),
                 kind: crate::fleet::CellKind::default(),
+                endpoint: Vec::new(),
             },
             FleetCommand::MarkCell {
                 cell_id: journals.cell_id,

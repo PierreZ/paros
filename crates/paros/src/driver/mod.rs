@@ -841,7 +841,15 @@ impl<P: Providers> Shared<'_, P> {
                         // the core's `slot % cols` stands.
                         let column = match rt.node.acceptors().quorum_system() {
                             QuorumSystem::Grid { cols, .. } if rt.node.is_leader() => {
-                                phase2_column(rt.node.proposer().next_slot(), cols)
+                                let slot = rt.node.proposer().next_slot();
+                                // Else a leader prefers a column with no
+                                // acceptor the cell holds slow (#361 (slow
+                                // machines)).
+                                phase2_column(slot, cols).or_else(|| {
+                                    fast_column(rt.node.acceptors(), slot, |id| {
+                                        rt.slow.contains(&id)
+                                    })
+                                })
                             }
                             _ => None,
                         };
@@ -886,7 +894,9 @@ impl<P: Providers> Shared<'_, P> {
                         );
                         Some(log_reads::next_row(ctx, rows))
                     }
-                    _ => None,
+                    // Else a row with no acceptor the cell holds slow (#361
+                    // (slow machines)).
+                    _ => fast_row(&b.config, ctx, |id| rt.slow.contains(&id)),
                 });
                 // The row the core will ask, resolved exactly as it resolves
                 // it, for the audit's report of what served it.
@@ -1399,6 +1409,95 @@ fn phase2_column(slot: paros_core::Slot, cols: usize) -> Option<usize> {
     let column = usize::try_from(slot.0.wrapping_add(1) % modulus).unwrap_or(0);
     assert!(column < cols, "an overridden column is one the grid has");
     Some(column)
+}
+
+/// The members of `node`'s configuration the cell holds slow (#361 (slow
+/// machines)), from the registry fold: empty outside a grid, where no
+/// column or row choice reads them, and without a control plan.
+fn slow_members(
+    node: &ColocatedNode,
+    registry: Option<&crate::system::Registry>,
+) -> BTreeSet<NodeId> {
+    let (QuorumSystem::Grid { .. }, Some(registry)) = (node.acceptors().quorum_system(), registry)
+    else {
+        return BTreeSet::new();
+    };
+    let slow: BTreeSet<NodeId> = node
+        .acceptors()
+        .members()
+        .iter()
+        .copied()
+        .filter(|id| registry.is_slow(*id))
+        .collect();
+    assert!(
+        slow.iter().all(|id| node.acceptors().contains(*id)),
+        "a slow member is a member"
+    );
+    slow
+}
+
+/// The column of a grid this leader's Phase 2 goes to when the core's own
+/// column holds an acceptor the cell holds slow (#361 (slow machines)) and
+/// another column holds none: the first such column after the core's. Every
+/// column is a Phase-2 quorum, so the choice is always valid; it only
+/// prefers fast acceptors. `None` keeps the core's choice.
+fn fast_column(
+    config: &paros_core::AcceptorConfig,
+    slot: paros_core::Slot,
+    is_slow: impl Fn(NodeId) -> bool,
+) -> Option<usize> {
+    let QuorumSystem::Grid { cols, .. } = config.quorum_system() else {
+        return None;
+    };
+    let own = config.column_of(slot)?;
+    let holds_slow = |column: usize| {
+        config
+            .phase2_addressees(Some(column))
+            .into_iter()
+            .any(&is_slow)
+    };
+    if !holds_slow(own) {
+        return None;
+    }
+    let column = (1..cols)
+        .map(|step| (own + step) % cols)
+        .find(|column| !holds_slow(*column))?;
+    assert!(column != own, "a fast column is another column");
+    assert!(column < cols, "a fast column is one the grid has");
+    moonpool_assertions::reachable!("grid: a round's column avoids a slow acceptor");
+    Some(column)
+}
+
+/// The row of a grid a quorum read asks when the core's own row holds an
+/// acceptor the cell holds slow (#361 (slow machines)) and another row
+/// holds none: the twin of [`fast_column`], under the same condition as the
+/// row override (a full column, so every row is a read quorum).
+fn fast_row(
+    config: &paros_core::AcceptorConfig,
+    ctx: u64,
+    slow: impl Fn(NodeId) -> bool,
+) -> Option<usize> {
+    let QuorumSystem::Grid { rows, acks, .. } = config.quorum_system() else {
+        return None;
+    };
+    if rows < 2 || acks != rows {
+        return None;
+    }
+    let own = config.row_of(ctx)?;
+    let holds_slow = |row: usize| config.phase1_addressees(Some(row)).into_iter().any(&slow);
+    if !holds_slow(own) {
+        return None;
+    }
+    let row = (1..rows)
+        .map(|step| (own + step) % rows)
+        .find(|row| !holds_slow(*row))?;
+    assert!(row != own, "a fast row is another row");
+    assert!(
+        config.admits_read_row(Some(row)),
+        "a fast row is a read row"
+    );
+    moonpool_assertions::reachable!("grid: a quorum read's row avoids a slow acceptor");
+    Some(row)
 }
 
 /// Whether the next tick waits twice the normal interval. Always safe: every
@@ -2126,6 +2225,10 @@ where
                     seq: Seq(req.seq),
                     records: req.records.into_iter().map(Value).collect(),
                 };
+                rt.slow = slow_members(
+                    &rt.node,
+                    follower.as_ref().map(system::ControlFollower::registry),
+                );
                 let outcome = shared.input(rt, Input::Propose(Call::Write { entry, reply })).await;
                 journals.fold(journal, outcome, ticks, self_id)?;
             }
@@ -2212,6 +2315,10 @@ where
                     (CallKind::Read, 0),
                     reply,
                     metered::read_answer,
+                );
+                rt.slow = slow_members(
+                    &rt.node,
+                    follower.as_ref().map(system::ControlFollower::registry),
                 );
                 let outcome = shared.input(rt, Input::Read { req, reply }).await;
                 journals.fold(journal, outcome, ticks, self_id)?;
