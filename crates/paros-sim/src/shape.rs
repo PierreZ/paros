@@ -1271,7 +1271,11 @@ pub(crate) fn downed_founder(state: &StateHandle) -> bool {
 }
 
 /// Whether the run draws the **zone-outage scenario** (#215 (zones)):
-/// drawn once per seed, its own BUGGIFY location, never with a scenario
+/// drawn once per seed, its own BUGGIFY location (a full coin once the
+/// location is active: with the 6–10 s hold, a half coin struck on 4 to 6
+/// of 300 hunt seeds and the sweep missed its gates in both shards, and a
+/// full coin on 10 and 11; with the 10–16 s hold, a full coin struck on 6),
+/// never with a scenario
 /// that wipes, moves or replaces a founding member; the downed-founder and
 /// drained-machine scenarios give way to it. Drawn after those two, it was
 /// left 6 seeds in 200 even with its coin forced on, and the sweep never
@@ -1294,7 +1298,7 @@ pub(crate) fn zone_outage(state: &StateHandle) -> bool {
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     *guard.zone_outage.get_or_insert_with(|| {
-        let outage = !other && moonpool_sim::buggify_with_prob!(0.5);
+        let outage = !other && moonpool_sim::buggify_with_prob!(1.0);
         if outage {
             assert_reachable!("zones: a run draws the zone-outage scenario");
         }
