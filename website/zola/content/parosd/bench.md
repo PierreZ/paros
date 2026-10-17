@@ -52,6 +52,15 @@ A grid writes each slot to one column, so it spreads the syncs over more disks. 
 sends more messages per write. The grid wins only when each acceptor has its own disk and
 CPU. A local cell shares one host, so there the plain majority is faster.
 
+`--store-durability batched` creates the journals with one sync per commit instead of two
+(`ordered`, the default; see the journal API page). A journal that exists keeps its own mode.
+A `--local` cell is new for each run. On a running cell, give each mode its own tenant:
+
+```sh
+parosctl bench --local 3 --store-durability batched
+docker compose run --rm parosctl bench --tenant bench-batched --store-durability batched
+```
+
 ## What it does
 
 - Each client does one call at a time. `--mix` gives each call a weight, for example

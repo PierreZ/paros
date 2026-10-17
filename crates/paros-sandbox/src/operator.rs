@@ -358,6 +358,7 @@ impl Desk {
                 writer: WriterMode::Single,
                 desired: Some(desired),
                 tags: paros::tags::UserTags::none(),
+                store: paros::tenant::StoreDurability::Ordered,
             },
         };
         let answer = journals::request(

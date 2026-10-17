@@ -301,6 +301,9 @@ message CreateJournalOp {
   // Its first user tags (#575 (key:value tags)): a reserved key or a set
   // over the cap is `malformed`.
   repeated paros.common.v1.Tag tags = 9;
+  // How its stores commit a batch (#599 (durability mode per journal)),
+  // fixed for its life. Ordered, the zero value, is the default.
+  paros.common.v1.StoreDurability store_durability = 10;
 }
 
 // Delete the live journal named `name`: a tombstone, never a reuse.

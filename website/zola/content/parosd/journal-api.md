@@ -139,6 +139,29 @@ A tenant's matchmaker set has `2F+1` matchmakers, with `F` the largest `failures
 of the tenant: its default and each of its journals. The coordinator grows or shrinks the set
 when that number changes.
 
+## Store durability
+
+A journal's store durability says how each machine's store commits a batch. You choose it at
+create with `--store-durability`, and it cannot change after that (#599 (durability mode per
+journal)):
+
+- `ordered`, the default: the store writes the entries, syncs, writes the persist records and
+  syncs again. A crash never leaves a batch ambiguous.
+- `batched`: the store writes the entries and the persist records, then syncs once. A write
+  costs one sync less on each machine. A crash inside a commit can lose the last batch. The
+  store then reports those entries faulty, and the journal repairs them from its peers.
+
+Both modes are safe: a lost entry was never acknowledged. A `batched` journal needs peers to
+repair a lost batch, so use it only with `--failures-per-partition 1` or more. With
+`--failures-per-partition 0`, a power loss inside a commit can stop the journal for good.
+
+```sh
+parosctl journal create acme orders --store-durability batched
+```
+
+`parosctl journal list acme` and `parosctl tenant show acme` show the mode in the `STORE`
+column.
+
 ## Ids
 
 Every journal call names its journal by the pair `(tenant, journal)`. Each half is a random

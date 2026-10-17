@@ -382,6 +382,7 @@ mod tests {
             desired: Desired::DEFAULT,
             config: AcceptorConfig::new(vec![NodeId(1)], QuorumSystem::Majority),
             tags: crate::tags::UserTags::none(),
+            store: crate::tenant::StoreDurability::Ordered,
         }
         .encode()
     }

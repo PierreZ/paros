@@ -562,6 +562,12 @@ pub(crate) fn plan_lost(state: &StateHandle, cell_id: u64) -> bool {
     lock(&machine_board(state)).lost.contains(&cell_id)
 }
 
+/// Whether `ip` is a machine's process IP the board knows.
+pub(crate) fn is_machine_ip(state: &StateHandle, ip: &str) -> bool {
+    let board = machine_board(state);
+    lock(&board).ips.values().any(|known| known == ip)
+}
+
 /// The process IP of the machine that advertises `addr` (#257): a named
 /// address, or one a moved machine left, is not the IP a kill strikes.
 pub(crate) fn process_ip(state: &StateHandle, addr: &Address) -> Option<String> {
@@ -1336,11 +1342,12 @@ const MACHINE_CLIENT_BASE: u64 = 1 << 32;
 /// scope's `NodeAudit` (#294).
 fn machine_audits(
     ctx: &SimContext,
-    audit_addr: Address,
+    (audit_addr, my_ip): (Address, &str),
     rank: usize,
 ) -> impl Fn(AuditScope) -> NodeAudit<SimTimeProvider> + Clone + Send + Sync + 'static {
     let time = ctx.time().clone();
     let state = ctx.state().clone();
+    let my_ip = my_ip.to_string();
     move |scope: AuditScope| -> NodeAudit<SimTimeProvider> {
         match scope {
             AuditScope::Machine => NodeAudit::new(time.clone(), crate::audit::audit_world(&state))
@@ -1363,6 +1370,10 @@ fn machine_audits(
                 NodeAudit::new(time.clone(), crate::audit::audit_world_for(&state, journal))
                     .in_journal(journal, journal_board(&state))
                     .with_tenants(crate::audit::tenants::tenant_board(&state))
+                    // A created journal's store commits under the mode its
+                    // create recorded: a `Batched` one's commits are cut
+                    // under a budget (#599 (durability mode per journal)).
+                    .with_cut_budget(state.clone(), my_ip.clone())
             }
         }
     }
@@ -1405,7 +1416,8 @@ async fn run_machine_role(
         metrics: machine_metrics(ctx),
     };
     // Ordered: a crash never leaves a batch ambiguous, which a one-member
-    // cell could never repair.
+    // cell could never repair. A journal a tenant created stores under the
+    // mode its create recorded instead (#599 (durability mode per journal)).
     let store_layout = paros::JournalStoreConfig {
         durability: paros::journal::Durability::Ordered,
         ..crate::shape::journal_layout(ctx.state())
@@ -1415,7 +1427,7 @@ async fn run_machine_role(
     let (listen, advertise) = boot_listen(ctx.state(), &layout, rank, my_ip, held)?;
     let RoleRig { incarnation, .. } = arm_role(ctx, my_ip);
     let tunables = incarnation.shape.tunables;
-    let audits = machine_audits(ctx, addrs[rank].clone(), rank);
+    let audits = machine_audits(ctx, (addrs[rank].clone(), my_ip), rank);
     operator_slip();
     let addresses =
         MachineAddresses::new(listen, Some(advertise)).map_err(SimulationError::InvalidState)?;

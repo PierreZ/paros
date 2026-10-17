@@ -3,7 +3,7 @@
 use std::sync::{Arc, Mutex, PoisonError};
 
 use moonpool_sim::SimStorageProvider;
-use moonpool_sim::{SimContext, SimTimeProvider, assert_reachable};
+use moonpool_sim::{SimContext, SimTimeProvider, assert_always, assert_reachable};
 
 use super::Down;
 use super::acceptor::Seat;
@@ -205,8 +205,19 @@ impl JournalStores for SimStores<'_> {
 
     /// A journal created naming this node (#189, a spare's): a quiet seat
     /// under `config`, kept across incarnations (a restart re-folds the
-    /// registry and asks again).
-    fn create(&mut self, journal: paros::JournalIdentifier, config: Config) -> bool {
+    /// registry and asks again). A quiet seat stores ordered whatever the
+    /// mode (`open`): no tenant creates a journal on this deployment, so
+    /// every ask names the ordered default.
+    fn create(
+        &mut self,
+        journal: paros::JournalIdentifier,
+        config: Config,
+        durability: paros::journal::Durability,
+    ) -> bool {
+        assert_always!(
+            durability == paros::journal::Durability::Ordered,
+            "journal store: a quiet seat is asked for an ordered store"
+        );
         let Some(board) = &self.system else {
             return false;
         };
