@@ -393,9 +393,27 @@ pub(super) struct ChainConfig {
     /// The same, per matchmaker shape (a matchmaker set has no leader to
     /// remove, so it is the four-entry [`MATCHMAKER_SHAPES`] ring).
     pub(super) matchmaker_shape_weights: [u64; MATCHMAKER_SHAPES.len()],
+    /// Per-shape weights of a `TRUNCATE` step's floor (#659 (partial and
+    /// mid-batch truncation)), the reconfiguration family's floor and
+    /// ceiling, over [`TRUNCATE_SHAPES`]. Floor 0 for any single weight: an
+    /// all-zero draw picks a shape off the step's draw.
+    pub(super) truncate_shape_weights: [u64; TRUNCATE_SHAPES.len()],
+    /// How many rounds of writes a client runs on a journal it created
+    /// (#658 (the full alphabet on created journals)): one batch from the
+    /// client's own records each. Floor 1: the round the data plane always
+    /// had; ceiling 32, so a created journal holds a long log when it moves.
+    pub(super) created_rounds: u64,
 }
 
+/// The floors a `TRUNCATE` step asks for (#659), by its shape draw: all the
+/// client may drop, uniform in `[first_seq, fence]`, inside the last batch
+/// of several records it wrote, exactly `first_seq` (a no-op) and
+/// `first_seq - 1` (backward). Each is clamped by the fold's fence.
+pub(super) const TRUNCATE_SHAPES: [&str; 5] = ["all", "uniform", "mid-batch", "floor", "backward"];
+
 impl ChainConfig {
+    // One knob per line: the table grows with every tunable.
+    #[allow(clippy::too_many_lines)]
     pub(super) fn for_timeline() -> Self {
         Self {
             steps: buggify_knob!(32_u64, 0_u64..65_u64),
@@ -547,6 +565,16 @@ impl ChainConfig {
                 buggify_knob!(10_u64, 0_u64..41_u64),
                 buggify_knob!(10_u64, 0_u64..41_u64),
             ],
+            // all, uniform, mid-batch, floor, backward: by default half the
+            // truncations drop all the client folded, as before #659.
+            truncate_shape_weights: [
+                buggify_knob!(20_u64, 0_u64..41_u64),
+                buggify_knob!(5_u64, 0_u64..41_u64),
+                buggify_knob!(5_u64, 0_u64..41_u64),
+                buggify_knob!(5_u64, 0_u64..41_u64),
+                buggify_knob!(5_u64, 0_u64..41_u64),
+            ],
+            created_rounds: buggify_knob!(1_u64, 1_u64..33_u64),
         }
     }
 

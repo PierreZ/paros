@@ -230,6 +230,13 @@ impl AuditWorld {
         self.lock().journal.record_at(position)
     }
 
+    /// A client of a created journal was told `write` is written (#651
+    /// (acked writes judged by their bytes)): the journal model judges it
+    /// against the records it saw accepted, once every verdict is in.
+    pub(crate) fn note_acked(&self, write: super::journal_model::AckedWrite) {
+        self.lock().journal.note_acked(write);
+    }
+
     /// A client folded the record at position `lsn` (#186: the application
     /// is the client's, fed by `Read`), hashing to `cmd_hash`, reaching
     /// `state`. Strictly increasing per client, one record and one state per
@@ -705,6 +712,12 @@ impl AuditWorld {
                 excused_from_convergence(&st, *node)
                     || st.applied_max.get(node) == Some(&cluster_max)
             })
+    }
+
+    /// The highest `next_seq` any verdict of this journal revealed: how many
+    /// records it held at most (#658).
+    pub(crate) fn next_seq(&self) -> u64 {
+        self.lock().journal.next_seq()
     }
 
     /// Every slot a call was answered at, its highest: what the final

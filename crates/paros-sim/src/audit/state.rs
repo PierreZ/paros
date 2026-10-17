@@ -1598,6 +1598,16 @@ impl AuditState {
                 }
             );
         }
+        // ... and holds the records the client sent (#651 (acked writes
+        // judged by their bytes)): every position the model saw accepted.
+        let mut judged = false;
+        for write in h.write_acked.values() {
+            judged |= self.journal.judge_acked(write);
+        }
+        assert_sometimes!(
+            judged,
+            "chain: an acknowledged write is judged by its bytes"
+        );
         assert_always!(
             h.read_acked + h.read_failed <= h.read_issued,
             "no read is acked/failed before it is issued"

@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use moonpool_sim::{assert_always, assert_reachable, assert_sometimes};
 
+use super::journal_model::AckedWrite;
 use super::linearizability::Attempt;
 
 // --- the client-history checker ---------------------------------------------
@@ -47,6 +48,9 @@ pub(crate) struct ClientHistory {
     pub(super) write_inv: BTreeMap<u64, u64>,
     /// First written ack per write op: `(time, last position)`.
     pub(super) write_resp: BTreeMap<u64, (u64, Option<u64>)>,
+    /// First written ack per write op, with the records it sent (#651
+    /// (acked writes judged by their bytes)).
+    pub(super) write_acked: BTreeMap<u64, AckedWrite>,
     /// Write seqs that ended without a committed ack (so far).
     pub(super) write_failed: BTreeSet<u64>,
     pub(super) read_inv: BTreeMap<u64, u64>,
@@ -71,9 +75,13 @@ impl ClientHistory {
         self.write_inv.entry(seq).or_insert(now_ms);
     }
 
-    /// Record operation `seq` acked written, its batch ending at `slot`.
-    pub(crate) fn record_write_ack(&mut self, seq: u64, slot: Option<u64>, now_ms: u64) {
+    /// Record operation `seq` acked written as `write`: the batch's last
+    /// position, and its records, which the audit judges by their bytes
+    /// (#651 (acked writes judged by their bytes)).
+    pub(crate) fn record_write_ack(&mut self, seq: u64, write: AckedWrite, now_ms: u64) {
+        let slot = (write.seq + write.count).checked_sub(1);
         self.write_resp.entry(seq).or_insert((now_ms, slot));
+        self.write_acked.entry(seq).or_insert(write);
         self.write_failed.remove(&seq);
     }
 
@@ -122,6 +130,8 @@ pub(super) struct LinHistory {
     pub(super) searched: bool,
     /// Acked writes with a known last position, by `(client, op)`.
     pub(super) write_slot: BTreeMap<(u64, u64), u64>,
+    /// Acked writes with the records they sent, by `(client, op)` (#651).
+    pub(super) write_acked: BTreeMap<(u64, u64), AckedWrite>,
     /// Committed reads and their observed watermark.
     pub(super) read_wm: BTreeMap<(u64, u64), Option<u64>>,
     /// Committed writes as real-time spans.
@@ -158,6 +168,9 @@ impl LinHistory {
             if let Some(&inv) = h.write_inv.get(&seq) {
                 self.writes.push(OpSpan { inv, resp });
             }
+        }
+        for (&seq, write) in &h.write_acked {
+            self.write_acked.insert((c, seq), write.clone());
         }
         for (&seq, &(resp, wm)) in &h.read_resp {
             self.read_wm.insert((c, seq), wm);

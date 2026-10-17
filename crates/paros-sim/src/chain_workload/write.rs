@@ -8,7 +8,7 @@ use moonpool_sim::{assert_always, assert_reachable, buggify_with_prob};
 use paros::client::{Resolution, TruncateOutcome, WriteOptions, WriteOutcome, Writer};
 use paros::{Command, Entry, LeaderUuid, Value, command_hash};
 
-use crate::audit::AuditWorld;
+use crate::audit::{AckedWrite, AuditWorld};
 use crate::chain::{hash_text, user_command_hash};
 
 use super::config::{ChainConfig, WRITE, WRITE_TO_NON_LEADER};
@@ -25,6 +25,21 @@ pub(super) struct Submission {
 }
 
 impl Submission {
+    /// The write, acknowledged at `[seq, seq + count)`, with the hash of
+    /// each record it sent: what the audit judges by its bytes (#651).
+    pub(super) fn acked(&self, seq: u64, count: u64) -> AckedWrite {
+        AckedWrite {
+            seq,
+            count,
+            records: self
+                .entry
+                .records
+                .iter()
+                .map(|record| user_command_hash(&record.0))
+                .collect(),
+        }
+    }
+
     /// The write, written at `[seq, seq + count)` through `node`.
     pub(super) fn written(&self, seq: u64, count: u64, node: usize) -> WrittenCommand {
         WrittenCommand {
@@ -79,8 +94,19 @@ impl ChainWorkload {
         class: u64,
         seed: u64,
     ) -> Vec<Value> {
+        let records = Self::draw_values(config, class, seed);
+        for record in &records {
+            audit.note_submitted(user_command_hash(&record.0));
+        }
+        records
+    }
+
+    /// The records of one write, drawn as [`ChainWorkload::draw_records`]
+    /// draws them, registered nowhere: a call by name whose journal the
+    /// client does not know (#658).
+    pub(super) fn draw_values(config: &ChainConfig, class: u64, seed: u64) -> Vec<Value> {
         let count = 1 + (seed >> 48) % config.batch_records.max(1);
-        let records: Vec<Value> = (0..count)
+        (0..count)
             .map(|k| {
                 Value(Self::payload(
                     class,
@@ -89,11 +115,7 @@ impl ChainWorkload {
                     seed.wrapping_add(k.wrapping_mul(0x9e37_79b9_7f4a_7c15)),
                 ))
             })
-            .collect();
-        for record in &records {
-            audit.note_submitted(user_command_hash(&record.0));
-        }
-        records
+            .collect()
     }
 
     /// Issue `entry` as this client's next write operation.
@@ -138,8 +160,8 @@ impl ChainWorkload {
         count: u64,
         now_ms: u64,
     ) {
-        let last = (seq + count).checked_sub(1);
-        self.history.record_write_ack(submission.op, last, now_ms);
+        self.history
+            .record_write_ack(submission.op, submission.acked(seq, count), now_ms);
         tracing::info!(
             cmd = %hash_text(submission.cmd_hash),
             op = submission.op,
