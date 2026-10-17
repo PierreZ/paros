@@ -242,6 +242,10 @@ pub struct LeaderHint {
     pub current: Option<usize>,
     /// The server believed to lead before `current` replaced it.
     pub stale: Option<usize>,
+    /// The server whose last read went unanswered (a moved or down
+    /// machine): a read that would start there starts at the next server
+    /// instead, until it serves a read again.
+    pub silent: Option<usize>,
 }
 
 /// What [`Client::write`] came back with: the outcome, the server that gave
@@ -1024,6 +1028,16 @@ impl<P: Providers> Client<P> {
         let span = self.tunables.read_timeout + Duration::from_millis(request.wait_ms);
         let servers = self.servers.len();
         let mut server = first % servers;
+        if servers > 1 && self.hint().silent == Some(server) {
+            // A server that left the last read unanswered is asked last: a
+            // founder that moved holds its journals until it registers
+            // (#390), and every read asked of it first costs `read_timeout`.
+            // Seed 410762996391560630 on 522c917: the operator's `init` and
+            // the coordinator's directory reads each paid it per call, and
+            // the resumed `init` missed its recovery-tail deadline.
+            moonpool_assertions::reachable!("client: a read skips a silent server");
+            server = (server + 1) % servers;
+        }
         let mut attempts = 0_u64;
         // The last answer that was not "unknown journal", and how many
         // servers in a row answered so.
@@ -1044,6 +1058,14 @@ impl<P: Providers> Client<P> {
             attempts += 1;
             let attempt = self.read_attempt(server, *request);
             let outcome = self.bounded(bound, ReadOutcome::Ambiguous, attempt).await;
+            {
+                let mut hint = self.hint.lock().unwrap_or_else(PoisonError::into_inner);
+                if outcome == ReadOutcome::Ambiguous {
+                    hint.silent = Some(server);
+                } else if hint.silent == Some(server) {
+                    hint.silent = None;
+                }
+            }
             if outcome.is_served() || matches!(outcome, ReadOutcome::Denied(_)) {
                 return ReadReport {
                     outcome,

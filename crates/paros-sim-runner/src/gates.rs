@@ -1150,6 +1150,10 @@ pub const RARE: &[Rare] = &[
         reason: "marginal: fired on 5 of 810 hunt seeds (#486)",
     },
     Rare {
+        msg: "client: a read skips a silent server",
+        reason: "a read that starts at a server whose last read went unanswered: needs a moved, down or cut-off server early in a client's server list (#390)",
+    },
+    Rare {
         msg: "client: a write's verdict is lost on a lost-verdict seed",
         reason: "marginal: fired on 4 of 810 hunt seeds (#486)",
     },
