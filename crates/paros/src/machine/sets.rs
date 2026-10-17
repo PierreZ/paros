@@ -51,7 +51,7 @@ use crate::client::journals::JournalAnswer;
 use crate::client::{Client, ReconfigureMatchmakersOutcome, Server};
 use crate::placement::{self, Step, Want};
 use crate::rpc::{InspectReply, NodeClient};
-use crate::system::{Booking, BookingTarget, Registry, Role};
+use crate::system::{Booking, BookingTarget, NodeStanding, Registry, Role};
 use crate::{Address, Names};
 
 /// The id of a tenant's one matchmaker set inside its tenant (§3.4: one set
@@ -396,22 +396,29 @@ impl Sets {
             // its slot stays, as a draining one's does, and the set is
             // handed back onto it (#475 (re-place after the Down bound),
             // witness 838622054030409282 on 757fa48: a set thinned off a
-            // gone machine waited in its book step for good).
+            // gone machine waited in its book step for good). A slow
+            // machine's slot stays too (#361 (slow machines)): else the set
+            // waits in its book step and is never handed back onto it.
             moonpool_assertions::reachable!("coordinator: a set has no machine to go to");
+            let kept = Leaving {
+                gone: BTreeSet::new(),
+                held: slots
+                    .iter()
+                    .map(|(_, b)| b.node)
+                    .filter(|node| registry.is_slow(*node))
+                    .collect(),
+            };
             staying = slots
                 .iter()
-                .filter(|(_, b)| {
-                    stays(
-                        registry,
-                        &Leaving {
-                            gone: BTreeSet::new(),
-                            held: gone.held.clone(),
-                        },
-                        b.node,
-                    )
-                })
+                .filter(|(_, b)| stays(registry, &kept, b.node))
                 .copied()
                 .collect();
+            assert!(
+                staying.iter().all(|(_, b)| registry
+                    .get(b.node)
+                    .is_some_and(|n| n.standing == NodeStanding::Registered)),
+                "a set with no machine to go to keeps its registered slots"
+            );
         }
         if staying.len() < size {
             return self
