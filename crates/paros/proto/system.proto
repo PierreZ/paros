@@ -182,6 +182,19 @@ message JoinFleet {
   uint64 fleet_id = 1;
   uint64 cell_id = 2;
   uint32 version = 3;
+  // The universe pointer (#232 (multiple cells)), when the cell does not
+  // host the universe tenant: the universe directory's journal and the
+  // machines of the cell that hosts it. Unset (0) for the universe's own
+  // cell, which reads the directory from its plan.
+  uint64 directory_tenant = 4;
+  uint64 directory_journal = 5;
+  repeated UniverseHost hosts = 6;
+}
+
+// One machine of the cell that hosts the universe tenant (#232).
+message UniverseHost {
+  uint64 node_id = 1;
+  string addr = 2;
 }
 
 // Tenant creation's cell step: the cell hosts tenant `tenant` (#229). The
@@ -233,6 +246,11 @@ message RegistryState {
   // The open maintenance windows (#359), machines in id order, then zones
   // in name order.
   repeated MaintenanceState maintenance = 13;
+  // The universe pointer the join recorded (#232): 0 and empty for the
+  // universe's own cell.
+  uint64 directory_tenant = 14;
+  uint64 directory_journal = 15;
+  repeated UniverseHost hosts = 16;
 }
 
 message MaintenanceState {

@@ -65,6 +65,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use paros_core::{JournalId, JournalIdentifier, TenantId};
 use prost::Message as _;
 
+use crate::Address;
 use crate::client::checkpoint::{Checkpointable, Folded};
 use crate::rpc::fleet as wire;
 use crate::tags::{Tag, TagError, Tags, UserTags, reserved};
@@ -80,8 +81,10 @@ use keys::{KeyChange, RootKeys};
 /// the tenant entry carries a set of groups and no placement (#243); `3`
 /// since the universe entry holds root public keys (#245 (Biscuit
 /// tokens)); `4` since tenants and cells carry tags and the tenant
-/// entry's groups became reserved tags (#575 (key:value tags)).
-pub const METADATA_VERSION: u32 = 4;
+/// entry's groups became reserved tags (#575 (key:value tags)); `5` since a
+/// cell entry carries its entry endpoint and a removed cell's id is
+/// tombstoned (#232 (multiple cells)).
+pub const METADATA_VERSION: u32 = 5;
 
 /// What a tenant is (§3.7, #575 (key:value tags)): its reserved tags
 /// `paros/kind` and `paros/role`, fixed when it is registered and never
@@ -445,6 +448,17 @@ pub enum FleetCommand {
         name: Vec<u8>,
         /// The cell's kind: its reserved tags (#575).
         kind: CellKind,
+        /// The cell's entry endpoint (#232 (multiple cells)): its founding
+        /// members by node id and advertised address, where a caller that
+        /// reached another cell is pointed. The first endpoint written stays.
+        endpoint: Vec<(u64, Address)>,
+    },
+    /// `universe remove-cell` (#232 (multiple cells)): a `REMOVING` cell
+    /// that hosts no tenant but its cell tenant leaves the directory, with
+    /// its cell tenant. Its id is tombstoned: never added again.
+    RemoveCell {
+        /// The cell.
+        cell_id: u64,
     },
     /// Move cell `cell_id` to `state`.
     MarkCell {
@@ -530,6 +544,27 @@ fn identifier(tenant: u64, journal: u64) -> JournalIdentifier {
     JournalIdentifier::new(TenantId(tenant), JournalId(journal))
 }
 
+fn members_to_wire(members: &[(u64, Address)]) -> Vec<wire::CellMember> {
+    members
+        .iter()
+        .map(|(node_id, addr)| wire::CellMember {
+            node_id: *node_id,
+            addr: addr.to_string(),
+        })
+        .collect()
+}
+
+fn members_from_wire(members: Vec<wire::CellMember>) -> Result<Vec<(u64, Address)>, &'static str> {
+    members
+        .into_iter()
+        .map(|m| {
+            let addr =
+                Address::parse(&m.addr).map_err(|_| "a cell member's address does not parse")?;
+            Ok((m.node_id, addr))
+        })
+        .collect()
+}
+
 impl FleetEntry {
     /// `command` for fleet `fleet_id` at this fold's [`METADATA_VERSION`].
     #[must_use]
@@ -556,13 +591,18 @@ impl FleetEntry {
                 control,
                 name,
                 kind,
+                endpoint,
             } => Kind::AddCell(wire::AddCell {
                 cell_id: *cell_id,
                 control_tenant: control.tenant.0,
                 control_journal: control.journal.0,
                 name: name.clone(),
                 tags: kind.tags().iter().map(Tag::to_wire).collect(),
+                endpoint: members_to_wire(endpoint),
             }),
+            FleetCommand::RemoveCell { cell_id } => {
+                Kind::RemoveCell(wire::RemoveCell { cell_id: *cell_id })
+            }
             FleetCommand::MarkCell { cell_id, state } => Kind::MarkCell(wire::MarkCell {
                 cell_id: *cell_id,
                 state: state.to_wire(),
@@ -650,8 +690,12 @@ impl FleetEntry {
                     control: identifier(add.control_tenant, add.control_journal),
                     name: add.name,
                     kind: CellKind::from_tags(held).map_err(|_| "an unknown cell kind")?,
+                    endpoint: members_from_wire(add.endpoint)?,
                 }
             }
+            Kind::RemoveCell(remove) => FleetCommand::RemoveCell {
+                cell_id: remove.cell_id,
+            },
             Kind::MarkCell(mark) => FleetCommand::MarkCell {
                 cell_id: mark.cell_id,
                 state: CellState::from_wire(mark.state).ok_or("an unknown cell state")?,
@@ -804,6 +848,11 @@ pub enum FleetEvent {
         /// The cell.
         cell_id: u64,
     },
+    /// A cell left the directory, its id tombstoned (#232).
+    CellRemoved {
+        /// The cell.
+        cell_id: u64,
+    },
     /// A cell moved.
     CellMarked {
         /// The cell.
@@ -880,6 +929,20 @@ pub enum FleetDirectoryRefusal {
     OtherFleet {
         /// The fleet the entry names.
         fleet_id: u64,
+    },
+    /// The cell id was removed from the directory (#232 (multiple
+    /// cells)): a removed cell never comes back.
+    CellTombstoned {
+        /// The cell named.
+        cell_id: u64,
+    },
+    /// The cell still hosts a tenant other than its cell tenant (#232
+    /// (multiple cells)): remove or move it first.
+    CellNotEmpty {
+        /// The cell named.
+        cell_id: u64,
+        /// A tenant it hosts.
+        tenant: TenantId,
     },
     /// A cell the directory does not hold.
     UnknownCell {
@@ -983,6 +1046,10 @@ struct Formed {
 pub struct FleetDirectory {
     fleet: Option<Formed>,
     cells: BTreeMap<u64, CellEntry>,
+    /// Each cell's entry endpoint (#232 (multiple cells)).
+    endpoints: BTreeMap<u64, Vec<(u64, Address)>>,
+    /// Cell ids removed from the directory: never added again (#232).
+    removed_cells: BTreeSet<u64>,
     tenants: BTreeMap<TenantId, TenantEntry>,
     /// Live `users` names, to the tenant holding each.
     names: BTreeMap<Vec<u8>, TenantId>,
@@ -1018,6 +1085,29 @@ impl FleetDirectory {
     #[must_use]
     pub fn cell(&self, cell_id: u64) -> Option<&CellEntry> {
         self.cells.get(&cell_id)
+    }
+
+    /// Cell `cell_id`'s entry endpoint (#232 (multiple cells)): its
+    /// founding members by node id and advertised address; empty for an
+    /// unknown cell or one added before endpoints (metadata version 3).
+    #[must_use]
+    pub fn endpoint(&self, cell_id: u64) -> &[(u64, Address)] {
+        self.endpoints.get(&cell_id).map_or(&[], Vec::as_slice)
+    }
+
+    /// Whether cell `cell_id` was removed from the directory (#232).
+    #[must_use]
+    pub fn is_cell_removed(&self, cell_id: u64) -> bool {
+        self.removed_cells.contains(&cell_id)
+    }
+
+    /// The cell that hosts the universe tenant: the cell its entry names,
+    /// once its hosting cell was added.
+    #[must_use]
+    pub fn universe_cell(&self) -> Option<u64> {
+        let fleet = self.fleet?;
+        let cell = self.tenants.get(&fleet.control.tenant)?.cell_id;
+        (cell != 0).then_some(cell)
     }
 
     /// Every cell entry, in id order.
@@ -1167,7 +1257,9 @@ impl FleetDirectory {
                 control,
                 name,
                 kind,
-            } => self.add_cell(*cell_id, *control, name, kind, entry.version),
+                endpoint,
+            } => self.add_cell(*cell_id, *control, name, kind, endpoint, entry.version),
+            FleetCommand::RemoveCell { cell_id } => self.remove_cell(*cell_id),
             FleetCommand::MarkCell { cell_id, state } => self.mark_cell(*cell_id, *state),
             FleetCommand::RegisterTenant {
                 control,
@@ -1275,10 +1367,14 @@ impl FleetDirectory {
         control: JournalIdentifier,
         name: &[u8],
         kind: &CellKind,
+        endpoint: &[(u64, Address)],
         version: u32,
     ) -> Result<FleetEvent, FleetDirectoryRefusal> {
-        if cell_id == 0 || !control.is_set() {
+        if cell_id == 0 || !control.is_set() || endpoint.iter().any(|(id, _)| *id == 0) {
             return Err(FleetDirectoryRefusal::Malformed);
+        }
+        if self.removed_cells.contains(&cell_id) {
+            return Err(FleetDirectoryRefusal::CellTombstoned { cell_id });
         }
         if let Some(cell) = self.cells.get(&cell_id) {
             let same = cell.control_tenant == control.tenant
@@ -1311,6 +1407,9 @@ impl FleetDirectory {
                 tags: UserTags::none(),
             },
         );
+        if !endpoint.is_empty() {
+            self.endpoints.insert(cell_id, endpoint.to_vec());
+        }
         self.tenants.insert(
             control.tenant,
             TenantEntry {
@@ -1333,6 +1432,39 @@ impl FleetDirectory {
             entry.cell_id = cell_id;
         }
         Ok(FleetEvent::CellAdded { cell_id })
+    }
+
+    fn remove_cell(&mut self, cell_id: u64) -> Result<FleetEvent, FleetDirectoryRefusal> {
+        if self.removed_cells.contains(&cell_id) {
+            return Ok(FleetEvent::Unchanged);
+        }
+        let (state, control_tenant) = self
+            .cells
+            .get(&cell_id)
+            .map(|cell| (cell.state, cell.control_tenant))
+            .ok_or(FleetDirectoryRefusal::UnknownCell { cell_id })?;
+        if state != CellState::Removing {
+            return Err(FleetDirectoryRefusal::CellTransition {
+                from: state,
+                to: CellState::Removing,
+            });
+        }
+        if let Some((tenant, _)) = self
+            .tenants
+            .iter()
+            .find(|(id, t)| t.cell_id == cell_id && **id != control_tenant)
+        {
+            return Err(FleetDirectoryRefusal::CellNotEmpty {
+                cell_id,
+                tenant: *tenant,
+            });
+        }
+        self.cells.remove(&cell_id);
+        self.endpoints.remove(&cell_id);
+        self.tenants.remove(&control_tenant);
+        self.removed.insert(control_tenant);
+        self.removed_cells.insert(cell_id);
+        Ok(FleetEvent::CellRemoved { cell_id })
     }
 
     fn mark_cell(
@@ -1485,8 +1617,10 @@ impl FleetDirectory {
                     version: c.version,
                     control_tenant: c.control_tenant.0,
                     tags: c.all_tags().to_wire(),
+                    endpoint: members_to_wire(self.endpoint(*id)),
                 })
                 .collect(),
+            removed_cells: self.removed_cells.iter().copied().collect(),
             tenants: self
                 .tenants
                 .iter()
@@ -1536,11 +1670,16 @@ impl Checkpointable for FleetDirectory {
             return Err("a fleet directory state names no fleet tenant");
         }
         let mut cells = BTreeMap::new();
+        let mut endpoints = BTreeMap::new();
         for c in state.cells {
             let cell_state = CellState::from_wire(c.state).ok_or("an unknown cell state")?;
             let (held, tags) = Tags::from_wire(c.tags)
                 .and_then(Tags::split)
                 .map_err(|_| "a cell entry's tags are malformed")?;
+            let endpoint = members_from_wire(c.endpoint)?;
+            if !endpoint.is_empty() {
+                endpoints.insert(c.cell_id, endpoint);
+            }
             cells.insert(
                 c.cell_id,
                 CellEntry {
@@ -1585,8 +1724,14 @@ impl Checkpointable for FleetDirectory {
             return Err("a fleet directory state holds a removed tenant");
         }
         let keys = RootKeys::restore(state.root_keys, state.removed_keys)?;
+        let removed_cells: BTreeSet<u64> = state.removed_cells.into_iter().collect();
+        if removed_cells.iter().any(|id| cells.contains_key(id)) {
+            return Err("a fleet directory state holds a removed cell");
+        }
         self.fleet = fleet;
         self.cells = cells;
+        self.endpoints = endpoints;
+        self.removed_cells = removed_cells;
         self.tenants = tenants;
         self.names = names;
         self.removed = removed;

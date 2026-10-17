@@ -162,6 +162,10 @@ pub const RARE: &[Rare] = &[
         reason: "marginal: needs a three-column grid (a pool of six) and the skip's BUGGIFY location on the same seed; 55 checks in 600 hunt seeds, but the sweep missed it once (#533 (move a stuck round), #486)",
     },
     Rare {
+        msg: "phase2: a stuck round whose slot is chosen elsewhere is not moved",
+        reason: "marginal: a grid round must outlast its own resend budget and see its slot chosen by a `Commit` or a catch-up before its tally closes, inside one beat; the sweep at 2e88949 fired it and the sweep at d7071df missed it (#533 (move a stuck round), #486)",
+    },
+    Rare {
         msg: "tenant coordinator: a configure refused for want of slots",
         reason: "marginal: the configure twin of an unplaceable create, needs a full machine; fired on 0 of 300 hunt seeds even with a widest-mode draw, while configures were recorded on 36 (#486)",
     },

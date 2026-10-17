@@ -53,6 +53,7 @@ fn registry() -> Registry {
             fleet_id: FLEET,
             cell_id: CELL,
             version: crate::fleet::METADATA_VERSION,
+            universe: None,
         },
         // Its footprint (#476), on the founder that registered.
         SystemCommand::GrantCapacity {

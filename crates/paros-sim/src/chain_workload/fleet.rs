@@ -87,6 +87,7 @@ mod other_cell;
 mod placement;
 mod replaced;
 mod resolve;
+mod second_cell;
 mod sets;
 mod tags;
 mod view;
@@ -499,6 +500,17 @@ impl FleetOps {
             return;
         };
         self.same_fleet(cell.fleet);
+        // On its own location, the second cell's next phase instead (#232
+        // (multiple cells)); more often once it is formed, so a run reaches
+        // its later phases.
+        let scenario = crate::shape::second_cell(ctx.state());
+        if (scenario && moonpool_sim::sim_random_bool(0.8)
+            || second_cell::started(ctx.state()) && buggify_with_prob!(0.6)
+            || buggify_with_prob!(0.15))
+            && self.second_cell(ctx, policy, payload).await
+        {
+            return;
+        }
         let name = NAMES[usize::try_from(class % NAMES.len() as u64).unwrap_or(0)].to_vec();
         let client = cell.client.clone();
         let first = cell.first(payload);
@@ -648,7 +660,16 @@ impl FleetOps {
         };
         judge_folds(&session);
         if !ended {
-            self.pending = Some(pending);
+            // An operator re-runs `init` whole (`parosctl init` has no fleet
+            // half alone): a founder that an abandoned `cell init` left
+            // promised higher, its peers' tokens lost to restarts, forms only
+            // through a new `cell init` (witness 17754553933206564732 on
+            // db7c456: client 1 resumed the fleet half alone for the whole
+            // tail, refused `NotClaimed` with no fleet quorum).
+            self.pending = Some(match pending {
+                Pending::Init => Pending::Initialize,
+                other => other,
+            });
             return false;
         }
         if std::mem::take(&mut self.killed) {
@@ -936,6 +957,11 @@ impl FleetOps {
         first: usize,
         name: &[u8],
     ) -> bool {
+        // A tenant of the second cell (#232 (multiple cells)) is dropped on
+        // that cell's registry: the removal reads it, as the directory names it.
+        if let Some(journal) = second_cell::joined_journal(&self.state) {
+            self.note_journals([journal]);
+        }
         let run = session
             .remove_tenant(client, first, name, Duration::ZERO)
             .await;
@@ -949,11 +975,17 @@ impl FleetOps {
                             names.removed.insert((cell.fleet, tenant), name.to_vec())
                         });
                     }
+                    // A tenant of the second cell (#232 (multiple cells)) is
+                    // dropped on that cell's registry, which the removal read.
+                    let home = second_cell::cell_id(&self.state)
+                        .map(|id| session.registry_of(id))
+                        .filter(|registry| registry.hosts(tenant) || registry.dropped(tenant))
+                        .unwrap_or(session.cell());
                     assert_always!(
                         session.directory().named(name).is_none()
                             && session.directory().is_removed(tenant)
-                            && !session.cell().hosts(tenant)
-                            && session.cell().dropped(tenant),
+                            && !home.hosts(tenant)
+                            && home.dropped(tenant),
                         "fleet: a removed tenant is gone from the directory and tombstoned on its cell",
                         { "tenant" => tenant.0 }
                     );
@@ -1295,8 +1327,9 @@ impl FleetOps {
             );
             assert_reachable!("fleet: a run ends with the cell READY in the directory");
         }
-        no_tenant_mid_operation(&directory, cell);
+        no_tenant_mid_operation(&directory, cell, cell_id);
         directory_equals_cell(&directory, cell);
+        self.final_second(ctx, &directory).await;
     }
 
     /// The cell heals around a renamed founding member (#349): once chaos
@@ -1450,9 +1483,11 @@ fn judged_cell(members: &[u64]) -> Folder<JudgedRegistry> {
 /// under that cell, every `READY` `users` tenant in the directory hosted.
 /// After chaos, no served tenant is left mid-operation: each is `READY`,
 /// or `ERROR` once its cell refused its footprint (#476).
-fn no_tenant_mid_operation(directory: &FleetDirectory, cell: &Registry) {
+fn no_tenant_mid_operation(directory: &FleetDirectory, cell: &Registry, cell_id: u64) {
     for (tenant, entry) in directory.tenants() {
-        if entry.kind == TenantKind::Users {
+        // Another cell's tenant (#232 (multiple cells)) is judged with its
+        // cell (`second_cell::final_second`).
+        if entry.kind == TenantKind::Users && entry.cell_id == cell_id {
             // A creation its cell refused for its footprint ends `ERROR`
             // (#476): that is an end, not the middle of an operation.
             let refused = cell.footprint(tenant).is_some_and(|g| !g.granted());
@@ -1499,7 +1534,12 @@ fn directory_equals_cell(directory: &FleetDirectory, cell: &Registry) {
             { "tenant" => tenant.0 }
         );
     }
-    for (tenant, entry) in directory.tenants() {
+    // Another cell's tenants (#232 (multiple cells)) are another cell
+    // control journal's.
+    let own = directory
+        .tenants()
+        .filter(|(_, entry)| entry.cell_id == joined.cell_id);
+    for (tenant, entry) in own {
         // A tenant is marked `ERROR` only once its cell refused its
         // footprint (#476), and such a tenant is never hosted.
         if entry.state == TenantState::Error {
@@ -1527,6 +1567,12 @@ fn reach(stage: Stage) {
         Stage::AddCell => assert_reachable!("fleet: a step adds the cell to the directory"),
         Stage::CellReady => {
             assert_reachable!("fleet: a step marks the cell READY in the directory");
+        }
+        Stage::CellRemoving => {
+            assert_reachable!("universe: a step marks a cell REMOVING in the directory");
+        }
+        Stage::RemoveCell => {
+            assert_reachable!("universe: a step removes a cell from the directory");
         }
         Stage::RegisterTenant => {
             assert_reachable!("fleet: a step registers a tenant in the directory");
