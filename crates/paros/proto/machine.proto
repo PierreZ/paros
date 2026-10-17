@@ -38,7 +38,7 @@ service Machine {
   rpc Admit(.paros.machine.v1.Admit) returns (.paros.machine.v1.AdmitAck);
   // A machine of a cell asks the cell coordinator to register the address it
   // advertises now (#349) and its machine interface (#404): a request to a
-  // leader (`docs/architecture.md` §3.3), sent to the coordinator's term
+  // leader (`docs/architecture/03-3-coordinators-and-placement.md` §3.3), sent to the coordinator's term
   // group the election journal names (a dynamic endpoint, #404). The
   // coordinator checks the machine answers there as itself, then writes
   // `RegisterNode` into the cell control journal when the address, the name
@@ -53,7 +53,7 @@ service Machine {
   // reads that outcome back, so it acts once, across a coordinator change
   // too.
   rpc JournalRequest(.paros.machine.v1.JournalRequest) returns (.paros.machine.v1.JournalRequestAck);
-  // Which references serve tenant `tenant` (#216, `docs/architecture.md`
+  // Which references serve tenant `tenant` (#216, `docs/architecture/03-5-frontend-and-resolver.md`
   // §3.5): the client's first call, sent to its entry endpoint. Any machine
   // of a cell answers it from its folds: the tenant's cell, id and control
   // journal from the universe directory, and the cell's machines from the
@@ -152,7 +152,7 @@ message FormCell {
   // The journals every member serves from its formation: the cell control
   // journal, the fleet tenant's when this cell hosts it, and the static assignment that
   // stands in for placement until M9 (#212). No identifier is fixed: every one is
-  // drawn at `cell init` (`docs/architecture.md` §3.8).
+  // drawn at `cell init` (`docs/architecture/03-8-identifiers-checkpoints-recovery-security.md` §3.8).
   repeated JournalIdentifier journals = 3;
   // The cell tenant's control journal.
   JournalIdentifier control = 4;
@@ -221,7 +221,7 @@ message Admit {
   JournalIdentifier fleet = 3;
   // The cell's machines the caller knows, by id and address: the founding
   // members and the registered machines. The admitted machine caches them
-  // (its cached registry fold, `docs/architecture.md` §3.2).
+  // (its cached registry fold, `docs/architecture/03-2-machines.md` §3.2).
   repeated Member members = 4;
   // The cell's election journal (#240), when the caller knows it.
   JournalIdentifier election = 5;

@@ -474,7 +474,7 @@ built on a cell-like architecture).
 
 ## Why this matters for `paros`
 
-`docs/architecture.md` already cites this whitepaper directly (§10, "Cells and static
+`docs/architecture/10-sources.md` already cites this whitepaper directly (§10, "Cells and static
 stability," and inline in §3.5/§3.7); checked against the actual text, **every paraphrase there
 is faithful**, no mismatch found:
 
@@ -487,7 +487,7 @@ is faithful**, no mismatch found:
   trade-off: Multi-AZ cells inherit AWS's built-in Multi-AZ resiliency "without sharing state with
   external components," whereas the Single-AZ path is the one that needs a cross-AZ *replication
   layer* between cells for DR, which the whitepaper says "can break the cell concept." This is the
-  same choice `docs/architecture.md` §3.7 and §5 make: a paros cell spans several AZs for its own
+  same choice `docs/architecture/03-7-universe.md` §3.7 and §5 make: a paros cell spans several AZs for its own
   quorums (so Phase 2 survives one AZ loss), rather than failing over to a sibling cell.
 - §3.5's **"the thinnest possible router routing on its cached map, [staying up] while the control
   plane is down"** matches the whitepaper's cell-router definition ("the thinnest possible layer,
@@ -501,7 +501,7 @@ is faithful**, no mismatch found:
   paragraph reuses the same four words for exactly the same sequence (reconfigure onto the target
   cell, transfer ownership with `SetLeader`, flip the directory pointer, then the old cell forgets
   the tenant).
-- **Not yet reflected in `docs/architecture.md`, but relevant for M12 (#232/#233):** the
+- **Not yet reflected in `docs/architecture/`, but relevant for M12 (#232/#233):** the
   whitepaper's **cell sizing** trade-off table (§6.5 above) and its **partition-key / mapping**
   taxonomy (full mapping, prefix/range, naive modulo, consistent hashing, plus the "always keep an
   override table" warning) are a direct match for the open "tenant → cell" placement question in
@@ -511,12 +511,12 @@ is faithful**, no mismatch found:
   tenant, few tenants) but is the kind of choice M12 should make explicitly rather than by
   default, should the fleet directory's cardinality ever matter.
 - The whitepaper's **static stability** framing (REL11-BP04, cited directly by
-  `docs/architecture.md` via the sibling Builders' Library reference) is the same property
-  `docs/architecture.md` §1 and §5 build in from M9: the data plane (an existing journal, already
+  `docs/architecture/` via the sibling Builders' Library reference) is the same property
+  `docs/architecture/01-goal.md` §1 and §5 build in from M9: the data plane (an existing journal, already
   placed) keeps serving writes/reads with no control-plane dependency even if the fleet or cell
   coordinator is down; only administration (provisioning, tenant creation) needs the control
   plane.
-- **Not cited by `docs/architecture.md` today:** the whitepaper's **cell deployment** guidance
+- **Not cited by `docs/architecture/` today:** the whitepaper's **cell deployment** guidance
   ("deploy in waves, cell by cell or set of cells," with the first wave as a canary cell) and its
   **cell observability** guidance (the whole stack must be cell-aware, tracking which cell a
   request lands in) describe operational practices paros has not yet written down for its own

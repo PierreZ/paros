@@ -1,4 +1,4 @@
-//! **The election library** (#240, `docs/architecture.md` §3.3): who leads a
+//! **The election library** (#240, `docs/architecture/03-3-coordinators-and-placement.md` §3.3): who leads a
 //! journal, decided over a **multi-writer** election journal (§2.4), for the
 //! cell, universe and tenant coordinators and for any customer.
 //!

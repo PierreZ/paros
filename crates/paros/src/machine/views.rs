@@ -1,4 +1,4 @@
-//! **The cell answers its views** (#399, `docs/architecture.md` §3.6):
+//! **The cell answers its views** (#399, `docs/architecture/03-6-status.md` §3.6):
 //! every founding member serves `View` in a task beside its node loop, as
 //! any other client of its cell would read it.
 //!

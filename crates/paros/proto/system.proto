@@ -174,7 +174,7 @@ message ReleaseCapacity {
   uint64 booking = 1;
 }
 
-// The cell side of the fleet's registration (#229, `docs/architecture.md`
+// The cell side of the fleet's registration (#229, `docs/architecture/03-7-universe.md`
 // §3.7): cell `cell_id` belongs to fleet `fleet_id`, speaking metadata
 // `version`. Written once by `init` step 3; a re-run with the same pair
 // changes nothing, any other pair is refused.

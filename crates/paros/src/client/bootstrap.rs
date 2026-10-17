@@ -1,6 +1,6 @@
 //! Bootstrap calls (#196, #216, #277): forming a cell with `cell init`, and learning a
 //! deployment's node ids and its control journals' identifiers from its
-//! addresses (no identifier is fixed, `docs/architecture.md` §3.8).
+//! addresses (no identifier is fixed, `docs/architecture/03-8-identifiers-checkpoints-recovery-security.md` §3.8).
 //!
 //! A machine's id is random, minted at format (#225), so an operator knows
 //! addresses — the founding members' — never ids. These calls bridge the

@@ -2,7 +2,7 @@
 //! answers one (the node loop, the replica tier) and every client that
 //! sends one.
 //!
-//! No identifier has a default (`docs/architecture.md` §3.8): an `Inspect` names
+//! No identifier has a default (`docs/architecture/03-8-identifiers-checkpoints-recovery-security.md` §3.8): an `Inspect` names
 //! the journal it asks about, or asks for the node alone — its id, its cell
 //! and the control journals' identifiers, which is how a client handed only an
 //! address learns the identifiers before it can name any journal. An unset identifier

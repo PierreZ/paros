@@ -1,5 +1,5 @@
 //! The universe entry's root public keys (#245 (Biscuit tokens),
-//! `docs/architecture.md` §3.5): the keys every entry role verifies a token
+//! `docs/architecture/03-5-frontend-and-resolver.md` §3.5): the keys every entry role verifies a token
 //! against. `init --root-public-key` writes the first; `universe key add`
 //! adds the next and `universe key remove` takes an old one out, so a
 //! rotation adds a key, then removes the old one once its tokens expired.

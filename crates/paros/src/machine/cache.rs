@@ -1,5 +1,5 @@
 //! A machine's **durable cached registry fold** (#211,
-//! `docs/architecture.md` §3.2): where each machine of its cell was dialed
+//! `docs/architecture/03-2-machines.md` §3.2): where each machine of its cell was dialed
 //! when the machine last folded the registry, kept on its own disk beside
 //! the record.
 //!

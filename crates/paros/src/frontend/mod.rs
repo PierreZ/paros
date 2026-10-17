@@ -1,4 +1,4 @@
-//! **The frontend** (#192 (the frontend), `docs/architecture.md` §3.5): the
+//! **The frontend** (#192 (the frontend), `docs/architecture/03-5-frontend-and-resolver.md` §3.5): the
 //! stateless entry role in front of a cell's machines.
 //!
 //! A client reaches a frontend, never a machine, for its data. The

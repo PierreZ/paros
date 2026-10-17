@@ -1,4 +1,4 @@
-//! **Busyness** (#424, `docs/architecture.md` §3.6): how busy a machine and
+//! **Busyness** (#424, `docs/architecture/03-6-status.md` §3.6): how busy a machine and
 //! its disk were over one window, from two samples of moonpool's cumulative
 //! counters (`moonpool_core::SystemProvider`).
 //!

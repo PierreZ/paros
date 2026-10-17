@@ -1,4 +1,4 @@
-//! **Placement** (#212 (placement), `docs/architecture.md` §3.3, §3.4): the
+//! **Placement** (#212 (placement), `docs/architecture/03-3-coordinators-and-placement.md` §3.3, §3.4): the
 //! pure function a coordinator runs to decide where the instances of one role
 //! of one journal or matchmaker set go.
 //!

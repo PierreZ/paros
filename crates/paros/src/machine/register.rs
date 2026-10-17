@@ -1,5 +1,5 @@
 //! A machine registers the address it advertises (#349,
-//! `docs/architecture.md` §3.2, §3.3): the machine-to-coordinator request
+//! `docs/architecture/03-2-machines.md` §3.2, §3.3): the machine-to-coordinator request
 //! path.
 //!
 //! A machine of a cell may come back advertising another address than the

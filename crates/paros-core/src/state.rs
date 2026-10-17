@@ -112,10 +112,10 @@ pub struct Config {
     /// — the driver routes a message to its journal before the core sees it,
     /// and a client call naming any other journal is refused at the wire.
     /// A deployment draws one for every journal it serves (no id is fixed
-    /// and none has a default, `docs/architecture.md` §3.8); a node alone
+    /// and none has a default, `docs/architecture/03-8-identifiers-checkpoints-recovery-security.md` §3.8); a node alone
     /// that routes nothing is given [`JournalIdentifier::UNSET`].
     pub journal: JournalIdentifier,
-    /// Who may write the journal (#241, `docs/architecture.md` §2): fixed
+    /// Who may write the journal (#241, `docs/architecture/02-data-plane.md` §2): fixed
     /// when the journal is created and recorded with the rest of this
     /// configuration in the format marker, so a restart never changes it.
     /// [`WriterMode::Single`] is the default: a fresh configuration is the
@@ -130,7 +130,7 @@ pub struct Config {
     /// restart never changes a label.
     #[cfg_attr(feature = "serde", serde(default))]
     pub peer_domains: Vec<FailureDomain>,
-    /// The cell that owns the journal (#215 (zones), `docs/architecture.md`
+    /// The cell that owns the journal (#215 (zones), `docs/architecture/03-7-universe.md`
     /// §3.7): the bootstrap configuration's `cell`. `0` is none, the plain
     /// arm.
     #[cfg_attr(feature = "serde", serde(default))]
@@ -141,7 +141,7 @@ impl Config {
     /// Node `id` serving the journal `journal`, alone: no peers, a
     /// majority, nothing opt-in. There is no `Config::default`: a node and
     /// its identifier are always named (no id has a default,
-    /// `docs/architecture.md` §3.8); a sans-IO caller that routes nothing
+    /// `docs/architecture/03-8-identifiers-checkpoints-recovery-security.md` §3.8); a sans-IO caller that routes nothing
     /// names [`JournalIdentifier::UNSET`] outright.
     ///
     /// # Panics

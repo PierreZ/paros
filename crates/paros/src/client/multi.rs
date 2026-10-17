@@ -1,4 +1,4 @@
-//! The multi-writer calls (#241, `docs/architecture.md` §2.4): a journal
+//! The multi-writer calls (#241, `docs/architecture/02-data-plane.md` §2.4): a journal
 //! anyone with access appends to. It has no leader, so a request carries no
 //! leader uuid and no position: the journal assigns the position at apply.
 //!

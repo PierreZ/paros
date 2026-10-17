@@ -1,4 +1,4 @@
-//! The tenant scrubber (#362 (background scrubbing), `docs/architecture.md`
+//! The tenant scrubber (#362 (background scrubbing), `docs/architecture/05-failure-model-and-zones.md`
 //! §5): the elected tenant coordinator reads every record of every live
 //! journal on each of its acceptors, at a low rate, so rot is found and
 //! repaired before a reader needs the record.

@@ -1,4 +1,4 @@
-//! **Name resolution** (#239, `docs/architecture.md` §3.5): a journal name,
+//! **Name resolution** (#239, `docs/architecture/03-5-frontend-and-resolver.md` §3.5): a journal name,
 //! `paros://<tenant>/<journal>` ([`crate::name::JournalName`]), to the
 //! [`JournalIdentifier`] the protocol carries.
 //!

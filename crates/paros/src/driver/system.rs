@@ -14,7 +14,7 @@
 //! pool-only.
 //!
 //! The folds drive the node (`run_journals` applies each event), the four
-//! levels of `docs/architecture.md` §3.1:
+//! levels of `docs/architecture/03-1-cell-tenant-and-bootstrap.md` §3.1:
 //!
 //! - a tenant the cell hosts (`HostTenant`, #210) brings its control journal:
 //!   every founding member serves it (the placement until #212), and every
@@ -91,7 +91,7 @@ pub struct ControlPlan {
     /// a node that does not serve a control journal follows it from here.
     pub seeds: Vec<(NodeId, String)>,
     /// The cell control journal's identifier: the registry (#235). No
-    /// identifier is fixed (`docs/architecture.md` §3.8): the deployment
+    /// identifier is fixed (`docs/architecture/03-8-identifiers-checkpoints-recovery-security.md` §3.8): the deployment
     /// drew it.
     pub cell: JournalIdentifier,
     /// The cell's founding members: always in the pool, never retired

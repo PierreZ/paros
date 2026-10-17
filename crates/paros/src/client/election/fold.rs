@@ -1,4 +1,4 @@
-//! The election's record and its fold (#240, `docs/architecture.md` §3.3):
+//! The election's record and its fold (#240, `docs/architecture/03-3-coordinators-and-placement.md` §3.3):
 //! the one deterministic rule every watcher of an election journal runs, so
 //! every watcher that folded the same records agrees on who leads which term.
 //!

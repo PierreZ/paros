@@ -6,7 +6,7 @@
 //! its random `node_id` (#225), so a wiped disk is a new machine and "a wiped
 //! identity never rejoins" holds by construction. Its configuration names no
 //! cell and no peer. It never forms a cell on its own
-//! (`docs/architecture.md` §3.1): it waits, serving the machine contract
+//! (`docs/architecture/03-1-cell-tenant-and-bootstrap.md` §3.1): it waits, serving the machine contract
 //! (`proto/machine.proto`), until a `cell init` that lists it forms it.
 //!
 //! **`cell init` is a single-decree Paxos on the cell plan** (decided on
@@ -44,7 +44,7 @@
 //! control journal ([`CellPlan::control`]), the fleet tenant's control
 //! journal ([`CellPlan::fleet`]: the fleet's one cell hosts the fleet tenant
 //! in M9, #226), every identifier drawn at `cell init` (no identifier is
-//! fixed, `docs/architecture.md` §3.8). A tenant's journals are not in the
+//! fixed, `docs/architecture/03-8-identifiers-checkpoints-recovery-security.md` §3.8). A tenant's journals are not in the
 //! plan: they live in its own control journal (#210). The plan also names the cell's
 //! first election journal ([`CellPlan::election`], #240): the founding
 //! members campaign over it for the cell coordinator, which installs itself
@@ -183,7 +183,7 @@ pub struct ControlJournals {
     pub election: Option<JournalIdentifier>,
 }
 
-/// A machine's class (FDB's process classes, `docs/architecture.md` §3.2).
+/// A machine's class (FDB's process classes, `docs/architecture/03-2-machines.md` §3.2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Class {
     /// Anything with a durable store: acceptors, replicas, matchmakers.
@@ -433,7 +433,7 @@ impl MachineFacts {
 /// `Admit` carries, and what the admitted machine records durably — the
 /// cell, its control journals, and the cell's machines the caller knew at
 /// admission, by id and address, in id order (the machine's cached registry
-/// fold, `docs/architecture.md` §3.2). On every later start the machine
+/// fold, `docs/architecture/03-2-machines.md` §3.2). On every later start the machine
 /// finds its cell from this record.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Admission {

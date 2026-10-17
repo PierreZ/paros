@@ -19,7 +19,7 @@ pub struct Slot(pub u64);
 ///
 /// Random, drawn by whoever creates the tenant and checked where it is
 /// recorded — the fleet directory for every tenant, the system ones included
-/// (`docs/architecture.md` §3.8). **No id is fixed**: there is no well-known
+/// (`docs/architecture/03-8-identifiers-checkpoints-recovery-security.md` §3.8). **No id is fixed**: there is no well-known
 /// tenant and no reserved range, and `0` means *unset* and is never
 /// served. An id has **no default**: it is drawn or read, never assumed. The core never makes a protocol decision on the id.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -131,7 +131,7 @@ impl core::str::FromStr for JournalIdentifier {
     }
 }
 
-/// A single-writer journal's **leader uuid** (#241, `docs/architecture.md`
+/// A single-writer journal's **leader uuid** (#241, `docs/architecture/02-data-plane.md`
 /// §2.3): the one fence a `Write` and a `Truncate` are judged against. A
 /// 128-bit random value the leader draws for one leadership term, never per
 /// process, so a process that wins again fences its own older in-flight
@@ -182,7 +182,7 @@ pub struct Value(pub Vec<u8>);
 /// apply, in slot order, by the journal state machine
 /// ([`crate::journal_state::JournalState::apply`]). That apply-time
 /// judgement is the safety rule: a propose-time refusal from the leader's
-/// own fold is only an optimisation (`docs/architecture.md` §2.2), and the
+/// own fold is only an optimisation (`docs/architecture/02-data-plane.md` §2.2), and the
 /// apply decides every slot whatever was or was not checked before it.
 /// The records are opaque bytes the core counts and slices (a read may start
 /// inside a batch) but never interprets.
@@ -237,7 +237,7 @@ pub enum Control {
     /// current leader uuid (`None` on a journal that never had one) and `new`
     /// is set and not the current leader, and then `new` leads from the next
     /// term. A uuid that led before wins again: the journal trusts its
-    /// clients to draw fresh ones (`docs/architecture.md` §2.3). No lease and
+    /// clients to draw fresh ones (`docs/architecture/02-data-plane.md` §2.3). No lease and
     /// no clock.
     SetLeader {
         /// The leader uuid that should lead from the next term.

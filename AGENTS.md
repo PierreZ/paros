@@ -2,7 +2,7 @@
 
 Learning project: the Paxos consensus algorithm in Rust. WIP, not for production.
 
-**The end goal is `docs/architecture.md`**: a multi-tenant journal service, `parosd`, with a
+**The end goal is `docs/architecture/`**: a multi-tenant journal service, `parosd`, with a
 four-call data plane (`Write`, `Read`, `Truncate`, `SetLeader`) and the milestones that get there.
 Read it before planning any work. Where the two disagree, this file is the present (what paros is
 and the doctrine every change follows) and that one is the direction. Each section below ends
@@ -70,7 +70,7 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
 ## Workflow rules
 
 - **Record what the user decides, in the same session.** A design decision or preference the
-  user states (what paros is, how it behaves) goes into `docs/architecture.md`, dated and with its
+  user states (what paros is, how it behaves) goes into `docs/architecture/`, dated and with its
   issue; a preference about how to work goes into this file. Amend the section it touches, never
   only a chat, a commit message or an issue comment, and correct a recorded decision the user
   later overturns rather than adding a second one.
@@ -91,7 +91,7 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   e.g. "#216 (finish bootstrap)", in chats, comments, PR descriptions and commit messages.
 - **Never edit a `CHANGELOG.md` by hand**: release-plz generates it; the commit message is where
   a change is described.
-- **Eat your own food, a first-class citizen** (decided on 2026-10-09, `docs/architecture.md` §1): solve
+- **Eat your own food, a first-class citizen** (decided on 2026-10-09, `docs/architecture/01-goal.md` §1): solve
   every control-plane problem with paros's own journals, leader election and Paxos flavors;
   ask "which journal, which election, which flavor?" before building anything new.
 - **Write documents in ASD-STE100 Simplified Technical English, most of the time** (decided on
@@ -105,7 +105,7 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   in #69. A feature lands only on a harness that can prove it.
 - **Keep the docs in step with the code** (decided on 2026-10-11): a PR that adds a feature or
   changes behaviour also updates the site (`website/zola/`, the `update-the-site` skill), the
-  `README.md` and `docs/architecture.md` where they describe it. A feature PR without its
+  `README.md` and `docs/architecture/` where they describe it. A feature PR without its
   docs is not done.
 - **Organize as you grow**: a module holds one concern; split a file the moment it holds a
   second. Deleting is part of every change: a superseded axis, type, flag or gate goes in the
@@ -303,7 +303,7 @@ Depth: module docs of `matchmaking.rs`, `node/matchmaking.rs`, `node/reconfigure
   (never a fingerprint) and every public call; the driver demuxes on the pair before the core;
   each journal has its own peer-mailbox lane. Ids are random or minted by the one writer that can
   check them, never a log position. **No id is fixed and none has a default**
-  (`docs/architecture.md` §3.8): `0` is unset and the only value with a meaning, there is no
+  (`docs/architecture/03-8-identifiers-checkpoints-recovery-security.md` §3.8): `0` is unset and the only value with a meaning, there is no
   reserved range and no well-known tenant or journal; the control journals' identifiers are drawn at
   `init`, recorded in the cell plan and learned through a node-only `Inspect`
   (`paros::machine::ControlJournals`); an `Inspect` names its journal or asks for the node alone;
@@ -463,7 +463,7 @@ Depth: the `adding-an-audit-check` and `changing-paros-core` skills.
   `Write` and `Truncate` carry the uuid, and the core's term counter never reaches a data-plane
   reply (a client sees `JournalView`; an operator's `Inspect` shows the term). The journal trusts its clients to draw fresh uuids (decided on
   2026-10-09): a reinstated uuid wins, and the simulation's `reinstate_pct` knob proves the
-  guarantees hold through it (`docs/architecture.md` §2.3).
+  guarantees hold through it (`docs/architecture/02-data-plane.md` §2.3).
 - **A trim-point jump** (`Message::TrimmedTo`) recovers a below-floor node: it carries a floor
   and the journal state, no bytes and **no ballot**; the promise never moves.
 - **Cooperative handoff** (`DPaxos`, `relinquish_to`): abdication is synchronous with the
@@ -527,7 +527,7 @@ Cargo workspace, every package under `crates/`. Dependency stack: `paros-core` �
 - `xtask` — `cargo xtask sim` (the sancov runner) and `cargo xtask mutants` (the mutation hunt, #269).
 
 Elsewhere: `website/` holds everything a browser loads (decided on 2026-10-13): `website/zola/` (the website, Zola + Goyo, #254; `website/zola/AGENTS.md`, the `update-the-site` skill; built by `website/zola/build.sh`), `website/play/` (the game's app), `website/sandbox/` (the sandbox page, `scripts/build-sandbox.sh`); the Rust behind them stays in `crates/`,
-`docs/architecture.md`, `docs/analysis/` (design notes), `docs/references/` (papers and source
+`docs/architecture/`, `docs/analysis/` (design notes), `docs/references/` (papers and source
 references), `scripts/` (`sancov-rustc.sh`, `build-play.sh`, `build-sandbox.sh`, `check-dockerfile-toolchain.sh`, `mutants-report.sh`), `.claude/skills/` and
 `.claude/agents/`.
 

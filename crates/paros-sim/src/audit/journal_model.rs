@@ -5,7 +5,7 @@
 //! slot order ([`paros::journal_state`]); each node reports the verdict it
 //! reached at each slot it walked ([`paros::Audit::applied`]). This model
 //! folds those reports — never a second implementation of the journal — and
-//! asserts the invariants of `docs/architecture.md`, section 6:
+//! asserts the invariants of `docs/architecture/06-verification.md`, section 6:
 //!
 //! - **one verdict per slot**: every node judges a slot to the same outcome
 //!   (the fold is a function of the log alone);

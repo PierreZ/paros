@@ -49,7 +49,7 @@ message AcceptorConfig {
   // Empty is an unlabeled configuration, byte-identical to before the field
   // existed; otherwise one per member, or the configuration is refused.
   repeated FailureDomain domains = 7;
-  // The cell that owns the journal (#215 (zones), `docs/architecture.md`
+  // The cell that owns the journal (#215 (zones), `docs/architecture/03-7-universe.md`
   // §3.7). Zero is none, byte-identical to before the field existed.
   uint64 cell_id = 8;
 }
@@ -62,7 +62,7 @@ message FailureDomain {
   string az = 2;
 }
 
-// A single-writer journal's leader uuid (#241, `docs/architecture.md`
+// A single-writer journal's leader uuid (#241, `docs/architecture/02-data-plane.md`
 // §2.3): 128 random bits, `hi` the high half. All zero is unset, never a
 // leader.
 message LeaderUuid {
@@ -99,7 +99,7 @@ message JournalView {
   uint64 first_seq = 3;
 }
 
-// One `key:value` tag (#575 (key:value tags), `docs/architecture.md` §3.9).
+// One `key:value` tag (#575 (key:value tags), `docs/architecture/03-8-identifiers-checkpoints-recovery-security.md` §3.9).
 // A key is `[prefix/]name` of lowercase ASCII letters, digits, `-` and `_`,
 // at most 63 bytes; a key under the reserved prefix `paros/` is written only
 // by the control plane. A value is printable UTF-8 without `,`, at most 255

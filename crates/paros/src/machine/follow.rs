@@ -1,5 +1,5 @@
 //! An admitted machine follows its cell's registry (#211,
-//! `docs/architecture.md` §3.2), so its cached registry fold stays current.
+//! `docs/architecture/03-2-machines.md` §3.2), so its cached registry fold stays current.
 //!
 //! A founding member serves the cell control journal and folds its own copy
 //! (`crate::driver::book`). An admitted machine serves no journal until

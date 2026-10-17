@@ -1,4 +1,4 @@
-//! **The cell coordinator** (#240, `docs/architecture.md` §3.3, §3.7): every
+//! **The cell coordinator** (#240, `docs/architecture/03-3-coordinators-and-placement.md` §3.3, §3.7): every
 //! founding member campaigns for it in the cell's election journal through
 //! [`crate::client::election`], and the winner leads the cell control journal
 //! for its term.

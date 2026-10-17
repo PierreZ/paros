@@ -4,7 +4,7 @@ package paros.election.v1;
 
 import "common.proto";
 
-// One record of an election journal (#240, `docs/architecture.md` §3.3): a
+// One record of an election journal (#240, `docs/architecture/03-3-coordinators-and-placement.md` §3.3): a
 // multi-writer journal that candidates append to and every watcher folds
 // with the same rule (`paros::client::election::ElectionFold`). The record
 // follows a magic prefix (`paros::client::election::MAGIC`), so a watcher

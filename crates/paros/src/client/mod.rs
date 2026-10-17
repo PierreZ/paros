@@ -290,7 +290,7 @@ pub enum Resolution {
     /// the journal reached the position. "Never" holds for a caller that
     /// never reinstates a uuid (the library's writer never does): one that
     /// reinstates the write's uuid lets a delayed copy land again
-    /// (`docs/architecture.md` §2.3).
+    /// (`docs/architecture/02-data-plane.md` §2.3).
     NotWritten {
         /// The journal state that proves it.
         state: JournalView,
@@ -965,7 +965,7 @@ impl<P: Providers> Client<P> {
     ///   leader, the tail and `led_from` must all match.
     ///
     /// Both proofs rest on fresh uuids, the precondition the journal
-    /// already trusts its clients with (`docs/architecture.md` §2.3).
+    /// already trusts its clients with (`docs/architecture/02-data-plane.md` §2.3).
     ///
     /// The first read-back walks the server list ([`Client::read_any`]); a
     /// later one, before each further re-send, asks `first` alone within

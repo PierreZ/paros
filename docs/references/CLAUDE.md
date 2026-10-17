@@ -43,7 +43,7 @@ we study, and analyses of external consensus codebases. This file is the map; re
 ### Zones & placement
 - [`papers/wpaxos/`](papers/wpaxos/): Ailijiang, Charapko, Demirbas, Tasci. Per-zone flexible
   quorums (`fz`, `fn`) and object stealing for wide-area deployments; the source of
-  `docs/architecture.md` §5's zone rules.
+  `docs/architecture/05-failure-model-and-zones.md` §5's zone rules.
 - [`papers/dpaxos/`](papers/dpaxos/): Nawab, Agrawal, El Abbadi. Zones, delegate quorums and
   leader zones that keep data close to users; pairs with
   [`../analysis/consensus/dpaxos-leader-handoff.md`](../analysis/consensus/dpaxos-leader-handoff.md).
@@ -61,7 +61,7 @@ we study, and analyses of external consensus codebases. This file is the map; re
   timestamps, and the testing/correctness chapter (deterministic simulation, formal methods).
 - [`papers/aws-cell-based-architecture/`](papers/aws-cell-based-architecture/): AWS
   Well-Architected whitepaper. Cells as blast-radius boundaries, cell sizing, the thin router,
-  partition mapping, cell migration and static stability; the source of `docs/architecture.md`
+  partition mapping, cell migration and static stability; the source of `docs/architecture/03-7-universe.md`
   §3.7's cell rules.
 
 ## Code implementation analyses

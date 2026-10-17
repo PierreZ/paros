@@ -79,7 +79,7 @@ pub struct MachineSettings {
     pub metrics: crate::metrics::Metrics,
 }
 
-/// A machine's two addresses (#257, `docs/architecture.md` §3.2): what it
+/// A machine's two addresses (#257, `docs/architecture/03-2-machines.md` §3.2): what it
 /// binds, and what its peers and clients dial.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MachineAddresses {

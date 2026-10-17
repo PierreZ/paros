@@ -1,4 +1,4 @@
-//! **The status words** (#191 (status), `docs/architecture.md` §3.6): how
+//! **The status words** (#191 (status), `docs/architecture/03-6-status.md` §3.6): how
 //! a journal stands, judged from what the cell desired, what is available
 //! and what is placed.
 //!

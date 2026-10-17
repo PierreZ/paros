@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use super::{AcceptorConfig, FailureDomain};
 
 /// The verdict of the **zone rule** over one configuration (#215 (zones),
-/// `docs/architecture.md` §5): two predicates over the members' failure
+/// `docs/architecture/05-failure-model-and-zones.md` §5): two predicates over the members' failure
 /// domains, each asked through the configuration's own quorum predicates,
 /// never a count.
 ///

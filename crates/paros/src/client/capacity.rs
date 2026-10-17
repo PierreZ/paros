@@ -1,4 +1,4 @@
-//! **Capacity requests** (#476, `docs/architecture.md` §3.3): a tenant
+//! **Capacity requests** (#476, `docs/architecture/03-3-coordinators-and-placement.md` §3.3): a tenant
 //! coordinator asks the cell coordinator for the slots it placed, under an
 //! idempotency id. Only the cell coordinator writes capacity: it draws the
 //! booking ids, writes one `GrantCapacity` (every slot booked, or none) and

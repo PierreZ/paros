@@ -1,4 +1,4 @@
-//! The multi-writer journal's operations (#241, `docs/architecture.md` §2.4)
+//! The multi-writer journal's operations (#241, `docs/architecture/02-data-plane.md` §2.4)
 //! and the mode confusion on both kinds of journal.
 //!
 //! A multi-writer journal has no leader: every client of it appends, with

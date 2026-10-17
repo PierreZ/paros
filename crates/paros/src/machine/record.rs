@@ -335,7 +335,7 @@ impl MachineRecord {
 
 /// The core configuration of `journal` on member `node_id` of `plan`:
 /// Multi-Paxos over every member, under a majority, born with its tenant's
-/// matchmaker set on the founding members (#190, `docs/architecture.md`
+/// matchmaker set on the founding members (#190, `docs/architecture/03-1-cell-tenant-and-bootstrap.md`
 /// §3.1: there is no bootstrap exception).
 #[must_use]
 pub fn journal_config(plan: &CellPlan, node_id: NodeId, journal: JournalIdentifier) -> Config {

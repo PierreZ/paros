@@ -308,7 +308,7 @@ that resolves to several machines stands for them all, and each server's node
 id — the one a leader hint names it by — is learned from its own `Inspect`
 (`ID=HOST:PORT` names it outright, in hex). A journal is a name, `TENANT/JOURNAL` or
 `paros://TENANT/JOURNAL`, or its ids, `id:TENANT/JOURNAL` in hex: both ids random and both
-required, with no default tenant and no fixed id (#235, #239, `docs/architecture.md` §3.5,
+required, with no default tenant and no fixed id (#235, #239, `docs/architecture/03-5-frontend-and-resolver.md` §3.5,
 §3.8).
 
 | command | what it does |
