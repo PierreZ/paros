@@ -2058,6 +2058,17 @@ pub(crate) struct MachineLayout {
     pub(crate) founders_keep_names: bool,
 }
 
+/// The capacity of one machine: the floor on the full founder, else the
+/// drawn capacity.
+fn founder_capacity(full: bool, floor: u64, capacity: u64) -> u64 {
+    if full {
+        assert_reachable!("machine: a founder holds only the floor");
+        floor
+    } else {
+        capacity
+    }
+}
+
 /// The run's machine layout (#246), drawn once per seed by whoever asks
 /// first, for `count` machines in rank order. The founder count is uniform
 /// over `1..=count` (`3..=count` on a replaced-founder, moved-founder or
@@ -2073,7 +2084,8 @@ pub(crate) struct MachineLayout {
 /// `move_pct` knob (default 0; extreme 20..=80, floor 0: a machine that
 /// never moves), and a cell machine's reboot comes back under a new name
 /// with the `rename_pct` knob (#349, default 0; extreme 20..=60, floor 0: a
-/// machine that keeps its name).
+/// machine that keeps its name). On a BUGGIFY coin the first founder holds
+/// only the floor, so the births fill it.
 #[tracing::instrument(level = "debug", skip(state))]
 pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout {
     // Drawn before the lock: the scenario takes the registry's lock too.
@@ -2140,6 +2152,12 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
             // the extreme refuses a second tenant on a cell of one.
             let floor = 3 * paros::footprint::Footprint::birth().storage();
             let capacity = floor + buggify_knob!(8_u64, 1_u64..4_u64);
+            // On half the seeds where BUGGIFY strikes, the first founder
+            // holds only the floor, so the births fill it and a tenant
+            // coordinator sizes a set past a full machine (recipe
+            // 122746:10910618044440912506 on 8668601583785772229). Never on
+            // a zone-outage seed: its tenants need every zone's room.
+            let full_founder = founders > 0 && !zoned && moonpool_sim::buggify_with_prob!(0.5);
             // On half the drained-machine seeds, the machines advertise
             // names and a reboot renames one at the knob's extreme, so a
             // drain meets a machine renamed since it took its slots (#504
@@ -2165,7 +2183,7 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
                         };
                     MachineDraw {
                         class,
-                        capacity,
+                        capacity: founder_capacity(full_founder && rank == 0, floor, capacity),
                         locality: paros::machine::Locality {
                             // The zone-outage scenario stands machine `r` in
                             // `zone-<r % 3>` (#215 (zones)).
