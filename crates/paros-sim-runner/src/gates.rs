@@ -50,6 +50,10 @@ pub const RARE: &[Rare] = &[
         reason: "an ADMIT that draws a machine an operator removed: one CI sweep seed (#359 (drain, remove and maintenance for machines))",
     },
     Rare {
+        msg: "coordinator: a served term follows a renamed founder",
+        reason: "a founder renamed (the rename_pct knob's extreme, #349) while a served term runs: one witness on PR #643's sweep",
+    },
+    Rare {
         msg: "coordinator: a machine down past its bound is gone",
         reason: "a gone-machine seed: 11 hits in 1,000 hunt seeds (#498 (moves in the sweep), #475 (re-place after the Down bound))",
     },
