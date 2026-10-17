@@ -119,7 +119,10 @@ impl LedgeredJournal {
         };
         if super::injector::apply(&self.provider, &injection).await {
             let ip = self.ip.clone();
-            self.with_world(|w| w.note_applied(&ip));
+            self.with_world(|w| {
+                w.note_applied(&ip);
+                w.note_flip_synced(&ip);
+            });
             (Some(injection), Judging::Landed)
         } else if injection.double_fault().is_some() {
             // The reserved park waits for the journal's verdict.

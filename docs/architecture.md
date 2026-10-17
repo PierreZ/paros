@@ -1056,7 +1056,7 @@ create.
   draining and hold no slot. The registry then tombstones its `node_id`. `parosctl status`
   shows `drained` for a draining machine that holds no slot, and `down, in maintenance` for a
   down machine a window covers. Oracles: a window that is still open keeps every slot its
-  machine held, and a removed machine is retired and holds no slot. A graceful stop that hands
+  machine held, unless the tenant's own mode change placed the journal elsewhere, and a removed machine is retired and holds no slot. A graceful stop that hands
   the leadership on before `parosd` exits is a follow-up issue.
 - **Retire coordination** (#477 (retire coordination moves into the control journals)). The
   simulation's operators coordinate a joiner's retirement through the registry, not through a
