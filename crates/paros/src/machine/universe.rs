@@ -1,5 +1,5 @@
 //! **The cell's side of the universe** (#513 (fleet Init duel), #225,
-//! `docs/architecture.md` §3.1, §3.7): the cell coordinator writes the
+//! `docs/architecture/03-1-cell-tenant-and-bootstrap.md` §3.1, §3.7): the cell coordinator writes the
 //! cell's `JoinFleet`, and each tenant's footprint, `HostTenant` and
 //! `DropTenant`, into the cell control journal, its one writer.
 //!

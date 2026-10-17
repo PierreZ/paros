@@ -1,5 +1,5 @@
 //! `paros-frontend` — the frontend (#192 (the frontend),
-//! `docs/architecture.md` §3.5): the stateless entry role in front of a
+//! `docs/architecture/03-5-frontend-and-resolver.md` §3.5): the stateless entry role in front of a
 //! cell's machines, over moonpool's `TokioProviders`.
 //!
 //! A client reaches a frontend for its data, never a machine. The

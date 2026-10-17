@@ -25,7 +25,7 @@
 //! the record. A member that restarted holds none and teaches nothing, and
 //! a learner whose pin refuses the token is not asked again: in both cases
 //! the operator runs `init` again, as for an admission
-//! (`docs/architecture.md` §3.1, Trust).
+//! (`docs/architecture/03-1-cell-tenant-and-bootstrap.md` §3.1, Trust).
 //!
 //! The teaching of a member ends once it answers in this cell, answers as
 //! another machine (a wiped member never forms), refuses the token, or the

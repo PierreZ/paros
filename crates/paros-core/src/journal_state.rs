@@ -2,7 +2,7 @@
 //! apply.
 //!
 //! A journal exposes four calls — `Write`, `Read`, `Truncate`, `SetLeader`
-//! (`docs/architecture.md`, section 2) — and every rule behind them is
+//! (`docs/architecture/02-data-plane.md`, section 2) — and every rule behind them is
 //! judged here, when the replica's contiguous walk reaches the slot that
 //! decided the call, in slot order, on every node alike. The state is four
 //! scalars, [`JournalState`]: the current leader uuid, the hidden term
@@ -22,7 +22,7 @@
 //!   a journal that never had one), and the term then rises by one. It is
 //!   refused when `new_uuid` is the current leader or the unset uuid; a uuid
 //!   that led before wins again (decided on 2026-10-09: the journal trusts
-//!   its clients to draw fresh uuids, `docs/architecture.md` §2.3). No lease,
+//!   its clients to draw fresh uuids, `docs/architecture/02-data-plane.md` §2.3). No lease,
 //!   no clock.
 //! - **`Truncate(leader_uuid, up_to_seq)`** ([`Control::Truncate`], #228) is
 //!   fenced like a `Write`: it is accepted iff `leader_uuid` is current, and
@@ -32,7 +32,7 @@
 //!   a position that is not the leader's checkpoint.
 //!
 //! A journal has one of two **writer modes** ([`WriterMode`]), fixed when it
-//! is created (`docs/architecture.md` §2, §2.4). The rules above are the
+//! is created (`docs/architecture/02-data-plane.md` §2, §2.4). The rules above are the
 //! single-writer mode's. A **multi-writer** journal has no leader:
 //!
 //! - **`Write(batch)`** is a [`Command::Write`] under the unset uuid. It is
@@ -73,7 +73,7 @@
 
 use crate::types::{Command, Control, Entry, LeaderUuid, Seq};
 
-/// Who may write a journal (`docs/architecture.md` §2, decided on
+/// Who may write a journal (`docs/architecture/02-data-plane.md` §2, decided on
 /// 2026-10-04): fixed when the journal is created, and never changed. The
 /// mode is configuration, recorded in the store's format marker with the
 /// rest of [`crate::Config`], so a restart can never change it.

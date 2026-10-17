@@ -1,4 +1,4 @@
-//! **A machine samples its own busyness** (#424, `docs/architecture.md`
+//! **A machine samples its own busyness** (#424, `docs/architecture/03-6-status.md`
 //! §3.6) and answers `Load` with its last full window.
 //!
 //! [`spawn_monitor`] starts one task per machine run: it samples moonpool's

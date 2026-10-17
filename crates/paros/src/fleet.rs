@@ -1,4 +1,4 @@
-//! The **fleet tenant** (#229, `docs/architecture.md` §3.7): the fleet
+//! The **fleet tenant** (#229, `docs/architecture/03-7-universe.md` §3.7): the fleet
 //! directory. Its control journal answers one question — which tenant lives
 //! in which cell — plus the cell entries; quotas, billing and status live
 //! elsewhere. Its identifier is random like every identifier (§3.8): `init`

@@ -50,7 +50,7 @@ pub struct AcceptorConfig<Id = NodeId> {
     /// it; [`AcceptorConfig::zone_rule`] does.
     domains: Vec<FailureDomain>,
     /// The cell that owns the journal this configuration runs (#215
-    /// (zones), #232 (multiple cells), `docs/architecture.md` §3.7): `0`
+    /// (zones), #232 (multiple cells), `docs/architecture/03-7-universe.md` §3.7): `0`
     /// is none, the plain arm. The core never decides on it; it is bound to
     /// the ballot like the rest, so the effective configuration names the
     /// owning cell.
@@ -461,7 +461,7 @@ impl<Id: Copy + Ord> AcceptorConfig<Id> {
     }
 
     /// This configuration owned by cell `cell` (`0`: none), every other
-    /// field unchanged (#215 (zones), `docs/architecture.md` §3.7).
+    /// field unchanged (#215 (zones), `docs/architecture/03-7-universe.md` §3.7).
     ///
     /// # Panics
     ///

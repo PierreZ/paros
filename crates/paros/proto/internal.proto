@@ -52,7 +52,7 @@ message RetireAck {
 
 message Deliver {
   repeated ConsensusMessage messages = 1;
-  // The sender's cell (#216): `docs/architecture.md` §3.2's session `Hello`
+  // The sender's cell (#216): `docs/architecture/03-2-machines.md` §3.2's session `Hello`
   // id, carried on every batch. A receiver of another cell refuses the
   // batch, so a machine never steps a peer of another cell. `0` is a
   // deployment without a cell plan; it meets only another such node.
@@ -93,7 +93,7 @@ message ConsensusMessage {
 
 // A journal `Write` decided into one slot (#204): judged at apply by the
 // journal state machine — the safety rule; any propose-time check is only
-// an optimisation (`docs/architecture.md` §2.2).
+// an optimisation (`docs/architecture/02-data-plane.md` §2.2).
 message WriteEntry {
   // 1 and 2 were the M7 writer `(generation, owner)` (#241).
   reserved 1, 2;
@@ -383,7 +383,7 @@ message InspectReply {
   // The answering node's own id (#196): node ids are random (#225), so a
   // client given addresses alone learns each server's id here.
   uint64 node = 18;
-  // The answering node's cell (#229, `docs/architecture.md` §3.2): no identifier
+  // The answering node's cell (#229, `docs/architecture/03-2-machines.md` §3.2): no identifier
   // is fixed (§3.8), so a client handed only addresses learns the control
   // journals here. `0` when the node knows no cell (a deployment without a
   // cell plan); the identifiers are unset when unknown, the fleet tenant's when this cell
@@ -413,7 +413,7 @@ message InspectReply {
 }
 
 // A scrub of one journal's durable records on the node that answers (#362
-// (background scrubbing), `docs/architecture.md` §5): the tenant's elected
+// (background scrubbing), `docs/architecture/05-failure-model-and-zones.md` §5): the tenant's elected
 // scrubber reads each acceptor's own copy, never a quorum read. The node
 // reads up to `limit` records (and about `max_bytes` of payload) from
 // `from_slot` up back from its device and checks each one locally. It

@@ -1,5 +1,5 @@
 //! **Joining a universe another cell hosts** (#232 (multiple cells),
-//! `docs/architecture.md` §3.1, §3.7): `universe add-cell`'s cell step.
+//! `docs/architecture/03-1-cell-tenant-and-bootstrap.md` §3.1, §3.7): `universe add-cell`'s cell step.
 //!
 //! An idle cell (formed by `cell init` with no universe tenant) joins a
 //! universe in two halves, like `init`'s fleet half. The operator writes

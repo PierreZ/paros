@@ -441,7 +441,7 @@ performance gains over Multi-Paxos and leaderless alternatives for spatially-loc
   (`has_phase1_quorum` / `has_phase2_quorum`); DPaxos's intra-intersection relaxation, its
   `intent`-tracking and its garbage collector for stale intents have no counterpart because paros
   never ships a Leader Election quorum smaller than its intersection obligation in the first
-  place. `docs/architecture.md` §5 reaches the WPaxos-adjacent conclusion for the same reason:
+  place. `docs/architecture/05-failure-model-and-zones.md` §5 reaches the WPaxos-adjacent conclusion for the same reason:
   shrinking Phase-1 at the expense of zone survival is a trade paros's single-region,
   multi-AZ deployment doesn't need to make.
 - **Leader Handoff (§4.4) maps directly onto `ColocatedNode::relinquish_to`**, restated in
@@ -468,16 +468,16 @@ performance gains over Multi-Paxos and leaderless alternatives for spatially-loc
   cover.
 - **Zone-centric Replication quorums (`fd + 1` nodes in `fz + 1` zones) parallel paros's
   `AcceptorConfig` zone labels** (§3.4 Tenant modes, §5 Failure model and zones of
-  `docs/architecture.md`): both tie a quorum's shape to zone membership recorded with the
+  `docs/architecture/`): both tie a quorum's shape to zone membership recorded with the
   configuration rather than read live. paros does not adopt DPaxos's *dynamic* Leader Zone
   migration protocol (the three-step register/transition/complete sequence over a dedicated
   Leader Zone Instance) because paros has no analogous "second Paxos instance just to move where
   leadership is allowed to start": `relinquish_to` moves the leader directly, and
-  `Reconfigure`/matchmaker-quorum reconfiguration (`docs/architecture.md` §3.3 Coordinators and
+  `Reconfigure`/matchmaker-quorum reconfiguration (`docs/architecture/03-3-coordinators-and-placement.md` §3.3 Coordinators and
   placement, and AGENTS.md's "Matchmaking, reconfiguration, GC, generations" section) is the
   mechanism for moving where the *acceptors* themselves live.
 - **Read leases (§4.5) are not adopted.** paros's reads are leaderless quorum reads
-  (`quorum_read.rs`, the Compartmentalized Paxos-style read `docs/architecture.md` §2.5 describes:
+  (`quorum_read.rs`, the Compartmentalized Paxos-style read `docs/architecture/02-data-plane.md` §2.5 describes:
   a Phase-1 quorum vote on watermarks, no leader on the read path), not a leader-local lease. The
   implicit lease-via-accept-message technique (no extra round trip, lease vote piggybacked on the
   ordinary Phase-2 ack) has no counterpart there.

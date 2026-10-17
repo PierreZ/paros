@@ -24,7 +24,7 @@
 //! call to it is refused `EndpointNotFound` before any handler runs.
 //!
 //! **Static and dynamic endpoints** (#404 (static vs dynamic endpoints),
-//! `docs/architecture.md` §3.2), after FDB's well-known and
+//! `docs/architecture/03-2-machines.md` §3.2), after FDB's well-known and
 //! dynamic endpoints. A well-known endpoint is what an operator or a new
 //! client reaches with an address alone. Two interfaces are also served as
 //! moonpool dynamic groups ([`RpcInterface`]), each reference naming one

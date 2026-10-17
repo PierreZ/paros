@@ -3,7 +3,7 @@
 /// A longer one is a programmer error in the core and a refusal on the wire.
 pub const MAX_FAILURE_DOMAIN_BYTES: usize = 64;
 
-/// The **failure domain** of an acceptor (#215 (zones), `docs/architecture.md`
+/// The **failure domain** of an acceptor (#215 (zones), `docs/architecture/05-failure-model-and-zones.md`
 /// §5): the region and the availability zone its machine stands in, as the
 /// cell's registry names them (e.g. `("eu-west-1", "eu-west-1a")`).
 ///

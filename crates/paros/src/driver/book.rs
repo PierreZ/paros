@@ -1,4 +1,4 @@
-//! A formed machine's **peer book** (#349, `docs/architecture.md` §3.2):
+//! A formed machine's **peer book** (#349, `docs/architecture/03-2-machines.md` §3.2):
 //! where its lanes dial each founding member, folded from the registry, never
 //! from the plan.
 //!

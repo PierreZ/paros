@@ -1,4 +1,4 @@
-//! A machine's matchmaker host (#190, `docs/architecture.md` §3.4): every
+//! A machine's matchmaker host (#190, `docs/architecture/03-4-tenant-modes.md` §3.4): every
 //! tenant's matchmaker set is born on the cell's founding members, the
 //! bootstrap generation, so every journal a machine serves is born with its
 //! tenant's set. The cell coordinator then places each set with

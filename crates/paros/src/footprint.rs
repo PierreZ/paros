@@ -1,4 +1,4 @@
-//! **The tenant footprint** (#476, `docs/architecture.md` §3.4): the slots a
+//! **The tenant footprint** (#476, `docs/architecture/03-4-tenant-modes.md` §3.4): the slots a
 //! tenant's birth books against its cell's capacity, so a cell hosts only a
 //! tenant it can run. A footprint is one coordinator slot, the tenant's
 //! matchmaker set, one acceptor quorum of its durability for data, and one

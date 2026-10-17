@@ -3,7 +3,7 @@
 //! comes back under a new name, and then a machine whose durable cached
 //! registry fold follows the move restarts. That restart dials the founder
 //! where only its cache knows it is: the static-stability case of
-//! `docs/architecture.md` §3.2.
+//! `docs/architecture/03-2-machines.md` §3.2.
 //!
 //! On that seed the machines advertise names, and the first crash's reboot
 //! renames the founder (`crate::machine::founder_to_move`). The

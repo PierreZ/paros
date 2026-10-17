@@ -1,5 +1,5 @@
 //! `parosctl status [--tenant t] [--cell c]` (#191 (status),
-//! `docs/architecture.md` §3.6): how the universe, the cell or one tenant
+//! `docs/architecture/03-6-status.md` §3.6): how the universe, the cell or one tenant
 //! stands, in the spirit of `fdbcli status`.
 //!
 //! Three columns per journal: **desired** (the durability the tenant asked

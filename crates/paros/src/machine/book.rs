@@ -1,4 +1,4 @@
-//! A cell's **address book** (#349, `docs/architecture.md` §3.2): where each
+//! A cell's **address book** (#349, `docs/architecture/03-2-machines.md` §3.2): where each
 //! machine of the cell is dialed, read from the registry fold, never from the
 //! plan `init` wrote.
 //!

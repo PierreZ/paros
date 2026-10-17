@@ -11,7 +11,7 @@ a page names must exist in `paros-core`/`paros-sim`. A protocol change
 therefore usually moves a page. `website/zola/AGENTS.md` (loads when you edit
 under `website/zola/`) holds the diagram rules; this skill is the map. The `parosd`
 part (`website/zola/content/parosd/`) is written for people from the code and
-`docs/architecture.md`, and never links readers to that file. #254 and its
+`docs/architecture/`, and never links readers to that file. #254 and its
 sub-issues (#306 to #316) list the pages still to come.
 
 | Changed | Page (`website/zola/content/`) |

@@ -3,7 +3,7 @@
 The paros website: Zola with the Goyo theme (#254), replacing the mdbook. Two parts:
 `content/parosd/` (the system) and `content/paxos/` (the Paxos implementation, told as a
 learning path). Pages are written for people and stand on their own: they never send a
-reader to `docs/architecture.md`, which is the agents' map, not human documentation.
+reader to `docs/architecture/`, which is the agents' map, not human documentation.
 
 ## Build & preview
 

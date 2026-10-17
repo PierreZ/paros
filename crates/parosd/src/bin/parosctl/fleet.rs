@@ -3,7 +3,7 @@
 //! journal, and what `init` shares with them (the session, the outcomes'
 //! endings and labels).
 //!
-//! No identifier is fixed (`docs/architecture.md` §3.8): the cell's and the fleet tenant's
+//! No identifier is fixed (`docs/architecture/03-8-identifiers-checkpoints-recovery-security.md` §3.8): the cell's and the fleet tenant's
 //! control journals are learned from the servers' `Inspect`
 //! (`paros::client::bootstrap::cell_frames`). Every operation here claims
 //! both journals under a leader uuid of its own (#241), drawn per run, so it

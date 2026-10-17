@@ -1,5 +1,5 @@
 //! The acceptor's side of a scrub (#362 (background scrubbing),
-//! `docs/architecture.md` §5): one page of a journal's durable records,
+//! `docs/architecture/05-failure-model-and-zones.md` §5): one page of a journal's durable records,
 //! read back from the device and checked by the node that holds them.
 //!
 //! The tenant's elected scrubber (`crate::machine::scrub`) asks each

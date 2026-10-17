@@ -276,7 +276,7 @@ impl Slot {
 /// its birth, or a capacity request's idempotency id.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum GrantKey {
-    /// The minimum footprint of the tenant (`docs/architecture.md` §3.4).
+    /// The minimum footprint of the tenant (`docs/architecture/03-4-tenant-modes.md` §3.4).
     Footprint(TenantId),
     /// A capacity request, by the id its requester drew (never `0`).
     Request(u64),
@@ -691,7 +691,7 @@ pub enum BookingTarget {
         /// The set's id within the tenant (never `0`).
         set: u64,
     },
-    /// `tenant` as a whole (#476): its minimum footprint (`docs/architecture.md`
+    /// `tenant` as a whole (#476): its minimum footprint (`docs/architecture/03-4-tenant-modes.md`
     /// §3.4), the slots its birth booked against the cell's capacity, whose
     /// `Coordinator` slot is where the cell coordinator placed the tenant's
     /// coordinator, and its tenant-wide roles (its frontends). Unlike a

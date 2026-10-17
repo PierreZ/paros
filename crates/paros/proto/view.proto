@@ -181,7 +181,7 @@ message JournalView {
   repeated uint64 acceptors = 6;
   // The matchmaker set's members (empty: plain Multi-Paxos).
   repeated uint64 matchmakers = 7;
-  // The status (#191 (status), `docs/architecture.md` §3.6), computed live
+  // The status (#191 (status), `docs/architecture/03-6-status.md` §3.6), computed live
   // from the registry fold the answer names, never written back.
   //
   // The acceptors the desired shape asks for (the founding members for a

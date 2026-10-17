@@ -1,4 +1,4 @@
-//! **The administrative views** (#399, `docs/architecture.md` §3.6): what a
+//! **The administrative views** (#399, `docs/architecture/03-6-status.md` §3.6): what a
 //! cell holds — its machines, its tenants and who holds which role — as one
 //! cell answers it.
 //!

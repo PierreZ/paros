@@ -28,7 +28,7 @@ operations (`RECONFIGURE`, `RECONFIGURE_MATCHMAKERS`, `RETIRE`) run only on
 the run's main journal (`shape::Identifiers::main`), and the run ends only once every journal a client writes
 to has converged (the `converged` set on the shared `Tail`). The
 system-journal operations (#189) live in `chain_workload/system.rs`; the
-three races of `docs/architecture.md` §6 (#205) in `chain_workload/races.rs`
+three races of `docs/architecture/06-verification.md` §6 (#205) in `chain_workload/races.rs`
 and the `READ` step.
 
 ## The alphabet is a wire format

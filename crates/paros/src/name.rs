@@ -1,4 +1,4 @@
-//! **Names at the edge** (#239, `docs/architecture.md` §3.5): what a person
+//! **Names at the edge** (#239, `docs/architecture/03-5-frontend-and-resolver.md` §3.5): what a person
 //! types and reads, never what the protocol carries.
 //!
 //! A user addresses a journal by name, `paros://<tenant>/<journal>`

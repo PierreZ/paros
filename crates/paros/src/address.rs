@@ -2,7 +2,7 @@
 //! dial.
 //!
 //! A machine binds its listen address and **advertises** another one
-//! (`docs/architecture.md` §3.2), as `FoundationDB`'s `public_address` and
+//! (`docs/architecture/03-2-machines.md` §3.2), as `FoundationDB`'s `public_address` and
 //! `CockroachDB`'s `--advertise-addr`. An advertised [`Address`] is
 //! `HOST:PORT`, where the host is a literal IP or a name (a Compose service,
 //! a DNS record). It is kept as written in the cell plan, an admission and

@@ -101,7 +101,7 @@ pub struct DriverTunables {
     /// than the wait simply times out (ambiguous, never wrong).
     pub read_retry_ticks: u64,
     /// The longest `wait_ms` a journal `Read` gets (#241,
-    /// `docs/architecture.md` §2.7): a larger one is capped to this. A read
+    /// `docs/architecture/02-data-plane.md` §2.7): a larger one is capped to this. A read
     /// at or past the serving node's end waits up to the capped value (the
     /// tail wait, #185) for something to be chosen before the driver
     /// answers an empty page. Floor 0: a zero cap answers every such read
@@ -264,7 +264,7 @@ pub struct DriverTunables {
     /// leadership's Phase 1. Meaningless under a majority or a flexible
     /// split.
     pub partition_move_resends: u64,
-    /// The most records one `Write` may carry (#241, `docs/architecture.md`
+    /// The most records one `Write` may carry (#241, `docs/architecture/02-data-plane.md`
     /// §2.7). A larger batch is refused at the edge (`TooLarge`) before it
     /// reaches consensus. Floor 1: a one-record batch always fits, so a
     /// writer that splits its batches always makes progress.

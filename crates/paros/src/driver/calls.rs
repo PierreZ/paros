@@ -5,7 +5,7 @@
 //!
 //! The safety rule is the judgement at apply: whatever is checked before a
 //! slot is proposed (a propose-time refusal is allowed as an optimisation,
-//! `docs/architecture.md` §2.2), the verdict a client gets is the one the
+//! `docs/architecture/02-data-plane.md` §2.2), the verdict a client gets is the one the
 //! fold gave its slot. This driver checks nothing early: the node proposes it
 //! ([`ColocatedNode::propose_in`](paros_core::ColocatedNode::propose_in),
 //! [`propose_control_in`](paros_core::ColocatedNode::propose_control_in)),
@@ -194,7 +194,7 @@ pub(crate) fn write_ack(outcome: &Outcome) -> WriteAck {
 }
 
 /// The edge's verdict on a `Write` batch of `records` (#241,
-/// `docs/architecture.md` §2.7): `Some(TooLarge)` when it carries more
+/// `docs/architecture/02-data-plane.md` §2.7): `Some(TooLarge)` when it carries more
 /// records or more record bytes than `tunables` allow, `None` when it may be
 /// proposed. Judged before consensus, so a refused batch is in no slot.
 pub(crate) fn batch_too_large(records: &[Vec<u8>], tunables: &DriverTunables) -> Option<WriteAck> {

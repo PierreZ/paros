@@ -1,4 +1,4 @@
-//! **`Resolve`** (#216, `docs/architecture.md` §3.5): a client handed only
+//! **`Resolve`** (#216, `docs/architecture/03-5-frontend-and-resolver.md` §3.5): a client handed only
 //! an entry endpoint asks it which references serve its tenant.
 //!
 //! The entry endpoint is a few addresses, or a DNS name in front of them.
