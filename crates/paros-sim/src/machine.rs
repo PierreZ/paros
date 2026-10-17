@@ -500,6 +500,12 @@ pub(crate) fn plan_lost(state: &StateHandle, cell_id: u64) -> bool {
     lock(&machine_board(state)).lost.contains(&cell_id)
 }
 
+/// Whether `ip` is a machine's process IP the board knows.
+pub(crate) fn is_machine_ip(state: &StateHandle, ip: &str) -> bool {
+    let board = machine_board(state);
+    lock(&board).ips.values().any(|known| known == ip)
+}
+
 /// The process IP of the machine that advertises `addr` (#257): a named
 /// address, or one a moved machine left, is not the IP a kill strikes.
 pub(crate) fn process_ip(state: &StateHandle, addr: &Address) -> Option<String> {

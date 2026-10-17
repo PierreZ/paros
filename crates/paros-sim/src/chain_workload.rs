@@ -581,6 +581,10 @@ impl ChainWorkload {
         }
 
         let mut config = ChainConfig::for_timeline();
+        // The batched-journals scenario needs three machines (#599
+        // (durability mode per journal)): drawn here when no machine drew
+        // it first.
+        crate::shape::batched_journals_among(ctx.state(), deployment.machines().len());
         if crate::shape::lagging_acceptor(ctx.state()) || crate::shape::split_floor(ctx.state()) {
             // The lagging-acceptor scenario (#340): the peers' floors must
             // pass what the held acceptor holds, so every client compacts

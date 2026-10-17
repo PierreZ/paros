@@ -1474,12 +1474,16 @@ pub(crate) fn untagged(state: &StateHandle) -> bool {
 /// inside a batched commit, so its last batch may come back faulty. That
 /// needs a batched journal that tolerates a loss and takes many commits:
 /// without more, a 100-seed hunt opened 4 batched commits, none with a
-/// loss to spare. So on a scenario seed the layout lists three founders or
-/// more where the machines allow it ([`machine_layout`]), client 0 runs
-/// `init` first, every client runs `TENANT` and `CREATE_JOURNAL` as often
-/// as the weight family allows at the steps knob's top, and each create
-/// first appends to journals the client created before
-/// (`crate::chain_workload`).
+/// loss to spare. So the scenario is drawn only on a run of three machines
+/// or more ([`batched_journals_among`]), its layout lists three founders
+/// ([`machine_layout`]), client 0 runs `init` first, every client runs
+/// `TENANT` and `CREATE_JOURNAL` as often as the weight family allows at
+/// the steps knob's top, a batched create names the default mode (one
+/// failure) on seven draws in eight, and each create first appends to
+/// journals the client created before (`crate::chain_workload`). The
+/// machines' attrition kills a machine only inside a batched commit with a
+/// copy to spare (`crate::world::cut`), so the cell lives to create and
+/// append, and the kills it asks for land where the scenario needs them.
 #[tracing::instrument(level = "debug", skip_all)]
 pub(crate) fn batched_journals(state: &StateHandle) -> bool {
     let registry = registry(state);
@@ -1487,6 +1491,28 @@ pub(crate) fn batched_journals(state: &StateHandle) -> bool {
     *guard
         .batched_journals
         .get_or_insert_with(|| moonpool_sim::buggify_with_prob!(1.0))
+}
+
+/// [`batched_journals`], drawn by a caller that knows the run's `machines`:
+/// never on a run of fewer than three, where no created journal has a copy
+/// to spare, so a cut inside its commit is always refused (over 300 hunt
+/// seeds, 112 of the 115 kills asked inside a batched commit met a journal
+/// with none).
+pub(crate) fn batched_journals_among(state: &StateHandle, machines: usize) -> bool {
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    *guard
+        .batched_journals
+        .get_or_insert_with(|| machines >= 3 && moonpool_sim::buggify_with_prob!(1.0))
+}
+
+/// Whether the run drew the batched-journals scenario
+/// ([`batched_journals`]), without drawing it: `false` until a caller drew
+/// it. For a veto, which must not draw.
+pub(crate) fn batched_journals_drawn(state: &StateHandle) -> bool {
+    let registry = registry(state);
+    let guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    guard.batched_journals == Some(true)
 }
 
 pub(crate) fn slow_machine(state: &StateHandle) -> bool {
@@ -2041,7 +2067,11 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
     let drained = drained_machine(state);
     let zoned = zone_outage(state);
     let changed = changed_mode(state);
-    let batched = batched_journals(state);
+    let batched = if count == 0 {
+        batched_journals(state)
+    } else {
+        batched_journals_among(state, count)
+    };
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     guard

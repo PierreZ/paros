@@ -128,10 +128,10 @@ fn commits(state: &StateHandle) -> Arc<Mutex<Commits>> {
     }
     let commits = crate::state::published(state, COMMITS_KEY, Commits::default);
     let veto = Arc::clone(&commits);
+    let run = state.clone();
     HintVeto::new(move |ip, _label| {
-        veto.lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .permit_kill(ip)
+        let mut commits = veto.lock().unwrap_or_else(PoisonError::into_inner);
+        !commits.holds_machine(&run, ip) && commits.permit_kill(ip)
     })
     .publish(state);
     let veto = Arc::clone(&commits);
@@ -181,6 +181,32 @@ impl Commits {
             assert_reachable!("outage: a commit in flight holds an outage back");
         }
         !blocked
+    }
+
+    /// Whether a kill of the process at `ip` waits, on a batched-journals
+    /// seed (#599 (durability mode per journal), `shape::batched_journals`):
+    /// a machine dies there only inside a commit of a `Batched` journal
+    /// that may lose a copy. The machines' kills are kept for the moment
+    /// the scenario exists for. A cell whose machines die every few seconds
+    /// never creates a tenant in the chaos window: over 120 hunt seeds,
+    /// every one of the 25 batched-journals seeds whose machines were
+    /// killed created no journal before the tail, so no kill ever met a
+    /// batched commit. Held, the cell forms, creates and appends, and the
+    /// attrition regime strikes at the journal commit's own `hint!`s (or a
+    /// timed reboot lands inside the commit). It holds nothing on any other
+    /// seed or process.
+    fn holds_machine(&self, state: &StateHandle, ip: &str) -> bool {
+        if !crate::shape::batched_journals_drawn(state)
+            || self
+                .machine
+                .iter()
+                .any(|((at, _), tolerated)| at == ip && *tolerated > 0)
+            || !crate::machine::is_machine_ip(state, ip)
+        {
+            return false;
+        }
+        assert_reachable!("journal store: a machine kill waits for a batched commit");
+        true
     }
 
     /// Whether the process at `ip` may die now, spending the budget of every

@@ -181,14 +181,26 @@ impl FleetOps {
                     desired,
                 }
             } else {
+                let store = drawn_store(ctx.state());
                 JournalOp::Create {
                     tags: self.birth_tags(tenant, &name),
                     name,
                     writer: drawn_mode(),
+                    store,
                     // On a draw in four the create names no mode: it takes the
-                    // tenant's default (#214 (tenant modes)).
-                    desired: (!(payload >> 20).is_multiple_of(4)).then(|| drawn_desired(payload)),
-                    store: drawn_store(ctx.state()),
+                    // tenant's default (#214 (tenant modes)). A batched one
+                    // names the default mode on seven draws in eight, so a
+                    // cut inside its commit has a copy to spare (#599
+                    // (durability mode per journal)): over 300 hunt seeds,
+                    // 66 of the 71 kills asked inside a batched commit met
+                    // a journal with no loss to spare.
+                    desired: if store == StoreDurability::Batched
+                        && !(payload >> 20).is_multiple_of(8)
+                    {
+                        Some(Desired::DEFAULT)
+                    } else {
+                        (!(payload >> 20).is_multiple_of(4)).then(|| drawn_desired(payload))
+                    },
                 }
             };
             JournalRequest {
@@ -890,10 +902,19 @@ impl FleetOps {
     /// One record written to `journal`, a single-writer journal this client
     /// had created: claim it, then write.
     async fn append_to_created(&mut self, cell: &Cell, journal: JournalIdentifier, draw: u64) {
-        let first = cell.first(draw);
+        let mut first = cell.first(draw);
         let mut writer = Writer::new(journal, self.leader_seeds.next());
         let started = self.time.now();
-        let _ = writer.claim(&cell.client, first, false).await;
+        // A server that does not serve the journal yet, or could not read
+        // it, passes the claim on to the next one, once around the cell.
+        let mut claim = writer.claim(&cell.client, first, false).await;
+        for _ in 1..cell.servers.len() {
+            if !matches!(claim, ClaimOutcome::UnknownJournal | ClaimOutcome::Unread) {
+                break;
+            }
+            first = (first + 1) % cell.servers.len();
+            claim = writer.claim(&cell.client, first, false).await;
+        }
         if let WriterOutcome::Written { .. } = writer
             .write(
                 &cell.client,

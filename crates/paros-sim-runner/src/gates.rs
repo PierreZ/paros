@@ -827,15 +827,15 @@ pub const RARE: &[Rare] = &[
     },
     Rare {
         msg: "journal store: a machine loses power inside a batched commit",
-        reason: "a kill asked while a machine's batched commit is open: none of 400 hunt seeds, with 331 batched commits in 100 batched-journals seeds and 4,029 kills asked (#599 (durability mode per journal))",
+        reason: "marginal: 66 cuts in 1,000 hunt seeds, on about one seed in a hundred: a hint location inside moonpool-journal's commit is active on half the runs and no scenario can force it (moonpool issue: hint! activation a harness can force per seed; #599 (durability mode per journal))",
     },
     Rare {
         msg: "journal store: a batched journal boots with its last batch lost",
-        reason: "follows a machine cut inside a batched commit: none of 400 hunt seeds (#599 (durability mode per journal))",
+        reason: "marginal: 4 in 1,000 hunt seeds, after 66 cuts: a cut leaves the last batch ambiguous only when its records land and its entries do not (moonpool issue: hint! activation a harness can force per seed; #599 (durability mode per journal))",
     },
     Rare {
         msg: "journal store: a batched journal converges after it lost its last batch",
-        reason: "follows a batched journal booted with its last batch lost: none of 400 hunt seeds (#599 (durability mode per journal))",
+        reason: "marginal: 2 of 2 checks in 1,000 hunt seeds, after a batched journal booted with its last batch lost (moonpool issue: hint! activation a harness can force per seed; #599 (durability mode per journal))",
     },
     Rare {
         msg: "machine: the scenario wipes a founder after another founder voted",

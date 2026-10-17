@@ -320,9 +320,13 @@ the mode, `parosctl bench --store-durability` creates its journals with it, and 
 list` and `tenant show` print it. The simulation draws `batched` for three creates in four on
 some seeds (`shape::batched_journals`). A machine's power loss inside a `batched` commit
 spends the journal's cut budget: at most as many machines as copies of one slot its
-configurations may lose (`world/cut.rs`). The gate "journal store: a batched journal
-converges after it lost its last batch" judges the repair. It is in `gates::RARE`: in 400 hunt
-seeds no kill struck while a machine's batched commit was open.
+configurations may lose (`world/cut.rs`). On those seeds a machine dies only inside a
+`batched` commit with a copy to spare, so the cell creates and appends first. The cut is
+`moonpool-journal`'s own commit `hint!` ("records written, not synced"). The gate "journal
+store: a batched journal converges after it lost its last batch" judges the repair. Over
+1,000 hunt seeds, 66 cuts struck inside a batched commit, 4 boots found the last batch lost,
+and 2 of 2 such journals converged. The three gates stay in `gates::RARE` as marginal: the
+commit's hint is active on half the runs, and no scenario can force it yet.
 
 ## 3. The control plane
 
