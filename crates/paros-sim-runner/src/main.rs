@@ -62,16 +62,21 @@ fn main() {
     let declared = gates::judge(&slots);
     gates::print(&declared, "  ");
     gates::print_rarest(&slots, RAREST);
-    // A CI shard hands its coverage defects (a declared gate that never ran,
-    // a gate that never fired, a sweep that never saturated) to the job that
-    // judges every shard's together (`.github/workflows/rust.yml`): such a
-    // defect fails CI only when every shard has it. Judged per shard, a rare
-    // gate would miss twice as often as with one sweep.
+    // A CI shard hands its gate defects (a declared gate that never ran, a
+    // gate that never fired) to the job that judges every shard's together
+    // (`.github/workflows/rust.yml`): such a defect fails CI only when every
+    // shard has it. Judged per shard, a rare gate would miss twice as often as
+    // with one sweep.
     let shard_out = std::env::var_os(MISSING_GATES_OUT);
     if let Some(path) = &shard_out {
-        write_coverage_defects(std::path::Path::new(path), &declared.missing, &report);
+        write_gate_defects(std::path::Path::new(path), &declared.missing, &report);
     }
     let shard = shard_out.is_some();
+    // A gate that never fired keeps the sweep from saturating, so a shard
+    // with a gate defect also hits the cap: that timeout is the gate's, and
+    // the judging job owns it. A shard whose every gate fired and that still
+    // hit the cap fails on its own.
+    let gate_defect = !report.coverage_violations.is_empty() || !declared.missing.is_empty();
     if let Some(more) = top_up.as_ref().filter(|more| !is_clean(more)) {
         print_failed_runs(more);
         println!(
@@ -87,7 +92,7 @@ fn main() {
     if is_clean(&report)
         && (shard || report.coverage_violations.is_empty())
         && (shard || declared.missing.is_empty())
-        && (shard || !report.convergence_timeout)
+        && (!report.convergence_timeout || (shard && gate_defect))
     {
         println!("  Chain safety, recovery, coverage, and saturation gates are green");
     } else {
@@ -110,23 +115,16 @@ fn main() {
 }
 
 /// The environment variable that makes this run a CI shard: the path where
-/// it writes its coverage defects, one per line, and no longer fails on
-/// them. A safety violation or a failed run still fails the shard.
+/// it writes its gate defects, one per line, and no longer fails on them. A
+/// safety violation, a failed run or a convergence timeout with every gate
+/// fired still fails the shard.
 const MISSING_GATES_OUT: &str = "PAROS_SIM_MISSING_GATES";
 
-/// The line a shard writes when its sweep hit the iteration cap.
-const NOT_SATURATED: &str = "<the sweep did not saturate>";
-
-/// Write the shard's coverage defects, sorted, one per line: each declared
-/// gate that never ran and each gate moonpool reports as never fired, by its
-/// slot name (the `Debug` form, so a line holds exactly one message), and
-/// [`NOT_SATURATED`] on a convergence timeout. Two shards name one gate
-/// alike, so the judging job can intersect their files.
-fn write_coverage_defects(
-    path: &std::path::Path,
-    missing: &[(&str, &str)],
-    report: &SimulationReport,
-) {
+/// Write the shard's gate defects, sorted, one per line: each declared gate
+/// that never ran and each gate moonpool reports as never fired, by its slot
+/// name (the `Debug` form, so a line holds exactly one message). Two shards
+/// name one gate alike, so the judging job can intersect their files.
+fn write_gate_defects(path: &std::path::Path, missing: &[(&str, &str)], report: &SimulationReport) {
     let never_fired = report.coverage_violations.iter().map(|v| violated_gate(v));
     let mut lines: Vec<String> = missing
         .iter()
@@ -134,14 +132,11 @@ fn write_coverage_defects(
         .chain(never_fired)
         .map(|msg| format!("{msg:?}\n"))
         .collect();
-    if report.convergence_timeout {
-        lines.push(format!("{NOT_SATURATED}\n"));
-    }
     lines.sort();
     lines.dedup();
     if let Err(error) = std::fs::write(path, lines.concat()) {
         println!(
-            "  cannot write the coverage defects to {}: {error}",
+            "  cannot write the gate defects to {}: {error}",
             path.display()
         );
         std::process::exit(1);
