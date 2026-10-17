@@ -43,8 +43,12 @@ pub(super) enum Resolved {
         control: JournalIdentifier,
         at: u64,
     },
-    /// No `READY` `users` tenant, or no live journal, holds the name.
-    Unknown,
+    /// No `READY` `users` tenant, or no live journal, holds the name;
+    /// `read` is the control journal and the position the journal hop read
+    /// it at, when that hop found no live journal there (#451).
+    Unknown {
+        read: Option<(JournalIdentifier, u64)>,
+    },
     /// A fold could not be read now, and nothing cached answers.
     Unavailable,
 }
@@ -284,13 +288,15 @@ where
                 at,
             }
         }
-        JournalResolution::Unknown { .. } => Resolved::Unknown,
+        JournalResolution::Unknown { at } => Resolved::Unknown {
+            read: Some((control, at)),
+        },
         JournalResolution::Unreadable(Unreadable::UnknownJournal) => {
             // No machine serves the tenant's control journal: the tenant
             // is gone since the directory was read.
             routes.tenants.remove(name.tenant());
             routes.directory = None;
-            Resolved::Unknown
+            Resolved::Unknown { read: None }
         }
         JournalResolution::Unreadable(_) => Resolved::Unavailable,
     }
@@ -341,7 +347,7 @@ where
         }
         TenantResolution::Unknown
         | TenantResolution::NotReady { .. }
-        | TenantResolution::Internal => Err(Resolved::Unknown),
+        | TenantResolution::Internal => Err(Resolved::Unknown { read: None }),
         TenantResolution::Unreadable(_) => Err(Resolved::Unavailable),
     }
 }

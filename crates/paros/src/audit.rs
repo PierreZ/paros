@@ -472,6 +472,11 @@ pub trait Audit {
     ) {
     }
 
+    /// A frontend found no live journal named `name` in the tenant control
+    /// journal `control`, read at position `at` (#451): it answers the call
+    /// unknown.
+    fn frontend_unknown(&self, name: &JournalName, control: JournalIdentifier, at: u64) {}
+
     /// A machine advertising `addr` read its record at boot (#246): `None` for an
     /// empty disk, which it formats next. Reported before anything is
     /// written, on the machine's own audit.
