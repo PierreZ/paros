@@ -247,6 +247,7 @@ impl ColocatedNode {
         };
         if self.role != NodeRole::Leader
             || !self.leadership_settled()
+            || self.ballot < self.acceptor.promised()
             || watermark < self.proposer.next_slot()
         {
             return;
