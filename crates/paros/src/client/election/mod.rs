@@ -496,7 +496,23 @@ impl<P: Providers> Election<P> {
             return Step::Deposed { term };
         }
         if self.leading.is_none() && self.caught_up && self.expired(jitter) {
-            self.campaign(wait_ms).await;
+            // A fold at the tail judges no campaign, its own included: a
+            // campaign there anchors nothing, so it never wins in its own
+            // fold and never renews, while every other fold follows it.
+            // Re-anchor at the floor first; a dead leader's floor no longer
+            // moves, and its record there restarts the lease. Seed
+            // 3257468052100910816 (recipe 99053:1040040546427245794) on
+            // 3c8c73d: a leader stepped down without a resignation, and a
+            // reader the floor outran campaigned 66 times without winning.
+            if self.fold.rewind(self.floor) {
+                moonpool_assertions::reachable!(
+                    "election: a candidate at the tail re-anchors at the floor"
+                );
+                self.watch(wait_ms).await;
+            }
+            if self.expired(jitter) {
+                self.campaign(wait_ms).await;
+            }
             self.leading = self.held();
         }
         assert!(

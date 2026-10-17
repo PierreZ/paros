@@ -304,6 +304,10 @@ pub struct ElectionFold {
     /// The position a gap resumed the fold at, while it knows nothing: a
     /// campaign there is the leader's own (only the leader truncates).
     floor: Option<u64>,
+    /// The term the fold was at when it resumed at the tail, while it
+    /// knows nothing: the records past the tail raise the term without
+    /// anchoring, so a rewind to the floor goes back to it.
+    tail_term: Option<u64>,
     /// The next position the fold expects.
     next: u64,
 }
@@ -323,6 +327,7 @@ impl ElectionFold {
             leader: None,
             known: true,
             floor: None,
+            tail_term: None,
             next: 0,
         }
     }
@@ -394,8 +399,35 @@ impl ElectionFold {
         self.known = false;
         self.floor = None;
         self.leader = None;
+        self.tail_term.get_or_insert(self.term);
         assert!(!self.known, "a fold at the tail knows nothing yet");
         assert!(self.floor.is_none(), "the tail is no truncation floor");
+    }
+
+    /// A fold at the tail ([`ElectionFold::resume_at_tail`]) goes back to
+    /// the journal's floor `floor`, to anchor on the record there: the
+    /// leader's own, by the truncation rule. Whether the fold moved: only a
+    /// fold that knows nothing and stands past `floor` moves.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own postconditions fails: a programmer error.
+    pub fn rewind(&mut self, floor: u64) -> bool {
+        if self.known || floor >= self.next {
+            return false;
+        }
+        self.next = floor;
+        self.floor = Some(floor);
+        self.leader = None;
+        // The records past the floor are folded again: the term they raised
+        // goes back to what the fold knew before it met them.
+        if let Some(term) = self.tail_term.take() {
+            assert!(term <= self.term, "a term raised at the tail only grows");
+            self.term = term;
+        }
+        assert!(!self.known, "a rewound fold knows nothing yet");
+        assert_eq!(self.next, floor, "a rewound fold resumes at the floor");
+        true
     }
 
     /// Fold the record at position `seq`.
@@ -539,6 +571,7 @@ impl ElectionFold {
         self.term = term;
         self.known = true;
         self.floor = None;
+        self.tail_term = None;
         self.leader = Some(Leader {
             term,
             candidate,
@@ -743,6 +776,26 @@ mod tests {
         let mut at_floor = ElectionFold::new();
         at_floor.resume_at_tail(4, 4);
         assert_eq!(at_floor.absorb(4, &campaign(5, 9)), Change::Adopted);
+    }
+
+    #[test]
+    fn a_fold_at_the_tail_rewinds_to_the_floor_and_anchors() {
+        // 1 leads term 4 and truncated to its renewal at 291, then died. A
+        // reader the floor outran resumes at the tail, 292, where its own
+        // campaign anchors nothing: rewound to the floor, the dead leader's
+        // renewal anchors it.
+        let mut cut = ElectionFold::new();
+        cut.resume_at_tail(291, 292);
+        assert_eq!(cut.absorb(292, &campaign(5, 2)), Change::Ignored);
+        assert!(cut.rewind(291));
+        assert_eq!(cut.next(), 291);
+        assert_eq!(cut.absorb(291, &renew(4, 1)), Change::Adopted);
+        assert!(cut.is_known());
+        assert!(!cut.rewind(291), "a known fold never rewinds");
+        // A fold at its floor already does not move.
+        let mut at_floor = ElectionFold::new();
+        at_floor.gap(4);
+        assert!(!at_floor.rewind(4));
     }
 
     #[test]
