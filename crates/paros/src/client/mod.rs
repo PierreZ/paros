@@ -1098,11 +1098,39 @@ impl<P: Providers> Client<P> {
     /// already naming `uuid` is a claim that won and whose answer was lost:
     /// it is adopted as
     /// [`ClaimOutcome::Owned`]. A writer that wants a new term asks with a
-    /// new uuid ([`Writer::claim`]).
+    /// new uuid ([`Writer::claim`]). A uuid that already led is re-claimed
+    /// with [`Client::reclaim`], never with this call.
     pub async fn claim(
         &self,
         journal: JournalIdentifier,
         uuid: LeaderUuid,
+        first: usize,
+    ) -> ClaimOutcome {
+        self.claim_as(journal, uuid, false, first).await
+    }
+
+    /// Re-claim `journal` for `uuid`, a uuid that already led (#241, #564):
+    /// a read naming it is [`ClaimOutcome::Owned`], as in
+    /// [`Client::claim`]; a read naming any other leader is
+    /// [`ClaimOutcome::Lost`] and sends no `SetLeader`. Asking again would
+    /// make `uuid` lead a second term, which breaks the read-back proof of
+    /// [`Client::resolve`] (a uuid leads one term only). The writer then
+    /// learns it was superseded and claims under a fresh uuid.
+    pub async fn reclaim(
+        &self,
+        journal: JournalIdentifier,
+        uuid: LeaderUuid,
+        first: usize,
+    ) -> ClaimOutcome {
+        self.claim_as(journal, uuid, true, first).await
+    }
+
+    /// [`Client::claim`] (`led` false) or [`Client::reclaim`] (`led` true).
+    async fn claim_as(
+        &self,
+        journal: JournalIdentifier,
+        uuid: LeaderUuid,
+        led: bool,
         first: usize,
     ) -> ClaimOutcome {
         let report = self.read_any(&state_read(journal), first).await;
@@ -1115,6 +1143,10 @@ impl<P: Providers> Client<P> {
         };
         if state.leader == Some(uuid) {
             return ClaimOutcome::Owned { state };
+        }
+        if led {
+            // Superseded: `uuid` led a term and another leader followed it.
+            return ClaimOutcome::Lost { state };
         }
         self.set_leader(journal, uuid, state.leader, report.server)
             .await
