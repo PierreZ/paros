@@ -80,6 +80,9 @@ pub(crate) struct Exposure {
     records: BTreeSet<u64>,
     /// The slots whose entry shares a flipped sector.
     entries: BTreeSet<u64>,
+    /// Whether a damaged copy the custody no longer holds shares a flipped
+    /// sector (see [`Custody::stale`]).
+    stale: bool,
 }
 
 impl Exposure {
@@ -111,6 +114,10 @@ impl Exposure {
                 exposure.entries.insert(*held);
             }
         }
+        exposure.stale = custody
+            .stale
+            .iter()
+            .any(|layout| hit(&layout.record) || hit(&layout.entry));
         // Every span covers its own flipped bytes.
         assert_always!(
             spans
@@ -154,6 +161,16 @@ pub(crate) struct Custody {
     first: u64,
     /// Where each held slot's persist record and entry live.
     records: BTreeMap<u64, Layout>,
+    /// The damaged copies (a lost entry or a rotted record) the custody no
+    /// longer holds, in a segment the journal still has: a floor passed
+    /// the slot, or a rewrite put it at a new place. The journal still
+    /// judges every persist record of a live segment at open, and it
+    /// rewrites none outside its last batch, so the damage stays. A flip
+    /// whose sector holds one of them may complete a double fault no
+    /// budget permitted, so none is planned. Witness 16919860385643220324
+    /// (recipe 41314:1687730448808971088) on dd9d1de: a node refused its
+    /// journal at 52 boots in a row, and the ledger had planned no fault.
+    stale: Vec<Layout>,
     /// The slots of the last batch that wrote entries.
     last_batch: BTreeSet<u64>,
     /// The two metainfo copies.
@@ -262,15 +279,36 @@ impl StorageWorld {
         regions: &[LayoutRegion],
         rewritten: bool,
     ) {
+        let (marks, rotted) = (self.marks.get(key), self.rotted.get(key));
+        let damaged = |slot: &u64| {
+            marks.is_some_and(|m| m.contains(slot)) || rotted.is_some_and(|r| r.contains(slot))
+        };
         let custody = self.custody.entry(key.to_string()).or_default();
         custody.node = node;
         if !written.is_empty() {
             custody.last_batch = written.iter().map(|(slot, _)| *slot).collect();
         }
         let slots: Vec<u64> = written.iter().map(|(slot, _)| *slot).collect();
+        for (slot, at) in &written {
+            if let Some(old) = custody.records.get(slot)
+                && old != at
+                && damaged(slot)
+            {
+                custody.stale.push(old.clone());
+            }
+        }
         custody.records.extend(written);
         custody.first = custody.first.max(first);
-        custody.records = custody.records.split_off(&custody.first);
+        let held = custody.records.split_off(&custody.first);
+        for (slot, old) in std::mem::replace(&mut custody.records, held) {
+            if damaged(&slot) {
+                custody.stale.push(old);
+            }
+        }
+        let live: BTreeSet<&str> = regions.iter().map(|r| r.path.as_str()).collect();
+        custody
+            .stale
+            .retain(|layout| live.contains(layout.record.path.as_str()));
         custody.meta = regions
             .iter()
             .filter(|r| r.kind == Layout::META)
@@ -338,7 +376,16 @@ impl StorageWorld {
                 .filter(|(slot, at)| custody.records.get(slot) != Some(at))
                 .map(|(slot, _)| *slot),
         );
-        custody.records.clear();
+        let (marks, rotted) = (self.marks.get(key), self.rotted.get(key));
+        for (slot, old) in std::mem::take(&mut custody.records) {
+            let moved = !layouts.iter().any(|(s, at)| *s == slot && *at == old);
+            if moved
+                && (marks.is_some_and(|m| m.contains(&slot))
+                    || rotted.is_some_and(|r| r.contains(&slot)))
+            {
+                custody.stale.push(old);
+            }
+        }
         self.ledger_custody(key, node, layouts, first, regions, false);
         if let Some(custody) = self.custody.get_mut(key) {
             custody.last_batch = last_batch;
@@ -434,13 +481,15 @@ impl StorageWorld {
         let exposure = Exposure::of(custody, Some(slot), regions);
         let marked = self.marks.get(key);
         let rotted = self.rotted.get(key);
-        let permitted = exposure.slots().all(|neighbour| {
-            !marked.is_some_and(|m| m.contains(&neighbour))
-                && !rotted.is_some_and(|r| r.contains(&neighbour))
-        }) && exposure
-            .entries
-            .iter()
-            .all(|neighbour| self.may_corrupt_record(key, *neighbour));
+        let permitted = !exposure.stale
+            && exposure.slots().all(|neighbour| {
+                !marked.is_some_and(|m| m.contains(&neighbour))
+                    && !rotted.is_some_and(|r| r.contains(&neighbour))
+            })
+            && exposure
+                .entries
+                .iter()
+                .all(|neighbour| self.may_corrupt_record(key, *neighbour));
         if !permitted {
             assert_reachable!("journal store: a flip's sector neighbour refuses it");
         }
