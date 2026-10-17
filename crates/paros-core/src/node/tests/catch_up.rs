@@ -491,3 +491,83 @@ fn a_trim_point_jump_advances_over_an_out_of_order_chosen_slot() {
         "no stranded chosen slot survives the jump"
     );
 }
+
+/// A leader that never saw its successor's `Prepare` learns the
+/// successor's `Commit`s: its promise moves, its role does not. Among them
+/// is a `Truncate` whose apply compacts its floor past its own allocator
+/// frontier, so a client `Write` there would open a proposal below the
+/// floor ("a proposal never lands below the floor").
+fn stale_leader_whose_floor_passed_its_frontier() -> [ColocatedNode; 3] {
+    let mut nodes = cluster::<3>();
+    make_leader(&mut nodes, 0);
+    let _ = nodes[0].propose_control(Control::SetLeader {
+        new: LeaderUuid(1),
+        old: None,
+    });
+    let q = drain(&mut nodes[0]);
+    deliver_all(&mut nodes, q);
+    for seq in 0..3u64 {
+        let _ = nodes[0].propose(Entry {
+            leader: LeaderUuid(1),
+            seq: Seq(seq),
+            records: vec![val(u8::try_from(seq).expect("small"))],
+        });
+        let q = drain(&mut nodes[0]);
+        deliver_all(&mut nodes, q);
+    }
+    let frontier = nodes[0].proposer().next_slot();
+    assert_eq!(frontier, Slot(4));
+
+    // Node 1 campaigns and wins with {1, 2}; node 0 never sees the Prepare.
+    campaign(&mut nodes[1]);
+    let q = drain(&mut nodes[1]);
+    deliver_filtered(&mut nodes, q, |to, _| to != NodeId(0));
+    assert!(nodes[1].is_leader(), "node 1 won without node 0");
+    assert!(nodes[0].is_leader(), "node 0 still believes it leads");
+    nodes[1].set_election_timeout(NO_CHECK_QUORUM);
+
+    // Node 1 decides two writes and a Truncate past everything node 0
+    // allocated. Node 0 receives only the Commits (no Accept, no beat).
+    let only_commits =
+        |to: NodeId, m: &Message| to != NodeId(0) || matches!(m, Message::Commit { .. });
+    for seq in 3..5u64 {
+        let _ = nodes[1].propose(Entry {
+            leader: LeaderUuid(1),
+            seq: Seq(seq),
+            records: vec![val(u8::try_from(seq).expect("small"))],
+        });
+        let q = drain(&mut nodes[1]);
+        deliver_filtered(&mut nodes, q, only_commits);
+    }
+    let r = nodes[1].propose_control(Control::Truncate {
+        leader: LeaderUuid(1),
+        up_to: Seq(5),
+    });
+    assert!(matches!(r, ProposeResult::Accepted(_)));
+    let q = drain(&mut nodes[1]);
+    deliver_filtered(&mut nodes, q, only_commits);
+
+    assert!(nodes[0].is_leader(), "node 0 is a still-Leader");
+    assert!(
+        nodes[0].ballot() < nodes[0].acceptor().promised(),
+        "node 0's promise passed its ballot"
+    );
+    assert!(
+        nodes[0].acceptor().first_slot() > nodes[0].proposer().next_slot(),
+        "node 0's floor passed its allocator frontier: floor {:?}, frontier {:?}",
+        nodes[0].acceptor().first_slot(),
+        nodes[0].proposer().next_slot()
+    );
+    nodes
+}
+
+#[test]
+fn a_leadership_a_higher_ballot_passed_proposes_nothing() {
+    let mut nodes = stale_leader_whose_floor_passed_its_frontier();
+    // Seed 935391525055755403 on merge(a2ec3f7, 55b319d): this Write panicked.
+    let r = nodes[0].propose(entry(1, 9, 99));
+    assert!(
+        matches!(r, ProposeResult::NotLeader(_)),
+        "a leadership a higher ballot passed proposes nothing, got {r:?}"
+    );
+}

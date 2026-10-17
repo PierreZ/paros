@@ -23,6 +23,8 @@
 //! on the same identifier.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::future::Future;
+use std::task::Poll;
 
 use moonpool_core::{Providers, RandomProvider};
 use paros_core::{ColocatedNode, JournalIdentifier, NodeId, Slot, TenantId};
@@ -32,6 +34,7 @@ use crate::storage::LogStorage;
 
 use super::boot::{check_format_marker, report_boot_state};
 use super::config::{BootKind, DriverTunables, RunError};
+use super::flight::{Flight, Flush, Input, Landing};
 use super::ready::{ClientWaiters, storage_fault_crash};
 use super::report::{Cadence, Deltas, draw_election_timeout};
 
@@ -42,7 +45,9 @@ use super::report::{Cadence, Deltas, draw_election_timeout};
 /// journal's durable state**, as a process restart would find it.
 pub trait JournalStores {
     /// The store every journal runs on.
-    type Store: LogStorage;
+    /// `Send` and `'static`: a batch's flush owns the store while it flies
+    /// (#613 (settle off the node loop)).
+    type Store: LogStorage + Send + 'static;
     /// The audit port a journal reports to (one per journal: every
     /// journal-scoped oracle is keyed by it).
     type Audit: Audit + Clone + Send + Sync + 'static;
@@ -166,7 +171,9 @@ pub(crate) struct SingleStore<S, A> {
     pub(crate) audit: A,
 }
 
-impl<S: LogStorage, A: Audit + Clone + Send + Sync + 'static> JournalStores for SingleStore<S, A> {
+impl<S: LogStorage + Send + 'static, A: Audit + Clone + Send + Sync + 'static> JournalStores
+    for SingleStore<S, A>
+{
     type Store = S;
     type Audit = A;
 
@@ -202,7 +209,14 @@ impl<S: LogStorage, A: Audit + Clone + Send + Sync + 'static> JournalStores for 
 /// per-node state.
 pub(crate) struct JournalRt<S, A> {
     pub(crate) node: ColocatedNode,
-    pub(crate) storage: S,
+    /// The journal's store; `None` while a batch's flush holds it.
+    pub(crate) storage: Option<S>,
+    /// The batch whose flush flies, if any (#613 (settle off the node loop)).
+    pub(crate) flight: Option<Flight<S>>,
+    /// The inputs held back while the batch flies, in arrival order.
+    pub(crate) backlog: Vec<Input>,
+    /// The read expiry a beat owes the next settle.
+    pub(crate) expiry: Option<(u64, bool)>,
     pub(crate) audit: A,
     pub(crate) waiters: ClientWaiters,
     pub(crate) last: Deltas,
@@ -215,6 +229,30 @@ pub(crate) struct JournalRt<S, A> {
     /// column-mates of a grid never duel forever over one slot. Volatile; a
     /// key below the acceptor's floor is forgotten.
     pub(crate) contested: BTreeSet<(Slot, u64, u64)>,
+    /// The members of this journal's configuration the cell holds slow
+    /// (#361 (slow machines)), as the registry fold said at the last call
+    /// the node loop took: a hint for a grid's column and row, read when
+    /// the call steps, which may be after a flight lands.
+    pub(crate) slow: BTreeSet<NodeId>,
+}
+
+impl<S, A> JournalRt<S, A> {
+    /// Whether the core holds only durable state: no batch flies. While one
+    /// does, the core already holds that batch's effects (a slot its own
+    /// unsynced vote decided, a fold walked past it, a `Truncate` applied),
+    /// and a crash before the flush lands undoes them. A reader that acts
+    /// on the fold (the control-journal follow, the peer book and its
+    /// durable cache) reads only a settled core (#613 (settle off the node
+    /// loop)): witness 16790173632859305817 on PR #639 (sync hand-off)
+    /// folded registry positions 32 to 34 from a flying batch that its
+    /// crash then lost, and every other node folded another event there.
+    pub(crate) fn settled(&self) -> bool {
+        let settled = self.flight.is_none();
+        if settled {
+            assert!(self.storage.is_some(), "a settled journal holds its store");
+        }
+        settled
+    }
 }
 
 /// Boot `journal` from `storage`: the scan, the format marker (#147), the
@@ -294,7 +332,10 @@ pub(crate) async fn boot_journal<P: Providers, S: LogStorage, A: Audit>(
     let last = Deltas::new(&node);
     Ok(JournalRt {
         node,
-        storage,
+        storage: Some(storage),
+        flight: None,
+        backlog: Vec::new(),
+        expiry: None,
         audit,
         // A fresh random token space per runtime: a reboot or a re-open
         // never reuses a token a dead incarnation's acks may still answer.
@@ -303,6 +344,7 @@ pub(crate) async fn boot_journal<P: Providers, S: LogStorage, A: Audit>(
         match_resend: Cadence::default(),
         gc_resend: Cadence::default(),
         contested: BTreeSet::new(),
+        slow: BTreeSet::new(),
     })
 }
 
@@ -310,6 +352,10 @@ pub(crate) async fn boot_journal<P: Providers, S: LogStorage, A: Audit>(
 /// re-open (with the tick they went down), and the ones down for good.
 pub(crate) struct Journals<S, A> {
     pub(crate) live: BTreeMap<JournalIdentifier, JournalRt<S, A>>,
+    /// The flushes of journals that left `live` while their batch flew
+    /// (#613 (settle off the node loop)): each lands on its own, and its
+    /// journal opens again only after it did.
+    orphans: BTreeMap<JournalIdentifier, Flush<S>>,
     quarantined: BTreeMap<JournalIdentifier, u64>,
     down: BTreeSet<JournalIdentifier>,
     /// Journals quarantined since the loop last told the opener
@@ -347,6 +393,7 @@ impl<S, A> Journals<S, A> {
         Self {
             control,
             live: BTreeMap::new(),
+            orphans: BTreeMap::new(),
             quarantined: BTreeMap::new(),
             down: BTreeSet::new(),
             newly_quarantined: Vec::new(),
@@ -404,6 +451,70 @@ impl<S, A> Journals<S, A> {
         self.booted.insert(journal);
         self.live.insert(journal, rt);
         self.assert_invariants();
+    }
+
+    /// Take `journal` out of `live`, keeping the flush its batch flies, if
+    /// any, as an orphan (#613 (settle off the node loop)).
+    fn leave(&mut self, journal: JournalIdentifier) -> Option<JournalRt<S, A>> {
+        let mut rt = self.live.remove(&journal)?;
+        if let Some(flight) = rt.flight.take() {
+            tracing::info!(journal = %journal, "flight_orphaned");
+            let orphaned = self.orphans.insert(journal, flight.flush);
+            assert!(orphaned.is_none(), "a journal leaves at most one orphan");
+        }
+        assert!(rt.flight.is_none(), "a journal that left flies nothing");
+        Some(rt)
+    }
+
+    /// Wait for the orphaned flush of `journal`, if one flies: its store is
+    /// opened again only once no older handle writes it.
+    pub(crate) async fn land_orphan(&mut self, journal: JournalIdentifier) {
+        if let Some(flush) = self.orphans.remove(&journal) {
+            // Its store and verdict go with the runtime that left.
+            drop(flush.await);
+        }
+        assert!(
+            !self.orphans.contains_key(&journal),
+            "a journal opens with no orphan in flight"
+        );
+    }
+
+    /// The next flight to land, among the live journals' (in id order) and
+    /// the orphans', which are dropped as they land. Pending while none
+    /// has; the node loop polls it as a `select!` arm.
+    pub(crate) fn next_landing(
+        &mut self,
+    ) -> impl Future<Output = (JournalIdentifier, Landing<S>)> + '_ {
+        std::future::poll_fn(move |cx| {
+            self.orphans
+                .retain(|_, flush| flush.as_mut().poll(cx).is_pending());
+            for (journal, rt) in &mut self.live {
+                let Some(flight) = rt.flight.as_mut() else {
+                    continue;
+                };
+                let Poll::Ready((storage, done)) = flight.flush.as_mut().poll(cx) else {
+                    continue;
+                };
+                let Some(flight) = rt.flight.take() else {
+                    continue;
+                };
+                assert!(
+                    rt.storage.is_none(),
+                    "a flying journal's store is in its flush"
+                );
+                return Poll::Ready((
+                    *journal,
+                    Landing {
+                        storage,
+                        done,
+                        taken: flight.taken,
+                        expiry: flight.expiry,
+                        began: flight.began,
+                    },
+                ));
+            }
+            Poll::Pending
+        })
     }
 
     /// The three states a journal can be in are disjoint, and the deployed
@@ -477,7 +588,7 @@ impl<S, A> Journals<S, A> {
             !self.control.contains(&journal),
             "a control journal is never forgotten"
         );
-        self.live.remove(&journal);
+        self.leave(journal);
         self.quarantined.remove(&journal);
         self.down.remove(&journal);
         self.newly_quarantined.retain(|j| *j != journal);
@@ -559,7 +670,7 @@ impl<S, A> Journals<S, A> {
     /// a boot refusal) or its opener has no store for it (`None`, a disk
     /// gone — the node simply stops serving the journal).
     pub(crate) fn park(&mut self, journal: JournalIdentifier, fault: Option<RunError>) {
-        self.live.remove(&journal);
+        self.leave(journal);
         self.quarantined.remove(&journal);
         self.down.insert(journal);
         if fault.is_some() {
@@ -660,7 +771,7 @@ impl<S, A: Audit> Journals<S, A> {
         match outcome {
             Ok(()) => Ok(()),
             Err(RunError::Storage(error)) => {
-                if let Some(rt) = self.live.remove(&journal) {
+                if let Some(rt) = self.leave(journal) {
                     rt.audit.journal_quarantined(NodeId(self_id));
                 }
                 tracing::warn!(node = self_id, journal = %journal, "journal_quarantined");

@@ -14,7 +14,9 @@ use moonpool_sim::{SimContext, TimeProvider, assert_always, assert_reachable};
 use paros::client::checkpoint::LoadOutcome;
 use paros::machine::Class;
 use paros::system::{NodeStanding, Registry, Role};
-use paros::{JournalIdentifier, NodeId, TenantId};
+use paros::{Address, JournalIdentifier, NodeId, TenantId};
+
+use crate::client::ChainClient;
 
 use super::cell::Cell;
 use super::judged_cell;
@@ -32,7 +34,12 @@ enum Unsettled {
 /// Read the cell's registry, then each hosted tenant's set in force, until
 /// every booked set settled or `deadline`. Gives up quietly when nothing can
 /// be read: the folds' liveness is `final_fleet`'s.
-pub(super) async fn sets_booked(ctx: &SimContext, known: &Cell, deadline: Duration) {
+pub(super) async fn sets_booked(
+    ctx: &SimContext,
+    known: &Cell,
+    deadline: Duration,
+    connect: impl Fn(&[(u64, Address)]) -> ChainClient,
+) {
     let mut attempt = 0_u64;
     // A machine cut off from its founding members is judged like any other:
     // the cell coordinator hands it the cell's book again (#505 (stranded
@@ -58,13 +65,31 @@ pub(super) async fn sets_booked(ctx: &SimContext, known: &Cell, deadline: Durati
                     { "node" => node.0 }
                 );
             }
+            // The founding members as the coordinator dials them: at the
+            // address the registry holds, every founder, not only the ones
+            // this operator reached at the tail's start. Only the founder
+            // that drove a handover holds its generation until the others
+            // campaign again: a belief is not a fact. Seed
+            // 461662224030609195 on 522c917: the operator reached two
+            // founders that still believed generation 0.
+            let founders: Vec<(u64, Address)> = known
+                .members
+                .iter()
+                .filter_map(|id| {
+                    registry
+                        .address(NodeId(*id))
+                        .and_then(|addr| Address::parse(addr).ok())
+                        .map(|addr| (*id, addr))
+                })
+                .collect();
+            let client = connect(&founders);
             let mut stuck = None;
             for tenant in registry.hosted().filter(|t| !registry.dropped(*t)) {
                 let Some(control) = registry.hosted_tenant(tenant).map(|h| h.control) else {
                     continue;
                 };
                 let journal = JournalIdentifier::new(tenant, control);
-                let Some(members) = in_force(known, journal).await else {
+                let Some(members) = in_force(&client, founders.len(), journal).await else {
                     continue;
                 };
                 if let Some(why) = unsettled(&registry, tenant, &members, (&known.members, &wiped))
@@ -112,10 +137,14 @@ pub(super) async fn registry(known: &Cell, first: usize) -> Option<Registry> {
 
 /// The members of the latest generation the founding members believe for
 /// `journal`, or `None` when none answers.
-async fn in_force(known: &Cell, journal: JournalIdentifier) -> Option<Vec<u64>> {
+async fn in_force(
+    client: &ChainClient,
+    count: usize,
+    journal: JournalIdentifier,
+) -> Option<Vec<u64>> {
     let mut best: Option<(u64, Vec<u64>)> = None;
-    for target in 0..known.servers.len() {
-        if let Some(reply) = known.client.inspect(target, journal).await
+    for target in 0..count {
+        if let Some(reply) = client.inspect(target, journal).await
             && best
                 .as_ref()
                 .is_none_or(|(generation, _)| reply.matchmaker_generation > *generation)

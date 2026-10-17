@@ -685,6 +685,18 @@ impl ColocatedNode {
             );
             return ProposeResult::NotLeader(self.leader);
         }
+        if self.ballot < self.acceptor.promised() {
+            // A leadership a higher ballot passed (its promise moved on a
+            // learned `Commit`, `mark_chosen`) proposes nothing: its
+            // allocator may sit inside the chosen prefix, and below the
+            // floor a decided `Truncate` raised since. The deposing beat or
+            // nack demotes it; until then it answers as no leader.
+            probe!(
+                reachable,
+                "propose: a leadership a higher ballot passed refuses a proposal"
+            );
+            return ProposeResult::NotLeader(None);
+        }
         let marks = self.durable_marks();
         let result = self.open_proposal(column, delegation, Command::Write(entry));
         self.assert_marks_monotone(marks);
@@ -705,6 +717,14 @@ impl ColocatedNode {
         assert!(
             self.role == NodeRole::Leader,
             "only a leader opens a proposal"
+        );
+        // Every entry point refused a leadership a higher ballot passed, so
+        // the allocator invariant (`assert_leadership_state_invariants`)
+        // holds unconditionally here: the frontier sits at or past the
+        // chosen prefix, hence at or past the floor.
+        assert!(
+            self.ballot >= self.acceptor.promised(),
+            "a proposal opens under a leadership no higher ballot passed"
         );
         let marks = self.durable_marks();
         let frontier = self.proposer.next_slot();
@@ -800,6 +820,10 @@ impl ColocatedNode {
                 "a refusing non-leader holds no round"
             );
             return ProposeResult::NotLeader(self.leader);
+        }
+        if self.ballot < self.acceptor.promised() {
+            // As `propose_in`: a passed leadership proposes nothing.
+            return ProposeResult::NotLeader(None);
         }
         let marks = self.durable_marks();
         let result = self.open_proposal(None, delegation, Command::Control(control));

@@ -70,6 +70,14 @@ pub const RARE: &[Rare] = &[
         reason: "a gone-machine seed with a long window: 8 hits in 1,000 hunt seeds (#498 (moves in the sweep), #475 (re-place after the Down bound))",
     },
     Rare {
+        msg: "coordinator: a move releases a member it does not retire",
+        reason: "a move off a slow or gone machine whose leader's floor names the member retirable: needs the gone- or slow-machine scenario and a finished move (#361 (slow machines), #475)",
+    },
+    Rare {
+        msg: "coordinator: a move leaves a mode change's extra slots booked",
+        reason: "a mode change booked its new slots, then a machine left before it reconfigured: one CI sweep seed (11932640834736807520 on 72e8955)",
+    },
+    Rare {
         msg: "coordinator: a move leaves a machine down past its bound",
         reason: "a gone-machine seed: 66 hits from 12 strikes in 1,000 hunt seeds (#498 (moves in the sweep), #475 (re-place after the Down bound))",
     },
@@ -128,6 +136,14 @@ pub const RARE: &[Rare] = &[
     Rare {
         msg: "zones: a client appends to its journal while a zone is down",
         reason: "marginal: needs the zone-outage scenario and a client append inside its hold; fired on 1 and 4 of 300 hunt seeds at 2a5997b and 88f803f, missed by both shards of PR #636's sweep (#215 (zones), #486)",
+    },
+    Rare {
+        msg: "zones: a control-journal write is chosen with a zone down",
+        reason: "marginal: needs the zone-outage scenario and a control-journal write inside its hold; fired on 1 of 300 hunt seeds, missed by shard 2 of main's sweep at e1062fe; a whole fleet run inside a zone outage, where the outage struck on 4 of 300 (#215 (zones), #486, #623 (zone-down gates in the sweep))",
+    },
+    Rare {
+        msg: "zones: a tenant is created with a zone down",
+        reason: "marginal: needs the zone-outage scenario and a whole tenant creation inside its hold; fired on 1 of 300 hunt seeds at 2a5997b, missed by shard 2 of main's sweep at e1062fe (#215 (zones), #486); also a whole tenant creation inside a zone outage: 1 of 300 hunt seeds with the 10–16 s hold, where the outage struck on 4 (#623 (zone-down gates in the sweep))",
     },
     Rare {
         msg: "admit: a pinned machine denies a tenant token",
@@ -228,6 +244,10 @@ pub const RARE: &[Rare] = &[
     Rare {
         msg: "matchmaking: a campaign meets a configuration outside the pool",
         reason: "marginal: fired on 3 of 810 hunt seeds (#486)",
+    },
+    Rare {
+        msg: "propose: a leadership a higher ballot passed refuses a proposal",
+        reason: "a leader that missed its successor's Prepare learns its Commits and takes a Write before it is demoted: one CI sweep seed (935391525055755403 on a2ec3f7 merged with 55b319d)",
     },
     Rare {
         msg: "phase2: a leader whose promise moved past its ballot opens a round it cannot record",
@@ -1130,6 +1150,10 @@ pub const RARE: &[Rare] = &[
         reason: "marginal: fired on 5 of 810 hunt seeds (#486)",
     },
     Rare {
+        msg: "client: a read skips a silent server",
+        reason: "a read that starts at a server whose last read went unanswered: needs a moved, down or cut-off server early in a client's server list (#390)",
+    },
+    Rare {
         msg: "client: a write's verdict is lost on a lost-verdict seed",
         reason: "marginal: fired on 4 of 810 hunt seeds (#486)",
     },
@@ -1224,14 +1248,6 @@ pub const RARE: &[Rare] = &[
     Rare {
         msg: "gc: an operator probes the members' beliefs before a retirement",
         reason: "missed by the sweep of PR #510 (whole-run chaos): it needs an effective GC floor at a retirement step, rarer under whole-run chaos (#454 (control plane meets chaos), #486)",
-    },
-    Rare {
-        msg: "zones: a control-journal write is chosen with a zone down",
-        reason: "a whole fleet run inside a zone outage: 1 of 300 hunt seeds with the 10–16 s hold, where the outage struck on 4 (#623 (zone-down gates in the sweep))",
-    },
-    Rare {
-        msg: "zones: a tenant is created with a zone down",
-        reason: "a whole tenant creation inside a zone outage: 1 of 300 hunt seeds with the 10–16 s hold, where the outage struck on 4 (#623 (zone-down gates in the sweep))",
     },
     Rare {
         msg: "coordinator: a move records its placement",
