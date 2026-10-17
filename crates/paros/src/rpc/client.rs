@@ -14,14 +14,14 @@ use moonpool_rpc::{
 use super::methods::{
     FrontReadRpc, FrontSetJournalTagsRpc, FrontSetLeaderRpc, FrontTruncateRpc, FrontWriteRpc,
     GarbageCollectRpc, InspectRpc, MachineInterface, MatchmakeRpc, MatchmakerReconfigureRpc,
-    ReadRpc, ReconfigureMatchmakersRpc, ReconfigureRpc, RetireRpc, SetLeaderRpc, TruncateRpc,
-    WellKnownMethod, WriteRpc,
+    ReadRpc, ReconfigureMatchmakersRpc, ReconfigureRpc, RetireRpc, ScrubRpc, SetLeaderRpc,
+    TruncateRpc, WellKnownMethod, WriteRpc,
 };
 use super::{
     Entry, FrontRead, FrontSetJournalTags, FrontSetLeader, FrontTruncate, FrontWrite, InspectReply,
     InspectRequest, Read, ReadAck, Reconfigure, ReconfigureAck, ReconfigureMatchmakers,
-    ReconfigureMatchmakersAck, RetireAck, RetireRequest, SetJournalTagsAck, SetLeader,
-    SetLeaderAck, Truncate, TruncateAck, Write, WriteAck,
+    ReconfigureMatchmakersAck, RetireAck, RetireRequest, ScrubReply, ScrubRequest,
+    SetJournalTagsAck, SetLeader, SetLeaderAck, Truncate, TruncateAck, Write, WriteAck,
 };
 use crate::name::JournalName;
 use crate::{Address, Names};
@@ -522,6 +522,16 @@ impl<P: Providers> NodeClient<P> {
     /// The attempt's [`RpcError`].
     pub async fn retire(&self, request: &RetireRequest) -> Result<RetireAck, RpcError> {
         self.call::<RetireRpc>(request).await
+    }
+
+    /// Ask the node for one scrub page of a journal it serves (#362
+    /// (background scrubbing)).
+    ///
+    /// # Errors
+    ///
+    /// The attempt's [`RpcError`].
+    pub async fn scrub(&self, request: &ScrubRequest) -> Result<ScrubReply, RpcError> {
+        self.call::<ScrubRpc>(request).await
     }
 }
 

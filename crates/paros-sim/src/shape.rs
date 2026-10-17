@@ -162,6 +162,7 @@ impl NodeShape {
     ///
     /// On a slow-link seed ([`slow_link`]) the node runs a fast tick and
     /// the floor batch, never the production profile.
+    #[allow(clippy::too_many_lines)]
     fn draw(slow_link: bool) -> Self {
         let defaults = DriverTunables::default();
         // A handful-sized peer queue makes mailbox overflow (the
@@ -234,6 +235,7 @@ impl NodeShape {
         // The failure detector's timeout past a renewal period (#211); the
         // re-placement bound adds to it (#475).
         let down_after_ms = buggify_knob!(1000_u64, ROUND_TRIP_FLOOR_MS..3001_u64);
+        let (scrub_rate, scrub_pass_within, scrub_page) = scrub_pace();
         let mut drawn = DriverTunables {
             tick_interval: ms(tick_ms),
             election_timeout_base: buggify_knob!(5_u64, 2_u64..13_u64).max(floor_ticks),
@@ -457,6 +459,9 @@ impl NodeShape {
             // journals; the ceiling spreads them over a second.
             internal_retry_backoff: ms(buggify_knob!(100_u64, 0_u64..1001_u64)),
             resolve_answer_within: resolve_answer_within(slow_link),
+            scrub_rate,
+            scrub_pass_within,
+            scrub_page,
         };
         cap_backoff(&mut drawn, tick_ms);
         // The handover re-send cadence stays under the shortest stall
@@ -554,6 +559,10 @@ fn pair_extremes(drawn: &DriverTunables, defaults: &DriverTunables) {
     if drawn.resolve_answer_within < defaults.resolve_answer_within {
         // BUGGIFY pairing: a short `Resolve` answer bound genuinely runs.
         assert_reachable!("a node runs a short resolve answer bound");
+    }
+    if drawn.scrub_rate < defaults.scrub_rate / 16 {
+        // BUGGIFY pairing: a slow scrubber genuinely runs.
+        assert_reachable!("a node runs a slow scrubber");
     }
     if drawn.peer_queue_capacity != defaults.peer_queue_capacity {
         // BUGGIFY pairing: the capacity extreme genuinely runs.
@@ -870,6 +879,9 @@ struct Registry {
     /// Run-level: whether the run draws the changed-mode scenario (see
     /// [`changed_mode`]), fixed by the first caller.
     changed_mode: Option<bool>,
+    /// Run-level: whether the run draws the cold-rot scenario (see
+    /// [`cold_rot`]), fixed by the first caller.
+    cold_rot: Option<bool>,
     /// Run-level: whether the run draws the second-cell scenario (see
     /// [`second_cell`]), fixed by the first caller.
     second_cell: Option<bool>,
@@ -1407,6 +1419,39 @@ pub(crate) fn changed_mode(state: &StateHandle) -> bool {
         .get_or_insert_with(|| !drained && moonpool_sim::buggify_with_prob!(1.0))
 }
 
+/// Whether the run draws the **cold-rot scenario** (#362 (background
+/// scrubbing)): drawn once per seed, its own BUGGIFY location, never with a
+/// scenario that wipes, renames, drains or reconfigures a machine's
+/// journals, nor with a second cell, whose layout leaves a machine unlisted.
+/// The scrubber finds rot only in a created journal's record that
+/// sits on a machine's disk long enough for a pass to reach it, and no
+/// fault of the main campaign rots a machine's disk at rest. On a scenario
+/// seed the layout lists three founders or more where the machines allow it
+/// ([`machine_layout`]), client 0 runs `init` first, every client runs
+/// `TENANT` and `CREATE_JOURNAL` as often as the weight family allows at the
+/// steps knob's top (`crate::chain_workload`), and `crate::world::cold_rot`
+/// rots one cold record of a created journal on one machine, at most once
+/// per journal. Rare-but-valid: a disk loses bits at rest.
+#[tracing::instrument(level = "debug", skip_all)]
+pub(crate) fn cold_rot(state: &StateHandle) -> bool {
+    // Drawn before the lock: the scenarios take the registry's lock too.
+    let other = wiped_founder(state)
+        || moved_founder(state)
+        || replaced_founder(state)
+        || drained_machine(state)
+        || changed_mode(state)
+        || second_cell(state);
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    *guard.cold_rot.get_or_insert_with(|| {
+        let rot = !other && moonpool_sim::buggify_with_prob!(1.0);
+        if rot {
+            assert_reachable!("scrub: a run draws the cold-rot scenario");
+        }
+        rot
+    })
+}
+
 /// Whether the run draws the **second-cell scenario** (#232 (multiple
 /// cells)): drawn once per seed, its own BUGGIFY location, never with a
 /// scenario that renames or wipes a founder (the other cell is the wiped
@@ -1474,12 +1519,18 @@ pub(crate) fn silent_machine(state: &StateHandle) -> bool {
 /// #454 (the control plane meets chaos)). Drawn once per seed, a knob:
 /// default 60 s, extreme 30–120 s, capped by [`crate::CHAOS_CAP`]. Floor
 /// 30 s: a cell forms, claims and serves inside it under every chaos
-/// surface (a 4 s window held no leader on half the seeds, #495).
+/// surface (a 4 s window held no leader on half the seeds, #495). The
+/// cold-rot scenario (#362 (background scrubbing)) takes the top: its
+/// journals are created late in a run, and a rot then needs time inside
+/// the chaos window for the scrubber to find it.
 pub(crate) fn run_end(state: &StateHandle) -> Duration {
+    // Drawn before the lock: the scenario takes the registry's lock too.
+    let rotted = cold_rot(state);
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     *guard.run_end.get_or_insert_with(|| {
-        Duration::from_millis(buggify_knob!(60_000_u64, 30_000_u64..120_001_u64))
+        let knob = buggify_knob!(60_000_u64, 30_000_u64..120_001_u64);
+        Duration::from_millis(if rotted { 120_000 } else { knob })
     })
 }
 
@@ -2170,6 +2221,7 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
     let zoned = zone_outage(state);
     let changed = changed_mode(state);
     let batched = batched_layout(state, count);
+    let rotted = cold_rot(state);
     let second = second_cell(state);
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
@@ -2186,15 +2238,12 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
             // only in a cell of three or more.
             // So does the changed-mode scenario (#214 (tenant modes)): on a
             // cell of one, every mode places the same one slot.
-            // So does the batched-journals scenario (#599 (durability mode
-            // per journal)): a cut may strike a batched commit only where
-            // the journal tolerates a loss, which one or two members never
-            // place.
-            let least = if (replaced || moved || downed || changed || batched) && count >= 3 {
-                3
-            } else {
-                1
-            };
+            // So do the cold-rot scenario (#362 (background scrubbing)), which
+            // rots only a journal of three members or more, and the batched-
+            // journals one (#599 (durability mode per journal)), which cuts
+            // only a batched commit that may lose a copy.
+            let three = (replaced || moved || downed || changed || rotted || batched) && count >= 3;
+            let least = if three { 3 } else { 1 };
             // The zone-outage scenario (#215 (zones)): three founding
             // members, one per zone, so a zone's loss leaves a majority.
             let zoned = zoned && count >= 3;
@@ -2840,6 +2889,24 @@ fn resolve_answer_within(slow_link: bool) -> Duration {
     } else {
         Duration::from_millis(buggify_knob!(2000_u64, RESOLVE_FLOOR_MS..2001_u64))
     }
+}
+
+/// The tenant scrubber's pace (#362 (background scrubbing)): its rate,
+/// its full-pass bound and its records per request.
+fn scrub_pace() -> (u64, Duration, usize) {
+    // Floor 1 KiB/s (the shipped floor): a pass still moves one small
+    // record a second. The low end leaves a pass unfinished inside a run,
+    // so its progress record outlives terms; the high end reads a whole
+    // journal in one round.
+    let rate = buggify_knob!(256 * 1024_u64, 1024_u64..(1024 * 1024 + 1));
+    // The full-pass bound. Floor 1 s (the shipped floor). The range stays
+    // under the chaos window, so a run sees several passes and, at the low
+    // end with a slow rate, late ones.
+    let within = Duration::from_millis(buggify_knob!(10_000_u64, 1000_u64..20_001_u64));
+    // Records per scrub request. Floor 1: one record per page, the most
+    // requests per pass.
+    let page = buggify_knob!(64_usize, 1_usize..257_usize);
+    (rate, within, page)
 }
 
 /// The election backoff's ceiling is wall-clock too: a capped base

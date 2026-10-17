@@ -220,6 +220,7 @@ impl CellFacts<'_> {
             survives: String::new(),
             cell_id: self.cell_id,
             journals: vec![journal(self.control, "control", WriterMode::Single)],
+            scrub: None,
         };
         if self.election.tenant == self.control.tenant {
             cell.journals
@@ -236,6 +237,7 @@ impl CellFacts<'_> {
                 survives: String::new(),
                 cell_id: self.cell_id,
                 journals: vec![journal(universe, "directory", WriterMode::Single)],
+                scrub: None,
             });
         }
         tenants
@@ -248,7 +250,9 @@ impl CellFacts<'_> {
         let entry = self.directory.and_then(|d| d.tenant(tenant));
         let mut journals =
             vec![self.founders_journal(hosted.control, "control", WriterMode::Single)];
-        if let Some(control) = self.tenants.iter().find(|c| c.tenant() == tenant) {
+        let control = self.tenants.iter().find(|c| c.tenant() == tenant);
+        let scrub = control.and_then(|c| c.scrub()).map(scrub_view);
+        if let Some(control) = control {
             journals.extend(control.live().map(|(id, journal)| {
                 let placed = self.placed(JournalIdentifier::new(tenant, id), &journal.placed);
                 wire::JournalView {
@@ -276,6 +280,7 @@ impl CellFacts<'_> {
             survives: hosted.survives.as_str().to_string(),
             cell_id: self.cell_id,
             journals,
+            scrub,
         })
     }
 
@@ -365,6 +370,25 @@ fn standing(standing: NodeStanding, booked: u64) -> &'static str {
         NodeStanding::Draining if booked == 0 => "drained",
         NodeStanding::Draining => "draining",
         NodeStanding::Retired => "retired",
+    }
+}
+
+/// The scrubber's progress as a view shows it (#362 (background
+/// scrubbing)).
+fn scrub_view(progress: &crate::tenant::ScrubProgress) -> wire::ScrubView {
+    wire::ScrubView {
+        pass: progress.pass,
+        done: progress.done,
+        late: progress.late,
+        journal: progress.journal.0,
+        next_slot: progress.next_slot,
+        checked: progress.counts.checked,
+        damaged: progress.counts.damaged,
+        repaired: progress.counts.repaired,
+        mismatched: progress.counts.mismatched,
+        damaged_total: progress.damaged_total,
+        repaired_total: progress.repaired_total,
+        mismatched_total: progress.mismatched_total,
     }
 }
 
@@ -542,6 +566,7 @@ pub fn universe_view(
             survives: entry.survives.as_str().to_string(),
             cell_id: entry.cell_id,
             journals: Vec::new(),
+            scrub: None,
         })
         .collect();
     reply

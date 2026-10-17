@@ -264,6 +264,9 @@ Each field has an environment override named after it, `_MS` for a duration:
 | `PAROS_MAX_BATCH_RECORDS` | 1024 | 1 |
 | `PAROS_MAX_BATCH_BYTES` | 1048576 | 1 |
 | `PAROS_MACHINE_DOWN_AFTER_MS` (the cell coordinator marks a silent machine down, #211) | 10000 | `PAROS_ELECTION_RENEW_MS` + 1 |
+| `PAROS_SCRUB_RATE` (bytes per second the scrubber reads from each journal, #362 (background scrubbing)) | 4194304 | 1024 |
+| `PAROS_SCRUB_PASS_WITHIN_MS` (a full scrub pass starts no sooner, and is late after it) | 604800000 | 1000 |
+| `PAROS_SCRUB_PAGE` (records per scrub request to one acceptor) | 64 | 1 |
 | `PAROS_SLOW_RTT_MS` (an `Identify` round trip that leans a machine slow, #361) | 2000 | 1 |
 | `PAROS_SLOW_BUSY_PERMILLE` (a disk or CPU busy ratio that leans a machine slow, #361) | 950 | 201 |
 | `PAROS_SLOW_ROUNDS` (watch rounds in a row before a machine is marked slow or fast again, #361) | 5 | 1 |

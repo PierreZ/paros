@@ -46,6 +46,10 @@ use crate::rpc::{
 };
 use crate::tags::UserTags;
 
+mod scrub;
+
+pub use scrub::{ScrubCounts, ScrubProgress};
+
 /// What a tenant survives (#252, §3.4): it picks the kind of cell the tenant
 /// may live in.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
@@ -473,6 +477,9 @@ pub enum TenantCommand {
         /// Its members and quorum system now.
         config: AcceptorConfig,
     },
+    /// The scrubber's progress (#362 (background scrubbing)). Not a
+    /// request: it records no outcome.
+    Scrubbed(ScrubProgress),
 }
 
 /// Whose desired mode a `Configure` changes (#214 (tenant modes)).
@@ -547,6 +554,7 @@ impl TenantCommand {
                 id: id.0,
                 config: Some(config_to_proto(config)),
             }),
+            TenantCommand::Scrubbed(progress) => Kind::Scrubbed(progress.to_wire()),
         };
         wire::TenantEntry { kind: Some(kind) }.encode_to_vec()
     }
@@ -604,6 +612,9 @@ impl TenantCommand {
                 config: config_from_proto(placed.config)?
                     .ok_or("a placed journal names its configuration")?,
             },
+            Kind::Scrubbed(scrubbed) => {
+                TenantCommand::Scrubbed(ScrubProgress::from_wire(&scrubbed)?)
+            }
         })
     }
 }
@@ -736,6 +747,8 @@ pub enum TenantEvent {
         /// Its members and quorum system now.
         config: AcceptorConfig,
     },
+    /// The scrubber recorded its progress (#362 (background scrubbing)).
+    Scrubbed(ScrubProgress),
     /// A request was answered with a refusal, recorded.
     Answered {
         /// The request.
@@ -792,6 +805,9 @@ pub enum TenantRefusal {
         /// The journal it named.
         id: JournalId,
     },
+    /// A scrub record behind the one the fold holds (#362): a stale term's
+    /// flush.
+    ScrubBehind,
 }
 
 /// The tenant control journal's fold.
@@ -808,6 +824,8 @@ pub struct TenantControl {
     /// Live names, to the journal holding each.
     names: BTreeMap<Vec<u8>, JournalId>,
     outcomes: BTreeMap<u64, RequestOutcome>,
+    /// The scrubber's newest progress (#362 (background scrubbing)).
+    scrub: Option<ScrubProgress>,
     next_seq: u64,
 }
 
@@ -829,6 +847,7 @@ impl TenantControl {
             journals: BTreeMap::new(),
             names: BTreeMap::new(),
             outcomes: BTreeMap::new(),
+            scrub: None,
             next_seq: 0,
         }
     }
@@ -843,6 +862,13 @@ impl TenantControl {
     #[must_use]
     pub fn control(&self) -> JournalId {
         self.control
+    }
+
+    /// The scrubber's newest progress, once it recorded some (#362
+    /// (background scrubbing)).
+    #[must_use]
+    pub fn scrub(&self) -> Option<&ScrubProgress> {
+        self.scrub.as_ref()
     }
 
     /// The next position this fold expects.
@@ -959,6 +985,7 @@ impl TenantControl {
                 desired,
             }) => self.configure(request, target, desired),
             Ok(TenantCommand::Placed { id, config }) => self.place(id, config),
+            Ok(TenantCommand::Scrubbed(progress)) => self.scrubbed(progress),
             Err(_) => TenantEvent::Refused(TenantRefusal::Malformed),
         };
         self.assert_invariants();
@@ -1148,6 +1175,18 @@ impl TenantControl {
         TenantEvent::Placed { id, config }
     }
 
+    /// A `Scrubbed` (#362): the newest progress, never one behind it.
+    fn scrubbed(&mut self, progress: ScrubProgress) -> TenantEvent {
+        if self
+            .scrub
+            .is_some_and(|held| progress.cursor() < held.cursor())
+        {
+            return TenantEvent::Refused(TenantRefusal::ScrubBehind);
+        }
+        self.scrub = Some(progress);
+        TenantEvent::Scrubbed(progress)
+    }
+
     /// The fold's invariants: every live name maps to a live journal of that
     /// name, every created outcome to a journal it created, and the control
     /// journal is never a created one.
@@ -1198,6 +1237,7 @@ impl TenantControl {
                 .map(|(request, outcome)| outcome.to_wire(*request))
                 .collect(),
             default_desired: self.default.as_ref().map(Desired::to_wire),
+            scrub: self.scrub.map(ScrubProgress::to_wire),
         }
     }
 }
@@ -1267,6 +1307,11 @@ impl Checkpointable for TenantControl {
         self.journals = journals;
         self.names = names;
         self.outcomes = outcomes;
+        self.scrub = state
+            .scrub
+            .as_ref()
+            .map(ScrubProgress::from_wire)
+            .transpose()?;
         self.next_seq = covers_up_to + 1;
         self.assert_invariants();
         Ok(())
@@ -1366,6 +1411,16 @@ mod tests {
                 id: JournalId(0x9e37),
                 config: config(&[1, 2, 4]),
             },
+            TenantCommand::Scrubbed(ScrubProgress::default().next_pass().advanced(
+                ScrubCounts {
+                    checked: 6,
+                    damaged: 1,
+                    repaired: 1,
+                    mismatched: 0,
+                },
+                JournalId(0x9e37),
+                4,
+            )),
         ];
         for command in commands {
             assert_eq!(TenantCommand::decode(&command.encode()), Ok(command));
@@ -1765,6 +1820,29 @@ mod tests {
             restored.outcome(4),
             Some(RequestOutcome::NameTaken(JournalId(12)))
         );
+    }
+
+    #[test]
+    fn a_scrub_record_moves_forward_and_survives_a_checkpoint() {
+        let mut t = fold();
+        let first = ScrubProgress::default().next_pass();
+        let ahead = first.advanced(ScrubCounts::default(), JournalId(11), 8);
+        assert_eq!(
+            t.fold(0, &TenantCommand::Scrubbed(ahead).encode()),
+            TenantEvent::Scrubbed(ahead)
+        );
+        // A stale term's flush behind it changes nothing.
+        assert_eq!(
+            t.fold(1, &TenantCommand::Scrubbed(first).encode()),
+            TenantEvent::Refused(TenantRefusal::ScrubBehind)
+        );
+        assert_eq!(t.scrub(), Some(&ahead));
+        let mut restored = fold();
+        restored
+            .restore(1, &t.checkpoint())
+            .expect("a checkpoint restores");
+        assert_eq!(restored.scrub(), Some(&ahead));
+        assert_eq!(restored.checkpoint(), t.checkpoint());
     }
 
     #[test]

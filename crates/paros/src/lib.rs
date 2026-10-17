@@ -98,8 +98,8 @@ pub use provision::{Provisioned, provision_matchmaker_store, provision_store};
 pub use proxy::{ProxyConfig, ProxyJournal, run_proxy};
 pub use replica_tier::run_replica;
 pub use storage::{
-    LogStorage, MemStorage, MetadataFault, StorageError, StorageRecord, WriteOutcome,
-    storage_contract_suite,
+    LogStorage, MemStorage, MetadataFault, ScrubPage, ScrubbedSlot, StorageError, StorageRecord,
+    WriteOutcome, command_bytes, storage_contract_suite,
 };
 pub use transport::Transport;
 

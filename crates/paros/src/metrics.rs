@@ -290,6 +290,10 @@ struct MachineFamilies {
     machine_cpu: Gauge,
     disk_busy: Gauge,
     disk_queue: IntGauge,
+    scrub_records: IntCounter,
+    scrub_bytes: IntCounter,
+    scrub_damaged: IntCounter,
+    scrub_repaired: IntCounter,
 }
 
 /// One journal's handles, labelled once with its names and ids.
@@ -390,7 +394,7 @@ impl Families {
     }
 
     /// Every registered family, in registration order.
-    fn collectors(&self) -> [&dyn prometheus::core::Collector; 15] {
+    fn collectors(&self) -> [&dyn prometheus::core::Collector; 19] {
         let machine = &self.machine;
         [
             &self.calls,
@@ -408,6 +412,10 @@ impl Families {
             &machine.machine_cpu,
             &machine.disk_busy,
             &machine.disk_queue,
+            &machine.scrub_records,
+            &machine.scrub_bytes,
+            &machine.scrub_damaged,
+            &machine.scrub_repaired,
         ]
     }
 
@@ -492,6 +500,23 @@ impl MachineFamilies {
                 "I/Os in flight on the data disk at the last window's end.",
             )),
         );
+        // The scrub's own reads (#362 (background scrubbing)).
+        let scrub_records = counter(
+            "paros_scrub_records_total",
+            "Records this machine read back and checked for a scrub.",
+        );
+        let scrub_bytes = counter(
+            "paros_scrub_bytes_total",
+            "Payload bytes this machine read back for a scrub.",
+        );
+        let scrub_damaged = counter(
+            "paros_scrub_damaged_total",
+            "Records a scrub found damaged on this machine's disk.",
+        );
+        let scrub_repaired = counter(
+            "paros_scrub_repaired_total",
+            "Damaged records this machine wrote again from its own copy.",
+        );
         Self {
             settles,
             settle_seconds,
@@ -501,6 +526,10 @@ impl MachineFamilies {
             machine_cpu,
             disk_busy,
             disk_queue,
+            scrub_records,
+            scrub_bytes,
+            scrub_damaged,
+            scrub_repaired,
         }
     }
 }
@@ -641,6 +670,21 @@ impl Metrics {
             journal.applied.set(gauge_i64(applied));
             journal.chosen.set(gauge_i64(chosen));
         }
+    }
+
+    /// The machine answered a scrub page (#362 (background scrubbing)) of
+    /// journal `_id`: what it read, found damaged and repaired.
+    pub(crate) fn scrubbed(&self, _id: JournalIdentifier, page: &crate::rpc::ScrubReply) {
+        let Some(families) = &self.0.families else {
+            return;
+        };
+        let machine = &families.machine;
+        machine.scrub_records.inc_by(page.slots.len() as u64);
+        machine.scrub_bytes.inc_by(page.bytes);
+        let damaged = page.slots.iter().filter(|s| s.damaged).count() as u64;
+        let repaired = page.slots.iter().filter(|s| s.repaired).count() as u64;
+        machine.scrub_damaged.inc_by(damaged);
+        machine.scrub_repaired.inc_by(repaired);
     }
 
     /// The machine published a busyness window (#424).

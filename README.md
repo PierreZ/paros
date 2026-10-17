@@ -62,6 +62,10 @@ A universe can hold more than one cell: `parosctl init --idle` forms a cell with
 Any machine resolves a tenant to its cell. `parosctl universe remove-cell` removes an empty
 cell for good.
 
+Each tenant scrubs its journals in the background: its coordinator reads every acceptor's copy
+of every record again, and an acceptor writes a damaged record again from its own copy
+(#362 (background scrubbing)). `parosctl status --tenant acme` shows the pass and what it found.
+
 Each machine serves Prometheus metrics and two probes (`/metrics`, `/healthz`, `/readyz`) when
 `PAROS_HTTP_LISTEN` is set. It pushes its spans and metrics to an OpenTelemetry collector when
 `PAROS_OTLP_ENDPOINT` is set. To measure throughput and latency on one machine, with no cell to

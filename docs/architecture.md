@@ -2288,6 +2288,57 @@ to a scratch directory and opens the copy with the shipped boot scan. Names come
 cell's journals the disk holds, folded over their accepted prefix: a label, never evidence of
 what the cell chose.
 
+**Background scrubbing** (#362 (background scrubbing), M12, decided on 2026-10-15, built on
+2026-10-16). A record that rots on a disk at rest stays hidden until something reads it: the node
+holds every accepted record in memory after its boot scan, and a read is served from memory. So
+the tenant coordinator reads every record of every live journal of its tenant in the background,
+at a low rate, and repairs the rot before a reader needs the record. Eat your own food: the
+scrubber is one duty of the elected tenant coordinator (one per tenant), never a task of the
+driver.
+
+- **Each copy, never a quorum read.** A quorum read returns one good copy and hides the rot on
+  the others. The scrubber asks each machine that holds an acceptor slot of the journal for the
+  same slot range (`Scrub`, an internal call). The acceptor reads the range back from its disk
+  (`LogStorage::scrub`, moonpool-journal's `replay`), checks each record's checksum locally, and
+  answers each record's ballot and value fingerprint, so the values never cross the network.
+- **Repair is CTRL's.** A record that fails its check is CTRL's `faulty`. The node still holds
+  the vote it cast, so the acceptor writes the same record again from its own copy
+  (`ColocatedNode::repair_record`), and the node loop's settle tail makes it durable before the
+  answer leaves. The promise, the vote watermark and the chosen prefix do not move. A node that
+  reboots onto the damage before a scrub reaches it reports the slot faulty at boot, and the
+  CTRL repair path fixes it from its peers.
+- **A mismatch is a safety fact.** Paxos accepts one value per slot per ballot. Two acceptors
+  that hold one slot under one ballot with two value fingerprints are a mismatch: counted,
+  logged, recorded, and asserted never to happen in the simulation.
+- **Progress is a journal entry.** The scrubber flushes where its pass stands and what it found
+  to the tenant's control journal (`TenantCommand::Scrubbed`: the pass, the journal and next
+  slot, this pass's counts and the totals), every few pages, at each journal's end and when a
+  page finds damage. A newly elected coordinator resumes from it; the fold refuses a record
+  behind the one it holds. `parosctl status --tenant` shows it, and each machine counts the
+  records it scrubbed, found damaged and repaired (`paros_scrub_*_total`).
+- **Pacing.** Three tunables with documented floors: `scrub_rate` (bytes per second per tenant,
+  a token bucket; floor 1 KiB/s), `scrub_pass_within` (the full-pass bound: a pass starts no
+  sooner than this after the last one this term started, and a pass that outlives it is recorded
+  late; floor 1 s) and `scrub_page` (records per request; floor 1). Production reads 4 MiB/s per
+  tenant and a full pass each week. A new term with no pass running starts the next one at once:
+  its clock knows nothing of the last term's, and the rate bounds the cost.
+- **Not yet scrubbed.** The tenant control journals and the cell's own journals (the registry,
+  the universe directory, the election journal) are not scrubbed: a later issue.
+
+The simulation proves it with the cold-rot scenario (`paros_sim::world::cold_rot`): a task
+beside a machine rots the entry of one cold record of a created journal on that machine's disk,
+at most one machine per journal and four records each, on journals of three members or more
+under a majority. Its runs last 120 s, the top of the `run_end` knob, because created journals
+come late in a run. In 200 seeds of the sweep's exploring campaign, the scrubber repaired 24
+records that no client read. The
+aim comes from the shipped store's own layout, read from a scratch copy of the store, never from
+a format the harness knows, and the bytes flip through the machine's own disk, as the boot-time
+injector's do. The issue asked for cold rot as a moonpool fault first. moonpool already damages
+bytes at rest; what this fault needs is the aim (which journal, which machine, which cold
+record), and that needs paros's placement and its stores' layout. So the injector lives in
+`paros-sim`, beside the harness's other disk-rot injectors. moonpool's random rot families stay
+masked (#176).
+
 **The storage contract.** paros's stores are moonpool-journal's (`paros::journal`), and the
 simulation must give them at least the chaos the harness's in-memory stores carry today (decided
 on 2026-10-04, #176, #202). Every storage fault moonpool can inject is eventually in contract.

@@ -674,6 +674,17 @@ impl ChainWorkload {
             }
             config.steps = config.steps.max(64);
         }
+        if crate::shape::cold_rot(ctx.state()) {
+            // The cold-rot scenario (#362 (background scrubbing)): a record
+            // rots only in a created journal, and the scrubber must reach it
+            // before the run ends, so every client creates tenants and
+            // journals as often as the weight family allows, at the steps
+            // knob's top.
+            for op in [TENANT, CREATE_JOURNAL] {
+                config.weights[usize::from(op)] = OP_WEIGHT_CEILING;
+            }
+            config.steps = config.steps.max(64);
+        }
         if crate::shape::changed_mode(ctx.state()) {
             // The changed-mode scenario (#214 (tenant modes)): a mode change
             // needs tenants and their journals, and time to finish, so every
@@ -846,10 +857,12 @@ impl ChainWorkload {
             }
         }
         // Likewise the changed-mode (#214 (tenant modes)), zone-outage
-        // (#215 (zones)) and batched-journals (#599 (durability mode per
-        // journal)) scenarios' ops.
+        // (#215 (zones)), cold-rot (#362 (background scrubbing)) and
+        // batched-journals (#599 (durability mode per journal)) scenarios'
+        // ops.
         if crate::shape::changed_mode(ctx.state())
             || crate::shape::zone_outage(ctx.state())
+            || crate::shape::cold_rot(ctx.state())
             || crate::shape::batched_journals(ctx.state())
         {
             for op in [TENANT, CREATE_JOURNAL] {
@@ -910,6 +923,7 @@ impl ChainWorkload {
                 || crate::shape::drained_machine(ctx.state())
                 || crate::shape::changed_mode(ctx.state())
                 || crate::shape::zone_outage(ctx.state())
+                || crate::shape::cold_rot(ctx.state())
                 || crate::shape::batched_journals(ctx.state())
                 || crate::shape::second_cell(ctx.state()));
         let mut successful_after_ambiguity = false;

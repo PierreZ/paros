@@ -69,6 +69,10 @@ pub(crate) struct TenantBoard {
     /// Every journal a tenant created, with the control journal's LSN that
     /// created it.
     created: BTreeMap<JournalIdentifier, u64>,
+    /// Every created journal's acceptor configuration at its create (#362
+    /// (background scrubbing): the cold-rot scenario rots only a journal
+    /// that keeps a clean copy on a quorum).
+    configs: BTreeMap<JournalIdentifier, paros::AcceptorConfig>,
     /// Every created journal's writer mode (#241).
     modes: BTreeMap<JournalIdentifier, WriterMode>,
     /// Every created journal's store durability (#599 (durability mode per
@@ -168,6 +172,16 @@ fn tolerated_loss(config: &AcceptorConfig) -> usize {
 }
 
 impl TenantBoard {
+    /// The acceptor configuration a tenant created `journal` with, while it
+    /// is not deleted (#362 (background scrubbing): the journals the
+    /// cold-rot scenario may rot).
+    pub(crate) fn live_config(&self, journal: JournalIdentifier) -> Option<&paros::AcceptorConfig> {
+        if self.deleted.contains_key(&journal) {
+            return None;
+        }
+        self.configs.get(&journal)
+    }
+
     /// #575 (key:value tags): a tag request names a live journal the
     /// tenant created before; a tag changes no outcome.
     fn tagged(&mut self, control: JournalIdentifier, request: u64, id: JournalId, lsn: u64) {
@@ -237,6 +251,9 @@ impl TenantBoard {
                 self.armed = true;
                 let journal = JournalIdentifier::new(control.tenant, *id);
                 self.modes.entry(journal).or_insert(*writer);
+                self.configs
+                    .entry(journal)
+                    .or_insert_with(|| config.clone());
                 self.created_store(journal, (*store, config), lsn);
                 let at = *self.created.entry(journal).or_insert(lsn);
                 assert_always!(
@@ -294,12 +311,14 @@ impl TenantBoard {
                     { "lsn" => lsn }
                 );
             }
+            TenantEvent::Scrubbed(progress) => scrubbed(lsn, progress),
             TenantEvent::Described
             | TenantEvent::Checkpoint { .. }
             | TenantEvent::Refused(
                 TenantRefusal::Malformed
                 | TenantRefusal::Redescribed
-                | TenantRefusal::NotPlaceable { .. },
+                | TenantRefusal::NotPlaceable { .. }
+                | TenantRefusal::ScrubBehind,
             ) => {}
         }
     }
@@ -584,4 +603,15 @@ impl TenantBoard {
             "names: a journal name is created again after a completed delete"
         );
     }
+}
+
+/// A scrub record folded at `lsn` (#362 (background scrubbing)). The
+/// scrubber compares the copies of one slot under one ballot: Paxos accepts
+/// one value per slot per ballot, so they never differ.
+fn scrubbed(lsn: u64, progress: &paros::tenant::ScrubProgress) {
+    assert_always!(
+        progress.mismatched_total == 0,
+        "scrub: the copies of a slot under one ballot hold one value",
+        { "lsn" => lsn, "mismatched" => progress.mismatched_total }
+    );
 }
