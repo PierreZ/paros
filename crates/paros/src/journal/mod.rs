@@ -68,6 +68,7 @@
 mod matchmaker;
 mod node;
 mod settle;
+mod spares;
 
 #[cfg(test)]
 mod tests;
@@ -89,6 +90,7 @@ pub use moonpool_journal::{BLOCK, Durability, Geometry, Layout};
 pub use node::{CHOSEN_INDEX_LAG, JournalBootFacts, JournalStorage};
 pub use settle::settle;
 pub(crate) use settle::sync_names;
+pub use spares::Spares;
 
 /// How a journal store lays out and writes its journal.
 ///

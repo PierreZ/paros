@@ -19,8 +19,8 @@ crate-type = ["cdylib", "rlib"]
 paros = { path = "../paros", version = "0.2.0" }
 # The simulator without its exploration and Tokio features builds for
 # wasm32-unknown-unknown. The pin is the one every paros crate shares.
-moonpool-sim = { git = "https://github.com/PierreZ/moonpool", rev = "8f3cb738fa9a2c410e651d052327323f5925f422", default-features = false }
-moonpool-rpc = { git = "https://github.com/PierreZ/moonpool", rev = "8f3cb738fa9a2c410e651d052327323f5925f422", default-features = false, features = ["prost"] }
+moonpool-sim = { git = "https://github.com/PierreZ/moonpool", rev = "c742acd50d1cdea13147b9a251f553addb655455", default-features = false }
+moonpool-rpc = { git = "https://github.com/PierreZ/moonpool", rev = "c742acd50d1cdea13147b9a251f553addb655455", default-features = false, features = ["prost"] }
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
