@@ -7,15 +7,17 @@ use moonpool_core::TokioProviders;
 use paros::client::bootstrap::control_journals;
 use paros::client::fleet::{Step, read_directory};
 use paros::client::journals::{self, JournalAnswer, JournalOp, JournalRequest};
-use paros::client::{ClaimOutcome, Client, Writer};
+use paros::client::{ClaimOutcome, Client, Pipeline};
 use paros::fleet::TenantState;
-use paros::tenant::{Desired, Survives};
+use paros::tenant::Survives;
 use paros::{JournalId, JournalIdentifier, TenantId, WriterMode};
 
 use crate::Runtime;
 use crate::fleet::{leader_seed, nonzero, refusal_text, session};
 use crate::labels::Labels;
 use crate::output::note;
+
+use super::topology::Topology;
 
 type ParosClient = Client<TokioProviders>;
 
@@ -26,9 +28,9 @@ pub struct Journal {
     pub id: JournalIdentifier,
 }
 
-/// The name of the bench's journal `index`.
-pub fn journal_name(index: usize) -> String {
-    format!("bench-{index}")
+/// The name of the bench's journal `index` of `topology`: `bench-3x2-0`.
+pub fn journal_name(topology: Topology, index: usize) -> String {
+    format!("bench-{topology}-{index}")
 }
 
 /// The tenant `name`, created (`users`, surviving a zone) when the universe
@@ -95,13 +97,13 @@ async fn lookup(
         .map(|(id, entry)| (id, entry.state)))
 }
 
-/// The journals `bench-0` to `bench-{count - 1}` of `tenant`, each
-/// created (single writer, in the `desired` mode) when missing.
+/// The journals `bench-T-0` to `bench-T-{count - 1}` of `tenant`, each
+/// created (single writer, in `topology`'s mode) when missing.
 pub async fn journals(
     runtime: &Runtime,
     client: &ParosClient,
     (tenant_name, tenant): (&str, TenantId),
-    (count, desired): (usize, Option<Desired>),
+    (count, topology): (usize, Topology),
     patience: Duration,
 ) -> Result<Vec<Journal>, String> {
     let cell = control_journals(client)
@@ -110,14 +112,14 @@ pub async fn journals(
     let election = cell.election.ok_or("the cell names no election journal")?;
     let mut out = Vec::with_capacity(count);
     for index in 0..count {
-        let name = journal_name(index);
+        let name = journal_name(topology, index);
         let request = JournalRequest {
             request: nonzero(&runtime.providers),
             tenant,
             op: JournalOp::Create {
                 name: name.clone().into_bytes(),
                 writer: WriterMode::Single,
-                desired,
+                desired: Some(topology.desired()),
                 tags: paros::tags::UserTags::none(),
             },
         };
@@ -149,31 +151,32 @@ pub async fn journals(
     Ok(out)
 }
 
-/// Claim `journal` under `writer`'s uuid, asking again while the journal is
-/// not served yet (a journal just created opens on its members) until
-/// `patience` runs out.
+/// Claim `journal` under the uuid of `pipeline`'s writer, asking again
+/// while the journal is not served yet (a journal just created opens on its
+/// members) until `patience` runs out. A claim another client of the
+/// journal won first counts: the writer leads all the same.
 pub async fn claim(
     client: &ParosClient,
-    writer: &mut Writer,
+    pipeline: &Pipeline,
     journal: &Journal,
     patience: Duration,
 ) -> Result<(), String> {
     let deadline = client.now() + patience;
     loop {
-        let outcome = writer
+        let outcome = pipeline
             .claim(client, client.leader().unwrap_or(0), false)
             .await;
-        let retry = match &outcome {
-            ClaimOutcome::Won { .. } | ClaimOutcome::Owned { .. } if writer.owned().is_some() => {
-                return Ok(());
-            }
+        if pipeline.owned().is_some() {
+            return Ok(());
+        }
+        let retry = matches!(
+            outcome,
             ClaimOutcome::UnknownJournal
-            | ClaimOutcome::Unread
-            | ClaimOutcome::Redirect { .. }
-            | ClaimOutcome::Ambiguous
-            | ClaimOutcome::Malformed => true,
-            _ => false,
-        };
+                | ClaimOutcome::Unread
+                | ClaimOutcome::Redirect { .. }
+                | ClaimOutcome::Ambiguous
+                | ClaimOutcome::Malformed
+        );
         if !retry || client.now() >= deadline {
             return Err(format!("claim of {}: {outcome:?}", journal.name));
         }

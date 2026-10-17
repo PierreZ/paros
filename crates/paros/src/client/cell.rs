@@ -37,12 +37,30 @@ use super::fleet::{
 };
 use crate::frontend::Denial;
 use crate::machine::{Admission, ControlJournals};
-use crate::system::{NodeStanding, Registry, SystemCommand};
+use crate::system::{MaintenanceScope, NodeStanding, Registry, SystemCommand};
 use crate::{Address, Names};
 
 /// The most steps one admission takes: a registration and an `Admit`, each
 /// decided afresh, so a run that needs more is going round.
 const MAX_STEPS: usize = 4;
+
+/// What `cell remove-machine` did (#359).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Removal {
+    /// The machine is retired: its `node_id` never comes back.
+    Removed,
+    /// It was retired already.
+    Unchanged,
+    /// The registry holds no machine with that id.
+    Unknown,
+    /// It is not draining: drain it first.
+    NotDraining,
+    /// It is draining, but roles are still booked on it.
+    NotDrained {
+        /// The slots booked on it.
+        slots: u64,
+    },
+}
 
 /// An operator's handle on a cell's control journal, for the cell
 /// operations.
@@ -465,6 +483,95 @@ impl CellSession {
         };
         self.record(client, first, &command).await?;
         Ok(self.registry().tagged(request))
+    }
+
+    /// `cell remove-machine` (#359): retire the drained machine `node` from
+    /// the cell for good. The registry tombstones its `node_id`: a machine
+    /// with that id never registers again. Only a machine that is draining
+    /// and holds no slot is removed: every role moved off it.
+    ///
+    /// # Panics
+    ///
+    /// The registry folded a `RetireNode` the session recorded and the
+    /// machine is not retired: a fold bug.
+    ///
+    /// # Errors
+    ///
+    /// The session did not open, or the write did not land (see
+    /// [`Interrupted`]).
+    pub async fn remove<P: Providers>(
+        &mut self,
+        client: &Client<P>,
+        first: usize,
+        node: NodeId,
+    ) -> Result<Removal, Interrupted> {
+        self.open(client, first).await?;
+        let registry = self.registry();
+        match registry.get(node).map(|n| n.standing) {
+            None => return Ok(Removal::Unknown),
+            Some(NodeStanding::Retired) => return Ok(Removal::Unchanged),
+            Some(NodeStanding::Registered) => return Ok(Removal::NotDraining),
+            Some(NodeStanding::Draining) if registry.booked(node) > 0 => {
+                return Ok(Removal::NotDrained {
+                    slots: registry.booked(node),
+                });
+            }
+            Some(NodeStanding::Draining) => {}
+        }
+        self.record(client, first, &SystemCommand::RetireNode { id: node })
+            .await?;
+        let retired = self
+            .registry()
+            .get(node)
+            .is_some_and(|n| n.standing == NodeStanding::Retired);
+        assert!(retired, "a removal recorded retires its machine");
+        Ok(Removal::Removed)
+    }
+
+    /// `cell maintenance` (#359): open a maintenance window of `for_ms`
+    /// milliseconds over `scope`, a machine or a failure domain, or end it
+    /// (`for_ms` 0). The cell coordinator re-places no role of a machine
+    /// it covers while the window is open. Whether the registry took it: a
+    /// machine window names a machine of the pool.
+    ///
+    /// # Panics
+    ///
+    /// The session's fold did not move past the entry it recorded: a fold
+    /// bug.
+    ///
+    /// # Errors
+    ///
+    /// The session did not open, or the write did not land (see
+    /// [`Interrupted`]).
+    pub async fn maintenance<P: Providers>(
+        &mut self,
+        client: &Client<P>,
+        first: usize,
+        scope: MaintenanceScope,
+        for_ms: u64,
+    ) -> Result<bool, Interrupted> {
+        self.open(client, first).await?;
+        if let MaintenanceScope::Machine(id) = &scope
+            && !self.registry().contains(*id)
+        {
+            return Ok(false);
+        }
+        let before = self.position();
+        self.record(
+            client,
+            first,
+            &SystemCommand::Maintenance {
+                scope: scope.clone(),
+                for_ms,
+            },
+        )
+        .await?;
+        assert!(self.position() > before, "a recorded window is in the fold");
+        let open = self
+            .registry()
+            .maintenance()
+            .any(|(s, w)| *s == scope && w.for_ms == for_ms);
+        Ok(open || for_ms == 0)
     }
 
     /// Fold the cell control journal to its tail again, while the session

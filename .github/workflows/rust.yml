@@ -137,8 +137,20 @@ jobs:
   # asserting safety on every one. A dedicated job because the instrumented build +
   # sweep is heavier than the plain `cargo nextest` run. Mirrors moonpool's `sim`
   # job.
+  #
+  # Two shards run the same sweep in parallel (decided on 2026-10-16): each PR gets
+  # twice the seeds for the same wall-clock time. The shards draw disjoint seeds
+  # without any flag: moonpool derives every iteration seed from a base seed taken
+  # from the wall clock in nanoseconds, so two runs on two runners share a seed
+  # only by a 64-bit hash collision. A red shard is a red CI: `fail-fast: false`
+  # lets the other shard finish, so a red run reports every failing seed.
   sim:
+    name: sim (shard ${{ matrix.shard }}/2)
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
     steps:
       - uses: actions/checkout@v7
       - uses: DeterminateSystems/nix-installer-action@main
@@ -147,5 +159,7 @@ jobs:
         with:
           cache-directories: target/sancov
           cache-on-failure: true
+          # Both shards build the same thing; one saves the cache.
+          save-if: ${{ matrix.shard == 1 }}
       - name: Run sancov simulation sweep
         run: nix develop --command cargo xtask sim run-all

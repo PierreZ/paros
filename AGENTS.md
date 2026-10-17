@@ -22,6 +22,8 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
 - `cargo xtask sim run-all`: the sancov-guided sweep (`scripts/sancov-rustc.sh` is the
   `RUSTC_WRAPPER`, gated by `SANCOV_CRATES`; the flake `shellHook` exports it). The registered
   campaign is `paros-chain` (binary `sim-paros-chain`; `cargo xtask sim run paros-chain`).
+  CI runs it as two parallel shards (decided on 2026-10-16): each draws its own seeds from
+  a wall-clock base seed, so a PR gets twice the seeds. A red in either shard blocks the merge.
 
 CI also runs the `paros-core` examples, the `paros-play` web build and the sandbox's wasm check. Rust 2024 edition,
 toolchain pinned in `rust-toolchain.toml` (incl. `wasm32-unknown-unknown`), clippy pedantic on
@@ -378,6 +380,9 @@ Three layers, and nothing crosses them:
   seed that draws the slow-machine scenario, its slowing of a founder may strike at most
   `LATE_WINDOW` into the tail, once the cell formed, and lasts 4–6 s
   (`paros_sim::world::slow_machine`, #424 (busyness metrics)). Likewise on a seed that draws
+  the gone-machine scenario, its crash of a machine that holds a slot may strike at most
+  `LATE_WINDOW` into the tail and lasts 13–18 s, past every `machine_replace_after`
+  (`paros_sim::world::gone_machine`, #475 (re-place after the Down bound)). Likewise on a seed that draws
   the lagging-fold scenario, half the nodes admit the registry's pool 2 s late
   (`paros::scenario::ADMIT_LATE`, #387 (unpooled joiner)), in the tail too: the hold is a bound,
   not a window, because most joiners register in the tail.

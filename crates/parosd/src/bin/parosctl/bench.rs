@@ -9,7 +9,10 @@
 //!
 //! - `write`: `--records-per-call` records at the tail of the client's own
 //!   journal (client `i` to journal `i % journals`). Clients that share a
-//!   journal share its one writer, so their writes to it go one at a time.
+//!   journal share its one writer through a `paros::client::Pipeline`
+//!   (#597 (several writes in flight per journal)): each client's write is
+//!   in flight at the same time, at consecutive positions, so `--clients 8`
+//!   on one journal keeps eight writes in flight on it.
 //! - `read-tail`: the last `--records-per-call` records of a random
 //!   journal.
 //! - `read-start`: the next page of a random journal from a cursor that
@@ -19,6 +22,11 @@
 //!
 //! `truncate` runs on its own schedule (`--truncate-every`): each journal
 //! keeps its last `--truncate-keep` records. A read checks every byte.
+//!
+//! `--topology` names the journals' shapes (`topology.rs`): `3x1`, the
+//! plain majority of three, by default. With several (`3x1,3x2,3x3`), the
+//! bench runs each in turn, under the same seed and load, on journals of
+//! its own (`bench-3x2-K`), then prints one row per topology and call.
 //!
 //! The clients run closed loop by default: a call starts when the last one
 //! ends. With `--rate`, they run open loop: the calls start on a fixed
@@ -35,6 +43,7 @@ mod mix;
 mod records;
 mod setup;
 mod summary;
+mod topology;
 
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
@@ -44,17 +53,18 @@ use std::time::{Duration, Instant, SystemTime};
 use clap::Args;
 use moonpool_core::{Providers, RandomProvider, TokioProviders};
 use paros::Value;
-use paros::client::{Client, Reader, ReaderOutcome, TruncateOutcome, Writer, WriterOutcome};
-use tokio::sync::Mutex;
+use paros::client::{
+    Client, Pipeline, Reader, ReaderOutcome, TruncateOutcome, Writer, WriterOutcome,
+};
 use tokio_util::sync::CancellationToken;
 
-use crate::journal::DurabilityArgs;
 use crate::output::note;
 use crate::{Ending, Runtime};
 
 use histograms::{Call, Calls, Export, Registry};
 use mix::Mix;
 use records::{HEADER, Rng};
+use topology::{Topologies, Topology};
 
 type ParosClient = Client<TokioProviders>;
 
@@ -67,14 +77,17 @@ pub struct BenchArgs {
     /// The tenant to write in, by name; created when missing.
     #[arg(long, default_value = "bench")]
     tenant: String,
-    /// How many journals: `bench-0` to `bench-{N-1}`, created when missing
-    /// (single writer).
+    /// How many journals per topology: `bench-T-0` to `bench-T-{N-1}`,
+    /// created when missing (single writer).
     #[arg(long, default_value = "4", value_parser = clap::value_parser!(u64).range(1..))]
     journals: u64,
-    /// The durability of a journal the bench creates.
-    #[command(flatten)]
-    durability: DurabilityArgs,
-    /// How many concurrent clients, each one call at a time.
+    /// The journal topologies, each run in turn on journals of its own:
+    /// `ROWSxCOLUMNS`, comma-separated. `3x1` is the plain majority of
+    /// three; `3x3` is nine acceptors in three partitions of three.
+    #[arg(long, default_value = "3x1")]
+    topology: Topologies,
+    /// How many concurrent clients, each one call at a time. The clients
+    /// of one journal each keep their write in flight on it at once.
     #[arg(long, default_value = "8", value_parser = clap::value_parser!(u64).range(1..))]
     clients: u64,
     /// How long to run after the ramp (`500ms`, `60s`, `2m`); `0s` runs until
@@ -112,7 +125,7 @@ pub struct BenchArgs {
     /// Start a cell of N machines in this process, on loopback, and run
     /// against it: `--servers` is not needed. The stores go in a new
     /// directory under `--local-dir`, deleted after the run.
-    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u64).range(1..=9))]
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u64).range(1..=MAX_LOCAL))]
     pub local: Option<u64>,
     /// Where a local cell's stores go: the filesystem the numbers measure.
     /// The system's temporary directory by default.
@@ -139,6 +152,16 @@ impl BenchArgs {
         self.mix.has(Call::Write) || self.mix.has(Call::SetLeader) || self.truncates()
     }
 
+    /// The most writes in flight on one journal: its clients (#597
+    /// (several writes in flight per journal)).
+    fn in_flight(&self) -> u64 {
+        if self.mix.has(Call::Write) {
+            self.clients.div_ceil(self.journals)
+        } else {
+            0
+        }
+    }
+
     fn truncates(&self) -> bool {
         !self.truncate_every.is_zero()
     }
@@ -147,7 +170,32 @@ impl BenchArgs {
     pub fn patience_ms(&self) -> u64 {
         self.patience_ms
     }
+
+    /// Refuse a run its arguments cannot hold: a topology wider than the
+    /// local cell (placement puts each acceptor on its own machine), or
+    /// one histogram file for several topologies.
+    ///
+    /// # Errors
+    ///
+    /// The refusal, to print.
+    pub fn check(&self) -> Result<(), String> {
+        let widest = self.topology.widest();
+        if let Some(machines) = self.local
+            && widest as u64 > machines
+        {
+            return Err(format!(
+                "--topology needs {widest} machines, and --local starts {machines}"
+            ));
+        }
+        if self.histograms.is_some() && self.topology.all().len() > 1 {
+            return Err("--histograms takes one topology".into());
+        }
+        Ok(())
+    }
 }
+
+/// The most machines `--local` starts: a 3x5 or a 5x3 grid.
+const MAX_LOCAL: u64 = 15;
 
 /// A rate in calls per second, above zero.
 fn parse_rate(text: &str) -> Result<f64, String> {
@@ -175,13 +223,14 @@ fn parse_duration(text: &str) -> Result<Duration, String> {
     }
 }
 
-/// One journal of the run: its one writer, with a client of its own (a
-/// leader hint names one journal's leader), and the tail its writes reached.
+/// One journal of the run: its one writer's pipeline, with a client of its
+/// own (a leader hint names one journal's leader), and the tail its writes
+/// reached.
 struct Slot {
     journal: setup::Journal,
     key: u64,
     client: ParosClient,
-    writer: Mutex<Writer>,
+    pipeline: Pipeline,
     tail: Cell<u64>,
 }
 
@@ -200,10 +249,11 @@ impl Failure {
     }
 }
 
-/// What every client shares.
+/// What every client of one topology's run shares.
 struct Shared {
-    args: BenchArgs,
+    args: Rc<BenchArgs>,
     seed: u64,
+    topology: Topology,
     /// Print one JSON report, and no tick.
     json: bool,
     slots: Vec<Rc<Slot>>,
@@ -212,61 +262,170 @@ struct Shared {
     failure: RefCell<Option<Failure>>,
     /// Records `read-tail` read and found wrong.
     mismatches: Cell<u64>,
+    /// Writes that arrived before the write in front of them and were sent
+    /// again (#597 (several writes in flight per journal)).
+    resent: Cell<u64>,
+}
+
+/// One topology's totals, for the comparison.
+pub struct Measured {
+    topology: Topology,
+    elapsed: Duration,
+    calls: Vec<Call>,
+    total: Calls,
+}
+
+/// A checked bench: its arguments and its seed, shared by every topology.
+pub struct Plan {
+    args: Rc<BenchArgs>,
+    seed: u64,
+}
+
+impl Plan {
+    /// Check `args` and draw the seed when they name none.
+    ///
+    /// # Errors
+    ///
+    /// The arguments cannot hold a run ([`BenchArgs::check`]).
+    pub fn new(runtime: &Runtime, args: BenchArgs) -> Result<Self, String> {
+        args.check()?;
+        let seed = args
+            .seed
+            .unwrap_or_else(|| runtime.providers.random().random());
+        note(&format!("bench seed={seed}"));
+        Ok(Self {
+            args: Rc::new(args),
+            seed,
+        })
+    }
+
+    /// The topologies, in the order given.
+    pub fn topologies(&self) -> Vec<Topology> {
+        self.args.topology.all().to_vec()
+    }
+
+    /// One topology's run against the cell `client` reaches (`servers`,
+    /// their ids): its journals, its clients, its totals.
+    ///
+    /// # Errors
+    ///
+    /// What the bench ends with: the setup failed, or a call stopped it.
+    pub async fn run_one(
+        &self,
+        runtime: &Runtime,
+        (client, servers): (&ParosClient, &[u64]),
+        topology: Topology,
+        (json, local): (bool, Option<&Path>),
+    ) -> Result<Measured, Ending> {
+        let (args, seed) = (&self.args, self.seed);
+        note(&format!("topology {topology}: {}", topology.label()));
+        if args.in_flight() > 0 {
+            note(&format!(
+                "write: up to {} in flight per journal",
+                args.in_flight()
+            ));
+        }
+        let patience = Duration::from_millis(args.patience_ms);
+        let slots = match prepare(runtime, client, servers, args, (seed, topology), patience).await
+        {
+            Ok(slots) => slots,
+            Err(error) => {
+                note(&error);
+                return Err(Ending::Unreachable);
+            }
+        };
+        let export = match &args.histograms {
+            Some(path) => match Export::create(path, seed) {
+                Ok(export) => Some(export),
+                Err(error) => {
+                    note(&format!("{}: {error}", path.display()));
+                    return Err(Ending::Refused);
+                }
+            },
+            None => None,
+        };
+        let shared = Rc::new(Shared {
+            args: args.clone(),
+            seed,
+            topology,
+            json,
+            slots,
+            stop: CancellationToken::new(),
+            failure: RefCell::new(None),
+            mismatches: Cell::new(0),
+            resent: Cell::new(0),
+        });
+        let (elapsed, calls, total) = tokio::task::LocalSet::new()
+            .run_until(drive(client.clone(), shared.clone(), export, local))
+            .await;
+        let mismatches = shared.mismatches.get();
+        if let Some(failure) = shared.failure.borrow_mut().take() {
+            note(&failure.message);
+            return Err(failure.ending);
+        }
+        if mismatches > 0 {
+            note(&format!("read-tail found {mismatches} wrong records"));
+            return Err(Ending::Refused);
+        }
+        Ok(Measured {
+            topology,
+            elapsed,
+            calls,
+            total,
+        })
+    }
+}
+
+/// End a bench whose topologies all ran: with several, and no `--json`,
+/// print them side by side.
+pub fn finish(runs: &[Measured], json: bool) -> Ending {
+    if runs.len() > 1 && !json {
+        compare(runs);
+    }
+    Ending::Success
 }
 
 /// `parosctl bench` against the cell `client` reaches (`servers`, their
-/// ids); `local` is a local cell's directory. `json` prints one report.
+/// ids): each topology in turn on the same cell, under the same seed. The
+/// first that fails ends the bench. `json` prints one report per topology.
 pub async fn run(
     runtime: &Runtime,
     client: &ParosClient,
     servers: &[u64],
     args: BenchArgs,
-    (json, local): (bool, Option<&Path>),
+    json: bool,
 ) -> Ending {
-    let seed = args
-        .seed
-        .unwrap_or_else(|| runtime.providers.random().random());
-    note(&format!("bench seed={seed}"));
-    let patience = Duration::from_millis(args.patience_ms);
-    let slots = match prepare(runtime, client, servers, &args, seed, patience).await {
-        Ok(slots) => slots,
+    let plan = match Plan::new(runtime, args) {
+        Ok(plan) => plan,
         Err(error) => {
             note(&error);
-            return Ending::Unreachable;
+            return Ending::Refused;
         }
     };
-    let export = match &args.histograms {
-        Some(path) => match Export::create(path, seed) {
-            Ok(export) => Some(export),
-            Err(error) => {
-                note(&format!("{}: {error}", path.display()));
-                return Ending::Refused;
-            }
-        },
-        None => None,
-    };
-    let shared = Rc::new(Shared {
-        args,
-        seed,
-        json,
-        slots,
-        stop: CancellationToken::new(),
-        failure: RefCell::new(None),
-        mismatches: Cell::new(0),
-    });
-    tokio::task::LocalSet::new()
-        .run_until(drive(client.clone(), shared.clone(), export, local))
-        .await;
-    let mismatches = shared.mismatches.get();
-    if let Some(failure) = shared.failure.borrow_mut().take() {
-        note(&failure.message);
-        return failure.ending;
+    let mut runs = Vec::new();
+    for topology in plan.topologies() {
+        match plan
+            .run_one(runtime, (client, servers), topology, (json, None))
+            .await
+        {
+            Ok(run) => runs.push(run),
+            Err(ending) => return ending,
+        }
     }
-    if mismatches > 0 {
-        note(&format!("read-tail found {mismatches} wrong records"));
-        return Ending::Refused;
+    finish(&runs, json)
+}
+
+/// One row per topology and call: the totals side by side.
+fn compare(runs: &[Measured]) {
+    assert!(runs.len() > 1, "a comparison needs two runs");
+    println!();
+    println!("{}", total_header("topology"));
+    for run in runs {
+        for call in &run.calls {
+            let name = format!("{} {}", run.topology, call.name());
+            println!("{}", total_row(run.elapsed, &name, &run.total, *call));
+        }
     }
-    Ending::Success
 }
 
 /// The tenant, the journals, and a claimed writer on each.
@@ -275,7 +434,7 @@ async fn prepare(
     client: &ParosClient,
     servers: &[u64],
     args: &BenchArgs,
-    seed: u64,
+    (seed, topology): (u64, Topology),
     patience: Duration,
 ) -> Result<Vec<Rc<Slot>>, String> {
     let providers = &runtime.providers;
@@ -285,7 +444,7 @@ async fn prepare(
         runtime,
         client,
         (&args.tenant, tenant),
-        (count, args.durability.desired()),
+        (count, topology),
         patience,
     )
     .await?;
@@ -294,10 +453,10 @@ async fn prepare(
         let journal_client = client.clone().with_own_leader_hint();
         let mut rng = Rng::of(&[seed, 1, index as u64]);
         let leader_seed = u128::from(rng.next_u64()) << 64 | u128::from(rng.next_u64());
-        let mut writer = Writer::new(journal.id, leader_seed);
+        let pipeline = Pipeline::new(Writer::new(journal.id, leader_seed));
         let tail = if args.writes() {
-            setup::claim(&journal_client, &mut writer, &journal, patience).await?;
-            writer.next_seq()
+            setup::claim(&journal_client, &pipeline, &journal, patience).await?;
+            pipeline.writer().next_seq()
         } else {
             journal_client
                 .journal_state(journal.id, 0)
@@ -310,7 +469,7 @@ async fn prepare(
             key: records::journal_key(&journal.name),
             journal,
             client: journal_client,
-            writer: Mutex::new(writer),
+            pipeline,
             tail: Cell::new(tail),
         }));
     }
@@ -318,13 +477,14 @@ async fn prepare(
 }
 
 /// Start the clients and the truncations, tick every second until the run
-/// ends, then print the totals (or the report, with `--json`).
+/// ends, then print the totals (or the report, with `--json`). The time
+/// measured, the calls drawn and their totals.
 async fn drive(
     client: ParosClient,
     shared: Rc<Shared>,
     mut export: Option<Export>,
     local: Option<&Path>,
-) {
+) -> (Duration, Vec<Call>, Calls) {
     let args = &shared.args;
     let mut registry = Registry::default();
     let start = Instant::now();
@@ -423,6 +583,7 @@ async fn drive(
     {
         note(&format!("histograms: {error}"));
     }
+    (measured, calls, std::mem::take(&mut registry.total))
 }
 
 /// The totals as text, or as one JSON report with `--json`.
@@ -435,6 +596,12 @@ fn report(
     let args = &shared.args;
     if !shared.json {
         totals(measured, calls, total, args.mix.has(Call::Write));
+        if shared.resent.get() > 0 {
+            note(&format!(
+                "write: {} arrived early and were sent again",
+                shared.resent.get()
+            ));
+        }
         return;
     }
     let run = serde_json::json!({
@@ -443,8 +610,12 @@ fn report(
             Some(_) => serde_json::json!({ "local": args.local }),
             None => serde_json::json!("servers"),
         },
+        "topology": shared.topology.to_string(),
+        "acceptors": shared.topology.acceptors(),
         "clients": args.clients,
         "journals": args.journals,
+        "writes_in_flight_per_journal": args.in_flight(),
+        "writes_resent": shared.resent.get(),
         "record_size": args.record_size,
         "records_per_call": args.records_per_call,
         "rate": args.rate,
@@ -603,40 +774,54 @@ fn call_bytes(args: &BenchArgs) -> u64 {
     args.records_per_call * args.record_size
 }
 
-/// Claim the journal again under `writer` when another uuid superseded it.
-async fn owned(shared: &Shared, slot: &Slot, writer: &mut Writer) -> Result<(), Failure> {
-    if writer.owned().is_none() {
+/// Claim the journal again when another uuid superseded its writer.
+async fn owned(shared: &Shared, slot: &Slot) -> Result<(), Failure> {
+    if slot.pipeline.owned().is_none() {
         let patience = Duration::from_millis(shared.args.patience_ms);
-        setup::claim(&slot.client, writer, &slot.journal, patience)
+        setup::claim(&slot.client, &slot.pipeline, &slot.journal, patience)
             .await
             .map_err(|e| Failure::new(Ending::Refused, e))?;
     }
     Ok(())
 }
 
-/// One `write` of `--records-per-call` records at the journal's tail, as
-/// its writer. A writer another uuid superseded claims again first.
+/// One `write` of `--records-per-call` records at the journal's next
+/// position, as its writer, beside the other clients' writes in flight on
+/// it. A writer another uuid superseded claims again first.
 async fn write(shared: &Shared, slot: &Slot) -> Result<u64, Failure> {
     let args = &shared.args;
-    let mut writer = slot.writer.lock().await;
     let size = usize::try_from(args.record_size).expect("a record size fits");
-    owned(shared, slot, &mut writer).await?;
     let retries = slot.client.tunables().retry_budget;
     let mut attempt = 0;
     loop {
-        let from = writer.next_seq();
-        let batch: Vec<Value> = (from..from + args.records_per_call)
-            .map(|seq| Value(records::record(shared.seed, slot.key, seq, size)))
-            .collect();
-        let outcome = writer.write(&slot.client, batch, 0).await;
+        owned(shared, slot).await?;
+        let batch = |from: u64| {
+            (from..from + args.records_per_call)
+                .map(|seq| Value(records::record(shared.seed, slot.key, seq, size)))
+                .collect()
+        };
+        let outcome = match slot.pipeline.write(&slot.client, batch, 0).await {
+            Some(sent) => {
+                shared
+                    .resent
+                    .set(shared.resent.get() + u64::from(sent.resent));
+                sent.outcome
+            }
+            None => WriterOutcome::NotOwner,
+        };
         match outcome {
             WriterOutcome::Written { seq, count, .. } => {
                 slot.tail.set(slot.tail.get().max(seq + count));
                 return Ok(call_bytes(args));
             }
-            // A stale position, still the owner: the refusal named the
-            // tail; the records of the new position go there.
-            WriterOutcome::Refused { .. } if writer.owned().is_some() && attempt < retries => {
+            // A position another write's failure left unreachable, or a
+            // term a `set-leader` of this run ended while the write was in
+            // flight: the records of a new position go there.
+            WriterOutcome::Refused { .. }
+            | WriterOutcome::Superseded { .. }
+            | WriterOutcome::NotOwner
+                if attempt < retries =>
+            {
                 attempt += 1;
             }
             WriterOutcome::Ambiguous => {
@@ -662,19 +847,19 @@ async fn write(shared: &Shared, slot: &Slot) -> Result<u64, Failure> {
 }
 
 /// One `set-leader`: the journal's writer takes a new term under a fresh
-/// uuid, which supersedes its last one.
+/// uuid, which supersedes its last one and the writes in flight under it.
 async fn set_leader(shared: &Shared, slot: &Slot) -> Result<u64, Failure> {
-    let mut writer = slot.writer.lock().await;
-    writer.begin_term();
-    owned(shared, slot, &mut writer).await?;
+    slot.pipeline
+        .claim(&slot.client, slot.client.leader().unwrap_or(0), true)
+        .await;
+    owned(shared, slot).await?;
     Ok(0)
 }
 
 /// One `truncate` of the journal below `up_to`, as its writer.
 async fn truncate(shared: &Shared, slot: &Slot, up_to: u64) -> Result<(), Failure> {
-    let mut writer = slot.writer.lock().await;
-    owned(shared, slot, &mut writer).await?;
-    match writer.truncate(&slot.client, up_to, 0).await {
+    owned(shared, slot).await?;
+    match slot.pipeline.truncate(&slot.client, up_to, 0).await {
         Some(TruncateOutcome::Applied { .. }) => Ok(()),
         Some(TruncateOutcome::Ambiguous) => Err(Failure::new(
             Ending::Ambiguous,

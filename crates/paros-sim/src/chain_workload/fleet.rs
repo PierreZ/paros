@@ -78,6 +78,7 @@ mod cell;
 mod converge;
 mod drain;
 mod election;
+mod healthy;
 mod journals;
 mod keys;
 mod load;
@@ -189,7 +190,11 @@ pub(super) struct FleetOps {
     /// This client saw an `init` end on the cell it knows.
     initialized: bool,
     /// Tenant identifiers this client had created: a deliberate reuse names one.
+    /// Only `tenants_fleet`'s: see [`FleetOps::same_fleet`].
     ever_created: Vec<JournalIdentifier>,
+    /// The fleet tenant (its control journal) of this client's last tenant
+    /// operation: the one fleet its tenant identifiers belong to.
+    tenants_fleet: Option<JournalIdentifier>,
     pending: Option<Pending>,
     /// How long into an operation its target is killed, and how long it
     /// stays down (`ChainConfig::fleet_kill_delay_ms`, `fleet_kill_down_ms`).
@@ -259,6 +264,7 @@ impl FleetOps {
             leader_seeds,
             initialized: false,
             ever_created: Vec::new(),
+            tenants_fleet: None,
             pending: None,
             kill_ms,
             killed: false,
@@ -487,6 +493,7 @@ impl FleetOps {
             assert_reachable!("fleet: a tenant operation finds no cell formed yet");
             return;
         };
+        self.same_fleet(cell.fleet);
         let name = NAMES[usize::try_from(class % NAMES.len() as u64).unwrap_or(0)].to_vec();
         let client = cell.client.clone();
         let first = cell.first(payload);
@@ -563,6 +570,25 @@ impl FleetOps {
         judge_folds(&session);
     }
 
+    /// Whether `fleet` is the fleet of this client's last tenant operation.
+    /// When it is not, the cell that fleet lived on was lost and another
+    /// formed (#304): forget the identifiers drawn in the old one. A new
+    /// fleet never held them, so registering one there is no reuse, and it
+    /// would put a second journal under the old one's identifier, where a
+    /// random draw never collides (witness recipes 15877527495400312596
+    /// 24979:14886674860522251853 and 24979:12654359453554662444 on
+    /// ef08f4a: a one-founder cell wiped and formed again, a reused id and
+    /// a resumed creation's id registered in the new fleet, and every
+    /// oracle of that identifier's audit red).
+    fn same_fleet(&mut self, fleet: JournalIdentifier) -> bool {
+        let same = self.tenants_fleet.is_none_or(|known| known == fleet);
+        if !same {
+            self.ever_created.clear();
+        }
+        self.tenants_fleet = Some(fleet);
+        same
+    }
+
     /// Run the operation this client stopped in, to its end; whether none is
     /// pending any more.
     #[tracing::instrument(level = "debug", skip_all, fields(client = self.client_id))]
@@ -581,6 +607,11 @@ impl FleetOps {
             self.pending = Some(pending);
             return false;
         };
+        if !self.same_fleet(cell.fleet) && matches!(pending, Pending::Create(..)) {
+            // A creation pending in a lost cell's fleet ends with it: see
+            // [`FleetOps::same_fleet`].
+            return true;
+        }
         let client = cell.client.clone();
         let first = cell.first(draw);
         let Some(mut session) = self.session(&cell, cell.journals, policy) else {
@@ -1133,6 +1164,10 @@ impl FleetOps {
             let learn = |journal| self.note_journals([journal]);
             placement::placements_booked(ctx, &cell, ctx.time().now() + FLEET_SETTLE, learn).await;
             sets::sets_booked(ctx, &cell, ctx.time().now() + FLEET_SETTLE).await;
+            // Every journal the cell can hold heals (#475 (re-place after
+            // the Down bound)).
+            self.journals_heal(ctx, &cell, ctx.time().now() + FLEET_SETTLE)
+                .await;
             // The machines' own `Resolve` folds escape after chaos (#457).
             self.resolve_answers(ctx, &cell, ctx.time().now() + FLEET_SETTLE)
                 .await;

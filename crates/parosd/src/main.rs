@@ -183,7 +183,7 @@ async fn run(settings: Settings, metrics: Metrics) -> ExitCode {
     let disk = ProviderDisk::new(
         TokioStorageProvider::new(),
         settings.data_dir.to_string_lossy(),
-        settings.layout.config(),
+        paros::JournalStoreConfig::default(),
     );
     let ran = Box::pin(paros::machine::run_machine(
         TokioProviders::new(),

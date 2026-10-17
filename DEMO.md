@@ -89,6 +89,16 @@ docker compose kill node2
 docker compose run --rm parosctl write "$J" still here --leader 8
 docker compose start node2
 
+# Maintenance, drain and removal (#359). A window keeps the roles of a machine that goes
+# down while it is open (the coordinator re-places them past `machine_replace_after`
+# otherwise, #475). `--for 0` ends it. Then drain the admitted machine: once
+# `machine list` shows it `drained`, remove it for good.
+docker compose run --rm parosctl cell maintenance storage4 --for 30m
+docker compose run --rm parosctl cell maintenance storage4 --for 0
+docker compose run --rm parosctl cell drain-machine storage4
+docker compose run --rm parosctl machine list
+docker compose run --rm parosctl cell remove-machine storage4
+
 # Bench (#517, #194): closed-loop clients write the journals bench-0..bench-3 of tenant
 # `bench` (both created when missing) and print throughput and latency per call each
 # second, then the totals. Ctrl-C stops it and still prints the totals. Add
@@ -119,7 +129,6 @@ nix develop --command cargo build --release -p parosd
 export PATH=$PWD/target/release:$PATH
 
 # The three machines, each with its own data directory, configured with no peer.
-export PAROS_STORE_LAYOUT=small
 mkdir -p /tmp/paros-demo
 for i in 1 2 3; do
   PAROS_LISTEN=127.0.0.1:450$i PAROS_DATA_DIR=/tmp/paros-demo/node$i \

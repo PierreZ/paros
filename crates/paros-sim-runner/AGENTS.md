@@ -51,7 +51,7 @@ the `mutants` test reads `PAROS_MUTANT_SEEDS`.
 
 ## Tests & gates
 
-- `cargo xtask sim run paros-chain` (= `run-all`; CI `sim` job) builds `sim-paros-chain` under
+- `cargo xtask sim run paros-chain` (= `run-all`; CI `sim` job, two parallel shards with their own seeds) builds `sim-paros-chain` under
   sancov and runs it.
 - Hunts: `cargo run --release -p paros-sim-runner --bin sim-paros-hunt -- main 2000`.
 - Mutation hunt: `cargo xtask mutants [--seeds N] [cargo-mutants args]` (weekly in CI,

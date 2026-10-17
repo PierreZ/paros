@@ -10,18 +10,16 @@
 //! connection and every pending call go with it on the spot, so a restart
 //! at the same address never meets its predecessor's socket.
 //!
-//! **The trade.** Polled by the loop, the runtime makes no network progress
-//! while an arm body awaits — above all the durability pipeline's storage
-//! calls in `drain_ready`. Outbound lanes, replies, pings and dials all wait
-//! for the arm to finish. The simulation cannot see this (its disks complete
-//! every operation on the poll that started it), and it is acceptable while
-//! an fsync is short next to the liveness ping (`keep_alive_timeout`): a
-//! stalled persist delays traffic, it reorders or loses nothing, and every
-//! class the lanes carry is lossy by contract. It stops being acceptable
-//! once device latency is modelled or a production disk can stall past the
-//! ping timeout — then the runtime moves to its own task, owned by the
-//! incarnation, and the crash-cleanliness this buys has to be re-earned
-//! (the listener must be released before a restart binds the address).
+//! **Polled through a flush too.** An arm body that awaits the durability
+//! pipeline's storage calls (`drain_ready`) polls the runtime beside them
+//! ([`RpcEdge::alongside`]), so a flush does not stop the network. Without
+//! it, an outbound lane waits for the ack of its previous batch, and the
+//! ack is read only once the flush returns: a leader's `Accept` left only
+//! after its own flush, however early it was queued (#578 (leader sends
+//! Accept before its own fsync), measured at one flush of added latency
+//! per write). The runtime still belongs to the incarnation, so the
+//! crash-cleanliness above holds. Inbound calls that arrive during a flush
+//! wait in their bounded queues until the loop takes them.
 
 use std::sync::Arc;
 
@@ -67,7 +65,10 @@ pub(crate) type Plain<M> =
 /// A driver's inbound edge: the listening runtime and its driving future.
 pub(crate) struct RpcEdge<P: Providers> {
     handle: RpcHandle<P>,
-    run: RuntimeFuture,
+    /// Locked by the one poller at a time: the loop's `select!` arm, or an
+    /// arm body's flush ([`RpcEdge::alongside`]). Never contended: both run
+    /// on the loop, one after the other.
+    run: tokio::sync::Mutex<RuntimeFuture>,
     role: &'static str,
 }
 
@@ -92,7 +93,11 @@ impl<P: Providers> RpcEdge<P> {
             .listen(providers.clone(), local_addr, rpc_config(tunables))
             .await
             .map_err(|e| SimulationError::InvalidState(format!("{role} RPC listener: {e}")))?;
-        Ok(Self { handle, run, role })
+        Ok(Self {
+            handle,
+            run: tokio::sync::Mutex::new(run),
+            role,
+        })
     }
 
     /// The runtime every endpoint of this incarnation registers on, and
@@ -104,9 +109,28 @@ impl<P: Providers> RpcEdge<P> {
     /// Drive the runtime; resolves only if it fails for good, with the
     /// error the loop exits on. Cancel-safe: the runtime's future is kept
     /// across `select!` passes.
-    pub(crate) async fn run(&mut self) -> SimulationError {
-        let error = (&mut self.run).await;
+    pub(crate) async fn run(&self) -> SimulationError {
+        let mut run = self.run.lock().await;
+        let error = (&mut *run).await;
         SimulationError::IoError(format!("{} RPC runtime: {error}", self.role))
+    }
+
+    /// Await `work` while the runtime keeps running: the replies, acks and
+    /// dials of this incarnation make progress during a flush. `Err` is the
+    /// runtime's failure, which the loop exits on; `work` is dropped then.
+    ///
+    /// # Errors
+    ///
+    /// The runtime failed for good before `work` finished.
+    pub(crate) async fn alongside<T>(
+        &self,
+        work: impl Future<Output = T>,
+    ) -> Result<T, SimulationError> {
+        moonpool_core::select! {
+            biased;
+            done = work => Ok(done),
+            error = self.run() => Err(error),
+        }
     }
 }
 

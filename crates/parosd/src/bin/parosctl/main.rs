@@ -471,6 +471,8 @@ fn is_view(command: &Command) -> bool {
             args.command,
             cell::CellAdminCommand::AddMachine { .. }
                 | cell::CellAdminCommand::DrainMachine { .. }
+                | cell::CellAdminCommand::RemoveMachine { .. }
+                | cell::CellAdminCommand::Maintenance { .. }
                 | cell::CellAdminCommand::TagMachine { .. }
                 | cell::CellAdminCommand::Tag { .. }
         ),
@@ -510,6 +512,8 @@ async fn run_view(asker: &views::Asker<'_>, out: &Printer, command: Command) -> 
             }
             cell::CellAdminCommand::AddMachine { .. }
             | cell::CellAdminCommand::DrainMachine { .. }
+            | cell::CellAdminCommand::RemoveMachine { .. }
+            | cell::CellAdminCommand::Maintenance { .. }
             | cell::CellAdminCommand::TagMachine { .. }
             | cell::CellAdminCommand::Tag { .. } => unreachable!("not a view"),
         },
@@ -613,9 +617,10 @@ async fn administer(
     }
 }
 
-/// `parosctl bench --local N` (#194 (throughput benchmark)): start a cell
-/// of N machines in this process, form it, run the bench against it, then
-/// stop it and delete its stores.
+/// `parosctl bench --local N` (#194 (throughput benchmark)): for each
+/// topology, start a fresh cell of N machines in this process, form it, run
+/// the bench against it, then stop it and delete its stores. A fresh cell
+/// per topology keeps one topology's journals out of the next one's numbers.
 async fn bench_local(global: &Global, args: bench::BenchArgs, machines: u64) -> ExitCode {
     let runtime = match runtime(global) {
         Ok(runtime) => runtime,
@@ -625,39 +630,59 @@ async fn bench_local(global: &Global, args: bench::BenchArgs, machines: u64) -> 
         }
     };
     let parent = args.local_dir.clone().unwrap_or_else(std::env::temp_dir);
-    let cell = match bench::local::start(machines, &parent) {
-        Ok(cell) => cell,
+    let patience = Duration::from_millis(args.patience_ms());
+    let plan = match bench::Plan::new(&runtime, args) {
+        Ok(plan) => plan,
         Err(error) => {
             eprintln!("parosctl: {error}");
-            return ExitCode::FAILURE;
+            return ExitCode::from(2);
         }
     };
-    output::note(&format!(
-        "local cell of {machines} machines, stores in {}",
-        cell.dir.display()
-    ));
-    let patience = Duration::from_millis(args.patience_ms());
-    let ending = if let Err(error) = cell.form(&runtime, patience).await {
-        output::note(&error);
-        Ending::Unreachable
-    } else {
-        let servers = bootstrap::discover(
-            &runtime.providers,
-            &runtime.rpc,
-            &runtime.names,
-            &cell.members,
-            global.timeout(),
-        )
-        .await;
-        let client = client(&runtime, &servers, global.timeout());
-        let ids: Vec<u64> = servers.iter().map(|(id, _)| *id).collect();
-        let dir = cell.dir.clone();
-        bench::run(&runtime, &client, &ids, args, (global.json, Some(&dir))).await
-    };
-    if let Err(error) = cell.stop() {
-        output::note(&format!("local cell: {error}"));
+    let mut runs = Vec::new();
+    for topology in plan.topologies() {
+        let cell = match bench::local::start(machines, &parent) {
+            Ok(cell) => cell,
+            Err(error) => {
+                eprintln!("parosctl: {error}");
+                return ExitCode::FAILURE;
+            }
+        };
+        output::note(&format!(
+            "local cell of {machines} machines, stores in {}",
+            cell.dir.display()
+        ));
+        let ran = if let Err(error) = cell.form(&runtime, patience).await {
+            output::note(&error);
+            Err(Ending::Unreachable)
+        } else {
+            match cell.servers(&runtime, global.timeout(), patience).await {
+                Ok(servers) => {
+                    let client = client(&runtime, &servers, global.timeout());
+                    let ids: Vec<u64> = servers.iter().map(|(id, _)| *id).collect();
+                    let dir = cell.dir.clone();
+                    plan.run_one(
+                        &runtime,
+                        (&client, &ids),
+                        topology,
+                        (global.json, Some(&dir)),
+                    )
+                    .await
+                }
+                Err(error) => {
+                    output::note(&error);
+                    Err(Ending::Unreachable)
+                }
+            }
+        };
+        if let Err(error) = cell.stop() {
+            output::note(&format!("local cell: {error}"));
+        }
+        match ran {
+            Ok(run) => runs.push(run),
+            Err(ending) => return ending.into(),
+        }
     }
-    ending.into()
+    bench::finish(&runs, global.json).into()
 }
 
 /// The commands that talk to servers.
@@ -729,7 +754,7 @@ async fn online(global: Global, command: Command) -> ExitCode {
             fleet::run(&runtime.providers, &client, &ids, &labels, &out, args).await
         }
         CellCommand::Bench(args) => {
-            bench::run(&runtime, &client, &ids, args, (cli.global.json, None)).await
+            bench::run(&runtime, &client, &ids, args, cli.global.json).await
         }
         CellCommand::Journal(args) if fronted => {
             journal::tag_through_frontends(&runtime.providers, &client, &out, args).await

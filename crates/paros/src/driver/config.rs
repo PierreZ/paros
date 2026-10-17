@@ -301,6 +301,17 @@ pub struct DriverTunables {
     /// below that every reboot is a `Down` then an `Up`, which is noise,
     /// never a wrong answer.
     pub machine_down_after: Duration,
+    /// How long the cell coordinator hears nothing from a machine it marked
+    /// down before it re-places the machine's roles (#475 (re-place after
+    /// the Down bound), §3.2): each journal and matchmaker set with a slot
+    /// on it moves to another machine, as off a draining one. A machine
+    /// that answers again inside the bound (a reboot: same `node_id`, new
+    /// incarnation) keeps its roles. A machine in a maintenance window is
+    /// never re-placed inside it (#359). Floor: above `machine_down_after`
+    /// (refused at or below it), so a machine is re-placed only once it is
+    /// down. A short bound re-places a machine that only rebooted: a move
+    /// that costs work, never a wrong answer.
+    pub machine_replace_after: Duration,
     /// The most rounds one page of a leader's recovery visits (#330,
     /// `ColocatedNode::set_recovery_page`) before the driver advances the
     /// batch. A per-node size, never on the wire. Floor 1: a one-slot page
@@ -406,6 +417,7 @@ impl Default for DriverTunables {
             election_renew: ELECTION_RENEW,
             election_compact_after: ELECTION_COMPACT_AFTER,
             machine_down_after: MACHINE_DOWN_AFTER,
+            machine_replace_after: MACHINE_REPLACE_AFTER,
             recovery_page: paros_core::LEADER_RECOVERY_BATCH,
             promise_page: paros_core::PROMISE_BATCH,
             resend_page: paros_core::RESEND_BATCH,
@@ -480,6 +492,12 @@ const ELECTION_RENEW: Duration = Duration::from_millis(500);
 const MACHINE_DOWN_AFTER: Duration = Duration::from_millis(1500);
 
 const _: () = assert!(MACHINE_DOWN_AFTER.as_millis() > ELECTION_RENEW.as_millis());
+
+/// Default [`DriverTunables::machine_replace_after`]: two failure-detector
+/// periods past the first.
+const MACHINE_REPLACE_AFTER: Duration = Duration::from_millis(4500);
+
+const _: () = assert!(MACHINE_REPLACE_AFTER.as_millis() > MACHINE_DOWN_AFTER.as_millis());
 
 /// Default [`DriverTunables::load_interval`]: FDB's 5 s.
 const LOAD_INTERVAL: Duration = Duration::from_secs(5);

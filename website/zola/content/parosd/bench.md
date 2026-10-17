@@ -28,15 +28,41 @@ Against a running cell, such as the Compose cell (`DEMO.md` in the repository):
 docker compose run --rm parosctl bench --tenant bench --journals 4 --clients 8 --duration 60s --ramp 10s
 ```
 
-The bench creates the tenant and the journals `bench-0` to `bench-3` if they are missing. It
-names them by their string names. Ctrl-C stops the run and still prints the totals.
+The bench creates the tenant and the journals `bench-3x1-0` to `bench-3x1-3` if they are
+missing. It names them by their string names. Ctrl-C stops the run and still prints the totals.
+
+## Compare topologies
+
+`--topology` sets the shape of the journals the bench writes. A topology is `ROWSxCOLUMNS`:
+`COLUMNS` acceptor partitions of `ROWS` acceptors each. `ROWS` is odd, from 1 to 7. `3x1` is
+the plain majority of three, and it is the default. `3x3` is a grid of nine acceptors: two
+acceptors of one column decide each slot. Give several topologies to compare them:
+
+```sh
+parosctl bench --local 9 --topology 3x1,3x2,3x3 --clients 8 --journals 8 --duration 30s
+```
+
+The bench runs each topology in turn, with the same seed and the same load, on journals of
+its own (`bench-3x3-0`). With `--local`, each topology gets a new cell, so the journals of one
+run do not load the next run. Placement puts each acceptor on a different machine, so `--local`
+must start at least `ROWS × COLUMNS` machines (at most 15). At the end, the bench prints one
+total row for each topology and call. With `--json`, it prints one report for each topology.
+
+A grid writes each slot to one column, so it spreads the syncs over more disks. It also
+sends more messages per write. The grid wins only when each acceptor has its own disk and
+CPU. A local cell shares one host, so there the plain majority is faster.
 
 ## What it does
 
 - Each client does one call at a time. `--mix` gives each call a weight, for example
   `--mix write=80,read-tail=15,set-leader=5`. The default is `write` only.
 - `write` writes `--records-per-call` records of `--record-size` bytes at the tail of the
-  client's own journal. Clients that share a journal share its one writer.
+  client's own journal. Clients that share a journal share its one writer. Each client keeps
+  its write in flight at the same time as the others, at the next position. Thus
+  `--clients 8 --journals 1` keeps eight writes in flight on one journal.
+- A write that arrives at the leader before the write in front of it is refused. The writer
+  waits for the write in front of it, then sends the same write again. The bench counts
+  these writes (`writes_resent` in the JSON report).
 - `read-tail` reads the last records of a random journal and checks every byte.
 - `read-start` reads the next page of a random journal from a cursor that starts at its first
   position, and checks every byte. At the tail, the cursor starts again at the first position.
@@ -74,7 +100,8 @@ One line per second per call, then a total row per call, then the result row (`w
 ends: for each call, the calls and the bytes, per second too, the errors and the latency (mean,
 p50, p90, p99, p99.9 and max, in milliseconds). The report also records what the numbers depend
 on: the commit, the command line, the CPU count, the kernel, and the filesystem of a local
-cell's stores.
+cell's stores. It also records the most writes in flight on one journal
+(`writes_in_flight_per_journal`).
 
 `--histograms FILE` also writes the raw histograms: one JSON line per second per call, with
 `name`, `seed`, `unix_ms`, `elapsed_ms`, `errors`, `bytes` and `histogram` (HdrHistogram's V2 encoding

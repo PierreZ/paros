@@ -288,6 +288,17 @@ impl FleetOps {
                     { "cell" => cell_id }
                 );
             }
+            Step::Refused(FleetRefusal::Retired { node }) => {
+                // A machine an operator removed is retired, and a retired
+                // id never comes back (#359, witness 3450446110933049764
+                // on 0bf2b96).
+                assert_always!(
+                    crate::machine::remove_asked(ctx.state(), node.0),
+                    "admit: only a removed machine is refused as retired",
+                    { "node" => node.0 }
+                );
+                assert_reachable!("admit: a removed machine is refused admission");
+            }
             Step::Refused(refusal) => {
                 assert_always!(
                     false,

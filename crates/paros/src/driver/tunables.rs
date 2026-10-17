@@ -87,6 +87,7 @@ impl DriverTunables {
     /// | `election_lease`, `election_renew` | 3 s, 1 s | a cell coordinator renews three times per lease (#240) |
     /// | `election_compact_after` | 64 | the election journal's log stays a few kilobytes |
     /// | `machine_down_after` | 10 s | a machine silent for ten renewal periods is down; a reboot is shorter (#211) |
+    /// | `machine_replace_after` | 5 min | a machine silent that long is gone: its roles move (#475); a reboot, even a slow one, is shorter |
     /// | `load_interval` | the default (5 s) | FDB's `WORKER_LOGGING_INTERVAL` (#424) |
     /// | `status_hold` | 20 s | two `machine_down_after`: a machine that reboots inside it never changes a word (#191 (status)) |
     /// | `internal_request_timeout` | 2 s | a coordinator's slow call ends before its lease runs out, so it renews in time (#457) |
@@ -123,6 +124,7 @@ impl DriverTunables {
             election_renew: Duration::from_secs(1),
             election_compact_after: 64,
             machine_down_after: Duration::from_secs(10),
+            machine_replace_after: Duration::from_secs(300),
             status_hold: Duration::from_secs(20),
             internal_request_timeout: Duration::from_secs(2),
             ..defaults
@@ -152,7 +154,7 @@ impl DriverTunables {
     }
 
     /// Every checked field: its name, its value and its floor.
-    fn floor_table(&self) -> [(&'static str, u64, u64); 42] {
+    fn floor_table(&self) -> [(&'static str, u64, u64); 43] {
         let ms = |d: Duration| u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
         let count = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
         [
@@ -225,6 +227,12 @@ impl DriverTunables {
                 "machine_down_after",
                 ms(self.machine_down_after),
                 ms(self.election_renew).saturating_add(1),
+            ),
+            // A machine is re-placed only once it is down (#475).
+            (
+                "machine_replace_after",
+                ms(self.machine_replace_after),
+                ms(self.machine_down_after).saturating_add(1),
             ),
             ("recovery_page", count(self.recovery_page), 1),
             ("promise_page", count(self.promise_page), 1),

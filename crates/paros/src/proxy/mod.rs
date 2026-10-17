@@ -341,7 +341,7 @@ where
 
     // The edge serves the `Deliver` lane alone: nothing else a node serves
     // is a proxy leader's, and a call to it is refused `EndpointNotFound`.
-    let mut edge = RpcEdge::listen(&providers, &local_addr, "proxy", &tunables, &transport).await?;
+    let edge = RpcEdge::listen(&providers, &local_addr, "proxy", &tunables, &transport).await?;
     let mut inbox = serve_deliveries(
         &providers,
         edge.handle(),

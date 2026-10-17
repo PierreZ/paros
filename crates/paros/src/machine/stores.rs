@@ -26,7 +26,7 @@ use tokio_util::sync::CancellationToken;
 use super::matchmakers::SetBookings;
 use super::record::MachineRecord;
 use super::{CacheSink, CachedRegistry, ProviderDisk};
-use crate::{Audit, BootKind, DriverTunables, JournalStorage, JournalStores};
+use crate::{Audit, BootKind, DriverTunables, JournalStorage, JournalStores, RunError};
 
 /// Which audit port a machine's facts report to, named by the caller of
 /// [`super::run_machine`] (`parosd` passes `NoAudit` for all three).
@@ -65,6 +65,9 @@ pub(crate) struct MachineStores<S, F> {
     /// first journal on a founding member, the cell control journal on an
     /// admitted machine (#474), which serves no journal at its first start.
     home: JournalIdentifier,
+    /// The storage fault the last provisioning of a created journal took,
+    /// handed to the driver once so it quarantines the journal.
+    open_faults: BTreeMap<JournalIdentifier, RunError>,
 }
 
 impl<S, F> MachineStores<S, F> {
@@ -104,6 +107,7 @@ impl<S, F> MachineStores<S, F> {
             matchmaker: None,
             sets: SetBookings::default(),
             home,
+            open_faults: BTreeMap::new(),
         }
     }
 
@@ -134,6 +138,7 @@ impl<S, F> MachineStores<S, F> {
             matchmaker: None,
             sets: SetBookings::default(),
             home: cell,
+            open_faults: BTreeMap::new(),
         }
     }
 
@@ -195,6 +200,14 @@ impl<S: StorageProvider + Clone + 'static, F> MachineStores<S, F> {
             }
             Err(error) => {
                 tracing::warn!(journal = %journal, %error, "created_journal_unprovisioned");
+                // A storage fault is the disk's, not the journal's: the
+                // driver quarantines the journal and provisions it again at
+                // its re-open (#475 (re-place after the Down bound): a
+                // one-acceptor journal parked for good here had no leader
+                // anywhere, witness 16441966175508397884 on 757fa48).
+                if matches!(error, RunError::Storage(_)) {
+                    self.open_faults.insert(journal, error);
+                }
                 return false;
             }
         }
@@ -251,6 +264,17 @@ where
             "a created journal is recorded before its first boot"
         );
         Some((self.store(journal, config), BootKind::ExistingMember))
+    }
+
+    fn open_fault(&mut self, journal: JournalIdentifier) -> Option<RunError> {
+        let fault = self.open_faults.remove(&journal);
+        assert!(
+            fault
+                .as_ref()
+                .is_none_or(|f| matches!(f, RunError::Storage(_))),
+            "only a storage fault quarantines an unopened journal"
+        );
+        fault
     }
 
     fn audit(&self, journal: JournalIdentifier) -> A {
