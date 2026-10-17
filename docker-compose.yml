@@ -26,7 +26,6 @@ x-parosd: &parosd
   image: paros:local
   build: .
   environment: &env
-    PAROS_STORE_LAYOUT: small
     # /metrics, /healthz and /readyz on each machine (#366 (metrics)), inside the Compose
     # network: http://node1:9100/metrics.
     PAROS_HTTP_LISTEN: 0.0.0.0:9100

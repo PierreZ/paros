@@ -19,7 +19,7 @@ use std::path::PathBuf;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use clap::{Args, Subcommand, ValueEnum};
+use clap::{Args, Subcommand};
 use moonpool_core::TokioStorageProvider;
 use paros::inspect::{
     DiskImage, JournalImage, SetImage, SetStoreImage, StoreImage, inspect, names,
@@ -52,14 +52,6 @@ enum StoreCommand {
 pub struct InspectArgs {
     /// The machine's data directory (`PAROS_DATA_DIR`).
     data_dir: PathBuf,
-    /// The store layout the machine runs with (`PAROS_STORE_LAYOUT`).
-    #[arg(
-        long,
-        env = "PAROS_STORE_LAYOUT",
-        value_enum,
-        default_value = "default"
-    )]
-    layout: Layout,
     /// Print every accepted slot of each journal store, and its records.
     #[arg(long)]
     records: bool,
@@ -68,24 +60,6 @@ pub struct InspectArgs {
     /// directory under the system's temporary directory, removed after.
     #[arg(long)]
     scratch: Option<PathBuf>,
-}
-
-/// The store layouts, as `parosd` names them.
-#[derive(Clone, Copy, Debug, ValueEnum)]
-enum Layout {
-    /// 64 MiB segments.
-    Default,
-    /// Small segments (laptops, tests).
-    Small,
-}
-
-impl Layout {
-    fn config(self) -> JournalStoreConfig {
-        match self {
-            Layout::Default => JournalStoreConfig::default(),
-            Layout::Small => JournalStoreConfig::small(),
-        }
-    }
 }
 
 /// `parosctl store`.
@@ -130,7 +104,9 @@ fn read(args: &InspectArgs) -> Result<DiskImage, String> {
     let image = runtime.block_on(inspect(
         &provider,
         &root,
-        args.layout.config(),
+        // A store keeps the geometry it was created with, whatever this one
+        // says (PierreZ/moonpool#335).
+        JournalStoreConfig::default(),
         &provider,
         &scratch_root,
     ));
