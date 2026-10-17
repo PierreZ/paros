@@ -550,7 +550,24 @@ impl Moves {
             // named retirable. A floor that rose past an earlier one names
             // none, and the released slot stops the journal there all the
             // same (`driver::SystemCtx::place`).
-            if reply.retirable.contains(&slot.node.0) {
+            //
+            // And only a machine that leaves for good, a draining one: a
+            // slow (#361) or gone (#475) machine stays registered and takes
+            // slots again, so its member is released, never retired, as a
+            // mode change's is (`super::modes`). A retired identity booked
+            // again is a member lost for good. Recipe 8829326179751023212
+            // 4788036:12833132764577949844 on a063911: "gc: a leader never
+            // runs a grid configuration naming a retired identity".
+            let draining = cell
+                .registry()
+                .get(slot.node)
+                .is_some_and(|n| n.standing == NodeStanding::Draining);
+            if !draining && reply.retirable.contains(&slot.node.0) {
+                moonpool_assertions::reachable!(
+                    "coordinator: a move releases a member it does not retire"
+                );
+            }
+            if draining && reply.retirable.contains(&slot.node.0) {
                 let index = ids.iter().position(|id| *id == slot.node);
                 retire(nodes, index, journal, reply).await;
             }

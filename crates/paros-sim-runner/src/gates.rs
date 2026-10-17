@@ -70,6 +70,10 @@ pub const RARE: &[Rare] = &[
         reason: "a gone-machine seed with a long window: 8 hits in 1,000 hunt seeds (#498 (moves in the sweep), #475 (re-place after the Down bound))",
     },
     Rare {
+        msg: "coordinator: a move releases a member it does not retire",
+        reason: "a move off a slow or gone machine whose leader's floor names the member retirable: needs the gone- or slow-machine scenario and a finished move (#361 (slow machines), #475)",
+    },
+    Rare {
         msg: "coordinator: a move leaves a mode change's extra slots booked",
         reason: "a mode change booked its new slots, then a machine left before it reconfigured: one CI sweep seed (11932640834736807520 on 72e8955)",
     },
