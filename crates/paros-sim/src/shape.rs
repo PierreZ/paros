@@ -44,6 +44,15 @@ const SHAPE_KEY: &str = "paros-node-shapes";
 /// production's 80 ticks of 100 ms (`DriverTunables::production`).
 const QUARANTINE_CEILING_MS: u64 = 8_000;
 
+/// The longest capped base election timeout a drawn backoff reaches, in
+/// milliseconds: production's `8 × T` (`DriverTunables::production`). A
+/// node waits up to twice it, and one that learns a new matchmaker set
+/// waits a second timeout to ask it: both fit the shortest recovery budget
+/// (45 s, `ChainConfig::recovery_budget_ms`), even at the floor's 9.6 s.
+const BACKOFF_CEILING_MS: u64 = 8_000;
+const _: () = assert!(BACKOFF_CEILING_MS <= (12 * SLOWEST_TICK_MS) << 2);
+const _: () = assert!(4 * ((12 * SLOWEST_TICK_MS) << 2) < 45_000);
+
 /// The wall-clock floor of every driver timeout that races the network: one
 /// Phase-1 round trip over moonpool's default cross-datacenter link plus one
 /// delivery batch, i.e. production's `5 ticks × 50 ms`. See [`NodeShape::draw`]
@@ -457,6 +466,7 @@ impl NodeShape {
                 ms(buggify_knob!(2000_u64, RESOLVE_FLOOR_MS..2001_u64))
             },
         };
+        cap_backoff(&mut drawn, tick_ms);
         // The handover re-send cadence stays under the shortest stall
         // budget, one base election timeout per election (`check_floors`):
         // the freeze closes only on a re-send beat, so a budget that ends on
@@ -854,6 +864,9 @@ struct Registry {
     /// Run-level: whether the run draws the changed-mode scenario (see
     /// [`changed_mode`]), fixed by the first caller.
     changed_mode: Option<bool>,
+    /// Run-level: whether the run draws the second-cell scenario (see
+    /// [`second_cell`]), fixed by the first caller.
+    second_cell: Option<bool>,
     /// Run-level: whether the run draws the slow-link scenario (see
     /// [`slow_link`]), fixed by the first caller.
     slow_link: Option<bool>,
@@ -1382,6 +1395,33 @@ pub(crate) fn changed_mode(state: &StateHandle) -> bool {
     *guard
         .changed_mode
         .get_or_insert_with(|| !drained && moonpool_sim::buggify_with_prob!(1.0))
+}
+
+/// Whether the run draws the **second-cell scenario** (#232 (multiple
+/// cells)): drawn once per seed, its own BUGGIFY location, never with a
+/// scenario that renames or wipes a founder (the other cell is the wiped
+/// one's), nor with a zone outage, whose tenant creations its `TENANT`
+/// steps would take (the sweep at 2e88949 never saw a tenant created with
+/// a zone down). With a scenario that needs three founders, or a drain, it
+/// keeps a machine only on a layout of four.
+/// A second cell needs a `storage` machine `init` does not list, still idle
+/// when an operator forms the cell on it, and `TENANT` steps after that for
+/// its later phases (`crate::chain_workload::fleet::second_cell`). Each
+/// is a coin on its own, and `ADMIT` takes the idle machines first: no
+/// second cell formed in 400 hunt seeds without the scenario. On a
+/// scenario seed the layout leaves the last machine unlisted and `storage`,
+/// `ADMIT` never takes it, client 0 runs `init` first, and every client runs
+/// `TENANT` as often as the weight family allows, at the steps knob's top.
+/// Rare-but-valid: an operator may form and join a cell at any time.
+#[tracing::instrument(level = "debug", skip_all)]
+pub(crate) fn second_cell(state: &StateHandle) -> bool {
+    // Drawn before the lock: the scenarios take the registry's lock too.
+    let other = moved_founder(state) || wiped_founder(state) || zone_outage(state);
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    *guard
+        .second_cell
+        .get_or_insert_with(|| !other && moonpool_sim::buggify_with_prob!(1.0))
 }
 
 /// Whether the run draws the **silent-machine scenario** (#211): drawn once
@@ -1999,6 +2039,10 @@ pub(crate) struct MachineLayout {
     /// renamed, so the lone founder never strands them (#505 (stranded
     /// admitted machine)).
     pub(crate) founders_keep_names: bool,
+    /// On a second-cell seed (#232 (multiple cells)), the last machine is
+    /// kept for the second cell: `init` never lists it and `ADMIT` never
+    /// takes it.
+    pub(crate) reserved: bool,
 }
 
 /// The capacity of one machine: the floor on the full founder, else the
@@ -2038,6 +2082,7 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
     let drained = drained_machine(state);
     let zoned = zone_outage(state);
     let changed = changed_mode(state);
+    let second = second_cell(state);
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     guard
@@ -2061,6 +2106,10 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
             // The zone-outage scenario (#215 (zones)): three founding
             // members, one per zone, so a zone's loss leaves a majority.
             let zoned = zoned && count >= 3;
+            // The second-cell scenario keeps the last machine out of `init`,
+            // for the second cell, when the founders it needs leave one.
+            // A drain needs two admitted machines besides it.
+            let reserve = second && count > if drained { 3 } else { least };
             let founders = if count == 0 {
                 0
             } else if zoned {
@@ -2069,14 +2118,18 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
                 // The drained-machine scenario: one founding member, and
                 // every other machine admitted.
                 1
+            } else if reserve {
+                moonpool_sim::sim_random_range(least..count)
             } else {
                 moonpool_sim::sim_random_range(least..count + 1)
             };
+            // The machines `init` may list: all but the second cell's.
+            let room = if reserve { count - 1 } else { count };
             // `init` lists more machines than found the cell only when the
             // founders are `2F+1`: it forms the cell on the first `2F+1`.
-            let listed = if founders % 2 == 1 && founders < count && !drained {
+            let listed = if founders % 2 == 1 && founders < room && !drained {
                 if moonpool_sim::sim_random_bool(0.5) {
-                    moonpool_sim::sim_random_range(founders + 1..count + 1)
+                    moonpool_sim::sim_random_range(founders + 1..room + 1)
                 } else {
                     founders
                 }
@@ -2106,21 +2159,19 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
             let renamed_drain = drained && moonpool_sim::sim_random_bool(0.5);
             let named = moonpool_sim::sim_random_bool(0.5) || moved || renamed_drain;
             let move_pct = buggify_knob!(0_u32, 20_u32..81_u32);
-            let rename_pct = buggify_knob!(0_u32, 20_u32..61_u32);
-            let rename_pct = if renamed_drain {
-                rename_pct.max(moonpool_sim::sim_random_range(20_u32..61_u32))
-            } else {
-                rename_pct
-            };
+            let rename_pct_knob = buggify_knob!(0_u32, 20_u32..61_u32);
+            let rename_pct = renamed_drain.then(|| moonpool_sim::sim_random_range(20_u32..61_u32));
+            let rename_pct = rename_pct.map_or(rename_pct_knob, |drawn| rename_pct_knob.max(drawn));
             let machines = (0..count)
                 .map(|rank| {
-                    let class =
-                        if rank >= founders && !drained && moonpool_sim::sim_random_bool(0.3) {
-                            assert_reachable!("machine: a machine outside the seeds is stateless");
-                            paros::machine::Class::Stateless
-                        } else {
-                            paros::machine::Class::Storage
-                        };
+                    // The founders, and the second cell's machine, store.
+                    let stores = rank < founders || rank >= room || drained;
+                    let class = if !stores && moonpool_sim::sim_random_bool(0.3) {
+                        assert_reachable!("machine: a machine outside the seeds is stateless");
+                        paros::machine::Class::Stateless
+                    } else {
+                        paros::machine::Class::Storage
+                    };
                     MachineDraw {
                         class,
                         capacity: founder_capacity(full_founder && rank == 0, floor, capacity),
@@ -2159,6 +2210,7 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
                 move_pct,
                 rename_pct,
                 founders_keep_names: renamed_drain,
+                reserved: reserve,
             }
         })
         .clone()
@@ -2667,6 +2719,30 @@ const _: () = assert!(
     INTERNAL_CALL_FLOOR_MS < 2000,
     "the floor sits under production's"
 );
+
+/// The election backoff's ceiling is wall-clock too: a capped base
+/// election timeout (`base << doublings` ticks) stays within
+/// `BACKOFF_CEILING_MS`, production's 8 s, unless the floor of two
+/// doublings alone passes it (12 ticks of 200 ms: 9.6 s). At a slow
+/// tick, six doublings held two leaderless nodes for 27 to 77 s
+/// each, and a node that learned a new matchmaker set waited one
+/// more capped timeout to ask it, past the recovery budget (witness:
+/// seed 12451707706557626383, #232 (multiple cells)'s sweep).
+fn cap_backoff(drawn: &mut DriverTunables, tick_ms: u64) {
+    let base_ms = drawn.election_timeout_base * tick_ms;
+    let capped = |doublings: u32| base_ms << doublings;
+    while drawn.election_backoff_doublings > 2
+        && capped(drawn.election_backoff_doublings) > BACKOFF_CEILING_MS
+    {
+        drawn.election_backoff_doublings -= 1;
+    }
+    assert_always!(
+        drawn.election_backoff_doublings == 2
+            || capped(drawn.election_backoff_doublings) <= BACKOFF_CEILING_MS,
+        "node: a capped election backoff fits the recovery tail",
+        { "capped_ms" => capped(drawn.election_backoff_doublings) }
+    );
+}
 
 #[cfg(test)]
 mod tests {

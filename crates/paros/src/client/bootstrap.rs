@@ -81,7 +81,8 @@ const INIT_RETRY: Duration = Duration::from_millis(500);
 /// the machine runs both phases of the decree before it answers. Re-sending
 /// is safe: a plan any listed machine accepted is finished, never redrawn.
 /// `token` is the caller's `admin` token, which a machine with a pinned root
-/// key checks (#245 (Biscuit tokens)).
+/// key checks (#245 (Biscuit tokens)). `idle` forms an idle cell, with no
+/// universe tenant (#232 (multiple cells)).
 #[allow(clippy::too_many_arguments)]
 pub async fn cell_init<P: Providers>(
     providers: &P,
@@ -89,7 +90,7 @@ pub async fn cell_init<P: Providers>(
     names: &Names,
     target: &Address,
     members: &[Address],
-    token: &[u8],
+    (token, idle): (&[u8], bool),
     patience: Duration,
 ) -> InitOutcome {
     let time = providers.time();
@@ -97,6 +98,7 @@ pub async fn cell_init<P: Providers>(
     let request = wire::CellInit {
         members: members.iter().map(Address::to_string).collect(),
         token: token.to_vec(),
+        idle,
     };
     loop {
         let remaining = deadline.saturating_sub(time.now());

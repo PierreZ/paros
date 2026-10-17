@@ -32,7 +32,13 @@ impl FleetOps {
             self.connector.names(),
             &target,
             std::slice::from_ref(&target),
-            &crate::frontend::operator_token(ctx.state(), self.connector.providers().time().now()),
+            (
+                &crate::frontend::operator_token(
+                    ctx.state(),
+                    self.connector.providers().time().now(),
+                ),
+                false,
+            ),
             self.patience,
         )
         .await;

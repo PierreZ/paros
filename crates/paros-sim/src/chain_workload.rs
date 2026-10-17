@@ -637,6 +637,13 @@ impl ChainWorkload {
             }
             config.steps = config.steps.max(64);
         }
+        if crate::shape::second_cell(ctx.state()) {
+            // The second-cell scenario (#232 (multiple cells)): its phases
+            // run in `TENANT` steps, so every client runs it as often as the
+            // weight family allows, at the steps knob's top.
+            config.weights[usize::from(TENANT)] = OP_WEIGHT_CEILING;
+            config.steps = config.steps.max(64);
+        }
         if crate::shape::downed_founder(ctx.state()) {
             // The downed-founder scenario (#213 (three founding members)):
             // its gates wait on a tenant step while a founder is down, so
@@ -790,8 +797,10 @@ impl ChainWorkload {
             }
         }
         // Likewise `TENANT` on a downed-founder seed (#213 (three founding
-        // members)).
-        if crate::shape::downed_founder(ctx.state()) && !operations.contains(&TENANT) {
+        // members)) and a second-cell seed (#232 (multiple cells)).
+        if (crate::shape::downed_founder(ctx.state()) || crate::shape::second_cell(ctx.state()))
+            && !operations.contains(&TENANT)
+        {
             operations.push(TENANT);
         }
         // Likewise `READ` on a lagging-replica seed (#550 (replica serves an
@@ -827,9 +836,9 @@ impl ChainWorkload {
         let mut reconfigure_next = false;
         // The wiped-founder (#246), replaced-founder (#423), slow-machine
         // (#424), downed-founder (#213 (three founding members)),
-        // drained-machine (#474) and changed-mode (#214 (tenant modes))
-        // scenarios: client 0 runs `init` first, so the cell decree runs
-        // inside the chaos window.
+        // drained-machine (#474), changed-mode (#214 (tenant modes)) and
+        // second-cell (#232 (multiple cells)) scenarios: client 0 runs
+        // `init` first, so the cell decree runs inside the chaos window.
         let mut init_first = self.client_id == 0
             && (crate::shape::wiped_founder(ctx.state())
                 || crate::shape::replaced_founder(ctx.state())
@@ -837,7 +846,8 @@ impl ChainWorkload {
                 || crate::shape::downed_founder(ctx.state())
                 || crate::shape::drained_machine(ctx.state())
                 || crate::shape::changed_mode(ctx.state())
-                || crate::shape::zone_outage(ctx.state()));
+                || crate::shape::zone_outage(ctx.state())
+                || crate::shape::second_cell(ctx.state()));
         let mut successful_after_ambiguity = false;
         // The library's decisions as outcomes (#221): a write redirected
         // and written at the leader, an ambiguous write the session settled,
