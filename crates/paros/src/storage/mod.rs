@@ -204,6 +204,41 @@ impl fmt::Display for StorageError {
 
 impl std::error::Error for StorageError {}
 
+/// What a scrub (#362 (background scrubbing)) read back of one slot's
+/// durable record.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScrubbedSlot {
+    /// The record passed its checksum and is the one the store holds: its
+    /// ballot and the [`paros_core::command_fingerprint`] of its value, which
+    /// a scrubber compares across acceptors.
+    Intact {
+        /// The ballot the record was accepted under.
+        ballot: Ballot,
+        /// The fingerprint of the value.
+        digest: u64,
+    },
+    /// The record failed its checksum, or holds another record than the
+    /// store's own: CTRL's faulty class, found by a read no protocol path
+    /// asked for. The store writes it again at the next append of the slot,
+    /// even when the record is one it holds.
+    Damaged {
+        /// The ballot the store holds for the slot.
+        ballot: Ballot,
+    },
+}
+
+/// One page of a scrub: the slots read back from `from` up, in slot order,
+/// and where the next page starts.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ScrubPage {
+    /// Each slot read, by slot.
+    pub slots: std::collections::BTreeMap<Slot, ScrubbedSlot>,
+    /// The bytes the page read from the device (the payloads).
+    pub bytes: u64,
+    /// The first slot after the page, when the store holds records there.
+    pub next: Option<Slot>,
+}
+
 /// The write side of node storage: **semantic per-record ops**, not a whole-blob
 /// rewrite.
 ///
@@ -398,6 +433,67 @@ pub trait LogStorage: Storage {
         point: Slot,
         state: JournalState,
     ) -> impl Future<Output = Result<(), StorageError>> + Send;
+
+    /// Read the durable records from `from` up back from the device and
+    /// check each one (#362 (background scrubbing)): at most `limit`
+    /// records and about `max_bytes` of payload (at least one record), each
+    /// a slot this store holds at or above its floor and not staged for the
+    /// next sync. A record that fails its checksum, or is not the record the
+    /// store holds, is [`ScrubbedSlot::Damaged`]: the store forgets that its
+    /// copy is whole, so the next append of the slot writes it again.
+    ///
+    /// The default reads the store's own records: an in-memory store holds
+    /// nothing a device could damage.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] if the device read fails.
+    fn scrub(
+        &mut self,
+        from: Slot,
+        limit: usize,
+        max_bytes: u64,
+    ) -> impl Future<Output = Result<ScrubPage, StorageError>> + Send {
+        let start = from.max(self.first_slot());
+        let last = self.last_slot();
+        let mut page = ScrubPage::default();
+        let mut slot = start;
+        while slot <= last {
+            if page.slots.len() >= limit.max(1)
+                || (page.bytes >= max_bytes && !page.slots.is_empty())
+            {
+                page.next = Some(slot);
+                break;
+            }
+            if let Some((ballot, command)) = self.accepted(slot) {
+                page.bytes += command_bytes(&command);
+                page.slots.insert(
+                    slot,
+                    ScrubbedSlot::Intact {
+                        ballot,
+                        digest: paros_core::command_fingerprint(&command),
+                    },
+                );
+            }
+            slot = Slot(slot.0 + 1);
+        }
+        async move { Ok(page) }
+    }
+}
+
+/// The payload bytes a command holds: its records' lengths, at least one
+/// byte for a control command. What a scrub counts against its byte budget.
+#[must_use]
+pub fn command_bytes(command: &Command) -> u64 {
+    match command {
+        Command::Write(entry) => entry
+            .records
+            .iter()
+            .map(|r| r.0.len() as u64)
+            .sum::<u64>()
+            .max(1),
+        Command::Control(_) => 1,
+    }
 }
 
 mod contract;

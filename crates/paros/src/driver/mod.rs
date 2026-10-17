@@ -58,6 +58,7 @@ pub(crate) mod operator;
 pub(crate) mod ready;
 pub(crate) mod reply;
 mod report;
+pub(crate) mod scrub;
 mod system;
 pub(crate) mod transport;
 mod tunables;
@@ -2597,6 +2598,45 @@ where
                 // re-asks; a started reconfiguration stands (a retry is refused
                 // as `not_leader` while it runs, then `unchanged` once done).
                 shared.with(&node_audit).answer(Reply::Reconfigure, reply, ack);
+            }
+            Some((req, reply)) = rpc.scrub.recv() => {
+                // A scrub page (#362 (background scrubbing)): read back and
+                // checked here; a damaged record goes to the core, and the
+                // settle tail makes its rewrite durable before the answer
+                // leaves. No journal has a default: an unset one, or one not
+                // live here, is refused.
+                let asked = JournalIdentifier::new(TenantId(req.tenant), paros_core::JournalId(req.journal));
+                let Some((&journal, rt)) = journals.named(asked) else {
+                    let _ = reply.send(scrub::refused("unknown_journal"));
+                    continue;
+                };
+                // The store comes back from a flying batch first (#613
+                // (settle off the node loop)): the read-back needs it.
+                if let Err(fault) = shared.land(rt).await {
+                    let _ = reply.send(scrub::refused("storage_fault"));
+                    journals.fold(journal, Err(fault), ticks, self_id)?;
+                    continue;
+                }
+                let Some(storage) = rt.storage.as_mut() else {
+                    unreachable!("a landed journal holds its store");
+                };
+                let mut served = scrub::serve(&mut rt.node, storage, &req).await;
+                if served.repairs > 0 {
+                    // The answer waits for the rewrite's flush: a slot is
+                    // reported repaired only once it is durable.
+                    shared.settle(rt).await;
+                    let outcome = shared.land(rt).await;
+                    if outcome.is_err() {
+                        // The rewrite did not land: the store's next
+                        // append of the slot writes it again.
+                        for slot in &mut served.reply.slots {
+                            slot.repaired = false;
+                        }
+                    }
+                    journals.fold(journal, outcome, ticks, self_id)?;
+                }
+                metrics.scrubbed(journal, &served.reply);
+                let _ = reply.send(served.reply);
             }
             Some((req, reply)) = rpc.inspect.recv() => {
                 // No settle tail: an inspect is a pure read of the core, so it

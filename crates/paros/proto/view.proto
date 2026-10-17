@@ -146,6 +146,27 @@ message TenantView {
   // Its tags (#575): its reserved tags (`paros/kind`, `paros/role`,
   // `paros/movable`), then its user tags.
   repeated .paros.common.v1.Tag tags = 9;
+  // The tenant scrubber's progress (#362 (background scrubbing)), as its
+  // control journal records it; unset before its first record.
+  ScrubView scrub = 10;
+}
+
+// Where the tenant scrubber stands (#362): the pass, whether it read every
+// live journal, whether it outlived its full-pass bound, the journal and
+// slot it reads next, this pass's counts and the counts over every pass.
+message ScrubView {
+  uint64 pass = 1;
+  bool done = 2;
+  bool late = 3;
+  uint64 journal = 4;
+  uint64 next_slot = 5;
+  uint64 checked = 6;
+  uint64 damaged = 7;
+  uint64 repaired = 8;
+  uint64 mismatched = 9;
+  uint64 damaged_total = 10;
+  uint64 repaired_total = 11;
+  uint64 mismatched_total = 12;
 }
 
 message JournalView {

@@ -886,6 +886,46 @@ impl ColocatedNode {
         self.acceptor.first_slot()
     }
 
+    /// A scrub found this node's durable copy of `slot` damaged (#362
+    /// (background scrubbing)): its store's record failed its checksum on a
+    /// read that no protocol path asked for. The acceptor writes the record
+    /// it holds again ([`crate::acceptor::Acceptor::rewrite`]), so the next
+    /// sync replaces the damaged copy and a later boot finds it whole. The
+    /// write rides the next [`ColocatedNode::ready`] batch, like every
+    /// durable change.
+    ///
+    /// Returns the ballot rewritten, or `None` when the node holds no
+    /// readable record at `slot` (nothing to repair from here: a slot the
+    /// boot already reported faulty heals by CTRL's catch-up or election).
+    ///
+    /// # Panics
+    ///
+    /// If an internal invariant is broken (a programmer error, never an
+    /// operating condition).
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, slot = slot.0)))]
+    pub fn repair_record(&mut self, slot: Slot) -> Option<Ballot> {
+        let marks = self.durable_marks();
+        let writes_before = self.pending_writes.len();
+        let chosen = self.replica.chosen_index();
+        let rewritten = self.acceptor.rewrite(slot, &mut self.pending_writes);
+        probe!(
+            sometimes,
+            rewritten.is_some(),
+            "scrub: a damaged record is written again from the node's own copy"
+        );
+        assert!(
+            self.pending_writes.len() == writes_before + usize::from(rewritten.is_some()),
+            "a repair writes the record once, or nothing"
+        );
+        assert!(
+            self.replica.chosen_index() == chosen,
+            "a repair never moves the chosen prefix"
+        );
+        self.assert_marks_monotone(marks);
+        self.assert_invariants();
+        rewritten
+    }
+
     /// Advance logical time by one tick: a leader beats and a non-leader
     /// checks on its leader when the heartbeat / election counters cross their
     /// thresholds.

@@ -560,6 +560,40 @@ the slot in one of three cases:
 `docs/analysis/storage/ctrl-multipaxos-restatement.md`. Play it:
 [`act4/faulty-records`](../../play/#act4/faulty-records).
 
+## Background scrubbing
+
+A boot scan finds a damaged record only when the node starts. A disk can rot a
+record that no client reads for months. If a second copy of that slot rots too,
+the value is lost while every node runs. So each tenant runs a **scrubber**. It
+reads every record of every journal of the tenant again, one pass after the other.
+
+The scrubber is one process per tenant, the elected tenant coordinator. It does
+not do a quorum read. It asks **each** acceptor for its own copy of a page of
+slots. Each acceptor reads the page from its disk and checks each checksum. It
+returns the ballot and a hash of each record, never the bytes. The scrubber then
+compares the copies:
+
+- A record that fails its checksum is damaged. The acceptor still holds the value
+  in memory, so it writes the record again from that copy before it answers. This
+  is the CTRL repair of the section above: the slot goes to the protocol, and no
+  other path rewrites it. If the node restarts first, its boot scan reports the
+  slot faulty, and the other acceptors repair it.
+- Two copies of one slot under one ballot with different hashes are a mismatch.
+  Paxos accepts one value per slot per ballot, so a mismatch is a bug, never rot.
+  The simulation fails a run that finds one.
+
+The scrubber writes its progress as an entry in the tenant's control journal.
+A newly elected scrubber reads that entry and continues the pass from there.
+A rate limit and a full-pass bound pace the reads, each with a floor.
+
+**In the code.** `LogStorage::scrub` (`storage/mod.rs`) reads and checks one
+page; `ColocatedNode::repair_record` (`node.rs`) and `Acceptor::rewrite`
+(`acceptor.rs`) write a damaged record again; `machine/scrub.rs` is the scrubber;
+`ScrubProgress` (`tenant/scrub.rs`) is its progress entry. In the simulation, a
+cold-rot scenario (`paros-sim`'s `world/cold_rot.rs`) damages a record on one disk
+while its machine runs, and a gate requires that the scrubber repairs a record no
+client read.
+
 ## The wiped node
 
 A crash costs a node everything it held in memory and nothing it wrote down. That

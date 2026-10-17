@@ -10,6 +10,7 @@
 //! injector's ([`injector`]) and the power cuts' budget ([`cut`]).
 
 pub(crate) mod bare_outage;
+pub(crate) mod cold_rot;
 pub(crate) mod cut;
 pub(crate) mod downed_founder;
 pub(crate) mod gone_machine;

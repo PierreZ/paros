@@ -27,6 +27,7 @@ message TenantEntry {
     SetJournalTags set_journal_tags = 7;
     Configure configure = 5;
     Placed placed = 6;
+    Scrubbed scrubbed = 8;
   }
 }
 
@@ -124,6 +125,36 @@ message Placed {
   paros.common.v1.AcceptorConfig config = 2;
 }
 
+// The tenant scrubber's progress (#362 (background scrubbing), §5): the
+// elected tenant coordinator reads every live journal's records on each
+// acceptor, in journal id order, and flushes where it stands here so a
+// later term resumes from it. Not a request: it records no outcome. A
+// record behind the one held (by `pass`, then `done`, then `journal`, then
+// `next_slot`) changes nothing.
+message Scrubbed {
+  // The pass, from 1.
+  uint64 pass = 1;
+  // The pass read every live journal.
+  bool done = 2;
+  // The journal the pass reads now, and its next slot (0: before the first
+  // journal, or the pass is done).
+  uint64 journal = 3;
+  uint64 next_slot = 4;
+  // This pass's counts: records read on every acceptor, records found
+  // damaged, damaged records the acceptors wrote again, and slots where two
+  // acceptors hold different values under the chosen prefix.
+  uint64 checked = 5;
+  uint64 damaged = 6;
+  uint64 repaired = 7;
+  uint64 mismatched = 8;
+  // Counts over every pass.
+  uint64 damaged_total = 9;
+  uint64 repaired_total = 10;
+  uint64 mismatched_total = 11;
+  // The pass outlived the full-pass bound (`scrub_pass_within`).
+  bool late = 12;
+}
+
 // The checkpoint state (#230): the description, every journal ever created
 // (tombstones included) and every request's outcome, each in id order so
 // equal states encode to equal bytes.
@@ -133,6 +164,8 @@ message TenantState {
   repeated OutcomeState outcomes = 3;
   // The default desired mode, once a `Configure` changed it (#214).
   Desired default_desired = 4;
+  // The scrubber's progress, once it recorded some (#362).
+  Scrubbed scrub = 5;
 }
 
 message JournalState {

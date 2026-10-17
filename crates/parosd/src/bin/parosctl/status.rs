@@ -266,12 +266,13 @@ async fn tenant_status(asker: &Asker<'_>, out: &Printer, name: &str) -> Ending {
     out.emit(
         || {
             format!(
-                "tenant:       {} ({})\ncell:         {}\nsurvives:     {}\njournals:     {}\n{}\nmachines:\n{}\n{}",
+                "tenant:       {} ({})\ncell:         {}\nsurvives:     {}\njournals:     {}\nscrub:        {}\n{}\nmachines:\n{}\n{}",
                 text(&tenant.name),
                 tenant.state,
                 text(&reply.cell_name),
                 if tenant.survives.is_empty() { "-" } else { &tenant.survives },
                 words_text(&summary),
+                scrub_text(tenant.scrub.as_ref()),
                 indent(&table(JOURNAL_HEADERS, &rows)),
                 indent(&table(["MACHINE", "DOMAIN", "STATE", "ACCEPTOR SLOTS"], &machine_rows)),
                 usage.text(tenant),
@@ -285,6 +286,34 @@ async fn tenant_status(asker: &Asker<'_>, out: &Printer, name: &str) -> Ending {
         },
     );
     Ending::Success
+}
+
+/// The tenant scrubber's progress (#362 (background scrubbing)): the pass,
+/// where it stands, this pass's findings and the findings over every pass.
+fn scrub_text(scrub: Option<&wire::ScrubView>) -> String {
+    let Some(scrub) = scrub else {
+        return "no pass yet".to_string();
+    };
+    let at = if scrub.done {
+        "done".to_string()
+    } else if scrub.journal == 0 {
+        "starting".to_string()
+    } else {
+        format!("at journal {:x} slot {}", scrub.journal, scrub.next_slot)
+    };
+    let late = if scrub.late { ", late" } else { "" };
+    format!(
+        "pass {} {at}{late}: {} records checked, {} damaged, {} repaired, {} mismatched; \
+         {} damaged, {} repaired, {} mismatched in all",
+        scrub.pass,
+        scrub.checked,
+        scrub.damaged,
+        scrub.repaired,
+        scrub.mismatched,
+        scrub.damaged_total,
+        scrub.repaired_total,
+        scrub.mismatched_total,
+    )
 }
 
 /// A tenant's usage (#366 (metrics)): what the machines that answered

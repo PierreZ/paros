@@ -10,7 +10,7 @@ use paros_core::{
 
 use super::{InspectReply, Reconfigure, common, internal};
 
-pub(super) fn ballot_to_proto(ballot: Ballot) -> common::Ballot {
+pub(crate) fn ballot_to_proto(ballot: Ballot) -> common::Ballot {
     common::Ballot {
         round: ballot.round,
         node: ballot.node.0,

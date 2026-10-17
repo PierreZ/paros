@@ -47,7 +47,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use moonpool_sim::{
     Process, ScriptedResolver, SimContext, SimTimeProvider, SimulationError, SimulationResult,
-    StateHandle, assert_always, assert_reachable, assert_sometimes,
+    StateHandle, TaskProvider, assert_always, assert_reachable, assert_sometimes,
 };
 use paros::machine::{
     AuditScope, CachedRegistry, CellPlan, ControlJournals, MachineAddresses, MachineError,
@@ -1420,6 +1420,22 @@ async fn run_machine_role(
     let addresses =
         MachineAddresses::new(listen, Some(advertise)).map_err(SimulationError::InvalidState)?;
     let names = machine_names(ctx.state());
+    if crate::shape::cold_rot(ctx.state()) {
+        // The cold-rot scenario (#362 (background scrubbing)): the disk
+        // rots a cold record at rest beside the running machine.
+        ctx.task()
+            .spawn_task(
+                "paros-cold-rot",
+                crate::world::cold_rot::run(
+                    ctx.storage().clone(),
+                    ctx.time().clone(),
+                    ctx.state().clone(),
+                    (ROOT, store_layout, rank),
+                    ctx.shutdown().clone(),
+                ),
+            )
+            .detach();
+    }
     loop {
         let ran = Box::pin(paros::machine::run_machine(
             ctx.providers().clone(),

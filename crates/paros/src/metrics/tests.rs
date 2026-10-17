@@ -137,7 +137,7 @@ fn families_list_every_family_before_its_first_series() {
     let slot = named("paros_applied_slot").expect("listed");
     assert_eq!(slot.kind, super::FamilyKind::Gauge);
     let gathered = metrics.registry().expect("on").gather().len();
-    assert_eq!(families.len(), 15);
+    assert_eq!(families.len(), 19);
     assert!(
         gathered < families.len(),
         "a family with no series is not gathered"

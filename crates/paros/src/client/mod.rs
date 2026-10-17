@@ -1437,6 +1437,21 @@ impl<P: Providers> Client<P> {
             .filter(|reply| reply.refusal.is_empty())
     }
 
+    /// One bounded scrub page of `request`'s journal at server `target`
+    /// (#362 (background scrubbing)); `None` without an answer or on a
+    /// refusal.
+    pub async fn scrub(
+        &self,
+        target: usize,
+        request: crate::rpc::ScrubRequest,
+    ) -> Option<crate::rpc::ScrubReply> {
+        let node = self.node(target).clone();
+        let probe = async move { node.scrub(&request).await.ok() };
+        self.bounded(self.tunables.request_timeout, None, probe)
+            .await
+            .filter(|reply| reply.refusal.is_empty())
+    }
+
     /// One bounded `Retire` of server `target`, carrying the GC watermark
     /// the operator read from a leader's `Inspect` (the RPC's evidence).
     pub async fn retire(&self, target: usize, request: RetireRequest) -> RetireOutcome {

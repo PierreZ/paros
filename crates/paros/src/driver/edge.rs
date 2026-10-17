@@ -38,8 +38,8 @@ use crate::audit::Audit;
 use crate::rpc::Addressed;
 use crate::rpc::methods::{
     GarbageCollectRpc, InspectRpc, MachineInterface, MatchmakeRpc, MatchmakerReconfigureRpc,
-    ReadRpc, ReconfigureMatchmakersRpc, ReconfigureRpc, RetireRpc, SetLeaderRpc, TruncateRpc,
-    WriteRpc,
+    ReadRpc, ReconfigureMatchmakersRpc, ReconfigureRpc, RetireRpc, ScrubRpc, SetLeaderRpc,
+    TruncateRpc, WriteRpc,
 };
 use crate::rpc::{
     Inbound, OnReject, garbage_collect_from_wire, match_request_from_wire,
@@ -146,6 +146,7 @@ pub(crate) struct NodeInbox {
     pub(crate) reconfigure_matchmakers: Plain<ReconfigureMatchmakersRpc>,
     pub(crate) inspect: Plain<InspectRpc>,
     pub(crate) retire: Plain<RetireRpc>,
+    pub(crate) scrub: Plain<ScrubRpc>,
     pub(crate) deliver: mpsc::Receiver<(JournalIdentifier, Message)>,
 }
 
@@ -182,6 +183,7 @@ impl NodeInbox {
             reconfigure_matchmakers: Inbound::plain(serve_well_known(rpc)?).in_group(machine)?,
             inspect: Inbound::plain(serve_well_known(rpc)?),
             retire: Inbound::plain(serve_well_known(rpc)?),
+            scrub: Inbound::plain(serve_well_known(rpc)?),
             deliver: serve_deliveries(
                 providers,
                 rpc,

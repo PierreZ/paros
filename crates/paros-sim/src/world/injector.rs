@@ -1072,7 +1072,7 @@ pub(crate) async fn apply(provider: &SimStorageProvider, injection: &Injection) 
 }
 
 /// Flip the bytes of one region (see [`apply`]).
-async fn flip(provider: &SimStorageProvider, region: &LayoutRegion) -> bool {
+pub(crate) async fn flip(provider: &SimStorageProvider, region: &LayoutRegion) -> bool {
     let len = region.bytes.end.saturating_sub(region.bytes.start);
     if len < FLIPPED_AT + FLIPPED {
         return false;
