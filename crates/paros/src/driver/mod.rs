@@ -2032,6 +2032,20 @@ where
                 report_match_step(&rt.audit, self_id, matchmaker, ballot, folded, &step);
                 let handover = handovers.entry(tenant).or_insert_with(|| HandoverDriver::new(NodeId(self_id), registry_page));
                 shared.with(&audits).on_match_refusal(&rt.node, handover, matchmaker, &step);
+                // A campaign a chosen successor set superseded asks that set
+                // at once, not one election timeout later: its candidate
+                // already adopted the set, and the old one never answers it
+                // again. Without it, a journal waits an election timeout for
+                // every generation a handover chains (witness
+                // 137495999355562437 on PR #626 (Accepts before own sync): a
+                // one-member journal on a draining machine waited three
+                // ~10 s timeouts after chaos, and its move missed the settle).
+                if matches!(step, MatchStep::Superseded { .. }) {
+                    moonpool_assertions::reachable!(
+                        "matchmaking: a superseded campaign asks the new set at once"
+                    );
+                    rt.node.campaign_above(ballot);
+                }
                 let outcome = shared.settle(rt).await;
                 journals.fold(journal, outcome, ticks, self_id)?;
             }
