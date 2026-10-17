@@ -26,6 +26,7 @@ use tokio_util::sync::CancellationToken;
 use super::matchmakers::SetBookings;
 use super::record::MachineRecord;
 use super::{CacheSink, CachedRegistry, ProviderDisk};
+use crate::journal::Spares;
 use crate::{Audit, BootKind, DriverTunables, JournalStorage, JournalStores, RunError};
 
 /// Which audit port a machine's facts report to, named by the caller of
@@ -43,7 +44,7 @@ pub enum AuditScope {
 }
 
 /// A formed machine's stores.
-pub(crate) struct MachineStores<S, F> {
+pub(crate) struct MachineStores<S: StorageProvider, F> {
     disk: ProviderDisk<S>,
     node: NodeId,
     genesis: BTreeMap<JournalIdentifier, Config>,
@@ -68,9 +69,12 @@ pub(crate) struct MachineStores<S, F> {
     /// The storage fault the last provisioning of a created journal took,
     /// handed to the driver once so it quarantines the journal.
     open_faults: BTreeMap<JournalIdentifier, RunError>,
+    /// Where each served journal prepares its spare segments (#600
+    /// (journal commit stalls)): the machine's own task provider.
+    spares: Option<Spares<S>>,
 }
 
-impl<S, F> MachineStores<S, F> {
+impl<S: StorageProvider, F> MachineStores<S, F> {
     /// The stores of member `node` serving `genesis` on `disk`.
     ///
     /// # Panics
@@ -108,6 +112,7 @@ impl<S, F> MachineStores<S, F> {
             sets: SetBookings::default(),
             home,
             open_faults: BTreeMap::new(),
+            spares: None,
         }
     }
 
@@ -139,6 +144,7 @@ impl<S, F> MachineStores<S, F> {
             sets: SetBookings::default(),
             home: cell,
             open_faults: BTreeMap::new(),
+            spares: None,
         }
     }
 
@@ -153,6 +159,16 @@ impl<S, F> MachineStores<S, F> {
             "a machine's matchmaker is named by its node id"
         );
         self.matchmaker = Some(config);
+        self
+    }
+
+    /// These stores, each journal they serve preparing its spare segments
+    /// on `spares` (#600 (journal commit stalls)). A store provisioned
+    /// here prepares none: it is dropped once formatted.
+    #[must_use]
+    pub(crate) fn with_spares(mut self, spares: Spares<S>) -> Self {
+        assert!(self.spares.is_none(), "a machine prepares spares one way");
+        self.spares = Some(spares);
         self
     }
 
@@ -174,6 +190,16 @@ impl<S: StorageProvider + Clone + 'static, F> MachineStores<S, F> {
             config,
             self.disk.layout(),
         )
+    }
+
+    /// The store `journal` serves on: [`Self::store`], preparing its spare
+    /// segments when the machine does.
+    fn serving(&self, journal: JournalIdentifier, config: Config) -> JournalStorage<S> {
+        let store = self.store(journal, config);
+        match &self.spares {
+            Some(spares) => store.with_spares(spares.clone()),
+            None => store,
+        }
     }
 
     /// Provision created journal `journal` under `config`: format its store
@@ -251,7 +277,7 @@ where
     async fn open(&mut self, journal: JournalIdentifier) -> Option<(Self::Store, BootKind)> {
         if let Some(config) = self.genesis.get(&journal).cloned() {
             assert!(config.id == self.node, "a store is opened as its machine");
-            return Some((self.store(journal, config), BootKind::ExistingMember));
+            return Some((self.serving(journal, config), BootKind::ExistingMember));
         }
         let config = self.created.get(&journal)?.clone();
         assert!(config.id == self.node, "a store is opened as its machine");
@@ -263,7 +289,7 @@ where
             self.record.created.contains(&journal),
             "a created journal is recorded before its first boot"
         );
-        Some((self.store(journal, config), BootKind::ExistingMember))
+        Some((self.serving(journal, config), BootKind::ExistingMember))
     }
 
     fn open_fault(&mut self, journal: JournalIdentifier) -> Option<RunError> {

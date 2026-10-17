@@ -1,5 +1,6 @@
-use super::{Ballot, ColocatedNode, Message, NodeId, NodeRole, Slot};
+use super::{Ballot, ColocatedNode, Message, NodeId, NodeRole, PULL_FALLBACK_BEATS, Slot};
 use crate::membership::AcceptorConfig;
+use crate::message::Audience;
 
 /// The leader's heartbeat cadence, in ticks: a leader beats on **every**
 /// tick ([`ColocatedNode::tick`] broadcasts unconditionally), so this is
@@ -129,7 +130,7 @@ impl ColocatedNode {
             // reached us — the leader only re-sends `Accept`s for still-*pending*
             // slots, so that hole would be permanent. Pull the decided range from
             // our first unchosen slot.
-            self.send(from, self.catch_up_request(self.first_unchosen()));
+            self.pull_gap(from, ci);
         } else if commit < ci {
             probe!(
                 reachable,
@@ -150,6 +151,55 @@ impl ColocatedNode {
             // branch for a replay we can serve normally).
             self.serve_catchup(from, commit.map_or(Slot(0), |c| Slot(c.0 + 1)));
         }
+        if commit <= ci {
+            // No gap: the next pull starts fresh.
+            self.pull_beats = 0;
+        }
+        assert!(
+            commit > ci || self.pull_beats == 0,
+            "a beat with no gap leaves no pull counting"
+        );
+    }
+
+    /// Pull the decided-prefix gap above `ci` that a beat from `from`
+    /// revealed. The beat's sender serves it, unless the pulls at this chosen
+    /// index outlast one election timeout (at least `PULL_FALLBACK_BEATS`):
+    /// then the whole pool is asked, and any peer that holds the chosen range
+    /// serves it. A chosen entry is the same from any holder, so the fallback
+    /// changes only who answers.
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, from = from.0)))]
+    fn pull_gap(&mut self, from: NodeId, ci: Option<Slot>) {
+        if self.pull_beats == 0 || self.pull_index != ci {
+            self.pull_index = ci;
+            self.pull_beats = 0;
+        }
+        self.pull_beats += 1;
+        let fallback = self.election_timeout.max(PULL_FALLBACK_BEATS);
+        let request = self.catch_up_request(self.first_unchosen());
+        let queued = self.pending_messages.len();
+        if self.pull_beats > fallback {
+            probe!(reachable, "catch-up: a stalled pull asks the whole pool");
+            self.broadcast(request);
+            self.pull_beats = 0;
+            assert!(
+                matches!(self.pending_messages.last(), Some((Audience::Learners, _))),
+                "a stalled pull asks the whole pool"
+            );
+        } else {
+            self.send(from, request);
+            assert!(
+                matches!(self.pending_messages.last(), Some((Audience::Node(to), _)) if *to == from),
+                "a pull short of the fallback asks the beat's sender alone"
+            );
+        }
+        assert!(
+            self.pending_messages.len() == queued + 1,
+            "a pull queues one request"
+        );
+        assert!(
+            self.pull_beats <= fallback,
+            "a stalled pull falls back to the pool"
+        );
     }
 
     /// Leader: a peer answered a beat at `ballot`. An ack at our own ballot
