@@ -369,7 +369,8 @@ impl<P: Providers> Election<P> {
                         moonpool_assertions::reachable!(
                             "election: a watch waits at the tail past a moving floor"
                         );
-                        self.fold.gap(state.next_seq.0.max(state.first_seq.0));
+                        self.fold
+                            .resume_at_tail(state.first_seq.0, state.next_seq.0);
                         wait = u64::try_from(
                             (2 * self.tunables.renew_every)
                                 .min(self.tunables.lease)
@@ -687,7 +688,7 @@ pub async fn read_election<P: Providers>(
                     moonpool_assertions::reachable!(
                         "election: a reader waits at the tail past a moving floor"
                     );
-                    fold.gap(state.next_seq.0.max(state.first_seq.0));
+                    fold.resume_at_tail(state.first_seq.0, state.next_seq.0);
                     wait = FLOOR_RACE_WAIT_MS;
                 } else {
                     fold.gap(state.first_seq.0);
