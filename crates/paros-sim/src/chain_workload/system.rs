@@ -802,6 +802,17 @@ impl SystemOps {
                     // journals)): a composer books a joiner's slot before it
                     // names it, and a draining joiner takes no booking, so
                     // one read here, after the drain, is final.
+                    // Where the registry runs, only a joiner that read shows
+                    // draining is retired: a failed read, or none draining,
+                    // retires nobody. A blind retirement took a draining
+                    // joiner that held its slot, so a journal lost a member
+                    // its configuration named and never elected again (#626
+                    // (Accepts before own sync), witness seed
+                    // 18415318552151628336, red on main 7cc3bbf too). Where
+                    // none runs, the request is still sent, to be refused.
+                    if self.active && !eligible.contains(&id) {
+                        return false;
+                    }
                     if registry
                         .as_ref()
                         .is_some_and(|registry| self.holds_slot(registry, id))
