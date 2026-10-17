@@ -7,7 +7,7 @@ use moonpool_core::TokioProviders;
 use paros::client::bootstrap::control_journals;
 use paros::client::fleet::{Step, read_directory};
 use paros::client::journals::{self, JournalAnswer, JournalOp, JournalRequest};
-use paros::client::{ClaimOutcome, Client, Writer};
+use paros::client::{ClaimOutcome, Client, Pipeline};
 use paros::fleet::TenantState;
 use paros::tenant::Survives;
 use paros::{JournalId, JournalIdentifier, TenantId, WriterMode};
@@ -151,31 +151,32 @@ pub async fn journals(
     Ok(out)
 }
 
-/// Claim `journal` under `writer`'s uuid, asking again while the journal is
-/// not served yet (a journal just created opens on its members) until
-/// `patience` runs out.
+/// Claim `journal` under the uuid of `pipeline`'s writer, asking again
+/// while the journal is not served yet (a journal just created opens on its
+/// members) until `patience` runs out. A claim another client of the
+/// journal won first counts: the writer leads all the same.
 pub async fn claim(
     client: &ParosClient,
-    writer: &mut Writer,
+    pipeline: &Pipeline,
     journal: &Journal,
     patience: Duration,
 ) -> Result<(), String> {
     let deadline = client.now() + patience;
     loop {
-        let outcome = writer
+        let outcome = pipeline
             .claim(client, client.leader().unwrap_or(0), false)
             .await;
-        let retry = match &outcome {
-            ClaimOutcome::Won { .. } | ClaimOutcome::Owned { .. } if writer.owned().is_some() => {
-                return Ok(());
-            }
+        if pipeline.owned().is_some() {
+            return Ok(());
+        }
+        let retry = matches!(
+            outcome,
             ClaimOutcome::UnknownJournal
-            | ClaimOutcome::Unread
-            | ClaimOutcome::Redirect { .. }
-            | ClaimOutcome::Ambiguous
-            | ClaimOutcome::Malformed => true,
-            _ => false,
-        };
+                | ClaimOutcome::Unread
+                | ClaimOutcome::Redirect { .. }
+                | ClaimOutcome::Ambiguous
+                | ClaimOutcome::Malformed
+        );
         if !retry || client.now() >= deadline {
             return Err(format!("claim of {}: {outcome:?}", journal.name));
         }

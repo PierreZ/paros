@@ -127,7 +127,8 @@ pub fn leader_uuid(seed: u128, k: u64) -> LeaderUuid {
 }
 
 /// One client's leadership of one journal. `Copy`: a caller that pipelines
-/// takes a copy, advances it per write, and folds the verdicts back.
+/// takes a copy, advances it per write, and folds the verdicts back, as
+/// [`super::Pipeline`] does (#597 (several writes in flight per journal)).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Writer {
     journal: JournalIdentifier,

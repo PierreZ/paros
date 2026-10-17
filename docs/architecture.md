@@ -133,6 +133,19 @@ a single-writer journal batches in its client (`paros::client::Writer`), never i
 A leader may refuse a `Write` from its own fold at propose time, so a superseded leader's
 pipelined burst does not burn slots. That is an optimisation; the apply-time check is the safety.
 
+The client pipelines a single-writer journal's writes with `paros::client::Pipeline` (#597
+(several writes in flight per journal)): one writer's leadership, shared by its callers, each
+write opened at the position after the last one and sent without waiting for the answer of the
+write in front of it. A write that reaches the leader first is refused under its own uuid at a
+tail below its position. It waits until every write in front of it settled, then is sent again
+unchanged when the tail reached its position (a retry is the same write). When a write in front
+of it failed, the tail never reaches its position, and its one verdict is that refusal. A write
+that is not written stops new writes until the ones in flight settle; the next one then opens
+at the tail the writer knows. A claim that wins a new term opens at the tail its view names at
+once, because the old term's writes in flight are fenced or already counted. The simulation's
+owner writes through it on its own BUGGIFY location, on a coin last position first and on
+another with a claim racing the writes.
+
 ### 2.3 Leadership
 
 Leadership is a pure compare-and-set, no lease and no clock. `SetLeader(new_uuid, old_uuid)`
@@ -1673,7 +1686,11 @@ local cell's stores. CI only checks that `parosctl bench --local 3 --duration 5s
 on shared runners are noise. The baseline is posted on #194. `--topology 3x1,3x3` compares
 journal shapes (decided on 2026-10-16, asked to see whether a grid behaves better): each
 `ROWSxCOLUMNS` runs in turn under one seed on journals of its own, on a new local cell for
-each topology, then one total row per topology and call.
+each topology, then one total row per topology and call. The clients of one journal share
+its writer through `paros::client::Pipeline` (#597 (several writes in flight per journal)):
+`--clients N` on one journal keeps N writes in flight on it, so the bench measures what a cell
+can do, not one write at a time. The report names the most writes in flight per journal and
+counts the writes that arrived early and were sent again.
 
 ### 3.7 The universe
 
