@@ -162,6 +162,7 @@ impl NodeShape {
     ///
     /// On a slow-link seed ([`slow_link`]) the node runs a fast tick and
     /// the floor batch, never the production profile.
+    #[allow(clippy::too_many_lines)]
     fn draw(slow_link: bool) -> Self {
         let defaults = DriverTunables::default();
         // A handful-sized peer queue makes mailbox overflow (the
@@ -234,6 +235,7 @@ impl NodeShape {
         // The failure detector's timeout past a renewal period (#211); the
         // re-placement bound adds to it (#475).
         let down_after_ms = buggify_knob!(1000_u64, ROUND_TRIP_FLOOR_MS..3001_u64);
+        let (scrub_rate, scrub_pass_within, scrub_page) = scrub_pace();
         let mut drawn = DriverTunables {
             tick_interval: ms(tick_ms),
             election_timeout_base: buggify_knob!(5_u64, 2_u64..13_u64).max(floor_ticks),
@@ -457,19 +459,9 @@ impl NodeShape {
             // journals; the ceiling spreads them over a second.
             internal_retry_backoff: ms(buggify_knob!(100_u64, 0_u64..1001_u64)),
             resolve_answer_within: resolve_answer_within(slow_link),
-            // The tenant scrubber's pace (#362 (background scrubbing)).
-            // Floor 1 KiB/s (the shipped floor): a pass still moves one
-            // small record a second. The low end leaves a pass unfinished
-            // inside a run, so its progress record outlives terms; the high
-            // end reads a whole journal in one round.
-            scrub_rate: buggify_knob!(256 * 1024_u64, 1024_u64..(1024 * 1024 + 1)),
-            // The full-pass bound. Floor 1 s (the shipped floor). The range
-            // stays under the chaos window, so a run sees several passes
-            // and, at the low end with a slow rate, late ones.
-            scrub_pass_within: ms(buggify_knob!(10_000_u64, 1000_u64..20_001_u64)),
-            // Records per scrub request. Floor 1: one record per page, the
-            // most requests per pass.
-            scrub_page: buggify_knob!(64_usize, 1_usize..257_usize),
+            scrub_rate,
+            scrub_pass_within,
+            scrub_page,
         };
         cap_backoff(&mut drawn, tick_ms);
         // The handover re-send cadence stays under the shortest stall
@@ -2833,6 +2825,24 @@ fn resolve_answer_within(slow_link: bool) -> Duration {
     } else {
         Duration::from_millis(buggify_knob!(2000_u64, RESOLVE_FLOOR_MS..2001_u64))
     }
+}
+
+/// The tenant scrubber's pace (#362 (background scrubbing)): its rate,
+/// its full-pass bound and its records per request.
+fn scrub_pace() -> (u64, Duration, usize) {
+    // Floor 1 KiB/s (the shipped floor): a pass still moves one small
+    // record a second. The low end leaves a pass unfinished inside a run,
+    // so its progress record outlives terms; the high end reads a whole
+    // journal in one round.
+    let rate = buggify_knob!(256 * 1024_u64, 1024_u64..(1024 * 1024 + 1));
+    // The full-pass bound. Floor 1 s (the shipped floor). The range stays
+    // under the chaos window, so a run sees several passes and, at the low
+    // end with a slow rate, late ones.
+    let within = Duration::from_millis(buggify_knob!(10_000_u64, 1000_u64..20_001_u64));
+    // Records per scrub request. Floor 1: one record per page, the most
+    // requests per pass.
+    let page = buggify_knob!(64_usize, 1_usize..257_usize);
+    (rate, within, page)
 }
 
 /// The election backoff's ceiling is wall-clock too: a capped base
