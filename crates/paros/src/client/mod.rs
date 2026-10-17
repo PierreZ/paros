@@ -84,6 +84,7 @@ mod reader;
 pub mod resolve;
 #[cfg(test)]
 mod tests;
+pub mod universe;
 pub mod views;
 mod writer;
 
@@ -469,6 +470,26 @@ impl<P: Providers> Client<P> {
             hint: Arc::default(),
             ..self.clone()
         }
+    }
+
+    /// This client over the machines at `addrs` (`(node id, address)`
+    /// pairs), through the same runtime and resolver (#232 (multiple
+    /// cells)): another cell's machines, from the universe directory.
+    ///
+    /// # Panics
+    ///
+    /// If `addrs` is empty.
+    #[must_use]
+    pub fn elsewhere(&self, addrs: &[(u64, crate::Address)]) -> Self {
+        let base = &self.servers[0].node;
+        let servers = addrs
+            .iter()
+            .map(|(id, addr)| Server {
+                id: *id,
+                node: base.elsewhere(addr.clone()),
+            })
+            .collect();
+        self.with_servers(servers)
     }
 
     /// This client under other tunables, sharing its leader hint.

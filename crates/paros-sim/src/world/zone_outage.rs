@@ -24,8 +24,13 @@ use super::outage::POLL;
 
 /// How long the zone stays down, in milliseconds: long enough for an
 /// operator to create a tenant or a journal and write to it without the
-/// zone, as the downed founder's hold.
-const DOWN_MS: std::ops::Range<u64> = 6_000..10_001;
+/// zone. A tenant created whole inside a 6–10 s hold fired on 0 of 300 hunt
+/// seeds, on 1 of 300 with 10–16 s (#623 (zone-down gates in the sweep)).
+const DOWN_MS: std::ops::Range<u64> = 10_000..16_001;
+
+/// How long the zone stays down when the outage strikes in the recovery
+/// tail, in milliseconds: the tail's liveness claims wait for it.
+const TAIL_DOWN_MS: std::ops::Range<u64> = 6_000..10_001;
 
 /// The zone-outage injector (see the module doc): a fresh one per timeline.
 pub(crate) struct ZoneOutage;
@@ -77,7 +82,12 @@ impl FaultInjector for ZoneOutage {
         if targets.len() > 1 {
             assert_reachable!("zones: a zone outage takes several machines down at once");
         }
-        let down = Duration::from_millis(moonpool_sim::sim_random_range(DOWN_MS));
+        let range = if crate::in_chaos() {
+            DOWN_MS
+        } else {
+            TAIL_DOWN_MS
+        };
+        let down = Duration::from_millis(moonpool_sim::sim_random_range(range));
         let now = time.now();
         tracing::info!(%zone, machines = targets.len(), ?down, "zone_outage_strikes");
         crate::machine::note_zone_down(ctx.state(), now, now + down);

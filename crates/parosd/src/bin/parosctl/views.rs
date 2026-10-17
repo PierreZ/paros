@@ -232,18 +232,24 @@ fn find_machine<'a>(
     }
 }
 
-/// `up` or `down`.
-pub(crate) fn state(up: bool) -> &'static str {
-    if up { "up" } else { "down" }
+/// `up`, `down`, or `slow` for a machine the cell coordinator holds slow
+/// (#361 (slow machines)).
+pub(crate) fn state(machine: &paros::wire::view::MachineView) -> &'static str {
+    match (machine.up, machine.slow) {
+        (false, _) => "down",
+        (true, true) => "slow",
+        (true, false) => "up",
+    }
 }
 
-/// A machine's state: `up` or `down`, and `in maintenance` while a
-/// maintenance window over it or its zone is open (#359).
+/// A machine's state: `up`, `slow` (#361 (slow machines)) or `down`, and
+/// `in maintenance` while a maintenance window over it or its zone is open
+/// (#359).
 pub(crate) fn machine_state(m: &wire::MachineView) -> String {
     if m.maintenance_ms > 0 {
-        format!("{}, in maintenance", state(m.up))
+        format!("{}, in maintenance", state(m))
     } else {
-        state(m.up).to_string()
+        state(m).to_string()
     }
 }
 
@@ -643,6 +649,7 @@ pub async fn cell_show(asker: &Asker<'_>, out: &Printer, cell: Option<&str>) -> 
         *standing.entry(m.standing.as_str()).or_default() += 1;
     }
     let down = reply.machines.iter().filter(|m| !m.up).count();
+    let slow = reply.machines.iter().filter(|m| m.up && m.slow).count();
     let users = reply.tenants.iter().filter(|t| t.kind == "users").count();
     let slot_rows: Vec<[String; 4]> = slots
         .iter()
@@ -658,7 +665,7 @@ pub async fn cell_show(asker: &Asker<'_>, out: &Printer, cell: Option<&str>) -> 
     out.emit(
         || {
             format!(
-                "cell:         {}\nuniverse:     {}\nstate:        {}\ncoordinator:  {}\nmachines:     {} ({}; {} down)\ntenants:      {users}\nslots:\n{}",
+                "cell:         {}\nuniverse:     {}\nstate:        {}\ncoordinator:  {}\nmachines:     {} ({}; {} down, {} slow)\ntenants:      {users}\nslots:\n{}",
                 text(&reply.cell_name),
                 text(&reply.universe_name),
                 if reply.cell_state.is_empty() { "-" } else { &reply.cell_state },
@@ -670,6 +677,7 @@ pub async fn cell_show(asker: &Asker<'_>, out: &Printer, cell: Option<&str>) -> 
                     .collect::<Vec<_>>()
                     .join(", "),
                 down,
+                slow,
                 indent(&table(["CLASS", "BOOKED", "FREE", "TOTAL"], &slot_rows)),
             )
         },
@@ -927,6 +935,7 @@ fn machine_json(m: &wire::MachineView) -> Value {
         "booked": m.booked,
         "standing": m.standing,
         "up": m.up,
+        "slow": m.slow,
         "maintenance_ms": m.maintenance_ms,
         "founder": m.founder,
         "incarnation": format!("{:016x}{:016x}", m.incarnation_high, m.incarnation_low),

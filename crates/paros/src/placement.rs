@@ -64,7 +64,8 @@ pub struct Machine {
     pub capacity: u64,
     /// The slots booked on it now.
     pub booked: u64,
-    /// Whether the cell coordinator holds it up.
+    /// Whether the cell coordinator holds it up and not slow (#361 (slow
+    /// machines)): placement books a slow machine last, as a down one.
     pub up: bool,
 }
 
@@ -105,7 +106,7 @@ pub fn machines(registry: &Registry, nodes: impl IntoIterator<Item = NodeId>) ->
                 zone: held.locality.zone.clone(),
                 capacity: held.capacity,
                 booked: registry.booked(node),
-                up: registry.liveness(node).up,
+                up: registry.liveness(node).up && !registry.liveness(node).slow,
             })
         })
         .collect()

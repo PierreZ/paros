@@ -338,9 +338,12 @@ list and no rendezvous name. The same rule holds at two levels:
 | `parosctl cell init --members a,b,c [--name]` | the listed idle machines | forms an idle cell on them |
 | `parosctl cell add-machine <addr>` | any member of the cell | the cell coordinator admits an idle machine |
 | `parosctl universe init --cell <addr> [--name]` | any member of an idle cell | creates the universe tenant there and admits that cell as the universe's first |
-| `parosctl universe add-cell <addr>` | the universe, and any member of the idle cell | admits another idle cell (M12) |
+| `parosctl universe add-cell --members a,b,c [--name]` | the universe, and the coordinator of the idle cell | admits another idle cell (#232, section 3.7) |
+| `parosctl universe remove-cell <name>` | the universe | removes an empty cell and tombstones its id (#232, section 3.7) |
 
 `parosctl init` stays as a shortcut for `cell init` followed by `universe init` (the toy).
+Today, `parosctl init --idle` is `cell init` alone: it forms an idle cell with no universe tenant
+(#232 (multiple cells), section 3.7).
 
 - **`cell init` is a single-decree Paxos on the cell plan** (decided on 2026-10-09, #277). The
   machine that receives it drives it, with every listed machine as an acceptor. The quorums are
@@ -664,6 +667,31 @@ gone machine that answers again before its move ends keeps the slot the move did
 yet; at an idle round the coordinator releases each slot outside the configuration the
 journal's leader holds in force. The bound counts on the coordinator's own clock, so a new term
 counts again from its start.
+
+**Slow machines** (#361 (slow machines), 2026-10-16; gray failure). The failure detector above is
+binary, but a slow disk or a starved CPU answers, late, and slows every write of every journal
+whose Phase-2 quorum holds it. So each watch round also measures every machine that answered:
+its `Identify` round trip on the coordinator's clock, and its disk and CPU busy ratios from its
+last `Load` window (#424 (busyness metrics)). `paros::machine::slow::SlowJudge` judges them with
+hysteresis: a machine leans slow when a busy ratio is at or above `slow_busy_permille`, or its
+round trip is at or above `slow_rtt` and four times the round's median (a slow coordinator sees
+every round trip long and marks nobody for it); it leans fast below both with a margin (200 ‰,
+half the round-trip bounds). Only `slow_rounds` rounds in a row against what the registry holds
+change the judgement, written `MachineSlow` (changes only, with the round's facts: `rtt_us`,
+`disk_busy_permille`, `cpu_busy_permille`). A new incarnation starts fast. **A slow mark never
+takes a quorum**: at most a minority of the pool is held slow (`SlowJudge::cap`), and a mark
+removes nothing by itself. A slow machine keeps no role, like a draining one
+(`Registry::keeps_roles`): the tenant coordinator moves each journal off it (book elsewhere,
+reconfigure, record the configuration in force as `Placed`, then release), placement books it last,
+as a down machine, and the mode changes leave its journals to the moves. An open maintenance
+window (#359) suspends this, as it suspends a down machine's re-placement: the mark stays
+written, but no slot moves off a machine the window covers. A grid leader sends a
+round's Phase 2 to a column with no slow acceptor when its own column holds one, and a quorum read
+asks such a row (`fast_column`, `fast_row` in `driver/mod.rs`); a majority already decides on the
+fastest replies. `parosctl` shows the machine `slow` (`MachineView.slow`). The simulation's
+slow-machine scenario holds a founding member slow for 10–16 s on half its strikes in the chaos
+window; its oracles: a slow mark never takes a quorum, and after chaos no journal with a machine
+to go to keeps a slot on a slow machine.
 
 Landed in #211 (2026-10-10): the **durable cached registry fold**
 (`paros::machine::CachedRegistry`). Every machine of a cell keeps the cell's address book
@@ -1904,6 +1932,48 @@ after a quick availability check (amended on 2026-10-07, #232), an optional pref
 per-cell switch that stops new placements), and tenant locks (`UNLOCKED`, `READ_ONLY` or
 `LOCKED` with an owner id) to make a tenant read-only during a move.
 
+**Adding and removing cells, part 1** (decided on 2026-10-16, #232 (multiple cells)). These rules
+are in force now:
+
+- **An idle cell.** `parosctl init --idle` (`InitParams::idle`, `CellInit.idle`) forms a cell
+  with no universe tenant (`CellPlan.fleet` is `None`). The cell elects its coordinator and
+  serves its cell tenant. It hosts no other tenant until it joins a universe.
+- **`universe add-cell`** (`FleetSession::add_cell`) has two halves, like `init`. The operator
+  writes the directory half: `AddCell` with the cell's control journal and its **entry
+  endpoint** (its founding members by id and address), then `MarkCell READY` once the cell
+  joined. The cell's coordinator writes the cell half: `JoinFleet` with the **universe
+  pointer**, the directory journal and the machines of the cell that hosts it. The operator
+  asks the coordinator to join with `JoinUniverse` (`0x5041_030D`, in the `CoordinatorInterface`
+  group). The coordinator reads the directory at the pointer, and joins only when the directory
+  holds its cell under its cell tenant's control journal. A cell joins once, and joins one
+  universe.
+- **The pointer lives in the cell control journal**, in `JoinFleet`, not in the cell plan. The
+  plan of an idle cell is decided before the cell knows its universe, and a plan is never
+  edited. The coordinator is the one writer of the cell control journal, so it is the one
+  writer of the pointer. This amends the sentence above that a cell records the universe values
+  "in its cell plan at admission".
+- **Reading the directory from another cell.** A machine whose cell does not host the universe
+  tenant reads the directory through the pointer, with a client over the hosting cell's
+  machines (`Client::elsewhere`). The coordinator, the resolver, the views and the frontend use
+  it.
+- **Tenants in a second cell.** `tenant create --cell NAME` (`FleetSession::with_cell`) creates a
+  tenant in a `READY` cell. Without `--cell`, the operator's own cell takes it when it is
+  `READY`, else the first `READY` cell. Placement across cells is still open (below).
+- **Resolve across cells.** A machine answers `other_cell` for a tenant of another cell, with
+  that cell's entry endpoint. The client asks that cell once more (one hop). A frontend serves
+  only the tenants of its own cell; another cell's tenant is unknown there.
+- **`universe remove-cell`** marks the cell `REMOVING`, then writes `RemoveCell`. The fold
+  refuses it while the cell hosts a tenant other than its cell tenant (`CellNotEmpty`). It
+  removes the cell, its entry endpoint and its cell tenant, and puts the cell id in a tombstone
+  set (`removed_cells`). `AddCell` refuses a tombstoned id (`CellTombstoned`). The cell that
+  hosts the universe tenant is not removed.
+
+Still open for M12: moving tenants and the universe tenant between cells, placement across
+cells, tenant locks, splitting the universe tenant, and multi-region cells. A move needs the
+cell fence of section 3.2 to let a reconfiguration cross cells, and the `cell_id` in
+`AcceptorConfig` (above), so it is a later part. `JoinUniverse` has no authorization check yet: it
+changes nothing unless the directory already holds the cell, which only an admin writes.
+
 ### 3.8 Identifiers
 
 Every identifier is random or minted by the one writer that can check it, never derived from a
@@ -2532,7 +2602,7 @@ Simulation is the investment. Every milestone lands with its share of:
   seeds, and the canary after every new draw.
   **As built** (2026-10-16): the zone-outage scenario (`paros_sim::world::zone_outage`,
   `shape::zone_outage`) lists three founding members, machine `r` in zone `zone-<r % 3>`, and
-  crashes every machine of the zone with the most live machines for 6 to 10 s, once the cell
+  crashes every machine of the zone with the most live machines for 10 to 16 s (6 to 10 s in the recovery tail), once the cell
   formed and a client created a journal; while it is down, a client appends to a journal it
   created. Gates "zones: a tenant is created with a zone down" and "zones: a created journal
   commits an append with a zone down".

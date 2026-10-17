@@ -32,6 +32,7 @@ message FleetEntry {
     RemoveRootKey remove_root_key = 10;
     SetTenantTags set_tenant_tags = 11;
     SetCellTags set_cell_tags = 12;
+    RemoveCell remove_cell = 13;
   }
 }
 
@@ -63,6 +64,24 @@ message AddCell {
   // `paros/kind:regional` with `paros/region`, or `paros/kind:multi-region`
   // with `paros/regions` and `paros/witness`. Any other key is refused.
   repeated paros.common.v1.Tag tags = 5;
+  // The cell's entry endpoint (#232 (multiple cells)): its founding
+  // members, by node id and advertised address. A caller that reaches
+  // another cell is pointed here. The first endpoint written stays.
+  repeated CellMember endpoint = 6;
+}
+
+// One machine of a cell's entry endpoint.
+message CellMember {
+  uint64 node_id = 1;
+  string addr = 2;
+}
+
+// `universe remove-cell` (#232 (multiple cells)): a `REMOVING` cell that
+// hosts no tenant but its cell tenant leaves the directory. Its id goes
+// into the tombstone set: a cell with this id is never added again.
+// Metadata version 5.
+message RemoveCell {
+  uint64 cell_id = 1;
 }
 
 // Move cell `cell_id` to `state` (see `CellState` for the transitions).
@@ -170,6 +189,9 @@ message FleetDirectoryState {
   repeated RootKey removed_keys = 9;
   // Every tag request applied (#575), in id order: never applied twice.
   repeated uint64 tagged = 10;
+  // The tombstoned cell ids, in id order (#232 (multiple cells)): never
+  // added again.
+  repeated uint64 removed_cells = 11;
 }
 
 message CellEntry {
@@ -179,6 +201,7 @@ message CellEntry {
   uint64 control_tenant = 4;
   // The cell's tags (#575): its reserved kind tags, then its user tags.
   repeated paros.common.v1.Tag tags = 5;
+  repeated CellMember endpoint = 6;
 }
 
 message TenantEntry {

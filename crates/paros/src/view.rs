@@ -167,6 +167,7 @@ impl CellFacts<'_> {
         let base = wire::MachineView {
             node_id: id.0,
             up: liveness.up,
+            slow: liveness.slow,
             incarnation_high: high,
             incarnation_low: low,
             founder: founder.is_some(),
@@ -504,7 +505,7 @@ pub fn tenant_view(
 const TENANT_MACHINE_TAGS: [&str; 2] = [reserved::ZONE, reserved::RACK];
 
 /// What a tenant scope may see of a tenant view: of each machine its id,
-/// name, zone, rack and up/down state; no address, no incarnation, no
+/// name, zone, rack and up, down or slow state; no address, no incarnation, no
 /// capacity, no booking, no standing, no class, no user tag; and no other
 /// cell detail.
 fn narrow(reply: &mut wire::ViewReply) {
@@ -516,6 +517,7 @@ fn narrow(reply: &mut wire::ViewReply) {
             name: std::mem::take(&mut machine.name),
             tags,
             up: machine.up,
+            slow: machine.slow,
             ..wire::MachineView::default()
         };
     }

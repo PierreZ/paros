@@ -76,6 +76,11 @@ pub struct InitArgs {
     /// universe that holds a key writes none.
     #[arg(long)]
     root_public_key: Option<std::path::PathBuf>,
+    /// Form an idle cell only (`cell init`, #232 (multiple cells)): no
+    /// universe tenant and no universe steps. `parosctl universe add-cell`
+    /// joins it to a universe another cell hosts.
+    #[arg(long)]
+    idle: bool,
 }
 
 /// A name for people: no `/`, no space, no control character.
@@ -147,6 +152,7 @@ pub async fn run(
         token,
         root_key,
         failures_per_partition: args.failures_per_partition,
+        idle: args.idle,
     };
     let (providers, rpc, names) = (asker.providers, asker.rpc, asker.names);
     match initialize::initialize(providers, rpc, names, members, connect, params).await {
@@ -170,7 +176,13 @@ pub async fn run(
             Ending::Refused
         }
         InitRun::Refused(InitRefusal::NoFleet) => {
-            note("the cell names no fleet journal");
+            note(
+                "the cell names no fleet journal: it was formed idle (add it with universe add-cell)",
+            );
+            Ending::Refused
+        }
+        InitRun::Refused(InitRefusal::NotIdle) => {
+            note("the cell was formed with a universe of its own: it is not an idle cell");
             Ending::Refused
         }
         InitRun::Refused(InitRefusal::Fleet(refusal)) => {
@@ -217,6 +229,34 @@ fn unreachable_text(why: Unreachable, target: Option<&Address>) -> String {
 /// its coordinator and its members; `--json` prints every id whole.
 fn print_initialized(out: &Printer, done: &Initialized, labels: &Labels) {
     let journals = done.journals;
+    if done.fleet_id == 0 {
+        // An idle cell (#232 (multiple cells)): no universe yet.
+        out.emit(
+            || {
+                let members: Vec<u64> = done.servers.iter().map(|(id, _)| *id).collect();
+                format!(
+                    "formed idle cell={} coordinator={} members={}: add it with parosctl universe add-cell",
+                    labels.cell(journals.cell_id),
+                    labels.machine(done.coordinator.0),
+                    labels.machines(&members),
+                )
+            },
+            || {
+                json!({
+                    "outcome": "idle",
+                    "cell": journals.cell_id,
+                    "coordinator": done.coordinator.0,
+                    "control": journals.cell.to_string(),
+                    "members": done
+                        .servers
+                        .iter()
+                        .map(|(id, addr)| json!({ "node": id, "addr": addr.to_string() }))
+                        .collect::<Vec<_>>(),
+                })
+            },
+        );
+        return;
+    }
     let fleet_control = journals.fleet.map(|f| f.to_string()).unwrap_or_default();
     let election = journals.election.map(|e| e.to_string()).unwrap_or_default();
     out.emit(

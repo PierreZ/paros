@@ -22,7 +22,7 @@ use paros::{
 };
 
 use super::StorageWorld;
-use super::cut::{Budget, InFlight, Owner};
+use super::cut::{Budget, InFlight, Owner, release_parked};
 
 /// The directory a matchmaker's registries live in on its simulated disk.
 pub(crate) const REGISTRY_DIR: &str = "paros/matchmaker";
@@ -163,6 +163,9 @@ impl MatchmakerStorage for LedgeredRegistry {
     #[tracing::instrument(level = "debug", skip_all, fields(ip = %self.ip))]
     async fn boot_scan(&mut self) -> Result<(), StorageError> {
         self.inner.boot_scan().await?;
+        // The open synced what it keeps: a batch a failed sync left in the
+        // file image is durable or gone.
+        release_parked(&self.state, &self.key);
         // The outcome a cut registry must reach: what it held before the
         // cut is still there after it.
         let ip = self.ip.clone();
@@ -242,7 +245,17 @@ impl MatchmakerStorage for LedgeredRegistry {
             )
         });
         let synced = self.inner.sync().await;
-        drop(in_flight);
+        match (&synced, in_flight) {
+            // A failed sync leaves its batch volatile in the file image: a
+            // kill may still tear it, so the commit stays in flight.
+            (Err(_), Some(in_flight)) => in_flight.park(&self.key),
+            (_, in_flight) => {
+                drop(in_flight);
+                if synced.is_ok() {
+                    release_parked(&self.state, &self.key);
+                }
+            }
+        }
         synced?;
         if std::mem::take(&mut self.format_pending) {
             // The marker is durable: the provisioning landed.

@@ -247,6 +247,14 @@ impl<P: Providers> NodeClient<P> {
         }
     }
 
+    /// A client of the node at `address`, through this one's runtime and
+    /// resolver (#232 (multiple cells)): another cell's machine, learned
+    /// from the universe directory. No pass and no machine interface.
+    #[must_use]
+    pub fn elsewhere(&self, address: Address) -> Self {
+        Self::named(&self.rpc, self.names.clone(), address)
+    }
+
     /// This client, sending the data plane through the machine interface
     /// `interface` (#404 (static vs dynamic endpoints)): the encoded
     /// reference a machine published. Empty bytes, or bytes that do not

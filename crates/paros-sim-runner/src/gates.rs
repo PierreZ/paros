@@ -162,6 +162,10 @@ pub const RARE: &[Rare] = &[
         reason: "marginal: needs a three-column grid (a pool of six) and the skip's BUGGIFY location on the same seed; 55 checks in 600 hunt seeds, but the sweep missed it once (#533 (move a stuck round), #486)",
     },
     Rare {
+        msg: "phase2: a stuck round whose slot is chosen elsewhere is not moved",
+        reason: "marginal: a grid round must outlast its own resend budget and see its slot chosen by a `Commit` or a catch-up before its tally closes, inside one beat; the sweep at 2e88949 fired it and the sweep at d7071df missed it (#533 (move a stuck round), #486)",
+    },
+    Rare {
         msg: "tenant coordinator: a configure refused for want of slots",
         reason: "marginal: the configure twin of an unplaceable create, needs a full machine; fired on 0 of 300 hunt seeds even with a widest-mode draw, while configures were recorded on 36 (#486)",
     },
@@ -1200,6 +1204,30 @@ pub const RARE: &[Rare] = &[
     Rare {
         msg: "gc: an operator probes the members' beliefs before a retirement",
         reason: "missed by the sweep of PR #510 (whole-run chaos): it needs an effective GC floor at a retirement step, rarer under whole-run chaos (#454 (control plane meets chaos), #486)",
+    },
+    Rare {
+        msg: "zones: a control-journal write is chosen with a zone down",
+        reason: "a whole fleet run inside a zone outage: 1 of 300 hunt seeds with the 10–16 s hold, where the outage struck on 4 (#623 (zone-down gates in the sweep))",
+    },
+    Rare {
+        msg: "zones: a tenant is created with a zone down",
+        reason: "a whole tenant creation inside a zone outage: 1 of 300 hunt seeds with the 10–16 s hold, where the outage struck on 4 (#623 (zone-down gates in the sweep))",
+    },
+    Rare {
+        msg: "coordinator: a move records its placement",
+        reason: "a move that finishes with the journal's recorded placement behind its members: fired on 1 of 2 sweeps; moves are rare in the sweep (#609 (slow moves in the sweep), #498 (moves in the sweep))",
+    },
+    Rare {
+        msg: "coordinator: a move takes a journal off a slow machine",
+        reason: "a move off a slow machine: 0 of 300 hunt seeds, where a machine was marked slow on 22 checks; a mark needs three machines, a move a journal on it and a free storage machine (#609 (slow moves in the sweep), #498 (moves in the sweep))",
+    },
+    Rare {
+        msg: "grid: a round's column avoids a slow acceptor",
+        reason: "needs a grid journal on the machines with a member marked slow: 0 of 300 hunt seeds (#609 (slow moves in the sweep))",
+    },
+    Rare {
+        msg: "grid: a quorum read's row avoids a slow acceptor",
+        reason: "needs a grid journal on the machines with a member marked slow: 0 of 300 hunt seeds (#609 (slow moves in the sweep))",
     },
     Rare {
         msg: "coordinator: a settled set left its booked machines",

@@ -105,8 +105,10 @@ impl FleetOps {
                 if !cell_name.is_empty() {
                     self.judge_cell_name(*cell_id, cell_name);
                 }
+                // A second cell (#232 (multiple cells)) answers for its own
+                // tenants only; its machine is in the entry endpoint too.
                 assert_always!(
-                    refusal != "other_cell",
+                    refusal != "other_cell" || crate::machine::second_cell_founded(&self.state),
                     "resolve: one universe of one cell never names another cell"
                 );
                 if refusal == "unknown_tenant" {

@@ -57,6 +57,11 @@ A journal's durability can change while it runs: `parosctl configure --tenant ac
 orders --failures-per-partition 2` asks for five acceptors, and the tenant coordinator moves
 the journal there by reconfiguration, without losing a write (#214 (tenant modes)).
 
+A universe can hold more than one cell: `parosctl init --idle` forms a cell with no universe,
+`parosctl universe add-cell` joins it, and `parosctl tenant create --cell` puts a tenant in it.
+Any machine resolves a tenant to its cell. `parosctl universe remove-cell` removes an empty
+cell for good.
+
 Each tenant scrubs its journals in the background: its coordinator reads every acceptor's copy
 of every record again, and an acceptor writes a damaged record again from its own copy
 (#362 (background scrubbing)). `parosctl status --tenant acme` shows the pass and what it found.
