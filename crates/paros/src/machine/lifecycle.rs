@@ -48,6 +48,7 @@ use super::{
     FormedCell, Joined, Locality, MachineFacts, ProviderDisk,
 };
 use crate::ControlPlan;
+use crate::journal::Spares;
 use crate::metrics::{Metrics, Phase};
 use crate::transport::Transport;
 use crate::{Address, Audit, DriverTunables, Names, RunError};
@@ -632,6 +633,7 @@ where
         bootstrap: plan.matchmakers(),
     };
     let stores = MachineStores::new(disk, record, genesis, audits)
+        .with_spares(Spares::on(providers.task().clone()))
         .with_cache(cache.clone())
         .with_matchmakers(matchmaker);
     // Bind where the machine is (#257), never at the address the plan
@@ -755,7 +757,8 @@ where
         admitted.cached.clone(),
         shutdown.clone(),
     );
-    let mut stores = MachineStores::admitted(disk, record, admission.cell.cell, audits);
+    let mut stores = MachineStores::admitted(disk, record, admission.cell.cell, audits)
+        .with_spares(Spares::on(providers.task().clone()));
     // A storage machine hosts the matchmaker sets the registry books on it
     // (#501 (matchmaker sets off the founders)): never a member of a
     // bootstrap generation, it opens only those.

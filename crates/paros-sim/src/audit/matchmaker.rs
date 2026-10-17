@@ -298,12 +298,14 @@ pub(super) struct MatchmakerAudit {
     /// `Accepted` — the Phase-2 votes, counted from the replies themselves
     /// rather than from any reconfigurer's own tally.
     decree_voters: BTreeMap<(u64, Ballot), BTreeSet<u64>>,
-    /// Per proposed `(generation, members)`: the reconstructions bootstrapped
-    /// for it, as `(watermark, history)`. More than one reconfigurer may
-    /// bootstrap the same members from a different stop quorum, so the claim
-    /// an activation is judged against is existential — the registry it
-    /// activates must be one of these, not merely a subset of one.
-    bootstrap_histories: BTreeMap<(u64, Vec<u64>), Vec<Reconstruction>>,
+    /// Per proposed `(generation, members)`, per journal: the reconstructions
+    /// bootstrapped for it, as `(watermark, history)`. More than one
+    /// reconfigurer may bootstrap the same members from a different stop
+    /// quorum, so the claim an activation is judged against is existential —
+    /// the registry it activates must be one of these, not merely a subset of
+    /// one. Shared by the tenant's journals: a reconfigurer reports only to
+    /// the journals its own node hosts.
+    pub(super) bootstrap_histories: TenantReconstructions,
     /// The highest GC floor proven effective at a matchmaker quorum.
     effective_floor: Ballot,
     /// Nodes an effective floor named retirable.
@@ -691,6 +693,49 @@ impl TenantBootstraps {
         self.lock()
             .get(proposed)
             .is_some_and(|h| h.contains(&matchmaker))
+    }
+}
+
+/// Per proposed `(generation, members)`, per journal: the reconstructions
+/// bootstrapped for it, shared by the audits of every journal of one tenant.
+/// A reconfigurer reports to the journals its own node hosts, and another
+/// journal's activation may rest on its reconstruction (witness
+/// 10244281805182423538 on b2790f5).
+#[derive(Clone, Debug, Default)]
+pub(crate) struct TenantReconstructions(Arc<Mutex<Reconstructions>>);
+
+/// What [`TenantReconstructions`] holds.
+type Reconstructions = BTreeMap<(u64, Vec<u64>), BTreeMap<JournalId, Vec<Reconstruction>>>;
+
+impl TenantReconstructions {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Reconstructions> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// `candidate` was bootstrapped for `journal` onto `proposed`.
+    fn note(&self, proposed: (u64, Vec<u64>), journal: JournalId, candidate: Reconstruction) {
+        let mut all = self.lock();
+        let candidates = all.entry(proposed).or_default().entry(journal).or_default();
+        if !candidates.contains(&candidate) {
+            candidates.push(candidate);
+        }
+    }
+
+    /// The reconstructions of `journal` onto `proposed`, once any
+    /// reconstruction onto it is known; a journal it left out reads as blank.
+    fn candidates(
+        &self,
+        proposed: &(u64, Vec<u64>),
+        journal: JournalId,
+    ) -> Option<Vec<Reconstruction>> {
+        self.lock().get(proposed).map(|journals| {
+            journals
+                .get(&journal)
+                .cloned()
+                .unwrap_or_else(|| vec![(Ballot::zero(), BTreeMap::new())])
+        })
     }
 }
 
@@ -2450,14 +2495,19 @@ impl MatchmakerAudit {
         // otherwise be invisible and every later check would compare
         // against the corrupted state.
         let proposed: Vec<u64> = bootstrap.set.members().iter().map(|m| m.0).collect();
-        let candidates = self
-            .bootstrap_histories
-            .entry((bootstrap.set.generation.0, proposed))
-            .or_default();
-        let candidate = (mine.gc_watermark, mine.history.clone());
-        if !candidates.contains(&candidate) {
-            candidates.push(candidate);
+        for (journal, registry) in &bootstrap.registries {
+            self.bootstrap_histories.note(
+                (bootstrap.set.generation.0, proposed.clone()),
+                *journal,
+                (registry.gc_watermark, registry.history.clone()),
+            );
         }
+        // This journal's piece, blank when the reconstruction left it out.
+        self.bootstrap_histories.note(
+            (bootstrap.set.generation.0, proposed),
+            self.journal(),
+            (mine.gc_watermark, mine.history.clone()),
+        );
         if !mine.history.is_empty() {
             reach_once!(
                 self.handover_with_prior_registrations,
@@ -2684,10 +2734,12 @@ impl MatchmakerAudit {
         // what this matchmaker activated is the reconstruction its generation
         // was chosen with, whole — checked *before* the fold below adopts the
         // reported registry as the audit's own.
+        let journal = self.journal.unwrap_or(JournalId::UNSET);
         if let Some(candidates) = self
             .bootstrap_histories
-            .get(&(set.generation.0, members.clone()))
+            .candidates(&(set.generation.0, members.clone()), journal)
         {
+            let candidates = &candidates;
             let reported = registry;
             // The registry may legitimately have been *pruned* since the
             // bootstrap was recorded — a GC raise at the new generation moves
