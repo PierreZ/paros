@@ -174,6 +174,10 @@ pub const RARE: &[Rare] = &[
         reason: "marginal: fired on 6 of 810 hunt seeds (#486)",
     },
     Rare {
+        msg: "an Accepted leaves for a slot its own batch compacted",
+        reason: "a heal-path accept and a floor raised past it in one batch, the lowest floor of the cell: one CI sweep seed (6657126035707192045 on 25d00a7)",
+    },
+    Rare {
         msg: "acceptor: an Accept inside the chosen prefix heals a faulty chosen record",
         reason: "marginal: fired on 9 of 810 hunt seeds (#486)",
     },
