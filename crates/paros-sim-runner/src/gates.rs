@@ -1242,14 +1242,6 @@ pub const RARE: &[Rare] = &[
         reason: "missed by the sweep of PR #510 (whole-run chaos): it needs an effective GC floor at a retirement step, rarer under whole-run chaos (#454 (control plane meets chaos), #486)",
     },
     Rare {
-        msg: "zones: a control-journal write is chosen with a zone down",
-        reason: "a whole fleet run inside a zone outage: 1 of 300 hunt seeds with the 10–16 s hold, where the outage struck on 4 (#623 (zone-down gates in the sweep))",
-    },
-    Rare {
-        msg: "zones: a tenant is created with a zone down",
-        reason: "a whole tenant creation inside a zone outage: 1 of 300 hunt seeds with the 10–16 s hold, where the outage struck on 4 (#623 (zone-down gates in the sweep))",
-    },
-    Rare {
         msg: "coordinator: a move records its placement",
         reason: "a move that finishes with the journal's recorded placement behind its members: fired on 1 of 2 sweeps; moves are rare in the sweep (#609 (slow moves in the sweep), #498 (moves in the sweep))",
     },
