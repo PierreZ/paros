@@ -37,6 +37,15 @@ const BOOK_READ_BYTES: usize = 64 * 1024;
 // A read that takes nothing never moves the fold.
 const _: () = assert!(BOOK_READ_RECORDS > 0 && BOOK_READ_BYTES > 0);
 
+/// The ticks a book may hold a moved address back for (2 s at the 50 ms
+/// tick): the lane dials the peer's old address meanwhile, as a node whose
+/// fold lags the peer's re-registration does. Counted on every tick, so a
+/// hold ends on a quiet registry too.
+const MOVE_HOLD_TICKS: u32 = 40;
+
+// A hold of no tick holds nothing back.
+const _: () = assert!(MOVE_HOLD_TICKS > 0);
+
 /// A formed machine's fold of its cell's registry, and the address each
 /// peer's lane dials now.
 pub(crate) struct PeerBook {
@@ -53,6 +62,9 @@ pub(crate) struct PeerBook {
     /// The address each peer's lane dials now, and the machine interface it
     /// dials there (empty: the well-known `Deliver`).
     dialed: BTreeMap<NodeId, PeerTarget>,
+    /// The peers whose moved address the book holds back, and for how many
+    /// more ticks.
+    held: BTreeMap<NodeId, u32>,
 }
 
 impl PeerBook {
@@ -80,6 +92,7 @@ impl PeerBook {
             fold: Folder::new(Registry::new(founders.iter().map(|(id, _)| *id))),
             floor: formed.cached.as_ref().map_or(0, |c| c.position),
             dialed,
+            held: BTreeMap::new(),
         }
     }
 
@@ -98,6 +111,11 @@ impl PeerBook {
         let Some(rt) = journals.live.get(&self.registry) else {
             return (Vec::new(), None);
         };
+        // A hold counts down on every tick; one that ends re-reads the book.
+        for ticks in self.held.values_mut() {
+            *ticks = ticks.saturating_sub(1);
+        }
+        let ended = self.held.values().any(|ticks| *ticks == 0);
         let before = self.fold.next_seq();
         loop {
             let from = self.fold.next_seq();
@@ -119,7 +137,7 @@ impl PeerBook {
         assert!(self.fold.next_seq() >= before, "the fold never moves back");
         // A fold that jumped a gap holds no registry until its checkpoint:
         // the book stands until then.
-        if self.fold.next_seq() == before || !self.fold.is_whole() {
+        if (self.fold.next_seq() == before && !ended) || !self.fold.is_whole() {
             return (Vec::new(), None);
         }
         // Below the cache's position the cache is the newer book (#211): a
@@ -154,12 +172,36 @@ impl PeerBook {
                 );
                 continue;
             }
+            // A moved address, held back for a few ticks: the lane dials
+            // the peer's old address, where nothing may listen, as a lagging
+            // fold's does. A follower's pull toward a leader behind that
+            // lane fails, and the pull falls back to the pool (#349).
+            if dialed.0 != addr {
+                if let Some(ticks) = self.held.get(&id) {
+                    if *ticks > 0 {
+                        continue;
+                    }
+                } else if moonpool_buggify::buggify_fault_with_prob!(0.2) {
+                    moonpool_assertions::reachable!(
+                        "machine: a peer book holds a moved address back"
+                    );
+                    self.held.insert(id, MOVE_HOLD_TICKS);
+                    continue;
+                }
+            }
+            self.held.remove(&id);
             *dialed = (addr.clone(), interface.clone());
             moved.push((id, (addr, interface)));
         }
         assert!(
             moved.iter().all(|(id, _)| *id != self.me),
             "a machine never moves its own lane"
+        );
+        // A hold that ended has moved its lane or found it current.
+        self.held.retain(|_, ticks| *ticks > 0);
+        assert!(
+            moved.iter().all(|(id, _)| !self.held.contains_key(id)),
+            "a moved lane is held back no more"
         );
         let cache = CachedRegistry {
             node: self.me,

@@ -324,10 +324,20 @@ impl Replica {
             "the fold's head never lies behind its base: term"
         );
         // The positions index names only retained, folded, accepted writes.
+        // It is monotone (asserted at each insert in `fold_one`): a later
+        // position is folded at a later slot. So its first and last slots
+        // bound every other one, and the check stays O(1) however long the
+        // log grows (#619 (O(n) invariants)).
         assert!(
             self.positions
-                .values()
-                .all(|s| *s >= self.floor && *s < self.folded),
+                .first_key_value()
+                .is_none_or(|(_, s)| *s >= self.floor),
+            "the positions index lies between the floor and the fold"
+        );
+        assert!(
+            self.positions
+                .last_key_value()
+                .is_none_or(|(_, s)| *s < self.folded),
             "the positions index lies between the floor and the fold"
         );
         assert!(
@@ -918,6 +928,19 @@ impl Replica {
         let outcome = state.apply(self.mode, command, |seq| self.accepted_at(seq));
         self.state = state;
         if let (Outcome::Accepted { seq, .. }, Command::Write(_)) = (&outcome, command) {
+            // The index stays monotone: the head's write starts past every
+            // indexed one, at a slot past every indexed one. The O(1) bounds
+            // in `assert_invariants` rest on it.
+            assert!(
+                self.positions.last_key_value().is_none_or(|(s, _)| s < seq),
+                "the positions index grows at its last position"
+            );
+            assert!(
+                self.positions
+                    .last_key_value()
+                    .is_none_or(|(_, at)| *at < slot),
+                "the positions index grows at its last slot"
+            );
             self.positions.insert(*seq, slot);
         }
         if matches!(outcome, Outcome::Trimmed(_)) {
