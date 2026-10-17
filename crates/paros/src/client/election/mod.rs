@@ -64,6 +64,21 @@ use crate::rpc::Read;
 /// target. The next watch resumes where this one stopped.
 const WATCH_PAGES: usize = 16;
 
+/// How long a reader the floor outran twice long-polls at the tail for the
+/// next renewal. A leader that truncates at every renewal moves the floor
+/// once per renewal period, so a reader whose round trip is longer chases
+/// the floor for ever (hunt seed 14109283004445105476 on a94cfb9: one
+/// read paged 242 times over 36 s). At the tail, the next renewal anchors
+/// the fold. A request: the server's `max_wait_ms` caps it, so a cell that
+/// truncates at every renewal runs a `max_wait_ms` of at least one renewal
+/// period. [`Election::watch`] waits two of its own renewal periods instead.
+const FLOOR_RACE_WAIT_MS: u64 = 2_000;
+
+const _: () = assert!(
+    FLOOR_RACE_WAIT_MS > 0,
+    "a reader past a moving floor waits for a renewal"
+);
+
 /// An election's timing, one plain field each so a harness can push any one
 /// to an extreme (prong 2). Both are bounds on the caller's own clock.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -77,7 +92,10 @@ pub struct ElectionTunables {
     /// How often the leader renews. Floor: non-zero, and under `lease`.
     pub renew_every: Duration,
     /// The records the leader lets lie below its latest renewal before it
-    /// truncates the journal to it. Floor 1: a truncation per renewal.
+    /// truncates the journal to it. Floor 1: a truncation per renewal, which
+    /// moves the floor once per renewal period, so a reader the floor
+    /// outruns waits at the tail for the next renewal: the server's
+    /// `max_wait_ms` must cover `renew_every`.
     pub compact_after: u64,
 }
 
@@ -304,6 +322,8 @@ impl<P: Providers> Election<P> {
     /// If an assertion on its own postconditions fails: a programmer error.
     pub async fn watch(&mut self, wait_ms: u64) -> bool {
         let mut wait = wait_ms;
+        // Whether a truncation already moved this watch to the floor.
+        let mut chased = false;
         for _ in 0..WATCH_PAGES {
             let from = self.fold.next();
             let request = Read {
@@ -341,9 +361,25 @@ impl<P: Providers> Election<P> {
                 }
                 ReadOutcome::Truncated { state } => {
                     // The journal was truncated past the fold: resume at the
-                    // floor and anchor on the leader's record there.
+                    // floor and anchor on the leader's record there. The
+                    // second time, the floor outran this watch: wait at the
+                    // tail for the next renewal ([`FLOOR_RACE_WAIT_MS`]).
                     self.floor = state.first_seq.0;
-                    self.fold.gap(state.first_seq.0);
+                    if chased {
+                        moonpool_assertions::reachable!(
+                            "election: a watch waits at the tail past a moving floor"
+                        );
+                        self.fold.gap(state.next_seq.0.max(state.first_seq.0));
+                        wait = u64::try_from(
+                            (2 * self.tunables.renew_every)
+                                .min(self.tunables.lease)
+                                .as_millis(),
+                        )
+                        .unwrap_or(FLOOR_RACE_WAIT_MS);
+                    } else {
+                        self.fold.gap(state.first_seq.0);
+                    }
+                    chased = true;
                     assert!(
                         self.fold.next() >= state.first_seq.0,
                         "a gap resumes at the floor"
@@ -596,7 +632,13 @@ impl<P: Providers> Election<P> {
 /// small pages. The tail it reads to is the one the first page reported: a
 /// leader that renews as fast as the reader pages keeps moving the live
 /// tail, and a read chasing it never ends (#574 (tenant modes), hunt seed
-/// 7429615914361011660: one read from 89 s to 319 s).
+/// 7429615914361011660: one read from 89 s to 319 s). A floor that outruns
+/// the read twice sends it to the tail, to wait for the next renewal
+/// ([`FLOOR_RACE_WAIT_MS`]).
+///
+/// # Panics
+///
+/// If an assertion on its own postconditions fails: a programmer error.
 pub async fn read_election<P: Providers>(
     client: &Client<P>,
     journal: JournalIdentifier,
@@ -605,6 +647,10 @@ pub async fn read_election<P: Providers>(
     let mut fold = ElectionFold::new();
     let mut first = first;
     let mut target: Option<u64> = None;
+    // Whether a truncation already moved this read to the floor, and the
+    // long-poll of the next page (only past a floor that outran it).
+    let mut chased = false;
+    let mut wait = 0;
     loop {
         let from = fold.next();
         let request = Read {
@@ -612,8 +658,9 @@ pub async fn read_election<P: Providers>(
             tenant: journal.tenant.0,
             from_seq: from,
             limit: client.tunables().page_size,
-            wait_ms: 0,
+            wait_ms: wait,
         };
+        wait = 0;
         let report = client.read_any(&request, first).await;
         first = report.server;
         match report.outcome {
@@ -634,7 +681,22 @@ pub async fn read_election<P: Providers>(
                 }
             }
             ReadOutcome::Truncated { state } if state.first_seq.0 > from => {
-                fold.gap(state.first_seq.0);
+                // The second time, the floor outran this read: wait at the
+                // tail for the next renewal ([`FLOOR_RACE_WAIT_MS`]).
+                if chased {
+                    moonpool_assertions::reachable!(
+                        "election: a reader waits at the tail past a moving floor"
+                    );
+                    fold.gap(state.next_seq.0.max(state.first_seq.0));
+                    wait = FLOOR_RACE_WAIT_MS;
+                } else {
+                    fold.gap(state.first_seq.0);
+                }
+                chased = true;
+                assert!(
+                    fold.next() >= state.first_seq.0,
+                    "a gap resumes at the floor"
+                );
             }
             _ => return None,
         }

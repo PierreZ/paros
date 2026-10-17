@@ -470,6 +470,14 @@ impl NodeShape {
         drawn.reconfigurer_resend_ticks = drawn.reconfigurer_resend_ticks.min(
             (drawn.election_timeout_base * drawn.reconfigure_timeout_elections).saturating_sub(1),
         );
+        // A coordinator that truncates at every renewal moves the floor once
+        // per renewal period: a reader the floor outran waits at the tail
+        // for the next renewal, which needs a tail wait as long as a
+        // renewal period (`FLOOR_RACE_WAIT_MS` in `paros::client::election`).
+        // A shorter wait answers empty at once and the reader never anchors.
+        if drawn.election_compact_after == 1 {
+            drawn.max_wait_ms = drawn.max_wait_ms.max(election_renew_ms);
+        }
         // The production profile `parosd` ships (#209), whole: every field
         // at once, which the per-field locations above would draw together
         // only by chance. Each of its values lies inside its knob's range
@@ -808,6 +816,9 @@ struct Registry {
     /// Run-level: whether the run draws the slow-machine scenario (see
     /// [`slow_machine`]), fixed by the first caller.
     slow_machine: Option<bool>,
+    /// Run-level: whether the run draws the racing-floor scenario (see
+    /// [`racing_floor`]), fixed by the first caller.
+    racing_floor: Option<bool>,
     /// Run-level: whether the machines run without metrics (see
     /// [`unmetered`]), fixed by the first caller.
     unmetered: Option<bool>,
@@ -1492,6 +1503,22 @@ pub(crate) fn untagged(state: &StateHandle) -> bool {
     *guard
         .untagged
         .get_or_insert_with(|| moonpool_sim::buggify_with_prob!(0.2))
+}
+
+/// Whether the run draws the **racing-floor scenario**: drawn once per seed,
+/// its own BUGGIFY location. Every coordinator renews at the floor and
+/// truncates the election journal at every renewal, so the floor moves
+/// once per renewal period and a reader with a slower round trip meets a
+/// floor that moved again (hunt seed 14109283004445105476 on a94cfb9: the
+/// two knobs drew together and a reader chased the floor for 36 s). Each
+/// ingredient keeps its own knob on the other seeds.
+#[tracing::instrument(level = "debug", skip_all)]
+pub(crate) fn racing_floor(state: &StateHandle) -> bool {
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    *guard
+        .racing_floor
+        .get_or_insert_with(|| moonpool_sim::buggify_with_prob!(0.3))
 }
 
 pub(crate) fn slow_machine(state: &StateHandle) -> bool {
@@ -2313,6 +2340,7 @@ pub(crate) fn boot(state: &StateHandle, ip: &str) -> Incarnation {
     let slow_machine = slow_machine(state);
     let moved_founder = moved_founder(state);
     let wide_grid = wide_grid(state);
+    let racing_floor = racing_floor(state);
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     let entry = guard.nodes.entry(ip.to_string()).or_insert_with(|| {
@@ -2329,6 +2357,16 @@ pub(crate) fn boot(state: &StateHandle, ip: &str) -> Incarnation {
             // cache that follows the move inside its window: at the drawn
             // period it struck on 1 of 22 moves in 1,000 hunt seeds.
             renew_at_floor(&mut shape.tunables);
+        }
+        if racing_floor {
+            // The racing-floor scenario: the floor moves at every renewal,
+            // once per 100 ms.
+            assert_reachable!("election: the scenario moves the floor at every renewal");
+            renew_at_floor(&mut shape.tunables);
+            shape.tunables.election_compact_after = 1;
+            // A tail wait as long as a renewal period (see `NodeShape::draw`).
+            let renew_ms = u64::try_from(ELECTION_RENEW_FLOOR.as_millis()).unwrap_or(u64::MAX);
+            shape.tunables.max_wait_ms = shape.tunables.max_wait_ms.max(renew_ms);
         }
         if wide_grid {
             // The wide-grid scenario: a stuck round moves after 1 to 3
