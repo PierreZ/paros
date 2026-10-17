@@ -122,6 +122,42 @@ pub(super) fn stays(registry: &Registry, leaving: &Leaving, node: NodeId) -> boo
     registered && !slow && !leaving.gone.contains(&node)
 }
 
+/// The machines a move keeps for a journal whose leader names `members`
+/// (sorted) and whose registry slots that stay are `staying`: at most `size`
+/// of them, the members that stay first, then the booked spares. A mode
+/// change that booked its new slots and was then handed to the move by a
+/// machine that left (#361 (slow machines), #475) leaves the registry more
+/// slots than the configuration in force names; the slots left over stay
+/// booked for the mode change. Under a grid or a flexible split the composed
+/// count must be one the quorum system admits (`AcceptorConfig::build`
+/// asserts it): `size` is, and so is a smaller `staying` the caller checked.
+fn move_target(members: &[u64], staying: &[(u64, Booking)], size: usize) -> Vec<u64> {
+    let staying_ids: BTreeSet<u64> = staying.iter().map(|(_, b)| b.node.0).collect();
+    let mut target: Vec<u64> = members
+        .iter()
+        .copied()
+        .filter(|m| staying_ids.contains(m))
+        .collect();
+    target.extend(
+        staying_ids
+            .iter()
+            .copied()
+            .filter(|n| !members.contains(n))
+            .take(size.saturating_sub(target.len())),
+    );
+    target.sort_unstable();
+    target.dedup();
+    assert!(
+        target.len() <= size,
+        "a move's target never exceeds the configuration's size"
+    );
+    assert!(
+        target.iter().all(|n| staying_ids.contains(n)),
+        "a move's target is drawn from the slots that stay"
+    );
+    target
+}
+
 /// The next journal after `last`, in id order and wrapping, with an
 /// acceptor slot on a draining machine or one `gone`, of a tenant the cell
 /// still hosts, with its slots.
@@ -427,10 +463,18 @@ impl Moves {
                 "coordinator: a move books no slot its desired mode would release"
             );
         }
-        let mut target: Vec<u64> = staying.iter().map(|(_, b)| b.node.0).collect();
-        target.sort_unstable();
         let mut members = reply.members.clone();
         members.sort_unstable();
+        let target = move_target(&members, &staying, size);
+        if staying.len() > size {
+            moonpool_assertions::reachable!(
+                "coordinator: a move leaves a mode change's extra slots booked"
+            );
+        }
+        assert!(
+            system.admits(target.len()),
+            "a move composes a configuration its quorum system admits"
+        );
         // The machines that stay, labeled with their zones as the registry
         // names them and owned by this cell (#215 (zones)): a move composes
         // a new configuration like a create.
