@@ -207,6 +207,13 @@ impl ChainWorkload {
             target,
             ..
         } = *step;
+        // The library's pipeline (#597 (several writes in flight per
+        // journal)), on its own location: the path `parosctl bench` runs.
+        if op == WRITE && writer.owned().is_some() && buggify_with_prob!(0.15) {
+            self.pipelined(step, (&mut *writer, &mut *written, &mut *next_op), now_ms)
+                .await;
+            return;
+        }
         // Race 1 (#205), mid-run: an owner pipelines a burst at
         // consecutive positions, and on a second coin claims the
         // journal again while it is in flight. Its entries are

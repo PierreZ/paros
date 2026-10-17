@@ -9,7 +9,10 @@
 //!
 //! - `write`: `--records-per-call` records at the tail of the client's own
 //!   journal (client `i` to journal `i % journals`). Clients that share a
-//!   journal share its one writer, so their writes to it go one at a time.
+//!   journal share its one writer through a `paros::client::Pipeline`
+//!   (#597 (several writes in flight per journal)): each client's write is
+//!   in flight at the same time, at consecutive positions, so `--clients 8`
+//!   on one journal keeps eight writes in flight on it.
 //! - `read-tail`: the last `--records-per-call` records of a random
 //!   journal.
 //! - `read-start`: the next page of a random journal from a cursor that
@@ -50,8 +53,9 @@ use std::time::{Duration, Instant, SystemTime};
 use clap::Args;
 use moonpool_core::{Providers, RandomProvider, TokioProviders};
 use paros::Value;
-use paros::client::{Client, Reader, ReaderOutcome, TruncateOutcome, Writer, WriterOutcome};
-use tokio::sync::Mutex;
+use paros::client::{
+    Client, Pipeline, Reader, ReaderOutcome, TruncateOutcome, Writer, WriterOutcome,
+};
 use tokio_util::sync::CancellationToken;
 
 use crate::output::note;
@@ -82,7 +86,8 @@ pub struct BenchArgs {
     /// three; `3x3` is nine acceptors in three partitions of three.
     #[arg(long, default_value = "3x1")]
     topology: Topologies,
-    /// How many concurrent clients, each one call at a time.
+    /// How many concurrent clients, each one call at a time. The clients
+    /// of one journal each keep their write in flight on it at once.
     #[arg(long, default_value = "8", value_parser = clap::value_parser!(u64).range(1..))]
     clients: u64,
     /// How long to run after the ramp (`500ms`, `60s`, `2m`); `0s` runs until
@@ -147,6 +152,16 @@ impl BenchArgs {
         self.mix.has(Call::Write) || self.mix.has(Call::SetLeader) || self.truncates()
     }
 
+    /// The most writes in flight on one journal: its clients (#597
+    /// (several writes in flight per journal)).
+    fn in_flight(&self) -> u64 {
+        if self.mix.has(Call::Write) {
+            self.clients.div_ceil(self.journals)
+        } else {
+            0
+        }
+    }
+
     fn truncates(&self) -> bool {
         !self.truncate_every.is_zero()
     }
@@ -208,13 +223,14 @@ fn parse_duration(text: &str) -> Result<Duration, String> {
     }
 }
 
-/// One journal of the run: its one writer, with a client of its own (a
-/// leader hint names one journal's leader), and the tail its writes reached.
+/// One journal of the run: its one writer's pipeline, with a client of its
+/// own (a leader hint names one journal's leader), and the tail its writes
+/// reached.
 struct Slot {
     journal: setup::Journal,
     key: u64,
     client: ParosClient,
-    writer: Mutex<Writer>,
+    pipeline: Pipeline,
     tail: Cell<u64>,
 }
 
@@ -246,6 +262,9 @@ struct Shared {
     failure: RefCell<Option<Failure>>,
     /// Records `read-tail` read and found wrong.
     mismatches: Cell<u64>,
+    /// Writes that arrived before the write in front of them and were sent
+    /// again (#597 (several writes in flight per journal)).
+    resent: Cell<u64>,
 }
 
 /// One topology's totals, for the comparison.
@@ -300,6 +319,12 @@ impl Plan {
     ) -> Result<Measured, Ending> {
         let (args, seed) = (&self.args, self.seed);
         note(&format!("topology {topology}: {}", topology.label()));
+        if args.in_flight() > 0 {
+            note(&format!(
+                "write: up to {} in flight per journal",
+                args.in_flight()
+            ));
+        }
         let patience = Duration::from_millis(args.patience_ms);
         let slots = match prepare(runtime, client, servers, args, (seed, topology), patience).await
         {
@@ -328,6 +353,7 @@ impl Plan {
             stop: CancellationToken::new(),
             failure: RefCell::new(None),
             mismatches: Cell::new(0),
+            resent: Cell::new(0),
         });
         let (elapsed, calls, total) = tokio::task::LocalSet::new()
             .run_until(drive(client.clone(), shared.clone(), export, local))
@@ -427,10 +453,10 @@ async fn prepare(
         let journal_client = client.clone().with_own_leader_hint();
         let mut rng = Rng::of(&[seed, 1, index as u64]);
         let leader_seed = u128::from(rng.next_u64()) << 64 | u128::from(rng.next_u64());
-        let mut writer = Writer::new(journal.id, leader_seed);
+        let pipeline = Pipeline::new(Writer::new(journal.id, leader_seed));
         let tail = if args.writes() {
-            setup::claim(&journal_client, &mut writer, &journal, patience).await?;
-            writer.next_seq()
+            setup::claim(&journal_client, &pipeline, &journal, patience).await?;
+            pipeline.writer().next_seq()
         } else {
             journal_client
                 .journal_state(journal.id, 0)
@@ -443,7 +469,7 @@ async fn prepare(
             key: records::journal_key(&journal.name),
             journal,
             client: journal_client,
-            writer: Mutex::new(writer),
+            pipeline,
             tail: Cell::new(tail),
         }));
     }
@@ -570,6 +596,12 @@ fn report(
     let args = &shared.args;
     if !shared.json {
         totals(measured, calls, total, args.mix.has(Call::Write));
+        if shared.resent.get() > 0 {
+            note(&format!(
+                "write: {} arrived early and were sent again",
+                shared.resent.get()
+            ));
+        }
         return;
     }
     let run = serde_json::json!({
@@ -582,6 +614,8 @@ fn report(
         "acceptors": shared.topology.acceptors(),
         "clients": args.clients,
         "journals": args.journals,
+        "writes_in_flight_per_journal": args.in_flight(),
+        "writes_resent": shared.resent.get(),
         "record_size": args.record_size,
         "records_per_call": args.records_per_call,
         "rate": args.rate,
@@ -740,40 +774,54 @@ fn call_bytes(args: &BenchArgs) -> u64 {
     args.records_per_call * args.record_size
 }
 
-/// Claim the journal again under `writer` when another uuid superseded it.
-async fn owned(shared: &Shared, slot: &Slot, writer: &mut Writer) -> Result<(), Failure> {
-    if writer.owned().is_none() {
+/// Claim the journal again when another uuid superseded its writer.
+async fn owned(shared: &Shared, slot: &Slot) -> Result<(), Failure> {
+    if slot.pipeline.owned().is_none() {
         let patience = Duration::from_millis(shared.args.patience_ms);
-        setup::claim(&slot.client, writer, &slot.journal, patience)
+        setup::claim(&slot.client, &slot.pipeline, &slot.journal, patience)
             .await
             .map_err(|e| Failure::new(Ending::Refused, e))?;
     }
     Ok(())
 }
 
-/// One `write` of `--records-per-call` records at the journal's tail, as
-/// its writer. A writer another uuid superseded claims again first.
+/// One `write` of `--records-per-call` records at the journal's next
+/// position, as its writer, beside the other clients' writes in flight on
+/// it. A writer another uuid superseded claims again first.
 async fn write(shared: &Shared, slot: &Slot) -> Result<u64, Failure> {
     let args = &shared.args;
-    let mut writer = slot.writer.lock().await;
     let size = usize::try_from(args.record_size).expect("a record size fits");
-    owned(shared, slot, &mut writer).await?;
     let retries = slot.client.tunables().retry_budget;
     let mut attempt = 0;
     loop {
-        let from = writer.next_seq();
-        let batch: Vec<Value> = (from..from + args.records_per_call)
-            .map(|seq| Value(records::record(shared.seed, slot.key, seq, size)))
-            .collect();
-        let outcome = writer.write(&slot.client, batch, 0).await;
+        owned(shared, slot).await?;
+        let batch = |from: u64| {
+            (from..from + args.records_per_call)
+                .map(|seq| Value(records::record(shared.seed, slot.key, seq, size)))
+                .collect()
+        };
+        let outcome = match slot.pipeline.write(&slot.client, batch, 0).await {
+            Some(sent) => {
+                shared
+                    .resent
+                    .set(shared.resent.get() + u64::from(sent.resent));
+                sent.outcome
+            }
+            None => WriterOutcome::NotOwner,
+        };
         match outcome {
             WriterOutcome::Written { seq, count, .. } => {
                 slot.tail.set(slot.tail.get().max(seq + count));
                 return Ok(call_bytes(args));
             }
-            // A stale position, still the owner: the refusal named the
-            // tail; the records of the new position go there.
-            WriterOutcome::Refused { .. } if writer.owned().is_some() && attempt < retries => {
+            // A position another write's failure left unreachable, or a
+            // term a `set-leader` of this run ended while the write was in
+            // flight: the records of a new position go there.
+            WriterOutcome::Refused { .. }
+            | WriterOutcome::Superseded { .. }
+            | WriterOutcome::NotOwner
+                if attempt < retries =>
+            {
                 attempt += 1;
             }
             WriterOutcome::Ambiguous => {
@@ -799,19 +847,19 @@ async fn write(shared: &Shared, slot: &Slot) -> Result<u64, Failure> {
 }
 
 /// One `set-leader`: the journal's writer takes a new term under a fresh
-/// uuid, which supersedes its last one.
+/// uuid, which supersedes its last one and the writes in flight under it.
 async fn set_leader(shared: &Shared, slot: &Slot) -> Result<u64, Failure> {
-    let mut writer = slot.writer.lock().await;
-    writer.begin_term();
-    owned(shared, slot, &mut writer).await?;
+    slot.pipeline
+        .claim(&slot.client, slot.client.leader().unwrap_or(0), true)
+        .await;
+    owned(shared, slot).await?;
     Ok(0)
 }
 
 /// One `truncate` of the journal below `up_to`, as its writer.
 async fn truncate(shared: &Shared, slot: &Slot, up_to: u64) -> Result<(), Failure> {
-    let mut writer = slot.writer.lock().await;
-    owned(shared, slot, &mut writer).await?;
-    match writer.truncate(&slot.client, up_to, 0).await {
+    owned(shared, slot).await?;
+    match slot.pipeline.truncate(&slot.client, up_to, 0).await {
         Some(TruncateOutcome::Applied { .. }) => Ok(()),
         Some(TruncateOutcome::Ambiguous) => Err(Failure::new(
             Ending::Ambiguous,
