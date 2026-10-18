@@ -1,4 +1,4 @@
-//! **The tenant coordinator** (#210, `docs/architecture.md` §3.3): the
+//! **The tenant coordinator** (#210, `docs/architecture/03-3-coordinators-and-placement.md` §3.3): the
 //! single writer of every hosted tenant's control journal, which answers the
 //! journal requests ([`crate::client::journals`]).
 //!

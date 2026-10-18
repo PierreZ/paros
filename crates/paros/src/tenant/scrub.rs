@@ -1,5 +1,5 @@
 //! The tenant scrubber's progress record (#362 (background scrubbing),
-//! `docs/architecture.md` §5): where the elected scrubber stands in its pass
+//! `docs/architecture/05-failure-model-and-zones.md` §5): where the elected scrubber stands in its pass
 //! and what it found, flushed to the tenant's control journal so a later term
 //! resumes from it.
 //!

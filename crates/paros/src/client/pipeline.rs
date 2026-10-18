@@ -3,7 +3,7 @@
 //! the callers that write through it, each write sent without waiting for
 //! the answer of the write before it.
 //!
-//! A `Write` names its position (`docs/architecture.md` §2.2), and the
+//! A `Write` names its position (`docs/architecture/02-data-plane.md` §2.2), and the
 //! journal judges it at apply: accepted only at `next_seq`. A leader that
 //! receives the writes in order puts them in consecutive slots, and every
 //! one is accepted. The pipeline keeps the order and at-most-once rules of

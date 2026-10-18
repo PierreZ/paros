@@ -1163,7 +1163,7 @@ fn may_rename(board: &MachineBoard, layout: &crate::shape::MachineLayout, rank: 
 /// book names only the founder's dead old name and the registry names the
 /// machine only at its dead old address: neither side reaches the other
 /// again, and no set or journal moves onto the machine. This is the limit
-/// `docs/architecture.md` lists for a moved machine; the harness never puts
+/// `docs/architecture/` lists for a moved machine; the harness never puts
 /// a run past it. Witness: recipe `6959312946067892202
 /// 110064:7756325629573379374` on b93880a, a one-founder cell whose admitted
 /// machine was renamed at 37.3 s and whose founder was renamed at 38.1 s.

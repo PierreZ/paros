@@ -39,7 +39,7 @@ one place. Keeping it current is part of landing a PR, not a follow-up.
 #69 is one of four places a merge can leave stale. In the same session:
 
 1. **#69**, as above.
-2. **`docs/architecture.md` §8 (Milestones)**: if the merge finished, split
+2. **`docs/architecture/07-changes-milestones-done.md` §8 (Milestones)**: if the merge finished, split
    or moved a milestone, update its row (the `milestone:M<n>` label and the
    issue numbers it carries).
 3. **`AGENTS.md`**: the root file if a rule, a gate or the workflow changed;

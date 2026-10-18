@@ -5,7 +5,7 @@ package paros.fleet.v1;
 import "common.proto";
 
 // The fleet tenant's control journal (#229): the fleet's directory, tenant ->
-// cell, plus the cell entries (`docs/architecture.md` §3.7). Its identifier is
+// cell, plus the cell entries (`docs/architecture/03-7-universe.md` §3.7). Its identifier is
 // random like every identifier (§3.8), drawn at `init`. Each entry is one record
 // of a `Write`, written by the fleet tenant's coordinator (whoever claimed the journal
 // with `SetLeader`); `paros::fleet::FleetDirectory` is the one fold of them. The core

@@ -3,7 +3,7 @@
 //! address — `parosctl init` over that one machine — instead of admitting
 //! it. The run's cell still names the old machine there, so its members
 //! keep sending their peer traffic to an address another cell now serves:
-//! the shape `Deliver`'s `cell_id` refuses (`docs/architecture.md` §3.2,
+//! the shape `Deliver`'s `cell_id` refuses (`docs/architecture/03-2-machines.md` §3.2,
 //! the cluster id `ScyllaDB` carries in gossip). From then on the run's operators do
 //! not count that address as their cell's: `Inspect` there names the other
 //! cell, and a re-run `init` learns the cell a majority of the founding

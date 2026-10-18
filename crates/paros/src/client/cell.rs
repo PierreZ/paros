@@ -1,4 +1,4 @@
-//! **Cell operations** (#216, `docs/architecture.md` §3.1): `cell
+//! **Cell operations** (#216, `docs/architecture/03-1-cell-tenant-and-bootstrap.md` §3.1): `cell
 //! add-machine`, an idempotent state machine over the cell tenant's control
 //! journal and the machine it admits, in the shape of the fleet operations
 //! ([`super::fleet`]): each step is one write, decided from what the journal

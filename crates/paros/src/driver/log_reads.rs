@@ -17,7 +17,7 @@
 //! `min_wait_ms`, #241), re-served after every batch (the fold only grows
 //! inside one), and is answered empty when its wait runs out. A page holds
 //! at most `max_read_records` records and `max_read_bytes` record bytes
-//! ([`ReadLimits`], `docs/architecture.md` §2.7). A read whose confirmation does not arrive within `read_retry_ticks`
+//! ([`ReadLimits`], `docs/architecture/02-data-plane.md` §2.7). A read whose confirmation does not arrive within `read_retry_ticks`
 //! is answered `served: false`: the client retries, here or elsewhere.
 //!
 //! Every driver that serves `Read` (the node's and the replica's) holds one
@@ -36,7 +36,7 @@ use super::DriverTunables;
 use super::reply::{Reply, answer};
 
 /// The limits a serving process puts on a `Read` (#241,
-/// `docs/architecture.md` §2.7), taken from its [`DriverTunables`]: the page
+/// `docs/architecture/02-data-plane.md` §2.7), taken from its [`DriverTunables`]: the page
 /// (records and bytes) and the tail wait (a maximum and a minimum).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ReadLimits {

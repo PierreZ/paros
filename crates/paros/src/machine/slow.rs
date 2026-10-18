@@ -1,4 +1,4 @@
-//! **Slow machines** (#361 (slow machines), gray failure, `docs/architecture.md`
+//! **Slow machines** (#361 (slow machines), gray failure, `docs/architecture/03-4-tenant-modes.md`
 //! §3.4): the cell coordinator finds a machine that is alive but slow, and
 //! the cell stops depending on it, the way it does for a draining one.
 //!

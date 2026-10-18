@@ -1,4 +1,4 @@
-//! **`Resolve`** (#216, `docs/architecture.md` §3.5): "which references
+//! **`Resolve`** (#216, `docs/architecture/03-5-frontend-and-resolver.md` §3.5): "which references
 //! serve tenant T", the client's first call to its entry endpoint.
 //!
 //! The design has two answerers: a resolver per region answers the cell hop

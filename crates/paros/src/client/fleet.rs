@@ -1,4 +1,4 @@
-//! **Fleet operations** (#229, `docs/architecture.md` §3.1, §3.7): `init`'s
+//! **Fleet operations** (#229, `docs/architecture/03-1-cell-tenant-and-bootstrap.md` §3.1, §3.7): `init`'s
 //! fleet steps, and creating and removing a tenant, each an **idempotent
 //! state machine** over two control journals — the fleet tenant's (the fleet's
 //! directory) and the cell tenant's (the cell's tenant list). No identifier is
@@ -680,7 +680,7 @@ impl FleetSession {
     /// names the creation: when the fleet tenant holds `name` under `draw`, the step
     /// resumes it; under any other identifier, in any state, it is refused
     /// ([`FleetRefusal::NameTaken`]), since a tenant is created once
-    /// (`docs/architecture.md` §3.7). Ends with the tenant's id once the directory
+    /// (`docs/architecture/03-7-universe.md` §3.7). Ends with the tenant's id once the directory
     /// holds it `READY`.
     #[tracing::instrument(level = "trace", skip_all, fields(tenant = draw.tenant.0))]
     #[allow(clippy::too_many_lines)] // one look per refusal, in order

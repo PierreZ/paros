@@ -1,4 +1,4 @@
-//! **The bootstrap pin** (#245 (Biscuit tokens), `docs/architecture.md`
+//! **The bootstrap pin** (#245 (Biscuit tokens), `docs/architecture/03-1-cell-tenant-and-bootstrap.md`
 //! §3.1 "Trust"): an idle machine checks an `admin` token on the calls that
 //! put it in a cell, `CellInit`, `PrepareCell`, `FormCell` and `Admit`.
 //!

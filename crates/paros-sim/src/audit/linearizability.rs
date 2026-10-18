@@ -5,7 +5,7 @@
 //! search with Lowe's memoization (the Porcupine algorithm).
 //!
 //! The model is this file's own: it restates the rules of
-//! `docs/architecture.md` §2 and never calls `paros_core`'s
+//! `docs/architecture/02-data-plane.md` §2 and never calls `paros_core`'s
 //! `JournalView::apply`, so a rule the core loses is a history the model
 //! refuses. Removing the fencing check from the core (a write accepted from
 //! any leader uuid) is red here on the first seed whose superseded

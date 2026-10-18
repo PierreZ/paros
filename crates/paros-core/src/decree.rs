@@ -1,5 +1,5 @@
 //! A **single-decree Paxos** wired out of the shared Paxos roles: one value,
-//! chosen once, over any acceptor configuration (`docs/architecture.md` §1,
+//! chosen once, over any acceptor configuration (`docs/architecture/01-goal.md` §1,
 //! "paros eats its own food": one-shot decisions use this flavor, never a
 //! hand-rolled agreement).
 //!

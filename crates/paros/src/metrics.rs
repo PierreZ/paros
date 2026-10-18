@@ -1,4 +1,4 @@
-//! **Metrics** (#366, `docs/architecture.md` §3.6): what a machine counts
+//! **Metrics** (#366, `docs/architecture/03-6-status.md` §3.6): what a machine counts
 //! about the calls it serves, for an operator, never for a decision.
 //!
 //! The library records in a plain `prometheus` registry, one per

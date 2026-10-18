@@ -938,7 +938,7 @@ pub(crate) struct JournalPlan {
     pub(crate) main: JournalIdentifier,
 }
 
-/// Every identifier the run names (`docs/architecture.md` §3.8: no identifier is
+/// Every identifier the run names (`docs/architecture/03-8-identifiers-checkpoints-recovery-security.md` §3.8: no identifier is
 /// fixed), drawn once per seed: the deployment's journal and the joiners'
 /// registry. Each a random tenant and a random journal, both set; the two
 /// never share a tenant. The cell's id, its control journal, the fleet

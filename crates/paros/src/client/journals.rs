@@ -1,4 +1,4 @@
-//! **A tenant's journals** (#210, `docs/architecture.md` §3.3): create and
+//! **A tenant's journals** (#210, `docs/architecture/03-3-coordinators-and-placement.md` §3.3): create and
 //! delete them through the tenant coordinator, and list them from the
 //! tenant's control journal.
 //!

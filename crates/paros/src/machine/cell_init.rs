@@ -46,7 +46,7 @@ use crate::rpc::well_known;
 use crate::{Address, Names};
 
 /// A random identifier: a random tenant and a random journal, both set (no id
-/// is fixed, `docs/architecture.md` §3.8).
+/// is fixed, `docs/architecture/03-8-identifiers-checkpoints-recovery-security.md` §3.8).
 fn draw_identifier<P: Providers>(providers: &P) -> JournalIdentifier {
     JournalIdentifier::new(
         TenantId(draw_nonzero(providers)),

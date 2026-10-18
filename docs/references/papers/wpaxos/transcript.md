@@ -7,7 +7,7 @@ Computer Science and Engineering, University at Buffalo, SUNY)
 arXiv:1703.08905v4 [cs.DC], revised 3 Apr 2019. 12 pages.
 **Source:** <https://arxiv.org/abs/1703.08905>
 
-Note on authorship: `docs/architecture.md`'s bibliography (near line 1086) gives the fourth
+Note on authorship: `docs/architecture/10-sources.md`'s bibliography (near line 1086) gives the fourth
 author as "Tasci". The paper's own byline and its listed e-mails
 (`ailidani, acharapk, demirbas, tkosar @buffalo.edu`) both say **Kosar**. This transcript follows
 the PDF; see "Unresolved issues" below.
@@ -155,9 +155,9 @@ nodes fail matters (unlike EPaxos's set-based quorums). The paper defines:
 For the 4-by-3 grid with `fn = fz = 0` (Fig. 3a): `Fmin = 2`, `Fmax = 6`. For `fn = fz = 1`
 (Fig. 3b): `Fmin = 3`, `Fmax = 6`.
 
-### Checking the architecture.md claim: does the printed definition intersect?
+### Checking the docs/architecture/ claim: does the printed definition intersect?
 
-`docs/architecture.md` (bibliography, near line 1086) states: *"The printed TLA+ quorum
+`docs/architecture/10-sources.md` (bibliography, near line 1086) states: *"The printed TLA+ quorum
 definition does not intersect; only the floor form the proof uses is sound."* This transcript
 verified that claim against the printed `Q1`/`Q2` set-builders above, independently of the GitHub
 `paxi/tla` specification (not inspected; see "Unresolved issues").
@@ -404,10 +404,10 @@ transactions atop WPaxos.
   the shared zone's node intersection the Lemma's proof assumes. This is consistent with (though
   not the stated reason for) paros binding every quorum question to code in `QuorumSystem` rather
   than a hand-derived formula: a quorum predicate is checked against the *exact* membership a
-  ballot committed to, not trusted from a paper's prose form. The reason `docs/architecture.md`
+  ballot committed to, not trusted from a paper's prose form. The reason `docs/architecture/`
   itself gives for binding zone labels to `AcceptorConfig` at the ballot is the one in the next
   bullet: two nodes that disagree on a member's zone must not evaluate different quorums.
-- **`docs/architecture.md` §5 already rejects WPaxos's per-zone quorum system for paros**:
+- **`docs/architecture/05-failure-model-and-zones.md` §5 already rejects WPaxos's per-zone quorum system for paros**:
   surviving one zone loss needs `fz = 1`, at which point every Phase 2 spans two zones (no better
   than a zone-balanced majority) while tolerating *fewer* node failures than a majority; WPaxos's
   latency win only exists at `fz = 0`, which gives up zone survival outright. paros's grid
@@ -429,7 +429,7 @@ transactions atop WPaxos.
 
 ## Unresolved issues
 
-- **Author name.** `docs/architecture.md` (near line 1086) lists the fourth author as "Tasci";
+- **Author name.** `docs/architecture/` (near line 1086) lists the fourth author as "Tasci";
   the paper's own byline and author e-mails say **Kosar**. Left for the maintainer to reconcile.
 - **TLA+ specification scope.** The quorum-intersection check above is against the *printed*,
   in-paper set-builder definitions and Lemma 1's proof only. The companion machine-checked

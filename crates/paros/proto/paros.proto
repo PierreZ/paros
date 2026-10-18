@@ -248,7 +248,7 @@ message ReconfigureAck {
   optional uint64 round = 4;
 }
 
-// The frontend's calls (#192 (the frontend), `docs/architecture.md` §3.5):
+// The frontend's calls (#192 (the frontend), `docs/architecture/03-5-frontend-and-resolver.md` §3.5):
 // a public call with the caller's entry, served by a frontend only. The
 // frontend checks the token, resolves the names, and forwards the call to
 // the machines; the answer is the call's own ack.

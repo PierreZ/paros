@@ -1,4 +1,4 @@
-//! **A tenant's control journal** (#210, `docs/architecture.md` §3.1, §3.3,
+//! **A tenant's control journal** (#210, `docs/architecture/03-1-cell-tenant-and-bootstrap.md` §3.1, §3.3,
 //! §3.8): the tenant describes itself in it, and every journal it creates or
 //! deletes is an entry in it. Every index above it (the cell's tenant list,
 //! the fleet directory) can be rebuilt from it.

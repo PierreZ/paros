@@ -1,4 +1,4 @@
-//! The three races of `docs/architecture.md` §6 (#205), as the owner runs
+//! The three races of `docs/architecture/06-verification.md` §6 (#205), as the owner runs
 //! them: a claim racing its own pipelined burst ([`ChainWorkload::burst`],
 //! race 1) and a write whose timeout is shorter than its ack, retried
 //! across the owner's re-claim ([`ChainWorkload::ack_race`], race 2). Race

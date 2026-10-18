@@ -1,7 +1,7 @@
 # paros-authz-biscuit
 
 Biscuit tokens for paros (#245 Biscuit tokens, #400 keygen and offline tokens), `publish = false`
-because `biscuit-auth` is pinned by git rev until 6.1. The design is `docs/architecture.md` §3.5
+because `biscuit-auth` is pinned by git rev until 6.1. The design is `docs/architecture/03-5-frontend-and-resolver.md` §3.5
 "Tokens are Biscuits". Used by `parosctl` (`key`, `token`, `--frontends`), the `paros-frontend`
 binary, `paros-sim` (#192 (the frontend)) and `parosd`'s bootstrap pin (#245). It depends on `paros` for
 the `Authz` trait only; Biscuit never enters `paros` or `paros-core`.
