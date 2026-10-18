@@ -125,6 +125,9 @@ pub enum CallOutcome {
     Truncated,
     /// Refused at the edge: the batch is over this machine's limits.
     TooLarge,
+    /// Refused at the edge: the leader's acceptors fall behind (#360
+    /// (disk full)).
+    Busy,
     /// Sent to the leader.
     Redirected,
     /// This machine does not run the journal (any more).
@@ -135,13 +138,14 @@ pub enum CallOutcome {
 
 impl CallOutcome {
     /// Every outcome, in label order.
-    pub const ALL: [CallOutcome; 9] = [
+    pub const ALL: [CallOutcome; 10] = [
         CallOutcome::Ok,
         CallOutcome::Duplicate,
         CallOutcome::Refused,
         CallOutcome::WrongMode,
         CallOutcome::Truncated,
         CallOutcome::TooLarge,
+        CallOutcome::Busy,
         CallOutcome::Redirected,
         CallOutcome::UnknownJournal,
         CallOutcome::Unserved,
@@ -157,6 +161,7 @@ impl CallOutcome {
             CallOutcome::WrongMode => "wrong_mode",
             CallOutcome::Truncated => "truncated",
             CallOutcome::TooLarge => "too_large",
+            CallOutcome::Busy => "busy",
             CallOutcome::Redirected => "redirected",
             CallOutcome::UnknownJournal => "unknown_journal",
             CallOutcome::Unserved => "unserved",

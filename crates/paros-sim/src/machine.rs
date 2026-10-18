@@ -626,8 +626,8 @@ pub(crate) fn wipe_target(
 
 /// The founding member the replaced-founder scenario wipes now
 /// (`crate::world::replaced_founder`, #423), if the run is at its moment:
-/// every founder of a cell of three or more formed, and no machine was
-/// wiped yet. The highest-ranked live founder, so the cell keeps a majority
+/// every founder of a cell of three or more formed and up, and no machine
+/// was wiped yet. The highest-ranked founder, so the cell keeps a majority
 /// of its members. The answer is the founder's process IP, what the wipe
 /// strikes.
 pub(crate) fn replace_target(state: &StateHandle, dead: impl Fn(&str) -> bool) -> Option<String> {
@@ -645,13 +645,17 @@ pub(crate) fn replace_target(state: &StateHandle, dead: impl Fn(&str) -> bool) -
     if !formed {
         return None;
     }
-    board
+    // Every founder up: a wipe while another founder is down (the silent
+    // machine's crash) leaves a cell of three no majority.
+    let ips: Vec<&String> = board
         .founders
         .iter()
-        .rev()
         .filter_map(|addr| board.ips.get(addr))
-        .find(|ip| !dead(ip))
-        .cloned()
+        .collect();
+    if ips.len() < board.founders.len() || ips.iter().any(|ip| dead(ip)) {
+        return None;
+    }
+    ips.last().map(|ip| (*ip).clone())
 }
 
 /// Where the replaced-founder scenario stands (#423): the machine that
@@ -751,9 +755,9 @@ pub(crate) fn cached_mover(state: &StateHandle, dead: impl Fn(&str) -> bool) -> 
 
 /// The machine the silent-machine scenario crashes now
 /// (`crate::world::silent_machine`), once the cell formed: a live machine
-/// the cell admitted, else, on a cell of at least three founding members, a
-/// live founder that formed (the others keep a majority and one of them
-/// leads), unless the downed-founder scenario takes one down (#213 (three
+/// the cell admitted, else, on a cell of at least three founding members
+/// that all formed and are up, a founder (the others keep a majority and
+/// one of them leads), unless the downed-founder scenario takes one down (#213 (three
 /// founding members)). `None` before that.
 pub(crate) fn silent_target(state: &StateHandle, dead: impl Fn(&str) -> bool) -> Option<String> {
     // Drawn before the board's lock: the downed-founder scenario takes a
@@ -782,6 +786,11 @@ pub(crate) fn silent_target(state: &StateHandle, dead: impl Fn(&str) -> bool) ->
         })
         .collect();
     if downed || board.founders.len() < 3 || formed.len() < board.founders.len() {
+        return None;
+    }
+    // Every founder up: a founder down already (a wipe not rebooted yet, a
+    // crash) and a second one silent leave a cell of three no majority.
+    if formed.iter().any(|addr| ip(addr).is_none()) {
         return None;
     }
     formed.into_iter().rev().find_map(ip)

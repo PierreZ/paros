@@ -105,6 +105,9 @@ pub(crate) type Judged<U> = fn(&U, u64) -> Answer;
 
 /// A `Write`'s answer: its records' bytes when accepted.
 pub(crate) fn write_answer(ack: &WriteAck, bytes: u64) -> Answer {
+    if ack.busy {
+        return Answer::bare(CallOutcome::Busy);
+    }
     let outcome = match WriteOutcome::try_from(ack.outcome) {
         Ok(WriteOutcome::Accepted) => {
             return Answer {

@@ -46,6 +46,27 @@ pub enum StorageFaultDecision {
     /// Fail-stop: the node crashes rather than run on state it does not
     /// durably have, and recovery is the ordinary crash/restart path.
     Crash,
+    /// Read-only (#360 (disk full)): the device has no space left. The
+    /// journal is quarantined like on [`Crash`](Self::Crash), but the node
+    /// keeps running, and the journal re-opens read-only: it votes in
+    /// Phase 1, serves reads and refuses Phase-2 votes until
+    /// `DriverTunables::read_only_ticks` pass.
+    ReadOnly,
+}
+
+impl StorageFaultDecision {
+    /// The decision the driver takes for `error`: read-only on a full disk,
+    /// fail-stop on every other fault.
+    #[must_use]
+    pub fn of(error: &StorageError) -> Self {
+        match error {
+            StorageError::Full { .. } => Self::ReadOnly,
+            StorageError::Io { .. }
+            | StorageError::FsyncFailed { .. }
+            | StorageError::Corruption { .. }
+            | StorageError::Metadata { .. } => Self::Crash,
+        }
+    }
 }
 
 /// What a delegated `Accept` did when it reached a proxy leader (#142), as

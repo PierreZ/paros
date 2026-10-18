@@ -256,6 +256,40 @@ slow-machine scenario holds a founding member slow for 10–16 s on half its str
 window; its oracles: a slow mark never takes a quorum, and after chaos no journal with a machine
 to go to keeps a slot on a slow machine.
 
+**Full disks** (#360 (disk full), decided on 2026-10-18). A full disk is a normal result, never a
+crash or a lost write. The journal store preallocates its segments, so a write inside a segment
+never needs space; only a segment roll or a new journal's files do. Such a write that finds the
+disk full fails with `ENOSPC` before any byte lands, and the store answers
+`StorageError::Full` (known lost). The driver decides it `StorageFaultDecision::ReadOnly`, not
+`Crash`:
+
+- The journal is quarantined, as on any storage fault, because its core may hold the refused
+  batch's effects. A journal a full disk took never ends the node, even when it was the last one
+  live.
+- It re-opens **read-only**: a state of the live journal, not a longer quarantine. The decision
+  is a new state, so the node keeps its Phase-1 promises and its reads. A read-only journal votes
+  in Phase 1 and serves reads. It refuses every Phase-2 vote (`Accept`), the records of a
+  catch-up and a handoff to it, as lost messages, and it never campaigns. The reason is typed:
+  `reason = "disk_full"` on `journal_read_only` and `phase2_refused`.
+- `read_only_ticks` (30 s in the shipped profile, floor 1) after the fault, it is writable
+  again. The time counts from the fault, not the re-open, so a full disk holds a journal
+  unwritable for the longer of the quarantine and `read_only_ticks`, not their sum. A write
+  that still finds the disk full makes it read-only again. A truncation frees space: the store
+  removes its dead segments once the floor passes them.
+
+Each watch round also reads the free bytes in every machine's `Load` answer (`has_space`,
+`free_bytes`, `total_bytes`, from moonpool's `SystemSample.space`, `statvfs` in production). A
+machine below `free_bytes_floor` (1 GiB in the shipped profile, floor 0: none) is written
+`MachineSpace { low: true }`, and `low: false` once it is above again (changes only, for the
+incarnation the registry holds; a new incarnation starts with space). Placement books a machine
+low on space last, as a down one; the mark moves no role already placed. The simulation's
+disk-full scenario (`paros_sim::world::disk_full`) gives the machines' and the acceptors' disks
+a capacity a little above what they use, sometimes counting each byte two to four times
+(moonpool#343 (disk capacity and ENOSPC)), then grows them back; recovery mode lifts every
+capacity. Its gates: a store went read-only and came back, a machine marked low on space and with
+space again. Its oracles are the campaign's: no acknowledged write is lost, and the audit judges
+every full disk `ReadOnly`, never a crash.
+
 Landed in #211 (2026-10-10): the **durable cached registry fold**
 (`paros::machine::CachedRegistry`). Every machine of a cell keeps the cell's address book
 (`cell_book`) at one registry position in a file `registry` beside its record, rewritten whole

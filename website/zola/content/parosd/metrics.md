@@ -39,7 +39,8 @@ When `PAROS_HTTP_LISTEN` is not set, the machine does not listen for HTTP. It st
 | `paros_scrub_damaged_total`, `paros_scrub_repaired_total` | counter | | the records a scrub found damaged on the disk of the machine, and those it wrote again from its own copy |
 
 The `outcome` label is one of `ok`, `duplicate`, `refused`, `wrong_mode`, `truncated`,
-`too_large`, `redirected`, `unknown_journal` and `unserved`. A refusal or a call the machine did
+`too_large`, `busy` (a leader whose acceptors fall behind), `redirected`, `unknown_journal` and
+`unserved`. A refusal or a call the machine did
 not serve is counted, not only a success. A call that has no answer yet is
 `paros_calls_total` minus `paros_call_answers_total`.
 

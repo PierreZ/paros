@@ -34,6 +34,13 @@ member. Then its disk writes complete and it exits with code 0. `PAROS_SHUTDOWN_
 (default 30 s) limits the stop. A second Ctrl-C stops the machine at once, which is the same as
 a crash: the next start recovers from the disk.
 
+**A full disk.** A machine with a full disk does not crash and does not lose a write. A journal
+store that cannot get space for its next segment becomes read-only until 30 s after the fault
+(`PAROS_READ_ONLY_TICKS`). It still answers Phase 1 and reads, and it refuses Phase-2 votes.
+Then it tries to write again. A truncation frees space. Each machine reports its free bytes,
+and placement uses a machine with less than 1 GiB free (`PAROS_FREE_BYTES_FLOOR`) only when no
+other machine has a slot.
+
 [The journal API](@/parosd/journal-api.md) describes the four calls, the two writer modes and
 the limits. [Admin views](@/parosd/admin-views.md) shows the machines, tenants and roles of a
 cell with `parosctl`. [TLS](@/parosd/tls.md) encrypts every session and proves every caller with

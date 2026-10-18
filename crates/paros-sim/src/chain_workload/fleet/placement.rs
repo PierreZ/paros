@@ -130,10 +130,11 @@ async fn read(
         })
         .collect();
     let mut tenants = Vec::with_capacity(hosted.len());
-    for (tenant, control) in hosted {
+    for &(tenant, control) in &hosted {
         learn(JournalIdentifier::new(tenant, control));
         tenants.push(journals::list(&known.client, tenant, control).await?);
     }
+    let reads = hosted;
     let mut after = judged_cell(&known.members);
     let loaded =
         paros::client::checkpoint::load(&mut after, known.journals.cell, &known.client, first, 0)
@@ -141,7 +142,28 @@ async fn read(
     if !matches!(loaded, LoadOutcome::Loaded { .. }) {
         return None;
     }
+    // The two reads are not one snapshot: a mode change or a move that
+    // records its placement between them, then releases a slot before the
+    // registry is read, shows an old placement against new bookings. Read
+    // the placements again and judge only when none changed (witness
+    // 4897247819957563398: a mode change shrank a journal to one member
+    // in the tail, and its two releases landed between the reads).
+    for (control, (tenant, id)) in tenants.iter().zip(&reads) {
+        let again = journals::list(&known.client, *tenant, *id).await?;
+        if placements(&again) != placements(control) {
+            assert_reachable!("placement: a placement changed between the oracle's reads");
+            return None;
+        }
+    }
     Some((tenants, after.state().clone(), slow_before))
+}
+
+/// Every live journal's recorded placement, in id order.
+fn placements(control: &TenantControl) -> Vec<(paros::JournalId, paros::AcceptorConfig)> {
+    control
+        .live()
+        .map(|(id, journal)| (id, journal.placed.clone()))
+        .collect()
 }
 
 /// The oracle itself, and the gate that a placement spread over zones.

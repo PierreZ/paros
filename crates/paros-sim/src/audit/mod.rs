@@ -1732,13 +1732,25 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
     #[tracing::instrument(level = "trace", skip_all, fields(node = node.0, decision = ?decision))]
     fn storage_fault(&self, node: NodeId, error: &StorageError, decision: StorageFaultDecision) {
         let mut st = self.state();
-        // Stages 6/7 have exactly one honest reaction; a different decision
-        // here is a driver bug until Stage 8's protocol-aware choices exist.
+        // Stages 6/7 have exactly one honest reaction to a damaged or
+        // failing device, fail-stop; a full disk (#360 (disk full)) has
+        // another, read-only. Any other decision is a driver bug.
         assert_always!(
-            decision == StorageFaultDecision::Crash,
+            decision == StorageFaultDecision::Crash || matches!(error, StorageError::Full { .. }),
             "a storage fault is decided as a fail-stop crash"
         );
+        assert_always!(
+            decision == StorageFaultDecision::ReadOnly
+                || !matches!(error, StorageError::Full { .. }),
+            "disk full: a full disk is decided read-only, never a crash"
+        );
         match error {
+            StorageError::Full { .. } => {
+                reach_once!(
+                    st.disk_full_read_only,
+                    "disk full: a full disk makes a store read-only"
+                );
+            }
             StorageError::Io { .. } | StorageError::FsyncFailed { .. } => {
                 st.storage_faults_detected += 1;
                 reach_once!(

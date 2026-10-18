@@ -66,6 +66,11 @@ Each tenant scrubs its journals in the background: its coordinator reads every a
 of every record again, and an acceptor writes a damaged record again from its own copy
 (#362 (background scrubbing)). `parosctl status --tenant acme` shows the pass and what it found.
 
+A full disk is a normal result, never a crash or a lost write: the store goes read-only (it
+still votes in Phase 1 and serves reads) and tries again later, placement passes over a machine
+low on space, and a leader whose acceptors fall behind answers writes `busy` until they catch up
+(#360 (disk full)).
+
 Each machine serves Prometheus metrics and two probes (`/metrics`, `/healthz`, `/readyz`) when
 `PAROS_HTTP_LISTEN` is set. It pushes its spans and metrics to an OpenTelemetry collector when
 `PAROS_OTLP_ENDPOINT` is set. To measure throughput and latency on one machine, with no cell to

@@ -1566,6 +1566,7 @@ impl ChainWorkload {
                                 WriteOutcome::Redirect { leader } => nodes.observe_leader(leader),
                                 WriteOutcome::WrongMode { .. } => owner_never_of_wrong_mode(),
                                 WriteOutcome::TooLarge { .. }
+                                | WriteOutcome::Busy
                                 | WriteOutcome::Denied(_)
                                 | WriteOutcome::UnknownJournal
                                 | WriteOutcome::Malformed

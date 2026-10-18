@@ -272,6 +272,11 @@ impl ChainWorkload {
                 self.history.record_write_failed(submission.op);
                 false
             }
+            WriteOutcome::Busy => {
+                assert_reachable!("chain: a leader answers a write busy");
+                self.history.record_write_failed(submission.op);
+                false
+            }
             WriteOutcome::Redirect { leader } => {
                 step.nodes.observe_leader(leader);
                 self.history.record_write_failed(submission.op);

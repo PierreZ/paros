@@ -768,6 +768,7 @@ impl<P: Providers> Client<P> {
         let deadline = self.time.now() + self.tunables.request_timeout;
         let mut server = first % self.servers.len();
         let mut redirects = 0;
+        let mut busy = false;
         // The servers that answered `UnknownJournal`: a server that does not
         // host the journal says nothing about it, as a read treats it
         // (`ReadOutcome::UnknownJournal` only when every server says so), so
@@ -793,6 +794,21 @@ impl<P: Providers> Client<P> {
                 .bounded(remaining, WriteOutcome::Ambiguous, attempt)
                 .await;
             match outcome {
+                // Admission control (#360 (disk full)): the leader admits no
+                // write now. The same write goes to the same leader again,
+                // after a pause, until the deadline.
+                WriteOutcome::Busy if self.time.now() < deadline => {
+                    moonpool_assertions::reachable!("admission: a client retries a busy write");
+                    self.observe_leader_at(server);
+                    busy = true;
+                    if !self.pause(self.tunables.redirect_backoff).await {
+                        return WriteReport {
+                            outcome: WriteOutcome::Busy,
+                            server,
+                            redirects,
+                        };
+                    }
+                }
                 WriteOutcome::UnknownJournal
                     if unknown + 1 < self.servers.len()
                         && self.retarget(options.retarget, server, None) != server
@@ -828,6 +844,11 @@ impl<P: Providers> Client<P> {
                     }
                 }
                 outcome => {
+                    if busy && matches!(outcome, WriteOutcome::Written { .. }) {
+                        moonpool_assertions::reachable!(
+                            "admission: a write answered busy then succeeded"
+                        );
+                    }
                     match &outcome {
                         WriteOutcome::Redirect { leader } => self.observe_leader(*leader),
                         outcome if outcome.is_verdict() => self.observe_leader_at(server),
@@ -946,6 +967,7 @@ impl<P: Providers> Client<P> {
                 // it says nothing about the first attempt, so ask another.
                 WriteOutcome::Redirect { .. }
                 | WriteOutcome::TooLarge { .. }
+                | WriteOutcome::Busy
                 | WriteOutcome::UnknownJournal
                 | WriteOutcome::Malformed
                 | WriteOutcome::Ambiguous => {

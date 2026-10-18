@@ -40,6 +40,7 @@ message SystemEntry {
     SetMachineTags set_machine_tags = 15;
     Maintenance maintenance = 16;
     MachineSlow machine_slow = 17;
+    MachineSpace machine_space = 18;
   }
 }
 
@@ -135,6 +136,17 @@ message MachineUp {
 // The cell coordinator judged machine `id`, as incarnation `incarnation`,
 // slow (`slow`) or fast again (#361 (slow machines)): written only on a
 // change, with the latency facts the judgement read.
+// The cell coordinator judged machine `id` low on space, or not any more
+// (#360 (disk full)): its disk's free bytes below the free-bytes floor.
+message MachineSpace {
+  uint64 id = 1;
+  fixed64 incarnation_high = 2;
+  fixed64 incarnation_low = 3;
+  bool low = 4;
+  // The free bytes its last `Load` answer reported.
+  uint64 free_bytes = 5;
+}
+
 message MachineSlow {
   uint64 id = 1;
   fixed64 incarnation_high = 2;
@@ -275,6 +287,8 @@ message LivenessState {
   bool up = 4;
   // Whether the cell coordinator holds it slow (#361 (slow machines)).
   bool slow = 5;
+  // Whether the cell coordinator holds it low on space (#360 (disk full)).
+  bool low_space = 6;
 }
 
 message RegisteredNodeState {

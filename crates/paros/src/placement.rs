@@ -65,8 +65,13 @@ pub struct Machine {
     /// The slots booked on it now.
     pub booked: u64,
     /// Whether the cell coordinator holds it up and not slow (#361 (slow
-    /// machines)): placement books a slow machine last, as a down one.
+    /// machines)): placement books a slow machine last, as a down one, and
+    /// moves its roles off it.
     pub up: bool,
+    /// Whether the cell coordinator marked it below the free-bytes floor
+    /// (#360 (disk full)): placement books it after every machine with
+    /// space, and the mark moves no role already placed.
+    pub low_space: bool,
 }
 
 impl Machine {
@@ -100,6 +105,9 @@ pub fn machines(registry: &Registry, nodes: impl IntoIterator<Item = NodeId>) ->
                 );
                 return None;
             }
+            if registry.liveness(node).low_space {
+                moonpool_assertions::reachable!("placement: a machine low on space is booked last");
+            }
             Some(Machine {
                 node,
                 class: held.class,
@@ -107,6 +115,7 @@ pub fn machines(registry: &Registry, nodes: impl IntoIterator<Item = NodeId>) ->
                 capacity: held.capacity,
                 booked: registry.booked(node),
                 up: registry.liveness(node).up && !registry.liveness(node).slow,
+                low_space: registry.liveness(node).low_space,
             })
         })
         .collect()
@@ -349,7 +358,9 @@ fn add(
     }
     let mut left = eligible;
     let mut chosen = Vec::with_capacity(missing);
-    // Rule 6: the machines that are up first, the others only after them.
+    // Rule 6: the machines that are up first, the others only after them;
+    // a machine low on space (#360 (disk full)) counts as down here.
+    let first = |m: &Machine| m.up && !m.low_space;
     for up in [true, false] {
         while chosen.len() < missing {
             // Zones that tie on the target's instances go least-loaded
@@ -357,12 +368,12 @@ fn add(
             // draw.
             let Some(zone) = left
                 .iter()
-                .filter(|m| m.up == up)
+                .filter(|m| first(m) == up)
                 .map(|m| {
                     let zone = m.zone.as_str();
                     let (sum, n) = left
                         .iter()
-                        .filter(|o| o.up == up && o.zone == zone)
+                        .filter(|o| first(o) == up && o.zone == zone)
                         .fold((0_u64, 0_u64), |(sum, n), o| {
                             (sum.saturating_add(o.booked), n + 1)
                         });
@@ -382,7 +393,7 @@ fn add(
             let (index, machine) = left
                 .iter()
                 .enumerate()
-                .filter(|(_, m)| m.up == up && m.zone == zone)
+                .filter(|(_, m)| first(m) == up && m.zone == zone)
                 .min_by_key(|(_, m)| (m.booked, rank(seed, m.node.0)))
                 .map(|(i, m)| (i, *m))
                 .expect("a zone picked holds a machine");
@@ -435,6 +446,7 @@ mod tests {
             capacity,
             booked: 0,
             up: true,
+            low_space: false,
         }
     }
 
@@ -540,6 +552,27 @@ mod tests {
         assert_eq!(nodes, vec![NodeId(2), NodeId(3)]);
         let steps = plan(&want(journal(1), 3), &machines, &[], 5).expect("fits");
         assert_eq!(booked(&steps).last(), Some(&NodeId(1)));
+    }
+
+    #[test]
+    fn a_machine_low_on_space_is_the_last_choice_and_keeps_its_slots() {
+        let mut machines = vec![machine(1, "a", 4), machine(2, "b", 4), machine(3, "c", 4)];
+        machines[0].low_space = true;
+        let steps = plan(&want(journal(1), 2), &machines, &[], 5).expect("fits");
+        let mut nodes = booked(&steps);
+        nodes.sort_unstable();
+        assert_eq!(nodes, vec![NodeId(2), NodeId(3)]);
+        let mut bookings = Vec::new();
+        let three = want(journal(1), 3);
+        let steps = plan(&three, &machines, &[], 5).expect("fits");
+        assert_eq!(booked(&steps).last(), Some(&NodeId(1)));
+        apply(&mut machines, &mut bookings, &three, &steps);
+        // The mark moves no role already placed: the same count plans nothing.
+        assert!(
+            plan(&three, &machines, &bookings, 5)
+                .expect("fits")
+                .is_empty()
+        );
     }
 
     #[test]

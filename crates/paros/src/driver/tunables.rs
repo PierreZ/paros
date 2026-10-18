@@ -98,6 +98,9 @@ impl DriverTunables {
     /// | `scrub_pass_within` | 7 days | every record is read again each week, so rot is found long before a second copy rots |
     /// | `scrub_page` | the default (64) | a page bounds one acceptor's read burst |
     /// | `shutdown_within` | 30 s | a clean stop hands every leadership on and lets every flush land; past it the stop is a crash (#560 (clean Ctrl-C shutdown)) |
+    /// | `read_only_ticks` | 300 (30 s) | a full disk is tried again twice a minute, one refused segment each time (#360 (disk full)) |
+    /// | `admission_rounds` | 256 | a leader holds at most 256 undecided rounds before it answers `busy` (#360 (disk full)) |
+    /// | `free_bytes_floor` | 1 GiB | a few hundred segments of the default geometry before placement passes a machine over (#360 (disk full)) |
     ///
     /// # Panics
     ///
@@ -138,6 +141,9 @@ impl DriverTunables {
             scrub_rate: 4 * 1024 * 1024,
             scrub_pass_within: Duration::from_hours(7 * 24),
             shutdown_within: Duration::from_secs(30),
+            read_only_ticks: 30 * ELECTION_BASE,
+            admission_rounds: 256,
+            free_bytes_floor: 1024 * 1024 * 1024,
             ..defaults
         };
         // What `parosd` ships is a profile the simulation could have drawn:
@@ -167,7 +173,7 @@ impl DriverTunables {
     /// Every checked field: its name, its value and its floor. One row per
     /// field, so it grows with the tunables.
     #[allow(clippy::too_many_lines)]
-    fn floor_table(&self) -> [(&'static str, u64, u64); 50] {
+    fn floor_table(&self) -> [(&'static str, u64, u64); 53] {
         let ms = |d: Duration| u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
         let count = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
         [
@@ -290,6 +296,9 @@ impl DriverTunables {
             ),
             ("scrub_page", count(self.scrub_page), 1),
             ("shutdown_within", ms(self.shutdown_within), 0),
+            ("read_only_ticks", self.read_only_ticks, 1),
+            ("admission_rounds", self.admission_rounds, 1),
+            ("free_bytes_floor", self.free_bytes_floor, 0),
         ]
     }
 
