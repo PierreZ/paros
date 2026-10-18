@@ -53,6 +53,7 @@ pub(crate) mod tenants;
 mod world;
 
 pub(crate) use client::{ClientHistory, check_control_history};
+pub(crate) use journal_model::AckedWrite;
 pub(crate) use linearizability::{Attempt, Call, Seen};
 pub(crate) use world::{
     AuditWorld, audit_world, audit_world_for, audit_world_named, check_every_world, check_run,

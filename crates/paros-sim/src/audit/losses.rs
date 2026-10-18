@@ -134,6 +134,46 @@ impl AuditState {
             || self.frozen_by_faulty()
     }
 
+    /// Whether the run's wipes excuse the journal's liveness: no
+    /// configuration it ever ran under, the bootstrap included, keeps a
+    /// Phase-1 quorum of members never wiped. A wiped acceptor never
+    /// rejoins, so no leader can be elected again, and no move or
+    /// reconfiguration can heal it either (each needs a leader): a chosen
+    /// slot no proposer tallied stays unapplied for good. The rule
+    /// `fleet/placement.rs` applies to a move. Seen on a two-member grid
+    /// journal (`1×2`, Phase 1 needs both): a torn column left a chosen
+    /// slot on the leader alone, then the other member's machine was wiped
+    /// (PR #678's sweep, recipe `246:12551097816637968050` on seed
+    /// 17950225408756416880). Safety is never excused, nor an acked slot.
+    pub(super) fn wipes_excuse_liveness(&self) -> bool {
+        if self.wiped.is_empty() {
+            return false;
+        }
+        let mut configs = self
+            .bootstrap
+            .iter()
+            .chain(self.configs.values())
+            .peekable();
+        if configs.peek().is_none() {
+            return false;
+        }
+        let excused = configs.all(|config| {
+            let alive: BTreeSet<NodeId> = config
+                .members()
+                .iter()
+                .copied()
+                .filter(|member| !self.wiped.contains(&member.0))
+                .collect();
+            !config.has_phase1_quorum(&alive)
+        });
+        if excused {
+            assert_reachable!(
+                "convergence: a journal its wipes left without a Phase-1 quorum is excused"
+            );
+        }
+        excused
+    }
+
     /// Whether an **undecided** slot is frozen by faulty copies no outage
     /// planned: a live member's boot reported its entry faulty, no node
     /// holds a clean copy the tally heard, and some configuration the

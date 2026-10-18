@@ -518,7 +518,7 @@ impl FleetOps {
                     );
                     self.note_journals([journal]);
                     let client = cell.client.clone();
-                    self.exercise_created(&client, journal, cell.first(draw))
+                    self.exercise_created(&client, journal, cell.first(draw), Some(journal))
                         .await;
                 }
             }
@@ -836,7 +836,7 @@ impl FleetOps {
             && buggify_with_prob!(0.3)
         {
             assert_reachable!("created: a client runs the data plane through a frontend");
-            self.exercise_created(&client, LOCAL, first).await;
+            self.exercise_created(&client, LOCAL, first, None).await;
         }
     }
 

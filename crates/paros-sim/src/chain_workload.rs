@@ -969,7 +969,7 @@ impl ChainWorkload {
             Duration::from_millis(config.init_patience_ms),
             client_id,
             LeaderSeeds::new(ctx.random().random::<u128>()),
-            (config.fleet_kill_delay_ms, config.fleet_kill_down_ms),
+            &config,
         )?;
         let mut system_ops = system::SystemOps::new(
             &deployment,
@@ -1584,7 +1584,7 @@ impl ChainWorkload {
                     }
                 }
                 TRUNCATE => {
-                    self.truncate_step(&step, (&mut writer, &mut fold), &truncate_traced)
+                    self.truncate_step(&step, (&mut writer, &mut fold, &written), &truncate_traced)
                         .await;
                 }
                 TRUNCATE_STORM => {

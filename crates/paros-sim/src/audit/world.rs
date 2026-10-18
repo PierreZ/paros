@@ -230,6 +230,13 @@ impl AuditWorld {
         self.lock().journal.record_at(position)
     }
 
+    /// A client of a created journal was told `write` is written (#651
+    /// (acked writes judged by their bytes)): the journal model judges it
+    /// against the records it saw accepted, once every verdict is in.
+    pub(crate) fn note_acked(&self, write: super::journal_model::AckedWrite) {
+        self.lock().journal.note_acked(write);
+    }
+
     /// A client folded the record at position `lsn` (#186: the application
     /// is the client's, fed by `Read`), hashing to `cmd_hash`, reaching
     /// `state`. Strictly increasing per client, one record and one state per
@@ -693,7 +700,7 @@ impl AuditWorld {
     /// waits on it before it asks for the claim.
     pub(crate) fn converged(&self) -> bool {
         let st = self.lock();
-        if st.loss_excuses_liveness() {
+        if st.loss_excuses_liveness() || st.wipes_excuse_liveness() {
             return true;
         }
         let Some(cluster_max) = st.applied_max.values().copied().max() else {
@@ -705,6 +712,12 @@ impl AuditWorld {
                 excused_from_convergence(&st, *node)
                     || st.applied_max.get(node) == Some(&cluster_max)
             })
+    }
+
+    /// The highest `next_seq` any verdict of this journal revealed: how many
+    /// records it held at most (#658).
+    pub(crate) fn next_seq(&self) -> u64 {
+        self.lock().journal.next_seq()
     }
 
     /// Every slot a call was answered at, its highest: what the final
@@ -768,7 +781,9 @@ impl AuditWorld {
         // safety is judged all along (`AuditState::loss_accepted`), and so
         // is the leg that is safety: nothing applied runs ahead of the
         // decided frontier.
-        let excused = st.loss_excuses_liveness();
+        // So is one whose wipes left no configuration a Phase-1 quorum of
+        // live members (`wipes_excuse_liveness`); an acked slot never is.
+        let excused = st.loss_excuses_liveness() || st.wipes_excuse_liveness();
         let Some(cluster_max) = st.applied_max.values().copied().max() else {
             assert_always!(
                 acked_max.is_none(),

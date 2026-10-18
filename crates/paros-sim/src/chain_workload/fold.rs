@@ -84,6 +84,9 @@ pub(super) struct Fold {
     journal: JournalIdentifier,
     state: ChainState,
     cursor: u64,
+    /// The highest `first_seq` this client learned (#659 (partial and
+    /// mid-batch truncation)): where a truncation's floor shapes start.
+    floor: u64,
     /// Whether the client is still in the fence. Once it left, a trim may
     /// overtake the cursor and the fold stops (`detached`).
     fenced: bool,
@@ -96,6 +99,7 @@ impl Fold {
             journal,
             state: ChainState::default(),
             cursor: 0,
+            floor: 0,
             fenced: true,
             detached: false,
         }
@@ -105,6 +109,17 @@ impl Fold {
     /// start here.
     pub(super) fn cursor(&self) -> u64 {
         self.cursor
+    }
+
+    /// The highest `first_seq` this client learned, from a page, a
+    /// trimmed answer or a truncation's verdict.
+    pub(super) fn floor(&self) -> u64 {
+        self.floor
+    }
+
+    /// Learn the journal's `first_seq` from any answer that names it.
+    pub(super) fn learn_floor(&mut self, first_seq: u64) {
+        self.floor = self.floor.max(first_seq);
     }
 
     /// The state after every entry folded so far.
@@ -129,6 +144,9 @@ impl Fold {
         from: u64,
         answer: &ReadOutcome,
     ) {
+        if let ReadOutcome::Page { state, .. } | ReadOutcome::Truncated { state } = answer {
+            self.learn_floor(state.first_seq.0);
+        }
         if from != self.cursor {
             return;
         }

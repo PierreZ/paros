@@ -3,13 +3,15 @@
 
 use std::future::Future;
 
-use moonpool_sim::assert_reachable;
+use moonpool_sim::{assert_always, assert_reachable, buggify_with_prob};
 use paros::client::{TruncateOutcome, Writer};
 use paros::{LeaderUuid, Truncate, leader_uuid_to_proto};
 
 use crate::chain::trace_truncate;
 
+use super::config::{MID_BATCH_SHAPE, TRUNCATE_SHAPES, weighted_index};
 use super::fold::{self, Fold};
+use super::write::WrittenCommand;
 use super::{ChainWorkload, Step, owner_never_of_wrong_mode};
 
 /// The writer fence an owner truncates under (#228): the uuid it leads
@@ -26,13 +28,67 @@ pub(super) fn absorb_truncate(writer: &mut Writer, outcome: Option<&TruncateOutc
     }
 }
 
+/// The floor a `TRUNCATE` step asks for (#659 (partial and mid-batch
+/// truncation)), by its shape (an index into [`TRUNCATE_SHAPES`]): `floor`
+/// is the highest `first_seq` the client learned and `fence` the most the
+/// trim fence allows. A shape that finds nothing to aim at asks for
+/// `fence`. A floor of 0 sends nothing.
+fn truncate_floor(
+    shape: usize,
+    (floor, fence): (u64, u64),
+    written: &[WrittenCommand],
+    draw: u64,
+) -> u64 {
+    match TRUNCATE_SHAPES[shape % TRUNCATE_SHAPES.len()] {
+        "uniform" => {
+            let low = floor.min(fence);
+            low + draw % (fence - low + 1)
+        }
+        // Strictly inside the last batch of several records this client
+        // wrote, below the fence.
+        "mid-batch" => written
+            .iter()
+            .rev()
+            .find(|own| own.count > 1 && own.seq + 1 < fence)
+            .map_or(fence, |own| {
+                let inside = own.count.min(fence - own.seq) - 1;
+                own.seq + 1 + draw % inside
+            }),
+        "floor" => floor.min(fence),
+        "backward" => floor.min(fence).saturating_sub(1),
+        _ => fence,
+    }
+}
+
+/// Judge a truncation the journal applied at `first` (its `first_seq`
+/// after it), asked up to `up_to` when the client knew the floor at
+/// `before` (#659): a floor never moves back, and the gates for a floor
+/// inside a batch and a backward ask.
+fn judge_floor(first: u64, (before, up_to): (u64, u64), written: &[WrittenCommand]) {
+    assert_always!(
+        first >= before,
+        "chain: a truncation never lowers the journal's floor",
+        { "first_seq" => first, "before" => before, "up_to" => up_to }
+    );
+    if up_to < before {
+        assert_reachable!("chain: a backward truncation leaves the floor");
+    }
+    if written
+        .iter()
+        .any(|own| own.seq < first && first < own.seq + own.count)
+    {
+        assert_reachable!("chain: a truncation floor lands inside a batch");
+    }
+}
+
 impl ChainWorkload {
     /// One `TRUNCATE` step (#228): an owner truncates under its writer fence,
-    /// clamped below every folding client's cursor.
+    /// clamped below every folding client's cursor. The floor it asks for is
+    /// a shape drawn per step (#659 (partial and mid-batch truncation)).
     pub(super) async fn truncate_step<T, F>(
         &mut self,
         step: &Step<'_>,
-        (writer, fold): (&mut Writer, &mut Fold),
+        (writer, fold, written): (&mut Writer, &mut Fold, &[WrittenCommand]),
         truncate_traced: &T,
     ) where
         T: Fn(usize, Option<LeaderUuid>, u64) -> F + Sync,
@@ -43,8 +99,11 @@ impl ChainWorkload {
             client_id,
             config,
             ctx,
+            journal,
             nodes,
+            raw_class,
             raw_pause,
+            raw_payload,
             raw_policy,
             readers,
             target,
@@ -58,7 +117,22 @@ impl ChainWorkload {
             // Everything this client has read is what it may
             // drop: its fold's cursor, or its own writes' end
             // when it wrote past what it read.
-            let up_to = writer.next_seq().max(fold.cursor());
+            let base = writer.next_seq().max(fold.cursor());
+            let before = fold.floor();
+            // On its own location, a client that wrote a batch of several
+            // records aims inside it whatever the seed's weights: the
+            // shape needs that batch below the fence, which the weights
+            // alone seldom line up (#659).
+            let several = written.iter().any(|own| own.count > 1);
+            let shape = if several && buggify_with_prob!(0.3) {
+                assert_reachable!("chain: a truncation aims inside a batch the client wrote");
+                MID_BATCH_SHAPE
+            } else {
+                weighted_index(&config.truncate_shape_weights, raw_class)
+            };
+            let up_to = fold::clamp(ctx.state(), journal, base).map_or(base, |fence| {
+                truncate_floor(shape, (before, fence), written, raw_payload)
+            });
             // The owner truncates under its own fence (#228). A
             // superseded owner sends nothing — or, as the
             // deliberate misbehaviour, its old uuid, which the
@@ -73,6 +147,11 @@ impl ChainWorkload {
                 fence(writer)
             };
             let outcome = truncate_traced(nodes.leader().unwrap_or(target), fence, up_to).await;
+            if let Some(TruncateOutcome::Applied { state }) = &outcome {
+                let first = state.first_seq.0;
+                judge_floor(first, (before, up_to), written);
+                fold.learn_floor(first);
+            }
             absorb_truncate(&mut *writer, outcome.as_ref());
         }
     }
