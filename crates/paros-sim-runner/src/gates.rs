@@ -138,6 +138,10 @@ pub const RARE: &[Rare] = &[
         reason: "a gone-machine seed with a long window: 2 hits in 1,000 hunt seeds (#498 (moves in the sweep), #475 (re-place after the Down bound))",
     },
     Rare {
+        msg: "status: a lost matchmaker set excuses a journal",
+        reason: "two of a tenant's three matchmakers wiped while a journal of the tenant stayed unhealthy: one witness, a coverage-guided recipe on 448be19's sweep (#475 (re-place after the Down bound), #486)",
+    },
+    Rare {
         msg: "system: a composer books a joiner's slot before it names it",
         reason: "a reconfiguration onto a joiner on a registry seed: 12 hits in 1,000 hunt seeds (#477 (retire coordination moves into the control journals))",
     },

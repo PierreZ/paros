@@ -768,6 +768,16 @@ impl<P: Providers> Client<P> {
         let deadline = self.time.now() + self.tunables.request_timeout;
         let mut server = first % self.servers.len();
         let mut redirects = 0;
+        // The servers that answered `UnknownJournal`: a server that does not
+        // host the journal says nothing about it, as a read treats it
+        // (`ReadOutcome::UnknownJournal` only when every server says so), so
+        // the write asks the next one, once each. Without it, a writer
+        // whose first server stopped hosting the journal (a founding member
+        // wiped before the cell formed, its address now an admitted
+        // machine's) never reached the journal's leader again once it lost
+        // its leader hint: witness seed 2897542392826386941 on 448be19, a
+        // coordinator's `Placed` record unavailable for 30 s.
+        let mut unknown = 0;
         let mut listen = options.abandon_first_after;
         loop {
             let remaining = deadline.saturating_sub(self.time.now());
@@ -783,6 +793,24 @@ impl<P: Providers> Client<P> {
                 .bounded(remaining, WriteOutcome::Ambiguous, attempt)
                 .await;
             match outcome {
+                WriteOutcome::UnknownJournal
+                    if unknown + 1 < self.servers.len()
+                        && self.retarget(options.retarget, server, None) != server
+                        && self.time.now() < deadline =>
+                {
+                    moonpool_assertions::reachable!(
+                        "client: a write asks another server past one that does not host the journal"
+                    );
+                    unknown += 1;
+                    server = self.retarget(options.retarget, server, None);
+                    if !self.pause(self.tunables.redirect_backoff).await {
+                        return WriteReport {
+                            outcome: WriteOutcome::Ambiguous,
+                            server,
+                            redirects,
+                        };
+                    }
+                }
                 WriteOutcome::Redirect { leader }
                     if !options.stop_at_redirect
                         && redirects < self.tunables.redirect_limit
