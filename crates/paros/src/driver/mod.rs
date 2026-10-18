@@ -3000,18 +3000,25 @@ impl<P: Providers, J: JournalStores> SystemCtx<'_, '_, P, J> {
                 // follows it, matchmaker link included (#454 (control plane
                 // meets chaos): witness 17483207099981818289, an admitted
                 // machine renamed in chaos whose set handover never reached
-                // it).
-                SystemEvent::Registry(RegistryEvent::Reregistered { id, addr, .. }) => {
+                // it). A founding member that moved before its first
+                // registration landed moves with a `Registered` (#543): an
+                // admitted machine opened its lane from the admission's book,
+                // at the plan's address, and that lane follows it too.
+                // Seed 15535649749772960988 (recipe
+                // 2208855:8827221011598423148) on fba843a: the joiner's lane
+                // to a moved founder dialed its dead address for the whole
+                // run, so a `1x4` grid journal never held a Phase-1 quorum
+                // again and a chosen slot stayed unapplied.
+                SystemEvent::Registry(
+                    RegistryEvent::Reregistered { id, addr, .. }
+                    | RegistryEvent::Registered { id, addr, .. },
+                ) => {
                     let interface = follower
                         .registry()
                         .get(id)
                         .map(|node| node.machine_interface.clone())
                         .unwrap_or_default();
                     self.readdress_peer(me, id, &addr, &interface);
-                    self.admit_peer(me, id, &addr);
-                    admit = true;
-                }
-                SystemEvent::Registry(RegistryEvent::Registered { id, addr, .. }) => {
                     self.admit_peer(me, id, &addr);
                     admit = true;
                 }

@@ -366,8 +366,15 @@ impl TenantDesk {
         }
         // A live name answers `NameTaken` at apply: it books nothing. An
         // unsettled fold may lack a live journal whose create landed
-        // unanswered: its orphans wait for a settled one.
-        let named = self.desk(tenant).state().named(name).is_some();
+        // unanswered: its orphans wait for a settled one. It may also lack
+        // this term's delete of the name, so a name it holds live is
+        // trusted only on a settled fold: else the create books, and the
+        // fold judges the name. Seed 4507917792168049601 (recipe
+        // 686941:15533205754184659368) on fba843a: a delete the catch-up
+        // missed freed the name, and the fold accepted a create that
+        // booked nothing.
+        let named =
+            !self.unsettled.contains(&tenant) && self.desk(tenant).state().named(name).is_some();
         if !named
             && !self.unsettled.contains(&tenant)
             && self.release_orphans(client, tenant, cell).await.is_err()
