@@ -962,7 +962,11 @@ impl<P: Providers> Client<P> {
     ///   below `led_from` can find a predecessor's identical bytes (a
     ///   writer that wrote before its claim's answer came back, hunt seed
     ///   10942456551287199571). The position, the length, the records, the
-    ///   leader, the tail and `led_from` must all match.
+    ///   leader, the tail and `led_from` must all match. And no other write
+    ///   of this uuid may share the request's positions
+    ///   ([`Writer::led_from`]): its own earlier batches can tile them with
+    ///   the same bytes (a broken pipeline it rolled back behind), and the
+    ///   journal refuses the request there.
     ///
     /// Both proofs rest on fresh uuids, the precondition the journal
     /// already trusts its clients with (`docs/architecture/02-data-plane.md` §2.3).

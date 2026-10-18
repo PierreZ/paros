@@ -315,6 +315,37 @@ fn every_refusal_label_the_node_sends_is_typed() {
 }
 
 #[test]
+fn a_read_back_proof_is_withheld_where_two_own_writes_overlap() {
+    // Hunt seed 8440881997986470091: two empty-record batches tile the
+    // positions of a four-record write sent after the writer rolled back.
+    let journal = JournalIdentifier::new(paros_core::TenantId(7), paros_core::JournalId(9));
+    let mut writer = Writer::new(journal, 7);
+    let uuid = leader_uuid(7, 0);
+    writer.won(&state(Some(uuid), 0, 0));
+    let pair = |seq| paros_core::Entry {
+        leader: uuid,
+        seq: Seq(seq),
+        records: vec![Value(Vec::new()); 2],
+    };
+    writer.opened(&pair(0));
+    writer.opened(&pair(2));
+    assert_eq!(writer.led_from(&pair(2)), Some(0));
+    let four = writer
+        .entry(vec![Value(Vec::new()); 4])
+        .expect("a leader builds a write");
+    assert_eq!(four.seq, Seq(0));
+    writer.opened(&four);
+    assert_eq!(writer.led_from(&four), None);
+    assert_eq!(writer.led_from(&pair(2)), None);
+    writer.advance_to(4);
+    let fresh = writer
+        .entry(vec![Value(Vec::new())])
+        .expect("a leader builds a write");
+    writer.opened(&fresh);
+    assert_eq!(writer.led_from(&fresh), Some(0));
+}
+
+#[test]
 fn a_writer_owns_only_what_it_claimed_and_stops_when_superseded() {
     let journal = JournalIdentifier::new(paros_core::TenantId(7), paros_core::JournalId(9));
     let mut writer = Writer::new(journal, 7);

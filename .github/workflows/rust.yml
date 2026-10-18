@@ -138,25 +138,26 @@ jobs:
   # sweep is heavier than the plain `cargo nextest` run. Mirrors moonpool's `sim`
   # job.
   #
-  # Two shards run the same sweep in parallel (decided on 2026-10-16): each PR gets
-  # twice the seeds for the same wall-clock time. The shards draw disjoint seeds
+  # Four shards run the same sweep in parallel (decided on 2026-10-16 with two,
+  # raised to four on 2026-10-18): each PR gets four times the seeds for the same
+  # wall-clock time. The shards draw disjoint seeds
   # without any flag: moonpool derives every iteration seed from a base seed taken
   # from the wall clock in nanoseconds, so two runs on two runners share a seed
   # only by a 64-bit hash collision. A red shard is a red CI: `fail-fast: false`
-  # lets the other shard finish, so a red run reports every failing seed.
+  # lets the other shards finish, so a red run reports every failing seed.
   # A shard fails on its own on a safety violation, a failed run, or a sweep
   # that did not saturate although every gate fired. It writes its gate
   # defects to a file instead of failing on them: a declared gate it never ran,
-  # a gate it never fired. The `sim-gates` job fails only on a gate both
-  # shards missed. Judged per shard, a rare gate would miss twice as often as
-  # with one sweep.
+  # a gate it never fired. The `sim-gates` job fails only on a gate every
+  # shard missed. Judged per shard, a rare gate would miss far more often than
+  # with all the shards together.
   sim:
-    name: sim (shard ${{ matrix.shard }}/2)
+    name: sim (shard ${{ matrix.shard }}/4)
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2]
+        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v7
       - uses: DeterminateSystems/nix-installer-action@main
@@ -165,7 +166,7 @@ jobs:
         with:
           cache-directories: target/sancov
           cache-on-failure: true
-          # Both shards build the same thing; one saves the cache.
+          # Every shard builds the same thing; one saves the cache.
           save-if: ${{ matrix.shard == 1 }}
       - name: Run sancov simulation sweep
         env:
@@ -179,7 +180,7 @@ jobs:
           path: ${{ runner.temp }}/missing-gates.txt
           if-no-files-found: error
 
-  # The gate check over both shards (#446 (a gate that never fires cannot
+  # The gate check over every shard (#446 (a gate that never fires cannot
   # fail the sweep)): a gate fails CI only when every shard missed it.
   # A shard that wrote no file (it died before its verdict) fails this job.
   sim-gates:
@@ -194,11 +195,13 @@ jobs:
       - name: Fail on a gate that every shard missed
         run: |
           set -euo pipefail
-          test -f missing-gates/missing-gates-1/missing-gates.txt
-          test -f missing-gates/missing-gates-2/missing-gates.txt
-          never=$(comm -12 \
-            <(sort missing-gates/missing-gates-1/missing-gates.txt) \
-            <(sort missing-gates/missing-gates-2/missing-gates.txt))
+          shards=4
+          for k in $(seq 1 "$shards"); do
+            test -f "missing-gates/missing-gates-$k/missing-gates.txt"
+          done
+          # A gate every shard missed is listed once in each of the files.
+          never=$(for f in missing-gates/missing-gates-*/missing-gates.txt; do sort -u "$f"; done \
+            | sort | uniq -c | awk -v n="$shards" '$1 == n { sub(/^ *[0-9]+ /, ""); print }')
           if [ -n "$never" ]; then
             echo "gates that every shard missed:"
             echo "$never"

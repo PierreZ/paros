@@ -3,7 +3,7 @@
 
 use std::future::Future;
 
-use moonpool_sim::{assert_always, assert_reachable, buggify_with_prob};
+use moonpool_sim::{assert_always, assert_reachable};
 use paros::client::{TruncateOutcome, Writer};
 use paros::{LeaderUuid, Truncate, leader_uuid_to_proto};
 
@@ -119,12 +119,15 @@ impl ChainWorkload {
             // when it wrote past what it read.
             let base = writer.next_seq().max(fold.cursor());
             let before = fold.floor();
-            // On its own location, a client that wrote a batch of several
-            // records aims inside it whatever the seed's weights: the
+            // A client that wrote a batch of several records aims inside
+            // it on three steps in ten, whatever the seed's weights: the
             // shape needs that batch below the fence, which the weights
-            // alone seldom line up (#659).
+            // alone seldom line up (#659). A plain choice off the step's
+            // draws, not a BUGGIFY site: a site's location is active on a
+            // quarter of the seeds only, and the few steps that hold such a
+            // batch then never met it in a whole sweep.
             let several = written.iter().any(|own| own.count > 1);
-            let shape = if several && buggify_with_prob!(0.3) {
+            let shape = if several && raw_policy.rotate_left(23) % 10 < 3 {
                 assert_reachable!("chain: a truncation aims inside a batch the client wrote");
                 MID_BATCH_SHAPE
             } else {

@@ -149,6 +149,13 @@ pub struct Writer {
     /// led from there on, so every position at or above it holds only
     /// writes under `mine` (#564). `None` until such a view.
     led_from: Option<u64>,
+    /// The end of the highest write it opened under `mine`.
+    opened_to: u64,
+    /// The positions two writes it opened under `mine` may share: a write
+    /// opened below `opened_to` (a writer that rolled back behind writes
+    /// whose fate it never learned) overlaps the earlier ones. `None` while
+    /// no two of its writes overlap.
+    shared: Option<(u64, u64)>,
 }
 
 /// The `Write` request carrying `entry` to `journal`.
@@ -177,6 +184,8 @@ impl Writer {
             last: None,
             next_seq: 0,
             led_from: None,
+            opened_to: 0,
+            shared: None,
         }
     }
 
@@ -234,10 +243,53 @@ impl Writer {
 
     /// A position from which the uuid it leads with is known to lead: a
     /// view naming it the leader showed this `next_seq` (#564). What
-    /// [`Client::resolve`] needs to read a write back as written.
+    /// [`Client::resolve`] needs to read `entry` back as written: `None`
+    /// unless `entry` is under the uuid it leads with, and `None` when
+    /// `entry` shares a position with another write it opened under that
+    /// uuid. Those writes can hold exactly `entry`'s bytes at `entry`'s
+    /// position (two empty-record batches of a broken pipeline, under a
+    /// four-record write sent after it rolled back), so the page proves
+    /// nothing about `entry` itself (hunt seed 8440881997986470091).
     #[must_use]
-    pub fn led_from(&self) -> Option<u64> {
-        if self.owned { self.led_from } else { None }
+    pub fn led_from(&self, entry: &Entry) -> Option<u64> {
+        if self.owned() != Some(entry.leader) {
+            return None;
+        }
+        let end = entry.seq.0 + entry.count();
+        let shares = self
+            .shared
+            .is_some_and(|(low, high)| entry.seq.0 < high && low < end);
+        if shares { None } else { self.led_from }
+    }
+
+    /// Note that `entry`, a new write (not a re-send of one), goes out under
+    /// the uuid it leads with. Every sender of a new write calls this once,
+    /// before the first send: [`Writer::write`] and [`super::Pipeline`] do.
+    /// An entry under another uuid is not noted.
+    ///
+    /// # Panics
+    ///
+    /// If its frontier fails to cover `entry` or the shared positions after
+    /// the note (a bug in this method).
+    pub fn opened(&mut self, entry: &Entry) {
+        if self.owned() != Some(entry.leader) {
+            return;
+        }
+        let end = entry.seq.0 + entry.count();
+        if entry.seq.0 < self.opened_to {
+            let (low, high) = self.shared.unwrap_or((entry.seq.0, self.opened_to));
+            self.shared = Some((low.min(entry.seq.0), high.max(self.opened_to)));
+        }
+        self.opened_to = self.opened_to.max(end);
+        assert!(
+            self.opened_to >= end,
+            "a noted write ends at or below the frontier"
+        );
+        assert!(
+            self.shared
+                .is_none_or(|(low, high)| low < high && high <= self.opened_to),
+            "the shared positions lie below the frontier"
+        );
     }
 
     /// Note a view that names `mine` the leader at `next_seq`.
@@ -257,6 +309,8 @@ impl Writer {
         self.terms += 1;
         self.mine = leader_uuid(self.seed, self.terms);
         self.led_from = None;
+        self.opened_to = 0;
+        self.shared = None;
         assert!(
             Some(self.mine) != self.last,
             "a writer's next uuid is not its last"
@@ -465,6 +519,7 @@ impl Writer {
         let Some(entry) = self.entry(records) else {
             return WriterOutcome::NotOwner;
         };
+        self.opened(&entry);
         self.write_entry(client, &entry, first).await
     }
 
@@ -520,7 +575,7 @@ impl Writer {
                         &request,
                         report.server,
                         super::Retarget::FollowHint,
-                        self.led_from(),
+                        self.led_from(entry),
                     )
                     .await;
                 match resolved.resolution {
