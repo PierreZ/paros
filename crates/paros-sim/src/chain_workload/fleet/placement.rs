@@ -2,9 +2,11 @@
 //! coordinator books an acceptor slot on every member of a journal before it
 //! writes the create, and releases them only after the journal's tombstone,
 //! so every live journal of every tenant the cell hosts holds one live
-//! acceptor booking per member in the cell's registry. The registry itself
-//! judges each booking at apply (the class, the capacity, an id booked once),
-//! so a placement never exceeds the capacity it was granted.
+//! acceptor booking per member in the cell's registry. The registry judges
+//! each booking at apply (the class, the capacity, an id booked once), and
+//! the system board's booking model judges the registry's events again with
+//! the class and capacity the layout drew (`crate::audit::system`, #650), so
+//! a placement never exceeds the capacity it was granted.
 //!
 //! A journal moves off a draining machine (#474 (journals on admitted
 //! machines)): its new slot is booked before its old one is released, so a

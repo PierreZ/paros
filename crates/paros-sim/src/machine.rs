@@ -1343,21 +1343,27 @@ const MACHINE_CLIENT_BASE: u64 = 1 << 32;
 fn machine_audits(
     ctx: &SimContext,
     (audit_addr, my_ip): (Address, &str),
-    rank: usize,
+    (rank, draw): (usize, &crate::shape::MachineDraw),
 ) -> impl Fn(AuditScope) -> NodeAudit<SimTimeProvider> + Clone + Send + Sync + 'static {
+    // The registry's fold oracles judge the machines' cell control journal
+    // too (#650), by the class and capacity the layout drew.
+    let plane = crate::audit::system::Plane::Machine(draw.class, draw.capacity);
+    let registry = crate::audit::system::system_board(ctx.state());
     let time = ctx.time().clone();
     let state = ctx.state().clone();
     let my_ip = my_ip.to_string();
     move |scope: AuditScope| -> NodeAudit<SimTimeProvider> {
         match scope {
             AuditScope::Machine => NodeAudit::new(time.clone(), crate::audit::audit_world(&state))
-                .on_machines(machine_board(&state), audit_addr.clone()),
+                .on_machines(machine_board(&state), audit_addr.clone())
+                .on_registry(registry.clone(), plane),
             // The coordinator's calls join the control journals' histories
             // (#240), as client `MACHINE_CLIENT_BASE + rank`.
             AuditScope::Node(home) => {
                 NodeAudit::new(time.clone(), crate::audit::audit_world_for(&state, home))
                     .on_machines(machine_board(&state), audit_addr.clone())
                     .with_tenants(crate::audit::tenants::tenant_board(&state))
+                    .on_registry(registry.clone(), plane)
                     .with_calls(Arc::new(
                         crate::chain_workload::system::Announce::of_machine(
                             &state,
@@ -1370,6 +1376,7 @@ fn machine_audits(
                 NodeAudit::new(time.clone(), crate::audit::audit_world_for(&state, journal))
                     .in_journal(journal, journal_board(&state))
                     .with_tenants(crate::audit::tenants::tenant_board(&state))
+                    .on_registry(registry.clone(), plane)
                     // A created journal's store commits under the mode its
                     // create recorded: a `Batched` one's commits are cut
                     // under a budget (#599 (durability mode per journal)).
@@ -1427,7 +1434,7 @@ async fn run_machine_role(
     let (listen, advertise) = boot_listen(ctx.state(), &layout, rank, my_ip, held)?;
     let RoleRig { incarnation, .. } = arm_role(ctx, my_ip);
     let tunables = incarnation.shape.tunables;
-    let audits = machine_audits(ctx, (addrs[rank].clone(), my_ip), rank);
+    let audits = machine_audits(ctx, (addrs[rank].clone(), my_ip), (rank, &draw));
     operator_slip();
     let addresses =
         MachineAddresses::new(listen, Some(advertise)).map_err(SimulationError::InvalidState)?;

@@ -31,7 +31,7 @@ use paros_core::{LeaderUuid, NodeId};
 
 use super::Client;
 use super::bootstrap::{self, AdmitOutcome};
-use super::checkpoint::{CheckpointPolicy, Checkpointer};
+use super::checkpoint::{CheckpointOutcome, CheckpointPolicy, Checkpointer};
 use super::fleet::{
     FleetRefusal, Interrupted, Run, Stage, Step, append, going_round, open, retry, settle,
 };
@@ -323,6 +323,10 @@ impl CellSession {
                             self.cell.state().get(node).is_some(),
                             "a registration the journal took is in the fold"
                         );
+                        // The registration landed: a checkpoint that did
+                        // not closes the session, and the next step opens
+                        // the journal afresh.
+                        let _ = self.checkpoint_if_due(client, first).await;
                         Step::Advanced(Stage::RegisterMachine)
                     }
                     Err(stop) => {
@@ -389,14 +393,54 @@ impl CellSession {
         }
     }
 
-    /// Append `command` to the cell control journal as this session's
-    /// writer and fold it, from server `first` on: the cell coordinator's
-    /// own entries (liveness and re-registrations, #211). The session must
-    /// be open; an interrupted write closes it.
+    /// Checkpoint the cell control journal and truncate it to the
+    /// checkpoint when the session's policy finds it due (#230, #650), after
+    /// a write landed, as the fleet tenant's owner does. A checkpoint that
+    /// the fold is not ready for writes nothing and keeps the session open.
     ///
     /// # Errors
     ///
-    /// The write did not land (see [`Interrupted`]).
+    /// The checkpoint is not known written: the owner's belief is unsure, so
+    /// the session closes and the next step opens the journal afresh.
+    async fn checkpoint_if_due<P: Providers>(
+        &mut self,
+        client: &Client<P>,
+        first: usize,
+    ) -> Result<(), Interrupted> {
+        assert!(self.cell_open, "only an open session checkpoints");
+        if !self.cell.due(client.now()) {
+            return Ok(());
+        }
+        match self.cell.checkpoint(client, first).await {
+            CheckpointOutcome::Checkpointed { .. } => {
+                moonpool_assertions::reachable!(
+                    "cell: an owner checkpoints the cell control journal"
+                );
+                assert!(self.cell_open, "a checkpoint keeps the session open");
+                Ok(())
+            }
+            CheckpointOutcome::NotFolded => Ok(()),
+            CheckpointOutcome::NotWritten(outcome) => {
+                self.cell_open = false;
+                Err(Interrupted::NotWritten {
+                    journal: self.cell.writer().journal(),
+                    outcome,
+                })
+            }
+        }
+    }
+
+    /// Append `command` to the cell control journal as this session's
+    /// writer and fold it, from server `first` on: the cell coordinator's
+    /// own entries (liveness and re-registrations, #211). The session must
+    /// be open; an interrupted write closes it. A due checkpoint follows a
+    /// landed write (#650).
+    ///
+    /// # Errors
+    ///
+    /// The write did not land, or it landed and the checkpoint after it is
+    /// not known written (see [`Interrupted`]). Either way the session is
+    /// closed and the caller writes nothing more on it.
     ///
     /// # Panics
     ///
@@ -415,7 +459,7 @@ impl CellSession {
                     self.cell.folder().next_seq() > before,
                     "a recorded entry is in the fold"
                 );
-                Ok(())
+                self.checkpoint_if_due(client, first).await
             }
             Err(stop) => {
                 self.cell_open = false;
