@@ -31,7 +31,7 @@ use paros_core::{LeaderUuid, NodeId};
 
 use super::Client;
 use super::bootstrap::{self, AdmitOutcome};
-use super::checkpoint::{CheckpointPolicy, Checkpointer};
+use super::checkpoint::{CheckpointOutcome, CheckpointPolicy, Checkpointer};
 use super::fleet::{
     FleetRefusal, Interrupted, Run, Stage, Step, append, going_round, open, retry, settle,
 };
@@ -323,6 +323,7 @@ impl CellSession {
                             self.cell.state().get(node).is_some(),
                             "a registration the journal took is in the fold"
                         );
+                        self.checkpoint_if_due(client, first).await;
                         Step::Advanced(Stage::RegisterMachine)
                     }
                     Err(stop) => {
@@ -389,6 +390,24 @@ impl CellSession {
         }
     }
 
+    /// Checkpoint the cell control journal and truncate it to the
+    /// checkpoint when the session's policy finds it due (#230, #650), after
+    /// a write landed, as the fleet tenant's owner does. A checkpoint that
+    /// does not land leaves the owner's belief unsure: the next step opens
+    /// the journal afresh.
+    async fn checkpoint_if_due<P: Providers>(&mut self, client: &Client<P>, first: usize) {
+        assert!(self.cell_open, "only an open session checkpoints");
+        if !self.cell.due(client.now()) {
+            return;
+        }
+        let checkpointed = self.cell.checkpoint(client, first).await;
+        if matches!(checkpointed, CheckpointOutcome::Checkpointed { .. }) {
+            moonpool_assertions::reachable!("cell: an owner checkpoints the cell control journal");
+        } else {
+            self.cell_open = false;
+        }
+    }
+
     /// Append `command` to the cell control journal as this session's
     /// writer and fold it, from server `first` on: the cell coordinator's
     /// own entries (liveness and re-registrations, #211). The session must
@@ -415,6 +434,7 @@ impl CellSession {
                     self.cell.folder().next_seq() > before,
                     "a recorded entry is in the fold"
                 );
+                self.checkpoint_if_due(client, first).await;
                 Ok(())
             }
             Err(stop) => {
