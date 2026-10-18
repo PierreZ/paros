@@ -293,10 +293,7 @@ where
             }
             Some((call, reply)) = inbox.set_tags.recv() => {
                 if stop.is_some() {
-                    let _ = reply.send(SetJournalTagsAck {
-                        outcome: "unavailable".into(),
-                        ..SetJournalTagsAck::default()
-                    });
+                    refuse_tags(call, reply);
                 } else {
                     spawn_tags(&shared, &ended, call, reply, Draws::draw(&providers));
                 }
@@ -441,6 +438,46 @@ fn tags_denied(denial: Denial) -> SetJournalTagsAck {
     ack
 }
 
+/// A stopping frontend's answer to a tag request (#560 (clean Ctrl-C
+/// shutdown)): a malformed one is still denied as malformed, and only a
+/// well-formed one is told to send again elsewhere.
+fn refuse_tags(call: FrontSetJournalTags, reply: ReplySender<SetJournalTagsAck>) {
+    let ack = match well_formed_tags(call) {
+        Ok(_) => SetJournalTagsAck {
+            outcome: "unavailable".into(),
+            ..SetJournalTagsAck::default()
+        },
+        Err(denied) => denied,
+    };
+    assert!(
+        ack.outcome == "unavailable" || ack.outcome.is_empty(),
+        "a stopping frontend decides no tag request"
+    );
+    moonpool_assertions::reachable!("stop: a stopping frontend refuses a call");
+    let _ = reply.send(ack);
+}
+
+/// A tag request's entry and tags when it is well formed (#575 (key:value
+/// tags)), or its malformed denial: a user's journal only, by its names (an
+/// internal journal carries no user tag a tenant sets), with an id.
+fn well_formed_tags(
+    call: FrontSetJournalTags,
+) -> Result<(Entry, crate::tags::UserTags), SetJournalTagsAck> {
+    let Some(entry) = call.entry else {
+        return Err(tags_denied(Denial::Malformed));
+    };
+    let tags = crate::tags::UserTags::from_wire(call.tags);
+    let (Ok(tags), false, true) = (tags, entry.tenant.is_empty(), call.request != 0) else {
+        moonpool_assertions::reachable!("frontend: a malformed tag request is denied");
+        return Err(tags_denied(Denial::Malformed));
+    };
+    assert!(
+        !entry.tenant.is_empty(),
+        "a well-formed tag request names a tenant"
+    );
+    Ok((entry, tags))
+}
+
 /// A tag request (#575): admitted like a journal call, then sent to the
 /// tenant coordinator as a `SetJournalTags` of the journal the name
 /// resolved to. The caller's id rides through, so a retry acts once.
@@ -458,15 +495,10 @@ where
         outcome: "unavailable".into(),
         ..SetJournalTagsAck::default()
     };
-    let Some(entry) = call.entry else {
-        return tags_denied(Denial::Malformed);
-    };
-    // A user's journal only, by its names: an internal journal carries no
-    // user tag a tenant sets.
-    let tags = crate::tags::UserTags::from_wire(call.tags);
-    let (Ok(tags), false, true) = (tags, entry.tenant.is_empty(), call.request != 0) else {
-        moonpool_assertions::reachable!("frontend: a malformed tag request is denied");
-        return tags_denied(Denial::Malformed);
+    let request_id = call.request;
+    let (entry, tags) = match well_formed_tags(call) {
+        Ok(parts) => parts,
+        Err(denied) => return denied,
     };
     let unset = JournalIdentifier::new(paros_core::TenantId(0), paros_core::JournalId(0));
     let (journal, name) = match admit(shared, &entry, unset, Operation::SetTags, draws).await {
@@ -486,7 +518,7 @@ where
         return unavailable();
     };
     let request = crate::client::journals::JournalRequest {
-        request: call.request,
+        request: request_id,
         tenant: journal.tenant,
         op: crate::client::journals::JournalOp::SetTags {
             name: name.journal().as_bytes().to_vec(),
