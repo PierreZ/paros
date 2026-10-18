@@ -3190,10 +3190,18 @@ impl<P: Providers, J: JournalStores> SystemCtx<'_, '_, P, J> {
             .collect();
         self.stores.book_sets(sets);
         // A journal its tenant created (live or deleted) that is no longer
-        // booked here stops: its booking was released.
-        let unbooked: Vec<JournalIdentifier> = self
-            .journals
-            .known()
+        // booked here stops: its booking was released. A store a booking
+        // released while this machine was down counts too: no journal of
+        // this incarnation knows it, but the machine still holds it.
+        let provisioned: Vec<JournalIdentifier> = self
+            .stores
+            .provisioned()
+            .into_iter()
+            .filter(|journal| !self.journals.released(*journal))
+            .collect();
+        let held: BTreeSet<JournalIdentifier> = self.journals.known().chain(provisioned).collect();
+        let unbooked: Vec<JournalIdentifier> = held
+            .into_iter()
             .filter(|journal| !self.journals.is_control(*journal) && !booked.contains(journal))
             .filter(|journal| {
                 follower
