@@ -60,6 +60,10 @@ use crate::audit::journals::journal_board;
 use crate::process::{RoleRig, arm_role, dispatch};
 use crate::roles::{Deployment, MACHINE_GROUP, Role};
 
+mod heal;
+
+pub(crate) use heal::{heal_wiped, registry_folded, registry_restored};
+
 /// Where a machine's disk lives on its simulated disk.
 const ROOT: &str = "paros/machine";
 
@@ -91,6 +95,10 @@ pub(crate) struct MachineBoard {
     nodes: BTreeMap<Address, u64>,
     /// The machines a wipe replaced: the address and the id it held.
     wiped: BTreeSet<(Address, u64)>,
+    /// The live bookings of the registries the machines fold: a wiped
+    /// machine heals once none is on its old id (moonpool #344 (rolling
+    /// wipes), [`heal`]).
+    bookings: heal::CellBookings,
     /// Each machine's last recorded promise in the cell decree, by minted id.
     promises: BTreeMap<u64, Ballot>,
     /// The first machine to record a promise: `cell init`'s receiver, which
@@ -1351,12 +1359,12 @@ fn machine_audits(
     move |scope: AuditScope| -> NodeAudit<SimTimeProvider> {
         match scope {
             AuditScope::Machine => NodeAudit::new(time.clone(), crate::audit::audit_world(&state))
-                .on_machines(machine_board(&state), audit_addr.clone()),
+                .on_machines(&state, audit_addr.clone()),
             // The coordinator's calls join the control journals' histories
             // (#240), as client `MACHINE_CLIENT_BASE + rank`.
             AuditScope::Node(home) => {
                 NodeAudit::new(time.clone(), crate::audit::audit_world_for(&state, home))
-                    .on_machines(machine_board(&state), audit_addr.clone())
+                    .on_machines(&state, audit_addr.clone())
                     .with_tenants(crate::audit::tenants::tenant_board(&state))
                     .with_calls(Arc::new(
                         crate::chain_workload::system::Announce::of_machine(

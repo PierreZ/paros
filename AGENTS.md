@@ -363,7 +363,9 @@ Three layers, and nothing crosses them:
   2026-10-12, #454 (control plane meets chaos): a per-seed `run_end` knob, 30 to 120 s, under
   `CHAOS_CAP`), then moonpool enters recovery mode and `check()` runs the tail on the live
   cluster, so the tail is a genuine recovery and liveness oracles apply. Never re-implement one in paros or re-split
-  the axis. One exception (decided on 2026-10-09): on a seed that draws the departed-straggler
+  the axis. Machine wipes roll (decided on 2026-10-18, moonpool #344 (rolling wipes)): the machine
+  group allows one unhealed wipe at a time, and the harness heals it once the cell holds no booking
+  on the old id (`paros_sim::machine::heal`); a founder's old id never heals. One exception (decided on 2026-10-09): on a seed that draws the departed-straggler
   scenario, its outage may strike early in the tail, once the owner's removal took effect and
   at most `LATE_WINDOW` in (`paros_sim::world::late_outage`); the rest of the tail is still the
   recovery the oracles judge. Likewise on a seed that draws the bare-quorum scenario, an outage

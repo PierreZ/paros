@@ -40,7 +40,7 @@ use std::time::Duration;
 use moonpool_sim::{
     Attrition, AttritionScope, AttritionVictims, Chaos, ChaosMode, ExplorationConfig, GrayFailure,
     LinkLatencyConfig, LocalityConfig, NetworkFault, NetworkFaultMask, SimulationBuilder,
-    StorageFault, StorageFaultMask, WorkloadCount,
+    StorageFault, StorageFaultMask, WipeHeal, WorkloadCount,
 };
 
 use crate::chain_workload::ChainWorkload;
@@ -263,7 +263,14 @@ pub(crate) fn past_cutoff(now: Duration, after: Duration) -> bool {
 /// `prob_wipe = 0` **stays** zero but on the machines
 /// ([`MACHINE_WIPE_WEIGHT`]): moonpool's `CrashAndWipe` now reaches
 /// the disk paros stores on, but it wipes a whole machine without asking the
-/// copy budget, so it could lose a quorum's copies at once. The amnesia fault
+/// copy budget, so it could lose a quorum's copies at once. On the machines
+/// the wipes roll (decided on 2026-10-18, moonpool #344 (rolling wipes)):
+/// the regime's wipe budget allows one unhealed wiped machine, and moonpool
+/// turns a later drawn wipe into a plain crash until the harness signals
+/// the first one healed, once the cell holds nothing on its old id
+/// (`crate::machine::heal_wiped`). `max_dead: 1` alone did not do this: a
+/// wiped machine restarts within seconds, so three machines wiped at about
+/// 9 s, 21 s and 27 s took a tenant's three-member matchmaker set. The amnesia fault
 /// is the storage ledger's own coin instead, drawn at a restart in
 /// `crate::process` (#124) under the dead-node budget and the provisioning
 /// ledger, and executed on the simulated disk (`world::wipe`) and answered by replacement through
@@ -304,6 +311,8 @@ fn chaos_surfaces() -> [Chaos; 13] {
         grace_period_ms: None,
         scope: AttritionScope::PerProcess,
         victims,
+        // No regime but the machines' draws a wipe.
+        wipe_budget: None,
     };
     [
         Chaos::Network(ChaosMode::Swarm),
@@ -323,13 +332,18 @@ fn chaos_surfaces() -> [Chaos; 13] {
             config: regime(AttritionVictims::group(REPLICA_GROUP)),
             mode: ChaosMode::Swarm,
         },
+        // Machine wipes roll (decided on 2026-10-18, moonpool #344
+        // (rolling wipes)): one unhealed wipe at a time, healed by the
+        // harness once the cell holds nothing on the old id
+        // (`crate::machine::heal_wiped`).
         Chaos::Attrition {
             config: Attrition {
                 prob_graceful: MACHINE_GRACEFUL_WEIGHT,
                 prob_wipe: MACHINE_WIPE_WEIGHT,
                 grace_period_ms: Some(MACHINE_GRACE_MS),
                 ..regime(AttritionVictims::group(MACHINE_GROUP))
-            },
+            }
+            .wipe_budget(1, WipeHeal::Signal),
             mode: ChaosMode::Swarm,
         },
         Chaos::Attrition {

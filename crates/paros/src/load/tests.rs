@@ -27,6 +27,9 @@ fn sample(at: u64, cpu: u64, io_ticks: u64, reads: u64) -> SystemSample {
             read_time: ms(reads),
             write_time: ms(reads),
         }),
+        // No disk space reading (moonpool #343 (disk capacity)): busyness
+        // reads none.
+        space: None,
     }
 }
 
