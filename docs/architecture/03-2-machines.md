@@ -221,10 +221,11 @@ is still running 5 s past its bound. Each of these is a crash, which recovery al
 no bound is a safety rule. Each step logs with the machine's name (`stop_started`,
 `stop_handoff_sent`, `stop_handoff_taken`, `stop_completed`). `paros-frontend` stops the same way
 with no leadership and no store: it refuses new calls (`stopping`), waits for the ones it took
-and returns.
+and returns. In the simulation, a stopping frontend sometimes waits out its whole bound,
+as a frontend behind a slow load balancer does. It refuses the calls that still arrive.
 
 The simulation draws a graceful reboot for about a third of the machine and frontend groups'
-attrition on the seeds whose swarm keeps it, with a 2–10 s grace around the drawn `shutdown_within` (0–12 s), so
+attrition on the seeds whose swarm keeps it, with a 1–3 s grace around the drawn `shutdown_within` (0–4 s for a machine, 0–2 s for a frontend), so
 a stop ends on its own on some seeds and is cut by the kill on others. Gates: a stopping machine
 refuses a call, a stopping leader hands its journal on, a successor takes it, a coordinator hands
 its term on, a stop completes, a stop runs out of time. The existing oracles judge the rest:

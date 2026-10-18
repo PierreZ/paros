@@ -382,10 +382,14 @@ const MACHINE_WIPE_WEIGHT: f64 = 0.1;
 /// seeds, so the crash-only regime stays.
 const MACHINE_GRACEFUL_WEIGHT: f64 = 0.5;
 
-/// The grace a stopping machine gets before moonpool kills it, in
-/// milliseconds (#560): around the drawn `shutdown_within` (0 to 12 s), so
+/// The grace a stopping machine or frontend gets before moonpool kills it,
+/// in milliseconds (#560): around the drawn `shutdown_within` (0 to 4 s), so
 /// a stop ends on its own on some seeds and is cut by the kill on others.
-const MACHINE_GRACE_MS: std::ops::Range<usize> = 2_000..10_000;
+/// Short, like a crash's recovery delay: moonpool lets a grace started just
+/// before the chaos ends run on into the recovery tail, and a founder held
+/// down there for up to 10 s left `cell init` unfinished past
+/// `FLEET_SETTLE` (hunt seed 10118493541056837987 on f8e629f).
+const MACHINE_GRACE_MS: std::ops::Range<usize> = 1_000..3_000;
 
 /// The storage families the campaign leaves out (architecture §5, #176).
 /// Rot (corruption, EIO, misdirection) damages a record on whichever disks

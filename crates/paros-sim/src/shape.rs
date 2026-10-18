@@ -468,7 +468,7 @@ impl NodeShape {
             // ways: a short bound returns before the handoff lands, a long
             // one is cut by the force kill, and both are crashes the
             // oracles already judge.
-            shutdown_within: ms(buggify_knob!(5000_u64, 0_u64..12_001_u64)),
+            shutdown_within: ms(buggify_knob!(1500_u64, 0_u64..4_001_u64)),
         };
         cap_backoff(&mut drawn, tick_ms);
         // The handover re-send cadence stays under the shortest stall

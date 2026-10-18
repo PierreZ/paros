@@ -242,23 +242,24 @@ where
     let time = providers.time().clone();
     // When a clean stop returns whatever still runs, once one began.
     let mut stop: Option<Duration> = None;
+    // Whether the stop waits out its whole bound, drained or not: a
+    // frontend behind a slow load balancer still gets calls a while, and
+    // refuses them (#560). Drawn once, at the stop.
+    let mut linger = false;
     loop {
         moonpool_core::select! {
             biased;
             () = shutdown.cancelled(), if stop.is_none() => {
                 stop = Some(time.now().saturating_add(within));
+                linger = moonpool_buggify::buggify_with_prob!(0.5);
+                if linger {
+                    moonpool_assertions::reachable!("stop: a stopping frontend lingers to its bound");
+                }
                 tracing::info!(listen = %shared.settings.listen, within_ms = u64::try_from(within.as_millis()).unwrap_or(u64::MAX), "frontend_stop_started");
             }
             _ = time.sleep(STOP_POLL), if stop.is_some() => {
-                let running = shared.in_flight.load(Ordering::SeqCst);
-                if running == 0 {
-                    moonpool_assertions::reachable!("stop: a frontend stopped cleanly");
-                    tracing::info!(listen = %shared.settings.listen, "frontend_stop_completed");
-                    return Ok(());
-                }
-                if stop.is_some_and(|deadline| time.now() >= deadline) {
-                    moonpool_assertions::reachable!("stop: a frontend's stop ran out of time");
-                    tracing::warn!(listen = %shared.settings.listen, running, "frontend_stop_timed_out");
+                let expired = stop.is_some_and(|deadline| time.now() >= deadline);
+                if stopped(&shared, expired, linger) {
                     return Ok(());
                 }
             }
@@ -300,6 +301,29 @@ where
             }
         }
     }
+}
+
+/// Whether a stopping frontend is done (#560 (clean Ctrl-C shutdown)): no
+/// call it took still runs and it does not linger to its bound, or the bound
+/// ran out.
+fn stopped<P, A>(shared: &Shared<P, A>, expired: bool, linger: bool) -> bool
+where
+    P: Providers,
+    A: Audit + Clone + Send + Sync + 'static,
+{
+    let running = shared.in_flight.load(Ordering::SeqCst);
+    if running == 0 && (!linger || expired) {
+        moonpool_assertions::reachable!("stop: a frontend stopped cleanly");
+        tracing::info!(listen = %shared.settings.listen, "frontend_stop_completed");
+        return true;
+    }
+    if running > 0 && expired {
+        moonpool_assertions::reachable!("stop: a frontend's stop ran out of time");
+        tracing::warn!(listen = %shared.settings.listen, running, "frontend_stop_timed_out");
+        return true;
+    }
+    assert!(!expired, "an expired stop always ends");
+    false
 }
 
 /// Refuse a call a stopping frontend took (#560 (clean Ctrl-C shutdown)):

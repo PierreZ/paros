@@ -502,12 +502,13 @@ async fn run_frontend_role(
         names: crate::machine::names(ctx.state()),
         epoch,
         tunables: DriverTunables {
-            // A clean stop's bound (#560 (clean Ctrl-C shutdown)), drawn
-            // like a machine's: floor 0 is a stop at once, the same as a
-            // crash, and the range crosses the grace period both ways.
+            // A clean stop's bound (#560 (clean Ctrl-C shutdown)). Floor 0:
+            // a stop at once, the same as a crash. Around a forwarded call's
+            // own bound (`FORWARD_TIMEOUT`), so a call in flight at the stop
+            // outlives the bound on some seeds and ends inside it on others.
             shutdown_within: Duration::from_millis(moonpool_sim::buggify_knob!(
-                5000_u64,
-                0_u64..12_001_u64
+                300_u64,
+                0_u64..2_001_u64
             )),
             ..DriverTunables::default()
         },
