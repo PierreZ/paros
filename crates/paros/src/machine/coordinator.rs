@@ -42,7 +42,15 @@
 //!    and silent for `machine_replace_after` is gone (#475 (re-place after
 //!    the Down bound)): the term's moves re-place its roles as a draining
 //!    machine's, unless an operator's maintenance window over it or its
-//!    zone is open (#359). Only changes are
+//!    zone is open (#359). The silence is measured on the candidacy's
+//!    clock, across its terms: the watch of a term that ended is resumed
+//!    by this member's next term, less the time between the two that it
+//!    watched nothing. Without that, every term restarted the clock, and a
+//!    coordinator whose terms an operator's claims fence more often than
+//!    `machine_replace_after` never named a wiped machine gone (witness
+//!    recipe 12277531871500182271 91348:13584114706456816475 on 448be19:
+//!    eighteen terms in 41 s, two wiped founders down and never gone,
+//!    PR #684 (lost set excuse)). Only changes are
 //!    written, never a heartbeat. Each round also times each `Identify`
 //!    and asks every machine that answered for its `Load`, and judges from
 //!    those facts which machines are alive but slow ([`super::slow`], #361
@@ -125,6 +133,14 @@ use crate::{Address, DriverTunables, Names};
 
 /// A served term's session and its watch over the cell's machines (#211).
 type Watching = Option<(CellSession, Watch)>;
+
+/// End a term's duties: its session is dropped, and its watch is parked for
+/// this candidacy's next term to resume ([`Watch::resumed`]).
+fn park(watching: &mut Watching, parked: &mut Option<Watch>) {
+    if let Some((_, watch)) = watching.take() {
+        *parked = Some(watch);
+    }
+}
 
 /// The journal requests' endpoint (#210).
 type Requests = Inbound<JournalRequestRpc, wire::JournalRequest, wire::JournalRequestAck>;
@@ -331,6 +347,9 @@ pub struct Watch {
     started: Duration,
     /// When the next round is due.
     next: Duration,
+    /// When this watch last watched: the end of its last round, or its
+    /// start.
+    seen: Duration,
     /// When each machine last answered as itself.
     heard: BTreeMap<NodeId, Duration>,
     /// Whether the last call ran a round.
@@ -396,6 +415,7 @@ impl Watch {
             every,
             started: now,
             next: now,
+            seen: now,
             heard: BTreeMap::new(),
             ran: false,
             probes: BTreeMap::new(),
@@ -418,6 +438,40 @@ impl Watch {
     #[must_use]
     pub fn ran(&self) -> bool {
         self.ran
+    }
+
+    /// This watch resumed at `now` by a later term of the same candidacy:
+    /// it keeps what it observed, and every moment it holds moves forward
+    /// by the time since it last watched, so a machine's silence counts
+    /// only the time a round could have heard it. The next round is due at
+    /// once.
+    ///
+    /// # Panics
+    ///
+    /// If `now` is before the watch last watched.
+    #[must_use]
+    pub fn resumed(mut self, now: Duration) -> Self {
+        assert!(now >= self.seen, "a watch resumes after it last watched");
+        let gap = now.saturating_sub(self.seen);
+        if !self.heard.is_empty() {
+            moonpool_assertions::reachable!("coordinator: a term resumed the last term's watch");
+        }
+        self.started += gap;
+        for since in self.heard.values_mut() {
+            *since += gap;
+        }
+        for (_, seen) in self.windows.values_mut() {
+            *seen += gap;
+        }
+        self.seen = now;
+        self.next = now;
+        self.ran = false;
+        assert!(self.started <= now, "a resumed watch started by now");
+        assert!(
+            self.heard.values().all(|since| *since <= now),
+            "a resumed watch heard every machine by now"
+        );
+        self
     }
 
     /// The machines whose roles the term re-places at `now` (#475 (re-place
@@ -447,6 +501,7 @@ impl Watch {
         for (scope, seq) in open {
             self.windows.entry(scope).or_insert((seq, now));
         }
+        self.seen = self.seen.max(now);
         self.departed
             .retain(|node| registry.booked(*node) > 0 && !registry.liveness(*node).up);
         let mut gone = self.departed.clone();
@@ -588,6 +643,8 @@ impl Watch {
             if answer.is_some() {
                 answered.push((id, addr.clone(), client.now().saturating_sub(asked)));
             }
+            // Asked now, answered or not: a moment this watch watched.
+            self.seen = client.now();
             let command = match &answer {
                 Some(ack) => {
                     self.heard.insert(id, client.now());
@@ -627,6 +684,11 @@ impl Watch {
                 (&answered, &watched),
             )
             .await?;
+        self.seen = client.now();
+        assert!(
+            self.heard.values().all(|since| *since <= self.seen),
+            "a watch heard every machine by its last round"
+        );
         Ok(wrote)
     }
 
@@ -1202,6 +1264,9 @@ async fn campaign<P: Providers>(
     let mut resigned: Option<u64> = None;
     // The served term's session and its watch over the cell's machines.
     let mut watching: Option<(CellSession, Watch)> = None;
+    // The last term's watch, resumed by the next (#475): a machine's silence
+    // outlives the term that observed it.
+    let mut parked: Option<Watch> = None;
     // The served term's moves off draining machines (#474), and its
     // matchmaker sets' placements and moves (#501 (matchmaker sets off the
     // founders)).
@@ -1251,7 +1316,7 @@ async fn campaign<P: Providers>(
         match step {
             Step::Leading { leader, .. } if resigned == Some(leader.term) => {
                 desk = None;
-                watching = None;
+                park(&mut watching, &mut parked);
                 election.resign(None).await;
             }
             Step::Leading { leader, .. } if served != Some(leader.term) => {
@@ -1282,8 +1347,13 @@ async fn campaign<P: Providers>(
                 };
                 let (duty, session) = renewing(&providers, &mut election, install).await;
                 watching = session.map(|session| {
-                    let watch = Watch::new(client.now(), tunables.renew_every, down_after, slow)
-                        .with_space_floor(space_floor);
+                    let watch = parked.take().map_or_else(
+                        || {
+                            Watch::new(client.now(), tunables.renew_every, down_after, slow)
+                                .with_space_floor(space_floor)
+                        },
+                        |watch| watch.resumed(client.now()),
+                    );
                     (session, watch)
                 });
                 moves = Moves::default();
@@ -1395,7 +1465,7 @@ async fn campaign<P: Providers>(
                         {
                             // The term's first write that did not land ends its
                             // watch: never fight the session that fenced it.
-                            Err(_) => watching = None,
+                            Err(_) => park(&mut watching, &mut parked),
                             // A round ran: the tenant coordinator takes one step
                             // of a move off a draining machine (#474), one step
                             // of a journal's change to its desired mode (#214
@@ -1472,14 +1542,14 @@ async fn campaign<P: Providers>(
                 };
                 let stepped = renewing(&providers, &mut election, duties).await;
                 match stepped {
-                    Some(None) => watching = None,
+                    Some(None) => park(&mut watching, &mut parked),
                     Some(Some(true)) if quit_mid_move && chaos() => {
                         // A term that stops in the middle of a move: the
                         // next term finds the move where this one left it.
                         quit_mid_move = false;
                         moonpool_assertions::reachable!("coordinator: a term resigned mid-move");
                         desk = None;
-                        watching = None;
+                        park(&mut watching, &mut parked);
                         served = None;
                         election.resign(None).await;
                     }
@@ -1489,7 +1559,7 @@ async fn campaign<P: Providers>(
             Step::Deposed { .. } => {
                 served = None;
                 desk = None;
-                watching = None;
+                park(&mut watching, &mut parked);
                 moonpool_assertions::reachable!(
                     "coordinator: a deposed coordinator stopped acting"
                 );
@@ -1521,7 +1591,7 @@ async fn campaign<P: Providers>(
             cell,
             until,
             group.as_mut(),
-            (&mut watching, &mut desk),
+            (&mut watching, &mut parked, &mut desk),
             &halt,
         );
         renewing(&providers, &mut election, answers).await;
@@ -1530,7 +1600,7 @@ async fn campaign<P: Providers>(
             // term, as a refused cell control journal does.
             resigned = Some(*term);
             desk = None;
-            watching = None;
+            park(&mut watching, &mut parked);
             election.resign(None).await;
         }
     }
@@ -1664,7 +1734,11 @@ async fn answer_until<P: Providers>(
     cell: (u64, Duration),
     until: Duration,
     mut group: Option<&mut TermGroup>,
-    (watching, desk): (&mut Watching, &mut Option<(u64, TenantDesk)>),
+    (watching, parked, desk): (
+        &mut Watching,
+        &mut Option<Watch>,
+        &mut Option<(u64, TenantDesk)>,
+    ),
     shutdown: &CancellationToken,
 ) {
     loop {
@@ -1685,7 +1759,9 @@ async fn answer_until<P: Providers>(
             biased;
             () = shutdown.cancelled() => return,
             Some((request, reply)) = next_request(registers) => {
-                let ack = register(providers, rpc, client, names, cell, watching, request).await;
+                let ack =
+                    register(providers, rpc, client, names, cell, (watching, parked), request)
+                        .await;
                 reply.send(ack);
             }
             Some((request, reply)) = next_request(requests) => {
@@ -1697,7 +1773,7 @@ async fn answer_until<P: Providers>(
                         if watching.as_ref().is_some_and(|(session, _)| !session.is_open()) {
                             // The term's first write that did not land ends
                             // its watch, as in `Watch::round`.
-                            *watching = None;
+                            park(watching, parked);
                         }
                         reply.send(answer.to_wire());
                         if desk.superseded() {
@@ -1729,7 +1805,7 @@ async fn answer_until<P: Providers>(
                             })
                             .await;
                             if !session.is_open() {
-                                *watching = None;
+                                park(watching, parked);
                             }
                             answer
                         }
@@ -1748,7 +1824,7 @@ async fn answer_until<P: Providers>(
                         Some((session, _)) => {
                             let answer = super::universe::join(client, session, &request).await;
                             if !session.is_open() {
-                                *watching = None;
+                                park(watching, parked);
                             }
                             answer
                         }
@@ -1781,7 +1857,7 @@ async fn register<P: Providers>(
     client: &Client<P>,
     names: &Names,
     (cell_id, patience): (u64, Duration),
-    watching: &mut Option<(CellSession, Watch)>,
+    (watching, parked): (&mut Watching, &mut Option<Watch>),
     request: wire::Register,
 ) -> wire::RegisterAck {
     let refuse = |refusal: &str| wire::RegisterAck {
@@ -1875,7 +1951,7 @@ async fn register<P: Providers>(
     };
     if session.record(client, 0, &command).await.is_err() {
         // The term's first write that did not land ends its watch.
-        *watching = None;
+        park(watching, parked);
         return refuse("unavailable");
     }
     let book = super::cell_book(session.founders(), session.registry());

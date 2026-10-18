@@ -146,7 +146,7 @@ pub(super) async fn registry(known: &Cell, first: usize) -> Option<Registry> {
 
 /// The members of the latest generation the founding members believe for
 /// `journal`, or `None` when none answers.
-async fn in_force(
+pub(super) async fn in_force(
     client: &ChainClient,
     count: usize,
     journal: JournalIdentifier,
