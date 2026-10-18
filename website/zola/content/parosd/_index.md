@@ -26,6 +26,14 @@ that was down when the decree chose the plan learns it later from a formed membe
 the operator's token again. `parosctl init` makes the first three listed machines the founding
 members and admits the others, so the control journals have three acceptors. `--failures-per-partition F` sets `2F+1` founding members.
 
+**Stopping a machine.** Ctrl-C (`SIGINT`) and `SIGTERM` stop a machine cleanly. The machine
+refuses new calls with `stopping`, so a client retries on another machine. It answers the calls
+it already took. It hands each journal it leads to another member with the same ballot, so the
+journal needs no election, and it hands the cell coordinator's term to the next founding
+member. Then its disk writes complete and it exits with code 0. `PAROS_SHUTDOWN_WITHIN_MS`
+(default 30 s) limits the stop. A second Ctrl-C stops the machine at once, which is the same as
+a crash: the next start recovers from the disk.
+
 [The journal API](@/parosd/journal-api.md) describes the four calls, the two writer modes and
 the limits. [Admin views](@/parosd/admin-views.md) shows the machines, tenants and roles of a
 cell with `parosctl`. [TLS](@/parosd/tls.md) encrypts every session and proves every caller with

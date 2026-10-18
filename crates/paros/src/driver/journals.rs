@@ -401,6 +401,20 @@ pub(crate) struct Journals<S, A> {
 }
 
 impl<S, A> Journals<S, A> {
+    /// Whether a batch's flush still flies, a live journal's or one that
+    /// left `live` meanwhile (#560 (clean Ctrl-C shutdown): a clean stop
+    /// waits for each to land).
+    pub(crate) fn flying(&self) -> bool {
+        let flying = !self.orphans.is_empty() || self.live.values().any(|rt| rt.flight.is_some());
+        if !flying {
+            assert!(
+                self.live.values().all(|rt| rt.storage.is_some()),
+                "a journal that does not fly holds its store"
+            );
+        }
+        flying
+    }
+
     pub(crate) fn new(control: BTreeSet<JournalIdentifier>) -> Self {
         assert!(
             control.iter().all(|journal| journal.is_set()),

@@ -325,13 +325,19 @@ fn chaos_surfaces() -> [Chaos; 13] {
         },
         Chaos::Attrition {
             config: Attrition {
+                prob_graceful: MACHINE_GRACEFUL_WEIGHT,
                 prob_wipe: MACHINE_WIPE_WEIGHT,
+                grace_period_ms: Some(MACHINE_GRACE_MS),
                 ..regime(AttritionVictims::group(MACHINE_GROUP))
             },
             mode: ChaosMode::Swarm,
         },
         Chaos::Attrition {
-            config: regime(AttritionVictims::group(FRONTEND_GROUP)),
+            config: Attrition {
+                prob_graceful: MACHINE_GRACEFUL_WEIGHT,
+                grace_period_ms: Some(MACHINE_GRACE_MS),
+                ..regime(AttritionVictims::group(FRONTEND_GROUP))
+            },
             mode: ChaosMode::Swarm,
         },
         crate::world::outage::regime(),
@@ -365,6 +371,25 @@ fn chaos_surfaces() -> [Chaos; 13] {
 /// (`cell_lost`). Only the machines draw it: an
 /// acceptor's wipe is the storage ledger's coin (see [`chaos_surfaces`]).
 const MACHINE_WIPE_WEIGHT: f64 = 0.1;
+
+/// The weight of moonpool's graceful reboot in the machine and frontend
+/// groups' attrition, against a crash's 1.0 (#560 (clean Ctrl-C shutdown)): about
+/// one machine reboot in three is an operator's `SIGTERM`. moonpool cancels
+/// the machine's shutdown token, the token `parosd`'s signal cancels, and
+/// kills it once [`MACHINE_GRACE_MS`] ran out. The shipped clean stop runs:
+/// it refuses new calls, answers the held ones, hands its leaderships on
+/// and lets its flushes land. The swarm masks the weight off on half the
+/// seeds, so the crash-only regime stays.
+const MACHINE_GRACEFUL_WEIGHT: f64 = 0.5;
+
+/// The grace a stopping machine or frontend gets before moonpool kills it,
+/// in milliseconds (#560): around the drawn `shutdown_within` (0 to 4 s), so
+/// a stop ends on its own on some seeds and is cut by the kill on others.
+/// Short, like a crash's recovery delay: moonpool lets a grace started just
+/// before the chaos ends run on into the recovery tail, and a founder held
+/// down there for up to 10 s left `cell init` unfinished past
+/// `FLEET_SETTLE` (hunt seed 10118493541056837987 on f8e629f).
+const MACHINE_GRACE_MS: std::ops::Range<usize> = 1_000..3_000;
 
 /// The storage families the campaign leaves out (architecture §5, #176).
 /// Rot (corruption, EIO, misdirection) damages a record on whichever disks

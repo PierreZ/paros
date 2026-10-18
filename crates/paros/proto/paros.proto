@@ -98,6 +98,9 @@ message WriteAck {
   // Set only by a frontend (#192 (the frontend)): why it answered the call
   // itself. A node never sets it.
   FrontendVerdict frontend = 9;
+  // The machine is stopping (#560 (clean Ctrl-C shutdown)): it took no
+  // part in the call. Retry on another machine.
+  bool stopping = 10;
 }
 
 message Read {
@@ -127,6 +130,9 @@ message ReadAck {
   // Set only by a frontend (#192 (the frontend)): why it answered the call
   // itself. A node never sets it.
   FrontendVerdict frontend = 7;
+  // The machine is stopping (#560 (clean Ctrl-C shutdown)): not served.
+  // Retry on another machine.
+  bool stopping = 8;
 }
 
 message Truncate {
@@ -160,6 +166,9 @@ message TruncateAck {
   // Set only by a frontend (#192 (the frontend)): why it answered the call
   // itself. A node never sets it.
   FrontendVerdict frontend = 7;
+  // The machine is stopping (#560 (clean Ctrl-C shutdown)): it took no
+  // part in the call. Retry on another machine.
+  bool stopping = 8;
 }
 
 message SetLeader {
@@ -188,6 +197,9 @@ message SetLeaderAck {
   // Set only by a frontend (#192 (the frontend)): why it answered the call
   // itself. A node never sets it.
   FrontendVerdict frontend = 7;
+  // The machine is stopping (#560 (clean Ctrl-C shutdown)): it took no
+  // part in the call. Retry on another machine.
+  bool stopping = 8;
 }
 
 message Reconfigure {
