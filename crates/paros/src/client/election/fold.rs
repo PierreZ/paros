@@ -31,6 +31,18 @@
 //! such a watcher knows no leader. The rule assumes nothing else truncates
 //! the journal: an election journal is the election's alone.
 //!
+//! **Only the record at the journal's floor anchors.** The floor is the
+//! truncating leader's own anchor, a record its fold counted, so every fold
+//! names that leader there. A record anywhere else proves nothing on its
+//! own: a renewal may be a deposed leader's late one (hunt seed
+//! 10124030878967114087 on 1f1f3c6 with PR #679: a fold that resumed at the tail adopted
+//! `Renew(13)` written after `Campaign(14)` had deposed its writer below the
+//! tail, and the next campaign for term 14 won in that fold alone). A fold
+//! the floor outran ([`ElectionFold::resume_at_tail`]) keeps the records it
+//! reads at the tail and anchors once a page reports the floor at one of
+//! them ([`ElectionFold::floor_seen`]), or goes back to the floor
+//! ([`ElectionFold::rewind`]).
+//!
 //! Anything in the journal that is not an election record (no [`MAGIC`]) is
 //! ignored.
 
@@ -308,6 +320,11 @@ pub struct ElectionFold {
     /// knows nothing: the records past the tail raise the term without
     /// anchoring, so a rewind to the floor goes back to it.
     tail_term: Option<u64>,
+    /// The records folded since the fold resumed at the tail, dense from
+    /// the tail, while it knows nothing: none anchors on its own, but the
+    /// one the floor reaches does ([`ElectionFold::floor_seen`]), and the
+    /// ones past it are folded again from there.
+    tail: Vec<(u64, Vec<u8>)>,
     /// The next position the fold expects.
     next: u64,
 }
@@ -328,6 +345,7 @@ impl ElectionFold {
             known: true,
             floor: None,
             tail_term: None,
+            tail: Vec::new(),
             next: 0,
         }
     }
@@ -371,18 +389,22 @@ impl ElectionFold {
         self.known = false;
         self.floor = Some(floor);
         self.leader = None;
+        self.tail.clear();
         assert!(!self.known, "a fold past a gap knows nothing yet");
     }
 
     /// The floor outran a reader (#640 (election reader livelock)): the
     /// fold resumes at the journal's `tail`, past the floor `floor`, and
-    /// knows nothing until a renewal there names the leader. Unlike
-    /// [`ElectionFold::gap`], no campaign or hand-off anchors it: only the
-    /// record at a leader's truncation floor began a term, and a record
-    /// written at the tail may be a campaign that lost (witness
-    /// 1055341407506467323 on 9d93679: an operator's late campaign for a
-    /// taken term). A tail at or below the floor is the floor itself, a
-    /// [`ElectionFold::gap`].
+    /// knows nothing until the floor reaches a record it read there
+    /// ([`ElectionFold::floor_seen`]) or it goes back to the floor
+    /// ([`ElectionFold::rewind`]). Unlike [`ElectionFold::gap`], no record
+    /// at the tail anchors it on its own: only the record at a leader's
+    /// truncation floor is known to count. A campaign written at the tail
+    /// may have lost (witness 1055341407506467323 on 9d93679: an operator's
+    /// late campaign for a taken term), and a renewal there may be a deposed
+    /// leader's, written after the campaign that deposed it, below the tail
+    /// (hunt seed 10124030878967114087 on 1f1f3c6 with PR #679). A tail at or below the
+    /// floor is the floor itself, a [`ElectionFold::gap`].
     ///
     /// # Panics
     ///
@@ -400,33 +422,109 @@ impl ElectionFold {
         self.floor = None;
         self.leader = None;
         self.tail_term.get_or_insert(self.term);
+        // Every record held lies below the new floor: gone.
+        self.tail.clear();
         assert!(!self.known, "a fold at the tail knows nothing yet");
         assert!(self.floor.is_none(), "the tail is no truncation floor");
     }
 
-    /// A fold at the tail ([`ElectionFold::resume_at_tail`]) goes back to
-    /// the journal's floor `floor`, to anchor on the record there: the
-    /// leader's own, by the truncation rule. Whether the fold moved: only a
-    /// fold that knows nothing and stands past `floor` moves.
+    /// A page served to a fold at the tail ([`ElectionFold::resume_at_tail`])
+    /// reported the journal's floor at `floor`. The floor is the leader's
+    /// own anchor, so its record counts in every fold: when the fold holds
+    /// that record, it anchors on it and folds the records past it again,
+    /// with no read, so a floor that moves once per renewal period cannot
+    /// outrun it (#640 (election reader livelock)). A floor past every
+    /// record held is where the next read starts, as a [`ElectionFold::gap`].
+    /// A floor below the tail is the one the fold skipped: the tail wait
+    /// goes on. Whether the fold anchored.
     ///
     /// # Panics
     ///
     /// If an assertion on its own postconditions fails: a programmer error.
-    pub fn rewind(&mut self, floor: u64) -> bool {
-        if self.known || floor >= self.next {
+    pub fn floor_seen(&mut self, floor: u64) -> bool {
+        if self.known || self.floor.is_some() {
             return false;
         }
+        let start = self.tail.first().map_or(self.next, |(seq, _)| *seq);
+        if floor < start {
+            return false;
+        }
+        self.replay(floor);
+        assert_eq!(
+            self.floor.is_none(),
+            self.known,
+            "a floor's record anchors or is awaited"
+        );
+        self.known
+    }
+
+    /// Go back to `floor`, a position at or past the first record held at
+    /// the tail, and fold the records held from there: the one at the floor
+    /// anchors, the ones past it follow the rule. A floor past every record
+    /// held leaves the fold waiting for its record.
+    fn replay(&mut self, floor: u64) {
+        assert!(!self.known, "only a fold that knows nothing replays");
+        let held = std::mem::take(&mut self.tail);
+        assert!(
+            held.first().is_none_or(|(seq, _)| *seq <= floor),
+            "a replay starts at a record held, or past them"
+        );
         self.next = floor;
         self.floor = Some(floor);
         self.leader = None;
-        // The records past the floor are folded again: the term they raised
+        // The records are folded again from the floor: the term they raised
         // goes back to what the fold knew before it met them.
         if let Some(term) = self.tail_term.take() {
             assert!(term <= self.term, "a term raised at the tail only grows");
             self.term = term;
         }
+        for (seq, record) in held {
+            if seq >= floor {
+                self.absorb(seq, &record);
+            }
+        }
+        assert!(self.next >= floor, "a replay ends at or past the floor");
+    }
+
+    /// A fold that knows nothing goes back to the journal's floor `floor`,
+    /// to anchor on the record there: the leader's own, by the truncation
+    /// rule. A fold at the tail ([`ElectionFold::resume_at_tail`]) that
+    /// holds the floor's record folds from memory
+    /// ([`ElectionFold::floor_seen`]); one whose floor lies below the
+    /// records it holds resumes at the floor. Whether the fold still knows
+    /// nothing, so the caller reads it on from [`ElectionFold::next`]; a
+    /// fold that knows moves nowhere.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own postconditions fails: a programmer error.
+    pub fn rewind(&mut self, floor: u64) -> bool {
+        if self.known {
+            return false;
+        }
+        if self.floor_seen(floor) {
+            return false;
+        }
+        if self.floor.is_none() {
+            // Still at the tail: the floor lies below every record held.
+            assert!(floor < self.next, "a floor at or past the tail is seen");
+            self.next = floor;
+            self.floor = Some(floor);
+            self.leader = None;
+            self.tail.clear();
+            // The records past the floor are folded again: the term they
+            // raised goes back to what the fold knew before it met them.
+            if let Some(term) = self.tail_term.take() {
+                assert!(term <= self.term, "a term raised at the tail only grows");
+                self.term = term;
+            }
+            assert_eq!(self.next, floor, "a rewound fold resumes at the floor");
+        }
         assert!(!self.known, "a rewound fold knows nothing yet");
-        assert_eq!(self.next, floor, "a rewound fold resumes at the floor");
+        assert!(
+            self.floor.is_some(),
+            "a rewound fold awaits its floor's record"
+        );
         true
     }
 
@@ -439,6 +537,10 @@ impl ElectionFold {
     pub fn absorb(&mut self, seq: u64, record: &[u8]) -> Change {
         assert_eq!(seq, self.next, "an election fold takes positions in order");
         self.next = seq + 1;
+        if !self.known && self.floor.is_none() {
+            // At the tail: held until the floor reaches one of them.
+            self.tail.push((seq, record.to_vec()));
+        }
         let Some(Ok(record)) = ElectionRecord::decode(record) else {
             return Change::Ignored;
         };
@@ -519,10 +621,13 @@ impl ElectionFold {
         }
     }
 
-    /// A fold past a gap: it anchors on a renewal (every renewal describes
-    /// the whole leadership), or on a campaign or a hand-off at the very
-    /// floor (only the leader truncates, to its own anchor, and the record
-    /// that began its term is one), and counts nothing else.
+    /// A fold that knows nothing: it anchors on the record at the very
+    /// floor, a renewal (every renewal describes the whole leadership), a
+    /// campaign or a hand-off (only the leader truncates, to its own anchor:
+    /// its latest renewal, or the record that began its term), and counts
+    /// nothing else. A renewal past the floor, or at the tail, may be a
+    /// deposed leader's late one (hunt seed 10124030878967114087 on
+    /// 86806ff): the campaign that deposed it lay below the fold's position.
     fn anchor(&mut self, seq: u64, record: ElectionRecord) -> Change {
         let at_floor = self.floor == Some(seq);
         match record {
@@ -530,7 +635,7 @@ impl ElectionFold {
                 term,
                 candidate,
                 uuid,
-            } if term >= self.term => {
+            } if at_floor && term >= self.term => {
                 self.lead(term, candidate, uuid, seq);
                 Change::Adopted
             }
@@ -572,6 +677,7 @@ impl ElectionFold {
         self.known = true;
         self.floor = None;
         self.tail_term = None;
+        self.tail.clear();
         self.leader = Some(Leader {
             term,
             candidate,
@@ -760,22 +866,87 @@ mod tests {
     }
 
     #[test]
-    fn a_fold_at_the_tail_anchors_only_on_a_renewal() {
+    fn a_fold_at_the_tail_anchors_only_at_the_floor_it_holds() {
         // 1 leads term 3 and truncated to its renewal at 4; a reader the
         // floor outran resumes at the tail, 6, where 2's campaign for the
-        // taken term 3 lost.
+        // taken term 3 lost, then 1 renewed.
         let mut cut = ElectionFold::new();
         cut.resume_at_tail(4, 6);
         assert_eq!(cut.next(), 6);
         assert_eq!(cut.absorb(6, &campaign(3, 2)), Change::Ignored);
         assert!(!cut.is_known(), "a campaign at the tail anchors nothing");
+        assert_eq!(cut.absorb(7, &renew(3, 1)), Change::Ignored);
+        assert!(!cut.is_known(), "a renewal at the tail anchors nothing");
         assert_eq!(cut.leader(), None);
-        assert_eq!(cut.absorb(7, &renew(3, 1)), Change::Adopted);
-        assert_eq!(cut.leader().map(|l| (l.term, l.candidate.id)), Some((3, 1)));
+        // The floor still at 4, below the tail: nothing.
+        assert!(!cut.floor_seen(4));
+        assert!(!cut.is_known());
+        // 1 truncated to its renewal at 7, a record the fold holds: anchored.
+        assert!(cut.floor_seen(7));
+        assert!(cut.is_known());
+        assert_eq!(
+            cut.leader().map(|l| (l.term, l.candidate.id, l.since)),
+            Some((3, 1, 7))
+        );
+        assert_eq!(cut.next(), 8);
+        // A floor past every record held: the next read starts there, and
+        // its record anchors.
+        let mut ahead = ElectionFold::new();
+        ahead.resume_at_tail(4, 6);
+        assert_eq!(ahead.absorb(6, &renew(3, 1)), Change::Ignored);
+        assert!(!ahead.floor_seen(8));
+        assert_eq!(ahead.next(), 8);
+        assert_eq!(ahead.absorb(8, &renew(3, 1)), Change::Adopted);
         // A tail at the floor is the floor: its record anchors.
         let mut at_floor = ElectionFold::new();
         at_floor.resume_at_tail(4, 4);
         assert_eq!(at_floor.absorb(4, &campaign(5, 9)), Change::Adopted);
+    }
+
+    #[test]
+    fn a_deposed_leaders_late_renewal_at_the_tail_anchors_nothing() {
+        // Hunt seed 10124030878967114087 on 1f1f3c6 with PR #679, in small: 1 led term
+        // 13 and truncated to its renewal (0); 2 took term 14 over (1); 1,
+        // not yet aware, renewed term 13 (2); 3, a fold the floor outran,
+        // resumed at the tail (2) and campaigned for term 14 (3); 2 renewed
+        // (4) and truncated to it.
+        let log = [
+            renew(13, 1),
+            campaign(14, 2),
+            renew(13, 1),
+            campaign(14, 3),
+            renew(14, 2),
+        ];
+        let mut whole = ElectionFold::new();
+        whole.gap(0);
+        for (seq, record) in log.iter().enumerate() {
+            whole.absorb(seq as u64, record);
+        }
+        let leads = |fold: &ElectionFold| fold.leader().map(|l| (l.term, l.candidate.id, l.uuid));
+        assert_eq!(leads(&whole).map(|l| (l.0, l.1)), Some((14, 2)));
+        // 3's fold: at the tail, 1's late renewal anchors nothing, so 3's
+        // own campaign never wins in its own fold.
+        let mut tail = ElectionFold::new();
+        tail.resume_at_tail(0, 2);
+        assert_eq!(tail.absorb(2, &log[2]), Change::Ignored);
+        assert_eq!(tail.absorb(3, &log[3]), Change::Ignored);
+        assert_eq!(tail.leader(), None);
+        assert_eq!(tail.term(), 14, "terms never go back at the tail");
+        assert_eq!(tail.absorb(4, &log[4]), Change::Ignored);
+        // 2 truncated to its renewal at 4: the fold holds it and agrees.
+        assert!(tail.floor_seen(4));
+        assert_eq!(leads(&tail), leads(&whole));
+        // Or, before campaigning, it rewinds to the floor still at 0, which
+        // it does not hold: a read from 0 folds the whole and agrees.
+        let mut rewound = ElectionFold::new();
+        rewound.resume_at_tail(0, 2);
+        assert_eq!(rewound.absorb(2, &log[2]), Change::Ignored);
+        assert!(rewound.rewind(0), "the floor's record is read");
+        assert_eq!(rewound.next(), 0);
+        for (seq, record) in log.iter().enumerate() {
+            rewound.absorb(seq as u64, record);
+        }
+        assert_eq!(leads(&rewound), leads(&whole));
     }
 
     #[test]
@@ -792,10 +963,24 @@ mod tests {
         assert_eq!(cut.absorb(291, &renew(4, 1)), Change::Adopted);
         assert!(cut.is_known());
         assert!(!cut.rewind(291), "a known fold never rewinds");
-        // A fold at its floor already does not move.
+        // A fold at its floor already does not move, and is still read.
         let mut at_floor = ElectionFold::new();
         at_floor.gap(4);
-        assert!(!at_floor.rewind(4));
+        assert!(at_floor.rewind(4));
+        assert_eq!(at_floor.next(), 4);
+        // A fold at the tail that holds the floor's record folds it from
+        // memory: no read.
+        let mut held = ElectionFold::new();
+        held.resume_at_tail(291, 292);
+        assert_eq!(held.absorb(292, &renew(4, 1)), Change::Ignored);
+        assert_eq!(held.absorb(293, &campaign(5, 2)), Change::Ignored);
+        assert!(!held.rewind(292), "anchored from the records held");
+        assert!(held.is_known());
+        assert_eq!(
+            held.leader().map(|l| (l.term, l.candidate.id)),
+            Some((5, 2))
+        );
+        assert_eq!(held.next(), 294);
     }
 
     #[test]
