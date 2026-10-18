@@ -198,13 +198,40 @@ async fn run((settings, ring): (FrontendSettings, KeyRing)) -> ExitCode {
     }
 }
 
-/// A cancellation token fired on `SIGTERM` or `SIGINT`.
+/// A cancellation token fired on `SIGTERM` or `SIGINT`: the frontend's
+/// clean stop (#560 (clean Ctrl-C shutdown)), which refuses new calls and
+/// answers the ones it took. A second signal exits at once (code 130).
 fn shutdown_on_signal() -> CancellationToken {
     let token = CancellationToken::new();
     let fired = token.clone();
     tokio::spawn(async move {
-        tokio::signal::ctrl_c().await.ok();
+        wait_for_signal().await;
+        tracing::info!("frontend_signal_shutdown");
         fired.cancel();
+        wait_for_signal().await;
+        eprintln!("paros-frontend: a second signal: stopping at once");
+        std::process::exit(130);
     });
     token
+}
+
+#[cfg(unix)]
+async fn wait_for_signal() {
+    use tokio::signal::unix::{SignalKind, signal};
+    match signal(SignalKind::terminate()) {
+        Ok(mut term) => {
+            tokio::select! {
+                _ = term.recv() => {}
+                _ = tokio::signal::ctrl_c() => {}
+            }
+        }
+        Err(_) => {
+            tokio::signal::ctrl_c().await.ok();
+        }
+    }
+}
+
+#[cfg(not(unix))]
+async fn wait_for_signal() {
+    tokio::signal::ctrl_c().await.ok();
 }

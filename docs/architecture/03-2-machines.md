@@ -190,6 +190,46 @@ yet; at an idle round the coordinator releases each slot outside the configurati
 journal's leader holds in force. The bound counts on the coordinator's own clock, so a new term
 counts again from its start.
 
+**Clean stop** (#560 (clean Ctrl-C shutdown), landed on 2026-10-18). `SIGINT` (Ctrl-C) and
+`SIGTERM` give the same clean stop. `parosd` only turns the signal into the machine's shutdown
+token; the stop is the library's (`driver/stop.rs` in the node loop, `machine/coordinator.rs`),
+so the simulation runs the same code. moonpool's graceful reboot cancels the same token, then
+kills the process after a grace period. The node loop serves on while it stops:
+
+1. **Stop accepting.** A `Write`, `SetLeader`, `Truncate` or `Read` that arrives is refused at
+   once, `stopping: true` in its ack, with no verdict: retry elsewhere. The client library reads
+   it as a redirect with no hint. Peer traffic goes on, because the handoffs need it. Operator
+   calls (`Reconfigure`, `Retire`, `Inspect`) are still served.
+2. **Finish the work in flight.** Every held call is answered from the slot it waits on, and
+   every read waits out its own bound.
+3. **Hand the leaderships on**, at the same time as step 2. Each journal the node leads hands its
+   Phase-2 authority to a member drawn at random (`relinquish_to`, the cooperative handoff). The
+   successor goes on under the same ballot, with no election, and answers the held calls too. The
+   stop waits for the successor's first beat at that ballot (or any beat above it). A journal with
+   no other member keeps its leadership. Some leaderships cannot hand off: they are not settled
+   yet, or they were handed to this node. The stop waits for them for one election timeout, then
+   leaves them to an election. The cell coordinator (also the tenant coordinator, until #476)
+   resigns its term naming the next founding member and moves the cell control journal's leader
+   uuid to it, as the hand-off BUGGIFY decision does. A lone founding member keeps its term.
+4. **Flush.** Every batch whose flush flies lands.
+5. **Exit.** The loop returns, `parosd` logs `parosd_stopped` and exits 0.
+
+The bound is the `shutdown_within` tunable (`PAROS_SHUTDOWN_WITHIN_MS`, 30 s in the shipped
+profile, floor 0): when it runs out, the loop returns anyway and logs `stop_timed_out` with the
+step that did not complete. A second signal exits at once with code 130, and so does a stop that
+is still running 5 s past its bound. Each of these is a crash, which recovery already handles, so
+no bound is a safety rule. Each step logs with the machine's name (`stop_started`,
+`stop_handoff_sent`, `stop_handoff_taken`, `stop_completed`). `paros-frontend` stops the same way
+with no leadership and no store: it refuses new calls (`stopping`), waits for the ones it took
+and returns.
+
+The simulation draws a graceful reboot for about a third of the machine and frontend groups'
+attrition on the seeds whose swarm keeps it, with a 2–10 s grace around the drawn `shutdown_within` (0–12 s), so
+a stop ends on its own on some seeds and is cut by the kill on others. Gates: a stopping machine
+refuses a call, a stopping leader hands its journal on, a successor takes it, a coordinator hands
+its term on, a stop completes, a stop runs out of time. The existing oracles judge the rest:
+linearizability over every call, one leader per term, and the crash oracles for a cut stop.
+
 **Slow machines** (#361 (slow machines), 2026-10-16; gray failure). The failure detector above is
 binary, but a slow disk or a starved CPU answers, late, and slows every write of every journal
 whose Phase-2 quorum holds it. So each watch round also measures every machine that answered:

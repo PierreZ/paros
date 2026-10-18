@@ -501,7 +501,16 @@ async fn run_frontend_role(
         cell,
         names: crate::machine::names(ctx.state()),
         epoch,
-        tunables: DriverTunables::default(),
+        tunables: DriverTunables {
+            // A clean stop's bound (#560 (clean Ctrl-C shutdown)), drawn
+            // like a machine's: floor 0 is a stop at once, the same as a
+            // crash, and the range crosses the grace period both ways.
+            shutdown_within: Duration::from_millis(moonpool_sim::buggify_knob!(
+                5000_u64,
+                0_u64..12_001_u64
+            )),
+            ..DriverTunables::default()
+        },
         transport: crate::tls::serving(ctx, paros::tls::Role::Frontend, my_ip)?,
         client: ClientTunables {
             request_timeout: FORWARD_TIMEOUT,

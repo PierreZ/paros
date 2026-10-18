@@ -166,7 +166,8 @@ parosctl resolve globex
 parosctl tenant delete globex
 parosctl universe remove-cell second
 
-# Stop: SIGTERM shuts each machine down cleanly; remove the data to start over.
+# Stop: SIGTERM (or Ctrl-C) stops each machine cleanly: it hands its leaderships on first.
+# Remove the data to start over.
 pkill parosd
 rm -rf /tmp/paros-demo
 ```

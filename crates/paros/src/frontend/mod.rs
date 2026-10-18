@@ -50,10 +50,13 @@ mod routes;
 pub use authz::{Authz, Denial, Operation, Request, Target};
 
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use moonpool_core::{Detach, Providers, RandomProvider, SimulationResult, TaskProvider};
+use moonpool_core::{
+    Detach, Providers, RandomProvider, SimulationResult, TaskProvider, TimeProvider,
+};
 use paros_core::JournalIdentifier;
 use tokio_util::sync::CancellationToken;
 
@@ -145,11 +148,41 @@ struct Shared<P: Providers, A> {
     authz: Arc<dyn Authz>,
     audit: A,
     settings: FrontendSettings,
+    /// The calls whose task runs (#560 (clean Ctrl-C shutdown)): a stopping
+    /// frontend waits for them.
+    in_flight: AtomicUsize,
 }
+
+/// One running call, counted in [`Shared::in_flight`] while it lives.
+struct Running<P: Providers, A>(Arc<Shared<P, A>>);
+
+impl<P: Providers, A> Running<P, A> {
+    fn start(shared: &Arc<Shared<P, A>>) -> Self {
+        shared.in_flight.fetch_add(1, Ordering::SeqCst);
+        Self(shared.clone())
+    }
+}
+
+impl<P: Providers, A> Drop for Running<P, A> {
+    fn drop(&mut self) {
+        let before = self.0.in_flight.fetch_sub(1, Ordering::SeqCst);
+        assert!(before > 0, "a running call was counted");
+    }
+}
+
+/// How often a stopping frontend looks whether its calls ended. Not a
+/// tunable: it only sets how late, by at most this much, a drained frontend
+/// sees it is drained; `shutdown_within` is the bound that shapes a stop.
+const STOP_POLL: Duration = Duration::from_millis(50);
 
 /// Run a frontend until `shutdown`: bind `settings.listen`, learn the cell
 /// from its founding members, and serve the frontend contract, checking
 /// every call through `authz` and reporting resolutions to `audit`.
+///
+/// `shutdown` begins a clean stop (#560 (clean Ctrl-C shutdown)): every new
+/// call is refused `stopping`, and the frontend returns once the calls it
+/// took are answered, or once `tunables.shutdown_within` ran out; a call
+/// still running then gets no answer, which its caller sees as ambiguous.
 ///
 /// # Errors
 ///
@@ -199,29 +232,84 @@ where
         authz,
         audit,
         settings,
+        in_flight: AtomicUsize::new(0),
     });
+    // Every call's task ends with the frontend: a call still running when
+    // it returns gets no answer.
+    let ended = CancellationToken::new();
+    let _ended = ended.clone().drop_guard();
+    let within = shared.settings.tunables.shutdown_within;
+    let time = providers.time().clone();
+    // When a clean stop returns whatever still runs, once one began.
+    let mut stop: Option<Duration> = None;
     loop {
         moonpool_core::select! {
             biased;
-            () = shutdown.cancelled() => return Ok(()),
+            () = shutdown.cancelled(), if stop.is_none() => {
+                stop = Some(time.now().saturating_add(within));
+                tracing::info!(listen = %shared.settings.listen, within_ms = u64::try_from(within.as_millis()).unwrap_or(u64::MAX), "frontend_stop_started");
+            }
+            _ = time.sleep(STOP_POLL), if stop.is_some() => {
+                let running = shared.in_flight.load(Ordering::SeqCst);
+                if running == 0 {
+                    moonpool_assertions::reachable!("stop: a frontend stopped cleanly");
+                    tracing::info!(listen = %shared.settings.listen, "frontend_stop_completed");
+                    return Ok(());
+                }
+                if stop.is_some_and(|deadline| time.now() >= deadline) {
+                    moonpool_assertions::reachable!("stop: a frontend's stop ran out of time");
+                    tracing::warn!(listen = %shared.settings.listen, running, "frontend_stop_timed_out");
+                    return Ok(());
+                }
+            }
             error = edge.run() => return Err(error),
             Some((FrontWrite { entry, call }, reply)) = inbox.write.recv() => {
-                spawn_call(&shared, &shutdown, entry, call, reply, Draws::draw(&providers));
+                if stop.is_some() {
+                    refuse(call.as_ref(), reply);
+                } else {
+                    spawn_call(&shared, &ended, entry, call, reply, Draws::draw(&providers));
+                }
             }
             Some((FrontRead { entry, call }, reply)) = inbox.read.recv() => {
-                spawn_call(&shared, &shutdown, entry, call, reply, Draws::draw(&providers));
+                if stop.is_some() {
+                    refuse(call.as_ref(), reply);
+                } else {
+                    spawn_call(&shared, &ended, entry, call, reply, Draws::draw(&providers));
+                }
             }
             Some((FrontTruncate { entry, call }, reply)) = inbox.truncate.recv() => {
-                spawn_call(&shared, &shutdown, entry, call, reply, Draws::draw(&providers));
+                if stop.is_some() {
+                    refuse(call.as_ref(), reply);
+                } else {
+                    spawn_call(&shared, &ended, entry, call, reply, Draws::draw(&providers));
+                }
             }
             Some((FrontSetLeader { entry, call }, reply)) = inbox.set_leader.recv() => {
-                spawn_call(&shared, &shutdown, entry, call, reply, Draws::draw(&providers));
+                if stop.is_some() {
+                    refuse(call.as_ref(), reply);
+                } else {
+                    spawn_call(&shared, &ended, entry, call, reply, Draws::draw(&providers));
+                }
             }
             Some((call, reply)) = inbox.set_tags.recv() => {
-                spawn_tags(&shared, &shutdown, call, reply, Draws::draw(&providers));
+                if stop.is_some() {
+                    let _ = reply.send(SetJournalTagsAck {
+                        outcome: "unavailable".into(),
+                        ..SetJournalTagsAck::default()
+                    });
+                } else {
+                    spawn_tags(&shared, &ended, call, reply, Draws::draw(&providers));
+                }
             }
         }
     }
+}
+
+/// Refuse a call a stopping frontend took (#560 (clean Ctrl-C shutdown)):
+/// `stopping`, retry elsewhere.
+fn refuse<C: Forwarded>(_call: Option<&C>, reply: ReplySender<C::Ack>) {
+    moonpool_assertions::reachable!("stop: a stopping frontend refuses a call");
+    let _ = reply.send(C::stopping());
 }
 
 /// Serve one call in its own task, until it answers or the frontend stops
@@ -241,10 +329,12 @@ fn spawn_call<P, A, C>(
 {
     let shutdown = shutdown.clone();
     let task = shared.clone();
+    let running = Running::start(shared);
     shared
         .providers
         .task()
         .spawn_task(C::TASK, async move {
+            let _running = running;
             moonpool_core::select! {
                 biased;
                 () = shutdown.cancelled() => {}
@@ -327,10 +417,12 @@ fn spawn_tags<P, A>(
 {
     let shutdown = shutdown.clone();
     let task = shared.clone();
+    let running = Running::start(shared);
     shared
         .providers
         .task()
         .spawn_task("frontend-set-tags", async move {
+            let _running = running;
             moonpool_core::select! {
                 biased;
                 () = shutdown.cancelled() => {}

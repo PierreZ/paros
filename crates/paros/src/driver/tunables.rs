@@ -97,6 +97,7 @@ impl DriverTunables {
     /// | `scrub_rate` | 4 MiB/s | a few percent of one disk, per tenant (#362 (background scrubbing)) |
     /// | `scrub_pass_within` | 7 days | every record is read again each week, so rot is found long before a second copy rots |
     /// | `scrub_page` | the default (64) | a page bounds one acceptor's read burst |
+    /// | `shutdown_within` | 30 s | a clean stop hands every leadership on and lets every flush land; past it the stop is a crash (#560 (clean Ctrl-C shutdown)) |
     ///
     /// # Panics
     ///
@@ -136,6 +137,7 @@ impl DriverTunables {
             internal_request_timeout: Duration::from_secs(2),
             scrub_rate: 4 * 1024 * 1024,
             scrub_pass_within: Duration::from_hours(7 * 24),
+            shutdown_within: Duration::from_secs(30),
             ..defaults
         };
         // What `parosd` ships is a profile the simulation could have drawn:
@@ -165,7 +167,7 @@ impl DriverTunables {
     /// Every checked field: its name, its value and its floor. One row per
     /// field, so it grows with the tunables.
     #[allow(clippy::too_many_lines)]
-    fn floor_table(&self) -> [(&'static str, u64, u64); 49] {
+    fn floor_table(&self) -> [(&'static str, u64, u64); 50] {
         let ms = |d: Duration| u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
         let count = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
         [
@@ -287,6 +289,7 @@ impl DriverTunables {
                 ms(super::config::SCRUB_PASS_WITHIN_FLOOR),
             ),
             ("scrub_page", count(self.scrub_page), 1),
+            ("shutdown_within", ms(self.shutdown_within), 0),
         ]
     }
 

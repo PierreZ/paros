@@ -35,7 +35,8 @@
 //!
 //! | exit | outcome | what the operator does |
 //! |---|---|---|
-//! | 0 | shut down on `SIGTERM` / `SIGINT` | nothing |
+//! | 0 | stopped on `SIGTERM` / `SIGINT`: the clean stop (#560) handed its leaderships on and let its flushes land, or its `PAROS_SHUTDOWN_WITHIN_MS` ran out | nothing |
+//! | 130 | a second `SIGTERM` / `SIGINT` during the stop, or the stop hung past its bound: the same as a crash | nothing: the next boot recovers from what the disk holds |
 //! | 75 (`EX_TEMPFAIL`) | [`RunError::Storage`] or [`MachineError::Storage`]: the fail-stop crash on a storage fault | restart: the next boot recovers from what the disk holds |
 //! | 78 (`EX_CONFIG`) | [`RunError::Refused`]: the store or the identity disagrees with the configuration | do **not** restart: resolve it (amnesia, an edited configuration, a class change) |
 //! | 1 | [`RunError::Infra`]: bind, listen, address | fix the environment |
@@ -67,6 +68,13 @@ use crate::settings::Settings;
 const EXIT_RESTART: u8 = 75;
 /// `EX_CONFIG`: the boot was refused; an operator must act.
 const EXIT_REFUSED: u8 = 78;
+/// A stop cut short (#560 (clean Ctrl-C shutdown)): a second signal, or a
+/// stop that hung past its bound. The shell's code for a Ctrl-C.
+const EXIT_FORCED: i32 = 130;
+/// How long past `shutdown_within` the process waits for the library's
+/// stop to return before it exits anyway (#560): the library ends its own
+/// stop at the bound, so this only catches a hang.
+const STOP_BACKSTOP: Duration = Duration::from_secs(5);
 
 /// How long a start waits for its names to resolve (#209): a Compose
 /// service's peers may still be starting.
@@ -158,7 +166,7 @@ async fn run(settings: Settings, metrics: Metrics) -> ExitCode {
             "parosd_pinned_root_keys"
         );
     }
-    let shutdown = shutdown_on_signal();
+    let shutdown = shutdown_on_signal(tunables.shutdown_within);
     if let Some(http) = &settings.http_listen {
         let addr = match patiently(|| resolve::resolve(http)) {
             Ok(addr) => addr,
@@ -290,14 +298,31 @@ fn remedy(refusal: BootRefusal) -> &'static str {
     }
 }
 
-/// A cancellation token fired on `SIGTERM` or `SIGINT`: the drivers' shutdown.
-fn shutdown_on_signal() -> CancellationToken {
+/// A cancellation token fired on `SIGTERM` or `SIGINT`: the machine's clean
+/// stop (#560 (clean Ctrl-C shutdown)), which `paros::machine::run_machine`
+/// runs: it refuses new calls, answers the held ones, hands its leaderships
+/// on and lets its flushes land, within `within`. A second signal during
+/// the stop exits at once, and so does a stop still running
+/// [`STOP_BACKSTOP`] past `within`: the same as a crash, which the next
+/// boot recovers from.
+fn shutdown_on_signal(within: Duration) -> CancellationToken {
     let token = CancellationToken::new();
     let fired = token.clone();
     tokio::spawn(async move {
         wait_for_signal().await;
-        tracing::info!("parosd_signal_shutdown");
+        tracing::info!(within_ms = within.as_millis(), "parosd_signal_shutdown");
         fired.cancel();
+        tokio::select! {
+            () = wait_for_signal() => {
+                tracing::warn!("parosd_second_signal");
+                eprintln!("parosd: a second signal: stopping at once");
+            }
+            () = tokio::time::sleep(within.saturating_add(STOP_BACKSTOP)) => {
+                tracing::warn!(within_ms = within.as_millis(), "parosd_stop_hung");
+                eprintln!("parosd: the stop did not end in time: stopping at once");
+            }
+        }
+        std::process::exit(EXIT_FORCED);
     });
     token
 }

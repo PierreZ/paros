@@ -94,7 +94,7 @@ use std::time::Duration;
 
 use moonpool_core::{Detach, Providers, RandomProvider, TaskProvider, TimeProvider};
 use moonpool_rpc::{AccessClass, RpcHandle, ServiceGroup};
-use paros_core::{LeaderUuid, NodeId, TenantId};
+use paros_core::{JournalIdentifier, LeaderUuid, NodeId, TenantId};
 use tokio_util::sync::CancellationToken;
 
 use super::capacity;
@@ -964,6 +964,11 @@ struct Candidacy {
 /// each served term's group (#404). Draws its seed and its BUGGIFY
 /// decisions here, on the node loop. Nothing starts when the plan names no
 /// election journal or the tunables are not a working election.
+///
+/// `stop` is the machine's clean stop (#560 (clean Ctrl-C shutdown)): the
+/// candidacy ends, and a term it leads is handed on to the next founding
+/// member, through the node loop that still serves. The receiver turns
+/// `true` once the candidacy ended, or at once when none started.
 pub(crate) fn spawn<P: Providers>(
     providers: &P,
     rpc: &RpcHandle<P>,
@@ -971,12 +976,13 @@ pub(crate) fn spawn<P: Providers>(
     tunables: &DriverTunables,
     observer: Option<Arc<dyn CallObserver>>,
     hold: Option<tokio::sync::watch::Receiver<bool>>,
-    shutdown: CancellationToken,
-) {
+    (shutdown, halt): (CancellationToken, CancellationToken),
+) -> tokio::sync::watch::Receiver<bool> {
     let election = election_tunables(tunables);
     if !election.is_valid() || !formed.plan.election.is_set() {
-        return;
+        return tokio::sync::watch::channel(true).1;
     }
+    let (ended, ended_rx) = tokio::sync::watch::channel(false);
     let candidacy = Candidacy {
         me: formed.facts.node_id,
         addr: formed.facts.addr.clone(),
@@ -1012,11 +1018,15 @@ pub(crate) fn spawn<P: Providers>(
     let rpc = rpc.clone();
     providers
         .task()
-        .spawn_task(
-            "paros-cell-coordinator",
-            campaign(providers.clone(), rpc, client, candidacy, hold, shutdown),
-        )
+        .spawn_task("paros-cell-coordinator", {
+            let providers = providers.clone();
+            async move {
+                campaign(providers, rpc, client, candidacy, hold, (shutdown, halt)).await;
+                let _ = ended.send(true);
+            }
+        })
         .detach();
+    ended_rx
 }
 
 /// A jitter in `[0, lease / 2]` derived from `seed` and the step count.
@@ -1052,6 +1062,8 @@ fn successor(plan: &CellPlan, me: NodeId) -> Option<Candidate> {
 
 /// The candidate's loop: step the election, serve every term it wins,
 /// answer the journal requests between steps, and stop with `shutdown`.
+/// A clean `stop` (#560 (clean Ctrl-C shutdown)) ends it too, and hands a
+/// led term on first ([`hand_on`]).
 #[tracing::instrument(level = "debug", skip_all, fields(node = candidacy.me.0, cell = candidacy.plan.cell_id))]
 // One loop over the election's steps: each arm is a thin call into the
 // term's duties, and splitting the arms out would scatter its shared state.
@@ -1062,7 +1074,7 @@ async fn campaign<P: Providers>(
     mut client: Client<P>,
     candidacy: Candidacy,
     mut hold: Option<tokio::sync::watch::Receiver<bool>>,
-    shutdown: CancellationToken,
+    (shutdown, halt): (CancellationToken, CancellationToken),
 ) {
     let Candidacy {
         me,
@@ -1143,7 +1155,7 @@ async fn campaign<P: Providers>(
     let mut slowed: Option<u64> = None;
     let mut steps = 0_u64;
     let mut waited = false;
-    while !shutdown.is_cancelled() {
+    while !shutdown.is_cancelled() && !halt.is_cancelled() {
         // A moved founding member campaigns only once its registration
         // ended (#506 (renamed founder not registered)): its peers cannot
         // reach it, and the reads it serves never confirm, so a term it won
@@ -1442,7 +1454,7 @@ async fn campaign<P: Providers>(
             until,
             group.as_mut(),
             (&mut watching, &mut desk),
-            &shutdown,
+            &halt,
         );
         renewing(&providers, &mut election, answers).await;
         if let Some((term, _)) = desk.as_ref().filter(|(_, desk)| desk.superseded()) {
@@ -1454,6 +1466,56 @@ async fn campaign<P: Providers>(
             election.resign(None).await;
         }
     }
+    // A clean stop (#560 (clean Ctrl-C shutdown)), not the node loop's end:
+    // the node loop still serves, so a led term can still be handed on.
+    if halt.is_cancelled() && !shutdown.is_cancelled() {
+        drop(group);
+        hand_on(&client, &mut election, (&plan, me), journals.cell).await;
+    }
+}
+
+/// Hand the term `election` leads, if any, on to the founding member after
+/// `me` (#560 (clean Ctrl-C shutdown)): resign naming it, then move the
+/// cell control journal's leader uuid to its, as a hand-off BUGGIFY
+/// decision does. A lone founding member has nobody to hand it to, and a
+/// lost hand-off costs the cell an election, never a second leader.
+#[tracing::instrument(level = "debug", skip_all, fields(node = me.0))]
+async fn hand_on<P: Providers>(
+    client: &Client<P>,
+    election: &mut Election<P>,
+    (plan, me): (&CellPlan, NodeId),
+    governed: JournalIdentifier,
+) {
+    let Some(leader) = election.leading().cloned() else {
+        tracing::info!(node = me.0, "coordinator_stop_not_leading");
+        return;
+    };
+    let Some(next) = successor(plan, me) else {
+        moonpool_assertions::reachable!("coordinator: a stopping lone coordinator keeps its term");
+        tracing::info!(
+            node = me.0,
+            term = leader.term,
+            "coordinator_stop_no_successor"
+        );
+        return;
+    };
+    let to = next.id;
+    if let Some(uuid) = election.resign(Some(next)).await {
+        assert!(uuid != leader.uuid, "a hand-off names another uuid");
+        let outcome = hand_off(client, governed, leader.uuid, uuid, 0).await;
+        moonpool_assertions::reachable!("coordinator: a stopping coordinator hands its term on");
+        tracing::info!(
+            node = me.0,
+            term = leader.term,
+            to,
+            ?outcome,
+            "coordinator_stop_handed_on"
+        );
+    }
+    assert!(
+        election.leading().is_none(),
+        "a stopped coordinator leads no term"
+    );
 }
 
 /// Whether a term-ending BUGGIFY decision the node loop drew at spawn (a
