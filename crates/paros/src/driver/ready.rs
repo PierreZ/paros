@@ -674,10 +674,9 @@ pub(crate) async fn persist_writes<S: LogStorage, A: Audit>(
 
     if !writes.is_empty() {
         audit.commit_started(NodeId(self_id), writes);
-        storage
-            .sync(must_sync)
-            .await
-            .map_err(|e| storage_fault_crash(audit, self_id, e))?;
+        let synced = storage.sync(must_sync).await;
+        audit.commit_ended(NodeId(self_id));
+        synced.map_err(|e| storage_fault_crash(audit, self_id, e))?;
         // Durability marker: whether this batch was fsync'd (a promise-raise or
         // accept — `MustSync::Sync`) or a relaxed write (a chosen-index-only
         // advance).

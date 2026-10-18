@@ -26,8 +26,10 @@ use tokio_util::sync::CancellationToken;
 use super::matchmakers::SetBookings;
 use super::record::MachineRecord;
 use super::{CacheSink, CachedRegistry, ProviderDisk};
-use crate::journal::Spares;
-use crate::{Audit, BootKind, DriverTunables, JournalStorage, JournalStores, RunError};
+use crate::journal::{Durability, Spares};
+use crate::{
+    Audit, BootKind, DriverTunables, JournalStorage, JournalStoreConfig, JournalStores, RunError,
+};
 
 /// Which audit port a machine's facts report to, named by the caller of
 /// [`super::run_machine`] (`parosd` passes `NoAudit` for all three).
@@ -48,8 +50,10 @@ pub(crate) struct MachineStores<S: StorageProvider, F> {
     disk: ProviderDisk<S>,
     node: NodeId,
     genesis: BTreeMap<JournalIdentifier, Config>,
-    /// Journals created at run time, with their configuration.
-    created: BTreeMap<JournalIdentifier, Config>,
+    /// Journals created at run time, with their configuration and the
+    /// commit protocol their create recorded (#599 (durability mode per
+    /// journal)).
+    created: BTreeMap<JournalIdentifier, (Config, Durability)>,
     /// The machine record, rewritten whole when a store is provisioned.
     record: MachineRecord,
     audits: Arc<F>,
@@ -183,19 +187,42 @@ impl<S: StorageProvider, F> MachineStores<S, F> {
 }
 
 impl<S: StorageProvider + Clone + 'static, F> MachineStores<S, F> {
-    fn store(&self, journal: JournalIdentifier, config: Config) -> JournalStorage<S> {
+    /// `journal`'s store under `config`, committing under `durability`: a
+    /// plan journal's is the disk's (ordered), a created journal's the one
+    /// its create recorded (#599 (durability mode per journal)). The
+    /// journal records the protocol per batch, so a store opens under
+    /// either whatever its earlier batches used.
+    fn store(
+        &self,
+        journal: JournalIdentifier,
+        config: Config,
+        durability: Durability,
+    ) -> JournalStorage<S> {
+        let layout = JournalStoreConfig {
+            durability,
+            ..self.disk.layout()
+        };
+        assert!(
+            layout.geometry == self.disk.layout().geometry,
+            "a journal's mode changes its commits, never its geometry"
+        );
         JournalStorage::new(
             self.disk.provider().clone(),
             self.disk.journal_dir(journal),
             config,
-            self.disk.layout(),
+            layout,
         )
     }
 
     /// The store `journal` serves on: [`Self::store`], preparing its spare
     /// segments when the machine does.
-    fn serving(&self, journal: JournalIdentifier, config: Config) -> JournalStorage<S> {
-        let store = self.store(journal, config);
+    fn serving(
+        &self,
+        journal: JournalIdentifier,
+        config: Config,
+        durability: Durability,
+    ) -> JournalStorage<S> {
+        let store = self.store(journal, config, durability);
         match &self.spares {
             Some(spares) => store.with_spares(spares.clone()),
             None => store,
@@ -205,8 +232,12 @@ impl<S: StorageProvider + Clone + 'static, F> MachineStores<S, F> {
     /// Provision created journal `journal` under `config`: format its store
     /// (an interrupted run resumes from the disk), then record it. `false`
     /// when the disk failed: the journal is down here until a restart.
-    async fn provision(&mut self, journal: JournalIdentifier, config: Config) -> bool {
-        let mut store = self.store(journal, config);
+    async fn provision(
+        &mut self,
+        journal: JournalIdentifier,
+        (config, durability): (Config, Durability),
+    ) -> bool {
+        let mut store = self.store(journal, config, durability);
         match crate::provision_store(&mut store).await {
             Ok(provisioned) => {
                 if provisioned == crate::Provisioned::Resumed {
@@ -277,11 +308,16 @@ where
     async fn open(&mut self, journal: JournalIdentifier) -> Option<(Self::Store, BootKind)> {
         if let Some(config) = self.genesis.get(&journal).cloned() {
             assert!(config.id == self.node, "a store is opened as its machine");
-            return Some((self.serving(journal, config), BootKind::ExistingMember));
+            let durability = self.disk.layout().durability;
+            return Some((
+                self.serving(journal, config, durability),
+                BootKind::ExistingMember,
+            ));
         }
-        let config = self.created.get(&journal)?.clone();
+        let (config, durability) = self.created.get(&journal)?.clone();
         assert!(config.id == self.node, "a store is opened as its machine");
-        if !self.record.created.contains(&journal) && !self.provision(journal, config.clone()).await
+        if !self.record.created.contains(&journal)
+            && !self.provision(journal, (config.clone(), durability)).await
         {
             return None;
         }
@@ -289,7 +325,10 @@ where
             self.record.created.contains(&journal),
             "a created journal is recorded before its first boot"
         );
-        Some((self.serving(journal, config), BootKind::ExistingMember))
+        Some((
+            self.serving(journal, config, durability),
+            BootKind::ExistingMember,
+        ))
     }
 
     fn open_fault(&mut self, journal: JournalIdentifier) -> Option<RunError> {
@@ -312,8 +351,14 @@ where
     }
 
     /// A journal a control journal created naming this machine (#210),
-    /// under `config`. Idempotent: a restart re-folds and asks again.
-    fn create(&mut self, journal: JournalIdentifier, config: Config) -> bool {
+    /// under `config`, committing under `durability` (#599 (durability mode
+    /// per journal)). Idempotent: a restart re-folds and asks again.
+    fn create(
+        &mut self,
+        journal: JournalIdentifier,
+        config: Config,
+        durability: Durability,
+    ) -> bool {
         assert!(
             config.id == self.node,
             "a created journal names its machine"
@@ -321,7 +366,12 @@ where
         if self.genesis.contains_key(&journal) {
             return false;
         }
-        self.created.entry(journal).or_insert(config);
+        let held = self.created.entry(journal).or_insert((config, durability));
+        // A journal's mode is fixed at its create: every ask names the same.
+        assert!(
+            held.1 == durability,
+            "a created journal keeps the mode its create recorded"
+        );
         true
     }
 

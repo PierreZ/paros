@@ -46,6 +46,10 @@ pub struct Rare {
 /// window seldom reaches, #485 the double fault, #486 the rest.
 pub const RARE: &[Rare] = &[
     Rare {
+        msg: "election: a candidate at the tail re-anchors at the floor",
+        reason: "needs a leader that steps down without a resignation while a reader the floor outran waits at the tail; one witness, seed 3257468052100910816 on 3c8c73d (#640 (election reader livelock), #486)",
+    },
+    Rare {
         msg: "admit: a removed machine is refused admission",
         reason: "an ADMIT that draws a machine an operator removed: one CI sweep seed (#359 (drain, remove and maintenance for machines))",
     },
@@ -864,6 +868,18 @@ pub const RARE: &[Rare] = &[
     Rare {
         msg: "journal store: a crash tears a batch the journal discards",
         reason: "marginal: fired on none of 810 hunt seeds (#486)",
+    },
+    Rare {
+        msg: "journal store: a machine loses power inside a batched commit",
+        reason: "marginal: 66 cuts in 1,000 hunt seeds, on about one seed in a hundred: a hint location inside moonpool-journal's commit is active on half the runs and no scenario can force it (moonpool#340 (hint! activation a harness can force per seed); #599 (durability mode per journal))",
+    },
+    Rare {
+        msg: "journal store: a batched journal boots with its last batch lost",
+        reason: "marginal: 4 in 1,000 hunt seeds, after 66 cuts: a cut leaves the last batch ambiguous only when its records land and its entries do not (moonpool#340 (hint! activation a harness can force per seed); #599 (durability mode per journal))",
+    },
+    Rare {
+        msg: "journal store: a batched journal converges after it lost its last batch",
+        reason: "marginal: 2 of 2 checks in 1,000 hunt seeds, after a batched journal booted with its last batch lost (moonpool#340 (hint! activation a harness can force per seed); #599 (durability mode per journal))",
     },
     Rare {
         msg: "machine: the scenario wipes a founder after another founder voted",

@@ -2976,6 +2976,7 @@ impl<P: Providers, J: JournalStores> SystemCtx<'_, '_, P, J> {
                             (
                                 paros_core::QuorumSystem::Majority,
                                 paros_core::WriterMode::Single,
+                                crate::tenant::StoreDurability::Ordered,
                             ),
                             Seat::Member,
                         )
@@ -2999,18 +3000,25 @@ impl<P: Providers, J: JournalStores> SystemCtx<'_, '_, P, J> {
                 // follows it, matchmaker link included (#454 (control plane
                 // meets chaos): witness 17483207099981818289, an admitted
                 // machine renamed in chaos whose set handover never reached
-                // it).
-                SystemEvent::Registry(RegistryEvent::Reregistered { id, addr, .. }) => {
+                // it). A founding member that moved before its first
+                // registration landed moves with a `Registered` (#543): an
+                // admitted machine opened its lane from the admission's book,
+                // at the plan's address, and that lane follows it too.
+                // Seed 15535649749772960988 (recipe
+                // 2208855:8827221011598423148) on fba843a: the joiner's lane
+                // to a moved founder dialed its dead address for the whole
+                // run, so a `1x4` grid journal never held a Phase-1 quorum
+                // again and a chosen slot stayed unapplied.
+                SystemEvent::Registry(
+                    RegistryEvent::Reregistered { id, addr, .. }
+                    | RegistryEvent::Registered { id, addr, .. },
+                ) => {
                     let interface = follower
                         .registry()
                         .get(id)
                         .map(|node| node.machine_interface.clone())
                         .unwrap_or_default();
                     self.readdress_peer(me, id, &addr, &interface);
-                    self.admit_peer(me, id, &addr);
-                    admit = true;
-                }
-                SystemEvent::Registry(RegistryEvent::Registered { id, addr, .. }) => {
                     self.admit_peer(me, id, &addr);
                     admit = true;
                 }
@@ -3035,6 +3043,7 @@ impl<P: Providers, J: JournalStores> SystemCtx<'_, '_, P, J> {
                             (
                                 paros_core::QuorumSystem::Majority,
                                 paros_core::WriterMode::Single,
+                                crate::tenant::StoreDurability::Ordered,
                             ),
                             Seat::Member,
                         )
@@ -3069,7 +3078,8 @@ impl<P: Providers, J: JournalStores> SystemCtx<'_, '_, P, J> {
 
 impl<P: Providers, J: JournalStores> SystemCtx<'_, '_, P, J> {
     /// Start journal `id` on this node, bootstrapped over `members` under
-    /// `quorum_system`, written in `writer` mode — unless the journal is
+    /// `quorum_system`, written in `writer` mode, its store committing under
+    /// `store` (#599 (durability mode per journal)) — unless the journal is
     /// gone for good, already served here, this machine takes no storage
     /// work (a `stateless` machine never serves a journal, #211), or this
     /// node is no member and `seat` takes members only. A node outside
@@ -3083,7 +3093,11 @@ impl<P: Providers, J: JournalStores> SystemCtx<'_, '_, P, J> {
         follower: &ControlFollower<P>,
         id: JournalIdentifier,
         (members, domains, cell_id): (&[NodeId], &[paros_core::FailureDomain], u64),
-        (quorum_system, writer): (paros_core::QuorumSystem, paros_core::WriterMode),
+        (quorum_system, writer, store): (
+            paros_core::QuorumSystem,
+            paros_core::WriterMode,
+            crate::tenant::StoreDurability,
+        ),
         seat: Seat,
     ) -> bool {
         assert!(
@@ -3127,7 +3141,7 @@ impl<P: Providers, J: JournalStores> SystemCtx<'_, '_, P, J> {
             journal_config.pool().contains(&me),
             "a started journal's pool holds this node"
         );
-        if !self.stores.create(id, journal_config) {
+        if !self.stores.create(id, journal_config, store.journal()) {
             return false;
         }
         open_journal(
@@ -3203,7 +3217,11 @@ impl<P: Providers, J: JournalStores> SystemCtx<'_, '_, P, J> {
             else {
                 continue;
             };
-            let systems = (created.config.quorum_system(), created.writer);
+            let systems = (
+                created.config.quorum_system(),
+                created.writer,
+                created.store,
+            );
             if self
                 .start(
                     follower,
@@ -3373,7 +3391,12 @@ impl<P: Providers, J: JournalStores> SystemCtx<'_, '_, P, J> {
                 nodes,
                 ..template.clone()
             };
-            if !self.stores.create(journal, config) {
+            // A spare of the static plan: ordered, like every journal no
+            // tenant created.
+            if !self
+                .stores
+                .create(journal, config, crate::journal::Durability::Ordered)
+            {
                 continue;
             }
             open_journal(

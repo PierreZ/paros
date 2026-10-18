@@ -32,7 +32,7 @@ use paros::client::names::{JournalNames, JournalResolution};
 use paros::client::{ClaimOutcome, ReadOutcome, WriteOptions, WriteOutcome};
 use paros::client::{Writer, WriterOutcome};
 use paros::fleet::{TenantKind, TenantState};
-use paros::tenant::{Desired, Durability};
+use paros::tenant::{Desired, Durability, StoreDurability};
 use paros::{JournalIdentifier, TenantId, Value, WriterMode};
 
 use std::collections::BTreeSet;
@@ -87,6 +87,7 @@ impl FleetOps {
                     writer: drawn_mode(),
                     desired: Some(drawn_desired(draw)),
                     tags: self.birth_tags(request.tenant, name),
+                    store: drawn_store(&self.state),
                 }
             }
             _ => return,
@@ -122,6 +123,22 @@ impl FleetOps {
             let journal = self.created_single[pick];
             assert_reachable!("zones: a client appends to its journal while a zone is down");
             self.append_to_created(&cell, journal, payload).await;
+        }
+        // The batched-journals scenario (#599 (durability mode per
+        // journal)): a cut strikes a batched commit only while one is open,
+        // so each create first appends to journals this client created
+        // before, one to four records.
+        if crate::shape::batched_journals(ctx.state())
+            && !self.created_single.is_empty()
+            && let Some(cell) = self.learn(ctx).await
+        {
+            for round in 0..moonpool_sim::sim_random_range(1..5_u64) {
+                let draw = payload.rotate_left(u32::try_from(round * 8).unwrap_or_default());
+                let pick =
+                    usize::try_from(draw % self.created_single.len() as u64).unwrap_or_default();
+                let journal = self.created_single[pick];
+                self.append_to_created(&cell, journal, draw).await;
+            }
         }
         let Some((cell, tenant, control, label)) = self.journal_tenant(ctx, payload).await else {
             self.frontend_before_ready(payload).await;
@@ -165,13 +182,26 @@ impl FleetOps {
                     desired,
                 }
             } else {
+                let store = drawn_store(ctx.state());
                 JournalOp::Create {
                     tags: self.birth_tags(tenant, &name),
                     name,
                     writer: drawn_mode(),
+                    store,
                     // On a draw in four the create names no mode: it takes the
-                    // tenant's default (#214 (tenant modes)).
-                    desired: (!(payload >> 20).is_multiple_of(4)).then(|| drawn_desired(payload)),
+                    // tenant's default (#214 (tenant modes)). A batched one
+                    // names the default mode on seven draws in eight, so a
+                    // cut inside its commit has a copy to spare (#599
+                    // (durability mode per journal)): over 300 hunt seeds,
+                    // 66 of the 71 kills asked inside a batched commit met
+                    // a journal with no loss to spare.
+                    desired: if store == StoreDurability::Batched
+                        && !(payload >> 20).is_multiple_of(8)
+                    {
+                        Some(Desired::DEFAULT)
+                    } else {
+                        (!(payload >> 20).is_multiple_of(4)).then(|| drawn_desired(payload))
+                    },
                 }
             };
             JournalRequest {
@@ -996,10 +1026,19 @@ impl FleetOps {
     /// One record written to `journal`, a single-writer journal this client
     /// had created: claim it, then write.
     async fn append_to_created(&mut self, cell: &Cell, journal: JournalIdentifier, draw: u64) {
-        let first = cell.first(draw);
+        let mut first = cell.first(draw);
         let mut writer = Writer::new(journal, self.leader_seeds.next());
         let started = self.time.now();
-        let _ = writer.claim(&cell.client, first, false).await;
+        // A server that does not serve the journal yet, or could not read
+        // it, passes the claim on to the next one, once around the cell.
+        let mut claim = writer.claim(&cell.client, first, false).await;
+        for _ in 1..cell.servers.len() {
+            if !matches!(claim, ClaimOutcome::UnknownJournal | ClaimOutcome::Unread) {
+                break;
+            }
+            first = (first + 1) % cell.servers.len();
+            claim = writer.claim(&cell.client, first, false).await;
+        }
         if let WriterOutcome::Written { .. } = writer
             .write(
                 &cell.client,
@@ -1172,6 +1211,19 @@ fn drawn_mode() -> WriterMode {
         WriterMode::Multi
     } else {
         WriterMode::Single
+    }
+}
+
+/// The store durability a create draws (#599 (durability mode per
+/// journal)): fixed for the journal's life. `Ordered` but on a
+/// batched-journals seed ([`crate::shape::batched_journals`]), where three
+/// creates in four are `Batched`.
+fn drawn_store(state: &moonpool_sim::StateHandle) -> StoreDurability {
+    if crate::shape::batched_journals(state) && moonpool_sim::sim_random_range(0..4_u32) != 0 {
+        assert_reachable!("journals: a client creates a batched journal");
+        StoreDurability::Batched
+    } else {
+        StoreDurability::Ordered
     }
 }
 

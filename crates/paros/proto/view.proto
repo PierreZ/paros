@@ -197,6 +197,9 @@ message JournalView {
   string word = 11;
   // Its user tags (#575); a journal the cell made carries none.
   repeated .paros.common.v1.Tag tags = 12;
+  // How its stores commit a batch (#599 (durability mode per journal)):
+  // "ordered" or "batched".
+  string store_durability = 13;
 }
 
 // One cell of the universe directory.

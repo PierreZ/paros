@@ -86,6 +86,16 @@ pub struct BenchArgs {
     /// three; `3x3` is nine acceptors in three partitions of three.
     #[arg(long, default_value = "3x1")]
     topology: Topologies,
+    /// How the stores of a journal the bench creates commit a batch
+    /// (#599): `ordered` (two syncs per commit) or `batched` (one). A
+    /// journal that exists keeps its own: bench the other mode under
+    /// another `--tenant`.
+    #[arg(
+        long,
+        default_value = "ordered",
+        value_parser = crate::journal::parse_store_durability
+    )]
+    store_durability: paros::tenant::StoreDurability,
     /// How many concurrent clients, each one call at a time. The clients
     /// of one journal each keep their write in flight on it at once.
     #[arg(long, default_value = "8", value_parser = clap::value_parser!(u64).range(1..))]
@@ -444,7 +454,7 @@ async fn prepare(
         runtime,
         client,
         (&args.tenant, tenant),
-        (count, topology),
+        (count, topology, args.store_durability),
         patience,
     )
     .await?;

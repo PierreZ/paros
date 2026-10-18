@@ -834,6 +834,9 @@ struct Registry {
     /// Whether the run sets no user tag (#575 (key:value tags), [`untagged`]),
     /// fixed by the first caller.
     untagged: Option<bool>,
+    /// Whether the run's creates draw batched stores (#599 (durability mode
+    /// per journal), [`batched_journals`]), fixed by the first caller.
+    batched_journals: Option<bool>,
     /// Run-level: when the clients' operations end (see [`run_end`]), fixed
     /// by the first caller.
     run_end: Option<Duration>,
@@ -1560,6 +1563,56 @@ pub(crate) fn untagged(state: &StateHandle) -> bool {
         .get_or_insert_with(|| moonpool_sim::buggify_with_prob!(0.2))
 }
 
+/// Whether the run's journal creates draw **batched stores** (#599
+/// (durability mode per journal)): drawn once per seed, its own BUGGIFY
+/// location. On such a seed a create asks for `Batched` on three draws in
+/// four, so a cell serves journals of both modes side by side; on every
+/// other seed each create is `Ordered`, production's default. The
+/// machines' cut budget (`crate::world::cut`) lets a power loss strike
+/// inside a batched commit, so its last batch may come back faulty. That
+/// needs a batched journal that tolerates a loss and takes many commits:
+/// without more, a 100-seed hunt opened 4 batched commits, none with a
+/// loss to spare. So the scenario is drawn only on a run of three machines
+/// or more ([`batched_journals_among`]), its layout lists three founders
+/// ([`machine_layout`]), client 0 runs `init` first, every client runs
+/// `TENANT` and `CREATE_JOURNAL` as often as the weight family allows at
+/// the steps knob's top, a batched create names the default mode (one
+/// failure) on seven draws in eight, and each create first appends to
+/// journals the client created before (`crate::chain_workload`). The
+/// machines' attrition kills a machine only inside a batched commit with a
+/// copy to spare (`crate::world::cut`), so the cell lives to create and
+/// append, and the kills it asks for land where the scenario needs them.
+#[tracing::instrument(level = "debug", skip_all)]
+pub(crate) fn batched_journals(state: &StateHandle) -> bool {
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    *guard
+        .batched_journals
+        .get_or_insert_with(|| moonpool_sim::buggify_with_prob!(1.0))
+}
+
+/// [`batched_journals`], drawn by a caller that knows the run's `machines`:
+/// never on a run of fewer than three, where no created journal has a copy
+/// to spare, so a cut inside its commit is always refused (over 300 hunt
+/// seeds, 112 of the 115 kills asked inside a batched commit met a journal
+/// with none).
+pub(crate) fn batched_journals_among(state: &StateHandle, machines: usize) -> bool {
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    *guard
+        .batched_journals
+        .get_or_insert_with(|| machines >= 3 && moonpool_sim::buggify_with_prob!(1.0))
+}
+
+/// Whether the run drew the batched-journals scenario
+/// ([`batched_journals`]), without drawing it: `false` until a caller drew
+/// it. For a veto, which must not draw.
+pub(crate) fn batched_journals_drawn(state: &StateHandle) -> bool {
+    let registry = registry(state);
+    let guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    guard.batched_journals == Some(true)
+}
+
 /// Whether the run draws the **racing-floor scenario**: drawn once per seed,
 /// its own BUGGIFY location. Every coordinator renews at the floor and
 /// truncates the election journal at every renewal, so the floor moves
@@ -2130,6 +2183,17 @@ fn founder_capacity(full: bool, floor: u64, capacity: u64) -> u64 {
     }
 }
 
+/// Whether the batched-journals scenario shapes a layout of `count`
+/// machines (#599 (durability mode per journal)): the run's own draw when
+/// the count is not known yet, else the draw among `count` machines.
+fn batched_layout(state: &StateHandle, count: usize) -> bool {
+    if count == 0 {
+        batched_journals(state)
+    } else {
+        batched_journals_among(state, count)
+    }
+}
+
 /// The run's machine layout (#246), drawn once per seed by whoever asks
 /// first, for `count` machines in rank order. The founder count is uniform
 /// over `1..=count` (`3..=count` on a replaced-founder, moved-founder or
@@ -2156,6 +2220,7 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
     let drained = drained_machine(state);
     let zoned = zone_outage(state);
     let changed = changed_mode(state);
+    let batched = batched_layout(state, count);
     let rotted = cold_rot(state);
     let second = second_cell(state);
     let registry = registry(state);
@@ -2173,13 +2238,12 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
             // only in a cell of three or more.
             // So does the changed-mode scenario (#214 (tenant modes)): on a
             // cell of one, every mode places the same one slot.
-            // So does the cold-rot scenario (#362 (background scrubbing)):
-            // a record rots only on a journal of three members or more.
-            let least = if (replaced || moved || downed || changed || rotted) && count >= 3 {
-                3
-            } else {
-                1
-            };
+            // So do the cold-rot scenario (#362 (background scrubbing)), which
+            // rots only a journal of three members or more, and the batched-
+            // journals one (#599 (durability mode per journal)), which cuts
+            // only a batched commit that may lose a copy.
+            let three = (replaced || moved || downed || changed || rotted || batched) && count >= 3;
+            let least = if three { 3 } else { 1 };
             // The zone-outage scenario (#215 (zones)): three founding
             // members, one per zone, so a zone's loss leaves a majority.
             let zoned = zoned && count >= 3;

@@ -91,6 +91,17 @@ enum WriterMode {
   WRITER_MODE_MULTI = 1;
 }
 
+// How a journal's stores commit a batch (#599 (durability mode per
+// journal)), fixed when it is created. Ordered writes the entries, syncs,
+// writes the persist records and syncs again: a crash never leaves a batch
+// ambiguous. Batched saves the first sync: a crash inside a commit can leave
+// the last batch ambiguous, and its entries come back faulty. Ordered is the
+// zero value.
+enum StoreDurability {
+  STORE_DURABILITY_ORDERED = 0;
+  STORE_DURABILITY_BATCHED = 1;
+}
+
 // What a client learns of a journal's state (#241): the leader uuid and the
 // positions, never the term.
 message JournalView {

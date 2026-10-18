@@ -9,9 +9,10 @@
 //! own oracles judge them (`final_registry`, `election_settles`).
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 use std::time::Duration;
 
-use moonpool_sim::{SimContext, TimeProvider, assert_reachable};
+use moonpool_sim::{SimContext, TimeProvider, assert_reachable, assert_sometimes};
 use paros::JournalIdentifier;
 
 /// The journals no writer touches once every operator settled: the formed
@@ -54,6 +55,7 @@ pub(super) async fn worlds_converge(ctx: &SimContext, deadline: Duration) {
             .collect()
     };
     let mut worlds = Vec::new();
+    let mut lost_batches = Vec::new();
     for (journal, stopped) in stops {
         let world = crate::audit::audit_world_for(ctx.state(), journal);
         for node in &wiped {
@@ -67,6 +69,9 @@ pub(super) async fn worlds_converge(ctx: &SimContext, deadline: Duration) {
             world.note_stopped(node);
         }
         if world.served() {
+            if crate::audit::tenants::lock(&board).batch_lost(journal) {
+                lost_batches.push(Arc::clone(&world));
+            }
             worlds.push(world);
         }
     }
@@ -83,6 +88,15 @@ pub(super) async fn worlds_converge(ctx: &SimContext, deadline: Duration) {
     }
     for world in &worlds {
         world.check_final_convergence(world.answered_max());
+    }
+    // #599 (durability mode per journal): a `Batched` journal a machine
+    // booted with its last batch lost repaired it from its peers and
+    // converged with the rest.
+    for world in &lost_batches {
+        assert_sometimes!(
+            world.converged(),
+            "journal store: a batched journal converges after it lost its last batch"
+        );
     }
     if !worlds.is_empty() {
         assert_reachable!("audit: every quiet journal world converges after chaos");

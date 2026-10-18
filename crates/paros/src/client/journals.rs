@@ -32,7 +32,7 @@ use crate::rpc::{
     config_from_proto, config_to_proto, writer_mode_from_proto, writer_mode_to_proto,
 };
 use crate::tags::UserTags;
-use crate::tenant::{Desired, TenantControl};
+use crate::tenant::{Desired, StoreDurability, TenantControl};
 use crate::{Address, Names};
 
 /// What a request asks for.
@@ -49,6 +49,9 @@ pub enum JournalOp {
         desired: Option<Desired>,
         /// Its first user tags (#575).
         tags: UserTags,
+        /// How its stores commit a batch (#599 (durability mode per
+        /// journal)), fixed for its life; `Ordered` is the default.
+        store: StoreDurability,
     },
     /// Delete the live journal named `name`.
     Delete {
@@ -95,6 +98,7 @@ impl JournalRequest {
                 writer,
                 desired,
                 tags,
+                store,
             } => Op::Create(wire::CreateJournalOp {
                 name: name.clone(),
                 writer: writer_mode_to_proto(*writer).into(),
@@ -103,6 +107,7 @@ impl JournalRequest {
                 // 0: the tenant's default.
                 partitions: desired.map_or(0, |d| d.durability.partitions),
                 tags: tags.to_wire(),
+                store_durability: store.to_proto().into(),
             }),
             JournalOp::Delete { name } => Op::Delete(wire::DeleteJournalOp { name: name.clone() }),
             JournalOp::SetTags { name, tags } => Op::SetTags(wire::SetJournalTagsOp {
@@ -155,6 +160,7 @@ impl JournalRequest {
                     }))?)
                 },
                 tags: UserTags::from_wire(create.tags.clone()).map_err(|_| "malformed tags")?,
+                store: StoreDurability::from_proto(create.store_durability)?,
             },
             Op::Delete(delete) => JournalOp::Delete {
                 name: delete.name.clone(),
@@ -532,6 +538,7 @@ mod tests {
                         .expect("a durability"),
                 ),
                 tags: UserTags::parse(&["team:payments"]).expect("a tag"),
+                store: StoreDurability::Batched,
             },
         };
         let wire = request.to_wire();
@@ -545,6 +552,7 @@ mod tests {
                 writer: WriterMode::Single,
                 desired: None,
                 tags: UserTags::none(),
+                store: StoreDurability::Ordered,
             },
         };
         assert_eq!(

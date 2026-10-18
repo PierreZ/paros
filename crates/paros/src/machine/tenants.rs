@@ -72,7 +72,8 @@ use crate::system::{
     Booking, BookingTarget, GrantKey, NodeStanding, Registry, Role, SystemCommand,
 };
 use crate::tenant::{
-    ConfigureTarget, Description, Desired, RequestOutcome, TenantCommand, TenantControl,
+    ConfigureTarget, Description, Desired, RequestOutcome, StoreDurability, TenantCommand,
+    TenantControl,
 };
 
 /// What `HostTenant` records of a tenant: its control journal, its name and
@@ -255,13 +256,20 @@ impl TenantDesk {
                 writer,
                 desired,
                 tags,
+                store,
             } => {
                 // A create that names no mode takes the tenant's default
                 // (#214 (tenant modes)).
                 let desired =
                     desired.unwrap_or_else(|| self.desk(request.tenant).state().default_desired());
-                self.create(client, request, (name, *writer, desired), tags, cell)
-                    .await
+                self.create(
+                    client,
+                    request,
+                    (name, *writer, desired, *store),
+                    tags,
+                    cell,
+                )
+                .await
             }
             JournalOp::Configure { name, desired } => {
                 self.configure(client, request, name.as_deref(), *desired, cell)
@@ -337,7 +345,7 @@ impl TenantDesk {
         &mut self,
         client: &Client<P>,
         request: &JournalRequest,
-        (name, writer, desired): (&[u8], paros_core::WriterMode, Desired),
+        (name, writer, desired, store): (&[u8], paros_core::WriterMode, Desired, StoreDurability),
         tags: &crate::tags::UserTags,
         cell: Option<&mut CellSession>,
     ) -> JournalAnswer {
@@ -358,8 +366,15 @@ impl TenantDesk {
         }
         // A live name answers `NameTaken` at apply: it books nothing. An
         // unsettled fold may lack a live journal whose create landed
-        // unanswered: its orphans wait for a settled one.
-        let named = self.desk(tenant).state().named(name).is_some();
+        // unanswered: its orphans wait for a settled one. It may also lack
+        // this term's delete of the name, so a name it holds live is
+        // trusted only on a settled fold: else the create books, and the
+        // fold judges the name. Seed 4507917792168049601 (recipe
+        // 686941:15533205754184659368) on fba843a: a delete the catch-up
+        // missed freed the name, and the fold accepted a create that
+        // booked nothing.
+        let named =
+            !self.unsettled.contains(&tenant) && self.desk(tenant).state().named(name).is_some();
         if !named
             && !self.unsettled.contains(&tenant)
             && self.release_orphans(client, tenant, cell).await.is_err()
@@ -422,6 +437,7 @@ impl TenantDesk {
                 desired,
                 config,
                 tags: tags.clone(),
+                store,
             };
             moonpool_buggify::hint!("tenant create drawn, not written").await;
             if let Err(answer) = self.append(client, tenant, &command).await {

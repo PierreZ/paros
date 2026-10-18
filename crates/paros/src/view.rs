@@ -266,6 +266,7 @@ impl CellFacts<'_> {
                     desired_acceptors: journal.desired.acceptors() as u64,
                     placed: Some(config_to_proto(&placed)),
                     tags: journal.tags.to_wire(),
+                    store_durability: journal.store.as_str().to_string(),
                     ..wire::JournalView::default()
                 }
             }));
@@ -344,6 +345,9 @@ impl CellFacts<'_> {
             acceptors: founders,
             matchmakers: Vec::new(),
             placed: Some(config_to_proto(&placed)),
+            // A journal the cell made stores ordered (#599 (durability mode
+            // per journal)).
+            store_durability: crate::tenant::StoreDurability::Ordered.as_str().to_string(),
             ..wire::JournalView::default()
         }
     }
