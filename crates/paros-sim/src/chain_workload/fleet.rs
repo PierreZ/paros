@@ -1249,28 +1249,32 @@ impl FleetOps {
     ) {
         self.final_fleet(ctx, ctx.time().now() + FLEET_SETTLE).await;
         // The cell's election settles too (#240), on its own deadline.
-        if crate::machine::formed_cell(ctx.state()).is_some()
+        let cell = if crate::machine::formed_cell(ctx.state()).is_some()
             && !crate::machine::cell_lost(ctx.state())
-            && let Some(cell) = self.learn(ctx).await
         {
-            election::election_settles(ctx, &cell, ctx.time().now() + FLEET_SETTLE).await;
-            self.renamed_registered(ctx, &cell, ctx.time().now() + FLEET_SETTLE)
+            self.learn(ctx).await
+        } else {
+            None
+        };
+        if let Some(cell) = &cell {
+            election::election_settles(ctx, cell, ctx.time().now() + FLEET_SETTLE).await;
+            self.renamed_registered(ctx, cell, ctx.time().now() + FLEET_SETTLE)
                 .await;
             let learn = |journal| self.note_journals([journal]);
-            placement::placements_booked(ctx, &cell, ctx.time().now() + FLEET_SETTLE, learn).await;
+            placement::placements_booked(ctx, cell, ctx.time().now() + FLEET_SETTLE, learn).await;
             let connect = |servers: &[(u64, paros::Address)]| self.connect(ctx, servers);
-            sets::sets_booked(ctx, &cell, ctx.time().now() + FLEET_SETTLE, connect).await;
+            sets::sets_booked(ctx, cell, ctx.time().now() + FLEET_SETTLE, connect).await;
             // Every journal the cell can hold heals (#475 (re-place after
             // the Down bound)).
-            self.journals_heal(ctx, &cell, ctx.time().now() + FLEET_SETTLE)
+            self.journals_heal(ctx, cell, ctx.time().now() + FLEET_SETTLE)
                 .await;
             // The machines' own `Resolve` folds escape after chaos (#457).
-            self.resolve_answers(ctx, &cell, ctx.time().now() + FLEET_SETTLE)
+            self.resolve_answers(ctx, cell, ctx.time().now() + FLEET_SETTLE)
                 .await;
         }
         // Every quiet journal world converges (#447 (model checks for every
         // journal world)), on its own deadline.
-        converge::worlds_converge(ctx, ctx.time().now() + FLEET_SETTLE).await;
+        converge::worlds_converge(ctx, cell.as_ref(), ctx.time().now() + FLEET_SETTLE).await;
         // Its own deadline (#304): a fleet half that took all of its time
         // must not leave the registry half none.
         self.final_registry(ctx, nodes, expected, ctx.time().now() + FLEET_SETTLE)

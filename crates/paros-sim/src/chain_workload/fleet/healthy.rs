@@ -104,7 +104,7 @@ impl FleetOps {
 }
 
 /// The cell's registry, folded to its tail.
-async fn read(cell: &Cell, attempt: u64) -> Option<Registry> {
+pub(super) async fn read(cell: &Cell, attempt: u64) -> Option<Registry> {
     let mut fold = judged_cell(&cell.members);
     let loaded = paros::client::checkpoint::load(
         &mut fold,
@@ -146,7 +146,7 @@ fn unhealthy(
 /// the tenant can elect the leader a re-placement needs. `false` when the
 /// set cannot be read, or on plain Multi-Paxos (no set): the journal is
 /// judged.
-async fn set_lost(
+pub(super) async fn set_lost(
     cell: &Cell,
     registry: &Registry,
     tenant: TenantId,
