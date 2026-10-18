@@ -433,6 +433,7 @@ impl Lanes {
             seq: Seq(seq),
             records,
         };
+        self.writer.opened(&entry);
         self.ahead = seq + entry.count();
         let id = self.next_id;
         self.next_id += 1;

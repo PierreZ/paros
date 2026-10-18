@@ -1144,6 +1144,7 @@ impl ChainWorkload {
                 let submission =
                     self.submit(&audit, &config, ahead, &mut next_op, raw, raw, now_ms());
                 ahead.advance_to(ahead.next_seq() + submission.entry.count());
+                writer.opened(&submission.entry);
                 let target = nodes.leader().unwrap_or(primer_target);
                 primer.push((submission, target));
             }
@@ -1511,6 +1512,7 @@ impl ChainWorkload {
                             raw_payload,
                             now_ms(),
                         );
+                        writer.opened(&submission.entry);
                         let second_target = (target
                             + 1
                             + usize::try_from(
@@ -2288,7 +2290,10 @@ impl ChainWorkload {
                     }
                     _ => {
                         let shape = if split { &one_small } else { &config };
-                        self.submit(&audit, shape, writer, &mut next_op, raw, raw, now_ms())
+                        let submission =
+                            self.submit(&audit, shape, writer, &mut next_op, raw, raw, now_ms());
+                        writer.opened(&submission.entry);
+                        submission
                     }
                 };
                 log.open_write(submission.op);

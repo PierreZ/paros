@@ -258,6 +258,7 @@ impl ChainWorkload {
                     now_ms(),
                 );
                 ahead.advance_to(ahead.next_seq() + submission.entry.count());
+                writer.opened(&submission.entry);
                 burst.push((submission, via));
             }
             let race = buggify_with_prob!(0.5).then(|| {
@@ -285,6 +286,9 @@ impl ChainWorkload {
             raw_payload,
             now_ms(),
         );
+        // A new write: the identical write is retried below, never noted
+        // again.
+        writer.opened(&submission.entry);
         let chosen_target = if op == WRITE_TO_NON_LEADER {
             nodes.leader().map_or(target, |leader| {
                 if server_count > 1 {
@@ -392,10 +396,9 @@ impl ChainWorkload {
                     }
                 } else {
                     // The writer's own `led_from`, only for an entry under
-                    // the uuid it leads with (#564).
-                    let led_from = writer
-                        .led_from()
-                        .filter(|_| writer.owned() == Some(submission.entry.leader));
+                    // the uuid it leads with that no other write of it
+                    // overlaps (#564).
+                    let led_from = writer.led_from(&submission.entry);
                     nodes
                         .resolve(&request, retry_target, retarget, led_from)
                         .await
