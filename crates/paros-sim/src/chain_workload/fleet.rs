@@ -1506,7 +1506,7 @@ impl FleetOps {
         let board = crate::audit::system::system_board(ctx.state());
         let mut lagging = Vec::new();
         while ctx.time().now() < deadline && !ctx.shutdown().is_cancelled() {
-            lagging = crate::audit::system::lock(&board).registry_lagging(expected, tail);
+            lagging = crate::audit::system::lock(&board).registry_lagging(registry, expected, tail);
             if lagging.is_empty() || ctx.time().sleep(Duration::from_millis(50)).await.is_err() {
                 break;
             }

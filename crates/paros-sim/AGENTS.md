@@ -168,7 +168,7 @@ then admitted; it may stop after the registration and is resumed by the client's
   quarantined journal sends nothing; a sibling keeps committing while one is held; a node keeps
   serving the rest while one is quarantined; a tenant journal commits while the control
   journals' seed is held down (static stability, #247). The hold is more likely under a grid, where it freezes one column (#426 (static-stability hold)).
-- **System board** (`audit/system.rs`): every node folds the registry alike per LSN; a checkpoint a node (or a client) meets
+- **System board** (`audit/system.rs`): one booking model per registry journal (#650): the harness registry on the acceptors, and every cell control journal the machines fold (their ports report folds, checkpoints, started journals, the record and the cache, `Plane::Machine`, judged by the class and capacity `shape::machine_layout` drew; the joiner gates stay the harness registry's); a machine's durable cached registry fold holds, at its position, the registry's address for every machine the registry holds there and no retired one, judged once the model reaches that position; gate "registry: a machine's fold crosses a granted booking at a checkpoint"; every node folds the registry alike per LSN; a checkpoint a node (or a client) meets
   with the whole prefix folded is that prefix's state (#230); a `stateless` joiner never serves
   a journal, a booking takes a slot of its node's class and never past its capacity, and a
   booking id is booked at most once, across checkpoints (#211, on the registry's events in LSN
