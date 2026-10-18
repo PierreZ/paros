@@ -356,8 +356,8 @@ fn a_pipeline_reopened_behind_an_unsettled_write_proves_no_lane_inside_it() {
     // back the batch's second record at the tail and was proved written.
     // The tail bounds where a batch ends, never where it starts.
     let (mut lanes, uuid) = leading_lanes(3);
-    let x = || Value(vec![0xAA]);
-    let a = lanes.open(vec![x(), x()]);
+    let rec = || Value(vec![0xAA]);
+    let a = lanes.open(vec![rec(), rec()]);
     assert_eq!((a.entry().leader, a.entry().seq), (uuid, Seq(3)));
     assert_eq!(lanes.writer.led_from(a.entry()), Some(3));
     assert_eq!(
@@ -366,7 +366,7 @@ fn a_pipeline_reopened_behind_an_unsettled_write_proves_no_lane_inside_it() {
     );
     assert_eq!(lanes.admit(), Admit::At(3));
     let b = lanes.open(one(1));
-    let c = lanes.open(vec![x()]);
+    let c = lanes.open(vec![rec()]);
     let d = lanes.open(one(2));
     let seqs: Vec<u64> = [&b, &c, &d].iter().map(|t| t.entry().seq.0).collect();
     assert_eq!(seqs, [3, 4, 5]);

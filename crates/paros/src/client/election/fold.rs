@@ -389,7 +389,6 @@ impl ElectionFold {
         self.known = false;
         self.floor = Some(floor);
         self.leader = None;
-        self.tail.clear();
         assert!(!self.known, "a fold past a gap knows nothing yet");
     }
 
@@ -428,25 +427,49 @@ impl ElectionFold {
         assert!(self.floor.is_none(), "the tail is no truncation floor");
     }
 
-    /// A page served to a fold at the tail ([`ElectionFold::resume_at_tail`])
+    /// How many records the fold holds from the tail
+    /// ([`ElectionFold::resume_at_tail`]), while it knows nothing: one per
+    /// page the tail wait returned, so a reader knows how long it waited
+    /// there for the floor.
+    #[must_use]
+    pub fn held(&self) -> usize {
+        self.tail.len()
+    }
+
+    /// An answer (a page, or a truncation) to a fold that knows nothing
     /// reported the journal's floor at `floor`. The floor is the leader's
     /// own anchor, so its record counts in every fold: when the fold holds
-    /// that record, it anchors on it and folds the records past it again,
-    /// with no read, so a floor that moves once per renewal period cannot
-    /// outrun it (#640 (election reader livelock)). A floor past every
-    /// record held is where the next read starts, as a [`ElectionFold::gap`].
-    /// A floor below the tail is the one the fold skipped: the tail wait
-    /// goes on. Whether the fold anchored.
+    /// that record (read at the tail, [`ElectionFold::resume_at_tail`], and
+    /// kept across a [`ElectionFold::rewind`]), it anchors on it and folds
+    /// the records past it again, with no read, so a floor that moves once
+    /// per renewal period cannot outrun it (#640 (election reader
+    /// livelock)). To a fold at the tail, a floor past every record held is
+    /// where the next read starts, as a [`ElectionFold::gap`]. A floor
+    /// below the records held is the one the fold skipped: the tail wait
+    /// goes on, or the reader goes back to it. Whether the fold anchored.
     ///
     /// # Panics
     ///
     /// If an assertion on its own postconditions fails: a programmer error.
     pub fn floor_seen(&mut self, floor: u64) -> bool {
-        if self.known || self.floor.is_some() {
+        if self.known {
             return false;
         }
-        let start = self.tail.first().map_or(self.next, |(seq, _)| *seq);
+        let Some(&(start, _)) = self.tail.first() else {
+            if self.floor.is_none() && floor > self.next {
+                // At the tail with nothing held: the floor's record is the
+                // next read's first.
+                self.replay(floor);
+            }
+            return false;
+        };
+        let end = self.tail.last().map_or(start, |(seq, _)| *seq + 1);
         if floor < start {
+            return false;
+        }
+        if floor >= end && self.floor.is_some() {
+            // Past every record held, and the reader is at a floor below
+            // them: its answer, not this one, says where to resume.
             return false;
         }
         self.replay(floor);
@@ -506,12 +529,13 @@ impl ElectionFold {
             return false;
         }
         if self.floor.is_none() {
-            // Still at the tail: the floor lies below every record held.
+            // Still at the tail: the floor lies below every record held,
+            // which stay held: the read from the floor may be answered
+            // with a floor that moved onto one of them.
             assert!(floor < self.next, "a floor at or past the tail is seen");
             self.next = floor;
             self.floor = Some(floor);
             self.leader = None;
-            self.tail.clear();
             // The records past the floor are folded again: the term they
             // raised goes back to what the fold knew before it met them.
             if let Some(term) = self.tail_term.take() {
@@ -540,6 +564,9 @@ impl ElectionFold {
         if !self.known && self.floor.is_none() {
             // At the tail: held until the floor reaches one of them.
             self.tail.push((seq, record.to_vec()));
+        } else if !self.known {
+            // Read from the floor: the records held are read again.
+            self.tail.clear();
         }
         let Some(Ok(record)) = ElectionRecord::decode(record) else {
             return Change::Ignored;
@@ -981,6 +1008,49 @@ mod tests {
             Some((5, 2))
         );
         assert_eq!(held.next(), 294);
+    }
+
+    #[test]
+    fn a_fold_rewound_to_a_still_floor_keeps_the_records_held() {
+        // replay-recipe 170029643898500327 40945:14733731119186289879 on
+        // ffd7a6e, in small: 1 leads term 1 and truncates every five
+        // renewals; a reader the floor outran twice resumed at the tail,
+        // 31, held two renewals there, and the floor stayed at 29.
+        let mut cut = ElectionFold::new();
+        cut.resume_at_tail(29, 31);
+        assert_eq!(cut.absorb(31, &renew(1, 1)), Change::Ignored);
+        assert_eq!(cut.absorb(32, &renew(1, 1)), Change::Ignored);
+        assert_eq!(cut.held(), 2);
+        assert!(!cut.floor_seen(29), "the floor stands below the tail");
+        // Back to the floor, to read it: the records stay held.
+        assert!(cut.rewind(29));
+        assert_eq!(cut.next(), 29);
+        assert_eq!(cut.held(), 2);
+        // The read is answered truncated: the floor moved onto a record
+        // held, which anchors, and the fold goes on past what it holds.
+        assert!(cut.floor_seen(32));
+        assert!(cut.is_known());
+        assert_eq!(
+            cut.leader().map(|l| (l.term, l.candidate.id, l.since)),
+            Some((1, 1, 32))
+        );
+        assert_eq!(cut.next(), 33);
+        assert_eq!(cut.held(), 0);
+        // A floor past the records held answers a fold at a floor below
+        // them with nothing: the reader resumes where its answer says.
+        let mut past = ElectionFold::new();
+        past.resume_at_tail(29, 31);
+        assert_eq!(past.absorb(31, &renew(1, 1)), Change::Ignored);
+        assert!(past.rewind(29));
+        assert!(!past.floor_seen(40));
+        assert_eq!(past.next(), 29);
+        assert_eq!(past.held(), 1);
+        // The read from the floor answered a page: the floor's record
+        // anchors, and the records held are read again.
+        assert_eq!(past.absorb(29, &renew(1, 1)), Change::Adopted);
+        assert_eq!(past.held(), 0);
+        assert_eq!(past.absorb(30, &renew(1, 1)), Change::Renewed);
+        assert_eq!(past.absorb(31, &renew(1, 1)), Change::Renewed);
     }
 
     #[test]

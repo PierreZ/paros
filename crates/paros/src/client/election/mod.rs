@@ -81,13 +81,25 @@ const _: () = assert!(
     "a reader past a moving floor waits for a renewal"
 );
 
-/// How many pages [`read_election`] long-polls for at the tail once it
-/// reached it knowing no leader: the renewal that lands, then the page that
-/// reports the floor moved to it. A bound, not a target: past it the read
-/// returns the fold as it stands.
+/// How many pages a reader long-polls for at the tail once it reached it
+/// knowing no leader, for the floor to reach a record it holds: the
+/// renewal that lands, then the page that reports the floor moved to it. A
+/// floor that moves once per renewal period reaches it by then; one that
+/// moves every `compact_after` renewals stands still long enough to be
+/// read instead, so past this the reader goes back to the floor
+/// ([`ElectionFold::rewind`]; replay-recipe 170029643898500327
+/// 40945:14733731119186289879 on #681 (ffd7a6e): a floor moved every five
+/// renewals, every read gave up at the tail, and the election never
+/// settled).
 const TAIL_WAITS: usize = 2;
 
 const _: () = assert!(TAIL_WAITS > 0, "a reader at the tail waits for the floor");
+
+/// How many times one [`read_election`] lets the floor send it to the tail
+/// before it returns the fold as it stands. A bound, not a target.
+const TAIL_CYCLES: usize = 4;
+
+const _: () = assert!(TAIL_CYCLES > 0, "a reader outrun goes to the tail");
 
 /// An election's timing, one plain field each so a harness can push any one
 /// to an extreme (prong 2). Both are bounds on the caller's own clock.
@@ -371,6 +383,15 @@ impl<P: Providers> Election<P> {
                         self.heard = now;
                     }
                     if self.fold.next() >= state.next_seq.0 {
+                        // The floor did not reach the records held in
+                        // [`TAIL_WAITS`] pages: it stands still long enough
+                        // to be read.
+                        if self.fold.held() >= TAIL_WAITS && self.fold.rewind(state.first_seq.0) {
+                            moonpool_assertions::reachable!(
+                                "election: a watch at the tail goes back to the floor"
+                            );
+                            continue;
+                        }
                         self.caught_up = true;
                         return true;
                     }
@@ -384,6 +405,14 @@ impl<P: Providers> Election<P> {
                     // second time, the floor outran this watch: wait at the
                     // tail for the next renewal ([`FLOOR_RACE_WAIT_MS`]).
                     self.floor = state.first_seq.0;
+                    if self.fold.floor_seen(state.first_seq.0) {
+                        // The floor moved onto a record held: anchored.
+                        moonpool_assertions::reachable!(
+                            "election: a fold at the tail anchors at the floor it holds"
+                        );
+                        self.heard = self.client.now();
+                        continue;
+                    }
                     if chased {
                         moonpool_assertions::reachable!(
                             "election: a watch waits at the tail past a moving floor"
@@ -697,6 +726,7 @@ pub async fn read_election<P: Providers>(
     let mut chased = false;
     let mut wait = 0;
     let mut waits = 0;
+    let mut cycles = 0;
     loop {
         let from = fold.next();
         let request = Read {
@@ -725,23 +755,43 @@ pub async fn read_election<P: Providers>(
                 }
                 let tail = *target.get_or_insert(state.next_seq.0);
                 if fold.next() >= tail {
-                    if fold.is_known() || waits >= TAIL_WAITS {
+                    if fold.is_known() {
                         return Some(fold);
                     }
-                    // At the tail knowing no leader: long-poll for the
-                    // next page, whose floor may reach a record held.
-                    waits += 1;
-                    wait = FLOOR_RACE_WAIT_MS;
-                    continue;
+                    if waits < TAIL_WAITS {
+                        // At the tail knowing no leader: long-poll for the
+                        // next page, whose floor may reach a record held.
+                        waits += 1;
+                        wait = FLOOR_RACE_WAIT_MS;
+                        continue;
+                    }
+                    // The floor did not reach the records held: it stands
+                    // still long enough to be read.
+                    if cycles < TAIL_CYCLES && fold.rewind(state.first_seq.0) {
+                        moonpool_assertions::reachable!(
+                            "election: a reader at the tail goes back to the floor"
+                        );
+                        continue;
+                    }
+                    return Some(fold);
                 }
                 if records.is_empty() {
                     return None;
                 }
             }
             ReadOutcome::Truncated { state } if state.first_seq.0 > from => {
+                if fold.floor_seen(state.first_seq.0) {
+                    // The floor moved onto a record held: anchored.
+                    moonpool_assertions::reachable!(
+                        "election: a fold at the tail anchors at the floor it holds"
+                    );
+                    continue;
+                }
                 // The second time, the floor outran this read: wait at the
                 // tail for the next renewal ([`FLOOR_RACE_WAIT_MS`]).
                 if chased {
+                    cycles += 1;
+                    waits = 0;
                     moonpool_assertions::reachable!(
                         "election: a reader waits at the tail past a moving floor"
                     );
