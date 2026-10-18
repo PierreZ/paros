@@ -346,6 +346,43 @@ fn a_read_back_proof_is_withheld_where_two_own_writes_overlap() {
 }
 
 #[test]
+fn a_pipeline_reopened_behind_an_unsettled_write_proves_no_lane_inside_it() {
+    use super::WriterOutcome;
+    use super::pipeline::{Admit, Folded};
+
+    // Hunt seed 8885773904785394005 on a tree before #680: a two-record
+    // write at 3 went ambiguous and stayed unresolved, the pipeline drained
+    // and opened again at 3, and its second lane (one record at 4) read
+    // back the batch's second record at the tail and was proved written.
+    // The tail bounds where a batch ends, never where it starts.
+    let (mut lanes, uuid) = leading_lanes(3);
+    let rec = || Value(vec![0xAA]);
+    let a = lanes.open(vec![rec(), rec()]);
+    assert_eq!((a.entry().leader, a.entry().seq), (uuid, Seq(3)));
+    assert_eq!(lanes.writer.led_from(a.entry()), Some(3));
+    assert_eq!(
+        lanes.fold(0, WriterOutcome::Ambiguous),
+        Folded::Done(WriterOutcome::Ambiguous)
+    );
+    assert_eq!(lanes.admit(), Admit::At(3));
+    let b = lanes.open(one(1));
+    let c = lanes.open(vec![rec()]);
+    let d = lanes.open(one(2));
+    let seqs: Vec<u64> = [&b, &c, &d].iter().map(|t| t.entry().seq.0).collect();
+    assert_eq!(seqs, [3, 4, 5]);
+    // Positions 3 and 4 may hold `a`: a page there proves neither lane.
+    assert_eq!(lanes.writer.led_from(b.entry()), None);
+    assert_eq!(lanes.writer.led_from(c.entry()), None);
+    // Past them only `d` can hold position 5 under this uuid: its proof
+    // stays, as every lane of an unbroken pipeline keeps its own.
+    assert_eq!(lanes.writer.led_from(d.entry()), Some(3));
+    // The pipeline's copy a send takes carries the same knowledge.
+    let copy = lanes.writer;
+    assert_eq!(copy.led_from(c.entry()), None);
+    assert_eq!(copy.led_from(d.entry()), Some(3));
+}
+
+#[test]
 fn a_writer_owns_only_what_it_claimed_and_stops_when_superseded() {
     let journal = JournalIdentifier::new(paros_core::TenantId(7), paros_core::JournalId(9));
     let mut writer = Writer::new(journal, 7);

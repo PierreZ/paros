@@ -47,7 +47,10 @@ coordinator is `paros::machine::coordinator`:
   election journal to its own latest renewal once `compact_after` records lie below it. A
   renewal is its own checkpoint. A reader that starts at the floor anchors on the leader's
   record there: a renewal, or the campaign or hand-off that began the term when the leader
-  truncated before its first renewal counted. Nothing else may truncate an election journal.
+  truncated before its first renewal counted. Only that record anchors a reader. A renewal
+  elsewhere may be a deposed leader's late one, so a reader that the floor outran keeps the
+  records it reads at the tail. It anchors when the floor reaches one of them (decided on
+  2026-10-18, a fix-main red). Nothing else may truncate an election journal.
 - **The interface.** Records carry the candidate's interface: its address, and the encoded
   `InterfaceRef` of its term's group (`reference`, #404), opaque to the election. The
   coordinator publishes them with its first renewal after its term's duties; until then both

@@ -2449,6 +2449,24 @@ where
                 // the inbox, so nothing here answers it. A message for a
                 // journal this node does not run now (quarantined, down, or
                 // never served) is dropped: the peer's re-send repairs it.
+                // A node sends in its own name only (`Outbound::resolve`
+                // asserts a fan-out never addresses its sender), so a
+                // message in this node's own name is a transport echo: a
+                // pooled peer id the registry still maps to this machine's
+                // address, a wiped machine's old id whose successor took
+                // the address (#246, #423). The core would follow it (a
+                // leader that steps its own beat demotes itself), so it is
+                // dropped whole before the core sees it. Witness
+                // 3102364801525731724 on f8e629f (PR #679 (clean Ctrl-C shutdown)): "placement: a journal
+                // with a machine to go to leaves a draining one after
+                // chaos".
+                if events::message_sender(&msg) == Some(Party::Node(NodeId(self_id))) {
+                    moonpool_assertions::reachable!(
+                        "node: a message in this node's own name is ignored"
+                    );
+                    tracing::info!(node = self_id, journal = %journal, kind = events::message_kind(&msg), "self_message_ignored");
+                    continue;
+                }
                 // The registry is the pool (#189): a node the fold has not
                 // admitted yet is refused before the core sees its message.
                 if let Some(f) = &follower
