@@ -305,6 +305,10 @@ where
         self.genesis.keys().copied().collect()
     }
 
+    fn provisioned(&self) -> Vec<JournalIdentifier> {
+        self.record.created.clone()
+    }
+
     async fn open(&mut self, journal: JournalIdentifier) -> Option<(Self::Store, BootKind)> {
         if let Some(config) = self.genesis.get(&journal).cloned() {
             assert!(config.id == self.node, "a store is opened as its machine");
