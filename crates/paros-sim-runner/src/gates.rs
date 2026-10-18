@@ -102,6 +102,10 @@ pub const RARE: &[Rare] = &[
         reason: "a gone-machine seed and the defer coin: 6 hits in 1,000 hunt seeds (#498 (moves in the sweep), #475 (re-place after the Down bound))",
     },
     Rare {
+        msg: "coordinator: a set's shrink keeps a held machine's slot",
+        reason: "a gone-machine seed with a long window whose tenant's largest F then falls: a set grown to the tenant's modes shrinks while the window holds one of its machines (#359, #214 (tenant modes))",
+    },
+    Rare {
         msg: "coordinator: a set moved off a machine down past its bound",
         reason: "a gone-machine seed whose machine held a set's slot: 1 hit in 1,000 hunt seeds (#498 (moves in the sweep), #475 (re-place after the Down bound))",
     },

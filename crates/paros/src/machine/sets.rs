@@ -31,7 +31,9 @@
 //! of its tenant (its default and every live journal, at least 1), on at
 //! most every storage machine (#214 (tenant modes)): a set grows by booking
 //! the slots it lacks and shrinks by handing over onto the slots placement
-//! keeps, releasing the others once the smaller set is in force. No step
+//! keeps, releasing the others once the smaller set is in force. A shrink
+//! keeps the slots of the machines an open maintenance window holds (#359)
+//! whenever it has another slot to release. No step
 //! names a draining machine in a set. A released member keeps its frozen store: it
 //! answers a late proposer with its successor (`crate::machine::matchmakers`).
 //! The cell tenant's own set never moves: the registry's elections need it
@@ -453,9 +455,43 @@ impl Sets {
         members.sort_unstable();
         if staying.len() > size {
             let storage = desk.storage(registry);
-            let Some(kept) = kept(registry, &storage, tenant, (&staying, &members), size) else {
+            // A shrink to the tenant's modes releases the slots of the
+            // machines an open maintenance window holds (#359) last: the
+            // window keeps every slot its machine held, and a shrink that
+            // has another slot to release takes that one. With more held
+            // slots than the size, placement chooses among them as before.
+            let (held, free): (Vec<_>, Vec<_>) = staying
+                .iter()
+                .copied()
+                .partition(|(_, b)| gone.held.contains(&b.node));
+            let kept = if held.is_empty() || held.len() > size {
+                kept(registry, &storage, tenant, (&staying, &members), size)
+            } else {
+                let mut keep: BTreeSet<NodeId> = held.iter().map(|(_, b)| b.node).collect();
+                if size > held.len() {
+                    match kept(
+                        registry,
+                        &storage,
+                        tenant,
+                        (&free, &members),
+                        size - held.len(),
+                    ) {
+                        Some(rest) => keep.extend(rest),
+                        None => return Some(SetStep::Waiting),
+                    }
+                }
+                moonpool_assertions::reachable!(
+                    "coordinator: a set's shrink keeps a held machine's slot"
+                );
+                Some(keep)
+            };
+            let Some(kept) = kept else {
                 return Some(SetStep::Waiting);
             };
+            assert!(
+                held.len() > size || held.iter().all(|(_, b)| kept.contains(&b.node)),
+                "a set's shrink keeps every slot a maintenance window holds"
+            );
             staying.retain(|(_, b)| kept.contains(&b.node));
             if staying.len() != size {
                 return Some(SetStep::Waiting);

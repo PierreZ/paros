@@ -14,6 +14,15 @@
 //! judged by its bytes against the journal's model (#651 (acked writes
 //! judged by their bytes)).
 //!
+//! The superseded writer's claim is precise: its write is never *accepted
+//! anew*. The journal answers a write below its tail from the log
+//! (`Outcome::Duplicate`): a write whose fate the writer never learned
+//! (`Ambiguous`) leaves its `next_seq` behind a position the journal holds
+//! under its uuid, and the alphabet repeats (an empty or one-byte record),
+//! so its "new" write can be byte for byte the write it already holds there.
+//! That answer is the dedup rule, not a stale write landing (hunt seed
+//! 14177363183093160763 on 4a24b98).
+//!
 //! Every call goes through `paros::client` and is logged in the journal's
 //! history (`Announce`, or the frontend's own log of what it forwards), so
 //! the linearizability search judges each one; the oracles here are the
@@ -138,19 +147,28 @@ impl FleetOps {
             config.batch_records = MAX_BATCH_RECORDS;
         }
         let mut batches = Vec::new();
+        // The writes whose fate the writer never learned: their positions
+        // and sizes. The journal may hold one, and answer the writer's next
+        // write at that position from the log.
+        let mut unsettled = Vec::new();
         for _ in 0..self.rounds() {
             let records = records_of(&config, audit);
             let sent = hashes(&records);
-            if let WriterOutcome::Written { seq, count, .. } =
-                writer.write(client, records, first).await
-            {
-                assert_reachable!("created: an owner appends a batch to a created journal");
-                acked(audit, seq, count, sent);
-                batches.push((seq, count));
+            let at = writer.next_seq();
+            match writer.write(client, records, first).await {
+                WriterOutcome::Written { seq, count, .. } => {
+                    assert_reachable!("created: an owner appends a batch to a created journal");
+                    acked(audit, seq, count, sent);
+                    batches.push((seq, count));
+                }
+                WriterOutcome::Ambiguous => unsettled.push((at, sent.len() as u64)),
+                _ => {}
             }
         }
         if buggify_with_prob!(0.25) {
-            writer = self.pipelined(client, writer, first, audit).await;
+            writer = self
+                .pipelined(client, writer, first, audit, &mut unsettled)
+                .await;
         }
         self.page(client, journal, first).await;
         // A floor drawn over the whole log, or strictly inside a batch of
@@ -188,11 +206,29 @@ impl FleetOps {
         assert_reachable!("created: a second writer supersedes the first");
         // The first writer still believes it leads: its write goes out under
         // its own uuid, which a won `SetLeader` replaced. A client draws a
-        // fresh uuid for every writer, so nothing reinstates it.
+        // fresh uuid for every writer, so nothing reinstates it. The one
+        // `Written` the journal may answer is a `Duplicate`: the write names
+        // a position of one of this writer's own unsettled writes, and the
+        // journal holds that write there, byte for byte (the module doc).
+        let at = writer.next_seq();
         let stale = writer.write(client, self.records(audit), first).await;
+        let own = match &stale {
+            WriterOutcome::Written {
+                seq,
+                count,
+                duplicate,
+                ..
+            } => *duplicate && *seq == at && unsettled.contains(&(*seq, *count)),
+            _ => true,
+        };
         assert_always!(
-            !matches!(stale, WriterOutcome::Written { .. }),
-            "created: a superseded writer's write is never written"
+            own,
+            "created: a superseded writer's write is never written",
+            {
+                "written" => matches!(stale, WriterOutcome::Written { .. }),
+                "at" => at,
+                "unsettled" => unsettled.len()
+            }
         );
         if matches!(stale, WriterOutcome::Superseded { .. }) {
             assert_reachable!("created: a superseded writer's write is refused");
@@ -210,13 +246,15 @@ impl FleetOps {
     /// A burst of `pipeline_depth` writes through the library's
     /// [`Pipeline`] (#597 (several writes in flight per journal)) on a
     /// machine-served journal (#658): every ticket's answer is its own.
-    /// Returns the pipeline's writer.
+    /// Returns the pipeline's writer; a ticket whose fate stayed unknown
+    /// goes into `unsettled` with its position and size.
     async fn pipelined(
         &self,
         client: &ChainClient,
         writer: Writer,
         first: usize,
         audit: Option<&AuditWorld>,
+        unsettled: &mut Vec<(u64, u64)>,
     ) -> Writer {
         let pipeline = Pipeline::new(writer);
         let mut opened = Vec::with_capacity(self.config.pipeline_depth);
@@ -236,6 +274,9 @@ impl FleetOps {
         )
         .await;
         for ((ticket, sent), result) in opened.into_iter().zip(results) {
+            if matches!(result.outcome, WriterOutcome::Ambiguous) {
+                unsettled.push((ticket.entry().seq.0, ticket.entry().count()));
+            }
             if let WriterOutcome::Written { seq, count, .. } = result.outcome {
                 assert_always!(
                     seq == ticket.entry().seq.0 && count == ticket.entry().count(),
