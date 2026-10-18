@@ -637,6 +637,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         if let Some(prev) = st.chosen.insert(slot.0, vhash) {
             assert_always!(prev == vhash, "at most one value is ever chosen for a slot");
         }
+        st.chosen_values.insert(vhash);
         // The journal state machine's oracles (#204): every node's verdict
         // at this slot is the same, and the verdicts obey section 6.
         st.journal.applied(node.0, slot.0, command, vhash, outcome);

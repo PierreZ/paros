@@ -227,6 +227,15 @@ pub(super) struct ChainConfig {
     /// mid-flight (honest ambiguity, retried under the same identity).
     /// Ceiling 60: every abandoned attempt is retried, so no rate stalls.
     pub(super) abandon_pct: u64,
+    /// How long an abandoned first attempt is listened to before it is
+    /// given up (#660 (late abandonment)). A write is answered tens to
+    /// hundreds of ms after it leaves, so past a few ms the abandonment
+    /// lands between the slot chosen and the reply received, where the
+    /// read-back and the identical re-send race the apply. A step draws a
+    /// late one (50 to 600 ms) on a coin of its own. Floor 1 ms: the attempt
+    /// is still sent; ceiling 600 ms, inside every request deadline
+    /// (`REQUEST_FLOOR_MS`).
+    pub(super) abandon_after_ms: u64,
     /// Idle between a redirect and the next attempt. Floor 0 (tight loop
     /// bounded by the request deadline).
     pub(super) redirect_sleep_ms: u64,
@@ -315,6 +324,8 @@ pub(super) struct ChainConfig {
     /// — shorter than any round trip, so the owner gives up on a write that
     /// may still land, re-claims, and retries it across the ownership
     /// change. Floor 1 ms: an attempt abandoned at once, still sent.
+    /// Ceiling 600 ms (#660 (late abandonment)): past the round trip, so the
+    /// give-up also lands after the slot is chosen, before its reply.
     pub(super) ack_race_timeout_ms: u64,
     /// A registry owner checkpoints once the log since its last checkpoint
     /// reaches this many times the registry's size
@@ -435,6 +446,7 @@ impl ChainConfig {
             recovery_budget_ms: buggify_knob!(60_000_u64, 45_000_u64..90_001_u64),
             recovery_proposals: buggify_knob!(12_u64, 1_u64..25_u64),
             abandon_pct: buggify_knob!(15_u64, 0_u64..61_u64),
+            abandon_after_ms: buggify_knob!(10_u64, 1_u64..601_u64),
             redirect_sleep_ms: buggify_knob!(10_u64, 0_u64..101_u64),
             retry_backoff_ms: buggify_knob!(25_u64, 0_u64..201_u64),
             write_redirect_limit: buggify_knob!(16_u8, 1_u8..33_u8),
@@ -454,7 +466,7 @@ impl ChainConfig {
             read_wait_ms: buggify_knob!(0_u64, 0_u64..401_u64),
             burst_claim_delay_ms: buggify_knob!(20_u64, 0_u64..201_u64),
             burst_spacing_ms: buggify_knob!(60_u64, 0_u64..121_u64),
-            ack_race_timeout_ms: buggify_knob!(5_u64, 1_u64..21_u64),
+            ack_race_timeout_ms: buggify_knob!(5_u64, 1_u64..601_u64),
             checkpoint_factor: buggify_knob!(4_u32, 1_u32..9_u32),
             checkpoint_interval_ms: buggify_knob!(60_000_u64, 0_u64..5_001_u64),
             checkpoint_chunk_bytes: buggify_knob!(8_192_usize, 16_usize..257_usize),

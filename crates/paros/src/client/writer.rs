@@ -241,6 +241,15 @@ impl Writer {
         self.next_seq
     }
 
+    /// The end of the highest write it opened under the uuid it leads with:
+    /// no write of its own under that uuid lands past it, so a position
+    /// past both it and [`Writer::next_seq`] is never the journal's tail
+    /// while it leads (#665 (conflicting rewrite)).
+    #[must_use]
+    pub fn opened_to(&self) -> u64 {
+        self.opened_to
+    }
+
     /// A position from which the uuid it leads with is known to lead: a
     /// view naming it the leader showed this `next_seq` (#564). What
     /// [`Client::resolve`] needs to read `entry` back as written: `None`

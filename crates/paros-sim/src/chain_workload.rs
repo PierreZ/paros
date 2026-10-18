@@ -33,6 +33,7 @@ use crate::chain::{hash_text, trace_truncate};
 use crate::client::{ChainClient, ClientRuntime, client_rpc_config};
 
 mod config;
+mod edge;
 mod fleet;
 mod fold;
 mod foreign;
@@ -1393,6 +1394,21 @@ impl ChainWorkload {
                     (&nodes, &audit),
                     (journal, &mut writer),
                     (target, raw_payload),
+                    request_timeout,
+                )
+                .await;
+            }
+            if op == WRITE
+                && writer.owned().is_some()
+                && let Some(last) = written.last()
+                && buggify_with_prob!(0.1)
+            {
+                assert_reachable!("chain: an owner rewrites a written position");
+                owner::conflicting_rewrite_refused(
+                    ctx,
+                    (&nodes, &audit),
+                    (journal, &mut writer),
+                    (target, last),
                     request_timeout,
                 )
                 .await;
