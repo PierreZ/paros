@@ -271,7 +271,9 @@ disk full fails with `ENOSPC` before any byte lands, and the store answers
   in Phase 1 and serves reads. It refuses every Phase-2 vote (`Accept`), the records of a
   catch-up and a handoff to it, as lost messages, and it never campaigns. The reason is typed:
   `reason = "disk_full"` on `journal_read_only` and `phase2_refused`.
-- After `read_only_ticks` (30 s in the shipped profile, floor 1) it is writable again. A write
+- `read_only_ticks` (30 s in the shipped profile, floor 1) after the fault, it is writable
+  again. The time counts from the fault, not the re-open, so a full disk holds a journal
+  unwritable for the longer of the quarantine and `read_only_ticks`, not their sum. A write
   that still finds the disk full makes it read-only again. A truncation frees space: the store
   removes its dead segments once the floor passes them.
 

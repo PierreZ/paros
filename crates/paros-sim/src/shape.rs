@@ -471,8 +471,12 @@ impl NodeShape {
             shutdown_within: ms(buggify_knob!(1500_u64, 0_u64..4_001_u64)),
             // How long a store stays read-only after a full disk (#360
             // (disk full)), in ticks. Floor 1: a store that tries a write
-            // every beat costs one refused segment per beat; the ceiling is
-            // the quarantine's wall-clock one, which the tail outlasts.
+            // every beat costs one refused segment per beat. The time counts
+            // from the fault, so a full disk holds a journal unwritable for
+            // the longer of it and the quarantine; the ceiling is the
+            // quarantine's wall-clock one, which the tail outlasts (witness
+            // 8180419182573274071: counted from the re-open, 8 s of
+            // quarantine then 8 s read-only outlasted the settle tail).
             read_only_ticks: buggify_knob!(20_u64, 1_u64..161_u64)
                 .min(QUARANTINE_CEILING_MS.div_ceil(tick_ms)),
             // The lag threshold of `Write` admission (#360 (disk full)).
@@ -540,6 +544,9 @@ impl NodeShape {
 /// `parosd`'s profile (#209), its take-back lowered to the sim's
 /// `TAKE_BACK_CEILING_MS`: production pairs two seconds with a five-second
 /// client deadline, the sim's clients draw theirs from `REQUEST_FLOOR_MS`.
+/// Its read-only time (#360 (disk full)) is lowered to the quarantine's
+/// `QUARANTINE_CEILING_MS`: production's 30 s waits for an operator to free
+/// space, and the sim's recovery tail is shorter.
 fn production_profile() -> DriverTunables {
     let mut profile = DriverTunables::production();
     let tick = u64::try_from(profile.tick_interval.as_millis())
@@ -548,6 +555,9 @@ fn production_profile() -> DriverTunables {
     profile.proxy_take_back_resends = profile
         .proxy_take_back_resends
         .min(TAKE_BACK_CEILING_MS / tick);
+    profile.read_only_ticks = profile
+        .read_only_ticks
+        .min(QUARANTINE_CEILING_MS.div_ceil(tick));
     profile
 }
 

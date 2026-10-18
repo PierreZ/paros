@@ -3698,18 +3698,29 @@ fn refuse_unknown<S, A: Audit, N: Audit, P: Providers>(
 /// A journal a full disk quarantined re-opens **read-only** (#360 (disk
 /// full), decided on 2026-10-18: a state of the live journal, not a longer
 /// quarantine, so the node keeps its Phase-1 promises and its reads): from
-/// tick `now` for `DriverTunables::read_only_ticks`, it votes in Phase 1,
+/// the fault's tick `since` for `DriverTunables::read_only_ticks`, so the
+/// quarantine before the re-open counts (a full disk holds a journal
+/// unwritable for the longer of the two, not their sum), it votes in Phase 1,
 /// serves reads, refuses every Phase-2 vote ([`read_only_refuses`]) and
 /// never campaigns (an election timeout of 0 never fires). A write that
 /// still finds the disk full quarantines it again.
-fn enter_read_only<S, A: Audit>(rt: &mut JournalRt<S, A>, journal: JournalIdentifier, now: u64) {
+fn enter_read_only<S, A: Audit>(
+    rt: &mut JournalRt<S, A>,
+    journal: JournalIdentifier,
+    since: u64,
+    now: u64,
+) {
     assert!(
         rt.read_only.is_none(),
         "a re-opened journal starts writable"
     );
+    assert!(
+        since <= now,
+        "a full disk took the journal before it re-opens"
+    );
     // A re-opened core is a follower with no campaign open.
     assert!(!rt.node.is_leader(), "a re-opened journal does not lead");
-    rt.read_only = Some(now);
+    rt.read_only = Some(since);
     rt.back_from_full = false;
     rt.node.set_election_timeout(0);
     assert!(
@@ -3769,8 +3780,8 @@ async fn open_journal<P: Providers, J: JournalStores>(
     };
     match boot_journal(providers, storage, boot, audit, tunables).await {
         Ok(mut rt) => {
-            if journals.take_full(journal) {
-                enter_read_only(&mut rt, journal, now);
+            if let Some(since) = journals.take_full(journal) {
+                enter_read_only(&mut rt, journal, since, now);
             }
             journals.insert(journal, rt);
             stores.opened(journal);

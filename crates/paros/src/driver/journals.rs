@@ -247,8 +247,9 @@ pub(crate) struct JournalRt<S, A> {
     /// the node loop took: a hint for a grid's column and row, read when
     /// the call steps, which may be after a flight lands.
     pub(crate) slow: BTreeSet<NodeId>,
-    /// The tick this journal re-opened read-only at (#360 (disk full)),
-    /// while it stays read-only: a full disk quarantined it. It votes in
+    /// The tick a full disk took this journal at (#360 (disk full)), while
+    /// it stays read-only: the read-only time counts from the fault, so the
+    /// quarantine before the re-open is part of it. It votes in
     /// Phase 1 and serves reads, refuses Phase-2 votes, and never leads.
     pub(crate) read_only: Option<u64>,
     /// Whether the journal left read-only and no flush of it landed since:
@@ -380,8 +381,9 @@ pub(crate) struct Journals<S, A> {
     orphans: BTreeMap<JournalIdentifier, Flush<S>>,
     quarantined: BTreeMap<JournalIdentifier, u64>,
     /// The quarantined journals whose fault was a full disk (#360 (disk
-    /// full)): each re-opens read-only, and none ends the node.
-    full: BTreeSet<JournalIdentifier>,
+    /// full)), each with the tick of its fault: each re-opens read-only,
+    /// and none ends the node.
+    full: BTreeMap<JournalIdentifier, u64>,
     down: BTreeSet<JournalIdentifier>,
     /// Journals quarantined since the loop last told the opener
     /// ([`JournalStores::quarantined`]).
@@ -437,7 +439,7 @@ impl<S, A> Journals<S, A> {
             live: BTreeMap::new(),
             orphans: BTreeMap::new(),
             quarantined: BTreeMap::new(),
-            full: BTreeSet::new(),
+            full: BTreeMap::new(),
             down: BTreeSet::new(),
             newly_quarantined: Vec::new(),
             last_fault: None,
@@ -581,7 +583,7 @@ impl<S, A> Journals<S, A> {
         // down for good (#360 (disk full)).
         assert!(
             self.full
-                .iter()
+                .keys()
                 .all(|j| !self.live.contains_key(j) && !self.down.contains(j)),
             "a journal a full disk took is neither live nor down"
         );
@@ -779,16 +781,18 @@ impl<S, A> Journals<S, A> {
         );
         self.quarantined.insert(journal, now);
         self.newly_quarantined.push(journal);
-        self.note_fault(journal, fault);
+        self.note_fault(journal, now, fault);
         self.assert_invariants();
     }
 
     /// Record the storage fault that quarantined `journal`: a full disk
     /// (#360 (disk full)) marks it to re-open read-only and is never the
     /// node's exit; every other fault is the node's last fault.
-    fn note_fault(&mut self, journal: JournalIdentifier, fault: RunError) {
+    fn note_fault(&mut self, journal: JournalIdentifier, now: u64, fault: RunError) {
         if matches!(fault, RunError::Storage(StorageError::Full { .. })) {
-            self.full.insert(journal);
+            // A journal still waiting keeps its first fault's tick: a full
+            // re-open is the same full disk.
+            self.full.entry(journal).or_insert(now);
             assert!(
                 self.quarantined.contains_key(&journal),
                 "a journal a full disk took is quarantined"
@@ -799,11 +803,12 @@ impl<S, A> Journals<S, A> {
         }
     }
 
-    /// Whether `journal` re-opens read-only (#360 (disk full)): a full disk
-    /// quarantined it. The mark is taken: the runtime holds it from here.
-    pub(crate) fn take_full(&mut self, journal: JournalIdentifier) -> bool {
+    /// The tick of the full disk that quarantined `journal`, when one did
+    /// (#360 (disk full)): it re-opens read-only, counted from that tick.
+    /// The mark is taken: the runtime holds it from here.
+    pub(crate) fn take_full(&mut self, journal: JournalIdentifier) -> Option<u64> {
         let full = self.full.remove(&journal);
-        assert!(!self.full.contains(&journal), "a taken mark is gone");
+        assert!(!self.full.contains_key(&journal), "a taken mark is gone");
         full
     }
 
@@ -881,7 +886,7 @@ impl<S, A: Audit> Journals<S, A> {
                 tracing::warn!(node = self_id, journal = %journal, "journal_quarantined");
                 self.quarantined.insert(journal, now);
                 self.newly_quarantined.push(journal);
-                self.note_fault(journal, RunError::Storage(error));
+                self.note_fault(journal, now, RunError::Storage(error));
                 self.assert_invariants();
                 if self.live.is_empty() && !self.waits_for_space() {
                     // Nothing left to serve this incarnation: the node

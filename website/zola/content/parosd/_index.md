@@ -35,7 +35,7 @@ member. Then its disk writes complete and it exits with code 0. `PAROS_SHUTDOWN_
 a crash: the next start recovers from the disk.
 
 **A full disk.** A machine with a full disk does not crash and does not lose a write. A journal
-store that cannot get space for its next segment becomes read-only for 30 s
+store that cannot get space for its next segment becomes read-only until 30 s after the fault
 (`PAROS_READ_ONLY_TICKS`). It still answers Phase 1 and reads, and it refuses Phase-2 votes.
 Then it tries to write again. A truncation frees space. Each machine reports its free bytes,
 and placement uses a machine with less than 1 GiB free (`PAROS_FREE_BYTES_FLOOR`) only when no
