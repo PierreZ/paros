@@ -255,13 +255,41 @@ where
     ready.advance();
 
     // What this batch commits is in flight until its sync returns: every
-    // journal it writes has its port first.
+    // journal it writes has its port first, an install's included. A
+    // journal this incarnation holds no registration of has no port at
+    // boot; unported, it never heard an install was in flight, and a kill
+    // inside its commit read back a registration its audit never saw. Seed
+    // 12338602098732519771 (recipe 1353357:2487056085033603764) on fba843a.
     if !writes.is_empty() {
         for op in &writes {
-            if let MatchmakerWriteOp::Register { journal, .. } = op {
-                ports.port(*journal);
+            match op {
+                MatchmakerWriteOp::Register { journal, .. } => {
+                    ports.port(*journal);
+                }
+                MatchmakerWriteOp::InstallRegistry {
+                    scalars,
+                    registrations,
+                } => {
+                    for journal in registrations.keys().chain(scalars.journals.keys()) {
+                        ports.port(*journal);
+                    }
+                }
+                _ => {}
             }
         }
+        assert!(
+            writes.iter().all(|op| match op {
+                MatchmakerWriteOp::InstallRegistry {
+                    scalars,
+                    registrations,
+                } => registrations
+                    .keys()
+                    .chain(scalars.journals.keys())
+                    .all(|journal| ports.by_journal.contains_key(journal)),
+                _ => true,
+            }),
+            "an install's journals each have a port before it is in flight"
+        );
         for audit in ports.set_wide() {
             audit.matchmaker_in_flight(id, Some(&writes));
         }

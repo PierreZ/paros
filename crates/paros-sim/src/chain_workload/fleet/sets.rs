@@ -82,6 +82,15 @@ pub(super) async fn sets_booked(
                         .map(|addr| (*id, addr))
                 })
                 .collect();
+            // A registry that holds no founder's address names nobody to
+            // dial yet: read it again. Seed 18233303712623226963 on
+            // 3c8c73d: the check built a client over no server.
+            if founders.is_empty() {
+                if ctx.time().sleep(Duration::from_millis(250)).await.is_err() {
+                    return;
+                }
+                continue;
+            }
             let client = connect(&founders);
             let mut stuck = None;
             for tenant in registry.hosted().filter(|t| !registry.dropped(*t)) {

@@ -58,6 +58,10 @@ pub const RARE: &[Rare] = &[
         reason: "a drained-machine seed whose moved journal had taken the data plane's 16+ rounds first: missed by PR #678's sweep (#658 (the full alphabet on created journals), #498 (moves in the sweep))",
     },
     Rare {
+        msg: "election: a candidate at the tail re-anchors at the floor",
+        reason: "needs a leader that steps down without a resignation while a reader the floor outran waits at the tail; one witness, seed 3257468052100910816 on 3c8c73d (#640 (election reader livelock), #486)",
+    },
+    Rare {
         msg: "admit: a removed machine is refused admission",
         reason: "an ADMIT that draws a machine an operator removed: one CI sweep seed (#359 (drain, remove and maintenance for machines))",
     },
