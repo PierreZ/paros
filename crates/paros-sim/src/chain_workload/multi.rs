@@ -9,7 +9,11 @@
 //! two nodes at once, `TRUNCATE` and `TRUNCATE_STORM` truncate open, and
 //! `SET_LEADER` claims a journal that must refuse it as of the wrong mode.
 //! An ambiguous append is sent again on a coin: delivery is at-least-once,
-//! and the journal model's gate asks for a batch that lands twice.
+//! and the journal model's gate asks for a batch that lands twice. On
+//! another coin a `WRITE` is a burst (#662 (multi-writer bursts)):
+//! `pipeline_depth` appends from the one client in flight at once, spaced
+//! by `burst_spacing_ms`, so a batch may group-commit them, a redirect or a
+//! leader change may strike mid-burst, and they may land out of send order.
 //!
 //! The mode confusion, each on its own BUGGIFY location: a fenced write or
 //! truncation sent to a multi-writer journal and an unfenced one sent to a
@@ -21,7 +25,10 @@
 
 use std::time::Duration;
 
-use moonpool_sim::{SimContext, TimeProvider, assert_always, assert_reachable, buggify_with_prob};
+use futures::future::join_all;
+use moonpool_sim::{
+    SimContext, TimeProvider, assert_always, assert_reachable, assert_sometimes, buggify_with_prob,
+};
 use paros::client::multi::{append_entry, append_request, open_truncate_request};
 use paros::client::{Retarget, SetLeaderOutcome, TruncateOutcome, WriteOptions, WriteOutcome};
 use paros::{
@@ -32,7 +39,7 @@ use paros::{
 use super::rpc::{CallLog, judged_truncate, judged_write, set_leader_once, within, write_once};
 use super::{
     ChainConfig, ChainWorkload, DUAL_SUBMIT, DUP_WRITE, SET_LEADER, Submission, TRUNCATE,
-    TRUNCATE_STORM, WrittenCommand,
+    TRUNCATE_STORM, WRITE, WrittenCommand,
 };
 use crate::audit::AuditWorld;
 use crate::client::ChainClient;
@@ -83,6 +90,7 @@ impl ChainWorkload {
                 assert_reachable!("chain: a fenced truncate meets a multi-writer journal");
                 fenced_truncate_refused(step).await;
             }
+            WRITE if buggify_with_prob!(0.2) => self.multi_burst(step, next_op, written).await,
             _ => {
                 let submission = self.submit_append(step, next_op);
                 match op {
@@ -138,6 +146,84 @@ impl ChainWorkload {
                 .ok();
         }
         false
+    }
+
+    /// A burst (#662 (multi-writer bursts)): `pipeline_depth` appends (two
+    /// at least) from this one client, each sent `burst_spacing_ms` after
+    /// the one before through the library's write, all in flight at once,
+    /// and every verdict folded back in send order. Nothing fences them, so
+    /// the journal may take them in any order, and a re-send inside the
+    /// library may land one twice; the linearizability search judges the
+    /// overlapping attempts.
+    #[tracing::instrument(level = "debug", skip_all, fields(journal = %step.journal))]
+    async fn multi_burst(
+        &mut self,
+        step: &Step<'_>,
+        next_op: &mut u64,
+        written: &mut Vec<WrittenCommand>,
+    ) {
+        assert_reachable!("chain: a client sends a multi-writer burst");
+        let (class, seed) = step.draws;
+        let now = u64::try_from(step.ctx.time().now().as_millis()).unwrap_or(u64::MAX);
+        let depth = step.config.pipeline_depth.max(2) as u64;
+        let submissions: Vec<Submission> = (0..depth)
+            .map(|k| {
+                let class = class.wrapping_add(k);
+                let spread = crate::chain::splitmix(seed ^ k);
+                let records = Self::draw_records(step.audit, step.config, class, spread);
+                let entry = append_entry(records.into_iter().map(|record| record.0).collect());
+                self.issue(step.audit, entry, next_op, class, now)
+            })
+            .collect();
+        let spacing = Duration::from_millis(step.config.burst_spacing_ms);
+        let first = step.nodes.leader().unwrap_or(step.target);
+        let time = step.ctx.time().clone();
+        let sends = join_all(submissions.iter().zip(0_u32..).map(|(submission, k)| {
+            let time = time.clone();
+            let records = submission
+                .entry
+                .records
+                .iter()
+                .map(|r| r.0.clone())
+                .collect();
+            let request = append_request(step.journal, records);
+            async move {
+                time.sleep(spacing * k).await.ok();
+                let report = step
+                    .nodes
+                    .write(
+                        &request,
+                        first,
+                        WriteOptions {
+                            retarget: step.retarget,
+                            ..WriteOptions::default()
+                        },
+                    )
+                    .await;
+                let node = step.nodes.id_of(report.server);
+                (
+                    report.server,
+                    judged_write(report.outcome, false, node, step.journal),
+                )
+            }
+        }));
+        let results = sends.await;
+        let mut landed = Vec::with_capacity(results.len());
+        for (submission, (server, outcome)) in submissions.iter().zip(results) {
+            if let WriteOutcome::Written { seq, .. } = outcome {
+                landed.push(seq);
+            }
+            self.absorb_append(step, submission, &outcome, server, written);
+        }
+        if !landed.is_empty() {
+            assert_reachable!("chain: a client's multi-writer burst is written");
+        }
+        if landed.len() > 1 {
+            assert_sometimes!(
+                landed.windows(2).any(|pair| pair[1] < pair[0]),
+                "chain: a multi-writer burst is written out of send order"
+            );
+        }
     }
 
     /// Draw one batch for a multi-writer journal: the records of an
