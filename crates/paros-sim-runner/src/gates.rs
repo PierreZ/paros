@@ -46,6 +46,10 @@ pub struct Rare {
 /// window seldom reaches, #485 the double fault, #486 the rest.
 pub const RARE: &[Rare] = &[
     Rare {
+        msg: "election: a candidate at the tail re-anchors at the floor",
+        reason: "needs a leader that steps down without a resignation while a reader the floor outran waits at the tail; one witness, seed 3257468052100910816 on 3c8c73d (#640 (election reader livelock), #486)",
+    },
+    Rare {
         msg: "admit: a removed machine is refused admission",
         reason: "an ADMIT that draws a machine an operator removed: one CI sweep seed (#359 (drain, remove and maintenance for machines))",
     },
