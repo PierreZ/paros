@@ -50,10 +50,13 @@ mod routes;
 pub use authz::{Authz, Denial, Operation, Request, Target};
 
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use moonpool_core::{Detach, Providers, RandomProvider, SimulationResult, TaskProvider};
+use moonpool_core::{
+    Detach, Providers, RandomProvider, SimulationResult, TaskProvider, TimeProvider,
+};
 use paros_core::JournalIdentifier;
 use tokio_util::sync::CancellationToken;
 
@@ -145,11 +148,41 @@ struct Shared<P: Providers, A> {
     authz: Arc<dyn Authz>,
     audit: A,
     settings: FrontendSettings,
+    /// The calls whose task runs (#560 (clean Ctrl-C shutdown)): a stopping
+    /// frontend waits for them.
+    in_flight: AtomicUsize,
 }
+
+/// One running call, counted in [`Shared::in_flight`] while it lives.
+struct Running<P: Providers, A>(Arc<Shared<P, A>>);
+
+impl<P: Providers, A> Running<P, A> {
+    fn start(shared: &Arc<Shared<P, A>>) -> Self {
+        shared.in_flight.fetch_add(1, Ordering::SeqCst);
+        Self(shared.clone())
+    }
+}
+
+impl<P: Providers, A> Drop for Running<P, A> {
+    fn drop(&mut self) {
+        let before = self.0.in_flight.fetch_sub(1, Ordering::SeqCst);
+        assert!(before > 0, "a running call was counted");
+    }
+}
+
+/// How often a stopping frontend looks whether its calls ended. Not a
+/// tunable: it only sets how late, by at most this much, a drained frontend
+/// sees it is drained; `shutdown_within` is the bound that shapes a stop.
+const STOP_POLL: Duration = Duration::from_millis(50);
 
 /// Run a frontend until `shutdown`: bind `settings.listen`, learn the cell
 /// from its founding members, and serve the frontend contract, checking
 /// every call through `authz` and reporting resolutions to `audit`.
+///
+/// `shutdown` begins a clean stop (#560 (clean Ctrl-C shutdown)): every new
+/// call is refused `stopping`, and the frontend returns once the calls it
+/// took are answered, or once `tunables.shutdown_within` ran out; a call
+/// still running then gets no answer, which its caller sees as ambiguous.
 ///
 /// # Errors
 ///
@@ -199,29 +232,105 @@ where
         authz,
         audit,
         settings,
+        in_flight: AtomicUsize::new(0),
     });
+    // Every call's task ends with the frontend: a call still running when
+    // it returns gets no answer.
+    let ended = CancellationToken::new();
+    let _ended = ended.clone().drop_guard();
+    let within = shared.settings.tunables.shutdown_within;
+    let time = providers.time().clone();
+    // When a clean stop returns whatever still runs, once one began.
+    let mut stop: Option<Duration> = None;
+    // Whether the stop waits out its whole bound, drained or not: a
+    // frontend behind a slow load balancer still gets calls a while, and
+    // refuses them (#560). Drawn once, at the stop.
+    let mut linger = false;
     loop {
         moonpool_core::select! {
             biased;
-            () = shutdown.cancelled() => return Ok(()),
+            () = shutdown.cancelled(), if stop.is_none() => {
+                stop = Some(time.now().saturating_add(within));
+                linger = moonpool_buggify::buggify_with_prob!(0.5);
+                if linger {
+                    moonpool_assertions::reachable!("stop: a stopping frontend lingers to its bound");
+                }
+                tracing::info!(listen = %shared.settings.listen, within_ms = u64::try_from(within.as_millis()).unwrap_or(u64::MAX), "frontend_stop_started");
+            }
+            _ = time.sleep(STOP_POLL), if stop.is_some() => {
+                let expired = stop.is_some_and(|deadline| time.now() >= deadline);
+                if stopped(&shared, expired, linger) {
+                    return Ok(());
+                }
+            }
             error = edge.run() => return Err(error),
             Some((FrontWrite { entry, call }, reply)) = inbox.write.recv() => {
-                spawn_call(&shared, &shutdown, entry, call, reply, Draws::draw(&providers));
+                if stop.is_some() {
+                    refuse(call.as_ref(), reply);
+                } else {
+                    spawn_call(&shared, &ended, entry, call, reply, Draws::draw(&providers));
+                }
             }
             Some((FrontRead { entry, call }, reply)) = inbox.read.recv() => {
-                spawn_call(&shared, &shutdown, entry, call, reply, Draws::draw(&providers));
+                if stop.is_some() {
+                    refuse(call.as_ref(), reply);
+                } else {
+                    spawn_call(&shared, &ended, entry, call, reply, Draws::draw(&providers));
+                }
             }
             Some((FrontTruncate { entry, call }, reply)) = inbox.truncate.recv() => {
-                spawn_call(&shared, &shutdown, entry, call, reply, Draws::draw(&providers));
+                if stop.is_some() {
+                    refuse(call.as_ref(), reply);
+                } else {
+                    spawn_call(&shared, &ended, entry, call, reply, Draws::draw(&providers));
+                }
             }
             Some((FrontSetLeader { entry, call }, reply)) = inbox.set_leader.recv() => {
-                spawn_call(&shared, &shutdown, entry, call, reply, Draws::draw(&providers));
+                if stop.is_some() {
+                    refuse(call.as_ref(), reply);
+                } else {
+                    spawn_call(&shared, &ended, entry, call, reply, Draws::draw(&providers));
+                }
             }
             Some((call, reply)) = inbox.set_tags.recv() => {
-                spawn_tags(&shared, &shutdown, call, reply, Draws::draw(&providers));
+                if stop.is_some() {
+                    refuse_tags(call, reply);
+                } else {
+                    spawn_tags(&shared, &ended, call, reply, Draws::draw(&providers));
+                }
             }
         }
     }
+}
+
+/// Whether a stopping frontend is done (#560 (clean Ctrl-C shutdown)): no
+/// call it took still runs and it does not linger to its bound, or the bound
+/// ran out.
+fn stopped<P, A>(shared: &Shared<P, A>, expired: bool, linger: bool) -> bool
+where
+    P: Providers,
+    A: Audit + Clone + Send + Sync + 'static,
+{
+    let running = shared.in_flight.load(Ordering::SeqCst);
+    if running == 0 && (!linger || expired) {
+        moonpool_assertions::reachable!("stop: a frontend stopped cleanly");
+        tracing::info!(listen = %shared.settings.listen, "frontend_stop_completed");
+        return true;
+    }
+    if running > 0 && expired {
+        moonpool_assertions::reachable!("stop: a frontend's stop ran out of time");
+        tracing::warn!(listen = %shared.settings.listen, running, "frontend_stop_timed_out");
+        return true;
+    }
+    assert!(!expired, "an expired stop always ends");
+    false
+}
+
+/// Refuse a call a stopping frontend took (#560 (clean Ctrl-C shutdown)):
+/// `stopping`, retry elsewhere.
+fn refuse<C: Forwarded>(_call: Option<&C>, reply: ReplySender<C::Ack>) {
+    moonpool_assertions::reachable!("stop: a stopping frontend refuses a call");
+    let _ = reply.send(C::stopping());
 }
 
 /// Serve one call in its own task, until it answers or the frontend stops
@@ -241,10 +350,12 @@ fn spawn_call<P, A, C>(
 {
     let shutdown = shutdown.clone();
     let task = shared.clone();
+    let running = Running::start(shared);
     shared
         .providers
         .task()
         .spawn_task(C::TASK, async move {
+            let _running = running;
             moonpool_core::select! {
                 biased;
                 () = shutdown.cancelled() => {}
@@ -327,10 +438,12 @@ fn spawn_tags<P, A>(
 {
     let shutdown = shutdown.clone();
     let task = shared.clone();
+    let running = Running::start(shared);
     shared
         .providers
         .task()
         .spawn_task("frontend-set-tags", async move {
+            let _running = running;
             moonpool_core::select! {
                 biased;
                 () = shutdown.cancelled() => {}
@@ -347,6 +460,46 @@ fn tags_denied(denial: Denial) -> SetJournalTagsAck {
     let mut ack = SetJournalTagsAck::default();
     ack.set_frontend(denial.verdict());
     ack
+}
+
+/// A stopping frontend's answer to a tag request (#560 (clean Ctrl-C
+/// shutdown)): a malformed one is still denied as malformed, and only a
+/// well-formed one is told to send again elsewhere.
+fn refuse_tags(call: FrontSetJournalTags, reply: ReplySender<SetJournalTagsAck>) {
+    let ack = match well_formed_tags(call) {
+        Ok(_) => SetJournalTagsAck {
+            outcome: "unavailable".into(),
+            ..SetJournalTagsAck::default()
+        },
+        Err(denied) => denied,
+    };
+    assert!(
+        ack.outcome == "unavailable" || ack.outcome.is_empty(),
+        "a stopping frontend decides no tag request"
+    );
+    moonpool_assertions::reachable!("stop: a stopping frontend refuses a call");
+    let _ = reply.send(ack);
+}
+
+/// A tag request's entry and tags when it is well formed (#575 (key:value
+/// tags)), or its malformed denial: a user's journal only, by its names (an
+/// internal journal carries no user tag a tenant sets), with an id.
+fn well_formed_tags(
+    call: FrontSetJournalTags,
+) -> Result<(Entry, crate::tags::UserTags), SetJournalTagsAck> {
+    let Some(entry) = call.entry else {
+        return Err(tags_denied(Denial::Malformed));
+    };
+    let tags = crate::tags::UserTags::from_wire(call.tags);
+    let (Ok(tags), false, true) = (tags, entry.tenant.is_empty(), call.request != 0) else {
+        moonpool_assertions::reachable!("frontend: a malformed tag request is denied");
+        return Err(tags_denied(Denial::Malformed));
+    };
+    assert!(
+        !entry.tenant.is_empty(),
+        "a well-formed tag request names a tenant"
+    );
+    Ok((entry, tags))
 }
 
 /// A tag request (#575): admitted like a journal call, then sent to the
@@ -366,15 +519,10 @@ where
         outcome: "unavailable".into(),
         ..SetJournalTagsAck::default()
     };
-    let Some(entry) = call.entry else {
-        return tags_denied(Denial::Malformed);
-    };
-    // A user's journal only, by its names: an internal journal carries no
-    // user tag a tenant sets.
-    let tags = crate::tags::UserTags::from_wire(call.tags);
-    let (Ok(tags), false, true) = (tags, entry.tenant.is_empty(), call.request != 0) else {
-        moonpool_assertions::reachable!("frontend: a malformed tag request is denied");
-        return tags_denied(Denial::Malformed);
+    let request_id = call.request;
+    let (entry, tags) = match well_formed_tags(call) {
+        Ok(parts) => parts,
+        Err(denied) => return denied,
     };
     let unset = JournalIdentifier::new(paros_core::TenantId(0), paros_core::JournalId(0));
     let (journal, name) = match admit(shared, &entry, unset, Operation::SetTags, draws).await {
@@ -394,7 +542,7 @@ where
         return unavailable();
     };
     let request = crate::client::journals::JournalRequest {
-        request: call.request,
+        request: request_id,
         tenant: journal.tenant,
         op: crate::client::journals::JournalOp::SetTags {
             name: name.journal().as_bytes().to_vec(),

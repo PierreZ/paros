@@ -556,6 +556,13 @@ impl JournalReads {
     pub(crate) fn has_confirming(&self) -> bool {
         !self.confirming.is_empty()
     }
+
+    /// Whether any read is still held: waiting on its confirmation, or
+    /// parked for its tail wait. A clean stop answers each before it ends
+    /// (#560 (clean Ctrl-C shutdown)).
+    pub(crate) fn busy(&self) -> bool {
+        self.has_confirming() || !self.parked.is_empty()
+    }
 }
 
 #[cfg(test)]

@@ -19,7 +19,7 @@ enum Field {
 }
 
 /// Every field of [`DriverTunables`], each overridable.
-const FIELDS: [Field; 49] = [
+const FIELDS: [Field; 50] = [
     Field::Millis("tick_interval", |t, v| t.tick_interval = v),
     Field::Count("election_timeout_base", |t, v| t.election_timeout_base = v),
     Field::Millis("keep_alive_interval", |t, v| t.keep_alive_interval = v),
@@ -117,6 +117,7 @@ const FIELDS: [Field; 49] = [
     Field::Count("scrub_page", |t, v| {
         t.scrub_page = usize::try_from(v).unwrap_or(usize::MAX);
     }),
+    Field::Millis("shutdown_within", |t, v| t.shutdown_within = v),
 ];
 
 /// The environment variable that overrides `field`.
@@ -285,6 +286,7 @@ mod tests {
             scrub_rate: _,
             scrub_pass_within: _,
             scrub_page: _,
+            shutdown_within: _,
         } = DriverTunables::production();
         let mut names: Vec<String> = FIELDS
             .iter()

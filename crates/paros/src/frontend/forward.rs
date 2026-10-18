@@ -57,6 +57,9 @@ pub(super) trait Forwarded: Clone + Send + Sync + 'static {
     fn unknown() -> Self::Ack;
     /// The answer to a call nothing was forwarded for: no verdict.
     fn unavailable() -> Self::Ack;
+    /// The answer of a stopping frontend (#560 (clean Ctrl-C shutdown)):
+    /// unavailable, marked `stopping`, so the caller retries elsewhere.
+    fn stopping() -> Self::Ack;
     /// The answer to a call that reached a machine and got no answer.
     fn unanswered() -> Self::Ack;
     /// Whether `ack` refuses the journal as unknown.
@@ -118,6 +121,13 @@ impl Forwarded for Write {
 
     fn unavailable() -> WriteAck {
         WriteAck::default()
+    }
+
+    fn stopping() -> WriteAck {
+        WriteAck {
+            stopping: true,
+            ..Self::unavailable()
+        }
     }
 
     fn unanswered() -> WriteAck {
@@ -191,6 +201,13 @@ impl Forwarded for Read {
         ReadAck::default()
     }
 
+    fn stopping() -> ReadAck {
+        ReadAck {
+            stopping: true,
+            ..Self::unavailable()
+        }
+    }
+
     fn unanswered() -> ReadAck {
         // A read changes nothing: no answer is "not served".
         ReadAck::default()
@@ -259,6 +276,13 @@ impl Forwarded for Truncate {
 
     fn unavailable() -> TruncateAck {
         TruncateAck::default()
+    }
+
+    fn stopping() -> TruncateAck {
+        TruncateAck {
+            stopping: true,
+            ..Self::unavailable()
+        }
     }
 
     fn unanswered() -> TruncateAck {
@@ -333,6 +357,13 @@ impl Forwarded for SetLeader {
 
     fn unavailable() -> SetLeaderAck {
         SetLeaderAck::default()
+    }
+
+    fn stopping() -> SetLeaderAck {
+        SetLeaderAck {
+            stopping: true,
+            ..Self::unavailable()
+        }
     }
 
     fn unanswered() -> SetLeaderAck {

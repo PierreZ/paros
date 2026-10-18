@@ -55,6 +55,13 @@ pub trait JournalStores {
     /// The journals this node serves, a static list (ids `>= 1`).
     fn journals(&self) -> Vec<JournalIdentifier>;
 
+    /// The created journals whose stores this node holds on disk (#474): a
+    /// booking released while the node was down leaves one behind, which
+    /// no journal of this incarnation knows. Empty for a static node.
+    fn provisioned(&self) -> Vec<JournalIdentifier> {
+        Vec::new()
+    }
+
     /// Open `journal`'s store with the operator's boot claim, or `None` when
     /// the journal must stay down on this node for good (its disk is gone).
     ///
@@ -385,12 +392,29 @@ pub(crate) struct Journals<S, A> {
     /// Every journal that booted in this incarnation: the ones whose
     /// configuration this node has read.
     booted: BTreeSet<JournalIdentifier>,
+    /// The journals this incarnation forgot because their booking was
+    /// released (#474), until a booking starts one again.
+    released: BTreeSet<JournalIdentifier>,
     /// The booted journals that name matchmakers (#190), live or not: every
     /// one hears its tenant's handover.
     matchmade: BTreeSet<JournalIdentifier>,
 }
 
 impl<S, A> Journals<S, A> {
+    /// Whether a batch's flush still flies, a live journal's or one that
+    /// left `live` meanwhile (#560 (clean Ctrl-C shutdown): a clean stop
+    /// waits for each to land).
+    pub(crate) fn flying(&self) -> bool {
+        let flying = !self.orphans.is_empty() || self.live.values().any(|rt| rt.flight.is_some());
+        if !flying {
+            assert!(
+                self.live.values().all(|rt| rt.storage.is_some()),
+                "a journal that does not fly holds its store"
+            );
+        }
+        flying
+    }
+
     pub(crate) fn new(control: BTreeSet<JournalIdentifier>) -> Self {
         assert!(
             control.iter().all(|journal| journal.is_set()),
@@ -407,6 +431,7 @@ impl<S, A> Journals<S, A> {
             deployed: None,
             preferred: None,
             booted: BTreeSet::new(),
+            released: BTreeSet::new(),
             matchmade: BTreeSet::new(),
         }
     }
@@ -455,6 +480,7 @@ impl<S, A> Journals<S, A> {
             self.matchmade.insert(journal);
         }
         self.booted.insert(journal);
+        self.released.remove(&journal);
         self.live.insert(journal, rt);
         self.assert_invariants();
     }
@@ -577,6 +603,17 @@ impl<S, A> Journals<S, A> {
         named
     }
 
+    /// Whether `journal`'s booking was released and this incarnation forgot
+    /// it (#474).
+    pub(crate) fn released(&self, journal: JournalIdentifier) -> bool {
+        let released = self.released.contains(&journal);
+        assert!(
+            !released || !self.live.contains_key(&journal),
+            "a released journal is not live"
+        );
+        released
+    }
+
     /// Every journal this node serves (live, quarantined or down), in id
     /// order.
     pub(crate) fn known(&self) -> impl Iterator<Item = JournalIdentifier> + '_ {
@@ -601,6 +638,7 @@ impl<S, A> Journals<S, A> {
         if self.deployed == Some(journal) {
             self.deployed = None;
         }
+        self.released.insert(journal);
         assert!(!self.serves(journal), "a forgotten journal is not served");
         self.assert_invariants();
     }

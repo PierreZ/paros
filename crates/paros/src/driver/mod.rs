@@ -59,6 +59,7 @@ pub(crate) mod ready;
 pub(crate) mod reply;
 mod report;
 pub(crate) mod scrub;
+mod stop;
 mod system;
 pub(crate) mod transport;
 mod tunables;
@@ -1893,6 +1894,17 @@ where
     // incarnation. This drop guard covers every `?` and return path.
     let incarnation_shutdown = CancellationToken::new();
     let _incarnation_guard = incarnation_shutdown.clone().drop_guard();
+    // The clean stop (#560 (clean Ctrl-C shutdown)): cancelled when
+    // `shutdown` fires, while the loop still serves, and with the
+    // incarnation. The tasks that hold a leadership of their own (the cell
+    // coordinator) hand it on when it fires.
+    let stopping = incarnation_shutdown.child_token();
+    // Who the stop's log lines name: the machine's name, never an id (the
+    // names rule), or the node on a deployment outside a machine.
+    let stop_name: String = machine.as_ref().map_or_else(
+        || format!("node {}", node.0),
+        |machine| machine.facts().name.clone(),
+    );
 
     // The RPC edge: a moonpool-rpc runtime listening on this node's address,
     // polled by the loop below. Its handlers are the typed queues the loop
@@ -1999,6 +2011,10 @@ where
     // leader's: the cell control journal that would register it stalls.
     // Held, it still answers every message that reaches it.
     let mut unregistered: Option<watch::Receiver<bool>> = None;
+    // Whether the cell coordinator's task ended (#560 (clean Ctrl-C
+    // shutdown)): a clean stop waits for it to hand its term on. `None` on
+    // a node that runs none.
+    let mut coordinator_ended: Option<watch::Receiver<bool>> = None;
     // The instant since which the registry's pool is owed to the live journals
     // (#189), and whether this incarnation holds it a while (#387,
     // `crate::scenario::ADMIT_LATE`; drawn only where a registry is followed).
@@ -2069,15 +2085,15 @@ where
         // Every founding member campaigns for the cell coordinator (#240):
         // a moved one once its registration ended (#506 (renamed founder
         // not registered)).
-        crate::machine::coordinator::spawn(
+        coordinator_ended = Some(crate::machine::coordinator::spawn(
             &providers,
             &rpc_handle,
             &formed,
             &tunables,
             node_audit.call_observer(),
             unregistered.clone(),
-            incarnation_shutdown.clone(),
-        );
+            (incarnation_shutdown.clone(), stopping.clone()),
+        ));
         formed.serve(
             &providers,
             &rpc_handle,
@@ -2165,6 +2181,9 @@ where
         node: NodeId(self_id),
     };
 
+    // The clean stop in progress, once `shutdown` fired (#560 (clean Ctrl-C
+    // shutdown)).
+    let mut halt: Option<stop::Stop> = None;
     let mut ticks: u64 = 0;
     // The tick deadline is ABSOLUTE, not a fresh relative sleep per loop
     // iteration: `select!` drops and re-creates its futures every pass, so a
@@ -2196,6 +2215,17 @@ where
                 // state machine's, at apply. The reply is held until the
                 // slot applies and answered with that verdict; a non-leader
                 // redirects immediately.
+                if halt.is_some() {
+                    // A stopping machine takes no new call (#560 (clean
+                    // Ctrl-C shutdown)): retry elsewhere.
+                    stop::refused("write");
+                    shared.with(&node_audit).answer(
+                        Reply::Redirect,
+                        reply,
+                        WriteAck { stopping: true, ..WriteAck::default() },
+                    );
+                    continue;
+                }
                 let journal = JournalIdentifier::new(TenantId(req.tenant), JournalId(req.journal));
                 let Some(rt) = journals.live.get_mut(&journal) else {
                     if refuse_unknown(&journals, follower.as_ref(), journal, "write", self_id, &node_audit) {
@@ -2236,6 +2266,15 @@ where
             Some((req, reply)) = rpc.set_leader.recv() => {
                 // A journal `SetLeader` (#241): a compare-and-set decided
                 // into the log and judged at apply, like a `Write`.
+                if halt.is_some() {
+                    stop::refused("set_leader");
+                    shared.with(&node_audit).answer(
+                        Reply::Redirect,
+                        reply,
+                        SetLeaderAck { stopping: true, ..SetLeaderAck::default() },
+                    );
+                    continue;
+                }
                 let journal = JournalIdentifier::new(TenantId(req.tenant), JournalId(req.journal));
                 let Some(rt) = journals.live.get_mut(&journal) else {
                     if refuse_unknown(&journals, follower.as_ref(), journal, "set_leader", self_id, &node_audit) {
@@ -2268,6 +2307,15 @@ where
                 // truncated like any other (§3.9: its owner checkpoints it,
                 // then truncates up to the checkpoint, #230); a follower that
                 // reads below the floor jumps to the checkpoint there.
+                if halt.is_some() {
+                    stop::refused("truncate");
+                    shared.with(&node_audit).answer(
+                        Reply::Redirect,
+                        reply,
+                        TruncateAck { stopping: true, ..TruncateAck::default() },
+                    );
+                    continue;
+                }
                 let journal = JournalIdentifier::new(TenantId(req.tenant), JournalId(req.journal));
                 let Some(rt) = journals.live.get_mut(&journal) else {
                     if refuse_unknown(&journals, follower.as_ref(), journal, "truncate", self_id, &node_audit) {
@@ -2299,6 +2347,15 @@ where
                 // the read is served from this node's journal fold once it
                 // covers the maximum. Never a redirect: no role is asked
                 // for.
+                if halt.is_some() {
+                    stop::refused("read");
+                    shared.with(&node_audit).answer(
+                        Reply::ReadUnserved,
+                        reply,
+                        ReadAck { stopping: true, ..ReadAck::default() },
+                    );
+                    continue;
+                }
                 let journal = JournalIdentifier::new(TenantId(req.tenant), JournalId(req.journal));
                 let Some(rt) = journals.live.get_mut(&journal) else {
                     if refuse_unknown(&journals, follower.as_ref(), journal, "read", self_id, &node_audit) {
@@ -2353,6 +2410,14 @@ where
                 // deposed-leader oracle measures its clock from.
                 if let Message::HeartbeatAck { from, ballot, .. } = &msg {
                     rt.audit.heartbeat_ack_received(NodeId(self_id), *from, *ballot);
+                }
+                // A stopping node's handed-off leadership moved once its
+                // successor beats (#560 (clean Ctrl-C shutdown)).
+                if let (Some(halt), Message::Heartbeat { from, ballot, .. }) = (halt.as_mut(), &msg)
+                    && halt.heard(journal, *from, *ballot)
+                {
+                    moonpool_assertions::reachable!("stop: a successor took a stopping leader's journal");
+                    tracing::info!(machine = %stop_name, journal = %journal, to = from.0, "stop_handoff_taken");
                 }
                 let outcome = shared.input(rt, Input::Deliver(msg)).await;
                 journals.fold(journal, outcome, ticks, self_id)?;
@@ -2828,9 +2893,59 @@ where
                 if journals.exhausted() && (!follows || journals.stranded()) {
                     return journals.exit();
                 }
+                if let Some(halt) = halt.as_mut() {
+                    // A clean stop's beat (#560 (clean Ctrl-C shutdown)):
+                    // hand every leadership it can on, then end once
+                    // nothing is open, or once the bound ran out.
+                    halt.beat();
+                    let leaders: Vec<JournalIdentifier> = journals
+                        .live
+                        .iter()
+                        .filter(|(_, rt)| rt.node.can_relinquish())
+                        .map(|(journal, _)| *journal)
+                        .collect();
+                    for journal in leaders {
+                        let Some(rt) = journals.live.get_mut(&journal) else { continue };
+                        if let Err(fault) = shared.land(rt).await {
+                            journals.fold(journal, Err(fault), ticks, self_id)?;
+                            continue;
+                        }
+                        if let Some(handoff) = stop::hand_on(&providers, &mut rt.node) {
+                            rt.audit.authority_relinquished(NodeId(self_id), handoff);
+                            halt.handed(journal, handoff.to, handoff.ballot);
+                            tracing::info!(machine = %stop_name, journal = %journal, to = handoff.to.0, "stop_handoff_sent");
+                        }
+                        shared.settle(rt).await;
+                    }
+                    let coordinator = coordinator_ended.as_ref().is_none_or(|ended| *ended.borrow());
+                    let open = halt.open(&journals, coordinator);
+                    let now = time.now();
+                    if open.is_none() || halt.expired(now) {
+                        let (handed, taken) = halt.handoffs();
+                        let took_ms = u64::try_from(halt.took(now).as_millis()).unwrap_or(u64::MAX);
+                        match open {
+                            None => {
+                                moonpool_assertions::reachable!("stop: a machine stopped cleanly");
+                                tracing::info!(machine = %stop_name, handed, taken, took_ms, "stop_completed");
+                            }
+                            Some(open) => {
+                                moonpool_assertions::reachable!("stop: a machine's stop ran out of time");
+                                tracing::warn!(machine = %stop_name, step = open.label(), handed, taken, took_ms, "stop_timed_out");
+                            }
+                        }
+                        return Ok(());
+                    }
+                }
                 tracing::info!(tick = ticks, "node_tick");
             }
-            () = shutdown.cancelled() => return Ok(()),
+            () = shutdown.cancelled(), if halt.is_none() => {
+                // The operator's stop (#560 (clean Ctrl-C shutdown)): the
+                // loop serves on, refuses new calls, and ends at a beat
+                // once nothing is open.
+                stopping.cancel();
+                halt = Some(stop::Stop::begin(time.now(), &tunables));
+                tracing::info!(machine = %stop_name, within_ms = u64::try_from(tunables.shutdown_within.as_millis()).unwrap_or(u64::MAX), "stop_started");
+            }
         }
     }
 }
@@ -3190,10 +3305,18 @@ impl<P: Providers, J: JournalStores> SystemCtx<'_, '_, P, J> {
             .collect();
         self.stores.book_sets(sets);
         // A journal its tenant created (live or deleted) that is no longer
-        // booked here stops: its booking was released.
-        let unbooked: Vec<JournalIdentifier> = self
-            .journals
-            .known()
+        // booked here stops: its booking was released. A store a booking
+        // released while this machine was down counts too: no journal of
+        // this incarnation knows it, but the machine still holds it.
+        let provisioned: Vec<JournalIdentifier> = self
+            .stores
+            .provisioned()
+            .into_iter()
+            .filter(|journal| !self.journals.released(*journal))
+            .collect();
+        let held: BTreeSet<JournalIdentifier> = self.journals.known().chain(provisioned).collect();
+        let unbooked: Vec<JournalIdentifier> = held
+            .into_iter()
             .filter(|journal| !self.journals.is_control(*journal) && !booked.contains(journal))
             .filter(|journal| {
                 follower

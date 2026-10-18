@@ -411,6 +411,13 @@ pub struct DriverTunables {
     /// Floor 1; the acceptor cuts a page at `paros::driver` `SCRUB_PAGE`
     /// records and 1 MiB whatever the scrubber asks.
     pub scrub_page: usize,
+    /// How long a clean stop may take (#560 (clean Ctrl-C shutdown)): the
+    /// node loop refuses new calls, answers the ones it holds, hands its
+    /// leaderships on and lets its flushes land, then returns; once this
+    /// bound runs out it returns anyway and logs the step that did not
+    /// complete. Floor 0: a stop at once, the same as a crash, which
+    /// recovery already handles.
+    pub shutdown_within: Duration,
 }
 
 impl Default for DriverTunables {
@@ -465,6 +472,7 @@ impl Default for DriverTunables {
             scrub_rate: SCRUB_RATE,
             scrub_pass_within: SCRUB_PASS_WITHIN,
             scrub_page: SCRUB_PAGE,
+            shutdown_within: SHUTDOWN_WITHIN,
         };
         // The simulation's baseline is itself a winnable profile.
         assert!(
@@ -594,6 +602,10 @@ pub const SCRUB_PASS_WITHIN_FLOOR: Duration = Duration::from_secs(1);
 
 /// Default [`DriverTunables::scrub_page`].
 const SCRUB_PAGE: usize = 64;
+
+/// Default [`DriverTunables::shutdown_within`]: 5 s, room for a handoff's
+/// round trips and an election renewal on the simulator's links.
+const SHUTDOWN_WITHIN: Duration = Duration::from_secs(5);
 
 const _: () = assert!(SCRUB_RATE >= SCRUB_RATE_FLOOR);
 const _: () = assert!(SCRUB_PASS_WITHIN.as_millis() >= SCRUB_PASS_WITHIN_FLOOR.as_millis());
