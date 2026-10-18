@@ -324,8 +324,9 @@ fn footprints(registry: &Registry) {
 /// slot, as `(tenant, node)`: a registered storage machine that serves the
 /// cell, never wiped, up and not slow, with a free slot, that
 /// holds no slot of it,
-/// while every machine it stays on was never wiped. `None` when every such
-/// move finished.
+/// while every machine it stays on was never wiped and the members never
+/// wiped hold both quorums of its configuration in force. `None` when
+/// every such move finished.
 fn unmoved(
     tenants: &[TenantControl],
     registry: &Registry,
@@ -375,14 +376,24 @@ fn unmoved(
             // the journal's members. A wiped acceptor never rejoins, so a
             // journal whose members never wiped hold no quorum never moves
             // (a two-member journal that lost one, placed while the cell
-            // had two storage machines).
+            // had two storage machines). The quorum is the configuration
+            // in force's, the placement the coordinator last recorded
+            // (`placed`, #214 (tenant modes)), never the create's
+            // bootstrap `config`: a mode change may have left the journal
+            // one acceptor per partition (`failures_per_partition` 0),
+            // whose Phase 1 needs every member. Recipe 409137802379467466
+            // 472027:15658202577153942549 on 936348a: a leader under a
+            // `1×3` grid lost a member to a wipe, kept leading, and the
+            // move's `Reconfigure` sent it campaigning for a Phase-1
+            // quorum the wiped member can never answer; the bootstrap, a
+            // majority, still read as a quorum.
             let alive: BTreeSet<NodeId> = slots
                 .iter()
                 .filter(|node| !wiped.contains(&node.0))
                 .copied()
                 .collect();
-            if !journal.config.has_phase1_quorum(&alive)
-                || !journal.config.has_phase2_quorum(&alive)
+            if !journal.placed.has_phase1_quorum(&alive)
+                || !journal.placed.has_phase2_quorum(&alive)
             {
                 continue;
             }
