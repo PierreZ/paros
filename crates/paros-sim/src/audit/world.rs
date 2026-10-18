@@ -700,7 +700,7 @@ impl AuditWorld {
     /// waits on it before it asks for the claim.
     pub(crate) fn converged(&self) -> bool {
         let st = self.lock();
-        if st.loss_excuses_liveness() {
+        if st.loss_excuses_liveness() || st.wipes_excuse_liveness() {
             return true;
         }
         let Some(cluster_max) = st.applied_max.values().copied().max() else {
@@ -781,7 +781,9 @@ impl AuditWorld {
         // safety is judged all along (`AuditState::loss_accepted`), and so
         // is the leg that is safety: nothing applied runs ahead of the
         // decided frontier.
-        let excused = st.loss_excuses_liveness();
+        // So is one whose wipes left no configuration a Phase-1 quorum of
+        // live members (`wipes_excuse_liveness`); an acked slot never is.
+        let excused = st.loss_excuses_liveness() || st.wipes_excuse_liveness();
         let Some(cluster_max) = st.applied_max.values().copied().max() else {
             assert_always!(
                 acked_max.is_none(),

@@ -46,6 +46,14 @@ pub struct Rare {
 /// window seldom reaches, #485 the double fault, #486 the rest.
 pub const RARE: &[Rare] = &[
     Rare {
+        msg: "convergence: a journal its wipes left without a Phase-1 quorum is excused",
+        reason: "a created journal whose surviving members hold no Phase-1 quorum after a machine wipe (a 1x2 grid that lost one): one witness on PR #678's sweep (#658 (the full alphabet on created journals), #486)",
+    },
+    Rare {
+        msg: "created: a journal holding a long log is moved",
+        reason: "a drained-machine seed whose moved journal had taken the data plane's 16+ rounds first: missed by PR #678's sweep (#658 (the full alphabet on created journals), #498 (moves in the sweep))",
+    },
+    Rare {
         msg: "admit: a removed machine is refused admission",
         reason: "an ADMIT that draws a machine an operator removed: one CI sweep seed (#359 (drain, remove and maintenance for machines))",
     },

@@ -411,6 +411,9 @@ pub(super) struct ChainConfig {
 /// `first_seq - 1` (backward). Each is clamped by the fold's fence.
 pub(super) const TRUNCATE_SHAPES: [&str; 5] = ["all", "uniform", "mid-batch", "floor", "backward"];
 
+/// The `mid-batch` entry of [`TRUNCATE_SHAPES`].
+pub(super) const MID_BATCH_SHAPE: usize = 2;
+
 impl ChainConfig {
     // One knob per line: the table grows with every tunable.
     #[allow(clippy::too_many_lines)]

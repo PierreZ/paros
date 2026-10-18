@@ -31,6 +31,8 @@ use super::FleetOps;
 use crate::audit::{AckedWrite, AuditWorld, audit_world_named};
 use crate::chain::user_command_hash;
 use crate::chain_workload::ChainWorkload;
+use crate::chain_workload::MAX_BATCH_RECORDS;
+use crate::chain_workload::config::ChainConfig;
 use crate::client::ChainClient;
 
 /// The most pages a paging read takes.
@@ -56,6 +58,17 @@ fn acked(audit: Option<&AuditWorld>, seq: u64, count: u64, sent: Vec<u64>) {
             count,
             records: sent,
         });
+    }
+}
+
+/// The records of one batch under `config`, drawn as the genesis
+/// journals' are (#658), registered with `audit` when there is one.
+fn records_of(config: &ChainConfig, audit: Option<&AuditWorld>) -> Vec<Value> {
+    let class = moonpool_sim::sim_random_range(0..u64::MAX);
+    let seed = moonpool_sim::sim_random_range(0..u64::MAX);
+    match audit {
+        Some(audit) => ChainWorkload::draw_records(audit, config, class, seed),
+        None => ChainWorkload::draw_values(config, class, seed),
     }
 }
 
@@ -92,12 +105,7 @@ impl FleetOps {
     /// The records of one batch, drawn as the genesis journals' are
     /// (#658), registered with `audit` when there is one.
     fn records(&self, audit: Option<&AuditWorld>) -> Vec<Value> {
-        let class = moonpool_sim::sim_random_range(0..u64::MAX);
-        let seed = moonpool_sim::sim_random_range(0..u64::MAX);
-        match audit {
-            Some(audit) => ChainWorkload::draw_records(audit, &self.config, class, seed),
-            None => ChainWorkload::draw_values(&self.config, class, seed),
-        }
+        records_of(&self.config, audit)
     }
 
     /// The rounds of batches a created journal takes: `created_rounds`,
@@ -122,28 +130,52 @@ impl FleetOps {
         audit: Option<&AuditWorld>,
     ) {
         let journal = writer.journal();
+        // On its own location, batches of up to the most records a write
+        // carries, whatever the seed's `batch_records`: a floor then has
+        // somewhere inside a batch to land (#659).
+        let mut config = self.config;
+        if buggify_with_prob!(0.5) {
+            config.batch_records = MAX_BATCH_RECORDS;
+        }
+        let mut batches = Vec::new();
         for _ in 0..self.rounds() {
-            let records = self.records(audit);
+            let records = records_of(&config, audit);
             let sent = hashes(&records);
             if let WriterOutcome::Written { seq, count, .. } =
                 writer.write(client, records, first).await
             {
                 assert_reachable!("created: an owner appends a batch to a created journal");
                 acked(audit, seq, count, sent);
+                batches.push((seq, count));
             }
         }
         if buggify_with_prob!(0.25) {
             writer = self.pipelined(client, writer, first, audit).await;
         }
         self.page(client, journal, first).await;
-        // A floor drawn over the whole log, often inside a batch (#659).
+        // A floor drawn over the whole log, or strictly inside a batch of
+        // several records it wrote (#659).
         let next = writer.next_seq();
-        let up_to = 1 + moonpool_sim::sim_random_range(0..next.max(1));
+        let several: Vec<&(u64, u64)> = batches.iter().filter(|(_, count)| *count > 1).collect();
+        let aim = !several.is_empty() && moonpool_sim::sim_random_range(0..2_u64) == 0;
+        let inside = aim.then(|| {
+            let pick = moonpool_sim::sim_random_range(0..several.len() as u64);
+            let (seq, count) = *several[usize::try_from(pick).unwrap_or(0)];
+            seq + 1 + moonpool_sim::sim_random_range(0..count - 1)
+        });
+        let up_to = inside.unwrap_or_else(|| 1 + moonpool_sim::sim_random_range(0..next.max(1)));
         if next > 1
-            && let Some(TruncateOutcome::Applied { .. }) =
+            && let Some(TruncateOutcome::Applied { state }) =
                 writer.truncate(client, up_to.min(next), first).await
         {
             assert_reachable!("created: an owner truncates a created journal");
+            let floor = state.first_seq.0;
+            if batches
+                .iter()
+                .any(|(seq, count)| *seq < floor && floor < seq + count)
+            {
+                assert_reachable!("created: a truncation floor lands inside a batch");
+            }
             self.page(client, journal, first).await;
         }
         let mut successor = Writer::new(journal, self.leader_seeds.next());

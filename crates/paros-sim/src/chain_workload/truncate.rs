@@ -3,13 +3,13 @@
 
 use std::future::Future;
 
-use moonpool_sim::{assert_always, assert_reachable};
+use moonpool_sim::{assert_always, assert_reachable, buggify_with_prob};
 use paros::client::{TruncateOutcome, Writer};
 use paros::{LeaderUuid, Truncate, leader_uuid_to_proto};
 
 use crate::chain::trace_truncate;
 
-use super::config::{TRUNCATE_SHAPES, weighted_index};
+use super::config::{MID_BATCH_SHAPE, TRUNCATE_SHAPES, weighted_index};
 use super::fold::{self, Fold};
 use super::write::WrittenCommand;
 use super::{ChainWorkload, Step, owner_never_of_wrong_mode};
@@ -119,7 +119,17 @@ impl ChainWorkload {
             // when it wrote past what it read.
             let base = writer.next_seq().max(fold.cursor());
             let before = fold.floor();
-            let shape = weighted_index(&config.truncate_shape_weights, raw_class);
+            // On its own location, a client that wrote a batch of several
+            // records aims inside it whatever the seed's weights: the
+            // shape needs that batch below the fence, which the weights
+            // alone seldom line up (#659).
+            let several = written.iter().any(|own| own.count > 1);
+            let shape = if several && buggify_with_prob!(0.3) {
+                assert_reachable!("chain: a truncation aims inside a batch the client wrote");
+                MID_BATCH_SHAPE
+            } else {
+                weighted_index(&config.truncate_shape_weights, raw_class)
+            };
             let up_to = fold::clamp(ctx.state(), journal, base).map_or(base, |fence| {
                 truncate_floor(shape, (before, fence), written, raw_payload)
             });
