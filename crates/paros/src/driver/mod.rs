@@ -960,8 +960,8 @@ impl<P: Providers> Shared<'_, P> {
 
     /// A read-only journal's beat (#360 (disk full)): it leaves read-only
     /// once `read_only_ticks` passed, with a fresh election timeout, and
-    /// until then it never leads (a campaign it won before the mark, or a
-    /// timeout a rival's `Prepare` asked for, is undone here).
+    /// until then it never campaigns (a timeout a rival's `Prepare` asked
+    /// for is set back to 0 here, before the core's tick).
     fn read_only_beat<S, A: Audit + Clone>(&self, rt: &mut JournalRt<S, A>, ticks: u64) {
         let Some(since) = rt.read_only else {
             return;
@@ -982,12 +982,8 @@ impl<P: Providers> Shared<'_, P> {
             tracing::info!(node = self_id, reason = "disk_full", "journal_writable");
             return;
         }
-        if rt.node.is_leader() {
-            rt.node.step_down();
-            rt.audit.stepped_down(NodeId(self_id));
-            moonpool_assertions::reachable!("disk full: a read-only store resigns its leadership");
-            tracing::info!(node = self_id, reason = "disk_full", "leadership_resigned");
-        }
+        // It re-opened a follower, its timeout is held at 0 before every
+        // core tick and a handoff to it is refused: it cannot lead.
         if rt.node.election_timeout() != 0 {
             rt.node.set_election_timeout(0);
         }
