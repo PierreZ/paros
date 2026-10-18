@@ -482,6 +482,10 @@ impl ChainWorkload {
                 nodes.observe_leader(leader);
                 self.history.record_write_failed(submission.op);
             }
+            WriteOutcome::Busy => {
+                assert_reachable!("chain: a leader answers a write busy");
+                self.history.record_write_failed(submission.op);
+            }
             WriteOutcome::TooLarge { .. } => {
                 assert_reachable!("chain: a batch over a node's limits is refused at the edge");
                 self.history.record_write_failed(submission.op);
@@ -589,6 +593,7 @@ impl ChainWorkload {
                 // attempt's refuses the identical retry.
                 WriteOutcome::WrongMode { .. } => owner_never_of_wrong_mode(),
                 WriteOutcome::TooLarge { .. }
+                | WriteOutcome::Busy
                 | WriteOutcome::Truncated { .. }
                 | WriteOutcome::Denied(_)
                 | WriteOutcome::UnknownJournal

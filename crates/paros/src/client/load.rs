@@ -24,7 +24,7 @@ use crate::{Address, Names};
 pub enum LoadOutcome {
     /// The machine answered; `windowed` is false when it has no full
     /// window yet.
-    Answered(wire::LoadAck),
+    Answered(Box<wire::LoadAck>),
     /// No answer within the timeout.
     Silent,
 }
@@ -62,7 +62,7 @@ pub async fn ask_all<P: Providers>(
                 )
                 .await;
                 let outcome = match reply {
-                    Some(Ok(ack)) => LoadOutcome::Answered(ack),
+                    Some(Ok(ack)) => LoadOutcome::Answered(Box::new(ack)),
                     _ => LoadOutcome::Silent,
                 };
                 // The caller may be gone: nobody waits for this answer.

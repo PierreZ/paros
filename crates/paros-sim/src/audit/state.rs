@@ -352,6 +352,8 @@ pub(super) struct AuditState {
     /// ([`Audit::storage_fault`](paros::Audit::storage_fault) with `Io`/`FsyncFailed`).
     pub(super) storage_faults_detected: u64,
     pub(super) storage_fault_crashed: bool,
+    /// A full disk made a store read-only (#360 (disk full)).
+    pub(super) disk_full_read_only: bool,
     /// Typed Stage-7 corruption/metadata crash decisions folded in.
     pub(super) corruption_crashes: u64,
     pub(super) corruption_crashed: bool,

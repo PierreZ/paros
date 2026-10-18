@@ -115,6 +115,11 @@ A `Read` with `limit` 0 gets the full page. A `Read` with `wait_ms` 0 never wait
 split the batch. An operator sets each limit with a `PAROS_*` variable, for example
 `PAROS_MAX_READ_RECORDS` or `PAROS_MAX_WAIT_MS`.
 
+A leader also slows its writes down when its acceptors fall behind. When it holds 256 rounds
+that no quorum has decided yet (`PAROS_ADMISSION_ROUNDS`), it answers a new `Write` with
+`busy`, before consensus. The write is in no slot. The client library sends the same write to
+the same leader again after a short pause, until its deadline.
+
 ## Durability and configure
 
 A journal's durability is `--failures-per-partition F` and `--partitions P`. Each acceptor

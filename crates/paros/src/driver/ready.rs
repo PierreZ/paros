@@ -767,10 +767,24 @@ fn surface_persisted<A: Audit>(
 /// the instant it is made) and traced as `storage_fault`, then
 /// [`RunError::Storage`] unwinds the incarnation. Production semantics: a
 /// storage fault is a process exit (crash-only); the sim's node loop matches
-/// the variant and routes to the crash/restart path instead.
+/// the variant and routes to the crash/restart path instead. A full disk
+/// (#360 (disk full)) is decided [`StorageFaultDecision::ReadOnly`]: the
+/// journal unwinds the same way, but [`super::journals::Journals::fold`]
+/// keeps the node running and the journal re-opens read-only.
 pub(crate) fn storage_fault_crash<A: Audit>(audit: &A, self_id: u64, e: StorageError) -> RunError {
-    audit.storage_fault(NodeId(self_id), &e, StorageFaultDecision::Crash);
-    tracing::warn!(node = self_id, error = %e, decision = "crash", "storage_fault");
+    let decision = StorageFaultDecision::of(&e);
+    audit.storage_fault(NodeId(self_id), &e, decision);
+    match decision {
+        StorageFaultDecision::Crash => {
+            tracing::warn!(node = self_id, error = %e, decision = "crash", "storage_fault");
+        }
+        StorageFaultDecision::ReadOnly => {
+            // A full disk (#360 (disk full)): a normal result, never a
+            // crash. The journal goes read-only once it re-opens.
+            moonpool_assertions::reachable!("disk full: a store's write finds the disk full");
+            tracing::warn!(node = self_id, error = %e, decision = "read_only", "storage_fault");
+        }
+    }
     RunError::Storage(e)
 }
 

@@ -112,7 +112,7 @@ use matchmaking::{
 use metered::{Meter, journal_names};
 use ready::{ClientWaiters, Taken, finish_ready, fold_head, take_ready};
 use reply::maybe_duplicate;
-use report::{Deltas, HandoffContext, handoff_context, maintain};
+use report::{Deltas, HandoffContext, draw_election_timeout, handoff_context, maintain};
 use system::{ControlFollower, Followed, follow_local};
 use transport::{LaneOpener, Outbound, peer_target};
 
@@ -767,6 +767,12 @@ impl<P: Providers> Shared<'_, P> {
         assert!(rt.storage.is_none(), "a landing gives the store back");
         rt.storage = Some(landing.storage);
         landing.done?;
+        if rt.back_from_full {
+            // A store a full disk made read-only wrote again (#360 (disk
+            // full)): the outcome the read-only state exists for.
+            rt.back_from_full = false;
+            moonpool_assertions::reachable!("disk full: a store went read-only and came back");
+        }
         self.with(&rt.audit)
             .finish(
                 &mut rt.node,
@@ -935,11 +941,57 @@ impl<P: Providers> Shared<'_, P> {
                         "prepare_below_floor"
                     );
                 }
+                if rt.read_only.is_some() && read_only_refuses(&msg) {
+                    moonpool_assertions::reachable!(
+                        "disk full: a read-only store refuses a Phase-2 vote"
+                    );
+                    tracing::debug!(node = self_id, reason = "disk_full", "phase2_refused");
+                    return;
+                }
                 contest_overwrite(&mut rt.node, &mut rt.contested, &msg, self_id);
                 rt.node.step(msg);
             }
-            Input::Tick(ticks) => self.beat_step(rt, ticks),
+            Input::Tick(ticks) => {
+                self.read_only_beat(rt, ticks);
+                self.beat_step(rt, ticks);
+            }
         }
+    }
+
+    /// A read-only journal's beat (#360 (disk full)): it leaves read-only
+    /// once `read_only_ticks` passed, with a fresh election timeout, and
+    /// until then it never leads (a campaign it won before the mark, or a
+    /// timeout a rival's `Prepare` asked for, is undone here).
+    fn read_only_beat<S, A: Audit + Clone>(&self, rt: &mut JournalRt<S, A>, ticks: u64) {
+        let Some(since) = rt.read_only else {
+            return;
+        };
+        let self_id = self.self_id;
+        if ticks.saturating_sub(since) >= self.tunables.read_only_ticks.max(1) {
+            rt.read_only = None;
+            rt.back_from_full = true;
+            let timeout =
+                draw_election_timeout(self.providers, self_id, self.tunables.election_timeout_base);
+            rt.node.set_election_timeout(timeout);
+            assert!(
+                rt.node.election_timeout() > 0,
+                "a writable journal campaigns again"
+            );
+            rt.audit.election_timeout_set(NodeId(self_id), timeout);
+            moonpool_assertions::reachable!("disk full: a read-only store becomes writable");
+            tracing::info!(node = self_id, reason = "disk_full", "journal_writable");
+            return;
+        }
+        if rt.node.is_leader() {
+            rt.node.step_down();
+            rt.audit.stepped_down(NodeId(self_id));
+            moonpool_assertions::reachable!("disk full: a read-only store resigns its leadership");
+            tracing::info!(node = self_id, reason = "disk_full", "leadership_resigned");
+        }
+        if rt.node.election_timeout() != 0 {
+            rt.node.set_election_timeout(0);
+        }
+        assert!(!rt.node.is_leader(), "a read-only journal does not lead");
     }
 
     /// One journal's beat, stepped into its core (#613 (settle off the node
@@ -1877,7 +1929,7 @@ where
     for journal in journals.take_quarantined() {
         stores.quarantined(journal);
     }
-    if journals.exhausted() && (!follows || journals.stranded()) {
+    if journals.exhausted() && !journals.waits_for_space() && (!follows || journals.stranded()) {
         return journals.exit();
     }
     // The caller named the node (no id has a default, §3.8); every journal
@@ -2249,6 +2301,15 @@ where
                 if let Some(ack) = calls::batch_too_large(&req.records, &tunables) {
                     tracing::debug!(node = self_id, records = req.records.len(), "write_too_large");
                     shared.with(&node_audit).answer(Reply::Write, reply, ack);
+                    continue;
+                }
+                // Admission control (#360 (disk full)): a leader whose
+                // acceptors fall behind answers `busy`, and the client
+                // retries the same write.
+                if let Some(ack) = calls::busy(&rt.node, &tunables) {
+                    moonpool_assertions::reachable!("admission: a leader answers a write busy");
+                    tracing::debug!(node = self_id, journal = %journal, "write_busy");
+                    shared.with(&node_audit).answer(Reply::Redirect, reply, ack);
                     continue;
                 }
                 let entry = Entry {
@@ -2756,7 +2817,7 @@ where
                     }
                     tracing::info!(node = self_id, journal = %journal, "retired");
                     journals.park(journal, None);
-                    if journals.exhausted() && (!follows || journals.stranded()) {
+                    if journals.exhausted() && !journals.waits_for_space() && (!follows || journals.stranded()) {
                         return journals.exit();
                     }
                 }
@@ -2890,7 +2951,7 @@ where
                         f.poll_remote(&providers, |journal| journals.live.contains_key(&journal));
                     }
                 }
-                if journals.exhausted() && (!follows || journals.stranded()) {
+                if journals.exhausted() && !journals.waits_for_space() && (!follows || journals.stranded()) {
                     return journals.exit();
                 }
                 if let Some(halt) = halt.as_mut() {
@@ -3616,6 +3677,45 @@ fn refuse_unknown<S, A: Audit, N: Audit, P: Providers>(
     true
 }
 
+/// A journal a full disk quarantined re-opens **read-only** (#360 (disk
+/// full), decided on 2026-10-18: a state of the live journal, not a longer
+/// quarantine, so the node keeps its Phase-1 promises and its reads): from
+/// tick `now` for `DriverTunables::read_only_ticks`, it votes in Phase 1,
+/// serves reads, refuses every Phase-2 vote ([`read_only_refuses`]) and
+/// never campaigns (an election timeout of 0 never fires). A write that
+/// still finds the disk full quarantines it again.
+fn enter_read_only<S, A: Audit>(rt: &mut JournalRt<S, A>, journal: JournalIdentifier, now: u64) {
+    assert!(
+        rt.read_only.is_none(),
+        "a re-opened journal starts writable"
+    );
+    // A re-opened core is a follower with no campaign open.
+    assert!(!rt.node.is_leader(), "a re-opened journal does not lead");
+    rt.read_only = Some(now);
+    rt.back_from_full = false;
+    rt.node.set_election_timeout(0);
+    assert!(
+        rt.node.election_timeout() == 0,
+        "a read-only journal never campaigns"
+    );
+    moonpool_assertions::reachable!("disk full: a store re-opens read-only");
+    let node = rt.node.config().id.0;
+    tracing::warn!(node, journal = %journal, reason = "disk_full", "journal_read_only");
+}
+
+/// Whether a read-only journal (#360 (disk full)) refuses `msg`: a Phase-2
+/// vote (`Accept`), the records a catch-up would write, and a handoff that
+/// would make it lead. A refused message is dropped, as a lost one: the
+/// leader's re-send reaches the node once it is writable again, and a
+/// quorum of other acceptors decides meanwhile. Phase 1 (`Prepare`) and
+/// reads go on.
+fn read_only_refuses(msg: &Message) -> bool {
+    matches!(
+        msg,
+        Message::Accept { .. } | Message::CatchUpResponse { .. } | Message::Relinquish { .. }
+    )
+}
+
 /// Open `journal`'s store and boot it into `journals` (at boot, or when its
 /// quarantine is over at tick `now`): live on success, back in quarantine on
 /// a storage fault (its open's too, [`JournalStores::open_fault`]), down for
@@ -3650,7 +3750,10 @@ async fn open_journal<P: Providers, J: JournalStores>(
         return;
     };
     match boot_journal(providers, storage, boot, audit, tunables).await {
-        Ok(rt) => {
+        Ok(mut rt) => {
+            if journals.take_full(journal) {
+                enter_read_only(&mut rt, journal, now);
+            }
             journals.insert(journal, rt);
             stores.opened(journal);
         }

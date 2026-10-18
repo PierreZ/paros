@@ -146,6 +146,19 @@ pub enum SystemCommand {
         /// The latency facts the judgement read.
         facts: SlowFacts,
     },
+    /// The cell coordinator judged machine `id`, as `incarnation`, low on
+    /// space or not any more (#360 (disk full)): its disk had `free_bytes`
+    /// free, against the free-bytes floor.
+    MachineSpace {
+        /// The machine.
+        id: NodeId,
+        /// The incarnation the registry holds for it.
+        incarnation: u128,
+        /// Whether it is low on space.
+        low: bool,
+        /// The free bytes its last `Load` answer reported.
+        free_bytes: u64,
+    },
     /// The cell coordinator saw machine `id` answer as `incarnation`
     /// (#211, D6).
     MachineUp {
@@ -397,6 +410,21 @@ impl SystemCommand {
                     cpu_busy_permille: facts.cpu_busy_permille,
                 })
             }
+            SystemCommand::MachineSpace {
+                id,
+                incarnation,
+                low,
+                free_bytes,
+            } => {
+                let (incarnation_high, incarnation_low) = incarnation_halves(*incarnation);
+                Kind::MachineSpace(wire::MachineSpace {
+                    id: id.0,
+                    incarnation_high,
+                    incarnation_low,
+                    low: *low,
+                    free_bytes: *free_bytes,
+                })
+            }
             SystemCommand::MachineAdmitted { id } => {
                 Kind::MachineAdmitted(wire::MachineAdmitted { id: id.0 })
             }
@@ -515,6 +543,12 @@ impl SystemCommand {
                     disk_busy_permille: slow.disk_busy_permille,
                     cpu_busy_permille: slow.cpu_busy_permille,
                 },
+            },
+            Kind::MachineSpace(space) => SystemCommand::MachineSpace {
+                id: NodeId(space.id),
+                incarnation: incarnation_from_halves(space.incarnation_high, space.incarnation_low),
+                low: space.low,
+                free_bytes: space.free_bytes,
             },
             Kind::MachineAdmitted(admitted) => SystemCommand::MachineAdmitted {
                 id: NodeId(admitted.id),
@@ -885,6 +919,9 @@ pub struct Liveness {
     /// Whether it was judged slow (#361 (slow machines)): alive, but its
     /// roles move off it like a drain's.
     pub slow: bool,
+    /// Whether it was judged low on space (#360 (disk full)): its disk's
+    /// free bytes below the free-bytes floor, so placement books it last.
+    pub low_space: bool,
 }
 
 /// The latency facts a slow judgement read (#361 (slow machines)): what the
@@ -989,6 +1026,14 @@ pub enum RegistryEvent {
         id: NodeId,
         /// Whether it is slow now.
         slow: bool,
+    },
+    /// The cell coordinator judged machine `id` low on space, or not any
+    /// more (#360 (disk full)).
+    MachineSpace {
+        /// The machine.
+        id: NodeId,
+        /// Whether it is low on space now.
+        low: bool,
     },
     /// The cell coordinator marked machine `id` up as `incarnation`
     /// (#211): `was_down` when it was marked down before.
@@ -1384,6 +1429,12 @@ impl Registry {
                 slow,
                 ..
             }) => self.slow(id, incarnation, slow),
+            Some(SystemCommand::MachineSpace {
+                id,
+                incarnation,
+                low,
+                ..
+            }) => self.space(id, incarnation, low),
             Some(SystemCommand::MachineAdmitted { id }) => self.admitted(id),
             Some(SystemCommand::Maintenance { scope, for_ms }) => {
                 self.open_maintenance(seq, scope, for_ms)
@@ -1459,6 +1510,7 @@ impl Registry {
                         incarnation,
                         up: true,
                         slow: false,
+                        low_space: false,
                     },
                 );
                 RegistryEvent::Reregistered { id, addr, capacity }
@@ -1486,6 +1538,7 @@ impl Registry {
                         incarnation,
                         up: true,
                         slow: false,
+                        low_space: false,
                     },
                 );
                 RegistryEvent::Registered {
@@ -1846,6 +1899,7 @@ impl Registry {
                 incarnation,
                 up: false,
                 slow: held.slow,
+                low_space: held.low_space,
             },
         );
         assert!(!self.liveness(id).up, "a machine marked down is held down");
@@ -1894,6 +1948,7 @@ impl Registry {
                 incarnation,
                 up: true,
                 slow: held.slow && held.incarnation == incarnation,
+                low_space: held.low_space && held.incarnation == incarnation,
             },
         );
         RegistryEvent::MachineUp {
@@ -1912,7 +1967,47 @@ impl Registry {
             incarnation: self.nodes.get(&id).map_or(0, |n| n.incarnation),
             up: true,
             slow: false,
+            low_space: false,
         })
+    }
+
+    /// `MachineSpace` (#360 (disk full)): a change only. Refused for a
+    /// machine outside the pool, for an incarnation other than the one held,
+    /// and for the judgement held.
+    fn space(&mut self, id: NodeId, incarnation: u128, low: bool) -> RegistryEvent {
+        if !self.contains(id) {
+            return RegistryEvent::Refused(RegistryRefusal::NotInPool { id });
+        }
+        let held = self.liveness(id);
+        if held.incarnation != incarnation {
+            return RegistryEvent::Refused(RegistryRefusal::StaleIncarnation { id });
+        }
+        if held.low_space == low {
+            return RegistryEvent::Refused(RegistryRefusal::LivenessUnchanged { id });
+        }
+        self.liveness.insert(
+            id,
+            Liveness {
+                low_space: low,
+                ..held
+            },
+        );
+        assert!(
+            self.liveness(id).low_space == low,
+            "a space judgement is held"
+        );
+        assert!(
+            self.liveness(id).up == held.up && self.liveness(id).slow == held.slow,
+            "a space judgement leaves the up and slow states alone"
+        );
+        RegistryEvent::MachineSpace { id, low }
+    }
+
+    /// Whether the cell coordinator holds `id` low on space (#360 (disk
+    /// full)).
+    #[must_use]
+    pub fn is_low_on_space(&self, id: NodeId) -> bool {
+        self.contains(id) && self.liveness(id).low_space
     }
 
     /// `MachineSlow` (#361 (slow machines)): a change only. Refused for a
@@ -2101,6 +2196,7 @@ impl Registry {
                     incarnation_low: incarnation_halves(l.incarnation).1,
                     up: l.up,
                     slow: l.slow,
+                    low_space: l.low_space,
                 })
                 .collect(),
             fleet_id: self.fleet.map_or(0, |f| f.fleet_id),
@@ -2275,6 +2371,7 @@ fn liveness_from_wire(states: Vec<wire::LivenessState>) -> BTreeMap<NodeId, Live
                     incarnation: incarnation_from_halves(l.incarnation_high, l.incarnation_low),
                     up: l.up,
                     slow: l.slow,
+                    low_space: l.low_space,
                 },
             )
         })

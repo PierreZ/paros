@@ -311,6 +311,8 @@ Depth: module docs of `matchmaking.rs`, `node/matchmaking.rs`, `node/reconfigure
   `journals/<tenant>/<journal>/`.
 - **A storage fault quarantines its journal, not the process**; it re-opens after
   `DriverTunables::quarantine_ticks`. A crash at a driver `hint!` is the process dying, for every journal.
+  A full disk (`StorageError::Full`, #360 (disk full)) is never a crash: the journal re-opens
+  read-only (Phase 1 and reads, no Phase-2 vote) for `read_only_ticks`, and never ends the node.
 - **Control journals** (#189, #210): the node registry is the cell tenant's control journal
   (`paros::system::Registry`), and every hosted tenant has its own control journal
   (`paros::tenant::TenantControl`): its description and every journal it created, each create or

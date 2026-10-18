@@ -212,6 +212,15 @@ The batch limits are `DriverTunables::max_batch_records` (1,024 by default) and
 `TooLarge`, which names the two limits. That write is in no slot. Different nodes can have
 different limits, so a retry to another node can get a different answer (#241).
 
+**Admission control** (#360 (disk full), decided on 2026-10-18). A leader slows `Write` admission
+when its acceptors fall behind: when it holds `admission_rounds` undecided Phase-2 rounds or more
+(256 in the shipped profile, floor 1), it answers a new `Write` `busy` before it proposes
+anything. The lag is the leader's own count of rounds its acceptors have not decided, so a slow,
+full or read-only acceptor shows there first. `busy` is no verdict and the write is in no slot.
+The client library sends the identical write to the same leader again after `redirect_backoff`,
+until its request deadline (`WriteOutcome::Busy` when the deadline passes). The metrics count it
+under the outcome `busy`.
+
 The read limits are `DriverTunables::max_read_records` (256 by default, floor 1: a `limit` of 0
 or above it is cut to it), `max_read_bytes` (64 KiB, floor 1: a page always holds one record,
 whatever its size), `max_wait_ms` (400 ms in the simulation's baseline, 1 s in `parosd`, floor 0)

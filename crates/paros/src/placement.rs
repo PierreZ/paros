@@ -64,8 +64,10 @@ pub struct Machine {
     pub capacity: u64,
     /// The slots booked on it now.
     pub booked: u64,
-    /// Whether the cell coordinator holds it up and not slow (#361 (slow
-    /// machines)): placement books a slow machine last, as a down one.
+    /// Whether the cell coordinator holds it up, not slow (#361 (slow
+    /// machines)) and not low on space (#360 (disk full)): placement books
+    /// a slow machine, or one below the free-bytes floor, last, as a down
+    /// one.
     pub up: bool,
 }
 
@@ -100,13 +102,18 @@ pub fn machines(registry: &Registry, nodes: impl IntoIterator<Item = NodeId>) ->
                 );
                 return None;
             }
+            if registry.liveness(node).low_space {
+                moonpool_assertions::reachable!("placement: a machine low on space is booked last");
+            }
             Some(Machine {
                 node,
                 class: held.class,
                 zone: held.locality.zone.clone(),
                 capacity: held.capacity,
                 booked: registry.booked(node),
-                up: registry.liveness(node).up && !registry.liveness(node).slow,
+                up: registry.liveness(node).up
+                    && !registry.liveness(node).slow
+                    && !registry.liveness(node).low_space,
             })
         })
         .collect()

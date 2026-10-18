@@ -14,7 +14,7 @@
 //! gets no verdict ([`Call::no_verdict`]) — ambiguous to the client, which
 //! retries, and a retried `Write` is answered from the log itself.
 
-use paros_core::{Command, Control, Entry, LeaderUuid, NodeId, Outcome, Seq};
+use paros_core::{ColocatedNode, Command, Control, Entry, LeaderUuid, NodeId, Outcome, Seq};
 
 use super::reply::Reply;
 use crate::audit::Audit;
@@ -197,6 +197,32 @@ pub(crate) fn write_ack(outcome: &Outcome) -> WriteAck {
 /// `docs/architecture/02-data-plane.md` §2.7): `Some(TooLarge)` when it carries more
 /// records or more record bytes than `tunables` allow, `None` when it may be
 /// proposed. Judged before consensus, so a refused batch is in no slot.
+/// `Write` admission (#360 (disk full)): the answer to a write a leader
+/// does not admit, because it holds `admission_rounds` undecided Phase-2
+/// rounds or more (its acceptors fall behind), or `None` when it admits the
+/// write. A node that does not lead admits every write: it redirects.
+pub(crate) fn busy(node: &ColocatedNode, tunables: &DriverTunables) -> Option<WriteAck> {
+    assert!(
+        tunables.admission_rounds >= 1,
+        "a leader with no round in flight always admits a write"
+    );
+    if !node.is_leader() {
+        return None;
+    }
+    let open = u64::try_from(node.proposer().rounds().len()).unwrap_or(u64::MAX);
+    if open < tunables.admission_rounds {
+        return None;
+    }
+    let ack = WriteAck {
+        busy: true,
+        ..WriteAck::default()
+    };
+    // A busy answer is no verdict: no journal state, no records.
+    assert!(ack.state.is_none(), "a busy answer names no journal state");
+    assert!(ack.count == 0, "a busy answer acks no records");
+    Some(ack)
+}
+
 pub(crate) fn batch_too_large(records: &[Vec<u8>], tunables: &DriverTunables) -> Option<WriteAck> {
     assert!(
         tunables.max_batch_records >= 1,

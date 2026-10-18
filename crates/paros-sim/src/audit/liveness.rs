@@ -74,6 +74,12 @@ impl JudgedRegistry {
             RegistryEvent::MachineSlow { slow: false, .. } => {
                 assert_reachable!("registry: a slow machine is fast again");
             }
+            RegistryEvent::MachineSpace { low: true, .. } => {
+                assert_reachable!("registry: the cell coordinator marks a machine low on space");
+            }
+            RegistryEvent::MachineSpace { low: false, .. } => {
+                assert_reachable!("registry: a machine low on space has space again");
+            }
             RegistryEvent::Refused(RegistryRefusal::LivenessUnchanged { id }) => {
                 assert_always!(
                     false,

@@ -68,6 +68,10 @@ pub enum WriteOutcome {
         /// The most record bytes the node accepts in one write.
         max_bytes: u64,
     },
+    /// Refused at the edge by the leader (#360 (disk full)): its acceptors
+    /// fall behind, so it admits no write now. Nothing moved; the same
+    /// write may be sent again to the same leader after a pause.
+    Busy,
     /// The reply named a journal state that does not decode: no verdict.
     Malformed,
     /// Refused by a frontend before it reached any machine (#192 (the
@@ -94,6 +98,9 @@ impl WriteOutcome {
         }
         if ack.unknown_journal {
             return Self::UnknownJournal;
+        }
+        if ack.busy {
+            return Self::Busy;
         }
         let state = || journal_view_from_proto(ack.state).ok();
         match ack.outcome() {

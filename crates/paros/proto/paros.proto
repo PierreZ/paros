@@ -101,6 +101,10 @@ message WriteAck {
   // The machine is stopping (#560 (clean Ctrl-C shutdown)): it took no
   // part in the call. Retry on another machine.
   bool stopping = 10;
+  // The leader's acceptors fall behind (#360 (disk full)): it holds too
+  // many undecided rounds and took no part in the call. Nothing moved;
+  // retry the same write on the same leader after a pause.
+  bool busy = 11;
 }
 
 message Read {

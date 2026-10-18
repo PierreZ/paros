@@ -469,6 +469,20 @@ impl NodeShape {
             // one is cut by the force kill, and both are crashes the
             // oracles already judge.
             shutdown_within: ms(buggify_knob!(1500_u64, 0_u64..4_001_u64)),
+            // How long a store stays read-only after a full disk (#360
+            // (disk full)), in ticks. Floor 1: a store that tries a write
+            // every beat costs one refused segment per beat; the ceiling is
+            // the quarantine's wall-clock one, which the tail outlasts.
+            read_only_ticks: buggify_knob!(20_u64, 1_u64..161_u64)
+                .min(QUARANTINE_CEILING_MS.div_ceil(tick_ms)),
+            // The lag threshold of `Write` admission (#360 (disk full)).
+            // Floor 1: one undecided round still admits the next write once
+            // it is decided; the extreme answers most bursts `busy`.
+            admission_rounds: buggify_knob!(1024_u64, 1_u64..5_u64),
+            // Placement's free-bytes floor (#360 (disk full)). Floor 0: no
+            // machine is ever low on space; the extreme passes over every
+            // machine the disk-full scenario filled.
+            free_bytes_floor: buggify_knob!(65_536_u64, 0_u64..2_097_153_u64),
         };
         cap_backoff(&mut drawn, tick_ms);
         // The handover re-send cadence stays under the shortest stall
@@ -832,6 +846,9 @@ struct Registry {
     /// Run-level: whether the run draws the slow-machine scenario (see
     /// [`slow_machine`]), fixed by the first caller.
     slow_machine: Option<bool>,
+    /// Run-level: whether the run draws the disk-full scenario (see
+    /// [`disk_full`]), fixed by the first caller.
+    disk_full: Option<bool>,
     /// Run-level: whether the run draws the racing-floor scenario (see
     /// [`racing_floor`]), fixed by the first caller.
     racing_floor: Option<bool>,
@@ -1634,6 +1651,22 @@ pub(crate) fn racing_floor(state: &StateHandle) -> bool {
     *guard
         .racing_floor
         .get_or_insert_with(|| moonpool_sim::buggify_with_prob!(0.3))
+}
+
+/// Whether the run draws the **disk-full scenario** (#360 (disk full)):
+/// drawn once per seed, its own BUGGIFY location. The machines' and the
+/// acceptors' disks fill and grow back during the chaos window
+/// (`crate::world::disk_full`), so a store meets `ENOSPC`, goes read-only
+/// and comes back, and the cell coordinator marks a machine low on space.
+/// No other ingredient: the workload's own writes fill the room a strike
+/// leaves.
+#[tracing::instrument(level = "debug", skip_all)]
+pub(crate) fn disk_full(state: &StateHandle) -> bool {
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    *guard
+        .disk_full
+        .get_or_insert_with(|| moonpool_sim::buggify_with_prob!(1.0))
 }
 
 pub(crate) fn slow_machine(state: &StateHandle) -> bool {
