@@ -46,6 +46,18 @@ pub struct Rare {
 /// window seldom reaches, #485 the double fault, #486 the rest.
 pub const RARE: &[Rare] = &[
     Rare {
+        msg: "election: a deposed actor's ambiguous write is re-sent to resolve it",
+        reason: "a pipelined burst on a created journal reached through a frontend, overtaken by a second writer while one of its writes went unanswered: one witness on PR #678's sweep (#658 (the full alphabet on created journals), #486)",
+    },
+    Rare {
+        msg: "convergence: a journal its wipes left without a Phase-1 quorum is excused",
+        reason: "a created journal whose surviving members hold no Phase-1 quorum after a machine wipe (a 1x2 grid that lost one): one witness on PR #678's sweep (#658 (the full alphabet on created journals), #486)",
+    },
+    Rare {
+        msg: "created: a journal holding a long log is moved",
+        reason: "a drained-machine seed whose moved journal had taken the data plane's 16+ rounds first: missed by PR #678's sweep (#658 (the full alphabet on created journals), #498 (moves in the sweep))",
+    },
+    Rare {
         msg: "election: a candidate at the tail re-anchors at the floor",
         reason: "needs a leader that steps down without a resignation while a reader the floor outran waits at the tail; one witness, seed 3257468052100910816 on 3c8c73d (#640 (election reader livelock), #486)",
     },

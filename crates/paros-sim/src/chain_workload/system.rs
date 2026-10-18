@@ -150,6 +150,22 @@ fn deposed(
     )
 }
 
+const INVOKED_EARLY_KEY: &str = "paros-invoked-before-deposed";
+
+/// The fenced writes to `journal` sent while their uuid was not deposed,
+/// by `(uuid, command hash)`, shared by every client of the run: a
+/// resolve's re-send may leave through another frontend.
+fn invoked_early(
+    state: &moonpool_sim::StateHandle,
+    journal: JournalIdentifier,
+) -> Arc<Mutex<std::collections::BTreeSet<(LeaderUuid, u64)>>> {
+    crate::state::published_arc(
+        state,
+        &crate::state::journal_key(INVOKED_EARLY_KEY, journal),
+        || Mutex::new(std::collections::BTreeSet::new()),
+    )
+}
+
 /// The journal identifiers one operator learned (#246): from `init`'s reply
 /// or through `Inspect`.
 pub(super) type Learned = Arc<Mutex<std::collections::BTreeSet<JournalIdentifier>>>;
@@ -266,18 +282,7 @@ impl CallObserver for Announce {
             Attempted::SetLeader(_) | Attempted::Read(_) => None,
         }
         .filter(|uuid| uuid.is_set());
-        if let Some(uuid) = fence {
-            let journal = attempt.journal();
-            assert_always!(
-                !deposed(&self.state, journal)
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .contains(&uuid),
-                "election: a deposed actor writes nothing after its first refusal",
-                { "client" => self.client, "journal" => journal.to_string() }
-            );
-        }
-        if let Attempted::Write(write) = attempt {
+        let write_hash = if let Attempted::Write(write) = attempt {
             for record in &write.records {
                 audit.note_submitted(user_command_hash(record));
             }
@@ -286,7 +291,39 @@ impl CallObserver for Announce {
                 seq: Seq(write.seq),
                 records: write.records.iter().cloned().map(Value).collect(),
             };
-            audit.note_appended(paros::command_hash(&Command::Write(entry)));
+            let hash = paros::command_hash(&Command::Write(entry));
+            audit.note_appended(hash);
+            Some(hash)
+        } else {
+            None
+        };
+        if let Some(uuid) = fence {
+            let journal = attempt.journal();
+            let gone = deposed(&self.state, journal)
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .contains(&uuid);
+            let early = invoked_early(&self.state, journal);
+            let mut early = early.lock().unwrap_or_else(PoisonError::into_inner);
+            // The one call that may still leave: the identical re-send of
+            // a write first sent before its uuid was deposed, the library's
+            // `resolve` settling it (PR #678: a pipeline's sibling tickets
+            // were refused while one of its writes was ambiguous). The
+            // journal refuses it in place; a new write is never re-sent.
+            let resend = gone && write_hash.is_some_and(|hash| early.contains(&(uuid, hash)));
+            if resend {
+                assert_reachable!(
+                    "election: a deposed actor's ambiguous write is re-sent to resolve it"
+                );
+            }
+            assert_always!(
+                !gone || resend,
+                "election: a deposed actor writes nothing after its first refusal",
+                { "client" => self.client, "journal" => journal.to_string() }
+            );
+            if let (false, Some(hash)) = (gone, write_hash) {
+                early.insert((uuid, hash));
+            }
         }
         let token = log.invoked(attempt)?;
         let token = (index as u64) << TOKEN_JOURNAL_SHIFT | token;

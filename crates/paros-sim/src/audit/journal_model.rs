@@ -36,7 +36,7 @@
 
 use std::collections::BTreeMap;
 
-use moonpool_sim::{assert_always, assert_sometimes};
+use moonpool_sim::{assert_always, assert_reachable, assert_sometimes};
 use paros::{Command, Control, JournalView, LeaderUuid, Outcome, WriterMode};
 
 /// The write a slot decided, as the model keeps it.
@@ -100,6 +100,20 @@ pub(super) struct JournalModel {
     /// Per record-batch hash, how many slots accepted it: a multi-writer
     /// write retried may land twice (#241, at-least-once).
     accepted_bytes: BTreeMap<u64, u64>,
+    /// Every write a client of a created journal was told is written (#651
+    /// (acked writes judged by their bytes)): its first position, its count
+    /// and each record's hash, judged in [`JournalModel::check`]. A plan
+    /// journal's acked writes come through its client history instead.
+    acked: Vec<AckedWrite>,
+}
+
+/// A write a client was told is written at `[seq, seq + count)`, and the
+/// hash of each record it sent (#651 (acked writes judged by their bytes)).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct AckedWrite {
+    pub(crate) seq: u64,
+    pub(crate) count: u64,
+    pub(crate) records: Vec<u64>,
 }
 
 /// The hash a record is kept under (`user_command_hash` of its bytes).
@@ -387,6 +401,36 @@ impl JournalModel {
         self.records.get(&position).copied()
     }
 
+    /// A client of this journal was told `write` is written (#651): judged
+    /// at [`JournalModel::check`], once every verdict is in.
+    pub(super) fn note_acked(&mut self, write: AckedWrite) {
+        self.acked.push(write);
+    }
+
+    /// Judge one acknowledged write by its bytes (#651 (acked writes judged
+    /// by their bytes)): it covers as many positions as it sent records, and
+    /// every position the model saw accepted holds the record the client
+    /// sent there. Returns whether the model knew one of its positions.
+    pub(super) fn judge_acked(&self, write: &AckedWrite) -> bool {
+        assert_always!(
+            write.count == write.records.len() as u64,
+            "chain: an acknowledged write covers as many positions as it sent records",
+            { "seq" => write.seq, "count" => write.count, "records" => write.records.len() }
+        );
+        let mut judged = false;
+        for (position, &sent) in (write.seq..).zip(&write.records) {
+            if let Some(&held) = self.records.get(&position) {
+                judged = true;
+                assert_always!(
+                    held == sent,
+                    "chain: an acknowledged write holds its own bytes",
+                    { "position" => position, "seq" => write.seq }
+                );
+            }
+        }
+        judged
+    }
+
     /// The highest `next_seq` any verdict revealed.
     pub(super) fn next_seq(&self) -> u64 {
         self.next_seq
@@ -525,6 +569,13 @@ impl JournalModel {
                     );
                 }
             }
+        }
+        let mut judged = false;
+        for write in &self.acked {
+            judged |= self.judge_acked(write);
+        }
+        if judged {
+            assert_reachable!("created: an acknowledged write is judged by its bytes");
         }
         self.gates(stale_truncate_refused);
     }

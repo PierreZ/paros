@@ -10,7 +10,7 @@
 use std::time::Duration;
 
 use futures::future::join_all;
-use moonpool_sim::{SimContext, TimeProvider, assert_reachable, buggify_with_prob};
+use moonpool_sim::{SimContext, TimeProvider, assert_always, assert_reachable, buggify_with_prob};
 use paros::client::{Pipeline, Writer, WriterOutcome};
 
 use super::{ChainWorkload, Step, WrittenCommand, owner_never_of_wrong_mode};
@@ -99,6 +99,17 @@ impl ChainWorkload {
         for ((submission, _), sent) in opened.into_iter().zip(results) {
             match sent.outcome {
                 WriterOutcome::Written { seq, count, .. } => {
+                    // A ticket's answer is its own (#651 (acked writes judged
+                    // by their bytes)): written at the position it opened.
+                    assert_always!(
+                        seq == submission.entry.seq.0 && count == submission.entry.count(),
+                        "chain: a pipelined write is written at the position its ticket opened",
+                        {
+                            "opened" => submission.entry.seq.0,
+                            "seq" => seq,
+                            "count" => count
+                        }
+                    );
                     let now = u64::try_from(ctx.time().now().as_millis()).unwrap_or(u64::MAX);
                     self.record_written(&submission, seq, count, now);
                     self.adversarial.payload_classes[submission.payload_class] = true;

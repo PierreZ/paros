@@ -25,7 +25,9 @@
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-use moonpool_sim::{SimContext, TimeProvider, assert_always, assert_reachable, assert_sometimes};
+use moonpool_sim::{
+    SimContext, StateHandle, TimeProvider, assert_always, assert_reachable, assert_sometimes,
+};
 use paros::client::checkpoint::LoadOutcome;
 use paros::client::journals;
 use paros::machine::Class;
@@ -56,7 +58,7 @@ pub(super) async fn placements_booked(
         attempt += 1;
         if let Some((tenants, registry, slow_before)) = read(known, first, &learn).await {
             if !judged {
-                judge(&tenants, &registry, &slow_before);
+                judge(ctx.state(), &tenants, &registry, &slow_before);
                 maintained(ctx, &tenants, registry.registry());
                 removed(ctx, registry.registry());
                 judged = true;
@@ -142,7 +144,12 @@ async fn read(
 
 /// The oracle itself, and the gate that a placement spread over zones.
 /// `slow_before` are the machines held slow when the reads began.
-fn judge(tenants: &[TenantControl], judged: &JudgedRegistry, slow_before: &BTreeSet<NodeId>) {
+fn judge(
+    state: &StateHandle,
+    tenants: &[TenantControl],
+    judged: &JudgedRegistry,
+    slow_before: &BTreeSet<NodeId>,
+) {
     let registry = judged.registry();
     // Placement books only a machine that serves the cell: a founding
     // member, or one whose admission the coordinator saw (#511 (placement
@@ -197,6 +204,14 @@ fn judge(tenants: &[TenantControl], judged: &JudgedRegistry, slow_before: &BTree
             assert_reachable!("placement: a live journal's slots are judged after chaos");
             if members.iter().any(|member| !slots.contains(member)) {
                 assert_reachable!("placement: a journal moved off a draining machine");
+                // A long log moved (#658 (the full alphabet on created
+                // journals)): catch-up and state transfer onto a new member.
+                let journal = JournalIdentifier::new(tenant, id);
+                if crate::audit::audit_world_named(state, journal).next_seq()
+                    >= super::created::LONG_LOG
+                {
+                    assert_reachable!("created: a journal holding a long log is moved");
+                }
             }
             let zones: BTreeSet<&str> = members
                 .iter()

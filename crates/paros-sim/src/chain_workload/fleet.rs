@@ -247,6 +247,9 @@ pub(super) struct FleetOps {
     /// The simulated clock: when an operation ran (#213 (three founding
     /// members)).
     time: SimTimeProvider,
+    /// The client's configuration: the alphabet a created journal's data
+    /// plane draws from (#658 (the full alphabet on created journals)).
+    config: super::config::ChainConfig,
 }
 
 impl FleetOps {
@@ -258,7 +261,7 @@ impl FleetOps {
         patience: Duration,
         client_id: u64,
         leader_seeds: super::LeaderSeeds,
-        kill_ms: (u64, u64),
+        config: &super::config::ChainConfig,
     ) -> moonpool_sim::SimulationResult<Self> {
         let machines = crate::machine::machine_addrs(ctx.state(), deployment)?;
         let layout = crate::shape::machine_layout(ctx.state(), machines.len());
@@ -284,7 +287,7 @@ impl FleetOps {
             tenants_fleet: None,
             pending: None,
             forgotten: None,
-            kill_ms,
+            kill_ms: (config.fleet_kill_delay_ms, config.fleet_kill_down_ms),
             killed: false,
             learned: super::system::Learned::default(),
             admitting: None,
@@ -296,6 +299,7 @@ impl FleetOps {
             frontend_cold: false,
             state: ctx.state().clone(),
             time: ctx.time().clone(),
+            config: *config,
         })
     }
 
