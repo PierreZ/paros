@@ -946,6 +946,10 @@ pub const RARE: &[Rare] = &[
         reason: "no work in the chaos window: fired on 6 of 1,000 hunt seeds (#495)",
     },
     Rare {
+        msg: "generation: a held founder paces its handover",
+        reason: "a renamed founder whose Register is never answered takes a handover before its registration ends: one witness on PR #691's sweep (#506 (renamed founder not registered))",
+    },
+    Rare {
         msg: "generation: the stall budget abandons a handover",
         reason: "no work in the chaos window: fired on 1 of 1,000 hunt seeds (#495)",
     },
