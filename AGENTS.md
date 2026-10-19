@@ -18,7 +18,9 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
 - `cargo clippy --all-targets -- -D warnings`
 - `RUSTDOCFLAGS="-D warnings" cargo doc -p paros-core --no-deps`
 - wasm gates: `cargo check --target wasm32-unknown-unknown -p paros-core`, the same with
-  `--no-default-features`, and `cargo check --target wasm32-unknown-unknown -p paros`
+  `--no-default-features`, `cargo check --target wasm32-unknown-unknown -p paros` and `-p paros-sim`
+  (#307 (paros-sim in wasm)), and `scripts/check-sim-wasm.sh <seeds>`: a seed of `paros-sim` is
+  the same run on wasm32 as natively (CI's `sim-wasm` job)
 - `cargo xtask sim run-all`: the sancov-guided sweep (`scripts/sancov-rustc.sh` is the
   `RUSTC_WRAPPER`, gated by `SANCOV_CRATES`; the flake `shellHook` exports it). The registered
   campaign is `paros-chain` (binary `sim-paros-chain`; `cargo xtask sim run paros-chain`).
@@ -27,7 +29,7 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
   the seeds. A red in any shard blocks the merge. Gates are judged over all the shards: CI's `sim-gates` job fails only on a gate no shard ran
   or fired (`PAROS_SIM_MISSING_GATES`).
 
-CI also runs the `paros-core` examples, the `paros-play` web build and the sandbox's wasm check. Rust 2024 edition,
+CI also runs the `paros-core` examples and the `wasm` job (the `paros-wasm` bundles and the game's web build). Rust 2024 edition,
 toolchain pinned in `rust-toolchain.toml` (incl. `wasm32-unknown-unknown`), clippy pedantic on
 (`[workspace.lints]`). The full local gate is the `validate` skill.
 
@@ -524,19 +526,24 @@ Cargo workspace, every package under `crates/`. Dependency stack: `paros-core` �
   `paros-core`. `biscuit-auth` is pinned by git rev, so the crate is `publish = false`.
 - `paros-sim` — the DST harness: processes, role map, storage ledger and injector, workload, audit.
 - `paros-sim-runner` — `sim-paros-chain` and `sim-paros-hunt` (`publish = false`).
-- `paros-play` — the interactive Paxos game's engine and wasm glue; the app is `website/play/`.
-- `paros-sandbox` — the Paxos sandbox (#518 (Paxos visualization sandbox)): a paros universe on
-  moonpool's simulated providers, the shipped `run_machine` and `paros::client`, replayed from a
-  seed, a config and an action log; wasm glue; the page is `website/sandbox/`.
+- `paros-wasm` — the site's wasm tools, one crate with one feature per tool (#540, decided on
+  2026-10-15), each built alone into its own bundle: `paxos`, the interactive Paxos game on
+  `paros-core` only (the app is `website/play/`), and `playground`, the paros playground (#518):
+  a paros universe on moonpool's simulated providers, the shipped `run_machine` and
+  `paros::client`, replayed from a seed, a config and an action log (the page is
+  `website/sandbox/`). Never depends on `paros-sim` or `parosd`.
+- `paros-sim-wasm-check` — the proof that a seed of `paros-sim` is the same run on wasm32 as
+  natively (#307): one fingerprint line per seed from the native binary and from the wasm
+  bundle under node (`scripts/check-sim-wasm.sh`).
 - `xtask` — `cargo xtask sim` (the sancov runner) and `cargo xtask mutants` (the mutation hunt, #269).
 
-Elsewhere: `website/` holds everything a browser loads (decided on 2026-10-13): `website/zola/` (the website, Zola + Goyo, #254; `website/zola/AGENTS.md`, the `update-the-site` skill; built by `website/zola/build.sh`), `website/play/` (the game's app), `website/sandbox/` (the sandbox page, `scripts/build-sandbox.sh`); the Rust behind them stays in `crates/`,
+Elsewhere: `website/` holds everything a browser loads (decided on 2026-10-13): `website/zola/` (the website, Zola + Goyo, #254; `website/zola/AGENTS.md`, the `update-the-site` skill; built by `website/zola/build.sh`), `website/play/` (the game's app), `website/sandbox/` (the sandbox page); `scripts/build-wasm.sh` builds and stages both; the Rust behind them stays in `crates/`,
 `docs/architecture/`, `docs/analysis/` (design notes), `docs/references/` (papers and source
-references), `scripts/` (`sancov-rustc.sh`, `build-play.sh`, `build-sandbox.sh`, `check-dockerfile-toolchain.sh`, `mutants-report.sh`), `.claude/skills/` and
+references), `scripts/` (`sancov-rustc.sh`, `build-wasm.sh`, `check-sim-wasm.sh`, `check-dockerfile-toolchain.sh`, `mutants-report.sh`), `.claude/skills/` and
 `.claude/agents/`.
 
 Publishing mirrors moonpool: library crates share a release-plz `version_group` with per-crate
 `CHANGELOG.md`; binaries and xtask are `publish = false`. `paros`, `paros-sim` and `parosd` pin
-moonpool by **git** rev (thirteen lines across their `Cargo.toml`s, `paros-sandbox` included, advanced together), so only
+moonpool by **git** rev (thirteen lines across their `Cargo.toml`s, `paros-wasm` included, advanced together), so only
 `paros-core` is truly publishable: its one moonpool line (`moonpool-assertions`, optional) also
 carries a crates.io `version`, which a publish resolves instead of the git rev.

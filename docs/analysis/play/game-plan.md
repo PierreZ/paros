@@ -1,5 +1,9 @@
 # paros play: the interactive Paxos game
 
+> Since #540 (one wasm crate), the engine is the `paxos` feature of `crates/paros-wasm`
+> (`src/paxos.rs`, `src/paxos/`), built by `scripts/build-wasm.sh`. The paths below are the
+> original plan's (`crates/paros-play`, `scripts/build-play.sh`).
+
 A browser game where the player runs the Paxos family *by hand* — chooses which message to
 deliver, which node ticks, who crashes, who proposes — and, when a node has to answer, plays
 that node's role and is checked against the real `paros-core` state machine compiled to

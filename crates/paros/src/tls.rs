@@ -35,7 +35,12 @@ pub use moonpool_rpc::security::tls::{
     CertificateDer, CertificateNames, ClientAuth, PrivateKeyDer, TlsError,
 };
 use moonpool_rpc::security::tls::{ServerNames, Tls, TlsClient, TlsServer};
-pub use moonpool_rpc::security::{FixedUtc, SystemUtc, UtcClock, UtcTime};
+pub use moonpool_rpc::security::{FixedUtc, UtcClock, UtcTime};
+// The host's wall clock: moonpool has none on `wasm32-unknown-unknown`, where
+// only a simulated process (with its `ProviderUtc`) runs (#307 (paros-sim in
+// wasm)).
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+pub use moonpool_rpc::security::SystemUtc;
 
 use crate::transport::Transport;
 
@@ -393,6 +398,7 @@ impl Files<'_> {
     /// # Errors
     ///
     /// As [`Files::material`], or material TLS cannot use.
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
     pub fn serving(&self, callers: ClientCertificates) -> Result<Transport, String> {
         match self.material()? {
             None => Ok(Transport::Plaintext),
@@ -410,6 +416,7 @@ impl Files<'_> {
     /// A certificate without its key or the reverse, a certificate without
     /// the authority, a file that cannot be read, or material TLS cannot
     /// use.
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
     pub fn dialing(&self) -> Result<Transport, String> {
         let (ca_name, ca) = self.ca;
         let Some(ca) = ca else {

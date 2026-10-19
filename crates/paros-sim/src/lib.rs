@@ -474,6 +474,22 @@ fn chain_builder(digest: Option<DigestSink>) -> SimulationBuilder {
         .swarm_operations()
 }
 
+/// The index in `0..len` a 64-bit draw names: `draw % len`, reduced in
+/// `u64` before it narrows to `usize`. Narrowing first would turn most draws
+/// into `0` on a 32-bit target (`wasm32`), so a seed would run differently in
+/// the browser than natively (#307 (paros-sim in wasm)). `len == 0` gives `0`.
+pub(crate) fn draw_index(draw: u64, len: usize) -> usize {
+    let Ok(len64) = u64::try_from(len) else {
+        return 0;
+    };
+    if len64 == 0 {
+        return 0;
+    }
+    let index = usize::try_from(draw % len64).unwrap_or(0);
+    assert!(index < len, "a drawn index is inside its range");
+    index
+}
+
 /// Where a run publishes its end-of-run audit digest (see
 /// [`chain_seed_digest`]). Shared by the workload factory's clones.
 pub(crate) type DigestSink = Arc<Mutex<Option<u64>>>;
@@ -573,6 +589,63 @@ pub fn chain_seed_digest(seed: u64) -> u64 {
     );
     let digest = *sink.lock().unwrap_or_else(PoisonError::into_inner);
     digest.expect("the chain workload published its audit digest")
+}
+
+/// What one seed's run looks like from outside, for comparing two builds of
+/// the same campaign: native and `wasm32` (#307 (paros-sim in wasm)). Every
+/// field is a function of the seed alone; none reads the host clock.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SeedFingerprint {
+    /// The seed that ran.
+    pub seed: u64,
+    /// The audit's end-of-run digest ([`chain_seed_digest`]); `None` when the
+    /// workload never reached `check()`.
+    pub digest: Option<u64>,
+    /// The simulated time the run took, in milliseconds.
+    pub simulated_ms: u128,
+    /// The scheduler events the run processed.
+    pub events: u64,
+    /// The always-assertions the run violated.
+    pub violations: Vec<String>,
+    /// Whether the run failed.
+    pub failed: bool,
+}
+
+impl std::fmt::Display for SeedFingerprint {
+    /// One line, the same bytes on every target for the same run.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let digest = self
+            .digest
+            .map_or_else(|| "none".to_owned(), |digest| format!("{digest:016x}"));
+        write!(
+            f,
+            "seed={} digest={digest} simulated_ms={} events={} failed={} violations={:?}",
+            self.seed, self.simulated_ms, self.events, self.failed, self.violations
+        )
+    }
+}
+
+/// Run one seed and return its [`SeedFingerprint`]. Two builds of paros-sim
+/// that run the same seed must return the same fingerprint: CI compares the
+/// native build with the `wasm32-unknown-unknown` one under node
+/// (`scripts/check-sim-wasm.sh`).
+#[must_use]
+#[tracing::instrument(level = "debug")]
+pub fn chain_seed_fingerprint(seed: u64) -> SeedFingerprint {
+    let sink: DigestSink = Arc::new(Mutex::new(None));
+    let report = chain_builder(Some(sink.clone()))
+        .set_iterations(1)
+        .set_debug_seeds(vec![seed])
+        .run_configured();
+    let digest = *sink.lock().unwrap_or_else(PoisonError::into_inner);
+    SeedFingerprint {
+        seed,
+        digest,
+        simulated_ms: report.metrics.simulated_time.as_millis(),
+        events: report.metrics.events_processed,
+        violations: report.assertion_violations.clone(),
+        failed: report.failed_runs > 0,
+    }
 }
 
 /// Run one seed of the main campaign under moonpool's determinism canary:
