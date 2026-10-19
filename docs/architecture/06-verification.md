@@ -89,7 +89,12 @@ Simulation is the investment. Every milestone lands with its share of:
   (the directory went with #210), the acceptors that serve them keep the per-seed harness draw
   (matchmakers, proxies, replicas, grids) beside the machines; after that they become machines
   too. A machine's disk can be wiped: the machines' attrition draws moonpool's `CrashAndWipe`,
-  and a per-seed scenario aims it at a founding member in the middle of `init`. The machine at
+  and a per-seed scenario aims it at a founding member in the middle of `init`. The wipes roll
+  (decided on 2026-10-18, moonpool #344 (rolling wipes)): while one wiped machine is unhealed,
+  moonpool turns every other wipe it draws in the group into a plain crash. The harness heals a
+  wiped machine once the cell holds no booking on its old id. A founder's old id never heals,
+  because the cell tenant's own matchmaker set stays on the founders, so a run wipes at most one
+  founder. The machine at
   that address is a new machine with a new `node_id`, and it never rejoins as the old one.
   When no vote names the old machine, `init` forms the cell over the new one. When a vote names
   it, the founding members that kept their disks choose that plan (`q1 = n`, `q2 = majority`,
