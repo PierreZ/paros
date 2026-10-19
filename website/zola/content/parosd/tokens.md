@@ -40,6 +40,11 @@ export PAROS_ROOT_PUBLIC_KEY=keys/prod-1.public
 parosd
 ```
 
+To pass the key without a file, put the text of the `.public` file in
+`PAROS_ROOT_PUBLIC_KEY_JSON` (`PAROS_FRONTEND_ROOT_PUBLIC_KEY_JSON` for a frontend). `parosctl
+init` takes the universe's first key the same way, in `PAROSCTL_ROOT_PUBLIC_KEY_JSON` or
+`--root-public-key-json`.
+
 While it is idle, a pinned machine checks the token of each call that puts it in a cell:
 `cell init` and `cell add-machine`. A call without an `admin` token is refused with
 `invalid_token`, `expired` or `forbidden`. A founding member that was down when `cell init` sent

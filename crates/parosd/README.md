@@ -202,6 +202,8 @@ error (exit 2), so a typo never silently keeps a default.
 | `PAROS_RACK` | its rack, the `paros/rack` tag (optional) |
 | `PAROS_<FIELD>[_MS]` | one override per driver tunable (below) |
 | `PAROS_TLS_CERT`, `PAROS_TLS_KEY`, `PAROS_TLS_CA` | its certificate chain, its key and the universe's authority, PEM (`parosctl tls init`): all three turn TLS on for every session it serves and dials; only some is an error |
+| `PAROS_TLS_CERT_PEM`, `PAROS_TLS_KEY_PEM`, `PAROS_TLS_CA_PEM` | the same three, the PEM text itself instead of a file (the Compose demo passes its keys so); one of the two per item |
+| `PAROS_ROOT_PUBLIC_KEY`, `PAROS_ROOT_PUBLIC_KEY_JSON` | the root public key files it pins while idle, comma-separated, and one more key as the `.public` file's text itself: `cell init` and `cell add-machine` then need an `admin` token |
 | `PAROS_TLS_CLIENT_AUTH` | `required` (mutual TLS, the default), `optional` or `off` (server-authenticated TLS): what it asks of a caller |
 | `PAROS_HTTP_LISTEN` | `HOST:PORT` of the HTTP endpoint (#366 (metrics)): `/metrics` (Prometheus text), `/healthz` and `/readyz`; none when unset |
 | `PAROS_OTLP_ENDPOINT` | an OpenTelemetry collector's OTLP/gRPC URL: spans and metrics are pushed there; none when unset |
@@ -336,7 +338,8 @@ required, with no default tenant and no fixed id (#235, #239, `docs/architecture
 
 With TLS, every command takes `--tls-ca ca.crt` (`PAROSCTL_TLS_CA`) and, against servers
 that require a client certificate, `--tls-cert admin.crt --tls-key admin.key`
-(`PAROSCTL_TLS_CERT`, `PAROSCTL_TLS_KEY`).
+(`PAROSCTL_TLS_CERT`, `PAROSCTL_TLS_KEY`). Each also takes the PEM text itself:
+`--tls-ca-pem` (`PAROSCTL_TLS_CA_PEM`), `--tls-cert-pem`, `--tls-key-pem`.
 
 Output is text — one line per record or answer, `key=value` details — or, with
 `--json`, one JSON document per answer. Diagnostics (a claim made on the way, a

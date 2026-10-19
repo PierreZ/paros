@@ -50,6 +50,11 @@ authority and the name `paros`, never the address.
 | `paros-frontend` | `PAROS_FRONTEND_TLS_CERT`, `PAROS_FRONTEND_TLS_KEY`, `PAROS_FRONTEND_TLS_CA`, `PAROS_FRONTEND_TLS_CLIENT_AUTH` |
 | `parosctl` | `PAROSCTL_TLS_CA`, `PAROSCTL_TLS_CERT`, `PAROSCTL_TLS_KEY` (or `--tls-ca`, `--tls-cert`, `--tls-key`) |
 
+Each variable names a file. Its `_PEM` twin holds the PEM text itself instead, for a deployment
+that passes secrets as variables (`PAROS_TLS_CERT_PEM`, `PAROS_FRONTEND_TLS_KEY_PEM`,
+`PAROSCTL_TLS_CA_PEM`, or `--tls-cert-pem`). Give one of the two for each item. A flag wins over
+its variable.
+
 A server needs all three files, or none for plaintext. Only some of them is an error, so a typo
 never turns TLS off. Every process of a cell must make the same choice: a plaintext process
 cannot reach a TLS process.

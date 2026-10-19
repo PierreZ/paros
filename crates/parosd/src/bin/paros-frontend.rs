@@ -25,6 +25,8 @@
 //! | `PAROS_FRONTEND_TLS_CERT` | its certificate chain, PEM (`parosctl tls`, role `frontend`); with the next two, every session is TLS, to its clients and to the machines |
 //! | `PAROS_FRONTEND_TLS_KEY` | the certificate's private key, PEM |
 //! | `PAROS_FRONTEND_TLS_CA` | the universe's authority, PEM |
+//! | `PAROS_FRONTEND_TLS_CERT_PEM`, `PAROS_FRONTEND_TLS_KEY_PEM`, `PAROS_FRONTEND_TLS_CA_PEM` | the same three, the PEM text itself instead of a file; one of the two per item |
+//! | `PAROS_FRONTEND_ROOT_PUBLIC_KEY_JSON` | one more root public key it trusts, the `.public` file's text itself |
 //! | `PAROS_FRONTEND_TLS_CLIENT_AUTH` | `required` (the default), `optional` or `off`: what it asks of a client |
 //!
 //! The machines and the frontend make the same choice: a frontend with
@@ -51,7 +53,7 @@ use clap::Parser;
 use moonpool_core::{TokioProviders, TokioResolver};
 use paros::client::ClientTunables;
 use paros::frontend::{FrontendSettings, run_frontend};
-use paros::tls::{ClientCertificates, Files};
+use paros::tls::{ClientCertificates, Files, Pem};
 use paros::{Address, DriverTunables, Names, NoAudit};
 use paros_authz_biscuit::{BiscuitAuthz, KeyRing, RootPublicKey, since_epoch};
 use tokio_util::sync::CancellationToken;
@@ -71,6 +73,10 @@ struct Settings {
     /// entry's, comma-separated.
     #[arg(long, env = "PAROS_FRONTEND_ROOT_PUBLIC_KEY", value_delimiter = ',')]
     root_public_key: Vec<std::path::PathBuf>,
+    /// One more root public key it trusts: the `.public` file's text
+    /// itself, so no file is needed.
+    #[arg(long, env = "PAROS_FRONTEND_ROOT_PUBLIC_KEY_JSON")]
+    root_public_key_json: Option<String>,
     /// One forwarded attempt's timeout, in milliseconds.
     #[arg(long, env = "PAROS_FRONTEND_TIMEOUT_MS", default_value = "5000")]
     timeout_ms: u64,
@@ -84,6 +90,33 @@ struct Settings {
     /// The universe's authority, PEM.
     #[arg(long, env = "PAROS_FRONTEND_TLS_CA")]
     tls_ca: Option<std::path::PathBuf>,
+    /// Its certificate chain, the PEM text itself (no file).
+    #[arg(
+        long,
+        env = "PAROS_FRONTEND_TLS_CERT_PEM",
+        hide_env_values = true,
+        allow_hyphen_values = true,
+        conflicts_with = "tls_cert"
+    )]
+    tls_cert_pem: Option<String>,
+    /// The certificate's private key, the PEM text itself (no file).
+    #[arg(
+        long,
+        env = "PAROS_FRONTEND_TLS_KEY_PEM",
+        hide_env_values = true,
+        allow_hyphen_values = true,
+        conflicts_with = "tls_key"
+    )]
+    tls_key_pem: Option<String>,
+    /// The universe's authority, the PEM text itself (no file).
+    #[arg(
+        long,
+        env = "PAROS_FRONTEND_TLS_CA_PEM",
+        hide_env_values = true,
+        allow_hyphen_values = true,
+        conflicts_with = "tls_ca"
+    )]
+    tls_ca_pem: Option<String>,
     /// What it asks of a client: `required` (mutual TLS), `optional` or
     /// `off`.
     #[arg(long, env = "PAROS_FRONTEND_TLS_CLIENT_AUTH", default_value = "required", value_parser = parse_client_auth)]
@@ -135,7 +168,13 @@ fn configure(settings: &Settings) -> Result<(FrontendSettings, KeyRing), String>
     if cell.is_empty() {
         return Err("PAROS_FRONTEND_CELL names no machine".into());
     }
-    let mut keys = Vec::with_capacity(settings.root_public_key.len());
+    let mut keys = Vec::with_capacity(settings.root_public_key.len() + 1);
+    if let Some(text) = &settings.root_public_key_json {
+        keys.push(
+            RootPublicKey::from_file(text)
+                .map_err(|error| format!("PAROS_FRONTEND_ROOT_PUBLIC_KEY_JSON: {error}"))?,
+        );
+    }
     for path in &settings.root_public_key {
         let text = std::fs::read_to_string(path)
             .map_err(|error| format!("{}: {error}", path.display()))?;
@@ -149,9 +188,24 @@ fn configure(settings: &Settings) -> Result<(FrontendSettings, KeyRing), String>
     }
     let ring = KeyRing::new(keys).map_err(|error| error.to_string())?;
     let transport = Files {
-        cert: ("PAROS_FRONTEND_TLS_CERT", settings.tls_cert.as_deref()),
-        key: ("PAROS_FRONTEND_TLS_KEY", settings.tls_key.as_deref()),
-        ca: ("PAROS_FRONTEND_TLS_CA", settings.tls_ca.as_deref()),
+        cert: Pem::pick(
+            ("PAROS_FRONTEND_TLS_CERT", settings.tls_cert.as_deref()),
+            (
+                "PAROS_FRONTEND_TLS_CERT_PEM",
+                settings.tls_cert_pem.as_deref(),
+            ),
+        ),
+        key: Pem::pick(
+            ("PAROS_FRONTEND_TLS_KEY", settings.tls_key.as_deref()),
+            (
+                "PAROS_FRONTEND_TLS_KEY_PEM",
+                settings.tls_key_pem.as_deref(),
+            ),
+        ),
+        ca: Pem::pick(
+            ("PAROS_FRONTEND_TLS_CA", settings.tls_ca.as_deref()),
+            ("PAROS_FRONTEND_TLS_CA_PEM", settings.tls_ca_pem.as_deref()),
+        ),
     }
     .serving(settings.tls_client_auth)?;
     let client = ClientTunables {

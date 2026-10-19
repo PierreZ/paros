@@ -1,6 +1,11 @@
 # The paros toy (#196), a demo to run paros by hand (no test runs it): one cell of five machines over three failure
 # domains, every one the same `parosd` image configured by PAROS_* variables.
 #
+# Out of the box it runs with mutual TLS and a pinned root key (#245 (Biscuit tokens)): the
+# key material is the pre-generated demo set in `demo/keys/`, passed as the text itself
+# (`*_PEM`, `*_JSON`, `PAROS_TOKEN`), so no file is mounted. The demo keys are public: never
+# use them for anything else. `demo/keys/README.md` says how to make a new set.
+#
 #   docker compose up -d --build
 #   docker compose run --rm init
 #   docker compose run --rm parosctl tenant create acme
@@ -30,12 +35,85 @@ x-parosd: &parosd
     # network: http://node1:9100/metrics.
     PAROS_HTTP_LISTEN: 0.0.0.0:9100
     RUST_LOG: warn,parosd=info,paros::machine=info
+    # The demo machine certificate, shared by the five machines (one host each would get its own).
+    PAROS_TLS_CERT_PEM: |
+      -----BEGIN CERTIFICATE-----
+      MIIBlTCCAUegAwIBAgIUFudcLpCk/Qbg+h4ZTw7Z4xvtosgwBQYDK2VwMBkxFzAV
+      BgNVBAMMDmRlbW8gYXV0aG9yaXR5MB4XDTI2MTAxOTE2MDE0M1oXDTM2MTAxNjE3
+      MDE0M1owLDEqMCgGA1UEAwwhdXJpOnNwaWZmZTovL2RlbW8vbWFjaGluZS9tYWNo
+      aW5lMCowBQYDK2VwAyEA/N+0nbE/0BdZxG60e1rxUKM1wVw3LHG7kN9ht4j6Hz2j
+      gY0wgYowHwYDVR0jBBgwFoAUDk4fKGJrl0SzphESPjt863BsX04wOAYDVR0RBDEw
+      L4Ydc3BpZmZlOi8vZGVtby9tYWNoaW5lL21hY2hpbmWCBXBhcm9zggdtYWNoaW5l
+      MA4GA1UdDwEB/wQEAwIHgDAdBgNVHSUEFjAUBggrBgEFBQcDAQYIKwYBBQUHAwIw
+      BQYDK2VwA0EAFUWAP1gjnLx2tF2WpOsh77ItfczALM1UoMP9QWA/wwaVVWiTurYt
+      9FsP8vu+r/StO9XcJqc7mIqOyBFfNtlGCg==
+      -----END CERTIFICATE-----
+      -----BEGIN CERTIFICATE-----
+      MIIBNTCB6KADAgECAhR1S4GOcjMzA3/RGvM4T3Iu3HPYMjAFBgMrZXAwGTEXMBUG
+      A1UEAwwOZGVtbyBhdXRob3JpdHkwHhcNMjYxMDE5MTYwMTQzWhcNMzYxMDI2MTcw
+      MTQzWjAZMRcwFQYDVQQDDA5kZW1vIGF1dGhvcml0eTAqMAUGAytlcAMhAM+RXO1v
+      YoxTYLyC+/j/q28RKRQFQ1Z5sgtFo9bsAIPCo0IwQDAOBgNVHQ8BAf8EBAMCAQYw
+      HQYDVR0OBBYEFA5OHyhia5dEs6YREj47fOtwbF9OMA8GA1UdEwEB/wQFMAMBAf8w
+      BQYDK2VwA0EAt5IT4eQnzm6qhZ/YFvD3GH0uCn8iZbRP/e9OveqTu7MKh+MdHJI4
+      TUMbIix+Ah6VrirKuGbrHZhXvNGf91kCDA==
+      -----END CERTIFICATE-----
+    PAROS_TLS_KEY_PEM: |
+      -----BEGIN PRIVATE KEY-----
+      MFECAQEwBQYDK2VwBCIEIEt03M/EbtdiE8eZKmDzpESGH3qgSooUsZE5eHTNOFR6
+      gSEA/N+0nbE/0BdZxG60e1rxUKM1wVw3LHG7kN9ht4j6Hz0=
+      -----END PRIVATE KEY-----
+    PAROS_TLS_CA_PEM: &ca |
+      -----BEGIN CERTIFICATE-----
+      MIIBNTCB6KADAgECAhR1S4GOcjMzA3/RGvM4T3Iu3HPYMjAFBgMrZXAwGTEXMBUG
+      A1UEAwwOZGVtbyBhdXRob3JpdHkwHhcNMjYxMDE5MTYwMTQzWhcNMzYxMDI2MTcw
+      MTQzWjAZMRcwFQYDVQQDDA5kZW1vIGF1dGhvcml0eTAqMAUGAytlcAMhAM+RXO1v
+      YoxTYLyC+/j/q28RKRQFQ1Z5sgtFo9bsAIPCo0IwQDAOBgNVHQ8BAf8EBAMCAQYw
+      HQYDVR0OBBYEFA5OHyhia5dEs6YREj47fOtwbF9OMA8GA1UdEwEB/wQFMAMBAf8w
+      BQYDK2VwA0EAt5IT4eQnzm6qhZ/YFvD3GH0uCn8iZbRP/e9OveqTu7MKh+MdHJI4
+      TUMbIix+Ah6VrirKuGbrHZhXvNGf91kCDA==
+      -----END CERTIFICATE-----
+    # The demo root key: `init` and `cell add-machine` need an `admin` token it signed.
+    PAROS_ROOT_PUBLIC_KEY_JSON: &root |
+      {
+        "key_id": 1712111896,
+        "label": "demo",
+        "public_key": "ed25519/ea140807425b025c5fb9900f34344f87ac222796571cde930c6d16ef8678d9cb"
+      }
 
 x-parosctl: &parosctl
   image: paros:local
   entrypoint: ["parosctl", "--servers", "members:4500", "--timeout-ms", "10000"]
   profiles: ["tools"]
   restart: "no"
+  environment: &ctlenv
+    # The admin certificate and the admin token of the demo set.
+    PAROSCTL_TLS_CA_PEM: *ca
+    PAROSCTL_TLS_CERT_PEM: |
+      -----BEGIN CERTIFICATE-----
+      MIIBcTCCASOgAwIBAgIUClBwQEc9MBflrCGoBHYzEP7ndcowBQYDK2VwMBkxFzAV
+      BgNVBAMMDmRlbW8gYXV0aG9yaXR5MB4XDTI2MTAxOTE2MDE0M1oXDTM2MTAxNjE3
+      MDE0M1owKDEmMCQGA1UEAwwddXJpOnNwaWZmZTovL2RlbW8vYWRtaW4vYWRtaW4w
+      KjAFBgMrZXADIQDIqfmt5S4QYyndIgb7vJJGCHVhNaFeGB2mVga8h5GD26NuMGww
+      HwYDVR0jBBgwFoAUDk4fKGJrl0SzphESPjt863BsX04wJAYDVR0RBB0wG4YZc3Bp
+      ZmZlOi8vZGVtby9hZG1pbi9hZG1pbjAOBgNVHQ8BAf8EBAMCB4AwEwYDVR0lBAww
+      CgYIKwYBBQUHAwIwBQYDK2VwA0EA9+rG4W3DyK3bEUrNdd13+IPR5yqYR28QfE5t
+      dKl57eaIQVxvHwXWQScjSliCVeVrKGJ+w4maVsKcajkGY8fBBQ==
+      -----END CERTIFICATE-----
+      -----BEGIN CERTIFICATE-----
+      MIIBNTCB6KADAgECAhR1S4GOcjMzA3/RGvM4T3Iu3HPYMjAFBgMrZXAwGTEXMBUG
+      A1UEAwwOZGVtbyBhdXRob3JpdHkwHhcNMjYxMDE5MTYwMTQzWhcNMzYxMDI2MTcw
+      MTQzWjAZMRcwFQYDVQQDDA5kZW1vIGF1dGhvcml0eTAqMAUGAytlcAMhAM+RXO1v
+      YoxTYLyC+/j/q28RKRQFQ1Z5sgtFo9bsAIPCo0IwQDAOBgNVHQ8BAf8EBAMCAQYw
+      HQYDVR0OBBYEFA5OHyhia5dEs6YREj47fOtwbF9OMA8GA1UdEwEB/wQFMAMBAf8w
+      BQYDK2VwA0EAt5IT4eQnzm6qhZ/YFvD3GH0uCn8iZbRP/e9OveqTu7MKh+MdHJI4
+      TUMbIix+Ah6VrirKuGbrHZhXvNGf91kCDA==
+      -----END CERTIFICATE-----
+    PAROSCTL_TLS_KEY_PEM: |
+      -----BEGIN PRIVATE KEY-----
+      MFECAQEwBQYDK2VwBCIEILPf14qW60zEdFJ5r1ILKzQlDimJueoFokZxv33QPu9R
+      gSEAyKn5reUuEGMp3SIG+7ySRgh1YTWhXhgdplYGvIeRg9s=
+      -----END PRIVATE KEY-----
+    PAROS_TOKEN: CJiCs7AGEuMBCnkKB3N1YmplY3QKDWRlbW8tb3BlcmF0b3IKCHJvb3Rfa2V5CgRkZW1vCgF0GAMiCAoGCAYSAhgNIgoKCAiACBIDGIEIIgoKCAiCCBIDGIMIMigKJgoCCBsSBwgFEgMIhAgaFwoFCgMIhAgKCAoGIPefie0HCgQaAggCEiQIABIgfed0VQOv_gcPpwQ4ugfqIGLOlS45wCYt5l4cm_FPI68aQA6r-QVV4LCukJijN8An1qBty9Wg5DnI1pMOkLzE6HwEpc3dZghvhdY7L5Bvf4E_ZWBpd9vn5JkJOHInq0QWyQsiIgogpsEdR_Q7i2DW6fY9DeP3BuPkANRwuq2hp5LZv2FqLMM=
 
 services:
   node1:
@@ -102,11 +180,17 @@ services:
   # initialized cell.
   init:
     <<: *parosctl
+    environment:
+      <<: *ctlenv
+      # The universe keeps the demo root key for its frontends.
+      PAROSCTL_ROOT_PUBLIC_KEY_JSON: *root
     entrypoint:
       - parosctl
       - --servers
       - members:4500
       - init
+      - --universe-name
+      - demo
       - --members
       - node1:4500,node2:4500,node3:4500
       - --patience-ms

@@ -13,12 +13,20 @@ Human output prints ids as short hex, like git; `--json` prints them whole.
 
 Needs Docker with the Compose plugin; nothing else (the image is a plain Rust build).
 
+The Compose file runs with mutual TLS and a pinned root key from the start. It passes a
+pre-generated demo key set (`demo/keys/`) as the text itself in variables: the machine
+certificate (`PAROS_TLS_*_PEM`), the root public key (`PAROS_ROOT_PUBLIC_KEY_JSON`), and the
+admin certificate and token for `parosctl` (`PAROSCTL_TLS_*_PEM`, `PAROS_TOKEN`). No file is
+mounted. The demo keys are public: never use them for anything else.
+
 ```sh
 # Five machines: node1..node3 (storage, zones a/b/c), storage4, stateless1 (stateless).
+# After an upgrade, start over with `docker compose down -v`: a volume an older version wrote
+# can make a machine refuse to start (exit 78).
 docker compose up -d --build
 
 # Form the cell over node1..node3, register the fleet and the fleet tenant. Prints one line:
-#   initialized fleet=… cell=… coordinator=… members=3 control=id:T/J election=id:T/J fleet_control=id:T/J steps=…
+#   initialized universe=demo cell=cell-1 coordinator=node1 members=[node1,node2,node3] admitted=[] steps=FormFleet,AddRootKey,AddCell,CellReady
 docker compose run --rm init
 
 # A tenant, then a journal in it (#210). The tenant coordinator draws the journal's id and

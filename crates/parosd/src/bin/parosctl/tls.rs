@@ -755,9 +755,12 @@ mod tests {
         );
         // The files the servers and parosctl read build their transports.
         let files = paros::tls::Files {
-            cert: ("CERT", Some(&machine)),
-            key: ("KEY", Some(&dir.path().join("parosd-1.key"))),
-            ca: ("CA", Some(&ca)),
+            cert: ("CERT", Some(paros::tls::Pem::File(&machine))),
+            key: (
+                "KEY",
+                Some(paros::tls::Pem::File(&dir.path().join("parosd-1.key"))),
+            ),
+            ca: ("CA", Some(paros::tls::Pem::File(&ca))),
         };
         assert!(
             files

@@ -92,7 +92,16 @@ enum KeyCommand {
 /// The file cannot be read, or holds no Ed25519 key.
 pub fn read_key(path: &Path) -> Result<RootKeyEntry, String> {
     let text = crate::key::read(path)?;
-    let key = RootPublicKey::from_file(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+    key_entry(&text).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// The universe entry of a `.public` (or `.private`) file's text.
+///
+/// # Errors
+///
+/// The text holds no Ed25519 key.
+pub fn key_entry(text: &str) -> Result<RootKeyEntry, String> {
+    let key = RootPublicKey::from_file(text).map_err(|e| e.to_string())?;
     Ok(RootKeyEntry {
         key_id: key.key_id(),
         label: key.label().to_string(),
