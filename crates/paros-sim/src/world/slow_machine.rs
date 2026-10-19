@@ -101,6 +101,7 @@ impl FaultInjector for SlowMachine {
         }
         let range = if long { LONG_SLOW_MS } else { SLOW_MS };
         let until = time.now() + Duration::from_millis(moonpool_sim::sim_random_range(range));
+        crate::machine::note_slowed(ctx.state(), until);
         while time.now() < until && !(long && crate::past_cutoff(time.now(), LATE_WINDOW)) {
             // A sleep cut short ends the run: the machine is healthy either
             // way once nobody runs.

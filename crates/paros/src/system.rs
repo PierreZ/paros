@@ -1568,7 +1568,12 @@ impl Registry {
         }
         if for_ms == 0 {
             return match self.maintenance.remove(&scope) {
-                Some(_) => RegistryEvent::Maintenance { scope, for_ms },
+                Some(_) => {
+                    moonpool_assertions::reachable!(
+                        "registry: an operator ends a maintenance window"
+                    );
+                    RegistryEvent::Maintenance { scope, for_ms }
+                }
                 None => RegistryEvent::Unchanged,
             };
         }

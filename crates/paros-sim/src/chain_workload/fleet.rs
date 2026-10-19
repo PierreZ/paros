@@ -82,6 +82,7 @@ mod election;
 mod healthy;
 mod journals;
 mod keys;
+mod live;
 mod load;
 mod other_cell;
 mod placement;
@@ -91,6 +92,7 @@ mod second_cell;
 mod sets;
 mod tags;
 mod view;
+mod windows;
 
 use cell::Cell;
 
@@ -1267,6 +1269,10 @@ impl FleetOps {
             // Every journal the cell can hold heals (#475 (re-place after
             // the Down bound)).
             self.journals_heal(ctx, cell, ctx.time().now() + FLEET_SETTLE)
+                .await;
+            // The failure detector holds every live machine up (#654 (live
+            // machine marked down)).
+            self.machines_live(ctx, cell, ctx.time().now() + FLEET_SETTLE)
                 .await;
             // The machines' own `Resolve` folds escape after chaos (#457).
             self.resolve_answers(ctx, cell, ctx.time().now() + FLEET_SETTLE)

@@ -301,6 +301,14 @@ impl CallObserver for Announce {
             for record in &write.records {
                 audit.note_submitted(user_command_hash(record));
             }
+            // The failure detector's tail oracle (#654 (live machine marked
+            // down)).
+            crate::machine::judge_sent(
+                &self.state,
+                attempt.journal(),
+                &write.records,
+                moonpool_sim::TimeProvider::now(&self.time),
+            );
             // The cell coordinator's terms, for the install-order oracle
             // (#653 (election term to installed leader)).
             if crate::machine::is_election(&self.state, attempt.journal()) {

@@ -44,6 +44,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
+use moonpool_sim::TimeProvider as _;
+
 use async_trait::async_trait;
 use moonpool_sim::{
     Process, ScriptedResolver, SimContext, SimTimeProvider, SimulationError, SimulationResult,
@@ -60,8 +62,10 @@ use crate::audit::journals::journal_board;
 use crate::process::{RoleRig, arm_role, dispatch};
 use crate::roles::{Deployment, MACHINE_GROUP, Role};
 
+mod detector;
 mod heal;
 
+pub(crate) use detector::{judge_sent, live_since, note_slowed, slowed_after};
 pub(crate) use heal::{heal_wiped, registry_folded, registry_restored};
 
 /// Where a machine's disk lives on its simulated disk.
@@ -171,6 +175,13 @@ pub(crate) struct MachineBoard {
     /// reboot gets the metrics it had, as a real `/metrics` keeps counting
     /// on the same host, and the oracle reads every one.
     metrics: BTreeMap<String, paros::metrics::Metrics>,
+    /// When each machine's process last started `run_machine`, by
+    /// advertised address (#654 (live machine marked down)).
+    started: BTreeMap<Address, Duration>,
+    /// When each machine's process last stopped, by advertised address.
+    ended: BTreeMap<Address, Duration>,
+    /// The latest instant the slow-machine scenario may slow a machine to.
+    slowed: Option<Duration>,
 }
 
 /// A maintenance window an operator opened over a machine (#359), for the
@@ -180,6 +191,9 @@ pub(crate) struct MachineBoard {
 pub(crate) struct MaintenanceNote {
     /// The machine.
     pub(crate) node: u64,
+    /// The window's scope: the machine, or its zone (#661 (maintenance
+    /// windows)).
+    pub(crate) scope: paros::system::MaintenanceScope,
     /// When the operator sent the entry, in simulated time: the window
     /// opens no earlier.
     pub(crate) sent: Duration,
@@ -402,6 +416,38 @@ pub(crate) fn gone_target(state: &StateHandle, dead: impl Fn(&str) -> bool) -> O
 /// An operator opened a maintenance window (#359).
 pub(crate) fn note_maintenance(state: &StateHandle, note: MaintenanceNote) {
     lock(&machine_board(state)).maintenance.push(note);
+}
+
+/// An operator sends a new window over `scope`, or ends it, at `at`
+/// (#661 (maintenance windows)): every window noted over `scope` holds no
+/// longer than `at`.
+pub(crate) fn note_window_cut(
+    state: &StateHandle,
+    scope: &paros::system::MaintenanceScope,
+    at: Duration,
+) {
+    let board = machine_board(state);
+    let mut board = lock(&board);
+    for note in board.maintenance.iter_mut().filter(|n| n.scope == *scope) {
+        note.length = note.length.min(at.saturating_sub(note.sent));
+    }
+}
+
+/// The machine the gone-machine scenario struck (#475), by minted id,
+/// while it is down.
+pub(crate) fn gone_down(state: &StateHandle) -> Option<u64> {
+    let board = machine_board(state);
+    let board = lock(&board);
+    let Some((node, true)) = board.gone else {
+        return None;
+    };
+    let addr = board.nodes.iter().find(|(_, id)| **id == node)?.0;
+    let started = board.started.get(addr)?;
+    board
+        .ended
+        .get(addr)
+        .is_some_and(|ended| ended >= started)
+        .then_some(node)
 }
 
 /// An operator removed machine `node` from the cell (#359).
@@ -1487,7 +1533,12 @@ async fn run_machine_role(
             )
             .detach();
     }
+    // The process's lifecycle, for the failure detector's oracles (#654
+    // (live machine marked down)): a kill drops this task, and the guard
+    // with it.
+    let _ended = Ended::new(ctx, &addrs[rank]);
     loop {
+        detector::note_started(ctx.state(), &addrs[rank], ctx.time().now());
         let ran = Box::pin(paros::machine::run_machine(
             ctx.providers().clone(),
             disk(),
@@ -1530,6 +1581,30 @@ async fn run_machine_role(
                 )));
             }
         }
+    }
+}
+
+/// Notes a machine's process stopped when it drops (#654 (live machine
+/// marked down)).
+struct Ended {
+    state: StateHandle,
+    time: moonpool_sim::SimTimeProvider,
+    addr: Address,
+}
+
+impl Ended {
+    fn new(ctx: &SimContext, addr: &Address) -> Self {
+        Self {
+            state: ctx.state().clone(),
+            time: ctx.time().clone(),
+            addr: addr.clone(),
+        }
+    }
+}
+
+impl Drop for Ended {
+    fn drop(&mut self) {
+        detector::note_ended(&self.state, &self.addr, self.time.now());
     }
 }
 
@@ -1671,6 +1746,29 @@ pub(crate) fn registry_cache_read(
     );
 }
 
+/// A minted id is new to the run (#657 (minted node id is new)): at the
+/// first sight of machine `node` at `addr`, no other machine holds it and
+/// no wipe took it, so a wiped machine never comes back under its old
+/// identity.
+fn judge_minted(board: &MachineBoard, addr: &Address, node: u64) {
+    if board.nodes.get(addr) == Some(&node) {
+        return;
+    }
+    let taken = board
+        .nodes
+        .iter()
+        .any(|(other, id)| other != addr && *id == node);
+    let reused = board.wiped.iter().any(|(_, old)| *old == node);
+    assert_always!(
+        !taken && !reused,
+        "machine: a minted node id is new to the run",
+        { "node" => node, "taken" => taken, "reused" => reused }
+    );
+    if !board.wiped.is_empty() {
+        assert_reachable!("machine: a machine mints a new id after a wipe");
+    }
+}
+
 /// A machine rewrote its record durably
 /// ([`paros::Audit::machine_recorded`]), as a reachable each: two proposers'
 /// ballots met at one machine (a promise raised over another machine's),
@@ -1679,6 +1777,7 @@ pub(crate) fn registry_cache_read(
 pub(crate) fn recorded(board: &Mutex<MachineBoard>, addr: &Address, record: &MachineRecord) {
     let mut board = lock(board);
     let node = record.node_id.0;
+    judge_minted(&board, addr, node);
     board.nodes.insert(addr.clone(), node);
     if record.promised != Ballot::default() {
         board.first_promiser.get_or_insert(node);
