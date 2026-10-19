@@ -457,12 +457,7 @@ impl FleetOps {
     /// a coin, part of it goes through the machines' batchers (#145
     /// (batchers)): a multi-writer journal's burst, a single-writer
     /// journal's first round.
-    async fn exercise_on_cell(
-        &mut self,
-        cell: &Cell,
-        journal: JournalIdentifier,
-        draw: u64,
-    ) {
+    async fn exercise_on_cell(&mut self, cell: &Cell, journal: JournalIdentifier, draw: u64) {
         let client = cell.client.clone();
         let batched = buggify_with_prob!(0.5).then(|| self.connect_batched(&cell.servers));
         self.exercise_created(&client, journal, cell.first(draw), (Some(journal), batched))

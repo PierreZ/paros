@@ -97,6 +97,10 @@ impl BatcherSettings {
     /// These settings with four times the record and byte limits, and a
     /// lane flushed only at its record limit or its tick: a batcher
     /// configured above the leader's limits.
+    ///
+    /// # Panics
+    ///
+    /// Never: the assert checks that the raised limits keep their floors.
     #[must_use]
     pub fn above_limits(self) -> Self {
         let max_records = self.limits.max_records.saturating_mul(4);

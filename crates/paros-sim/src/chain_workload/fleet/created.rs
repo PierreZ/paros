@@ -134,12 +134,12 @@ impl FleetOps {
 
     /// A single-writer journal: rounds of appends, on a coin a pipelined
     /// burst, a paging read, a truncation, then a second writer's claim,
-    /// after which the first writer's write is refused. With `batched`, the
+    /// after which the first writer's write is refused. With `via_batcher`, the
     /// first round goes through a batcher, which passes a fenced write on
     /// alone (#145 (batchers)).
     async fn single_writer(
         &mut self,
-        (client, batched): (&ChainClient, Option<&ChainClient>),
+        (client, via_batcher): (&ChainClient, Option<&ChainClient>),
         mut writer: Writer,
         first: usize,
         audit: Option<&AuditWorld>,
@@ -161,7 +161,7 @@ impl FleetOps {
             let records = records_of(&config, audit);
             let sent = hashes(&records);
             let at = writer.next_seq();
-            let via = batched.filter(|_| round == 0).unwrap_or(client);
+            let via = via_batcher.filter(|_| round == 0).unwrap_or(client);
             match writer.write(via, records, first).await {
                 WriterOutcome::Written { seq, count, .. } => {
                     assert_reachable!("created: an owner appends a batch to a created journal");
