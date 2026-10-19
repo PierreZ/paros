@@ -567,7 +567,11 @@ impl Writer {
                 max_records,
                 max_bytes,
             },
-            WriteOutcome::Malformed => WriterOutcome::Unavailable { leader: None },
+            // A leader that stayed busy to the deadline (#360 (disk full))
+            // moved nothing, as on a redirect.
+            WriteOutcome::Malformed | WriteOutcome::Busy => {
+                WriterOutcome::Unavailable { leader: None }
+            }
             WriteOutcome::Denied(denial) => WriterOutcome::Denied(denial),
             WriteOutcome::Ambiguous => {
                 let resolved = client

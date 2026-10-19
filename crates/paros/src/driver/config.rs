@@ -418,6 +418,25 @@ pub struct DriverTunables {
     /// complete. Floor 0: a stop at once, the same as a crash, which
     /// recovery already handles.
     pub shutdown_within: Duration,
+    /// Ticks a journal stays read-only after a full disk quarantined it
+    /// (#360 (disk full)): it votes in Phase 1, serves reads and refuses
+    /// Phase-2 votes, then becomes writable again; a write that still finds
+    /// the disk full makes it read-only again. Floor 1: a store retried
+    /// every beat costs one refused write per beat, never a wrong answer; a
+    /// long hold keeps a store that has space again out of Phase 2.
+    pub read_only_ticks: u64,
+    /// The lag threshold of `Write` admission (#360 (disk full)): a leader
+    /// that holds this many undecided Phase-2 rounds or more answers a new
+    /// `Write` `busy` (its acceptors fall behind), and the client retries
+    /// it. Floor 1: a leader with one round in flight still takes the next
+    /// write once that round is decided; a high threshold admits every
+    /// write, as before admission control.
+    pub admission_rounds: u64,
+    /// The free-bytes floor of placement (#360 (disk full)): a machine
+    /// whose disk has less free space than this is marked low on space in
+    /// the registry, and placement books it last, as a down one. Floor 0:
+    /// no machine is ever low on space.
+    pub free_bytes_floor: u64,
 }
 
 impl Default for DriverTunables {
@@ -473,6 +492,9 @@ impl Default for DriverTunables {
             scrub_pass_within: SCRUB_PASS_WITHIN,
             scrub_page: SCRUB_PAGE,
             shutdown_within: SHUTDOWN_WITHIN,
+            read_only_ticks: READ_ONLY_TICKS,
+            admission_rounds: ADMISSION_ROUNDS,
+            free_bytes_floor: FREE_BYTES_FLOOR,
         };
         // The simulation's baseline is itself a winnable profile.
         assert!(
@@ -606,6 +628,22 @@ const SCRUB_PAGE: usize = 64;
 /// Default [`DriverTunables::shutdown_within`]: 5 s, room for a handoff's
 /// round trips and an election renewal on the simulator's links.
 const SHUTDOWN_WITHIN: Duration = Duration::from_secs(5);
+
+/// Default [`DriverTunables::read_only_ticks`]: four election timeouts, so
+/// a store tries a write again well inside a recovery tail.
+const READ_ONLY_TICKS: u64 = 4 * ELECTION_TIMEOUT_BASE;
+
+/// Default [`DriverTunables::admission_rounds`]: far above the workload's
+/// writes in flight, so admission control refuses only on a seed that draws
+/// it low.
+const ADMISSION_ROUNDS: u64 = 1024;
+
+/// Default [`DriverTunables::free_bytes_floor`]: 64 KiB, below one segment
+/// of the simulation's compact geometry.
+const FREE_BYTES_FLOOR: u64 = 64 * 1024;
+
+const _: () = assert!(READ_ONLY_TICKS >= 1);
+const _: () = assert!(ADMISSION_ROUNDS >= 1);
 
 const _: () = assert!(SCRUB_RATE >= SCRUB_RATE_FLOOR);
 const _: () = assert!(SCRUB_PASS_WITHIN.as_millis() >= SCRUB_PASS_WITHIN_FLOOR.as_millis());

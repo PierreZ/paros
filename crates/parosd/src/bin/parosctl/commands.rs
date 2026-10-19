@@ -296,6 +296,10 @@ async fn append(
             note("no leader took the write");
             Ending::Unreachable
         }
+        WriteOutcome::Busy => {
+            note("the leader stayed busy: its acceptors fall behind; the write did not land");
+            Ending::Unreachable
+        }
         WriteOutcome::Malformed | WriteOutcome::Ambiguous => {
             note("the write's answer never came: it may land");
             Ending::Ambiguous

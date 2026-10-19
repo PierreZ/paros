@@ -2,9 +2,11 @@
 //! coordinator books an acceptor slot on every member of a journal before it
 //! writes the create, and releases them only after the journal's tombstone,
 //! so every live journal of every tenant the cell hosts holds one live
-//! acceptor booking per member in the cell's registry. The registry itself
-//! judges each booking at apply (the class, the capacity, an id booked once),
-//! so a placement never exceeds the capacity it was granted.
+//! acceptor booking per member in the cell's registry. The registry judges
+//! each booking at apply (the class, the capacity, an id booked once), and
+//! the system board's booking model judges the registry's events again with
+//! the class and capacity the layout drew (`crate::audit::system`, #650), so
+//! a placement never exceeds the capacity it was granted.
 //!
 //! A journal moves off a draining machine (#474 (journals on admitted
 //! machines)): its new slot is booked before its old one is released, so a
@@ -128,10 +130,11 @@ async fn read(
         })
         .collect();
     let mut tenants = Vec::with_capacity(hosted.len());
-    for (tenant, control) in hosted {
+    for &(tenant, control) in &hosted {
         learn(JournalIdentifier::new(tenant, control));
         tenants.push(journals::list(&known.client, tenant, control).await?);
     }
+    let reads = hosted;
     let mut after = judged_cell(&known.members);
     let loaded =
         paros::client::checkpoint::load(&mut after, known.journals.cell, &known.client, first, 0)
@@ -139,7 +142,28 @@ async fn read(
     if !matches!(loaded, LoadOutcome::Loaded { .. }) {
         return None;
     }
+    // The two reads are not one snapshot: a mode change or a move that
+    // records its placement between them, then releases a slot before the
+    // registry is read, shows an old placement against new bookings. Read
+    // the placements again and judge only when none changed (witness
+    // 4897247819957563398: a mode change shrank a journal to one member
+    // in the tail, and its two releases landed between the reads).
+    for (control, (tenant, id)) in tenants.iter().zip(&reads) {
+        let again = journals::list(&known.client, *tenant, *id).await?;
+        if placements(&again) != placements(control) {
+            assert_reachable!("placement: a placement changed between the oracle's reads");
+            return None;
+        }
+    }
     Some((tenants, after.state().clone(), slow_before))
+}
+
+/// Every live journal's recorded placement, in id order.
+fn placements(control: &TenantControl) -> Vec<(paros::JournalId, paros::AcceptorConfig)> {
+    control
+        .live()
+        .map(|(id, journal)| (id, journal.placed.clone()))
+        .collect()
 }
 
 /// The oracle itself, and the gate that a placement spread over zones.
@@ -300,8 +324,9 @@ fn footprints(registry: &Registry) {
 /// slot, as `(tenant, node)`: a registered storage machine that serves the
 /// cell, never wiped, up and not slow, with a free slot, that
 /// holds no slot of it,
-/// while every machine it stays on was never wiped. `None` when every such
-/// move finished.
+/// while every machine it stays on was never wiped and the members never
+/// wiped hold both quorums of its configuration in force. `None` when
+/// every such move finished.
 fn unmoved(
     tenants: &[TenantControl],
     registry: &Registry,
@@ -351,14 +376,24 @@ fn unmoved(
             // the journal's members. A wiped acceptor never rejoins, so a
             // journal whose members never wiped hold no quorum never moves
             // (a two-member journal that lost one, placed while the cell
-            // had two storage machines).
+            // had two storage machines). The quorum is the configuration
+            // in force's, the placement the coordinator last recorded
+            // (`placed`, #214 (tenant modes)), never the create's
+            // bootstrap `config`: a mode change may have left the journal
+            // one acceptor per partition (`failures_per_partition` 0),
+            // whose Phase 1 needs every member. Recipe 409137802379467466
+            // 472027:15658202577153942549 on 936348a: a leader under a
+            // `1×3` grid lost a member to a wipe, kept leading, and the
+            // move's `Reconfigure` sent it campaigning for a Phase-1
+            // quorum the wiped member can never answer; the bootstrap, a
+            // majority, still read as a quorum.
             let alive: BTreeSet<NodeId> = slots
                 .iter()
                 .filter(|node| !wiped.contains(&node.0))
                 .copied()
                 .collect();
-            if !journal.config.has_phase1_quorum(&alive)
-                || !journal.config.has_phase2_quorum(&alive)
+            if !journal.placed.has_phase1_quorum(&alive)
+                || !journal.placed.has_phase2_quorum(&alive)
             {
                 continue;
             }

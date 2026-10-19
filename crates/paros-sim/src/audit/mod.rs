@@ -90,8 +90,8 @@ pub(crate) struct NodeAudit<T> {
     /// (#188); `None` for a port outside the journal plane (a matchmaker).
     journal: Option<(JournalIdentifier, Arc<Mutex<journals::JournalBoard>>)>,
     /// The run's system-journal board (#189), on a node that follows the
-    /// system journals.
-    system: Option<Arc<Mutex<system::SystemBoard>>>,
+    /// system journals, and the registry it reports (#650).
+    system: Option<(Arc<Mutex<system::SystemBoard>>, system::Plane)>,
     /// The run's tenant board (#210), on a machine that follows the tenant
     /// control journals.
     tenants: Option<Arc<Mutex<tenants::TenantBoard>>>,
@@ -195,13 +195,34 @@ impl<T: TimeProvider> NodeAudit<T> {
 
     /// This port also reports the system journals' folds and their effects
     /// to `board` (#189).
-    pub(crate) fn with_system(mut self, board: Arc<Mutex<system::SystemBoard>>) -> Self {
-        self.system = Some(board);
+    pub(crate) fn with_system(self, board: Arc<Mutex<system::SystemBoard>>) -> Self {
+        self.on_registry(board, system::Plane::Harness)
+    }
+
+    /// This port reports the registry `plane` names to `board`: a machine's
+    /// port reports its cell control journal's folds, its record and its
+    /// cache (#650).
+    pub(crate) fn on_registry(
+        mut self,
+        board: Arc<Mutex<system::SystemBoard>>,
+        plane: system::Plane,
+    ) -> Self {
+        self.system = Some((board, plane));
         self
     }
 
+    /// The board, on a port that reports to it, with the port's plane.
+    fn registry_board(&self) -> Option<(MutexGuard<'_, system::SystemBoard>, system::Plane)> {
+        self.system
+            .as_ref()
+            .map(|(board, plane)| (system::lock(board), *plane))
+    }
+
+    /// The board, on a port that reports the harness registry: the joiner
+    /// facts are its alone (#650).
     fn system_board(&self) -> Option<MutexGuard<'_, system::SystemBoard>> {
-        self.system.as_deref().map(system::lock)
+        self.registry_board()
+            .and_then(|(board, plane)| matches!(plane, system::Plane::Harness).then_some(board))
     }
 
     /// This port reports for `journal` (#188): the non-interference oracles
@@ -1369,8 +1390,8 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
                 {
                     tenants::lock(board).tenant_dropped(*tenant);
                 }
-                if let Some(mut board) = self.system_board() {
-                    board.folded(node, journal, seq, event);
+                if let Some((mut board, plane)) = self.registry_board() {
+                    board.folded(node, journal, seq, event, plane);
                 }
                 if let Some(state) = &self.wipes {
                     crate::machine::registry_folded(state, journal, seq, event);
@@ -1392,8 +1413,8 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         verified: Option<bool>,
         state: &paros::system::Registry,
     ) {
-        if let Some(mut board) = self.system_board() {
-            board.checkpoint_folded(node, seq, verified, state);
+        if let Some((mut board, plane)) = self.registry_board() {
+            board.checkpoint_folded(node, journal, (seq, verified), state, plane);
         }
         if let Some(run) = &self.wipes {
             crate::machine::registry_restored(run, journal, seq, verified, state);
@@ -1407,8 +1428,8 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
     }
 
     fn journal_started(&self, node: NodeId, journal: JournalIdentifier) {
-        if let Some(mut board) = self.system_board() {
-            board.started(node);
+        if let Some((mut board, plane)) = self.registry_board() {
+            board.started(node, plane);
         }
         // #449: a machine starts only a genesis journal or one a tenant
         // created.
@@ -1724,13 +1745,25 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
     #[tracing::instrument(level = "trace", skip_all, fields(node = node.0, decision = ?decision))]
     fn storage_fault(&self, node: NodeId, error: &StorageError, decision: StorageFaultDecision) {
         let mut st = self.state();
-        // Stages 6/7 have exactly one honest reaction; a different decision
-        // here is a driver bug until Stage 8's protocol-aware choices exist.
+        // Stages 6/7 have exactly one honest reaction to a damaged or
+        // failing device, fail-stop; a full disk (#360 (disk full)) has
+        // another, read-only. Any other decision is a driver bug.
         assert_always!(
-            decision == StorageFaultDecision::Crash,
+            decision == StorageFaultDecision::Crash || matches!(error, StorageError::Full { .. }),
             "a storage fault is decided as a fail-stop crash"
         );
+        assert_always!(
+            decision == StorageFaultDecision::ReadOnly
+                || !matches!(error, StorageError::Full { .. }),
+            "disk full: a full disk is decided read-only, never a crash"
+        );
         match error {
+            StorageError::Full { .. } => {
+                reach_once!(
+                    st.disk_full_read_only,
+                    "disk full: a full disk makes a store read-only"
+                );
+            }
             StorageError::Io { .. } | StorageError::FsyncFailed { .. } => {
                 st.storage_faults_detected += 1;
                 reach_once!(
@@ -1844,11 +1877,17 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         if let Some((board, addr)) = &self.machines {
             crate::machine::recorded(board, addr, record);
         }
+        if let Some((mut board, system::Plane::Machine(class, capacity))) = self.registry_board() {
+            board.machine(record.node_id, class, capacity);
+        }
     }
 
     fn registry_cached(&self, node: NodeId, cache: &paros::machine::CachedRegistry, durable: bool) {
         if let Some((board, _)) = &self.machines {
             crate::machine::registry_cached(board, node, cache, durable);
+        }
+        if durable && let Some((mut board, system::Plane::Machine(..))) = self.registry_board() {
+            board.cached(node, cache);
         }
     }
 

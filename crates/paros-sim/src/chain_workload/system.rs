@@ -562,6 +562,9 @@ impl SystemOps {
                         .and_then(|l| targets.iter().position(|t| *t as u64 == l))
                         .unwrap_or(target + 1);
                 }
+                // The leader stayed busy (#360 (disk full)): nothing moved,
+                // so the same write goes to it again.
+                WriteOutcome::Busy => {}
                 // The record limit's floor admits one record, and the byte
                 // limit's floor a system command (`paros_sim::shape`).
                 WriteOutcome::TooLarge { .. } => {

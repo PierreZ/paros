@@ -160,6 +160,16 @@ pub enum StorageError {
         /// The crash-vs-corruption disentanglement verdict.
         verdict: CorruptionVerdict,
     },
+    /// The device has no space left (`ENOSPC`, #360 (disk full)): a write
+    /// that needed a new segment or a new file was refused before any byte
+    /// of it landed, so the effect is known absent. The store is not
+    /// damaged: the driver quarantines the journal, then re-opens it
+    /// read-only (it keeps its Phase-1 promises and serves reads, and
+    /// refuses Phase-2 votes) until space comes back.
+    Full {
+        /// The record the refused write was for.
+        record: StorageRecord,
+    },
     /// The record store itself is unusable at file granularity (FS metadata).
     /// Reliably crash — never attempt recovery on metadata, in Stage 8 either.
     Metadata {
@@ -175,7 +185,8 @@ impl StorageError {
         match self {
             StorageError::Io { record, .. }
             | StorageError::FsyncFailed { record, .. }
-            | StorageError::Corruption { record, .. } => *record,
+            | StorageError::Corruption { record, .. }
+            | StorageError::Full { record } => *record,
             StorageError::Metadata { .. } => StorageRecord::Store,
         }
     }
@@ -197,6 +208,7 @@ impl fmt::Display for StorageError {
             } => {
                 write!(f, "storage corruption on {record}: {fault} ({verdict})")
             }
+            StorageError::Full { record } => write!(f, "storage full on {record} (lost)"),
             StorageError::Metadata { fault } => write!(f, "storage metadata fault: {fault}"),
         }
     }

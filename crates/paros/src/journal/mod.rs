@@ -248,6 +248,11 @@ fn open_error(error: &OpenError, scalars: StorageRecord) -> StorageError {
         verdict: CorruptionVerdict::Corrupted,
     };
     match error {
+        // A new journal's files found the disk full (#360 (disk full)):
+        // nothing was created, and the store re-opens read-only.
+        OpenError::Io(io) if io.kind() == std::io::ErrorKind::StorageFull => StorageError::Full {
+            record: StorageRecord::Store,
+        },
         OpenError::Io(_) => StorageError::Io {
             record: StorageRecord::Store,
             outcome: WriteOutcome::Unknown,
@@ -286,6 +291,15 @@ fn commit_error(error: &CommitError) -> StorageError {
         | CommitError::Poisoned => StorageError::FsyncFailed {
             record: StorageRecord::Batch,
             outcome: WriteOutcome::Unknown,
+        },
+        // A segment roll found the disk full (#360 (disk full)): refused
+        // before anything was written, so known absent, and the store goes
+        // read-only rather than failing.
+        CommitError::Io {
+            durable: Durable::No,
+            error,
+        } if error.kind() == std::io::ErrorKind::StorageFull => StorageError::Full {
+            record: StorageRecord::Batch,
         },
         // Refused or failed before anything was written: known absent.
         CommitError::Io {

@@ -365,6 +365,9 @@ pub struct Watch {
     directory: Folder<FleetDirectory>,
     /// The slow-machine judgement (#361 (slow machines)).
     slow: SlowJudge,
+    /// The free-bytes floor (#360 (disk full)): a machine that answers
+    /// `Load` with less free space is marked low on space.
+    space_floor: u64,
 }
 
 /// One `Identify` check of a machine's new address, run off the renewal
@@ -419,7 +422,16 @@ impl Watch {
             positions: BTreeMap::new(),
             directory: Folder::new(FleetDirectory::default()),
             slow: SlowJudge::new(slow),
+            space_floor: 0,
         }
+    }
+
+    /// The same watch, marking a machine low on space below `floor` free
+    /// bytes (#360 (disk full)); `0` marks none.
+    #[must_use]
+    pub fn with_space_floor(mut self, floor: u64) -> Self {
+        self.space_floor = floor;
+        self
     }
 
     /// Whether the last [`Watch::round`] call ran a round.
@@ -715,7 +727,7 @@ impl Watch {
             .iter()
             .map(|(id, _, rtt)| {
                 let ack = match loads.get(&id.0) {
-                    Some(crate::client::load::LoadOutcome::Answered(ack)) => Some(ack),
+                    Some(crate::client::load::LoadOutcome::Answered(ack)) => Some(&**ack),
                     _ => None,
                 };
                 (*id, Sample::of(*rtt, ack))
@@ -747,6 +759,57 @@ impl Watch {
                 incarnation: held.incarnation,
                 slow: change.slow,
                 facts: change.facts,
+            };
+            session.record(client, 0, &command).await?;
+            wrote += 1;
+        }
+        wrote += self.judge_space(client, session, &judged, &loads).await?;
+        Ok(wrote)
+    }
+
+    /// The space half of a round (#360 (disk full)): every machine whose
+    /// `Load` answer reports its disk's space is low on space below the
+    /// free-bytes floor, and each change of judgement is written
+    /// `MachineSpace`, for the incarnation the registry holds. How many
+    /// entries it wrote.
+    async fn judge_space<P: Providers>(
+        &self,
+        client: &Client<P>,
+        session: &mut CellSession,
+        judged: &[&(NodeId, Address, Duration)],
+        loads: &BTreeMap<u64, crate::client::load::LoadOutcome>,
+    ) -> Result<usize, Interrupted> {
+        let mut wrote = 0;
+        for (id, _, _) in judged {
+            let Some(crate::client::load::LoadOutcome::Answered(ack)) = loads.get(&id.0) else {
+                continue;
+            };
+            if !ack.has_space {
+                continue;
+            }
+            let low = ack.free_bytes < self.space_floor;
+            let held = session.registry().liveness(*id);
+            if held.low_space == low {
+                continue;
+            }
+            if low {
+                moonpool_assertions::reachable!("coordinator: a machine is marked low on space");
+            } else {
+                moonpool_assertions::reachable!(
+                    "coordinator: a machine low on space has space again"
+                );
+            }
+            tracing::info!(
+                machine = id.0,
+                low,
+                free_bytes = ack.free_bytes,
+                "machine_space"
+            );
+            let command = SystemCommand::MachineSpace {
+                id: *id,
+                incarnation: held.incarnation,
+                low,
+                free_bytes: ack.free_bytes,
             };
             session.record(client, 0, &command).await?;
             wrote += 1;
@@ -971,6 +1034,8 @@ struct Candidacy {
     defer: bool,
     /// The slow-machine judgement's bounds (#361 (slow machines)).
     slow: SlowBounds,
+    /// The free-bytes floor (#360 (disk full)).
+    space_floor: u64,
     /// The leader stops renewing for one lease and a half after its first
     /// term's duties (a BUGGIFY decision: the takeover's way in). A fault:
     /// never in the recovery tail ([`chaos`]), like `hand_off` and
@@ -1059,6 +1124,7 @@ pub(crate) fn spawn<P: Providers>(
             busy_permille: tunables.slow_busy_permille,
             rounds: tunables.slow_rounds,
         },
+        space_floor: tunables.free_bytes_floor,
         stall: moonpool_buggify::buggify_fault_with_prob!(0.3),
         hand_off: formed.plan.members.len() > 1 && moonpool_buggify::buggify_fault_with_prob!(0.25),
         reuse: moonpool_buggify::buggify_with_prob!(0.3),
@@ -1148,6 +1214,7 @@ async fn campaign<P: Providers>(
         down_after,
         mut defer,
         slow,
+        space_floor,
         mut stall,
         hand_off: mut handing,
         reuse,
@@ -1281,7 +1348,10 @@ async fn campaign<P: Providers>(
                 let (duty, session) = renewing(&providers, &mut election, install).await;
                 watching = session.map(|session| {
                     let watch = parked.take().map_or_else(
-                        || Watch::new(client.now(), tunables.renew_every, down_after, slow),
+                        || {
+                            Watch::new(client.now(), tunables.renew_every, down_after, slow)
+                                .with_space_floor(space_floor)
+                        },
                         |watch| watch.resumed(client.now()),
                     );
                     (session, watch)

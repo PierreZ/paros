@@ -425,6 +425,12 @@ message LoadAck {
   // What the machine counted per journal since its process started, from
   // its metrics. Set whether or not `windowed` is.
   repeated JournalUsage usage = 15;
+  // The data disk's space at the window's end (#360 (disk full)), when
+  // `has_space`: the cell coordinator marks a machine below the free-bytes
+  // floor low on space, and placement books it last.
+  bool has_space = 16;
+  uint64 free_bytes = 17;
+  uint64 total_bytes = 18;
 }
 
 // One journal's usage on one machine (#366 (metrics)).

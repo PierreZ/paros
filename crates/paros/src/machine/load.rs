@@ -18,7 +18,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use moonpool_core::{
-    Detach, Providers, SimulationResult, SystemProvider, SystemSample, TaskProvider, TimeProvider,
+    Detach, DiskSpace, Providers, SimulationResult, SystemProvider, SystemSample, TaskProvider,
+    TimeProvider,
 };
 use moonpool_rpc::RpcHandle;
 use paros_core::{JournalId, JournalIdentifier, TenantId};
@@ -42,6 +43,9 @@ pub struct Window {
     pub end_at: Duration,
     /// When the window ended, on the time provider's clock.
     pub ended: Duration,
+    /// The data disk's space at the window's end, when the system provider
+    /// knows it (#360 (disk full)).
+    pub space: Option<DiskSpace>,
 }
 
 /// Where a machine keeps its last full window: shared by the monitor that
@@ -156,6 +160,7 @@ async fn monitor<P: Providers>(
                         start_at: before.at,
                         end_at: after.at,
                         ended: providers.time().now(),
+                        space: after.space,
                     });
                 }
                 // A counter that went back (a wrap, a cgroup change): a
@@ -288,6 +293,9 @@ pub fn answer(node_id: u64, name: &str, window: Option<Window>, now: Duration) -
             read_bps: disk.read_bps,
             write_bps: disk.write_bps,
         }),
+        has_space: window.space.is_some(),
+        free_bytes: window.space.map_or(0, |space| space.free_bytes),
+        total_bytes: window.space.map_or(0, |space| space.total_bytes),
         ..base
     }
 }

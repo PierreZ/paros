@@ -634,8 +634,8 @@ pub(crate) fn wipe_target(
 
 /// The founding member the replaced-founder scenario wipes now
 /// (`crate::world::replaced_founder`, #423), if the run is at its moment:
-/// every founder of a cell of three or more formed, and no machine was
-/// wiped yet. The highest-ranked live founder, so the cell keeps a majority
+/// every founder of a cell of three or more formed and up, and no machine
+/// was wiped yet. The highest-ranked founder, so the cell keeps a majority
 /// of its members. The answer is the founder's process IP, what the wipe
 /// strikes.
 pub(crate) fn replace_target(state: &StateHandle, dead: impl Fn(&str) -> bool) -> Option<String> {
@@ -653,13 +653,17 @@ pub(crate) fn replace_target(state: &StateHandle, dead: impl Fn(&str) -> bool) -
     if !formed {
         return None;
     }
-    board
+    // Every founder up: a wipe while another founder is down (the silent
+    // machine's crash) leaves a cell of three no majority.
+    let ips: Vec<&String> = board
         .founders
         .iter()
-        .rev()
         .filter_map(|addr| board.ips.get(addr))
-        .find(|ip| !dead(ip))
-        .cloned()
+        .collect();
+    if ips.len() < board.founders.len() || ips.iter().any(|ip| dead(ip)) {
+        return None;
+    }
+    ips.last().map(|ip| (*ip).clone())
 }
 
 /// Where the replaced-founder scenario stands (#423): the machine that
@@ -759,9 +763,9 @@ pub(crate) fn cached_mover(state: &StateHandle, dead: impl Fn(&str) -> bool) -> 
 
 /// The machine the silent-machine scenario crashes now
 /// (`crate::world::silent_machine`), once the cell formed: a live machine
-/// the cell admitted, else, on a cell of at least three founding members, a
-/// live founder that formed (the others keep a majority and one of them
-/// leads), unless the downed-founder scenario takes one down (#213 (three
+/// the cell admitted, else, on a cell of at least three founding members
+/// that all formed and are up, a founder (the others keep a majority and
+/// one of them leads), unless the downed-founder scenario takes one down (#213 (three
 /// founding members)). `None` before that.
 pub(crate) fn silent_target(state: &StateHandle, dead: impl Fn(&str) -> bool) -> Option<String> {
     // Drawn before the board's lock: the downed-founder scenario takes a
@@ -790,6 +794,11 @@ pub(crate) fn silent_target(state: &StateHandle, dead: impl Fn(&str) -> bool) ->
         })
         .collect();
     if downed || board.founders.len() < 3 || formed.len() < board.founders.len() {
+        return None;
+    }
+    // Every founder up: a founder down already (a wipe not rebooted yet, a
+    // crash) and a second one silent leave a cell of three no majority.
+    if formed.iter().any(|addr| ip(addr).is_none()) {
         return None;
     }
     formed.into_iter().rev().find_map(ip)
@@ -1351,21 +1360,27 @@ const MACHINE_CLIENT_BASE: u64 = 1 << 32;
 fn machine_audits(
     ctx: &SimContext,
     (audit_addr, my_ip): (Address, &str),
-    rank: usize,
+    (rank, draw): (usize, &crate::shape::MachineDraw),
 ) -> impl Fn(AuditScope) -> NodeAudit<SimTimeProvider> + Clone + Send + Sync + 'static {
+    // The registry's fold oracles judge the machines' cell control journal
+    // too (#650), by the class and capacity the layout drew.
+    let plane = crate::audit::system::Plane::Machine(draw.class, draw.capacity);
+    let registry = crate::audit::system::system_board(ctx.state());
     let time = ctx.time().clone();
     let state = ctx.state().clone();
     let my_ip = my_ip.to_string();
     move |scope: AuditScope| -> NodeAudit<SimTimeProvider> {
         match scope {
             AuditScope::Machine => NodeAudit::new(time.clone(), crate::audit::audit_world(&state))
-                .on_machines(&state, audit_addr.clone()),
+                .on_machines(&state, audit_addr.clone())
+                .on_registry(registry.clone(), plane),
             // The coordinator's calls join the control journals' histories
             // (#240), as client `MACHINE_CLIENT_BASE + rank`.
             AuditScope::Node(home) => {
                 NodeAudit::new(time.clone(), crate::audit::audit_world_for(&state, home))
                     .on_machines(&state, audit_addr.clone())
                     .with_tenants(crate::audit::tenants::tenant_board(&state))
+                    .on_registry(registry.clone(), plane)
                     .with_calls(Arc::new(
                         crate::chain_workload::system::Announce::of_machine(
                             &state,
@@ -1378,6 +1393,7 @@ fn machine_audits(
                 NodeAudit::new(time.clone(), crate::audit::audit_world_for(&state, journal))
                     .in_journal(journal, journal_board(&state))
                     .with_tenants(crate::audit::tenants::tenant_board(&state))
+                    .on_registry(registry.clone(), plane)
                     // A created journal's store commits under the mode its
                     // create recorded: a `Batched` one's commits are cut
                     // under a budget (#599 (durability mode per journal)).
@@ -1435,7 +1451,7 @@ async fn run_machine_role(
     let (listen, advertise) = boot_listen(ctx.state(), &layout, rank, my_ip, held)?;
     let RoleRig { incarnation, .. } = arm_role(ctx, my_ip);
     let tunables = incarnation.shape.tunables;
-    let audits = machine_audits(ctx, (addrs[rank].clone(), my_ip), rank);
+    let audits = machine_audits(ctx, (addrs[rank].clone(), my_ip), (rank, &draw));
     operator_slip();
     let addresses =
         MachineAddresses::new(listen, Some(advertise)).map_err(SimulationError::InvalidState)?;
