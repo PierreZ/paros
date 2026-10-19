@@ -2,7 +2,7 @@
 
 The sans-IO Paxos roles and `ColocatedNode`, the node that wires them: `step`/`tick` in, one
 `Ready` out, `advance()`; no I/O, clock, RNG or deps. Bottom of the stack (`paros-core` ←
-`paros` ← `paros-sim` ← runner; `paros` ← `parosd`; `paros-play` drives it directly). Never
+`paros` ← `paros-sim` ← runner; `paros` ← `parosd`; `paros-wasm`'s `paxos` feature drives it directly). Never
 buggified: perturbed only through its public API. Doctrine lives in the root `AGENTS.md`.
 
 ## Map

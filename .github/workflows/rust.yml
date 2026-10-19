@@ -82,7 +82,8 @@ jobs:
 
   # The sans-IO core and the library driver stay portable to wasm32: paros-core is
   # zero-dep/std-only, paros (the provider-generic driver) is runtime-free. The
-  # gate guards those two contracts; the browser build itself is the `play` job.
+  # gate guards those two contracts, and paros-sim's (#307); the browser build
+  # itself is the `wasm` job.
   portability:
     runs-on: ubuntu-latest
     steps:
@@ -97,14 +98,30 @@ jobs:
         run: nix develop --command cargo check -p paros-core --features serde
       - name: Build paros (the library driver) for wasm32-unknown-unknown
         run: nix develop --command cargo check --target wasm32-unknown-unknown -p paros
-      - name: Build the Paxos sandbox (paros on moonpool's simulator) for wasm32-unknown-unknown
-        run: nix develop --command cargo check --target wasm32-unknown-unknown -p paros-sandbox
+      - name: Build the simulation harness for wasm32-unknown-unknown (#307 (paros-sim in wasm))
+        run: nix develop --command cargo check --target wasm32-unknown-unknown -p paros-sim
 
-  # paros play, the interactive game: the engine crate's wasm build, the TypeScript
-  # bindings ts-rs generates from its view types (committed; a stale copy fails the
-  # diff), and the web app's type check, unit tests and production bundle. Every
-  # tool comes from the flake; `npm ci` installs the locked dependencies.
-  play:
+  # A seed of paros-sim is the same run on wasm32 as natively (#307 (paros-sim in
+  # wasm)): the same seeds run through the native build and through the wasm
+  # bundle under node, and every fingerprint line (the audit digest, the simulated
+  # time, the event count, the violations) must be identical. A u64 draw narrowed
+  # to usize before its modulo once split them on a 32-bit target.
+  sim-wasm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - name: A seed runs the same on wasm32 as natively
+        run: nix develop --command scripts/check-sim-wasm.sh 1 2 3 4 5 6 7 8 9 10
+
+  # The site's wasm tools, one crate (#540): `paros-wasm` with one feature per tool,
+  # each built alone for wasm32-unknown-unknown (`paxos`: the game on paros-core;
+  # `playground`: paros on moonpool's simulator). Then the game's TypeScript
+  # bindings ts-rs generates from its view types (committed; a stale copy fails
+  # the diff), and the web app's type check, unit tests and production bundle.
+  # Every tool comes from the flake; `npm ci` installs the locked dependencies.
+  wasm:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -112,11 +129,11 @@ jobs:
       - uses: DeterminateSystems/magic-nix-cache-action@main
       - name: Regenerate the TypeScript bindings and check they are committed
         run: |
-          nix develop --command cargo test -p paros-play --test bindings
+          nix develop --command cargo test -p paros-wasm --test paxos_bindings
           git diff --exit-code -- website/play/src/generated
-      - name: Build the game's wasm and the web app
-        run: nix develop --command scripts/build-play.sh --wasm-only
-      - name: Type-check, test and bundle the web app
+      - name: Build every wasm tool (one bundle per feature)
+        run: nix develop --command scripts/build-wasm.sh --wasm-only
+      - name: Type-check, test and bundle the game's web app
         run: nix develop --command bash -c 'cd website/play && npm ci --no-audit --no-fund && npm run check && npm test && npm run build'
 
   # The toy (#196), the user's demo and no test: the image builds from a fresh

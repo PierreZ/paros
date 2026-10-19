@@ -165,6 +165,6 @@ checkpoint, common, fleet, public, internal, matchmaker, system, machine, view}`
 - Dev: `futures` executor (`:53`), `tokio` `rt`+`macros` (`:57`). Build: `prost-build` (`:60`).
 - `prometheus` without default features: the machine's metrics (#366 (metrics)), wasm-safe.
 - The pin is **thirteen lines**: six here, `crates/paros-core/Cargo.toml` (`moonpool-assertions`),
-  `crates/paros-sandbox/Cargo.toml` (`moonpool-sim`, `moonpool-rpc`),
+  `crates/paros-wasm/Cargo.toml` (`moonpool-sim`, `moonpool-rpc`),
   `crates/paros-sim/Cargo.toml:20,29`, `crates/parosd/Cargo.toml:22,24` — advance every line
   together.

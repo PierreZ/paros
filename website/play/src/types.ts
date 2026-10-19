@@ -1,6 +1,6 @@
 // Re-exports of the generated contract.
 //
-// `src/generated/` is written by `cargo test -p paros-play` and is never
+// `src/generated/` is written by `cargo test -p paros-wasm --test paxos_bindings` and is never
 // hand-edited; this file is the one import path the rest of the app uses, so a
 // renamed or added view type is a one-line change here.
 

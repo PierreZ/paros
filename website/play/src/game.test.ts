@@ -140,18 +140,18 @@ describe('the Game wrapper', () => {
 
 // ---- the real engine, if the wasm has been built ----------------------------
 
-const WASM = fileURLToPath(new URL('./wasm/paros_play_bg.wasm', import.meta.url));
+const WASM = fileURLToPath(new URL('./wasm/paros_paxos_bg.wasm', import.meta.url));
 const built = existsSync(WASM);
 
 describe.skipIf(!built)('the real engine (wasm)', () => {
   async function engine(levelId: string): Promise<Game> {
-    const module = await import('./wasm/paros_play.js');
+    const module = await import('./wasm/paros_paxos.js');
     module.initSync({ module: readFileSync(WASM) });
     return new Game(new module.WasmGame(levelId));
   }
 
   it('lists the levels it knows', async () => {
-    const module = await import('./wasm/paros_play.js');
+    const module = await import('./wasm/paros_paxos.js');
     module.initSync({ module: readFileSync(WASM) });
     const levels = decodeLevels(module.WasmGame.levels());
     expect(levels.length).toBeGreaterThan(0);
