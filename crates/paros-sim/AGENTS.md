@@ -194,14 +194,20 @@ then admitted; it may stop after the registration and is resumed by the client's
 
 ## Entry points (`lib.rs:323-428`)
 
-`explore`, `run_chain_seed`, `chain_seed_digest`, `chain_seed_canary`, `chain_canary_hunt`,
-`chain_smoke`, `explore_chain_seed`, `run_storage_contract_suite`.
+`explore`, `run_chain_seed`, `chain_seed_digest`, `chain_seed_fingerprint` (the
+`SeedFingerprint` line `paros-sim-wasm-check` compares between native and wasm32, #307),
+`chain_seed_canary`, `chain_canary_hunt`, `chain_smoke`, `explore_chain_seed`,
+`run_storage_contract_suite`.
 
 ## Local rules
 
 - moonpool macros only; never plain `assert!`; never reword a message. Budget: 2048 slots
   (moonpool `MAX_ASSERTION_SLOTS`), 256 buckets; no slot, ballot, id, seed or hash as identity.
 - No seed constants, seed lists or seed-replay tests (root *Simulation rules*).
+- **A seed is the same run on every target** (#307 (paros-sim in wasm)): the crate builds for
+  `wasm32-unknown-unknown` and CI's `sim-wasm` job compares seeds with the native build. An
+  index drawn from a `u64` goes through `draw_index` (reduce in `u64`, then narrow), never
+  `usize::try_from(draw).unwrap_or(0) % len`, which gives `0` for most draws on a 32-bit target.
 - **No new fault wrapper here** (root *Simulation rules*, #294). This crate never decides a
   fault by wrapping shipped code: no new `Ledgered*` store, `Sim*` disk or stores, timer race
   around a commit (the deleted `PowerCut`), hook trait (the deleted `BuggifyHooks`), `crash_self` call on a code path, or workload that stops the

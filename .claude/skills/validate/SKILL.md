@@ -1,12 +1,12 @@
 ---
 name: validate
-description: Run paros's full local gate the way CI's seven jobs do - cargo fmt, clippy --all-targets -D warnings, rustdoc -D warnings on paros-core, nextest, the eight paros-core examples, the wasm32 and no-default-features portability checks (paros-core and paros), the play job (ts-rs bindings diff, scripts/build-play.sh, npm check/test/build), and cargo xtask sim run-all when the protocol or harness changed - through Nix (nix develop locally, nix shell nixpkgs#rustup plus protobuf on Claude Code on the web). Use before declaring any change done, before committing, when asked "will CI pass", and after any Cargo.toml or feature change.
+description: Run paros's full local gate the way CI's jobs do - cargo fmt, clippy --all-targets -D warnings, rustdoc -D warnings on paros-core, nextest, the eight paros-core examples, the wasm32 and no-default-features portability checks (paros-core, paros and paros-sim), the sim-wasm job (a seed of paros-sim is the same run on wasm32 as natively), the wasm job (ts-rs bindings diff, scripts/build-wasm.sh, npm check/test/build), and cargo xtask sim run-all when the protocol or harness changed - through Nix (nix develop locally, nix shell nixpkgs#rustup plus protobuf on Claude Code on the web). Use before declaring any change done, before committing, when asked "will CI pass", and after any Cargo.toml or feature change.
 ---
 
 # Validate
 
-`.github/workflows/rust.yml` has seven jobs (`clippy`, `fmt`, `test`,
-`examples`, `portability`, `play`, `sim`) and every one runs through
+`.github/workflows/rust.yml` has these jobs (`clippy`, `fmt`, `test`,
+`examples`, `portability`, `sim-wasm`, `wasm`, `image`, `sim`, `sim-gates`) and every one runs through
 `nix develop --command`. The sandbox's `/root/.cargo` toolchain is off-limits
 in this project: the pinned toolchain is `rust-toolchain.toml` (1.95.0 with
 `wasm32-unknown-unknown`), and results from anything else do not predict CI.
@@ -28,9 +28,12 @@ in this project: the pinned toolchain is `rust-toolchain.toml` (1.95.0 with
 
   Install Nix first if `nix-store` is missing, exactly as the root
   `AGENTS.md` describes (`nix-bin`, `NIX_CONFIG`, `NIX_SSL_CERT_FILE`). The
-  `play` job additionally needs `wasm-bindgen-cli` (its version must equal the
-  `wasm-bindgen` pin in `crates/paros-play/Cargo.toml`) and `nodejs_22`, both
-  from the flake; add them to the `nix shell` line if you run it there.
+  `wasm` and `sim-wasm` jobs additionally need `wasm-bindgen-cli` (its version
+  must equal the `wasm-bindgen` pin in `crates/paros-wasm/Cargo.toml`),
+  `binaryen` and `nodejs_22`, and paros-sim's wasm32 build needs an unwrapped
+  clang for ring (`llvmPackages.clang-unwrapped`, `bintools-unwrapped`, exported
+  as `CC_wasm32_unknown_unknown` / `AR_wasm32_unknown_unknown`), all from the
+  flake; add them to the `nix shell` line if you run it there.
 
 Below, `RUN` stands for whichever prefix applies.
 
@@ -49,16 +52,21 @@ RUN cargo check --target wasm32-unknown-unknown -p paros-core           # job: p
 RUN cargo check --target wasm32-unknown-unknown -p paros-core --no-default-features
 RUN cargo check -p paros-core --features serde
 RUN cargo check --target wasm32-unknown-unknown -p paros
-RUN cargo test -p paros-play --test bindings                            # job: play
+RUN cargo check --target wasm32-unknown-unknown -p paros-sim
+RUN scripts/check-sim-wasm.sh 1 2 3 4 5 6 7 8 9 10                    # job: sim-wasm
+RUN cargo test -p paros-wasm --test paxos_bindings                      # job: wasm
 git diff --exit-code -- website/play/src/generated   # the ts-rs bindings are committed
-RUN scripts/build-play.sh --wasm-only
+RUN scripts/build-wasm.sh --wasm-only
 RUN bash -c 'cd website/play && npm ci --no-audit --no-fund && npm run check && npm test && npm run build'
 RUN cargo xtask sim run-all                  # job: sim — the sancov sweep; see /sim-sweep
 ```
 
-Run the `play` job whenever the change touches `crates/paros-play`, a
+Run the `wasm` job whenever the change touches `crates/paros-wasm`, a
 `paros-core` type its views read, or `website/play/`: a stale binding in
 `website/play/src/generated` fails the diff, so commit the regenerated files.
+Run the `sim-wasm` job whenever the change touches how paros-sim draws (an
+index from a `u64` draw goes through `paros_sim::draw_index`) or its wasm32
+dependencies.
 
 Run the sim job whenever the change touches `paros-core`, the driver, the
 harness, a hook, a knob, an audit message, or the moonpool pin. It is the real

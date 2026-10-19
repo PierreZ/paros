@@ -1,6 +1,6 @@
 // Runs the sandbox's wasm off the page's thread: one message in (a request
 // `{config, actions}`), one message out (the run, as JSON text).
-import init, { runSandbox } from "./wasm/paros_sandbox.js";
+import init, { runSandbox } from "./wasm/paros_playground.js";
 
 const ready = init();
 

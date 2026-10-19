@@ -1,7 +1,7 @@
 # website/play — the paros play frontend
 
 The browser half of **paros play**, the interactive Paxos game. The engine is
-`crates/paros-play`, compiled to WebAssembly; everything here renders what it
+the `paxos` feature of `crates/paros-wasm`, compiled to WebAssembly; everything here renders what it
 returns and collects what the player does. No protocol logic lives in this
 directory, and none ever should: if the UI needs a fact, the fact belongs in
 the view contract.
@@ -11,12 +11,12 @@ the view contract.
 Every tool comes from Nix. Build the wasm once, then run vite:
 
 ```sh
-nix develop --command scripts/build-play.sh --wasm-only   # writes src/wasm/
+nix develop --command scripts/build-wasm.sh --wasm-only   # writes src/wasm/
 nix develop --command bash -c 'cd website/play && npm ci && npm run dev'
 ```
 
 Then open <http://localhost:5173/>. Rebuild the wasm (the first command) after
-any change under `crates/paros-play`; vite reloads the rest on save.
+any change under `crates/paros-wasm/src/paxos`; vite reloads the rest on save.
 
 The four gates, the same ones CI runs:
 
@@ -25,7 +25,7 @@ nix develop --command bash -c 'cd website/play && npm ci && npm run check && npm
 ```
 
 The full deploy build — wasm, bundle, and the copy into `website/zola/public/play/` —
-is `nix develop --command scripts/build-play.sh`, after `website/zola/build.sh`.
+is `nix develop --command scripts/build-wasm.sh`, after `website/zola/build.sh`.
 
 ## Layout
 
@@ -77,9 +77,9 @@ Nothing a player must read is only on the stage.
 
 ## The contract rule
 
-`src/generated/` is written by `cargo test -p paros-play` from the `ts_rs::TS`
+`src/generated/` is written by `cargo test -p paros-wasm --test paxos_bindings` from the `ts_rs::TS`
 derives in the Rust crate, is committed, and CI fails on a diff. **Never edit a
-file in it.** A field the UI wants is a change to `crates/paros-play/src/view.rs`
+file in it.** A field the UI wants is a change to `crates/paros-wasm/src/paxos/view.rs`
 followed by re-running that test.
 
 Four conventions the generated types do not spell out: every number is a

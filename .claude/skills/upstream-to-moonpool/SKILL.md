@@ -1,6 +1,6 @@
 ---
 name: upstream-to-moonpool
-description: Handle a moonpool limitation paros exposes - decide whether it is reusable simulator infrastructure (open a focused issue in PierreZ/moonpool with downstream evidence, the smallest API asked for, determinism constraints and acceptance criteria, keep paros-side defense in depth) or a paros bug (fix here), and advance the moonpool git pin (one rev on all thirteen moonpool lines across crates/paros-core/Cargo.toml, crates/paros/Cargo.toml, crates/paros-sim/Cargo.toml, crates/parosd/Cargo.toml and crates/paros-sandbox/Cargo.toml) once the fix lands and the compatibility gates pass. Also use for any moonpool API question - consult the LLM docs first.
+description: Handle a moonpool limitation paros exposes - decide whether it is reusable simulator infrastructure (open a focused issue in PierreZ/moonpool with downstream evidence, the smallest API asked for, determinism constraints and acceptance criteria, keep paros-side defense in depth) or a paros bug (fix here), and advance the moonpool git pin (one rev on all thirteen moonpool lines across crates/paros-core/Cargo.toml, crates/paros/Cargo.toml, crates/paros-sim/Cargo.toml, crates/parosd/Cargo.toml and crates/paros-wasm/Cargo.toml) once the fix lands and the compatibility gates pass. Also use for any moonpool API question - consult the LLM docs first.
 ---
 
 # Upstreaming to moonpool

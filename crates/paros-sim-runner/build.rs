@@ -11,7 +11,7 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 /// The crates whose code the campaign runs, by their `src` directory. The
-/// binaries (`parosd`, `paros-play`) and the runner itself are not in it.
+/// binaries (`parosd`, `paros-wasm`) and the runner itself are not in it.
 const SCANNED: &[&str] = &["paros-core", "paros", "paros-sim"];
 
 fn main() {

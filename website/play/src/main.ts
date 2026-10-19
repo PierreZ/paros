@@ -6,7 +6,7 @@
 // typed into a box, and where the focus was) are carried explicitly.
 
 import './styles.css';
-import init, { WasmGame } from './wasm/paros_play.js';
+import init, { WasmGame } from './wasm/paros_paxos.js';
 import { Game, decodeLevels } from './game';
 import { parseHash, type Route } from './route';
 import { h, replace } from './render/dom';
@@ -404,7 +404,7 @@ window.addEventListener('hashchange', () => {
 // ---- boot -------------------------------------------------------------------
 
 async function boot(): Promise<void> {
-  await init({ module_or_path: new URL('./wasm/paros_play_bg.wasm', import.meta.url) });
+  await init({ module_or_path: new URL('./wasm/paros_paxos_bg.wasm', import.meta.url) });
   levels = decodeLevels(WasmGame.levels());
   openRoute(parseHash(window.location.hash));
 }

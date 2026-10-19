@@ -16,6 +16,6 @@ timeout: number,
 elapsed: number, 
 /**
  * Whether the timeout is the no-check-quorum sentinel a hand-stepped
- * leader holds (see [`crate::world::NO_CHECK_QUORUM`]).
+ * leader holds (see [`crate::paxos::world::NO_CHECK_QUORUM`]).
  */
 held: boolean, };

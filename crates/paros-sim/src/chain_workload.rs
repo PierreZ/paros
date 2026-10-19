@@ -1059,7 +1059,7 @@ impl ChainWorkload {
                 reconfigurer: &reconfigurer,
                 matchmaker_reconfigurer: &matchmaker_reconfigurer,
                 op: RECONFIGURE_MATCHMAKERS,
-                target: usize::try_from(raw_payload).unwrap_or(0) % server_count,
+                target: crate::draw_index(raw_payload, server_count),
                 retarget: retarget_from_draw(0),
                 ignore_hint: false,
                 after_claim: false,
@@ -1080,8 +1080,7 @@ impl ChainWorkload {
         // owner's patience (`claim_patience_ms`), the next server along.
         let mut remove_next = false;
         if !reader && !multi_writer {
-            let mut first =
-                usize::try_from(ctx.random().random::<u64>()).unwrap_or(0) % server_count;
+            let mut first = crate::draw_index(ctx.random().random::<u64>(), server_count);
             let patience = time.now() + Duration::from_millis(config.claim_patience_ms);
             loop {
                 let outcome = claim(&nodes, journal, first, writer.uuid()).await;
@@ -1170,8 +1169,7 @@ impl ChainWorkload {
             )
             .await;
             if config.compaction && writer.next_seq() > 0 {
-                let fallback =
-                    usize::try_from(ctx.random().random::<u64>()).unwrap_or(0) % server_count;
+                let fallback = crate::draw_index(ctx.random().random::<u64>(), server_count);
                 let outcome = truncate_traced(
                     nodes.leader().unwrap_or(fallback),
                     fence(&writer),
@@ -2203,7 +2201,7 @@ impl ChainWorkload {
             large_command_bytes: config.command_bytes,
             ..config
         };
-        let first = usize::try_from(ctx.random().random::<u64>()).unwrap_or(0) % server_count;
+        let first = crate::draw_index(ctx.random().random::<u64>(), server_count);
         let mut target = nodes.leader().unwrap_or(first) % server_count;
         // A multi-writer journal's recovery batch (#241): one small record
         // a write, each sent until it is written, the open truncation
