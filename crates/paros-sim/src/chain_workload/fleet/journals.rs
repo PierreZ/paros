@@ -1226,8 +1226,10 @@ impl Call {
             assert_reachable!("frontend: a sealed token is served");
         }
         if let Some(expires) = self.expires {
+            // Served while the frontend's second is the expiry's second at
+            // the latest: strictly before the second after it.
             assert_always!(
-                self.sent <= expires + frontend::MAX_SKEW,
+                self.sent < expires + frontend::MAX_SKEW + frontend::DATE_GRANULARITY,
                 "frontend: a short-lived token is served only before its expiry",
                 {
                     "sent_ms" => self.sent.as_millis(),

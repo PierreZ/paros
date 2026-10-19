@@ -1333,6 +1333,14 @@ pub const RARE: &[Rare] = &[
         msg: "coordinator: a settled set left its booked machines",
         reason: "fired on 0 of 300 hunt seeds, and on a witness the sweep's exploration found (PR #555 (fix main's red sweep, part 2)): a set's handover asked again (11 of 300) must be abandoned frozen and finished by another node whose stop quorum misses a member (#501 (matchmaker sets off the founders), #486)",
     },
+    Rare {
+        msg: "election: a later term's install refuses an earlier term's",
+        reason: "a deposed term's install refused on the cell journal after a later term installed: missed by all four shards of PR #705's sweep; needs a deposed coordinator whose compare-and-set loses to a later term (#653 (election term to installed leader), #703 (election oracles))",
+    },
+    Rare {
+        msg: "chain: a multi-writer burst is written out of send order",
+        reason: "a cause most bursts never show: one shard of PR #692 saw none of 22 bursts out of order, and all four shards of PR #705's sweep missed it (#662 (burst multi-writer appends))",
+    },
 ];
 
 /// What the sweep ran of the declared gates.

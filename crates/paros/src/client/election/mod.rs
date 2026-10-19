@@ -13,8 +13,10 @@
 //!   ([`ElectionFold`]): the first campaign for the next term wins.
 //! - **Renew**: the leader appends a renewal every `renew_every`. A watcher
 //!   deems the leader gone once it has **seen** no renewal for `lease`,
-//!   measured on its own clock (never by comparing clocks), and campaigns:
-//!   the lease is a liveness hint only. A wrong guess costs availability,
+//!   measured on its own clock (never by comparing clocks), over reads that
+//!   served, and campaigns: the lease is a liveness hint only. A read no
+//!   server served shows nothing and counts for nothing: a watcher whose
+//!   reads fail deposes no live leader. A wrong guess costs availability,
 //!   never safety.
 //! - **Watch**: a read of the election journal, long-polling at its tail.
 //! - **Takeover**: a campaign that deposes a leader whose lease ran out. The
@@ -191,6 +193,18 @@ pub struct Election<P: Providers> {
     /// When it last saw the current leadership alive (a campaign, a
     /// hand-off, a renewal), on its own clock — or started watching.
     heard: Duration,
+    /// When a watch last served it a page of the journal, on its own clock
+    /// — or started watching: how far the silence in the fold is evidence.
+    /// A read no server served (`ReadOutcome::Unserved`, an ambiguous one)
+    /// says nothing about the leader; counted as silence, it deposed a live
+    /// one. Witness recipe 13880051458641227329 145102:2992283494425834125
+    /// on ce8b03b: in the recovery tail of a slow-link seed, a founder's
+    /// three election reads in a row expired unserved while the
+    /// coordinator's renewals landed every period; it campaigned, the next
+    /// term took 11 s to open, and the operator's `init` missed its settle
+    /// deadline (red on "fleet: an operation an operator stopped in ends in
+    /// the recovery tail").
+    served: Duration,
     /// When it last sent a renewal.
     renewed: Option<Duration>,
     /// It folded to the tail at least once: what it folds after that
@@ -233,6 +247,7 @@ impl<P: Providers> Election<P> {
             leading: None,
             resigned: None,
             heard,
+            served: heard,
             renewed: None,
             caught_up: false,
             floor: 0,
@@ -268,16 +283,23 @@ impl<P: Providers> Election<P> {
 
     /// Whether this candidate deems the leader gone: it leads nothing, and
     /// the fold names no leader (and knows the term), or it has seen no sign
-    /// of the leader for `lease + jitter` on its own clock. `jitter` is the
-    /// caller's draw.
+    /// of the leader for `lease + jitter` on its own clock, over reads that
+    /// served. Only a served read shows silence: the time a failed read
+    /// took shows nothing, and counts for nothing (`served`). `jitter` is
+    /// the caller's draw.
     #[must_use]
     pub fn expired(&self, jitter: Duration) -> bool {
         if self.leading.is_some() {
             return false;
         }
-        let silent = self.client.now().saturating_sub(self.heard);
+        let bound = self.tunables.lease + jitter;
+        let silent = self.served.saturating_sub(self.heard);
+        let on_clock = self.client.now().saturating_sub(self.heard);
+        if on_clock > bound && silent <= bound {
+            moonpool_assertions::reachable!("election: a failed read shows no silence");
+        }
         let vacant = self.fold.is_known() && self.fold.leader().is_none() && self.caught_up;
-        vacant || silent > self.tunables.lease + jitter
+        vacant || silent > bound
     }
 
     /// Publish `interface` as this candidate's, with the encoded
@@ -364,6 +386,9 @@ impl<P: Providers> Election<P> {
                     records,
                     state,
                 } => {
+                    // A served page shows the journal up to now: silence
+                    // in it is evidence from here on.
+                    self.served = self.client.now();
                     if at != from {
                         return false;
                     }
@@ -404,6 +429,7 @@ impl<P: Providers> Election<P> {
                     // floor and anchor on the leader's record there. The
                     // second time, the floor outran this watch: wait at the
                     // tail for the next renewal ([`FLOOR_RACE_WAIT_MS`]).
+                    self.served = self.client.now();
                     self.floor = state.first_seq.0;
                     if self.fold.floor_seen(state.first_seq.0) {
                         // The floor moved onto a record held: anchored.
@@ -482,7 +508,7 @@ impl<P: Providers> Election<P> {
     /// that campaigns earlier deposes a live leader, which costs
     /// availability, never safety: the governed journal's fence decides.
     pub async fn campaign(&mut self, wait_ms: u64) -> bool {
-        let lapsed = self.client.now().saturating_sub(self.heard) > self.tunables.lease;
+        let lapsed = self.served.saturating_sub(self.heard) > self.tunables.lease;
         let term = self.fold.term() + 1;
         let uuid = self.mint();
         let record = ElectionRecord::Campaign {

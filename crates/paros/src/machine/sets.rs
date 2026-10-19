@@ -411,30 +411,61 @@ impl Sets {
             .filter(|(_, b)| stays(registry, gone, b.node))
             .copied()
             .collect();
+        // The set lacks slots no machine can take now: it is not booked, and
+        // it is handed over onto the machines that stay, a thinner set.
+        let mut short = false;
         if staying.len() < size
             && gone_plan(registry, desk, (tenant, gone), &staying, size).is_none()
         {
-            // A gone machine is left only for a machine to go to: with none,
-            // its slot stays, as a draining one's does, and the set is
-            // handed back onto it (#475 (re-place after the Down bound),
-            // witness 838622054030409282 on 757fa48: a set thinned off a
-            // gone machine waited in its book step for good). A slow
-            // machine's slot stays too (#361 (slow machines)): else the set
-            // waits in its book step and is never handed back onto it.
+            // With no machine to go to, the set never waits in its book
+            // step (#475 (re-place after the Down bound), witness
+            // 838622054030409282 on 757fa48: a set thinned off a gone
+            // machine waited there for good). A slow machine's slot stays
+            // (#361 (slow machines)): else the set is never handed back
+            // onto it. A gone machine's slot is left all the same, as a
+            // journal's is: the set is handed over onto the machines that
+            // stay, and the machine takes a slot again once it answers. A
+            // gone machine may be wiped and never answer as itself, and a
+            // bootstrap it can never hold freezes the generation for good:
+            // every journal of the tenant then waits on a GC a frozen
+            // matchmaker refuses, and no move of theirs ever finishes
+            // (sweep recipe `6627242282366560563
+            // 263607:11592686499006116539,219039:12004839530364989954` on
+            // e7ab094: two admitted machines wiped, a set of five handed
+            // back onto both, a journal degraded for the whole tail).
+            // Only when nothing stays is the set handed back onto every
+            // registered slot, a gone one included.
             moonpool_assertions::reachable!("coordinator: a set has no machine to go to");
+            short = true;
+            let slow: BTreeSet<NodeId> = slots
+                .iter()
+                .map(|(_, b)| b.node)
+                .filter(|node| registry.is_slow(*node))
+                .collect();
             let kept = Leaving {
-                gone: BTreeSet::new(),
-                held: slots
-                    .iter()
-                    .map(|(_, b)| b.node)
-                    .filter(|node| registry.is_slow(*node))
-                    .collect(),
+                gone: gone.gone.clone(),
+                held: slow.clone(),
             };
             staying = slots
                 .iter()
                 .filter(|(_, b)| stays(registry, &kept, b.node))
                 .copied()
                 .collect();
+            if staying.is_empty() {
+                let kept = Leaving {
+                    gone: BTreeSet::new(),
+                    held: slow,
+                };
+                staying = slots
+                    .iter()
+                    .filter(|(_, b)| stays(registry, &kept, b.node))
+                    .copied()
+                    .collect();
+            } else if staying.len() < slots.len() {
+                moonpool_assertions::reachable!(
+                    "coordinator: a set thins off a gone machine with nowhere to go"
+                );
+            }
             assert!(
                 staying.iter().all(|(_, b)| registry
                     .get(b.node)
@@ -442,13 +473,13 @@ impl Sets {
                 "a set with no machine to go to keeps its registered slots"
             );
         }
-        if staying.len() < size {
+        if staying.len() < size && !short {
             return self
                 .book(client, cell, desk, (tenant, gone), &staying, size)
                 .await;
         }
         assert!(
-            staying.len() >= size,
+            staying.len() >= size || short,
             "a set books only where a machine can take the slot"
         );
         let mut members = reply.matchmakers.clone();

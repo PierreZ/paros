@@ -222,6 +222,55 @@ impl<Id: Copy + Ord, V> Election<Id, V> {
         self.promises.from_slot
     }
 
+    /// The slot a keep-alive `Prepare` asks from (#428 (paging livelock)):
+    /// one past the highest slot any merged page reported, and never below
+    /// the campaign's first slot. An acceptor that answered completely
+    /// reported nothing at or past it, so its answer to a `Prepare` from
+    /// here is an empty page: the re-affirmation the keep-alive wants, not
+    /// the whole suffix again. A keep-alive sent from the campaign's first
+    /// slot made every answered acceptor send its full suffix on every tick
+    /// (witness seed 1245551733207877429 on d813220: one acceptor answered
+    /// 1,911 keep-alives with a 28-entry page each, 196 MB on one link,
+    /// 38 M simulated events and a 353 s run; 0.4 M events and 71 s on a
+    /// run of the ordinary shape).
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
+    #[must_use]
+    pub fn keep_alive_from(&self) -> Slot {
+        let reported = self
+            .recovered
+            .keys()
+            .next_back()
+            .copied()
+            .into_iter()
+            .chain(self.faulty_reports.keys().next_back().copied())
+            .max();
+        let from = reported.map_or(self.promises.from_slot, |slot| {
+            Slot(
+                slot.0
+                    .checked_add(1)
+                    .expect("a slot past the reported suffix exists"),
+            )
+        });
+        // Never below the first slot, and past every merged report.
+        assert!(
+            from >= self.promises.from_slot,
+            "a keep-alive asks from the campaign's first slot or past it"
+        );
+        assert!(
+            self.recovered.keys().all(|slot| *slot < from),
+            "a keep-alive asks past every recovered slot"
+        );
+        assert!(
+            self.faulty_reports.keys().all(|slot| *slot < from),
+            "a keep-alive asks past every faulty report"
+        );
+        from
+    }
+
     /// Whether some acceptor answered with a partial suffix and still owes
     /// a `Promise` page: the campaign is paging (#428 (paging livelock)).
     ///
