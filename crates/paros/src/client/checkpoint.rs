@@ -632,6 +632,28 @@ impl<S: Checkpointable> Checkpointer<S> {
     #[tracing::instrument(level = "debug", skip_all, fields(journal = %self.writer.journal()))]
     pub async fn open<P: Providers>(&mut self, client: &Client<P>, first: usize) -> OpenOutcome {
         let claim = self.writer.claim(client, first, false).await;
+        self.opened(client, first, claim).await
+    }
+
+    /// [`Checkpointer::open`], claiming over `old` only (#653 (election
+    /// term to installed leader), [`Writer::claim_over`]).
+    pub async fn open_over<P: Providers>(
+        &mut self,
+        client: &Client<P>,
+        first: usize,
+        old: Option<LeaderUuid>,
+    ) -> OpenOutcome {
+        let claim = self.writer.claim_over(client, first, old).await;
+        self.opened(client, first, claim).await
+    }
+
+    /// Fold the journal to its tail once `claim` won it.
+    async fn opened<P: Providers>(
+        &mut self,
+        client: &Client<P>,
+        first: usize,
+        claim: ClaimOutcome,
+    ) -> OpenOutcome {
         if !matches!(claim, ClaimOutcome::Won { .. } | ClaimOutcome::Owned { .. }) {
             return OpenOutcome::NotClaimed(claim);
         }

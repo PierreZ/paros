@@ -31,7 +31,7 @@ use paros_core::{LeaderUuid, NodeId};
 
 use super::Client;
 use super::bootstrap::{self, AdmitOutcome};
-use super::checkpoint::{CheckpointOutcome, CheckpointPolicy, Checkpointer};
+use super::checkpoint::{CheckpointOutcome, CheckpointPolicy, Checkpointer, OpenOutcome};
 use super::fleet::{
     FleetRefusal, Interrupted, Run, Stage, Step, append, going_round, open, retry, settle,
 };
@@ -153,6 +153,36 @@ impl CellSession {
     ) -> Result<(), Interrupted> {
         if !self.cell_open {
             open(&mut self.cell, client, first).await?;
+            self.cell_open = true;
+        }
+        Ok(())
+    }
+
+    /// [`CellSession::open`], claiming over `old` only (#653 (election term
+    /// to installed leader)): an elected coordinator installs its term only
+    /// over the leader it read before it read its election.
+    ///
+    /// # Errors
+    ///
+    /// The claim found another leader than `old`, or the claim or the fold
+    /// did not end (see [`Interrupted`]).
+    pub async fn open_over<P: Providers>(
+        &mut self,
+        client: &Client<P>,
+        first: usize,
+        old: Option<LeaderUuid>,
+    ) -> Result<(), Interrupted> {
+        if !self.cell_open {
+            let journal = self.journals.cell;
+            match self.cell.open_over(client, first, old).await {
+                OpenOutcome::Open { .. } => {}
+                OpenOutcome::NotClaimed(outcome) => {
+                    return Err(Interrupted::NotClaimed { journal, outcome });
+                }
+                OpenOutcome::Behind(outcome) => {
+                    return Err(Interrupted::Behind { journal, outcome });
+                }
+            }
             self.cell_open = true;
         }
         Ok(())
