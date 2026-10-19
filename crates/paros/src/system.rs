@@ -1705,6 +1705,13 @@ impl Registry {
         self.dropped.contains(&tenant)
     }
 
+    /// Every tenant the cell dropped (#229). A fold restored from a
+    /// checkpoint learns a drop only here: the `TenantDropped` entry is
+    /// below the checkpoint.
+    pub fn dropped_tenants(&self) -> impl Iterator<Item = TenantId> + '_ {
+        self.dropped.iter().copied()
+    }
+
     /// The cell side of the fleet's registration, once `init` wrote it
     /// (#229).
     #[must_use]
