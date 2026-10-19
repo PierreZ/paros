@@ -34,7 +34,7 @@
 //! over the whole record at the end of the run ([`JournalModel::check`]), so
 //! no check depends on which node reported first.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use moonpool_sim::{assert_always, assert_reachable, assert_sometimes};
 use paros::{Command, Control, JournalView, LeaderUuid, Outcome, WriterMode};
@@ -52,8 +52,9 @@ struct WriteFact {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SlotFact {
     write: Option<WriteFact>,
-    /// A `Truncate`'s fence, the leader uuid it names (#228).
-    truncate: Option<LeaderUuid>,
+    /// A `Truncate`'s fence, the leader uuid it names (#228), and the
+    /// position it asked to trim to (#656 (verdicts no client received)).
+    truncate: Option<(LeaderUuid, u64)>,
     /// A `SetLeader`'s `(new, old)` (#339: a won one is judged in slot
     /// order).
     set_leader: Option<(LeaderUuid, Option<LeaderUuid>)>,
@@ -97,6 +98,14 @@ pub(super) struct JournalModel {
     superseded_write_answered: bool,
     reinstated_any: bool,
     wrong_mode_any: bool,
+    /// Every slot a node answered a client from (#656 (verdicts no client
+    /// received)): the others' verdicts reach no client, so only this model
+    /// judges them.
+    answered: BTreeSet<u64>,
+    /// Per record position of each `Duplicate`, by slot: the hashes of the
+    /// records it sent, judged in [`JournalModel::check`] against the
+    /// batches accepted (#656).
+    duplicates: BTreeMap<u64, (u64, u64, Vec<u64>)>,
     /// Per record-batch hash, how many slots accepted it: a multi-writer
     /// write retried may land twice (#241, at-least-once).
     accepted_bytes: BTreeMap<u64, u64>,
@@ -156,7 +165,7 @@ impl JournalModel {
             vhash,
         });
         let truncate = match command {
-            Command::Control(Control::Truncate { leader, .. }) => Some(*leader),
+            Command::Control(Control::Truncate { leader, up_to }) => Some((*leader, up_to.0)),
             _ => None,
         };
         let set_leader = match command {
@@ -200,33 +209,10 @@ impl JournalModel {
             (Outcome::Accepted { seq, count }, Some(write)) => {
                 self.accepted(slot, (seq.0, *count), write, command);
             }
-            (Outcome::Duplicate { seq, .. }, Some(write)) => {
-                self.duplicate_any = true;
-                if let Some((_, original)) = self.batches.get(&seq.0) {
-                    assert_always!(
-                        original.vhash == write.vhash,
-                        "journal: a retry is acked only with the bytes accepted there",
-                        { "slot" => slot, "seq" => seq.0 }
-                    );
-                }
+            (Outcome::Duplicate { seq, count }, Some(write)) => {
+                self.duplicate(slot, (seq.0, *count), write, command);
             }
-            (Outcome::Refused(state), Some(write)) => {
-                if self.mode == WriterMode::Multi {
-                    assert_always!(
-                        write.count == 0,
-                        "journal: a multi-writer journal refuses only an empty write",
-                        { "slot" => slot, "count" => write.count }
-                    );
-                } else if state.leader != Some(write.leader) {
-                    self.fenced_any = true;
-                } else if write.seq > state.next_seq.0 {
-                    // Ahead of the journal (#339): its own gate, apart from
-                    // a write at a position another write took.
-                    self.ahead_refused_any = true;
-                } else if write.seq != state.next_seq.0 {
-                    self.gap_refused_any = true;
-                }
-            }
+            (Outcome::Refused(state), Some(write)) => self.refused(slot, state, write),
             (Outcome::Truncated(state), Some(write)) => {
                 self.truncated_any = true;
                 assert_always!(
@@ -281,6 +267,64 @@ impl JournalModel {
                     { "slot" => slot, "outcome" => format!("{outcome:?}"), "write" => write.is_some() }
                 );
             }
+        }
+    }
+
+    /// A `Duplicate`'s first verdict: acked at the position and count the
+    /// retry names, with the bytes accepted there when the model saw them;
+    /// its records are kept for [`JournalModel::check`] (#656 (verdicts no
+    /// client received)).
+    fn duplicate(
+        &mut self,
+        slot: u64,
+        (seq, count): (u64, u64),
+        write: WriteFact,
+        command: &Command,
+    ) {
+        self.duplicate_any = true;
+        assert_always!(
+            write.seq == seq && write.count == count,
+            "journal: a duplicate is acked at the position and count it names",
+            { "slot" => slot, "seq" => seq, "asked" => write.seq }
+        );
+        if let Some((_, original)) = self.batches.get(&seq) {
+            assert_always!(
+                original.vhash == write.vhash,
+                "journal: a retry is acked only with the bytes accepted there",
+                { "slot" => slot, "seq" => seq }
+            );
+        }
+        if let Command::Write(entry) = command {
+            let hashes = entry.records.iter().map(|r| record_hash(&r.0)).collect();
+            self.duplicates.insert(slot, (seq, count, hashes));
+        }
+    }
+
+    /// A refused write's first verdict, against the view it was judged
+    /// against.
+    fn refused(&mut self, slot: u64, state: &JournalView, write: WriteFact) {
+        if self.mode == WriterMode::Multi {
+            assert_always!(
+                write.count == 0,
+                "journal: a multi-writer journal refuses only an empty write",
+                { "slot" => slot, "count" => write.count }
+            );
+        } else if state.leader != Some(write.leader) {
+            self.fenced_any = true;
+        } else if write.seq > state.next_seq.0 {
+            // Ahead of the journal (#339): its own gate, apart from a write
+            // at a position another write took.
+            self.ahead_refused_any = true;
+        } else if write.seq != state.next_seq.0 {
+            self.gap_refused_any = true;
+        } else {
+            // The leader in force, at the next position (#656 (verdicts no
+            // client received)): only an empty batch is refused there.
+            assert_always!(
+                write.count == 0,
+                "journal: an in-order write from the leader is refused only when empty",
+                { "slot" => slot, "seq" => write.seq, "count" => write.count }
+            );
         }
     }
 
@@ -352,17 +396,29 @@ impl JournalModel {
     /// is not the leader it was judged against. On a multi-writer journal
     /// (#241) anyone truncates, under the unset uuid, and nobody is refused.
     fn truncate_verdict(&mut self, slot: u64, fact: &SlotFact, state: &JournalView) {
+        // An applied truncation trims at least to where it asked, clamped
+        // to `next_seq` (#656 (verdicts no client received)); its upper
+        // bound needs the floor before it, judged in slot order.
+        if let (Outcome::Trimmed(_), Some((_, up_to))) = (&fact.outcome, fact.truncate) {
+            assert_always!(
+                state.first_seq.0 >= up_to.min(state.next_seq.0),
+                "journal: a truncation trims at least to where it asked",
+                { "slot" => slot, "up_to" => up_to, "first_seq" => state.first_seq.0 }
+            );
+        }
         if self.mode == WriterMode::Multi {
             self.trimmed_any = true;
             assert_always!(
                 matches!(fact.outcome, Outcome::Trimmed(_))
-                    && fact.truncate.is_some_and(|fence| !fence.is_set()),
+                    && fact.truncate.is_some_and(|(fence, _)| !fence.is_set()),
                 "journal: a multi-writer truncation applies from anyone",
                 { "slot" => slot }
             );
             return;
         }
-        let leads = fact.truncate.is_some() && state.leader == fact.truncate;
+        let leads = fact
+            .truncate
+            .is_some_and(|(fence, _)| state.leader == Some(fence));
         if matches!(fact.outcome, Outcome::Trimmed(_)) {
             self.trimmed_any = true;
             assert_always!(
@@ -382,6 +438,7 @@ impl JournalModel {
     /// A node answered the call it proposed at `slot` with `outcome`: the
     /// verdict its fold reached there, which every node shares.
     pub(super) fn answered(&mut self, node: u64, slot: u64, outcome: &Outcome) {
+        self.answered.insert(slot);
         if let Some(known) = self.slots.get(&slot) {
             assert_always!(
                 known.outcome == *outcome,
@@ -474,7 +531,11 @@ impl JournalModel {
         let mut first = 0_u64;
         let mut current: Option<LeaderUuid> = None;
         let mut stale_truncate_refused = false;
+        // The floor the last verdict revealed, once one did (#656).
+        let mut floor: Option<u64> = None;
+        let mut unanswered_judged = false;
         for (&slot, fact) in &self.slots {
+            unanswered_judged |= self.unanswered_verdict(slot, fact, &mut floor);
             let (before, after) = match (&fact.outcome, fact.write) {
                 (Outcome::Accepted { seq, count }, _) => (Some(seq.0), Some(seq.0 + count)),
                 (outcome, _) => revealed(outcome).map_or((None, None), |state| {
@@ -536,13 +597,13 @@ impl JournalModel {
             if let Outcome::Leader(state) = &fact.outcome {
                 current = state.leader;
             }
-            if let (Outcome::TruncateRefused(_), Some(fence)) = (&fact.outcome, fact.truncate)
+            if let (Outcome::TruncateRefused(_), Some((fence, _))) = (&fact.outcome, fact.truncate)
                 && self.leaders.get(&fence).is_some_and(|at| *at < slot)
                 && current != Some(fence)
             {
                 stale_truncate_refused = true;
             }
-            if let (Outcome::Trimmed(_), Some(fence), Some(current)) =
+            if let (Outcome::Trimmed(_), Some((fence, _)), Some(current)) =
                 (&fact.outcome, fact.truncate, current)
             {
                 assert_always!(
@@ -570,6 +631,19 @@ impl JournalModel {
                 }
             }
         }
+        self.judge_bytes(unanswered_judged);
+        self.gates(stale_truncate_refused);
+    }
+
+    /// The checks of the bytes, once every verdict is in: every
+    /// `Duplicate` (#656 (verdicts no client received)) and every
+    /// acknowledged write (#651 (acked writes judged by their bytes)).
+    fn judge_bytes(&self, unanswered_judged: bool) {
+        self.judge_duplicates();
+        assert_sometimes!(
+            unanswered_judged,
+            "journal: a verdict no client received is judged"
+        );
         let mut judged = false;
         for write in &self.acked {
             judged |= self.judge_acked(write);
@@ -577,7 +651,63 @@ impl JournalModel {
         if judged {
             assert_reachable!("created: an acknowledged write is judged by its bytes");
         }
-        self.gates(stale_truncate_refused);
+    }
+
+    /// The slot-ordered half of #656 (verdicts no client received): an
+    /// applied truncation moves the floor `floor` (the one the last verdict
+    /// revealed) to its clamped ask, or leaves it; `floor` moves on to this
+    /// slot's. Returns whether this slot is a verdict no node answered a
+    /// client from that the model's checks judge.
+    fn unanswered_verdict(&self, slot: u64, fact: &SlotFact, floor: &mut Option<u64>) -> bool {
+        if let (Outcome::Trimmed(state), Some((_, up_to)), Some(before)) =
+            (&fact.outcome, fact.truncate, *floor)
+        {
+            // Every slot reaches the model (the density check relies on it
+            // too), so the floor before this one is known.
+            assert_always!(
+                state.first_seq.0 == before.max(up_to.min(state.next_seq.0)),
+                "journal: a truncation trims to its clamped ask and no further",
+                { "slot" => slot, "up_to" => up_to, "first_seq" => state.first_seq.0, "before" => before }
+            );
+        }
+        if let Some(state) = revealed(&fact.outcome) {
+            *floor = Some(state.first_seq.0);
+        }
+        !self.answered.contains(&slot)
+            && matches!(
+                fact.outcome,
+                Outcome::Refused(_) | Outcome::Trimmed(_) | Outcome::Duplicate { .. }
+            )
+    }
+
+    /// Judge every `Duplicate` against the batches accepted (#656
+    /// (verdicts no client received)), once every verdict is in: a retry is
+    /// acked only where a batch starts, never mid-batch, and every position
+    /// it covers holds the record it sent.
+    fn judge_duplicates(&self) {
+        for (&slot, (seq, count, hashes)) in &self.duplicates {
+            let covering = self
+                .batches
+                .range(..=*seq)
+                .next_back()
+                .filter(|(start, (_, write))| *seq < *start + write.count);
+            if let Some((start, (_, original))) = covering {
+                assert_always!(
+                    *start == *seq && original.count == *count,
+                    "journal: a duplicate is acked only for a whole batch accepted there",
+                    { "slot" => slot, "seq" => *seq, "start" => *start }
+                );
+            }
+            for (position, sent) in (*seq..).zip(hashes) {
+                if let Some(held) = self.records.get(&position) {
+                    assert_always!(
+                        held == sent,
+                        "journal: a duplicate is acked only where its own bytes are",
+                        { "slot" => slot, "position" => position }
+                    );
+                }
+            }
+        }
     }
 
     /// The journal's coverage gates, once the slot-ordered checks ran.
