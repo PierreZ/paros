@@ -33,6 +33,7 @@ use crate::chain::{hash_text, trace_truncate};
 use crate::client::{ChainClient, ClientRuntime, client_rpc_config};
 
 mod config;
+pub(crate) mod deposed;
 mod edge;
 mod fleet;
 mod fold;

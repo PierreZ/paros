@@ -50,6 +50,7 @@ use paros::{Command, Entry, JournalIdentifier, LeaderUuid, NodeId, Seq, Value};
 
 use paros::client::{ReadOutcome, SetLeaderOutcome, WriteOutcome};
 
+use super::deposed;
 use super::rpc::{CallLog, read_once, set_leader_once, within, write_once};
 use crate::audit::system::{lock as board_lock, system_board};
 use crate::audit::{audit_world_for, audit_world_named};
@@ -133,6 +134,11 @@ pub(crate) struct Announce {
     /// The fenced call each pending token carries: its journal and uuid,
     /// for the deposed-actor oracle (#240).
     fenced: Mutex<std::collections::BTreeMap<u64, (JournalIdentifier, LeaderUuid)>>,
+    /// A frontend's observer (#192 (the frontend)): it sees each call at
+    /// relay time, a network delay after the actor sent it, so it never
+    /// judges the deposed-actor rule; the actor's own observer does
+    /// (`super::deposed::ActorFence`).
+    relaying: bool,
 }
 
 const DEPOSED_KEY: &str = "paros-deposed-uuids";
@@ -195,6 +201,7 @@ impl Announce {
             journals: Mutex::new(Vec::new()),
             learned: None,
             fenced: Mutex::new(std::collections::BTreeMap::new()),
+            relaying: false,
         }
     }
 
@@ -214,6 +221,17 @@ impl Announce {
             journals: Mutex::new(Vec::new()),
             learned: None,
             fenced: Mutex::new(std::collections::BTreeMap::new()),
+            relaying: false,
+        }
+    }
+
+    /// This observer as a frontend's (#192 (the frontend)): it logs every
+    /// call it relays and keeps the deposed-actor bookkeeping, but judges
+    /// no send, which the actor's `ActorFence` does.
+    pub(crate) fn relaying(self) -> Self {
+        Self {
+            relaying: true,
+            ..self
         }
     }
 
@@ -275,23 +293,15 @@ impl CallObserver for Announce {
         }
         let (index, audit, log) = self.entry(attempt.journal())?;
         // An actor's writer stops at its first refusal (#240): no fenced
-        // call leaves under a uuid a refusal already named deposed.
-        let fence = match attempt {
-            Attempted::Write(write) => Some(paros::leader_uuid_from_proto(write.leader)),
-            Attempted::Truncate(truncate) => Some(paros::leader_uuid_from_proto(truncate.leader)),
-            Attempted::SetLeader(_) | Attempted::Read(_) => None,
-        }
-        .filter(|uuid| uuid.is_set());
+        // call leaves under a uuid a refusal already named deposed. A
+        // frontend sees the call only as it relays it, so it keeps the
+        // bookkeeping and judges nothing (`super::deposed`).
+        let fence = deposed::fence_of(attempt);
         let write_hash = if let Attempted::Write(write) = attempt {
             for record in &write.records {
                 audit.note_submitted(user_command_hash(record));
             }
-            let entry = Entry {
-                leader: paros::leader_uuid_from_proto(write.leader),
-                seq: Seq(write.seq),
-                records: write.records.iter().cloned().map(Value).collect(),
-            };
-            let hash = paros::command_hash(&Command::Write(entry));
+            let hash = deposed::write_hash(write);
             audit.note_appended(hash);
             Some(hash)
         } else {
@@ -299,30 +309,16 @@ impl CallObserver for Announce {
         };
         if let Some(uuid) = fence {
             let journal = attempt.journal();
-            let gone = deposed(&self.state, journal)
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .contains(&uuid);
+            let gone = deposed(&self.state, journal);
+            let gone = gone.lock().unwrap_or_else(PoisonError::into_inner);
             let early = invoked_early(&self.state, journal);
             let mut early = early.lock().unwrap_or_else(PoisonError::into_inner);
-            // The one call that may still leave: the identical re-send of
-            // a write first sent before its uuid was deposed, the library's
-            // `resolve` settling it (PR #678: a pipeline's sibling tickets
-            // were refused while one of its writes was ambiguous). The
-            // journal refuses it in place; a new write is never re-sent.
-            let resend = gone && write_hash.is_some_and(|hash| early.contains(&(uuid, hash)));
-            if resend {
-                assert_reachable!(
-                    "election: a deposed actor's ambiguous write is re-sent to resolve it"
-                );
-            }
-            assert_always!(
-                !gone || resend,
-                "election: a deposed actor writes nothing after its first refusal",
-                { "client" => self.client, "journal" => journal.to_string() }
-            );
-            if let (false, Some(hash)) = (gone, write_hash) {
-                early.insert((uuid, hash));
+            if self.relaying {
+                if let (false, Some(hash)) = (gone.contains(&uuid), write_hash) {
+                    early.insert((uuid, hash));
+                }
+            } else {
+                deposed::sending(&gone, &mut early, (self.client, journal), uuid, write_hash);
             }
         }
         let token = log.invoked(attempt)?;
@@ -343,20 +339,9 @@ impl CallObserver for Announce {
             .unwrap_or_else(PoisonError::into_inner)
             .remove(&token);
         if let Some((journal, uuid)) = fenced {
-            let leader = match answer {
-                Answered::Write(WriteOutcome::Refused { state })
-                | Answered::Truncate(TruncateOutcome::Refused { state }) => Some(state.leader),
-                _ => None,
-            };
-            if let Some(leader) = leader
-                && leader != Some(uuid)
-            {
-                deposed(&self.state, journal)
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .insert(uuid);
-                assert_reachable!("election: a fenced call is refused because another leads");
-            }
+            let gone = deposed(&self.state, journal);
+            let mut gone = gone.lock().unwrap_or_else(PoisonError::into_inner);
+            deposed::answered(&mut gone, uuid, answer);
         }
         let index = usize::try_from(token >> TOKEN_JOURNAL_SHIFT).unwrap_or(usize::MAX);
         let log = self

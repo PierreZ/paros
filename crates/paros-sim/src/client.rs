@@ -100,6 +100,7 @@ impl ClientRuntime {
             shutdown: ctx.shutdown().clone(),
             tunables,
             names: crate::machine::names(ctx.state()),
+            client: u64::try_from(ctx.client_id()).unwrap_or(0),
         }
     }
 
@@ -149,6 +150,8 @@ pub(crate) struct Connector {
     tunables: ClientTunables,
     /// The run's name table (#257): the machines' advertised names.
     names: paros::Names,
+    /// The workload client's id, named by its observers' detail maps.
+    client: u64,
 }
 
 impl Connector {
@@ -200,7 +203,9 @@ impl Connector {
 
     /// The library client over the frontends at `frontends` (#192 (the
     /// frontend)), in the order the client indexes them: every call carries
-    /// `pass`. A frontend never names a node, so the ids are ranks.
+    /// `pass`. A frontend never names a node, so the ids are ranks. Its
+    /// observer is the actor's side of the deposed-actor oracle
+    /// (`chain_workload::deposed::ActorFence`): the frontend logs the calls.
     pub(crate) fn through(
         &self,
         frontends: &[paros::Address],
@@ -224,5 +229,8 @@ impl Connector {
             .collect();
         paros::client::Client::new(&self.providers, servers, self.tunables)
             .with_shutdown(self.shutdown.clone())
+            .with_observer(std::sync::Arc::new(
+                crate::chain_workload::deposed::ActorFence::new(self.client),
+            ))
     }
 }
