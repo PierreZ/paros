@@ -8,12 +8,18 @@
 //! workload's batches are at most four records of 16 KiB, far under the
 //! default limits.
 //!
+//! An owner's own write rarely meets a `TooLarge`: both a multi-record
+//! batch and a node's small limits must be drawn. So on its own BUGGIFY
+//! location an owner first sends a batch of empty records one past the
+//! largest record limit any node draws: every node that serves the journal
+//! refuses it and names its limits (#663).
+//!
 //! Both writes are ordinary owner writes through the history: issued,
 //! noted with the audit, and judged by the linearizability search.
 
 use moonpool_sim::{assert_always, assert_reachable, buggify_with_prob};
-use paros::Value;
 use paros::client::{WriteOutcome, Writer};
+use paros::{DriverTunables, Value};
 
 use crate::audit::AuditWorld;
 use crate::chain::user_command_hash;
@@ -100,11 +106,80 @@ fn records(
 }
 
 impl ChainWorkload {
-    /// After `server` refused a batch as over `limits`: on a coin, a batch
-    /// exactly at one of them (never `TooLarge` from that node), then one
-    /// past it (never written).
-    #[tracing::instrument(level = "debug", skip_all, fields(server = server))]
+    /// After `server` refused a batch as over `limits`: on a coin, probe
+    /// them ([`Self::probe_edges`]).
     pub(super) async fn edge_limits(
+        &mut self,
+        step: &Step<'_>,
+        (writer, written, next_op): (&mut Writer, &mut Vec<WrittenCommand>, &mut u64),
+        server: usize,
+        limits: (u64, u64),
+        now_ms: &(impl Fn() -> u64 + Sync),
+    ) {
+        if writer.owned().is_none() || !buggify_with_prob!(0.5) {
+            return;
+        }
+        self.probe_edges(step, (writer, written, next_op), server, limits, now_ms)
+            .await;
+    }
+
+    /// An owner's batch of empty records one past every node's record
+    /// limit, sent to `server`: refused `TooLarge` by a node that serves the
+    /// journal, never written; its limits are then probed.
+    #[tracing::instrument(level = "debug", skip_all, fields(server = server))]
+    pub(super) async fn oversized_write(
+        &mut self,
+        step: &Step<'_>,
+        (writer, written, next_op): (&mut Writer, &mut Vec<WrittenCommand>, &mut u64),
+        server: usize,
+        now_ms: &(impl Fn() -> u64 + Sync),
+    ) {
+        assert_always!(
+            writer.owned().is_some(),
+            "chain: only an owner sends an oversized batch"
+        );
+        // The largest record limit a node runs: the default, and the
+        // production profile `parosd` ships (`shape.rs` draws below both).
+        let most = DriverTunables::default()
+            .max_batch_records
+            .max(DriverTunables::production().max_batch_records);
+        let count = usize::try_from(most + 1).unwrap_or(usize::MAX);
+        let over = self
+            .edge_write(
+                step,
+                (&mut *writer, next_op),
+                server,
+                vec![Value(Vec::new()); count],
+                now_ms,
+            )
+            .await;
+        assert_always!(
+            !matches!(over.1, WriteOutcome::Written { .. }),
+            "chain: an oversized batch is never written",
+            { "records" => most + 1 }
+        );
+        self.edge_failed(writer, &over.0, &over.1, step);
+        if let WriteOutcome::TooLarge {
+            max_records,
+            max_bytes,
+        } = over.1
+        {
+            assert_reachable!("chain: an oversized batch names a node's limits");
+            self.probe_edges(
+                step,
+                (writer, written, next_op),
+                server,
+                (max_records, max_bytes),
+                now_ms,
+            )
+            .await;
+        }
+    }
+
+    /// A batch exactly at one of `server`'s `limits` (never `TooLarge`
+    /// from that node), then one past it (never written).
+    #[tracing::instrument(level = "debug", skip_all, fields(server = server))]
+    async fn probe_edges(
         &mut self,
         step: &Step<'_>,
         (writer, written, next_op): (&mut Writer, &mut Vec<WrittenCommand>, &mut u64),
@@ -118,12 +193,12 @@ impl ChainWorkload {
             raw_payload,
             ..
         } = *step;
-        if writer.owned().is_none() || !buggify_with_prob!(0.5) {
-            return;
-        }
         // A batch at the byte limit only where the run's stores hold it: a
         // node whose limit was not capped (none in this harness) would stall.
         let fits = limits.1 <= crate::shape::entry_capacity(ctx.state());
+        // A batch at the record limit holds one byte: its encoding, a few
+        // bytes a record, fits the entry log's floor (`ENTRY_BLOCKS_FLOOR`)
+        // even at the default 1024 records.
         let limit = if fits && raw_class & 1 == 1 {
             Limit::Bytes
         } else {

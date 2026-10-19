@@ -1459,6 +1459,19 @@ impl ChainWorkload {
             };
             match op {
                 WRITE | WRITE_TO_NON_LEADER => {
+                    // An oversized batch (#663 (batches at the edge
+                    // limits)), its own location: every node names its
+                    // limits, which the owner then probes.
+                    if op == WRITE && writer.owned().is_some() && buggify_with_prob!(0.1) {
+                        assert_reachable!("chain: an owner sends a batch over every node's limits");
+                        self.oversized_write(
+                            &step,
+                            (&mut writer, &mut written, &mut next_op),
+                            target,
+                            &now_ms,
+                        )
+                        .await;
+                    }
                     self.write_step(
                         &step,
                         (&mut writer, &mut written, &mut next_op),
