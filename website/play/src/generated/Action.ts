@@ -211,11 +211,11 @@ phase: Phase,
  */
 nodes: Array<number>, } | { "kind": "answer", 
 /**
- * The prompt's id (from [`crate::view::PromptView`]).
+ * The prompt's id (from [`crate::paxos::view::PromptView`]).
  */
 prompt: number, 
 /**
- * The chosen [`crate::prompt::Choice::id`].
+ * The chosen [`crate::paxos::prompt::Choice::id`].
  */
 choice: string, } | { "kind": "set_automation", 
 /**

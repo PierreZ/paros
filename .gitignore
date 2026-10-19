@@ -27,7 +27,7 @@ target
 .claude/worktrees/
 
 # paros play: installed npm packages, the vite bundle, and the wasm-bindgen output
-# (scripts/build-play.sh produces the last two; src/generated/ is committed).
+# (scripts/build-wasm.sh produces the last two; src/generated/ is committed).
 /website/play/node_modules/
 /website/play/dist/
 /website/play/src/wasm/

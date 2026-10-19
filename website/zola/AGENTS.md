@@ -72,13 +72,13 @@ config with `--no-sandbox`).
 ## The game is a live surface, and the Paxos chapters are its field guide
 
 The interactive half of the site is **paros play**, deployed on the same GitHub Pages site
-at `/play/` (`crates/paros-play` + `website/play`, staged into `website/zola/public/play/` by
-`scripts/build-play.sh` in the Pages workflow). The one-widget rewrite (#308) replaces this
+at `/play/` (`crates/paros-wasm`'s `paxos` feature + `website/play`, staged into `website/zola/public/play/`
+by `scripts/build-wasm.sh` in the Pages workflow). The one-widget rewrite (#308) replaces this
 section's rules when it lands. It drives the real `paros-core` compiled
 to wasm — the player is the network and the clock, and plays each role until the core judges
 the answer right — and it **never replays a trace**: the game has no seed, no recorded run and
 no simulation (the sandbox, below, is the one place that simulates). `website/zola/content/paxos/play.md` is the level map; the levels themselves are
-Rust, in `crates/paros-play/src/level/`.
+Rust, in `crates/paros-wasm/src/paxos/level/`.
 
 That splits the writing between the two surfaces, and the split is the rule for every future
 chapter edit:
@@ -120,8 +120,8 @@ a separate page, linked, never embedded.
 
 The **paros sandbox** runs a paros universe in the browser: the shipped `run_machine` on
 moonpool's simulated network, disk and clock, driven by the operator calls `parosctl` makes
-(`crates/paros-sandbox`, the page `website/sandbox/`, staged at `/sandbox/app/` by
-`scripts/build-sandbox.sh`). Its section is `content/sandbox/`. The rule that forbids seeds and
+(`crates/paros-wasm`'s `playground` feature, the page `website/sandbox/`, staged at
+`/sandbox/app/` by `scripts/build-wasm.sh`). Its section is `content/sandbox/`. The rule that forbids seeds and
 simulation in the browser is the game's, and it does not apply to the sandbox. The game stays as
 it is (decided on 2026-10-13: keep both): the game teaches each role by hand, the sandbox shows
 the whole system.
@@ -132,7 +132,7 @@ the whole system.
   behaviour, never from a sim-only path or a `Sim*` wrapper.
 - **Every run is a replay.** A run is a function of its seed, its config and its action log, and
   the page link holds all three. An action added to the log never changes what happened before
-  its time (`crates/paros-sandbox/tests/probe.rs` pins this).
+  its time (`crates/paros-wasm/tests/playground_probe.rs` pins this).
 - **Say what is simulated.** The page and the section say that the network, the disks and the
   clock are simulated, and that its times are not production numbers.
 - **It explains Paxos and paros.** It never names a person or an audience.

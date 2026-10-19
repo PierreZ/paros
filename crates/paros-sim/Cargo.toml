@@ -34,5 +34,21 @@ moonpool-rpc = { git = "https://github.com/PierreZ/moonpool", rev = "5a6b71e3f52
 tokio-util = "0.7"
 tracing = "0.1"
 
+# paros-sim builds for the browser (#307 (paros-sim in wasm)). On
+# `wasm32-unknown-unknown`, `getrandom` has no source of entropy unless its
+# JavaScript backend is on. The run draws nothing from it: every key the
+# harness makes comes from the seed. These lines only let the crates that link
+# it (Biscuit's keys, rustls's ring) build for wasm32; rustls's own clock is
+# unused too (`paros::tls` validates against the simulated time). ring's C code
+# needs a clang that targets wasm32 (`CC_wasm32_unknown_unknown`, set by the
+# flake).
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.4", features = ["wasm_js"] }
+ring = { version = "0.17", features = ["wasm32_unknown_unknown_js"] }
+rustls-pki-types = { version = "1", features = ["web"] }
+# Biscuit's own `Instant` has no wasm32 source without its `wasm` feature.
+# The rev is `paros-authz-biscuit`'s.
+biscuit-auth = { git = "https://github.com/eclipse-biscuit/biscuit-rust", rev = "93832a82bf509ad81f05fdb6adaf69d03c56887b", default-features = false, features = ["wasm"] }
+
 [lints]
 workspace = true

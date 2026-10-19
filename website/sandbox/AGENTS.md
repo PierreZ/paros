@@ -1,7 +1,8 @@
 # website/sandbox
 
-The page of the Paxos sandbox (#518); the engine is `crates/paros-sandbox`, compiled to wasm
-by `scripts/build-sandbox.sh` into `wasm/` (gitignored) and staged at `/sandbox/app/`. Plain
+The page of the Paxos sandbox (#518); the engine is the `playground` feature of
+`crates/paros-wasm` (#540), compiled to wasm by `scripts/build-wasm.sh` into `wasm/` (bundle
+`paros_playground`, gitignored) and staged at `/sandbox/app/`. Plain
 HTML, CSS and ES modules, no build step: `main.js` (editor, replay link, playback, the three
 acts and their captions), `stage.js` (the cluster view: machines by zone, each journal a chip,
 every message and client call a dot in flight, the followed journal's quorum and log, the
@@ -15,4 +16,4 @@ thread), `style.css` (light and dark).
 - The URL hash is the replay: base64url JSON of `{config, actions}`.
 - The log always starts with `init` at 0 ms, and the page never removes it; the engine refuses
   a log without it.
-- Preview: `scripts/build-sandbox.sh --wasm-only`, then serve this directory with any static server.
+- Preview: `scripts/build-wasm.sh --wasm-only`, then serve this directory with any static server.

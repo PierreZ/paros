@@ -62,9 +62,11 @@
             # The site (website/zola/, Zola + Goyo, #254): website/zola/build.sh.
             zola
 
-            # paros play: the interactive game (crates/paros-play + website/play).
+            # The site's wasm tools (crates/paros-wasm, #540: the game at
+            # website/play, the playground at website/sandbox) and the paros-sim
+            # wasm check (crates/paros-sim-wasm-check, #307).
             # wasm-bindgen-cli's version MUST equal the `wasm-bindgen` crate pin
-            # in crates/paros-play/Cargo.toml and crates/paros-sandbox/Cargo.toml
+            # in crates/paros-wasm/Cargo.toml and crates/paros-sim-wasm-check/Cargo.toml
             # (a mismatch fails bindgen with an opaque schema-version error);
             # bump all three together.
             wasm-bindgen-cli
@@ -95,12 +97,17 @@
             echo "  • Use 'cargo test' to run tests"
             echo "  • Use 'cargo nextest run' for better test output with timeouts"
             echo "  • Use 'cargo fmt' to format code"
-            echo "  • wasm-bindgen $(wasm-bindgen --version | cut -d' ' -f2), node $(node --version): scripts/build-play.sh builds the game"
+            echo "  • wasm-bindgen $(wasm-bindgen --version | cut -d' ' -f2), node $(node --version): scripts/build-wasm.sh builds the wasm tools"
             echo "  • zola $(zola --version | cut -d' ' -f2): website/zola/build.sh builds the site"
           '';
 
           # Environment variables
           RUST_SRC_PATH = "${rust-toolchain}/lib/rustlib/src/rust/library";
+          # ring's C code (rustls, under paros-sim's TLS) built for wasm32
+          # (#307 (paros-sim in wasm)): an unwrapped clang targets wasm32, which the
+          # gcc wrapper cannot.
+          CC_wasm32_unknown_unknown = "${pkgs.llvmPackages.clang-unwrapped}/bin/clang";
+          AR_wasm32_unknown_unknown = "${pkgs.llvmPackages.bintools-unwrapped}/bin/llvm-ar";
         };
       }
     );

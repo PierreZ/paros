@@ -5,7 +5,7 @@
  */
 export type Choice = { 
 /**
- * The stable id an [`crate::Action::Answer`] names.
+ * The stable id an [`crate::paxos::Action::Answer`] names.
  */
 id: string, 
 /**

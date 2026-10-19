@@ -7,11 +7,9 @@ on:
   pull_request:
     paths:
       - "website/**"
-      - "crates/paros-play/**"
-      - "crates/paros-sandbox/**"
-      - "scripts/build-sandbox.sh"
+      - "crates/paros-wasm/**"
       - "website/zola/build.sh"
-      - "scripts/build-play.sh"
+      - "scripts/build-wasm.sh"
       - "flake.nix"
       - "flake.lock"
       - ".github/workflows/pages.yml"
@@ -35,10 +33,8 @@ jobs:
       - uses: DeterminateSystems/magic-nix-cache-action@main
       - name: Build the site
         run: nix develop --command website/zola/build.sh
-      - name: Build and stage the game at /play/
-        run: nix develop --command scripts/build-play.sh
-      - name: Build and stage the sandbox at /sandbox/app/
-        run: nix develop --command scripts/build-sandbox.sh
+      - name: Build and stage the wasm tools at /play/ and /sandbox/app/
+        run: nix develop --command scripts/build-wasm.sh
       - uses: actions/upload-pages-artifact@v5
         with:
           path: ./website/zola/public
