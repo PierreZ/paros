@@ -13,6 +13,9 @@
 //! location, the operator drains a machine renamed since it joined (#504
 //! (red drain seeds)).
 //!
+//! On a coin, the operator drains a machine that holds a tenant's batcher
+//! (#145 (batchers)): the cell coordinator releases that slot.
+//!
 //! Once a drained machine holds no slot, the operator removes it on a coin
 //! (`CellSession::remove`, #359): its `node_id` is tombstoned for good.
 //!
@@ -101,6 +104,21 @@ impl FleetOps {
             return false;
         }
         let gone = crate::shape::gone_machine(ctx.state());
+        // On a coin, a machine that holds a tenant's batcher (#145
+        // (batchers)): the coordinator releases its slot and books the
+        // count on the machines that stay.
+        if !loaded
+            && !draining
+            && !gone
+            && let Some(node) = batcher_host(registry)
+            && buggify_with_prob!(0.3)
+        {
+            if let Ok(true) = session.drain(&cell.client, first, node).await {
+                assert_reachable!("drain: an operator drains a batcher's machine");
+                tracing::info!(node = node.0, "machine_drained");
+            }
+            return true;
+        }
         if gone && crate::machine::gone_requested(ctx.state()) {
             return false;
         }
@@ -252,4 +270,20 @@ fn movable(registry: &Registry, members: &[u64], node: NodeId) -> bool {
         };
         b.node == node && moves && storage.iter().any(|m| !holders.contains(m))
     })
+}
+
+/// A registered machine that holds a tenant's batcher slot (#145
+/// (batchers)), if any.
+fn batcher_host(registry: &Registry) -> Option<NodeId> {
+    registry
+        .bookings()
+        .filter(|(_, b)| {
+            b.role == Role::Batcher && matches!(b.target, BookingTarget::Tenant { .. })
+        })
+        .map(|(_, b)| b.node)
+        .find(|node| {
+            registry
+                .get(*node)
+                .is_some_and(|n| n.standing == NodeStanding::Registered)
+        })
 }

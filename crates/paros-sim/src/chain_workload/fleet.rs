@@ -1271,6 +1271,11 @@ impl FleetOps {
             // The machines' own `Resolve` folds escape after chaos (#457).
             self.resolve_answers(ctx, cell, ctx.time().now() + FLEET_SETTLE)
                 .await;
+            // Each tenant name resolves once more after chaos, when a
+            // configure's batchers are booked (#145 (batchers)).
+            for (first, name) in NAMES.iter().enumerate() {
+                self.resolve_at_entry(first, name, None).await;
+            }
         }
         // Every quiet journal world converges (#447 (model checks for every
         // journal world)), on its own deadline.

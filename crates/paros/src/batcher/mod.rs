@@ -112,7 +112,35 @@ impl BatcherSettings {
         assert!(limits.valid(), "raised limits keep their floors");
         Self { limits, ..self }
     }
+
+    /// These settings with at most [`TIGHT_RECORDS`] records a write: a
+    /// batcher configured below the leader's limits, which sends a write
+    /// of more records alone.
+    ///
+    /// # Panics
+    ///
+    /// Never: the asserts check that the lowered limits keep their floors.
+    #[must_use]
+    pub fn below_limits(self) -> Self {
+        let max_records = self.limits.max_records.min(TIGHT_RECORDS);
+        let limits = BatchLimits {
+            max_records,
+            flush_records: self.limits.flush_records.min(max_records),
+            ..self.limits
+        };
+        assert!(limits.valid(), "lowered limits keep their floors");
+        assert!(
+            limits.max_records <= self.limits.max_records,
+            "a limit only goes down"
+        );
+        Self { limits, ..self }
+    }
 }
+
+/// The record limit of a batcher configured below the leader's limits.
+/// Floor 1: a one-record write still fits.
+pub const TIGHT_RECORDS: usize = 2;
+const _: () = assert!(TIGHT_RECORDS >= 1);
 
 /// The nodes a batcher sends its writes to: a fixed list, or a cell's
 /// address book, followed as the machine's cached registry fold moves.
@@ -188,9 +216,14 @@ pub(crate) fn spawn<P: Providers>(
     // the machine's start path: a machine whose tunables differ from the
     // leader's merges past what the leader takes, and learns its limits
     // from the refusal.
+    // Below them on another decision: a write of more records than the
+    // batcher takes goes alone.
     let settings = if moonpool_buggify::buggify_with_prob!(0.25) {
         moonpool_assertions::reachable!("batcher: a batcher starts above the leader's limits");
         settings.above_limits()
+    } else if moonpool_buggify::buggify_with_prob!(0.25) {
+        moonpool_assertions::reachable!("batcher: a batcher starts below the leader's limits");
+        settings.below_limits()
     } else {
         settings
     };
