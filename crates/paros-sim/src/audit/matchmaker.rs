@@ -282,7 +282,8 @@ pub(super) struct MatchmakerAudit {
     decree_checked: bool,
     activation_checked: bool,
     /// Per proposed `(generation, members)`: the matchmakers that durably
-    /// hold its bootstrap. Shared by every journal of the tenant (#501
+    /// hold its bootstrap, reported at its persist or read back at a boot
+    /// (`recovered`). Shared by every journal of the tenant (#501
     /// (matchmaker sets off the founders)): a matchmaker reports its
     /// scalars to the journals its set holds a registry of, and a fresh
     /// member of a later generation may hold none of the journal the
@@ -1010,16 +1011,27 @@ impl MatchmakerAudit {
         );
     }
 
-    /// A matchmaker booted from its durable registry.
+    /// A matchmaker booted from its durable registry. `pending` is every
+    /// bootstrap its scalars hold: one a kill between its sync and its
+    /// report (`registration durable, reply not sent`) left unreported is
+    /// durable all the same, and the re-asked `Bootstrap` is answered from
+    /// it (invariant 7's read-back side; witness
+    /// `4072618331913533157 563993:14006474283715661092` on e7ab094).
     pub(super) fn recovered(
         &mut self,
         matchmaker: MatchmakerId,
         set: &MatchmakerSet,
         phase: MatchmakerPhase,
+        pending: &[PendingBootstrap],
         registry: &BTreeMap<Ballot, Registration>,
         gc_watermark: Ballot,
     ) {
         self.deployed = true;
+        for bootstrap in pending {
+            let members: Vec<u64> = bootstrap.set.members().iter().map(|m| m.0).collect();
+            self.bootstrapped
+                .hold((bootstrap.set.generation.0, members), matchmaker.0);
+        }
         // A booted matchmaker names an authoritative set for its generation
         // (a spare names the bootstrap set it is outside of).
         if phase != MatchmakerPhase::Inactive {

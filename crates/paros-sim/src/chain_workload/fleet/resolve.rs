@@ -183,18 +183,27 @@ impl FleetOps {
         deadline: std::time::Duration,
     ) {
         use moonpool_sim::TimeProvider;
-        let wiped = crate::machine::wiped_ids(ctx.state());
         let patience = self
             .patience
             .max(crate::shape::resolve_answer_ceiling() + crate::shape::RESOLVE_ROUND_TRIP);
         // Every member is asked in each round, so one member that stays
-        // silent cannot use up the others' time.
+        // silent cannot use up the others' time. A wipe is read again each
+        // round and at the verdict: the replaced-founder scenario may strike
+        // `LATE_WINDOW` into the tail, and the board learns of a wipe only
+        // at the replacement's boot, so a founder wiped during this check
+        // is excused like one wiped before it (witness recipe
+        // `12026813195170844786 216871:7753195129087799838` on edde689: the
+        // wipe landed between the first ask and the verdict).
+        let excused = |silent: &mut Vec<(u64, _)>| {
+            let wiped = crate::machine::wiped_ids(ctx.state());
+            silent.retain(|(id, _)| !wiped.contains(id));
+        };
         let mut silent: Vec<(u64, _)> = cell
             .servers
             .iter()
-            .filter(|(id, _)| !wiped.contains(id))
             .map(|(id, addr)| (*id, addr.clone()))
             .collect();
+        excused(&mut silent);
         while !silent.is_empty() && ctx.time().now() < deadline && !ctx.shutdown().is_cancelled() {
             let mut still = Vec::new();
             for (id, addr) in silent {
@@ -212,6 +221,7 @@ impl FleetOps {
                 }
             }
             silent = still;
+            excused(&mut silent);
             if !silent.is_empty()
                 && ctx
                     .time()
