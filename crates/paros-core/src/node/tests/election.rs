@@ -856,7 +856,9 @@ fn campaign_above_an_overwrite_reads_both_values() {
 /// #428 (paging livelock): while a campaign pages one peer's long suffix,
 /// every tick re-sends the campaign's `Prepare` to the peers that already
 /// answered completely, so their election clocks stay quiet; the repeated
-/// `Promise` folds as nothing. No paging, no keep-alive.
+/// `Promise` folds as nothing. No paging, no keep-alive. The keep-alive
+/// asks from one past the highest slot the tally merged, so an answered
+/// peer re-affirms with an empty page, never its whole suffix again.
 #[test]
 fn a_paging_campaign_keeps_its_promisers_quiet() {
     let mut nodes = cluster::<5>();
@@ -902,7 +904,7 @@ fn a_paging_campaign_keeps_its_promisers_quiet() {
     ));
 
     // A tick re-sends the campaign's Prepare to node 1 alone: the same
-    // ballot, from the campaign's first slot.
+    // ballot, from one past the highest slot the tally merged (slot 0).
     nodes[0].tick();
     let keep_alive: Vec<_> = drain(&mut nodes[0])
         .into_iter()
@@ -917,7 +919,7 @@ fn a_paging_campaign_keeps_its_promisers_quiet() {
     assert_eq!(to, NodeId(1));
     assert!(matches!(
         prepare,
-        Message::Prepare { ballot, from_slot: Slot(0), .. } if ballot == camp
+        Message::Prepare { ballot, from_slot: Slot(1), .. } if ballot == camp
     ));
 
     // Node 1 already promised the ballot: the keep-alive resets its clock,
@@ -925,7 +927,7 @@ fn a_paging_campaign_keeps_its_promisers_quiet() {
     nodes[1].step(Message::Prepare {
         reply_to: NodeId(0),
         ballot: camp,
-        from_slot: Slot(0),
+        from_slot: Slot(1),
         config: None,
     });
     let _ = drain(&mut nodes[1]);
@@ -935,7 +937,7 @@ fn a_paging_campaign_keeps_its_promisers_quiet() {
     nodes[1].step(Message::Prepare {
         reply_to: NodeId(0),
         ballot: camp,
-        from_slot: Slot(0),
+        from_slot: Slot(1),
         config: None,
     });
     assert_eq!(
@@ -947,6 +949,14 @@ fn a_paging_campaign_keeps_its_promisers_quiet() {
     let [(NodeId(0), promise)] = reply.as_slice() else {
         panic!("expected one Promise, got {reply:?}");
     };
+    assert!(
+        matches!(
+            promise,
+            Message::Promise { from_slot: Slot(1), accepted, faulty, next_from_slot: None, .. }
+                if accepted.is_empty() && faulty.is_empty()
+        ),
+        "a keep-alive is answered with an empty page: {promise:?}"
+    );
     nodes[0].step(promise.clone());
     assert_eq!(
         nodes[0].role(),
