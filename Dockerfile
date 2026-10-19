@@ -28,11 +28,11 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
  && cp target/release/parosd target/release/parosctl target/release/paros-frontend /usr/local/bin/
 
 FROM debian:bookworm-slim
-# `/secrets`, `/public` and `/tokens` are the Compose toy's key and token
-# volumes: owned here, so a named volume mounted on them is writable.
+# `/secrets` is the Compose toy's key volume: owned here, so a named volume
+# mounted on it is writable.
 RUN useradd --system --uid 10001 --home-dir /var/lib/paros paros \
- && mkdir -p /var/lib/paros /secrets /public /tokens \
- && chown paros:paros /var/lib/paros /secrets /public /tokens
+ && mkdir -p /var/lib/paros /secrets \
+ && chown paros:paros /var/lib/paros /secrets
 COPY --from=builder /usr/local/bin/parosd /usr/local/bin/parosctl /usr/local/bin/paros-frontend /usr/local/bin/
 USER paros
 # A named volume mounted here takes the directory's ownership on first use.

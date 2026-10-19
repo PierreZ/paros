@@ -15,7 +15,7 @@
 //! | `PAROS_TLS_KEY` | the certificate's private key, PEM |
 //! | `PAROS_TLS_CA` | the universe's authority, PEM: the peers and callers it trusts |
 //! | `PAROS_TLS_CLIENT_AUTH` | `required` (mutual TLS, the default), `optional` or `off`: what it asks of a caller |
-//! | `PAROS_ROOT_PUBLIC_KEY` | the root public key files it pins while idle, comma-separated (#245 (Biscuit tokens)): `cell init` and `cell add-machine` then need an `admin` token; none trusts the network |
+//! | `PAROS_ROOT_PUBLIC_KEY` | the root public keys it pins while idle, comma-separated, each a key line `<label>:<key_id>:ed25519/<hex>` or a key file's path (#245 (Biscuit tokens)): `cell init` and `cell add-machine` then need an `admin` token; none trusts the network |
 //! | `PAROS_HTTP_LISTEN` | `HOST:PORT` of its HTTP endpoint (#366 (metrics)): `/metrics` (Prometheus text), `/healthz` and `/readyz`; none by default |
 //! | `PAROS_OTLP_ENDPOINT` | an OpenTelemetry collector's OTLP/gRPC URL (`http://collector:4317`): spans and metrics are pushed there; none by default |
 //! | `PAROS_OTLP_TRACES_ENDPOINT`, `PAROS_OTLP_METRICS_ENDPOINT` | one signal's collector, in place of `PAROS_OTLP_ENDPOINT` |
@@ -122,12 +122,12 @@ pub struct Settings {
     /// `off` (server-authenticated TLS).
     #[arg(long, env = "PAROS_TLS_CLIENT_AUTH", default_value = "required", value_parser = parse_client_auth)]
     pub tls_client_auth: ClientCertificates,
-    /// The root public key files it pins while idle (#245 (Biscuit
-    /// tokens)): the calls that put it in a cell then need an `admin`
-    /// token signed by one of them. None: the network is the trust
-    /// boundary.
-    #[arg(long, env = "PAROS_ROOT_PUBLIC_KEY", value_delimiter = ',')]
-    pub root_public_key: Vec<PathBuf>,
+    /// The root public keys it pins while idle (#245 (Biscuit tokens)),
+    /// each a key line or a key file's path: the calls that put it in a
+    /// cell then need an `admin` token signed by one of them. None: the
+    /// network is the trust boundary.
+    #[arg(long, env = "PAROS_ROOT_PUBLIC_KEY", value_delimiter = ',', value_parser = crate::root_key::parse)]
+    pub root_public_key: Vec<RootPublicKey>,
 }
 
 impl Settings {
@@ -176,23 +176,13 @@ impl Settings {
     ///
     /// # Errors
     ///
-    /// A key file that cannot be read or holds no key, or two keys under
-    /// one key id.
+    /// Two keys under one key id.
     pub fn pin(&self, epoch: std::time::Duration) -> Result<AdminPin, String> {
         if self.root_public_key.is_empty() {
             return Ok(AdminPin::open());
         }
-        let mut keys = Vec::with_capacity(self.root_public_key.len());
-        for path in &self.root_public_key {
-            let text = std::fs::read_to_string(path)
-                .map_err(|error| format!("PAROS_ROOT_PUBLIC_KEY {}: {error}", path.display()))?;
-            keys.push(
-                RootPublicKey::from_file(&text).map_err(|error| {
-                    format!("PAROS_ROOT_PUBLIC_KEY {}: {error}", path.display())
-                })?,
-            );
-        }
-        let ring = KeyRing::new(keys).map_err(|error| format!("PAROS_ROOT_PUBLIC_KEY: {error}"))?;
+        let ring = KeyRing::new(self.root_public_key.iter().cloned())
+            .map_err(|error| format!("PAROS_ROOT_PUBLIC_KEY: {error}"))?;
         Ok(AdminPin::new(Arc::new(BiscuitAuthz::new(ring)), epoch))
     }
 }

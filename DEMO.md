@@ -18,82 +18,74 @@ says who acts:
 
 | service | who | holds | reaches |
 |---|---|---|---|
-| `issuer` | the key holder | the root private key (`/secrets`, its own volume) | nothing: it works offline, with no network |
 | `admin` | the operator | an `admin` token | the machines (network `internal`) |
 | `acme` | the tenant `acme` | its `tenant` token | the frontend only (network `public`) |
+| `issuer` | a key holder | new root keys (`/secrets`, its own volume) | nothing: it works offline, with no network |
 
-The machines pin the root public key at their start (#245 (Biscuit tokens)), so the key comes
-first. The frontend holds no key: it reads the keys `init` writes in the universe. Set the
-aliases once per shell.
+The root key and the two tokens are in `docker-compose.yml`, made once with
+`parosctl key bootstrap --tenant acme --ttl 3650d` (#245 (Biscuit tokens)). Its private key was
+never written down, so no one can sign another token with `root-1`. Every machine pins the key:
+it forms or joins a cell only for an `admin` token. The frontend holds no key: it reads the keys
+`init` writes in the universe. Long-lived tokens in a repository are a demo shortcut; real tokens
+are short-lived and secret.
 
-Bash or zsh:
+Set the aliases once per shell. Bash or zsh:
 
 ```sh
-alias issuer='docker compose run --rm issuer'
 alias admin='docker compose run --rm admin'
 alias acme='docker compose run --rm acme'
+alias issuer='docker compose run --rm issuer'
 ```
 
 Fish:
 
 ```fish
-alias issuer 'docker compose run --rm issuer'
 alias admin 'docker compose run --rm admin'
 alias acme 'docker compose run --rm acme'
+alias issuer 'docker compose run --rm issuer'
 ```
 
-The commands below work in both shells.
+The commands below work in both shells (fish 3.4 or later reads `$(...)`).
 
 ```sh
-# 1. The key holder, offline, before any machine exists: the root key pair (the public half
-#    goes to the volume the machines read), then the operator's admin token.
-issuer key generate --label root-1 --out /secrets --public-out /public
-issuer token mint --key /secrets/root-1.private --role admin --subject operator --ttl 12h \
-  --out /tokens/admin.token
-issuer token inspect --token-file /tokens/admin.token
-
-# 2. Five machines, each pinned to root-1: node1..node3 (storage, zones a/b/c), storage4,
-#    stateless1 (stateless), and the frontend.
+# Five machines, each pinned to root-1: node1..node3 (storage, zones a/b/c), storage4,
+# stateless1 (stateless), and the frontend.
 docker compose up -d --build
 
-# 3. The operator forms the cell over node1..node3 with its token. The universe records root-1,
-#    which the frontend will check every token against. Prints one line:
+# The operator forms the cell over node1..node3 with its token. The universe records root-1
+# (`PAROSCTL_ROOT_PUBLIC_KEY` in the admin service), which the frontend checks every token
+# against. Prints one line:
 #   initialized universe=… cell=… coordinator=… members=[…] steps=FormFleet,AddRootKey,AddCell,CellReady
-admin init --members node1:4500,node2:4500,node3:4500 --root-public-key /public/root-1.public
+admin init --members node1:4500,node2:4500,node3:4500
 admin universe key list
 
-# 4. A tenant, then a journal in it (#210). The tenant coordinator draws the journal's id and
-#    picks its members from its durability (`--failures-per-partition 1 --partitions 1` by
-#    default: three acceptors in one acceptor partition). Prints:
+# A tenant, then a journal in it (#210). The tenant coordinator draws the journal's id and
+# picks its members from its durability (`--failures-per-partition 1 --partitions 1` by
+# default: three acceptors in one acceptor partition). Prints:
 #   created journal=acme/orders members=…
 admin tenant create acme
 admin journal create acme orders
 
-# 5. A tenant creation returns no token: the key holder mints the tenant's, offline.
-issuer token mint --key /secrets/root-1.private --role tenant --tenant acme \
-  --subject orders-service --ttl 12h --out /tokens/acme.token
-
-# 6. The tenant writes and reads through the frontend, by name. `--leader 7` claims the
-#    journal under the leader uuid 7 (a uuid is drawn when absent), then writes at the tail.
+# The tenant writes and reads through the frontend, by name. `--leader 7` claims the
+# journal under the leader uuid 7 (a uuid is drawn when absent), then writes at the tail.
 acme write acme/orders hello world --leader 7
 acme read acme/orders
 # A page of at most one record; at the tail, wait up to 2 s for a new one (each node caps
 # the wait at its PAROS_MAX_WAIT_MS, 1 s by default).
 acme read acme/orders --limit 1
 acme read acme/orders --from 2 --wait-ms 2000
+# What the tenant's token says: its role, its tenant, its key and its expiry.
+acme token inspect
 
-# 7. What a token does not allow (each exit 3). acme's token on another tenant: forbidden.
+# What a token does not allow (each exit 3). acme's token on another tenant: forbidden.
 admin tenant create globex
 admin journal create globex ledger
 acme read globex/ledger
 # The tenant narrows its own token, with no key: read-only, journal `orders` only.
-acme token derive --token-file /tokens/acme.token --read-only --journal orders \
-  --out /tokens/acme-ro.token
-acme token inspect --token-file /tokens/acme-ro.token
-acme --token-file /tokens/acme-ro.token read acme/orders
-acme --token-file /tokens/acme-ro.token write acme/orders nope --leader 7
-# A tenant token cannot put a machine in the cell: the pinned machine refuses it.
-admin --token-file /tokens/acme.token cell add-machine storage4:4500
+acme --token "$(acme token derive --read-only --journal orders)" read acme/orders
+acme --token "$(acme token derive --read-only --journal orders)" write acme/orders nope --leader 7
+# A tenant's token cannot put a machine in the cell: the pinned machine refuses it.
+admin --token "$(acme token derive --read-only)" cell add-machine storage4:4500
 # And the tenant cannot reach a machine at all: `node1` does not resolve on its network.
 acme --servers node1:4500 inspect
 
@@ -160,18 +152,8 @@ admin cell drain-machine storage4
 admin machine list
 admin cell remove-machine storage4
 
-# Rotate the root key: add the next key, sign new tokens with it, then remove the old one once
-# its tokens expired. A token file is written once: remove the old one first.
-issuer key generate --label root-2 --out /secrets --public-out /public
-admin universe key add /public/root-2.public
-docker compose run --rm --entrypoint rm issuer /tokens/acme.token
-issuer token mint --key /secrets/root-2.private --role tenant --tenant acme \
-  --subject orders-service --ttl 12h --out /tokens/acme.token
-acme write acme/orders rotated --leader 8
-admin universe key remove root-1
-
-# Bench (#517, #194): closed-loop clients write the journals bench-3x1-0..bench-3x1-3 of tenant
-# `bench` (both created when missing) and print throughput and latency per call each
+# Bench (#517, #194): closed-loop clients write the journals bench-3x1-0..bench-3x1-3 of
+# tenant `bench` (both created when missing) and print throughput and latency per call each
 # second, then the totals. It runs as the operator, straight to the machines. Ctrl-C stops
 # it and still prints the totals. Add `--mix write=80,read-tail=20` for reads that check
 # every byte, `--rate 200` for an open loop, `--histograms /tmp/h.json` for the raw
@@ -179,7 +161,17 @@ admin universe key remove root-1
 # without Compose, on a cell in its own process.
 admin bench --tenant bench --journals 4 --clients 8 --duration 60s --ramp 10s
 
-# Logs, and tear everything down (volumes included: the keys and the tokens too).
+# Rotate the root key, last: the key holder makes root-2 and the universe adds it, then a
+# token root-2 signs works. `key show` prints a key's line, which every command takes in
+# place of a key file.
+issuer key generate --label root-2 --out /secrets
+admin universe key add "$(issuer key show /secrets/root-2.public)"
+acme --token "$(issuer token mint --key /secrets/root-2.private --role tenant --tenant acme --subject orders-service --ttl 12h)" write acme/orders rotated --leader 8
+# Removing root-1 retires the tokens in docker-compose.yml at the frontend's next read of the
+# universe: after this, start over with `docker compose down -v`.
+admin universe key remove root-1
+
+# Logs, and tear everything down (volumes included).
 docker compose logs node1
 docker compose down -v
 ```
@@ -192,9 +184,12 @@ four calls, the two writer modes and the limits are on the site's journal API pa
 
 A rebuilt image does not read volumes an older build wrote (no upgrades until M13, #363
 (upgrades)). If every machine exits 78 with `machine record: ...`, run `docker compose down -v`
-first, then start again from step 1. A machine that exits 2 at its start with
-`PAROS_ROOT_PUBLIC_KEY /public/root-1.public: No such file` started before step 1: run step 1,
-then `docker compose up -d` again.
+first, then `up -d --build` and `init` again.
+
+To make a key and tokens of your own, run `parosctl key bootstrap --tenant acme --ttl 12h` (add
+`--out DIR` to keep the private key), and paste its `key=`, `admin=` and `tenant.acme=` lines
+into the three `x-` anchors at the top of `docker-compose.yml`. Repeat `--tenant` for more
+tenants.
 
 ## Locally, without Docker
 
@@ -298,7 +293,10 @@ parosctl universe key remove demo-1
 ```
 
 `init` without a token is refused `forbidden` or `invalid_token` (exit 3). A frontend reads the
-keys in the universe, so `PAROS_FRONTEND_ROOT_PUBLIC_KEY` is optional.
+keys in the universe, so `PAROS_FRONTEND_ROOT_PUBLIC_KEY` is optional. Every command and variable
+that takes a key file also takes the key's line, `<label>:<key_id>:ed25519/<hex>`, which
+`parosctl key show` prints. `parosctl key bootstrap --tenant acme --ttl 12h` makes a key and its
+tokens in one command (repeat `--tenant`; `--out DIR` keeps the private key).
 
 ## If something goes wrong
 

@@ -21,17 +21,11 @@ From a fresh clone, Docker alone (the image is a plain multi-stage Rust build,
 the one build outside Nix):
 
 ```sh
-alias issuer='docker compose run --rm issuer' admin='docker compose run --rm admin' \
-  acme='docker compose run --rm acme'
-issuer key generate --label root-1 --out /secrets --public-out /public
-issuer token mint --key /secrets/root-1.private --role admin --subject operator --ttl 12h \
-  --out /tokens/admin.token
+alias admin='docker compose run --rm admin' acme='docker compose run --rm acme'
 docker compose up -d --build        # five machines, pinned to root-1; each formats and waits
-admin init --members node1:4500,node2:4500,node3:4500 --root-public-key /public/root-1.public
+admin init --members node1:4500,node2:4500,node3:4500
 admin tenant create acme
 admin journal create acme orders
-issuer token mint --key /secrets/root-1.private --role tenant --tenant acme \
-  --subject orders-service --ttl 12h --out /tokens/acme.token
 acme write acme/orders hello world --leader 7     # through the frontend
 acme read acme/orders
 ```
@@ -41,17 +35,19 @@ domains, every one the same image configured by `PAROS_*` variables alone, and a
 frontend (`paros-frontend`, port 4600). Three tool services (profile `tools`) are the
 people who run it:
 
-| service | who | volumes | network |
+| service | who | carries | network |
 |---|---|---|---|
-| `issuer` | the key holder: `parosctl key` and `token`, offline | `secrets` (the private keys, here only), `public`, `tokens` | none |
-| `admin` | the operator: `PAROS_TOKEN_FILE=/tokens/admin.token`, `--servers members:4500` | `public`, `tokens` (read-only) | `internal` |
-| `acme` | the tenant `acme`: `PAROS_TOKEN_FILE=/tokens/acme.token`, `--frontends frontend:4600` | `tokens` | `public` |
+| `admin` | the operator | `PAROS_TOKEN` (the `admin` token), `PAROSCTL_ROOT_PUBLIC_KEY` (for `init`), `--servers members:4500` | `internal` |
+| `acme` | the tenant `acme` | `PAROS_TOKEN` (its `tenant` token), `--frontends frontend:4600` | `public` |
+| `issuer` | a key holder: `parosctl key` and `token`, offline, for a rotation | the volume `secrets` | none |
 
-The machines and the frontend are on `internal`; the frontend is on `public` too. So a
-tenant reaches the frontend and no machine: the trust boundary of section 3.5
-(`docs/architecture/03-5-frontend-and-resolver.md`). Every machine mounts `public`
-read-only and pins `PAROS_ROOT_PUBLIC_KEY=/public/root-1.public` (#245 (Biscuit tokens)):
-a machine started before `issuer key generate` stops with exit 2.
+The root key's line and the two tokens are YAML anchors at the top of the file, made
+once with `parosctl key bootstrap --tenant acme --ttl 3650d`, whose private key was never
+written down (#245 (Biscuit tokens)). Every machine pins the key
+(`PAROS_ROOT_PUBLIC_KEY`, which takes a key line or a key file). The machines and the
+frontend are on `internal`; the frontend is on `public` too. So a tenant reaches the
+frontend and no machine: the trust boundary of section 3.5
+(`docs/architecture/03-5-frontend-and-resolver.md`).
 
 | machine | class | zone | role today |
 |---|---|---|---|
@@ -66,8 +62,8 @@ configured with **no peer**: no seed, no join list. On its first start it
 **mints its `node_id`** at random and records it in its data directory (there
 is no `PAROS_ID`), then waits, idle. A machine never forms a cell on its own.
 
-**Init.** `admin init --members node1:4500,node2:4500,node3:4500
---root-public-key /public/root-1.public` runs `cell init` over the **founding
+**Init.** `admin init --members node1:4500,node2:4500,node3:4500` runs
+`cell init` over the **founding
 members** (`--members`, by default the servers), each named by its advertised
 address (#257). It sends `CellInit` to the first member still
 idle, and that machine drives a single-decree Paxos on the cell plan, every

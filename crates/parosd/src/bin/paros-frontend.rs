@@ -20,7 +20,7 @@
 //! |---|---|
 //! | `PAROS_FRONTEND_LISTEN` | `HOST:PORT` the frontend binds |
 //! | `PAROS_FRONTEND_CELL` | the cell's founding members, `HOST:PORT,…` (a Compose alias stands for each machine behind it) |
-//! | `PAROS_FRONTEND_ROOT_PUBLIC_KEY` | the root public key files it trusts until it read the universe entry's, comma-separated (`parosctl key generate`); optional |
+//! | `PAROS_FRONTEND_ROOT_PUBLIC_KEY` | the root public keys it trusts until it read the universe entry's, comma-separated, each a key line or a key file's path (`parosctl key generate`); optional |
 //! | `PAROS_FRONTEND_TIMEOUT_MS` | one forwarded attempt's timeout (default 5000) |
 //! | `PAROS_FRONTEND_TLS_CERT` | its certificate chain, PEM (`parosctl tls`, role `frontend`); with the next two, every session is TLS, to its clients and to the machines |
 //! | `PAROS_FRONTEND_TLS_KEY` | the certificate's private key, PEM |
@@ -42,6 +42,8 @@
 
 #[path = "../resolve.rs"]
 mod resolve;
+#[path = "../root_key.rs"]
+mod root_key;
 
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -67,10 +69,10 @@ struct Settings {
     /// The cell's founding members, `HOST:PORT,…`.
     #[arg(long, env = "PAROS_FRONTEND_CELL", value_delimiter = ',')]
     cell: Vec<String>,
-    /// The root public key files it trusts until it read the universe
-    /// entry's, comma-separated.
-    #[arg(long, env = "PAROS_FRONTEND_ROOT_PUBLIC_KEY", value_delimiter = ',')]
-    root_public_key: Vec<std::path::PathBuf>,
+    /// The root public keys it trusts until it read the universe entry's,
+    /// comma-separated, each a key line or a key file's path.
+    #[arg(long, env = "PAROS_FRONTEND_ROOT_PUBLIC_KEY", value_delimiter = ',', value_parser = root_key::parse)]
+    root_public_key: Vec<RootPublicKey>,
     /// One forwarded attempt's timeout, in milliseconds.
     #[arg(long, env = "PAROS_FRONTEND_TIMEOUT_MS", default_value = "5000")]
     timeout_ms: u64,
@@ -135,19 +137,11 @@ fn configure(settings: &Settings) -> Result<(FrontendSettings, KeyRing), String>
     if cell.is_empty() {
         return Err("PAROS_FRONTEND_CELL names no machine".into());
     }
-    let mut keys = Vec::with_capacity(settings.root_public_key.len());
-    for path in &settings.root_public_key {
-        let text = std::fs::read_to_string(path)
-            .map_err(|error| format!("{}: {error}", path.display()))?;
-        keys.push(
-            RootPublicKey::from_file(&text)
-                .map_err(|error| format!("{}: {error}", path.display()))?,
-        );
-    }
-    if keys.is_empty() {
+    if settings.root_public_key.is_empty() {
         tracing::info!("frontend_trusts_the_universe_entry_keys_only");
     }
-    let ring = KeyRing::new(keys).map_err(|error| error.to_string())?;
+    let ring = KeyRing::new(settings.root_public_key.iter().cloned())
+        .map_err(|error| error.to_string())?;
     let transport = Files {
         cert: ("PAROS_FRONTEND_TLS_CERT", settings.tls_cert.as_deref()),
         key: ("PAROS_FRONTEND_TLS_KEY", settings.tls_key.as_deref()),

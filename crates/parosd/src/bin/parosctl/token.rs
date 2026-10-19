@@ -105,7 +105,7 @@ enum TokenCommand {
 }
 
 /// A duration as `<n><unit>`, the unit one of `s`, `m`, `h`, `d`.
-fn parse_duration(text: &str) -> Result<Duration, String> {
+pub fn parse_duration(text: &str) -> Result<Duration, String> {
     let split = text.len().saturating_sub(1);
     let (number, unit) = text.split_at(split);
     let number: u64 = number
@@ -211,6 +211,11 @@ fn mint(
         (RoleArg::Admin, Some(_)) => return Err("--tenant is for --role tenant".to_string()),
         (RoleArg::Tenant, None) => return Err("--role tenant needs --tenant".to_string()),
     };
+    output.write(out, &sign(&key, role, subject, ttl)?)
+}
+
+/// A token for `role` that `key` signs, valid for `ttl` from now.
+pub fn sign(key: &RootKey, role: Role, subject: String, ttl: Duration) -> Result<Token, String> {
     // The minting clock is this machine's: parosctl runs outside any cell.
     let now = SystemTime::now();
     let grant = Grant {
@@ -218,9 +223,7 @@ fn mint(
         subject,
         expires: now + ttl,
     };
-    let token =
-        paros_authz_biscuit::mint(&key, &grant, now, &entropy()).map_err(|e| e.to_string())?;
-    output.write(out, &token)
+    paros_authz_biscuit::mint(key, &grant, now, &entropy()).map_err(|e| e.to_string())
 }
 
 fn derive(

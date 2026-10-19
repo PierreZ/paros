@@ -11,7 +11,6 @@
 //! are never reused, and the last key stays. Keys are named by their
 //! labels, never by their ids (decided on 2026-10-10).
 
-use std::path::Path;
 use std::time::Duration;
 
 use clap::{Args, Subcommand};
@@ -72,11 +71,11 @@ enum UniverseCommand {
 enum KeyCommand {
     /// List the root public keys in force.
     List,
-    /// Add a root public key: a `.public` file (or the public half of a
-    /// `.private` one) from `parosctl key generate`.
+    /// Add a root public key: its line or a `.public` file (or the public
+    /// half of a `.private` one) from `parosctl key generate`.
     Add {
-        /// The key file.
-        file: std::path::PathBuf,
+        /// The key line, or the key file's path.
+        key: String,
     },
     /// Remove the root key with this label. The last key stays.
     Remove {
@@ -85,19 +84,13 @@ enum KeyCommand {
     },
 }
 
-/// The universe entry's record of the key in the file at `path`.
-///
-/// # Errors
-///
-/// The file cannot be read, or holds no Ed25519 key.
-pub fn read_key(path: &Path) -> Result<RootKeyEntry, String> {
-    let text = crate::key::read(path)?;
-    let key = RootPublicKey::from_file(&text).map_err(|e| format!("{}: {e}", path.display()))?;
-    Ok(RootKeyEntry {
+/// The universe entry's record of `key`.
+pub fn entry(key: &RootPublicKey) -> RootKeyEntry {
+    RootKeyEntry {
         key_id: key.key_id(),
         label: key.label().to_string(),
         public_key: key.key_text(),
-    })
+    }
 }
 
 /// `parosctl universe …`.
@@ -121,9 +114,9 @@ pub async fn run(
     };
     match command {
         KeyCommand::List => list(client, out).await,
-        KeyCommand::Add { file } => {
-            let key = match read_key(&file) {
-                Ok(key) => key,
+        KeyCommand::Add { key } => {
+            let key = match crate::root_key::parse(&key) {
+                Ok(key) => entry(&key),
                 Err(error) => {
                     note(&error);
                     return Ending::Refused;

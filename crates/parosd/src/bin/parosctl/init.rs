@@ -29,6 +29,7 @@ use moonpool_core::TokioProviders;
 use paros::Address;
 use paros::client::Client;
 use paros::client::initialize::{self, InitParams, InitRefusal, InitRun, Initialized, Unreachable};
+use paros_authz_biscuit::RootPublicKey;
 use serde_json::json;
 
 use crate::Ending;
@@ -70,12 +71,13 @@ pub struct InitArgs {
     /// universe's cells. A re-run never renames.
     #[arg(long, default_value = "cell-1", value_parser = label)]
     cell_name: String,
-    /// The universe's first root public key, a `.public` (or `.private`)
-    /// file from `parosctl key generate` (#245 (Biscuit tokens)): every
-    /// token is checked against the universe entry's keys. A re-run over a
-    /// universe that holds a key writes none.
-    #[arg(long)]
-    root_public_key: Option<std::path::PathBuf>,
+    /// The universe's first root public key, its line or the path of a
+    /// `.public` (or `.private`) file, from `parosctl key generate` or `key
+    /// bootstrap` (#245 (Biscuit tokens)): every token is checked against
+    /// the universe entry's keys. A re-run over a universe that holds a key
+    /// writes none.
+    #[arg(long, env = "PAROSCTL_ROOT_PUBLIC_KEY", value_parser = crate::root_key::parse)]
+    root_public_key: Option<RootPublicKey>,
     /// Form an idle cell only (`cell init`, #232 (multiple cells)): no
     /// universe tenant and no universe steps. `parosctl universe add-cell`
     /// joins it to a universe another cell hosts.
@@ -132,18 +134,7 @@ pub async fn run(
     args: &InitArgs,
     token: Vec<u8>,
 ) -> Ending {
-    let root_key = match args
-        .root_public_key
-        .as_deref()
-        .map(crate::universe::read_key)
-    {
-        Some(Ok(key)) => Some(key),
-        Some(Err(error)) => {
-            note(&error);
-            return Ending::Refused;
-        }
-        None => None,
-    };
+    let root_key = args.root_public_key.as_ref().map(crate::universe::entry);
     let params = InitParams {
         patience: Duration::from_millis(args.patience_ms),
         fleet_id: nonzero(asker.providers),

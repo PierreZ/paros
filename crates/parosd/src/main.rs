@@ -45,6 +45,7 @@
 mod http;
 mod otel;
 mod resolve;
+mod root_key;
 mod settings;
 mod tunables;
 

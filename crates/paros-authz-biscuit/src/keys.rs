@@ -216,6 +216,37 @@ impl RootPublicKey {
             .map(|key| key.public())
             .map_err(|_| Error::BadKey("not a public or private key file".to_string()))
     }
+
+    /// The key on one line, `<label>:<key_id>:ed25519/<hex>`: what a
+    /// variable or an argument carries in place of a `.public` file.
+    #[must_use]
+    pub fn to_line(&self) -> String {
+        format!("{}:{}:{}", self.label, self.key_id, self.key)
+    }
+
+    /// A public key from its line ([`RootPublicKey::to_line`]).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::BadKey`] when the text is not a key line, or the key is not
+    /// Ed25519.
+    pub fn from_line(text: &str) -> Result<Self, Error> {
+        // The key text and the id hold no ':', so a label may.
+        let mut parts = text.trim().rsplitn(3, ':');
+        let (Some(key), Some(key_id), Some(label)) = (parts.next(), parts.next(), parts.next())
+        else {
+            return Err(Error::BadKey(
+                "not a key line: <label>:<key_id>:ed25519/<hex>".to_string(),
+            ));
+        };
+        if label.is_empty() {
+            return Err(Error::BadKey("a key line names no label".to_string()));
+        }
+        let key_id = key_id
+            .parse()
+            .map_err(|_| Error::BadKey(format!("bad key id {key_id:?}")))?;
+        Self::from_parts(key_id, label, key)
+    }
 }
 
 /// The public keys a verifier trusts, each under its key id: the universe
@@ -296,6 +327,15 @@ mod tests {
         let back = RootPublicKey::from_parts(key.key_id(), key.label(), &key.key_text()).unwrap();
         assert_eq!(back, key);
         assert!(RootPublicKey::from_parts(1, "a", "ed25519/zz").is_err());
+    }
+
+    #[test]
+    fn a_key_line_round_trips() {
+        let key = RootKey::generate("root-1", &Entropy::from_bytes([5; 32])).public();
+        assert_eq!(RootPublicKey::from_line(&key.to_line()).unwrap(), key);
+        assert!(RootPublicKey::from_line("ed25519/00").is_err());
+        assert!(RootPublicKey::from_line(":1:ed25519/00").is_err());
+        assert!(RootPublicKey::from_line("a:x:ed25519/00").is_err());
     }
 
     #[test]

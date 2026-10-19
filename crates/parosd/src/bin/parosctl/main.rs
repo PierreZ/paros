@@ -30,6 +30,8 @@ mod names;
 mod output;
 #[path = "../../resolve.rs"]
 mod resolve;
+#[path = "../../root_key.rs"]
+mod root_key;
 mod status;
 mod store;
 mod tls;
@@ -191,7 +193,7 @@ enum Command {
     /// where the registry places them. Any machine of a cell answers.
     Resolve(entry::ResolveArgs),
     /// Root key pairs for Biscuit tokens, offline (#400): `key generate`,
-    /// `key show`.
+    /// `key show`, `key bootstrap` (a key and its first tokens).
     Key(key::KeyArgs),
     /// Biscuit tokens, offline (#400): `token mint` with a root key,
     /// `token derive` (narrower, macaroon style, no key), `token inspect`.

@@ -5,10 +5,10 @@ moonpool's `TokioProviders` and `paros::journal`'s stores on a real filesystem, 
 Stack: `paros-core` ← `paros` ← **`parosd`**. The only crate that links `TokioProviders`; the
 drivers, the stores and the machine phase are the library's. User-facing doc: `README.md`; the
 image and the Compose toy are `Dockerfile` and `docker-compose.yml` at the repository root. The
-toy's tool services are people (`issuer` holds the root private key, offline; `admin` the
-operator, on the machines' `internal` network; `acme` a tenant, on `public` with the frontend
-only), and the machines pin the root public key, so the demo shows the whole Biscuit bootstrap
-(#245 (Biscuit tokens)).
+toy's tool services are people (`admin` the operator, on the machines' `internal` network; `acme`
+a tenant, on `public` with the frontend only; `issuer` an offline key holder for a rotation);
+its root key line and tokens are YAML anchors made once with `parosctl key bootstrap`, and the
+machines pin that key (#245 (Biscuit tokens)).
 
 ## Map
 
@@ -34,7 +34,7 @@ only), and the machines pin the root public key, so the demo shows the whole Bis
   commands (no server, no client runtime), the admin `--token`/`--token-file` (`PAROS_TOKEN`, `PAROS_TOKEN_FILE`) that `init` and `cell` present to a pinned machine (#245 (Biscuit tokens)), server ids discovered from `Inspect`, `init` vs the cell
   commands, exit codes.
 - `src/bin/parosctl/universe.rs` → `parosctl universe key list|add|remove` (#245 (Biscuit tokens)): the universe entry's root public keys, by label, each change one idempotent write through `paros::client::fleet`; `parosctl universe add-cell --members a,b,c [--name]` and `remove-cell <name>` (#232 (multiple cells)): an idle cell learned with `majority_cell`, added through `FleetSession::add_cell`, and an empty cell removed for good; `read_key` reads a `.public` or `.private` file, shared with `init`.
-- `src/bin/parosctl/init.rs` → `parosctl init [--members a,b,c] [--patience-ms N] [--root-public-key FILE] [--idle]` (the universe's first root key, #245; `--idle`: `cell init` alone, a cell with no universe, #232 (multiple cells)): resolves the
+- `src/bin/parosctl/init.rs` → `parosctl init [--members a,b,c] [--patience-ms N] [--root-public-key KEY] [--idle]` (`KEY`: a line or a file, also `PAROSCTL_ROOT_PUBLIC_KEY`) (the universe's first root key, #245; `--idle`: `cell init` alone, a cell with no universe, #232 (multiple cells)): resolves the
   founding members (default: the servers), runs `paros::client::initialize` over them and prints
   what it came to (`cell init`, the elected coordinator, the fleet steps; #229, #240, #246, #277).
 - `src/bin/parosctl/fleet.rs` → `parosctl tenant create [--cell NAME]|delete|tag` (`--cell`: a `READY` cell by name, #232 (multiple cells)) over
@@ -44,7 +44,8 @@ only), and the machines pin the root public key, so the demo shows the whole Bis
 - `src/bin/parosctl/entry.rs` → `parosctl resolve <tenant>` over `paros::client::resolve` (#216): the servers are the entry endpoint; prints the tenant's universe and cell by name (short hex only when the answer names none) and the cell's machines.
 - `src/bin/parosctl/tls.rs` → `parosctl tls init|ca|issue|show|verify`, offline (PR #509 (mutual TLS)): `init` writes the authority and a leaf per machine, frontend, admin and client in one directory and prints each process's variables; never overwrites, keys 0600; `show` reads with `x509-parser`; `verify` runs rustls's `WebPkiServerVerifier` (name `paros`) and `WebPkiClientVerifier`. The global `--tls-ca`, `--tls-cert`, `--tls-key` (`PAROSCTL_TLS_*`) build the client runtime's transport (`paros::tls::Files::dialing`). `paros-frontend` reads `PAROS_FRONTEND_TLS_*`.
 - `src/bin/parosctl/store.rs` → `parosctl store inspect <data-dir> [--records] [--scratch]` (#365 (offline store inspection)): offline, its own current-thread runtime; `paros::inspect::inspect` over `TokioStorageProvider` with a scratch directory under the system's temporary directory (removed after; refused inside the data directory), names from `paros::inspect::names` through `Labels::of`; exit 3 when the record or a store does not read.
-- `src/bin/parosctl/key.rs` → `parosctl key generate|show` (#400): root key pairs, offline, entropy from the provider's random source; `<label>.private` (mode 0600) and `<label>.public` (in `--public-out DIR` when given: the machines' copy, away from the private key), written once; outputs name a key by its label, never its id.
+- `src/bin/parosctl/key.rs` → `parosctl key generate|show|bootstrap` (#400): root key pairs, offline, entropy from the provider's random source; `<label>.private` (mode 0600) and `<label>.public`, written once; `show` prints the key's line; `bootstrap --tenant T… --ttl D [--out DIR]` makes a key pair, an `admin` token and a `tenant` token per `--tenant`, and prints the line and the tokens (the private key kept only with `--out`); outputs name a key by its label, never its id.
+- `src/root_key.rs` → `parse` → a root public key on the command line, shared by `parosd`, `paros-frontend` and `parosctl` by `#[path]`: a key line `<label>:<key_id>:ed25519/<hex>` (`RootPublicKey::from_line`) or a key file's path; the clap `value_parser` of `PAROS_ROOT_PUBLIC_KEY`, `PAROS_FRONTEND_ROOT_PUBLIC_KEY`, `init --root-public-key` and `universe key add`.
 - `src/bin/parosctl/token.rs` → `parosctl token mint|derive|inspect` (#400): Biscuit tokens over `paros-authz-biscuit`, offline; a token from the argument, `--token-file` or `PAROS_TOKEN`.
 - `src/bin/parosctl/views.rs` → `Asker`, `parosctl machine list|show`, `cell list|show`, `tenant list|show`, `roles [--cell|--tenant|--machine]` (#399): `-l SELECTOR` on the lists and the tags in every table and `--json` (`CLASS` and `ZONE` read from `paros/class` and `paros/zone`, #575 (key:value tags)); one `View` to the servers' cell, printed as a table (`output::table`) or JSON; the global `--as-tenant NAME` asks in one tenant's scope. `machine list|show` also ask every machine for `Load` (#424): the `CPU`, `MACHINE` and `DISK` columns, a `load` block, `no metrics` for a machine that does not answer.
 - `src/bin/parosctl/status.rs` → `parosctl status [--tenant t] [--cell c]` (#191 (status)): the universe line when the servers' cell hosts its directory, the cell (coordinator, machines available, slots per class) or one tenant (its machines and footprint), and every journal's desired, current and available acceptors with the word the cell shows (`healthy (now degraded)` while hysteresis holds a word back); `--json` adds a `status` block. A tenant's status adds a usage table per journal, summed from every machine's `Load` (`N of M machines metered`; `usage` in `--json`, #366 (metrics)).

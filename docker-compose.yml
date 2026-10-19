@@ -3,25 +3,24 @@
 #
 # Three people run the demo, one tool service each (profile `tools`), so who acts is the first word:
 #
-#   issuer  holds the root private key (`/secrets`, its volume alone) and signs tokens, offline:
-#           no network at all.
 #   admin   the operator: an `admin` token, on the `internal` network with the machines.
 #   acme    a tenant: its `tenant` token, on the `public` network, which reaches the frontend
 #           and no machine.
+#   issuer  a key holder (`/secrets`, its own volume), offline with no network: new keys and
+#           tokens, for a rotation.
 #
-# The machines pin the root public key (`/public`) at their start (#245 (Biscuit tokens)), so
-# the key comes first:
+# The root key and the two tokens below were made once, offline, with
 #
-#   docker compose run --rm issuer key generate --label root-1 --out /secrets --public-out /public
-#   docker compose run --rm issuer token mint --key /secrets/root-1.private --role admin \
-#     --subject operator --ttl 12h --out /tokens/admin.token
+#   parosctl key bootstrap --tenant acme --ttl 3650d
+#
+# and pasted here (#245 (Biscuit tokens)). Its private key was never written down: no one can
+# mint another token with root-1. A demo shortcut: real tokens are short-lived and never committed.
+# Every machine pins root-1, so it forms or joins a cell only for the admin token.
+#
 #   docker compose up -d --build
-#   docker compose run --rm admin init --members node1:4500,node2:4500,node3:4500 \
-#     --root-public-key /public/root-1.public
+#   docker compose run --rm admin init --members node1:4500,node2:4500,node3:4500
 #   docker compose run --rm admin tenant create acme
 #   docker compose run --rm admin journal create acme orders
-#   docker compose run --rm issuer token mint --key /secrets/root-1.private --role tenant \
-#     --tenant acme --subject orders-service --ttl 12h --out /tokens/acme.token
 #   docker compose run --rm acme write acme/orders hello world --leader 7
 #   docker compose run --rm acme read acme/orders
 #   docker compose run --rm admin bench --tenant bench --journals 4 --clients 8 --duration 60s --ramp 10s
@@ -29,7 +28,7 @@
 # The copy-paste demo, with shell aliases for the three, is DEMO.md; the walkthrough is
 # crates/parosd/README.md.
 # A rebuilt image does not read volumes an older build wrote (no upgrades until M13, #363 (upgrades)). If every
-# machine exits 78 with `machine record: ...`, run `docker compose down -v`, then start again from the key.
+# machine exits 78 with `machine record: ...`, run `docker compose down -v`, then `up -d --build` and `init` again.
 # A machine mints its node id on
 # its first start and waits, configured with no peer; `init` forms the cell over the
 # three nodes it names (`cell init`'s founding members, #277) and claims its control journal. `storage4` and `stateless1` idle until `admin cell add-machine` admits them, then wait for placement,
@@ -45,6 +44,11 @@
 
 name: paros
 
+# `parosctl key bootstrap --tenant acme --ttl 3650d`, once (see above).
+x-root-key: &root_key "root-1:2323390768:ed25519/35ee99ac8522c0f5a744c7c7ef40c594bbd7f62cb11ef16e17345ea4d58d5222"
+x-admin-token: &admin_token "CLDC8NMIEtUBCmsKB3N1YmplY3QKCHJvb3Rfa2V5CgZyb290LTEKAXQYAyIICgYIBhICGA0iCQoHCIAIEgIYDSIKCggIgQgSAxiCCDIoCiYKAggbEgcIBRIDCIMIGhcKBQoDCIMICggKBiC3l4ftBwoEGgIIAhIkCAASIH304cq-4cGuVzkMbi89Mbue4hZD58MEP9lHegs8PzYrGkBTgrEguADehzk2K54ORcKcwWESNkXxVTQa0C6QJhuAbJCwWvhB5KssjGpbXEe0d2gGGWPaRBqUOpzpW5_wDNsKIiIKIG25BnWs1rHiSxhnt45GO8CxZUA8cesLuqaHNTogg1an"
+x-acme-token: &acme_token "CLDC8NMIEucBCn0KB3N1YmplY3QKBGFjbWUKCHJvb3Rfa2V5CgZyb290LTEKAXQYAyIICgYIBhICGAgiCgoICIAIEgMYgQgiCgoICIIIEgMYgwgiCQoHCAgSAxiBCDIoCiYKAggbEgcIBRIDCIQIGhcKBQoDCIQICggKBiC3l4ftBwoEGgIIAhIkCAASICwdg2eHYHGvTkSAuXdvR0fraxiZKRZNXUHEzQ1PHk1kGkD1ulXfBNUvnS0U_olg0Jj7oCksfAeazhXM6FBLq3_KikaumJGzZ8vh-rScgfskLMrdJPIoEV-G-HMhkKlEgVIOIiIKIAbWZg4MJP3SuKHCJ6Z3g2yK97OJ5oinLWHR_G04DZng"
+
 x-parosd: &parosd
   image: paros:local
   build: .
@@ -54,8 +58,8 @@ x-parosd: &parosd
     PAROS_HTTP_LISTEN: 0.0.0.0:9100
     RUST_LOG: warn,parosd=info,paros::machine=info
     # The pin (#245 (Biscuit tokens)): while idle, a machine forms or joins a cell only for an
-    # `admin` token this key signed. A missing file stops the machine (exit 2): make the key first.
-    PAROS_ROOT_PUBLIC_KEY: /public/root-1.public
+    # `admin` token this key signed.
+    PAROS_ROOT_PUBLIC_KEY: *root_key
   networks: [internal]
 
 x-tool: &tool
@@ -73,7 +77,7 @@ services:
       PAROS_ADVERTISE: node1:4500
       PAROS_CLASS: storage
       PAROS_ZONE: zone-a
-    volumes: [node1:/var/lib/paros, public:/public:ro]
+    volumes: [node1:/var/lib/paros]
     networks: { internal: { aliases: [members] } }
 
   node2:
@@ -85,7 +89,7 @@ services:
       PAROS_ADVERTISE: node2:4500
       PAROS_CLASS: storage
       PAROS_ZONE: zone-b
-    volumes: [node2:/var/lib/paros, public:/public:ro]
+    volumes: [node2:/var/lib/paros]
     networks: { internal: { aliases: [members] } }
 
   node3:
@@ -97,7 +101,7 @@ services:
       PAROS_ADVERTISE: node3:4500
       PAROS_CLASS: storage
       PAROS_ZONE: zone-c
-    volumes: [node3:/var/lib/paros, public:/public:ro]
+    volumes: [node3:/var/lib/paros]
     networks: { internal: { aliases: [members] } }
 
   storage4:
@@ -109,7 +113,7 @@ services:
       PAROS_ADVERTISE: storage4:4500
       PAROS_CLASS: storage
       PAROS_ZONE: zone-a
-    volumes: [storage4:/var/lib/paros, public:/public:ro]
+    volumes: [storage4:/var/lib/paros]
 
   stateless1:
     <<: *parosd
@@ -120,7 +124,7 @@ services:
       PAROS_ADVERTISE: stateless1:4500
       PAROS_CLASS: stateless
       PAROS_ZONE: zone-b
-    volumes: [stateless1:/var/lib/paros, public:/public:ro]
+    volumes: [stateless1:/var/lib/paros]
 
   # The frontend (#192 (the frontend)): checks each call's token, resolves its names and forwards
   # it to the founding members. It holds no key: it reads the keys `init` wrote in the universe.
@@ -134,20 +138,14 @@ services:
     depends_on: [node1, node2, node3]
     networks: [internal, public]
 
-  # The key holder: the only service that mounts the private key. Offline, so no network.
-  issuer:
-    <<: *tool
-    entrypoint: ["parosctl"]
-    network_mode: none
-    volumes: [secrets:/secrets, public:/public, tokens:/tokens]
-
   # The operator: every admin command, `init` and `bench`, straight to the machines.
   admin:
     <<: *tool
     entrypoint: ["parosctl", "--servers", "members:4500", "--timeout-ms", "10000"]
     environment:
-      PAROS_TOKEN_FILE: /tokens/admin.token
-    volumes: [public:/public:ro, tokens:/tokens:ro]
+      PAROS_TOKEN: *admin_token
+      # `init --root-public-key`: the key the universe records, the one the machines pin.
+      PAROSCTL_ROOT_PUBLIC_KEY: *root_key
     networks: [internal]
 
   # The tenant `acme`: the journal calls through the frontend, with its own token. It can derive
@@ -156,9 +154,15 @@ services:
     <<: *tool
     entrypoint: ["parosctl", "--frontends", "frontend:4600", "--timeout-ms", "10000"]
     environment:
-      PAROS_TOKEN_FILE: /tokens/acme.token
-    volumes: [tokens:/tokens]
+      PAROS_TOKEN: *acme_token
     networks: [public]
+
+  # A key holder, offline: `key generate` and `token mint` for a rotation. No network.
+  issuer:
+    <<: *tool
+    entrypoint: ["parosctl"]
+    network_mode: none
+    volumes: [secrets:/secrets]
 
 networks:
   internal:
@@ -171,5 +175,3 @@ volumes:
   storage4:
   stateless1:
   secrets:
-  public:
-  tokens:

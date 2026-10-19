@@ -1,16 +1,19 @@
-//! `parosctl key generate|show` (#400): root key pairs, offline.
+//! `parosctl key generate|show|bootstrap` (#400): root key pairs, offline.
 //!
 //! A universe has its own root key pairs (#245 Biscuit tokens): never share
 //! one between two universes. The key and its id come from the thread RNG,
-//! which the OS seeds, through the provider's random source.
+//! which the OS seeds, through the provider's random source. A public key
+//! also has a line, `<label>:<key_id>:ed25519/<hex>`, which every command
+//! and variable that takes a key file takes in its place.
 
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use clap::{Args, Subcommand};
 use moonpool_core::{RandomProvider, TokioRandomProvider};
-use paros_authz_biscuit::{Entropy, RootKey, RootPublicKey};
+use paros_authz_biscuit::{Entropy, Role, RootKey, RootPublicKey};
 use serde_json::json;
 
 use crate::Ending;
@@ -31,19 +34,34 @@ enum KeyCommand {
         /// The directory to write to.
         #[arg(long)]
         out: PathBuf,
-        /// The directory for `<label>.public`, when the public half goes
-        /// elsewhere than the private one (the machines' copy).
-        #[arg(long)]
-        public_out: Option<PathBuf>,
         /// The key pair's name, e.g. `prod-2026-10`: letters, digits, `.`,
         /// `_` and `-`. It names the files and the key in every output.
         #[arg(long, value_parser = parse_label)]
         label: String,
     },
-    /// Print the public half of a `.private` or `.public` file.
+    /// Print the public half of a `.private` or `.public` file, as its
+    /// line.
     Show {
         /// The key file.
         file: PathBuf,
+    },
+    /// Everything a new universe needs, in one command: a root key pair, an
+    /// `admin` token, and a `tenant` token per `--tenant`. Prints the public
+    /// key's line and each token. The private key is kept only with
+    /// `--out`: without it, no token can be minted from this key again.
+    Bootstrap {
+        /// The key pair's name.
+        #[arg(long, value_parser = parse_label, default_value = "root-1")]
+        label: String,
+        /// A tenant to mint a token for, by name; repeat it for more.
+        #[arg(long = "tenant")]
+        tenants: Vec<String>,
+        /// How long the tokens are valid: `90s`, `30m`, `12h`, `7d`.
+        #[arg(long, value_parser = crate::token::parse_duration)]
+        ttl: Duration,
+        /// A directory to write the key pair to, as `key generate` does.
+        #[arg(long)]
+        out: Option<PathBuf>,
     },
 }
 
@@ -106,19 +124,16 @@ fn public_json(key: &RootPublicKey) -> serde_json::Value {
 
 pub fn run(out: &Printer, args: KeyArgs) -> Ending {
     let result = match args.command {
-        KeyCommand::Generate {
-            out: dir,
-            public_out,
-            label,
-        } => generate(out, &dir, public_out.as_deref().unwrap_or(&dir), &label),
+        KeyCommand::Generate { out: dir, label } => generate(out, &dir, &label),
         KeyCommand::Show { file } => read(&file)
             .and_then(|text| RootPublicKey::from_file(&text).map_err(|e| e.to_string()))
-            .map(|key| {
-                out.emit(
-                    || format!("{} {}", key.label(), key.key_text()),
-                    || public_json(&key),
-                );
-            }),
+            .map(|key| out.emit(|| key.to_line(), || public_json(&key))),
+        KeyCommand::Bootstrap {
+            label,
+            tenants,
+            ttl,
+            out: dir,
+        } => bootstrap(out, &label, &tenants, ttl, dir.as_deref()),
     };
     match result {
         Ok(()) => Ending::Success,
@@ -129,15 +144,9 @@ pub fn run(out: &Printer, args: KeyArgs) -> Ending {
     }
 }
 
-fn generate(out: &Printer, dir: &Path, public_dir: &Path, label: &str) -> Result<(), String> {
+fn generate(out: &Printer, dir: &Path, label: &str) -> Result<(), String> {
     let key = RootKey::generate(label, &entropy());
-    let private = dir.join(format!("{label}.private"));
-    let public = public_dir.join(format!("{label}.public"));
-    if public.exists() {
-        return Err(format!("{}: already exists", public.display()));
-    }
-    write_new(&private, &key.to_file(), true)?;
-    write_new(&public, &key.public().to_file(), false)?;
+    let (private, public) = write_pair(dir, &key)?;
     out.emit(
         || {
             format!(
@@ -153,6 +162,64 @@ fn generate(out: &Printer, dir: &Path, public_dir: &Path, label: &str) -> Result
                 "key_id": key.key_id(),
                 "private": private.display().to_string(),
                 "public": public.display().to_string(),
+            })
+        },
+    );
+    Ok(())
+}
+
+/// Write `key` to `dir` as `<label>.private` and `<label>.public`, each a
+/// new file.
+fn write_pair(dir: &Path, key: &RootKey) -> Result<(PathBuf, PathBuf), String> {
+    let private = dir.join(format!("{}.private", key.label()));
+    let public = dir.join(format!("{}.public", key.label()));
+    if public.exists() {
+        return Err(format!("{}: already exists", public.display()));
+    }
+    write_new(&private, &key.to_file(), true)?;
+    write_new(&public, &key.public().to_file(), false)?;
+    Ok((private, public))
+}
+
+fn bootstrap(
+    out: &Printer,
+    label: &str,
+    tenants: &[String],
+    ttl: Duration,
+    dir: Option<&Path>,
+) -> Result<(), String> {
+    let key = RootKey::generate(label, &entropy());
+    let admin = crate::token::sign(&key, Role::Admin, "admin".to_string(), ttl)?;
+    let mut minted = Vec::with_capacity(tenants.len());
+    for tenant in tenants {
+        let role = Role::Tenant(tenant.clone());
+        minted.push((tenant, crate::token::sign(&key, role, tenant.clone(), ttl)?));
+    }
+    let files = dir.map(|dir| write_pair(dir, &key)).transpose()?;
+    let line = key.public().to_line();
+    out.emit(
+        || {
+            let mut lines = vec![format!("key={line}"), format!("admin={}", admin.to_text())];
+            for (tenant, token) in &minted {
+                lines.push(format!("tenant.{tenant}={}", token.to_text()));
+            }
+            if let Some((private, public)) = &files {
+                lines.push(format!("private={}", private.display()));
+                lines.push(format!("public={}", public.display()));
+            }
+            lines.join("\n")
+        },
+        || {
+            let tenants: serde_json::Map<String, serde_json::Value> = minted
+                .iter()
+                .map(|(tenant, token)| ((*tenant).clone(), json!(token.to_text())))
+                .collect();
+            json!({
+                "key": line,
+                "admin": admin.to_text(),
+                "tenants": tenants,
+                "private": files.as_ref().map(|(private, _)| private.display().to_string()),
+                "public": files.as_ref().map(|(_, public)| public.display().to_string()),
             })
         },
     );
