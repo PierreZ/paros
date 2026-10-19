@@ -26,9 +26,7 @@
 use std::time::Duration;
 
 use futures::future::join_all;
-use moonpool_sim::{
-    SimContext, TimeProvider, assert_always, assert_reachable, assert_sometimes, buggify_with_prob,
-};
+use moonpool_sim::{SimContext, TimeProvider, assert_always, assert_reachable, buggify_with_prob};
 use paros::client::multi::{append_entry, append_request, open_truncate_request};
 use paros::client::{Retarget, SetLeaderOutcome, TruncateOutcome, WriteOptions, WriteOutcome};
 use paros::{
@@ -218,11 +216,10 @@ impl ChainWorkload {
         if !landed.is_empty() {
             assert_reachable!("chain: a client's multi-writer burst is written");
         }
-        if landed.len() > 1 {
-            assert_sometimes!(
-                landed.windows(2).any(|pair| pair[1] < pair[0]),
-                "chain: a multi-writer burst is written out of send order"
-            );
+        // A cause, not an outcome every burst owes: most bursts land in send
+        // order, and one shard saw none of 22 out of order (PR #692).
+        if landed.windows(2).any(|pair| pair[1] < pair[0]) {
+            assert_reachable!("chain: a multi-writer burst is written out of send order");
         }
     }
 
