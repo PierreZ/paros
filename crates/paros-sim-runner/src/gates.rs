@@ -70,6 +70,10 @@ pub const RARE: &[Rare] = &[
         reason: "an ADMIT that draws a machine an operator removed: one CI sweep seed (#359 (drain, remove and maintenance for machines))",
     },
     Rare {
+        msg: "init: a removed listed machine refuses init",
+        reason: "an init re-run that lists a machine past the founders an operator removed between its registration and its admission: one exploration timeline on PR #692's sweep (#359 (drain, remove and maintenance for machines))",
+    },
+    Rare {
         msg: "coordinator: a served term follows a renamed founder",
         reason: "a founder renamed (the rename_pct knob's extreme, #349) while a served term runs: one witness on PR #643's sweep",
     },
