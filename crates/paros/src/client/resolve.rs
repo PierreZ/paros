@@ -49,6 +49,9 @@ pub struct Resolved {
     pub universe_name: Vec<u8>,
     /// The cell's name, for people; empty when the directory names none.
     pub cell_name: Vec<u8>,
+    /// The tenant's batchers (#145, #604): the machines the registry books
+    /// a `batcher` slot of the tenant on. Empty when it has none.
+    pub batchers: Vec<(NodeId, Address)>,
 }
 
 /// What resolving a tenant through the entry endpoint came to.
@@ -163,6 +166,24 @@ impl Resolved {
         assert_eq!(servers.len(), self.machines.len(), "one server per machine");
         servers
     }
+
+    /// A client's servers for the tenant's batchers (#145): each sends
+    /// `BatchWrite`, so a client over them sends multi-writer writes only.
+    /// Empty when the tenant has no batcher.
+    #[must_use]
+    pub fn batcher_servers<P: Providers>(
+        &self,
+        rpc: &RpcHandle<P>,
+        names: &Names,
+    ) -> Vec<Server<P>> {
+        self.batchers
+            .iter()
+            .map(|(id, addr)| Server {
+                id: id.0,
+                node: NodeClient::batcher(rpc, names.clone(), addr.clone()),
+            })
+            .collect()
+    }
 }
 
 /// A machine's answer, judged.
@@ -191,6 +212,17 @@ pub fn from_wire(ack: &wire::ResolveAck) -> Resolution {
             (m.node_id != 0).then_some((NodeId(m.node_id), addr))
         })
         .collect();
+    let batchers: Option<Vec<(NodeId, Address)>> = ack
+        .batchers
+        .iter()
+        .map(|m| {
+            let addr = m.addr.parse::<Address>().ok()?;
+            (m.node_id != 0).then_some((NodeId(m.node_id), addr))
+        })
+        .collect();
+    let Some(batchers) = batchers else {
+        return Resolution::Malformed;
+    };
     let well_formed = ack.cell_id != 0
         && ack.tenant != 0
         && ack.tenant_cell == ack.cell_id
@@ -212,6 +244,7 @@ pub fn from_wire(ack: &wire::ResolveAck) -> Resolution {
             at: ack.at,
             universe_name: ack.universe_name.clone(),
             cell_name: ack.cell_name.clone(),
+            batchers,
         }),
         _ => Resolution::Malformed,
     }

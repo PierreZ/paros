@@ -695,8 +695,8 @@ pub(crate) fn wipe_target(
 
 /// The founding member the replaced-founder scenario wipes now
 /// (`crate::world::replaced_founder`, #423), if the run is at its moment:
-/// every founder of a cell of three or more formed and up, and no machine
-/// was wiped yet. The highest-ranked founder, so the cell keeps a majority
+/// every founder of a cell of three or more formed and up, every renamed
+/// founder registered at its new name, and no machine was wiped yet. The highest-ranked founder, so the cell keeps a majority
 /// of its members. The answer is the founder's process IP, what the wipe
 /// strikes.
 pub(crate) fn replace_target(state: &StateHandle, dead: impl Fn(&str) -> bool) -> Option<String> {
@@ -722,6 +722,21 @@ pub(crate) fn replace_target(state: &StateHandle, dead: impl Fn(&str) -> bool) -
         .filter_map(|addr| board.ips.get(addr))
         .collect();
     if ips.len() < board.founders.len() || ips.iter().any(|ip| dead(ip)) {
+        return None;
+    }
+    // Every renamed founder registered at its new name: until then its peers
+    // reach it only at its dead old name, so it is as lost as a down one,
+    // and a wipe beside it takes the cell's majority for good. The mirror of
+    // `may_rename`, which renames no founder once one is wiped. Witness:
+    // recipe `17967350196043573522 331026:3916672135343956209` on 965794d,
+    // a founder of four renamed at 63.771 s and another wiped 1 ms later.
+    if !board
+        .renamed
+        .iter()
+        .filter(|(rank, _)| **rank < board.founders.len())
+        .all(|(rank, name)| renamed_registered(&board, *rank, name))
+    {
+        tracing::debug!("replaced_founder_waits_for_rename");
         return None;
     }
     ips.last().map(|ip| (*ip).clone())
@@ -1250,17 +1265,20 @@ fn renamed_outside_registered(board: &MachineBoard, layout: &crate::shape::Machi
         .renamed
         .iter()
         .filter(|(rank, _)| **rank >= layout.founders)
-        .all(|(rank, name)| {
-            let Ok(rank_addr) = Address::parse(&format!("{}:{MACHINE_PORT}", machine_host(*rank)))
-            else {
-                return false;
-            };
-            board
-                .nodes
-                .get(&rank_addr)
-                .and_then(|id| board.cached.get(id).map(|cache| (id, cache)))
-                .is_some_and(|(id, cache)| cache.address(NodeId(*id)) == Some(name))
-        })
+        .all(|(rank, name)| renamed_registered(board, *rank, name))
+}
+
+/// Whether the machine of `rank`, renamed `name`, is registered there: its
+/// own durable cached registry fold names it at that name.
+fn renamed_registered(board: &MachineBoard, rank: usize, name: &Address) -> bool {
+    let Ok(rank_addr) = Address::parse(&format!("{}:{MACHINE_PORT}", machine_host(rank))) else {
+        return false;
+    };
+    board
+        .nodes
+        .get(&rank_addr)
+        .and_then(|id| board.cached.get(id).map(|cache| (id, cache)))
+        .is_some_and(|(id, cache)| cache.address(NodeId(*id)) == Some(name))
 }
 
 /// Whether every founding member formed its cell.

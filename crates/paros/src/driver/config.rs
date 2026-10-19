@@ -437,6 +437,14 @@ pub struct DriverTunables {
     /// the registry, and placement books it last, as a down one. Floor 0:
     /// no machine is ever low on space.
     pub free_bytes_floor: u64,
+    /// The longest a write waits in a batcher's lane before the lane
+    /// flushes (#145): the batcher's tick. Floor 1 ms: a lane flushes on
+    /// the next tick after its first write.
+    pub batch_tick: Duration,
+    /// How many records a batcher's lane holds before it flushes on its own,
+    /// before a tick (#145). Floor 1: every write goes out at once, alone.
+    /// Capped at `max_batch_records` when the batcher starts.
+    pub batch_flush_records: u64,
 }
 
 impl Default for DriverTunables {
@@ -495,6 +503,8 @@ impl Default for DriverTunables {
             read_only_ticks: READ_ONLY_TICKS,
             admission_rounds: ADMISSION_ROUNDS,
             free_bytes_floor: FREE_BYTES_FLOOR,
+            batch_tick: BATCH_TICK,
+            batch_flush_records: BATCH_FLUSH_RECORDS,
         };
         // The simulation's baseline is itself a winnable profile.
         assert!(
@@ -642,6 +652,16 @@ const ADMISSION_ROUNDS: u64 = 1024;
 /// of the simulation's compact geometry.
 const FREE_BYTES_FLOOR: u64 = 64 * 1024;
 
+/// Default [`DriverTunables::batch_tick`]: 2 ms, a small cost in latency
+/// for many writers' writes in one slot.
+const BATCH_TICK: Duration = Duration::from_millis(2);
+
+/// Default [`DriverTunables::batch_flush_records`]: the default record limit
+/// of one write, so a lane flushes at the limit or at the tick.
+const BATCH_FLUSH_RECORDS: u64 = 1024;
+
+const _: () = assert!(BATCH_TICK.as_millis() >= 1);
+const _: () = assert!(BATCH_FLUSH_RECORDS >= 1);
 const _: () = assert!(READ_ONLY_TICKS >= 1);
 const _: () = assert!(ADMISSION_ROUNDS >= 1);
 

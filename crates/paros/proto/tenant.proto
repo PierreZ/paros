@@ -117,6 +117,17 @@ message Configure {
   uint64 id = 2;
   bool tenant_default = 3;
   Desired desired = 4;
+  // The tenant's role counts (#604), on a tenant default only; unset keeps
+  // the counts it has.
+  TenantRoles roles = 5;
+}
+
+// A tenant's role counts (§3.4, #604): how many instances of each of its
+// pools of stateless roles the tenant coordinator places.
+message TenantRoles {
+  uint32 frontends = 1;
+  uint32 proxy_leaders = 2;
+  uint32 batchers = 3;
 }
 
 // The configuration in force of journal `id` once the coordinator applied
@@ -169,6 +180,8 @@ message TenantState {
   Desired default_desired = 4;
   // The scrubber's progress, once it recorded some (#362).
   Scrubbed scrub = 5;
+  // The role counts, once a `Configure` set them (#604).
+  TenantRoles roles = 6;
 }
 
 message JournalState {

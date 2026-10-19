@@ -71,6 +71,16 @@ second time. Delivery is at least once, and the writers own that. The client lib
 sends a multi-writer write again on its own. Anyone may `Truncate`, and `SetLeader` is
 refused.
 
+**Batchers.** A multi-writer journal can put many writers' writes in one slot. A client sends
+its `Write` to a batcher, not to a node. The batcher keeps one lane per journal and sends the
+lane to the journal's leader as one write: when the lane is full, when the next write would pass
+the limits, or after a short tick. The journal gives that write a range of positions. The
+batcher cuts the range in order, so each writer gets the positions of its own records. A merged
+write is accepted or refused whole. When the batcher gets no answer, each writer gets
+`ambiguous`, and the batcher never sends the write again. Every machine serves the batcher
+endpoint. `parosctl configure --tenant acme --batchers 3` asks the tenant coordinator to book
+three batchers on the cell's `stateless` machines, and `parosctl resolve acme` names them.
+
 ## Reads
 
 A `Read` returns the records from `from_seq`, dense from it, plus `first_seq`, `next_seq` and
@@ -133,6 +143,10 @@ FoundationDB:
   acceptors for `acme/orders`.
 - `parosctl configure --tenant acme --partitions 3` changes the tenant's default. A create that
   names no durability takes the default.
+- `parosctl configure --tenant acme --batchers 3` sets the tenant's role counts. The command
+  also takes `--frontends` and `--proxy-leaders`. A count that the command does not name keeps
+  its value. The cell places batchers today. It records the other two counts for a later
+  change.
 
 The answer `configured` means that the tenant's control journal holds the new durability. The
 tenant coordinator then applies it. It books slots on new machines, asks the journal's leader to

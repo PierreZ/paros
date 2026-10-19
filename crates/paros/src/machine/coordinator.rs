@@ -109,6 +109,7 @@ use super::capacity;
 use super::footprints::Footprints;
 use super::modes::Modes;
 use super::moves::Moves;
+use super::roles::Roles;
 use super::scrub::{ScrubPace, Scrubs};
 use super::sets::{SetStep, Sets};
 use super::slow::{Sample, SlowBounds, SlowJudge};
@@ -1324,6 +1325,8 @@ async fn campaign<P: Providers>(
         .chain(journals.fleet.map(|fleet| fleet.tenant))
         .collect();
     let mut footprints = Footprints::new(internal.clone());
+    // The served term's role counts (#604).
+    let mut roles = Roles::default();
     // The served term's scrubbers (#362 (background scrubbing)).
     let mut scrubs = Scrubs::new(scrub);
     // The served term's dynamic endpoint (#404).
@@ -1405,6 +1408,7 @@ async fn campaign<P: Providers>(
                 changes = Modes::default();
                 sets = Sets::new(ask_again);
                 footprints = Footprints::new(internal.clone());
+                roles = Roles::default();
                 scrubs = Scrubs::new(scrub);
                 match duty {
                     TermDuty::Served { .. } => {
@@ -1554,9 +1558,22 @@ async fn campaign<P: Providers>(
                                                             None => None,
                                                         };
                                                         // Then one step of a tenant's
+                                                        // role counts (#604): its batchers.
+                                                        let role_step = match footprint {
+                                                            Some(_) => {
+                                                                roles
+                                                                    .step(
+                                                                        &client, session, desk,
+                                                                        &gone,
+                                                                    )
+                                                                    .await
+                                                            }
+                                                            None => None,
+                                                        };
+                                                        // Then one step of a tenant's
                                                         // scrub pass (#362 (background
                                                         // scrubbing)).
-                                                        let scrubbed = match footprint {
+                                                        let scrubbed = match role_step {
                                                             Some(_) => {
                                                                 scrubs
                                                                     .step(ctx, session, desk)

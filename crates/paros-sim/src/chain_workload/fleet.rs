@@ -236,6 +236,9 @@ pub(super) struct FleetOps {
     /// The tenants where a create the cell had no slot for was refused
     /// (#212 (placement)), until this client's next create there is placed.
     refused: BTreeSet<TenantId>,
+    /// The tenants whose default this client configured with batchers on
+    /// a batchers seed (#145 (batchers), `crate::shape::batchers`).
+    batchers_named: BTreeSet<TenantId>,
     /// The replaced-founder scenario's steps this operator took (#423).
     replaced: replaced::Steps,
     /// The single-writer journals this client created (#215 (zones)): on a
@@ -296,6 +299,7 @@ impl FleetOps {
             journal_pending: None,
             journal_names: BTreeMap::new(),
             refused: BTreeSet::new(),
+            batchers_named: BTreeSet::new(),
             created_single: Vec::new(),
             replaced: replaced::Steps::default(),
             frontend_cold: false,
@@ -1277,6 +1281,11 @@ impl FleetOps {
             // The machines' own `Resolve` folds escape after chaos (#457).
             self.resolve_answers(ctx, cell, ctx.time().now() + FLEET_SETTLE)
                 .await;
+            // Each tenant name resolves once more after chaos, when a
+            // configure's batchers are booked (#145 (batchers)).
+            for (first, name) in NAMES.iter().enumerate() {
+                self.resolve_at_entry(first, name, None).await;
+            }
         }
         // Every quiet journal world converges (#447 (model checks for every
         // journal world)), on its own deadline.
@@ -1513,10 +1522,29 @@ impl FleetOps {
         let Some(tail) = tail else {
             return;
         };
+        // A liveness claim, not a throughput bound: the window restarts
+        // each time a lagging node folds further, up to one more window. A
+        // slow follower (`LAG_FOLLOW`) that a one-record page serves can
+        // clear a long backlog after the first window (witness
+        // 13771843782373076243 on 9e5149a: one record short at 20 s).
         let board = crate::audit::system::system_board(ctx.state());
+        let cap = deadline + FLEET_SETTLE;
+        let mut until = deadline;
+        let mut progress = 0;
         let mut lagging = Vec::new();
-        while ctx.time().now() < deadline && !ctx.shutdown().is_cancelled() {
-            lagging = crate::audit::system::lock(&board).registry_lagging(registry, expected, tail);
+        while ctx.time().now() < until.min(cap) && !ctx.shutdown().is_cancelled() {
+            let (now_lagging, now_progress) = {
+                let board = crate::audit::system::lock(&board);
+                (
+                    board.registry_lagging(registry, expected, tail),
+                    board.registry_progress(registry, expected),
+                )
+            };
+            lagging = now_lagging;
+            if now_progress > progress {
+                progress = now_progress;
+                until = until.max(ctx.time().now() + FLEET_SETTLE);
+            }
             if lagging.is_empty() || ctx.time().sleep(Duration::from_millis(50)).await.is_err() {
                 break;
             }
@@ -1524,7 +1552,7 @@ impl FleetOps {
         assert_always!(
             lagging.is_empty() || ctx.shutdown().is_cancelled(),
             "registry: every live node's fold reaches the registry's tail after chaos",
-            { "tail" => tail, "lagging" => format!("{lagging:?}") }
+            { "tail" => tail, "lagging" => format!("{lagging:?}"), "progress" => progress }
         );
     }
 }

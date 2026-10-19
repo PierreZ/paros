@@ -12,10 +12,10 @@ use moonpool_rpc::{
 };
 
 use super::methods::{
-    FrontReadRpc, FrontSetJournalTagsRpc, FrontSetLeaderRpc, FrontTruncateRpc, FrontWriteRpc,
-    GarbageCollectRpc, InspectRpc, MachineInterface, MatchmakeRpc, MatchmakerReconfigureRpc,
-    ReadRpc, ReconfigureMatchmakersRpc, ReconfigureRpc, RetireRpc, ScrubRpc, SetLeaderRpc,
-    TruncateRpc, WellKnownMethod, WriteRpc,
+    BatchWriteRpc, FrontReadRpc, FrontSetJournalTagsRpc, FrontSetLeaderRpc, FrontTruncateRpc,
+    FrontWriteRpc, GarbageCollectRpc, InspectRpc, MachineInterface, MatchmakeRpc,
+    MatchmakerReconfigureRpc, ReadRpc, ReconfigureMatchmakersRpc, ReconfigureRpc, RetireRpc,
+    ScrubRpc, SetLeaderRpc, TruncateRpc, WellKnownMethod, WriteRpc,
 };
 use super::{
     Entry, FrontRead, FrontSetJournalTags, FrontSetLeader, FrontTruncate, FrontWrite, InspectReply,
@@ -133,6 +133,8 @@ pub struct NodeClient<P: Providers> {
     names: Names,
     pass: Option<Arc<Pass>>,
     interface: Option<InterfaceRef<MachineInterface>>,
+    /// A batcher (#145): `write` sends `BatchWrite`.
+    batcher: bool,
 }
 
 impl<P: Providers> Clone for NodeClient<P> {
@@ -143,6 +145,7 @@ impl<P: Providers> Clone for NodeClient<P> {
             names: self.names.clone(),
             pass: self.pass.clone(),
             interface: self.interface.clone(),
+            batcher: self.batcher,
         }
     }
 }
@@ -244,6 +247,7 @@ impl<P: Providers> NodeClient<P> {
             names,
             pass: None,
             interface: None,
+            batcher: false,
         }
     }
 
@@ -287,7 +291,26 @@ impl<P: Providers> NodeClient<P> {
             names,
             pass: Some(pass),
             interface: None,
+            batcher: false,
         }
+    }
+
+    /// The batcher serving at `address` (#145), resolved through `names`
+    /// at each call, called through `rpc`: `write` sends `BatchWrite`, the
+    /// other calls go to the node methods at that address, which a batcher
+    /// does not serve. A client of batchers sends multi-writer writes only.
+    #[must_use]
+    pub fn batcher(rpc: &RpcHandle<P>, names: Names, address: Address) -> Self {
+        Self {
+            batcher: true,
+            ..Self::named(rpc, names, address)
+        }
+    }
+
+    /// Whether this client calls a batcher.
+    #[must_use]
+    pub fn is_batcher(&self) -> bool {
+        self.batcher
     }
 
     /// The pass this client presents, when it calls a frontend.
@@ -343,6 +366,9 @@ impl<P: Providers> NodeClient<P> {
     ///
     /// The attempt's [`RpcError`].
     pub async fn write(&self, request: &Write) -> Result<WriteAck, RpcError> {
+        if self.batcher {
+            return self.call::<BatchWriteRpc>(request).await;
+        }
         let Some(pass) = &self.pass else {
             return self.data::<WriteRpc>(request).await;
         };

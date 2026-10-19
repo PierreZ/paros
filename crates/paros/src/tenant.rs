@@ -367,6 +367,72 @@ impl std::str::FromStr for Desired {
     }
 }
 
+/// The most instances of one role a tenant may ask for (#604): a count
+/// above it is malformed. Placement caps a count at the machines that can
+/// take an instance.
+pub const MAX_ROLE_COUNT: u32 = 64;
+
+/// A tenant's role counts (§3.4, #604): how many instances of each of its
+/// pools of stateless roles the tenant coordinator places on the cell's
+/// `stateless` machines. Zero is none: the tenant's calls go to the
+/// machines, as before.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TenantRoles {
+    /// Frontends (recorded; placed by a later change, #604).
+    pub frontends: u32,
+    /// Proxy leaders (recorded; placed by a later change, #604).
+    pub proxy_leaders: u32,
+    /// Batchers (#145): placed, and named by `Resolve`.
+    pub batchers: u32,
+}
+
+impl TenantRoles {
+    /// Checked counts.
+    ///
+    /// # Errors
+    ///
+    /// A count above [`MAX_ROLE_COUNT`].
+    pub fn new(frontends: u32, proxy_leaders: u32, batchers: u32) -> Result<Self, &'static str> {
+        if frontends > MAX_ROLE_COUNT || proxy_leaders > MAX_ROLE_COUNT || batchers > MAX_ROLE_COUNT
+        {
+            return Err("a role count is at most 64");
+        }
+        Ok(Self {
+            frontends,
+            proxy_leaders,
+            batchers,
+        })
+    }
+
+    /// The wire form.
+    #[must_use]
+    pub fn to_wire(&self) -> wire::TenantRoles {
+        wire::TenantRoles {
+            frontends: self.frontends,
+            proxy_leaders: self.proxy_leaders,
+            batchers: self.batchers,
+        }
+    }
+
+    /// From the wire.
+    ///
+    /// # Errors
+    ///
+    /// A count above [`MAX_ROLE_COUNT`].
+    pub fn from_wire(roles: &wire::TenantRoles) -> Result<Self, &'static str> {
+        Self::new(roles.frontends, roles.proxy_leaders, roles.batchers)
+    }
+
+    /// Its label: `2 frontends · 0 proxy leaders · 3 batchers`.
+    #[must_use]
+    pub fn label(&self) -> String {
+        format!(
+            "{} frontends · {} proxy leaders · {} batchers",
+            self.frontends, self.proxy_leaders, self.batchers
+        )
+    }
+}
+
 /// The tenant's own description (the `Describe` entry).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Description {
@@ -467,6 +533,9 @@ pub enum TenantCommand {
         target: ConfigureTarget,
         /// The new mode.
         desired: Desired,
+        /// The tenant's new role counts (#604), on a tenant default only:
+        /// `None` keeps the counts it has.
+        roles: Option<TenantRoles>,
     },
     /// The configuration in force of journal `id`, once the coordinator
     /// applied its desired mode (#214 (tenant modes)). Not a request: it
@@ -538,6 +607,7 @@ impl TenantCommand {
                 request,
                 target,
                 desired,
+                roles,
             } => {
                 let (id, tenant_default) = match target {
                     ConfigureTarget::TenantDefault => (0, true),
@@ -548,6 +618,7 @@ impl TenantCommand {
                     id,
                     tenant_default,
                     desired: Some(desired.to_wire()),
+                    roles: roles.as_ref().map(TenantRoles::to_wire),
                 })
             }
             TenantCommand::Placed { id, config } => Kind::Placed(wire::Placed {
@@ -606,6 +677,13 @@ impl TenantCommand {
                     ConfigureTarget::Journal(JournalId(configure.id))
                 },
                 desired: Desired::from_wire(configure.desired)?,
+                roles: match configure.roles.as_ref() {
+                    Some(_) if !configure.tenant_default => {
+                        return Err("role counts are the tenant default's");
+                    }
+                    Some(roles) => Some(TenantRoles::from_wire(roles)?),
+                    None => None,
+                },
             },
             Kind::Placed(placed) => TenantCommand::Placed {
                 id: JournalId(placed.id),
@@ -820,6 +898,8 @@ pub struct TenantControl {
     description: Option<Description>,
     /// The default desired mode a `Configure` set (#214 (tenant modes)).
     default: Option<Desired>,
+    /// The role counts a `Configure` of the tenant default set (#604).
+    roles: TenantRoles,
     journals: BTreeMap<JournalId, TenantJournal>,
     /// Live names, to the journal holding each.
     names: BTreeMap<Vec<u8>, JournalId>,
@@ -844,6 +924,7 @@ impl TenantControl {
             control,
             description: None,
             default: None,
+            roles: TenantRoles::default(),
             journals: BTreeMap::new(),
             names: BTreeMap::new(),
             outcomes: BTreeMap::new(),
@@ -881,6 +962,13 @@ impl TenantControl {
     #[must_use]
     pub fn description(&self) -> Option<&Description> {
         self.description.as_ref()
+    }
+
+    /// The tenant's role counts (#604): the last ones a `Configure` of its
+    /// default set, else none.
+    #[must_use]
+    pub fn roles(&self) -> TenantRoles {
+        self.roles
     }
 
     /// The desired mode a create that names none takes (#214 (tenant
@@ -983,7 +1071,8 @@ impl TenantControl {
                 request,
                 target,
                 desired,
-            }) => self.configure(request, target, desired),
+                roles,
+            }) => self.configure(request, target, desired, roles),
             Ok(TenantCommand::Placed { id, config }) => self.place(id, config),
             Ok(TenantCommand::Scrubbed(progress)) => self.scrubbed(progress),
             Err(_) => TenantEvent::Refused(TenantRefusal::Malformed),
@@ -1126,6 +1215,7 @@ impl TenantControl {
         request: u64,
         target: ConfigureTarget,
         desired: Desired,
+        roles: Option<TenantRoles>,
     ) -> TenantEvent {
         if request == 0 {
             return TenantEvent::Refused(TenantRefusal::Malformed);
@@ -1136,7 +1226,13 @@ impl TenantControl {
         let id = match target {
             ConfigureTarget::TenantDefault => {
                 self.default = Some(desired);
+                if let Some(roles) = roles {
+                    self.roles = roles;
+                }
                 None
+            }
+            ConfigureTarget::Journal(_) if roles.is_some() => {
+                return TenantEvent::Refused(TenantRefusal::Malformed);
             }
             ConfigureTarget::Journal(id) => {
                 let Some(journal) = self
@@ -1238,6 +1334,7 @@ impl TenantControl {
                 .collect(),
             default_desired: self.default.as_ref().map(Desired::to_wire),
             scrub: self.scrub.map(ScrubProgress::to_wire),
+            roles: (self.roles != TenantRoles::default()).then(|| self.roles.to_wire()),
         }
     }
 }
@@ -1302,8 +1399,15 @@ impl Checkpointable for TenantControl {
             .default_desired
             .map(|d| Desired::from_wire(Some(d)))
             .transpose()?;
+        let roles = state
+            .roles
+            .as_ref()
+            .map(TenantRoles::from_wire)
+            .transpose()?
+            .unwrap_or_default();
         self.description = description;
         self.default = default;
+        self.roles = roles;
         self.journals = journals;
         self.names = names;
         self.outcomes = outcomes;
@@ -1401,11 +1505,13 @@ mod tests {
                 desired: "failures-per-partition=0,partitions=3"
                     .parse()
                     .expect("a mode"),
+                roles: None,
             },
             TenantCommand::Configure {
                 request: 13,
                 target: ConfigureTarget::TenantDefault,
                 desired: Desired::DEFAULT,
+                roles: Some(TenantRoles::new(1, 2, 3).expect("counts")),
             },
             TenantCommand::Placed {
                 id: JournalId(0x9e37),
@@ -1567,8 +1673,52 @@ mod tests {
             request,
             target,
             desired: desired.parse().expect("a mode"),
+            roles: None,
         }
         .encode()
+    }
+
+    #[test]
+    fn role_counts_are_the_tenant_defaults_and_survive_a_checkpoint() {
+        let mut t = fold();
+        let roles = TenantRoles::new(0, 0, 3).expect("counts");
+        let set = TenantCommand::Configure {
+            request: 40,
+            target: ConfigureTarget::TenantDefault,
+            desired: Desired::DEFAULT,
+            roles: Some(roles),
+        };
+        let seq = t.next_seq();
+        assert!(matches!(
+            t.fold(seq, &set.encode()),
+            TenantEvent::Configured { .. }
+        ));
+        assert_eq!(t.roles(), roles);
+        // A configure that names no counts keeps them.
+        let seq = t.next_seq();
+        t.fold(
+            seq,
+            &configure(41, ConfigureTarget::TenantDefault, "partitions=2"),
+        );
+        assert_eq!(t.roles(), roles);
+        // A journal's configure never carries them.
+        let journal = TenantCommand::Configure {
+            request: 42,
+            target: ConfigureTarget::Journal(JournalId(11)),
+            desired: Desired::DEFAULT,
+            roles: Some(roles),
+        };
+        let seq = t.next_seq();
+        assert_eq!(
+            t.fold(seq, &journal.encode()),
+            TenantEvent::Refused(TenantRefusal::Malformed)
+        );
+        let mut restored = TenantControl::new(t.tenant(), t.control());
+        restored
+            .restore(t.next_seq() - 1, &t.checkpoint())
+            .expect("a checkpoint restores");
+        assert_eq!(restored.roles(), roles);
+        assert!(TenantRoles::new(65, 0, 0).is_err(), "a count is at most 64");
     }
 
     #[test]

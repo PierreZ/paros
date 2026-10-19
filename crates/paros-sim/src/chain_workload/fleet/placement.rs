@@ -61,6 +61,7 @@ pub(super) async fn placements_booked(
         if let Some((tenants, registry, slow_before)) = read(known, first, &learn).await {
             if !judged {
                 judge(ctx.state(), &tenants, &registry, &slow_before);
+                batchers(&tenants, registry.registry());
                 maintained(ctx, &tenants, registry.registry());
                 removed(ctx, registry.registry());
                 judged = true;
@@ -253,8 +254,14 @@ fn judge(
 
 /// The footprints' oracle (#476): every tenant the cell hosts has its
 /// footprint granted, and a footprint's coordinator slots are on
-/// `stateless` machines, one up at most; gates: a footprint whole after
-/// chaos, and a tenant's coordinator on a `stateless` machine.
+/// `stateless` machines, one live at most; gates: a footprint whole after
+/// chaos, and a tenant's coordinator on a `stateless` machine. A slot is
+/// live on a registered machine that is up, as `paros::footprint::fix`
+/// judges it: a slot on a draining machine is leaving, and `fix` books its
+/// successor before it releases it, one watch round apart (a drain of a
+/// batcher's machine that holds the coordinator, #145 (batchers), read
+/// between the two: hunt seed 7885406025994626138 on the batchers
+/// scenario's first draft).
 fn footprints(registry: &Registry) {
     for tenant in registry.hosted() {
         assert_always!(
@@ -284,7 +291,12 @@ fn footprints(registry: &Registry) {
             .collect();
         let live = coordinators
             .iter()
-            .filter(|node| registry.liveness(**node).up)
+            .filter(|node| {
+                registry
+                    .get(**node)
+                    .is_some_and(|n| n.standing == NodeStanding::Registered)
+                    && registry.liveness(**node).up
+            })
             .count();
         assert_always!(
             live <= 1,
@@ -316,6 +328,38 @@ fn footprints(registry: &Registry) {
             storage >= birth.storage(),
             "footprint: a tenant's footprint is whole after chaos"
         );
+    }
+}
+
+/// A tenant's batchers (#145 (batchers), #604 (role counts)): every
+/// batcher slot of a tenant is on a `stateless` machine, one per machine;
+/// gate: a tenant holds batchers, no more than its count, after chaos.
+fn batchers(tenants: &[TenantControl], registry: &Registry) {
+    for control in tenants {
+        let tenant = control.tenant();
+        let target = BookingTarget::Tenant { tenant };
+        let nodes: Vec<NodeId> = registry
+            .bookings()
+            .filter(|(_, b)| b.role == Role::Batcher && b.target == target)
+            .map(|(_, b)| b.node)
+            .collect();
+        let distinct: BTreeSet<NodeId> = nodes.iter().copied().collect();
+        assert_always!(
+            distinct.len() == nodes.len(),
+            "placement: a tenant holds one batcher slot per machine at most",
+            { "tenant" => tenant.0, "slots" => nodes.len() }
+        );
+        assert_always!(
+            nodes
+                .iter()
+                .all(|node| registry.get(*node).is_some_and(|n| n.class == Class::Stateless)),
+            "placement: a batcher is booked on a stateless machine",
+            { "tenant" => tenant.0 }
+        );
+        let wanted = usize::try_from(control.roles().batchers).unwrap_or(usize::MAX);
+        if !nodes.is_empty() && nodes.len() <= wanted {
+            assert_reachable!("placement: a tenant holds its batchers after chaos");
+        }
     }
 }
 

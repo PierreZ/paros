@@ -165,6 +165,11 @@ impl Connector {
         &self.providers
     }
 
+    /// The workload client's id.
+    pub(crate) fn client_id(&self) -> u64 {
+        self.client
+    }
+
     /// How the clients resolve the machines' advertised names (#257).
     pub(crate) fn names(&self) -> &paros::Names {
         &self.names
@@ -182,6 +187,25 @@ impl Connector {
             .map(|(id, addr)| Server {
                 id: *id,
                 node: NodeClient::named(&self.rpc, self.names.clone(), addr.clone()),
+            })
+            .collect();
+        paros::client::Client::new(&self.providers, servers, self.tunables)
+            .with_shutdown(self.shutdown.clone())
+    }
+
+    /// The library client of the batchers at `servers` (#145 (batchers)):
+    /// every machine serves the batcher endpoint, so a client of a
+    /// multi-writer journal sends its writes to any of them.
+    pub(crate) fn batched(&self, servers: &[(u64, paros::Address)]) -> ChainClient {
+        moonpool_sim::assert_always!(
+            !servers.is_empty(),
+            "client: a client over learned servers names at least one"
+        );
+        let servers = servers
+            .iter()
+            .map(|(id, addr)| Server {
+                id: *id,
+                node: NodeClient::batcher(&self.rpc, self.names.clone(), addr.clone()),
             })
             .collect();
         paros::client::Client::new(&self.providers, servers, self.tunables)

@@ -67,6 +67,7 @@
 mod probe;
 
 pub mod acceptor;
+pub mod batcher;
 mod collector;
 pub mod decree;
 pub mod journal_state;
@@ -91,6 +92,7 @@ mod storage;
 mod types;
 mod write;
 
+pub use batcher::{Batch, BatchLimits, Batcher, Unbatcher};
 pub use decree::Decree;
 pub use journal_state::{JournalState, JournalView, Outcome, WriterMode};
 pub use matchmaker::{

@@ -2082,6 +2082,7 @@ where
             &rpc_handle,
             &tunables,
             cache,
+            node_audit.call_observer(),
             incarnation_shutdown.clone(),
         )?;
     }
@@ -2147,6 +2148,7 @@ where
             &rpc_handle,
             &tunables,
             cache.subscribe(),
+            node_audit.call_observer(),
             incarnation_shutdown.clone(),
         )?;
     }

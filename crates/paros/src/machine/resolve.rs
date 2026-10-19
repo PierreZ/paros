@@ -274,20 +274,19 @@ impl Folds {
                     ack.machines = self
                         .book
                         .iter()
-                        .map(|(id, addr)| wire::Member {
-                            node_id: id.0,
-                            addr: addr.to_string(),
-                            machine_interface: registry
-                                .and_then(|registry| registry.get(*id))
-                                .map(|node| node.machine_interface.clone())
-                                .unwrap_or_default(),
-                        })
+                        .map(|(id, addr)| member(registry, *id, addr))
                         .collect();
                     assert_eq!(
                         ack.machines.len(),
                         self.book.len(),
                         "every machine of the book is answered"
                     );
+                    // The tenant's batchers (#145, #604): each machine the
+                    // registry books a `batcher` slot of the tenant on, at
+                    // the address the book holds for it.
+                    ack.batchers = registry
+                        .map(|registry| batchers_of(registry, tenant, &self.book))
+                        .unwrap_or_default();
                 } else {
                     moonpool_assertions::reachable!(
                         "resolve: a machine points at the tenant's other cell"
@@ -372,6 +371,49 @@ impl Folds {
         }
         true
     }
+}
+
+/// Machine `id` at `addr`, with the machine interface `registry` holds
+/// for it (#404 (static vs dynamic endpoints)).
+fn member(registry: Option<&Registry>, id: NodeId, addr: &Address) -> wire::Member {
+    wire::Member {
+        node_id: id.0,
+        addr: addr.to_string(),
+        machine_interface: registry
+            .and_then(|registry| registry.get(id))
+            .map(|node| node.machine_interface.clone())
+            .unwrap_or_default(),
+    }
+}
+
+/// The machines `registry` books a `batcher` slot of `tenant` on, each
+/// once, at the address `book` holds for it (a machine the book does not
+/// place is left out), with its machine interface.
+fn batchers_of(
+    registry: &Registry,
+    tenant: paros_core::TenantId,
+    book: &[(NodeId, Address)],
+) -> Vec<wire::Member> {
+    let nodes: std::collections::BTreeSet<NodeId> = registry
+        .bookings()
+        .filter(|(_, b)| {
+            b.role == crate::system::Role::Batcher
+                && b.target == crate::system::BookingTarget::Tenant { tenant }
+        })
+        .map(|(_, b)| b.node)
+        .collect();
+    let members: Vec<wire::Member> = nodes
+        .iter()
+        .filter_map(|id| {
+            let (_, addr) = book.iter().find(|(b, _)| b == id)?;
+            Some(member(Some(registry), *id, addr))
+        })
+        .collect();
+    assert!(members.len() <= nodes.len(), "a batcher is named once");
+    if !members.is_empty() {
+        moonpool_assertions::reachable!("resolve: a machine names a tenant's batchers");
+    }
+    members
 }
 
 /// An answer with only the machine's own facts and `refusal`.

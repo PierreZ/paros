@@ -13,6 +13,12 @@
 //! location, the operator drains a machine renamed since it joined (#504
 //! (red drain seeds)).
 //!
+//! On a coin, the operator drains a machine that holds a tenant's batcher
+//! (#145 (batchers)): the cell coordinator releases that slot. On a
+//! batchers seed (`crate::shape::batchers`), the operator does so at every
+//! journal step of the chaos window, once a read of the registry shows a
+//! booked batcher, until one drain landed in the run.
+//!
 //! Once a drained machine holds no slot, the operator removes it on a coin
 //! (`CellSession::remove`, #359): its `node_id` is tombstoned for good.
 //!
@@ -34,6 +40,18 @@ use paros::machine::Class;
 use paros::system::{BookingTarget, NodeStanding, Registry, Role};
 
 use super::FleetOps;
+
+/// Well-known `StateHandle` key: a batchers seed's one drain of a batcher's
+/// machine landed (#145 (batchers)).
+const BATCHER_DRAINED_KEY: &str = "paros-batcher-drained";
+
+/// Whether a drain of a batcher's machine landed in this run, on a
+/// batchers seed (`crate::shape::batchers`): the scenario drains one.
+pub(in crate::chain_workload) fn batcher_drained(state: &moonpool_sim::StateHandle) -> bool {
+    *crate::state::published(state, BATCHER_DRAINED_KEY, || false)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 impl FleetOps {
     /// Drain one registered admitted storage machine, when one is
@@ -147,6 +165,97 @@ impl FleetOps {
         true
     }
 
+    /// The batchers scenario's drain (#145 (batchers)): read the registry
+    /// without a session, and only when it books a tenant's batcher,
+    /// drain that machine ([`FleetOps::drain_batcher`]). A session fences
+    /// the coordinator's term, so an operator that opened one at every step
+    /// would keep the coordinator from booking. Records a drain that
+    /// landed ([`batcher_drained`]).
+    pub(in crate::chain_workload) async fn drain_booked_batcher(
+        &mut self,
+        ctx: &SimContext,
+        policy: CheckpointPolicy,
+        draw: u64,
+    ) {
+        let Some(cell) = self.learn(ctx).await else {
+            return;
+        };
+        let mut folded = super::judged_cell(&cell.members);
+        let loaded = paros::client::checkpoint::load(
+            &mut folded,
+            cell.journals.cell,
+            &cell.client,
+            cell.first(draw),
+            0,
+        )
+        .await;
+        if !matches!(
+            loaded,
+            paros::client::checkpoint::LoadOutcome::Loaded { .. }
+        ) || batcher_host(folded.state().registry()).is_none()
+        {
+            return;
+        }
+        if self.drain_batcher(ctx, policy, draw).await {
+            *crate::state::published(ctx.state(), BATCHER_DRAINED_KEY, || false)
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+        }
+    }
+
+    /// Drain a registered machine that holds a tenant's batcher (#145
+    /// (batchers)), when one does and no machine is draining: the cell
+    /// coordinator releases the slot and books the count on the machines
+    /// that stay. Not on a drained-machine or gone-machine seed, which
+    /// drain one machine of their own. Whether the drain landed.
+    #[tracing::instrument(level = "debug", skip_all, fields(client = self.client_id))]
+    pub(in crate::chain_workload) async fn drain_batcher(
+        &mut self,
+        ctx: &SimContext,
+        policy: CheckpointPolicy,
+        draw: u64,
+    ) -> bool {
+        if crate::shape::drained_machine(ctx.state()) || crate::shape::gone_machine(ctx.state()) {
+            return false;
+        }
+        let Some(cell) = self.learn(ctx).await else {
+            return false;
+        };
+        let members: Vec<NodeId> = cell.members.iter().copied().map(NodeId).collect();
+        let founders: Vec<(NodeId, paros::Address)> = cell
+            .servers
+            .iter()
+            .map(|(id, addr)| (NodeId(*id), addr.clone()))
+            .collect();
+        let mut session = CellSession::new(
+            cell.journals,
+            &members,
+            founders,
+            self.leader_seeds.next(),
+            policy,
+        );
+        let first = cell.first(draw);
+        if session.open(&cell.client, first).await.is_err() {
+            return false;
+        }
+        let registry = session.registry();
+        if registry
+            .nodes()
+            .any(|(_, n)| n.standing == NodeStanding::Draining)
+        {
+            return false;
+        }
+        let Some(node) = batcher_host(registry) else {
+            return false;
+        };
+        if let Ok(true) = session.drain(&cell.client, first, node).await {
+            assert_reachable!("drain: an operator drains a batcher's machine");
+            tracing::info!(node = node.0, "machine_drained");
+            return true;
+        }
+        false
+    }
+
     /// Remove the drained machine `node` (#359), through `session`. Whether
     /// it ran.
     async fn remove_machine(
@@ -201,4 +310,20 @@ fn movable(registry: &Registry, members: &[u64], node: NodeId) -> bool {
         };
         b.node == node && moves && storage.iter().any(|m| !holders.contains(m))
     })
+}
+
+/// A registered machine that holds a tenant's batcher slot (#145
+/// (batchers)), if any.
+fn batcher_host(registry: &Registry) -> Option<NodeId> {
+    registry
+        .bookings()
+        .filter(|(_, b)| {
+            b.role == Role::Batcher && matches!(b.target, BookingTarget::Tenant { .. })
+        })
+        .map(|(_, b)| b.node)
+        .find(|node| {
+            registry
+                .get(*node)
+                .is_some_and(|n| n.standing == NodeStanding::Registered)
+        })
 }

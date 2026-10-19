@@ -88,8 +88,19 @@ tenant's default.
   create names no mode on one draw in four. Oracles: a refused configure records `Unplaceable`
   and no new mode, a configured journal is one its tenant created before, a placement is recorded
   only for a journal created before, and the placed members hold their slots after chaos.
-- **Still to do.** Role counts (`frontends=`, `proxy_leaders=`, `batchers=`, `replicas=`)
-  are recorded (`replicas`) but not applied: the cell does not place those roles yet.
+- **Role counts** (#604 (role counts), decided on 2026-10-19). A `Configure` of the tenant
+  default may carry `frontends=`, `proxy_leaders=` and `batchers=` (`TenantRoles`, each at most
+  64; refused on a journal target). The tenant control journal records them, and its checkpoint
+  keeps them. `parosctl configure --tenant T --batchers 3` sends them; a count that the command
+  does not name keeps the tenant's. The tenant coordinator applies `batchers=`: one step per
+  watch round, after the footprint step, in turn over the hosted tenants (`machine/roles.rs`).
+  It first releases a batcher slot on a machine that leaves. Then it books or releases slots
+  with `paros::placement` (`Role::Batcher`, `BookingTarget::Tenant`) until the tenant holds
+  `min(batchers, stateless machines that can take one)`. A cell with no `stateless` machine
+  places none. A cell that grows places the rest later.
+- **Still to do.** The counts of frontends and proxy leaders, and the `replicas=` mode field,
+  are recorded but not placed. `proxy_count` and `replica_count` sit in the core's `Config`
+  under the format marker, so placing them needs a change of that design.
 
 **`failures-per-partition=0` survives no zone** (decided on 2026-10-07, #215): a majority over one
 acceptor cannot meet the zone rule of section 5. It stays a mode without zone survival, for

@@ -28,8 +28,10 @@
 //! the linearizability search judges each one; the oracles here are the
 //! ones the history cannot state: the superseded writer.
 
+use std::time::Duration;
+
 use futures::future::join_all;
-use moonpool_sim::{assert_always, assert_reachable, buggify_with_prob};
+use moonpool_sim::{TimeProvider, assert_always, assert_reachable, buggify_with_prob};
 use paros::client::{
     ClaimOutcome, Pipeline, ReaderOutcome, TruncateOutcome, WriteOptions, WriteOutcome, Writer,
     WriterOutcome, multi,
@@ -81,6 +83,14 @@ fn records_of(config: &ChainConfig, audit: Option<&AuditWorld>) -> Vec<Value> {
     }
 }
 
+/// The bursts a batchers seed sends a journal it just created, until one
+/// write of a burst is acked (#145 (batchers)).
+const BURSTS: usize = 3;
+
+/// The pause between two of those bursts: about a leader election on a
+/// fresh journal.
+const BURST_PAUSE: Duration = Duration::from_millis(1_500);
+
 impl FleetOps {
     /// Run the data plane on `journal` through `client`, from server
     /// `first` on. The writer mode is learned from the first claim: a
@@ -93,7 +103,7 @@ impl FleetOps {
         client: &ChainClient,
         journal: JournalIdentifier,
         first: usize,
-        audited: Option<JournalIdentifier>,
+        (audited, batched): (Option<JournalIdentifier>, Option<ChainClient>),
     ) {
         let audit = audited.map(|journal| audit_world_named(&self.state, journal));
         let audit = audit.as_deref();
@@ -101,13 +111,47 @@ impl FleetOps {
         match writer.claim(client, first, false).await {
             ClaimOutcome::Won { .. } => {
                 assert_reachable!("created: a client claims a journal it reached");
-                self.single_writer(client, writer, first, audit).await;
+                self.single_writer((client, batched.as_ref()), writer, first, audit)
+                    .await;
             }
             ClaimOutcome::WrongMode { .. } => {
                 assert_reachable!("created: a claim of a multi-writer journal is refused");
+                if let Some(batched) = batched {
+                    let _ = self.batched_burst(&batched, journal, first, audit).await;
+                }
                 self.multi_writer(client, journal, first, audit).await;
             }
             _ => {}
+        }
+    }
+
+    /// The batchers scenario's burst (#145 (batchers),
+    /// `crate::shape::batchers`): a multi-writer journal this client just
+    /// created takes a burst through the batchers of `servers` at once,
+    /// with no claim first, so a batcher lane holds several writes. A
+    /// journal right after its create often has no leader yet, and a
+    /// merged write then goes unanswered: a burst with no write acked is
+    /// sent again after a pause, up to [`BURSTS`] bursts.
+    pub(super) async fn batched_created(
+        &mut self,
+        servers: &[(u64, paros::Address)],
+        journal: JournalIdentifier,
+        first: usize,
+    ) {
+        assert_reachable!("created: a batchers seed bursts on a journal it created");
+        let batched = self.connect_batched(servers);
+        let audit = audit_world_named(&self.state, journal);
+        for _ in 0..BURSTS {
+            if self
+                .batched_burst(&batched, journal, first, Some(&audit))
+                .await
+                > 0
+            {
+                return;
+            }
+            if self.time.sleep(BURST_PAUSE).await.is_err() {
+                return;
+            }
         }
     }
 
@@ -130,10 +174,12 @@ impl FleetOps {
 
     /// A single-writer journal: rounds of appends, on a coin a pipelined
     /// burst, a paging read, a truncation, then a second writer's claim,
-    /// after which the first writer's write is refused.
+    /// after which the first writer's write is refused. With `via_batcher`, the
+    /// first round goes through a batcher, which passes a fenced write on
+    /// alone (#145 (batchers)).
     async fn single_writer(
         &mut self,
-        client: &ChainClient,
+        (client, via_batcher): (&ChainClient, Option<&ChainClient>),
         mut writer: Writer,
         first: usize,
         audit: Option<&AuditWorld>,
@@ -151,11 +197,12 @@ impl FleetOps {
         // and sizes. The journal may hold one, and answer the writer's next
         // write at that position from the log.
         let mut unsettled = Vec::new();
-        for _ in 0..self.rounds() {
+        for round in 0..self.rounds() {
             let records = records_of(&config, audit);
             let sent = hashes(&records);
             let at = writer.next_seq();
-            match writer.write(client, records, first).await {
+            let via = via_batcher.filter(|_| round == 0).unwrap_or(client);
+            match writer.write(via, records, first).await {
                 WriterOutcome::Written { seq, count, .. } => {
                     assert_reachable!("created: an owner appends a batch to a created journal");
                     acked(audit, seq, count, sent);
@@ -329,6 +376,66 @@ impl FleetOps {
             assert_reachable!("created: a writer truncates a created multi-writer journal");
             self.page(client, journal, first).await;
         }
+    }
+
+    /// A burst of `pipeline_depth` unfenced appends through the cell's
+    /// batchers (#145 (batchers)), all in flight at once, so a batcher
+    /// merges several of them into one slot. Each answer is its own write's
+    /// range, judged by its bytes like any acked write. The writes acked.
+    async fn batched_burst(
+        &self,
+        client: &ChainClient,
+        journal: JournalIdentifier,
+        first: usize,
+        audit: Option<&AuditWorld>,
+    ) -> usize {
+        // On a coin, each write carries more records than a batcher below
+        // the leader's limits takes (`paros::batcher::TIGHT_RECORDS`): it
+        // goes alone, and a merged write passes the limits sooner.
+        let wide = buggify_with_prob!(0.3);
+        let writes: Vec<(Vec<u64>, paros::Write)> = (0..self.config.pipeline_depth)
+            .map(|_| {
+                // Never more than the workload's largest write
+                // (`MAX_BATCH_RECORDS`), which one store entry holds.
+                let mut records = self.records(audit);
+                while wide && records.len() <= paros::batcher::TIGHT_RECORDS {
+                    records.extend(self.records(audit));
+                }
+                records.truncate(usize::try_from(MAX_BATCH_RECORDS).unwrap_or(usize::MAX));
+                let sent = hashes(&records);
+                let request = multi::append_request(
+                    journal,
+                    records.into_iter().map(|value| value.0).collect(),
+                );
+                (sent, request)
+            })
+            .collect();
+        let results = join_all(
+            writes
+                .iter()
+                .map(|(_, request)| client.write(request, first, WriteOptions::default())),
+        )
+        .await;
+        let mut ranges: Vec<(u64, u64)> = Vec::new();
+        for ((sent, _), report) in writes.into_iter().zip(results) {
+            if let WriteOutcome::Written { seq, count, .. } = report.outcome {
+                assert_always!(
+                    count == sent.len() as u64,
+                    "batcher: a write's range holds exactly its records",
+                    { "count" => count, "sent" => sent.len() }
+                );
+                assert_reachable!("created: a batched append lands on a created journal");
+                ranges.push((seq, count));
+                acked(audit, seq, count, sent);
+            }
+        }
+        ranges.sort_unstable();
+        assert_always!(
+            ranges.windows(2).all(|w| w[0].0 + w[0].1 <= w[1].0),
+            "batcher: two writes never share a position",
+            { "ranges" => format!("{ranges:?}") }
+        );
+        ranges.len()
     }
 
     /// Read `journal` from its start, `read_limit` records a page waiting

@@ -31,6 +31,7 @@
 
 mod address;
 mod audit;
+pub mod batcher;
 pub mod client;
 mod corruption;
 mod driver;

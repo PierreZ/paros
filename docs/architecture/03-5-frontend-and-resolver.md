@@ -55,6 +55,10 @@ keeps them between requests:
 - The registry. The answer lists the cell's machines at the addresses the registry holds
   (`cell_book`). A client calls them until the frontend exists. Then the same answer carries the
   tenant's frontends, and with #404 each reference is an `InterfaceRef`.
+- The tenant's batchers (#145 (batchers), #604 (role counts)): each machine that the registry
+  books a `batcher` slot of the tenant on, at the address the book holds for it
+  (`ResolveAck.batchers`). A client of a multi-writer journal sends its writes there
+  (`Resolved::batcher_servers`, section 2.4). A tenant with no batcher gets an empty list.
 
 `paros::client::resolve` asks the entry endpoint's addresses in turn and passes over a machine
 that does not answer or answers `unavailable`. `parosctl resolve <tenant>` prints the answer. An

@@ -320,6 +320,12 @@ message ConfigureOp {
   uint32 replicas = 2;
   uint32 failures_per_partition = 3;
   uint32 partitions = 4;
+  // The tenant's role counts (#604), on a tenant default only (no `name`):
+  // set when `roles` is true, kept otherwise.
+  bool roles = 5;
+  uint32 frontends = 6;
+  uint32 proxy_leaders = 7;
+  uint32 batchers = 8;
 }
 
 // The live journal named `name`'s user tags become `tags`, all of them at
@@ -385,6 +391,11 @@ message ResolveAck {
   // universe directory records for `tenant_cell`, where the client asks
   // again. Empty when the directory records none.
   repeated Member tenant_cell_endpoint = 12;
+  // On "": the tenant's batchers (#145, #604), the machines its registry
+  // books a `batcher` slot of the tenant on, each at its address and with
+  // its machine interface. A client sends its multi-writer writes there
+  // (`BatchWrite`). Empty when the tenant has none.
+  repeated Member batchers = 13;
 }
 
 message Load {}

@@ -393,6 +393,19 @@ impl CallObserver for Announce {
             log.resolved(token & ((1 << TOKEN_JOURNAL_SHIFT) - 1), report);
         }
     }
+
+    /// A machine's batcher merged several writes into `write` (#145
+    /// (batchers)): the journal may apply it, so it joins the journal's
+    /// appended set. Its records are the callers', each submitted by its
+    /// own client; the callers' writes, not this one, are the history.
+    fn merged(&self, write: &paros::Write) {
+        let journal = JournalIdentifier::new(
+            paros::TenantId(write.tenant),
+            paros::JournalId(write.journal),
+        );
+        audit_world_named(&self.state, journal).note_appended(deposed::write_hash(write));
+        moonpool_sim::assert_reachable!("batcher: a merged write joins its journal's appended set");
+    }
 }
 
 impl SystemOps {

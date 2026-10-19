@@ -7,7 +7,7 @@ buggified: perturbed only through its public API. Doctrine lives in the root `AG
 
 ## Map
 
-- `lib.rs` → the re-export list (roles, `ColocatedNode`, messages, `PreReadFold`, `LogPage`/`LogRead`, `WriteOp`).
+- `lib.rs` → the re-export list (roles, `ColocatedNode`, messages, `PreReadFold`, `LogPage`/`LogRead`, `WriteOp`, `Batcher`/`Unbatcher`).
 - `acceptor.rs` → `Acceptor` → the durable promise, accepted records, compaction floor, CTRL faulty set; emits its own writes.
 - `acceptor/retention.rs` → `Acceptor::truncate` / `trim_to` → the two floor-moving ops (a concern, not a role).
 - `proposer.rs` → `Proposer` → the leader-side tallies; embeds the next five.
@@ -32,6 +32,7 @@ buggified: perturbed only through its public API. Doctrine lives in the root `AG
 - `matchmaker/handover_model.rs` → the handover model checker (test-only); half its seeds page by one or two journals (#439).
 - `proxy_model.rs` → the proxy-leader model checker (test-only); `model_support.rs` → seeded RNG + lossy mailbox both share.
 - `retained.rs` → `RetainedWindow` → a map with a floor under it.
+- `batcher.rs` → `Batcher`, `BatchLimits`, `Batch`, `Unbatcher` → the batcher's pure lanes (#145 (batchers)): one lane per journal, flushed at `flush_records`, before it would pass the limits, or at a tick; an empty or over-limit write goes alone; `Unbatcher::scatter` cuts a merged write's range into each write's own, densely and in order.
 - `node.rs` → `ColocatedNode`, `Delegation`, the private `Counters` → entry points and driver-policy methods (`resend_pending`, `take_back_delegated`, `step_down`, `campaign_above`, `relinquish_to`, `reconfigure`, `quorum_read`).
 - `node/{election,phase2,learn,replication,catch_up}.rs` → campaign (a paging campaign re-sends its `Prepare` to the peers that answered on every tick, #428 (paging livelock), asked from one past the highest slot the tally merged (`Election::keep_alive_from`), so an answered peer re-affirms with an empty page, never its whole suffix again), Phase-2 open/delegate/decide (`record_own_round`), learner, catch-up + trim-point jump; a follower pulls a gap from the beat's sender, and from the whole pool once its pulls at one chosen index outlast an election timeout (`PULL_FALLBACK_BEATS` at least, #349: a dead lane to a renamed leader).
 - `node/{authority,quorum_reads}.rs` → `CheckQuorum`; the read path (`PreRead` wiring, `serve_quorum_reads`/`tick_quorum_reads`, `READ_TTL_TICKS`).

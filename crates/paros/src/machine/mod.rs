@@ -75,6 +75,7 @@ mod pin;
 mod record;
 pub(crate) mod register;
 mod resolve;
+mod roles;
 mod scrub;
 mod sets;
 pub mod slow;
