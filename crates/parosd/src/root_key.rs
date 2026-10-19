@@ -15,6 +15,14 @@ pub fn parse(arg: &str) -> Result<RootPublicKey, String> {
     if arg.contains(":ed25519/") {
         return RootPublicKey::from_line(arg).map_err(|error| error.to_string());
     }
-    let text = std::fs::read_to_string(arg).map_err(|error| format!("{arg}: {error}"))?;
+    let text = std::fs::read_to_string(arg).map_err(|error| {
+        if arg.contains(':') {
+            format!(
+                "{arg}: neither a key line <label>:<key_id>:ed25519/<hex> nor a key file: {error}"
+            )
+        } else {
+            format!("{arg}: {error}")
+        }
+    })?;
     RootPublicKey::from_file(&text).map_err(|error| format!("{arg}: {error}"))
 }

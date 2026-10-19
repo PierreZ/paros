@@ -39,7 +39,7 @@ mod verify;
 pub use entropy::Entropy;
 pub use error::Error;
 pub use frontend::{BiscuitAuthz, operation, since_epoch};
-pub use keys::{KeyRing, RootKey, RootPublicKey};
+pub use keys::{KeyRing, RootKey, RootPublicKey, is_label};
 pub use operation::{Access, Class, Operation};
 pub use token::{Grant, Restriction, Role, Token, derive, inspect, mint, seal};
 pub use verify::{MAX_BLOCKS, MAX_TOKEN_BYTES, POLICY, Refusal, Request, TargetKind, authorize};

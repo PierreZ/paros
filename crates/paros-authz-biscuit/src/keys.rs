@@ -231,7 +231,7 @@ impl RootPublicKey {
     /// [`Error::BadKey`] when the text is not a key line, or the key is not
     /// Ed25519.
     pub fn from_line(text: &str) -> Result<Self, Error> {
-        // The key text and the id hold no ':', so a label may.
+        // The key text and the id hold no ':'.
         let mut parts = text.trim().rsplitn(3, ':');
         let (Some(key), Some(key_id), Some(label)) = (parts.next(), parts.next(), parts.next())
         else {
@@ -239,14 +239,27 @@ impl RootPublicKey {
                 "not a key line: <label>:<key_id>:ed25519/<hex>".to_string(),
             ));
         };
-        if label.is_empty() {
-            return Err(Error::BadKey("a key line names no label".to_string()));
+        if !is_label(label) {
+            return Err(Error::BadKey(format!(
+                "bad label {label:?}: letters, digits, '.', '_' and '-' only"
+            )));
         }
         let key_id = key_id
             .parse()
             .map_err(|_| Error::BadKey(format!("bad key id {key_id:?}")))?;
         Self::from_parts(key_id, label, key)
     }
+}
+
+/// Whether `text` is a key label: letters, digits, `.`, `_` and `-`, not
+/// empty and not starting with `.` (a label names files).
+#[must_use]
+pub fn is_label(text: &str) -> bool {
+    !text.is_empty()
+        && !text.starts_with('.')
+        && text
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
 /// The public keys a verifier trusts, each under its key id: the universe
@@ -336,6 +349,8 @@ mod tests {
         assert!(RootPublicKey::from_line("ed25519/00").is_err());
         assert!(RootPublicKey::from_line(":1:ed25519/00").is_err());
         assert!(RootPublicKey::from_line("a:x:ed25519/00").is_err());
+        let pasted = format!("key={}", key.to_line());
+        assert!(RootPublicKey::from_line(&pasted).is_err());
     }
 
     #[test]

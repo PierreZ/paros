@@ -67,12 +67,7 @@ enum KeyCommand {
 
 /// A key label: it names files, so letters, digits, `.`, `_` and `-` only.
 pub fn parse_label(text: &str) -> Result<String, String> {
-    let valid = !text.is_empty()
-        && !text.starts_with('.')
-        && text
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
-    if valid {
+    if paros_authz_biscuit::is_label(text) {
         Ok(text.to_string())
     } else {
         Err(format!("{text:?}: letters, digits, '.', '_' and '-' only"))

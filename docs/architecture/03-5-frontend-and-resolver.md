@@ -137,7 +137,7 @@ key, and may be refused as `invalid_token` until the frontend read it.
 **Trust** (decided on 2026-10-04). The boundary is the network: only frontends and peers reach
 a node's journals (a separate network in the Compose toy; a client reaches a machine only for the
 well-known `Resolve` call, section 3.2), and nodes do no authorization. The Compose toy's tool services are people
-(decided on 2026-10-19): `admin` (the `admin` token, on the machines' `internal` network), `acme`
+(decided on 2026-10-19, #196 (the toy)): `admin` (the `admin` token, on the machines' `internal` network), `acme`
 (a `tenant` token, on a `public` network that reaches the frontend only) and `issuer` (an offline
 key holder, for a rotation). Its root key line and its two tokens are written in
 `docker-compose.yml`, made once with `parosctl key bootstrap`, and every machine pins that key.
@@ -171,7 +171,7 @@ pairs and mints tokens for any role.
   and `<name>.public`: JSON with the label, a random `u32` key id (the Biscuit `root_key_id`,
   inside the token format only) and the key in Biscuit's own text form. A token without a key id
   the universe entry holds is refused. A public key also has a line,
-  `<label>:<key_id>:ed25519/<hex>` (decided on 2026-10-19), which every command and variable
+  `<label>:<key_id>:ed25519/<hex>` (decided on 2026-10-19, #245 (Biscuit tokens)), which every command and variable
   that takes a key file takes in its place. `parosctl key bootstrap --tenant <name>… --ttl <d>`
   makes a key pair, an `admin` token and a `tenant` token per tenant in one command, and keeps
   the private key only when asked (`--out`).
@@ -186,7 +186,7 @@ pairs and mints tokens for any role.
 - **The universe entry's keys** (landed on 2026-10-15, #245 (Biscuit tokens)). The universe
   directory holds the root public keys in force (`AddRootKey`, `RemoveRootKey`, metadata
   version 3). Each key has its key id and its label, and neither is ever used again after a
-  removal. The last key in force is never removed. `parosctl init --root-public-key <file>`
+  removal. The last key in force is never removed. `parosctl init --root-public-key <key>` (a line or a file)
   writes the first key, right after the universe is formed and only while the entry holds none.
   `parosctl universe key list|add|remove` changes them, each change one idempotent write
   through `paros::client::fleet`. A rotation is `key add` of the next key, then `key remove` of

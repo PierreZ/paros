@@ -11,8 +11,10 @@ the `Authz` trait only; Biscuit never enters `paros` or `paros-core`.
 - `src/entropy.rs` → `Entropy`: 32 bytes the caller draws from its provider's random source,
   the seed of a `ChaCha20Rng`. moonpool's `RandomProvider` is not a `CryptoRng`, so this is the
   bridge, the same code in production and simulation.
-- `src/keys.rs` → `RootKey`, `RootPublicKey`, `KeyRing`: generation, the JSON key files
-  (`key_id`, `label`, the key in Biscuit's text form), the ring a verifier trusts.
+- `src/keys.rs` → `RootKey`, `RootPublicKey`, `KeyRing`, `is_label`: generation, the JSON key
+  files (`key_id`, `label`, the key in Biscuit's text form), a public key's line
+  `<label>:<key_id>:ed25519/<hex>` (`to_line`, `from_line`, the label checked by `is_label`), the
+  ring a verifier trusts.
 - `src/operation.rs` → `Operation`, `Class`, `Access`: the operation table. Never rename an
   operation or a class: tokens in the field name them.
 - `src/token.rs` → `Role`, `Grant`, `Restriction`, `Token`, `mint`, `derive`, `seal`, `inspect`:
@@ -34,3 +36,6 @@ the `Authz` trait only; Biscuit never enters `paros` or `paros-core`.
   defaults and `AuthorizerBuilder::time`); time is a fact the caller adds; `max_time` out of
   reach, `max_facts` and `max_iterations` bound the run; a refusal is judged by kind only.
 - Out of scope: third-party blocks, revocation ids, P-256, snapshots, queries.
+- The Compose toy commits a key line and two tokens (`docker-compose.yml`, the `x-` anchors). A
+  change to the token format or the policy that refuses them re-runs `parosctl key bootstrap
+  --tenant acme --ttl 3650d` and replaces the three anchors (no gate runs the toy).

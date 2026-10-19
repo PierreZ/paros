@@ -86,7 +86,8 @@ acme --token "$(acme token derive --read-only --journal orders)" read acme/order
 acme --token "$(acme token derive --read-only --journal orders)" write acme/orders nope --leader 7
 # A tenant's token cannot put a machine in the cell: the pinned machine refuses it.
 admin --token "$(acme token derive --read-only)" cell add-machine storage4:4500
-# And the tenant cannot reach a machine at all: `node1` does not resolve on its network.
+# And the tenant cannot reach a machine at all: `node1` does not resolve on its network
+# (exit 2, before any call).
 acme --servers node1:4500 inspect
 
 # Supersede the writer: uuid 8 takes the journal, and uuid 7 is refused from now on (exit 3).
@@ -117,6 +118,16 @@ admin journal list acme
 # `--journal`, it changes the tenant's default, which a create with no durability takes.
 admin configure --tenant acme --journal orders --partitions 3 --failures-per-partition 0
 admin configure --tenant acme --failures-per-partition 1
+
+# Bench (#517, #194): closed-loop clients write the journals bench-3x1-0..bench-3x1-3 of
+# tenant `bench` (both created when missing) and print throughput and latency per call each
+# second, then the totals. It runs as the operator, straight to the machines. Ctrl-C stops
+# it and still prints the totals. Add `--mix write=80,read-tail=20` for reads that check
+# every byte, `--rate 200` for an open loop, `--histograms /tmp/h.json` for the raw
+# histograms. Numbers compare runs on the same machine. `parosctl bench --local 3` runs
+# without Compose, on a cell in its own process. Run it before the next step: a journal with
+# a slot on an admitted machine never elects a leader yet (#700 (admitted machine journal)).
+admin bench --tenant bench --journals 4 --clients 8 --duration 60s --ramp 10s
 
 # Admit the two idle machines into the cell (#216), with the admin token: each is registered
 # in the cell control journal, then records its cell. A re-run prints `unchanged`.
@@ -152,15 +163,6 @@ admin cell drain-machine storage4
 admin machine list
 admin cell remove-machine storage4
 
-# Bench (#517, #194): closed-loop clients write the journals bench-3x1-0..bench-3x1-3 of
-# tenant `bench` (both created when missing) and print throughput and latency per call each
-# second, then the totals. It runs as the operator, straight to the machines. Ctrl-C stops
-# it and still prints the totals. Add `--mix write=80,read-tail=20` for reads that check
-# every byte, `--rate 200` for an open loop, `--histograms /tmp/h.json` for the raw
-# histograms. Numbers compare runs on the same machine. `parosctl bench --local 3` runs
-# without Compose, on a cell in its own process.
-admin bench --tenant bench --journals 4 --clients 8 --duration 60s --ramp 10s
-
 # Rotate the root key, last: the key holder makes root-2 and the universe adds it, then a
 # token root-2 signs works. `key show` prints a key's line, which every command takes in
 # place of a key file.
@@ -182,13 +184,13 @@ The journal `orders` is single-writer: a writer must hold the current leader uui
 four calls, the two writer modes and the limits are on the site's journal API page
 (`website/zola/content/parosd/journal-api.md`).
 
-A rebuilt image does not read volumes an older build wrote (no upgrades until M13, #363
+A rebuilt image may not read volumes an older build wrote (no upgrades until M13, #363
 (upgrades)). If every machine exits 78 with `machine record: ...`, run `docker compose down -v`
 first, then `up -d --build` and `init` again.
 
 To make a key and tokens of your own, run `parosctl key bootstrap --tenant acme --ttl 12h` (add
-`--out DIR` to keep the private key), and paste its `key=`, `admin=` and `tenant.acme=` lines
-into the three `x-` anchors at the top of `docker-compose.yml`. Repeat `--tenant` for more
+`--out DIR` to keep the private key), and paste the text after `key=`, `admin=` and
+`tenant.acme=` into the three `x-` anchors at the top of `docker-compose.yml`. Repeat `--tenant` for more
 tenants.
 
 ## Locally, without Docker

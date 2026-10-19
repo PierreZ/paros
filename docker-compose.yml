@@ -27,7 +27,7 @@
 #
 # The copy-paste demo, with shell aliases for the three, is DEMO.md; the walkthrough is
 # crates/parosd/README.md.
-# A rebuilt image does not read volumes an older build wrote (no upgrades until M13, #363 (upgrades)). If every
+# A rebuilt image may not read volumes an older build wrote (no upgrades until M13, #363 (upgrades)). If every
 # machine exits 78 with `machine record: ...`, run `docker compose down -v`, then `up -d --build` and `init` again.
 # A machine mints its node id on
 # its first start and waits, configured with no peer; `init` forms the cell over the
