@@ -12,6 +12,7 @@ Human output prints ids as short hex, like git; `--json` prints them whole.
 ## With Docker Compose
 
 Needs Docker with the Compose plugin; nothing else (the image is a plain Rust build).
+A rebuilt image does not read volumes an older build wrote (no upgrades until M13, #363 (upgrades)). If every machine exits 78 with `machine record: ...`, run `docker compose down -v` first, then `up -d --build` and `init` again.
 
 ```sh
 # Five machines: node1..node3 (storage, zones a/b/c), storage4, stateless1 (stateless).

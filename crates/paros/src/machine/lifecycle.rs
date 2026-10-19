@@ -487,7 +487,13 @@ async fn identity<P: Providers, S: StorageProvider + Clone, A: Audit>(
         tracing::info!(machine = %record.name, "machine_formatted");
         return Ok(record);
     };
-    let mut record = MachineRecord::parse(&text).map_err(refused)?;
+    let mut record = MachineRecord::parse(&text).map_err(|error| {
+        refused(format!(
+            "{error}: another paros version wrote this disk, or it is damaged. paros reads no \
+             data directory from another version until M13 (#363 (upgrades)). Wipe the data \
+             directory to start this machine as a new machine."
+        ))
+    })?;
     assert_ne!(record.node_id, NodeId(0), "a minted identity is set");
     audit.machine_booted(addr, Some(&record));
     if record.formed().is_some() {

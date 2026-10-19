@@ -10,6 +10,8 @@
 #   docker compose run --rm parosctl bench --tenant bench --journals 4 --clients 8 --duration 60s --ramp 10s
 #
 # The copy-paste demo is DEMO.md; the walkthrough is crates/parosd/README.md.
+# A rebuilt image does not read volumes an older build wrote (no upgrades until M13, #363 (upgrades)). If every
+# machine exits 78 with `machine record: ...`, run `docker compose down -v`, then `up -d --build` and `init` again.
 # A machine mints its node id on
 # its first start and waits, configured with no peer; `init` forms the cell over the
 # three nodes it names (`cell init`'s founding members, #277) and claims its control journal. `storage4` and `stateless1` idle until `parosctl cell add-machine` admits them, then wait for placement,
