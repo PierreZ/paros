@@ -1837,6 +1837,36 @@ async fn answer_until<P: Providers>(
     }
 }
 
+/// The cell's address book for a `Register` from `id`, from a fold caught
+/// up to the tail when the term's fold does not name `id`; `None` when the
+/// catch-up failed. The term's fold moves only on its own writes, and an
+/// operator's `cell add-machine` registers machines between them. The
+/// machine takes `unknown_machine` as final, so it is answered only from a
+/// fold at the tail (witness: recipe 1769568628990727465
+/// 102806:3654508340332248788 on PR #691 (client write inputs): an admitted
+/// machine renamed while it asked a term whose fold predated its
+/// registration was never registered at its new name).
+async fn book_naming<P: Providers>(
+    session: &mut CellSession,
+    client: &Client<P>,
+    id: NodeId,
+) -> Option<Vec<(NodeId, Address)>> {
+    let book = super::cell_book(session.founders(), session.registry());
+    if book.iter().any(|(member, _)| *member == id) {
+        return Some(book);
+    }
+    let before = session.position();
+    if !session.refresh(client, 0).await {
+        return None;
+    }
+    assert!(
+        session.position() >= before,
+        "a refreshed fold never goes back"
+    );
+    moonpool_assertions::reachable!("coordinator: a register catches its fold up first");
+    Some(super::cell_book(session.founders(), session.registry()))
+}
+
 /// Answer a machine's `Register` (#349): register the address it advertises
 /// now in the cell control journal, through the served term's session, when
 /// the cell's address book does not hold it. Refused while this member
@@ -1883,7 +1913,9 @@ async fn register<P: Providers>(
     let Some((session, watch)) = watching.as_mut() else {
         return refuse("not_coordinator");
     };
-    let book = super::cell_book(session.founders(), session.registry());
+    let Some(book) = book_naming(session, client, id).await else {
+        return refuse("unavailable");
+    };
     let Some((_, known)) = book.iter().find(|(member, _)| *member == id) else {
         return refuse("unknown_machine");
     };

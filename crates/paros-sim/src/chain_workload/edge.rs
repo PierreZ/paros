@@ -144,13 +144,22 @@ impl ChainWorkload {
             "chain: a batch at a node's limits passes its edge",
             { "max_records" => limits.0, "max_bytes" => limits.1 }
         );
+        // An answer past the edge (a verdict, a redirect): the limit
+        // admitted the batch. The node need not lead the journal.
+        if !matches!(
+            at.1,
+            WriteOutcome::TooLarge { .. } | WriteOutcome::Ambiguous
+        ) {
+            if limit == Limit::Bytes {
+                assert_reachable!("chain: a batch exactly at a node's byte limit passes its edge");
+            } else {
+                assert_reachable!(
+                    "chain: a batch exactly at a node's record limit passes its edge"
+                );
+            }
+        }
         match at.1 {
             WriteOutcome::Written { seq, count, .. } => {
-                if limit == Limit::Bytes {
-                    assert_reachable!("chain: a batch exactly at a node's byte limit is written");
-                } else {
-                    assert_reachable!("chain: a batch exactly at a node's record limit is written");
-                }
                 writer.advance_to(seq + count);
                 self.record_written(&at.0, seq, count, now_ms());
                 written.push(at.0.written(seq, count, server));
