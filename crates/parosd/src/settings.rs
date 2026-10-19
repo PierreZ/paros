@@ -11,18 +11,21 @@
 //! | `PAROS_CAPACITY` | its capacity, in role slots (default 32): one slot holds one acceptor of one journal |
 //! | `PAROS_ZONE` | its zone, its failure domain: the reserved tag `paros/zone` (#575 (key:value tags); default none) |
 //! | `PAROS_RACK` | its rack inside the zone: the reserved tag `paros/rack` (default none) |
-//! | `PAROS_TLS_CERT` | its certificate chain, PEM (`parosctl tls`); with the next two, every session is TLS |
-//! | `PAROS_TLS_KEY` | the certificate's private key, PEM |
-//! | `PAROS_TLS_CA` | the universe's authority, PEM: the peers and callers it trusts |
+//! | `PAROS_TLS_CERT` | its certificate chain, a PEM file (`parosctl tls`); with the next two, every session is TLS |
+//! | `PAROS_TLS_KEY` | the certificate's private key, a PEM file |
+//! | `PAROS_TLS_CA` | the universe's authority, a PEM file: the peers and callers it trusts |
+//! | `PAROS_TLS_CERT_PEM`, `PAROS_TLS_KEY_PEM`, `PAROS_TLS_CA_PEM` | the same, the PEM text itself instead of a file; one of the two per item |
 //! | `PAROS_TLS_CLIENT_AUTH` | `required` (mutual TLS, the default), `optional` or `off`: what it asks of a caller |
 //! | `PAROS_ROOT_PUBLIC_KEY` | the root public key files it pins while idle, comma-separated (#245 (Biscuit tokens)): `cell init` and `cell add-machine` then need an `admin` token; none trusts the network |
+//! | `PAROS_ROOT_PUBLIC_KEY_JSON` | one more root public key it pins, the `.public` file's text itself |
 //! | `PAROS_HTTP_LISTEN` | `HOST:PORT` of its HTTP endpoint (#366 (metrics)): `/metrics` (Prometheus text), `/healthz` and `/readyz`; none by default |
 //! | `PAROS_OTLP_ENDPOINT` | an OpenTelemetry collector's OTLP/gRPC URL (`http://collector:4317`): spans and metrics are pushed there; none by default |
 //! | `PAROS_OTLP_TRACES_ENDPOINT`, `PAROS_OTLP_METRICS_ENDPOINT` | one signal's collector, in place of `PAROS_OTLP_ENDPOINT` |
 //! | `PAROS_OTLP_INTERVAL_MS` | how often the metrics are pushed (default 10000, at least 100) |
 //! | `PAROS_<FIELD>[_MS]` | one override per `DriverTunables` field ([`crate::tunables`]) |
 //!
-//! Each variable has the matching `--flag`. An unknown `PAROS_*` variable
+//! Each variable has the matching `--flag`; when both give a setting, the
+//! flag wins. An unknown `PAROS_*` variable
 //! is an error, so a typo never silently keeps a default.
 
 use std::path::PathBuf;
@@ -31,11 +34,11 @@ use std::sync::Arc;
 use clap::Parser;
 use paros::Transport;
 use paros::machine::{AdminPin, Class};
-use paros::tls::{ClientCertificates, Files};
+use paros::tls::{ClientCertificates, Files, Pem};
 use paros_authz_biscuit::{BiscuitAuthz, KeyRing, RootPublicKey};
 
 /// The variables this module reads.
-const VARIABLES: [&str; 18] = [
+const VARIABLES: [&str; 22] = [
     "PAROS_HTTP_LISTEN",
     "PAROS_OTLP_ENDPOINT",
     "PAROS_OTLP_TRACES_ENDPOINT",
@@ -53,7 +56,11 @@ const VARIABLES: [&str; 18] = [
     "PAROS_TLS_KEY",
     "PAROS_TLS_CA",
     "PAROS_TLS_CLIENT_AUTH",
+    "PAROS_TLS_CERT_PEM",
+    "PAROS_TLS_KEY_PEM",
+    "PAROS_TLS_CA_PEM",
     "PAROS_ROOT_PUBLIC_KEY",
+    "PAROS_ROOT_PUBLIC_KEY_JSON",
 ];
 
 /// The paros daemon: one uniform binary any machine runs (#196).
@@ -118,6 +125,33 @@ pub struct Settings {
     /// The universe's authority, PEM: the peers and callers it trusts.
     #[arg(long, env = "PAROS_TLS_CA")]
     pub tls_ca: Option<PathBuf>,
+    /// Its certificate chain, the PEM text itself (no file).
+    #[arg(
+        long,
+        env = "PAROS_TLS_CERT_PEM",
+        hide_env_values = true,
+        allow_hyphen_values = true,
+        conflicts_with = "tls_cert"
+    )]
+    pub tls_cert_pem: Option<String>,
+    /// The certificate's private key, the PEM text itself (no file).
+    #[arg(
+        long,
+        env = "PAROS_TLS_KEY_PEM",
+        hide_env_values = true,
+        allow_hyphen_values = true,
+        conflicts_with = "tls_key"
+    )]
+    pub tls_key_pem: Option<String>,
+    /// The universe's authority, the PEM text itself (no file).
+    #[arg(
+        long,
+        env = "PAROS_TLS_CA_PEM",
+        hide_env_values = true,
+        allow_hyphen_values = true,
+        conflicts_with = "tls_ca"
+    )]
+    pub tls_ca_pem: Option<String>,
     /// What it asks of a caller: `required` (mutual TLS), `optional` or
     /// `off` (server-authenticated TLS).
     #[arg(long, env = "PAROS_TLS_CLIENT_AUTH", default_value = "required", value_parser = parse_client_auth)]
@@ -128,6 +162,10 @@ pub struct Settings {
     /// boundary.
     #[arg(long, env = "PAROS_ROOT_PUBLIC_KEY", value_delimiter = ',')]
     pub root_public_key: Vec<PathBuf>,
+    /// One more root public key it pins: the `.public` file's text itself
+    /// (`parosctl key generate`), so no file is needed.
+    #[arg(long, env = "PAROS_ROOT_PUBLIC_KEY_JSON")]
+    pub root_public_key_json: Option<String>,
 }
 
 impl Settings {
@@ -162,9 +200,18 @@ impl Settings {
     /// Only some of the files, or a file TLS cannot use.
     pub fn transport(&self) -> Result<Transport, String> {
         Files {
-            cert: ("PAROS_TLS_CERT", self.tls_cert.as_deref()),
-            key: ("PAROS_TLS_KEY", self.tls_key.as_deref()),
-            ca: ("PAROS_TLS_CA", self.tls_ca.as_deref()),
+            cert: Pem::pick(
+                ("PAROS_TLS_CERT", self.tls_cert.as_deref()),
+                ("PAROS_TLS_CERT_PEM", self.tls_cert_pem.as_deref()),
+            ),
+            key: Pem::pick(
+                ("PAROS_TLS_KEY", self.tls_key.as_deref()),
+                ("PAROS_TLS_KEY_PEM", self.tls_key_pem.as_deref()),
+            ),
+            ca: Pem::pick(
+                ("PAROS_TLS_CA", self.tls_ca.as_deref()),
+                ("PAROS_TLS_CA_PEM", self.tls_ca_pem.as_deref()),
+            ),
         }
         .serving(self.tls_client_auth)
     }
@@ -179,10 +226,16 @@ impl Settings {
     /// A key file that cannot be read or holds no key, or two keys under
     /// one key id.
     pub fn pin(&self, epoch: std::time::Duration) -> Result<AdminPin, String> {
-        if self.root_public_key.is_empty() {
+        if self.root_public_key.is_empty() && self.root_public_key_json.is_none() {
             return Ok(AdminPin::open());
         }
-        let mut keys = Vec::with_capacity(self.root_public_key.len());
+        let mut keys = Vec::with_capacity(self.root_public_key.len() + 1);
+        if let Some(text) = &self.root_public_key_json {
+            keys.push(
+                RootPublicKey::from_file(text)
+                    .map_err(|error| format!("PAROS_ROOT_PUBLIC_KEY_JSON: {error}"))?,
+            );
+        }
         for path in &self.root_public_key {
             let text = std::fs::read_to_string(path)
                 .map_err(|error| format!("PAROS_ROOT_PUBLIC_KEY {}: {error}", path.display()))?;
@@ -230,6 +283,72 @@ pub fn check_unknown(names: impl IntoIterator<Item = String>) -> Result<(), Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+    use paros::tls::{Authority, KeySeed, Role, UtcTime, Validity, leaf};
+    use paros_authz_biscuit::{Entropy, RootKey};
+
+    fn settings(args: &[&str]) -> Result<Settings, clap::Error> {
+        let mut command = vec!["parosd", "--listen", "127.0.0.1:4500", "--data-dir", "/x"];
+        command.extend_from_slice(args);
+        Settings::try_parse_from(command)
+    }
+
+    #[test]
+    fn key_material_may_be_the_text_itself() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("after 1970")
+            .as_secs();
+        let valid = Validity::starting(UtcTime::from_unix_seconds(now - 60), 86_400);
+        let authority = Authority::new("test", valid, KeySeed::Bytes([1; 32])).expect("authority");
+        let issued = authority
+            .issue(&leaf(
+                "u",
+                Role::Machine,
+                "m",
+                &[],
+                valid,
+                KeySeed::Bytes([2; 32]),
+            ))
+            .expect("leaf");
+        let (chain, key, ca) = (
+            issued.chain_pem(),
+            issued.key_pem(),
+            authority.certificate_pem(),
+        );
+        let tls = settings(&[
+            "--tls-cert-pem",
+            &chain,
+            "--tls-key-pem",
+            &key,
+            "--tls-ca-pem",
+            &ca,
+        ])
+        .expect("valid");
+        let transport = tls.transport();
+        assert!(
+            transport.as_ref().is_ok_and(paros::Transport::is_encrypted),
+            "{transport:?}"
+        );
+        // A file and its text together are refused: one source per item.
+        assert!(settings(&["--tls-cert", "/c.pem", "--tls-cert-pem", &chain]).is_err());
+        // Only some of the three is still an error, named by its setting.
+        let partial = settings(&["--tls-cert-pem", &chain]).expect("valid");
+        assert!(
+            partial
+                .transport()
+                .is_err_and(|e| e.contains("PAROS_TLS_KEY"))
+        );
+        let public = RootKey::generate("demo", &Entropy::from_bytes([3; 32]))
+            .public()
+            .to_file();
+        let pinned = settings(&["--root-public-key-json", &public]).expect("valid");
+        assert!(pinned.pin(std::time::Duration::ZERO).is_ok());
+        let bad = settings(&["--root-public-key-json", "{}"]).expect("valid");
+        assert!(
+            bad.pin(std::time::Duration::ZERO)
+                .is_err_and(|e| e.contains("_JSON"))
+        );
+    }
 
     #[test]
     fn an_unknown_paros_variable_is_refused_and_others_pass() {

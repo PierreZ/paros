@@ -333,31 +333,62 @@ pub fn dialing(
     )?)))
 }
 
-/// A process's three PEM files, each with the name of the setting that
-/// gave it, so an error names what to fix: what `parosd`,
-/// `paros-frontend` and `parosctl` read.
+/// One PEM a setting gives: a file to read, or the PEM text itself (a
+/// `*_PEM` variable that holds the content, so a deployment needs no file).
+#[derive(Clone, Copy, Debug)]
+pub enum Pem<'a> {
+    /// A file that holds the PEM.
+    File(&'a std::path::Path),
+    /// The PEM text.
+    Text(&'a str),
+}
+
+impl<'a> Pem<'a> {
+    /// The one of a file setting and its text setting that is set, with
+    /// that setting's name: the text when both are (a caller's parser
+    /// refuses both together).
+    #[must_use]
+    pub fn pick(
+        (file_name, file): (&'a str, Option<&'a std::path::Path>),
+        (text_name, text): (&'a str, Option<&'a str>),
+    ) -> (&'a str, Option<Self>) {
+        match (text, file) {
+            (Some(text), _) => (text_name, Some(Self::Text(text))),
+            (None, Some(file)) => (file_name, Some(Self::File(file))),
+            (None, None) => (file_name, None),
+        }
+    }
+
+    fn read(self, setting: &str) -> Result<Vec<u8>, String> {
+        match self {
+            Self::File(path) => std::fs::read(path)
+                .map_err(|error| format!("{setting} ({}): {error}", path.display())),
+            Self::Text(text) => Ok(text.as_bytes().to_vec()),
+        }
+    }
+}
+
+/// A process's three PEMs, each with the name of the setting that gave
+/// it, so an error names what to fix: what `parosd`, `paros-frontend` and
+/// `parosctl` read, from files or from their `*_PEM` variables.
 ///
-/// A serving process takes all three files or none: with none, its
-/// sessions are plaintext; with only some, the missing ones are an error,
-/// so a typo never silently turns TLS off. A dialing process needs the
+/// A serving process takes all three or none: with none, its sessions
+/// are plaintext; with only some, the missing ones are an error, so a
+/// typo never silently turns TLS off. A dialing process needs the
 /// authority alone to verify the servers, and its certificate and key only
 /// when the servers ask for one.
 #[derive(Clone, Copy, Debug)]
 pub struct Files<'a> {
-    /// The certificate chain file, leaf first, and its setting's name.
-    pub cert: (&'a str, Option<&'a std::path::Path>),
-    /// The private key file, and its setting's name.
-    pub key: (&'a str, Option<&'a std::path::Path>),
-    /// The authority's certificate file, and its setting's name.
-    pub ca: (&'a str, Option<&'a std::path::Path>),
-}
-
-fn read_file((setting, path): (&str, &std::path::Path)) -> Result<Vec<u8>, String> {
-    std::fs::read(path).map_err(|error| format!("{setting} ({}): {error}", path.display()))
+    /// The certificate chain, leaf first, and its setting's name.
+    pub cert: (&'a str, Option<Pem<'a>>),
+    /// The private key, and its setting's name.
+    pub key: (&'a str, Option<Pem<'a>>),
+    /// The authority's certificate, and its setting's name.
+    pub ca: (&'a str, Option<Pem<'a>>),
 }
 
 impl Files<'_> {
-    /// The material, or `None` when no file is set.
+    /// The material, or `None` when no PEM is set.
     ///
     /// # Errors
     ///
@@ -368,9 +399,9 @@ impl Files<'_> {
             ((_, None), (_, None), (_, None)) => Ok(None),
             ((cert_name, Some(cert)), (key_name, Some(key)), (ca_name, Some(ca))) => {
                 Material::from_pem(
-                    &read_file((cert_name, cert))?,
-                    &read_file((key_name, key))?,
-                    &read_file((ca_name, ca))?,
+                    &cert.read(cert_name)?,
+                    &key.read(key_name)?,
+                    &ca.read(ca_name)?,
                 )
                 .map(Some)
                 .map_err(|error| format!("{cert_name}: {error}"))
@@ -427,18 +458,17 @@ impl Files<'_> {
                 )),
             };
         };
-        let roots = read_certificates(&read_file((ca_name, ca))?)
-            .map_err(|error| format!("{ca_name}: {error}"))?;
+        let roots =
+            read_certificates(&ca.read(ca_name)?).map_err(|error| format!("{ca_name}: {error}"))?;
         if roots.is_empty() {
             return Err(format!("{ca_name}: no certificate"));
         }
         let certificate = match (self.cert, self.key) {
             ((_, None), (_, None)) => None,
             ((cert_name, Some(cert)), (key_name, Some(key))) => Some((
-                read_certificates(&read_file((cert_name, cert))?)
+                read_certificates(&cert.read(cert_name)?)
                     .map_err(|error| format!("{cert_name}: {error}"))?,
-                read_key(&read_file((key_name, key))?)
-                    .map_err(|error| format!("{key_name}: {error}"))?,
+                read_key(&key.read(key_name)?).map_err(|error| format!("{key_name}: {error}"))?,
             )),
             ((cert_name, _), (key_name, _)) => {
                 return Err(format!("{cert_name} and {key_name} go together"));
@@ -558,6 +588,20 @@ mod tests {
         }
         assert!(dialing(&material.roots, None, clock).is_ok());
         assert!(Material::from_pem(b"", b"", b"").is_err());
+        // The same PEMs given as text, as a `*_PEM` variable gives them.
+        let (chain, key, ca) = (
+            issued.chain_pem(),
+            issued.key_pem(),
+            authority.certificate_pem(),
+        );
+        let text = Files {
+            cert: Pem::pick(("CERT", None), ("CERT_PEM", Some(chain.as_str()))),
+            key: Pem::pick(("KEY", None), ("KEY_PEM", Some(key.as_str()))),
+            ca: Pem::pick(("CA", None), ("CA_PEM", Some(ca.as_str()))),
+        };
+        assert_eq!(text.cert.0, "CERT_PEM");
+        let read = text.material().expect("text").expect("set");
+        assert_eq!(read.chain.len(), 2);
     }
 
     #[test]
@@ -574,7 +618,7 @@ mod tests {
         assert!(none.dialing().is_ok_and(|t| !t.is_encrypted()));
         let path = std::path::Path::new("/nonexistent/paros.crt");
         let partial = Files {
-            cert: ("CERT", Some(path)),
+            cert: ("CERT", Some(Pem::File(path))),
             ..none
         };
         let error = partial.material().expect_err("a partial set is refused");

@@ -45,7 +45,7 @@ use clap::{Args, Parser, Subcommand};
 use moonpool_core::{TokioProviders, TokioResolver};
 use moonpool_rpc::{RpcConfig, RpcHandle};
 use paros::client::{Client, ClientTunables, bootstrap};
-use paros::tls::Files;
+use paros::tls::{Files, Pem};
 use paros::{Address, Names};
 
 use crate::output::Printer;
@@ -101,6 +101,36 @@ struct Global {
     /// The certificate's private key, PEM.
     #[arg(long, env = "PAROSCTL_TLS_KEY", global = true)]
     tls_key: Option<std::path::PathBuf>,
+    /// The authority, the PEM text itself instead of a file.
+    #[arg(
+        long,
+        env = "PAROSCTL_TLS_CA_PEM",
+        hide_env_values = true,
+        allow_hyphen_values = true,
+        global = true,
+        conflicts_with = "tls_ca"
+    )]
+    tls_ca_pem: Option<String>,
+    /// The certificate, the PEM text itself instead of a file.
+    #[arg(
+        long,
+        env = "PAROSCTL_TLS_CERT_PEM",
+        hide_env_values = true,
+        allow_hyphen_values = true,
+        global = true,
+        conflicts_with = "tls_cert"
+    )]
+    tls_cert_pem: Option<String>,
+    /// The certificate's private key, the PEM text itself instead of a file.
+    #[arg(
+        long,
+        env = "PAROSCTL_TLS_KEY_PEM",
+        hide_env_values = true,
+        allow_hyphen_values = true,
+        global = true,
+        conflicts_with = "tls_key"
+    )]
+    tls_key_pem: Option<String>,
     /// The Biscuit token every call presents, base64url (#245 (Biscuit
     /// tokens)): a tenant or `admin` token through the frontends, and the
     /// `admin` token `init` and `cell add-machine` send to an idle machine
@@ -300,9 +330,18 @@ fn runtime(global: &Global) -> Result<Runtime, String> {
         ..RpcConfig::default()
     };
     let transport = Files {
-        cert: ("PAROSCTL_TLS_CERT", global.tls_cert.as_deref()),
-        key: ("PAROSCTL_TLS_KEY", global.tls_key.as_deref()),
-        ca: ("PAROSCTL_TLS_CA", global.tls_ca.as_deref()),
+        cert: Pem::pick(
+            ("PAROSCTL_TLS_CERT", global.tls_cert.as_deref()),
+            ("PAROSCTL_TLS_CERT_PEM", global.tls_cert_pem.as_deref()),
+        ),
+        key: Pem::pick(
+            ("PAROSCTL_TLS_KEY", global.tls_key.as_deref()),
+            ("PAROSCTL_TLS_KEY_PEM", global.tls_key_pem.as_deref()),
+        ),
+        ca: Pem::pick(
+            ("PAROSCTL_TLS_CA", global.tls_ca.as_deref()),
+            ("PAROSCTL_TLS_CA_PEM", global.tls_ca_pem.as_deref()),
+        ),
     }
     .dialing()?;
     let providers = TokioProviders::new();

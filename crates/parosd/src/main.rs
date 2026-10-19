@@ -162,7 +162,8 @@ async fn run(settings: Settings, metrics: Metrics) -> ExitCode {
     };
     if pin.is_pinned() {
         tracing::info!(
-            keys = settings.root_public_key.len(),
+            keys = settings.root_public_key.len()
+                + usize::from(settings.root_public_key_json.is_some()),
             "parosd_pinned_root_keys"
         );
     }

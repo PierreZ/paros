@@ -271,6 +271,8 @@ fn parse_window(text: &str) -> Result<Duration, String> {
         .parse()
         .map_err(|_| format!("{text:?}: a duration is a number and a unit (ms, s, m, h)"))?;
     match unit {
+        // `--for 0` ends a window: zero needs no unit.
+        "" if value == 0 => Ok(Duration::ZERO),
         "ms" => Ok(Duration::from_millis(value)),
         "s" => Ok(Duration::from_secs(value)),
         "m" => Ok(Duration::from_secs(value.saturating_mul(60))),
@@ -479,5 +481,17 @@ async fn drain(
             Ending::Success
         }
         Err(stop) => interrupted(&stop),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_window_takes_a_unit_except_zero() {
+        assert_eq!(parse_window("0"), Ok(Duration::ZERO));
+        assert_eq!(parse_window("30m"), Ok(Duration::from_mins(30)));
+        assert!(parse_window("5").is_err());
     }
 }

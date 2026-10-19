@@ -76,6 +76,13 @@ pub struct InitArgs {
     /// universe that holds a key writes none.
     #[arg(long)]
     root_public_key: Option<std::path::PathBuf>,
+    /// The same key, the `.public` file's text itself instead of a file.
+    #[arg(
+        long,
+        env = "PAROSCTL_ROOT_PUBLIC_KEY_JSON",
+        conflicts_with = "root_public_key"
+    )]
+    root_public_key_json: Option<String>,
     /// Form an idle cell only (`cell init`, #232 (multiple cells)): no
     /// universe tenant and no universe steps. `parosctl universe add-cell`
     /// joins it to a universe another cell hosts.
@@ -132,11 +139,15 @@ pub async fn run(
     args: &InitArgs,
     token: Vec<u8>,
 ) -> Ending {
-    let root_key = match args
-        .root_public_key
-        .as_deref()
-        .map(crate::universe::read_key)
-    {
+    let root_key = match (&args.root_public_key, &args.root_public_key_json) {
+        (Some(path), _) => Some(crate::universe::read_key(path)),
+        (None, Some(text)) => Some(
+            crate::universe::key_entry(text)
+                .map_err(|error| format!("PAROSCTL_ROOT_PUBLIC_KEY_JSON: {error}")),
+        ),
+        (None, None) => None,
+    };
+    let root_key = match root_key {
         Some(Ok(key)) => Some(key),
         Some(Err(error)) => {
             note(&error);
