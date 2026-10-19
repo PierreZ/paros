@@ -104,21 +104,6 @@ impl FleetOps {
             return false;
         }
         let gone = crate::shape::gone_machine(ctx.state());
-        // On a coin, a machine that holds a tenant's batcher (#145
-        // (batchers)): the coordinator releases its slot and books the
-        // count on the machines that stay.
-        if !loaded
-            && !draining
-            && !gone
-            && let Some(node) = batcher_host(registry)
-            && buggify_with_prob!(0.3)
-        {
-            if let Ok(true) = session.drain(&cell.client, first, node).await {
-                assert_reachable!("drain: an operator drains a batcher's machine");
-                tracing::info!(node = node.0, "machine_drained");
-            }
-            return true;
-        }
         if gone && crate::machine::gone_requested(ctx.state()) {
             return false;
         }
@@ -158,6 +143,58 @@ impl FleetOps {
         }
         if let Ok(true) = session.drain(&cell.client, first, node).await {
             assert_reachable!("drain: an operator drains an admitted machine");
+            tracing::info!(node = node.0, "machine_drained");
+        }
+        true
+    }
+
+    /// Drain a registered machine that holds a tenant's batcher (#145
+    /// (batchers)), when one does and no machine is draining: the cell
+    /// coordinator releases the slot and books the count on the machines
+    /// that stay. Not on a drained-machine or gone-machine seed, which
+    /// drain one machine of their own. Whether it ran.
+    #[tracing::instrument(level = "debug", skip_all, fields(client = self.client_id))]
+    pub(in crate::chain_workload) async fn drain_batcher(
+        &mut self,
+        ctx: &SimContext,
+        policy: CheckpointPolicy,
+        draw: u64,
+    ) -> bool {
+        if crate::shape::drained_machine(ctx.state()) || crate::shape::gone_machine(ctx.state()) {
+            return false;
+        }
+        let Some(cell) = self.learn(ctx).await else {
+            return false;
+        };
+        let members: Vec<NodeId> = cell.members.iter().copied().map(NodeId).collect();
+        let founders: Vec<(NodeId, paros::Address)> = cell
+            .servers
+            .iter()
+            .map(|(id, addr)| (NodeId(*id), addr.clone()))
+            .collect();
+        let mut session = CellSession::new(
+            cell.journals,
+            &members,
+            founders,
+            self.leader_seeds.next(),
+            policy,
+        );
+        let first = cell.first(draw);
+        if session.open(&cell.client, first).await.is_err() {
+            return false;
+        }
+        let registry = session.registry();
+        if registry
+            .nodes()
+            .any(|(_, n)| n.standing == NodeStanding::Draining)
+        {
+            return false;
+        }
+        let Some(node) = batcher_host(registry) else {
+            return false;
+        };
+        if let Ok(true) = session.drain(&cell.client, first, node).await {
+            assert_reachable!("drain: an operator drains a batcher's machine");
             tracing::info!(node = node.0, "machine_drained");
         }
         true

@@ -349,9 +349,19 @@ impl FleetOps {
         first: usize,
         audit: Option<&AuditWorld>,
     ) {
+        // On a coin, each write carries more records than a batcher below
+        // the leader's limits takes (`paros::batcher::TIGHT_RECORDS`): it
+        // goes alone, and a merged write passes the limits sooner.
+        let wide = buggify_with_prob!(0.3);
         let writes: Vec<(Vec<u64>, paros::Write)> = (0..self.config.pipeline_depth)
             .map(|_| {
-                let records = self.records(audit);
+                // Never more than the workload's largest write
+                // (`MAX_BATCH_RECORDS`), which one store entry holds.
+                let mut records = self.records(audit);
+                while wide && records.len() <= paros::batcher::TIGHT_RECORDS {
+                    records.extend(self.records(audit));
+                }
+                records.truncate(usize::try_from(MAX_BATCH_RECORDS).unwrap_or(usize::MAX));
                 let sent = hashes(&records);
                 let request = multi::append_request(
                     journal,

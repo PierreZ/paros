@@ -140,6 +140,11 @@ impl FleetOps {
                 self.append_to_created(&cell, journal, draw).await;
             }
         }
+        // On a coin, the operator drains a machine that holds a tenant's
+        // batcher (#145 (batchers)), once a configure booked one.
+        if buggify_with_prob!(0.1) {
+            self.drain_batcher(ctx, policy, payload).await;
+        }
         let Some((cell, tenant, control, label)) = self.journal_tenant(ctx, payload).await else {
             self.frontend_before_ready(payload).await;
             return;
