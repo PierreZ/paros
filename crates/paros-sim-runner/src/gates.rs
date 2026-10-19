@@ -1325,6 +1325,10 @@ pub const RARE: &[Rare] = &[
         msg: "election: a later term's install refuses an earlier term's",
         reason: "a deposed term's install refused on the cell journal after a later term installed: missed by all four shards of PR #705's sweep; needs a deposed coordinator whose compare-and-set loses to a later term (#653 (election term to installed leader), #703 (election oracles))",
     },
+    Rare {
+        msg: "chain: a multi-writer burst is written out of send order",
+        reason: "a cause most bursts never show: one shard of PR #692 saw none of 22 bursts out of order, and all four shards of PR #705's sweep missed it (#662 (burst multi-writer appends))",
+    },
 ];
 
 /// What the sweep ran of the declared gates.
