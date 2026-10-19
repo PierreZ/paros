@@ -1413,6 +1413,20 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         verified: Option<bool>,
         state: &paros::system::Registry,
     ) {
+        // A machine that restored its fold from this checkpoint learns the
+        // tenants the cell dropped from it, never from a `TenantDropped`
+        // entry below it, and stops their journals (`rehost`). The board
+        // learns them the same way, so a dropped tenant's journals owe
+        // nothing: witness seed 17310756831146654209 on 3ab2df7, where every
+        // follower's read jumped over the drop to the checkpoint's run, two
+        // members stopped the tenant's control journal and the third, its
+        // store re-opened after a quarantine, never decided a slot.
+        if let Some(board) = &self.tenants {
+            let mut board = tenants::lock(board);
+            for tenant in state.dropped_tenants() {
+                board.tenant_dropped(tenant);
+            }
+        }
         if let Some((mut board, plane)) = self.registry_board() {
             board.checkpoint_folded(node, journal, (seq, verified), state, plane);
         }
