@@ -1069,6 +1069,18 @@ pub(crate) fn journal_layout(state: &StateHandle) -> JournalStoreConfig {
     })
 }
 
+/// The most record bytes one entry of the run's journal stores holds
+/// (#663 (batches at the edge limits)): the drawn entry log less one block,
+/// the slack for the encoding and the entry header that
+/// [`ENTRY_BLOCKS_FLOOR`] keeps. A node's `max_batch_bytes` is capped at it
+/// ([`boot`]): a batch the edge admits but no store holds is refused
+/// `BatchTooLarge` at every sync, a stalled node, not a knob.
+pub(crate) fn entry_capacity(state: &StateHandle) -> u64 {
+    let blocks = journal_layout(state).geometry.entry_blocks;
+    let block = u64::try_from(paros::journal::BLOCK).unwrap_or(u64::MAX);
+    u64::from(blocks.saturating_sub(1)).saturating_mul(block)
+}
+
 /// Whether the run's nodes withhold every GC request for the chaos window
 /// (`paros::scenario::WITHHOLD_GC`, #263): drawn once per seed, its own
 /// BUGGIFY location, which decides the driver's named location. A leader that collects nothing keeps every prior
@@ -2513,10 +2525,19 @@ pub(crate) fn boot(state: &StateHandle, ip: &str) -> Incarnation {
     let moved_founder = moved_founder(state);
     let wide_grid = wide_grid(state);
     let racing_floor = racing_floor(state);
+    let entry_bytes = entry_capacity(state);
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     let entry = guard.nodes.entry(ip.to_string()).or_insert_with(|| {
         let mut shape = NodeShape::draw(slow);
+        // The edge admits no batch the stores cannot hold (#663 (batches at
+        // the edge limits)): the default 1 MiB limit sits far above the
+        // simulation's small entry logs.
+        shape.tunables.max_batch_bytes = shape.tunables.max_batch_bytes.min(entry_bytes);
+        assert_always!(
+            shape.tunables.max_batch_bytes >= 16_384,
+            "a node's byte limit admits the workload's largest record"
+        );
         if slow_machine {
             // The slow-machine scenario: a full window every second, so
             // one falls inside the slow time.

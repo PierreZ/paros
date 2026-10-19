@@ -223,6 +223,12 @@ impl AuditWorld {
         st.foreign.insert(vhash);
     }
 
+    /// Whether a node applied the write hashing to `vhash` by now: its slot
+    /// was chosen (#660 (late abandonment)).
+    pub(crate) fn was_chosen(&self, vhash: u64) -> bool {
+        self.lock().chosen_values.contains(&vhash)
+    }
+
     /// The hash of the record the nodes' verdicts accepted at `position`
     /// (#204) — what a journal read's record there must hash to. `None`
     /// when the audit has not seen it accepted.
