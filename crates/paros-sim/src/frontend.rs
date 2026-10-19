@@ -67,13 +67,18 @@ const TOKEN_LIFE: Duration = Duration::from_secs(3_600);
 /// expiry is judged against it, never buggified.
 pub(crate) const MAX_SKEW: Duration = Duration::from_millis(2_000);
 
+/// A Biscuit date is whole seconds (`biscuit_auth::builder::date`): the
+/// verifier truncates both the token's expiry and its own `time` fact, so a
+/// token stays valid up to one second past its expiry.
+pub(crate) const DATE_GRANULARITY: Duration = Duration::from_secs(1);
+
 /// How far a short-lived token's expiry lies from its minting, either way:
 /// beyond [`MAX_SKEW`], so some are expired for every frontend, some valid
 /// for every frontend, and some judged by the skew alone.
 const SHORT_SPREAD_MS: u64 = 6_000;
 
 const _: () = assert!(
-    SHORT_SPREAD_MS as u128 > MAX_SKEW.as_millis(),
+    SHORT_SPREAD_MS as u128 > MAX_SKEW.as_millis() + DATE_GRANULARITY.as_millis(),
     "a short-lived token's spread passes the skew"
 );
 
