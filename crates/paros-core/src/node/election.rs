@@ -383,6 +383,18 @@ impl ColocatedNode {
     /// plain path's message set is unchanged, and so does a campaign whose
     /// ballot fell below this node's own promise (it can no longer win, and
     /// a keep-alive would only delay the next campaign).
+    ///
+    /// The keep-alive asks from [`Election::keep_alive_from`], one past
+    /// everything the tally merged, never from the campaign's first slot: an
+    /// acceptor answers a `Prepare` with its suffix from the asked slot, and
+    /// an answered acceptor has nothing there, so the keep-alive costs an
+    /// empty page. Asked from the first slot, each keep-alive carried the
+    /// acceptor's whole suffix again, once per tick per answered peer, and
+    /// a long suffix on a slow link starved the page the campaign was still
+    /// waiting for (witness seed 1245551733207877429 on d813220, 38 M
+    /// events: red at the sweep's 300 s worker ceiling, green with this
+    /// rule). The tally still ignores the answer: the sender answered
+    /// completely.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0)))]
     pub(super) fn keep_paging_promisers(&mut self) {
         if self.role != NodeRole::Candidate {
@@ -396,7 +408,11 @@ impl ColocatedNode {
             return;
         }
         let ballot = election.ballot();
-        let from_slot = election.from_slot();
+        let from_slot = election.keep_alive_from();
+        assert!(
+            from_slot >= election.from_slot(),
+            "a keep-alive asks from the campaign's first slot or past it"
+        );
         let answered: Vec<NodeId> = election
             .promised()
             .iter()
