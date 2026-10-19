@@ -563,6 +563,16 @@ impl SystemBoard {
             .collect()
     }
 
+    /// The sum of `nodes`' registry fold positions in `journal`: it grows
+    /// while any of them still folds.
+    pub(crate) fn registry_progress(&self, journal: JournalIdentifier, nodes: &[u64]) -> u64 {
+        let at = self.models.get(&journal).map(|model| &model.at);
+        nodes
+            .iter()
+            .map(|node| at.and_then(|at| at.get(node)).copied().unwrap_or(0))
+            .sum()
+    }
+
     /// A fold restarted from a checkpoint (#230).
     pub(crate) fn reader_restarted(&mut self) {
         self.restarted = true;
