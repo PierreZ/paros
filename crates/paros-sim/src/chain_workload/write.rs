@@ -4,7 +4,7 @@
 use std::future::Future;
 use std::time::Duration;
 
-use moonpool_sim::{assert_always, assert_reachable, buggify_with_prob};
+use moonpool_sim::{assert_always, assert_reachable, assert_sometimes, buggify_with_prob};
 use paros::client::{Resolution, TruncateOutcome, WriteOptions, WriteOutcome, Writer};
 use paros::{Command, Entry, LeaderUuid, Value, command_hash};
 
@@ -104,12 +104,17 @@ impl ChainWorkload {
     /// The records of one write, drawn as [`ChainWorkload::draw_records`]
     /// draws them, registered nowhere: a call by name whose journal the
     /// client does not know (#658).
+    ///
+    /// Each record draws its own size class (#663 (batches at the edge
+    /// limits)): record `k` takes bits `2k..2k + 2` of `class`, so one batch
+    /// mixes empty, one-byte, ordinary and large records. The first record's
+    /// class is the write's payload class.
     pub(super) fn draw_values(config: &ChainConfig, class: u64, seed: u64) -> Vec<Value> {
         let count = 1 + (seed >> 48) % config.batch_records.max(1);
         (0..count)
             .map(|k| {
                 Value(Self::payload(
-                    class,
+                    class.wrapping_shr(u32::try_from(2 * k).unwrap_or(0)),
                     config.command_bytes,
                     config.large_command_bytes,
                     seed.wrapping_add(k.wrapping_mul(0x9e37_79b9_7f4a_7c15)),
@@ -171,7 +176,7 @@ impl ChainWorkload {
         );
     }
 
-    fn payload(class: u64, ordinary: usize, large: usize, mut seed: u64) -> Vec<u8> {
+    pub(super) fn payload(class: u64, ordinary: usize, large: usize, mut seed: u64) -> Vec<u8> {
         let len = match class % 4 {
             0 => 0,
             1 => 1,
@@ -317,6 +322,20 @@ impl ChainWorkload {
             // abandonment (the honest-ambiguity generator) fires.
             assert_reachable!("chain: a client abandons an in-flight observation");
         }
+        // How long the abandoned attempt is listened to (#660 (late
+        // abandonment)): the drawn knob, or on a coin of its own a late
+        // give-up, between the slot chosen and the reply received.
+        let abandon_after = if abandon && buggify_with_prob!(0.5) {
+            assert_reachable!("chain: a client abandons a write late");
+            50 + raw_pause % 551
+        } else {
+            config.abandon_after_ms
+        };
+        let abandon_after = Duration::from_millis(abandon_after.min(config.request_timeout_ms));
+        // Whether the abandoned attempt's slot was chosen before the client
+        // gave up on it, and the node a `TooLarge` came from.
+        let mut chosen_before_abandon = false;
+        let mut answered = chosen_target;
         let result = if ack_race {
             self.ack_race(ctx, nodes, config, &submission, chosen_target, &mut *writer)
                 .await
@@ -333,10 +352,11 @@ impl ChainWorkload {
                     WriteOptions {
                         retarget,
                         stop_at_redirect: op != WRITE,
-                        abandon_first_after: abandon.then_some(Duration::from_millis(10)),
+                        abandon_first_after: abandon.then_some(abandon_after),
                     },
                 )
                 .await;
+            answered = report.server;
             let result = judged_write(
                 report.outcome,
                 false,
@@ -348,6 +368,7 @@ impl ChainWorkload {
             }
             let result = if matches!(result, WriteOutcome::Ambiguous) {
                 tracing::info!(cmd = %hash_text(submission.cmd_hash), "chain_proposal_ambiguous");
+                chosen_before_abandon = abandon && audit.was_chosen(submission.cmd_hash);
                 // Settle it (#204: the journal answers the
                 // identical write from the log): read the
                 // position back, then re-send it byte for byte —
@@ -435,6 +456,14 @@ impl ChainWorkload {
                 result
             };
             log.close_write();
+            if chosen_before_abandon {
+                // The window #660 opens: the read-back and the re-send race
+                // the apply of a write already chosen.
+                assert_sometimes!(
+                    matches!(result, WriteOutcome::Written { .. }),
+                    "chain: a write abandoned after its slot was chosen is settled Written"
+                );
+            }
             result
         };
         match result {
@@ -442,6 +471,14 @@ impl ChainWorkload {
                 writer.advance_to(seq + count);
                 self.record_written(&submission, seq, count, now_ms());
                 self.adversarial.payload_classes[submission.payload_class] = true;
+                let records = &submission.entry.records;
+                if records.iter().any(|record| record.0.is_empty())
+                    && records
+                        .iter()
+                        .any(|record| record.0.len() == config.large_command_bytes)
+                {
+                    assert_reachable!("chain: a batch mixing empty and large records is written");
+                }
                 written.push(submission.written(
                     seq,
                     count,
@@ -486,9 +523,22 @@ impl ChainWorkload {
                 assert_reachable!("chain: a leader answers a write busy");
                 self.history.record_write_failed(submission.op);
             }
-            WriteOutcome::TooLarge { .. } => {
+            WriteOutcome::TooLarge {
+                max_records,
+                max_bytes,
+            } => {
                 assert_reachable!("chain: a batch over a node's limits is refused at the edge");
                 self.history.record_write_failed(submission.op);
+                if !ack_race {
+                    self.edge_limits(
+                        step,
+                        (&mut *writer, &mut *written, &mut *next_op),
+                        answered,
+                        (max_records, max_bytes),
+                        now_ms,
+                    )
+                    .await;
+                }
             }
             WriteOutcome::WrongMode { .. } => {
                 owner_never_of_wrong_mode();

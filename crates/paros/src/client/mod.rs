@@ -1182,7 +1182,24 @@ impl<P: Providers> Client<P> {
         uuid: LeaderUuid,
         first: usize,
     ) -> ClaimOutcome {
-        self.claim_as(journal, uuid, false, first).await
+        self.claim_as(journal, uuid, ClaimMode::Fresh, first).await
+    }
+
+    /// Claim `journal` for `uuid` over `old` only (#653 (election term to
+    /// installed leader)): as [`Client::claim`], but a read naming another
+    /// leader than `old` is [`ClaimOutcome::Lost`] and sends no
+    /// `SetLeader`. A caller that judged `old` safe to replace (an elected
+    /// coordinator that read its election after it read `old`) never
+    /// installs over a leader it did not judge.
+    pub async fn claim_over(
+        &self,
+        journal: JournalIdentifier,
+        uuid: LeaderUuid,
+        old: Option<LeaderUuid>,
+        first: usize,
+    ) -> ClaimOutcome {
+        self.claim_as(journal, uuid, ClaimMode::Over(old), first)
+            .await
     }
 
     /// Re-claim `journal` for `uuid`, a uuid that already led (#241, #564):
@@ -1198,15 +1215,16 @@ impl<P: Providers> Client<P> {
         uuid: LeaderUuid,
         first: usize,
     ) -> ClaimOutcome {
-        self.claim_as(journal, uuid, true, first).await
+        self.claim_as(journal, uuid, ClaimMode::Led, first).await
     }
 
-    /// [`Client::claim`] (`led` false) or [`Client::reclaim`] (`led` true).
+    /// [`Client::claim`], [`Client::reclaim`] or [`Client::claim_over`], by
+    /// `mode`.
     async fn claim_as(
         &self,
         journal: JournalIdentifier,
         uuid: LeaderUuid,
-        led: bool,
+        mode: ClaimMode,
         first: usize,
     ) -> ClaimOutcome {
         let report = self.read_any(&state_read(journal), first).await;
@@ -1220,9 +1238,17 @@ impl<P: Providers> Client<P> {
         if state.leader == Some(uuid) {
             return ClaimOutcome::Owned { state };
         }
-        if led {
+        match mode {
             // Superseded: `uuid` led a term and another leader followed it.
-            return ClaimOutcome::Lost { state };
+            ClaimMode::Led => return ClaimOutcome::Lost { state },
+            // Another leader than the one the caller judged (#653).
+            ClaimMode::Over(old) if old != state.leader => {
+                moonpool_assertions::reachable!(
+                    "client: a claim over a judged leader finds another"
+                );
+                return ClaimOutcome::Lost { state };
+            }
+            ClaimMode::Fresh | ClaimMode::Over(_) => {}
         }
         self.set_leader(journal, uuid, state.leader, report.server)
             .await
@@ -1530,4 +1556,15 @@ pub(super) fn state_read(journal: JournalIdentifier) -> Read {
         limit: 1,
         wait_ms: 0,
     }
+}
+
+/// How [`Client::claim_as`] treats the leader its read names.
+#[derive(Clone, Copy, Debug)]
+enum ClaimMode {
+    /// Replace any leader ([`Client::claim`]).
+    Fresh,
+    /// The uuid led already: replace none ([`Client::reclaim`]).
+    Led,
+    /// Replace only this leader ([`Client::claim_over`], #653).
+    Over(Option<LeaderUuid>),
 }

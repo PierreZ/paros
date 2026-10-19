@@ -34,6 +34,7 @@ use crate::client::{ChainClient, ClientRuntime, client_rpc_config};
 
 mod config;
 pub(crate) mod deposed;
+mod edge;
 mod fleet;
 mod fold;
 mod foreign;
@@ -514,6 +515,9 @@ impl Workload for ChainWorkload {
                 .chain([self.journal])
                 .collect();
             digest ^= crate::audit::check_every_world(ctx.state(), &judged);
+            // The cell coordinator's terms install in order (#653 (election
+            // term to installed leader)).
+            crate::audit::installs::check_installs(ctx.state());
         }
         // The histories `Announce` logged (#247): every client's library
         // calls at the registry, at the control journals of the cell the
@@ -773,7 +777,8 @@ impl ChainWorkload {
         let journal = self.journal;
         // Every attempt at this client's journal, logged at the RPC seam:
         // the library client reports each one to it (#221).
-        let log = CallLog::new(journal, client_id, ctx.time().clone());
+        let log = CallLog::new(journal, client_id, ctx.time().clone())
+            .announcing(audit_world_for(ctx.state(), journal));
         self.calls = Some(log.clone());
         let observer: Arc<dyn paros::client::CallObserver> = Arc::new(log.clone());
         let server_count = servers.len();
@@ -1398,6 +1403,21 @@ impl ChainWorkload {
                 )
                 .await;
             }
+            if op == WRITE
+                && writer.owned().is_some()
+                && let Some(last) = written.last()
+                && buggify_with_prob!(0.1)
+            {
+                assert_reachable!("chain: an owner rewrites a written position");
+                owner::conflicting_rewrite_refused(
+                    ctx,
+                    (&nodes, &audit),
+                    (journal, &mut writer),
+                    (target, last),
+                    request_timeout,
+                )
+                .await;
+            }
             if op == SET_LEADER && writer.owned().is_some() && buggify_with_prob!(0.25) {
                 assert_reachable!("chain: an owner claims the term it leads");
                 owner::own_term_refused(
@@ -1444,6 +1464,19 @@ impl ChainWorkload {
             };
             match op {
                 WRITE | WRITE_TO_NON_LEADER => {
+                    // An oversized batch (#663 (batches at the edge
+                    // limits)), its own location: every node names its
+                    // limits, which the owner then probes.
+                    if op == WRITE && writer.owned().is_some() && buggify_with_prob!(0.1) {
+                        assert_reachable!("chain: an owner sends a batch over every node's limits");
+                        self.oversized_write(
+                            &step,
+                            (&mut writer, &mut written, &mut next_op),
+                            target,
+                            &now_ms,
+                        )
+                        .await;
+                    }
                     self.write_step(
                         &step,
                         (&mut writer, &mut written, &mut next_op),

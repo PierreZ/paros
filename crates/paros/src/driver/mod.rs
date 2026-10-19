@@ -2884,6 +2884,33 @@ where
                 // Each tenant's handover is paced once per tick, on the
                 // first of its matchmaker journals that beats (#190).
                 let mut paced: BTreeSet<TenantId> = BTreeSet::new();
+                // A held founder beats no journal, but a handover it took
+                // before its registration ended still needs its stall clock
+                // and its re-sends: unpaced, it stays busy for good and
+                // refuses every later handover of its tenant.
+                if unregistered.is_some() {
+                    let busy: Vec<TenantId> = handovers
+                        .iter()
+                        .filter(|(_, handover)| handover.is_busy())
+                        .map(|(tenant, _)| *tenant)
+                        .collect();
+                    for tenant in busy {
+                        let Some(journal) = journals.live.iter().find_map(|(id, rt)| {
+                            (id.tenant == tenant && rt.node.config().has_matchmakers()).then_some(*id)
+                        }) else {
+                            continue;
+                        };
+                        let audits = tenant_audits(&journals, &stores, tenant);
+                        let (Some(rt), Some(handover)) = (journals.live.get(&journal), handovers.get_mut(&tenant)) else {
+                            continue;
+                        };
+                        moonpool_assertions::reachable!(
+                            "generation: a held founder paces its handover"
+                        );
+                        shared.with(&audits).pace_handover(&rt.node, handover);
+                        assert!(paced.insert(tenant), "a tenant's handover is paced once per tick");
+                    }
+                }
                 for journal in live {
                     let audits = tenant_audits(&journals, &stores, journal.tenant);
                     let Some(rt) = journals.live.get_mut(&journal) else { continue };

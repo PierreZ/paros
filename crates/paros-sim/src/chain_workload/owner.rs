@@ -5,7 +5,13 @@
 //!   that leads with `L`. The compare-and-set names the leader in force, but
 //!   the current leader never wins its own term again: refused.
 //! - **A write ahead of the journal**: the owner's uuid at a position past
-//!   `next_seq`. Accepted only at the position it names, so refused.
+//!   `next_seq`. Accepted only at the position it names, so refused. The
+//!   gap is one, two or far (#665 (conflicting rewrite)): one past the tail
+//!   is where an off-by-one in the check lets it through.
+//! - **A conflicting rewrite** (#665): the owner's uuid at a position it
+//!   saw written, with records that differ from the written ones in one
+//!   byte. Only the identical write is a duplicate, so refused, never
+//!   `Duplicate`.
 //!
 //! Each is its own BUGGIFY location in the chain workload, and each goes
 //! through the library client, so the linearizability search judges it.
@@ -19,13 +25,19 @@ use paros::client::{SetLeaderOutcome, WriteOutcome, Writer};
 use paros::{Command, Entry, JournalIdentifier, Seq, Value, command_hash};
 
 use super::rpc::{set_leader_once, within, write_once};
+use super::write::WrittenCommand;
 use crate::audit::AuditWorld;
 use crate::client::ChainClient;
 
-/// How far past the owner's next position the ahead write names: no run
-/// writes this many records, so the write never lands on its own position
-/// later (a write that did would be honest, but no longer the misbehaviour).
+/// How far past the owner's next position the far ahead write names: no
+/// run writes this many records, so the write never lands on its own
+/// position later (a write that did would be honest, but no longer the
+/// misbehaviour).
 const AHEAD_GAP: u64 = 1 << 20;
+
+/// The gaps an ahead write is drawn from (#665 (conflicting rewrite)): one
+/// past the frontier, two past it, or [`AHEAD_GAP`] and more.
+const AHEAD_GAPS: [u64; 3] = [1, 2, 1 + AHEAD_GAP];
 
 /// The owner claims the term it leads (#339): `SetLeader(L, Some(L))`,
 /// refused, or no verdict. Sent to the believed leader, and once more to
@@ -83,7 +95,19 @@ pub(super) async fn ahead_write_refused(
     let Some(leader) = writer.owned() else {
         return;
     };
-    let seq = writer.next_seq() + 1 + AHEAD_GAP + draw % 1024;
+    // Past every write it opened as well as its next position: none of its
+    // own writes can make this position the tail while it leads.
+    let frontier = writer.next_seq().max(writer.opened_to());
+    let gap = AHEAD_GAPS[usize::try_from(draw % 3).unwrap_or(0)];
+    let gap = if gap > 2 {
+        gap + (draw >> 2) % 1024
+    } else {
+        gap
+    };
+    if gap == 1 {
+        assert_reachable!("chain: an owner writes one past the journal's tail");
+    }
+    let seq = frontier + gap;
     let entry = Entry {
         leader,
         seq: Seq(seq),
@@ -113,6 +137,73 @@ pub(super) async fn ahead_write_refused(
     if let WriteOutcome::Refused { state } = &outcome {
         if state.leader == Some(leader) {
             assert_reachable!("chain: an owner's write ahead of the journal is refused");
+        }
+        writer.learn(state);
+    }
+}
+
+/// The owner rewrites a position it saw written (#665 (conflicting
+/// rewrite)): its current uuid at that position, the written records with
+/// one byte changed. Refused, or truncated, or no verdict; never written,
+/// not even as a duplicate. Sent to the believed leader, and once more to
+/// the leader a redirect names. A refusal names the state, which the
+/// writer learns from.
+#[tracing::instrument(level = "debug", skip_all, fields(journal = %journal))]
+pub(super) async fn conflicting_rewrite_refused(
+    ctx: &SimContext,
+    (nodes, audit): (&ChainClient, &AuditWorld),
+    (journal, writer): (JournalIdentifier, &mut Writer),
+    (target, last): (usize, &WrittenCommand),
+    timeout: Duration,
+) {
+    let Some(leader) = writer.owned() else {
+        return;
+    };
+    let mut records = last.entry.records.clone();
+    let Some(first) = records.first_mut() else {
+        return;
+    };
+    // Near-equal: the same count and lengths but one, a byte apart.
+    match first.0.first_mut() {
+        Some(byte) => *byte ^= 1,
+        None => first.0.push(0),
+    }
+    let entry = Entry {
+        leader,
+        seq: Seq(last.seq),
+        records,
+    };
+    assert_always!(
+        entry != last.entry,
+        "chain: a conflicting rewrite differs from the written batch"
+    );
+    if entry.leader == last.entry.leader {
+        assert_reachable!("chain: an owner rewrites a position under the uuid that wrote it");
+    }
+    // Sent to this journal: a slot of it may hold the write (refused).
+    audit.note_appended(command_hash(&Command::Write(entry.clone())));
+    let send = |target: usize| {
+        within(
+            ctx,
+            timeout,
+            WriteOutcome::Ambiguous,
+            write_once(nodes, journal, target, &entry, false, false),
+        )
+    };
+    let mut outcome = send(nodes.leader().unwrap_or(target)).await;
+    if let WriteOutcome::Redirect { leader: Some(node) } = outcome
+        && let Some(target) = nodes.index_of(node)
+    {
+        outcome = send(target).await;
+    }
+    assert_always!(
+        !matches!(outcome, WriteOutcome::Written { .. }),
+        "chain: an owner's conflicting rewrite is never written",
+        { "seq" => last.seq }
+    );
+    if let WriteOutcome::Refused { state } | WriteOutcome::Truncated { state } = &outcome {
+        if matches!(outcome, WriteOutcome::Refused { .. }) && state.leader == Some(leader) {
+            assert_reachable!("chain: an owner's conflicting rewrite is refused");
         }
         writer.learn(state);
     }

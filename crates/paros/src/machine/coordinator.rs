@@ -118,7 +118,9 @@ use super::{CellPlan, ControlJournals, FormedCell, incarnation_from_halves};
 use crate::client::capacity::{CapacityAnswer, CapacityRequest};
 use crate::client::cell::CellSession;
 use crate::client::checkpoint::{CheckpointPolicy, Folder, LoadOutcome, load};
-use crate::client::election::{Candidate, Election, ElectionTunables, Leader, Step, hand_off};
+use crate::client::election::{
+    Candidate, Election, ElectionTunables, Leader, Step, hand_off, read_election,
+};
 use crate::client::fleet::{Interrupted, Stage, Step as FleetStep};
 use crate::client::journals::{JournalAnswer, JournalRequest};
 use crate::client::universe::{JoinAnswer, JoinRequest};
@@ -269,7 +271,38 @@ async fn open_term<P: Providers>(
     // derives the same matchmaker set").
     // `with_leader` keeps only the reached founders that are members.
     let mut session = CellSession::with_leader(journals, &members, founders, leader.uuid, policy);
-    match session.open(client, 0).await {
+    // A term installs only over a leader it judged (#653 (election term to
+    // installed leader)): read the cell journal's leader, then the election;
+    // a term the election moved past leads nothing, and the claim replaces
+    // only the leader read. A later term campaigns before it installs, so a
+    // leader read first that a later term installed is in the election read
+    // after. Without it, a deposed term whose fold still leads (its lease is
+    // its own clock's) read the next term's uuid and installed over it
+    // (witness 593093569845979540: term 8 over term 9 at slot 20).
+    let opened = match journals.election {
+        Some(election) => {
+            let Some(current) = client.journal_state(journals.cell, 0).await else {
+                return (TermDuty::Unavailable, None);
+            };
+            let Some(fold) = read_election(client, election, 0).await else {
+                return (TermDuty::Unavailable, None);
+            };
+            match fold.leader().map(|now| now.term) {
+                Some(term) if term > leader.term => {
+                    moonpool_assertions::reachable!(
+                        "coordinator: a term the election moved past installs nothing"
+                    );
+                    return (TermDuty::Refused, None);
+                }
+                Some(term) if term == leader.term => {}
+                // A fold behind the term this candidacy won: read again.
+                _ => return (TermDuty::Unavailable, None),
+            }
+            session.open_over(client, 0, current.leader).await
+        }
+        None => session.open(client, 0).await,
+    };
+    match opened {
         Ok(()) => {}
         Err(Interrupted::NotClaimed {
             outcome: ClaimOutcome::Lost { .. },
@@ -1854,6 +1887,36 @@ async fn answer_until<P: Providers>(
     }
 }
 
+/// The cell's address book for a `Register` from `id`, from a fold caught
+/// up to the tail when the term's fold does not name `id`; `None` when the
+/// catch-up failed. The term's fold moves only on its own writes, and an
+/// operator's `cell add-machine` registers machines between them. The
+/// machine takes `unknown_machine` as final, so it is answered only from a
+/// fold at the tail (witness: recipe 1769568628990727465
+/// 102806:3654508340332248788 on PR #691 (client write inputs): an admitted
+/// machine renamed while it asked a term whose fold predated its
+/// registration was never registered at its new name).
+async fn book_naming<P: Providers>(
+    session: &mut CellSession,
+    client: &Client<P>,
+    id: NodeId,
+) -> Option<Vec<(NodeId, Address)>> {
+    let book = super::cell_book(session.founders(), session.registry());
+    if book.iter().any(|(member, _)| *member == id) {
+        return Some(book);
+    }
+    let before = session.position();
+    if !session.refresh(client, 0).await {
+        return None;
+    }
+    assert!(
+        session.position() >= before,
+        "a refreshed fold never goes back"
+    );
+    moonpool_assertions::reachable!("coordinator: a register catches its fold up first");
+    Some(super::cell_book(session.founders(), session.registry()))
+}
+
 /// Answer a machine's `Register` (#349): register the address it advertises
 /// now in the cell control journal, through the served term's session, when
 /// the cell's address book does not hold it. Refused while this member
@@ -1900,7 +1963,9 @@ async fn register<P: Providers>(
     let Some((session, watch)) = watching.as_mut() else {
         return refuse("not_coordinator");
     };
-    let book = super::cell_book(session.founders(), session.registry());
+    let Some(book) = book_naming(session, client, id).await else {
+        return refuse("unavailable");
+    };
     let Some((_, known)) = book.iter().find(|(member, _)| *member == id) else {
         return refuse("unknown_machine");
     };

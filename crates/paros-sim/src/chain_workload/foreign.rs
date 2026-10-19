@@ -29,7 +29,7 @@ use std::time::Duration;
 
 use moonpool_sim::{SimContext, assert_always, assert_reachable};
 use paros::client::{SetLeaderOutcome, TruncateOutcome, WriteOutcome, Writer, write_request};
-use paros::{Command, JournalIdentifier, TenantId, Truncate, Value, leader_uuid_to_proto};
+use paros::{Command, Control, JournalIdentifier, TenantId, Truncate, Value, leader_uuid_to_proto};
 
 use super::rpc::within;
 use crate::client::ChainClient;
@@ -95,6 +95,14 @@ async fn served(
             up_to: entry.seq.0,
             leader: Some(leader_uuid_to_proto(entry.leader)),
         };
+        // Sent to the other journal, whose slot may hold it (#652): its
+        // fence refuses it there.
+        crate::audit::audit_world_for(ctx.state(), other).note_appended(paros::command_hash(
+            &Command::Control(Control::Truncate {
+                leader: entry.leader,
+                up_to: entry.seq,
+            }),
+        ));
         let mut at = target;
         for _ in 0..REDIRECTS {
             let ask = nodes.truncate_attempt(at, request);

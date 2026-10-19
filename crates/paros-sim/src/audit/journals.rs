@@ -38,8 +38,11 @@ const JOURNAL_BOARD_KEY: &str = "paros-journal-board";
 #[derive(Default)]
 #[allow(clippy::struct_excessive_bools)] // sticky, independent gate facts
 pub(crate) struct JournalBoard {
-    /// The run serves more than one journal.
+    /// The run's plan serves more than one journal.
     multi: bool,
+    /// Every journal an audit port reports for (#652 (cross-journal check
+    /// on every seed)): the plan's and every journal the machines host.
+    served: BTreeSet<JournalIdentifier>,
     /// The journals some node held for a beat (`JournalBoard::held`).
     held: BTreeSet<JournalIdentifier>,
     /// `(node, journal)` pairs quarantined right now.
@@ -95,9 +98,21 @@ impl JournalBoard {
         }
     }
 
-    /// Whether the run serves more than one journal.
+    /// Whether the run's plan serves more than one journal.
     pub(crate) fn is_multi(&self) -> bool {
         self.multi
+    }
+
+    /// An audit port reports for `journal` (#652).
+    pub(crate) fn serves(&mut self, journal: JournalIdentifier) {
+        self.served.insert(journal);
+    }
+
+    /// Whether more than one journal has an audit port (#652): the
+    /// cross-journal check judges every slot from then on, whatever the
+    /// plan drew.
+    pub(crate) fn judges_slots(&self) -> bool {
+        self.multi || self.served.len() > 1
     }
 
     /// `journal` was quarantined on `node`.

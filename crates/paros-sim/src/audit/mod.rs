@@ -41,6 +41,7 @@ macro_rules! reach_once {
 const READ_FLOOR_SPAN_MS: u64 = 120_000;
 
 mod client;
+pub(crate) mod installs;
 mod journal_model;
 pub(crate) mod journals;
 mod linearizability;
@@ -232,29 +233,49 @@ impl<T: TimeProvider> NodeAudit<T> {
         journal: JournalIdentifier,
         board: Arc<Mutex<journals::JournalBoard>>,
     ) -> Self {
+        journals::lock(&board).serves(journal);
         self.journal = Some((journal, board));
         self
     }
 
-    /// The non-interference half of an apply (#188): on a multi-journal run
-    /// a write must be one a client sent to this journal, and
-    /// the board learns which journal committed while a sibling was held or
-    /// quarantined.
-    fn journal_applied(&self, node: NodeId, write: Option<u64>) {
+    /// Whether this port reports a journal the machines host (#652): the
+    /// registry, the universe, election and tenant control journals and
+    /// every created journal.
+    fn on_machine(&self) -> bool {
+        self.system
+            .as_ref()
+            .is_some_and(|(_, plane)| matches!(plane, system::Plane::Machine(..)))
+    }
+
+    /// The non-interference half of an apply (#188): once the run serves
+    /// more than one journal, a `Write`, `Truncate` or `SetLeader` (hashing
+    /// to `command`; `None` for a `Noop`) must be one a client sent to this
+    /// journal (#652: the machines host many journals in one process on
+    /// every seed), and the board learns which journal committed while a
+    /// sibling was held or quarantined.
+    fn journal_applied(&self, node: NodeId, command: Option<u64>) {
         let Some((journal, board)) = &self.journal else {
             return;
         };
         let mut board = journals::lock(board);
         board.applied_under_parent(node.0, *journal);
-        if !board.is_multi() {
+        if !board.judges_slots() {
             return;
         }
-        if let Some(vhash) = write {
+        if let Some(vhash) = command {
             assert_always!(
                 self.state().appended.contains(&vhash),
                 "journal: a slot holds only a command appended to its own journal",
                 { "node" => node.0, "journal" => journal.to_string(), "command" => vhash }
             );
+            if self.on_machine() {
+                assert_reachable!(
+                    "journal: a machine-hosted journal's slot is judged by its appends"
+                );
+            }
+        }
+        if !board.is_multi() {
+            return;
         }
         let in_chaos = crate::in_chaos();
         board.applied(*journal, in_chaos);
@@ -644,6 +665,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         if let Some(prev) = st.chosen.insert(slot.0, vhash) {
             assert_always!(prev == vhash, "at most one value is ever chosen for a slot");
         }
+        st.chosen_values.insert(vhash);
         // The journal state machine's oracles (#204): every node's verdict
         // at this slot is the same, and the verdicts obey section 6.
         st.journal.applied(node.0, slot.0, command, vhash, outcome);
@@ -692,7 +714,8 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         if let Some(board) = &self.tenants {
             tenants::lock(board).applied(node, command);
         }
-        self.journal_applied(node, command.write().map(|_| vhash));
+        let takes_slot = !matches!(command, Command::Control(paros::Control::Noop));
+        self.journal_applied(node, takes_slot.then_some(vhash));
     }
 
     fn journal_quarantined(&self, node: NodeId) {

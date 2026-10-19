@@ -116,6 +116,9 @@ pub(crate) struct MachineBoard {
     /// Every election journal a formatting plan named (#240): multi-writer
     /// journals, which the audit models as such.
     elections: BTreeSet<paros::JournalIdentifier>,
+    /// The cell control journal each election journal's terms install on
+    /// (#653 (election term to installed leader)), by election journal.
+    governs: BTreeMap<paros::JournalIdentifier, paros::JournalIdentifier>,
     /// The address an operator founded another cell on (#216): a machine
     /// that replaced a wiped member of the run's cell, alone in its own.
     other_founder: Option<Address>,
@@ -239,6 +242,18 @@ pub(crate) fn formed_cell(state: &StateHandle) -> Option<ControlJournals> {
 /// Whether `journal` is a cell's election journal (#240): multi-writer.
 pub(crate) fn is_election(state: &StateHandle, journal: paros::JournalIdentifier) -> bool {
     lock(&machine_board(state)).elections.contains(&journal)
+}
+
+/// Every election journal a formatting plan named, with the cell control
+/// journal its terms install on (#653 (election term to installed leader)).
+pub(crate) fn governed(
+    state: &StateHandle,
+) -> Vec<(paros::JournalIdentifier, paros::JournalIdentifier)> {
+    lock(&machine_board(state))
+        .governs
+        .iter()
+        .map(|(election, cell)| (*election, *cell))
+        .collect()
 }
 
 /// How many of `plan`'s members came back under a new name (#349): a
@@ -1794,6 +1809,7 @@ pub(crate) fn formatting(
 ) {
     let mut board = lock(board);
     board.elections.insert(plan.election);
+    board.governs.insert(plan.election, plan.control);
     if is_other_cell(&board, addr, plan) {
         return;
     }

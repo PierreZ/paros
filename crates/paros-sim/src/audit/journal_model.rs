@@ -522,6 +522,16 @@ impl JournalModel {
     /// journal's coverage gates.
     /// Whether any node reported a verdict of this journal: the model has
     /// something to judge.
+    /// Every `SetLeader` verdict in slot order (#653 (election term to
+    /// installed leader)): its slot, the uuid it asked to install and
+    /// whether it won.
+    pub(super) fn set_leaders(&self) -> impl Iterator<Item = (u64, LeaderUuid, bool)> + '_ {
+        self.slots.iter().filter_map(|(&slot, fact)| {
+            fact.set_leader
+                .map(|(new, _)| (slot, new, matches!(fact.outcome, Outcome::Leader(_))))
+        })
+    }
+
     pub(super) fn judged_any(&self) -> bool {
         !self.slots.is_empty()
     }

@@ -301,12 +301,24 @@ impl CallObserver for Announce {
             for record in &write.records {
                 audit.note_submitted(user_command_hash(record));
             }
-            let hash = deposed::write_hash(write);
-            audit.note_appended(hash);
-            Some(hash)
+            // The cell coordinator's terms, for the install-order oracle
+            // (#653 (election term to installed leader)).
+            if crate::machine::is_election(&self.state, attempt.journal()) {
+                crate::audit::installs::note_election_write(
+                    &self.state,
+                    attempt.journal(),
+                    &write.records,
+                );
+            }
+            Some(deposed::write_hash(write))
         } else {
             None
         };
+        // Every command a slot may hold (#652 (cross-journal check on every
+        // seed)): a `Truncate` and a `SetLeader` too.
+        if let Some(command) = super::rpc::command_of(attempt) {
+            audit.note_appended(command);
+        }
         if let Some(uuid) = fence {
             let journal = attempt.journal();
             let gone = deposed(&self.state, journal);

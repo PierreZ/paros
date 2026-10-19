@@ -241,6 +241,15 @@ impl Writer {
         self.next_seq
     }
 
+    /// The end of the highest write it opened under the uuid it leads with:
+    /// no write of its own under that uuid lands past it, so a position
+    /// past both it and [`Writer::next_seq`] is never the journal's tail
+    /// while it leads (#665 (conflicting rewrite)).
+    #[must_use]
+    pub fn opened_to(&self) -> u64 {
+        self.opened_to
+    }
+
     /// A position from which the uuid it leads with is known to lead: a
     /// view naming it the leader showed this `next_seq` (#564). What
     /// [`Client::resolve`] needs to read `entry` back as written: `None`
@@ -503,6 +512,25 @@ impl Writer {
             client.reclaim(self.journal, self.mine, first).await
         } else {
             client.claim(self.journal, self.mine, first).await
+        };
+        self.claimed(&outcome);
+        outcome
+    }
+
+    /// Claim the journal over `old` only (#653 (election term to installed
+    /// leader), [`Client::claim_over`]): a read naming another leader is
+    /// lost. A writer that leads already re-claims as [`Writer::claim`]
+    /// does.
+    pub async fn claim_over<P: Providers>(
+        &mut self,
+        client: &Client<P>,
+        first: usize,
+        old: Option<LeaderUuid>,
+    ) -> ClaimOutcome {
+        let outcome = if self.owned {
+            client.reclaim(self.journal, self.mine, first).await
+        } else {
+            client.claim_over(self.journal, self.mine, old, first).await
         };
         self.claimed(&outcome);
         outcome

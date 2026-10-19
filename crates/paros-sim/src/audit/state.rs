@@ -129,6 +129,10 @@ pub(super) struct AuditState {
     // --- Paxos safety -------------------------------------------------------
     /// Cluster-wide: the value chosen for each slot.
     pub(super) chosen: BTreeMap<u64, u64>,
+    /// Cluster-wide: every value some node applied, never pruned (#660
+    /// (late abandonment)): whether a write was chosen before its client
+    /// gave up on it.
+    pub(super) chosen_values: BTreeSet<u64>,
     /// Per open quorum read `(node, ctx)`: the highest slot applied anywhere
     /// when it opened (#260) — the floor its served prefix must reach — and
     /// the simulated ms it opened at.

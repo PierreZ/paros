@@ -446,6 +446,22 @@ impl FleetOps {
                 );
                 true
             }
+            InitRun::Refused(InitRefusal::Fleet(FleetRefusal::Retired { node })) => {
+                // A listed machine past the founders that an operator
+                // removed (#359): `init` registered it, and a drain removed
+                // it before the admission landed, so its id is a tombstone.
+                // A retired id never comes back; the operator's re-run lists
+                // a machine it removed (witness: the recipe
+                // 16995329085795718639 14013:17259961563028630674 on
+                // aff9a7e).
+                assert_always!(
+                    crate::machine::remove_asked(ctx.state(), node.0),
+                    "init: a listed machine is refused as retired only once an operator removed it",
+                    { "node" => node.0 }
+                );
+                assert_reachable!("init: a removed listed machine refuses init");
+                true
+            }
             InitRun::Refused(refusal) => {
                 assert_always!(
                     false,
