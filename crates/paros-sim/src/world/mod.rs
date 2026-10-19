@@ -968,7 +968,22 @@ pub(crate) fn parked_nodes(
 ) -> BTreeSet<String> {
     let world = storage_world_for(handle, journal);
     let guard = world.lock().unwrap_or_else(PoisonError::into_inner);
-    guard.parked.keys().cloned().collect()
+    // Only a park the process honors ([`StorageWorld::park_reason`]): a
+    // corruption park a boot reserved for a double fault its journal never
+    // judged (#351) is not one. That identity boots again and gives the
+    // verdict then, so the settle tail must wait for it like any live
+    // node. Witness 4423791662002375256 on d813220: node 2 rebooted at
+    // 59.9 s, its boot reserved the park, the kill at the injection's
+    // hint took it before the sync, chaos ended at 61.8 s, the probe took
+    // the reserved park for a dead node and settled without it at 62.8 s,
+    // and the final claim then judged it at the prefix it held, 8 of 20,
+    // while its restart was still due.
+    guard
+        .parked
+        .keys()
+        .filter(|ip| guard.park_reason(ip).is_some())
+        .cloned()
+        .collect()
 }
 
 /// The IPs of matchmakers whose registry was lost for good.

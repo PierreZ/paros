@@ -2280,9 +2280,14 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         // folded before the boot is judged (#190).
         self.world
             .note_registry_recovered(matchmaker, scalars, registry);
-        self.state()
-            .matchmaker
-            .recovered(matchmaker, set, phase, registry, gc_watermark);
+        self.state().matchmaker.recovered(
+            matchmaker,
+            set,
+            phase,
+            &scalars.pending,
+            registry,
+            gc_watermark,
+        );
     }
 
     fn matchmaker_in_flight(
