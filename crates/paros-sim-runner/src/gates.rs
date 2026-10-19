@@ -58,6 +58,22 @@ pub const RARE: &[Rare] = &[
         reason: "a tenant default configured with fewer batchers after its slots were booked, or a booked stateless machine leaving: fired in PR #698's earlier sweeps, missed by every shard on c593395 (#702 (batcher rare paths))",
     },
     Rare {
+        msg: "coordinator: a batcher leaves a machine that leaves",
+        reason: "a drained stateless machine that holds a tenant's batcher, released by a later coordinator term (the drain's session fences the current one): 0 drains in 300 hunt seeds, released after 2 of 2 drains under a tilted harness (#702 (batcher rare paths))",
+    },
+    Rare {
+        msg: "drain: an operator drains a batcher's machine",
+        reason: "needs an admitted stateless machine with a booked batcher and the drain coin: ran in 2 of 4 shards on 989aa2f (#702 (batcher rare paths))",
+    },
+    Rare {
+        msg: "batcher: a slot held more than one write",
+        reason: "two writes queued in one batcher lane before its flush: 1 check in 1 of 4 shards on 989aa2f (#702 (batcher rare paths))",
+    },
+    Rare {
+        msg: "unbatcher: a merged write is scattered",
+        reason: "a merged write of several writes answered and scattered: 1 check in 1 of 4 shards on 989aa2f (#702 (batcher rare paths))",
+    },
+    Rare {
         msg: "placement: a placement changed between the oracle's reads",
         reason: "a mode change or a move that records its placement and releases a slot between the oracle's two reads, in the tail: one witness, seed 4897247819957563398 on PR #683 (disk full) (#360 (disk full), #486)",
     },
