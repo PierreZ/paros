@@ -97,6 +97,9 @@ pub(crate) struct NodeAudit<T> {
     tenants: Option<Arc<Mutex<tenants::TenantBoard>>>,
     /// The run's machine board (#246), on a machine's own port.
     machines: Option<(Arc<Mutex<crate::machine::MachineBoard>>, paros::Address)>,
+    /// The run's state, on a machine's own port: where a wiped machine is
+    /// signaled healed (moonpool #344 (rolling wipes), `crate::machine::heal`).
+    wipes: Option<moonpool_sim::StateHandle>,
     /// The observer of the node's own client's calls (the cell
     /// coordinator's, #240), handed to `paros` through
     /// [`Audit::call_observer`].
@@ -150,6 +153,7 @@ impl<T: TimeProvider> NodeAudit<T> {
             system: None,
             tenants: None,
             machines: None,
+            wipes: None,
             calls: None,
             cut: None,
         }
@@ -176,13 +180,16 @@ impl<T: TimeProvider> NodeAudit<T> {
         self
     }
 
-    /// This port also reports a machine's lifecycle to `board` (#246).
+    /// This port also reports a machine's lifecycle to the machine board
+    /// of `state` (#246), and signals there when a wiped machine heals
+    /// (moonpool #344 (rolling wipes)).
     pub(crate) fn on_machines(
         mut self,
-        board: Arc<Mutex<crate::machine::MachineBoard>>,
+        state: &moonpool_sim::StateHandle,
         addr: paros::Address,
     ) -> Self {
-        self.machines = Some((board, addr));
+        self.machines = Some((crate::machine::machine_board(state), addr));
+        self.wipes = Some(state.clone());
         self
     }
 
@@ -1386,6 +1393,9 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
                 if let Some((mut board, plane)) = self.registry_board() {
                     board.folded(node, journal, seq, event, plane);
                 }
+                if let Some(state) = &self.wipes {
+                    crate::machine::registry_folded(state, journal, seq, event);
+                }
             }
             paros::system::SystemEvent::Tenant(event) => {
                 if let Some(board) = &self.tenants {
@@ -1403,8 +1413,25 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         verified: Option<bool>,
         state: &paros::system::Registry,
     ) {
+        // A machine that restored its fold from this checkpoint learns the
+        // tenants the cell dropped from it, never from a `TenantDropped`
+        // entry below it, and stops their journals (`rehost`). The board
+        // learns them the same way, so a dropped tenant's journals owe
+        // nothing: witness seed 17310756831146654209 on 3ab2df7, where every
+        // follower's read jumped over the drop to the checkpoint's run, two
+        // members stopped the tenant's control journal and the third, its
+        // store re-opened after a quarantine, never decided a slot.
+        if let Some(board) = &self.tenants {
+            let mut board = tenants::lock(board);
+            for tenant in state.dropped_tenants() {
+                board.tenant_dropped(tenant);
+            }
+        }
         if let Some((mut board, plane)) = self.registry_board() {
             board.checkpoint_folded(node, journal, (seq, verified), state, plane);
+        }
+        if let Some(run) = &self.wipes {
+            crate::machine::registry_restored(run, journal, seq, verified, state);
         }
     }
 
@@ -1830,6 +1857,9 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         let _ = addr;
         if let Some((board, rank_addr)) = &self.machines {
             crate::machine::booted(board, rank_addr, record);
+        }
+        if let (Some(state), None) = (&self.wipes, record) {
+            crate::machine::heal_wiped(state);
         }
     }
 
