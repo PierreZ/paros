@@ -54,6 +54,10 @@ pub const RARE: &[Rare] = &[
         reason: "a wide batched burst on a multi-writer created journal, sent to a batcher that started below the leader's limits: missed by PR #698's sweeps (#702 (batcher rare paths))",
     },
     Rare {
+        msg: "coordinator: a batcher slot is released to its count",
+        reason: "a tenant default configured with fewer batchers after its slots were booked, or a booked stateless machine leaving: fired in PR #698's earlier sweeps, missed by every shard on c593395 (#702 (batcher rare paths))",
+    },
+    Rare {
         msg: "placement: a placement changed between the oracle's reads",
         reason: "a mode change or a move that records its placement and releases a slot between the oracle's two reads, in the tail: one witness, seed 4897247819957563398 on PR #683 (disk full) (#360 (disk full), #486)",
     },
