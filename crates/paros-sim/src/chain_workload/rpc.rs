@@ -21,7 +21,8 @@ use paros::client::{
     TruncateOutcome, WriteOutcome, write_request,
 };
 use paros::{
-    Entry, JournalIdentifier, LeaderUuid, Read, Write, leader_from_proto, leader_uuid_from_proto,
+    Command, Control, Entry, JournalIdentifier, LeaderUuid, Read, Seq, Write, leader_from_proto,
+    leader_uuid_from_proto,
 };
 
 use crate::audit::{Attempt, Call, Seen};
@@ -58,6 +59,9 @@ pub(crate) struct CallLog {
     retries: Arc<Mutex<Retries>>,
     /// Each settlement started, by token: the write and when it started.
     settling: Arc<Mutex<Vec<(Call, u64)>>>,
+    /// The journal's audit, told every command this log's client sends it
+    /// (#652 (cross-journal check on every seed)).
+    audit: Option<Arc<crate::audit::AuditWorld>>,
 }
 
 /// The write operation open now, and the request each operation first sent.
@@ -88,6 +92,16 @@ impl CallLog {
             attempts,
             retries: Arc::default(),
             settling: Arc::default(),
+            audit: None,
+        }
+    }
+
+    /// This log also announces every command its client sends to `audit`,
+    /// its journal's: a slot of the journal may hold it (#652).
+    pub(crate) fn announcing(self, audit: Arc<crate::audit::AuditWorld>) -> Self {
+        Self {
+            audit: Some(audit),
+            ..self
         }
     }
 
@@ -137,6 +151,9 @@ impl CallObserver for CallLog {
     fn invoked(&self, attempt: Attempted<'_>) -> Option<u64> {
         if attempt.journal() != self.journal {
             return None;
+        }
+        if let (Some(audit), Some(command)) = (&self.audit, command_of(attempt)) {
+            audit.note_appended(command);
         }
         let call = match attempt {
             Attempted::Write(w) => write_call(w),
@@ -241,6 +258,25 @@ impl CallObserver for CallLog {
 
 /// A `Write` as the history records it: its fence, its position and one
 /// hash per record.
+/// The command hash (`paros::command_hash`) of an attempt that takes a
+/// slot (#652): a `Write`, a `Truncate` or a `SetLeader`, as the node
+/// proposes it; `None` for a `Read`.
+pub(crate) fn command_of(attempt: Attempted<'_>) -> Option<u64> {
+    let command = match attempt {
+        Attempted::Write(write) => return Some(super::deposed::write_hash(write)),
+        Attempted::Read(_) => return None,
+        Attempted::Truncate(t) => Control::Truncate {
+            leader: leader_uuid_from_proto(t.leader),
+            up_to: Seq(t.up_to),
+        },
+        Attempted::SetLeader(s) => Control::SetLeader {
+            new: leader_uuid_from_proto(s.new),
+            old: leader_from_proto(s.old),
+        },
+    };
+    Some(paros::command_hash(&Command::Control(command)))
+}
+
 fn write_call(write: &Write) -> Call {
     Call::Write {
         leader: leader_uuid_from_proto(write.leader),

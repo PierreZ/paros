@@ -515,6 +515,9 @@ impl Workload for ChainWorkload {
                 .chain([self.journal])
                 .collect();
             digest ^= crate::audit::check_every_world(ctx.state(), &judged);
+            // The cell coordinator's terms install in order (#653 (election
+            // term to installed leader)).
+            crate::audit::installs::check_installs(ctx.state());
         }
         // The histories `Announce` logged (#247): every client's library
         // calls at the registry, at the control journals of the cell the
@@ -774,7 +777,8 @@ impl ChainWorkload {
         let journal = self.journal;
         // Every attempt at this client's journal, logged at the RPC seam:
         // the library client reports each one to it (#221).
-        let log = CallLog::new(journal, client_id, ctx.time().clone());
+        let log = CallLog::new(journal, client_id, ctx.time().clone())
+            .announcing(audit_world_for(ctx.state(), journal));
         self.calls = Some(log.clone());
         let observer: Arc<dyn paros::client::CallObserver> = Arc::new(log.clone());
         let server_count = servers.len();
