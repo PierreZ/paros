@@ -46,6 +46,14 @@ pub struct Rare {
 /// window seldom reaches, #485 the double fault, #486 the rest.
 pub const RARE: &[Rare] = &[
     Rare {
+        msg: "batcher: a merged write over the leader's limits is split",
+        reason: "a batcher above the leader's limits whose merged write passes a small max_batch_records or max_batch_bytes knob: fired on PR #698's first sweep, missed by its later ones (#702 (batcher rare paths))",
+    },
+    Rare {
+        msg: "batcher: a write goes alone",
+        reason: "a wide batched burst on a multi-writer created journal, sent to a batcher that started below the leader's limits: missed by PR #698's sweeps (#702 (batcher rare paths))",
+    },
+    Rare {
         msg: "placement: a placement changed between the oracle's reads",
         reason: "a mode change or a move that records its placement and releases a slot between the oracle's two reads, in the tail: one witness, seed 4897247819957563398 on PR #683 (disk full) (#360 (disk full), #486)",
     },
