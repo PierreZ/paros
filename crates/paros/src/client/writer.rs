@@ -517,6 +517,25 @@ impl Writer {
         outcome
     }
 
+    /// Claim the journal over `old` only (#653 (election term to installed
+    /// leader), [`Client::claim_over`]): a read naming another leader is
+    /// lost. A writer that leads already re-claims as [`Writer::claim`]
+    /// does.
+    pub async fn claim_over<P: Providers>(
+        &mut self,
+        client: &Client<P>,
+        first: usize,
+        old: Option<LeaderUuid>,
+    ) -> ClaimOutcome {
+        let outcome = if self.owned {
+            client.reclaim(self.journal, self.mine, first).await
+        } else {
+            client.claim_over(self.journal, self.mine, old, first).await
+        };
+        self.claimed(&outcome);
+        outcome
+    }
+
     /// Write `records` at the tail as the leader: see [`Writer::write_entry`].
     /// Sends nothing when it leads no term.
     pub async fn write<P: Providers>(

@@ -117,7 +117,9 @@ use super::{CellPlan, ControlJournals, FormedCell, incarnation_from_halves};
 use crate::client::capacity::{CapacityAnswer, CapacityRequest};
 use crate::client::cell::CellSession;
 use crate::client::checkpoint::{CheckpointPolicy, Folder, LoadOutcome, load};
-use crate::client::election::{Candidate, Election, ElectionTunables, Leader, Step, hand_off};
+use crate::client::election::{
+    Candidate, Election, ElectionTunables, Leader, Step, hand_off, read_election,
+};
 use crate::client::fleet::{Interrupted, Stage, Step as FleetStep};
 use crate::client::journals::{JournalAnswer, JournalRequest};
 use crate::client::universe::{JoinAnswer, JoinRequest};
@@ -268,7 +270,38 @@ async fn open_term<P: Providers>(
     // derives the same matchmaker set").
     // `with_leader` keeps only the reached founders that are members.
     let mut session = CellSession::with_leader(journals, &members, founders, leader.uuid, policy);
-    match session.open(client, 0).await {
+    // A term installs only over a leader it judged (#653 (election term to
+    // installed leader)): read the cell journal's leader, then the election;
+    // a term the election moved past leads nothing, and the claim replaces
+    // only the leader read. A later term campaigns before it installs, so a
+    // leader read first that a later term installed is in the election read
+    // after. Without it, a deposed term whose fold still leads (its lease is
+    // its own clock's) read the next term's uuid and installed over it
+    // (witness 593093569845979540: term 8 over term 9 at slot 20).
+    let opened = match journals.election {
+        Some(election) => {
+            let Some(current) = client.journal_state(journals.cell, 0).await else {
+                return (TermDuty::Unavailable, None);
+            };
+            let Some(fold) = read_election(client, election, 0).await else {
+                return (TermDuty::Unavailable, None);
+            };
+            match fold.leader().map(|now| now.term) {
+                Some(term) if term > leader.term => {
+                    moonpool_assertions::reachable!(
+                        "coordinator: a term the election moved past installs nothing"
+                    );
+                    return (TermDuty::Refused, None);
+                }
+                Some(term) if term == leader.term => {}
+                // A fold behind the term this candidacy won: read again.
+                _ => return (TermDuty::Unavailable, None),
+            }
+            session.open_over(client, 0, current.leader).await
+        }
+        None => session.open(client, 0).await,
+    };
+    match opened {
         Ok(()) => {}
         Err(Interrupted::NotClaimed {
             outcome: ClaimOutcome::Lost { .. },
