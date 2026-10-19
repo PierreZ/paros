@@ -529,6 +529,18 @@ impl Watch {
             .maintenance()
             .map(|(scope, window)| (scope.clone(), window.seq))
             .collect();
+        // A window an operator replaced (a new entry over the same scope)
+        // runs from when this watch folds the new entry (#661 (maintenance
+        // windows)).
+        if self
+            .windows
+            .iter()
+            .any(|(scope, (seq, _))| open.get(scope).is_some_and(|now| now != seq))
+        {
+            moonpool_assertions::reachable!(
+                "coordinator: a replaced maintenance window restarts its clock"
+            );
+        }
         self.windows
             .retain(|scope, (seq, _)| open.get(scope) == Some(seq));
         for (scope, seq) in open {

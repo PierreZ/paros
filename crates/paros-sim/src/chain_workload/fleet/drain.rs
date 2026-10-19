@@ -25,14 +25,13 @@
 //! one that outlasts the run, under which no slot it held may move.
 
 use std::collections::BTreeSet;
-use std::time::Duration;
 
-use moonpool_sim::{RandomProvider, SimContext, TimeProvider, assert_reachable, buggify_with_prob};
+use moonpool_sim::{SimContext, assert_reachable, buggify_with_prob};
 use paros::NodeId;
 use paros::client::cell::{CellSession, Removal};
 use paros::client::checkpoint::CheckpointPolicy;
 use paros::machine::Class;
-use paros::system::{BookingTarget, MaintenanceScope, NodeStanding, Registry, Role};
+use paros::system::{BookingTarget, NodeStanding, Registry, Role};
 
 use super::FleetOps;
 
@@ -128,8 +127,11 @@ impl FleetOps {
         let node = admitted[usize::try_from(draw % admitted.len() as u64).unwrap_or(0)];
         if gone {
             // A window first, on a coin, then the machine goes down (#475).
-            if buggify_with_prob!(0.75) {
-                self.maintain(ctx, &mut session, (&cell.client, first), node)
+            if buggify_with_prob!(0.75)
+                && let Some(scope) = super::windows::scope_of(&session, node)
+            {
+                let for_ms = super::windows::window_ms(ctx);
+                self.send_window(ctx, &mut session, (&cell.client, first), scope, for_ms)
                     .await;
             }
             if crate::machine::request_gone(ctx.state(), node.0) {
@@ -168,60 +170,7 @@ impl FleetOps {
             }
         }
     }
-
-    /// Open a maintenance window over machine `node` or its zone (#359),
-    /// through `session`: on a coin a short one, which ends while the
-    /// machine is down, else one that outlasts the run.
-    async fn maintain(
-        &mut self,
-        ctx: &SimContext,
-        session: &mut CellSession,
-        (client, first): (&crate::client::ChainClient, usize),
-        node: NodeId,
-    ) {
-        let registry = session.registry();
-        let Some(zone) = registry.get(node).map(|n| n.locality.zone.clone()) else {
-            return;
-        };
-        let slots: Vec<(u64, BookingTarget)> = registry
-            .bookings()
-            .filter(|(_, b)| b.node == node)
-            .map(|(id, b)| (id, b.target))
-            .collect();
-        let scope = if buggify_with_prob!(0.5) {
-            assert_reachable!("drain: an operator puts a zone in maintenance");
-            MaintenanceScope::Zone(zone)
-        } else {
-            MaintenanceScope::Machine(node)
-        };
-        let short = buggify_with_prob!(0.5);
-        let length = if short {
-            Duration::from_millis(1_000 + ctx.random().random_range(0..3_000))
-        } else {
-            LONG_WINDOW
-        };
-        let sent = ctx.time().now();
-        let for_ms = u64::try_from(length.as_millis()).unwrap_or(u64::MAX);
-        if let Ok(true) = session.maintenance(client, first, scope, for_ms).await {
-            assert_reachable!("drain: an operator opens a maintenance window");
-            tracing::info!(node = node.0, for_ms, "maintenance_opened");
-            // A zone window covers every machine of the zone; the oracle
-            // judges the one the operator watches.
-            crate::machine::note_maintenance(
-                ctx.state(),
-                crate::machine::MaintenanceNote {
-                    node: node.0,
-                    sent,
-                    length,
-                    slots,
-                },
-            );
-        }
-    }
 }
-
-/// A maintenance window that outlasts every run (#359).
-const LONG_WINDOW: Duration = Duration::from_secs(3_600);
 
 /// Whether `node` holds a journal's slot, or a matchmaker set's (#501
 /// (matchmaker sets off the founders)), that another storage machine could

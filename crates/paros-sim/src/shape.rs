@@ -2866,6 +2866,33 @@ pub(crate) fn longest_election_lease(state: &StateHandle) -> Duration {
         .unwrap_or(Duration::ZERO)
 }
 
+/// The longest `machine_down_after` any node booted under so far (#654
+/// (live machine marked down)). Zero before any boot.
+pub(crate) fn longest_down_after(state: &StateHandle) -> Duration {
+    let registry = registry(state);
+    let guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    guard
+        .nodes
+        .values()
+        .map(|entry| entry.shape.tunables.machine_down_after)
+        .max()
+        .unwrap_or(Duration::ZERO)
+}
+
+/// The longest `internal_request_timeout` any node booted under so far
+/// (#654 (live machine marked down)): how long a cell coordinator's
+/// `Identify` may wait. Zero before any boot.
+pub(crate) fn longest_internal_timeout(state: &StateHandle) -> Duration {
+    let registry = registry(state);
+    let guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    guard
+        .nodes
+        .values()
+        .map(|entry| entry.shape.tunables.internal_request_timeout)
+        .max()
+        .unwrap_or(Duration::ZERO)
+}
+
 /// The longest re-placement bound any node booted under so far (#475
 /// (re-place after the Down bound)): a cell coordinator may wait that long
 /// before it re-places a machine's roles. Zero before any boot.

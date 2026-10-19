@@ -52,6 +52,15 @@ impl FleetOps {
         {
             return;
         }
+        // On its own location, on any seed, a maintenance window (#661
+        // (maintenance windows)): opened, opened again or ended.
+        if self.admitting.is_none()
+            && replaced.is_none()
+            && buggify_with_prob!(0.15)
+            && self.window_step(ctx, policy, draw).await
+        {
+            return;
+        }
         let founders = self.layout.founders;
         // On a second-cell seed (#232 (multiple cells)) the last machine is
         // the second cell's.

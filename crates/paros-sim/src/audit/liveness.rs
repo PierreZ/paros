@@ -54,6 +54,13 @@ impl JudgedRegistry {
         self.restored || self.ever_down.contains(&id)
     }
 
+    /// Whether a `MachineDown` named machine `id` in the history folded:
+    /// one the coordinator marked down and the fold saw (#654 (live
+    /// machine marked down)).
+    pub(crate) fn seen_down(&self, id: NodeId) -> bool {
+        self.ever_down.contains(&id)
+    }
+
     /// The registry folded so far.
     pub(crate) fn registry(&self) -> &Registry {
         &self.registry
