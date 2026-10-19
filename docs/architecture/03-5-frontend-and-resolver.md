@@ -136,7 +136,11 @@ key, and may be refused as `invalid_token` until the frontend read it.
 
 **Trust** (decided on 2026-10-04). The boundary is the network: only frontends and peers reach
 a node's journals (a separate network in the Compose toy; a client reaches a machine only for the
-well-known `Resolve` call, section 3.2), and nodes do no authorization.
+well-known `Resolve` call, section 3.2), and nodes do no authorization. The Compose toy shows the whole
+bootstrap (decided on 2026-10-19): its tool services are people, `issuer` (the root private key,
+no network), `admin` (the `admin` token, on the machines' `internal` network) and `acme` (a
+`tenant` token, on a `public` network that reaches the frontend only), and every machine pins the
+root public key, so the key comes before the machines.
 
 **Tokens are Biscuits** (decided on 2026-10-04, #245; JWT is in section 11). paros is its own
 issuer: a root key pair, Ed25519, whose public half (with its root key id) is recorded in the

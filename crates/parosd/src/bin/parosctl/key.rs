@@ -31,6 +31,10 @@ enum KeyCommand {
         /// The directory to write to.
         #[arg(long)]
         out: PathBuf,
+        /// The directory for `<label>.public`, when the public half goes
+        /// elsewhere than the private one (the machines' copy).
+        #[arg(long)]
+        public_out: Option<PathBuf>,
         /// The key pair's name, e.g. `prod-2026-10`: letters, digits, `.`,
         /// `_` and `-`. It names the files and the key in every output.
         #[arg(long, value_parser = parse_label)]
@@ -102,7 +106,11 @@ fn public_json(key: &RootPublicKey) -> serde_json::Value {
 
 pub fn run(out: &Printer, args: KeyArgs) -> Ending {
     let result = match args.command {
-        KeyCommand::Generate { out: dir, label } => generate(out, &dir, &label),
+        KeyCommand::Generate {
+            out: dir,
+            public_out,
+            label,
+        } => generate(out, &dir, public_out.as_deref().unwrap_or(&dir), &label),
         KeyCommand::Show { file } => read(&file)
             .and_then(|text| RootPublicKey::from_file(&text).map_err(|e| e.to_string()))
             .map(|key| {
@@ -121,10 +129,10 @@ pub fn run(out: &Printer, args: KeyArgs) -> Ending {
     }
 }
 
-fn generate(out: &Printer, dir: &Path, label: &str) -> Result<(), String> {
+fn generate(out: &Printer, dir: &Path, public_dir: &Path, label: &str) -> Result<(), String> {
     let key = RootKey::generate(label, &entropy());
     let private = dir.join(format!("{label}.private"));
-    let public = dir.join(format!("{label}.public"));
+    let public = public_dir.join(format!("{label}.public"));
     if public.exists() {
         return Err(format!("{}: already exists", public.display()));
     }

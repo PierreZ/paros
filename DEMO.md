@@ -12,115 +12,189 @@ Human output prints ids as short hex, like git; `--json` prints them whole.
 ## With Docker Compose
 
 Needs Docker with the Compose plugin; nothing else (the image is a plain Rust build).
-A rebuilt image does not read volumes an older build wrote (no upgrades until M13, #363 (upgrades)). If every machine exits 78 with `machine record: ...`, run `docker compose down -v` first, then `up -d --build` and `init` again.
+
+Three people run the demo, and each is a Compose tool service, so the first word of a command
+says who acts:
+
+| service | who | holds | reaches |
+|---|---|---|---|
+| `issuer` | the key holder | the root private key (`/secrets`, its own volume) | nothing: it works offline, with no network |
+| `admin` | the operator | an `admin` token | the machines (network `internal`) |
+| `acme` | the tenant `acme` | its `tenant` token | the frontend only (network `public`) |
+
+The machines pin the root public key at their start (#245 (Biscuit tokens)), so the key comes
+first. The frontend holds no key: it reads the keys `init` writes in the universe. Set the
+aliases once per shell.
+
+Bash or zsh:
 
 ```sh
-# Five machines: node1..node3 (storage, zones a/b/c), storage4, stateless1 (stateless).
+alias issuer='docker compose run --rm issuer'
+alias admin='docker compose run --rm admin'
+alias acme='docker compose run --rm acme'
+```
+
+Fish:
+
+```fish
+alias issuer 'docker compose run --rm issuer'
+alias admin 'docker compose run --rm admin'
+alias acme 'docker compose run --rm acme'
+```
+
+The commands below work in both shells.
+
+```sh
+# 1. The key holder, offline, before any machine exists: the root key pair (the public half
+#    goes to the volume the machines read), then the operator's admin token.
+issuer key generate --label root-1 --out /secrets --public-out /public
+issuer token mint --key /secrets/root-1.private --role admin --subject operator --ttl 12h \
+  --out /tokens/admin.token
+issuer token inspect --token-file /tokens/admin.token
+
+# 2. Five machines, each pinned to root-1: node1..node3 (storage, zones a/b/c), storage4,
+#    stateless1 (stateless), and the frontend.
 docker compose up -d --build
 
-# Form the cell over node1..node3, register the fleet and the fleet tenant. Prints one line:
-#   initialized fleet=… cell=… coordinator=… members=3 control=id:T/J election=id:T/J fleet_control=id:T/J steps=…
-docker compose run --rm init
+# 3. The operator forms the cell over node1..node3 with its token. The universe records root-1,
+#    which the frontend will check every token against. Prints one line:
+#   initialized universe=… cell=… coordinator=… members=[…] steps=FormFleet,AddRootKey,AddCell,CellReady
+admin init --members node1:4500,node2:4500,node3:4500 --root-public-key /public/root-1.public
+admin universe key list
 
-# A tenant, then a journal in it (#210). The tenant coordinator draws the journal's id and
-# picks its members from its durability (`--failures-per-partition 1 --partitions 1` by
-# default: three acceptors in one acceptor partition). Prints:
-#   created journal=id:T/J members=…
-docker compose run --rm parosctl tenant create acme
-docker compose run --rm parosctl journal create acme orders
-J=acme/orders
+# 4. A tenant, then a journal in it (#210). The tenant coordinator draws the journal's id and
+#    picks its members from its durability (`--failures-per-partition 1 --partitions 1` by
+#    default: three acceptors in one acceptor partition). Prints:
+#   created journal=acme/orders members=…
+admin tenant create acme
+admin journal create acme orders
 
-# Write and read the journal. `--leader 7` claims the journal under the leader
-# uuid 7 (a uuid is drawn when absent), then writes at the tail.
-docker compose run --rm parosctl write "$J" hello world --leader 7
-docker compose run --rm parosctl read "$J"
+# 5. A tenant creation returns no token: the key holder mints the tenant's, offline.
+issuer token mint --key /secrets/root-1.private --role tenant --tenant acme \
+  --subject orders-service --ttl 12h --out /tokens/acme.token
+
+# 6. The tenant writes and reads through the frontend, by name. `--leader 7` claims the
+#    journal under the leader uuid 7 (a uuid is drawn when absent), then writes at the tail.
+acme write acme/orders hello world --leader 7
+acme read acme/orders
 # A page of at most one record; at the tail, wait up to 2 s for a new one (each node caps
 # the wait at its PAROS_MAX_WAIT_MS, 1 s by default).
-docker compose run --rm parosctl read "$J" --limit 1
-docker compose run --rm parosctl read "$J" --from 2 --wait-ms 2000
+acme read acme/orders --limit 1
+acme read acme/orders --from 2 --wait-ms 2000
+
+# 7. What a token does not allow (each exit 3). acme's token on another tenant: forbidden.
+admin tenant create globex
+admin journal create globex ledger
+acme read globex/ledger
+# The tenant narrows its own token, with no key: read-only, journal `orders` only.
+acme token derive --token-file /tokens/acme.token --read-only --journal orders \
+  --out /tokens/acme-ro.token
+acme token inspect --token-file /tokens/acme-ro.token
+acme --token-file /tokens/acme-ro.token read acme/orders
+acme --token-file /tokens/acme-ro.token write acme/orders nope --leader 7
+# A tenant token cannot put a machine in the cell: the pinned machine refuses it.
+admin --token-file /tokens/acme.token cell add-machine storage4:4500
+# And the tenant cannot reach a machine at all: `node1` does not resolve on its network.
+acme --servers node1:4500 inspect
 
 # Supersede the writer: uuid 8 takes the journal, and uuid 7 is refused from now on (exit 3).
-docker compose run --rm parosctl set-leader "$J" --new 8
-docker compose run --rm parosctl write "$J" stale --leader 7 --no-claim
-docker compose run --rm parosctl write "$J" fresh --leader 8
+acme set-leader acme/orders --new 8
+acme write acme/orders stale --leader 7 --no-claim
+acme write acme/orders fresh --leader 8
 
 # Ask any machine which references serve a tenant (#216): the client's first call. Prints:
 #   tenant=acme universe=… cell=… machines=node1:4500,node2:4500,node3:4500
-docker compose run --rm parosctl resolve acme
+admin resolve acme
 
 # Tenants: created once (a second create of a name is refused).
-docker compose run --rm parosctl tenant create globex --survives region
-docker compose run --rm parosctl tenant list
+admin tenant create initech --survives region
+admin tenant list
 
 # A tenant's journals: a second create of a live name is refused (exit 3), a delete is a
 # tombstone, and the list shows both.
-docker compose run --rm parosctl journal create acme events --writers multi
-docker compose run --rm parosctl journal create acme events
+admin journal create acme events --writers multi
+admin journal create acme events
 # A journal whose stores sync once per commit instead of twice (#599): fixed at create.
-docker compose run --rm parosctl journal create acme clicks --store-durability batched
-docker compose run --rm parosctl journal delete acme events
-docker compose run --rm parosctl journal list acme
+admin journal create acme clicks --store-durability batched
+admin journal delete acme events
+admin journal list acme
 
 # Change a journal's durability after its create (#214 (tenant modes)): FDB's `configure`.
 # The tenant coordinator books the new slots, reconfigures the journal and releases the old
-# ones; `parosctl tenant show acme` shows the new acceptors once it is done. Without
+# ones; `admin tenant show acme` shows the new acceptors once it is done. Without
 # `--journal`, it changes the tenant's default, which a create with no durability takes.
-docker compose run --rm parosctl configure --tenant acme --journal orders --partitions 3 --failures-per-partition 0
-docker compose run --rm parosctl configure --tenant acme --failures-per-partition 1
+admin configure --tenant acme --journal orders --partitions 3 --failures-per-partition 0
+admin configure --tenant acme --failures-per-partition 1
 
-# Admit the two idle machines into the cell (#216): each is registered in the cell
-# control journal, then records its cell. A re-run prints `unchanged`.
-docker compose run --rm parosctl cell add-machine storage4:4500
-docker compose run --rm parosctl cell add-machine stateless1:4500
+# Admit the two idle machines into the cell (#216), with the admin token: each is registered
+# in the cell control journal, then records its cell. A re-run prints `unchanged`.
+admin cell add-machine storage4:4500
+admin cell add-machine stateless1:4500
 
 # The cell, as tables (#399): its machines, its tenants, who holds which role.
-docker compose run --rm parosctl machine list
-docker compose run --rm parosctl cell show
-docker compose run --rm parosctl tenant show acme
-docker compose run --rm parosctl roles --tenant acme
+admin machine list
+admin cell show
+admin tenant show acme
+admin roles --tenant acme
 
 # The same tenant in its own scope: only its spread over the cell. Any other view is refused.
-docker compose run --rm parosctl --as-tenant acme tenant show acme
-docker compose run --rm parosctl --as-tenant acme cell show
+admin --as-tenant acme tenant show acme
+admin --as-tenant acme cell show
 
 # What each machine is (node id, cell, control journals), then its view of the journal.
-docker compose run --rm parosctl inspect
-docker compose run --rm parosctl inspect --journal "$J"
+admin inspect
+admin inspect --journal acme/orders
 
 # Kill a machine and keep writing (a majority is left), then bring it back.
 docker compose kill node2
-docker compose run --rm parosctl write "$J" still here --leader 8
+acme write acme/orders still here --leader 8
 docker compose start node2
 
 # Maintenance, drain and removal (#359). A window keeps the roles of a machine that goes
 # down while it is open (the coordinator re-places them past `machine_replace_after`
 # otherwise, #475). `--for 0` ends it. Then drain the admitted machine: once
 # `machine list` shows it `drained`, remove it for good.
-docker compose run --rm parosctl cell maintenance storage4 --for 30m
-docker compose run --rm parosctl cell maintenance storage4 --for 0
-docker compose run --rm parosctl cell drain-machine storage4
-docker compose run --rm parosctl machine list
-docker compose run --rm parosctl cell remove-machine storage4
+admin cell maintenance storage4 --for 30m
+admin cell maintenance storage4 --for 0
+admin cell drain-machine storage4
+admin machine list
+admin cell remove-machine storage4
 
-# Bench (#517, #194): closed-loop clients write the journals bench-0..bench-3 of tenant
+# Rotate the root key: add the next key, sign new tokens with it, then remove the old one once
+# its tokens expired. A token file is written once: remove the old one first.
+issuer key generate --label root-2 --out /secrets --public-out /public
+admin universe key add /public/root-2.public
+docker compose run --rm --entrypoint rm issuer /tokens/acme.token
+issuer token mint --key /secrets/root-2.private --role tenant --tenant acme \
+  --subject orders-service --ttl 12h --out /tokens/acme.token
+acme write acme/orders rotated --leader 8
+admin universe key remove root-1
+
+# Bench (#517, #194): closed-loop clients write the journals bench-3x1-0..bench-3x1-3 of tenant
 # `bench` (both created when missing) and print throughput and latency per call each
-# second, then the totals. Ctrl-C stops it and still prints the totals. Add
-# `--mix write=80,read-tail=20` for reads that check every byte, `--rate 200` for an open
-# loop, `--histograms /tmp/h.json` for the raw histograms. Numbers compare runs on the same
-# machine. `parosctl bench --local 3` runs without Compose, on a cell in its own process.
-docker compose run --rm parosctl bench --tenant bench --journals 4 --clients 8 --duration 60s --ramp 10s
+# second, then the totals. It runs as the operator, straight to the machines. Ctrl-C stops
+# it and still prints the totals. Add `--mix write=80,read-tail=20` for reads that check
+# every byte, `--rate 200` for an open loop, `--histograms /tmp/h.json` for the raw
+# histograms. Numbers compare runs on the same machine. `parosctl bench --local 3` runs
+# without Compose, on a cell in its own process.
+admin bench --tenant bench --journals 4 --clients 8 --duration 60s --ramp 10s
 
-# Logs, and tear everything down (volumes included).
+# Logs, and tear everything down (volumes included: the keys and the tokens too).
 docker compose logs node1
 docker compose down -v
 ```
 
-Add `--json` after `parosctl` for machine-readable output, e.g.
-`docker compose run --rm parosctl --json tenant list`.
+Add `--json` after the service name for machine-readable output, e.g. `admin --json tenant list`.
 
 The journal `orders` is single-writer: a writer must hold the current leader uuid. The
 four calls, the two writer modes and the limits are on the site's journal API page
 (`website/zola/content/parosd/journal-api.md`).
+
+A rebuilt image does not read volumes an older build wrote (no upgrades until M13, #363
+(upgrades)). If every machine exits 78 with `machine record: ...`, run `docker compose down -v`
+first, then start again from step 1. A machine that exits 2 at its start with
+`PAROS_ROOT_PUBLIC_KEY /public/root-1.public: No such file` started before step 1: run step 1,
+then `docker compose up -d` again.
 
 ## Locally, without Docker
 

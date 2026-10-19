@@ -21,16 +21,37 @@ From a fresh clone, Docker alone (the image is a plain multi-stage Rust build,
 the one build outside Nix):
 
 ```sh
-docker compose up -d --build        # five machines; each formats and waits
-docker compose run --rm init        # forms the cell
-docker compose run --rm parosctl tenant create acme
-docker compose run --rm parosctl journal create acme orders
-docker compose run --rm parosctl write acme/orders hello world --leader 7
-docker compose run --rm parosctl read acme/orders
+alias issuer='docker compose run --rm issuer' admin='docker compose run --rm admin' \
+  acme='docker compose run --rm acme'
+issuer key generate --label root-1 --out /secrets --public-out /public
+issuer token mint --key /secrets/root-1.private --role admin --subject operator --ttl 12h \
+  --out /tokens/admin.token
+docker compose up -d --build        # five machines, pinned to root-1; each formats and waits
+admin init --members node1:4500,node2:4500,node3:4500 --root-public-key /public/root-1.public
+admin tenant create acme
+admin journal create acme orders
+issuer token mint --key /secrets/root-1.private --role tenant --tenant acme \
+  --subject orders-service --ttl 12h --out /tokens/acme.token
+acme write acme/orders hello world --leader 7     # through the frontend
+acme read acme/orders
 ```
 
 `docker-compose.yml` runs one cell of five `parosd` machines over three failure
-domains, every one the same image configured by `PAROS_*` variables alone:
+domains, every one the same image configured by `PAROS_*` variables alone, and a
+frontend (`paros-frontend`, port 4600). Three tool services (profile `tools`) are the
+people who run it:
+
+| service | who | volumes | network |
+|---|---|---|---|
+| `issuer` | the key holder: `parosctl key` and `token`, offline | `secrets` (the private keys, here only), `public`, `tokens` | none |
+| `admin` | the operator: `PAROS_TOKEN_FILE=/tokens/admin.token`, `--servers members:4500` | `public`, `tokens` (read-only) | `internal` |
+| `acme` | the tenant `acme`: `PAROS_TOKEN_FILE=/tokens/acme.token`, `--frontends frontend:4600` | `tokens` | `public` |
+
+The machines and the frontend are on `internal`; the frontend is on `public` too. So a
+tenant reaches the frontend and no machine: the trust boundary of section 3.5
+(`docs/architecture/03-5-frontend-and-resolver.md`). Every machine mounts `public`
+read-only and pins `PAROS_ROOT_PUBLIC_KEY=/public/root-1.public` (#245 (Biscuit tokens)):
+a machine started before `issuer key generate` stops with exit 2.
 
 | machine | class | zone | role today |
 |---|---|---|---|
@@ -45,8 +66,8 @@ configured with **no peer**: no seed, no join list. On its first start it
 **mints its `node_id`** at random and records it in its data directory (there
 is no `PAROS_ID`), then waits, idle. A machine never forms a cell on its own.
 
-**Init.** `parosctl --servers members:4500 init --members
-node1:4500,node2:4500,node3:4500` runs `cell init` over the **founding
+**Init.** `admin init --members node1:4500,node2:4500,node3:4500
+--root-public-key /public/root-1.public` runs `cell init` over the **founding
 members** (`--members`, by default the servers), each named by its advertised
 address (#257). It sends `CellInit` to the first member still
 idle, and that machine drives a single-decree Paxos on the cell plan, every
@@ -129,10 +150,12 @@ unique prefix of an id `parosctl` can list, or all 16 digits. Human output print
 hex, widened when two ids of one listing share a prefix; `--json` prints ids whole. A node id given on the command line
 (`retire --node`, `reconfigure --members`, `ID=HOST:PORT`) is hex too.
 
-**Write and read.** `parosctl` is handed addresses only: `--servers members:4500`
+**Write and read.** `admin` is handed addresses only: `--servers members:4500`
 stands for every founding member, and each server's node id is learned from its own
-`Inspect`. The writer claims the journal on its way (`SetLeader` against the
-generation it read), then writes at the tail.
+`Inspect`. `acme` is handed the frontend only, and names the journal by name: the
+frontend checks its token, resolves the name and forwards the call. The writer claims
+the journal on its way (`SetLeader` against the generation it read), then writes at
+the tail.
 
 **Kill and restart.** `docker compose kill node2` (a storage machine) and
 `docker compose kill stateless1` (a stateless one): the journal keeps a majority and
@@ -140,7 +163,7 @@ keeps taking writes. `docker compose start node2` brings the machine back as an
 existing member: same `node_id`, same stores. There is no restart policy on
 purpose: exit 78 means an operator must act.
 
-**Supersede a writer.** `parosctl set-leader acme/orders --new 8` takes the journal;
+**Supersede a writer.** `acme set-leader acme/orders --new 8` takes the journal;
 the first leader's writes and truncations are refused from then on
 (`superseded`, exit 3), and the new leader's `truncate --up-to N --leader 8`
 applies.
@@ -155,7 +178,7 @@ applies.
 - *the whole volume* (`docker compose rm -sf node2 && docker volume rm
   paros_node2 && docker compose up -d node2`): the machine comes back as a **new
   machine** with a new `node_id`, and waits. It never rejoins as the old one: an
-  `init` sent to it (`docker compose run --rm --entrypoint parosctl parosctl
+  `init` sent to it (`docker compose run --rm --entrypoint parosctl admin
   --servers node2:4500 init --members members:4500`) finishes the plan the other
   members hold, which names the old machine at that address: the cell keeps
   serving on the two members that kept their disks, and the new machine stays

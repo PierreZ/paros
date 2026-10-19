@@ -22,10 +22,11 @@ Each machine is the shipped `parosd` code. Its stores go in a new directory unde
 the directory when the run ends. Choose `--local-dir` on the disk you want to measure: a
 temporary directory is often in memory (`tmpfs`).
 
-Against a running cell, such as the Compose cell (`DEMO.md` in the repository):
+Against a running cell, such as the Compose cell (`DEMO.md` in the repository), as its `admin`
+tool service, which reaches the machines:
 
 ```sh
-docker compose run --rm parosctl bench --tenant bench --journals 4 --clients 8 --duration 60s --ramp 10s
+docker compose run --rm admin bench --tenant bench --journals 4 --clients 8 --duration 60s --ramp 10s
 ```
 
 The bench creates the tenant and the journals `bench-3x1-0` to `bench-3x1-3` if they are
@@ -58,7 +59,7 @@ A `--local` cell is new for each run. On a running cell, give each mode its own 
 
 ```sh
 parosctl bench --local 3 --store-durability batched
-docker compose run --rm parosctl bench --tenant bench-batched --store-durability batched
+docker compose run --rm admin bench --tenant bench-batched --store-durability batched
 ```
 
 ## What it does

@@ -19,7 +19,8 @@ parosctl token mint --key keys/prod-1.private --role tenant --tenant acme --ttl 
 ```
 
 The `.private` file has mode 0600: keep it secret. The `.public` file is the half that every
-process checks a token with. There are two roles:
+process checks a token with. `--public-out DIR` writes the `.public` file to another directory,
+so the copy for the machines is never next to the private key. There are two roles:
 
 - An `admin` token administers the universe: `init`, cells, machines and tenants.
 - A `tenant` token reads and writes the journals of one tenant, by name.
@@ -83,3 +84,19 @@ to stop a token, remove its key.
   `PAROS_ROOT_PUBLIC_KEY`.
 - The cell coordinator finishes an admission that an operator left in flight. It has no token,
   so a pinned machine refuses it. Run `cell add-machine` again with your token.
+
+## In the Compose demo
+
+The Compose demo (`DEMO.md` in the repository) shows each step. Three tool services are the
+three people: `issuer` holds the private key and has no network, `admin` holds the `admin`
+token and reaches the machines, and `acme` holds the tenant's token and reaches only the
+frontend. The key comes first, because the machines pin it at their start:
+
+```sh
+docker compose run --rm issuer key generate --label root-1 --out /secrets --public-out /public
+docker compose run --rm issuer token mint --key /secrets/root-1.private --role admin \
+  --subject operator --ttl 12h --out /tokens/admin.token
+docker compose up -d --build
+docker compose run --rm admin init --members node1:4500,node2:4500,node3:4500 \
+  --root-public-key /public/root-1.public
+```

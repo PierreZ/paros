@@ -39,15 +39,23 @@ acceptors ever choose different values.
 
 ## Run it
 
-A cell of five machines with Docker alone, from a fresh clone:
+A cell of five machines and a frontend with Docker alone, from a fresh clone. Three tool
+services act: `issuer` holds the root key, `admin` is the operator, `acme` is a tenant that
+reaches only the frontend ([`DEMO.md`](DEMO.md) has the whole demo and shell aliases):
 
 ```sh
+docker compose run --rm issuer key generate --label root-1 --out /secrets --public-out /public
+docker compose run --rm issuer token mint --key /secrets/root-1.private --role admin \
+  --subject operator --ttl 12h --out /tokens/admin.token
 docker compose up -d --build
-docker compose run --rm init
-docker compose run --rm parosctl tenant create acme
-docker compose run --rm parosctl journal create acme orders   # prints journal=T/J
-docker compose run --rm parosctl write T/J hello world --leader 7
-docker compose run --rm parosctl read T/J
+docker compose run --rm admin init --members node1:4500,node2:4500,node3:4500 \
+  --root-public-key /public/root-1.public
+docker compose run --rm admin tenant create acme
+docker compose run --rm admin journal create acme orders
+docker compose run --rm issuer token mint --key /secrets/root-1.private --role tenant \
+  --tenant acme --subject orders-service --ttl 12h --out /tokens/acme.token
+docker compose run --rm acme write acme/orders hello world --leader 7
+docker compose run --rm acme read acme/orders
 ```
 
 Every session can run over TLS, mutual by default: `parosctl tls init` writes the
