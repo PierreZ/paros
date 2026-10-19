@@ -234,6 +234,9 @@ pub(super) struct FleetOps {
     /// The tenants where a create the cell had no slot for was refused
     /// (#212 (placement)), until this client's next create there is placed.
     refused: BTreeSet<TenantId>,
+    /// The tenants whose default this client configured with batchers on
+    /// a batchers seed (#145 (batchers), `crate::shape::batchers`).
+    batchers_named: BTreeSet<TenantId>,
     /// The replaced-founder scenario's steps this operator took (#423).
     replaced: replaced::Steps,
     /// The single-writer journals this client created (#215 (zones)): on a
@@ -294,6 +297,7 @@ impl FleetOps {
             journal_pending: None,
             journal_names: BTreeMap::new(),
             refused: BTreeSet::new(),
+            batchers_named: BTreeSet::new(),
             created_single: Vec::new(),
             replaced: replaced::Steps::default(),
             frontend_cold: false,

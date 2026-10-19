@@ -922,6 +922,9 @@ struct Registry {
     /// Run-level: whether the run draws the cold-rot scenario (see
     /// [`cold_rot`]), fixed by the first caller.
     cold_rot: Option<bool>,
+    /// Run-level: whether the run draws the batchers scenario (see
+    /// [`batchers`]), fixed by the first caller.
+    batchers: Option<bool>,
     /// Run-level: whether the run draws the second-cell scenario (see
     /// [`second_cell`]), fixed by the first caller.
     second_cell: Option<bool>,
@@ -1283,11 +1286,13 @@ pub(crate) fn wiped_founder(state: &StateHandle) -> bool {
 /// comes back under a new name is (#349).
 #[tracing::instrument(level = "debug", skip_all)]
 pub(crate) fn moved_founder(state: &StateHandle) -> bool {
+    // Drawn before the lock: the scenario takes the registry's lock too.
+    let batchers = batchers(state);
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     *guard
         .moved_founder
-        .get_or_insert_with(|| moonpool_sim::buggify_with_prob!(1.0))
+        .get_or_insert_with(|| !batchers && moonpool_sim::buggify_with_prob!(1.0))
 }
 
 /// Whether the run draws the **replaced-founder scenario** (#423): drawn
@@ -1310,7 +1315,7 @@ pub(crate) fn moved_founder(state: &StateHandle) -> bool {
 #[tracing::instrument(level = "debug", skip_all)]
 pub(crate) fn replaced_founder(state: &StateHandle) -> bool {
     // Drawn before the lock: the scenarios take the registry's lock too.
-    let other = wiped_founder(state) || moved_founder(state);
+    let other = wiped_founder(state) || moved_founder(state) || batchers(state);
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     *guard
@@ -1340,7 +1345,8 @@ pub(crate) fn downed_founder(state: &StateHandle) -> bool {
     let other = wiped_founder(state)
         || moved_founder(state)
         || replaced_founder(state)
-        || zone_outage(state);
+        || zone_outage(state)
+        || batchers(state);
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     *guard
@@ -1372,7 +1378,8 @@ pub(crate) fn downed_founder(state: &StateHandle) -> bool {
 #[tracing::instrument(level = "debug", skip_all)]
 pub(crate) fn zone_outage(state: &StateHandle) -> bool {
     // Drawn before the lock: the scenarios take the registry's lock too.
-    let other = wiped_founder(state) || moved_founder(state) || replaced_founder(state);
+    let other =
+        wiped_founder(state) || moved_founder(state) || replaced_founder(state) || batchers(state);
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     *guard.zone_outage.get_or_insert_with(|| {
@@ -1412,7 +1419,8 @@ pub(crate) fn drained_machine(state: &StateHandle) -> bool {
     let other = moved_founder(state)
         || replaced_founder(state)
         || downed_founder(state)
-        || zone_outage(state);
+        || zone_outage(state)
+        || batchers(state);
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     *guard.drained_machine.get_or_insert_with(|| {
@@ -1463,12 +1471,12 @@ pub(crate) fn gone_machine(state: &StateHandle) -> bool {
 #[tracing::instrument(level = "debug", skip_all)]
 pub(crate) fn changed_mode(state: &StateHandle) -> bool {
     // Drawn before the lock: the scenarios take the registry's lock too.
-    let drained = drained_machine(state);
+    let other = drained_machine(state) || batchers(state);
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     *guard
         .changed_mode
-        .get_or_insert_with(|| !drained && moonpool_sim::buggify_with_prob!(1.0))
+        .get_or_insert_with(|| !other && moonpool_sim::buggify_with_prob!(1.0))
 }
 
 /// Whether the run draws the **cold-rot scenario** (#362 (background
@@ -1492,7 +1500,8 @@ pub(crate) fn cold_rot(state: &StateHandle) -> bool {
         || replaced_founder(state)
         || drained_machine(state)
         || changed_mode(state)
-        || second_cell(state);
+        || second_cell(state)
+        || batchers(state);
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     *guard.cold_rot.get_or_insert_with(|| {
@@ -1529,6 +1538,59 @@ pub(crate) fn second_cell(state: &StateHandle) -> bool {
     *guard
         .second_cell
         .get_or_insert_with(|| !other && moonpool_sim::buggify_with_prob!(1.0))
+}
+
+/// Whether the run draws the **batchers scenario** (#145 (batchers), #604
+/// (role counts)), without drawing it: the draw is
+/// [`batchers_among`], made where a caller knows the run's machines. A
+/// run that asks before any draw is not a scenario run.
+pub(crate) fn batchers(state: &StateHandle) -> bool {
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    *guard.batchers.get_or_insert(false)
+}
+
+/// Whether the run draws the **batchers scenario** (#145 (batchers), #604
+/// (role counts)) among `machines` machines: drawn once per seed, its own
+/// BUGGIFY location, by the first process or client that starts (it knows
+/// the machine count), and only on a run of three machines or more. A
+/// tenant's batchers are booked only on admitted `stateless` machines,
+/// after a configure of the tenant default names a batcher count. Each is
+/// a coin on its own: a machine outside the founders is `stateless` on 3
+/// draws in 10, an admission is one op among many, and a configure names
+/// role counts on a few journal steps. In 300 hunt seeds without the
+/// scenario, no batcher was booked. On a scenario seed the layout lists one
+/// founding member, with room for twice the births, and makes the next two
+/// machines `stateless` ([`machine_layout`]), client 0 runs `init` first,
+/// every client runs `ADMIT`, `TENANT` and `CREATE_JOURNAL` as often as the
+/// weight family allows at the steps knob's top, each client's first
+/// configure in a tenant names its default with two or three batchers, a
+/// created journal takes the data plane, a multi-writer one a burst
+/// through the batchers, and an operator drains a batcher's machine once
+/// per run in the chaos window (`crate::chain_workload`). In 600
+/// single-seed hunts before and after: a tenant's batchers booked on 3 and
+/// 30 seeds, a batcher's machine drained on 0 and 23, a batcher lane that
+/// held several writes on 0 and 18.
+///
+/// It takes the place of every scenario whose layout lists three founders
+/// or stores on every machine: the moved-founder, replaced-founder,
+/// downed-founder, zone-outage, drained-machine, changed-mode, cold-rot
+/// and batched-journals scenarios give way to it. Drawn after them, it
+/// would be left on about one seed in 200 (the product of their coins):
+/// those scenarios cover most runs of three machines or more. The second-cell scenario keeps its machine only on a
+/// layout of four. Rare-but-valid: an operator may ask for batchers at any
+/// time.
+#[tracing::instrument(level = "debug", skip(state))]
+pub(crate) fn batchers_among(state: &StateHandle, machines: usize) -> bool {
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    *guard.batchers.get_or_insert_with(|| {
+        let drawn = machines >= 3 && moonpool_sim::buggify_with_prob!(0.5);
+        if drawn {
+            assert_reachable!("batchers: a run draws the batchers scenario");
+        }
+        drawn
+    })
 }
 
 /// Whether the run draws the **silent-machine scenario** (#211): drawn once
@@ -1636,11 +1698,13 @@ pub(crate) fn untagged(state: &StateHandle) -> bool {
 /// append, and the kills it asks for land where the scenario needs them.
 #[tracing::instrument(level = "debug", skip_all)]
 pub(crate) fn batched_journals(state: &StateHandle) -> bool {
+    // Drawn before the lock: the scenario takes the registry's lock too.
+    let batchers = batchers(state);
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     *guard
         .batched_journals
-        .get_or_insert_with(|| moonpool_sim::buggify_with_prob!(1.0))
+        .get_or_insert_with(|| !batchers && moonpool_sim::buggify_with_prob!(1.0))
 }
 
 /// [`batched_journals`], drawn by a caller that knows the run's `machines`:
@@ -1649,11 +1713,13 @@ pub(crate) fn batched_journals(state: &StateHandle) -> bool {
 /// seeds, 112 of the 115 kills asked inside a batched commit met a journal
 /// with none).
 pub(crate) fn batched_journals_among(state: &StateHandle, machines: usize) -> bool {
+    // Drawn before the lock: the scenario takes the registry's lock too.
+    let batchers = batchers(state);
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     *guard
         .batched_journals
-        .get_or_insert_with(|| machines >= 3 && moonpool_sim::buggify_with_prob!(1.0))
+        .get_or_insert_with(|| !batchers && machines >= 3 && moonpool_sim::buggify_with_prob!(1.0))
 }
 
 /// Whether the run drew the batched-journals scenario
@@ -2251,6 +2317,50 @@ fn founder_capacity(full: bool, floor: u64, capacity: u64) -> u64 {
     }
 }
 
+/// The run's machine capacity floor and capacity, a `buggify_knob!` over
+/// the floor (#212 (placement)). Every live journal holds one slot on each
+/// of its members, so the default fits the run's few tenants of three
+/// journal names each, and the extreme fills the cell. On top, every
+/// tenant's birth books its footprint (#476): the floor holds the cell
+/// tenant's, the universe tenant's and one tenant's on any one founding
+/// member, so `init` always fits and the extreme refuses a second tenant
+/// on a cell of one. On a `batchers` seed (#145 (batchers)) the one
+/// founder holds every tenant's footprint and journals, so it keeps room
+/// for twice the births and the default room besides.
+fn machine_capacity(batchers: bool) -> (u64, u64) {
+    let floor = 3 * paros::footprint::Footprint::birth().storage();
+    let capacity = floor + buggify_knob!(8_u64, 1_u64..4_u64);
+    let capacity = if batchers {
+        capacity.max(2 * floor + 8)
+    } else {
+        capacity
+    };
+    assert_always!(
+        capacity > floor,
+        "machine: a drawn capacity holds more than the births' floor",
+        { "floor" => floor, "capacity" => capacity }
+    );
+    (floor, capacity)
+}
+
+/// Machine `rank`'s locality: a zone always, a rack on half the machines.
+/// The zone-outage scenario (`zoned`) stands machine `r` in `zone-<r % 3>`
+/// (#215 (zones)).
+fn machine_locality(zoned: bool, rank: usize) -> paros::machine::Locality {
+    paros::machine::Locality {
+        zone: if zoned {
+            format!("zone-{}", rank % 3)
+        } else {
+            format!("zone-{}", moonpool_sim::sim_random_range(0_u32..3_u32))
+        },
+        rack: if moonpool_sim::sim_random_bool(0.5) {
+            format!("rack-{}", moonpool_sim::sim_random_range(0_u32..4_u32))
+        } else {
+            String::new()
+        },
+    }
+}
+
 /// Whether the batched-journals scenario shapes a layout of `count`
 /// machines (#599 (durability mode per journal)): the run's own draw when
 /// the count is not known yet, else the draw among `count` machines.
@@ -2266,7 +2376,9 @@ fn batched_layout(state: &StateHandle, count: usize) -> bool {
 /// first, for `count` machines in rank order. The founder count is uniform
 /// over `1..=count` (`3..=count` on a replaced-founder, moved-founder or
 /// downed-founder seed with three machines or more, [`replaced_founder`],
-/// [`moved_founder`], [`downed_founder`]); every founder is a `storage` machine (`cell init`
+/// [`moved_founder`], [`downed_founder`]; one on a drained-machine or
+/// batchers seed, [`drained_machine`], [`batchers`], where the next two
+/// machines are `stateless`); every founder is a `storage` machine (`cell init`
 /// refuses a `stateless` member) and every other machine is `storage` or
 /// `stateless` on a coin, idle, waiting until journals move onto admitted
 /// machines. The capacity is one `buggify_knob!` for the run (default 8,
@@ -2291,6 +2403,7 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
     let batched = batched_layout(state, count);
     let rotted = cold_rot(state);
     let second = second_cell(state);
+    let batchers = batchers(state) && count >= 3;
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     guard
@@ -2317,15 +2430,18 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
             let zoned = zoned && count >= 3;
             // The second-cell scenario keeps the last machine out of `init`,
             // for the second cell, when the founders it needs leave one.
-            // A drain needs two admitted machines besides it.
-            let reserve = second && count > if drained { 3 } else { least };
+            // A drain needs two admitted machines besides it, and so does
+            // the batchers scenario (#145 (batchers)): two `stateless`
+            // machines beside its founder.
+            let reserve = second && count > if drained || batchers { 3 } else { least };
             let founders = if count == 0 {
                 0
             } else if zoned {
                 3
-            } else if drained {
+            } else if drained || batchers {
                 // The drained-machine scenario: one founding member, and
-                // every other machine admitted.
+                // every other machine admitted. The batchers scenario: one
+                // founding member, and room for two `stateless` machines.
                 1
             } else if reserve {
                 moonpool_sim::sim_random_range(least..count)
@@ -2336,7 +2452,11 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
             let room = if reserve { count - 1 } else { count };
             // `init` lists more machines than found the cell only when the
             // founders are `2F+1`: it forms the cell on the first `2F+1`.
-            let listed = if founders % 2 == 1 && founders < room && !drained {
+            // On half the batchers seeds, `init` admits every machine it
+            // may list, so the `stateless` ones serve before `ADMIT` runs.
+            let listed = if batchers && moonpool_sim::sim_random_bool(0.5) {
+                room
+            } else if founders % 2 == 1 && founders < room && !drained {
                 if moonpool_sim::sim_random_bool(0.5) {
                     moonpool_sim::sim_random_range(founders + 1..room + 1)
                 } else {
@@ -2345,21 +2465,15 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
             } else {
                 founders
             };
-            // Every live journal holds one slot on each of its members
-            // (#212 (placement)), so the default fits the run's few tenants
-            // of three journal names each, and the extreme fills the cell.
-            // On top, every tenant's birth books its footprint (#476): the
-            // floor holds the cell tenant's, the universe tenant's and one
-            // tenant's on any one founding member, so `init` always fits and
-            // the extreme refuses a second tenant on a cell of one.
-            let floor = 3 * paros::footprint::Footprint::birth().storage();
-            let capacity = floor + buggify_knob!(8_u64, 1_u64..4_u64);
+            let (floor, capacity) = machine_capacity(batchers);
             // On half the seeds where BUGGIFY strikes, the first founder
             // holds only the floor, so the births fill it and a tenant
             // coordinator sizes a set past a full machine (recipe
             // 122746:10910618044440912506 on 8668601583785772229). Never on
             // a zone-outage seed: its tenants need every zone's room.
-            let full_founder = founders > 0 && !zoned && moonpool_sim::buggify_with_prob!(0.5);
+            // Nor on a batchers seed, whose one founder holds every tenant.
+            let full_founder =
+                founders > 0 && !zoned && !batchers && moonpool_sim::buggify_with_prob!(0.5);
             // On half the drained-machine seeds, the machines advertise
             // names and a reboot renames one at the knob's extreme, so a
             // drain meets a machine renamed since it took its slots (#504
@@ -2375,7 +2489,10 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
                 .map(|rank| {
                     // The founders, and the second cell's machine, store.
                     let stores = rank < founders || rank >= room || drained;
-                    let class = if !stores && moonpool_sim::sim_random_bool(0.3) {
+                    // The batchers scenario: the two machines past the
+                    // founder are `stateless`.
+                    let stateless = batchers && rank < founders + 2;
+                    let class = if !stores && (stateless || moonpool_sim::sim_random_bool(0.3)) {
                         assert_reachable!("machine: a machine outside the seeds is stateless");
                         paros::machine::Class::Stateless
                     } else {
@@ -2384,20 +2501,7 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
                     MachineDraw {
                         class,
                         capacity: founder_capacity(full_founder && rank == 0, floor, capacity),
-                        locality: paros::machine::Locality {
-                            // The zone-outage scenario stands machine `r` in
-                            // `zone-<r % 3>` (#215 (zones)).
-                            zone: if zoned {
-                                format!("zone-{}", rank % 3)
-                            } else {
-                                format!("zone-{}", moonpool_sim::sim_random_range(0_u32..3_u32))
-                            },
-                            rack: if moonpool_sim::sim_random_bool(0.5) {
-                                format!("rack-{}", moonpool_sim::sim_random_range(0_u32..4_u32))
-                            } else {
-                                String::new()
-                            },
-                        },
+                        locality: machine_locality(zoned, rank),
                     }
                 })
                 .collect();
@@ -2405,6 +2509,11 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
                 count == 0 || (founders >= 1 && founders <= count),
                 "machine: a layout's founding members are machines of it",
                 { "count" => count, "founders" => founders }
+            );
+            assert_always!(
+                !batchers || founders + 2 <= room,
+                "machine: a batchers layout keeps room for two stateless machines",
+                { "count" => count, "founders" => founders, "room" => room }
             );
             assert_always!(
                 founders <= listed && listed <= count,

@@ -283,6 +283,10 @@ where
 {
     let my_ip = ctx.my_ip().to_string();
     let deployment = crate::roles::deployment(ctx.topology());
+    // The batchers scenario (#145 (batchers)) needs the machine count:
+    // drawn here, at the first process's start, before any scenario that
+    // gives way to it.
+    crate::shape::batchers_among(ctx.state(), deployment.machines().len());
     let role = deployment.role_of(&my_ip);
     if let Some(id) = role.and_then(id) {
         run(deployment, id, my_ip).await

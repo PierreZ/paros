@@ -47,31 +47,15 @@ pub struct Rare {
 pub const RARE: &[Rare] = &[
     Rare {
         msg: "batcher: a merged write over the leader's limits is split",
-        reason: "a batcher above the leader's limits whose merged write passes a small max_batch_records or max_batch_bytes knob: fired on PR #698's first sweep, missed by its later ones (#702 (batcher rare paths))",
+        reason: "a batcher above the leader's limits whose merged write passes a small max_batch_records or max_batch_bytes knob: fired on PR #698's first sweep, missed by its later ones; 0 of 600 single-seed hunts with the batchers scenario (#702 (batcher rare paths))",
     },
     Rare {
         msg: "batcher: a write goes alone",
-        reason: "a wide batched burst on a multi-writer created journal, sent to a batcher that started below the leader's limits: missed by PR #698's sweeps (#702 (batcher rare paths))",
+        reason: "a wide batched burst on a multi-writer created journal, sent to a batcher that started below the leader's limits: missed by PR #698's sweeps; 1 of 600 single-seed hunts with the batchers scenario (#702 (batcher rare paths))",
     },
     Rare {
         msg: "coordinator: a batcher slot is released to its count",
-        reason: "a tenant default configured with fewer batchers after its slots were booked, or a booked stateless machine leaving: fired in PR #698's earlier sweeps, missed by every shard on c593395 (#702 (batcher rare paths))",
-    },
-    Rare {
-        msg: "coordinator: a batcher leaves a machine that leaves",
-        reason: "a drained stateless machine that holds a tenant's batcher, released by a later coordinator term (the drain's session fences the current one): 0 drains in 300 hunt seeds, released after 2 of 2 drains under a tilted harness (#702 (batcher rare paths))",
-    },
-    Rare {
-        msg: "drain: an operator drains a batcher's machine",
-        reason: "needs an admitted stateless machine with a booked batcher and the drain coin: ran in 2 of 4 shards on 989aa2f (#702 (batcher rare paths))",
-    },
-    Rare {
-        msg: "batcher: a slot held more than one write",
-        reason: "two writes queued in one batcher lane before its flush: 1 check in 1 of 4 shards on 989aa2f (#702 (batcher rare paths))",
-    },
-    Rare {
-        msg: "unbatcher: a merged write is scattered",
-        reason: "a merged write of several writes answered and scattered: 1 check in 1 of 4 shards on 989aa2f (#702 (batcher rare paths))",
+        reason: "a tenant default configured with fewer batchers than its booked slots: a configure of the default after the booking names a lower count; 5 of 600 single-seed hunts with the batchers scenario, which books on 30 (#702 (batcher rare paths))",
     },
     Rare {
         msg: "placement: a placement changed between the oracle's reads",

@@ -84,7 +84,7 @@ impl FleetOps {
                 assert_reachable!("journals: a reused-name seed creates a deleted name again");
                 JournalOp::Create {
                     name: name.clone(),
-                    writer: drawn_mode(),
+                    writer: drawn_mode(&self.state),
                     desired: Some(drawn_desired(draw)),
                     tags: self.birth_tags(request.tenant, name),
                     store: drawn_store(&self.state),
@@ -140,11 +140,7 @@ impl FleetOps {
                 self.append_to_created(&cell, journal, draw).await;
             }
         }
-        // On a coin, the operator drains a machine that holds a tenant's
-        // batcher (#145 (batchers)), once a configure booked one.
-        if buggify_with_prob!(0.1) {
-            self.drain_batcher(ctx, policy, payload).await;
-        }
+        self.drain_at_journal_step(ctx, policy, payload).await;
         let Some((cell, tenant, control, label)) = self.journal_tenant(ctx, payload).await else {
             self.frontend_before_ready(payload).await;
             return;
@@ -159,16 +155,10 @@ impl FleetOps {
             if self.cached_name(tenant, &name).is_some() && buggify_with_prob!(0.5) {
                 self.read_through_name(&cell, control, &name, payload).await;
             }
-            // FDB's `configure` (#214 (tenant modes)) on a draw in four, on
-            // a draw in two on a changed-mode seed, and on a BUGGIFY coin
-            // besides.
-            let every = if crate::shape::changed_mode(ctx.state()) {
-                2
-            } else {
-                4
-            };
-            let configure = (payload >> 56).is_multiple_of(every) || buggify_with_prob!(0.3);
-            let op = if configure {
+            let (name_batchers, configure) = self.configures(ctx, tenant, payload);
+            let op = if name_batchers {
+                batchers_configure(payload)
+            } else if configure {
                 // A new desired mode for a journal of the tenant, or on a
                 // draw in four for the tenant's default. The coordinator
                 // applies a journal's by reconfiguration, under this
@@ -185,8 +175,11 @@ impl FleetOps {
                 let name = (!(payload >> 12).is_multiple_of(4)).then_some(name);
                 // The tenant default's configure names the tenant's role
                 // counts on a coin (#604): up to three batchers, and the
-                // recorded counts of frontends and proxy leaders.
-                let roles = (name.is_none() && buggify_with_prob!(0.6)).then(|| {
+                // recorded counts of frontends and proxy leaders. Always on
+                // a batchers seed, so a lower count releases a slot.
+                let roles = (name.is_none()
+                    && (crate::shape::batchers(ctx.state()) || buggify_with_prob!(0.6)))
+                .then(|| {
                     assert_reachable!("journals: a configure names the tenant's role counts");
                     let batchers = u32::try_from((payload >> 40) % 4).unwrap_or(0);
                     let others = u32::try_from((payload >> 44) % 3).unwrap_or(0);
@@ -203,7 +196,7 @@ impl FleetOps {
                 JournalOp::Create {
                     tags: self.birth_tags(tenant, &name),
                     name,
-                    writer: drawn_mode(),
+                    writer: drawn_mode(&self.state),
                     store,
                     // On a draw in four the create names no mode: it takes the
                     // tenant's default (#214 (tenant modes)). A batched one
@@ -238,6 +231,46 @@ impl FleetOps {
         // an admitted machine.
         if crate::shape::drained_machine(ctx.state()) {
             self.drain(ctx, policy, payload, true).await;
+        }
+    }
+
+    /// Whether this journal step in `tenant` names the tenant's batchers,
+    /// and whether it configures. FDB's `configure` (#214 (tenant modes))
+    /// on a draw in four, on a draw in two on a changed-mode or batchers
+    /// seed, and on a BUGGIFY coin besides. The batchers scenario (#145
+    /// (batchers), #604 (role counts)): this client's first journal step in
+    /// a tenant configures its default with batchers
+    /// ([`batchers_configure`]).
+    fn configures(&mut self, ctx: &SimContext, tenant: TenantId, payload: u64) -> (bool, bool) {
+        let every =
+            if crate::shape::changed_mode(ctx.state()) || crate::shape::batchers(ctx.state()) {
+                2
+            } else {
+                4
+            };
+        let name_batchers =
+            crate::shape::batchers(ctx.state()) && self.batchers_named.insert(tenant);
+        let configure =
+            name_batchers || (payload >> 56).is_multiple_of(every) || buggify_with_prob!(0.3);
+        (name_batchers, configure)
+    }
+
+    /// On a coin, the operator drains a machine that holds a tenant's
+    /// batcher (#145 (batchers)), once a configure booked one. On a
+    /// batchers seed (`crate::shape::batchers`), at every journal step in
+    /// the chaos window until one drain landed.
+    async fn drain_at_journal_step(
+        &mut self,
+        ctx: &SimContext,
+        policy: CheckpointPolicy,
+        payload: u64,
+    ) {
+        if crate::shape::batchers(ctx.state()) {
+            if crate::in_chaos() && !super::drain::batcher_drained(ctx.state()) {
+                self.drain_booked_batcher(ctx, policy, payload).await;
+            }
+        } else if buggify_with_prob!(0.1) {
+            self.drain_batcher(ctx, policy, payload).await;
         }
     }
 
@@ -464,7 +497,9 @@ impl FleetOps {
     /// journal's first round.
     async fn exercise_on_cell(&mut self, cell: &Cell, journal: JournalIdentifier, draw: u64) {
         let client = cell.client.clone();
-        let batched = buggify_with_prob!(0.5).then(|| self.connect_batched(&cell.servers));
+        // The batchers scenario (#145 (batchers)): every time.
+        let batched = (crate::shape::batchers(&self.state) || buggify_with_prob!(0.5))
+            .then(|| self.connect_batched(&cell.servers));
         self.exercise_created(&client, journal, cell.first(draw), (Some(journal), batched))
             .await;
     }
@@ -538,9 +573,17 @@ impl FleetOps {
                     crate::machine::note_journal_created(&self.state);
                     self.append_to_created(cell, journal, draw).await;
                 }
+                // The batchers scenario (#145 (batchers)): a multi-writer
+                // journal takes a burst through the batchers at once.
+                if crate::shape::batchers(&self.state) && *writer == WriterMode::Multi {
+                    self.note_journals([journal]);
+                    self.batched_created(&cell.servers, journal, cell.first(draw))
+                        .await;
+                }
                 // #451: on its own location, the whole data plane on the
-                // created journal, as on a genesis one.
-                if buggify_with_prob!(0.5) {
+                // created journal, as on a genesis one; every time on a
+                // batchers seed (#145 (batchers)).
+                if crate::shape::batchers(&self.state) || buggify_with_prob!(0.5) {
                     assert_reachable!(
                         "created: a client runs the data plane on a journal it created"
                     );
@@ -1231,9 +1274,35 @@ fn expected_denial(presented: Presented, internal: bool, kind: Kind) -> Option<D
     }
 }
 
+/// The batchers scenario's configure (#145 (batchers), #604 (role counts)):
+/// the tenant default with two or three batchers, so the tenant holds one
+/// on each `stateless` machine, and the default mode of one partition,
+/// which fits the scenario's one or two storage machines, so the cell
+/// never refuses it.
+fn batchers_configure(payload: u64) -> JournalOp {
+    assert_reachable!("journals: a configure names batchers on a batchers seed");
+    let batchers = 2 + u32::try_from((payload >> 40) % 2).unwrap_or(0);
+    let others = u32::try_from((payload >> 44) % 3).unwrap_or(0);
+    JournalOp::Configure {
+        name: None,
+        desired: Desired::DEFAULT,
+        roles: Some(
+            paros::tenant::TenantRoles::new(others, others, batchers)
+                .expect("the counts are within the cap"),
+        ),
+    }
+}
+
 /// The writer mode a create draws (#241): fixed for the journal's life.
-fn drawn_mode() -> WriterMode {
-    if buggify_with_prob!(0.5) {
+fn drawn_mode(state: &moonpool_sim::StateHandle) -> WriterMode {
+    // The batchers scenario (#145 (batchers)): half the creates are
+    // multi-writer, so a burst goes through the batchers.
+    let multi = if crate::shape::batchers(state) {
+        moonpool_sim::sim_random_bool(0.5)
+    } else {
+        buggify_with_prob!(0.5)
+    };
+    if multi {
         assert_reachable!("system: a client creates a multi-writer journal");
         WriterMode::Multi
     } else {

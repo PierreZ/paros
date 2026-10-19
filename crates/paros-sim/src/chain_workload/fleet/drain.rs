@@ -14,7 +14,10 @@
 //! (red drain seeds)).
 //!
 //! On a coin, the operator drains a machine that holds a tenant's batcher
-//! (#145 (batchers)): the cell coordinator releases that slot.
+//! (#145 (batchers)): the cell coordinator releases that slot. On a
+//! batchers seed (`crate::shape::batchers`), the operator does so at every
+//! journal step of the chaos window, once a read of the registry shows a
+//! booked batcher, until one drain landed in the run.
 //!
 //! Once a drained machine holds no slot, the operator removes it on a coin
 //! (`CellSession::remove`, #359): its `node_id` is tombstoned for good.
@@ -38,6 +41,18 @@ use paros::machine::Class;
 use paros::system::{BookingTarget, MaintenanceScope, NodeStanding, Registry, Role};
 
 use super::FleetOps;
+
+/// Well-known `StateHandle` key: a batchers seed's one drain of a batcher's
+/// machine landed (#145 (batchers)).
+const BATCHER_DRAINED_KEY: &str = "paros-batcher-drained";
+
+/// Whether a drain of a batcher's machine landed in this run, on a
+/// batchers seed (`crate::shape::batchers`): the scenario drains one.
+pub(in crate::chain_workload) fn batcher_drained(state: &moonpool_sim::StateHandle) -> bool {
+    *crate::state::published(state, BATCHER_DRAINED_KEY, || false)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 impl FleetOps {
     /// Drain one registered admitted storage machine, when one is
@@ -148,11 +163,49 @@ impl FleetOps {
         true
     }
 
+    /// The batchers scenario's drain (#145 (batchers)): read the registry
+    /// without a session, and only when it books a tenant's batcher,
+    /// drain that machine ([`FleetOps::drain_batcher`]). A session fences
+    /// the coordinator's term, so an operator that opened one at every step
+    /// would keep the coordinator from booking. Records a drain that
+    /// landed ([`batcher_drained`]).
+    pub(in crate::chain_workload) async fn drain_booked_batcher(
+        &mut self,
+        ctx: &SimContext,
+        policy: CheckpointPolicy,
+        draw: u64,
+    ) {
+        let Some(cell) = self.learn(ctx).await else {
+            return;
+        };
+        let mut folded = super::judged_cell(&cell.members);
+        let loaded = paros::client::checkpoint::load(
+            &mut folded,
+            cell.journals.cell,
+            &cell.client,
+            cell.first(draw),
+            0,
+        )
+        .await;
+        if !matches!(
+            loaded,
+            paros::client::checkpoint::LoadOutcome::Loaded { .. }
+        ) || batcher_host(folded.state().registry()).is_none()
+        {
+            return;
+        }
+        if self.drain_batcher(ctx, policy, draw).await {
+            *crate::state::published(ctx.state(), BATCHER_DRAINED_KEY, || false)
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+        }
+    }
+
     /// Drain a registered machine that holds a tenant's batcher (#145
     /// (batchers)), when one does and no machine is draining: the cell
     /// coordinator releases the slot and books the count on the machines
     /// that stay. Not on a drained-machine or gone-machine seed, which
-    /// drain one machine of their own. Whether it ran.
+    /// drain one machine of their own. Whether the drain landed.
     #[tracing::instrument(level = "debug", skip_all, fields(client = self.client_id))]
     pub(in crate::chain_workload) async fn drain_batcher(
         &mut self,
@@ -196,8 +249,9 @@ impl FleetOps {
         if let Ok(true) = session.drain(&cell.client, first, node).await {
             assert_reachable!("drain: an operator drains a batcher's machine");
             tracing::info!(node = node.0, "machine_drained");
+            return true;
         }
-        true
+        false
     }
 
     /// Remove the drained machine `node` (#359), through `session`. Whether

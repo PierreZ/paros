@@ -420,9 +420,11 @@ impl Workload for ChainWorkload {
         // The run's journals (#188): drawn once per seed by whoever asks
         // first, the same for every node and client; clients are spread over
         // them round-robin.
-        let has_matchmakers = !crate::roles::deployment(ctx.topology())
-            .matchmakers()
-            .is_empty();
+        let deployment = crate::roles::deployment(ctx.topology());
+        // The batchers scenario (#145 (batchers)): drawn here when no
+        // process drew it first, before any scenario that gives way to it.
+        crate::shape::batchers_among(ctx.state(), deployment.machines().len());
+        let has_matchmakers = !deployment.matchmakers().is_empty();
         let plan = crate::shape::journals(ctx.state());
         if has_matchmakers && plan.ids.len() > 1 {
             // #201: several journals beside the matchmaker plane, the
@@ -628,9 +630,10 @@ impl ChainWorkload {
         }
 
         let mut config = ChainConfig::for_timeline();
-        // The batched-journals scenario needs three machines (#599
-        // (durability mode per journal)): drawn here when no machine drew
-        // it first.
+        // The batchers scenario (#145 (batchers)) and the batched-journals
+        // scenario need three machines (#599 (durability mode per
+        // journal)): drawn here when no machine drew them first.
+        crate::shape::batchers_among(ctx.state(), deployment.machines().len());
         crate::shape::batched_journals_among(ctx.state(), deployment.machines().len());
         if crate::shape::lagging_acceptor(ctx.state()) || crate::shape::split_floor(ctx.state()) {
             // The lagging-acceptor scenario (#340): the peers' floors must
@@ -706,6 +709,18 @@ impl ChainWorkload {
             // journals exist and take appends, so every client creates them
             // as often as the weight family allows, at the steps knob's top.
             for op in [TENANT, CREATE_JOURNAL] {
+                config.weights[usize::from(op)] = OP_WEIGHT_CEILING;
+            }
+            config.steps = config.steps.max(64);
+        }
+        if crate::shape::batchers(ctx.state()) {
+            // The batchers scenario (#145 (batchers), #604 (role counts)): a
+            // batcher is booked only on an admitted `stateless` machine of a
+            // tenant whose default names a count, so every client admits
+            // machines, creates tenants and journals as often as the weight
+            // family allows, at the steps knob's top, so a drain still finds
+            // ops after a booking.
+            for op in [ADMIT, TENANT, CREATE_JOURNAL] {
                 config.weights[usize::from(op)] = OP_WEIGHT_CEILING;
             }
             config.steps = config.steps.max(64);
@@ -853,9 +868,12 @@ impl ChainWorkload {
             operations.push(LOAD);
         }
         // Likewise the drained-machine scenario's ops (#474 (journals on
-        // admitted machines)) and the slow-machine scenario's (#361 (slow
-        // machines)).
-        if crate::shape::drained_machine(ctx.state()) || crate::shape::slow_machine(ctx.state()) {
+        // admitted machines)), the slow-machine scenario's (#361 (slow
+        // machines)) and the batchers scenario's (#145 (batchers)).
+        if crate::shape::drained_machine(ctx.state())
+            || crate::shape::slow_machine(ctx.state())
+            || crate::shape::batchers(ctx.state())
+        {
             for op in [ADMIT, TENANT, CREATE_JOURNAL] {
                 if !operations.contains(&op) {
                     operations.push(op);
@@ -918,8 +936,9 @@ impl ChainWorkload {
         // The wiped-founder (#246), replaced-founder (#423), slow-machine
         // (#424), downed-founder (#213 (three founding members)),
         // drained-machine (#474), changed-mode (#214 (tenant modes)),
-        // batched-journals (#599 (durability mode per journal)) and
-        // second-cell (#232 (multiple cells)) scenarios: client 0 runs
+        // batched-journals (#599 (durability mode per journal)), batchers
+        // (#145 (batchers)) and second-cell (#232 (multiple cells))
+        // scenarios: client 0 runs
         // `init` first, so the cell decree runs inside the chaos window.
         let mut init_first = self.client_id == 0
             && (crate::shape::wiped_founder(ctx.state())
@@ -931,6 +950,7 @@ impl ChainWorkload {
                 || crate::shape::zone_outage(ctx.state())
                 || crate::shape::cold_rot(ctx.state())
                 || crate::shape::batched_journals(ctx.state())
+                || crate::shape::batchers(ctx.state())
                 || crate::shape::second_cell(ctx.state()));
         let mut successful_after_ambiguity = false;
         // The library's decisions as outcomes (#221): a write redirected
