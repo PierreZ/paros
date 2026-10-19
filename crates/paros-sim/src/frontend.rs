@@ -521,11 +521,14 @@ async fn run_frontend_role(
     };
     let audit = FrontendAudit {
         state: ctx.state().clone(),
-        calls: Arc::new(crate::chain_workload::system::Announce::of_machine(
-            ctx.state(),
-            ctx.time().clone(),
-            FRONTEND_CLIENT_BASE + rank as u64,
-        )),
+        calls: Arc::new(
+            crate::chain_workload::system::Announce::of_machine(
+                ctx.state(),
+                ctx.time().clone(),
+                FRONTEND_CLIENT_BASE + rank as u64,
+            )
+            .relaying(),
+        ),
     };
     tracing::info!(ip = %ip, at = ?ctx.time().now(), "frontend_booting");
     run_frontend(
