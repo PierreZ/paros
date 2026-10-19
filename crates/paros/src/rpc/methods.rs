@@ -19,6 +19,8 @@
 //! - `0x5041_0401..` — the frontend contract (`proto/paros.proto`'s
 //!   `Frontend` service, #192), served by a frontend: a public call with the
 //!   caller's entry (token and names).
+//! - `0x5041_0501..` — the batcher contract (#145): `BatchWrite`, a public
+//!   `Write` a batcher merges with other writers' writes of its journal.
 //!
 //! A role that does not serve a method simply does not register it, and a
 //! call to it is refused `EndpointNotFound` before any handler runs.
@@ -319,4 +321,11 @@ well_known_method!(
     /// coordinator.
     FrontSetJournalTagsRpc, 0x5041_0405, public::FrontSetJournalTags => public::SetJournalTagsAck,
     "paros.frontend.SetJournalTags"
+);
+// 0x5041_05xx: the batcher contract (#145), served by a batcher only.
+well_known_method!(
+    /// A multi-writer `Write` sent to a batcher: merged with other writers'
+    /// writes of its journal into one slot, answered with its own range.
+    BatchWriteRpc, 0x5041_0501, public::Write => public::WriteAck,
+    "paros.batcher.Write"
 );

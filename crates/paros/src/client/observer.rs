@@ -79,6 +79,14 @@ pub trait CallObserver: Send + Sync + 'static {
     /// later only if that uuid leads again. A settlement whose future is
     /// dropped is never reported.
     fn resolved(&self, token: u64, report: &ResolveReport);
+
+    /// A batcher sends `write`: the records of several callers' writes of
+    /// one multi-writer journal, merged into one write (#145 (batchers)).
+    /// It is no caller's attempt: each caller's own write is reported by
+    /// its own client.
+    fn merged(&self, write: &Write) {
+        let _ = write;
+    }
 }
 
 /// The production observer: reports nothing.

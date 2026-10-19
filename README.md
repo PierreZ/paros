@@ -57,6 +57,11 @@ A journal's durability can change while it runs: `parosctl configure --tenant ac
 orders --failures-per-partition 2` asks for five acceptors, and the tenant coordinator moves
 the journal there by reconfiguration, without losing a write (#214 (tenant modes)).
 
+A multi-writer journal can put many writers' writes in one slot through batchers (#145
+(batchers)): `parosctl configure --tenant acme --batchers 3` books three on the cell's
+`stateless` machines, `parosctl resolve acme` names them, and each writer gets its own positions
+back.
+
 A universe can hold more than one cell: `parosctl init --idle` forms a cell with no universe,
 `parosctl universe add-cell` joins it, and `parosctl tenant create --cell` puts a tenant in it.
 Any machine resolves a tenant to its cell. `parosctl universe remove-cell` removes an empty

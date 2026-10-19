@@ -93,7 +93,7 @@ impl FleetOps {
         client: &ChainClient,
         journal: JournalIdentifier,
         first: usize,
-        audited: Option<JournalIdentifier>,
+        (audited, batched): (Option<JournalIdentifier>, Option<ChainClient>),
     ) {
         let audit = audited.map(|journal| audit_world_named(&self.state, journal));
         let audit = audit.as_deref();
@@ -101,10 +101,14 @@ impl FleetOps {
         match writer.claim(client, first, false).await {
             ClaimOutcome::Won { .. } => {
                 assert_reachable!("created: a client claims a journal it reached");
-                self.single_writer(client, writer, first, audit).await;
+                self.single_writer((client, batched.as_ref()), writer, first, audit)
+                    .await;
             }
             ClaimOutcome::WrongMode { .. } => {
                 assert_reachable!("created: a claim of a multi-writer journal is refused");
+                if let Some(batched) = batched {
+                    self.batched_burst(&batched, journal, first, audit).await;
+                }
                 self.multi_writer(client, journal, first, audit).await;
             }
             _ => {}
@@ -130,10 +134,12 @@ impl FleetOps {
 
     /// A single-writer journal: rounds of appends, on a coin a pipelined
     /// burst, a paging read, a truncation, then a second writer's claim,
-    /// after which the first writer's write is refused.
+    /// after which the first writer's write is refused. With `batched`, the
+    /// first round goes through a batcher, which passes a fenced write on
+    /// alone (#145 (batchers)).
     async fn single_writer(
         &mut self,
-        client: &ChainClient,
+        (client, batched): (&ChainClient, Option<&ChainClient>),
         mut writer: Writer,
         first: usize,
         audit: Option<&AuditWorld>,
@@ -151,11 +157,12 @@ impl FleetOps {
         // and sizes. The journal may hold one, and answer the writer's next
         // write at that position from the log.
         let mut unsettled = Vec::new();
-        for _ in 0..self.rounds() {
+        for round in 0..self.rounds() {
             let records = records_of(&config, audit);
             let sent = hashes(&records);
             let at = writer.next_seq();
-            match writer.write(client, records, first).await {
+            let via = batched.filter(|_| round == 0).unwrap_or(client);
+            match writer.write(via, records, first).await {
                 WriterOutcome::Written { seq, count, .. } => {
                     assert_reachable!("created: an owner appends a batch to a created journal");
                     acked(audit, seq, count, sent);
@@ -329,6 +336,55 @@ impl FleetOps {
             assert_reachable!("created: a writer truncates a created multi-writer journal");
             self.page(client, journal, first).await;
         }
+    }
+
+    /// A burst of `pipeline_depth` unfenced appends through the cell's
+    /// batchers (#145 (batchers)), all in flight at once, so a batcher
+    /// merges several of them into one slot. Each answer is its own write's
+    /// range, judged by its bytes like any acked write.
+    async fn batched_burst(
+        &self,
+        client: &ChainClient,
+        journal: JournalIdentifier,
+        first: usize,
+        audit: Option<&AuditWorld>,
+    ) {
+        let writes: Vec<(Vec<u64>, paros::Write)> = (0..self.config.pipeline_depth)
+            .map(|_| {
+                let records = self.records(audit);
+                let sent = hashes(&records);
+                let request = multi::append_request(
+                    journal,
+                    records.into_iter().map(|value| value.0).collect(),
+                );
+                (sent, request)
+            })
+            .collect();
+        let results = join_all(
+            writes
+                .iter()
+                .map(|(_, request)| client.write(request, first, WriteOptions::default())),
+        )
+        .await;
+        let mut ranges: Vec<(u64, u64)> = Vec::new();
+        for ((sent, _), report) in writes.into_iter().zip(results) {
+            if let WriteOutcome::Written { seq, count, .. } = report.outcome {
+                assert_always!(
+                    count == sent.len() as u64,
+                    "batcher: a write's range holds exactly its records",
+                    { "count" => count, "sent" => sent.len() }
+                );
+                assert_reachable!("created: a batched append lands on a created journal");
+                ranges.push((seq, count));
+                acked(audit, seq, count, sent);
+            }
+        }
+        ranges.sort_unstable();
+        assert_always!(
+            ranges.windows(2).all(|w| w[0].0 + w[0].1 <= w[1].0),
+            "batcher: two writes never share a position",
+            { "ranges" => format!("{ranges:?}") }
+        );
     }
 
     /// Read `journal` from its start, `read_limit` records a page waiting

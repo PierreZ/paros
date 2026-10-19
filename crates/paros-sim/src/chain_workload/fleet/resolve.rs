@@ -5,6 +5,8 @@
 //! drawn one on: idle machines do not serve `Resolve` and are passed over,
 //! founding and admitted machines answer from their own folds.
 
+use std::collections::BTreeSet;
+
 use moonpool_sim::{assert_always, assert_reachable, assert_sometimes, buggify_with_prob};
 use paros::TenantId;
 use paros::client::resolve::{Resolution, resolve};
@@ -81,6 +83,7 @@ impl FleetOps {
                     "resolve: a resolution gives its universe's name"
                 );
                 assert_reachable!("resolve: an entry machine resolves a tenant");
+                judge_batchers(resolved);
                 // The answer's references serve the data plane (#404
                 // (static vs dynamic endpoints)): the tenant's control
                 // journal, read through the machines it names.
@@ -232,5 +235,23 @@ impl FleetOps {
             { "cell" => cell.journals.cell_id, "silent" => format!("{silent:?}") }
         );
         assert_reachable!("resolve: every founding member's answer is judged after chaos");
+    }
+}
+
+/// A tenant's batchers (#145 (batchers)) are machines of its cell, each
+/// named once.
+fn judge_batchers(resolved: &paros::client::resolve::Resolved) {
+    let named: BTreeSet<u64> = resolved.batchers.iter().map(|(id, _)| id.0).collect();
+    assert_always!(
+        named.len() == resolved.batchers.len()
+            && resolved
+                .batchers
+                .iter()
+                .all(|(id, _)| resolved.machines.iter().any(|(m, _)| m == id)),
+        "resolve: a tenant's batchers are machines of its cell, each once",
+        { "batchers" => resolved.batchers.len(), "machines" => resolved.machines.len() }
+    );
+    if !resolved.batchers.is_empty() {
+        assert_reachable!("resolve: a resolution names the tenant's batchers");
     }
 }

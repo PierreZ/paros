@@ -118,6 +118,31 @@ monotone. A multi-writer journal is what many independent producers append to, a
 election runs over (section 3.3). Batchers (section 4) merge multi-writer writes into fewer
 slots; the unbatcher hands each write its own `seq` range.
 
+How the batcher works (#145 (batchers), decided on 2026-10-19). A batcher serves `BatchWrite`
+(`0x5041_0501`): the plain `Write` request and answer, sent to a batcher and not to a node. It
+keeps one lane per journal (`paros_core::Batcher`, pure). A lane flushes when it holds
+`batch_flush_records` records, when the next write would pass the leader's limits, or at the
+`batch_tick` after its first write. A flushed lane goes to the journal's leader as one unfenced
+`Write` of the concatenated records, so one slot holds many writers' writes. The journal gives
+the merged write its range `[seq, seq + n)` at apply. The unbatcher (`paros_core::Unbatcher`)
+cuts that range in order: each write gets the positions of its own records, densely. A merged
+write is accepted or refused whole. The unbatcher runs in the batcher's process: the leader
+answers a held write itself, so the answer comes back to the batcher that sent it.
+
+The batcher follows the leader hints itself and removes them from the answer. A merged write that
+the leader refuses as too large teaches the batcher the leader's limits, and the batcher sends
+each write of it again alone. A merged write that may have run with no answer is answered
+unanswered (ambiguous), the same as a frontend's, and the batcher never sends it again: the
+writers own an ambiguous write (at-least-once). A write that carries a leader uuid (a
+single-writer journal's) is never merged: it goes to the leader alone, with its fence and its
+position, and the journal judges it. An empty write also goes alone.
+
+Every machine serves the batcher endpoint over the cell's address book. The tenant coordinator
+books a tenant's batchers, by its `batchers=` count, on the cell's `stateless` machines (section
+3.4), and `Resolve` names them (section 3.5). A client of a multi-writer journal sends its writes
+to a batcher it was given (`Resolved::batcher_servers`). `paros::batcher::run_batcher` runs a
+batcher on its own address, in front of a fixed list of nodes.
+
 How it is built (#241, part 3). The mode is a field of the journal's `Config`, so the format
 marker records it and a restart cannot change it. `CreateJournal` carries it, and a journal
 without one is single-writer. On the wire a multi-writer call uses the same messages: a

@@ -100,6 +100,7 @@ impl DriverTunables {
     /// | `shutdown_within` | 30 s | a clean stop hands every leadership on and lets every flush land; past it the stop is a crash (#560 (clean Ctrl-C shutdown)) |
     /// | `read_only_ticks` | 300 (30 s) | a full disk is tried again twice a minute, one refused segment each time (#360 (disk full)) |
     /// | `admission_rounds` | 256 | a leader holds at most 256 undecided rounds before it answers `busy` (#360 (disk full)) |
+    /// | `batch_tick`, `batch_flush_records` | the defaults (2 ms, 1024) | a batcher waits a little to merge many writers' writes into one slot (#145) |
     /// | `free_bytes_floor` | 1 GiB | a few hundred segments of the default geometry before placement passes a machine over (#360 (disk full)) |
     ///
     /// # Panics
@@ -173,7 +174,7 @@ impl DriverTunables {
     /// Every checked field: its name, its value and its floor. One row per
     /// field, so it grows with the tunables.
     #[allow(clippy::too_many_lines)]
-    fn floor_table(&self) -> [(&'static str, u64, u64); 53] {
+    fn floor_table(&self) -> [(&'static str, u64, u64); 55] {
         let ms = |d: Duration| u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
         let count = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
         [
@@ -299,6 +300,8 @@ impl DriverTunables {
             ("read_only_ticks", self.read_only_ticks, 1),
             ("admission_rounds", self.admission_rounds, 1),
             ("free_bytes_floor", self.free_bytes_floor, 0),
+            ("batch_tick", ms(self.batch_tick), 1),
+            ("batch_flush_records", self.batch_flush_records, 1),
         ]
     }
 

@@ -65,6 +65,21 @@ impl FleetOps {
             .rotating_over(servers.len())
     }
 
+    /// A client of the batchers on `servers` (#145 (batchers)), announcing
+    /// every call as [`FleetOps::connect`]'s does.
+    pub(super) fn connect_batched(&self, servers: &[(u64, Address)]) -> ChainClient {
+        let observer = Announce::of_machine(
+            &self.state,
+            moonpool_sim::Providers::time(self.connector.providers()).clone(),
+            self.connector.client_id(),
+        )
+        .learned_only(self.learned.clone());
+        self.connector
+            .batched(servers)
+            .with_observer(Arc::new(observer))
+            .rotating_over(servers.len())
+    }
+
     /// Record `journals` as learned by this operator (#246): from `init`'s
     /// reply or through `Inspect`, the only sources a call may name.
     fn note_learned(&self, journals: impl IntoIterator<Item = JournalIdentifier>) {

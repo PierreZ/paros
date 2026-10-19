@@ -32,7 +32,7 @@ use crate::rpc::{
     config_from_proto, config_to_proto, writer_mode_from_proto, writer_mode_to_proto,
 };
 use crate::tags::UserTags;
-use crate::tenant::{Desired, StoreDurability, TenantControl};
+use crate::tenant::{Desired, StoreDurability, TenantControl, TenantRoles};
 use crate::{Address, Names};
 
 /// What a request asks for.
@@ -73,6 +73,9 @@ pub enum JournalOp {
         name: Option<Vec<u8>>,
         /// The new mode.
         desired: Desired,
+        /// The tenant's new role counts (#604), on the tenant default only
+        /// (`name` is `None`); `None` keeps the counts it has.
+        roles: Option<TenantRoles>,
     },
 }
 
@@ -114,11 +117,19 @@ impl JournalRequest {
                 name: name.clone(),
                 tags: tags.to_wire(),
             }),
-            JournalOp::Configure { name, desired } => Op::Configure(wire::ConfigureOp {
+            JournalOp::Configure {
+                name,
+                desired,
+                roles,
+            } => Op::Configure(wire::ConfigureOp {
                 name: name.clone().unwrap_or_default(),
                 replicas: desired.replicas,
                 failures_per_partition: desired.durability.failures_per_partition,
                 partitions: desired.durability.partitions,
+                roles: roles.is_some(),
+                frontends: roles.map_or(0, |r| r.frontends),
+                proxy_leaders: roles.map_or(0, |r| r.proxy_leaders),
+                batchers: roles.map_or(0, |r| r.batchers),
             }),
         };
         wire::JournalRequest {
@@ -176,6 +187,15 @@ impl JournalRequest {
                     failures_per_partition: configure.failures_per_partition,
                     partitions: configure.partitions,
                 }))?,
+                roles: match (configure.roles, configure.name.is_empty()) {
+                    (false, _) => None,
+                    (true, false) => return Err("role counts are the tenant default's"),
+                    (true, true) => Some(TenantRoles::new(
+                        configure.frontends,
+                        configure.proxy_leaders,
+                        configure.batchers,
+                    )?),
+                },
             },
         };
         if let JournalOp::Create { name, .. }
@@ -567,6 +587,7 @@ mod tests {
                 op: JournalOp::Configure {
                     name,
                     desired: "failures-per-partition=2".parse().expect("a durability"),
+                    roles: None,
                 },
             };
             assert_eq!(
@@ -580,6 +601,7 @@ mod tests {
             op: JournalOp::Configure {
                 name: None,
                 desired: Desired::DEFAULT,
+                roles: None,
             },
         }
         .to_wire();

@@ -207,6 +207,7 @@ impl FormedCell {
         rpc: &RpcHandle<P>,
         tunables: &DriverTunables,
         books: watch::Receiver<Option<CachedRegistry>>,
+        observer: Option<std::sync::Arc<dyn crate::client::CallObserver>>,
         shutdown: CancellationToken,
     ) -> SimulationResult<()> {
         self.facts = self.facts.serving(rpc);
@@ -229,6 +230,24 @@ impl FormedCell {
                 client: tunables.internal_client(),
                 answer_within: tunables.resolve_answer_within,
             },
+            shutdown.clone(),
+        )?;
+        // Every machine serves the batcher endpoint (#145) over the cell's
+        // address book; the tenant coordinator books a tenant's batchers
+        // (#604) and `Resolve` names them.
+        crate::batcher::spawn(
+            providers,
+            rpc,
+            crate::batcher::BatcherSettings::from_tunables(tunables),
+            (
+                crate::batcher::BatcherBook {
+                    nodes: super::with_own(&self.founders(), self.facts.node_id, &self.facts.addr),
+                    updates: Some(books.clone()),
+                    skip: None,
+                    observer,
+                },
+                self.facts.names.clone(),
+            ),
             shutdown.clone(),
         )?;
         // Teach the decree to a member that missed it (see the module doc).

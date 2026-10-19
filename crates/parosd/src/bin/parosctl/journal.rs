@@ -26,7 +26,9 @@ use paros::client::fleet::read_directory;
 use paros::client::journals::{self, JournalAnswer, JournalOp, JournalRequest};
 use paros::fleet::TenantState;
 use paros::tags::{Tags, UserTags};
-use paros::tenant::{Desired, Durability, MAX_FAILURES_PER_PARTITION, StoreDurability};
+use paros::tenant::{
+    Desired, Durability, MAX_FAILURES_PER_PARTITION, StoreDurability, TenantRoles,
+};
 use paros::{JournalIdentifier, Names, TenantId, WriterMode};
 use serde_json::json;
 
@@ -250,6 +252,18 @@ pub struct ConfigureArgs {
     /// The replicas per journal (recorded).
     #[arg(long)]
     replicas: Option<u32>,
+    /// The tenant's batchers (#145 (batchers)): the coordinator books that
+    /// many on the cell's `stateless` machines. Only without `--journal`.
+    #[arg(long)]
+    batchers: Option<u32>,
+    /// The tenant's frontends (recorded, #604 (role counts)). Only without
+    /// `--journal`.
+    #[arg(long)]
+    frontends: Option<u32>,
+    /// The tenant's proxy leaders (recorded, #604 (role counts)). Only
+    /// without `--journal`.
+    #[arg(long)]
+    proxy_leaders: Option<u32>,
     /// How long the request is sent again while no coordinator decides it,
     /// in milliseconds.
     #[arg(long, default_value = "30000")]
@@ -380,6 +394,20 @@ async fn ready_tenant(
     Ok((tenant, entry.control, election, entry.all_tags()))
 }
 
+/// The role counts `args` names (#604 (role counts)), each count it does
+/// not name kept from `held`, or a refusal printed.
+fn role_counts(args: &ConfigureArgs, held: TenantRoles) -> Result<TenantRoles, Ending> {
+    TenantRoles::new(
+        args.frontends.unwrap_or(held.frontends),
+        args.proxy_leaders.unwrap_or(held.proxy_leaders),
+        args.batchers.unwrap_or(held.batchers),
+    )
+    .map_err(|error| {
+        note(&format!("refused: {error}"));
+        Ending::Refused
+    })
+}
+
 /// `parosctl configure` (#214 (tenant modes)): record a new desired mode
 /// for a journal or the tenant's default. The answer says it is recorded;
 /// the tenant coordinator then applies a journal's mode by reconfiguration
@@ -392,25 +420,56 @@ pub async fn configure(
     out: &Printer,
     args: ConfigureArgs,
 ) -> Ending {
-    let Some(mut desired) = args
-        .durability
-        .desired()
-        .or_else(|| args.replicas.map(|_| Desired::DEFAULT))
-    else {
-        note("name a mode: --failures-per-partition, --partitions or --replicas");
+    let named_roles =
+        args.batchers.is_some() || args.frontends.is_some() || args.proxy_leaders.is_some();
+    if named_roles && args.journal.is_some() {
+        note("role counts are the tenant default's: drop --journal");
         return Ending::Refused;
-    };
-    desired.replicas = args.replicas.unwrap_or(0);
-    let (tenant, _, election, _) = match ready_tenant(client, out, &args.tenant).await {
+    }
+    let named_mode = args.durability.desired();
+    if named_mode.is_none() && args.replicas.is_none() && !named_roles {
+        note("name a mode: --failures-per-partition, --partitions, --replicas or a role count");
+        return Ending::Refused;
+    }
+    let (tenant, control, election, _) = match ready_tenant(client, out, &args.tenant).await {
         Ok(found) => found,
         Err(ending) => return ending,
     };
+    // A count or a mode not named keeps the tenant's: read its fold when
+    // the command names only part of them.
+    let current = if args.journal.is_none() && (named_roles || named_mode.is_none()) {
+        let Some(fold) = journals::list(client, tenant, control).await else {
+            note("the tenant's control journal could not be read to its tail");
+            return Ending::Unreachable;
+        };
+        Some((fold.default_desired(), fold.roles()))
+    } else {
+        None
+    };
+    let roles = if named_roles {
+        let held = current.map(|(_, roles)| roles).unwrap_or_default();
+        match role_counts(&args, held) {
+            Ok(roles) => Some(roles),
+            Err(ending) => return ending,
+        }
+    } else {
+        None
+    };
+    let mut desired = named_mode
+        .or_else(|| current.map(|(desired, _)| desired))
+        .unwrap_or(Desired::DEFAULT);
+    if let Some(replicas) = args.replicas {
+        desired.replicas = replicas;
+    } else if named_mode.is_some() {
+        desired.replicas = 0;
+    }
     let request = JournalRequest {
         request: nonzero(providers),
         tenant,
         op: JournalOp::Configure {
             name: args.journal.as_ref().map(|j| j.clone().into_bytes()),
             desired,
+            roles,
         },
     };
     let answer = journals::request(
@@ -430,9 +489,13 @@ pub async fn configure(
     let label = answer.as_str();
     match answer {
         JournalAnswer::Configured { .. } => {
+            let roles_label = roles.map(|r| r.label());
             out.emit(
-                || format!("configured {target}: {}", desired.label()),
-                || json!({ "outcome": label, "target": target, "mode": desired.label() }),
+                || match &roles_label {
+                    Some(r) => format!("configured {target}: {}, {r}", desired.label()),
+                    None => format!("configured {target}: {}", desired.label()),
+                },
+                || json!({ "outcome": label, "target": target, "mode": desired.label(), "roles": roles_label }),
             );
             Ending::Success
         }

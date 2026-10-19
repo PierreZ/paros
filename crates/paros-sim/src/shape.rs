@@ -487,6 +487,12 @@ impl NodeShape {
             // machine is ever low on space; the extreme passes over every
             // machine the disk-full scenario filled.
             free_bytes_floor: buggify_knob!(65_536_u64, 0_u64..2_097_153_u64),
+            // A batcher's tick (#145). Floor 1 ms; the extreme holds writes
+            // long enough for many writers' bursts to share one slot.
+            batch_tick: ms(buggify_knob!(2_u64, 1_u64..51_u64)),
+            // A batcher's flush bound (#145). Floor 1: every write goes out
+            // alone; the extreme flushes a lane at two or three records.
+            batch_flush_records: buggify_knob!(1024_u64, 1_u64..4_u64),
         };
         cap_backoff(&mut drawn, tick_ms);
         // The handover re-send cadence stays under the shortest stall

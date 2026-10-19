@@ -73,7 +73,7 @@ use crate::system::{
 };
 use crate::tenant::{
     ConfigureTarget, Description, Desired, RequestOutcome, StoreDurability, TenantCommand,
-    TenantControl,
+    TenantControl, TenantRoles,
 };
 
 /// What `HostTenant` records of a tenant: its control journal, its name and
@@ -271,8 +271,12 @@ impl TenantDesk {
                 )
                 .await
             }
-            JournalOp::Configure { name, desired } => {
-                self.configure(client, request, name.as_deref(), *desired, cell)
+            JournalOp::Configure {
+                name,
+                desired,
+                roles,
+            } => {
+                self.configure(client, request, (name.as_deref(), *desired, *roles), cell)
                     .await
             }
             JournalOp::SetTags { name, tags } => {
@@ -492,8 +496,7 @@ impl TenantDesk {
         &mut self,
         client: &Client<P>,
         request: &JournalRequest,
-        name: Option<&[u8]>,
-        desired: Desired,
+        (name, desired, roles): (Option<&[u8]>, Desired, Option<TenantRoles>),
         cell: Option<&mut CellSession>,
     ) -> JournalAnswer {
         let tenant = request.tenant;
@@ -553,6 +556,7 @@ impl TenantDesk {
             request: request.request,
             target,
             desired,
+            roles,
         };
         if let Err(answer) = self.append(client, tenant, &command).await {
             return answer;

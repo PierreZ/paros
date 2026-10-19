@@ -177,9 +177,21 @@ impl FleetOps {
                 } else {
                     drawn_configure(payload)
                 };
+                let name = (!(payload >> 12).is_multiple_of(4)).then_some(name);
+                // The tenant default's configure names the tenant's role
+                // counts on a coin (#604): up to three batchers, and the
+                // recorded counts of frontends and proxy leaders.
+                let roles = (name.is_none() && buggify_with_prob!(0.6)).then(|| {
+                    assert_reachable!("journals: a configure names the tenant's role counts");
+                    let batchers = u32::try_from((payload >> 40) % 4).unwrap_or(0);
+                    let others = u32::try_from((payload >> 44) % 3).unwrap_or(0);
+                    paros::tenant::TenantRoles::new(others, others, batchers)
+                        .expect("the counts are within the cap")
+                });
                 JournalOp::Configure {
-                    name: (!(payload >> 12).is_multiple_of(4)).then_some(name),
+                    name,
                     desired,
+                    roles,
                 }
             } else {
                 let store = drawn_store(ctx.state());
@@ -441,6 +453,22 @@ impl FleetOps {
     }
 
     /// The client's oracles of a decided answer.
+    /// The data plane on `journal`, created on `cell`: on
+    /// a coin, part of it goes through the machines' batchers (#145
+    /// (batchers)): a multi-writer journal's burst, a single-writer
+    /// journal's first round.
+    async fn exercise_on_cell(
+        &mut self,
+        cell: &Cell,
+        journal: JournalIdentifier,
+        draw: u64,
+    ) {
+        let client = cell.client.clone();
+        let batched = buggify_with_prob!(0.5).then(|| self.connect_batched(&cell.servers));
+        self.exercise_created(&client, journal, cell.first(draw), (Some(journal), batched))
+            .await;
+    }
+
     async fn judge_answer(
         &mut self,
         cell: &Cell,
@@ -450,7 +478,7 @@ impl FleetOps {
         answer: &JournalAnswer,
         draw: u64,
     ) {
-        if let JournalOp::Configure { name, desired } = &request.op
+        if let JournalOp::Configure { name, desired, .. } = &request.op
             && !matches!(answer, JournalAnswer::UnknownTenant)
         {
             Self::judge_configure(cell, control, request, answer, (name.as_deref(), desired)).await;
@@ -517,9 +545,7 @@ impl FleetOps {
                         "created: a client runs the data plane on a journal it created"
                     );
                     self.note_journals([journal]);
-                    let client = cell.client.clone();
-                    self.exercise_created(&client, journal, cell.first(draw), Some(journal))
-                        .await;
+                    self.exercise_on_cell(cell, journal, draw).await;
                 }
             }
             (JournalAnswer::Deleted { .. }, JournalOp::Delete { name }) => {
@@ -836,7 +862,8 @@ impl FleetOps {
             && buggify_with_prob!(0.3)
         {
             assert_reachable!("created: a client runs the data plane through a frontend");
-            self.exercise_created(&client, LOCAL, first, None).await;
+            self.exercise_created(&client, LOCAL, first, (None, None))
+                .await;
         }
     }
 

@@ -228,6 +228,7 @@ impl AdmittedMachine {
         rpc: &RpcHandle<P>,
         tunables: &DriverTunables,
         cache: CacheSink,
+        observer: Option<std::sync::Arc<dyn crate::client::CallObserver>>,
         shutdown: CancellationToken,
     ) -> SimulationResult<()> {
         assert!(
@@ -261,6 +262,24 @@ impl AdmittedMachine {
                 client: tunables.internal_client(),
                 answer_within: tunables.resolve_answer_within,
             },
+            shutdown.clone(),
+        )?;
+        // Every machine serves the batcher endpoint (#145) over the cell's
+        // address book; the tenant coordinator books a tenant's batchers
+        // on the `stateless` machines (#604) and `Resolve` names them.
+        crate::batcher::spawn(
+            providers,
+            rpc,
+            crate::batcher::BatcherSettings::from_tunables(tunables),
+            (
+                crate::batcher::BatcherBook {
+                    nodes: self.book(),
+                    updates: Some(cache.subscribe()),
+                    skip: None,
+                    observer,
+                },
+                self.facts.names.clone(),
+            ),
             shutdown.clone(),
         )?;
         tracing::info!(
