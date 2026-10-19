@@ -39,7 +39,10 @@ coordinator is `paros::machine::coordinator`:
   resignation can name a successor and the successor's uuid; the successor then leads the
   next term.
 - **The lease.** A candidate campaigns when it saw no renewal for `lease` plus the
-  caller's jitter, on its own clock. The library draws no randomness. A caller that campaigns
+  caller's jitter, on its own clock, over reads that served. A read no server served shows
+  nothing and counts for nothing (PR #705 (fix main)): a watcher whose
+  election reads fail for a lease deposed a live coordinator, and the next term took 11 s to
+  open. The library draws no randomness. A caller that campaigns
   earlier deposes a live leader: that costs availability, never safety.
 - **Uuids.** A candidate derives a fresh uuid per term from the caller's seed. A
   restarted leader does not take back its old term: it waits a lease and takes the next term.
