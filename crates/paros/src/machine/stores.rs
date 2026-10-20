@@ -26,7 +26,7 @@ use tokio_util::sync::CancellationToken;
 use super::matchmakers::SetBookings;
 use super::record::MachineRecord;
 use super::{CacheSink, CachedRegistry, ProviderDisk};
-use crate::journal::{Durability, Spares};
+use crate::journal::Durability;
 use crate::{
     Audit, BootKind, DriverTunables, JournalStorage, JournalStoreConfig, JournalStores, RunError,
 };
@@ -73,9 +73,6 @@ pub(crate) struct MachineStores<S: StorageProvider, F> {
     /// The storage fault the last provisioning of a created journal took,
     /// handed to the driver once so it quarantines the journal.
     open_faults: BTreeMap<JournalIdentifier, RunError>,
-    /// Where each served journal prepares its spare segments (#600
-    /// (journal commit stalls)): the machine's own task provider.
-    spares: Option<Spares<S>>,
 }
 
 impl<S: StorageProvider, F> MachineStores<S, F> {
@@ -116,7 +113,6 @@ impl<S: StorageProvider, F> MachineStores<S, F> {
             sets: SetBookings::default(),
             home,
             open_faults: BTreeMap::new(),
-            spares: None,
         }
     }
 
@@ -148,7 +144,6 @@ impl<S: StorageProvider, F> MachineStores<S, F> {
             sets: SetBookings::default(),
             home: cell,
             open_faults: BTreeMap::new(),
-            spares: None,
         }
     }
 
@@ -163,16 +158,6 @@ impl<S: StorageProvider, F> MachineStores<S, F> {
             "a machine's matchmaker is named by its node id"
         );
         self.matchmaker = Some(config);
-        self
-    }
-
-    /// These stores, each journal they serve preparing its spare segments
-    /// on `spares` (#600 (journal commit stalls)). A store provisioned
-    /// here prepares none: it is dropped once formatted.
-    #[must_use]
-    pub(crate) fn with_spares(mut self, spares: Spares<S>) -> Self {
-        assert!(self.spares.is_none(), "a machine prepares spares one way");
-        self.spares = Some(spares);
         self
     }
 
@@ -212,21 +197,6 @@ impl<S: StorageProvider + Clone + 'static, F> MachineStores<S, F> {
             config,
             layout,
         )
-    }
-
-    /// The store `journal` serves on: [`Self::store`], preparing its spare
-    /// segments when the machine does.
-    fn serving(
-        &self,
-        journal: JournalIdentifier,
-        config: Config,
-        durability: Durability,
-    ) -> JournalStorage<S> {
-        let store = self.store(journal, config, durability);
-        match &self.spares {
-            Some(spares) => store.with_spares(spares.clone()),
-            None => store,
-        }
     }
 
     /// Provision created journal `journal` under `config`: format its store
@@ -314,7 +284,7 @@ where
             assert!(config.id == self.node, "a store is opened as its machine");
             let durability = self.disk.layout().durability;
             return Some((
-                self.serving(journal, config, durability),
+                self.store(journal, config, durability),
                 BootKind::ExistingMember,
             ));
         }
@@ -330,7 +300,7 @@ where
             "a created journal is recorded before its first boot"
         );
         Some((
-            self.serving(journal, config, durability),
+            self.store(journal, config, durability),
             BootKind::ExistingMember,
         ))
     }
