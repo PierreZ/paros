@@ -16,8 +16,10 @@
 //!   measured on its own clock (never by comparing clocks), over reads that
 //!   served, and campaigns: the lease is a liveness hint only. A read no
 //!   server served shows nothing and counts for nothing: a watcher whose
-//!   reads fail deposes no live leader. A wrong guess costs availability,
-//!   never safety.
+//!   reads fail deposes no live leader. A watcher that reads its own id as
+//!   leader under a uuid it never minted deems that term gone at once: an
+//!   earlier incarnation of itself wrote it, and nothing renews it. A wrong
+//!   guess costs availability, never safety.
 //! - **Watch**: a read of the election journal, long-polling at its tail.
 //! - **Takeover**: a campaign that deposes a leader whose lease ran out. The
 //!   caller hands in the backoff jitter (the library draws no randomness),
@@ -282,15 +284,22 @@ impl<P: Providers> Election<P> {
     }
 
     /// Whether this candidate deems the leader gone: it leads nothing, and
-    /// the fold names no leader (and knows the term), or it has seen no sign
-    /// of the leader for `lease + jitter` on its own clock, over reads that
-    /// served. Only a served read shows silence: the time a failed read
-    /// took shows nothing, and counts for nothing (`served`). `jitter` is
-    /// the caller's draw.
+    /// the fold names no leader (and knows the term), or the fold names an
+    /// earlier incarnation of this candidate ([`Election::earlier_incarnation`]),
+    /// or it has seen no sign of the leader for `lease + jitter` on its own
+    /// clock, over reads that served. Only a served read shows silence: the
+    /// time a failed read took shows nothing, and counts for nothing
+    /// (`served`). `jitter` is the caller's draw.
     #[must_use]
     pub fn expired(&self, jitter: Duration) -> bool {
         if self.leading.is_some() {
             return false;
+        }
+        if self.earlier_incarnation() {
+            moonpool_assertions::reachable!(
+                "election: a candidate deposes its own earlier incarnation at once"
+            );
+            return true;
         }
         let bound = self.tunables.lease + jitter;
         let silent = self.served.saturating_sub(self.heard);
@@ -300,6 +309,30 @@ impl<P: Providers> Election<P> {
         }
         let vacant = self.fold.is_known() && self.fold.leader().is_none() && self.caught_up;
         vacant || silent > bound
+    }
+
+    /// Whether the fold's leader is an earlier incarnation of this
+    /// candidate: its own id, under a uuid this incarnation neither minted
+    /// nor was handed. A candidate id names one process at a time, and the
+    /// uuids an incarnation minted die with it, so nothing renews that
+    /// term: its lease is a hint about a leader this candidate knows is
+    /// gone, and waiting it out only costs the cell a coordinator. A term
+    /// this incarnation gave up stays its own ([`Election::held`] keeps it
+    /// resigned), and a hand-off this incarnation was handed is its own
+    /// (`handed`). Safe as every takeover: the governed journal's fence
+    /// decides whose writes land.
+    ///
+    /// Witness `replay-main 15358477277245717568` on 6899d5b, a slow-link
+    /// cell of two live founders (the third wiped): a founder crashed with
+    /// its campaign in flight at the end of the chaos window, rebooted, and
+    /// read its own dead term; both founders waited `lease + jitter`
+    /// (4.2 s) before the next term, and the operator's `init` missed the
+    /// recovery tail's settle bound by 0.7 s ("fleet: an operation an
+    /// operator stopped in ends in the recovery tail").
+    fn earlier_incarnation(&self) -> bool {
+        self.fold
+            .leader()
+            .is_some_and(|leader| leader.candidate.id == self.me.id && !self.mine(leader))
     }
 
     /// Publish `interface` as this candidate's, with the encoded
