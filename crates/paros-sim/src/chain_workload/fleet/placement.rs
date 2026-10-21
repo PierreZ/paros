@@ -462,9 +462,11 @@ fn unmoved(
 }
 
 /// Whether the slot `target` on `node` is still the window's to keep: a
-/// live journal whose recorded placement names `node`, or a set. Only a
-/// tenant's own mode change records `Placed` (#214 (tenant modes)); a move
-/// records nothing, so a re-placement is still judged. A shrink the tenant
+/// live journal whose recorded placement names `node`, or a set. A mode
+/// change (#214 (tenant modes)) and a move (`moves::finish`, #361 (slow
+/// machines)) both record the configuration in force as `Placed` before
+/// they release a slot, so a slot released off the recorded placement is
+/// theirs to release. A shrink the tenant
 /// asked may release the machine while it is up, which no window forbids
 /// (#359: the window holds the roles of a down machine; witness
 /// 15801232642831952797 on 58e72ec).
