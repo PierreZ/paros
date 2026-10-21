@@ -64,6 +64,12 @@ we study, and analyses of external consensus codebases. This file is the map; re
   partition mapping, cell migration and static stability; the source of `docs/architecture/03-7-universe.md`
   §3.7's cell rules.
 
+### Production systems (geo-distributed SQL)
+- [`papers/cockroachdb/`](papers/cockroachdb/): Taft et al. (Cockroach Labs, SIGMOD 2020). Raft
+  per Range with fenced leases, replica placement by constraints, data domiciling policies,
+  joint consensus for replica moves, and why "follow the workload" was rarely used; read for
+  #232 (tenant moves), #687 (rebalance), #714 (residency) and #581 (leader follows its writer).
+
 ## Code implementation analyses
 
 - [`frankenpaxos/`](frankenpaxos/) — Whittaker's Scala research codebase. Per-slot MultiPaxos, the
