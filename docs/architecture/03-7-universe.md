@@ -182,8 +182,9 @@ co-locating it with tenants.
 
 **A journal move follows the papers** (decided by Pierre on 2026-10-21, #232). Every journal
 move (a tenant move between cells, a rebalance inside a cell (#687), a move between cell kinds)
-uses only mechanisms that a paper in `docs/references/papers/` describes, in this order. It adds
-no new protocol step.
+uses only mechanisms that a paper in `docs/references/papers/` describes: **DPaxos for the
+leader, WPaxos for the data** (Pierre, 2026-10-21). The steps run in this order, and the move
+adds no new protocol step.
 
 1. **Warm.** Place non-voting replicas of the journal on the target machines (Compartmentalized
    Paxos replicas, #604). They learn and apply, and never vote, so the quorum does not change.
