@@ -180,6 +180,31 @@ never the authority: if it disagrees with the control journal's leader, the lead
 The universe tenant moves the same way, being one journal; moving it to a dedicated cell is the escape hatch from
 co-locating it with tenants.
 
+**A journal move follows the papers** (decided by Pierre on 2026-10-21, #232). Every journal
+move (a tenant move between cells, a rebalance inside a cell (#687), a move between cell kinds)
+uses only mechanisms that a paper in `docs/references/papers/` describes, in this order. It adds
+no new protocol step.
+
+1. **Warm.** Place non-voting replicas of the journal on the target machines (Compartmentalized
+   Paxos replicas, #604). They learn and apply, and never vote, so the quorum does not change.
+   The move waits until they reach the chosen end. WPaxos §5.2 keeps non-voting learners "to
+   avoid catch-up delay if they later become leader".
+2. **Reconfigure.** One Matchmaker reconfiguration to a `C_new` on the target machines. New
+   acceptors need no warm-up for safety, and the next leader needs a Phase-1 quorum of every
+   configuration in `H_b` until GC (Matchmaker Paxos). This gives the guarantee of joint
+   consensus in one round: no intermediate configuration has fewer members or more members in
+   one zone (CockroachDB §7.1.2).
+3. **Hand off the leader.** The leader calls `relinquish_to` on a member in the target, so no
+   election runs (DPaxos §4.4; MemoryDB's collaborative leadership transfer). A lost handoff
+   costs an election, never safety.
+4. **GC.** The old configuration is forgotten at the effective GC watermark, then its members
+   retire and release their bookings.
+
+A tenant move then runs flip, redirect and forget as above. The move is predictable and driven by
+the operator or the data distributor, never by an adaptive policy on its own: CockroachDB §7.5
+reports that "follow the workload" was rarely used because operators favor predictable
+performance.
+
 **Moving the universe tenant** (decided on 2026-10-09). The universe information and the tenant
 list are tenant data, so they move like the data of any user tenant. The universe tenant's
 control journal holds the universe entry, the cell entries and the tenant entries (the universe
