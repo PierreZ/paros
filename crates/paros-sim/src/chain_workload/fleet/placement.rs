@@ -496,7 +496,8 @@ fn kept(
 /// While a maintenance window an operator opened still holds (#359), every
 /// slot its machine held when the operator sent it is still booked, unless
 /// the machine left the registered machines, the slot's journal is gone, or
-/// the tenant's own mode change placed the journal off the machine.
+/// the tenant's own mode change placed the journal off the machine. A slot
+/// booked again on the machine for the same journal or set is kept.
 fn maintained(ctx: &SimContext, tenants: &[TenantControl], registry: &Registry) {
     let now = ctx.time().now();
     for note in crate::machine::maintenance_notes(ctx.state()) {
@@ -516,12 +517,24 @@ fn maintained(ctx: &SimContext, tenants: &[TenantControl], registry: &Registry) 
             .filter(|(_, b)| b.node == node)
             .map(|(id, _)| id)
             .collect();
+        let held: BTreeSet<BookingTarget> = registry
+            .bookings()
+            .filter(|(_, b)| b.node == node)
+            .map(|(_, b)| b.target)
+            .collect();
         // A slot released with its journal, or by the tenant's own mode
-        // change, is the tenant's, not a move's.
+        // change, is the tenant's, not a move's. A mode change may also
+        // shrink a journal off the machine and a later one grow it back
+        // onto it: the machine holds the journal again under a new booking,
+        // so its role is kept (witness 17657004667486383178 on PR #710).
         let moved = note
             .slots
             .iter()
-            .filter(|(id, target)| !booked.contains(id) && kept(tenants, registry, *target, node))
+            .filter(|(id, target)| {
+                !booked.contains(id)
+                    && !held.contains(target)
+                    && kept(tenants, registry, *target, node)
+            })
             .count();
         assert_always!(
             moved == 0,
