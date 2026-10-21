@@ -361,6 +361,15 @@ impl<P: Providers> Election<P> {
     /// most [`WATCH_PAGES`] pages), the first page long-polling `wait_ms` at
     /// the tail, and fold every record. Whether it reached the tail.
     ///
+    /// A leader renews between pages when a renewal falls due: its watch
+    /// pages through the renewals it appended during its duties, and a
+    /// page is a round trip, so a watch of [`WATCH_PAGES`] small pages over
+    /// a slow link outlasts a lease (replay-recipe 17229808712646104550
+    /// 6925:13858580900965588934 on b00ab75 (#710 (recycled segments)): a
+    /// `page_size` of 1, 220 ms a page, a 2 s lease; every term's watch
+    /// read 16 renewals in 3.5 s with no renewal, the other founder took
+    /// over, and the election never settled).
+    ///
     /// # Panics
     ///
     /// If an assertion on its own postconditions fails: a programmer error.
@@ -369,6 +378,11 @@ impl<P: Providers> Election<P> {
         // Whether a truncation already moved this watch to the floor.
         let mut chased = false;
         for _ in 0..WATCH_PAGES {
+            if let Some(leader) = self.leading().cloned()
+                && self.renew_when_due(&leader).await
+            {
+                moonpool_assertions::reachable!("election: a leader renewed between pages");
+            }
             let from = self.fold.next();
             let request = Read {
                 journal: self.journal.journal.0,
@@ -614,27 +628,39 @@ impl<P: Providers> Election<P> {
         Step::Leading { leader, fresh }
     }
 
-    /// Renew `leader` (this candidate's) when one is due, then truncate the
-    /// journal to the latest renewal the fold counted once
-    /// `compact_after` records lie below it.
-    async fn renew(&mut self, leader: &Leader) {
+    /// Append a renewal of `leader` (this candidate's) when one is due:
+    /// whether one was.
+    ///
+    /// # Panics
+    ///
+    /// If `leader` is not this candidate's: a programmer error.
+    async fn renew_when_due(&mut self, leader: &Leader) -> bool {
         assert!(self.mine(leader), "only the leader renews");
         let now = self.client.now();
         let due = self
             .renewed
             .is_none_or(|at| now.saturating_sub(at) >= self.tunables.renew_every);
-        if due {
-            let record = ElectionRecord::Renew {
-                term: leader.term,
-                candidate: self.me.clone(),
-                uuid: leader.uuid,
-            };
-            self.append(&record).await;
-            // Counted once the write returned: a renewal its caller dropped
-            // mid-way ([`Election::renew_if_due`] beside a duty that ended)
-            // is due again at once.
-            self.renewed = Some(now);
+        if !due {
+            return false;
         }
+        let record = ElectionRecord::Renew {
+            term: leader.term,
+            candidate: self.me.clone(),
+            uuid: leader.uuid,
+        };
+        self.append(&record).await;
+        // Counted once the write returned: a renewal its caller dropped
+        // mid-way ([`Election::renew_if_due`] beside a duty that ended)
+        // is due again at once.
+        self.renewed = Some(now);
+        true
+    }
+
+    /// Renew `leader` (this candidate's) when one is due, then truncate the
+    /// journal to the latest renewal the fold counted once
+    /// `compact_after` records lie below it.
+    async fn renew(&mut self, leader: &Leader) {
+        self.renew_when_due(leader).await;
         if leader.anchor >= self.floor.saturating_add(self.tunables.compact_after) {
             let request = open_truncate_request(self.journal, leader.anchor);
             if let TruncateOutcome::Applied { state } =
