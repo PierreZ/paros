@@ -49,6 +49,10 @@ crc32c = "0.6"
 # The driver emits standard observability events (node_tick, peer_message_received)
 # and wraps every loop stage in an `#[instrument]` span carrying the node id.
 tracing = "0.1"
+# `join!` and `join_all`, so a cold election read asks for several pages in
+# one round trip (`client::election::read_election`). No executor: the
+# caller's runtime drives the futures, wasm included.
+futures = { version = "0.3", default-features = false, features = ["alloc", "async-await"] }
 # Runtime-neutral queues between the RPC edge and the single-owner driver
 # loop. The runtime itself is supplied by the Moonpool providers.
 tokio = { version = "1", features = ["sync"] }

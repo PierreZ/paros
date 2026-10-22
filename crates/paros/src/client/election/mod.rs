@@ -51,6 +51,7 @@
 
 mod fold;
 
+use std::collections::VecDeque;
 use std::time::Duration;
 
 use moonpool_core::Providers;
@@ -61,7 +62,7 @@ pub use fold::{Candidate, Change, ElectionFold, ElectionRecord, Leader, MAGIC};
 use super::multi::{append_request, open_truncate_request};
 use super::outcome::{ReadOutcome, SetLeaderOutcome, TruncateOutcome, WriteOutcome};
 use super::writer::leader_uuid;
-use super::{Client, WriteOptions};
+use super::{Client, ReadReport, WriteOptions};
 use crate::rpc::Read;
 
 /// The pages one watch reads at most before it returns: a bound, not a
@@ -98,6 +99,21 @@ const _: () = assert!(
 const TAIL_WAITS: usize = 2;
 
 const _: () = assert!(TAIL_WAITS > 0, "a reader at the tail waits for the floor");
+
+/// How many pages one [`read_election`] asks for at once past its first
+/// page, which reports the tail and the server's page stride. A read from
+/// the floor costs one round trip per page: a server that serves one record
+/// per page (`max_read_records`, `max_read_bytes`) and a leader that lets
+/// `compact_after` renewals lie below its anchor make a cold read dozens of
+/// round trips long, whatever page the client asks for (replay-recipe
+/// 5454952632029993027 202233:16131444186009562747 on #710 (recycled
+/// segments): 82 one-record pages at 350 ms, 22 s past the settle check's
+/// deadline; replay-recipe 14626817771292676959 25491:2229301628492927278:
+/// the operator's `init` waited on its coordinator over 520 ms pages past
+/// the recovery tail). A bound, not a target.
+const READ_WINDOW: u64 = 16;
+
+const _: () = assert!(READ_WINDOW > 1, "a cold read pages ahead");
 
 /// How many times one [`read_election`] lets the floor send it to the tail
 /// before it returns the fold as it stands. A bound, not a target.
@@ -694,7 +710,11 @@ impl<P: Providers> Election<P> {
     /// `compact_after` records lie below it.
     async fn renew(&mut self, leader: &Leader) {
         self.renew_when_due(leader).await;
-        if leader.anchor >= self.floor.saturating_add(self.tunables.compact_after) {
+        // A truncation put off leaves more records between the floor and
+        // the tail, for every cold read to page through ([`READ_WINDOW`]).
+        if leader.anchor >= self.floor.saturating_add(self.tunables.compact_after)
+            && !moonpool_buggify::buggify_with_prob!(0.2)
+        {
             let request = open_truncate_request(self.journal, leader.anchor);
             if let TruncateOutcome::Applied { state } =
                 self.client.truncate(&request, self.first).await
@@ -793,7 +813,11 @@ impl<P: Providers> Election<P> {
 /// the read twice sends it to the tail, to wait for the next renewal and
 /// for the floor to reach it ([`FLOOR_RACE_WAIT_MS`], at most [`TAIL_WAITS`]
 /// pages): a fold at the tail anchors only at the floor
-/// ([`ElectionFold::floor_seen`]).
+/// ([`ElectionFold::floor_seen`]). Past its first page, it asks for up to
+/// [`READ_WINDOW`] pages at once, one server page stride apart, and folds
+/// them in order: a page that does not start where the fold is (a short
+/// page, a truncation, a page no server served) drops the rest, and the
+/// read goes on one page at a time from there.
 ///
 /// # Panics
 ///
@@ -812,6 +836,10 @@ pub async fn read_election<P: Providers>(
     let mut wait = 0;
     let mut waits = 0;
     let mut cycles = 0;
+    // The pages read ahead, by the position each asked from, and the
+    // records the last page the server served held: its page stride.
+    let mut ahead: VecDeque<(u64, ReadReport)> = VecDeque::new();
+    let mut stride = 0_u64;
     loop {
         let from = fold.next();
         let request = Read {
@@ -822,7 +850,20 @@ pub async fn read_election<P: Providers>(
             wait_ms: wait,
         };
         wait = 0;
-        let report = client.read_any(&request, first).await;
+        let report = match ahead.pop_front() {
+            Some((at, report))
+                if at == from
+                    && request.wait_ms == 0
+                    && matches!(report.outcome, ReadOutcome::Page { .. }) =>
+            {
+                moonpool_assertions::reachable!("election: a cold read folds a page it read ahead");
+                report
+            }
+            _ => {
+                ahead.clear();
+                read_ahead(client, request, first, stride, target, &mut ahead).await
+            }
+        };
         first = report.server;
         match report.outcome {
             ReadOutcome::Page {
@@ -830,6 +871,7 @@ pub async fn read_election<P: Providers>(
                 records,
                 state,
             } if at == from => {
+                stride = u64::try_from(records.len()).unwrap_or(u64::MAX);
                 for (seq, record) in (from..).zip(&records) {
                     fold.absorb(seq, record);
                 }
@@ -894,6 +936,58 @@ pub async fn read_election<P: Providers>(
             _ => return None,
         }
     }
+}
+
+/// Read `request`, from server `first` on, and the pages after it, up to
+/// [`READ_WINDOW`] in all, `stride` records apart and short of `target`,
+/// into `ahead`: one round trip for the window. A long-poll, an unknown
+/// stride or tail, or a window of one reads `request` alone.
+async fn read_ahead<P: Providers>(
+    client: &Client<P>,
+    request: Read,
+    first: usize,
+    stride: u64,
+    target: Option<u64>,
+    ahead: &mut VecDeque<(u64, ReadReport)>,
+) -> ReadReport {
+    // A window of one keeps the serial path, one round trip per page, in
+    // reach of the sweep.
+    let window = if moonpool_buggify::buggify_with_prob!(0.1) {
+        1
+    } else {
+        READ_WINDOW
+    };
+    let starts: Vec<u64> = match target {
+        Some(tail) if stride > 0 && request.wait_ms == 0 => (1..window)
+            .map_while(|k| {
+                k.checked_mul(stride)
+                    .and_then(|skip| request.from_seq.checked_add(skip))
+            })
+            .take_while(|&at| at < tail)
+            .collect(),
+        _ => Vec::new(),
+    };
+    if starts.is_empty() {
+        return client.read_any(&request, first).await;
+    }
+    moonpool_assertions::reachable!("election: a cold read pages in a window");
+    let pages = starts.iter().map(|&at| {
+        let page = Read {
+            from_seq: at,
+            ..request
+        };
+        async move { (at, client.read_any(&page, first).await) }
+    });
+    let (report, read) = futures::join!(
+        client.read_any(&request, first),
+        futures::future::join_all(pages)
+    );
+    ahead.extend(read);
+    assert!(
+        ahead.iter().all(|(at, _)| *at > request.from_seq),
+        "pages read ahead lie past the page asked"
+    );
+    report
 }
 
 /// Hand the governed journal to the successor `resign` named:
