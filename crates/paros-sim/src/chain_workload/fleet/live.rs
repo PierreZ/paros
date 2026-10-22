@@ -49,6 +49,9 @@ impl FleetOps {
                 0,
             )
             .await;
+            // The `MachineDown`s sent in the tail and not judged yet
+            // (`crate::machine::judge_sent`).
+            crate::machine::judge_pending(ctx.state(), ctx.time().now());
             if matches!(loaded, LoadOutcome::Loaded { .. }) {
                 let now = ctx.time().now();
                 let judged = fold.state();

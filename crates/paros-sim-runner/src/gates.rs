@@ -1341,6 +1341,10 @@ pub const RARE: &[Rare] = &[
         msg: "chain: a multi-writer burst is written out of send order",
         reason: "a cause most bursts never show: one shard of PR #692 saw none of 22 bursts out of order, and all four shards of PR #705's sweep missed it (#662 (burst multi-writer appends))",
     },
+    Rare {
+        msg: "maintenance: an operator ends a window while its machine is down",
+        reason: "needs a gone-machine seed whose gone machine a window covers while a window step runs inside its 13 to 18 s outage: fired once in PR #710's (recycled segments) first sweep, missed by every shard of its second and of PR #712's; a coin that puts the down machine in maintenance fired 0 of 300 hunt seeds (#661 (maintenance windows), #475 (re-place after the Down bound))",
+    },
 ];
 
 /// What the sweep ran of the declared gates.
