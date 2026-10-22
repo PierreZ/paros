@@ -344,6 +344,25 @@ impl Modes {
         if target.len() != want.count || !system.admits(target.len()) {
             return ModeStep::Waiting;
         }
+        // Every member of the new configuration is up: a member that is
+        // down may never return (a wipe), and a configuration with fewer
+        // live members than a Phase-1 quorum elects no leader again, so no
+        // move can heal it. A down member under a maintenance window stays
+        // a member (#359), and the change waits for it (replay-recipe
+        // 6088854892229177840 14147:11814493376964626340 on f918cf5 (#712
+        // (renew between pages)): a window held a wiped member, a booked
+        // spare was wiped a second before, the change reconfigured onto
+        // both, and slot 8, decided under the old configuration, was never
+        // applied).
+        if target
+            .iter()
+            .any(|node| !cell.registry().liveness(*node).up)
+        {
+            moonpool_assertions::reachable!(
+                "coordinator: a mode change waits for a member that is down"
+            );
+            return ModeStep::Waiting;
+        }
         // The new configuration is labeled with its members' zones and
         // owned by this cell, like a create's (#215 (zones)).
         let machines = placement::machines(cell.registry(), target.iter().copied());

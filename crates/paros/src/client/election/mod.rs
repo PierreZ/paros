@@ -16,8 +16,10 @@
 //!   measured on its own clock (never by comparing clocks), over reads that
 //!   served, and campaigns: the lease is a liveness hint only. A read no
 //!   server served shows nothing and counts for nothing: a watcher whose
-//!   reads fail deposes no live leader. A wrong guess costs availability,
-//!   never safety.
+//!   reads fail deposes no live leader. A watcher that reads its own id as
+//!   leader under a uuid it never minted deems that term gone at once: an
+//!   earlier incarnation of itself wrote it, and nothing renews it. A wrong
+//!   guess costs availability, never safety.
 //! - **Watch**: a read of the election journal, long-polling at its tail.
 //! - **Takeover**: a campaign that deposes a leader whose lease ran out. The
 //!   caller hands in the backoff jitter (the library draws no randomness),
@@ -282,15 +284,22 @@ impl<P: Providers> Election<P> {
     }
 
     /// Whether this candidate deems the leader gone: it leads nothing, and
-    /// the fold names no leader (and knows the term), or it has seen no sign
-    /// of the leader for `lease + jitter` on its own clock, over reads that
-    /// served. Only a served read shows silence: the time a failed read
-    /// took shows nothing, and counts for nothing (`served`). `jitter` is
-    /// the caller's draw.
+    /// the fold names no leader (and knows the term), or the fold names an
+    /// earlier incarnation of this candidate ([`Election::earlier_incarnation`]),
+    /// or it has seen no sign of the leader for `lease + jitter` on its own
+    /// clock, over reads that served. Only a served read shows silence: the
+    /// time a failed read took shows nothing, and counts for nothing
+    /// (`served`). `jitter` is the caller's draw.
     #[must_use]
     pub fn expired(&self, jitter: Duration) -> bool {
         if self.leading.is_some() {
             return false;
+        }
+        if self.earlier_incarnation() {
+            moonpool_assertions::reachable!(
+                "election: a candidate deposes its own earlier incarnation at once"
+            );
+            return true;
         }
         let bound = self.tunables.lease + jitter;
         let silent = self.served.saturating_sub(self.heard);
@@ -300,6 +309,30 @@ impl<P: Providers> Election<P> {
         }
         let vacant = self.fold.is_known() && self.fold.leader().is_none() && self.caught_up;
         vacant || silent > bound
+    }
+
+    /// Whether the fold's leader is an earlier incarnation of this
+    /// candidate: its own id, under a uuid this incarnation neither minted
+    /// nor was handed. A candidate id names one process at a time, and the
+    /// uuids an incarnation minted die with it, so nothing renews that
+    /// term: its lease is a hint about a leader this candidate knows is
+    /// gone, and waiting it out only costs the cell a coordinator. A term
+    /// this incarnation gave up stays its own ([`Election::held`] keeps it
+    /// resigned), and a hand-off this incarnation was handed is its own
+    /// (`handed`). Safe as every takeover: the governed journal's fence
+    /// decides whose writes land.
+    ///
+    /// Witness `replay-main 15358477277245717568` on 6899d5b, a slow-link
+    /// cell of two live founders (the third wiped): a founder crashed with
+    /// its campaign in flight at the end of the chaos window, rebooted, and
+    /// read its own dead term; both founders waited `lease + jitter`
+    /// (4.2 s) before the next term, and the operator's `init` missed the
+    /// recovery tail's settle bound by 0.7 s ("fleet: an operation an
+    /// operator stopped in ends in the recovery tail").
+    fn earlier_incarnation(&self) -> bool {
+        self.fold
+            .leader()
+            .is_some_and(|leader| leader.candidate.id == self.me.id && !self.mine(leader))
     }
 
     /// Publish `interface` as this candidate's, with the encoded
@@ -361,6 +394,15 @@ impl<P: Providers> Election<P> {
     /// most [`WATCH_PAGES`] pages), the first page long-polling `wait_ms` at
     /// the tail, and fold every record. Whether it reached the tail.
     ///
+    /// A leader renews between pages when a renewal falls due: its watch
+    /// pages through the renewals it appended during its duties, and a
+    /// page is a round trip, so a watch of [`WATCH_PAGES`] small pages over
+    /// a slow link outlasts a lease (replay-recipe 17229808712646104550
+    /// 6925:13858580900965588934 on b00ab75 (#710 (recycled segments)): a
+    /// `page_size` of 1, 220 ms a page, a 2 s lease; every term's watch
+    /// read 16 renewals in 3.5 s with no renewal, the other founder took
+    /// over, and the election never settled).
+    ///
     /// # Panics
     ///
     /// If an assertion on its own postconditions fails: a programmer error.
@@ -369,6 +411,11 @@ impl<P: Providers> Election<P> {
         // Whether a truncation already moved this watch to the floor.
         let mut chased = false;
         for _ in 0..WATCH_PAGES {
+            if let Some(leader) = self.leading().cloned()
+                && self.renew_when_due(&leader).await
+            {
+                moonpool_assertions::reachable!("election: a leader renewed between pages");
+            }
             let from = self.fold.next();
             let request = Read {
                 journal: self.journal.journal.0,
@@ -614,27 +661,39 @@ impl<P: Providers> Election<P> {
         Step::Leading { leader, fresh }
     }
 
-    /// Renew `leader` (this candidate's) when one is due, then truncate the
-    /// journal to the latest renewal the fold counted once
-    /// `compact_after` records lie below it.
-    async fn renew(&mut self, leader: &Leader) {
+    /// Append a renewal of `leader` (this candidate's) when one is due:
+    /// whether one was.
+    ///
+    /// # Panics
+    ///
+    /// If `leader` is not this candidate's: a programmer error.
+    async fn renew_when_due(&mut self, leader: &Leader) -> bool {
         assert!(self.mine(leader), "only the leader renews");
         let now = self.client.now();
         let due = self
             .renewed
             .is_none_or(|at| now.saturating_sub(at) >= self.tunables.renew_every);
-        if due {
-            let record = ElectionRecord::Renew {
-                term: leader.term,
-                candidate: self.me.clone(),
-                uuid: leader.uuid,
-            };
-            self.append(&record).await;
-            // Counted once the write returned: a renewal its caller dropped
-            // mid-way ([`Election::renew_if_due`] beside a duty that ended)
-            // is due again at once.
-            self.renewed = Some(now);
+        if !due {
+            return false;
         }
+        let record = ElectionRecord::Renew {
+            term: leader.term,
+            candidate: self.me.clone(),
+            uuid: leader.uuid,
+        };
+        self.append(&record).await;
+        // Counted once the write returned: a renewal its caller dropped
+        // mid-way ([`Election::renew_if_due`] beside a duty that ended)
+        // is due again at once.
+        self.renewed = Some(now);
+        true
+    }
+
+    /// Renew `leader` (this candidate's) when one is due, then truncate the
+    /// journal to the latest renewal the fold counted once
+    /// `compact_after` records lie below it.
+    async fn renew(&mut self, leader: &Leader) {
+        self.renew_when_due(leader).await;
         if leader.anchor >= self.floor.saturating_add(self.tunables.compact_after) {
             let request = open_truncate_request(self.journal, leader.anchor);
             if let TruncateOutcome::Applied { state } =

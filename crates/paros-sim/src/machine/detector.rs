@@ -12,6 +12,18 @@
 //! span of that ask lies in the quiet tail, the machine listened throughout
 //! and no machine was slow, nothing excuses the silence. The final fleet
 //! check judges the end state too (`chain_workload::fleet::live`).
+//!
+//! A `MachineDown` is judged [`NOTED`] after it was sent, never as it is
+//! sent: the board notes a kill when the killed task drops, a scheduler
+//! step after the kill closed the machine's connections, so a write sent
+//! at the kill's own instant reads the machine live. Witness replay-recipe
+//! 8586656184448954778 719326:5636923068530185909 on f729de1 (#712 (renew
+//! between pages)): an operator's resumed `init` killed its target founder
+//! 89 s into the tail (`FleetOps::killer`, its own BUGGIFY location, live
+//! in the tail), the coordinator's `Identify` in flight was refused at
+//! once, 2.8 s after the machine last answered, past the seed's
+//! `machine_down_after`, and the board noted the end 15 µs after the
+//! `MachineDown` was judged.
 
 use std::time::Duration;
 
@@ -64,8 +76,26 @@ pub(crate) fn slowed_after(state: &StateHandle, from: Duration) -> bool {
         .is_some_and(|until| until >= from)
 }
 
-/// A client sent `records` to `journal` at `now`: every
-/// `MachineDown` among them is judged (see the module doc).
+/// How long after a `MachineDown` was sent it is judged: far above the
+/// scheduler step between a kill and the board's note of it, far below
+/// the tail.
+const NOTED: Duration = Duration::from_secs(1);
+
+/// A `MachineDown` sent in the tail, judged once the board's lifecycle
+/// facts are past it ([`judge_pending`]).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct SentDown {
+    /// The machine marked down, by minted id.
+    node: u64,
+    /// When the `Identify` that went unanswered began, at the latest.
+    asked: Duration,
+    /// When the write was sent.
+    sent: Duration,
+}
+
+/// A client sent `records` to `journal` at `now`: every `MachineDown`
+/// among them is noted for judgement, and every one noted [`NOTED`] ago
+/// is judged (see the module doc).
 pub(crate) fn judge_sent(
     state: &StateHandle,
     journal: paros::JournalIdentifier,
@@ -93,13 +123,38 @@ pub(crate) fn judge_sent(
         if asked < end || slowed_after(state, asked) {
             continue;
         }
-        let Some(since) = live_since(state, id.0) else {
+        lock(&machine_board(state)).downs.push(SentDown {
+            node: id.0,
+            asked,
+            sent: now,
+        });
+    }
+    judge_pending(state, now);
+}
+
+/// Judge every `MachineDown` sent [`NOTED`] before `now` (see the module
+/// doc): the machine it names is not live since before the ask. A machine
+/// whose process ended since is not live; one that started again is live
+/// since that start.
+pub(crate) fn judge_pending(state: &StateHandle, now: Duration) {
+    let due: Vec<SentDown> = {
+        let board = machine_board(state);
+        let mut board = lock(&board);
+        let (due, pending): (Vec<SentDown>, Vec<SentDown>) = board
+            .downs
+            .drain(..)
+            .partition(|down| now.saturating_sub(down.sent) >= NOTED);
+        board.downs = pending;
+        due
+    };
+    for down in due {
+        let Some(since) = live_since(state, down.node) else {
             continue;
         };
         assert_always!(
-            since > asked,
+            since > down.asked,
             "registry: the cell coordinator never marks a live machine down in the tail",
-            { "node" => id.0 }
+            { "node" => down.node }
         );
     }
 }
