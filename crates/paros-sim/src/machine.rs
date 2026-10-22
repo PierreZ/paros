@@ -65,7 +65,7 @@ use crate::roles::{Deployment, MACHINE_GROUP, Role};
 mod detector;
 mod heal;
 
-pub(crate) use detector::{judge_sent, live_since, note_slowed, slowed_after};
+pub(crate) use detector::{judge_pending, judge_sent, live_since, note_slowed, slowed_after};
 pub(crate) use heal::{heal_wiped, registry_folded, registry_restored};
 
 /// Where a machine's disk lives on its simulated disk.
@@ -182,6 +182,9 @@ pub(crate) struct MachineBoard {
     ended: BTreeMap<Address, Duration>,
     /// The latest instant the slow-machine scenario may slow a machine to.
     slowed: Option<Duration>,
+    /// The `MachineDown`s sent in the tail and not judged yet
+    /// (`detector::judge_sent`).
+    downs: Vec<detector::SentDown>,
 }
 
 /// A maintenance window an operator opened over a machine (#359), for the
