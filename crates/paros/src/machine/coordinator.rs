@@ -512,7 +512,8 @@ impl Watch {
     /// after the Down bound)): registered machines `registry` holds down
     /// that this watch has not heard for `replace_after`, outside every open
     /// maintenance window over them or their zone (#359), and every machine
-    /// named gone before that still holds a slot and is still down. A
+    /// named gone before that still holds a slot, is still down, and no open
+    /// window holds. A
     /// machine that answers again inside the bound keeps its roles: a
     /// reboot rejoins in place.
     ///
@@ -550,7 +551,19 @@ impl Watch {
         self.seen = self.seen.max(now);
         self.departed
             .retain(|node| registry.booked(*node) > 0 && !registry.liveness(*node).up);
-        let mut gone = self.departed.clone();
+        // A window the operator opened over a machine named gone before
+        // holds its roles all the same: the coordinator re-places no role
+        // of a down machine a window covers (#359). Without this, a machine
+        // gone, back up, then down again stayed gone through its window, and
+        // a set released its slot there (sweep recipe `354564601073116033
+        // 651466:18426518659794956008,189780:8849847318170525142` on
+        // deadab0, PR #710 (adopt recycled segments)).
+        let mut gone: std::collections::BTreeSet<NodeId> = self
+            .departed
+            .iter()
+            .copied()
+            .filter(|id| !self.held_one(registry, *id, now))
+            .collect();
         for (id, node) in registry.nodes() {
             if node.standing != NodeStanding::Registered
                 || registry.liveness(id).up
