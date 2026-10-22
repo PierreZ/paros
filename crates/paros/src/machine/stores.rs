@@ -27,6 +27,7 @@ use super::matchmakers::SetBookings;
 use super::record::MachineRecord;
 use super::{CacheSink, CachedRegistry, ProviderDisk};
 use crate::journal::Durability;
+use crate::storage::{StorageError, StorageRecord, WriteOutcome};
 use crate::{
     Audit, BootKind, DriverTunables, JournalStorage, JournalStoreConfig, JournalStores, RunError,
 };
@@ -201,7 +202,9 @@ impl<S: StorageProvider + Clone + 'static, F> MachineStores<S, F> {
 
     /// Provision created journal `journal` under `config`: format its store
     /// (an interrupted run resumes from the disk), then record it. `false`
-    /// when the disk failed: the journal is down here until a restart.
+    /// when it did not: on a storage fault the driver quarantines the
+    /// journal and provisions it again at its re-open, else the journal is
+    /// down here until a restart.
     async fn provision(
         &mut self,
         journal: JournalIdentifier,
@@ -221,6 +224,7 @@ impl<S: StorageProvider + Clone + 'static, F> MachineStores<S, F> {
                     let dir = self.disk.journal_dir(journal);
                     if let Err(error) = crate::journal::settle(self.disk.provider(), &dir).await {
                         tracing::warn!(journal = %journal, %error, "created_journal_unsettled");
+                        self.open_faults.insert(journal, disk_fault());
                         return false;
                     }
                 }
@@ -255,11 +259,25 @@ impl<S: StorageProvider + Clone + 'static, F> MachineStores<S, F> {
         record.created.push(journal);
         if let Err(error) = self.disk.write_record(&record.render()).await {
             tracing::warn!(journal = %journal, %error, "created_journal_unrecorded");
+            // The record's write is the disk's fault too: a journal parked
+            // here for good left a move's new configuration with no member
+            // to elect a leader on (recipe 11674261066061092807
+            // 944091:3485147030935198268 on 6d6f7f0: a directory sync failed).
+            self.open_faults.insert(journal, disk_fault());
             return false;
         }
         self.record = record;
         true
     }
+}
+
+/// The fault a provisioning that failed past the format takes: the disk's,
+/// at the store's granularity, its effect unknown.
+fn disk_fault() -> RunError {
+    RunError::Storage(StorageError::Io {
+        record: StorageRecord::Store,
+        outcome: WriteOutcome::Unknown,
+    })
 }
 
 impl<S, A, F> JournalStores for MachineStores<S, F>
