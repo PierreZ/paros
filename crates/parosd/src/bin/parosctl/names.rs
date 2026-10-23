@@ -14,7 +14,7 @@
 use std::fmt;
 use std::str::FromStr;
 
-use moonpool_core::TokioProviders;
+use moonpool_core::CompioProviders;
 use paros::client::Client;
 use paros::client::bootstrap::control_journals;
 use paros::client::fleet::read_directory;
@@ -30,7 +30,7 @@ use crate::Ending;
 use crate::labels::Labels;
 use crate::output::note;
 
-type ParosClient = Client<TokioProviders>;
+type ParosClient = Client<CompioProviders>;
 
 /// The prefix of a journal named by its ids.
 const ID_PREFIX: &str = "id:";

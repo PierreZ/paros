@@ -1,5 +1,6 @@
 //! The journal stores on a real filesystem (#206): the two contract suites
-//! `paros` runs over the simulated disk, here over Tokio's storage provider
+//! `paros` runs over the simulated disk, here over compio's storage provider (what
+//! `parosd` runs on)
 //! in a temporary directory, and a restart loop that drops a store
 //! mid-batch, the way a killed process leaves it.
 //!
@@ -9,7 +10,7 @@
 //! not. What a real filesystem adds is the real thing underneath — files,
 //! directories, `fsync`, rename — and that is what these exercise.
 
-use moonpool_core::TokioStorageProvider;
+use moonpool_core::CompioStorageProvider;
 use paros::journal::Durability;
 use paros::{
     Ballot, Command, Config, Entry, JournalMatchmakerStorage, JournalStorage, JournalStoreConfig,
@@ -17,14 +18,11 @@ use paros::{
     matchmaker_storage_contract_suite, storage_contract_suite,
 };
 
-type Node = JournalStorage<TokioStorageProvider>;
-type Registry = JournalMatchmakerStorage<TokioStorageProvider>;
+type Node = JournalStorage<CompioStorageProvider>;
+type Registry = JournalMatchmakerStorage<CompioStorageProvider>;
 
-fn runtime() -> tokio::runtime::Runtime {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("runtime")
+fn runtime() -> compio::runtime::Runtime {
+    compio::runtime::Runtime::new().expect("runtime")
 }
 
 fn config() -> Config {
@@ -66,7 +64,7 @@ fn dir(root: &tempfile::TempDir, name: &str) -> String {
 }
 
 async fn open_node(dir: &str, store: JournalStoreConfig) -> Node {
-    let mut node = JournalStorage::new(TokioStorageProvider::new(), dir, config(), store);
+    let mut node = JournalStorage::new(CompioStorageProvider::new(), dir, config(), store);
     node.boot_scan()
         .await
         .expect("a store on a real disk opens");
@@ -75,7 +73,7 @@ async fn open_node(dir: &str, store: JournalStoreConfig) -> Node {
 
 async fn open_registry(dir: &str) -> Registry {
     let mut registry = JournalMatchmakerStorage::new(
-        TokioStorageProvider::new(),
+        CompioStorageProvider::new(),
         dir,
         paros::JournalIdentifier::UNSET,
         layout(Durability::Batched),
@@ -211,7 +209,7 @@ fn a_store_dropped_mid_batch_reopens_with_every_acknowledged_write() {
 fn the_machine_record_is_absent_then_read_back_whole() {
     let root = tempfile::tempdir().expect("tempdir");
     let disk = paros::machine::ProviderDisk::new(
-        TokioStorageProvider::new(),
+        CompioStorageProvider::new(),
         dir(&root, "machine"),
         compact(),
     );

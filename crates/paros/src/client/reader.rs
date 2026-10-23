@@ -5,7 +5,7 @@
 //! it will never read — as [`ReaderOutcome::Gap`]: a reader that skipped it
 //! silently would hand its caller a fold with a hole it cannot see.
 
-use moonpool_core::Providers;
+use crate::ParosProviders;
 use paros_core::{JournalIdentifier, JournalView};
 
 use super::Client;
@@ -128,7 +128,11 @@ impl Reader {
     /// Read the next page — the client's `page_size` records, long-polling
     /// its `wait_ms` at the tail — from server `first` on (see
     /// [`Client::read_any`]), and fold it.
-    pub async fn next<P: Providers>(&mut self, client: &Client<P>, first: usize) -> ReaderOutcome {
+    pub async fn next<P: ParosProviders>(
+        &mut self,
+        client: &Client<P>,
+        first: usize,
+    ) -> ReaderOutcome {
         let tunables = client.tunables();
         let request = self.request(tunables.page_size, tunables.wait_ms);
         let report = client.read_any(&request, first).await;

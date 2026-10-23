@@ -15,7 +15,7 @@ use async_trait::async_trait;
 use moonpool_rpc::{RpcConfig, RpcHandle};
 use moonpool_sim::{
     Providers, RandomProvider, SimContext, SimProviders, SimulationError, SimulationResult,
-    TaskProvider, TimeProvider,
+    TimeProvider,
 };
 use std::collections::BTreeMap;
 
@@ -44,6 +44,7 @@ use crate::playground::model::{
 const PATIENCE: Duration = Duration::from_secs(20);
 
 /// The operator workload.
+#[derive(Clone)]
 pub(crate) struct Operator {
     config: Config,
     actions: Vec<Action>,
@@ -92,6 +93,16 @@ impl moonpool_sim::Workload for Operator {
 
     #[tracing::instrument(level = "debug", skip_all)]
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
+        // paros's futures are not `Send`: drive them as a local task.
+        let operator = self.clone();
+        ctx.run_local("operator", |ctx| async move { operator.drive(&ctx).await })
+            .await
+    }
+}
+
+impl Operator {
+    /// Play the actions against the machines, recording each step.
+    async fn drive(&self, ctx: &SimContext) -> SimulationResult<()> {
         // No fault injection: the shipped BUGGIFY sites are inert, as in
         // production (the machines turn them off too).
         moonpool_sim::buggify_reset();
@@ -100,15 +111,14 @@ impl moonpool_sim::Workload for Operator {
             .map_err(|e| SimulationError::InvalidState(format!("client RPC runtime: {e}")))?;
         let stop = CancellationToken::new();
         let cancelled = stop.clone();
-        ctx.task()
-            .spawn_task("operator-rpc", async move {
-                moonpool_sim::select! {
-                    biased;
-                    () = cancelled.cancelled() => {}
-                    _ = run => {}
-                }
-            })
-            .detach();
+        moonpool_sim::LocalTaskProvider::spawn_local_task(ctx.task(), "operator-rpc", async move {
+            moonpool_sim::select! {
+                biased;
+                () = cancelled.cancelled() => {}
+                _ = run => {}
+            }
+        })
+        .detach();
         let _stop = stop.drop_guard();
         let desk = Desk {
             providers: ctx.providers().clone(),

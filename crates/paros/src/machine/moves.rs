@@ -44,7 +44,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound::{Excluded, Unbounded};
 
-use moonpool_core::Providers;
+use crate::ParosProviders;
 use moonpool_rpc::RpcHandle;
 use paros_core::{AcceptorConfig, JournalIdentifier, NodeId};
 
@@ -191,7 +191,7 @@ fn next_move(
 
 /// The first of the `count` servers of `nodes` that answers an `Inspect` of
 /// `journal` as its leader, with its answer.
-pub(super) async fn leader_of<P: Providers>(
+pub(super) async fn leader_of<P: ParosProviders>(
     nodes: &Client<P>,
     count: usize,
     journal: JournalIdentifier,
@@ -209,7 +209,7 @@ pub(super) async fn leader_of<P: Providers>(
 /// Retire the old member at server `index` of `nodes` from `journal`, with
 /// the GC watermark of the leader's answer `reply` as its evidence. Its
 /// answer changes nothing: the watermark already proves it is forgotten.
-pub(super) async fn retire<P: Providers>(
+pub(super) async fn retire<P: ParosProviders>(
     nodes: &Client<P>,
     index: Option<usize>,
     journal: JournalIdentifier,
@@ -229,7 +229,7 @@ pub(super) async fn retire<P: Providers>(
 /// The desired mode of `journal` and the configuration in force its
 /// control journal records, when its tenant holds it live, as that journal
 /// reads now; `None` when it is not live.
-async fn live<P: Providers>(
+async fn live<P: ParosProviders>(
     client: &Client<P>,
     registry: &Registry,
     journal: JournalIdentifier,
@@ -261,7 +261,7 @@ pub(super) fn bookable(
 /// control journal holds another. `Some(true)` once it is recorded,
 /// `Some(false)` when it could not be (no tenant, a write that did not
 /// land), `None` when a later term fenced the tenant control journal.
-async fn record_in_force<P: Providers>(
+async fn record_in_force<P: ParosProviders>(
     client: &Client<P>,
     registry: &Registry,
     desk: &mut TenantDesk,
@@ -305,7 +305,7 @@ async fn record_in_force<P: Providers>(
 /// placement, once the leader's floor reached it. `None` when it is
 /// recorded, else the step's answer: `Some(None)` when a later term fenced
 /// the tenant control journal, `Some(Some(Waiting))` when it waits.
-async fn record_shrunk<P: Providers>(
+async fn record_shrunk<P: ParosProviders>(
     client: &Client<P>,
     cell: &CellSession,
     desk: &mut TenantDesk,
@@ -355,7 +355,7 @@ pub(super) fn at_or_above(a: Option<&Ballot>, b: Option<&Ballot>) -> bool {
 /// A client of the machines that hold `slots`, each where the cell's
 /// address book says it is, with their ids in the client's order. `None`
 /// when the book names none of them.
-fn journal_nodes<P: Providers>(
+fn journal_nodes<P: ParosProviders>(
     (providers, rpc, names, client): (&P, &RpcHandle<P>, &Names, &Client<P>),
     cell: &CellSession,
     slots: &[(u64, Booking)],
@@ -397,7 +397,7 @@ impl Moves {
     /// machine's does. `None` when a write did not land: the term writes
     /// nothing more.
     #[tracing::instrument(level = "debug", skip_all)]
-    pub(super) async fn step<P: Providers>(
+    pub(super) async fn step<P: ParosProviders>(
         &mut self,
         (providers, rpc, names, client): (&P, &RpcHandle<P>, &Names, &Client<P>),
         cell: &mut CellSession,
@@ -523,7 +523,7 @@ impl Moves {
     /// The last step of a move: once the leader's floor reached the
     /// configuration in force, retire each leaving member it names and
     /// release every leaving slot. `None` when a release did not land.
-    async fn finish<P: Providers>(
+    async fn finish<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
         (cell, desk): (&mut CellSession, &mut TenantDesk),
@@ -603,7 +603,7 @@ impl Moves {
     /// Book the slots `journal` lacks on other storage machines, so its
     /// machines that stay and the new ones are `size`. `None` when a
     /// booking did not land.
-    async fn book<P: Providers>(
+    async fn book<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
         cell: &mut CellSession,

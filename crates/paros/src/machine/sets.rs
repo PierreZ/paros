@@ -42,7 +42,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound::{Excluded, Unbounded};
 
-use moonpool_core::Providers;
+use crate::ParosProviders;
 use moonpool_rpc::RpcHandle;
 use paros_core::{JournalIdentifier, NodeId, TenantId};
 
@@ -215,7 +215,7 @@ fn kept(
 /// read: the size in force or the slots `booked`, the larger, once the set
 /// holds a slot; `Some(None)`, wait, while it holds none. `None` once a
 /// later term fenced it.
-async fn desired_size<P: Providers>(
+async fn desired_size<P: ParosProviders>(
     client: &Client<P>,
     cell: &CellSession,
     desk: &mut TenantDesk,
@@ -305,7 +305,7 @@ fn gone_plan(
 /// The set in force of `journal`'s tenant as the founding members of
 /// `nodes` believe it for `journal`: the answer with the latest generation,
 /// and which server gave it.
-async fn set_in_force<P: Providers>(
+async fn set_in_force<P: ParosProviders>(
     nodes: &Client<P>,
     count: usize,
     journal: JournalIdentifier,
@@ -345,7 +345,7 @@ impl Sets {
     /// not land: the term writes nothing more.
     #[allow(clippy::too_many_lines)]
     #[tracing::instrument(level = "debug", skip_all)]
-    pub(super) async fn step<P: Providers>(
+    pub(super) async fn step<P: ParosProviders>(
         &mut self,
         (providers, rpc, names, client): (&P, &RpcHandle<P>, &Names, &Client<P>),
         cell: &mut CellSession,
@@ -597,7 +597,7 @@ impl Sets {
     /// The last step of a set's move: the set in force is its booked
     /// machines that stay, so release every slot on a draining machine.
     /// `None` when a release did not land.
-    async fn finish<P: Providers>(
+    async fn finish<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
         cell: &mut CellSession,
@@ -652,7 +652,7 @@ impl Sets {
     /// Book the slots `tenant`'s set lacks on the cell's storage machines, so
     /// its machines that stay and the new ones are `size`. `None` when a
     /// booking did not land.
-    async fn book<P: Providers>(
+    async fn book<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
         cell: &mut CellSession,

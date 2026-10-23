@@ -279,7 +279,7 @@ pub(crate) async fn dispatch<I, Fut>(
     run: impl FnOnce(Deployment, I, String) -> Fut,
 ) -> SimulationResult<()>
 where
-    Fut: Future<Output = SimulationResult<()>> + Send,
+    Fut: Future<Output = SimulationResult<()>>,
 {
     let my_ip = ctx.my_ip().to_string();
     let deployment = crate::roles::deployment(ctx.topology());
@@ -310,18 +310,22 @@ impl Process for NodeProcess {
 
     #[tracing::instrument(level = "debug", skip_all)]
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-        dispatch(
-            ctx,
-            "every node process is mapped to the acceptor role",
-            "an acceptor",
-            |role| match role {
-                Role::Acceptor(rank) => Some(rank),
-                _ => None,
-            },
-            |deployment, self_rank, my_ip| async move {
-                Box::pin(run_acceptor(ctx, &deployment, self_rank, &my_ip)).await
-            },
-        )
+        ctx.run_local(self.name(), |ctx| async move {
+            let ctx = &ctx;
+            dispatch(
+                ctx,
+                "every node process is mapped to the acceptor role",
+                "an acceptor",
+                |role| match role {
+                    Role::Acceptor(rank) => Some(rank),
+                    _ => None,
+                },
+                |deployment, self_rank, my_ip| async move {
+                    Box::pin(run_acceptor(ctx, &deployment, self_rank, &my_ip)).await
+                },
+            )
+            .await
+        })
         .await
     }
 }
@@ -334,16 +338,20 @@ impl Process for MatchmakerProcess {
 
     #[tracing::instrument(level = "debug", skip_all)]
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-        dispatch(
-            ctx,
-            "every matchmaker process is mapped to the matchmaker role",
-            "a matchmaker",
-            |role| match role {
-                Role::Matchmaker(id) => Some(id),
-                _ => None,
-            },
-            |_, id, my_ip| async move { Box::pin(run_matchmaker_role(ctx, id, &my_ip)).await },
-        )
+        ctx.run_local(self.name(), |ctx| async move {
+            let ctx = &ctx;
+            dispatch(
+                ctx,
+                "every matchmaker process is mapped to the matchmaker role",
+                "a matchmaker",
+                |role| match role {
+                    Role::Matchmaker(id) => Some(id),
+                    _ => None,
+                },
+                |_, id, my_ip| async move { Box::pin(run_matchmaker_role(ctx, id, &my_ip)).await },
+            )
+            .await
+        })
         .await
     }
 }
@@ -356,18 +364,22 @@ impl Process for ProxyProcess {
 
     #[tracing::instrument(level = "debug", skip_all)]
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-        dispatch(
-            ctx,
-            "every proxy process is mapped to the proxy role",
-            "a proxy leader",
-            |role| match role {
-                Role::Proxy(id) => Some(id),
-                _ => None,
-            },
-            |deployment, id, my_ip| async move {
-                run_proxy_role(ctx, &deployment, id, &my_ip).await
-            },
-        )
+        ctx.run_local(self.name(), |ctx| async move {
+            let ctx = &ctx;
+            dispatch(
+                ctx,
+                "every proxy process is mapped to the proxy role",
+                "a proxy leader",
+                |role| match role {
+                    Role::Proxy(id) => Some(id),
+                    _ => None,
+                },
+                |deployment, id, my_ip| async move {
+                    run_proxy_role(ctx, &deployment, id, &my_ip).await
+                },
+            )
+            .await
+        })
         .await
     }
 }
@@ -380,18 +392,22 @@ impl Process for ReplicaProcess {
 
     #[tracing::instrument(level = "debug", skip_all)]
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-        dispatch(
-            ctx,
-            "every replica process is mapped to the replica role",
-            "a replica",
-            |role| match role {
-                Role::Replica(rank) => Some(rank),
-                _ => None,
-            },
-            |deployment, rank, my_ip| async move {
-                run_replica_role(ctx, &deployment, rank, &my_ip).await
-            },
-        )
+        ctx.run_local(self.name(), |ctx| async move {
+            let ctx = &ctx;
+            dispatch(
+                ctx,
+                "every replica process is mapped to the replica role",
+                "a replica",
+                |role| match role {
+                    Role::Replica(rank) => Some(rank),
+                    _ => None,
+                },
+                |deployment, rank, my_ip| async move {
+                    run_replica_role(ctx, &deployment, rank, &my_ip).await
+                },
+            )
+            .await
+        })
         .await
     }
 }

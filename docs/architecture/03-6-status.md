@@ -73,8 +73,8 @@ project). `parosctl machine list` shows how busy each machine is, as FDB's statu
 uses FDB's key names.
 
 - **Measure.** moonpool's sixth provider, `SystemProvider`, gives cumulative counters: the
-  process CPU time (`getrusage`), the machine CPU (`/proc/stat`), the run loop's busiest worker
-  (Tokio's `worker_total_busy_duration`) and the data disk (`/proc/diskstats`, found from the
+  process CPU time (`getrusage`), the machine CPU (`/proc/stat`), the run loop's busy time
+  (the CPU time of `parosd`'s one compio thread) and the data disk (`/proc/diskstats`, found from the
   data directory). `paros::load::Busyness::between` turns two samples into one window. It is
   pure arithmetic; a counter that goes back gives no window.
 - **Sample.** Every machine samples itself every `load_interval` (default 5 s, floor 1 s,

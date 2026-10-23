@@ -69,7 +69,7 @@ pub trait MatchmakerStorage: RegistryStorage {
     /// # Errors
     /// Returns the first classified [`StorageError`] whose verdict requires a
     /// crash.
-    fn boot_scan(&mut self) -> impl Future<Output = Result<(), StorageError>> + Send {
+    fn boot_scan(&mut self) -> impl Future<Output = Result<(), StorageError>> {
         async { Ok(()) }
     }
 
@@ -110,7 +110,7 @@ pub trait MatchmakerStorage: RegistryStorage {
     fn format(
         &mut self,
         config: &MatchmakerConfig,
-    ) -> impl Future<Output = Result<(), StorageError>> + Send;
+    ) -> impl Future<Output = Result<(), StorageError>>;
 
     /// Persist `registration` under `ballot` in `journal`'s registry as one
     /// record (#190: one store holds every journal of its tenant's set).
@@ -124,7 +124,7 @@ pub trait MatchmakerStorage: RegistryStorage {
         journal: JournalId,
         ballot: Ballot,
         registration: &Registration,
-    ) -> impl Future<Output = Result<(), StorageError>> + Send;
+    ) -> impl Future<Output = Result<(), StorageError>>;
 
     /// Persist `journal`'s raised GC watermark and drop every one of its
     /// registration records below it. Monotone: a store never lowers a
@@ -136,7 +136,7 @@ pub trait MatchmakerStorage: RegistryStorage {
         &mut self,
         journal: JournalId,
         watermark: Ballot,
-    ) -> impl Future<Output = Result<(), StorageError>> + Send;
+    ) -> impl Future<Output = Result<(), StorageError>>;
 
     /// Persist the durable scalars whole (#125: the generation state, the
     /// freeze, the successor link, the decree record, the pending
@@ -147,7 +147,7 @@ pub trait MatchmakerStorage: RegistryStorage {
     fn set_scalars(
         &mut self,
         scalars: &MatchmakerHardState,
-    ) -> impl Future<Output = Result<(), StorageError>> + Send;
+    ) -> impl Future<Output = Result<(), StorageError>>;
 
     /// Replace the registry whole — a successor generation's activation:
     /// every record dropped, each journal's `registrations` written, and
@@ -160,7 +160,7 @@ pub trait MatchmakerStorage: RegistryStorage {
         &mut self,
         scalars: &MatchmakerHardState,
         registrations: &Registrations,
-    ) -> impl Future<Output = Result<(), StorageError>> + Send;
+    ) -> impl Future<Output = Result<(), StorageError>>;
 
     /// Flush this batch's writes to stable storage. Every matchmaker write is
     /// safety-critical, so this is always an fsync: the batch must be durable
@@ -168,7 +168,7 @@ pub trait MatchmakerStorage: RegistryStorage {
     ///
     /// # Errors
     /// Returns [`StorageError`] if the flush fails.
-    fn sync(&mut self) -> impl Future<Output = Result<(), StorageError>> + Send;
+    fn sync(&mut self) -> impl Future<Output = Result<(), StorageError>>;
 }
 
 /// Every journal's registration records, per journal in ballot order.

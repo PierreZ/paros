@@ -18,7 +18,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use moonpool_core::Providers;
+use crate::ParosProviders;
 use moonpool_rpc::RpcHandle;
 use paros_core::{JournalIdentifier, TenantId};
 
@@ -57,7 +57,7 @@ pub(super) enum Resolved {
 
 /// The cell the frontend fronts, as its founding members name it.
 #[derive(Clone)]
-pub(super) struct Cell<P: Providers> {
+pub(super) struct Cell<P: ParosProviders> {
     /// The cell's id.
     id: u64,
     /// The universe tenant's control journal: the universe directory.
@@ -74,7 +74,7 @@ pub(super) struct Cell<P: Providers> {
 }
 
 /// The frontend's caches. Never held across an await.
-pub(super) struct Routes<P: Providers> {
+pub(super) struct Routes<P: ParosProviders> {
     rpc: RpcHandle<P>,
     cell: Option<Cell<P>>,
     /// The universe directory as last read.
@@ -89,7 +89,7 @@ pub(super) struct Routes<P: Providers> {
     leaders: BTreeMap<JournalIdentifier, Client<P>>,
 }
 
-impl<P: Providers> Routes<P> {
+impl<P: ParosProviders> Routes<P> {
     /// Nothing cached, calls through `rpc`.
     pub(super) fn new(rpc: RpcHandle<P>) -> Self {
         Self {
@@ -161,7 +161,7 @@ impl<P: Providers> Routes<P> {
 /// (`Inspect`, as an operator learns it, §3.8).
 async fn cell<P, A>(shared: &Shared<P, A>) -> Option<Cell<P>>
 where
-    P: Providers,
+    P: ParosProviders,
     A: Audit,
 {
     let rpc = {
@@ -234,7 +234,7 @@ where
 
 /// The ids of `client`'s servers: the genesis pool a fold of the cell
 /// control journal starts from.
-fn servers_ids<P: Providers>(client: &Client<P>) -> Vec<paros_core::NodeId> {
+fn servers_ids<P: ParosProviders>(client: &Client<P>) -> Vec<paros_core::NodeId> {
     (0..client.server_count())
         .map(|i| paros_core::NodeId(client.id_of(i)))
         .collect()
@@ -246,7 +246,7 @@ pub(super) async fn coordinator_route<P, A>(
     shared: &Shared<P, A>,
 ) -> Option<(JournalIdentifier, Client<P>, RpcHandle<P>)>
 where
-    P: Providers,
+    P: ParosProviders,
     A: Audit,
 {
     let cell = cell(shared).await?;
@@ -261,7 +261,7 @@ pub(super) async fn client_for<P, A>(
     journal: JournalIdentifier,
 ) -> Option<Client<P>>
 where
-    P: Providers,
+    P: ParosProviders,
     A: Audit,
 {
     let client = cell(shared).await?.client;
@@ -278,7 +278,7 @@ where
 /// `name`'s journal: each hop from the cache, else read afresh.
 pub(super) async fn resolve<P, A>(shared: &Shared<P, A>, name: &JournalName) -> Resolved
 where
-    P: Providers,
+    P: ParosProviders,
     A: Audit,
 {
     let Some(Cell {
@@ -350,7 +350,7 @@ async fn tenant<P, A>(
     name: &JournalName,
 ) -> Result<(TenantId, JournalIdentifier), Resolved>
 where
-    P: Providers,
+    P: ParosProviders,
     A: Audit,
 {
     if let Some(held) = lock(&shared.routes).tenants.get(name.tenant()).copied() {
@@ -407,7 +407,7 @@ where
 /// [`super::Authz`]'s own pin then rules.
 pub(super) async fn keys<P, A>(shared: &Shared<P, A>, refresh: bool) -> Option<Arc<[RootKeyEntry]>>
 where
-    P: Providers,
+    P: ParosProviders,
     A: Audit,
 {
     let held = lock(&shared.routes).keys.clone();

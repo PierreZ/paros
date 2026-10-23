@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use crate::labels::Labels;
 use clap::Args;
-use moonpool_core::{Providers, RandomProvider, TokioProviders};
+use moonpool_core::{CompioProviders, LocalProviders, RandomProvider};
 use paros::client::bootstrap::control_journals_of;
 use paros::client::{
     ClaimOutcome, Client, ReaderOutcome, ReconfigureOutcome, RetireOutcome, TruncateOutcome,
@@ -24,7 +24,7 @@ use crate::Ending;
 use crate::names::{JournalRef, NodeRef, Resolved};
 use crate::output::{Printer, note, record_text, state_json, state_text};
 
-type ParosClient = Client<TokioProviders>;
+type ParosClient = Client<CompioProviders>;
 
 /// Where the next call starts: the believed leader, or the first server.
 fn start(client: &ParosClient) -> usize {
@@ -47,7 +47,7 @@ fn parse_uuid(text: &str) -> Result<LeaderUuid, String> {
 
 /// `--leader`, or a random uuid when absent: a run that names none leads a
 /// term of its own (#241).
-fn leader_or_drawn(providers: &TokioProviders, given: Option<LeaderUuid>) -> LeaderUuid {
+fn leader_or_drawn(providers: &CompioProviders, given: Option<LeaderUuid>) -> LeaderUuid {
     given.unwrap_or_else(|| {
         loop {
             let uuid: u128 = providers.random().random();
@@ -161,7 +161,7 @@ async fn become_writer(
 /// settled, a refusal for a stale position corrected and retried, a
 /// superseded writer stopped.
 pub async fn write(
-    providers: &TokioProviders,
+    providers: &CompioProviders,
     client: &ParosClient,
     out: &Printer,
     args: WriteArgs,
@@ -487,16 +487,16 @@ pub async fn tail(client: &ParosClient, out: &Printer, args: TailArgs) -> Ending
                 }
                 ReaderOutcome::Unavailable => {
                     note("no server served the read; retrying");
-                    tokio::time::sleep(backoff.max(Duration::from_millis(100))).await;
+                    compio::time::sleep(backoff.max(Duration::from_millis(100))).await;
                 }
                 ReaderOutcome::UnknownJournal => return unknown_journal(&resolved.label),
                 ReaderOutcome::Denied(denial) => return denied(denial),
             }
         }
     };
-    tokio::select! {
+    moonpool_core::select! {
         ending = follow => ending,
-        _ = tokio::signal::ctrl_c() => Ending::Success,
+        _ = compio::signal::ctrl_c() => Ending::Success,
     }
 }
 
@@ -526,7 +526,7 @@ pub struct TruncateArgs {
 /// (a claim, or `--no-claim`), then ask the leader to raise the journal's
 /// floor under that fence (#228). A superseded leader is refused and says so.
 pub async fn truncate(
-    providers: &TokioProviders,
+    providers: &CompioProviders,
     client: &ParosClient,
     out: &Printer,
     args: TruncateArgs,
@@ -610,7 +610,7 @@ fn parse_old(text: &str) -> Result<Old, String> {
 /// `parosctl set-leader`: compare-and-set the journal's leader uuid —
 /// against `--old`, or against the leader a read finds (#241).
 pub async fn set_leader(
-    providers: &TokioProviders,
+    providers: &CompioProviders,
     client: &ParosClient,
     out: &Printer,
     args: SetLeaderArgs,

@@ -47,7 +47,7 @@
 //! [`follow`] reads the directory at the pointer ([`directory_reader`]),
 //! and the tenant steps above run as in the cell that hosts the universe.
 
-use moonpool_core::Providers;
+use crate::ParosProviders;
 use paros_core::{JournalIdentifier, TenantId};
 
 use crate::client::Client;
@@ -219,7 +219,7 @@ fn footprint_grant(registry: &Registry, tenant: TenantId) -> Option<SystemComman
 ///
 /// If the session is not open (a programmer error), or a written entry is
 /// not in the session's fold.
-pub(crate) async fn follow<P: Providers>(
+pub(crate) async fn follow<P: ParosProviders>(
     client: &Client<P>,
     session: &mut CellSession,
     directory: &mut Folder<FleetDirectory>,
@@ -274,7 +274,7 @@ pub(crate) async fn follow<P: Providers>(
 /// universe tenant, else the universe pointer its join recorded (#232
 /// (multiple cells)), through the machines the pointer names. `None` while
 /// the cell knows no universe.
-pub(crate) fn directory_reader<P: Providers>(
+pub(crate) fn directory_reader<P: ParosProviders>(
     client: &Client<P>,
     journals: ControlJournals,
     registry: &Registry,
@@ -295,7 +295,7 @@ pub(crate) fn directory_reader<P: Providers>(
 /// # Panics
 ///
 /// If the session is not open (a programmer error).
-pub(crate) async fn join<P: Providers>(
+pub(crate) async fn join<P: ParosProviders>(
     client: &Client<P>,
     session: &mut CellSession,
     request: &JoinRequest,

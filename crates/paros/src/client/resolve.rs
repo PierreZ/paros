@@ -14,7 +14,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use moonpool_core::Providers;
+use crate::ParosProviders;
 use moonpool_rpc::RpcHandle;
 use paros_core::{JournalId, JournalIdentifier, NodeId, TenantId};
 
@@ -85,7 +85,7 @@ pub enum Resolution {
 /// dialed through `names`: each address asked once, in order, each call
 /// within `timeout`.
 #[tracing::instrument(level = "debug", skip_all, fields(entry = entry.len()))]
-pub async fn resolve<P: Providers>(
+pub async fn resolve<P: ParosProviders>(
     providers: &P,
     rpc: &RpcHandle<P>,
     names: &Names,
@@ -123,7 +123,7 @@ pub async fn resolve<P: Providers>(
 
 /// Ask each address of `entry` in turn: the first answer that is a
 /// verdict (anything but `unavailable`), else `None`.
-async fn ask<P: Providers>(
+async fn ask<P: ParosProviders>(
     providers: &P,
     rpc: &RpcHandle<P>,
     names: &Names,
@@ -150,7 +150,7 @@ impl Resolved {
     ///
     /// Never: the assertion checks one server per machine.
     #[must_use]
-    pub fn servers<P: Providers>(&self, rpc: &RpcHandle<P>, names: &Names) -> Vec<Server<P>> {
+    pub fn servers<P: ParosProviders>(&self, rpc: &RpcHandle<P>, names: &Names) -> Vec<Server<P>> {
         let servers: Vec<Server<P>> = self
             .machines
             .iter()
@@ -171,7 +171,7 @@ impl Resolved {
     /// `BatchWrite`, so a client over them sends multi-writer writes only.
     /// Empty when the tenant has no batcher.
     #[must_use]
-    pub fn batcher_servers<P: Providers>(
+    pub fn batcher_servers<P: ParosProviders>(
         &self,
         rpc: &RpcHandle<P>,
         names: &Names,

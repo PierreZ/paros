@@ -35,9 +35,35 @@ pub struct Telemetry {
 
 impl Telemetry {
     /// Start the exporters `settings` asks for, with `metrics` as the
-    /// metrics source. Must run inside the Tokio runtime: the gRPC
-    /// channels live on it.
-    pub fn start(settings: &Settings, metrics: &Metrics) -> Result<Self, String> {
+    /// metrics source, and the runtime they run on.
+    ///
+    /// The machine runs on compio, but tonic's gRPC channels need a Tokio
+    /// runtime. When `settings` asks for an exporter, this starts one with
+    /// a single worker thread (`parosd-otlp`) and builds the exporters in
+    /// it. Keep the runtime until [`Telemetry::shutdown`] returns: the
+    /// exporters flush over it. Without an exporter, no runtime starts.
+    pub fn start(
+        settings: &Settings,
+        metrics: &Metrics,
+    ) -> Result<(Self, Option<tokio::runtime::Runtime>), String> {
+        if settings.traces_endpoint().is_none() && settings.metrics_endpoint().is_none() {
+            return Ok((Self::default(), None));
+        }
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .thread_name("parosd-otlp")
+            .enable_all()
+            .build()
+            .map_err(|error| format!("PAROS_OTLP: cannot start the exporters' runtime: {error}"))?;
+        let telemetry = {
+            let _entered = runtime.enter();
+            Self::exporters(settings, metrics)?
+        };
+        Ok((telemetry, Some(runtime)))
+    }
+
+    /// Build the exporters; inside the exporters' Tokio runtime.
+    fn exporters(settings: &Settings, metrics: &Metrics) -> Result<Self, String> {
         let resource = Resource::builder()
             .with_service_name("parosd")
             .with_attribute(KeyValue::new(

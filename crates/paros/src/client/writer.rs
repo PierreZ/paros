@@ -17,7 +17,7 @@
 //! whose answer was lost is asked again under the same uuid, and a journal
 //! already naming it is adopted, never claimed twice.
 
-use moonpool_core::Providers;
+use crate::ParosProviders;
 
 use crate::frontend::Denial;
 use paros_core::{Entry, JournalIdentifier, JournalView, LeaderUuid, Seq, Value};
@@ -453,7 +453,7 @@ impl Writer {
     /// `first`), following redirects. `None` when it leads no term:
     /// nothing is sent. A refusal is folded back (a superseded writer
     /// stops).
-    pub async fn truncate<P: Providers>(
+    pub async fn truncate<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
         up_to: u64,
@@ -498,7 +498,7 @@ impl Writer {
     /// # Panics
     ///
     /// If a fresh claim still leads a term (a broken `begin_term`).
-    pub async fn claim<P: Providers>(
+    pub async fn claim<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
         first: usize,
@@ -521,7 +521,7 @@ impl Writer {
     /// leader), [`Client::claim_over`]): a read naming another leader is
     /// lost. A writer that leads already re-claims as [`Writer::claim`]
     /// does.
-    pub async fn claim_over<P: Providers>(
+    pub async fn claim_over<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
         first: usize,
@@ -538,7 +538,7 @@ impl Writer {
 
     /// Write `records` at the tail as the leader: see [`Writer::write_entry`].
     /// Sends nothing when it leads no term.
-    pub async fn write<P: Providers>(
+    pub async fn write<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
         records: Vec<Value>,
@@ -556,7 +556,7 @@ impl Writer {
     /// following redirects; an ambiguous answer is settled by
     /// [`Client::resolve`] before this returns. Sends nothing when the
     /// writer does not lead under `entry`'s uuid: a superseded writer stops.
-    pub async fn write_entry<P: Providers>(
+    pub async fn write_entry<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
         entry: &Entry,

@@ -19,7 +19,8 @@
 
 use std::time::Duration;
 
-use moonpool_core::{Providers, TimeProvider};
+use crate::ParosProviders;
+use moonpool_core::LocalTimeProvider;
 use moonpool_rpc::RpcHandle;
 use paros_core::{JournalId, JournalIdentifier, TenantId};
 
@@ -157,7 +158,7 @@ impl JoinRequest {
 }
 
 /// Send `request` to the coordinator `target`, once, within `timeout`.
-pub async fn send<P: Providers>(
+pub async fn send<P: ParosProviders>(
     providers: &P,
     rpc: &RpcHandle<P>,
     names: &Names,
@@ -179,7 +180,7 @@ pub async fn send<P: Providers>(
 /// machines), again until an answer decides it or `patience` runs out (then
 /// the last answer, retryable).
 #[tracing::instrument(level = "debug", skip_all, fields(fleet = request.fleet_id))]
-pub async fn join<P: Providers>(
+pub async fn join<P: ParosProviders>(
     providers: &P,
     rpc: &RpcHandle<P>,
     names: &Names,

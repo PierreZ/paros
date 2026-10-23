@@ -51,7 +51,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant, SystemTime};
 
 use clap::Args;
-use moonpool_core::{Providers, RandomProvider, TokioProviders};
+use moonpool_core::{CompioProviders, LocalProviders, RandomProvider};
 use paros::Value;
 use paros::client::{
     Client, Pipeline, Reader, ReaderOutcome, TruncateOutcome, Writer, WriterOutcome,
@@ -66,7 +66,7 @@ use mix::Mix;
 use records::{HEADER, Rng};
 use topology::{Topologies, Topology};
 
-type ParosClient = Client<TokioProviders>;
+type ParosClient = Client<CompioProviders>;
 
 /// The console prints its header again after this many ticks.
 const HEADER_EVERY: u64 = 20;
@@ -365,9 +365,7 @@ impl Plan {
             mismatches: Cell::new(0),
             resent: Cell::new(0),
         });
-        let (elapsed, calls, total) = tokio::task::LocalSet::new()
-            .run_until(drive(client.clone(), shared.clone(), export, local))
-            .await;
+        let (elapsed, calls, total) = drive(client.clone(), shared.clone(), export, local).await;
         let mismatches = shared.mismatches.get();
         if let Some(failure) = shared.failure.borrow_mut().take() {
             note(&failure.message);
@@ -498,28 +496,31 @@ async fn drive(
     let args = &shared.args;
     let mut registry = Registry::default();
     let start = Instant::now();
+    // The workers and the truncator; dropping a handle cancels its task,
+    // so none outlives the run.
+    let mut tasks = Vec::new();
     for index in 0..args.clients {
         let calls = registry.client();
         let client = client.clone().with_own_leader_hint();
         let shared = shared.clone();
         // Stagger the starts over the ramp.
         let delay = stagger(args.ramp, index, args.clients);
-        tokio::task::spawn_local(async move {
-            tokio::select! {
+        tasks.push(compio::runtime::spawn(async move {
+            moonpool_core::select! {
                 () = shared.stop.cancelled() => {}
                 () = worker(&client, &shared, index, &calls, delay) => {}
             }
-        });
+        }));
     }
     if args.truncates() {
         let calls = registry.client();
         let shared = shared.clone();
-        tokio::task::spawn_local(async move {
-            tokio::select! {
+        tasks.push(compio::runtime::spawn(async move {
+            moonpool_core::select! {
                 () = shared.stop.cancelled() => {}
                 () = truncator(&shared, &calls) => {}
             }
-        });
+        }));
     }
     let calls: Vec<Call> = Call::ALL
         .into_iter()
@@ -527,15 +528,14 @@ async fn drive(
         .collect();
     let end = (!args.duration.is_zero()).then(|| args.ramp + args.duration);
     let mut ramping = !args.ramp.is_zero();
-    let mut ticker = tokio::time::interval_at(
-        tokio::time::Instant::now() + Duration::from_secs(1),
+    let mut ticker = compio::time::interval_at(
+        std::time::Instant::now() + Duration::from_secs(1),
         Duration::from_secs(1),
     );
     let mut ticks = 0_u64;
-    let ctrl_c = tokio::signal::ctrl_c();
-    tokio::pin!(ctrl_c);
+    let mut ctrl_c = std::pin::pin!(compio::signal::ctrl_c());
     loop {
-        tokio::select! {
+        moonpool_core::select! {
             _ = ticker.tick() => {}
             () = shared.stop.cancelled() => break,
             _ = &mut ctrl_c => {
@@ -701,7 +701,7 @@ async fn worker(
     calls: &RefCell<Calls>,
     delay: Duration,
 ) {
-    tokio::time::sleep(delay).await;
+    compio::time::sleep(delay).await;
     let args = &shared.args;
     let mut rng = Rng::of(&[shared.seed, 2, index]);
     let journals = usize::try_from(args.journals).expect("a journal count fits");
@@ -722,7 +722,7 @@ async fn worker(
             Some(period) => {
                 let at = due;
                 due += period;
-                tokio::time::sleep_until(at.into()).await;
+                compio::time::sleep_until(at).await;
                 at
             }
             None => Instant::now(),
@@ -753,8 +753,8 @@ async fn worker(
 /// `--truncate-keep` records, as its writer.
 async fn truncator(shared: &Shared, calls: &RefCell<Calls>) {
     let args = &shared.args;
-    let mut ticker = tokio::time::interval_at(
-        tokio::time::Instant::now() + args.truncate_every,
+    let mut ticker = compio::time::interval_at(
+        std::time::Instant::now() + args.truncate_every,
         args.truncate_every,
     );
     loop {

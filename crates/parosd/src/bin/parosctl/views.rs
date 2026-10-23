@@ -25,7 +25,7 @@ use std::fmt::Write as _;
 use std::time::Duration;
 
 use clap::{Args, Subcommand};
-use moonpool_core::TokioProviders;
+use moonpool_core::CompioProviders;
 use moonpool_rpc::RpcHandle;
 use paros::client::load::{LoadOutcome, ask_all};
 use paros::client::views::{ViewOutcome, ask, request};
@@ -39,8 +39,8 @@ use crate::output::{Printer, note, record_text, table};
 
 /// Where a view goes: the servers of one cell, the scope and the patience.
 pub struct Asker<'a> {
-    pub providers: &'a TokioProviders,
-    pub rpc: &'a RpcHandle<TokioProviders>,
+    pub providers: &'a CompioProviders,
+    pub rpc: &'a RpcHandle<CompioProviders>,
     pub names: &'a Names,
     pub servers: Vec<Address>,
     pub scope: Scope,

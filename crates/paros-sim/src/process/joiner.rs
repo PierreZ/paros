@@ -35,18 +35,22 @@ impl Process for JoinerProcess {
 
     #[tracing::instrument(level = "debug", skip_all)]
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-        dispatch(
-            ctx,
-            "every joiner process is mapped to the joiner role",
-            "a joiner",
-            |role| match role {
-                Role::Joiner(id) => Some(id),
-                _ => None,
-            },
-            |deployment, id, my_ip| async move {
-                Box::pin(run_joiner(ctx, &deployment, id, &my_ip)).await
-            },
-        )
+        ctx.run_local(self.name(), |ctx| async move {
+            let ctx = &ctx;
+            dispatch(
+                ctx,
+                "every joiner process is mapped to the joiner role",
+                "a joiner",
+                |role| match role {
+                    Role::Joiner(id) => Some(id),
+                    _ => None,
+                },
+                |deployment, id, my_ip| async move {
+                    Box::pin(run_joiner(ctx, &deployment, id, &my_ip)).await
+                },
+            )
+            .await
+        })
         .await
     }
 }

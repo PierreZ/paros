@@ -24,7 +24,8 @@
 
 use std::sync::Arc;
 
-use moonpool_core::{Providers, SimulationError, SimulationResult};
+use crate::ParosProviders;
+use moonpool_core::{SimulationError, SimulationResult};
 use moonpool_rpc::{RpcHandle, ServiceGroup};
 use paros_core::{
     GcAck, GcRequest, JournalIdentifier, MatchReply, MatchRequest, Message, Party,
@@ -64,7 +65,7 @@ pub(crate) type Plain<M> =
     Inbound<M, <M as moonpool_rpc::RpcMethod>::Request, <M as moonpool_rpc::RpcMethod>::Reply>;
 
 /// A driver's inbound edge: the listening runtime and its driving future.
-pub(crate) struct RpcEdge<P: Providers> {
+pub(crate) struct RpcEdge<P: ParosProviders> {
     handle: RpcHandle<P>,
     /// Locked by the one poller at a time: the loop's `select!` arm, or an
     /// arm body's wait for a flush ([`RpcEdge::alongside`]). Never contended: both run
@@ -73,7 +74,7 @@ pub(crate) struct RpcEdge<P: Providers> {
     role: &'static str,
 }
 
-impl<P: Providers> RpcEdge<P> {
+impl<P: ParosProviders> RpcEdge<P> {
     /// Bind `local_addr` and start a runtime shaped by `tunables`, its
     /// sessions protected by `transport` (it dials its peers the same way).
     /// Nothing is served until the loop polls [`RpcEdge::run`].
@@ -163,7 +164,7 @@ impl NodeInbox {
     // The node's edge, its shape, its identity, its observer, its lifetime
     // and the machine's group.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn serve<P: Providers>(
+    pub(crate) fn serve<P: ParosProviders>(
         providers: &P,
         edge: &RpcEdge<P>,
         tunables: &DriverTunables,
@@ -216,7 +217,7 @@ impl ReplicaInbox {
     ///
     /// A registration the runtime refuses.
     #[tracing::instrument(level = "debug", skip_all)]
-    pub(crate) fn serve<P: Providers>(
+    pub(crate) fn serve<P: ParosProviders>(
         providers: &P,
         edge: &RpcEdge<P>,
         tunables: &DriverTunables,
@@ -262,7 +263,7 @@ impl MatchmakerInbox {
     ///
     /// A registration the runtime refuses.
     #[tracing::instrument(level = "debug", skip_all)]
-    pub(crate) fn serve<P: Providers>(
+    pub(crate) fn serve<P: ParosProviders>(
         rpc: &RpcHandle<P>,
         machine: Option<&ServiceGroup<MachineInterface>>,
     ) -> SimulationResult<Self> {

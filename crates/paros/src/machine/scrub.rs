@@ -43,7 +43,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound::{Excluded, Unbounded};
 use std::time::Duration;
 
-use moonpool_core::Providers;
+use crate::ParosProviders;
 use moonpool_rpc::RpcHandle;
 use paros_core::{JournalId, JournalIdentifier, NodeId, TenantId};
 
@@ -223,7 +223,7 @@ impl Scrubs {
     /// tenant control journal: the term writes nothing more.
     #[tracing::instrument(level = "debug", skip_all)]
     #[allow(clippy::too_many_lines)]
-    pub(super) async fn step<P: Providers>(
+    pub(super) async fn step<P: ParosProviders>(
         &mut self,
         (providers, rpc, names, client): (&P, &RpcHandle<P>, &Names, &Client<P>),
         cell: &CellSession,

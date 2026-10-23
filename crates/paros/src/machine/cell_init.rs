@@ -28,7 +28,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
-use moonpool_core::{Detach, Providers, RandomProvider, TaskProvider, TimeProvider};
+use crate::ParosProviders;
+use moonpool_core::{Detach, LocalTaskProvider, LocalTimeProvider, RandomProvider};
 use moonpool_rpc::RpcHandle;
 use paros_core::decree::{AcceptFold, DecreePromise};
 use paros_core::{
@@ -47,7 +48,7 @@ use crate::{Address, Names};
 
 /// A random identifier: a random tenant and a random journal, both set (no id
 /// is fixed, `docs/architecture/03-8-identifiers-checkpoints-recovery-security.md` §3.8).
-fn draw_identifier<P: Providers>(providers: &P) -> JournalIdentifier {
+fn draw_identifier<P: ParosProviders>(providers: &P) -> JournalIdentifier {
     JournalIdentifier::new(
         TenantId(draw_nonzero(providers)),
         JournalId(draw_nonzero(providers)),
@@ -55,7 +56,7 @@ fn draw_identifier<P: Providers>(providers: &P) -> JournalIdentifier {
 }
 
 /// A random non-zero `u64`.
-fn draw_nonzero<P: Providers>(providers: &P) -> u64 {
+fn draw_nonzero<P: ParosProviders>(providers: &P) -> u64 {
     loop {
         let id: u64 = providers.random().random();
         if id != 0 {
@@ -95,7 +96,7 @@ enum Attempt {
 /// promise) and reopened above a preempting promise up to
 /// [`DECREE_BALLOTS`] times. The chosen plan, or the refusal's label.
 #[tracing::instrument(level = "debug", skip_all, fields(node = facts.node_id.0))]
-pub(super) async fn propose<P: Providers>(
+pub(super) async fn propose<P: ParosProviders>(
     providers: &P,
     rpc: &RpcHandle<P>,
     facts: &MachineFacts,
@@ -168,7 +169,11 @@ pub(super) async fn propose<P: Providers>(
 /// A fresh decree ballot for `node`: a random `init_id` while nothing bounds
 /// it, else a random step above `floor` (this machine's promise, or a
 /// promise that refused an earlier ballot).
-fn draw_ballot<P: Providers>(providers: &P, node: NodeId, floor: Option<Ballot>) -> Option<Ballot> {
+fn draw_ballot<P: ParosProviders>(
+    providers: &P,
+    node: NodeId,
+    floor: Option<Ballot>,
+) -> Option<Ballot> {
     let round = match floor {
         None => draw_nonzero(providers),
         Some(floor) => {
@@ -183,7 +188,7 @@ fn draw_ballot<P: Providers>(providers: &P, node: NodeId, floor: Option<Ballot>)
 /// draw one, then form every other member and this one last.
 #[allow(clippy::too_many_lines)]
 #[tracing::instrument(level = "debug", skip_all, fields(round = ballot.round))]
-async fn attempt<P: Providers>(
+async fn attempt<P: ParosProviders>(
     providers: &P,
     rpc: &RpcHandle<P>,
     facts: &MachineFacts,
@@ -423,7 +428,7 @@ async fn attempt<P: Providers>(
 /// journals, and the fleet tenant's when `universe` (this cell hosts it: the
 /// fleet's first; an idle cell, #232 (multiple cells), hosts none). No user
 /// journal: a tenant creates its journals through its coordinator (#210).
-fn draw_plan<P: Providers>(
+fn draw_plan<P: ParosProviders>(
     providers: &P,
     identities: &BTreeMap<Address, NodeId>,
     universe: bool,
@@ -455,7 +460,7 @@ fn draw_plan<P: Providers>(
 /// within `patience`, and collect every answer in address order: `None`
 /// where nothing came back. Each address is resolved as it is dialed
 /// (#257): a name that does not resolve is an address that did not answer.
-pub(super) async fn fan_out<P: Providers, M: WellKnownMethod>(
+pub(super) async fn fan_out<P: ParosProviders, M: WellKnownMethod>(
     providers: &P,
     rpc: &RpcHandle<P>,
     names: &Names,
@@ -476,8 +481,8 @@ where
         let request = request.clone();
         let sender = sender.clone();
         providers
-            .task()
-            .spawn_task("paros-cell-decree", async move {
+            .local_task()
+            .spawn_local_task("paros-cell-decree", async move {
                 let call = async {
                     let resolved = names.resolve(&addr).await.ok()?;
                     well_known::<P, M>(&rpc, resolved)

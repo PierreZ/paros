@@ -42,8 +42,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
+use crate::ParosProviders;
 use moonpool_core::{
-    Detach, Providers, SimulationError, SimulationResult, TaskProvider, TimeProvider,
+    Detach, LocalTaskProvider, LocalTimeProvider, SimulationError, SimulationResult,
 };
 use moonpool_rpc::RpcHandle;
 use paros_core::{JournalIdentifier, LogPage, LogRead, NodeId, Party, Seq, TenantId};
@@ -120,7 +121,7 @@ pub(crate) struct Followed {
 }
 
 /// The node's follow of the control journals, and their folds.
-pub(crate) struct ControlFollower<P: Providers> {
+pub(crate) struct ControlFollower<P: ParosProviders> {
     self_id: NodeId,
     class: crate::system::Class,
     /// The nodes a remote read goes to, in turn, by id: each dialed where
@@ -170,7 +171,7 @@ pub(crate) struct ControlFollower<P: Providers> {
     shutdown: CancellationToken,
 }
 
-impl<P: Providers> ControlFollower<P> {
+impl<P: ParosProviders> ControlFollower<P> {
     /// A follower for `plan`, reading remotely through `rpc`; `fixed` is the
     /// static address book. Returns the inbox remote answers arrive on.
     ///
@@ -656,8 +657,8 @@ impl<P: Providers> ControlFollower<P> {
             let shutdown = self.shutdown.clone();
             let self_id = self.self_id.0;
             providers
-                .task()
-                .spawn_task("paros-system-follow", async move {
+                .local_task()
+                .spawn_local_task("paros-system-follow", async move {
                     let answer = moonpool_core::select! {
                         biased;
                         () = shutdown.cancelled() => return,
@@ -702,7 +703,7 @@ impl Followed {
 /// registry first (a tenant it hosts is folded in the same pass). A local
 /// read needs no confirmation: it is this node's own fold, and the driver
 /// only acts on what it folded.
-pub(crate) fn follow_local<P: Providers, S, A>(
+pub(crate) fn follow_local<P: ParosProviders, S, A>(
     follower: &mut ControlFollower<P>,
     journals: &Journals<S, A>,
 ) -> Vec<(JournalIdentifier, Vec<(u64, SystemEvent)>)> {

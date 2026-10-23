@@ -17,8 +17,9 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, PoisonError};
 
+use crate::ParosProviders;
 use moonpool_buggify::hint::Strike;
-use moonpool_core::{Providers, SimulationResult, StorageProvider};
+use moonpool_core::{LocalStorageProvider, SimulationResult};
 use moonpool_rpc::RpcHandle;
 use paros_core::{Config, JournalIdentifier, MatchmakerConfig, NodeId};
 use tokio_util::sync::CancellationToken;
@@ -47,7 +48,7 @@ pub enum AuditScope {
 }
 
 /// A formed machine's stores.
-pub(crate) struct MachineStores<S: StorageProvider, F> {
+pub(crate) struct MachineStores<S: LocalStorageProvider, F> {
     disk: ProviderDisk<S>,
     node: NodeId,
     genesis: BTreeMap<JournalIdentifier, Config>,
@@ -76,7 +77,7 @@ pub(crate) struct MachineStores<S: StorageProvider, F> {
     open_faults: BTreeMap<JournalIdentifier, RunError>,
 }
 
-impl<S: StorageProvider, F> MachineStores<S, F> {
+impl<S: LocalStorageProvider, F> MachineStores<S, F> {
     /// The stores of member `node` serving `genesis` on `disk`.
     ///
     /// # Panics
@@ -172,7 +173,7 @@ impl<S: StorageProvider, F> MachineStores<S, F> {
     }
 }
 
-impl<S: StorageProvider + Clone + 'static, F> MachineStores<S, F> {
+impl<S: LocalStorageProvider + Clone + 'static, F> MachineStores<S, F> {
     /// `journal`'s store under `config`, committing under `durability`: a
     /// plan journal's is the disk's (ordered), a created journal's the one
     /// its create recorded (#599 (durability mode per journal)). The
@@ -282,7 +283,7 @@ fn disk_fault() -> RunError {
 
 impl<S, A, F> JournalStores for MachineStores<S, F>
 where
-    S: StorageProvider + Clone + 'static,
+    S: LocalStorageProvider + Clone + 'static,
     A: Audit + Clone + Send + Sync + 'static,
     F: Fn(AuditScope) -> A + Send + Sync + 'static,
 {
@@ -367,7 +368,7 @@ where
         true
     }
 
-    fn host_on_edge<P: Providers>(
+    fn host_on_edge<P: ParosProviders>(
         &mut self,
         providers: &P,
         rpc: &RpcHandle<P>,

@@ -25,7 +25,7 @@
 use std::time::Duration;
 
 use clap::Args;
-use moonpool_core::TokioProviders;
+use moonpool_core::CompioProviders;
 use paros::Address;
 use paros::client::Client;
 use paros::client::initialize::{self, InitParams, InitRefusal, InitRun, Initialized, Unreachable};
@@ -133,7 +133,7 @@ impl InitArgs {
 /// founding member that pins a root key checks it (#245).
 pub async fn run(
     members: &[Address],
-    connect: impl Fn(&[(u64, Address)]) -> Client<TokioProviders>,
+    connect: impl Fn(&[(u64, Address)]) -> Client<CompioProviders>,
     out: &Printer,
     asker: &Asker<'_>,
     args: &InitArgs,

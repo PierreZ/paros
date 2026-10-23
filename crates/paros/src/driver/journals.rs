@@ -26,7 +26,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::task::Poll;
 
-use moonpool_core::{Providers, RandomProvider};
+use crate::ParosProviders;
+use moonpool_core::RandomProvider;
 use paros_core::{ColocatedNode, JournalIdentifier, NodeId, Slot, TenantId};
 
 use crate::audit::Audit;
@@ -47,7 +48,7 @@ pub trait JournalStores {
     /// The store every journal runs on.
     /// `Send` and `'static`: a batch's flush owns the store while it flies
     /// (#613 (settle off the node loop)).
-    type Store: LogStorage + Send + 'static;
+    type Store: LogStorage + 'static;
     /// The audit port a journal reports to (one per journal: every
     /// journal-scoped oracle is keyed by it).
     type Audit: Audit + Clone + Send + Sync + 'static;
@@ -111,7 +112,7 @@ pub trait JournalStores {
     /// # Errors
     ///
     /// A registration the RPC runtime refuses.
-    fn host_on_edge<P: Providers>(
+    fn host_on_edge<P: ParosProviders>(
         &mut self,
         providers: &P,
         rpc: &moonpool_rpc::RpcHandle<P>,
@@ -184,7 +185,7 @@ pub(crate) struct SingleStore<S, A> {
     pub(crate) audit: A,
 }
 
-impl<S: LogStorage + Send + 'static, A: Audit + Clone + Send + Sync + 'static> JournalStores
+impl<S: LogStorage + 'static, A: Audit + Clone + Send + Sync + 'static> JournalStores
     for SingleStore<S, A>
 {
     type Store = S;
@@ -283,7 +284,7 @@ impl<S, A> JournalRt<S, A> {
 ///
 /// [`RunError::Storage`] when the scan or the formatting failed,
 /// [`RunError::Refused`] when the boot claim and the marker disagree.
-pub(crate) async fn boot_journal<P: Providers, S: LogStorage, A: Audit>(
+pub(crate) async fn boot_journal<P: ParosProviders, S: LogStorage, A: Audit>(
     providers: &P,
     mut storage: S,
     boot: BootKind,

@@ -18,7 +18,8 @@
 
 use std::time::Duration;
 
-use moonpool_core::{Providers, TimeProvider};
+use crate::ParosProviders;
+use moonpool_core::LocalTimeProvider;
 use moonpool_rpc::{InterfaceMethod, InterfaceRef, RpcError, RpcHandle};
 use paros_core::{AcceptorConfig, JournalId, JournalIdentifier, TenantId, WriterMode};
 
@@ -349,7 +350,7 @@ pub enum FrontTagged {
 
 /// Set the user tags of the journal `name` to `tags` through the frontend
 /// `frontend`, under the idempotency id `request`: one attempt (#575).
-pub async fn tag_through_frontend<P: Providers>(
+pub async fn tag_through_frontend<P: ParosProviders>(
     frontend: &crate::rpc::NodeClient<P>,
     name: &crate::name::JournalName,
     request: u64,
@@ -402,7 +403,7 @@ impl Coordinator {
     /// One attempt of `M` at this term's group, the address resolved now
     /// through `names`, within `timeout`: `None` when the name does not
     /// resolve or nothing came back.
-    pub(crate) async fn call<P: Providers, M: InterfaceMethod<CoordinatorInterface>>(
+    pub(crate) async fn call<P: ParosProviders, M: InterfaceMethod<CoordinatorInterface>>(
         &self,
         providers: &P,
         rpc: &RpcHandle<P>,
@@ -433,7 +434,7 @@ impl Coordinator {
 
 /// The tenant coordinator: the interface the election journal's leader
 /// publishes. `None` while no leader published one.
-pub async fn coordinator<P: Providers>(
+pub async fn coordinator<P: ParosProviders>(
     client: &Client<P>,
     election: JournalIdentifier,
 ) -> Option<Coordinator> {
@@ -443,7 +444,7 @@ pub async fn coordinator<P: Providers>(
 
 /// Send `request` to the coordinator `target`, once, within `timeout`. A
 /// term that ended answers nothing: [`JournalAnswer::Unavailable`], retried.
-pub async fn send<P: Providers>(
+pub async fn send<P: ParosProviders>(
     providers: &P,
     rpc: &RpcHandle<P>,
     names: &Names,
@@ -465,7 +466,7 @@ pub async fn send<P: Providers>(
 /// `patience` runs out (then the last answer, retryable). The coordinator's
 /// address is resolved through `names`.
 #[tracing::instrument(level = "debug", skip_all, fields(tenant = request.tenant.0))]
-pub async fn request<P: Providers>(
+pub async fn request<P: ParosProviders>(
     providers: &P,
     rpc: &RpcHandle<P>,
     names: &Names,
@@ -498,7 +499,7 @@ pub async fn request<P: Providers>(
 /// turn until an answer decides it or `patience` runs out. A denial ends
 /// it at once.
 #[tracing::instrument(level = "debug", skip_all, fields(request))]
-pub async fn tag_through<P: Providers>(
+pub async fn tag_through<P: ParosProviders>(
     providers: &P,
     frontends: &Client<P>,
     (name, request): (&crate::name::JournalName, u64),
@@ -527,7 +528,7 @@ pub async fn tag_through<P: Providers>(
 /// Fold tenant `tenant`'s control journal `control` to its tail: every
 /// journal it created, and its description. `None` when no page could be
 /// read to the tail.
-pub async fn list<P: Providers>(
+pub async fn list<P: ParosProviders>(
     client: &Client<P>,
     tenant: TenantId,
     control: JournalId,

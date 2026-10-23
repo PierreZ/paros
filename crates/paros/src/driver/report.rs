@@ -2,7 +2,8 @@
 //! election-timeout draw, the leadership/handoff/membership transitions, and
 //! the held-reply bookkeeping a step-down performs.
 
-use moonpool_core::{Providers, RandomProvider};
+use crate::ParosProviders;
+use moonpool_core::RandomProvider;
 use paros_core::{
     Ballot, ColocatedNode, HandoffCounters, LeadershipOrigin, NodeId, NodeRole, RepairCounters,
 };
@@ -46,7 +47,11 @@ pub(crate) fn handoff_context(node: &ColocatedNode) -> HandoffContext {
 /// seeded RNG. Drawn here, never in the zero-dep core, so the core stays
 /// deterministic and dependency-free while a seed still replays bit-identically.
 #[tracing::instrument(level = "debug", skip_all, fields(node = self_id, base))]
-pub(crate) fn draw_election_timeout<P: Providers>(providers: &P, self_id: u64, base: u64) -> u64 {
+pub(crate) fn draw_election_timeout<P: ParosProviders>(
+    providers: &P,
+    self_id: u64,
+    base: u64,
+) -> u64 {
     // A base of at least two beats (`check_floors`): the draw's range is
     // never empty.
     assert!(base > 0, "an election timeout base is at least one tick");
@@ -232,7 +237,7 @@ impl Cadence {
 // would only rename the same nine things.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 #[tracing::instrument(level = "trace", skip_all, fields(node = self_id))]
-pub(crate) fn maintain<P: Providers, A: Audit>(
+pub(crate) fn maintain<P: ParosProviders, A: Audit>(
     node: &mut ColocatedNode,
     providers: &P,
     last: &mut Deltas,

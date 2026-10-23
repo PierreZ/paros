@@ -25,7 +25,7 @@
 use std::str::FromStr;
 use std::time::Duration;
 
-use moonpool_core::TimeProvider;
+use moonpool_core::LocalTimeProvider;
 pub use moonpool_rpc::security::tls::pki::{
     Authority, Flaw, Issued, KeySeed, LeafSpec, SubjectName, Usage, Validity, read_certificates,
     read_key,
@@ -488,7 +488,7 @@ pub struct ProviderUtc<T> {
     time: T,
 }
 
-impl<T: TimeProvider> ProviderUtc<T> {
+impl<T: LocalTimeProvider> ProviderUtc<T> {
     /// `epoch` plus `time`'s reading.
     #[must_use]
     pub fn new(epoch: Duration, time: T) -> Self {
@@ -496,7 +496,7 @@ impl<T: TimeProvider> ProviderUtc<T> {
     }
 }
 
-impl<T: TimeProvider> UtcClock for ProviderUtc<T> {
+impl<T: LocalTimeProvider + Send + Sync> UtcClock for ProviderUtc<T> {
     fn now_utc(&self) -> Option<UtcTime> {
         Some(UtcTime::from_unix_seconds(
             self.epoch.saturating_add(self.time.now()).as_secs(),

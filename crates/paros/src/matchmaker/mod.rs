@@ -2,7 +2,7 @@
 //! sans-IO [`paros_core::Matchmaker`], the twin of [`run_node`](crate::run_node)
 //! for the registry role.
 //!
-//! Written once over moonpool's `P: Providers`, so the *same* loop runs in
+//! Written once over `P: ParosProviders`, so the *same* loop runs in
 //! production and deterministic simulation; the harness adapts a moonpool
 //! `Process` to it exactly as it adapts the node. The loop serves the
 //! matchmaker RPC contract, feeds each request into the core, and drains every
@@ -29,8 +29,8 @@ mod storage;
 
 use std::collections::BTreeMap;
 
+use crate::ParosProviders;
 use moonpool_buggify::hint::Strike;
-use moonpool_core::Providers;
 use paros_core::{
     GcAck, GcOutcome, GcRequest, JournalId, JournalIdentifier, MatchOutcome, MatchReply,
     Matchmaker, MatchmakerConfig, MatchmakerId, MatchmakerSet, MatchmakerWriteOp, ReconfigureReply,
@@ -551,7 +551,7 @@ pub(crate) trait SetOpener {
     fn open(
         &mut self,
         tenant: TenantId,
-    ) -> impl std::future::Future<Output = Option<HostedSet<Self::Storage>>> + Send;
+    ) -> impl std::future::Future<Output = Option<HostedSet<Self::Storage>>>;
 }
 
 /// The opener of a static deployment: it hosts what it booted, nothing more.
@@ -566,7 +566,7 @@ impl<S: MatchmakerStorage> SetOpener for NoOpener<S> {
 }
 
 /// The edge's run, or nothing on a shared edge another loop polls.
-async fn run_edge<P: Providers>(
+async fn run_edge<P: ParosProviders>(
     edge: &mut Option<&mut RpcEdge<P>>,
 ) -> moonpool_core::SimulationError {
     match edge {
@@ -741,7 +741,7 @@ impl<'f, F> Host<'f, F> {
         shutdown: CancellationToken,
     ) -> Result<(), RunError>
     where
-        P: Providers,
+        P: ParosProviders,
         S: MatchmakerStorage,
         A: Audit,
         F: Fn(JournalIdentifier) -> A,
@@ -1050,7 +1050,7 @@ where
 /// Drive a paros matchmaker process to completion over the given providers:
 /// one matchmaker set per hosted tenant (#190).
 ///
-/// Generic over `P: Providers` (production *or* simulation) and
+/// Generic over `P: ParosProviders` (production *or* simulation) and
 /// `S: MatchmakerStorage` (the injected durable registry of each set). Every
 /// set runs its own [`paros_core::Matchmaker`], built from `config` (the
 /// process's identity and the deployment's bootstrap set) over its own
@@ -1101,7 +1101,7 @@ pub async fn run_matchmaker<P, S, A, F>(
     audit: F,
 ) -> Result<(), RunError>
 where
-    P: Providers,
+    P: ParosProviders,
     S: MatchmakerStorage,
     A: Audit,
     F: Fn(JournalIdentifier) -> A,

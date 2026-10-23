@@ -36,7 +36,8 @@
 
 use std::time::Duration;
 
-use moonpool_core::{Detach, Providers, SimulationResult, TaskProvider, TimeProvider};
+use crate::ParosProviders;
+use moonpool_core::{Detach, LocalTaskProvider, LocalTimeProvider, SimulationResult};
 use moonpool_rpc::RpcHandle;
 use paros_core::NodeId;
 use tokio_util::sync::CancellationToken;
@@ -82,7 +83,7 @@ pub(crate) struct Resolver {
 ///
 /// The endpoint could not be registered.
 #[tracing::instrument(level = "debug", skip_all, fields(node = resolver.facts.node_id.0, cell = resolver.cell.cell_id))]
-pub(crate) fn spawn<P: Providers>(
+pub(crate) fn spawn<P: ParosProviders>(
     providers: &P,
     rpc: &RpcHandle<P>,
     resolver: Resolver,
@@ -115,8 +116,8 @@ pub(crate) fn spawn<P: Providers>(
     let rpc = rpc.clone();
     providers
         .clone()
-        .task()
-        .spawn_task("paros-machine-resolve", async move {
+        .local_task()
+        .spawn_local_task("paros-machine-resolve", async move {
             let mut folds = Folds::new(&resolver);
             let mut completed = false;
             loop {
@@ -183,7 +184,7 @@ impl Folds {
     }
 
     /// A client over the cell's machines this one knows.
-    fn client<P: Providers>(
+    fn client<P: ParosProviders>(
         &self,
         providers: &P,
         rpc: &RpcHandle<P>,
@@ -204,7 +205,7 @@ impl Folds {
     }
 
     /// The answer to `request`, read from the folds brought to their tails.
-    async fn answer<P: Providers>(
+    async fn answer<P: ParosProviders>(
         &mut self,
         providers: &P,
         rpc: &RpcHandle<P>,
@@ -319,7 +320,7 @@ impl Folds {
 
     /// Bring the registry to its tail and the book with it; `false` when it
     /// could not be read.
-    async fn fold_registry<P: Providers>(
+    async fn fold_registry<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
         resolver: &Resolver,

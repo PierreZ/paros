@@ -30,7 +30,7 @@
 
 use std::collections::BTreeMap;
 
-use moonpool_core::Providers;
+use crate::ParosProviders;
 use paros_core::{JournalIdentifier, TenantId};
 
 use super::Client;
@@ -149,7 +149,7 @@ pub fn tenant_in(directory: &FleetDirectory, name: &[u8], at: u64) -> TenantReso
 /// Resolve the tenant `name` through the universe directory `universe`,
 /// read to its tail from server `first` on.
 #[tracing::instrument(level = "debug", skip_all, fields(universe = %universe))]
-pub async fn resolve_tenant<P: Providers>(
+pub async fn resolve_tenant<P: ParosProviders>(
     client: &Client<P>,
     first: usize,
     universe: JournalIdentifier,
@@ -169,7 +169,7 @@ pub async fn resolve_tenant<P: Providers>(
 ///
 /// The journal could not be read to its tail.
 #[tracing::instrument(level = "debug", skip_all, fields(control = %control))]
-pub async fn read_tenant_control<P: Providers>(
+pub async fn read_tenant_control<P: ParosProviders>(
     client: &Client<P>,
     first: usize,
     control: JournalIdentifier,
@@ -214,7 +214,7 @@ pub fn journal_in(
 
 /// Resolve the journal `name` inside the tenant whose control journal is
 /// `control`, read to its tail from server `first` on.
-pub async fn resolve_journal<P: Providers>(
+pub async fn resolve_journal<P: ParosProviders>(
     client: &Client<P>,
     first: usize,
     control: JournalIdentifier,
@@ -233,7 +233,7 @@ pub async fn resolve_journal<P: Providers>(
 ///
 /// If the journal hop resolves outside the tenant the tenant hop found.
 #[tracing::instrument(level = "debug", skip_all, fields(name = %name))]
-pub async fn resolve<P: Providers>(
+pub async fn resolve<P: ParosProviders>(
     client: &Client<P>,
     first: usize,
     universe: JournalIdentifier,
@@ -292,7 +292,7 @@ impl JournalNames {
     }
 
     /// `name`'s journal: the cached resolution, or a fresh one.
-    pub async fn resolve<P: Providers>(
+    pub async fn resolve<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
         first: usize,
@@ -306,7 +306,7 @@ impl JournalNames {
 
     /// `name`'s journal, read afresh from the control journal; the cache
     /// keeps what it came to.
-    pub async fn refresh<P: Providers>(
+    pub async fn refresh<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
         first: usize,

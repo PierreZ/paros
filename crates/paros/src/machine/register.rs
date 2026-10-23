@@ -38,7 +38,8 @@
 
 use std::time::Duration;
 
-use moonpool_core::{Detach, Providers, TaskProvider, TimeProvider};
+use crate::ParosProviders;
+use moonpool_core::{Detach, LocalTaskProvider, LocalTimeProvider};
 use moonpool_rpc::RpcHandle;
 use paros_core::{JournalIdentifier, NodeId};
 use tokio::sync::watch;
@@ -69,7 +70,7 @@ pub(crate) struct Registration {
 /// a known machine to read it from. The receiver turns `true` once the
 /// registration ended: the registry holds the address, or nothing can
 /// change the answer.
-pub(crate) fn spawn<P: Providers>(
+pub(crate) fn spawn<P: ParosProviders>(
     providers: &P,
     rpc: &RpcHandle<P>,
     registration: Registration,
@@ -124,8 +125,8 @@ pub(crate) fn spawn<P: Providers>(
     let providers_task = providers.clone();
     let rpc = rpc.clone();
     providers
-        .task()
-        .spawn_task(
+        .local_task()
+        .spawn_local_task(
             "paros-machine-register",
             run(
                 providers_task,
@@ -144,7 +145,7 @@ pub(crate) fn spawn<P: Providers>(
 /// the registry holds this machine's address or the ask is refused for
 /// good.
 #[tracing::instrument(level = "debug", skip_all, fields(node = facts.node_id.0, cell = cell_id, addr = %facts.addr))]
-async fn run<P: Providers>(
+async fn run<P: ParosProviders>(
     providers: P,
     rpc: RpcHandle<P>,
     client: Client<P>,

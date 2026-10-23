@@ -14,9 +14,11 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use futures::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use moonpool_core::{
+    CompioNetworkProvider, CompioTcpStream, LocalNetworkProvider, LocalTcpListener,
+};
 use paros::metrics::Metrics;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 
 /// The longest request head read; a longer one is refused.
@@ -80,34 +82,36 @@ pub async fn serve(
     metrics: Metrics,
     shutdown: CancellationToken,
 ) -> std::io::Result<()> {
-    let listener = TcpListener::bind(addr).await?;
+    let listener = CompioNetworkProvider::new().bind(&addr.to_string()).await?;
     tracing::info!(%addr, "parosd_http_listening");
-    tokio::spawn(async move {
+    compio::runtime::spawn(async move {
         loop {
-            tokio::select! {
+            moonpool_core::select! {
                 () = shutdown.cancelled() => return,
                 accepted = listener.accept() => match accepted {
                     Ok((stream, _)) => {
                         let metrics = metrics.clone();
-                        tokio::spawn(async move {
+                        compio::runtime::spawn(async move {
                             if let Err(error) = answer(stream, &metrics).await {
                                 tracing::debug!(%error, "parosd_http_connection_failed");
                             }
-                        });
+                        })
+                        .detach();
                     }
                     Err(error) => tracing::warn!(%error, "parosd_http_accept_failed"),
                 },
             }
         }
-    });
+    })
+    .detach();
     Ok(())
 }
 
 /// Read one request head from `stream` and write its answer.
-async fn answer(mut stream: TcpStream, metrics: &Metrics) -> std::io::Result<()> {
+async fn answer(mut stream: CompioTcpStream, metrics: &Metrics) -> std::io::Result<()> {
     let mut head = Vec::with_capacity(512);
     let mut buffer = [0_u8; 1024];
-    let read = tokio::time::timeout(READ_TIMEOUT, async {
+    let read = compio::time::timeout(READ_TIMEOUT, async {
         while !head.windows(4).any(|w| w == b"\r\n\r\n") {
             let n = stream.read(&mut buffer).await?;
             if n == 0 {
@@ -147,7 +151,7 @@ async fn answer(mut stream: TcpStream, metrics: &Metrics) -> std::io::Result<()>
         response.extend_from_slice(answer.body.as_bytes());
     }
     stream.write_all(&response).await?;
-    stream.shutdown().await
+    stream.close().await
 }
 
 #[cfg(test)]
