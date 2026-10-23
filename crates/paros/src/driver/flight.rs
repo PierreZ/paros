@@ -98,11 +98,13 @@ pub(crate) struct Landing<S> {
 pub(crate) enum Input {
     /// A journal call to propose (#204).
     Propose(Call),
-    /// A journal read to open (#204).
-    Read {
-        req: Read,
-        reply: ReplySender<ReadAck>,
-    },
+    /// Journal reads to open (#204), at least one: every read that waited
+    /// in the inbox together, served by one quorum read. Each arrived
+    /// before the row is asked, so one watermark sample answers them all;
+    /// a read opened for each would send one `PreRead` per read per peer,
+    /// and a burst of them overflows the peer's keep-newest lane
+    /// (`peer_queue_capacity`, `log_reads`).
+    Read(Vec<(Read, ReplySender<ReadAck>)>),
     /// A peer's Paxos message.
     Deliver(Message),
     /// A beat, at the node's tick count. At most one waits: a journal whose

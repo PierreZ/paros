@@ -269,7 +269,7 @@ fn trace_received(self_id: u64, msg: &paros_core::Message) {
 fn open_read<A: Audit>(
     replica: &mut ReplicaNode,
     reads: &mut JournalReads,
-    req: &Read,
+    req: Read,
     reply: ReplySender<ReadAck>,
     tunables: &DriverTunables,
     audit: &A,
@@ -293,7 +293,7 @@ fn open_read<A: Audit>(
         audit.quorum_read_opened(replica.config().id, ctx);
     }
     replica.quorum_read_in(ctx, row);
-    reads.park(req, reply, ReadLimits::of(tunables), row, opened);
+    reads.park(vec![(req, reply)], ReadLimits::of(tunables), row, opened);
 }
 
 /// Scan the replica's store and check its format marker against `boot`;
@@ -564,7 +564,7 @@ where
                     answer(&node_audit, me_id, Reply::LogRead, reply, refused);
                     continue;
                 };
-                open_read(&mut rt.replica, &mut rt.reads, &req, reply, &tunables, &rt.audit);
+                open_read(&mut rt.replica, &mut rt.reads, req, reply, &tunables, &rt.audit);
                 if rt.settle(&out, self_id, None).await? {
                     note_read(&mut read, asked);
                 }

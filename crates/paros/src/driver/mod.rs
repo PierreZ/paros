@@ -880,7 +880,7 @@ impl<P: Providers> Shared<'_, P> {
                 };
                 park_call(rt, result, call, self);
             }
-            Input::Read { req, reply } => {
+            Input::Read(reads) => {
                 let ctx = rt.waiters.reads.next_ctx();
                 // The configuration the core reads over is its read basis
                 // (#260), not its belief; without one the core opens nothing
@@ -915,8 +915,7 @@ impl<P: Providers> Shared<'_, P> {
                 }
                 rt.node.quorum_read_in(ctx, row);
                 rt.waiters.reads.park(
-                    &req,
-                    reply,
+                    reads,
                     log_reads::ReadLimits::of(&self.tunables),
                     row,
                     opened,
@@ -2458,7 +2457,7 @@ where
                 let outcome = shared.input(rt, Input::Propose(Call::Truncate { leader, up_to, reply })).await;
                 journals.fold(journal, outcome, ticks, self_id)?;
             }
-            Some((req, reply)) = rpc.log_read.recv() => {
+            Some(first) = rpc.log_read.recv() => {
                 // A journal `Read` (#204), served through the leaderless
                 // read (#143, Paxos Quorum Reads) on any node: the core asks
                 // a Phase-1 quorum — a row of a grid, the whole
@@ -2466,39 +2465,76 @@ where
                 // the read is served from this node's journal fold once it
                 // covers the maximum. Never a redirect: no role is asked
                 // for.
-                if halt.is_some() {
-                    stop::refused("read");
-                    shared.with(&node_audit).answer(
-                        Reply::ReadUnserved,
-                        reply,
-                        ReadAck { stopping: true, ..ReadAck::default() },
-                    );
-                    continue;
-                }
-                let journal = JournalIdentifier::new(TenantId(req.tenant), JournalId(req.journal));
-                let Some(rt) = journals.live.get_mut(&journal) else {
-                    if refuse_unknown(&journals, follower.as_ref(), journal, "read", self_id, &node_audit) {
-                        shared.with(&node_audit).answer(
-                            Reply::LogRead,
-                            reply,
-                            ReadAck { unknown_journal: true, ..ReadAck::default() },
-                        );
+                //
+                // Every read already in the inbox goes with the first
+                // (`Input::Read`): reads that arrived together are one
+                // quorum read, since each arrived before the row is asked.
+                // One quorum read per `Read` sends one `PreRead` per read
+                // per peer, and a client that reads a window of pages at
+                // once (`client::election::read_election`, 16 pages) sent
+                // more than a peer lane holds (`peer_queue_capacity`, a
+                // keep-newest mailbox of 6 on the witness): the oldest
+                // `PreRead`s were evicted, those reads expired unserved
+                // after `read_retry_ticks`, every cold read of the election
+                // failed, and a leader's own watch read caught in the burst
+                // starved its lease (replay-main 18315968079077685493 on
+                // 86ca15c, red on "fleet: an operation an operator stopped
+                // in ends in the recovery tail" and "election: the election
+                // settles on one renewing leader after chaos"). The inbox
+                // (`client_inbox_capacity`) bounds the drain. BUGGIFY: the
+                // first read goes alone, so the one-read path stays in
+                // reach.
+                let mut arrived = vec![first];
+                if moonpool_buggify::buggify_with_prob!(0.1) {
+                    moonpool_assertions::reachable!("node: a read opens a quorum read alone");
+                } else {
+                    while let Some(next) = rpc.log_read.try_recv() {
+                        arrived.push(next);
                     }
-                    continue;
-                };
-                let reply = meter.call(
-                    journal,
-                    || journal_names(follower.as_ref(), cell.as_ref(), journal),
-                    (CallKind::Read, 0),
-                    reply,
-                    metered::read_answer,
-                );
-                rt.slow = slow_members(
-                    &rt.node,
-                    follower.as_ref().map(system::ControlFollower::registry),
-                );
-                let outcome = shared.input(rt, Input::Read { req, reply }).await;
-                journals.fold(journal, outcome, ticks, self_id)?;
+                }
+                let mut by_journal: BTreeMap<JournalIdentifier, Vec<_>> = BTreeMap::new();
+                for (req, reply) in arrived {
+                    if halt.is_some() {
+                        stop::refused("read");
+                        shared.with(&node_audit).answer(
+                            Reply::ReadUnserved,
+                            reply,
+                            ReadAck { stopping: true, ..ReadAck::default() },
+                        );
+                        continue;
+                    }
+                    let journal = JournalIdentifier::new(TenantId(req.tenant), JournalId(req.journal));
+                    let Some(rt) = journals.live.get_mut(&journal) else {
+                        if refuse_unknown(&journals, follower.as_ref(), journal, "read", self_id, &node_audit) {
+                            shared.with(&node_audit).answer(
+                                Reply::LogRead,
+                                reply,
+                                ReadAck { unknown_journal: true, ..ReadAck::default() },
+                            );
+                        }
+                        continue;
+                    };
+                    let reply = meter.call(
+                        journal,
+                        || journal_names(follower.as_ref(), cell.as_ref(), journal),
+                        (CallKind::Read, 0),
+                        reply,
+                        metered::read_answer,
+                    );
+                    rt.slow = slow_members(
+                        &rt.node,
+                        follower.as_ref().map(system::ControlFollower::registry),
+                    );
+                    by_journal.entry(journal).or_default().push((req, reply));
+                }
+                for (journal, reads) in by_journal {
+                    // Found live above, and nothing ran in between.
+                    let Some(rt) = journals.live.get_mut(&journal) else {
+                        unreachable!("a read's journal stays live until its input");
+                    };
+                    let outcome = shared.input(rt, Input::Read(reads)).await;
+                    journals.fold(journal, outcome, ticks, self_id)?;
+                }
             }
             Some((journal, msg)) = rpc.deliver.recv() => {
                 // A peer Paxos message → its journal's single input router.

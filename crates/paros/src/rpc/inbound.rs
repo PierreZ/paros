@@ -166,6 +166,13 @@ impl<M: RpcMethod, T, U: 'static> Inbound<M, T, U> {
             }
         }
     }
+
+    /// A request already queued, without waiting: `None` when none is, or
+    /// the runtime is gone. One poll of [`Inbound::recv`], which is
+    /// cancel-safe, so a request it does not return stays queued.
+    pub(crate) fn try_recv(&mut self) -> Option<(T, ReplySender<U>)> {
+        futures::FutureExt::now_or_never(self.recv()).flatten()
+    }
 }
 
 impl<M: InterfaceMethod<MachineInterface>, T, U> Inbound<M, T, U> {

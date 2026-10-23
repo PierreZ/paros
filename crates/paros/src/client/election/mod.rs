@@ -110,7 +110,12 @@ const _: () = assert!(TAIL_WAITS > 0, "a reader at the tail waits for the floor"
 /// segments): 82 one-record pages at 350 ms, 22 s past the settle check's
 /// deadline; replay-recipe 14626817771292676959 25491:2229301628492927278:
 /// the operator's `init` waited on its coordinator over 520 ms pages past
-/// the recovery tail). A bound, not a target.
+/// the recovery tail). A bound, not a target. The pages reach the server
+/// together, and it opens one quorum read for all of them (`Input::Read` in
+/// `driver`): one `PreRead` per peer, not one per page, which a peer lane of
+/// a few slots (`peer_queue_capacity`) cannot hold (replay-main
+/// 18315968079077685493 on 86ca15c: 16 `PreRead`s into a lane of 6, every
+/// cold read of the election unserved for the whole recovery tail).
 const READ_WINDOW: u64 = 16;
 
 const _: () = assert!(READ_WINDOW > 1, "a cold read pages ahead");
