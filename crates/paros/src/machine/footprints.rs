@@ -16,7 +16,7 @@
 use std::collections::BTreeSet;
 use std::ops::Bound::{Excluded, Unbounded};
 
-use moonpool_core::Providers;
+use crate::ParosProviders;
 use paros_core::TenantId;
 
 use crate::client::Client;
@@ -81,7 +81,7 @@ impl Footprints {
     /// when no footprint needs a step now, `None` when the write did not
     /// land: the term writes nothing more.
     #[tracing::instrument(level = "debug", skip_all)]
-    pub(super) async fn step<P: Providers>(
+    pub(super) async fn step<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
         cell: &mut CellSession,

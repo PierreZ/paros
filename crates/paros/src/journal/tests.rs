@@ -11,7 +11,7 @@
 use std::future::Future;
 use std::net::IpAddr;
 
-use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
+use moonpool_core::{LocalStorageFile, LocalStorageProvider, OpenOptions};
 use moonpool_journal::Durability;
 use moonpool_sim::{SimStorageProvider, SimWorld, StorageConfiguration};
 use paros_core::{

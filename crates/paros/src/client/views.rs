@@ -9,7 +9,8 @@
 
 use std::time::Duration;
 
-use moonpool_core::{Providers, TimeProvider};
+use crate::ParosProviders;
+use moonpool_core::LocalTimeProvider;
 use moonpool_rpc::RpcHandle;
 
 use crate::rpc::methods::ViewRpc;
@@ -46,7 +47,7 @@ pub fn request(scope: &Scope, query: wire::view_request::Query) -> wire::ViewReq
 /// admitted machine), stays silent or cannot read its journals
 /// (`unavailable`) passes the request to the next.
 #[tracing::instrument(level = "debug", skip_all, fields(servers = servers.len()))]
-pub async fn ask<P: Providers>(
+pub async fn ask<P: ParosProviders>(
     providers: &P,
     rpc: &RpcHandle<P>,
     names: &Names,

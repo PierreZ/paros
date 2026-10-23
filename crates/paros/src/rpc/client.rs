@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use moonpool_core::Providers;
+use crate::ParosProviders;
 use moonpool_rpc::{
     AccessClass, BootstrapAddress, Endpoint, ErrorReason, InterfaceMethod, InterfaceRef, RpcError,
     RpcHandle, RpcInterface, ServiceClient, WellKnownRef,
@@ -29,7 +29,7 @@ use paros_core::{JournalId, JournalIdentifier, TenantId};
 
 /// `M`'s well-known endpoint at `addr`, bound to the runtime `rpc`: calls
 /// reach whichever incarnation is serving that address.
-pub(crate) fn well_known<P: Providers, M: WellKnownMethod>(
+pub(crate) fn well_known<P: ParosProviders, M: WellKnownMethod>(
     rpc: &RpcHandle<P>,
     addr: SocketAddr,
 ) -> ServiceClient<P, M> {
@@ -93,7 +93,7 @@ pub(crate) fn published<I: RpcInterface>(reference: &InterfaceRef<I>) -> Vec<u8>
 
 /// Method `M` of the group `reference` names, at `addr`, bound to `rpc`:
 /// `None` when the reference does not name `I`.
-pub(crate) fn in_group<P: Providers, I: RpcInterface, M: InterfaceMethod<I>>(
+pub(crate) fn in_group<P: ParosProviders, I: RpcInterface, M: InterfaceMethod<I>>(
     rpc: &RpcHandle<P>,
     reference: &InterfaceRef<I>,
     addr: SocketAddr,
@@ -127,7 +127,7 @@ pub(crate) fn in_group<P: Providers, I: RpcInterface, M: InterfaceMethod<I>>(
 /// machine that restarted since refuses it unrun (`StaleIncarnation`,
 /// `EndpointNotFound`): the caller learns the machine's new reference, and
 /// this client never falls back to the well-known endpoint on its own.
-pub struct NodeClient<P: Providers> {
+pub struct NodeClient<P: ParosProviders> {
     rpc: RpcHandle<P>,
     address: Address,
     names: Names,
@@ -137,7 +137,7 @@ pub struct NodeClient<P: Providers> {
     batcher: bool,
 }
 
-impl<P: Providers> Clone for NodeClient<P> {
+impl<P: ParosProviders> Clone for NodeClient<P> {
     fn clone(&self) -> Self {
         Self {
             rpc: self.rpc.clone(),
@@ -230,7 +230,7 @@ const UNSET: JournalIdentifier = JournalIdentifier {
     journal: JournalId(0),
 };
 
-impl<P: Providers> NodeClient<P> {
+impl<P: ParosProviders> NodeClient<P> {
     /// The node serving at the literal `addr`, called through `rpc`.
     #[must_use]
     pub fn new(rpc: &RpcHandle<P>, addr: SocketAddr) -> Self {
@@ -572,7 +572,7 @@ impl<P: Providers> NodeClient<P> {
 /// the interface refuses for good (the member restarted since it
 /// registered) marks it stale, and the link calls the well-known endpoint
 /// until the book names another interface.
-pub(crate) struct MatchmakerClient<P: Providers> {
+pub(crate) struct MatchmakerClient<P: ParosProviders> {
     rpc: RpcHandle<P>,
     names: Names,
     target: Arc<Mutex<MatchmakerTarget>>,
@@ -587,7 +587,7 @@ struct MatchmakerTarget {
     stale: bool,
 }
 
-impl<P: Providers> Clone for MatchmakerClient<P> {
+impl<P: ParosProviders> Clone for MatchmakerClient<P> {
     fn clone(&self) -> Self {
         Self {
             rpc: self.rpc.clone(),
@@ -597,7 +597,7 @@ impl<P: Providers> Clone for MatchmakerClient<P> {
     }
 }
 
-impl<P: Providers> MatchmakerClient<P> {
+impl<P: ParosProviders> MatchmakerClient<P> {
     /// The matchmaker serving at `address`, resolved through `names` at
     /// each call, called through `rpc`.
     pub(crate) fn named(rpc: &RpcHandle<P>, names: Names, address: Address) -> Self {

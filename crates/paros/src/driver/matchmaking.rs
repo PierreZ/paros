@@ -7,7 +7,8 @@ use std::collections::BTreeMap;
 use std::future::Future;
 use std::time::Duration;
 
-use moonpool_core::{Detach, Providers, TaskProvider, TimeProvider};
+use crate::ParosProviders;
+use moonpool_core::{Detach, LocalTaskProvider, LocalTimeProvider};
 use moonpool_rpc::RpcError;
 use paros_core::{
     Ballot, ColocatedNode, GcAck, GcRequest, MatchOutcome, MatchReply, MatchRequest, MatchStep,
@@ -33,7 +34,7 @@ use super::ready::Outbox;
 /// link serves every tenant: a request names its tenant on the wire, and
 /// its answer comes back tagged with the tenant it was sent for (the node
 /// loop routes a reply on the tenant and the journal it echoes).
-pub(crate) struct MatchmakerLinks<P: Providers> {
+pub(crate) struct MatchmakerLinks<P: ParosProviders> {
     /// One client per matchmaker. Behind a lock only so a link can be added
     /// while the loop holds the links shared (#501 (matchmaker sets off the
     /// founders): a machine the registry admits may host a set); the loop
@@ -54,7 +55,7 @@ pub(crate) struct MatchmakerLinks<P: Providers> {
 /// naming a machine outside the deployment) is dropped rather than sent. Kept
 /// ahead of each sender's audit/trace prelude, so an undeliverable request is
 /// never reported as one that left.
-fn link_to<P: Providers>(
+fn link_to<P: ParosProviders>(
     links: &MatchmakerLinks<P>,
     self_id: u64,
     matchmaker: MatchmakerId,
@@ -70,7 +71,7 @@ fn link_to<P: Providers>(
     client
 }
 
-impl<P: Providers> MatchmakerLinks<P> {
+impl<P: ParosProviders> MatchmakerLinks<P> {
     fn clients(&self) -> std::sync::MutexGuard<'_, BTreeMap<MatchmakerId, MatchmakerClient<P>>> {
         self.clients
             .lock()
@@ -125,16 +126,16 @@ fn spawn_matchmaker_rpc<P, R, Fut>(
     sink: mpsc::Sender<R>,
     rpc: Fut,
 ) where
-    P: Providers,
+    P: ParosProviders,
     R: Send + 'static,
-    Fut: Future<Output = Result<Result<R, &'static str>, RpcError>> + Send + 'static,
+    Fut: Future<Output = Result<Result<R, &'static str>, RpcError>> + 'static,
 {
     let time = providers.time().clone();
     let timeout = links.timeout;
     let shutdown = links.shutdown.clone();
     providers
-        .task()
-        .spawn_task(task, async move {
+        .local_task()
+        .spawn_local_task(task, async move {
             let answer = moonpool_core::select! {
                 biased;
                 () = shutdown.cancelled() => return,
@@ -157,7 +158,7 @@ fn spawn_matchmaker_rpc<P, R, Fut>(
 }
 
 /// Send one batch's matchmaker-wire requests, of a journal of `tenant`.
-pub(crate) fn send_outbox<P: Providers, A: Audit>(
+pub(crate) fn send_outbox<P: ParosProviders, A: Audit>(
     providers: &P,
     links: &MatchmakerLinks<P>,
     audit: &A,
@@ -196,7 +197,7 @@ pub(crate) fn send_outbox<P: Providers, A: Audit>(
 /// Send one batch of garbage-collection requests (#123), each as its own RPC
 /// task whose ack is fed back into the node loop through the ack inbox.
 #[tracing::instrument(level = "trace", skip_all, fields(node = self_id, requests = requests.len()))]
-fn send_gc_requests<P: Providers, A: Audit>(
+fn send_gc_requests<P: ParosProviders, A: Audit>(
     providers: &P,
     links: &MatchmakerLinks<P>,
     audit: &A,
@@ -244,7 +245,7 @@ fn send_gc_requests<P: Providers, A: Audit>(
 /// Send one batch of matchmaker-reconfiguration requests (#125), each as its
 /// own RPC task whose reply is fed back into the node loop.
 #[tracing::instrument(level = "trace", skip_all, fields(node = self_id, requests = requests.len()))]
-pub(crate) fn send_reconfigure_requests<P: Providers, A: Audit>(
+pub(crate) fn send_reconfigure_requests<P: ParosProviders, A: Audit>(
     providers: &P,
     links: &MatchmakerLinks<P>,
     audit: &A,
@@ -343,7 +344,7 @@ pub(crate) fn surface_matchmaking<A: Audit>(
 /// The task draws no randomness and consults no hook — a lost or late reply
 /// is exactly what [`ColocatedNode::resend_matchmaking`] exists for.
 #[tracing::instrument(level = "trace", skip_all, fields(node = self_id, requests = requests.len()))]
-fn send_match_requests<P: Providers, A: Audit>(
+fn send_match_requests<P: ParosProviders, A: Audit>(
     providers: &P,
     links: &MatchmakerLinks<P>,
     audit: &A,

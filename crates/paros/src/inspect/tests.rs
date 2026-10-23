@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::future::Future;
 use std::net::IpAddr;
 
-use moonpool_core::{OpenOptions, StorageProvider};
+use moonpool_core::{LocalStorageProvider, OpenOptions};
 use moonpool_sim::{SimStorageProvider, SimWorld, StorageConfiguration};
 use paros_core::{
     Ballot, Command, Config, Control, Entry, JournalId, JournalIdentifier, JournalState,

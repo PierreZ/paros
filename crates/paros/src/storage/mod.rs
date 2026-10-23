@@ -333,7 +333,7 @@ pub trait LogStorage: Storage {
     /// # Errors
     /// Returns the first classified [`StorageError`] whose verdict requires a
     /// crash.
-    fn boot_scan(&mut self) -> impl Future<Output = Result<(), StorageError>> + Send {
+    fn boot_scan(&mut self) -> impl Future<Output = Result<(), StorageError>> {
         async { Ok(()) }
     }
 
@@ -369,16 +369,13 @@ pub trait LogStorage: Storage {
     ///
     /// # Errors
     /// Returns [`StorageError`] if the durable write fails.
-    fn format(&mut self, config: &Config) -> impl Future<Output = Result<(), StorageError>> + Send;
+    fn format(&mut self, config: &Config) -> impl Future<Output = Result<(), StorageError>>;
 
     /// Persist a raised promised ballot (Phase 1).
     ///
     /// # Errors
     /// Returns [`StorageError`] if the durable write fails.
-    fn persist_ballot(
-        &mut self,
-        ballot: Ballot,
-    ) -> impl Future<Output = Result<(), StorageError>> + Send;
+    fn persist_ballot(&mut self, ballot: Ballot) -> impl Future<Output = Result<(), StorageError>>;
 
     /// Persist the `(ballot, command)` accepted for `slot` (Phase 2). An
     /// upsert-by-slot (a chosen value overwrites a stale accept).
@@ -390,16 +387,13 @@ pub trait LogStorage: Storage {
         slot: Slot,
         ballot: Ballot,
         command: Command,
-    ) -> impl Future<Output = Result<(), StorageError>> + Send;
+    ) -> impl Future<Output = Result<(), StorageError>>;
 
     /// Advance the durable chosen index (commit index) to `slot`.
     ///
     /// # Errors
     /// Returns [`StorageError`] if the durable write fails.
-    fn set_chosen_index(
-        &mut self,
-        slot: Slot,
-    ) -> impl Future<Output = Result<(), StorageError>> + Send;
+    fn set_chosen_index(&mut self, slot: Slot) -> impl Future<Output = Result<(), StorageError>>;
 
     /// Flush this batch's writes to stable storage. A [`MustSync::Sync`] batch
     /// (promise-raise / accepted-append) must be fsync-durable on return; a
@@ -408,10 +402,7 @@ pub trait LogStorage: Storage {
     ///
     /// # Errors
     /// Returns [`StorageError`] if the flush fails.
-    fn sync(
-        &mut self,
-        must_sync: MustSync,
-    ) -> impl Future<Output = Result<(), StorageError>> + Send;
+    fn sync(&mut self, must_sync: MustSync) -> impl Future<Output = Result<(), StorageError>>;
 
     /// Truncate the log below `first`, discarding the compacted prefix, and
     /// record `first` as the durable compaction floor (returned by
@@ -429,7 +420,7 @@ pub trait LogStorage: Storage {
         &mut self,
         first: Slot,
         sealed: JournalState,
-    ) -> impl Future<Output = Result<(), StorageError>> + Send;
+    ) -> impl Future<Output = Result<(), StorageError>>;
 
     /// Jump below a peer's trim point (#186, [`paros_core::WriteOp::TrimmedTo`]):
     /// record `point` as the durable compaction floor, raise the durable
@@ -444,7 +435,7 @@ pub trait LogStorage: Storage {
         &mut self,
         point: Slot,
         state: JournalState,
-    ) -> impl Future<Output = Result<(), StorageError>> + Send;
+    ) -> impl Future<Output = Result<(), StorageError>>;
 
     /// Read the durable records from `from` up back from the device and
     /// check each one (#362 (background scrubbing)): at most `limit`
@@ -465,7 +456,7 @@ pub trait LogStorage: Storage {
         from: Slot,
         limit: usize,
         max_bytes: u64,
-    ) -> impl Future<Output = Result<ScrubPage, StorageError>> + Send {
+    ) -> impl Future<Output = Result<ScrubPage, StorageError>> {
         let start = from.max(self.first_slot());
         let last = self.last_slot();
         let mut page = ScrubPage::default();

@@ -3,7 +3,7 @@
 //! the fourth driver beside [`run_node`](crate::run_node),
 //! [`run_matchmaker`](crate::run_matchmaker) and [`run_proxy`](crate::run_proxy).
 //!
-//! Written once over moonpool's `P: Providers`, so the *same* loop runs in
+//! Written once over `P: ParosProviders`, so the *same* loop runs in
 //! production and deterministic simulation. The loop serves the node
 //! contract's **learner subset** — it receives the `Commit`s a leader or a
 //! proxy leader sends to every learner, the leader's beats, and the
@@ -42,8 +42,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::ParosProviders;
 use moonpool_buggify::hint::Strike;
-use moonpool_core::{Providers, RandomProvider, SimulationError, SimulationResult, TimeProvider};
+use moonpool_core::{LocalTimeProvider, RandomProvider, SimulationError, SimulationResult};
 use paros_core::{
     Ballot, Command, JournalId, JournalIdentifier, MustSync, NodeId, Outcome, Party, QuorumSystem,
     ReadState, ReplicaNode, Slot, TenantId, WriteOp,
@@ -365,7 +366,7 @@ fn note_read(read: &mut BTreeSet<JournalIdentifier>, journal: JournalIdentifier)
 /// rebuilt from it and tuned. A journal whose store stays down for good is
 /// left out. Every store names one replica id; a store naming another is
 /// caller input, refused.
-async fn boot_journals<P: Providers, J: JournalStores>(
+async fn boot_journals<P: ParosProviders, J: JournalStores>(
     providers: &P,
     stores: &mut J,
     tunables: &DriverTunables,
@@ -429,7 +430,7 @@ async fn boot_journals<P: Providers, J: JournalStores>(
 
 /// Drive a paros replica to completion over the given providers.
 ///
-/// Generic over `P: Providers` (production *or* simulation) and
+/// Generic over `P: ParosProviders` (production *or* simulation) and
 /// `J: JournalStores` (the journals this replica serves and their injected
 /// durable stores, the same seam a node runs on). A replica is a shared
 /// process (#193, §3.4): one [`ReplicaNode`] and one store per journal,
@@ -481,7 +482,7 @@ pub async fn run_replica<P, J>(
     shutdown: CancellationToken,
 ) -> Result<(), RunError>
 where
-    P: Providers,
+    P: ParosProviders,
     J: JournalStores,
 {
     let (self_id, mut journals) = boot_journals(&providers, &mut stores, &tunables).await?;
@@ -613,7 +614,7 @@ where
 
 /// Open one lane per node of the pool — a replica only ever asks an
 /// acceptor — and the [`Outbound`] over them, riding `edge`'s runtime.
-fn acceptor_lanes<P: Providers, A: Audit + Clone + Send + Sync + 'static>(
+fn acceptor_lanes<P: ParosProviders, A: Audit + Clone + Send + Sync + 'static>(
     providers: &P,
     edge: &RpcEdge<P>,
     tunables: &DriverTunables,

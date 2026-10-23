@@ -17,9 +17,10 @@
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
+use crate::ParosProviders;
 use moonpool_core::{
-    Detach, DiskSpace, Providers, SimulationResult, SystemProvider, SystemSample, TaskProvider,
-    TimeProvider,
+    Detach, DiskSpace, LocalTaskProvider, LocalTimeProvider, SimulationResult, SystemProvider,
+    SystemSample,
 };
 use moonpool_rpc::RpcHandle;
 use paros_core::{JournalId, JournalIdentifier, TenantId};
@@ -90,7 +91,7 @@ impl Eq for LoadBoard {}
 /// that holds `data_dir`, onto `board`, until `shutdown`. `skip_first`
 /// (the caller's BUGGIFY decision) throws the first window away, so the
 /// machine answers `Load` with no window for one interval more.
-pub(crate) fn spawn_monitor<P: Providers>(
+pub(crate) fn spawn_monitor<P: ParosProviders>(
     providers: &P,
     data_dir: String,
     interval: Duration,
@@ -107,8 +108,8 @@ pub(crate) fn spawn_monitor<P: Providers>(
         skip_first,
     );
     providers
-        .task()
-        .spawn_task("paros-machine-load", async move {
+        .local_task()
+        .spawn_local_task("paros-machine-load", async move {
             moonpool_core::select! {
                 biased;
                 () = shutdown.cancelled() => {}
@@ -119,7 +120,7 @@ pub(crate) fn spawn_monitor<P: Providers>(
 }
 
 /// Sample every `interval` and publish each full window.
-async fn monitor<P: Providers>(
+async fn monitor<P: ParosProviders>(
     providers: P,
     data_dir: String,
     interval: Duration,
@@ -179,7 +180,7 @@ async fn monitor<P: Providers>(
 /// # Errors
 ///
 /// The endpoint could not be registered.
-pub(crate) fn serve<P: Providers>(
+pub(crate) fn serve<P: ParosProviders>(
     providers: &P,
     rpc: &RpcHandle<P>,
     facts: &MachineFacts,
@@ -191,8 +192,8 @@ pub(crate) fn serve<P: Providers>(
     let metrics = facts.metrics.clone();
     let (node_id, name) = (facts.node_id.0, facts.name.clone());
     providers
-        .task()
-        .spawn_task("paros-machine-load-serve", async move {
+        .local_task()
+        .spawn_local_task("paros-machine-load-serve", async move {
             loop {
                 moonpool_core::select! {
                     biased;

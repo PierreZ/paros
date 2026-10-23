@@ -6,7 +6,7 @@
 use std::time::Duration;
 
 use clap::Args;
-use moonpool_core::TokioProviders;
+use moonpool_core::CompioProviders;
 use moonpool_rpc::RpcHandle;
 use paros::client::resolve::{Resolution, resolve};
 use paros::{Address, Names};
@@ -24,8 +24,8 @@ pub struct ResolveArgs {
 
 /// `parosctl resolve <tenant>` through the entry endpoint `entry`.
 pub async fn run(
-    providers: &TokioProviders,
-    rpc: &RpcHandle<TokioProviders>,
+    providers: &CompioProviders,
+    rpc: &RpcHandle<CompioProviders>,
     names: &Names,
     entry: &[Address],
     timeout: Duration,

@@ -24,7 +24,8 @@
 
 use std::time::Duration;
 
-use moonpool_core::{Detach, Providers, TaskProvider, TimeProvider};
+use crate::ParosProviders;
+use moonpool_core::{Detach, LocalTaskProvider, LocalTimeProvider};
 use moonpool_rpc::RpcHandle;
 use paros_core::NodeId;
 use tokio_util::sync::CancellationToken;
@@ -53,7 +54,7 @@ pub(crate) struct Follow {
 }
 
 /// Start `follow` in a task that ends with `shutdown`.
-pub(crate) fn spawn<P: Providers>(
+pub(crate) fn spawn<P: ParosProviders>(
     providers: &P,
     rpc: &RpcHandle<P>,
     follow: Follow,
@@ -70,8 +71,8 @@ pub(crate) fn spawn<P: Providers>(
     );
     let every = tunables.election_renew.max(Duration::from_millis(1));
     providers
-        .task()
-        .spawn_task(
+        .local_task()
+        .spawn_local_task(
             "paros-machine-follow",
             run(
                 providers.clone(),
@@ -86,7 +87,7 @@ pub(crate) fn spawn<P: Providers>(
 }
 
 /// A client over `book`, this machine left out: it serves no journal.
-fn client_over<P: Providers>(
+fn client_over<P: ParosProviders>(
     providers: &P,
     rpc: &RpcHandle<P>,
     facts: &MachineFacts,
@@ -108,7 +109,7 @@ fn client_over<P: Providers>(
 /// The follow's loop: learn the genesis pool, then fold the registry to its
 /// tail each period and offer every new book.
 #[tracing::instrument(level = "debug", skip_all, fields(node = follow.facts.node_id.0, cell = follow.cell.cell_id))]
-async fn run<P: Providers>(
+async fn run<P: ParosProviders>(
     providers: P,
     rpc: RpcHandle<P>,
     follow: Follow,

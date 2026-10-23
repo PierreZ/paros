@@ -56,7 +56,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
-use moonpool_core::Providers;
+use crate::ParosProviders;
 use paros_core::{AcceptorConfig, JournalId, JournalIdentifier, LeaderUuid, NodeId, TenantId};
 
 use crate::client::capacity::{CapacityAnswer, CapacityRequest, Wanted};
@@ -87,7 +87,7 @@ const ID_DRAWS: u64 = 4;
 /// `client`, or, when `impatient`, a copy of it that stops listening at
 /// once: every call and read it makes is abandoned unanswered (the floors of
 /// [`ClientTunables`] broken on purpose, for one call).
-fn impatient<P: Providers>(client: &Client<P>, impatient: bool) -> Client<P> {
+fn impatient<P: ParosProviders>(client: &Client<P>, impatient: bool) -> Client<P> {
     if !impatient {
         return client.clone();
     }
@@ -184,7 +184,7 @@ impl TenantDesk {
     /// session ended: a create or a delete then answers unavailable or
     /// leaves its release to a later term).
     #[tracing::instrument(level = "debug", skip_all, fields(tenant = request.tenant.0))]
-    pub(crate) async fn answer<P: Providers>(
+    pub(crate) async fn answer<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
         request: &JournalRequest,
@@ -206,7 +206,7 @@ impl TenantDesk {
     }
 
     #[allow(clippy::too_many_lines)]
-    async fn decide<P: Providers>(
+    async fn decide<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
         request: &JournalRequest,
@@ -345,7 +345,7 @@ impl TenantDesk {
     /// create the cell has no slot for is recorded `Unplaceable`; one whose
     /// machines are not all registered yet answers unavailable.
     #[allow(clippy::too_many_lines)] // placement, booking and the write, in order
-    async fn create<P: Providers>(
+    async fn create<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
         request: &JournalRequest,
@@ -458,7 +458,7 @@ impl TenantDesk {
     /// A create placed nothing: refused and recorded `Unplaceable` when the
     /// cell has no slot for it or the zone rule refuses every draw (#215
     /// (zones)); unavailable while its founding members register.
-    async fn unplaced<P: Providers>(
+    async fn unplaced<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
         request: &JournalRequest,
@@ -492,7 +492,7 @@ impl TenantDesk {
     /// (`Unplaceable` with no name), so it changes nothing and a retry reads
     /// it back; the coordinator's watch applies a recorded mode
     /// ([`super::modes`]).
-    async fn configure<P: Providers>(
+    async fn configure<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
         request: &JournalRequest,
@@ -579,7 +579,7 @@ impl TenantDesk {
     ///
     /// `NotCoordinator` once a later term fenced the journal (the desk is
     /// then superseded), `Unavailable` when it could not be claimed or read.
-    pub(super) async fn tenant<P: Providers>(
+    pub(super) async fn tenant<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
         tenant: TenantId,
@@ -605,7 +605,7 @@ impl TenantDesk {
     /// # Errors
     ///
     /// The write did not land, or a later term fenced the journal.
-    pub(super) async fn record_placed<P: Providers>(
+    pub(super) async fn record_placed<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
         tenant: TenantId,
@@ -627,7 +627,7 @@ impl TenantDesk {
     /// # Errors
     ///
     /// The write did not land, or a later term fenced the journal.
-    pub(super) async fn record_scrub<P: Providers>(
+    pub(super) async fn record_scrub<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
         tenant: TenantId,
@@ -671,7 +671,7 @@ impl TenantDesk {
     /// the tenant control journal, so no earlier term can still write the
     /// create those slots were booked for, and only on a settled fold, so no
     /// write of this term can either.
-    async fn release_orphans<P: Providers>(
+    async fn release_orphans<P: ParosProviders>(
         &self,
         client: &Client<P>,
         tenant: TenantId,
@@ -699,7 +699,7 @@ impl TenantDesk {
     /// when a live journal holds the name), and answer what the fold
     /// recorded. A configure's refusal names no journal: no live journal
     /// holds the empty name.
-    async fn refuse<P: Providers>(
+    async fn refuse<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
         request: &JournalRequest,
@@ -730,7 +730,7 @@ impl TenantDesk {
     /// # Panics
     ///
     /// If a grant books another number of slots than it asked for.
-    pub(super) async fn book<P: Providers>(
+    pub(super) async fn book<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
         cell: &mut CellSession,
@@ -799,7 +799,7 @@ impl TenantDesk {
     /// # Errors
     ///
     /// The fold could not be read to the tail.
-    async fn hosted<P: Providers>(
+    async fn hosted<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
         tenant: TenantId,
@@ -827,7 +827,7 @@ impl TenantDesk {
 
     /// Claim `tenant`'s control journal under the term's uuid and fold it to
     /// its tail, unless the desk holds it already.
-    async fn open<P: Providers>(
+    async fn open<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
         tenant: TenantId,
@@ -887,7 +887,7 @@ impl TenantDesk {
     /// when the write is not known written, or the catch-up read falls short
     /// of it (#445 (ignored load result): once a panic, red on the main
     /// campaign's seed 14738496120122066363, green since).
-    async fn append<P: Providers>(
+    async fn append<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
         tenant: TenantId,
@@ -1039,7 +1039,7 @@ pub(crate) fn placed_count(desired: &Desired, storage: usize) -> usize {
 /// # Errors
 ///
 /// A write did not land: the session is closed, and the rest stay booked.
-pub(crate) async fn release<P: Providers>(
+pub(crate) async fn release<P: ParosProviders>(
     client: &Client<P>,
     cell: &mut CellSession,
     which: impl Fn(&Booking) -> bool,

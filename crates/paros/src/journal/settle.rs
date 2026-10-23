@@ -11,7 +11,7 @@
 
 use std::io;
 
-use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
+use moonpool_core::{LocalStorageFile, LocalStorageProvider, OpenOptions};
 
 /// Sync every file in `dir` and every directory from the root down to
 /// `dir`. A `dir` that does not exist holds nothing to make durable.
@@ -21,7 +21,7 @@ use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
 /// The first I/O error a listing, an open or a sync returned; nothing is
 /// durable then, and a retry syncs everything again.
 #[tracing::instrument(level = "debug", skip_all, fields(dir = %dir))]
-pub async fn settle<S: StorageProvider>(provider: &S, dir: &str) -> io::Result<()> {
+pub async fn settle<S: LocalStorageProvider>(provider: &S, dir: &str) -> io::Result<()> {
     let names = match provider.list_dir(dir).await {
         Ok(names) => names,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
@@ -40,7 +40,7 @@ pub async fn settle<S: StorageProvider>(provider: &S, dir: &str) -> io::Result<(
 /// a name `create_dir_all` or a rename made is lost in a crash unless its
 /// directory is synced, and a synced child does not survive the loss of its
 /// parent's own name (`moonpool-journal`'s rule).
-pub(crate) async fn sync_names<S: StorageProvider>(provider: &S, dir: &str) -> io::Result<()> {
+pub(crate) async fn sync_names<S: LocalStorageProvider>(provider: &S, dir: &str) -> io::Result<()> {
     let mut current = if dir.starts_with('/') { "/" } else { "." }.to_string();
     for component in dir.split('/').filter(|c| !c.is_empty() && *c != ".") {
         provider.sync_dir(&current).await?;

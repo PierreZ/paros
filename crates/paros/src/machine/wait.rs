@@ -9,7 +9,8 @@ use std::collections::BTreeMap;
 use std::pin::Pin;
 use std::time::Duration;
 
-use moonpool_core::{Providers, TimeProvider};
+use crate::ParosProviders;
+use moonpool_core::LocalTimeProvider;
 use paros_core::acceptor::{AcceptOutcome, Acceptor, PrepareOutcome};
 use paros_core::decree::DECREE_SLOT;
 use paros_core::{AcceptorWrite, Ballot};
@@ -89,7 +90,7 @@ pub enum Joined {
 /// The decree a `CellInit` drives, in flight on the waiting loop, with the
 /// answer it owes.
 type Proposal<'a> = (
-    Pin<Box<dyn Future<Output = Result<CellPlan, &'static str>> + Send + 'a>>,
+    Pin<Box<dyn Future<Output = Result<CellPlan, &'static str>> + 'a>>,
     ReplySender<wire::CellInitAck>,
 );
 
@@ -109,7 +110,7 @@ type Proposal<'a> = (
 /// If `ledger` already holds a vote: a formed machine does not wait.
 #[tracing::instrument(level = "debug", skip_all, fields(node = facts.node_id.0, addr = %facts.addr))]
 #[allow(clippy::too_many_lines)] // one select! over the machine contract's calls
-pub async fn wait_for_cell<P: Providers, L: CellLedger>(
+pub async fn wait_for_cell<P: ParosProviders, L: CellLedger>(
     providers: P,
     facts: &MachineFacts,
     ledger: &mut L,
@@ -275,7 +276,7 @@ fn refused(refusal: &str) -> wire::CellInitAck {
 
 /// Keep the runtime running for [`FLUSH`], so an answer just sent leaves
 /// before the listener closes.
-async fn flush<P: Providers>(providers: &P, edge: &mut RpcEdge<P>) {
+async fn flush<P: ParosProviders>(providers: &P, edge: &mut RpcEdge<P>) {
     let time = providers.time().clone();
     moonpool_core::select! {
         _ = edge.run() => {}

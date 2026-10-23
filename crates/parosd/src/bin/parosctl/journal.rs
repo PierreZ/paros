@@ -18,7 +18,7 @@
 use std::time::Duration;
 
 use clap::{Args, Subcommand};
-use moonpool_core::TokioProviders;
+use moonpool_core::CompioProviders;
 use moonpool_rpc::RpcHandle;
 use paros::client::Client;
 use paros::client::bootstrap::control_journals;
@@ -37,7 +37,7 @@ use crate::fleet::nonzero;
 use crate::labels::Labels;
 use crate::output::{Printer, note, record_text, table};
 
-type ParosClient = Client<TokioProviders>;
+type ParosClient = Client<CompioProviders>;
 
 /// `parosctl journal`.
 #[derive(Args, Debug)]
@@ -132,7 +132,7 @@ impl JournalArgs {
 /// the tenant's own token sets its journal's user tags. One idempotency id
 /// per run, sent to each frontend in turn until an answer decides it.
 pub async fn tag_through_frontends(
-    providers: &TokioProviders,
+    providers: &CompioProviders,
     frontends: &ParosClient,
     out: &Printer,
     args: JournalArgs,
@@ -272,8 +272,8 @@ pub struct ConfigureArgs {
 
 /// `parosctl journal …`.
 pub async fn run(
-    providers: &TokioProviders,
-    rpc: &RpcHandle<TokioProviders>,
+    providers: &CompioProviders,
+    rpc: &RpcHandle<CompioProviders>,
     names: &Names,
     client: &ParosClient,
     labels: &Labels,
@@ -413,8 +413,8 @@ fn role_counts(args: &ConfigureArgs, held: TenantRoles) -> Result<TenantRoles, E
 /// the tenant coordinator then applies a journal's mode by reconfiguration
 /// (`parosctl status` shows it degraded until then).
 pub async fn configure(
-    providers: &TokioProviders,
-    rpc: &RpcHandle<TokioProviders>,
+    providers: &CompioProviders,
+    rpc: &RpcHandle<CompioProviders>,
     names: &Names,
     client: &ParosClient,
     out: &Printer,

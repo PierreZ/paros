@@ -3,9 +3,9 @@
 //! directory on a real filesystem with real syncs.
 //!
 //! Each machine is the shipped `paros::machine::run_machine` over
-//! `TokioProviders`, as in `parosd`, with the production tunables. The
-//! machines run on a multi-thread runtime in a thread of their own, so
-//! the bench's clients do not share a thread with them. The bench forms
+//! `CompioProviders`, as in `parosd`, with the production tunables. The
+//! machines run on one compio runtime in a thread of their own, so the
+//! bench's clients do not share a thread with them. The bench forms
 //! the cell with `paros::client::initialize`, as `parosctl init` does, runs
 //! against it, then stops it and deletes the directory.
 
@@ -13,7 +13,7 @@ use std::net::{SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use moonpool_core::{TokioProviders, TokioResolver, TokioStorageProvider};
+use moonpool_core::{CompioProviders, CompioResolver, CompioStorageProvider};
 use paros::client::initialize::{self, InitParams, InitRun};
 use paros::machine::{AdminPin, Class, MachineAddresses, MachineSettings, ProviderDisk};
 use paros::metrics::Metrics;
@@ -61,6 +61,9 @@ pub fn start(count: u64, parent: &Path) -> Result<LocalCell, String> {
     let token = stop.clone();
     let thread = std::thread::Builder::new()
         .name("local-cell".into())
+        // Every machine of the cell polls on this one thread, and an
+        // unoptimized build's futures nest deeper than the 2 MiB default.
+        .stack_size(LOCAL_CELL_STACK)
         .spawn(move || run(machines, &token))
         .map_err(|e| format!("local cell thread: {e}"))?;
     Ok(LocalCell {
@@ -72,6 +75,10 @@ pub fn start(count: u64, parent: &Path) -> Result<LocalCell, String> {
 }
 
 /// `count` free loopback ports: each bound, read and released.
+/// The local cell thread's stack: the size of a main thread's (8 MiB) many
+/// times over, enough for a debug build's deepest poll.
+const LOCAL_CELL_STACK: usize = 64 << 20;
+
 fn ports(count: u64) -> Result<Vec<SocketAddr>, String> {
     let listeners = (0..count)
         .map(|_| TcpListener::bind("127.0.0.1:0").map_err(|e| format!("a loopback port: {e}")))
@@ -85,22 +92,18 @@ fn ports(count: u64) -> Result<Vec<SocketAddr>, String> {
 /// The machines' runtime: every machine until `stop`, then what each ended
 /// with when it was not a clean stop.
 fn run(machines: Vec<(u64, SocketAddr, PathBuf)>, stop: &CancellationToken) -> Vec<String> {
-    let runtime = match tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-    {
+    let runtime = match compio::runtime::Runtime::new() {
         Ok(runtime) => runtime,
         Err(error) => {
             stop.cancel();
             return vec![format!("local cell runtime: {error}")];
         }
     };
-    let local = tokio::task::LocalSet::new();
-    runtime.block_on(local.run_until(async {
+    runtime.block_on(async {
         let handles: Vec<_> = machines
             .into_iter()
             .map(|(index, listen, dir)| {
-                tokio::task::spawn_local(machine(index, listen, dir, stop.clone()))
+                compio::runtime::spawn(machine(index, listen, dir, stop.clone()))
             })
             .collect();
         let mut ended = Vec::new();
@@ -108,11 +111,11 @@ fn run(machines: Vec<(u64, SocketAddr, PathBuf)>, stop: &CancellationToken) -> V
             match handle.await {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => ended.push(error),
-                Err(error) => ended.push(format!("a local machine panicked: {error}")),
+                Err(error) => ended.push(format!("a local machine ended: {error}")),
             }
         }
         ended
-    }))
+    })
 }
 
 /// Local machine `index`: the shipped lifecycle on its own directory, a
@@ -135,17 +138,17 @@ async fn machine(
     };
     let addresses = MachineAddresses::new(listen, None)?;
     let disk = ProviderDisk::new(
-        TokioStorageProvider::new(),
+        CompioStorageProvider::new(),
         dir.to_string_lossy(),
         paros::JournalStoreConfig::default(),
     );
     let ran = Box::pin(paros::machine::run_machine(
-        TokioProviders::new(),
+        CompioProviders::new(),
         disk,
         |_| NoAudit,
         &settings,
         addresses,
-        Names::new(TokioResolver::new()),
+        Names::new(CompioResolver::new()),
         DriverTunables::production(),
         Transport::Plaintext,
         stop.clone(),
@@ -182,7 +185,7 @@ impl LocalCell {
             connect,
             params,
         );
-        tokio::select! {
+        moonpool_core::select! {
             ran = run => match ran {
                 InitRun::Initialized(_) => Ok(()),
                 other => Err(format!("init of the local cell: {other:?}")),
@@ -205,7 +208,7 @@ impl LocalCell {
         timeout: Duration,
         patience: Duration,
     ) -> Result<Vec<(u64, Address)>, String> {
-        let deadline = tokio::time::Instant::now() + patience;
+        let deadline = std::time::Instant::now() + patience;
         loop {
             let found = paros::client::bootstrap::discover(
                 &runtime.providers,
@@ -219,14 +222,14 @@ impl LocalCell {
             if found.len() == self.members.len() {
                 return Ok(found);
             }
-            if tokio::time::Instant::now() >= deadline {
+            if std::time::Instant::now() >= deadline {
                 return Err(format!(
                     "{} of {} local machines answered",
                     found.len(),
                     self.members.len()
                 ));
             }
-            tokio::time::sleep(Duration::from_millis(200)).await;
+            compio::time::sleep(Duration::from_millis(200)).await;
         }
     }
 

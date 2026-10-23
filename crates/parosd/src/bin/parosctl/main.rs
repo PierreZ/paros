@@ -42,7 +42,7 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use clap::{Args, Parser, Subcommand};
-use moonpool_core::{TokioProviders, TokioResolver};
+use moonpool_core::{CompioProviders, CompioResolver};
 use moonpool_rpc::{RpcConfig, RpcHandle};
 use paros::client::{Client, ClientTunables, bootstrap};
 use paros::tls::{Files, Pem};
@@ -317,8 +317,8 @@ impl From<Ending> for ExitCode {
 /// The client-only RPC runtime, driven on a task of its own for the life
 /// of the process.
 struct Runtime {
-    providers: TokioProviders,
-    rpc: RpcHandle<TokioProviders>,
+    providers: CompioProviders,
+    rpc: RpcHandle<CompioProviders>,
     /// The operating system's resolver: names are resolved as they are
     /// dialed (#257).
     names: Names,
@@ -344,18 +344,19 @@ fn runtime(global: &Global) -> Result<Runtime, String> {
         ),
     }
     .dialing()?;
-    let providers = TokioProviders::new();
+    let providers = CompioProviders::new();
     let (run, rpc) = transport
         .client_only(providers.clone(), config)
         .map_err(|e| format!("client RPC runtime: {e}"))?;
-    tokio::spawn(async move {
+    compio::runtime::spawn(async move {
         let error = run.await;
         tracing::warn!(%error, "client RPC runtime failed");
-    });
+    })
+    .detach();
     Ok(Runtime {
         providers,
         rpc,
-        names: Names::new(TokioResolver::new()),
+        names: Names::new(CompioResolver::new()),
     })
 }
 
@@ -364,7 +365,7 @@ fn client(
     runtime: &Runtime,
     servers: &[(u64, Address)],
     timeout: Duration,
-) -> Client<TokioProviders> {
+) -> Client<CompioProviders> {
     let tunables = ClientTunables {
         request_timeout: timeout,
         read_timeout: timeout,
@@ -381,7 +382,7 @@ fn client(
 
 /// A client of the frontends `global` names (#192 (the frontend)), each
 /// call carrying the token (`--token`, `--token-file`, `PAROS_TOKEN`).
-fn frontend_client(runtime: &Runtime, global: &Global) -> Result<Client<TokioProviders>, String> {
+fn frontend_client(runtime: &Runtime, global: &Global) -> Result<Client<CompioProviders>, String> {
     let token = global.token()?.ok_or_else(|| {
         "no token for the frontends: pass --token or --token-file, or set PAROS_TOKEN".to_string()
     })?;
@@ -464,10 +465,7 @@ fn main() -> ExitCode {
         Command::Token(args) => token::run(&out, args).into(),
         Command::Tls(args) => tls::run(&out, args).into(),
         Command::Store(args) => store::run(&out, args).into(),
-        command => match tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        {
+        command => match compio::runtime::Runtime::new() {
             Ok(runtime) => runtime.block_on(online(cli.global, command)),
             Err(error) => {
                 eprintln!("parosctl: runtime: {error}");
@@ -483,7 +481,7 @@ async fn connect(
     runtime: &Runtime,
     global: &Global,
     fronted: bool,
-) -> Result<(Vec<(u64, Address)>, Client<TokioProviders>), ExitCode> {
+) -> Result<(Vec<(u64, Address)>, Client<CompioProviders>), ExitCode> {
     if fronted {
         return frontend_client(runtime, global)
             .map(|client| (Vec::new(), client))

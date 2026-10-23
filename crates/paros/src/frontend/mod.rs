@@ -54,8 +54,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
+use crate::ParosProviders;
 use moonpool_core::{
-    Detach, Providers, RandomProvider, SimulationResult, TaskProvider, TimeProvider,
+    Detach, LocalTaskProvider, LocalTimeProvider, RandomProvider, SimulationResult,
 };
 use paros_core::JournalIdentifier;
 use tokio_util::sync::CancellationToken;
@@ -116,7 +117,7 @@ struct Draws {
 }
 
 impl Draws {
-    fn draw<P: Providers>(providers: &P) -> Self {
+    fn draw<P: ParosProviders>(providers: &P) -> Self {
         let cold = moonpool_buggify::buggify_with_prob!(0.05);
         let stale = moonpool_buggify::buggify_with_prob!(0.1);
         let stray = moonpool_buggify::buggify_with_prob!(0.2)
@@ -142,7 +143,7 @@ struct FrontendInbox {
 }
 
 /// What every call's task shares: the cache, the providers, the policy.
-struct Shared<P: Providers, A> {
+struct Shared<P: ParosProviders, A> {
     providers: P,
     routes: Mutex<Routes<P>>,
     authz: Arc<dyn Authz>,
@@ -154,16 +155,16 @@ struct Shared<P: Providers, A> {
 }
 
 /// One running call, counted in [`Shared::in_flight`] while it lives.
-struct Running<P: Providers, A>(Arc<Shared<P, A>>);
+struct Running<P: ParosProviders, A>(Arc<Shared<P, A>>);
 
-impl<P: Providers, A> Running<P, A> {
+impl<P: ParosProviders, A> Running<P, A> {
     fn start(shared: &Arc<Shared<P, A>>) -> Self {
         shared.in_flight.fetch_add(1, Ordering::SeqCst);
         Self(shared.clone())
     }
 }
 
-impl<P: Providers, A> Drop for Running<P, A> {
+impl<P: ParosProviders, A> Drop for Running<P, A> {
     fn drop(&mut self) {
         let before = self.0.in_flight.fetch_sub(1, Ordering::SeqCst);
         assert!(before > 0, "a running call was counted");
@@ -201,7 +202,7 @@ pub async fn run_frontend<P, A>(
     shutdown: CancellationToken,
 ) -> SimulationResult<()>
 where
-    P: Providers,
+    P: ParosProviders,
     A: Audit + Clone + Send + Sync + 'static,
 {
     assert!(!settings.cell.is_empty(), "a frontend fronts a cell");
@@ -308,7 +309,7 @@ where
 /// ran out.
 fn stopped<P, A>(shared: &Shared<P, A>, expired: bool, linger: bool) -> bool
 where
-    P: Providers,
+    P: ParosProviders,
     A: Audit + Clone + Send + Sync + 'static,
 {
     let running = shared.in_flight.load(Ordering::SeqCst);
@@ -344,7 +345,7 @@ fn spawn_call<P, A, C>(
     reply: ReplySender<C::Ack>,
     draws: Draws,
 ) where
-    P: Providers,
+    P: ParosProviders,
     A: Audit + Clone + Send + Sync + 'static,
     C: Forwarded,
 {
@@ -353,8 +354,8 @@ fn spawn_call<P, A, C>(
     let running = Running::start(shared);
     shared
         .providers
-        .task()
-        .spawn_task(C::TASK, async move {
+        .local_task()
+        .spawn_local_task(C::TASK, async move {
             let _running = running;
             moonpool_core::select! {
                 biased;
@@ -376,7 +377,7 @@ async fn serve<P, A, C>(
     draws: Draws,
 ) -> C::Ack
 where
-    P: Providers,
+    P: ParosProviders,
     A: Audit + Clone + Send + Sync + 'static,
     C: Forwarded,
 {
@@ -433,7 +434,7 @@ fn spawn_tags<P, A>(
     reply: ReplySender<SetJournalTagsAck>,
     draws: Draws,
 ) where
-    P: Providers,
+    P: ParosProviders,
     A: Audit + Clone + Send + Sync + 'static,
 {
     let shutdown = shutdown.clone();
@@ -441,8 +442,8 @@ fn spawn_tags<P, A>(
     let running = Running::start(shared);
     shared
         .providers
-        .task()
-        .spawn_task("frontend-set-tags", async move {
+        .local_task()
+        .spawn_local_task("frontend-set-tags", async move {
             let _running = running;
             moonpool_core::select! {
                 biased;
@@ -512,7 +513,7 @@ async fn serve_tags<P, A>(
     draws: Draws,
 ) -> SetJournalTagsAck
 where
-    P: Providers,
+    P: ParosProviders,
     A: Audit + Clone + Send + Sync + 'static,
 {
     let unavailable = || SetJournalTagsAck {
@@ -615,7 +616,7 @@ async fn admit<P, A>(
     draws: Draws,
 ) -> Result<(JournalIdentifier, Option<JournalName>), Refusal>
 where
-    P: Providers,
+    P: ParosProviders,
     A: Audit + Clone + Send + Sync + 'static,
 {
     let named = named(entry, ids).map_err(|denial| {
@@ -629,7 +630,8 @@ where
         },
         Named::Internal(_) => Target::Internal,
     };
-    let now = shared.settings.epoch + moonpool_core::TimeProvider::now(shared.providers.time());
+    let now =
+        shared.settings.epoch + moonpool_core::LocalTimeProvider::now(shared.providers.time());
     let keys = routes::keys(shared, false).await;
     let refreshed;
     let mut request = Request {

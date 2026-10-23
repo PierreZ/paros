@@ -22,7 +22,7 @@
 use std::collections::BTreeSet;
 use std::ops::Bound::{Excluded, Unbounded};
 
-use moonpool_core::Providers;
+use crate::ParosProviders;
 use paros_core::{NodeId, TenantId};
 
 use super::moves::{Leaving, stays};
@@ -91,7 +91,7 @@ impl Roles {
     /// tenant control journals). `None` when a write did not land: the term
     /// writes nothing more.
     #[tracing::instrument(level = "debug", skip_all)]
-    pub(super) async fn step<P: Providers>(
+    pub(super) async fn step<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
         cell: &mut CellSession,

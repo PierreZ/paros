@@ -20,7 +20,7 @@ use std::path::PathBuf;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use clap::{Args, Subcommand};
-use moonpool_core::TokioStorageProvider;
+use moonpool_core::CompioStorageProvider;
 use paros::inspect::{
     DiskImage, JournalImage, SetImage, SetStoreImage, StoreImage, inspect, names,
 };
@@ -96,11 +96,8 @@ fn read(args: &InspectArgs) -> Result<DiskImage, String> {
     if scratch.starts_with(&args.data_dir) {
         return Err("the scratch directory lies inside the data directory".to_string());
     }
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| format!("runtime: {e}"))?;
-    let provider = TokioStorageProvider::new();
+    let runtime = compio::runtime::Runtime::new().map_err(|e| format!("runtime: {e}"))?;
+    let provider = CompioStorageProvider::new();
     let image = runtime.block_on(inspect(
         &provider,
         &root,

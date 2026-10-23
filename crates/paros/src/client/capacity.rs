@@ -14,7 +14,8 @@
 
 use std::time::Duration;
 
-use moonpool_core::{Providers, TimeProvider};
+use crate::ParosProviders;
+use moonpool_core::LocalTimeProvider;
 use moonpool_rpc::RpcHandle;
 use paros_core::{JournalId, JournalIdentifier, NodeId, TenantId};
 
@@ -176,7 +177,7 @@ impl CapacityRequest {
 
 /// Send `request` to the coordinator `target`, once, within `timeout`. A
 /// term that ended answers nothing: [`CapacityAnswer::Unavailable`], retried.
-pub async fn send<P: Providers>(
+pub async fn send<P: ParosProviders>(
     providers: &P,
     rpc: &RpcHandle<P>,
     names: &Names,
@@ -197,7 +198,7 @@ pub async fn send<P: Providers>(
 /// is `election`, the same id again until an answer decides it or
 /// `patience` runs out (then the last answer, retryable).
 #[tracing::instrument(level = "debug", skip_all, fields(tenant = request.tenant.0))]
-pub async fn request<P: Providers>(
+pub async fn request<P: ParosProviders>(
     providers: &P,
     rpc: &RpcHandle<P>,
     names: &Names,

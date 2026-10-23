@@ -37,7 +37,8 @@ use std::net::SocketAddr;
 
 use std::time::Duration;
 
-use moonpool_core::{Providers, RandomProvider, StorageProvider, TimeProvider};
+use crate::ParosProviders;
+use moonpool_core::{LocalStorageProvider, LocalTimeProvider, RandomProvider};
 use paros_core::{Ballot, Config, JournalIdentifier, MatchmakerConfig, MatchmakerId, NodeId};
 use tokio_util::sync::CancellationToken;
 
@@ -160,7 +161,7 @@ struct DiskLedger<'a, S, A> {
     record: MachineRecord,
 }
 
-impl<S: StorageProvider + Clone, A: Audit> DiskLedger<'_, S, A> {
+impl<S: LocalStorageProvider + Clone, A: Audit> DiskLedger<'_, S, A> {
     async fn commit(&mut self, record: MachineRecord) -> Result<(), String> {
         self.disk.write_record(&record.render()).await?;
         self.audit.machine_recorded(&record);
@@ -169,7 +170,7 @@ impl<S: StorageProvider + Clone, A: Audit> DiskLedger<'_, S, A> {
     }
 }
 
-impl<S: StorageProvider + Clone, A: Audit> CellLedger for DiskLedger<'_, S, A> {
+impl<S: LocalStorageProvider + Clone, A: Audit> CellLedger for DiskLedger<'_, S, A> {
     fn promised(&self) -> Ballot {
         self.record.promised
     }
@@ -288,8 +289,8 @@ pub async fn run_machine<P, S, A, F>(
     shutdown: CancellationToken,
 ) -> Result<(), MachineError>
 where
-    P: Providers,
-    S: StorageProvider + Clone + 'static,
+    P: ParosProviders,
+    S: LocalStorageProvider + Clone + 'static,
     A: Audit + Clone + Send + Sync + 'static,
     F: Fn(AuditScope) -> A + Send + Sync + 'static,
 {
@@ -396,7 +397,7 @@ where
 /// The cached registry fold on `disk` (#211), if it holds one that machine
 /// `node` wrote. A cache that cannot be read or parsed is no cache: it only
 /// says where to dial, so the machine starts from its plan or admission.
-async fn read_cache<S: StorageProvider + Clone, A: Audit>(
+async fn read_cache<S: LocalStorageProvider + Clone, A: Audit>(
     disk: &ProviderDisk<S>,
     audit: &A,
     node: NodeId,
@@ -436,7 +437,7 @@ async fn read_cache<S: StorageProvider + Clone, A: Audit>(
 
 /// The machine's record: read, or minted on an empty disk; the
 /// configuration's mutable fields recorded.
-async fn identity<P: Providers, S: StorageProvider + Clone, A: Audit>(
+async fn identity<P: ParosProviders, S: LocalStorageProvider + Clone, A: Audit>(
     providers: &P,
     disk: &ProviderDisk<S>,
     audit: &A,
@@ -526,7 +527,7 @@ async fn identity<P: Providers, S: StorageProvider + Clone, A: Audit>(
 /// The machine samples its own busyness from its first start on (#424):
 /// every phase answers `Load` from the board this returns, beside the
 /// metrics each window also goes to (#366 (metrics)).
-fn monitor<P: Providers>(
+fn monitor<P: ParosProviders>(
     providers: &P,
     root: &str,
     settings: &MachineSettings,
@@ -582,8 +583,8 @@ async fn serve<P, S, A, F>(
     shutdown: CancellationToken,
 ) -> Result<(), MachineError>
 where
-    P: Providers,
-    S: StorageProvider + Clone + 'static,
+    P: ParosProviders,
+    S: LocalStorageProvider + Clone + 'static,
     A: Audit + Clone + Send + Sync + 'static,
     F: Fn(AuditScope) -> A + Send + Sync + 'static,
 {
@@ -701,8 +702,8 @@ async fn serve_admitted<P, S, A, F>(
     shutdown: CancellationToken,
 ) -> Result<(), MachineError>
 where
-    P: Providers,
-    S: StorageProvider + Clone + 'static,
+    P: ParosProviders,
+    S: LocalStorageProvider + Clone + 'static,
     A: Audit + Clone + Send + Sync + 'static,
     F: Fn(AuditScope) -> A + Send + Sync + 'static,
 {
@@ -804,7 +805,7 @@ where
 }
 
 /// The record on `disk` of machine `node`, as it stands now.
-async fn read_record<S: StorageProvider + Clone>(
+async fn read_record<S: LocalStorageProvider + Clone>(
     disk: &ProviderDisk<S>,
     node: NodeId,
 ) -> Result<MachineRecord, MachineError> {

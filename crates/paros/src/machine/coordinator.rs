@@ -100,7 +100,8 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, PoisonError};
 use std::time::Duration;
 
-use moonpool_core::{Detach, Providers, RandomProvider, TaskProvider, TimeProvider};
+use crate::ParosProviders;
+use moonpool_core::{Detach, LocalTaskProvider, LocalTimeProvider, RandomProvider};
 use moonpool_rpc::{AccessClass, RpcHandle, ServiceGroup};
 use paros_core::{JournalIdentifier, LeaderUuid, NodeId, TenantId};
 use tokio_util::sync::CancellationToken;
@@ -175,7 +176,7 @@ struct TermGroup {
 impl TermGroup {
     /// Register term `term`'s group on `rpc`; `None` once the runtime is
     /// gone.
-    fn open<P: Providers>(rpc: &RpcHandle<P>, term: u64) -> Option<Self> {
+    fn open<P: ParosProviders>(rpc: &RpcHandle<P>, term: u64) -> Option<Self> {
         assert!(term != 0, "a served term is set");
         let group = rpc
             .register_group::<CoordinatorInterface>(AccessClass::Public)
@@ -234,7 +235,7 @@ pub enum TermDuty {
 /// If `leader` carries the unset uuid, or a postcondition fails (a
 /// programmer error).
 #[tracing::instrument(level = "debug", skip_all, fields(term = leader.term, candidate = leader.candidate.id))]
-pub async fn serve_term<P: Providers>(
+pub async fn serve_term<P: ParosProviders>(
     providers: &P,
     rpc: &RpcHandle<P>,
     client: &Client<P>,
@@ -250,7 +251,7 @@ pub async fn serve_term<P: Providers>(
 
 /// [`serve_term`], handing back the open session of a served term, which
 /// the coordinator's [`Watch`] writes through for the rest of the term.
-async fn open_term<P: Providers>(
+async fn open_term<P: ParosProviders>(
     providers: &P,
     rpc: &RpcHandle<P>,
     client: &Client<P>,
@@ -679,7 +680,7 @@ impl Watch {
     ///
     /// A write did not land: the term writes nothing more.
     #[tracing::instrument(level = "trace", skip_all, fields(cell = session.registry().fleet().map_or(0, |f| f.cell_id)))]
-    pub async fn round<P: Providers>(
+    pub async fn round<P: ParosProviders>(
         &mut self,
         providers: &P,
         rpc: &RpcHandle<P>,
@@ -786,7 +787,7 @@ impl Watch {
     /// machine that answered `Identify` for its `Load`, judge the round's
     /// facts, and write each change of judgement `MachineSlow`, for the
     /// incarnation the registry holds. How many entries it wrote.
-    async fn judge_slow<P: Providers>(
+    async fn judge_slow<P: ParosProviders>(
         &mut self,
         providers: &P,
         rpc: &RpcHandle<P>,
@@ -862,7 +863,7 @@ impl Watch {
     /// free-bytes floor, and each change of judgement is written
     /// `MachineSpace`, for the incarnation the registry holds. How many
     /// entries it wrote.
-    async fn judge_space<P: Providers>(
+    async fn judge_space<P: ParosProviders>(
         &self,
         client: &Client<P>,
         session: &mut CellSession,
@@ -1019,7 +1020,7 @@ pub fn election_tunables(tunables: &DriverTunables) -> ElectionTunables {
 /// The library client of the cell's members, each dialed by its advertised
 /// address, resolved at each call (#257), with the machine's internal client
 /// tunables (#457 (hard-coded tunables)).
-pub(crate) fn cell_client<P: Providers>(
+pub(crate) fn cell_client<P: ParosProviders>(
     providers: &P,
     rpc: &RpcHandle<P>,
     formed: &FormedCell,
@@ -1047,7 +1048,7 @@ pub(crate) fn cell_client<P: Providers>(
 /// kept its election for the rest of the run (#529 (sets oracles after PR
 /// #515): witness 2036487808999208197, a set never moved off a drained
 /// machine).
-async fn follow_book<P: Providers>(
+async fn follow_book<P: ParosProviders>(
     rpc: &RpcHandle<P>,
     client: &Client<P>,
     names: &Names,
@@ -1084,7 +1085,7 @@ fn followed_book(
 }
 
 /// `client` over `book`, each member dialed by its address.
-fn dial_book<P: Providers>(
+fn dial_book<P: ParosProviders>(
     rpc: &RpcHandle<P>,
     client: &Client<P>,
     names: &Names,
@@ -1186,7 +1187,7 @@ struct Candidacy {
 /// candidacy ends, and a term it leads is handed on to the next founding
 /// member, through the node loop that still serves. The receiver turns
 /// `true` once the candidacy ended, or at once when none started.
-pub(crate) fn spawn<P: Providers>(
+pub(crate) fn spawn<P: ParosProviders>(
     providers: &P,
     rpc: &RpcHandle<P>,
     formed: &FormedCell,
@@ -1235,8 +1236,8 @@ pub(crate) fn spawn<P: Providers>(
     let providers = providers.clone();
     let rpc = rpc.clone();
     providers
-        .task()
-        .spawn_task("paros-cell-coordinator", {
+        .local_task()
+        .spawn_local_task("paros-cell-coordinator", {
             let providers = providers.clone();
             async move {
                 campaign(providers, rpc, client, candidacy, hold, (shutdown, halt)).await;
@@ -1286,7 +1287,7 @@ fn successor(plan: &CellPlan, me: NodeId) -> Option<Candidate> {
 // One loop over the election's steps: each arm is a thin call into the
 // term's duties, and splitting the arms out would scatter its shared state.
 #[allow(clippy::too_many_lines)]
-async fn campaign<P: Providers>(
+async fn campaign<P: ParosProviders>(
     providers: P,
     rpc: RpcHandle<P>,
     mut client: Client<P>,
@@ -1724,7 +1725,7 @@ async fn campaign<P: Providers>(
 /// decision does. A lone founding member has nobody to hand it to, and a
 /// lost hand-off costs the cell an election, never a second leader.
 #[tracing::instrument(level = "debug", skip_all, fields(node = me.0))]
-async fn hand_on<P: Providers>(
+async fn hand_on<P: ParosProviders>(
     client: &Client<P>,
     election: &mut Election<P>,
     (plan, me): (&CellPlan, NodeId),
@@ -1788,7 +1789,7 @@ fn chaos() -> bool {
 /// (witness 17167272764625629279, a 1.6 s lease over a slow link). A
 /// renewal still in flight when `work` ends is dropped: the next step sends
 /// it again. With no term led, `work` runs alone.
-async fn renewing<P: Providers, T>(
+async fn renewing<P: ParosProviders, T>(
     providers: &P,
     election: &mut Election<P>,
     work: impl std::future::Future<Output = T>,
@@ -1835,7 +1836,7 @@ async fn next_request<M: moonpool_rpc::RpcMethod, T, U: 'static>(
 /// term, and is refused `not_coordinator` by a group that outlived its term;
 /// a desk the request found superseded stops the wait, so the term ends at
 /// once.
-async fn answer_until<P: Providers>(
+async fn answer_until<P: ParosProviders>(
     (providers, rpc, client, names): (&P, &RpcHandle<P>, &Client<P>, &Names),
     cell: (u64, Duration),
     until: Duration,
@@ -1952,7 +1953,7 @@ async fn answer_until<P: Providers>(
 /// 102806:3654508340332248788 on PR #691 (client write inputs): an admitted
 /// machine renamed while it asked a term whose fold predated its
 /// registration was never registered at its new name).
-async fn book_naming<P: Providers>(
+async fn book_naming<P: ParosProviders>(
     session: &mut CellSession,
     client: &Client<P>,
     id: NodeId,
@@ -1987,7 +1988,7 @@ async fn book_naming<P: Providers>(
 /// 3556034011252864713, a founding member renamed onto a link with 81 ms
 /// of extra latency, under a 100 ms renewal period).
 #[tracing::instrument(level = "debug", skip_all, fields(cell = cell_id))]
-async fn register<P: Providers>(
+async fn register<P: ParosProviders>(
     providers: &P,
     rpc: &RpcHandle<P>,
     client: &Client<P>,
@@ -2113,7 +2114,7 @@ fn identified(answer: Option<wire::IdentifyAck>, id: NodeId, incarnation: u128) 
 
 /// Start an `Identify` of `addr` that waits up to `timeout`, off the
 /// renewal path (see [`register`]).
-fn spawn_probe<P: Providers>(
+fn spawn_probe<P: ParosProviders>(
     providers: &P,
     rpc: &RpcHandle<P>,
     names: &Names,
@@ -2130,8 +2131,8 @@ fn spawn_probe<P: Providers>(
         addr.clone(),
     );
     providers
-        .task()
-        .spawn_task("paros-register-probe", async move {
+        .local_task()
+        .spawn_local_task("paros-register-probe", async move {
             let answer = bootstrap::identify(&task_providers, &rpc, &names, &target, timeout).await;
             *slot.lock().unwrap_or_else(PoisonError::into_inner) =
                 Some(identified(answer, id, incarnation));

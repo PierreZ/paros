@@ -15,7 +15,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use clap::{Args, Subcommand};
-use moonpool_core::TokioProviders;
+use moonpool_core::CompioProviders;
 use paros::Address;
 use paros::client::Client;
 use paros::client::bootstrap::{control_journals, majority_cell};
@@ -112,7 +112,7 @@ pub fn key_entry(text: &str) -> Result<RootKeyEntry, String> {
 /// `parosctl universe …`.
 pub async fn run(
     asker: &Asker<'_>,
-    client: &Client<TokioProviders>,
+    client: &Client<CompioProviders>,
     servers: &[u64],
     out: &Printer,
     args: UniverseArgs,
@@ -208,7 +208,7 @@ pub async fn run(
 /// `paros::client::fleet`.
 async fn add_cell(
     asker: &Asker<'_>,
-    client: &Client<TokioProviders>,
+    client: &Client<CompioProviders>,
     servers: &[u64],
     out: &Printer,
     members: &[String],
@@ -296,7 +296,7 @@ async fn add_cell(
 /// named `name` leaves the universe, its id tombstoned.
 async fn remove_cell(
     asker: &Asker<'_>,
-    client: &Client<TokioProviders>,
+    client: &Client<CompioProviders>,
     servers: &[u64],
     out: &Printer,
     name: &str,
@@ -344,7 +344,7 @@ async fn remove_cell(
 
 /// `parosctl universe key list`: the keys in force, read as a reader that
 /// owns nothing.
-async fn list(client: &Client<TokioProviders>, out: &Printer) -> Ending {
+async fn list(client: &Client<CompioProviders>, out: &Printer) -> Ending {
     let Some(journals) = control_journals(client).await else {
         note("no server named its cell's control journals: is the cell initialized?");
         return Ending::Unreachable;

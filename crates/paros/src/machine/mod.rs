@@ -342,9 +342,7 @@ pub struct MachineFacts {
 }
 
 /// The incarnation of the RPC runtime `rpc`, or `0` once it stopped.
-pub(crate) fn incarnation_of<P: moonpool_core::Providers>(
-    rpc: &moonpool_rpc::RpcHandle<P>,
-) -> u128 {
+pub(crate) fn incarnation_of<P: crate::ParosProviders>(rpc: &moonpool_rpc::RpcHandle<P>) -> u128 {
     rpc.incarnation().map_or(0, moonpool_rpc::Incarnation::get)
 }
 
@@ -365,7 +363,7 @@ pub fn incarnation_from_halves(high: u64, low: u64) -> u128 {
 impl MachineFacts {
     /// These facts as the runtime `rpc` serves them: its incarnation set.
     #[must_use]
-    pub(crate) fn serving<P: moonpool_core::Providers>(
+    pub(crate) fn serving<P: crate::ParosProviders>(
         &self,
         rpc: &moonpool_rpc::RpcHandle<P>,
     ) -> Self {

@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use moonpool_core::TokioProviders;
+use moonpool_core::CompioProviders;
 use paros::client::bootstrap::control_journals;
 use paros::client::fleet::{Step, read_directory};
 use paros::client::journals::{self, JournalAnswer, JournalOp, JournalRequest};
@@ -19,7 +19,7 @@ use crate::output::note;
 
 use super::topology::Topology;
 
-type ParosClient = Client<TokioProviders>;
+type ParosClient = Client<CompioProviders>;
 
 /// One journal of the bench, by name and by ids.
 pub struct Journal {
@@ -38,7 +38,7 @@ pub fn journal_name(topology: Topology, index: usize) -> String {
 /// another state than `READY` is an error: the bench never finishes or
 /// deletes one.
 pub async fn tenant(
-    providers: &TokioProviders,
+    providers: &CompioProviders,
     client: &ParosClient,
     servers: &[u64],
     name: &str,
@@ -186,6 +186,6 @@ pub async fn claim(
         if !retry || client.now() >= deadline {
             return Err(format!("claim of {}: {outcome:?}", journal.name));
         }
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        compio::time::sleep(Duration::from_millis(200)).await;
     }
 }

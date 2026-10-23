@@ -40,7 +40,7 @@ use super::ready::{Taken, persist_writes};
 
 /// A flush in flight: the journal's store, given back when it lands, and
 /// the flush's verdict.
-pub(crate) type Flush<S> = Pin<Box<dyn Future<Output = (S, Result<(), RunError>)> + Send>>;
+pub(crate) type Flush<S> = Pin<Box<dyn Future<Output = (S, Result<(), RunError>)>>>;
 
 /// One journal's batch while its flush flies.
 pub(crate) struct Flight<S> {
@@ -54,7 +54,7 @@ pub(crate) struct Flight<S> {
     pub(crate) began: Duration,
 }
 
-impl<S: LogStorage + Send + 'static> Flight<S> {
+impl<S: LogStorage + 'static> Flight<S> {
     /// Launch the flush of `taken`'s writes on `storage`. The writes move
     /// into the flush; the batch keeps the rest.
     pub(crate) fn launch<A: Audit + Clone + Send + Sync + 'static>(

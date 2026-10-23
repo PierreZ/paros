@@ -1,6 +1,6 @@
 //! `parosd` — the paros daemon (#196): **one uniform binary** every machine
-//! runs, over moonpool's `TokioProviders` and the journal stores on a real
-//! filesystem. `parosd` serves; the client is `parosctl` (#220), over
+//! runs, on one compio thread, over moonpool's `CompioProviders` and the
+//! journal stores on a real filesystem. `parosd` serves; the client is `parosctl` (#220), over
 //! `paros::client`.
 //!
 //! A machine starts with its listen and advertised addresses, its data
@@ -52,7 +52,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use clap::Parser;
-use moonpool_core::{TokioProviders, TokioResolver, TokioStorageProvider};
+use moonpool_core::{CompioProviders, CompioResolver, CompioStorageProvider};
 use paros::machine::{MachineAddresses, MachineError, MachineSettings, ProviderDisk};
 use paros::metrics::Metrics;
 use paros::{Address, BootRefusal, Names, NoAudit, RunError};
@@ -88,10 +88,8 @@ fn main() -> ExitCode {
         eprintln!("parosd: {error}");
         return ExitCode::from(2);
     }
-    let runtime = match tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-    {
+    // One thread runs the machine: a compio runtime (io_uring on Linux).
+    let runtime = match compio::runtime::Runtime::new() {
         Ok(runtime) => runtime,
         Err(error) => {
             eprintln!("parosd: cannot start the runtime: {error}");
@@ -101,14 +99,11 @@ fn main() -> ExitCode {
     // Metrics are always recorded (#366 (metrics)); `PAROS_HTTP_LISTEN`
     // serves them, with the probes, and `PAROS_OTLP_*` pushes them.
     let metrics = Metrics::on();
-    let telemetry = {
-        let _entered = runtime.enter();
-        match otel::Telemetry::start(&settings, &metrics) {
-            Ok(telemetry) => telemetry,
-            Err(error) => {
-                eprintln!("parosd: {error}");
-                return ExitCode::from(2);
-            }
+    let (telemetry, _otlp) = match otel::Telemetry::start(&settings, &metrics) {
+        Ok(started) => started,
+        Err(error) => {
+            eprintln!("parosd: {error}");
+            return ExitCode::from(2);
         }
     };
     tracing_subscriber::registry()
@@ -121,7 +116,7 @@ fn main() -> ExitCode {
         }))
         .init();
     let code = runtime.block_on(Box::pin(run(settings, metrics)));
-    // The runtime's workers still run: the exporters flush over it.
+    // The exporters' runtime still runs: they flush over it.
     telemetry.shutdown();
     code
 }
@@ -190,17 +185,17 @@ async fn run(settings: Settings, metrics: Metrics) -> ExitCode {
         metrics,
     };
     let disk = ProviderDisk::new(
-        TokioStorageProvider::new(),
+        CompioStorageProvider::new(),
         settings.data_dir.to_string_lossy(),
         paros::JournalStoreConfig::default(),
     );
     let ran = Box::pin(paros::machine::run_machine(
-        TokioProviders::new(),
+        CompioProviders::new(),
         disk,
         |_| NoAudit,
         &machine,
         addresses,
-        Names::new(TokioResolver::new()),
+        Names::new(CompioResolver::new()),
         tunables,
         transport,
         shutdown,
@@ -309,45 +304,42 @@ fn remedy(refusal: BootRefusal) -> &'static str {
 fn shutdown_on_signal(within: Duration) -> CancellationToken {
     let token = CancellationToken::new();
     let fired = token.clone();
-    tokio::spawn(async move {
+    compio::runtime::spawn(async move {
         wait_for_signal().await;
         tracing::info!(within_ms = within.as_millis(), "parosd_signal_shutdown");
         fired.cancel();
-        tokio::select! {
+        moonpool_core::select! {
             () = wait_for_signal() => {
                 tracing::warn!("parosd_second_signal");
                 eprintln!("parosd: a second signal: stopping at once");
             }
-            () = tokio::time::sleep(within.saturating_add(STOP_BACKSTOP)) => {
+            () = compio::time::sleep(within.saturating_add(STOP_BACKSTOP)) => {
                 tracing::warn!(within_ms = within.as_millis(), "parosd_stop_hung");
                 eprintln!("parosd: the stop did not end in time: stopping at once");
             }
         }
         std::process::exit(EXIT_FORCED);
-    });
+    })
+    .detach();
     token
 }
 
 #[cfg(unix)]
 async fn wait_for_signal() {
-    use tokio::signal::unix::{SignalKind, signal};
-    match signal(SignalKind::terminate()) {
-        Ok(mut term) => {
-            tokio::select! {
-                _ = term.recv() => {}
-                _ = tokio::signal::ctrl_c() => {}
+    moonpool_core::select! {
+        term = compio::signal::unix::signal(libc::SIGTERM) => {
+            if let Err(error) = term {
+                tracing::warn!(%error, "sigterm_handler_unavailable");
+                compio::signal::ctrl_c().await.ok();
             }
         }
-        Err(error) => {
-            tracing::warn!(%error, "sigterm_handler_unavailable");
-            tokio::signal::ctrl_c().await.ok();
-        }
+        _ = compio::signal::ctrl_c() => {}
     }
 }
 
 #[cfg(not(unix))]
 async fn wait_for_signal() {
-    tokio::signal::ctrl_c().await.ok();
+    compio::signal::ctrl_c().await.ok();
 }
 
 #[cfg(test)]

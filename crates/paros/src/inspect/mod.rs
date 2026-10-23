@@ -42,7 +42,7 @@ mod scratch;
 #[cfg(test)]
 mod tests;
 
-use moonpool_core::StorageProvider;
+use moonpool_core::LocalStorageProvider;
 use paros_core::{
     Ballot, Command, Config, JournalId, JournalIdentifier, JournalState, MatchmakerConfig,
     MatchmakerHardState, NodeId, RegistryStorage, Slot, Storage, TenantId,
@@ -143,8 +143,8 @@ pub async fn inspect<P, S>(
     scratch_root: &str,
 ) -> Result<DiskImage, String>
 where
-    P: StorageProvider + Clone,
-    S: StorageProvider + Clone,
+    P: LocalStorageProvider + Clone,
+    S: LocalStorageProvider + Clone,
 {
     let disk = ProviderDisk::new(source.clone(), root, layout);
     if !source
@@ -201,7 +201,7 @@ where
 /// The names under `dir` that parse as a nonzero id, sorted; none where
 /// `dir` does not exist. A name that is not an id is not a store paros
 /// wrote, and is left out.
-async fn ids<P: StorageProvider>(source: &P, dir: &str) -> Result<Vec<u64>, String> {
+async fn ids<P: LocalStorageProvider>(source: &P, dir: &str) -> Result<Vec<u64>, String> {
     let names = match source.list_dir(dir).await {
         Ok(names) => names,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -217,7 +217,7 @@ async fn ids<P: StorageProvider>(source: &P, dir: &str) -> Result<Vec<u64>, Stri
 }
 
 /// Every journal store's identifier under `root/journals/`.
-async fn journal_dirs<P: StorageProvider>(
+async fn journal_dirs<P: LocalStorageProvider>(
     source: &P,
     root: &str,
 ) -> Result<Vec<JournalIdentifier>, String> {
@@ -235,7 +235,10 @@ async fn journal_dirs<P: StorageProvider>(
 }
 
 /// Every matchmaker set's tenant under `root/matchmakers/`.
-async fn set_dirs<P: StorageProvider>(source: &P, root: &str) -> Result<Vec<TenantId>, String> {
+async fn set_dirs<P: LocalStorageProvider>(
+    source: &P,
+    root: &str,
+) -> Result<Vec<TenantId>, String> {
     Ok(ids(source, &format!("{root}/matchmakers"))
         .await?
         .into_iter()
@@ -244,7 +247,7 @@ async fn set_dirs<P: StorageProvider>(source: &P, root: &str) -> Result<Vec<Tena
 }
 
 /// Boot-scan the journal store in `dir` (a scratch copy) and read it back.
-async fn read_journal<S: StorageProvider + Clone>(
+async fn read_journal<S: LocalStorageProvider + Clone>(
     scratch: &S,
     dir: &str,
     journal: JournalIdentifier,
@@ -288,7 +291,7 @@ async fn read_journal<S: StorageProvider + Clone>(
 
 /// Boot-scan the matchmaker store in `dir` (a scratch copy) and read it
 /// back.
-async fn read_set<S: StorageProvider + Clone>(
+async fn read_set<S: LocalStorageProvider + Clone>(
     scratch: &S,
     dir: &str,
     tenant: TenantId,

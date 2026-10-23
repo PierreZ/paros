@@ -37,7 +37,7 @@
 
 use std::time::Duration;
 
-use moonpool_core::Providers;
+use crate::ParosProviders;
 use moonpool_rpc::RpcHandle;
 use paros_core::NodeId;
 
@@ -203,7 +203,7 @@ type Found = (Vec<(u64, Address)>, Vec<u64>, ControlJournals);
 /// run that formed the cell folds it over — never over whichever servers
 /// answered this time (not reproduced in the simulation: a fold's pool must
 /// not depend on who was up).
-async fn found<P: Providers>(
+async fn found<P: ParosProviders>(
     providers: &P,
     rpc: &RpcHandle<P>,
     names: &Names,
@@ -253,7 +253,7 @@ async fn found<P: Providers>(
 /// journal has a leader, and the election journal names one. The
 /// coordinator installs the cell control journal's first leader (#240), so
 /// a fleet step never claims an unset journal.
-async fn coordinator<P: Providers>(
+async fn coordinator<P: ParosProviders>(
     client: &Client<P>,
     journals: &ControlJournals,
     patience: Duration,
@@ -294,7 +294,7 @@ async fn coordinator<P: Providers>(
 // The steps in order: formation, coordinator, fleet steps, admissions.
 #[allow(clippy::too_many_lines)]
 #[tracing::instrument(level = "debug", skip_all, fields(listed = listed.len()))]
-pub async fn initialize<P: Providers>(
+pub async fn initialize<P: ParosProviders>(
     providers: &P,
     rpc: &RpcHandle<P>,
     names: &Names,
@@ -498,7 +498,7 @@ impl Admission<'_> {
     /// to `steps`. An admitted machine is admitted again unchanged, so a
     /// re-run resumes. Ends with the admitted machines, or with what
     /// stopped an admission.
-    async fn admit<P: Providers>(
+    async fn admit<P: ParosProviders>(
         self,
         providers: &P,
         rpc: &RpcHandle<P>,

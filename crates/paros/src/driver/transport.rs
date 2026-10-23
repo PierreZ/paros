@@ -9,8 +9,9 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
+use crate::ParosProviders;
 use moonpool_core::{
-    Detach, Providers, SimulationError, SimulationResult, TaskProvider, TimeProvider,
+    Detach, LocalTaskProvider, LocalTimeProvider, SimulationError, SimulationResult,
 };
 use moonpool_rpc::{InterfaceRef, RpcError, RpcHandle, ServiceClient};
 use paros_core::{Audience, JournalIdentifier, Message, NodeId, Party, ProxyId};
@@ -748,7 +749,7 @@ pub(crate) fn peer_target(addr: &str) -> SimulationResult<Address> {
 /// `Deliver` until the book names another interface. Falling back keeps
 /// the cell live: when a founding member restarts, the registry that would
 /// record its new interface may need its own vote.
-struct Dialer<P: Providers> {
+struct Dialer<P: ParosProviders> {
     rpc: RpcHandle<P>,
     names: Names,
     address: Address,
@@ -767,7 +768,7 @@ struct Dialer<P: Providers> {
     moved: bool,
 }
 
-impl<P: Providers> Dialer<P> {
+impl<P: ParosProviders> Dialer<P> {
     fn new(rpc: &RpcHandle<P>, names: Names, address: Address) -> Self {
         Self {
             rpc: rpc.clone(),
@@ -890,7 +891,7 @@ impl<P: Providers> Dialer<P> {
 /// driver (one lane per peer and per proxy), the proxy driver (one per
 /// acceptor and replica) and the replica driver (one per acceptor): the lane
 /// is the same whoever sends through it.
-pub(crate) struct LaneOpener<'a, P: Providers, A: Audit> {
+pub(crate) struct LaneOpener<'a, P: ParosProviders, A: Audit> {
     pub(crate) providers: &'a P,
     pub(crate) tunables: DriverTunables,
     pub(crate) shutdown: CancellationToken,
@@ -903,7 +904,7 @@ pub(crate) struct LaneOpener<'a, P: Providers, A: Audit> {
     pub(crate) names: Names,
 }
 
-impl<P: Providers, A: Audit + Clone + Send + Sync + 'static> LaneOpener<'_, P, A> {
+impl<P: ParosProviders, A: Audit + Clone + Send + Sync + 'static> LaneOpener<'_, P, A> {
     /// Open one outbound lane toward `to` at `addr`: a bounded keep-newest
     /// mailbox of the tunables' `peer_queue_capacity`, drained by a detached
     /// delivery task (named `task`) over a reconnecting channel on `rpc`
@@ -919,8 +920,8 @@ impl<P: Providers, A: Audit + Clone + Send + Sync + 'static> LaneOpener<'_, P, A
         let dialer = Dialer::new(rpc, self.names.clone(), addr);
         let mailbox = PeerMailbox::new(self.tunables.peer_queue_capacity);
         self.providers
-            .task()
-            .spawn_task(
+            .local_task()
+            .spawn_local_task(
                 task,
                 run_peer_delivery(
                     dialer,
@@ -970,7 +971,7 @@ impl<P: Providers, A: Audit + Clone + Send + Sync + 'static> LaneOpener<'_, P, A
 // The lane is a task of its own: it owns its copy of the tunables.
 #[allow(clippy::too_many_arguments, clippy::large_types_passed_by_value)]
 #[tracing::instrument(level = "debug", skip_all, fields(from = %from, to = %to))]
-async fn run_peer_delivery<P: Providers, A: Audit>(
+async fn run_peer_delivery<P: ParosProviders, A: Audit>(
     mut dialer: Dialer<P>,
     time: P::Time,
     shutdown: CancellationToken,

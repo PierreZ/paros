@@ -1,6 +1,6 @@
 //! `paros-frontend` — the frontend (#192 (the frontend),
 //! `docs/architecture/03-5-frontend-and-resolver.md` §3.5): the stateless entry role in front of a
-//! cell's machines, over moonpool's `TokioProviders`.
+//! cell's machines, on one compio thread, over moonpool's `CompioProviders`.
 //!
 //! A client reaches a frontend for its data, never a machine. The
 //! frontend checks each call's Biscuit token against the root public keys
@@ -8,7 +8,7 @@
 //! the ids the machines know, and forwards the call and its answer. The
 //! frontend is the library's, `paros::frontend::run_frontend`: the same
 //! code the deterministic simulation runs. This binary holds only its
-//! Tokio wiring and configuration. It holds no key and no state.
+//! runtime wiring and configuration. It holds no key and no state.
 //!
 //! The root public keys it trusts are the universe entry's (#245 (Biscuit
 //! tokens), `parosctl universe key`), read with the universe directory.
@@ -50,7 +50,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use clap::Parser;
-use moonpool_core::{TokioProviders, TokioResolver};
+use moonpool_core::{CompioProviders, CompioResolver};
 use paros::client::ClientTunables;
 use paros::frontend::{FrontendSettings, run_frontend};
 use paros::tls::{ClientCertificates, Files, Pem};
@@ -142,10 +142,7 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let runtime = match tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-    {
+    let runtime = match compio::runtime::Runtime::new() {
         Ok(runtime) => runtime,
         Err(error) => {
             eprintln!("paros-frontend: cannot start the runtime: {error}");
@@ -217,7 +214,7 @@ fn configure(settings: &Settings) -> Result<(FrontendSettings, KeyRing), String>
         FrontendSettings {
             listen,
             cell,
-            names: Names::new(TokioResolver::new()),
+            names: Names::new(CompioResolver::new()),
             epoch: since_epoch(SystemTime::now()),
             tunables: DriverTunables::production(),
             transport,
@@ -230,7 +227,7 @@ fn configure(settings: &Settings) -> Result<(FrontendSettings, KeyRing), String>
 async fn run((settings, ring): (FrontendSettings, KeyRing)) -> ExitCode {
     // The epoch is read as the providers start: the frontend's wall clock
     // is `epoch + time.now()`.
-    let providers = TokioProviders::new();
+    let providers = CompioProviders::new();
     let settings = FrontendSettings {
         epoch: since_epoch(SystemTime::now()),
         ..settings
@@ -258,34 +255,31 @@ async fn run((settings, ring): (FrontendSettings, KeyRing)) -> ExitCode {
 fn shutdown_on_signal() -> CancellationToken {
     let token = CancellationToken::new();
     let fired = token.clone();
-    tokio::spawn(async move {
+    compio::runtime::spawn(async move {
         wait_for_signal().await;
         tracing::info!("frontend_signal_shutdown");
         fired.cancel();
         wait_for_signal().await;
         eprintln!("paros-frontend: a second signal: stopping at once");
         std::process::exit(130);
-    });
+    })
+    .detach();
     token
 }
 
 #[cfg(unix)]
 async fn wait_for_signal() {
-    use tokio::signal::unix::{SignalKind, signal};
-    match signal(SignalKind::terminate()) {
-        Ok(mut term) => {
-            tokio::select! {
-                _ = term.recv() => {}
-                _ = tokio::signal::ctrl_c() => {}
+    moonpool_core::select! {
+        term = compio::signal::unix::signal(libc::SIGTERM) => {
+            if term.is_err() {
+                compio::signal::ctrl_c().await.ok();
             }
         }
-        Err(_) => {
-            tokio::signal::ctrl_c().await.ok();
-        }
+        _ = compio::signal::ctrl_c() => {}
     }
 }
 
 #[cfg(not(unix))]
 async fn wait_for_signal() {
-    tokio::signal::ctrl_c().await.ok();
+    compio::signal::ctrl_c().await.ok();
 }

@@ -67,7 +67,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use moonpool_core::StorageProvider;
+use moonpool_core::LocalStorageProvider;
 use std::ops::Range;
 
 use moonpool_buggify::hint::Strike;
@@ -207,7 +207,7 @@ struct Stored {
 /// [`StorageProvider`]. Like [`JournalStorage`](super::JournalStorage) it
 /// opens and loads in [`boot_scan`](MatchmakerStorage::boot_scan) and
 /// creates its journal at its first sync.
-pub struct JournalMatchmakerStorage<P: StorageProvider> {
+pub struct JournalMatchmakerStorage<P: LocalStorageProvider> {
     provider: P,
     dir: String,
     id: JournalIdentifier,
@@ -238,7 +238,7 @@ pub struct JournalMatchmakerStorage<P: StorageProvider> {
     chunks: Range<u64>,
 }
 
-impl<P: StorageProvider> std::fmt::Debug for JournalMatchmakerStorage<P> {
+impl<P: LocalStorageProvider> std::fmt::Debug for JournalMatchmakerStorage<P> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("JournalMatchmakerStorage")
             .field("dir", &self.dir)
@@ -247,7 +247,7 @@ impl<P: StorageProvider> std::fmt::Debug for JournalMatchmakerStorage<P> {
     }
 }
 
-impl<P: StorageProvider> JournalMatchmakerStorage<P> {
+impl<P: LocalStorageProvider> JournalMatchmakerStorage<P> {
     /// A store kept under `dir` on `provider`, for the matchmaker plane of
     /// `id` (the identity its journal is stamped with). Nothing is read
     /// until the boot scan.
@@ -692,7 +692,7 @@ impl<P: StorageProvider> JournalMatchmakerStorage<P> {
     }
 }
 
-impl<P: StorageProvider> RegistryStorage for JournalMatchmakerStorage<P> {
+impl<P: LocalStorageProvider> RegistryStorage for JournalMatchmakerStorage<P> {
     fn initial_state(&self) -> MatchmakerHardState {
         self.meta.scalars.clone()
     }
@@ -706,7 +706,7 @@ impl<P: StorageProvider> RegistryStorage for JournalMatchmakerStorage<P> {
     }
 }
 
-impl<P: StorageProvider> MatchmakerStorage for JournalMatchmakerStorage<P> {
+impl<P: LocalStorageProvider> MatchmakerStorage for JournalMatchmakerStorage<P> {
     #[tracing::instrument(level = "debug", skip_all, fields(dir = %self.dir))]
     async fn boot_scan(&mut self) -> Result<(), StorageError> {
         self.load().await
@@ -926,7 +926,7 @@ impl<P: StorageProvider> MatchmakerStorage for JournalMatchmakerStorage<P> {
     }
 }
 
-impl<P: StorageProvider> JournalMatchmakerStorage<P> {
+impl<P: LocalStorageProvider> JournalMatchmakerStorage<P> {
     /// Commit `batch`, creating the journal first if none is on disk yet,
     /// with the last durable metainfo and the format marker: a creation
     /// lands before the batch it opens for.

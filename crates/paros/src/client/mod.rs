@@ -2,7 +2,7 @@
 //!
 //! [`NodeClient`] is a typed RPC stub: one call to one server, nothing
 //! more. A correct client needs a **policy** on top of it, and this module
-//! is that policy, written once, provider-generic (`P: Providers`) like the
+//! is that policy, written once, provider-generic (`P: ParosProviders`) like the
 //! drivers, so the client the deterministic simulation's sweep, its
 //! linearizability checker and its hunts judge is the client `parosctl`
 //! and every later consumer ships:
@@ -93,7 +93,8 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use moonpool_core::{Providers, TimeProvider};
+use crate::ParosProviders;
+use moonpool_core::LocalTimeProvider;
 use moonpool_rpc::RpcHandle;
 use paros_core::{JournalIdentifier, JournalView, LeaderUuid, QuorumSystem, TenantId};
 use tokio_util::sync::CancellationToken;
@@ -218,14 +219,14 @@ pub enum Retarget {
 
 /// One server of a deployment: its node id (what a redirect names) and its
 /// stub.
-pub struct Server<P: Providers> {
+pub struct Server<P: ParosProviders> {
     /// The node id a leader hint names it by.
     pub id: u64,
     /// The stub that reaches it.
     pub node: NodeClient<P>,
 }
 
-impl<P: Providers> Clone for Server<P> {
+impl<P: ParosProviders> Clone for Server<P> {
     fn clone(&self) -> Self {
         Self {
             id: self.id,
@@ -332,7 +333,7 @@ pub struct ReadReport {
 /// A client of one deployment: a server list, a leader hint, the tunables,
 /// and the caller's observer and shutdown signal. Cheap to clone; clones
 /// share the leader hint.
-pub struct Client<P: Providers> {
+pub struct Client<P: ParosProviders> {
     time: P::Time,
     servers: Arc<[Server<P>]>,
     rotation: usize,
@@ -342,7 +343,7 @@ pub struct Client<P: Providers> {
     hint: Arc<Mutex<LeaderHint>>,
 }
 
-impl<P: Providers> Clone for Client<P> {
+impl<P: ParosProviders> Clone for Client<P> {
     fn clone(&self) -> Self {
         Self {
             time: self.time.clone(),
@@ -356,7 +357,7 @@ impl<P: Providers> Clone for Client<P> {
     }
 }
 
-impl<P: Providers> Client<P> {
+impl<P: ParosProviders> Client<P> {
     /// A client of `servers`, timed by `providers`.
     ///
     /// # Panics
@@ -640,7 +641,7 @@ impl<P: Providers> Client<P> {
         &self,
         timeout: Duration,
         fallback: T,
-        request: impl Future<Output = T> + Send,
+        request: impl Future<Output = T>,
     ) -> T {
         moonpool_core::select! {
             result = request => result,
@@ -672,7 +673,7 @@ impl<P: Providers> Client<P> {
         target: usize,
         request: Write,
         listen: Option<Duration>,
-    ) -> impl Future<Output = WriteOutcome> + Send + use<P> {
+    ) -> impl Future<Output = WriteOutcome> + use<P> {
         let node = self.node(target).clone();
         let time = self.time.clone();
         let observer = self.observer.clone();
@@ -700,7 +701,7 @@ impl<P: Providers> Client<P> {
         journal: JournalIdentifier,
         new: LeaderUuid,
         old: Option<LeaderUuid>,
-    ) -> impl Future<Output = SetLeaderOutcome> + Send + use<P> {
+    ) -> impl Future<Output = SetLeaderOutcome> + use<P> {
         let node = self.node(target).clone();
         let observer = self.observer.clone();
         let request = SetLeader {
@@ -724,7 +725,7 @@ impl<P: Providers> Client<P> {
         &self,
         target: usize,
         request: Read,
-    ) -> impl Future<Output = ReadOutcome> + Send + use<P> {
+    ) -> impl Future<Output = ReadOutcome> + use<P> {
         let node = self.node(target).clone();
         let observer = self.observer.clone();
         let token = observer.invoked(Attempted::Read(&request));
@@ -744,7 +745,7 @@ impl<P: Providers> Client<P> {
         &self,
         target: usize,
         request: Truncate,
-    ) -> impl Future<Output = TruncateOutcome> + Send + use<P> {
+    ) -> impl Future<Output = TruncateOutcome> + use<P> {
         let node = self.node(target).clone();
         let observer = self.observer.clone();
         let token = observer.invoked(Attempted::Truncate(&request));

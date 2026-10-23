@@ -25,7 +25,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use moonpool_core::Providers;
+use crate::ParosProviders;
 use moonpool_rpc::RpcHandle;
 use paros_core::{LeaderUuid, NodeId};
 
@@ -146,7 +146,7 @@ impl CellSession {
     /// # Errors
     ///
     /// The claim or the fold did not end (see [`Interrupted`]).
-    pub async fn open<P: Providers>(
+    pub async fn open<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
         first: usize,
@@ -166,7 +166,7 @@ impl CellSession {
     ///
     /// The claim found another leader than `old`, or the claim or the fold
     /// did not end (see [`Interrupted`]).
-    pub async fn open_over<P: Providers>(
+    pub async fn open_over<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
         first: usize,
@@ -285,7 +285,7 @@ impl CellSession {
     /// journal took is in the fold, and that the admission names the
     /// machine it admits.
     #[tracing::instrument(level = "trace", skip_all, fields(cell = self.journals.cell_id, %target))]
-    pub async fn admit_step<P: Providers>(
+    pub async fn admit_step<P: ParosProviders>(
         &mut self,
         providers: &P,
         rpc: &RpcHandle<P>,
@@ -404,7 +404,7 @@ impl CellSession {
     /// it (#511 (placement books machines that never served)). The
     /// coordinator's watch writes it when this write does not land: the
     /// machine is admitted either way.
-    async fn record_admission<P: Providers>(
+    async fn record_admission<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
         first: usize,
@@ -432,7 +432,7 @@ impl CellSession {
     ///
     /// The checkpoint is not known written: the owner's belief is unsure, so
     /// the session closes and the next step opens the journal afresh.
-    async fn checkpoint_if_due<P: Providers>(
+    async fn checkpoint_if_due<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
         first: usize,
@@ -475,7 +475,7 @@ impl CellSession {
     /// # Panics
     ///
     /// If the session is not open (a programmer error).
-    pub async fn record<P: Providers>(
+    pub async fn record<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
         first: usize,
@@ -508,7 +508,7 @@ impl CellSession {
     ///
     /// The session did not open, or the write did not land (see
     /// [`Interrupted`]).
-    pub async fn drain<P: Providers>(
+    pub async fn drain<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
         first: usize,
@@ -539,7 +539,7 @@ impl CellSession {
     ///
     /// The session did not open, or the write did not land (see
     /// [`Interrupted`]).
-    pub async fn set_machine_tags<P: Providers>(
+    pub async fn set_machine_tags<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
         first: usize,
@@ -573,7 +573,7 @@ impl CellSession {
     ///
     /// The session did not open, or the write did not land (see
     /// [`Interrupted`]).
-    pub async fn remove<P: Providers>(
+    pub async fn remove<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
         first: usize,
@@ -617,7 +617,7 @@ impl CellSession {
     ///
     /// The session did not open, or the write did not land (see
     /// [`Interrupted`]).
-    pub async fn maintenance<P: Providers>(
+    pub async fn maintenance<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
         first: usize,
@@ -652,7 +652,7 @@ impl CellSession {
     /// holds it: another writer, an operator's `cell drain-machine`, appends
     /// to it between this session's own writes (#474 (journals on admitted
     /// machines)). Whether the fold reached the tail.
-    pub async fn refresh<P: Providers>(&mut self, client: &Client<P>, first: usize) -> bool {
+    pub async fn refresh<P: ParosProviders>(&mut self, client: &Client<P>, first: usize) -> bool {
         self.cell_open
             && matches!(
                 self.cell.load(client, first, 0).await,
@@ -678,7 +678,7 @@ impl CellSession {
     ///
     /// If `node` is a founding member (a programmer error: the coordinator
     /// sends this only to an admitted machine).
-    pub async fn readmit<P: Providers>(
+    pub async fn readmit<P: ParosProviders>(
         &self,
         providers: &P,
         rpc: &RpcHandle<P>,
@@ -728,7 +728,7 @@ impl CellSession {
     // to start, the machine and the patience: each is the caller's.
     #[allow(clippy::too_many_arguments)]
     #[tracing::instrument(level = "debug", skip_all, fields(cell = self.journals.cell_id, %target))]
-    pub async fn add_machine<P: Providers>(
+    pub async fn add_machine<P: ParosProviders>(
         &mut self,
         providers: &P,
         rpc: &RpcHandle<P>,

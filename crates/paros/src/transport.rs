@@ -19,12 +19,12 @@ use std::future::Future;
 use std::io;
 use std::pin::Pin;
 
-use moonpool_core::Providers;
+use crate::ParosProviders;
 use moonpool_rpc::{RpcConfig, RpcDriver, RpcHandle};
 
 /// A runtime's driving future: it resolves only when the runtime fails for
 /// good, with the error.
-pub type RuntimeFuture = Pin<Box<dyn Future<Output = io::Error> + Send>>;
+pub type RuntimeFuture = Pin<Box<dyn Future<Output = io::Error>>>;
 
 /// How a runtime's sessions travel.
 #[derive(Clone, Debug, Default)]
@@ -66,7 +66,7 @@ impl Transport {
     /// # Errors
     ///
     /// A configuration the runtime refuses or a failed bind.
-    pub async fn listen<P: Providers>(
+    pub async fn listen<P: ParosProviders>(
         &self,
         providers: P,
         address: &str,
@@ -91,7 +91,7 @@ impl Transport {
     /// # Errors
     ///
     /// A configuration the runtime refuses.
-    pub fn client_only<P: Providers>(
+    pub fn client_only<P: ParosProviders>(
         &self,
         providers: P,
         config: RpcConfig,
