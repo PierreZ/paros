@@ -5,7 +5,8 @@
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
-use moonpool_core::{Detach, Providers, SimulationError, SimulationResult, TaskProvider};
+use crate::ParosProviders;
+use moonpool_core::{Detach, LocalTaskProvider, SimulationError, SimulationResult};
 use moonpool_rpc::{
     AccessClass, IncomingRequest, InterfaceMethod, ReplyHandle, RequestStream, RpcConfig,
     RpcHandle, RpcMethod, ServiceGroup,
@@ -50,7 +51,7 @@ pub(crate) fn rpc_config(tunables: &DriverTunables) -> RpcConfig {
 /// # Errors
 ///
 /// A registration the runtime refuses (never on a fresh listening runtime).
-pub(crate) fn serve_well_known<P: Providers, M: WellKnownMethod>(
+pub(crate) fn serve_well_known<P: ParosProviders, M: WellKnownMethod>(
     rpc: &RpcHandle<P>,
 ) -> SimulationResult<RequestStream<M>> {
     rpc.register_well_known::<M>(M::ID, AccessClass::Public)
@@ -61,7 +62,7 @@ pub(crate) fn serve_well_known<P: Providers, M: WellKnownMethod>(
 /// The one-shot answer to a request a driver loop holds: sending consumes
 /// it, dropping it is a broken promise (the caller's call fails at once,
 /// possibly executed) — the reply seam's drop.
-pub(crate) struct ReplySender<U>(Box<dyn FnOnce(U) -> bool + Send>);
+pub(crate) struct ReplySender<U>(Box<dyn FnOnce(U) -> bool>);
 
 impl<U: 'static> ReplySender<U> {
     fn new<M: RpcMethod>(handle: ReplyHandle<M>, encode: fn(U) -> M::Reply) -> Self {
@@ -80,7 +81,7 @@ impl<U: 'static> ReplySender<U> {
     /// The same answer, with `observe` shown the reply just before it
     /// leaves (#366 (metrics)): an observer only, it cannot change the
     /// reply. A reply dropped unsent is never observed.
-    pub(crate) fn observed(self, observe: impl FnOnce(&U) + Send + 'static) -> Self {
+    pub(crate) fn observed(self, observe: impl FnOnce(&U) + 'static) -> Self {
         Self(Box::new(move |reply| {
             observe(&reply);
             (self.0)(reply)
@@ -248,7 +249,7 @@ pub(crate) type OnReject = Arc<dyn Fn(EdgeRejection) + Send + Sync>;
 // One lane's wiring: the runtime, its shape, the receiver's identity, its
 // observer, its lifetime and the machine's group.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn serve_deliveries<P: Providers>(
+pub(crate) fn serve_deliveries<P: ParosProviders>(
     providers: &P,
     rpc: &RpcHandle<P>,
     capacity: usize,
@@ -293,8 +294,8 @@ pub(crate) fn serve_deliveries<P: Providers>(
     };
     if let Some(stream) = dynamic {
         providers
-            .task()
-            .spawn_task(
+            .local_task()
+            .spawn_local_task(
                 "paros-deliver-edge-group",
                 lane(
                     stream,
@@ -307,8 +308,8 @@ pub(crate) fn serve_deliveries<P: Providers>(
             .detach();
     }
     providers
-        .task()
-        .spawn_task(
+        .local_task()
+        .spawn_local_task(
             "paros-deliver-edge",
             lane(stream, inbox, on_reject, shutdown, false),
         )

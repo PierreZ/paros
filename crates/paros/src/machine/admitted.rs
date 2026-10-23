@@ -35,7 +35,8 @@
 
 use std::collections::BTreeSet;
 
-use moonpool_core::{Detach, Providers, SimulationResult, TaskProvider};
+use crate::ParosProviders;
+use moonpool_core::{Detach, LocalTaskProvider, SimulationResult};
 use moonpool_rpc::RpcHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -171,7 +172,7 @@ impl AdmittedMachine {
     /// Start what an admitted machine runs beside its answers: the follow
     /// that keeps its cached registry fold current (#211), and its
     /// registration of the address it advertises now (#349).
-    fn follow_and_register<P: Providers>(
+    fn follow_and_register<P: ParosProviders>(
         &self,
         providers: &P,
         rpc: &moonpool_rpc::RpcHandle<P>,
@@ -222,7 +223,7 @@ impl AdmittedMachine {
     ///
     /// An endpoint could not be registered.
     #[tracing::instrument(level = "debug", skip_all, fields(node = self.facts.node_id.0, cell = self.admission.cell.cell_id))]
-    pub(crate) fn serve_beside<P: Providers>(
+    pub(crate) fn serve_beside<P: ParosProviders>(
         mut self,
         providers: &P,
         rpc: &RpcHandle<P>,
@@ -288,8 +289,8 @@ impl AdmittedMachine {
             "machine_serving_admitted"
         );
         providers
-            .task()
-            .spawn_task("paros-machine-admitted", async move {
+            .local_task()
+            .spawn_local_task("paros-machine-admitted", async move {
                 loop {
                     moonpool_core::select! {
                         biased;

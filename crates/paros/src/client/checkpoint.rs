@@ -47,7 +47,7 @@
 
 use std::time::Duration;
 
-use moonpool_core::Providers;
+use crate::ParosProviders;
 use paros_core::{JournalIdentifier, LeaderUuid, Value};
 use prost::Message as _;
 
@@ -630,14 +630,18 @@ impl<S: Checkpointable> Checkpointer<S> {
 
     /// Claim the journal, then fold it to the tail the claim answered.
     #[tracing::instrument(level = "debug", skip_all, fields(journal = %self.writer.journal()))]
-    pub async fn open<P: Providers>(&mut self, client: &Client<P>, first: usize) -> OpenOutcome {
+    pub async fn open<P: ParosProviders>(
+        &mut self,
+        client: &Client<P>,
+        first: usize,
+    ) -> OpenOutcome {
         let claim = self.writer.claim(client, first, false).await;
         self.opened(client, first, claim).await
     }
 
     /// [`Checkpointer::open`], claiming over `old` only (#653 (election
     /// term to installed leader), [`Writer::claim_over`]).
-    pub async fn open_over<P: Providers>(
+    pub async fn open_over<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
         first: usize,
@@ -648,7 +652,7 @@ impl<S: Checkpointable> Checkpointer<S> {
     }
 
     /// Fold the journal to its tail once `claim` won it.
-    async fn opened<P: Providers>(
+    async fn opened<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
         first: usize,
@@ -676,7 +680,7 @@ impl<S: Checkpointable> Checkpointer<S> {
     /// from server `first` on: a `truncated` answer jumps to the floor and
     /// restarts from the checkpoint run there.
     #[tracing::instrument(level = "debug", skip_all, fields(journal = %self.writer.journal(), tail))]
-    pub async fn load<P: Providers>(
+    pub async fn load<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
         first: usize,
@@ -687,7 +691,7 @@ impl<S: Checkpointable> Checkpointer<S> {
 
     /// Append `record` as the owner (see [`Writer::write`]) and fold it once
     /// written at the fold's next position.
-    pub async fn append<P: Providers>(
+    pub async fn append<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
         record: Vec<u8>,
@@ -728,7 +732,7 @@ impl<S: Checkpointable> Checkpointer<S> {
     /// Write a checkpoint, then truncate to it: [`Checkpointer::write_checkpoint`]
     /// and [`Checkpointer::truncate_to`].
     #[tracing::instrument(level = "debug", skip_all, fields(journal = %self.writer.journal()))]
-    pub async fn checkpoint<P: Providers>(
+    pub async fn checkpoint<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
         first: usize,
@@ -758,7 +762,7 @@ impl<S: Checkpointable> Checkpointer<S> {
     ///
     /// When a written run does not fold as one (the owner's own records).
     #[tracing::instrument(level = "debug", skip_all, fields(journal = %self.writer.journal(), seq = self.writer.next_seq()))]
-    pub async fn write_checkpoint<P: Providers>(
+    pub async fn write_checkpoint<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
         first: usize,
@@ -787,7 +791,7 @@ impl<S: Checkpointable> Checkpointer<S> {
     /// # Panics
     ///
     /// As [`Checkpointer::write_checkpoint`].
-    pub async fn write_run_without_end<P: Providers>(
+    pub async fn write_run_without_end<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
         first: usize,
@@ -817,7 +821,7 @@ impl<S: Checkpointable> Checkpointer<S> {
     /// Write `records` (a run, or its prefix) at the owner's next position
     /// in batches under the policy's limits, folding each batch once
     /// written there; a node's `TooLarge` lowers the limits to its own.
-    async fn write_run<P: Providers>(
+    async fn write_run<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
         first: usize,
@@ -888,7 +892,7 @@ impl<S: Checkpointable> Checkpointer<S> {
     /// `seq` a checkpoint this owner wrote. `None` when the writer no longer
     /// owns a generation: nothing is sent.
     #[tracing::instrument(level = "debug", skip_all, fields(journal = %self.writer.journal(), seq))]
-    pub async fn truncate_to<P: Providers>(
+    pub async fn truncate_to<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
         seq: u64,
@@ -902,7 +906,7 @@ impl<S: Checkpointable> Checkpointer<S> {
 /// least), from server `first` on — what [`Checkpointer::load`] runs, for a
 /// reader that owns nothing.
 #[tracing::instrument(level = "debug", skip_all, fields(journal = %journal, tail))]
-pub async fn load<P: Providers, S: Checkpointable>(
+pub async fn load<P: ParosProviders, S: Checkpointable>(
     folder: &mut Folder<S>,
     journal: JournalIdentifier,
     client: &Client<P>,

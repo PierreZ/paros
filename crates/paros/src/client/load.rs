@@ -11,7 +11,8 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use moonpool_core::{Detach, Providers, TaskProvider};
+use crate::ParosProviders;
+use moonpool_core::{Detach, LocalTaskProvider};
 use moonpool_rpc::RpcHandle;
 
 use crate::client::bootstrap::call_once;
@@ -32,7 +33,7 @@ pub enum LoadOutcome {
 /// Ask every machine of `machines` (by node id, at its address) for its
 /// `Load`, all at once, each within `timeout`; the outcome per node id.
 #[tracing::instrument(level = "debug", skip_all, fields(machines = machines.len()))]
-pub async fn ask_all<P: Providers>(
+pub async fn ask_all<P: ParosProviders>(
     providers: &P,
     rpc: &RpcHandle<P>,
     names: &Names,
@@ -50,8 +51,8 @@ pub async fn ask_all<P: Providers>(
         );
         let node = *node;
         providers
-            .task()
-            .spawn_task("paros-client-load", async move {
+            .local_task()
+            .spawn_local_task("paros-client-load", async move {
                 let reply = call_once::<P, LoadRpc>(
                     &providers_,
                     &rpc,

@@ -26,8 +26,9 @@
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, PoisonError};
 
+use crate::ParosProviders;
 use moonpool_buggify::hint::Strike;
-use moonpool_core::{Detach, Providers, SimulationResult, StorageProvider, TaskProvider};
+use moonpool_core::{Detach, LocalStorageProvider, LocalTaskProvider, SimulationResult};
 use moonpool_rpc::RpcHandle;
 use paros_core::{JournalId, JournalIdentifier, MatchmakerConfig, TenantId};
 use tokio_util::sync::CancellationToken;
@@ -93,7 +94,7 @@ struct MachineSets<S> {
     booked: SetBookings,
 }
 
-impl<S: StorageProvider + Clone + 'static> MachineSets<S> {
+impl<S: LocalStorageProvider + Clone + 'static> MachineSets<S> {
     fn store(&self, tenant: TenantId) -> JournalMatchmakerStorage<S> {
         JournalMatchmakerStorage::new(
             self.disk.provider().clone(),
@@ -156,7 +157,7 @@ impl<S: StorageProvider + Clone + 'static> MachineSets<S> {
     }
 }
 
-impl<S: StorageProvider + Clone + 'static> SetOpener for MachineSets<S> {
+impl<S: LocalStorageProvider + Clone + 'static> SetOpener for MachineSets<S> {
     type Storage = JournalMatchmakerStorage<S>;
 
     async fn open(&mut self, tenant: TenantId) -> Option<HostedSet<Self::Storage>> {
@@ -226,8 +227,8 @@ pub(crate) fn spawn<P, S, A, F>(
     shutdown: CancellationToken,
 ) -> SimulationResult<crate::driver::HostEnded>
 where
-    P: Providers,
-    S: StorageProvider + Clone + 'static,
+    P: ParosProviders,
+    S: LocalStorageProvider + Clone + 'static,
     A: Audit + Send + Sync + 'static,
     F: Fn(JournalIdentifier) -> A + Send + Sync + 'static,
 {
@@ -240,8 +241,8 @@ where
     assert!(page >= 1, "a registry page holds a registration");
     let (alive, ended) = crate::driver::HostEnded::pair();
     providers
-        .task()
-        .spawn_task("paros-machine-matchmakers", async move {
+        .local_task()
+        .spawn_local_task("paros-machine-matchmakers", async move {
             // Held for the task's life: its drop is the host's end.
             let _alive = alive;
             let provisioned = match disk.read_sets().await {

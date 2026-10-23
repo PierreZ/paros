@@ -89,7 +89,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use moonpool_core::Providers;
+use crate::ParosProviders;
 use paros_core::{JournalIdentifier, NodeId, TenantId};
 
 use super::Client;
@@ -569,7 +569,7 @@ impl FleetSession {
     /// re-run never mints a second fleet. Ends with the fleet's id once the directory
     /// holds the cell `READY` and the cell names the fleet.
     #[tracing::instrument(level = "trace", skip_all, fields(cell = self.journals.cell_id))]
-    pub async fn init_step<P: Providers>(
+    pub async fn init_step<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
         first: usize,
@@ -684,7 +684,7 @@ impl FleetSession {
     /// holds it `READY`.
     #[tracing::instrument(level = "trace", skip_all, fields(tenant = draw.tenant.0))]
     #[allow(clippy::too_many_lines)] // one look per refusal, in order
-    pub async fn create_step<P: Providers>(
+    pub async fn create_step<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
         first: usize,
@@ -801,7 +801,7 @@ impl FleetSession {
     /// the fleet tenant removed it, or with `None` when the fleet tenant holds no tenant by that
     /// name (never created, or removed already).
     #[tracing::instrument(level = "trace", skip_all)]
-    pub async fn remove_step<P: Providers>(
+    pub async fn remove_step<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
         first: usize,
@@ -863,7 +863,7 @@ impl FleetSession {
     /// Ends with the cell's id once the directory holds it `READY` and the
     /// cell names this universe.
     #[tracing::instrument(level = "trace", skip_all, fields(cell = joining.journals.cell_id))]
-    pub async fn add_cell_step<P: Providers>(
+    pub async fn add_cell_step<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
         first: usize,
@@ -980,7 +980,7 @@ impl FleetSession {
     /// its cell tenant, and for the cell that hosts the universe tenant.
     /// Ends with the cell's id once the directory tombstoned it.
     #[tracing::instrument(level = "trace", skip_all, fields(cell = cell_id))]
-    pub async fn remove_cell_step<P: Providers>(
+    pub async fn remove_cell_step<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
         first: usize,
@@ -1045,7 +1045,7 @@ impl FleetSession {
     /// taken again for up to `patience`.
     #[allow(clippy::too_many_arguments)]
     #[tracing::instrument(level = "debug", skip_all, fields(cell = joining.journals.cell_id))]
-    pub async fn add_cell<P: Providers>(
+    pub async fn add_cell<P: ParosProviders>(
         &mut self,
         providers: &P,
         rpc: &moonpool_rpc::RpcHandle<P>,
@@ -1094,7 +1094,7 @@ impl FleetSession {
     /// [`FleetSession::remove_cell_step`]), taking an interrupted step again
     /// for up to `patience`.
     #[tracing::instrument(level = "debug", skip_all, fields(cell = cell_id))]
-    pub async fn remove_cell<P: Providers>(
+    pub async fn remove_cell<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
         first: usize,
@@ -1118,7 +1118,7 @@ impl FleetSession {
     /// One step of `universe key add` (#245): ends once the universe entry
     /// holds `key`.
     #[tracing::instrument(level = "trace", skip_all, fields(key = %key.label))]
-    pub async fn add_key_step<P: Providers>(
+    pub async fn add_key_step<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
         first: usize,
@@ -1159,7 +1159,7 @@ impl FleetSession {
     /// has the label `label`, with the key id it removed (`None`: none was
     /// in force, an earlier run removed it).
     #[tracing::instrument(level = "trace", skip_all, fields(key = label))]
-    pub async fn remove_key_step<P: Providers>(
+    pub async fn remove_key_step<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
         first: usize,
@@ -1209,7 +1209,7 @@ impl FleetSession {
     /// entity's id once the directory applied `request`. A retry under the
     /// same id after it applied writes nothing, so a later change stays.
     #[tracing::instrument(level = "trace", skip_all)]
-    pub async fn tag_step<P: Providers>(
+    pub async fn tag_step<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
         first: usize,
@@ -1271,7 +1271,7 @@ impl FleetSession {
     /// [`FleetSession::tag_step`]), taking an interrupted step again for up
     /// to `patience` past the last written step.
     #[tracing::instrument(level = "debug", skip_all)]
-    pub async fn set_tags<P: Providers>(
+    pub async fn set_tags<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
         first: usize,
@@ -1314,7 +1314,7 @@ impl FleetSession {
     /// [`FleetSession::add_key_step`]), taking an interrupted step again for
     /// up to `patience` past the last written step.
     #[tracing::instrument(level = "debug", skip_all)]
-    pub async fn add_root_key<P: Providers>(
+    pub async fn add_root_key<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
         first: usize,
@@ -1339,7 +1339,7 @@ impl FleetSession {
     /// [`FleetSession::remove_key_step`]), taking an interrupted step again
     /// for up to `patience` past the last written step.
     #[tracing::instrument(level = "debug", skip_all)]
-    pub async fn remove_root_key<P: Providers>(
+    pub async fn remove_root_key<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
         first: usize,
@@ -1365,7 +1365,7 @@ impl FleetSession {
     /// written step (a cell still electing its leaders, an operator racing
     /// this one, the coordinator's join).
     #[tracing::instrument(level = "debug", skip_all, fields(cell = self.journals.cell_id))]
-    pub async fn init<P: Providers>(
+    pub async fn init<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
         first: usize,
@@ -1407,7 +1407,7 @@ impl FleetSession {
     /// Never on any input: the one assertion checks that a switch to another
     /// of this creation's draws moves to a different one.
     #[tracing::instrument(level = "debug", skip_all)]
-    pub async fn create_tenant<P: Providers>(
+    pub async fn create_tenant<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
         first: usize,
@@ -1459,7 +1459,7 @@ impl FleetSession {
     /// [`FleetSession::remove_step`]), taking an interrupted step again for
     /// up to `patience` past the last written step.
     #[tracing::instrument(level = "debug", skip_all)]
-    pub async fn remove_tenant<P: Providers>(
+    pub async fn remove_tenant<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
         first: usize,
@@ -1481,7 +1481,7 @@ impl FleetSession {
     }
 
     /// Claim the fleet tenant and fold it to its tail, unless this session holds it.
-    async fn open_directory<P: Providers>(
+    async fn open_directory<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
         first: usize,
@@ -1507,7 +1507,7 @@ impl FleetSession {
     /// # Panics
     ///
     /// Never on any input: the one assertion checks the fold's own report.
-    pub async fn read_cell<P: Providers>(
+    pub async fn read_cell<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
         first: usize,
@@ -1568,7 +1568,7 @@ impl FleetSession {
     /// Fold another cell's control journal `journal` to its tail as a
     /// reader, through the machines of its `endpoint` (#232 (multiple
     /// cells)), claiming nothing.
-    async fn read_other<P: Providers>(
+    async fn read_other<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
         cell_id: u64,
@@ -1595,7 +1595,7 @@ impl FleetSession {
     /// Read the journal of cell `cell_id` (this session's own, or another
     /// one through the endpoint the directory records, #232) to its tail and
     /// check it is cell `cell_id` of `fleet`.
-    async fn cell_of<P: Providers, T>(
+    async fn cell_of<P: ParosProviders, T>(
         &mut self,
         client: &Client<P>,
         first: usize,
@@ -1628,7 +1628,7 @@ impl FleetSession {
 
     /// Write one fleet entry as its owner, and checkpoint the fleet directory when its
     /// policy finds it due.
-    async fn write_directory<P: Providers, T>(
+    async fn write_directory<P: ParosProviders, T>(
         &mut self,
         client: &Client<P>,
         first: usize,
@@ -1643,7 +1643,7 @@ impl FleetSession {
     }
 
     /// [`FleetSession::write_directory`] for the step that ends the operation.
-    async fn finish_directory<P: Providers, T>(
+    async fn finish_directory<P: ParosProviders, T>(
         &mut self,
         client: &Client<P>,
         first: usize,
@@ -1661,7 +1661,7 @@ impl FleetSession {
         }
     }
 
-    async fn append_directory<P: Providers>(
+    async fn append_directory<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
         first: usize,
@@ -1704,7 +1704,7 @@ impl FleetSession {
 /// `NotJoined` 0.2 s before the coordinator's `JoinFleet`, and stayed
 /// pending, red on "fleet: an operation an operator stopped in ends in the
 /// recovery tail").
-pub(super) async fn retry<P: Providers, T>(
+pub(super) async fn retry<P: ParosProviders, T>(
     client: &Client<P>,
     step: &Step<T>,
     deadline: &mut Duration,
@@ -1753,7 +1753,7 @@ pub(super) fn going_round<T>(steps: Vec<Stage>) -> Run<T> {
 
 /// Claim `owner`'s journal and fold it to its tail: the first checkpoint
 /// the fold found diverged, if any.
-pub(super) async fn open<P: Providers, S: crate::client::checkpoint::Checkpointable>(
+pub(super) async fn open<P: ParosProviders, S: crate::client::checkpoint::Checkpointable>(
     owner: &mut Checkpointer<S>,
     client: &Client<P>,
     first: usize,
@@ -1770,7 +1770,7 @@ pub(super) async fn open<P: Providers, S: crate::client::checkpoint::Checkpointa
 /// journal took at another position than the fold's next (a resolved
 /// ambiguity) is folded by reading up to it — the first checkpoint that
 /// read found diverged, if any.
-pub(super) async fn append<P: Providers, S: crate::client::checkpoint::Checkpointable>(
+pub(super) async fn append<P: ParosProviders, S: crate::client::checkpoint::Checkpointable>(
     owner: &mut Checkpointer<S>,
     client: &Client<P>,
     first: usize,
@@ -1810,7 +1810,7 @@ pub(super) async fn append<P: Providers, S: crate::client::checkpoint::Checkpoin
 ///
 /// The fold did not reach the tail (see [`LoadOutcome`]).
 #[tracing::instrument(level = "debug", skip_all, fields(fleet = %journal))]
-pub async fn read_directory<P: Providers>(
+pub async fn read_directory<P: ParosProviders>(
     client: &Client<P>,
     first: usize,
     journal: JournalIdentifier,

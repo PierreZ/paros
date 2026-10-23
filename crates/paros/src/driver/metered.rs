@@ -13,7 +13,7 @@
 //! machine records metrics, so the simulation can check the counters
 //! against its own fold of them.
 
-use moonpool_core::TimeProvider;
+use moonpool_core::LocalTimeProvider;
 use paros_core::{JournalIdentifier, NodeId};
 
 use crate::audit::Audit;
@@ -29,7 +29,7 @@ use super::system::ControlFollower;
 /// as `(control)`, `(election)` and `(directory)`, a tenant's control
 /// journal as `(control)`, a tenant's journal by its name. A journal whose
 /// names this node does not know is labelled with its ids in hex.
-pub(crate) fn journal_names<P: moonpool_core::Providers>(
+pub(crate) fn journal_names<P: crate::ParosProviders>(
     follower: Option<&ControlFollower<P>>,
     cell: Option<&ControlJournals>,
     journal: JournalIdentifier,
@@ -180,7 +180,7 @@ pub(crate) struct Meter<'a, T, N> {
     pub(crate) node: NodeId,
 }
 
-impl<T: TimeProvider, N: Audit + Clone + Send + Sync + 'static> Meter<'_, T, N> {
+impl<T: LocalTimeProvider, N: Audit + Clone + Send + Sync + 'static> Meter<'_, T, N> {
     /// Count call `call` to `journal` (labelled with `names` at its first
     /// call) and hand back its reply handle, which times the answer and
     /// counts it as `judged`; `bytes` are the records the request

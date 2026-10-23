@@ -26,7 +26,8 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use moonpool_core::{Providers, RandomProvider};
+use crate::ParosProviders;
+use moonpool_core::RandomProvider;
 use paros_core::{Ballot, ColocatedNode, Handoff, JournalIdentifier, NodeId, NodeRole};
 
 use super::DriverTunables;
@@ -43,7 +44,10 @@ pub(crate) fn refused(call: &'static str) {
 /// it may (`relinquish_to`, the cooperative handoff): the successor runs on
 /// under the same ballot, with no election. `None` when it does not lead,
 /// leads alone, or its leadership is not settled yet.
-pub(crate) fn hand_on<P: Providers>(providers: &P, node: &mut ColocatedNode) -> Option<Handoff> {
+pub(crate) fn hand_on<P: ParosProviders>(
+    providers: &P,
+    node: &mut ColocatedNode,
+) -> Option<Handoff> {
     if !node.can_relinquish() {
         return None;
     }

@@ -18,7 +18,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use moonpool_core::{Providers, TimeProvider};
+use crate::ParosProviders;
+use moonpool_core::LocalTimeProvider;
 
 use crate::frontend::{Authz, Denial, Operation, Request, Target};
 
@@ -53,7 +54,7 @@ impl AdminPin {
 
     /// Allow `operation` for the bearer of `token`, or the label of its
     /// refusal.
-    pub(super) fn allow<P: Providers>(
+    pub(super) fn allow<P: ParosProviders>(
         &self,
         providers: &P,
         token: &[u8],

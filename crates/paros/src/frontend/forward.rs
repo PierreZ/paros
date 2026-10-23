@@ -4,7 +4,8 @@
 
 use std::future::Future;
 
-use moonpool_core::{Providers, TimeProvider};
+use crate::ParosProviders;
+use moonpool_core::LocalTimeProvider;
 use moonpool_rpc::{Execution, RpcError};
 use paros_core::{JournalId, JournalIdentifier, TenantId};
 
@@ -43,10 +44,10 @@ pub(super) trait Forwarded: Clone + Send + Sync + 'static {
     /// Name `journal` by its ids, as the machines know it.
     fn aim(&mut self, journal: JournalIdentifier);
     /// One attempt at `node`.
-    fn send<P: Providers>(
+    fn send<P: ParosProviders>(
         node: &NodeClient<P>,
         call: &Self,
-    ) -> impl Future<Output = Result<Self::Ack, RpcError>> + Send;
+    ) -> impl Future<Output = Result<Self::Ack, RpcError>>;
     /// What `ack` means to the loop.
     fn route(ack: &Self::Ack) -> Route;
     /// `ack` with its leader hint removed: the client never learns a node.
@@ -84,10 +85,10 @@ impl Forwarded for Write {
         (self.tenant, self.journal) = (journal.tenant.0, journal.journal.0);
     }
 
-    fn send<P: Providers>(
+    fn send<P: ParosProviders>(
         node: &NodeClient<P>,
         call: &Self,
-    ) -> impl Future<Output = Result<WriteAck, RpcError>> + Send {
+    ) -> impl Future<Output = Result<WriteAck, RpcError>> {
         node.write(call)
     }
 
@@ -162,10 +163,10 @@ impl Forwarded for Read {
         (self.tenant, self.journal) = (journal.tenant.0, journal.journal.0);
     }
 
-    fn send<P: Providers>(
+    fn send<P: ParosProviders>(
         node: &NodeClient<P>,
         call: &Self,
-    ) -> impl Future<Output = Result<ReadAck, RpcError>> + Send {
+    ) -> impl Future<Output = Result<ReadAck, RpcError>> {
         node.read(call)
     }
 
@@ -239,10 +240,10 @@ impl Forwarded for Truncate {
         (self.tenant, self.journal) = (journal.tenant.0, journal.journal.0);
     }
 
-    fn send<P: Providers>(
+    fn send<P: ParosProviders>(
         node: &NodeClient<P>,
         call: &Self,
-    ) -> impl Future<Output = Result<TruncateAck, RpcError>> + Send {
+    ) -> impl Future<Output = Result<TruncateAck, RpcError>> {
         node.truncate(call)
     }
 
@@ -320,10 +321,10 @@ impl Forwarded for SetLeader {
         (self.tenant, self.journal) = (journal.tenant.0, journal.journal.0);
     }
 
-    fn send<P: Providers>(
+    fn send<P: ParosProviders>(
         node: &NodeClient<P>,
         call: &Self,
-    ) -> impl Future<Output = Result<SetLeaderAck, RpcError>> + Send {
+    ) -> impl Future<Output = Result<SetLeaderAck, RpcError>> {
         node.set_leader(call)
     }
 
@@ -402,7 +403,7 @@ pub(super) async fn forward<P, A, C>(
     draws: Draws,
 ) -> C::Ack
 where
-    P: Providers,
+    P: ParosProviders,
     C: Forwarded,
 {
     let count = client.server_count();

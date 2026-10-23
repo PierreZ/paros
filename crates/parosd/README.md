@@ -1,7 +1,8 @@
 # parosd and parosctl
 
-`parosd` is the paros daemon: every role of a paros deployment over moonpool's
-Tokio providers, with `paros::journal`'s stores on a real filesystem. The
+`parosd` is the paros daemon: every role of a paros deployment on one thread,
+over moonpool's compio providers (io_uring on Linux), with `paros::journal`'s
+stores on a real filesystem. The
 drivers and the stores are the library's — the same code the deterministic
 simulation runs — and this crate adds only what a process needs: arguments, a
 data directory, a tracing subscriber, signals and exit codes.

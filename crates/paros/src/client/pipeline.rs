@@ -35,7 +35,7 @@
 
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
-use moonpool_core::Providers;
+use crate::ParosProviders;
 use paros_core::{Entry, JournalIdentifier, JournalView, LeaderUuid, Seq, Value};
 use tokio::sync::watch;
 
@@ -156,7 +156,7 @@ impl Pipeline {
     /// If `ticket` is not in flight on this pipeline (sent twice, or
     /// opened on another one).
     #[tracing::instrument(level = "debug", skip_all, fields(seq = ticket.entry.seq.0, records = ticket.entry.count()))]
-    pub async fn send<P: Providers>(
+    pub async fn send<P: ParosProviders>(
         &self,
         client: &Client<P>,
         ticket: Ticket,
@@ -216,7 +216,7 @@ impl Pipeline {
 
     /// [`Pipeline::open`], then [`Pipeline::send`]: `None` when the writer
     /// leads no term.
-    pub async fn write<P: Providers>(
+    pub async fn write<P: ParosProviders>(
         &self,
         client: &Client<P>,
         build: impl FnOnce(u64) -> Vec<Value>,
@@ -231,7 +231,7 @@ impl Pipeline {
     /// under the old one. A won claim opens the next write at the tail its
     /// view names.
     #[tracing::instrument(level = "debug", skip_all, fields(fresh))]
-    pub async fn claim<P: Providers>(
+    pub async fn claim<P: ParosProviders>(
         &self,
         client: &Client<P>,
         first: usize,
@@ -255,7 +255,7 @@ impl Pipeline {
     /// ([`Writer::truncate`]); `None` when it leads no term. A refusal is
     /// folded into the shared writer.
     #[tracing::instrument(level = "debug", skip_all, fields(up_to))]
-    pub async fn truncate<P: Providers>(
+    pub async fn truncate<P: ParosProviders>(
         &self,
         client: &Client<P>,
         up_to: u64,

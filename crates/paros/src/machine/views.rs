@@ -26,7 +26,8 @@
 //! member that answers from a fold it did not catch up, as a lagging member
 //! would) is drawn on the node loop before the task starts.
 
-use moonpool_core::{Detach, Providers, SimulationResult, TaskProvider, TimeProvider};
+use crate::ParosProviders;
+use moonpool_core::{Detach, LocalTaskProvider, LocalTimeProvider, SimulationResult};
 use moonpool_rpc::RpcHandle;
 use paros_core::{NodeId, TenantId};
 use tokio_util::sync::CancellationToken;
@@ -51,7 +52,7 @@ type Requests = Inbound<ViewRpc, wire::ViewRequest, wire::ViewReply>;
 
 /// What one founding member keeps between views: its folds of the
 /// registry and the universe directory.
-struct Desk<P: Providers> {
+struct Desk<P: ParosProviders> {
     providers: P,
     client: Client<P>,
     me: NodeId,
@@ -73,7 +74,7 @@ struct Desk<P: Providers> {
 /// # Errors
 ///
 /// The `View` endpoint could not be registered.
-pub(crate) fn spawn<P: Providers>(
+pub(crate) fn spawn<P: ParosProviders>(
     providers: &P,
     rpc: &RpcHandle<P>,
     formed: &FormedCell,
@@ -98,14 +99,14 @@ pub(crate) fn spawn<P: Providers>(
         status: Hysteresis::new(tunables.status_hold),
     };
     providers
-        .task()
-        .spawn_task("paros-cell-views", serve(desk, requests, shutdown))
+        .local_task()
+        .spawn_local_task("paros-cell-views", serve(desk, requests, shutdown))
         .detach();
     Ok(())
 }
 
 /// Answer views until `shutdown`.
-async fn serve<P: Providers>(
+async fn serve<P: ParosProviders>(
     mut desk: Desk<P>,
     mut requests: Requests,
     shutdown: CancellationToken,
@@ -123,7 +124,7 @@ async fn serve<P: Providers>(
     }
 }
 
-impl<P: Providers> Desk<P> {
+impl<P: ParosProviders> Desk<P> {
     /// The answer to `request`.
     #[tracing::instrument(level = "debug", skip_all, fields(node = self.me.0, cell = self.plan.cell_id))]
     async fn answer(&mut self, request: wire::ViewRequest) -> wire::ViewReply {

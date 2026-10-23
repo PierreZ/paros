@@ -11,6 +11,12 @@ Every `parosd` is uniform. **Identity** has three parts (decided on 2026-10-02, 
   (`PAROS_ADVERTISE`, below).
 - `incarnation`: moonpool-rpc's per-start `Incarnation`, carried in the `InterfaceRef`.
 
+**One thread** (decided on 2026-10-22): every `parosd`, `paros-frontend` and `parosctl` runs on
+one compio runtime thread (io_uring on Linux, polling where a seccomp profile refuses it).
+The library is written against moonpool's local provider traits (`paros::ParosProviders`), so
+its futures need not be `Send`. The simulation runs the same code on `SimProviders`. The only
+other thread is the OTLP exporters' Tokio runtime, and only when `PAROS_OTLP_*` asks for one.
+
 The same `node_id` with a new incarnation is a reboot: the machine rejoins in place and keeps its
 assignments. It is re-placed only if it does not come back within a bound (a cell tunable, drawn
 per seed in simulation), so a whole cell

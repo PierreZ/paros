@@ -17,7 +17,7 @@
 use std::time::Duration;
 
 use clap::{Args, Subcommand};
-use moonpool_core::{Providers, RandomProvider, TokioProviders};
+use moonpool_core::{CompioProviders, LocalProviders, RandomProvider};
 use paros::client::Client;
 use paros::client::bootstrap::control_journals;
 use paros::client::fleet::{FleetRefusal, FleetSession, Interrupted, Run, Stage, Step, TagTarget};
@@ -31,7 +31,7 @@ use crate::Ending;
 use crate::labels::Labels;
 use crate::output::{Printer, note};
 
-type ParosClient = Client<TokioProviders>;
+type ParosClient = Client<CompioProviders>;
 
 /// How many tenant identifiers `tenant create` hands the library to try in turn
 /// (a collision of random 64-bit ids is all but impossible: one redraw is
@@ -100,7 +100,7 @@ pub enum TenantCommand {
 }
 
 /// A random non-zero id.
-pub fn nonzero(providers: &TokioProviders) -> u64 {
+pub fn nonzero(providers: &CompioProviders) -> u64 {
     loop {
         let id: u64 = providers.random().random();
         if id != 0 {
@@ -110,7 +110,7 @@ pub fn nonzero(providers: &TokioProviders) -> u64 {
 }
 
 /// A random leader seed: every run leads its own terms (#241).
-pub fn leader_seed(providers: &TokioProviders) -> u128 {
+pub fn leader_seed(providers: &CompioProviders) -> u128 {
     providers.random().random()
 }
 
@@ -291,7 +291,7 @@ pub fn steps(steps: &[Stage]) -> Vec<String> {
 /// A fleet session over the servers' initialized cell, under a leader seed
 /// of its own; else how the command ends.
 pub async fn open_session(
-    providers: &TokioProviders,
+    providers: &CompioProviders,
     client: &ParosClient,
     servers: &[u64],
 ) -> Result<FleetSession, Ending> {
@@ -322,7 +322,7 @@ pub async fn open_session(
 
 /// `parosctl tenant …`.
 pub async fn run(
-    providers: &TokioProviders,
+    providers: &CompioProviders,
     client: &ParosClient,
     servers: &[u64],
     labels: &Labels,
@@ -421,7 +421,7 @@ pub async fn run(
 /// `tenant tag` and `cell tag` (#575 (key:value tags)): set `target`'s user
 /// tags to `texts`, under an idempotency id drawn for this run.
 pub async fn set_tags(
-    providers: &TokioProviders,
+    providers: &CompioProviders,
     client: &ParosClient,
     (out, labels): (&Printer, &Labels),
     (fleet, patience): (&mut FleetSession, Duration),

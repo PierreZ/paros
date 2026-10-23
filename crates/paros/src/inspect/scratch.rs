@@ -4,7 +4,7 @@
 
 use std::io;
 
-use moonpool_core::{OpenOptions, StorageProvider};
+use moonpool_core::{LocalStorageProvider, OpenOptions};
 
 use crate::machine::{read_all, write_all};
 
@@ -15,7 +15,7 @@ pub(super) struct Scratch<S> {
     root: String,
 }
 
-impl<S: StorageProvider> Scratch<S> {
+impl<S: LocalStorageProvider> Scratch<S> {
     /// The scratch directory `root` on `provider`, made if missing.
     pub(super) async fn new(provider: S, root: &str) -> Result<Self, String> {
         assert!(!root.is_empty(), "a scratch directory is named");
@@ -37,7 +37,7 @@ impl<S: StorageProvider> Scratch<S> {
     /// Copy every file of the directory `dir` on `source` into the
     /// directory `name` of the scratch, and give its path. `source` is only
     /// listed and read.
-    pub(super) async fn copy<P: StorageProvider>(
+    pub(super) async fn copy<P: LocalStorageProvider>(
         &self,
         source: &P,
         dir: &str,
@@ -100,7 +100,7 @@ impl<S: StorageProvider> Scratch<S> {
 }
 
 /// Every byte of the file `path` on `provider`, opened read-only.
-async fn read_file<P: StorageProvider>(provider: &P, path: &str) -> io::Result<Vec<u8>> {
+async fn read_file<P: LocalStorageProvider>(provider: &P, path: &str) -> io::Result<Vec<u8>> {
     let file = provider.open(path, OpenOptions::read_only()).await?;
     read_all(&file).await
 }

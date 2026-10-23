@@ -21,7 +21,7 @@
 use std::io;
 
 use moonpool_buggify::hint::Strike;
-use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
+use moonpool_core::{LocalStorageFile, LocalStorageProvider, OpenOptions};
 use paros_core::{JournalIdentifier, NodeId};
 
 use super::{CellPlan, journal_config};
@@ -55,7 +55,7 @@ pub struct ProviderDisk<S> {
     layout: JournalStoreConfig,
 }
 
-impl<S: StorageProvider + Clone> ProviderDisk<S> {
+impl<S: LocalStorageProvider + Clone> ProviderDisk<S> {
     /// The disk under `root` on `provider`, its journal stores laid out by
     /// `layout`.
     ///
@@ -322,7 +322,7 @@ impl<S: StorageProvider + Clone> ProviderDisk<S> {
 }
 
 /// Every byte of `file`, looping over short reads.
-pub(crate) async fn read_all<F: StorageFile>(file: &F) -> io::Result<Vec<u8>> {
+pub(crate) async fn read_all<F: LocalStorageFile>(file: &F) -> io::Result<Vec<u8>> {
     let size = usize::try_from(file.size().await?)
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "a record too large"))?;
     let mut bytes = vec![0_u8; size];
@@ -340,7 +340,7 @@ pub(crate) async fn read_all<F: StorageFile>(file: &F) -> io::Result<Vec<u8>> {
 
 /// Write every byte of `bytes` at the start of `file`, looping over short
 /// writes.
-pub(crate) async fn write_all<F: StorageFile>(file: &F, bytes: &[u8]) -> io::Result<()> {
+pub(crate) async fn write_all<F: LocalStorageFile>(file: &F, bytes: &[u8]) -> io::Result<()> {
     let mut done = 0;
     while done < bytes.len() {
         let wrote = file.write_at(done as u64, &bytes[done..]).await?;

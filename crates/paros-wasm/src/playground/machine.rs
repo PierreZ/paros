@@ -58,63 +58,71 @@ impl Process for MachineProcess {
 
     #[tracing::instrument(level = "debug", skip_all)]
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-        // No fault injection: the shipped BUGGIFY sites and crash hints are
-        // inert, as in production.
-        moonpool_sim::buggify_reset();
-        let index = machine_index(ctx.my_ip()).ok_or_else(|| {
-            SimulationError::InvalidState(format!("{} is no machine IP", ctx.my_ip()))
-        })?;
-        let settings = MachineSettings {
-            metrics: paros::metrics::Metrics::off(),
-            class: Class::Storage,
-            // parosd's default: every tenant's footprint takes 7 slots
-            // (#476 (tenant footprint)), the cell's and the universe's too.
-            capacity: 32,
-            locality: paros::machine::Locality::zone(zone_of(index)),
-            name: format!("machine-{index}"),
-            pin: paros::machine::AdminPin::open(),
-        };
-        let listen = machine_addr(index)
-            .literal()
-            .ok_or_else(|| SimulationError::InvalidState("a literal address".into()))?;
-        let addresses = MachineAddresses::new(listen, Some(machine_addr(index)))
-            .map_err(SimulationError::InvalidState)?;
-        // Segments of a few blocks: a browser holds every simulated disk
-        // in memory, and the default 64 MiB segment per journal would not
-        // fit. The protocol and every commit are the shipped ones.
-        let layout = paros::JournalStoreConfig {
-            durability: paros::journal::Durability::Ordered,
-            geometry: paros::journal::Geometry {
-                persist_blocks: 8,
-                gap_blocks: 0,
-                entry_blocks: 16,
-            },
-            ..paros::JournalStoreConfig::default()
-        };
-        // parosd's supervisor: a run that ended on a storage failure starts
-        // again on the same disk.
-        loop {
-            let ran = Box::pin(paros::machine::run_machine(
-                ctx.providers().clone(),
-                ProviderDisk::new(ctx.storage().clone(), ROOT, layout),
-                |_| NoAudit,
-                &settings,
-                addresses.clone(),
-                Names::literal(),
-                DriverTunables::default(),
-                Transport::Plaintext,
-                ctx.shutdown().clone(),
-            ))
-            .await;
-            match ran {
-                Ok(()) => return Ok(()),
-                Err(MachineError::Storage(_) | MachineError::Run(RunError::Storage(_))) => {}
-                Err(MachineError::Run(RunError::Infra(e))) => return Err(e),
-                Err(error) => {
-                    return Err(SimulationError::InvalidState(format!(
-                        "machine {index} stopped: {error}"
-                    )));
-                }
+        // paros's futures are not `Send`: drive them as a local task.
+        ctx.run_local(MACHINE_GROUP, |ctx| async move { run_machine(&ctx).await })
+            .await
+    }
+}
+
+/// One machine: `run_machine` on its own disk, restarted after a storage
+/// failure.
+async fn run_machine(ctx: &SimContext) -> SimulationResult<()> {
+    // No fault injection: the shipped BUGGIFY sites and crash hints are
+    // inert, as in production.
+    moonpool_sim::buggify_reset();
+    let index = machine_index(ctx.my_ip()).ok_or_else(|| {
+        SimulationError::InvalidState(format!("{} is no machine IP", ctx.my_ip()))
+    })?;
+    let settings = MachineSettings {
+        metrics: paros::metrics::Metrics::off(),
+        class: Class::Storage,
+        // parosd's default: every tenant's footprint takes 7 slots
+        // (#476 (tenant footprint)), the cell's and the universe's too.
+        capacity: 32,
+        locality: paros::machine::Locality::zone(zone_of(index)),
+        name: format!("machine-{index}"),
+        pin: paros::machine::AdminPin::open(),
+    };
+    let listen = machine_addr(index)
+        .literal()
+        .ok_or_else(|| SimulationError::InvalidState("a literal address".into()))?;
+    let addresses = MachineAddresses::new(listen, Some(machine_addr(index)))
+        .map_err(SimulationError::InvalidState)?;
+    // Segments of a few blocks: a browser holds every simulated disk
+    // in memory, and the default 64 MiB segment per journal would not
+    // fit. The protocol and every commit are the shipped ones.
+    let layout = paros::JournalStoreConfig {
+        durability: paros::journal::Durability::Ordered,
+        geometry: paros::journal::Geometry {
+            persist_blocks: 8,
+            gap_blocks: 0,
+            entry_blocks: 16,
+        },
+        ..paros::JournalStoreConfig::default()
+    };
+    // parosd's supervisor: a run that ended on a storage failure starts
+    // again on the same disk.
+    loop {
+        let ran = Box::pin(paros::machine::run_machine(
+            ctx.providers().clone(),
+            ProviderDisk::new(ctx.storage().clone(), ROOT, layout),
+            |_| NoAudit,
+            &settings,
+            addresses.clone(),
+            Names::literal(),
+            DriverTunables::default(),
+            Transport::Plaintext,
+            ctx.shutdown().clone(),
+        ))
+        .await;
+        match ran {
+            Ok(()) => return Ok(()),
+            Err(MachineError::Storage(_) | MachineError::Run(RunError::Storage(_))) => {}
+            Err(MachineError::Run(RunError::Infra(e))) => return Err(e),
+            Err(error) => {
+                return Err(SimulationError::InvalidState(format!(
+                    "machine {index} stopped: {error}"
+                )));
             }
         }
     }

@@ -43,7 +43,8 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use moonpool_core::{Detach, Providers, SimulationResult, TaskProvider, TimeProvider};
+use crate::ParosProviders;
+use moonpool_core::{Detach, LocalTaskProvider, LocalTimeProvider, SimulationResult};
 use moonpool_rpc::RpcHandle;
 use paros_core::{Ballot, NodeId};
 use tokio::sync::watch;
@@ -201,7 +202,7 @@ impl FormedCell {
     ///
     /// An endpoint could not be registered.
     #[tracing::instrument(level = "debug", skip_all, fields(node = self.facts.node_id.0, cell = self.plan.cell_id))]
-    pub(crate) fn serve<P: Providers>(
+    pub(crate) fn serve<P: ParosProviders>(
         mut self,
         providers: &P,
         rpc: &RpcHandle<P>,
@@ -262,8 +263,8 @@ impl FormedCell {
         let teach_providers = providers.clone();
         let teach_shutdown = shutdown.clone();
         providers
-            .task()
-            .spawn_task("paros-machine-teach", async move {
+            .local_task()
+            .spawn_local_task("paros-machine-teach", async move {
                 moonpool_core::select! {
                     () = teach_shutdown.cancelled() => {}
                     () = teacher.run(&teach_providers, &teach_rpc) => {}
@@ -271,8 +272,8 @@ impl FormedCell {
             })
             .detach();
         providers
-            .task()
-            .spawn_task("paros-machine-formed", async move {
+            .local_task()
+            .spawn_local_task("paros-machine-formed", async move {
                 loop {
                     moonpool_core::select! {
                         biased;
@@ -344,7 +345,7 @@ impl Teacher {
     /// Never: the assertions check that a teacher re-sends its own vote, with
     /// its own token, to the others only.
     #[tracing::instrument(level = "debug", skip_all, fields(node = self.cell.facts.node_id.0, cell = self.cell.plan.cell_id))]
-    async fn run<P: Providers>(mut self, providers: &P, rpc: &RpcHandle<P>) {
+    async fn run<P: ParosProviders>(mut self, providers: &P, rpc: &RpcHandle<P>) {
         let me = self.cell.facts.node_id;
         // By address: an idle member accepts the plan only at the address
         // the plan names (`not_a_member` otherwise).

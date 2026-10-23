@@ -1053,18 +1053,22 @@ impl Process for MachineProcess {
 
     #[tracing::instrument(level = "debug", skip_all)]
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-        dispatch(
-            ctx,
-            "every machine process is mapped to the machine role",
-            "a machine",
-            |role| match role {
-                Role::Machine(rank) => Some(rank),
-                _ => None,
-            },
-            |deployment, rank, my_ip| async move {
-                Box::pin(run_machine_role(ctx, &deployment, rank, &my_ip)).await
-            },
-        )
+        ctx.run_local(self.name(), |ctx| async move {
+            let ctx = &ctx;
+            dispatch(
+                ctx,
+                "every machine process is mapped to the machine role",
+                "a machine",
+                |role| match role {
+                    Role::Machine(rank) => Some(rank),
+                    _ => None,
+                },
+                |deployment, rank, my_ip| async move {
+                    Box::pin(run_machine_role(ctx, &deployment, rank, &my_ip)).await
+                },
+            )
+            .await
+        })
         .await
     }
 }

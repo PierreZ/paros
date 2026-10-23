@@ -226,9 +226,11 @@ needs. **Every quorum question crosses `membership/`**: predicates are phase-spl
 against a threshold on its own; a new quorum system is a `QuorumSystem` variant, never a tally
 rewrite. Policies are explicit types, never flags.
 
-**The driver is written once, generic over moonpool's `P: Providers`** (`run_node`,
-`run_journals`, `run_matchmaker`, `run_proxy`, `run_replica`), so the same code runs in
-production (`TokioProviders`, `parosd`) and in simulation ("test the code you ship"). Protocol
+**The driver is written once, generic over `P: paros::ParosProviders`** (`run_node`,
+`run_journals`, `run_matchmaker`, `run_proxy`, `run_replica`): moonpool's local provider traits
+plus a local task slot (`ThreadProviders`), so futures need not be `Send`. The same code runs
+in production (`CompioProviders`, `parosd`, one thread) and in simulation (`SimProviders`;
+a `Process` runs it with `ctx.run_local`) ("test the code you ship"). Protocol
 logic lives there, never in a sim-only path. `paros::client` is likewise provider-generic.
 
 ## Plain Multi-Paxos is first-class and permanent; everything else is opt-in
@@ -516,7 +518,7 @@ Cargo workspace, every package under `crates/`. Dependency stack: `paros-core` �
 - `paros` — the library: provider-generic drivers, RPC contract (`proto/`, built by
   `prost-build`), stores, `paros::client`; wasm-safe and provider-free. Its `tls` feature
   (`paros::tls`, on in `parosd` and `paros-sim`) adds TLS and mutual TLS (PR #509 (mutual TLS)).
-- `parosd` — the uniform `parosd` daemon over Tokio (one binary per machine: `PAROS_*` config,
+- `parosd` — the uniform `parosd` daemon on one compio thread (one binary per machine: `PAROS_*` config,
   `node_id` minted at format, waits for `parosctl init`, #196), `paros-frontend` (#192 (the
   frontend)) and `parosctl`
   (`src/bin/parosctl/`), the CLI over `paros::client` (`publish = false`). The image and the

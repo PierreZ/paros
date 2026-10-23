@@ -24,7 +24,7 @@
 use std::time::Duration;
 
 use clap::{Args, Subcommand};
-use moonpool_core::TokioProviders;
+use moonpool_core::CompioProviders;
 use paros::client::Client;
 use paros::client::bootstrap::{cell_members, control_journals};
 use paros::client::cell::{CellSession, Removal};
@@ -124,7 +124,7 @@ pub enum CellAdminCommand {
 /// a root key checks it (#245 (Biscuit tokens)).
 pub async fn run(
     asker: &Asker<'_>,
-    client: &Client<TokioProviders>,
+    client: &Client<CompioProviders>,
     servers: &[(u64, Address)],
     labels: &Labels,
     out: &Printer,
@@ -234,7 +234,7 @@ pub async fn run(
 /// its founding members among the servers.
 async fn session(
     asker: &Asker<'_>,
-    client: &Client<TokioProviders>,
+    client: &Client<CompioProviders>,
     servers: &[(u64, Address)],
 ) -> Result<CellSession, Ending> {
     let Some(journals) = control_journals(client).await else {
@@ -285,7 +285,7 @@ fn parse_window(text: &str) -> Result<Duration, String> {
 /// `machine` names in it.
 async fn open_on(
     asker: &Asker<'_>,
-    client: &Client<TokioProviders>,
+    client: &Client<CompioProviders>,
     servers: &[(u64, Address)],
     labels: &Labels,
     machine: &str,
@@ -305,7 +305,7 @@ async fn open_on(
 /// drained machine `machine` names.
 async fn remove(
     asker: &Asker<'_>,
-    client: &Client<TokioProviders>,
+    client: &Client<CompioProviders>,
     servers: &[(u64, Address)],
     labels: &Labels,
     out: &Printer,
@@ -346,7 +346,7 @@ async fn remove(
 
 /// `parosctl cell maintenance <machine|zone> --for <duration>` (#359).
 async fn maintenance(
-    (asker, client, servers): (&Asker<'_>, &Client<TokioProviders>, &[(u64, Address)]),
+    (asker, client, servers): (&Asker<'_>, &Client<CompioProviders>, &[(u64, Address)]),
     labels: &Labels,
     out: &Printer,
     (target, zone): (&str, bool),
@@ -408,7 +408,7 @@ fn registered_machine(session: &CellSession, labels: &Labels, machine: &str) -> 
 /// `parosctl cell tag-machine <machine> [k:v…]` (#575 (key:value tags)).
 async fn tag_machine(
     asker: &Asker<'_>,
-    client: &Client<TokioProviders>,
+    client: &Client<CompioProviders>,
     servers: &[(u64, Address)],
     (labels, out): (&Labels, &Printer),
     machine: &str,
@@ -461,7 +461,7 @@ async fn tag_machine(
 /// registered machine `machine` names, unless it is draining already.
 async fn drain(
     asker: &Asker<'_>,
-    client: &Client<TokioProviders>,
+    client: &Client<CompioProviders>,
     servers: &[(u64, Address)],
     labels: &Labels,
     out: &Printer,

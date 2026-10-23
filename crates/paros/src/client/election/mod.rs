@@ -54,7 +54,7 @@ mod fold;
 use std::collections::VecDeque;
 use std::time::Duration;
 
-use moonpool_core::Providers;
+use crate::ParosProviders;
 use paros_core::{JournalIdentifier, LeaderUuid};
 
 pub use fold::{Candidate, Change, ElectionFold, ElectionRecord, Leader, MAGIC};
@@ -190,7 +190,7 @@ pub enum Step {
 }
 
 /// One candidate's view of an election, and the calls that move it.
-pub struct Election<P: Providers> {
+pub struct Election<P: ParosProviders> {
     client: Client<P>,
     journal: JournalIdentifier,
     me: Candidate,
@@ -239,7 +239,7 @@ pub struct Election<P: Providers> {
     first: usize,
 }
 
-impl<P: Providers> Election<P> {
+impl<P: ParosProviders> Election<P> {
     /// Candidate `me` of the election over `journal`, through `client`,
     /// its leader uuids derived from the caller's random `seed`.
     ///
@@ -859,7 +859,7 @@ impl<P: Providers> Election<P> {
 /// # Panics
 ///
 /// If an assertion on its own postconditions fails: a programmer error.
-pub async fn read_election<P: Providers>(
+pub async fn read_election<P: ParosProviders>(
     client: &Client<P>,
     journal: JournalIdentifier,
     first: usize,
@@ -966,7 +966,7 @@ pub async fn read_election<P: Providers>(
 /// `ahead` when it starts at `request` and is no long-poll, else read with
 /// the pages after it ([`read_ahead`], `stride` records apart and short of
 /// `tail`), `ahead` emptied first.
-async fn next_page<P: Providers>(
+async fn next_page<P: ParosProviders>(
     client: &Client<P>,
     request: Read,
     first: usize,
@@ -994,7 +994,7 @@ async fn next_page<P: Providers>(
 /// into `ahead`: one round trip for the window. A long-poll, an unknown
 /// stride or tail, or a window of one reads `request` alone. A cold
 /// [`read_election`] and a leader's [`Election::watch`] both page this way.
-async fn read_ahead<P: Providers>(
+async fn read_ahead<P: ParosProviders>(
     client: &Client<P>,
     request: Read,
     first: usize,
@@ -1050,7 +1050,7 @@ async fn read_ahead<P: Providers>(
 ///
 /// If `successor` is `mine` or either is the unset uuid (a programmer
 /// error).
-pub async fn hand_off<P: Providers>(
+pub async fn hand_off<P: ParosProviders>(
     client: &Client<P>,
     governed: JournalIdentifier,
     mine: LeaderUuid,

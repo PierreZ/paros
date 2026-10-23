@@ -4,11 +4,11 @@
 //! [`paros_core`] state machine and adds the **driver** that owns it and
 //! performs I/O — the etcd-raft `Node` layer to `paros_core`'s `ColocatedNode`.
 //!
-//! [`run_node`] is written once over moonpool's `P: Providers` abstraction, so
-//! the *same* code runs in production (`TokioProviders`) and deterministic
+//! [`run_node`] is written once over [`ParosProviders`] (moonpool's local providers), so
+//! the *same* code runs in production (`CompioProviders`) and deterministic
 //! simulation (`SimProviders`); the deterministic-simulation harness lives in
 //! `paros-sim` and adapts a moonpool `Process` to [`run_node`]; the `parosd`
-//! binary (its own crate, #206) runs the same drivers over Tokio.
+//! binary (its own crate, #206) runs the same drivers on one compio thread.
 //!
 //! [`run_matchmaker`] is the same shape for the **matchmaker** role (the
 //! per-ballot configuration registry of Matchmaker Paxos), driven over
@@ -50,6 +50,7 @@ mod provision;
 mod proxy;
 mod replica_tier;
 mod rpc;
+mod runtime;
 pub mod scenario;
 pub mod status;
 mod storage;
@@ -98,6 +99,7 @@ pub use matchmaker::{
 pub use provision::{Provisioned, provision_matchmaker_store, provision_store};
 pub use proxy::{ProxyConfig, ProxyJournal, run_proxy};
 pub use replica_tier::run_replica;
+pub use runtime::ParosProviders;
 pub use storage::{
     LogStorage, MemStorage, MetadataFault, ScrubPage, ScrubbedSlot, StorageError, StorageRecord,
     WriteOutcome, command_bytes, storage_contract_suite,

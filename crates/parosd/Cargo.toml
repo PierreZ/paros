@@ -13,20 +13,29 @@ paros = { path = "../paros", version = "0.2.0", features = ["tls"] }
 # `parosctl key` and `parosctl token` (#400): Biscuit keys and tokens, offline.
 paros-authz-biscuit = { path = "../paros-authz-biscuit" }
 
-# The production providers (#206): the first build of paros that links
-# `TokioProviders`. The `paros` library pulls moonpool without them so it
-# stays wasm-safe; this binary layers them back on. Same rev as `paros`.
+# The production providers: moonpool's `CompioProviders`, the local
+# (non-`Send`) bundle on compio's thread-per-core runtime (io_uring on Linux,
+# polling where a seccomp profile or an old kernel refuses it). Every
+# binary of this crate runs on one compio thread. The `paros` library pulls
+# moonpool without them so it stays wasm-safe; this crate layers them back
+# on. Same rev as `paros`.
 #
 # Built together with `paros-sim` (a workspace-wide `cargo build` or
 # `nextest`), cargo unifies moonpool-core's features and this binary gets
 # moonpool-sim's deterministic `select!` expansion; `cargo build -p parosd`
 # alone — the shipped build — keeps tokio's macro verbatim.
-moonpool-core = { git = "https://github.com/PierreZ/moonpool", rev = "f9c22bf25ebd7679ecb58ec6af7bd9e9bda1213c", features = ["tokio-providers", "select"] }
+moonpool-core = { git = "https://github.com/PierreZ/moonpool", rev = "ee52b2bdbdb1534efeeecfd60058e3a52144a0db", default-features = false, features = ["compio-providers", "select"] }
 # `parosctl`'s client-only RPC runtime, under `paros::client`.
-moonpool-rpc = { git = "https://github.com/PierreZ/moonpool", rev = "f9c22bf25ebd7679ecb58ec6af7bd9e9bda1213c", default-features = false, features = ["prost"] }
+moonpool-rpc = { git = "https://github.com/PierreZ/moonpool", rev = "ee52b2bdbdb1534efeeecfd60058e3a52144a0db", default-features = false, features = ["prost"] }
 
 clap = { version = "4", features = ["derive", "env"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
+# The runtime every binary runs on: one thread, its timers and its signals.
+compio = { version = "0.19", default-features = false, features = ["runtime", "time", "signal", "io-uring", "polling"] }
+futures = "0.3"
+libc = "0.2"
+# Only for the OTLP exporters (#366 (metrics)): tonic needs a Tokio runtime,
+# so a pushing `parosd` runs one worker thread beside the compio thread.
+tokio = { version = "1", features = ["rt-multi-thread"] }
 tokio-util = "0.7"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "registry"] }

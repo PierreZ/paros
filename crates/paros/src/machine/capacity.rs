@@ -12,7 +12,7 @@
 //! elected cell coordinator is still every tenant's coordinator, so its
 //! request is a call into its own session.
 
-use moonpool_core::Providers;
+use crate::ParosProviders;
 
 use crate::client::Client;
 use crate::client::capacity::{CapacityAnswer, CapacityRequest};
@@ -34,7 +34,7 @@ fn answer_of(grant: &Grant) -> CapacityAnswer {
 /// Decide `request` through the term's session `cell`, each booking id
 /// drawn with `draw`.
 #[tracing::instrument(level = "debug", skip_all, fields(tenant = request.tenant.0, request = request.request))]
-pub(super) async fn grant<P: Providers>(
+pub(super) async fn grant<P: ParosProviders>(
     client: &Client<P>,
     cell: &mut CellSession,
     request: &CapacityRequest,

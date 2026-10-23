@@ -1,10 +1,10 @@
 //! The provider-generic node driver — the `Node` layer that owns the sans-IO
 //! [`paros_core::ColocatedNode`] and performs all I/O.
 //!
-//! Written once over moonpool's `P: Providers` abstraction, so the *same* loop
-//! runs in production (`TokioProviders`) and deterministic simulation
-//! (`SimProviders`). The sim harness (`paros-sim`) adapts a moonpool `Process`
-//! to it; a future `parosd` binary will adapt a tokio `main`.
+//! Written once over `P: ParosProviders` (moonpool's local providers), so the
+//! *same* loop runs in production (`CompioProviders`) and deterministic
+//! simulation (`SimProviders`). The sim harness (`paros-sim`) adapts a
+//! moonpool `Process` to it; `parosd` runs it on one compio thread.
 //!
 //! The loop `select`s over {client request, peer message, tick timer, shutdown},
 //! feeds the core via `step`/`tick`, and drains every [`paros_core::Ready`] in
@@ -75,7 +75,8 @@ pub use tunables::BelowFloor;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use moonpool_core::{Providers, RandomProvider, SimulationError, SimulationResult, TimeProvider};
+use crate::ParosProviders;
+use moonpool_core::{LocalTimeProvider, RandomProvider, SimulationError, SimulationResult};
 use paros_core::{
     ColocatedNode, Control, Delegation, Entry, Fingerprint, GcAck, JournalId, JournalIdentifier,
     MatchRefusal, MatchReply, MatchStep, MatchmakerGeneration, MatchmakerId, MatchmakerSet,
@@ -120,7 +121,7 @@ use transport::{LaneOpener, Outbound, peer_target};
 /// and none of them change across an incarnation. Bundled so the tail is one
 /// call instead of four repeated at every arm, and so the steps the arms share
 /// take one handle.
-struct NodeLoop<'a, P: Providers, A: Audit> {
+struct NodeLoop<'a, P: ParosProviders, A: Audit> {
     providers: &'a P,
     links: &'a MatchmakerLinks<P>,
     out: &'a Outbound,
@@ -129,7 +130,7 @@ struct NodeLoop<'a, P: Providers, A: Audit> {
     tunables: DriverTunables,
 }
 
-impl<P: Providers, A: Audit> NodeLoop<'_, P, A> {
+impl<P: ParosProviders, A: Audit> NodeLoop<'_, P, A> {
     /// The **settle tail**'s second half, once the batch [`take_ready`] took
     /// is durable: finish the batch (send → apply), surface a matchmaking
     /// phase it opened *before* the requests leave, put the batch's
@@ -599,7 +600,7 @@ fn tenant_audits<S, J: JournalStores>(
 
 /// What every journal's steps share on this node: the handles a
 /// [`NodeLoop`] needs apart from the journal's own audit port.
-struct Shared<'a, P: Providers> {
+struct Shared<'a, P: ParosProviders> {
     providers: &'a P,
     links: &'a MatchmakerLinks<P>,
     out: &'a Outbound,
@@ -610,7 +611,7 @@ struct Shared<'a, P: Providers> {
     metrics: &'a Metrics,
 }
 
-impl<P: Providers> Shared<'_, P> {
+impl<P: ParosProviders> Shared<'_, P> {
     /// The node loop's steps, reporting to `audit` (a journal's port).
     fn with<'b, A: Audit>(&'b self, audit: &'b A) -> NodeLoop<'b, P, A> {
         NodeLoop {
@@ -630,7 +631,7 @@ impl<P: Providers> Shared<'_, P> {
     /// not fly: a flying journal's inputs wait in its backlog.
     async fn settle<S, A>(&self, rt: &mut JournalRt<S, A>)
     where
-        S: LogStorage + Send + 'static,
+        S: LogStorage + 'static,
         A: Audit + Clone + Send + Sync + 'static,
     {
         assert!(
@@ -646,7 +647,7 @@ impl<P: Providers> Shared<'_, P> {
     /// flight it launches.
     async fn take<S, A>(&self, rt: &mut JournalRt<S, A>)
     where
-        S: LogStorage + Send + 'static,
+        S: LogStorage + 'static,
         A: Audit + Clone + Send + Sync + 'static,
     {
         assert!(rt.flight.is_none(), "a flying journal takes no other batch");
@@ -698,7 +699,7 @@ impl<P: Providers> Shared<'_, P> {
     /// The landed flush's fault ([`Shared::land`]).
     async fn input<S, A>(&self, rt: &mut JournalRt<S, A>, input: Input) -> Result<(), RunError>
     where
-        S: LogStorage + Send + 'static,
+        S: LogStorage + 'static,
         A: Audit + Clone + Send + Sync + 'static,
     {
         if rt.flight.is_some() && rt.backlog.len() < flight::BACKLOG {
@@ -725,7 +726,7 @@ impl<P: Providers> Shared<'_, P> {
     /// The flush's storage fault, or the runtime's exit.
     async fn land<S, A>(&self, rt: &mut JournalRt<S, A>) -> Result<(), RunError>
     where
-        S: LogStorage + Send + 'static,
+        S: LogStorage + 'static,
         A: Audit + Clone + Send + Sync + 'static,
     {
         // The backlog's batches may fly in turn: wait for each, so the
@@ -760,7 +761,7 @@ impl<P: Providers> Shared<'_, P> {
         landing: flight::Landing<S>,
     ) -> Result<(), RunError>
     where
-        S: LogStorage + Send + 'static,
+        S: LogStorage + 'static,
         A: Audit + Clone + Send + Sync + 'static,
     {
         assert!(rt.flight.is_none(), "a landing ends the journal's flight");
@@ -802,7 +803,7 @@ impl<P: Providers> Shared<'_, P> {
     /// backlog is empty, or when a batch flies: the rest waits for it.
     async fn step_backlog<S, A>(&self, rt: &mut JournalRt<S, A>)
     where
-        S: LogStorage + Send + 'static,
+        S: LogStorage + 'static,
         A: Audit + Clone + Send + Sync + 'static,
     {
         while rt.flight.is_none() && !rt.backlog.is_empty() {
@@ -1642,7 +1643,7 @@ fn hold(backlog: &mut Vec<Input>, input: Input) {
 /// Park `call` on the slot its proposal took (`result`), with the ballot
 /// it was proposed under, to be answered when that slot applies, or
 /// redirect it at once when this node does not lead.
-fn park_call<S, A: Audit, P: Providers>(
+fn park_call<S, A: Audit, P: ParosProviders>(
     rt: &mut JournalRt<S, A>,
     result: ProposeResult,
     call: Call,
@@ -1679,7 +1680,7 @@ fn park_call<S, A: Audit, P: Providers>(
 
 /// Drive a paros node to completion over the given providers.
 ///
-/// Generic over `P: Providers` (production *or* simulation — only the providers
+/// Generic over `P: ParosProviders` (production *or* simulation — only the providers
 /// differ) and `S: LogStorage` (the injected durable storage). The loop owns a
 /// [`ColocatedNode`], serves the Paros RPC interface, feeds client proposals and
 /// peer messages into the core, sends the core's outbound messages to the peers
@@ -1757,8 +1758,8 @@ pub async fn run_node<P, S, A>(
     audit: &A,
 ) -> Result<(), RunError>
 where
-    P: Providers,
-    S: LogStorage + Send + 'static,
+    P: ParosProviders,
+    S: LogStorage + 'static,
     // `Clone + Send + Sync + 'static` because each peer-delivery task carries
     // its own handle to the audit: the bounded-mailbox drops happen inside
     // those tasks, and reporting them (`Audit::dropped_at_mailbox`) is part of
@@ -1857,7 +1858,7 @@ pub async fn run_journals<P, J>(
     shutdown: CancellationToken,
 ) -> Result<(), RunError>
 where
-    P: Providers,
+    P: ParosProviders,
     J: JournalStores,
 {
     let mut hosted = None;
@@ -1919,7 +1920,7 @@ async fn serve_journals<P, J>(
     hosted: &mut Option<HostEnded>,
 ) -> Result<(), RunError>
 where
-    P: Providers,
+    P: ParosProviders,
     J: JournalStores,
 {
     let ids = stores.journals();
@@ -3152,7 +3153,7 @@ where
 
 /// What applying the system journals' folds (#189) touches: the node's
 /// journals and their opener, the lanes, and the node-level audit.
-struct SystemCtx<'a, 'l, P: Providers, J: JournalStores> {
+struct SystemCtx<'a, 'l, P: ParosProviders, J: JournalStores> {
     stores: &'a mut J,
     journals: &'a mut Journals<J::Store, J::Audit>,
     now: u64,
@@ -3201,7 +3202,7 @@ fn assert_event_source(
     }
 }
 
-impl<P: Providers, J: JournalStores> SystemCtx<'_, '_, P, J> {
+impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
     /// Apply what `journal`'s fold moved, in position order: start a created
     /// journal naming this node, stop a tombstoned one, open a lane to an
     /// admitted node, and stop every user journal on this node's own
@@ -3391,7 +3392,7 @@ impl<P: Providers, J: JournalStores> SystemCtx<'_, '_, P, J> {
     }
 }
 
-impl<P: Providers, J: JournalStores> SystemCtx<'_, '_, P, J> {
+impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
     /// Start journal `id` on this node, bootstrapped over `members` under
     /// `quorum_system`, written in `writer` mode, its store committing under
     /// `store` (#599 (durability mode per journal)) — unless the journal is
@@ -3742,7 +3743,7 @@ impl<P: Providers, J: JournalStores> SystemCtx<'_, '_, P, J> {
 /// Admit the registry's pool into every live journal when an admission is
 /// owed, unless this node holds it late ([`crate::scenario::ADMIT_LATE`],
 /// #387): then it stays owed, and a later call admits it.
-fn admit_owed<P: Providers, S, A>(
+fn admit_owed<P: ParosProviders, S, A>(
     journals: &mut Journals<S, A>,
     follower: &ControlFollower<P>,
     owed: &mut Option<std::time::Duration>,
@@ -3762,7 +3763,10 @@ fn admit_owed<P: Providers, S, A>(
 /// becomes one it follows, counts and answers. Refused by the core on a
 /// journal that cannot reconfigure; retired nodes stay in (the pool is
 /// grow-only) and are kept out at the edge instead.
-fn admit_pool<P: Providers, S, A>(journals: &mut Journals<S, A>, follower: &ControlFollower<P>) {
+fn admit_pool<P: ParosProviders, S, A>(
+    journals: &mut Journals<S, A>,
+    follower: &ControlFollower<P>,
+) {
     let pool = follower.pool();
     // In a cell, a machine's matchmaker is named by its node id: every
     // registered machine may host a set of a later generation (#501
@@ -3785,7 +3789,7 @@ fn admit_pool<P: Providers, S, A>(journals: &mut Journals<S, A>, follower: &Cont
 /// unknown (`true`: answer `unknown_journal`, reported through the audit) or
 /// silently left unanswered (`false`: the node serves the journal but it is
 /// quarantined or down here, and the client's deadline retries elsewhere).
-fn refuse_unknown<S, A: Audit, N: Audit, P: Providers>(
+fn refuse_unknown<S, A: Audit, N: Audit, P: ParosProviders>(
     journals: &Journals<S, A>,
     follower: Option<&ControlFollower<P>>,
     journal: JournalIdentifier,
@@ -3870,7 +3874,7 @@ fn read_only_refuses(msg: &Message) -> bool {
 /// quarantine is over at tick `now`): live on success, back in quarantine on
 /// a storage fault (its open's too, [`JournalStores::open_fault`]), down for
 /// good when the store refuses to open.
-async fn open_journal<P: Providers, J: JournalStores>(
+async fn open_journal<P: ParosProviders, J: JournalStores>(
     providers: &P,
     stores: &mut J,
     journals: &mut Journals<J::Store, J::Audit>,

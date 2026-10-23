@@ -8,7 +8,9 @@
 use std::time::Duration;
 
 use moonpool_rpc::{RpcConfig, RpcHandle};
-use moonpool_sim::{SimContext, SimProviders, SimulationError, SimulationResult, TaskProvider};
+use moonpool_sim::{
+    LocalTaskProvider, SimContext, SimProviders, SimulationError, SimulationResult,
+};
 use paros::client::{ClientTunables, Server};
 use paros::{NodeClient, parse_addr};
 use tokio_util::sync::{CancellationToken, DropGuard};
@@ -48,17 +50,16 @@ impl ClientRuntime {
             .map_err(|e| SimulationError::InvalidState(format!("client RPC runtime: {e}")))?;
         let stop = CancellationToken::new();
         let cancelled = stop.clone();
-        ctx.task()
-            .spawn_task("paros-client-rpc", async move {
-                moonpool_sim::select! {
-                    biased;
-                    () = cancelled.cancelled() => {}
-                    error = run => {
-                        tracing::warn!(%error, "client RPC runtime failed");
-                    }
+        LocalTaskProvider::spawn_local_task(ctx.task(), "paros-client-rpc", async move {
+            moonpool_sim::select! {
+                biased;
+                () = cancelled.cancelled() => {}
+                error = run => {
+                    tracing::warn!(%error, "client RPC runtime failed");
                 }
-            })
-            .detach();
+            }
+        })
+        .detach();
         Ok(Self {
             rpc,
             _stop: stop.drop_guard(),

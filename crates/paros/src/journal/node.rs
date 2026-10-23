@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use moonpool_buggify::hint::Strike;
-use moonpool_core::StorageProvider;
+use moonpool_core::LocalStorageProvider;
 use moonpool_journal::{Batch, Journal, ReadError, Recovery};
 use paros_core::{Ballot, Command, Config, HardState, JournalState, MustSync, Slot, Storage};
 use serde::{Deserialize, Serialize};
@@ -62,7 +62,7 @@ struct NodeMeta {
 /// which is also where it loads; until then every accessor answers for an
 /// empty store. A store with no journal on disk yet creates it at its first
 /// sync.
-pub struct JournalStorage<P: StorageProvider> {
+pub struct JournalStorage<P: LocalStorageProvider> {
     provider: P,
     dir: String,
     store: JournalStoreConfig,
@@ -109,7 +109,7 @@ pub struct JournalBootFacts {
     pub truncated: bool,
 }
 
-impl<P: StorageProvider> std::fmt::Debug for JournalStorage<P> {
+impl<P: LocalStorageProvider> std::fmt::Debug for JournalStorage<P> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("JournalStorage")
             .field("dir", &self.dir)
@@ -119,7 +119,7 @@ impl<P: StorageProvider> std::fmt::Debug for JournalStorage<P> {
     }
 }
 
-impl<P: StorageProvider> JournalStorage<P> {
+impl<P: LocalStorageProvider> JournalStorage<P> {
     /// A store for the node `config` names, kept under `dir` on `provider`.
     /// Nothing is read until the boot scan.
     #[must_use]
@@ -432,7 +432,7 @@ fn report(node: u64, recovery: &Recovery) {
     }
 }
 
-impl<P: StorageProvider> Storage for JournalStorage<P> {
+impl<P: LocalStorageProvider> Storage for JournalStorage<P> {
     fn initial_state(&self) -> (HardState, Config) {
         let mut hard_state = HardState::default();
         hard_state.max_promised_ballot = self.meta.promise;
@@ -461,7 +461,7 @@ impl<P: StorageProvider> Storage for JournalStorage<P> {
     }
 }
 
-impl<P: StorageProvider> LogStorage for JournalStorage<P> {
+impl<P: LocalStorageProvider> LogStorage for JournalStorage<P> {
     /// Open the journal and read it back (see the [module docs](super) for
     /// what damage means). A clean store, a store with faulty entries
     /// (reported through the read ports) and a store whose last batch a

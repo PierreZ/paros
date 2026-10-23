@@ -11,7 +11,8 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use moonpool_core::{Providers, TimeProvider};
+use crate::ParosProviders;
+use moonpool_core::LocalTimeProvider;
 use moonpool_rpc::{ErrorReason, RpcHandle};
 use paros_core::{JournalId, JournalIdentifier, TenantId};
 
@@ -27,7 +28,7 @@ use crate::{Address, Names};
 /// One attempt of `M` at `target`, its address resolved now through `names`
 /// (#257), within `timeout`: `None` when the name does not resolve or
 /// nothing came back.
-pub(crate) async fn call_once<P: Providers, M: WellKnownMethod>(
+pub(crate) async fn call_once<P: ParosProviders, M: WellKnownMethod>(
     providers: &P,
     rpc: &RpcHandle<P>,
     names: &Names,
@@ -84,7 +85,7 @@ const INIT_RETRY: Duration = Duration::from_millis(500);
 /// key checks (#245 (Biscuit tokens)). `idle` forms an idle cell, with no
 /// universe tenant (#232 (multiple cells)).
 #[allow(clippy::too_many_arguments)]
-pub async fn cell_init<P: Providers>(
+pub async fn cell_init<P: ParosProviders>(
     providers: &P,
     rpc: &RpcHandle<P>,
     names: &Names,
@@ -134,7 +135,7 @@ pub async fn cell_init<P: Providers>(
 
 /// Who the machine at `target` is (#216): its `Identify`, asked once within
 /// `timeout`. `None` when it does not answer.
-pub async fn identify<P: Providers>(
+pub async fn identify<P: ParosProviders>(
     providers: &P,
     rpc: &RpcHandle<P>,
     names: &Names,
@@ -172,7 +173,7 @@ pub enum AdmitOutcome {
 /// `timeout`, with the caller's `admin` token, which a machine with a
 /// pinned root key checks (#245 (Biscuit tokens)).
 #[allow(clippy::too_many_arguments)]
-pub async fn admit<P: Providers>(
+pub async fn admit<P: ParosProviders>(
     providers: &P,
     rpc: &RpcHandle<P>,
     names: &Names,
@@ -188,7 +189,7 @@ pub async fn admit<P: Providers>(
 /// taken at: the cell coordinator's `Admit` sent again to an admitted
 /// machine whose registry fold is stuck (#505 (stranded admitted machine)).
 #[allow(clippy::too_many_arguments)]
-pub async fn admit_at<P: Providers>(
+pub async fn admit_at<P: ParosProviders>(
     providers: &P,
     rpc: &RpcHandle<P>,
     names: &Names,
@@ -228,7 +229,7 @@ pub enum RegisterOutcome {
 /// names at the address it advertises, with its machine interface (#349,
 /// #404), once, within `timeout`. A term that ended answers nothing:
 /// [`RegisterOutcome::Unreachable`].
-pub async fn register<P: Providers>(
+pub async fn register<P: ParosProviders>(
     providers: &P,
     rpc: &RpcHandle<P>,
     names: &Names,
@@ -252,7 +253,7 @@ pub async fn register<P: Providers>(
 /// Learn the node id of every server in `addrs` from its own node-only
 /// `Inspect` (`node`), each asked once within `timeout`. A server that does
 /// not answer is left out; the order of `addrs` is kept.
-pub async fn discover<P: Providers>(
+pub async fn discover<P: ParosProviders>(
     providers: &P,
     rpc: &RpcHandle<P>,
     names: &Names,
@@ -285,7 +286,7 @@ pub async fn discover<P: Providers>(
 ///
 /// If two cells each answer from a majority of `addrs`, which no list
 /// allows: each address is asked once, so two majorities share an address.
-pub async fn majority_cell<P: Providers>(
+pub async fn majority_cell<P: ParosProviders>(
     providers: &P,
     rpc: &RpcHandle<P>,
     names: &Names,
@@ -366,7 +367,7 @@ pub fn control_journals_of(reply: &InspectReply) -> Option<ControlJournals> {
 /// Learn the fleet's control journals from the cell's servers (§3.2): a
 /// node-only `Inspect` of each in turn, the first that names the cell's and
 /// the fleet's. `None` when none does.
-pub async fn control_journals<P: Providers>(client: &Client<P>) -> Option<ControlJournals> {
+pub async fn control_journals<P: ParosProviders>(client: &Client<P>) -> Option<ControlJournals> {
     for server in 0..client.server_count() {
         if let Some(journals) = client
             .inspect_node(server)
@@ -385,7 +386,7 @@ pub async fn control_journals<P: Providers>(client: &Client<P>) -> Option<Contro
 /// server that serves `control` reports it, sorted. An admitted machine
 /// serves no journal, so the servers are asked in turn. `None` when none
 /// answers with a member.
-pub async fn cell_members<P: Providers>(
+pub async fn cell_members<P: ParosProviders>(
     client: &Client<P>,
     control: JournalIdentifier,
 ) -> Option<Vec<u64>> {

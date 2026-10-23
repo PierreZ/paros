@@ -36,7 +36,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound::{Excluded, Unbounded};
 
-use moonpool_core::Providers;
+use crate::ParosProviders;
 use moonpool_rpc::RpcHandle;
 use paros_core::{AcceptorConfig, JournalIdentifier, NodeId, QuorumSystem, TenantId};
 
@@ -130,7 +130,7 @@ impl Modes {
     /// `gone` is the move's. `None` when a write did not land: the term
     /// writes nothing more.
     #[tracing::instrument(level = "debug", skip_all)]
-    pub(super) async fn step<P: Providers>(
+    pub(super) async fn step<P: ParosProviders>(
         &mut self,
         (providers, rpc, names, client): (&P, &RpcHandle<P>, &Names, &Client<P>),
         cell: &mut CellSession,
@@ -222,7 +222,7 @@ impl Modes {
     /// the cell hosts, with no slot on a draining, slow or `gone` machine.
     /// `None` when a later term fenced a tenant control journal: the term
     /// is over.
-    async fn next<P: Providers>(
+    async fn next<P: ParosProviders>(
         &self,
         client: &Client<P>,
         cell: &CellSession,
@@ -278,7 +278,7 @@ impl Modes {
 
     /// Book the slots the new mode lacks, so the journal holds `want`'s
     /// count, on no machine `gone`. `None` when a booking did not land.
-    async fn book<P: Providers>(
+    async fn book<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
         cell: &mut CellSession,
@@ -307,7 +307,7 @@ impl Modes {
     /// Ask the leader at server `at` of `nodes` to reconfigure onto the new
     /// mode's members under `system`: every slot when the journal holds as
     /// many as the mode asks for, else the slots placement keeps.
-    async fn reconfigure<P: Providers>(
+    async fn reconfigure<P: ParosProviders>(
         &mut self,
         cell: &CellSession,
         desk: &TenantDesk,
@@ -389,7 +389,7 @@ impl Modes {
     /// Record it, then, once the leader's floor reached it, release every
     /// slot it does not name (no member is retired: see the module doc).
     /// `None` when a write did not land.
-    async fn finish<P: Providers>(
+    async fn finish<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
         cell: &mut CellSession,

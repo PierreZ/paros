@@ -3,7 +3,7 @@
 //! [`paros_core::ProxyLeader`], the third driver beside
 //! [`run_node`](crate::run_node) and [`run_matchmaker`](crate::run_matchmaker).
 //!
-//! Written once over moonpool's `P: Providers`, so the *same* loop runs in
+//! Written once over `P: ParosProviders`, so the *same* loop runs in
 //! production and deterministic simulation; the harness adapts a moonpool
 //! `Process` to it exactly as it adapts the node. The loop serves the node
 //! contract's **Phase-2 subset** — it receives the leader's delegated
@@ -31,7 +31,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use moonpool_core::{Providers, SimulationError, TimeProvider};
+use crate::ParosProviders;
+use moonpool_core::{LocalTimeProvider, SimulationError};
 use paros_core::{
     AcceptorConfig, Audience, Ballot, JournalIdentifier, Message, NodeId, Party, ProxyId,
     ProxyLeader, Slot,
@@ -276,7 +277,7 @@ fn note_decided(decided: &mut BTreeSet<JournalIdentifier>, journal: JournalIdent
 
 /// Drive a paros proxy leader to completion over the given providers.
 ///
-/// Generic over `P: Providers` (production *or* simulation). The loop owns
+/// Generic over `P: ParosProviders` (production *or* simulation). The loop owns
 /// one [`ProxyLeader`] per journal of `config` (#193), serves the node
 /// contract's Phase-2 subset on `local_addr`, and sends to the acceptors and
 /// learners named in `members` — the full **node pool** (`NodeId` →
@@ -320,7 +321,7 @@ pub async fn run_proxy<P, A, F>(
     journal_audit: F,
 ) -> Result<(), RunError>
 where
-    P: Providers,
+    P: ParosProviders,
     // Not `Send + 'static`, as on `run_node`: a hook is consulted from this
     // loop and never from a spawned task.
     A: Audit + Clone + Send + Sync + 'static,

@@ -38,7 +38,8 @@
 
 use std::fmt::Write as _;
 
-use moonpool_core::{Detach, Providers, StorageProvider, TaskProvider};
+use crate::ParosProviders;
+use moonpool_core::{Detach, LocalStorageProvider, LocalTaskProvider};
 use paros_core::NodeId;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
@@ -255,15 +256,15 @@ pub fn spawn_writer<P, S, A>(
     shutdown: CancellationToken,
 ) -> CacheSink
 where
-    P: Providers,
-    S: StorageProvider + Clone + 'static,
+    P: ParosProviders,
+    S: LocalStorageProvider + Clone + 'static,
     A: Audit + Send + Sync + 'static,
 {
     assert!(node.0 != 0, "a cache is a machine's");
     let (latest, mut offered) = watch::channel(None::<CachedRegistry>);
     providers
-        .task()
-        .spawn_task("paros-machine-registry-cache", async move {
+        .local_task()
+        .spawn_local_task("paros-machine-registry-cache", async move {
             let mut written = cached;
             loop {
                 moonpool_core::select! {

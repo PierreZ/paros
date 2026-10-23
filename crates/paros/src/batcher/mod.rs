@@ -35,7 +35,8 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use moonpool_core::{Detach, Providers, SimulationResult, TaskProvider, TimeProvider};
+use crate::ParosProviders;
+use moonpool_core::{Detach, LocalTaskProvider, LocalTimeProvider, SimulationResult};
 use moonpool_rpc::{Execution, RpcHandle};
 use paros_core::{
     Batch, BatchLimits, Batcher, JournalId, JournalIdentifier, NodeId, TenantId, Unbatcher,
@@ -170,7 +171,7 @@ pub struct BatcherBook {
 ///
 /// If `book` names no node, or `settings` breaks a floor.
 #[tracing::instrument(level = "debug", skip_all, fields(listen = %listen))]
-pub async fn run_batcher<P: Providers>(
+pub async fn run_batcher<P: ParosProviders>(
     providers: P,
     (listen, tunables, transport): (SocketAddr, &DriverTunables, &Transport),
     settings: BatcherSettings,
@@ -204,7 +205,7 @@ pub async fn run_batcher<P: Providers>(
 /// # Errors
 ///
 /// The endpoint could not be registered.
-pub(crate) fn spawn<P: Providers>(
+pub(crate) fn spawn<P: ParosProviders>(
     providers: &P,
     rpc: &RpcHandle<P>,
     settings: BatcherSettings,
@@ -235,7 +236,10 @@ pub(crate) fn spawn<P: Providers>(
         (book, names),
         shutdown,
     );
-    providers.task().spawn_task("paros-batcher", task).detach();
+    providers
+        .local_task()
+        .spawn_local_task("paros-batcher", task)
+        .detach();
     Ok(())
 }
 
@@ -243,7 +247,7 @@ pub(crate) fn spawn<P: Providers>(
 type Requests = Inbound<BatchWriteRpc, Write, WriteAck>;
 
 /// What the batcher's loop and its flushes share.
-struct Shared<P: Providers> {
+struct Shared<P: ParosProviders> {
     providers: P,
     settings: BatcherSettings,
     /// The limits a leader taught a flush, for the loop's next push.
@@ -254,7 +258,7 @@ struct Shared<P: Providers> {
 
 /// The nodes a batcher sends to, as clients: one per journal, so each
 /// keeps its own leader hint.
-struct Route<P: Providers> {
+struct Route<P: ParosProviders> {
     rpc: RpcHandle<P>,
     names: Names,
     skip: Option<NodeId>,
@@ -262,7 +266,7 @@ struct Route<P: Providers> {
     clients: BTreeMap<JournalIdentifier, Client<P>>,
 }
 
-impl<P: Providers> Route<P> {
+impl<P: ParosProviders> Route<P> {
     /// The client of `journal`, `None` while the book names no node to send
     /// to.
     fn client(
@@ -307,7 +311,7 @@ impl<P: Providers> Route<P> {
 /// cache's other readers would be woken in an order the seed does not
 /// decide (tokio spreads a channel's waiters over several notifiers), so
 /// the loop looks at the book only when it is about to send.
-fn follow_book<P: Providers>(
+fn follow_book<P: ParosProviders>(
     updates: &mut Option<watch::Receiver<Option<CachedRegistry>>>,
     route: &mut Route<P>,
 ) {
@@ -331,7 +335,7 @@ type Held = ReplySender<WriteAck>;
 
 /// The batcher's loop.
 #[tracing::instrument(level = "debug", skip_all)]
-async fn serve<P: Providers>(
+async fn serve<P: ParosProviders>(
     providers: P,
     rpc: RpcHandle<P>,
     mut requests: Requests,
@@ -432,7 +436,7 @@ async fn serve<P: Providers>(
 }
 
 /// Send `batch` (unfenced) in a task of its own.
-fn flush<P: Providers>(
+fn flush<P: ParosProviders>(
     shared: &Arc<Shared<P>>,
     route: &mut Route<P>,
     held: &mut BTreeMap<u64, Held>,
@@ -444,7 +448,7 @@ fn flush<P: Providers>(
 
 /// Send `batch` as one write carrying `fence`, in a task of its own, and
 /// answer each of its writes from the leader's answer.
-fn flush_with<P: Providers>(
+fn flush_with<P: ParosProviders>(
     shared: &Arc<Shared<P>>,
     route: &mut Route<P>,
     held: &mut BTreeMap<u64, Held>,
@@ -478,8 +482,8 @@ fn flush_with<P: Providers>(
     shared
         .providers
         .clone()
-        .task()
-        .spawn_task("paros-batcher-flush", async move {
+        .local_task()
+        .spawn_local_task("paros-batcher-flush", async move {
             moonpool_core::select! {
                 biased;
                 () = shutdown.cancelled() => {}
@@ -508,7 +512,7 @@ fn write_of(batch: &Batch<u64>, records: Vec<Vec<u8>>, fence: Option<Fence>) -> 
 }
 
 /// Send `batch`, then answer every write of it.
-async fn answer<P: Providers>(
+async fn answer<P: ParosProviders>(
     shared: &Shared<P>,
     client: &Client<P>,
     batch: Batch<u64>,
@@ -579,7 +583,11 @@ async fn answer<P: Providers>(
 /// One write to the journal's leader: the hints followed here, as a
 /// frontend follows them, and stripped from the answer. A write that may
 /// have run with no answer is answered unanswered, never sent again.
-async fn send<P: Providers>(shared: &Shared<P>, client: &Client<P>, write: &Write) -> WriteAck {
+async fn send<P: ParosProviders>(
+    shared: &Shared<P>,
+    client: &Client<P>,
+    write: &Write,
+) -> WriteAck {
     let count = client.server_count();
     assert!(count > 0, "a batcher sends to at least one node");
     let tunables = &shared.settings.client;

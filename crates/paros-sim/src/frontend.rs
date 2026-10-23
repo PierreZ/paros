@@ -449,18 +449,22 @@ impl Process for FrontendProcess {
 
     #[tracing::instrument(level = "debug", skip_all)]
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-        dispatch(
-            ctx,
-            "every frontend process is mapped to the frontend role",
-            "a frontend",
-            |role| match role {
-                ProcessRole::Frontend(rank) => Some(rank),
-                _ => None,
-            },
-            |deployment, rank, my_ip| async move {
-                Box::pin(run_frontend_role(ctx, &deployment, rank, &my_ip)).await
-            },
-        )
+        ctx.run_local(self.name(), |ctx| async move {
+            let ctx = &ctx;
+            dispatch(
+                ctx,
+                "every frontend process is mapped to the frontend role",
+                "a frontend",
+                |role| match role {
+                    ProcessRole::Frontend(rank) => Some(rank),
+                    _ => None,
+                },
+                |deployment, rank, my_ip| async move {
+                    Box::pin(run_frontend_role(ctx, &deployment, rank, &my_ip)).await
+                },
+            )
+            .await
+        })
         .await
     }
 }
