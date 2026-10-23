@@ -61,6 +61,9 @@ pub fn start(count: u64, parent: &Path) -> Result<LocalCell, String> {
     let token = stop.clone();
     let thread = std::thread::Builder::new()
         .name("local-cell".into())
+        // Every machine of the cell polls on this one thread, and an
+        // unoptimized build's futures nest deeper than the 2 MiB default.
+        .stack_size(LOCAL_CELL_STACK)
         .spawn(move || run(machines, &token))
         .map_err(|e| format!("local cell thread: {e}"))?;
     Ok(LocalCell {
@@ -72,6 +75,10 @@ pub fn start(count: u64, parent: &Path) -> Result<LocalCell, String> {
 }
 
 /// `count` free loopback ports: each bound, read and released.
+/// The local cell thread's stack: the size of a main thread's (8 MiB) many
+/// times over, enough for a debug build's deepest poll.
+const LOCAL_CELL_STACK: usize = 64 << 20;
+
 fn ports(count: u64) -> Result<Vec<SocketAddr>, String> {
     let listeners = (0..count)
         .map(|_| TcpListener::bind("127.0.0.1:0").map_err(|e| format!("a loopback port: {e}")))

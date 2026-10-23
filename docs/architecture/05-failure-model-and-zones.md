@@ -75,10 +75,12 @@ masked (#176).
 **The storage contract.** paros's stores are moonpool-journal's (`paros::journal`), and the
 simulation must give them at least the chaos the harness's in-memory stores carry today (decided
 on 2026-10-04, #176, #202). Every storage fault moonpool can inject is eventually in contract.
-Three families start masked through moonpool's `storage_fault_mask` (moonpool#292), each with
+Four families start masked through moonpool's `storage_fault_mask` (moonpool#292), each with
 an issue to lift the mask: phantom writes (a write acknowledged as synced that never lands loses
 an acknowledged vote, which no quorum survives), a hung disk (`DiskFailure`: it needs a storage
-watchdog in the driver) and stall/throttle episodes (`Degradation`). Barrier violations ("sync
+watchdog in the driver), stall/throttle episodes (`Degradation`) and failed writebacks
+(`WritebackError`, fsyncgate, moonpool#355: a retried sync succeeds with the bytes not durable,
+and a re-opened journal reads them as durable; masked on 2026-10-23, #720 (fsyncgate)). Barrier violations ("sync
 lies") and moonpool's slow-disk extremes run unmasked (decided on 2026-10-06, #176): no moonpool
 profile draws barrier violations, and the slow-disk extremes are a performance knob the mask
 does not cover; if paros does not stay live on them, that is a finding, not a knob to clamp.
