@@ -226,6 +226,12 @@ pub(super) struct MatchmakerAudit {
     /// matchmaker's disk, but the fact that a quorum once held it is what
     /// makes the configuration effective forever after.
     reconfigurations: BTreeMap<Ballot, (AcceptorConfig, BTreeSet<u64>)>,
+    /// Every leadership won, by its ballot, with the configuration it ran:
+    /// a reconfiguration below a won leadership under another configuration
+    /// was refused as stale by every matchmaker that registered the
+    /// leadership, so a minority holds it and no campaign need adopt it
+    /// (`ColocatedNode::probe_floor`, #278).
+    won: BTreeMap<Ballot, AcceptorConfig>,
     /// Every candidate's matchmaking phase, keyed by `(node, ballot)`.
     campaigns: BTreeMap<(u64, Ballot), Campaign>,
     /// Every open membership probe (#173), keyed by `(node, tag)`.
@@ -924,6 +930,11 @@ impl MatchmakerAudit {
 
     /// Whether `node` holds a matchmaker quorum for `ballot` — the licence
     /// for any `Prepare` and any leadership at that ballot.
+    /// A leadership won `ballot` under `config`.
+    pub(super) fn leadership_won(&mut self, ballot: Ballot, config: &AcceptorConfig) {
+        self.won.insert(ballot, config.clone());
+    }
+
     pub(super) fn phase1_licensed(&self, node: u64, ballot: Ballot) -> bool {
         self.campaigns
             .get(&(node, ballot))
@@ -1721,12 +1732,20 @@ impl MatchmakerAudit {
         // a stale belief must have aborted instead (`campaign_stale`), so a
         // superseded configuration is never reinstated by an election. A
         // reconfiguration campaign is exempt: it is the next one.
+        // A reconfiguration below a leadership that won under another
+        // configuration is one that leadership's matchmaking quorum
+        // missed, held by a minority: the candidate keeps its belief over
+        // it (`probe_floor`; replay-main 9491883622406273044 on 832b116).
         let effective = folded_effective(campaign);
         if !campaign.kind.is_reconfiguration()
             && let Some((newest, config)) = effective
         {
+            let below_a_leadership = self
+                .won
+                .range((Bound::Excluded(newest), Bound::Excluded(ballot)))
+                .any(|(_, ran)| *ran != config);
             assert_always!(
-                campaign.config.as_ref() == Some(&config),
+                campaign.config.as_ref() == Some(&config) || below_a_leadership,
                 "matchmaking: a completed ordinary campaign registered the effective configuration",
                 { "node" => node.0, "round" => ballot.round, "newest_round" => newest.round }
             );

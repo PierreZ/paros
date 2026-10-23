@@ -139,8 +139,11 @@ struct PendingRead {
 
 /// The journal reads a driver is holding open.
 pub(crate) struct JournalReads {
-    /// Reads waiting on their quorum read, by the core's `ctx`.
-    confirming: BTreeMap<u64, PendingRead>,
+    /// Reads waiting on their quorum read, by the core's `ctx`: every read
+    /// that arrived before the row was asked rides the same quorum read
+    /// (`Input::Read`), so one `PreRead` per peer answers them all. Never
+    /// empty under a token.
+    confirming: BTreeMap<u64, Vec<PendingRead>>,
     /// Confirmed reads waiting at the tail, oldest first.
     parked: Vec<PendingRead>,
     /// This runtime's first token, drawn at random when it was built. The
@@ -321,8 +324,13 @@ impl JournalReads {
             "every confirming read carries a token minted here"
         );
         assert!(
+            self.confirming.values().all(|riders| !riders.is_empty()),
+            "a quorum read is confirming for at least one read"
+        );
+        assert!(
             self.confirming
                 .values()
+                .flatten()
                 .chain(&self.parked)
                 .all(|p| p.limit > 0 && p.bytes > 0),
             "every pending read's page is bounded"
@@ -334,9 +342,21 @@ impl JournalReads {
         assert!(
             self.confirming
                 .values()
+                .flatten()
                 .chain(&self.parked)
                 .all(|p| p.parked_at <= self.now),
             "no read was parked in the future"
+        );
+        // Riders of one quorum read arrived together: one row, one head,
+        // one deadline.
+        assert!(
+            self.confirming.values().all(|riders| {
+                riders.iter().all(|p| {
+                    (p.row, p.opened, p.parked_at)
+                        == (riders[0].row, riders[0].opened, riders[0].parked_at)
+                })
+            }),
+            "riders of one quorum read share its row, head and deadline"
         );
     }
 
@@ -350,24 +370,36 @@ impl JournalReads {
         self.next_ctx
     }
 
-    /// Park `req` on the quorum read the caller just opened at
-    /// [`JournalReads::next_ctx`] (asking `row`, with the fold head at
-    /// `opened`), until the core confirms it. Its page and its tail wait
-    /// are cut to `limits`.
+    /// Park `reads` (at least one) on the quorum read the caller just
+    /// opened at [`JournalReads::next_ctx`] (asking `row`, with the fold
+    /// head at `opened`), until the core confirms it. Every one arrived
+    /// before the row was asked, so the one answer serves them all. Each
+    /// page and tail wait is cut to `limits`.
+    ///
+    /// # Panics
+    ///
+    /// If `reads` is empty (a programmer error).
     pub(crate) fn park(
         &mut self,
-        req: &Read,
-        reply: ReplySender<ReadAck>,
+        reads: Vec<(Read, ReplySender<ReadAck>)>,
         limits: ReadLimits,
         row: Option<usize>,
         opened: Option<Slot>,
     ) {
+        assert!(!reads.is_empty(), "a quorum read is opened for a read");
+        if reads.len() > 1 {
+            // BUGGIFY pairing (the node loop's drain, which a site skips):
+            // reads that waited together share the row's answer.
+            moonpool_assertions::reachable!(
+                "node: reads that arrived together share one quorum read"
+            );
+        }
         let ctx = self.next_ctx;
         let minted = self.minted();
         self.next_ctx = self.next_ctx.wrapping_add(1);
-        self.confirming.insert(
-            ctx,
-            PendingRead {
+        let riders: Vec<PendingRead> = reads
+            .into_iter()
+            .map(|(req, reply)| PendingRead {
                 from: Seq(req.from_seq),
                 limit: limits.page(req.limit),
                 bytes: limits.bytes,
@@ -376,9 +408,15 @@ impl JournalReads {
                 row,
                 opened,
                 reply,
-            },
-        );
+            })
+            .collect();
+        let before = self.confirming.len();
+        self.confirming.insert(ctx, riders);
         assert!(self.minted() > minted, "a read token is never reused");
+        assert!(
+            self.confirming.len() == before + 1,
+            "a parked quorum read is a new token"
+        );
         self.assert_invariants();
     }
 
@@ -397,18 +435,14 @@ impl JournalReads {
         audit: &A,
     ) {
         for state in served {
-            let Some(mut pending) = self.confirming.remove(&state.ctx) else {
+            let Some(riders) = self.confirming.remove(&state.ctx) else {
                 continue;
             };
-            audit.quorum_read_served(
-                node,
-                state.ctx,
-                pending.row,
-                state.index,
-                fold,
-                pending.opened,
-                leader,
-            );
+            // One quorum read, reported once; every rider is a page of it.
+            let (row, opened) = riders
+                .first()
+                .map_or((None, None), |first| (first.row, first.opened));
+            audit.quorum_read_served(node, state.ctx, row, state.index, fold, opened, leader);
             tracing::info!(
                 node = node.0,
                 ctx = state.ctx,
@@ -418,19 +452,21 @@ impl JournalReads {
                 leader,
                 "quorum_read_served"
             );
-            let page = page_for(&pending, &read);
-            if at_end(&page) && pending.wait_ticks > 0 {
-                pending.parked_at = self.now;
-                self.parked.push(pending);
-            } else {
-                send(
-                    &page,
-                    pending.from,
-                    LogReadAnswer::Immediate,
-                    pending.reply,
-                    node,
-                    audit,
-                );
+            for mut pending in riders {
+                let page = page_for(&pending, &read);
+                if at_end(&page) && pending.wait_ticks > 0 {
+                    pending.parked_at = self.now;
+                    self.parked.push(pending);
+                } else {
+                    send(
+                        &page,
+                        pending.from,
+                        LogReadAnswer::Immediate,
+                        pending.reply,
+                        node,
+                        audit,
+                    );
+                }
             }
         }
         // A confirmed read leaves the confirming tally, answered or parked.
@@ -490,24 +526,28 @@ impl JournalReads {
         audit: &A,
     ) {
         self.now = ticks;
+        // Riders of one quorum read share its deadline.
         let overdue: Vec<(u64, bool)> = self
             .confirming
             .iter()
-            .filter_map(|(ctx, pending)| {
-                let by_deadline = ticks.saturating_sub(pending.parked_at) > retry_ticks;
+            .filter_map(|(ctx, riders)| {
+                let parked_at = riders.first().map_or(ticks, |first| first.parked_at);
+                let by_deadline = ticks.saturating_sub(parked_at) > retry_ticks;
                 (expire_all || by_deadline).then_some((*ctx, !by_deadline))
             })
             .collect();
         for (ctx, early) in overdue {
-            if let Some(pending) = self.confirming.remove(&ctx) {
-                audit.read_expired(node, early);
-                answer(
-                    audit,
-                    node,
-                    Reply::ReadUnserved,
-                    pending.reply,
-                    ReadAck::default(),
-                );
+            if let Some(riders) = self.confirming.remove(&ctx) {
+                for pending in riders {
+                    audit.read_expired(node, early);
+                    answer(
+                        audit,
+                        node,
+                        Reply::ReadUnserved,
+                        pending.reply,
+                        ReadAck::default(),
+                    );
+                }
             }
         }
         // What is still confirming is inside its deadline, and an early
@@ -521,6 +561,7 @@ impl JournalReads {
         assert!(
             self.confirming
                 .values()
+                .flatten()
                 .all(|p| ticks.saturating_sub(p.parked_at) <= retry_ticks),
             "no confirming read outlives its deadline"
         );

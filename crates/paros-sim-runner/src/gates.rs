@@ -46,6 +46,10 @@ pub struct Rare {
 /// window seldom reaches, #485 the double fault, #486 the rest.
 pub const RARE: &[Rare] = &[
     Rare {
+        msg: "matchmaking: a campaign keeps its belief over a reconfiguration below a won leadership",
+        reason: "a reconfiguration registered at one matchmaker only, whose holder answers a member's campaign after a later leadership won under another configuration: one witness, replay-main 9491883622406273044 on PR #718 (one matchmaker host); 0 of 300 hunt seeds (#486)",
+    },
+    Rare {
         msg: "batcher: a merged write over the leader's limits is split",
         reason: "a batcher above the leader's limits whose merged write passes a small max_batch_records or max_batch_bytes knob: fired on PR #698's first sweep, missed by its later ones; 0 of 600 single-seed hunts with the batchers scenario (#702 (batcher rare paths))",
     },

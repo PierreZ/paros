@@ -69,7 +69,7 @@ pub use config::{
     parse_addr,
 };
 pub use events::{command_hash, message_kind, registration_history_hash};
-pub use journals::JournalStores;
+pub use journals::{HostEnded, JournalStores};
 pub use system::ControlPlan;
 pub use tunables::BelowFloor;
 
@@ -881,7 +881,7 @@ impl<P: ParosProviders> Shared<'_, P> {
                 };
                 park_call(rt, result, call, self);
             }
-            Input::Read { req, reply } => {
+            Input::Read(reads) => {
                 let ctx = rt.waiters.reads.next_ctx();
                 // The configuration the core reads over is its read basis
                 // (#260), not its belief; without one the core opens nothing
@@ -916,8 +916,7 @@ impl<P: ParosProviders> Shared<'_, P> {
                 }
                 rt.node.quorum_read_in(ctx, row);
                 rt.waiters.reads.park(
-                    &req,
-                    reply,
+                    reads,
                     log_reads::ReadLimits::of(&self.tunables),
                     row,
                     opened,
@@ -1841,11 +1840,70 @@ where
 /// When a founding member's plan names a founding member `members` has no
 /// lane to (a programmer error: a machine passes its plan's members).
 #[tracing::instrument(level = "debug", skip_all, fields(local_addr = %local_addr, members = members.len(), matchmakers = matchmakers.len(), proxies = proxies.len(), replicas = replicas.len()))]
+// The parameters are the node's complete wiring.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_journals<P, J>(
+    providers: P,
+    stores: J,
+    node: NodeId,
+    local_addr: String,
+    members: Vec<(NodeId, String)>,
+    matchmakers: Vec<(MatchmakerId, String)>,
+    proxies: Vec<(ProxyId, String)>,
+    replicas: Vec<(NodeId, String)>,
+    system: Option<ControlPlan>,
+    machine: Option<CellMachine>,
+    tunables: DriverTunables,
+    transport: Transport,
+    shutdown: CancellationToken,
+) -> Result<(), RunError>
+where
+    P: ParosProviders,
+    J: JournalStores,
+{
+    let mut hosted = None;
+    let served = serve_journals(
+        providers,
+        stores,
+        node,
+        local_addr,
+        members,
+        matchmakers,
+        proxies,
+        replicas,
+        system,
+        machine,
+        tunables,
+        transport,
+        shutdown,
+        &mut hosted,
+    )
+    .await;
+    // The incarnation is over and its shutdown fired: what the stores
+    // hosted beside the journals ends before the next incarnation opens the
+    // same disk. A matchmaker host still booting a set would otherwise read
+    // its store while the next host writes it (two hosts on one store: a
+    // stale boot, recipe 490398:3305291055031534832 on seed
+    // 436643911234798984, d404bf5).
+    if let Some(ended) = hosted {
+        ended.wait().await;
+    }
+    served
+}
+
+/// One incarnation of [`run_journals`]: its loop, until it exits. What
+/// the stores host beside the journals is handed out in `hosted`, so the
+/// caller waits for its end.
 // One cohesive select loop: every arm is a thin feed into the core plus the
 // same drain/maintain tail; splitting arms out would only scatter the loop's
-// shared state. The parameters are the node's complete wiring.
-#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
-pub async fn run_journals<P, J>(
+// shared state. The parameters are the node's complete wiring, handed on
+// by value from `run_journals` as they were before the split.
+#[allow(
+    clippy::too_many_lines,
+    clippy::too_many_arguments,
+    clippy::large_types_passed_by_value
+)]
+async fn serve_journals<P, J>(
     providers: P,
     mut stores: J,
     node: NodeId,
@@ -1859,6 +1917,7 @@ pub async fn run_journals<P, J>(
     tunables: DriverTunables,
     transport: Transport,
     shutdown: CancellationToken,
+    hosted: &mut Option<HostEnded>,
 ) -> Result<(), RunError>
 where
     P: ParosProviders,
@@ -2039,7 +2098,7 @@ where
     let rpc_handle = edge.handle().clone();
     // What the stores host beside the journals on this edge: a founding
     // member's matchmaker sets (#190).
-    stores.host_on_edge(
+    *hosted = stores.host_on_edge(
         &providers,
         &rpc_handle,
         machine_group.as_ref(),
@@ -2399,7 +2458,7 @@ where
                 let outcome = shared.input(rt, Input::Propose(Call::Truncate { leader, up_to, reply })).await;
                 journals.fold(journal, outcome, ticks, self_id)?;
             }
-            Some((req, reply)) = rpc.log_read.recv() => {
+            Some(first) = rpc.log_read.recv() => {
                 // A journal `Read` (#204), served through the leaderless
                 // read (#143, Paxos Quorum Reads) on any node: the core asks
                 // a Phase-1 quorum — a row of a grid, the whole
@@ -2407,39 +2466,76 @@ where
                 // the read is served from this node's journal fold once it
                 // covers the maximum. Never a redirect: no role is asked
                 // for.
-                if halt.is_some() {
-                    stop::refused("read");
-                    shared.with(&node_audit).answer(
-                        Reply::ReadUnserved,
-                        reply,
-                        ReadAck { stopping: true, ..ReadAck::default() },
-                    );
-                    continue;
-                }
-                let journal = JournalIdentifier::new(TenantId(req.tenant), JournalId(req.journal));
-                let Some(rt) = journals.live.get_mut(&journal) else {
-                    if refuse_unknown(&journals, follower.as_ref(), journal, "read", self_id, &node_audit) {
-                        shared.with(&node_audit).answer(
-                            Reply::LogRead,
-                            reply,
-                            ReadAck { unknown_journal: true, ..ReadAck::default() },
-                        );
+                //
+                // Every read already in the inbox goes with the first
+                // (`Input::Read`): reads that arrived together are one
+                // quorum read, since each arrived before the row is asked.
+                // One quorum read per `Read` sends one `PreRead` per read
+                // per peer, and a client that reads a window of pages at
+                // once (`client::election::read_election`, 16 pages) sent
+                // more than a peer lane holds (`peer_queue_capacity`, a
+                // keep-newest mailbox of 6 on the witness): the oldest
+                // `PreRead`s were evicted, those reads expired unserved
+                // after `read_retry_ticks`, every cold read of the election
+                // failed, and a leader's own watch read caught in the burst
+                // starved its lease (replay-main 18315968079077685493 on
+                // 86ca15c, red on "fleet: an operation an operator stopped
+                // in ends in the recovery tail" and "election: the election
+                // settles on one renewing leader after chaos"). The inbox
+                // (`client_inbox_capacity`) bounds the drain. BUGGIFY: the
+                // first read goes alone, so the one-read path stays in
+                // reach.
+                let mut arrived = vec![first];
+                if moonpool_buggify::buggify_with_prob!(0.1) {
+                    moonpool_assertions::reachable!("node: a read opens a quorum read alone");
+                } else {
+                    while let Some(next) = rpc.log_read.try_recv() {
+                        arrived.push(next);
                     }
-                    continue;
-                };
-                let reply = meter.call(
-                    journal,
-                    || journal_names(follower.as_ref(), cell.as_ref(), journal),
-                    (CallKind::Read, 0),
-                    reply,
-                    metered::read_answer,
-                );
-                rt.slow = slow_members(
-                    &rt.node,
-                    follower.as_ref().map(system::ControlFollower::registry),
-                );
-                let outcome = shared.input(rt, Input::Read { req, reply }).await;
-                journals.fold(journal, outcome, ticks, self_id)?;
+                }
+                let mut by_journal: BTreeMap<JournalIdentifier, Vec<_>> = BTreeMap::new();
+                for (req, reply) in arrived {
+                    if halt.is_some() {
+                        stop::refused("read");
+                        shared.with(&node_audit).answer(
+                            Reply::ReadUnserved,
+                            reply,
+                            ReadAck { stopping: true, ..ReadAck::default() },
+                        );
+                        continue;
+                    }
+                    let journal = JournalIdentifier::new(TenantId(req.tenant), JournalId(req.journal));
+                    let Some(rt) = journals.live.get_mut(&journal) else {
+                        if refuse_unknown(&journals, follower.as_ref(), journal, "read", self_id, &node_audit) {
+                            shared.with(&node_audit).answer(
+                                Reply::LogRead,
+                                reply,
+                                ReadAck { unknown_journal: true, ..ReadAck::default() },
+                            );
+                        }
+                        continue;
+                    };
+                    let reply = meter.call(
+                        journal,
+                        || journal_names(follower.as_ref(), cell.as_ref(), journal),
+                        (CallKind::Read, 0),
+                        reply,
+                        metered::read_answer,
+                    );
+                    rt.slow = slow_members(
+                        &rt.node,
+                        follower.as_ref().map(system::ControlFollower::registry),
+                    );
+                    by_journal.entry(journal).or_default().push((req, reply));
+                }
+                for (journal, reads) in by_journal {
+                    // Found live above, and nothing ran in between.
+                    let Some(rt) = journals.live.get_mut(&journal) else {
+                        unreachable!("a read's journal stays live until its input");
+                    };
+                    let outcome = shared.input(rt, Input::Read(reads)).await;
+                    journals.fold(journal, outcome, ticks, self_id)?;
+                }
             }
             Some((journal, msg)) = rpc.deliver.recv() => {
                 // A peer Paxos message → its journal's single input router.
@@ -2802,10 +2898,17 @@ where
             Some(answer) = follow_answers.recv() => {
                 // A seed's answer to this node's follow read of a system
                 // journal (#189): fold it and apply what moved. The next read
-                // opens on the next tick.
+                // opens on the next tick, unless the page stopped short of
+                // the seed's committed end: then it opens now, so a seed
+                // that serves short pages (`max_read_records` down to one)
+                // is followed at the round trip's pace, not the tick's
+                // (witness replay-main 2454129073386138776 on 7ceb194: a
+                // 420-record registry, one record per 160 ms tick, red on
+                // "registry: every live node's fold reaches the registry's
+                // tail after chaos").
                 let Some(f) = follower.as_mut() else { continue };
                 let journal = answer.journal();
-                let events = f.fold_remote(answer);
+                let (events, behind) = f.fold_remote(answer);
                 let checkpoints = if journal == f.registry_key() { f.take_checkpoints() } else { Vec::new() };
                 let mut sys = SystemCtx { stores: &mut stores, journals: &mut journals, now: ticks, tunables: &tunables, out: &out, lanes: &lanes, links: &links, rpc: &rpc_handle, audit: &node_audit };
                 let (mut admit, owed) = sys.apply(f, journal, events, checkpoints).await;
@@ -2816,6 +2919,10 @@ where
                     admission_owed.get_or_insert(time.now());
                 }
                 admit_owed(&mut journals, f, &mut admission_owed, late_admitter, time.now());
+                if behind && !crate::scenario::lag_follow() {
+                    moonpool_assertions::reachable!("driver: a short follow page opens the next read at once");
+                    f.poll_remote(&providers, |journal| journals.live.contains_key(&journal));
+                }
             }
             _ = time.sleep(next_tick.saturating_sub(time.now())) => {
                 // Pacing, not a protocol bound: every timeout the core owns is

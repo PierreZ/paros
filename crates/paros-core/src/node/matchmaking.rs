@@ -681,12 +681,25 @@ impl ColocatedNode {
             self.become_follower(None);
             return MatchStep::UnknownMember;
         }
+        // The campaign's twin of the probe floor (#278): a reconfiguration
+        // at or below a leadership this node knows won is one that
+        // leadership's matchmaking quorum missed (a registration refused as
+        // stale by every matchmaker that registered the leadership, so held
+        // by a minority), never in effect. Adopting it bound the members of
+        // the configuration in force to a dead rotation that left them
+        // outside, probing forever, while the rotation's members knew
+        // better and did not lead: no leader for a 190 s tail (replay-main
+        // 9491883622406273044 on 832b116, red on "cluster converged after
+        // chaos"). Phase 1 still covers it: it stays in `prior`.
+        let floor = self.probe_floor();
         let m = self.matchmaking.as_mut().expect("the phase is still open");
         if !m.quorum_held(matchmakers) {
             MatchStep::Registered {
                 remaining: m.remaining(matchmakers),
             }
-        } else if let Some((newest, config)) = m.stale_belief() {
+        } else if let Some((newest, config)) =
+            m.stale_belief().filter(|(newest, _)| *newest > floor)
+        {
             // Stale belief: the quorum's histories name a
             // reconfiguration to a configuration other than the
             // one this ordinary campaign registered. Adopt the
@@ -722,6 +735,12 @@ impl ColocatedNode {
             // cover. A belief that matches the effective
             // configuration (or predates any reconfiguration)
             // runs the leadership under what it registered.
+            if m.stale_belief().is_some() {
+                probe!(
+                    reachable,
+                    "matchmaking: a campaign keeps its belief over a reconfiguration below a won leadership"
+                );
+            }
             let prior = m.prior();
             let watermark = m.watermark();
             let disagreements = m.disagreements();
