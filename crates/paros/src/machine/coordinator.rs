@@ -38,7 +38,11 @@
 //!    that answers as a machine of this cell is written `MachineAdmitted`
 //!    once, and only then may placement book it (#511 (placement books
 //!    machines that never served)); one silent for
-//!    `machine_down_after` is written `MachineDown`. A machine held down
+//!    `machine_down_after` is written `MachineDown`. Its silence runs
+//!    from its last answer, else from this watch's first `Identify` of it,
+//!    never from the watch's start (#654 (live machine marked down)): a
+//!    machine that enters the book mid-term is one lost probe from being
+//!    down otherwise. A machine held down
 //!    and silent for `machine_replace_after` is gone (#475 (re-place after
 //!    the Down bound)): the term's moves re-place its roles as a draining
 //!    machine's, unless an operator's maintenance window over it or its
@@ -377,8 +381,14 @@ pub struct Watch {
     departed: std::collections::BTreeSet<NodeId>,
     /// How often a round runs.
     every: Duration,
-    /// When the watch started: a machine never heard is silent since then.
-    started: Duration,
+    /// When this watch first asked each machine: a machine never heard is
+    /// silent since then, never since the watch started (#654 (live machine
+    /// marked down)). A machine registered 22 s into a term was asked once,
+    /// its probe was lost to its own admission (the waiting machine drops
+    /// its endpoints and serves them again), and the watch read the whole
+    /// term as its silence: one missed probe marked a live machine down
+    /// (witness replay-main 9118588131313873891 on 3525236).
+    asked: BTreeMap<NodeId, Duration>,
     /// When the next round is due.
     next: Duration,
     /// When this watch last watched: the end of its last round, or its
@@ -447,7 +457,7 @@ impl Watch {
             windows: BTreeMap::new(),
             departed: std::collections::BTreeSet::new(),
             every,
-            started: now,
+            asked: BTreeMap::new(),
             next: now,
             seen: now,
             heard: BTreeMap::new(),
@@ -490,7 +500,9 @@ impl Watch {
         if !self.heard.is_empty() {
             moonpool_assertions::reachable!("coordinator: a term resumed the last term's watch");
         }
-        self.started += gap;
+        for since in self.asked.values_mut() {
+            *since += gap;
+        }
         for since in self.heard.values_mut() {
             *since += gap;
         }
@@ -500,7 +512,10 @@ impl Watch {
         self.seen = now;
         self.next = now;
         self.ran = false;
-        assert!(self.started <= now, "a resumed watch started by now");
+        assert!(
+            self.asked.values().all(|since| *since <= now),
+            "a resumed watch asked every machine by now"
+        );
         assert!(
             self.heard.values().all(|since| *since <= now),
             "a resumed watch heard every machine by now"
@@ -558,7 +573,7 @@ impl Watch {
             {
                 continue;
             }
-            let since = self.heard.get(&id).copied().unwrap_or(self.started);
+            let since = self.silent_since(id, now);
             if now.saturating_sub(since) < self.replace_after {
                 continue;
             }
@@ -683,6 +698,9 @@ impl Watch {
         let mut answered: Vec<(NodeId, Address, Duration)> = Vec::new();
         for (id, addr) in machines {
             let asked = client.now();
+            // The silence of a machine this watch never heard runs from its
+            // first ask, never from the watch's start.
+            self.asked.entry(id).or_insert(asked);
             let answer = bootstrap::identify(providers, rpc, names, &addr, timeout)
                 .await
                 .filter(|ack| ack.node_id == id.0);
@@ -942,12 +960,32 @@ impl Watch {
         }
     }
 
+    /// Since when machine `id` is silent at `now`: its last answer, else
+    /// this watch's first ask of it, else `now` (never asked: no silence).
+    fn silent_since(&self, id: NodeId, now: Duration) -> Duration {
+        let since = self
+            .heard
+            .get(&id)
+            .or_else(|| self.asked.get(&id))
+            .copied()
+            .unwrap_or(now);
+        assert!(since <= now, "a machine is silent since a moment by now");
+        since
+    }
+
     /// The change machine `id`'s silence at `now` makes, if any: `Down`
     /// once it was silent for `down_after`, unless it is held down.
     fn silent(&self, session: &CellSession, id: NodeId, now: Duration) -> Option<SystemCommand> {
         let held = session.registry().liveness(id);
-        let since = self.heard.get(&id).copied().unwrap_or(self.started);
+        let since = self.silent_since(id, now);
         if !held.up || now.saturating_sub(since) < self.down_after {
+            if !self.heard.contains_key(&id) && held.up {
+                // One lost probe, the first this watch sent it: the machine
+                // was asked just now, so its silence is one probe long.
+                moonpool_assertions::reachable!(
+                    "coordinator: a machine's first probe was lost, not a silence"
+                );
+            }
             return None;
         }
         assert!(
