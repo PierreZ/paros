@@ -411,6 +411,24 @@ impl<P: Providers> Election<P> {
         Some(leader.term)
     }
 
+    /// The page of the election journal from `from`, long-polling `wait_ms`.
+    fn page_from(&self, from: u64, wait_ms: u64) -> Read {
+        Read {
+            journal: self.journal.journal.0,
+            tenant: self.journal.tenant.0,
+            from_seq: from,
+            limit: self.client.tunables().page_size,
+            wait_ms,
+        }
+    }
+
+    /// How long a watch the floor outran twice long-polls at the tail: two
+    /// renewal periods, at most a lease ([`FLOOR_RACE_WAIT_MS`] past `u64`).
+    fn floor_race_wait_ms(&self) -> u64 {
+        let wait = (2 * self.tunables.renew_every).min(self.tunables.lease);
+        u64::try_from(wait.as_millis()).unwrap_or(FLOOR_RACE_WAIT_MS)
+    }
+
     /// Read the election journal from the fold's position to its tail (at
     /// most [`WATCH_PAGES`] pages), the first page long-polling `wait_ms` at
     /// the tail, and fold every record. Whether it reached the tail.
@@ -424,6 +442,17 @@ impl<P: Providers> Election<P> {
     /// read 16 renewals in 3.5 s with no renewal, the other founder took
     /// over, and the election never settled).
     ///
+    /// Past its first page, a watch asks for up to [`READ_WINDOW`] pages at
+    /// once, like [`read_election`]. One page per round trip, a leader that
+    /// renews between pages appends a record for each page it reads, so it
+    /// gains on the tail only a page less one record per round trip
+    /// (replay-main 11683990755735688663 on a079991 (#710 (recycled
+    /// segments)): two-record pages at 860 ms, every watch of the recovery
+    /// tail 14 to 16 s long; the coordinator joined the cell 15 s after it
+    /// installed, and the operator's `init` gave up waiting for it, red on
+    /// "fleet: an operation an operator stopped in ends in the recovery
+    /// tail").
+    ///
     /// # Panics
     ///
     /// If an assertion on its own postconditions fails: a programmer error.
@@ -431,6 +460,10 @@ impl<P: Providers> Election<P> {
         let mut wait = wait_ms;
         // Whether a truncation already moved this watch to the floor.
         let mut chased = false;
+        // The pages read ahead, the last page's stride and the tail it saw.
+        let mut ahead: VecDeque<(u64, ReadReport)> = VecDeque::new();
+        let mut stride = 0_u64;
+        let mut tail: Option<u64> = None;
         for _ in 0..WATCH_PAGES {
             if let Some(leader) = self.leading().cloned()
                 && self.renew_when_due(&leader).await
@@ -438,15 +471,16 @@ impl<P: Providers> Election<P> {
                 moonpool_assertions::reachable!("election: a leader renewed between pages");
             }
             let from = self.fold.next();
-            let request = Read {
-                journal: self.journal.journal.0,
-                tenant: self.journal.tenant.0,
-                from_seq: from,
-                limit: self.client.tunables().page_size,
-                wait_ms: wait,
-            };
+            let request = self.page_from(from, wait);
             wait = 0;
-            let report = self.client.read_any(&request, self.first).await;
+            let report = next_page(
+                &self.client,
+                request,
+                self.first,
+                (stride, tail),
+                &mut ahead,
+            )
+            .await;
             self.first = report.server;
             match report.outcome {
                 ReadOutcome::Page {
@@ -460,6 +494,8 @@ impl<P: Providers> Election<P> {
                     if at != from {
                         return false;
                     }
+                    stride = u64::try_from(records.len()).unwrap_or(u64::MAX);
+                    tail = Some(state.next_seq.0);
                     self.floor = state.first_seq.0;
                     let now = self.client.now();
                     for (seq, record) in (from..).zip(&records) {
@@ -497,6 +533,7 @@ impl<P: Providers> Election<P> {
                     // floor and anchor on the leader's record there. The
                     // second time, the floor outran this watch: wait at the
                     // tail for the next renewal ([`FLOOR_RACE_WAIT_MS`]).
+                    ahead.clear();
                     self.served = self.client.now();
                     self.floor = state.first_seq.0;
                     if self.fold.floor_seen(state.first_seq.0) {
@@ -513,12 +550,7 @@ impl<P: Providers> Election<P> {
                         );
                         self.fold
                             .resume_at_tail(state.first_seq.0, state.next_seq.0);
-                        wait = u64::try_from(
-                            (2 * self.tunables.renew_every)
-                                .min(self.tunables.lease)
-                                .as_millis(),
-                        )
-                        .unwrap_or(FLOOR_RACE_WAIT_MS);
+                        wait = self.floor_race_wait_ms();
                     } else {
                         self.fold.gap(state.first_seq.0);
                     }
@@ -855,20 +887,7 @@ pub async fn read_election<P: Providers>(
             wait_ms: wait,
         };
         wait = 0;
-        let report = match ahead.pop_front() {
-            Some((at, report))
-                if at == from
-                    && request.wait_ms == 0
-                    && matches!(report.outcome, ReadOutcome::Page { .. }) =>
-            {
-                moonpool_assertions::reachable!("election: a cold read folds a page it read ahead");
-                report
-            }
-            _ => {
-                ahead.clear();
-                read_ahead(client, request, first, stride, target, &mut ahead).await
-            }
-        };
+        let report = next_page(client, request, first, (stride, target), &mut ahead).await;
         first = report.server;
         match report.outcome {
             ReadOutcome::Page {
@@ -943,10 +962,38 @@ pub async fn read_election<P: Providers>(
     }
 }
 
+/// The page `request` asks for, from server `first` on: the next page of
+/// `ahead` when it starts at `request` and is no long-poll, else read with
+/// the pages after it ([`read_ahead`], `stride` records apart and short of
+/// `tail`), `ahead` emptied first.
+async fn next_page<P: Providers>(
+    client: &Client<P>,
+    request: Read,
+    first: usize,
+    (stride, tail): (u64, Option<u64>),
+    ahead: &mut VecDeque<(u64, ReadReport)>,
+) -> ReadReport {
+    match ahead.pop_front() {
+        Some((at, report))
+            if at == request.from_seq
+                && request.wait_ms == 0
+                && matches!(report.outcome, ReadOutcome::Page { .. }) =>
+        {
+            moonpool_assertions::reachable!("election: a cold read folds a page it read ahead");
+            report
+        }
+        _ => {
+            ahead.clear();
+            read_ahead(client, request, first, stride, tail, ahead).await
+        }
+    }
+}
+
 /// Read `request`, from server `first` on, and the pages after it, up to
 /// [`READ_WINDOW`] in all, `stride` records apart and short of `target`,
 /// into `ahead`: one round trip for the window. A long-poll, an unknown
-/// stride or tail, or a window of one reads `request` alone.
+/// stride or tail, or a window of one reads `request` alone. A cold
+/// [`read_election`] and a leader's [`Election::watch`] both page this way.
 async fn read_ahead<P: Providers>(
     client: &Client<P>,
     request: Read,

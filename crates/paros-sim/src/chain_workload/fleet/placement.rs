@@ -462,9 +462,11 @@ fn unmoved(
 }
 
 /// Whether the slot `target` on `node` is still the window's to keep: a
-/// live journal whose recorded placement names `node`, or a set. Only a
-/// tenant's own mode change records `Placed` (#214 (tenant modes)); a move
-/// records nothing, so a re-placement is still judged. A shrink the tenant
+/// live journal whose recorded placement names `node`, or a set. A mode
+/// change (#214 (tenant modes)) and a move (`moves::finish`, #361 (slow
+/// machines)) both record the configuration in force as `Placed` before
+/// they release a slot, so a slot released off the recorded placement is
+/// theirs to release. A shrink the tenant
 /// asked may release the machine while it is up, which no window forbids
 /// (#359: the window holds the roles of a down machine; witness
 /// 15801232642831952797 on 58e72ec).
@@ -493,6 +495,18 @@ fn kept(
     }
 }
 
+/// Whether `target` is a set whose every remaining slot is on a machine an
+/// open window holds (`open`): a shrink with no free slot to release took a
+/// held one (witness 63463262104038630 on 9f9d706, PR #710: four
+/// machines under windows, a set of four shrunk to three).
+fn shrunk_among_held(registry: &Registry, target: BookingTarget, open: &BTreeSet<u64>) -> bool {
+    matches!(target, BookingTarget::Set { .. })
+        && registry
+            .bookings()
+            .filter(|(_, b)| b.target == target)
+            .all(|(_, b)| open.contains(&b.node.0))
+}
+
 /// While a maintenance window an operator opened still holds (#359), every
 /// slot its machine held when the operator sent it is still booked, unless
 /// the machine left the registered machines, the slot's journal is gone, or
@@ -500,7 +514,14 @@ fn kept(
 /// booked again on the machine for the same journal or set is kept.
 fn maintained(ctx: &SimContext, tenants: &[TenantControl], registry: &Registry) {
     let now = ctx.time().now();
-    for note in crate::machine::maintenance_notes(ctx.state()) {
+    let notes = crate::machine::maintenance_notes(ctx.state());
+    // The machines an open window holds now.
+    let open: BTreeSet<u64> = notes
+        .iter()
+        .filter(|note| now < note.sent + note.length)
+        .map(|note| note.node)
+        .collect();
+    for note in notes {
         if now >= note.sent + note.length {
             continue;
         }
@@ -527,12 +548,16 @@ fn maintained(ctx: &SimContext, tenants: &[TenantControl], registry: &Registry) 
         // shrink a journal off the machine and a later one grow it back
         // onto it: the machine holds the journal again under a new booking,
         // so its role is kept (witness 17657004667486383178 on PR #710).
+        // A set shrunk to its tenant's modes while windows hold more of its
+        // machines than its size releases a held slot all the same
+        // (`machine::sets`): every slot it kept is on a held machine.
         let moved = note
             .slots
             .iter()
             .filter(|(id, target)| {
                 !booked.contains(id)
                     && !held.contains(target)
+                    && !shrunk_among_held(registry, *target, &open)
                     && kept(tenants, registry, *target, node)
             })
             .count();
