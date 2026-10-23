@@ -38,6 +38,27 @@ use super::flight::{Flight, Flush, Input, Landing};
 use super::ready::{ClientWaiters, storage_fault_crash};
 use super::report::{Cadence, Deltas, draw_election_timeout};
 
+/// The end of what a node's stores host beside its journals
+/// ([`JournalStores::host_on_edge`]): resolves once the hosted task ended,
+/// or was dropped.
+#[derive(Debug)]
+pub struct HostEnded(tokio::sync::oneshot::Receiver<()>);
+
+impl HostEnded {
+    /// A hosted task's end: the task holds the sender for its whole life.
+    #[must_use]
+    pub fn pair() -> (tokio::sync::oneshot::Sender<()>, Self) {
+        let (alive, ended) = tokio::sync::oneshot::channel();
+        (alive, Self(ended))
+    }
+
+    /// Wait until the hosted task ended.
+    pub async fn wait(self) {
+        // The task never sends: its sender drops when it ends.
+        let _ = self.0.await;
+    }
+}
+
 /// Where a node's journals come from (#188): the static list, and a way to
 /// open each journal's store — at boot, and again when the driver re-opens
 /// a quarantined journal (opening is cheap and touches no device: the
@@ -106,7 +127,10 @@ pub trait JournalStores {
     /// `rpc`, until `shutdown`: a founding member's matchmaker sets (#190),
     /// also served in its `machine` group (#404 (static vs dynamic
     /// endpoints)), serving only requests of cell `cell_id` (#539
-    /// (matchmaker cell fence)). The default hosts nothing.
+    /// (matchmaker cell fence)). The default hosts nothing. What it starts
+    /// may run on past `shutdown` while it ends its current step: the
+    /// returned [`HostEnded`] resolves once it ended, and the loop waits for
+    /// it before the next incarnation opens the same disk.
     ///
     /// # Errors
     ///
@@ -118,9 +142,9 @@ pub trait JournalStores {
         machine: Option<&moonpool_rpc::ServiceGroup<crate::rpc::methods::MachineInterface>>,
         (tunables, cell_id): (&DriverTunables, u64),
         shutdown: tokio_util::sync::CancellationToken,
-    ) -> moonpool_core::SimulationResult<()> {
+    ) -> moonpool_core::SimulationResult<Option<HostEnded>> {
         let _ = (providers, rpc, machine, tunables, cell_id, shutdown);
-        Ok(())
+        Ok(None)
     }
 
     /// The tenants whose matchmaker set the registry books on this node, as

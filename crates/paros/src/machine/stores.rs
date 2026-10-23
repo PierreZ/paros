@@ -386,10 +386,10 @@ where
         machine: Option<&moonpool_rpc::ServiceGroup<crate::rpc::methods::MachineInterface>>,
         (tunables, cell_id): (&DriverTunables, u64),
         shutdown: CancellationToken,
-    ) -> SimulationResult<()> {
+    ) -> SimulationResult<Option<crate::driver::HostEnded>> {
         assert!(cell_id != 0, "a machine hosts its cell's sets");
         let Some(config) = self.matchmaker.clone() else {
-            return Ok(());
+            return Ok(None);
         };
         let audits = Arc::clone(&self.audits);
         super::matchmakers::spawn(
@@ -402,6 +402,7 @@ where
             Arc::new(move |journal| audits(AuditScope::Journal(journal))),
             shutdown,
         )
+        .map(Some)
     }
 
     fn book_sets(&mut self, tenants: std::collections::BTreeSet<paros_core::TenantId>) {

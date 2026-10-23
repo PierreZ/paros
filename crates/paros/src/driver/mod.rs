@@ -69,7 +69,7 @@ pub use config::{
     parse_addr,
 };
 pub use events::{command_hash, message_kind, registration_history_hash};
-pub use journals::JournalStores;
+pub use journals::{HostEnded, JournalStores};
 pub use system::ControlPlan;
 pub use tunables::BelowFloor;
 
@@ -1840,11 +1840,70 @@ where
 /// When a founding member's plan names a founding member `members` has no
 /// lane to (a programmer error: a machine passes its plan's members).
 #[tracing::instrument(level = "debug", skip_all, fields(local_addr = %local_addr, members = members.len(), matchmakers = matchmakers.len(), proxies = proxies.len(), replicas = replicas.len()))]
+// The parameters are the node's complete wiring.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_journals<P, J>(
+    providers: P,
+    stores: J,
+    node: NodeId,
+    local_addr: String,
+    members: Vec<(NodeId, String)>,
+    matchmakers: Vec<(MatchmakerId, String)>,
+    proxies: Vec<(ProxyId, String)>,
+    replicas: Vec<(NodeId, String)>,
+    system: Option<ControlPlan>,
+    machine: Option<CellMachine>,
+    tunables: DriverTunables,
+    transport: Transport,
+    shutdown: CancellationToken,
+) -> Result<(), RunError>
+where
+    P: Providers,
+    J: JournalStores,
+{
+    let mut hosted = None;
+    let served = serve_journals(
+        providers,
+        stores,
+        node,
+        local_addr,
+        members,
+        matchmakers,
+        proxies,
+        replicas,
+        system,
+        machine,
+        tunables,
+        transport,
+        shutdown,
+        &mut hosted,
+    )
+    .await;
+    // The incarnation is over and its shutdown fired: what the stores
+    // hosted beside the journals ends before the next incarnation opens the
+    // same disk. A matchmaker host still booting a set would otherwise read
+    // its store while the next host writes it (two hosts on one store: a
+    // stale boot, recipe 490398:3305291055031534832 on seed
+    // 436643911234798984, d404bf5).
+    if let Some(ended) = hosted {
+        ended.wait().await;
+    }
+    served
+}
+
+/// One incarnation of [`run_journals`]: its loop, until it exits. What
+/// the stores host beside the journals is handed out in `hosted`, so the
+/// caller waits for its end.
 // One cohesive select loop: every arm is a thin feed into the core plus the
 // same drain/maintain tail; splitting arms out would only scatter the loop's
-// shared state. The parameters are the node's complete wiring.
-#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
-pub async fn run_journals<P, J>(
+// shared state. The parameters are the node's complete wiring, handed on
+// by value from `run_journals` as they were before the split.
+#[allow(
+    clippy::too_many_lines,
+    clippy::too_many_arguments,
+    clippy::large_types_passed_by_value
+)]
+async fn serve_journals<P, J>(
     providers: P,
     mut stores: J,
     node: NodeId,
@@ -1858,6 +1917,7 @@ pub async fn run_journals<P, J>(
     tunables: DriverTunables,
     transport: Transport,
     shutdown: CancellationToken,
+    hosted: &mut Option<HostEnded>,
 ) -> Result<(), RunError>
 where
     P: Providers,
@@ -2038,7 +2098,7 @@ where
     let rpc_handle = edge.handle().clone();
     // What the stores host beside the journals on this edge: a founding
     // member's matchmaker sets (#190).
-    stores.host_on_edge(
+    *hosted = stores.host_on_edge(
         &providers,
         &rpc_handle,
         machine_group.as_ref(),

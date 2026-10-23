@@ -206,6 +206,10 @@ impl<S: StorageProvider + Clone + 'static> SetOpener for MachineSets<S> {
 /// founders)). It serves only requests of cell `cell_id` (#539 (matchmaker
 /// cell fence)).
 ///
+/// The host runs on past `shutdown` until it ends the request it serves (a
+/// set's boot, its durable write): the returned end resolves then, and the
+/// node loop waits for it before the next incarnation hosts the same disk.
+///
 /// # Errors
 ///
 /// A registration the RPC runtime refuses.
@@ -220,7 +224,7 @@ pub(crate) fn spawn<P, S, A, F>(
     tunables: &DriverTunables,
     audits: Arc<F>,
     shutdown: CancellationToken,
-) -> SimulationResult<()>
+) -> SimulationResult<crate::driver::HostEnded>
 where
     P: Providers,
     S: StorageProvider + Clone + 'static,
@@ -234,9 +238,12 @@ where
     let inbox = MatchmakerInbox::serve(rpc, machine)?;
     let page = tunables.registry_page.clamp(1, paros_core::REGISTRY_PAGE);
     assert!(page >= 1, "a registry page holds a registration");
+    let (alive, ended) = crate::driver::HostEnded::pair();
     providers
         .task()
         .spawn_task("paros-machine-matchmakers", async move {
+            // Held for the task's life: its drop is the host's end.
+            let _alive = alive;
             let provisioned = match disk.read_sets().await {
                 Ok(None) => BTreeSet::new(),
                 Ok(Some(text)) => match parse(&text) {
@@ -283,7 +290,7 @@ where
             }
         })
         .detach();
-    Ok(())
+    Ok(ended)
 }
 
 #[cfg(test)]
