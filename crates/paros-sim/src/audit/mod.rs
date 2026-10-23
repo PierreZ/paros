@@ -976,6 +976,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
                 "matchmaking: a leader runs Phase 2 under the configuration registered for its ballot",
                 { "node" => node.0, "round" => won.round }
             );
+            st.matchmaker.leadership_won(won, config);
         } else {
             assert_always!(
                 st.bootstrap.as_ref() == Some(config),

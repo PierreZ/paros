@@ -259,7 +259,8 @@ configuration, not a transitional state. Before touching `on_check_leader`, `Ele
 - **A belief is not a fact.** A registration is a belief (an ordinary campaign) or a
   reconfiguration; the **effective configuration** is the highest-ballot reconfiguration a
   quorum holds. A campaign whose histories name another abandons, adopts it and re-campaigns
-  (`MatchStep::StaleConfiguration`); beliefs never trigger that.
+  (`MatchStep::StaleConfiguration`), unless it sits at or below a leadership the node knows won
+  (the probe floor, #278: a minority held it); beliefs never trigger that.
 - **Membership probe** (`MembershipProbe`): every incarnation boots believing the bootstrap
   configuration and asks a matchmaker quorum for the effective one, registering nothing, before
   its first campaign or skip. A node only registers a belief it heard. A node whose heard belief
