@@ -2898,10 +2898,17 @@ where
             Some(answer) = follow_answers.recv() => {
                 // A seed's answer to this node's follow read of a system
                 // journal (#189): fold it and apply what moved. The next read
-                // opens on the next tick.
+                // opens on the next tick, unless the page stopped short of
+                // the seed's committed end: then it opens now, so a seed
+                // that serves short pages (`max_read_records` down to one)
+                // is followed at the round trip's pace, not the tick's
+                // (witness replay-main 2454129073386138776 on 7ceb194: a
+                // 420-record registry, one record per 160 ms tick, red on
+                // "registry: every live node's fold reaches the registry's
+                // tail after chaos").
                 let Some(f) = follower.as_mut() else { continue };
                 let journal = answer.journal();
-                let events = f.fold_remote(answer);
+                let (events, behind) = f.fold_remote(answer);
                 let checkpoints = if journal == f.registry_key() { f.take_checkpoints() } else { Vec::new() };
                 let mut sys = SystemCtx { stores: &mut stores, journals: &mut journals, now: ticks, tunables: &tunables, out: &out, lanes: &lanes, links: &links, rpc: &rpc_handle, audit: &node_audit };
                 let (mut admit, owed) = sys.apply(f, journal, events, checkpoints).await;
@@ -2912,6 +2919,10 @@ where
                     admission_owed.get_or_insert(time.now());
                 }
                 admit_owed(&mut journals, f, &mut admission_owed, late_admitter, time.now());
+                if behind && !crate::scenario::lag_follow() {
+                    moonpool_assertions::reachable!("driver: a short follow page opens the next read at once");
+                    f.poll_remote(&providers, |journal| journals.live.contains_key(&journal));
+                }
             }
             _ = time.sleep(next_tick.saturating_sub(time.now())) => {
                 // Pacing, not a protocol bound: every timeout the core owns is

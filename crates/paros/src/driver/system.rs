@@ -456,22 +456,36 @@ impl<P: ParosProviders> ControlFollower<P> {
         );
     }
 
-    /// Fold one remote answer.
-    pub(crate) fn fold_remote(&mut self, followed: Followed) -> Vec<(u64, SystemEvent)> {
+    /// Fold one remote answer: the events it folded, and whether the page
+    /// left the fold **behind** the seed's committed end (a page with
+    /// records that stops short of `next_seq`: the seed's page limit cut
+    /// it, so the next read need not wait for a tick).
+    pub(crate) fn fold_remote(&mut self, followed: Followed) -> (Vec<(u64, SystemEvent)>, bool) {
         let Followed { journal, reply } = followed;
         // Every answer closes the one read `poll_remote` opened for it.
         let was_outstanding = self.outstanding.remove(&journal);
         assert!(was_outstanding, "a follow answer closes an open read");
         // A tenant dropped while its read was in flight is followed no more.
         if !self.follows(journal) || reply.unknown_journal || !reply.served {
-            return Vec::new();
+            return (Vec::new(), false);
         }
         if reply.truncated {
             let floor = reply.state.as_ref().map_or(0, |state| state.first_seq);
             self.jump(journal, floor);
-            return Vec::new();
+            return (Vec::new(), false);
         }
-        self.fold(journal, reply.from_seq, reply.records)
+        let end = reply.from_seq + reply.records.len() as u64;
+        let behind = !reply.records.is_empty()
+            && reply
+                .state
+                .as_ref()
+                .is_some_and(|state| state.next_seq > end);
+        let events = self.fold(journal, reply.from_seq, reply.records);
+        assert!(
+            !behind || !self.follows(journal) || self.cursor(journal) <= end,
+            "a page behind the end leaves the cursor at most at its end"
+        );
+        (events, behind)
     }
 
     /// The cell hosts `tenant` (its control journal `control`): follow it.
