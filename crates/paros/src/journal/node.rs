@@ -9,8 +9,8 @@ use paros_core::{Ballot, Command, Config, HardState, JournalState, MustSync, Slo
 use serde::{Deserialize, Serialize};
 
 use super::{
-    JournalStoreConfig, Spares, ballot_id, commit_error, decode, encode, id_ballot, open_error,
-    store_id, undecodable,
+    JournalStoreConfig, ballot_id, commit_error, decode, encode, id_ballot, open_error, store_id,
+    undecodable,
 };
 use crate::storage::{
     LogStorage, ScrubPage, ScrubbedSlot, StorageError, StorageRecord, WriteOutcome, command_bytes,
@@ -94,9 +94,6 @@ pub struct JournalStorage<P: StorageProvider> {
     /// the record held.
     damaged: BTreeSet<Slot>,
     boot_facts: JournalBootFacts,
-    /// Where the journal prepares its spare segments, if anywhere (#600
-    /// (journal commit stalls)): kept across boots.
-    spares: Option<Spares<P>>,
 }
 
 /// What a [`JournalStorage`]'s last boot found: observation for a harness's
@@ -150,23 +147,7 @@ impl<P: StorageProvider> JournalStorage<P> {
             staged_floor: None,
             damaged: BTreeSet::new(),
             boot_facts: JournalBootFacts::default(),
-            spares: None,
         }
-    }
-
-    /// This store, its journal preparing its next segment ahead on
-    /// `spares` from its boot (or its first commit) on, so a roll never
-    /// zero-fills a segment on the commit path (#600 (journal commit
-    /// stalls), moonpool#338). Without it, a roll creates the segment inline.
-    ///
-    /// # Panics
-    ///
-    /// When the store already booted: spares are set before the boot.
-    #[must_use]
-    pub fn with_spares(mut self, spares: Spares<P>) -> Self {
-        assert!(self.journal.is_none(), "spares are set before the boot");
-        self.spares = Some(spares);
-        self
     }
 
     /// Whether the store of `journal` under `dir` carries its format marker,
@@ -249,14 +230,13 @@ impl<P: StorageProvider> JournalStorage<P> {
         )
         .await
         .map_err(|e| open_error(&e, StorageRecord::Promise))?;
-        let mut fresh = Self::new(
+        let fresh = Self::new(
             self.provider.clone(),
             self.dir.clone(),
             self.config.clone(),
             self.store,
         );
-        fresh.spares = self.spares.take();
-        let Some((mut journal, recovery)) = opened else {
+        let Some((journal, recovery)) = opened else {
             // No journal on disk: an empty, unformatted store.
             *self = fresh;
             return Ok(());
@@ -322,9 +302,6 @@ impl<P: StorageProvider> JournalStorage<P> {
             truncated: self.first.0 > 0,
             recovery,
         };
-        if let Some(spares) = &self.spares {
-            spares.start(&mut journal);
-        }
         self.journal = Some(journal);
         Ok(())
     }
@@ -390,8 +367,7 @@ impl<P: StorageProvider> JournalStorage<P> {
     /// (its first metainfo is [`Self::early_meta`]: a creation lands before
     /// the batch it opens for).
     async fn commit(&mut self, batch: Batch) -> Result<(), StorageError> {
-        let created = self.journal.is_none();
-        if created {
+        if self.journal.is_none() {
             let early = self.early_meta();
             let created = Journal::create(
                 self.provider.clone(),
@@ -410,17 +386,13 @@ impl<P: StorageProvider> JournalStorage<P> {
         let committed = journal.commit(batch).await.map_err(|e| commit_error(&e));
         let after = journal.rolls();
         assert!(
-            after.onto_spare >= before.onto_spare && after.inline >= before.inline,
+            after.onto_spare >= before.onto_spare && after.created >= before.created,
             "a journal's rolls only grow"
         );
         if after.onto_spare > before.onto_spare {
-            moonpool_assertions::reachable!("journal store: a commit rolled onto a prepared spare");
-        }
-        // A new journal prepares spares once its first segment exists: begun
-        // before it, the spare would sit beside that segment, a whole
-        // segment of disk, until the segment is half full.
-        if created && let Some(spares) = &self.spares {
-            spares.start(journal);
+            moonpool_assertions::reachable!(
+                "journal store: a commit rolled onto a recycled segment"
+            );
         }
         committed
     }
@@ -452,7 +424,6 @@ fn report(node: u64, recovery: &Recovery) {
         );
     }
     if recovery.spares_removed > 0 {
-        moonpool_assertions::reachable!("journal store: a boot removed a spare segment");
         tracing::info!(
             node,
             spares = u64::from(recovery.spares_removed),

@@ -71,6 +71,9 @@ pub(super) struct JournalModel {
     /// Per slot: the verdict every node must reach there (a `Noop` is kept
     /// out: it judges nothing).
     slots: BTreeMap<u64, SlotFact>,
+    /// Every slot a node reported a `Noop` at: a gap in `slots` that hides
+    /// no verdict (#656 (verdicts no client received)).
+    noops: BTreeSet<u64>,
     /// Per leader uuid: the slot its `SetLeader` won at.
     leaders: BTreeMap<LeaderUuid, u64>,
     /// Per accepted batch, by its first position: the slot and the write.
@@ -156,6 +159,7 @@ impl JournalModel {
         outcome: Option<&Outcome>,
     ) {
         let Some(outcome) = outcome else {
+            self.noops.insert(slot);
             return;
         };
         let write = command.write().map(|entry| WriteFact {
@@ -544,7 +548,10 @@ impl JournalModel {
         // The floor the last verdict revealed, once one did (#656).
         let mut floor: Option<u64> = None;
         let mut unanswered_judged = false;
+        let mut previous: Option<u64> = None;
         for (&slot, fact) in &self.slots {
+            let gap = self.hides_verdict(previous.replace(slot), slot);
+            floor = floor.filter(|_| !gap);
             unanswered_judged |= self.unanswered_verdict(slot, fact, &mut floor);
             let (before, after) = match (&fact.outcome, fact.write) {
                 (Outcome::Accepted { seq, count }, _) => (Some(seq.0), Some(seq.0 + count)),
@@ -663,6 +670,14 @@ impl JournalModel {
         }
     }
 
+    /// Whether a slot between `previous` and `slot` reached the model from
+    /// no node: it may hide a `Truncate` that moved the floor (a node that
+    /// crashed after it applied and a node that jumped past it both stay
+    /// silent), so the floor is unknown again.
+    fn hides_verdict(&self, previous: Option<u64>, slot: u64) -> bool {
+        previous.is_some_and(|p| !(p + 1..slot).all(|gap| self.noops.contains(&gap)))
+    }
+
     /// The slot-ordered half of #656 (verdicts no client received): an
     /// applied truncation moves the floor `floor` (the one the last verdict
     /// revealed) to its clamped ask, or leaves it; `floor` moves on to this
@@ -672,8 +687,8 @@ impl JournalModel {
         if let (Outcome::Trimmed(state), Some((_, up_to)), Some(before)) =
             (&fact.outcome, fact.truncate, *floor)
         {
-            // Every slot reaches the model (the density check relies on it
-            // too), so the floor before this one is known.
+            // The floor before this slot is known: the slot before it, or
+            // only `Noop`s, reached the model.
             assert_always!(
                 state.first_seq.0 == before.max(up_to.min(state.next_seq.0)),
                 "journal: a truncation trims to its clamped ask and no further",

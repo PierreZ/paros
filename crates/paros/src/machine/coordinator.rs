@@ -386,6 +386,15 @@ pub struct Watch {
     seen: Duration,
     /// When each machine last answered as itself.
     heard: BTreeMap<NodeId, Duration>,
+    /// When this watch first asked each machine: one never heard is silent
+    /// since then. A machine the cell's book names only after the watch
+    /// started was once judged silent since the start: a machine whose
+    /// registration made it up 12 s into a term was marked down at its
+    /// first unanswered `Identify` (replay-recipe 12913196830458982579
+    /// 651425:1084719881269859971 on a079991 (#710 (recycled segments)),
+    /// red on "registry: the cell coordinator never marks a live machine
+    /// down in the tail").
+    asked: BTreeMap<NodeId, Duration>,
     /// Whether the last call ran a round.
     ran: bool,
     /// The `Identify` checks a `Register` left running, by machine (#454
@@ -451,6 +460,7 @@ impl Watch {
             next: now,
             seen: now,
             heard: BTreeMap::new(),
+            asked: BTreeMap::new(),
             ran: false,
             probes: BTreeMap::new(),
             positions: BTreeMap::new(),
@@ -491,7 +501,7 @@ impl Watch {
             moonpool_assertions::reachable!("coordinator: a term resumed the last term's watch");
         }
         self.started += gap;
-        for since in self.heard.values_mut() {
+        for since in self.heard.values_mut().chain(self.asked.values_mut()) {
             *since += gap;
         }
         for (_, seen) in self.windows.values_mut() {
@@ -505,14 +515,35 @@ impl Watch {
             self.heard.values().all(|since| *since <= now),
             "a resumed watch heard every machine by now"
         );
+        assert!(
+            self.asked.values().all(|since| *since <= now),
+            "a resumed watch asked every machine by now"
+        );
         self
+    }
+
+    /// Since when machine `id` is silent: its last answer, else this
+    /// watch's first ask of it, else the watch's start.
+    fn silent_since(&self, id: NodeId) -> Duration {
+        let since = self
+            .heard
+            .get(&id)
+            .or_else(|| self.asked.get(&id))
+            .copied()
+            .unwrap_or(self.started);
+        assert!(
+            since >= self.started,
+            "a machine is silent since the watch watched"
+        );
+        since
     }
 
     /// The machines whose roles the term re-places at `now` (#475 (re-place
     /// after the Down bound)): registered machines `registry` holds down
     /// that this watch has not heard for `replace_after`, outside every open
     /// maintenance window over them or their zone (#359), and every machine
-    /// named gone before that still holds a slot and is still down. A
+    /// named gone before that still holds a slot, is still down, and no open
+    /// window holds. A
     /// machine that answers again inside the bound keeps its roles: a
     /// reboot rejoins in place.
     ///
@@ -550,7 +581,19 @@ impl Watch {
         self.seen = self.seen.max(now);
         self.departed
             .retain(|node| registry.booked(*node) > 0 && !registry.liveness(*node).up);
-        let mut gone = self.departed.clone();
+        // A window the operator opened over a machine named gone before
+        // holds its roles all the same: the coordinator re-places no role
+        // of a down machine a window covers (#359). Without this, a machine
+        // gone, back up, then down again stayed gone through its window, and
+        // a set released its slot there (sweep recipe `354564601073116033
+        // 651466:18426518659794956008,189780:8849847318170525142` on
+        // deadab0, PR #710 (adopt recycled segments)).
+        let mut gone: std::collections::BTreeSet<NodeId> = self
+            .departed
+            .iter()
+            .copied()
+            .filter(|id| !self.held_one(registry, *id, now))
+            .collect();
         for (id, node) in registry.nodes() {
             if node.standing != NodeStanding::Registered
                 || registry.liveness(id).up
@@ -558,7 +601,7 @@ impl Watch {
             {
                 continue;
             }
-            let since = self.heard.get(&id).copied().unwrap_or(self.started);
+            let since = self.silent_since(id);
             if now.saturating_sub(since) < self.replace_after {
                 continue;
             }
@@ -683,6 +726,7 @@ impl Watch {
         let mut answered: Vec<(NodeId, Address, Duration)> = Vec::new();
         for (id, addr) in machines {
             let asked = client.now();
+            self.asked.entry(id).or_insert(asked);
             let answer = bootstrap::identify(providers, rpc, names, &addr, timeout)
                 .await
                 .filter(|ack| ack.node_id == id.0);
@@ -946,7 +990,7 @@ impl Watch {
     /// once it was silent for `down_after`, unless it is held down.
     fn silent(&self, session: &CellSession, id: NodeId, now: Duration) -> Option<SystemCommand> {
         let held = session.registry().liveness(id);
-        let since = self.heard.get(&id).copied().unwrap_or(self.started);
+        let since = self.silent_since(id);
         if !held.up || now.saturating_sub(since) < self.down_after {
             return None;
         }
