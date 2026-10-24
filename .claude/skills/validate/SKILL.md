@@ -1,6 +1,6 @@
 ---
 name: validate
-description: Run paros's full local gate the way CI's jobs do - cargo fmt, clippy --all-targets -D warnings, rustdoc -D warnings on paros-core, nextest, the eight paros-core examples, the wasm32 and no-default-features portability checks (paros-core, paros and paros-sim), the sim-wasm job (a seed of paros-sim is the same run on wasm32 as natively), the wasm job (ts-rs bindings diff, scripts/build-wasm.sh, npm check/test/build), and cargo xtask sim run-all when the protocol or harness changed - through Nix (nix develop locally, nix shell nixpkgs#rustup plus protobuf on Claude Code on the web). Use before declaring any change done, before committing, when asked "will CI pass", and after any Cargo.toml or feature change.
+description: Run paros's full local gate the way CI's jobs do - cargo fmt, clippy --all-targets -D warnings, rustdoc -D warnings on paros-core, nextest, the eight paros-core examples, the wasm32 and no-default-features portability checks (paros-core, paros and paros-sim), the sim-wasm job (a seed of paros-sim is the same run on wasm32 as natively), the wasm job (ts-rs bindings diff, scripts/build-wasm.sh, npm check/test/build), and cargo xtask sim run-all when the protocol or harness changed - through Nix (nix develop, locally and on Claude Code on the web). Use before declaring any change done, before committing, when asked "will CI pass", and after any Cargo.toml or feature change.
 ---
 
 # Validate
@@ -8,34 +8,21 @@ description: Run paros's full local gate the way CI's jobs do - cargo fmt, clipp
 `.github/workflows/rust.yml` has these jobs (`clippy`, `fmt`, `test`,
 `examples`, `portability`, `sim-wasm`, `wasm`, `image`, `sim`, `sim-gates`) and every one runs through
 `nix develop --command`. The sandbox's `/root/.cargo` toolchain is off-limits
-in this project: the pinned toolchain is `rust-toolchain.toml` (1.95.0 with
+in this project: the pinned toolchain is `rust-toolchain.toml` (its channel, with
 `wasm32-unknown-unknown`), and results from anything else do not predict CI.
 
 ## Pick the runner
 
-- **Local session** (`CLAUDE_CODE_ENTRYPOINT` is `cli`/`vscode`): the flake dev
-  shell. Prefix every command with `nix develop --command` (or rely on direnv).
-- **Claude Code on the web** (`CLAUDE_CODE_ENTRYPOINT` starts with `remote`):
-  the flake's inputs are egress-blocked, so `nix develop` cannot build. Use a
-  Nix-provided rustup, which reads `rust-toolchain.toml`. `crates/paros/build.rs`
-  compiles the wire messages with `prost-build`, which needs `protoc` (the
-  flake ships `protobuf`; a bare `nix shell` does not), so the recipe is:
+Prefix every command with `nix develop --command` (or rely on direnv), in a
+local session and on Claude Code on the web alike. The flake's inputs are
+fetched over git, which the web session's egress policy allows (#727 (flake
+inputs over git)). The dev shell carries everything the gate needs: the pinned
+toolchain, `protobuf` for `crates/paros/build.rs`, `cargo-nextest`,
+`wasm-bindgen-cli`, `binaryen`, `nodejs_22` and the unwrapped clang for ring's
+wasm32 build. On the web, install Nix first if `nix-store` is missing, exactly
+as the root `AGENTS.md` describes.
 
-  ```bash
-  nix shell nixpkgs#rustup nixpkgs#cargo-nextest nixpkgs#protobuf \
-    -c bash -c 'export PROTOC=$(command -v protoc); cargo …'
-  ```
-
-  Install Nix first if `nix-store` is missing, exactly as the root
-  `AGENTS.md` describes (`nix-bin`, `NIX_CONFIG`, `NIX_SSL_CERT_FILE`). The
-  `wasm` and `sim-wasm` jobs additionally need `wasm-bindgen-cli` (its version
-  must equal the `wasm-bindgen` pin in `crates/paros-wasm/Cargo.toml`),
-  `binaryen` and `nodejs_22`, and paros-sim's wasm32 build needs an unwrapped
-  clang for ring (`llvmPackages.clang-unwrapped`, `bintools-unwrapped`, exported
-  as `CC_wasm32_unknown_unknown` / `AR_wasm32_unknown_unknown`), all from the
-  flake; add them to the `nix shell` line if you run it there.
-
-Below, `RUN` stands for whichever prefix applies.
+Below, `RUN` stands for `nix develop --command`.
 
 ## The gate, in CI order
 

@@ -24,15 +24,11 @@ for volume.
 
 xtask sets `SANCOV_CRATES` and the target dir but **not** `RUSTC_WRAPPER`:
 the flake's `shellHook` exports `RUSTC_WRAPPER="$PWD/scripts/sancov-rustc.sh"`.
-Outside the flake shell (Claude Code on the web, where `nix develop` cannot
-build) export it yourself, or the sweep runs uninstrumented and its code
-coverage never guides the seeds. `crates/paros/build.rs` also needs `protoc`
-there (see `/validate`):
+So always run the sweep in the dev shell (locally and on Claude Code on the web),
+or it runs uninstrumented and its code coverage never guides the seeds:
 
 ```bash
-nix shell nixpkgs#rustup nixpkgs#protobuf -c bash -c \
-  'export PROTOC=$(command -v protoc) RUSTC_WRAPPER=$PWD/scripts/sancov-rustc.sh;
-   cargo xtask sim run paros-chain'
+nix develop --command cargo xtask sim run paros-chain
 ```
 
 ## Hunt axes and replay commands (`crates/paros-sim-runner/src/hunt.rs`)
