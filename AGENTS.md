@@ -51,6 +51,9 @@ If `CLAUDE_CODE_ENTRYPOINT` starts with `remote` (e.g. `remote`, `remote_mobile`
     export NIX_CONFIG="experimental-features = nix-command flakes"
     export NIX_SSL_CERT_FILE=/root/.ccr/ca-bundle.crt
 
+Then use `nix develop`, on the web as locally. Every flake input is fetched over git
+(`git+https`), not as a GitHub tarball, because the web session's egress policy refuses GitHub
+tarballs (#727 (flake inputs over git)). Keep it that way: a new input never uses `github:`.
 Any other value (`cli`, `vscode`) is local: Nix is already set up; use `nix develop` (or direnv).
 
 **Use Nix-provided software for all tooling.** The one documented exception is the image
@@ -59,13 +62,10 @@ with Docker alone. It is the user's demo, never a test: no smoke script, no test
 `parosd` processes (behaviour is proved in simulation); CI only builds the image; its Rust version must equal `rust-toolchain.toml`'s channel (CI's `image` job,
 `scripts/check-dockerfile-toolchain.sh`). Never run the sandbox's preinstalled binaries
 (the `rustup`/`cargo`/`rustc` under `/root/.cargo`), never `apt-get`/`pip install`/`npm -g`/
-`brew` (`nix-bin` above is the one exception). On the web the flake's inputs are GitHub tarballs
-the egress policy blocks (a 403 is org policy, not a bug to retry), so use a Nix `rustup`, which
-reads `rust-toolchain.toml`, plus `protobuf` (`crates/paros/build.rs` runs `prost-build`):
+`brew` (`nix-bin` above is the one exception). Run every command in the dev shell:
 
-    nix shell nixpkgs#rustup nixpkgs#protobuf -c bash -c 'export PROTOC=$(command -v protoc); cargo build'
-    nix shell nixpkgs#rustup nixpkgs#protobuf nixpkgs#cargo-nextest \
-      -c bash -c 'export PROTOC=$(command -v protoc); cargo nextest run'
+    nix develop --command cargo build
+    nix develop --command cargo nextest run
 
 Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the flake.
 
