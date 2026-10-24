@@ -2,15 +2,20 @@
   description = "Paros - Paxos in Rust";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    flake-utils.url = "github:numtide/flake-utils";
+    # Every input is fetched over git, not as a GitHub tarball (`github:`): the cloud
+    # session proxy refuses GitHub tarballs, so `github:` inputs cannot lock there.
+    nixpkgs.url = "git+https://github.com/NixOS/nixpkgs?ref=nixos-unstable&shallow=1";
+    systems.url = "git+https://github.com/nix-systems/default?shallow=1";
+    flake-utils = {
+      url = "git+https://github.com/numtide/flake-utils?shallow=1";
+      inputs.systems.follows = "systems";
+    };
     rust-overlay = {
-      url = "github:oxalica/rust-overlay";
+      url = "git+https://github.com/oxalica/rust-overlay?shallow=1";
       inputs.nixpkgs.follows = "nixpkgs";
     };
     # Zola for the site (#254). Goyo's templates need Zola 0.22: 0.23 changed the
     # template engine and refuses them. nixos-26.05 ships 0.22.1; unstable has 0.23.
-    # Fetched over git so the session proxy (which refuses GitHub tarballs) can lock it.
     nixpkgs-zola.url = "git+https://github.com/NixOS/nixpkgs?ref=nixos-26.05&shallow=1";
     # The Goyo theme (v0.7.1), pinned by rev, not a flake. website/zola/build.sh copies
     # it into website/zola/themes/goyo (decided on 2026-10-07: no git submodule).
@@ -20,7 +25,7 @@
     };
   };
 
-  outputs = { self, nixpkgs, flake-utils, rust-overlay, nixpkgs-zola, goyo }:
+  outputs = { self, nixpkgs, systems, flake-utils, rust-overlay, nixpkgs-zola, goyo }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         overlays = [ (import rust-overlay) ];
