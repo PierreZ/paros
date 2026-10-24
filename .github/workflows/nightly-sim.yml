@@ -1,0 +1,168 @@
+# The nightly simulation hunt: raw seed volume through `sim-paros-hunt`, far
+# more seeds than a PR's sweep gets. Never a PR gate: it runs on main at night
+# and on demand (the "Run workflow" button of the Actions tab), and a failing
+# seed lands in one rolling issue, labelled `nightly-sim`, that names the job
+# and the seed with its replay command.
+#
+# Each shard builds the hunt once in release, then runs one hunt process per
+# core in chunks until its time budget is spent (`scripts/nightly-sim-shard.sh`).
+# The shards draw disjoint seeds without any flag: every hunt takes its base
+# seed from the wall clock in nanoseconds. The sizing (shards x workers x
+# minutes) and the numbers behind it are in the comments of `env` below.
+name: Nightly sim
+
+on:
+  schedule:
+    # 02:17 UTC, every night but Saturday's: the weekly mutation hunt
+    # (`mutants.yml`) takes 16 runners from Saturday 02:00 for about 3.5 hours.
+    - cron: "17 2 * * 0-5"
+  workflow_dispatch:
+    inputs:
+      shards:
+        description: "Parallel runners (matrix jobs), 1 to 16"
+        type: number
+        default: 8
+      minutes:
+        description: "Hunt minutes per runner, 5 to 300"
+        type: number
+        default: 180
+      workers:
+        description: "Hunt processes per runner (0: one per core)"
+        type: number
+        default: 0
+      axis:
+        description: "Hunt axis"
+        type: choice
+        options: [main, canary]
+        default: main
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # The sizing, measured on 2026-10-24. A hunt process is one thread: the
+  # mutation hunt's 300-seed baseline took 18m 29s on a hosted runner, 3.7 s
+  # a seed. On a 4-core machine, 30 seeds per process took 250 s with one
+  # process, 203 s with two and 238 s with four: 7, 18 and 30 seeds a minute.
+  # So a runner runs one process per core (`workers` 0), and a process peaks
+  # under 1 GB, well inside a runner's 16 GB. The PR sweep runs about 940
+  # seeds per shard in 57 minutes, mostly because it explores timelines; 8
+  # runners for 180 minutes give some 40,000 hunt seeds a night. 8 runners
+  # leave 12 of the account's 20 concurrent jobs, nearly one PR's CI, free at
+  # night; 180 minutes ends the run before 06:00 UTC.
+  #
+  # Seeds per hunt process launch: at 4 to 8 s a seed with four processes
+  # side by side, a chunk is 3 to 7 minutes. A hang or a crash loses at most
+  # one chunk, and the last chunk overruns the budget by at most one chunk.
+  CHUNK: 50
+  # A chunk that runs past this is a hang (4x a slow chunk).
+  CHUNK_TIMEOUT: 1800
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      shards: ${{ steps.plan.outputs.shards }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+      minutes: ${{ steps.plan.outputs.minutes }}
+    steps:
+      - id: plan
+        env:
+          SHARDS: ${{ inputs.shards || 8 }}
+          MINUTES: ${{ inputs.minutes || 180 }}
+        run: |
+          set -euo pipefail
+          if [ "$SHARDS" -lt 1 ] || [ "$SHARDS" -gt 16 ]; then
+            echo "shards must be 1 to 16, not $SHARDS"; exit 1
+          fi
+          # The job's timeout is 360 minutes: the budget, the build and the
+          # last chunk's overrun must fit under it.
+          if [ "$MINUTES" -lt 5 ] || [ "$MINUTES" -gt 300 ]; then
+            echo "minutes must be 5 to 300, not $MINUTES"; exit 1
+          fi
+          echo "shards=$SHARDS" >> "$GITHUB_OUTPUT"
+          echo "matrix=$(seq -s, 1 "$SHARDS" | sed 's/.*/[&]/')" >> "$GITHUB_OUTPUT"
+          echo "minutes=$MINUTES" >> "$GITHUB_OUTPUT"
+
+  hunt:
+    name: hunt (shard ${{ matrix.shard }}/${{ needs.plan.outputs.shards }})
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: nightly-sim
+          # Every shard builds the same thing; one saves the cache.
+          save-if: ${{ matrix.shard == 1 }}
+      - name: Build the hunt
+        run: nix develop --command cargo build --release -p paros-sim-runner --bin sim-paros-hunt
+      - name: Hunt for ${{ needs.plan.outputs.minutes }} minutes
+        run: |
+          scripts/nightly-sim-shard.sh "$RUNNER_TEMP/nightly-shard-${{ matrix.shard }}" \
+            "${{ needs.plan.outputs.minutes }}" "${{ inputs.workers || 0 }}" \
+            "$CHUNK" "${{ inputs.axis || 'main' }}"
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: nightly-shard-${{ matrix.shard }}
+          path: ${{ runner.temp }}/nightly-shard-${{ matrix.shard }}
+          if-no-files-found: error
+
+  # The verdict over every shard, and the rolling issue. The run is red when a
+  # seed failed, a chunk hung or crashed, or a shard uploaded nothing.
+  report:
+    needs: [plan, hunt]
+    if: ${{ !cancelled() && needs.plan.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: nightly-shard-*
+          path: shards
+      - name: Judge the night and update the rolling issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SHARDS: ${{ needs.plan.outputs.shards }}
+          AXIS: ${{ inputs.axis || 'main' }}
+        run: |
+          set -euo pipefail
+          red=0
+          scripts/nightly-sim-report.sh shards > report.md || red=$?
+          cat report.md >> "$GITHUB_STEP_SUMMARY"
+          cat report.md
+          if [ "$red" -eq 0 ]; then exit 0; fi
+          # An issue body or comment holds at most 65536 characters.
+          if [ "$(wc -c < report.md)" -gt 60000 ]; then
+            head -c 60000 report.md > cut.md
+            printf '\n\n(cut: the whole report is in the run summary, %s)\n' "$RUN_URL" >> cut.md
+            mv cut.md report.md
+          fi
+          gh label create nightly-sim --force \
+            --color B60205 --description "A failing seed of the nightly simulation hunt"
+          number=$(gh issue list --label nightly-sim --state open \
+            --json number --jq '.[0].number // empty')
+          if [ -n "$number" ]; then
+            gh issue comment "$number" --body-file report.md
+          else
+            gh issue create --title "nightly sim: failing seeds" \
+              --label nightly-sim --body-file report.md
+          fi
+          exit 1

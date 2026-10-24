@@ -163,6 +163,13 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   generate (#263, #267) stay documented next to the rule they prove. The first run's triage,
   and the equivalent edits a regex cannot exclude, are in
   `docs/analysis/simulation/mutation-triage.md`.
+- **Nightly hunt** (`.github/workflows/nightly-sim.yml`, decided on 2026-10-24): every night
+  but Saturday's (the mutation hunt's) at 02:17 UTC, plus `workflow_dispatch` with shards,
+  minutes, workers and axis. 8 runners run one `sim-paros-hunt` process per core in chunks of
+  50 seeds for 180 minutes (`scripts/nightly-sim-shard.sh`), some 40,000 seeds. Never a PR gate.
+  A failing seed, a hung chunk or a crash lands in one rolling issue, labelled `nightly-sim`,
+  that names the job and the seed with its replay command (`scripts/nightly-sim-report.sh`).
+  The issue is a record: nobody debugs its seeds unless the user asks (decided on 2026-10-24).
 - **Assertion budget**: 2048 slots per campaign process (moonpool's `MAX_ASSERTION_SLOTS`) and
   256 `sometimes_each` buckets, shared with moonpool's internals. A slot is the hash of its
   message: never reword a message, keep messages short with no interpolated ids, and never use
