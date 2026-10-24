@@ -60,6 +60,9 @@ binaries take no flags beyond the positional arguments below and read one enviro
 - Hunts: `cargo run --release -p paros-sim-runner --bin sim-paros-hunt -- main 2000`.
 - Mutation hunt: `cargo xtask mutants [--seeds N] [cargo-mutants args]` (weekly in CI,
   `.github/workflows/mutants.yml`); one mutant by name: `--re '<name from --list>'`.
+- Nightly hunt: `.github/workflows/nightly-sim.yml` runs `sim-paros-hunt main 50` again and again,
+  one process per core, on 8 runners for 180 minutes (`scripts/nightly-sim-shard.sh`); failing
+  seeds go to the rolling `nightly-sim` issue (`scripts/nightly-sim-report.sh`).
 
 ## Deps
 
