@@ -14,7 +14,10 @@
 use std::time::Duration;
 
 use moonpool_sim::{SimContext, TimeProvider, assert_always, assert_reachable, assert_sometimes};
+use paros::Address;
 use paros::client::checkpoint::LoadOutcome;
+use paros::client::load::{LoadOutcome as Load, ask_all};
+use paros::machine::slow::{BUSY_MARGIN, Sample};
 use paros::system::NodeStanding;
 
 use super::cell::Cell;
@@ -26,6 +29,44 @@ use super::{FleetOps, judged_cell};
 const SLACK: Duration = Duration::from_secs(10);
 
 impl FleetOps {
+    /// Whether the machine at `addr` still measures busy: its disk or CPU
+    /// at or above the lowest slow bound any node drew, less
+    /// [`BUSY_MARGIN`]. The coordinator clears a slow mark only once the
+    /// machine leans fast (`paros::machine::slow`), so a mark held over a
+    /// machine that is still this busy has a reason: its own work keeps it
+    /// in the band between the bounds. The cell coordinator's lease
+    /// renewals did that to its own machine, the one founder, at the
+    /// 100 ms renewal floor: 70 to 90 % disk busy for the whole tail
+    /// (witness `replay-main 10435710832576718291` on 0fe713a). A machine
+    /// that does not answer is judged as usual.
+    async fn still_busy(&self, ctx: &SimContext, node: u64, addr: &str) -> bool {
+        let Ok(target) = Address::parse(addr) else {
+            return false;
+        };
+        let outcomes = ask_all(
+            self.connector.providers(),
+            self.connector.rpc(),
+            self.connector.names(),
+            &[(node, target)],
+            self.patience,
+        )
+        .await;
+        let Some(Load::Answered(ack)) = outcomes.get(&node) else {
+            return false;
+        };
+        let sample = Sample::of(Duration::ZERO, Some(ack));
+        let busiest = sample
+            .disk_busy_permille
+            .max(sample.cpu_busy_permille)
+            .unwrap_or(0);
+        let bound = crate::shape::lowest_slow_busy(ctx.state()).saturating_sub(BUSY_MARGIN);
+        let busy = busiest >= bound;
+        if busy {
+            assert_reachable!("registry: a slow mark is held over a machine still busy");
+        }
+        busy
+    }
+
     /// Read the cell's registry until every machine live long enough is
     /// held up and not slow, or `deadline`.
     pub(super) async fn machines_live(&self, ctx: &SimContext, cell: &Cell, deadline: Duration) {
@@ -71,6 +112,9 @@ impl FleetOps {
                         continue;
                     }
                     let held = registry.liveness(id);
+                    if held.up && held.slow && self.still_busy(ctx, id.0, &node.addr).await {
+                        continue;
+                    }
                     if !held.up || held.slow {
                         wrong = Some((id.0, held.up, held.slow));
                         break;
