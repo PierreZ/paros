@@ -341,6 +341,7 @@ pub(super) struct MatchmakerAudit {
     probe_rejoined: bool,
     reprobe_rejoined: bool,
     late_answer_moved: bool,
+    campaign_kept_newer_fact: bool,
     ledger_agreement_checked: bool,
     /// Every configuration some completed campaign or started reconfiguration
     /// put on the wire — the only sources a candidate may learn a belief from
@@ -1736,6 +1737,13 @@ impl MatchmakerAudit {
         // configuration is one that leadership's matchmaking quorum
         // missed, held by a minority: the candidate keeps its belief over
         // it (`probe_floor`; replay-main 9491883622406273044 on 832b116).
+        // A reconfiguration registered *above* the one the quorum shows,
+        // which the quorum missed (held by a minority, heard from one late
+        // probe answer or an earlier quorum), is the other half of the
+        // probe floor: the fact the candidate's belief matches. The
+        // candidate keeps it; it is newer than what the quorum shows, never
+        // superseded by it (replay-main 1859054409658602303 and
+        // 1861290827981239083 on 25f93b4).
         let effective = folded_effective(campaign);
         if !campaign.kind.is_reconfiguration()
             && let Some((newest, config)) = effective
@@ -1744,11 +1752,22 @@ impl MatchmakerAudit {
                 .won
                 .range((Bound::Excluded(newest), Bound::Excluded(ballot)))
                 .any(|(_, ran)| *ran != config);
+            let newer_fact = campaign.config.as_ref().is_some_and(|mine| {
+                self.reconfigurations
+                    .range((Bound::Excluded(newest), Bound::Excluded(ballot)))
+                    .any(|(_, (registered, _))| registered == mine)
+            });
             assert_always!(
-                campaign.config.as_ref() == Some(&config) || below_a_leadership,
+                campaign.config.as_ref() == Some(&config) || below_a_leadership || newer_fact,
                 "matchmaking: a completed ordinary campaign registered the effective configuration",
                 { "node" => node.0, "round" => ballot.round, "newest_round" => newest.round }
             );
+            if campaign.config.as_ref() != Some(&config) && newer_fact {
+                reach_once!(
+                    self.campaign_kept_newer_fact,
+                    "matchmaking: a campaign keeps a reconfiguration its quorum missed"
+                );
+            }
         }
         campaign.completed = true;
         let registered = campaign.config.clone();

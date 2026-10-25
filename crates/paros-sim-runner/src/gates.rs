@@ -46,6 +46,10 @@ pub struct Rare {
 /// window seldom reaches, #485 the double fault, #486 the rest.
 pub const RARE: &[Rare] = &[
     Rare {
+        msg: "matchmaking: a campaign keeps a reconfiguration its quorum missed",
+        reason: "a reconfiguration registered at a minority above the newest one a later campaign's quorum shows, whose fact a member's belief already matches: two witnesses, replay-main 1859054409658602303 and 1861290827981239083 on 25f93b4 (#486)",
+    },
+    Rare {
         msg: "matchmaking: a campaign keeps its belief over a reconfiguration below a won leadership",
         reason: "a reconfiguration registered at one matchmaker only, whose holder answers a member's campaign after a later leadership won under another configuration: one witness, replay-main 9491883622406273044 on PR #718 (one matchmaker host); 0 of 300 hunt seeds (#486)",
     },
