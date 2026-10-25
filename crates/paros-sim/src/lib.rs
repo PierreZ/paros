@@ -37,6 +37,8 @@ pub use moonpool_sim::{AssertKind, AssertionStats, SimulationReport};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
+use tracing::level_filters::LevelFilter;
+
 use moonpool_sim::{
     Attrition, AttritionScope, AttritionVictims, Chaos, ChaosMode, ExplorationConfig, GrayFailure,
     LinkLatencyConfig, LocalityConfig, NetworkFault, NetworkFaultMask, SimulationBuilder,
@@ -474,6 +476,11 @@ fn chain_builder(digest: Option<DigestSink>) -> SimulationBuilder {
         .chaos_duration(CHAOS_CAP)
         .chaos_until_run_ends()
         .swarm_operations()
+        // No invariant reads the trace timeline and no subscriber prints it,
+        // so every span and event is off: about a fifth of a seed's time went
+        // to tracing. The level never changes scheduling or randomness, so a
+        // seed replays the same at any level.
+        .trace_level(LevelFilter::OFF)
 }
 
 /// The index in `0..len` a 64-bit draw names: `draw % len`, reduced in
