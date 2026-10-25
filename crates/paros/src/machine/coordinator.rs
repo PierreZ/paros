@@ -1787,8 +1787,12 @@ fn chaos() -> bool {
 /// control journal, a watch round `Identify`s every machine. Without these
 /// renewals every term of a slow cell was deposed before it served
 /// (witness 17167272764625629279, a 1.6 s lease over a slow link). A
-/// renewal still in flight when `work` ends is dropped: the next step sends
-/// it again. With no term led, `work` runs alone.
+/// renewal still waiting for its due time when `work` ends is dropped. A
+/// renewal already writing is finished first: a dropped write is due again
+/// at once, so when one renewal outlasts each short duty, every step wrote
+/// a renewal that never counted, near twice the renewals the period asks
+/// for on the coordinator's disk (witness `replay-main
+/// 10435710832576718291` on 0fe713a). With no term led, `work` runs alone.
 async fn renewing<P: ParosProviders, T>(
     providers: &P,
     election: &mut Election<P>,
@@ -1797,14 +1801,24 @@ async fn renewing<P: ParosProviders, T>(
     let mut work = std::pin::pin!(work);
     while election.leading().is_some() {
         let wait = election.renewal_due_in();
-        let renewal = async {
+        let writing = std::cell::Cell::new(false);
+        let mut renewal = std::pin::pin!(async {
             let _ = providers.time().sleep(wait).await;
+            writing.set(true);
             election.renew_if_due().await
-        };
+        });
         moonpool_core::select! {
             biased;
-            out = &mut work => return out,
-            led = renewal => {
+            out = &mut work => {
+                if writing.get() {
+                    moonpool_assertions::reachable!(
+                        "coordinator: a renewal in flight outlives its duty"
+                    );
+                    let _ = renewal.await;
+                }
+                return out;
+            }
+            led = &mut renewal => {
                 if !led {
                     break;
                 }

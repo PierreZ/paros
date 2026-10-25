@@ -3008,6 +3008,20 @@ pub(crate) fn longest_internal_timeout(state: &StateHandle) -> Duration {
         .unwrap_or(Duration::ZERO)
 }
 
+/// The lowest slow-busy bound any node booted under so far, in
+/// thousandths (#654 (live machine marked down)): the bound a cell
+/// coordinator may judge a machine by. The default before any boot.
+pub(crate) fn lowest_slow_busy(state: &StateHandle) -> u32 {
+    let registry = registry(state);
+    let guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    guard
+        .nodes
+        .values()
+        .map(|entry| entry.shape.tunables.slow_busy_permille)
+        .min()
+        .unwrap_or(DriverTunables::default().slow_busy_permille)
+}
+
 /// The longest re-placement bound any node booted under so far (#475
 /// (re-place after the Down bound)): a cell coordinator may wait that long
 /// before it re-places a machine's roles. Zero before any boot.

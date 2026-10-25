@@ -46,6 +46,10 @@ pub struct Rare {
 /// window seldom reaches, #485 the double fault, #486 the rest.
 pub const RARE: &[Rare] = &[
     Rare {
+        msg: "registry: a slow mark is held over a machine still busy",
+        reason: "a machine marked slow during chaos whose own work keeps its disk in the band between the slow bounds for the whole tail: the cell coordinator's renewals on a one-founder cell at the 100 ms renewal floor; one witness, replay-main 10435710832576718291 on 0fe713a (#486)",
+    },
+    Rare {
         msg: "matchmaking: a campaign keeps a reconfiguration its quorum missed",
         reason: "a reconfiguration registered at a minority above the newest one a later campaign's quorum shows, whose fact a member's belief already matches: two witnesses, replay-main 1859054409658602303 and 1861290827981239083 on 25f93b4 (#486)",
     },
