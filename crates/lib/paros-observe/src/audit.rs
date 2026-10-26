@@ -638,7 +638,7 @@ pub trait Audit {
 
     /// This node, as a settled leader, filled `count` slots with a `Noop` up
     /// to a vote watermark a pre-read reported past its allocator frontier
-    /// (#204, `ColocatedNode::watermark_fills`).
+    /// (#204, `NodeCounters::watermark_fills`).
     fn watermark_filled(&self, node: NodeId, count: u64) {}
 
     /// This node booted with recoverable **faulty entries** (Stage 8): the
