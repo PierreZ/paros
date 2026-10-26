@@ -29,6 +29,7 @@ pub use self::replication::HEARTBEAT_TICKS;
 use crate::acceptor::Acceptor;
 use crate::collector::Collector;
 pub use crate::collector::GcStep;
+use crate::journal::{Command, Control, Entry, Seq, command_fingerprint};
 use crate::matchmaker::{GcRequest, MatchRequest};
 use crate::matchmaking::{Matchmaking, MembershipProbe};
 use crate::membership::{AcceptorConfig, MatchmakerId, MatchmakerSet, ProxyId, QuorumSystem};
@@ -39,7 +40,7 @@ use crate::ready::Ready;
 use crate::replica::Replica;
 use crate::state::{Config, HardState};
 use crate::storage::Storage;
-use crate::types::{Ballot, Command, Control, Entry, NodeId, Seq, Slot, command_fingerprint};
+use crate::types::{Ballot, NodeId, Slot};
 use crate::write::WriteOp;
 
 /// Maximum accepted records carried by one [`Message::Promise`] page — the
@@ -612,7 +613,7 @@ impl ColocatedNode {
     /// [`ProposeResult::NotLeader`] with a redirect hint. Nothing about the
     /// write is judged here — not its writer, not its position, not whether
     /// it retries an earlier one: every rule is the journal state machine's,
-    /// at apply, in slot order ([`crate::journal_state`]). A retry takes a
+    /// at apply, in slot order ([`crate::journal::state`]). A retry takes a
     /// fresh slot and is answered from the log itself.
     ///
     /// # Panics

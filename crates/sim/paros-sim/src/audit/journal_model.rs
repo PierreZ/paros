@@ -2,7 +2,7 @@
 //! one journal owes every other, and what the journal owes its clients.
 //!
 //! The core judges every `Write`, `SetLeader` and `Truncate` at apply, in
-//! slot order ([`paros::core::journal_state`]); each node reports the verdict it
+//! slot order ([`paros::core::journal::state`]); each node reports the verdict it
 //! reached at each slot it walked ([`paros::observe::audit::Audit::applied`]). This model
 //! folds those reports — never a second implementation of the journal — and
 //! asserts the invariants of `docs/architecture/06-verification.md`, section 6:

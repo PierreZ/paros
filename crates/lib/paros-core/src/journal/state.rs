@@ -71,7 +71,7 @@
 //! own ordering (`first_seq <= next_seq`) and its monotonicity are pinned at
 //! every transition.
 
-use crate::types::{Command, Control, Entry, LeaderUuid, Seq};
+use crate::journal::{Command, Control, Entry, LeaderUuid, Seq};
 
 /// Who may write a journal (`docs/architecture/02-data-plane.md` §2, decided on
 /// 2026-10-04): fixed when the journal is created, and never changed. The

@@ -20,9 +20,8 @@ use crate::storage::Storage;
 
 /// The journal every test node serves.
 const J: crate::JournalId = crate::JournalId::UNSET;
-use crate::types::{
-    Ballot, Command, Control, Entry, LeaderUuid, NodeId, Seq, Slot, Value, command_fingerprint,
-};
+use crate::journal::{Command, Control, Entry, LeaderUuid, Seq, command_fingerprint};
+use crate::types::{Ballot, NodeId, Slot, Value};
 
 /// In-memory [`Storage`] seeded with an explicit initial state (for restart
 /// tests): the durable scalars plus a per-slot accepted log.

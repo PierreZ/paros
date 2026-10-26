@@ -6,9 +6,10 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use crate::journal_state::JournalState;
+use crate::journal::Command;
+use crate::journal::state::JournalState;
 use crate::membership::{AcceptorConfig, ProxyId};
-use crate::types::{Ballot, Command, NodeId, Slot};
+use crate::types::{Ballot, NodeId, Slot};
 
 /// A **party** to the Phase-2 exchange: the address an `Accept` asks its
 /// `Accepted` sent to, and the sender a `Commit` names. A node, or a proxy

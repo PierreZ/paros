@@ -1,8 +1,9 @@
 //! Durable state ([`HardState`]) and static node configuration ([`Config`]).
 
-use crate::journal_state::WriterMode;
+use crate::journal::JournalIdentifier;
+use crate::journal::state::WriterMode;
 use crate::membership::{AcceptorConfig, FailureDomain, MatchmakerId, QuorumSystem, ReplicaId};
-use crate::types::{Ballot, JournalIdentifier, NodeId, Slot};
+use crate::types::{Ballot, NodeId, Slot};
 
 /// The small, persisted-whole durable scalars of Multi-Paxos: the state that has
 /// to hit stable storage **before any message predicated on it is sent**.

@@ -4,7 +4,8 @@
 use std::collections::BTreeMap;
 
 use super::{MatchmakerHardState, MatchmakerWriteOp, Registration};
-use crate::types::{Ballot, JournalId};
+use crate::journal::JournalId;
+use crate::types::Ballot;
 
 /// The read-only recovery port of a matchmaker — the registry's
 /// [`crate::Storage`], mirrored method for method. The **application**

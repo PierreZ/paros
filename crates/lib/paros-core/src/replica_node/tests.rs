@@ -5,12 +5,13 @@
 use std::collections::BTreeMap;
 
 use super::{ReplicaNode, ReplicaReady};
+use crate::journal::{Command, Control, Entry, LeaderUuid, Seq};
 use crate::membership::ReplicaId;
 use crate::message::{Audience, Message};
 use crate::node::ColocatedNode;
 use crate::state::{Config, HardState};
 use crate::storage::Storage;
-use crate::types::{Ballot, Command, Control, Entry, LeaderUuid, NodeId, Seq, Slot, Value};
+use crate::types::{Ballot, NodeId, Slot, Value};
 use crate::write::{AcceptorWrite, WriteOp};
 
 const ACCEPTORS: [u64; 3] = [0, 1, 2];

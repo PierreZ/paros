@@ -78,6 +78,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 use super::support::{Mailbox, Rng, env_or};
+use crate::journal::JournalId;
 use crate::matchmaker::{
     MatchOutcome, MatchRefusal, MatchReply, MatchRequest, Matchmaker, MatchmakerConfig,
     MatchmakerHardState, MatchmakerPhase, MatchmakerReconfigurer, MatchmakerWriteOp, MemRegistry,
@@ -87,7 +88,7 @@ use crate::matchmaker::{
 use crate::matchmaking::{MatchFold, Matchmaking, RegisteredPage};
 use crate::membership::{AcceptorConfig, QuorumSystem};
 use crate::membership::{MatchmakerGeneration, MatchmakerId, MatchmakerSet};
-use crate::types::{Ballot, JournalId, NodeId};
+use crate::types::{Ballot, NodeId};
 
 /// Seeds per campaign (`HANDOVER_MODEL_SEEDS` overrides; a long run is
 /// `HANDOVER_MODEL_SEEDS=5000 cargo nextest run -p paros-core handover_model`).

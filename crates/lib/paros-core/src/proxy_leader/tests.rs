@@ -1,7 +1,8 @@
 use super::*;
+use crate::journal::{Entry, LeaderUuid, Seq};
 use crate::membership::QuorumSystem;
 use crate::proposer::Round;
-use crate::types::{Entry, LeaderUuid, Seq, Value};
+use crate::types::Value;
 
 fn ballot(round: u64, node: u64) -> Ballot {
     Ballot {

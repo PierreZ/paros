@@ -1,8 +1,9 @@
 use std::collections::BTreeMap;
 
 use super::{LogRead, Replica};
-use crate::journal_state::{JournalState, Outcome, WriterMode};
-use crate::types::{Ballot, Command, Control, Entry, LeaderUuid, NodeId, Seq, Slot, Value};
+use crate::journal::state::{JournalState, Outcome, WriterMode};
+use crate::journal::{Command, Control, Entry, LeaderUuid, Seq};
+use crate::types::{Ballot, NodeId, Slot, Value};
 
 fn write(seq: u64, records: &[&[u8]]) -> Command {
     Command::Write(Entry {

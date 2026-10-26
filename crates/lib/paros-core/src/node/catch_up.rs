@@ -1,5 +1,5 @@
 use super::{BTreeMap, Ballot, ColocatedNode, Command, Message, NodeId, Slot};
-use crate::journal_state::JournalState;
+use crate::journal::state::JournalState;
 
 /// Maximum number of decided slots one [`Message::CatchUpResponse`] carries. A
 /// lagging peer that needs more re-requests on the next heartbeat, so a large

@@ -20,9 +20,10 @@ use super::{
     PendingBootstrap, ReconfigureReply, ReconfigureRequest, Registration, raise_effective,
 };
 use crate::acceptor::{AcceptOutcome, Acceptor, PrepareOutcome};
+use crate::journal::JournalId;
 use crate::membership::{MatchmakerGeneration, MatchmakerId, MatchmakerSet};
 use crate::retained::RetainedWindow;
-use crate::types::{Ballot, JournalId, Slot};
+use crate::types::{Ballot, Slot};
 use crate::write::AcceptorWrite;
 
 /// The one slot a successor decree runs over: a matchmaker set is a single

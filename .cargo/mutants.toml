@@ -14,7 +14,7 @@ examine_globs = [
   "crates/lib/paros-core/src/proposer/probe.rs",
   "crates/lib/paros-core/src/proposer/rounds.rs",
   "crates/lib/paros-core/src/replica.rs",
-  "crates/lib/paros-core/src/journal_state.rs",
+  "crates/lib/paros-core/src/journal/state.rs",
   "crates/lib/paros-core/src/matchmaking.rs",
   "crates/lib/paros-core/src/membership/*.rs",
   "crates/lib/paros-core/src/node/catch_up.rs",

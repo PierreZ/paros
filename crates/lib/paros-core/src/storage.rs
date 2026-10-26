@@ -1,8 +1,9 @@
 //! The read-only [`Storage`] port the core depends on.
 
-use crate::journal_state::JournalState;
+use crate::journal::Command;
+use crate::journal::state::JournalState;
 use crate::state::{Config, HardState};
-use crate::types::{Ballot, Command, Slot};
+use crate::types::{Ballot, Slot};
 
 /// A read-only recovery/serving port. The **application** implements it and owns
 /// *all* writes; the core only ever *reads back* state the application has

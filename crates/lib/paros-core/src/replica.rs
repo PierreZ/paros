@@ -12,7 +12,7 @@
 //!   applied entries, bounded per batch;
 //! - the **journal fold** (#204): the [`JournalState`] of the journal the log
 //!   carries, judged at apply in slot order
-//!   ([`crate::journal_state`]) — the state at the retention floor (the
+//!   ([`crate::journal::state`]) — the state at the retention floor (the
 //!   `base`, sealed durably when truncation drops the slots it was folded
 //!   from and carried by a trim-point jump), the state at the fold's head,
 //!   the [`Outcome`] of every retained slot (what a driver answers the call
@@ -46,8 +46,9 @@
 
 use std::collections::BTreeMap;
 
-use crate::journal_state::{JournalState, JournalView, Outcome, WriterMode};
-use crate::types::{Ballot, Command, Entry, Seq, Slot, Value};
+use crate::journal::state::{JournalState, JournalView, Outcome, WriterMode};
+use crate::journal::{Command, Entry, Seq};
+use crate::types::{Ballot, Slot, Value};
 use crate::write::WriteOp;
 
 /// Maximum slots the contiguous apply walk releases in one batch — the

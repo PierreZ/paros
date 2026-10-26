@@ -1,5 +1,6 @@
 use super::{JournalState, Outcome, WriterMode};
-use crate::types::{Command, Control, Entry, LeaderUuid, Seq, Value};
+use crate::journal::{Command, Control, Entry, LeaderUuid, Seq};
+use crate::types::Value;
 
 fn write(leader: u128, seq: u64, records: &[&[u8]]) -> Command {
     Command::Write(Entry {

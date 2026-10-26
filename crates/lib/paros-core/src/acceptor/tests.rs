@@ -1,6 +1,7 @@
 use super::*;
-use crate::journal_state::JournalState;
-use crate::types::{Command, Entry, LeaderUuid, NodeId, Seq, Value};
+use crate::journal::state::JournalState;
+use crate::journal::{Command, Entry, LeaderUuid, Seq};
+use crate::types::{NodeId, Value};
 use crate::write::WriteOp;
 
 fn ballot(round: u64) -> Ballot {

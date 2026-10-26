@@ -9,8 +9,9 @@
 //! whole, the log persists per record — and is what lets later stages truncate,
 //! checksum, and recover per entry without a blob rewrite.
 
-use crate::journal_state::JournalState;
-use crate::types::{Ballot, Command, Slot};
+use crate::journal::Command;
+use crate::journal::state::JournalState;
+use crate::types::{Ballot, Slot};
 
 /// The two durable writes an [`Acceptor`](crate::acceptor::Acceptor) makes,
 /// over whatever value that deployment's log carries.
@@ -198,7 +199,8 @@ impl WriteOp {
 #[cfg(test)]
 mod tests {
     use super::{AcceptorWrite, WriteOp};
-    use crate::types::{Ballot, Command, Entry, LeaderUuid, NodeId, Seq, Slot, Value};
+    use crate::journal::{Command, Entry, LeaderUuid, Seq};
+    use crate::types::{Ballot, NodeId, Slot, Value};
 
     fn ballot() -> Ballot {
         Ballot {
@@ -231,7 +233,7 @@ mod tests {
         assert!(
             WriteOp::Truncate {
                 first: Slot(1),
-                sealed: crate::journal_state::JournalState::default()
+                sealed: crate::journal::state::JournalState::default()
             }
             .needs_sync()
         );

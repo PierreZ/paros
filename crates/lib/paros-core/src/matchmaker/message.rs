@@ -11,8 +11,9 @@
 use std::collections::BTreeMap;
 
 use super::{BootstrapPage, JournalRegistry, MatchmakerPhase, Registration, RegistrationKind};
+use crate::journal::JournalId;
 use crate::membership::{AcceptorConfig, MatchmakerGeneration, MatchmakerId, MatchmakerSet};
-use crate::types::{Ballot, JournalId, NodeId};
+use crate::types::{Ballot, NodeId};
 
 /// A proposer's matchmaking request: "register `config` for `ballot`, and tell
 /// me every configuration registered below it" (the paper's `MatchA`), fenced

@@ -141,9 +141,10 @@ pub use self::state::{
 pub(crate) use self::state::{raise_effective, resolved_phase, resolved_set};
 pub use self::storage::{MemRegistry, RegistryStorage};
 pub use self::write::{MatchmakerReady, MatchmakerWriteOp};
+use crate::journal::JournalId;
 use crate::membership::{AcceptorConfig, MatchmakerGeneration, MatchmakerId, MatchmakerSet};
 use crate::retained::RetainedWindow;
-use crate::types::{Ballot, JournalId, NodeId};
+use crate::types::{Ballot, NodeId};
 
 /// A journal this set holds no record for reads as this registry.
 static EMPTY_REGISTRY: BTreeMap<Ballot, Registration> = BTreeMap::new();

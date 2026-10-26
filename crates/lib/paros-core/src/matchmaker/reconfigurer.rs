@@ -59,7 +59,8 @@ use super::{
     JournalRegistry, MatchmakerId, MatchmakerSet, PendingBootstrap, REGISTRY_PAGE,
     ReconfigureReply, ReconfigureRequest, raise_effective,
 };
-use crate::types::{Ballot, JournalId, NodeId};
+use crate::journal::JournalId;
+use crate::types::{Ballot, NodeId};
 
 /// Why [`MatchmakerReconfigurer::start`] refused a request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -9,10 +9,10 @@ use super::{
     ColocatedNode, Delegation, Message, NO_CHECK_QUORUM, NodeId, NodeRole, Party, ProposeResult,
     Slot, TestStorage, campaign, cluster, deliver_all, drain, entry, make_leader, ucmd,
 };
+use crate::journal::command_fingerprint;
 use crate::membership::ProxyId;
 use crate::message::Audience;
 use crate::proxy_leader::ProxyLeader;
-use crate::types::command_fingerprint;
 
 /// A three-node plain deployment with `proxies` proxy leaders.
 fn proxied_node(id: u64, proxies: usize) -> ColocatedNode {

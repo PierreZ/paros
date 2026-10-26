@@ -122,10 +122,10 @@
 //!   completes is simply abandoned at the next election timeout.
 
 use super::{Ballot, BeliefSource, ColocatedNode, NodeId, NodeRole};
+use crate::journal::JournalId;
 use crate::matchmaker::{MatchOutcome, MatchRefusal, MatchReply, MatchRequest, RegistrationKind};
 use crate::matchmaking::{MatchFold, Matchmaking, MembershipProbe, RegisteredPage};
 use crate::membership::{AcceptorConfig, MatchmakerGeneration, MatchmakerId, MatchmakerSet};
-use crate::types::JournalId;
 
 /// What one matchmaker reply did to an open campaign, returned by
 /// [`super::ColocatedNode::on_match_reply`] so the driver can report the transition

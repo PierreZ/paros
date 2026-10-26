@@ -5,7 +5,8 @@
 use std::collections::BTreeMap;
 
 use super::{MatchReply, Matchmaker, MatchmakerHardState, ReconfigureReply, Registration};
-use crate::types::{Ballot, JournalId};
+use crate::journal::JournalId;
+use crate::types::Ballot;
 
 /// A single semantic durable write the driver must apply to stable storage
 /// and **fsync before** the batch's replies leave — every matchmaker write is

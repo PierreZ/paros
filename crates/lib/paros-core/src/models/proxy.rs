@@ -46,13 +46,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 use super::support::{Mailbox, Rng, env_or};
+use crate::journal::{Command, LeaderUuid, Seq, command_fingerprint};
 use crate::membership::{AcceptorConfig, ProxyId, QuorumSystem};
 use crate::message::{Message, Party};
 use crate::node::{ColocatedNode, Delegation, ProposeResult};
 use crate::proxy_leader::ProxyLeader;
 use crate::state::{Config, HardState};
 use crate::storage::Storage;
-use crate::types::{Ballot, Command, LeaderUuid, NodeId, Seq, Slot, Value, command_fingerprint};
+use crate::types::{Ballot, NodeId, Slot, Value};
 use crate::write::{AcceptorWrite, WriteOp};
 
 /// Seeds per campaign (`PROXY_MODEL_SEEDS` overrides; a long run is
@@ -695,7 +696,7 @@ impl World {
         let trace = self.trace;
         let node = self.site(leader).live.as_mut().expect("a leader is live");
         let result = node.propose_in(
-            crate::types::Entry {
+            crate::journal::Entry {
                 leader: LeaderUuid(1),
                 seq: Seq(seq),
                 records: vec![value],

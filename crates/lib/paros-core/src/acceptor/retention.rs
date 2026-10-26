@@ -13,7 +13,7 @@
 //! beside the same private `drop_prefix`.
 
 use super::Acceptor;
-use crate::journal_state::JournalState;
+use crate::journal::state::JournalState;
 use crate::types::Slot;
 use crate::write::WriteOp;
 

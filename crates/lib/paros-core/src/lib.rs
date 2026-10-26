@@ -70,7 +70,7 @@ pub mod acceptor;
 pub mod batcher;
 mod collector;
 pub mod decree;
-pub mod journal_state;
+pub mod journal;
 mod matchmaker;
 pub mod matchmaking;
 pub mod membership;
@@ -92,7 +92,10 @@ mod write;
 
 pub use batcher::{Batch, BatchLimits, Batcher, Unbatcher};
 pub use decree::Decree;
-pub use journal_state::{JournalState, JournalView, Outcome, WriterMode};
+pub use journal::{
+    Command, Control, Entry, JournalId, JournalIdentifier, JournalState, JournalView, LeaderUuid,
+    Outcome, Seq, TenantId, WriterMode, command_fingerprint,
+};
 pub use matchmaker::{
     BootstrapPage, DecreeRecord, GcAck, GcOutcome, GcRequest, JournalRegistry, JournalScalars,
     MatchOutcome, MatchPurpose, MatchRefusal, MatchReply, MatchRequest, Matchmaker,
@@ -121,8 +124,5 @@ pub use replica_node::{ReplicaCounters, ReplicaNode, ReplicaReady};
 pub use retained::RetainedWindow;
 pub use state::{Config, HardState};
 pub use storage::Storage;
-pub use types::{
-    Ballot, Command, Control, Entry, Fingerprint, JournalId, JournalIdentifier, LeaderUuid, NodeId,
-    Seq, Slot, TenantId, Value, command_fingerprint,
-};
+pub use types::{Ballot, Fingerprint, NodeId, Slot, Value};
 pub use write::{AcceptorWrite, MustSync, WriteOp};

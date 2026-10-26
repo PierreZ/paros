@@ -7,8 +7,9 @@
 
 use std::collections::BTreeMap;
 
+use crate::journal::JournalId;
 use crate::membership::{AcceptorConfig, MatchmakerGeneration, MatchmakerId, MatchmakerSet};
-use crate::types::{Ballot, JournalId};
+use crate::types::Ballot;
 
 /// This matchmaker's durable **acceptor record** in the successor decree: the
 /// promise it made and the vote it cast, the two scalars of Paxos's acceptor
