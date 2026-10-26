@@ -17,13 +17,13 @@ use paros_core::{AcceptorWrite, Ballot};
 use tokio_util::sync::CancellationToken;
 
 use super::admitted::AdmittedMachine;
-use super::formed::{FormationToken, FormedCell, vote_ballot};
+use super::formed::{FormationToken, FormedCell, FormedExt as _, vote_ballot};
 use super::{AdminPin, Admission, CellPlan, Class, MachineFacts, ballot_from_wire, ballot_to_wire};
-use crate::driver::edge::RpcEdge;
-use crate::driver::{DriverTunables, RunError};
-use crate::frontend::Operation;
 use crate::net::transport::Transport;
 use crate::net::{Inbound, ReplySender, serve_well_known};
+use crate::roles::frontend::Operation;
+use crate::roles::node::edge::RpcEdge;
+use crate::roles::node::{DriverTunables, RunError};
 use crate::wire::machine as wire;
 use crate::wire::methods::{AdmitRpc, CellInitRpc, FormCellRpc, IdentifyRpc, PrepareCellRpc};
 

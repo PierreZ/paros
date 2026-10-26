@@ -7,7 +7,7 @@
 //! founding or admitted, hosts a later generation of a set the registry
 //! books on it.
 //!
-//! The host is the shipped matchmaker loop ([`crate::matchmaker`]) in a task
+//! The host is the shipped matchmaker loop ([`crate::roles::matchmaker`]) in a task
 //! beside the node loop, on the node's own RPC edge: a machine answers the
 //! matchmaker contract at the address it serves its journals at. A set's
 //! store is provisioned at the first request that names its tenant:
@@ -34,8 +34,8 @@ use paros_core::{JournalId, JournalIdentifier, MatchmakerConfig, TenantId};
 use tokio_util::sync::CancellationToken;
 
 use super::ProviderDisk;
-use crate::driver::edge::MatchmakerInbox;
-use crate::matchmaker::{Host, HostedSet, SetOpener};
+use crate::roles::matchmaker::{Host, HostedSet, SetOpener};
+use crate::roles::node::edge::MatchmakerInbox;
 use crate::storage::journal::JournalMatchmakerStorage;
 use crate::{Audit, BootKind, DriverTunables, Provisioned};
 
@@ -227,7 +227,7 @@ pub(crate) fn spawn<P, S, A, F>(
     tunables: &DriverTunables,
     audits: Arc<F>,
     shutdown: CancellationToken,
-) -> SimulationResult<crate::driver::HostEnded>
+) -> SimulationResult<crate::roles::node::HostEnded>
 where
     P: ParosProviders,
     S: LocalStorageProvider + Clone + 'static,
@@ -241,7 +241,7 @@ where
     let inbox = MatchmakerInbox::serve(rpc, machine)?;
     let page = tunables.registry_page.clamp(1, paros_core::REGISTRY_PAGE);
     assert!(page >= 1, "a registry page holds a registration");
-    let (alive, ended) = crate::driver::HostEnded::pair();
+    let (alive, ended) = crate::roles::node::HostEnded::pair();
     providers
         .local_task()
         .spawn_local_task("paros-machine-matchmakers", async move {

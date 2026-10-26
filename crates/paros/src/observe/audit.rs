@@ -30,11 +30,11 @@ use paros_core::{
 
 use crate::Address;
 use crate::client::CallObserver;
-use crate::driver::BootRefusal;
 use crate::machine::{CachedRegistry, CellPlan, MachineRecord};
 use crate::model::name::JournalName;
 use crate::net::EdgeRejection;
 use crate::observe::metrics::{CallKind, CallOutcome};
+use crate::roles::node::BootRefusal;
 use crate::storage::StorageError;
 use crate::wire::{MatchmakersRefusal, RetireRefusal};
 

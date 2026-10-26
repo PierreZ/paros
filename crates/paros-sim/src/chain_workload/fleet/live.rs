@@ -17,7 +17,7 @@ use moonpool_sim::{SimContext, TimeProvider, assert_always, assert_reachable, as
 use paros::Address;
 use paros::client::checkpoint::LoadOutcome;
 use paros::client::load::{LoadOutcome as Load, ask_all};
-use paros::machine::slow::{BUSY_MARGIN, Sample};
+use paros::coordinator::cell::slow::{BUSY_MARGIN, Sample};
 use paros::model::registry::NodeStanding;
 
 use super::cell::Cell;
@@ -32,7 +32,7 @@ impl FleetOps {
     /// Whether the machine at `addr` still measures busy: its disk or CPU
     /// at or above the lowest slow bound any node drew, less
     /// [`BUSY_MARGIN`]. The coordinator clears a slow mark only once the
-    /// machine leans fast (`paros::machine::slow`), so a mark held over a
+    /// machine leans fast (`paros::coordinator::cell::slow`), so a mark held over a
     /// machine that is still this busy has a reason: its own work keeps it
     /// in the band between the bounds. The cell coordinator's lease
     /// renewals did that to its own machine, the one founder, at the

@@ -6,7 +6,7 @@
 //! It runs the node loop of the cell's machines ([`crate::run_journals`],
 //! #474) and serves every journal placed on it: the registry books an
 //! acceptor slot of the journal on it, and the journal's tenant created it
-//! (`crate::driver::system`). It follows the control journals from the
+//! (`crate::roles::node::system`). It follows the control journals from the
 //! founding members its admission names, and its journals are born with
 //! their tenant's matchmaker set on the founding members. A `stateless`
 //! machine serves no journal. It answers what any machine of a cell
@@ -44,8 +44,8 @@ use paros_core::NodeId;
 
 use super::{Admission, CacheSink, CachedRegistry, MachineFacts};
 use crate::Address;
-use crate::driver::DriverTunables;
 use crate::net::{Inbound, serve_well_known};
+use crate::roles::node::DriverTunables;
 use crate::wire::machine as wire;
 use crate::wire::methods::{AdmitRpc, CellInitRpc, FormCellRpc, IdentifyRpc, PrepareCellRpc};
 
@@ -268,12 +268,12 @@ impl AdmittedMachine {
         // Every machine serves the batcher endpoint (#145) over the cell's
         // address book; the tenant coordinator books a tenant's batchers
         // on the `stateless` machines (#604) and `Resolve` names them.
-        crate::batcher::spawn(
+        crate::roles::batcher::spawn(
             providers,
             rpc,
-            crate::batcher::BatcherSettings::from_tunables(tunables),
+            crate::roles::batcher::BatcherSettings::from_tunables(tunables),
             (
-                crate::batcher::BatcherBook {
+                crate::roles::batcher::BatcherBook {
                     nodes: self.book(),
                     updates: Some(cache.subscribe()),
                     skip: None,

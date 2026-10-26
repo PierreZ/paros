@@ -291,7 +291,7 @@ impl FleetOps {
             }
             Step::Refused(FleetRefusal::Denied { denial, .. }) => {
                 assert_always!(
-                    bad_token && denial == paros::frontend::Denial::Forbidden,
+                    bad_token && denial == paros::roles::frontend::Denial::Forbidden,
                     "admit: a pinned machine denies only a tenant token",
                     { "denial" => denial.as_str() }
                 );

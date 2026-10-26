@@ -2,7 +2,7 @@
 //! cell's election journal, beside the founding members' coordinators,
 //! through the library's `paros::client::election` — the code the
 //! coordinator runs. A term it wins is served with the coordinator's own
-//! duties (`paros::machine::coordinator::serve_term`): it installs its uuid
+//! duties (`paros::coordinator::cell::serve_term`): it installs its uuid
 //! on the cell control journal and finishes the admissions in flight.
 //!
 //! The candidacy lasts a few steps. On its own BUGGIFY locations a leading
@@ -24,7 +24,7 @@ use paros::client::checkpoint::CheckpointPolicy;
 use paros::client::election::{
     Candidate, Election, ElectionFold, ElectionTunables, Step, hand_off, read_election,
 };
-use paros::machine::coordinator::{TermDuty, serve_term};
+use paros::coordinator::cell::{TermDuty, serve_term};
 use paros::{JournalIdentifier, LeaderUuid, NodeId};
 
 use super::{Cell, FleetOps};

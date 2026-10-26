@@ -301,7 +301,7 @@ pub(super) async fn run_acceptor(
             proxies.clone(),
             replicas.clone(),
             system.as_ref().map(|(plan, _)| plan.clone()),
-            None,
+            None::<paros::roles::node::host::NoHost>,
             tunables,
             crate::tls::serving(ctx, paros::net::tls::Role::Machine, my_ip)?,
             ctx.shutdown().clone(),

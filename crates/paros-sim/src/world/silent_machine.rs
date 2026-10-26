@@ -3,7 +3,7 @@
 //! and stays down for longer than any `machine_down_after` the knob draws,
 //! through moonpool's own `Crash` with a long recovery delay. The cell
 //! coordinator's watch marks it down, then up when it is back as a new
-//! incarnation (`paros::machine::coordinator::Watch`), and the final fleet
+//! incarnation (`paros::coordinator::cell::Watch`), and the final fleet
 //! check judges the entries it wrote (`crate::audit::liveness`).
 //!
 //! The target is an admitted machine when the cell has one, else a founding

@@ -14,8 +14,8 @@ use paros_core::{
 
 use super::{inspect, names};
 use crate::machine::{CellPlan, Class, MachineRecord, read_all, write_all};
-use crate::matchmaker::MatchmakerStorage;
 use crate::model::registry::SystemCommand;
+use crate::roles::matchmaker::MatchmakerStorage;
 use crate::storage::LogStorage;
 use crate::{Address, JournalMatchmakerStorage, JournalStorage, JournalStoreConfig};
 

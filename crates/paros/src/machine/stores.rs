@@ -377,7 +377,7 @@ where
         machine: Option<&moonpool_rpc::ServiceGroup<crate::wire::methods::MachineInterface>>,
         (tunables, cell_id): (&DriverTunables, u64),
         shutdown: CancellationToken,
-    ) -> SimulationResult<Option<crate::driver::HostEnded>> {
+    ) -> SimulationResult<Option<crate::roles::node::HostEnded>> {
         assert!(cell_id != 0, "a machine hosts its cell's sets");
         let Some(config) = self.matchmaker.clone() else {
             return Ok(None);

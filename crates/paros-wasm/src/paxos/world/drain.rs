@@ -6,7 +6,7 @@
 //! that can cut a batch in half, and a **prompt** that can hold one back until
 //! the player has said what the core did with it.
 //!
-//! The order never changes, and it is the order `paros::driver::ready` uses
+//! The order never changes, and it is the order `paros::roles::node::ready` uses
 //! with a real disk underneath:
 //!
 //! 1. `ready()`, copy every bucket out, `advance()` — the guard is never held
@@ -430,7 +430,7 @@ impl World {
     fn commit_batch(&mut self, index: usize, batch: Batch) {
         let id = self.pool[index];
         // `Truncate` waits until after the application apply: see the module
-        // doc, and `paros::driver::ready`.
+        // doc, and `paros::roles::node::ready`.
         let (truncates, writes): (Vec<WriteOp>, Vec<WriteOp>) = batch
             .writes
             .into_iter()

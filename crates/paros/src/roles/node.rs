@@ -48,6 +48,7 @@ mod calls;
 pub(crate) mod edge;
 mod flight;
 mod handover;
+pub mod host;
 mod journals;
 pub(crate) mod log_reads;
 mod matchmaking;
@@ -81,7 +82,7 @@ use paros_core::{
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
-use crate::machine::{CellMachine, ControlJournals};
+use crate::model::machine::ControlJournals;
 use crate::model::registry::{NodeStanding, RegistryEvent, SystemEvent};
 use crate::model::tenant::TenantEvent;
 use crate::net::transport::Transport;
@@ -94,6 +95,7 @@ use crate::wire::{
     RetireAck, RetireRefusal, SetLeaderAck, TruncateAck, WriteAck, leader_from_proto,
     leader_uuid_from_proto,
 };
+use host::{CellHost, Hosted, NoHost};
 use reply::Reply;
 
 use crate::observe::events::message_route;
@@ -1780,7 +1782,7 @@ where
         proxies,
         replicas,
         None,
-        None,
+        None::<NoHost>,
         tunables,
         transport,
         shutdown,
@@ -1839,7 +1841,7 @@ where
 #[tracing::instrument(level = "debug", skip_all, fields(local_addr = %local_addr, members = members.len(), matchmakers = matchmakers.len(), proxies = proxies.len(), replicas = replicas.len()))]
 // The parameters are the node's complete wiring.
 #[allow(clippy::too_many_arguments)]
-pub async fn run_journals<P, J>(
+pub async fn run_journals<P, J, H>(
     providers: P,
     stores: J,
     node: NodeId,
@@ -1849,7 +1851,7 @@ pub async fn run_journals<P, J>(
     proxies: Vec<(ProxyId, String)>,
     replicas: Vec<(NodeId, String)>,
     system: Option<ControlPlan>,
-    machine: Option<CellMachine>,
+    machine: Option<H>,
     tunables: DriverTunables,
     transport: Transport,
     shutdown: CancellationToken,
@@ -1857,6 +1859,7 @@ pub async fn run_journals<P, J>(
 where
     P: ParosProviders,
     J: JournalStores,
+    H: CellHost,
 {
     let mut hosted = None;
     let served = serve_journals(
@@ -1900,7 +1903,7 @@ where
     clippy::too_many_arguments,
     clippy::large_types_passed_by_value
 )]
-async fn serve_journals<P, J>(
+async fn serve_journals<P, J, H>(
     providers: P,
     mut stores: J,
     node: NodeId,
@@ -1910,7 +1913,7 @@ async fn serve_journals<P, J>(
     proxies: Vec<(ProxyId, String)>,
     replicas: Vec<(NodeId, String)>,
     system: Option<ControlPlan>,
-    machine: Option<CellMachine>,
+    machine: Option<H>,
     tunables: DriverTunables,
     transport: Transport,
     shutdown: CancellationToken,
@@ -1919,6 +1922,7 @@ async fn serve_journals<P, J>(
 where
     P: ParosProviders,
     J: JournalStores,
+    H: CellHost,
 {
     let ids = stores.journals();
     if ids.is_empty() && system.is_none() {
@@ -1931,7 +1935,7 @@ where
             "the system plan names another node".into(),
         )));
     }
-    let cell: Option<ControlJournals> = machine.as_ref().map(CellMachine::control_journals);
+    let cell: Option<ControlJournals> = machine.as_ref().map(CellHost::control_journals);
     // The machine's metrics (#366 (metrics)): off on a node outside a
     // machine.
     let metrics: Metrics = machine
@@ -2105,21 +2109,21 @@ where
     // A machine's vote is final: it answers the cell decree from its record
     // while it serves its cell (#277). A founding member's peers are dialed
     // where the registry fold says (#349), from the plan's addresses on.
-    let mut peer_book = match &machine {
-        Some(CellMachine::Founded { cell, .. }) => Some(book::PeerBook::new(cell)),
-        _ => None,
-    };
+    let mut peer_book = machine
+        .as_ref()
+        .and_then(CellHost::formed)
+        .map(book::PeerBook::new);
     // A founding member that came back at another address than the one its
     // cell knows (#390) holds its journals' clocks until its registration
     // ends. Its peers send to the address they know, so it hears none of
     // them, and its campaigns only raise their promises above the sitting
     // leader's: the cell control journal that would register it stalls.
     // Held, it still answers every message that reaches it.
-    let mut unregistered: Option<watch::Receiver<bool>> = None;
+    let mut unregistered: Option<watch::Receiver<bool>>;
     // Whether the cell coordinator's task ended (#560 (clean Ctrl-C
     // shutdown)): a clean stop waits for it to hand its term on. `None` on
     // a node that runs none.
-    let mut coordinator_ended: Option<watch::Receiver<bool>> = None;
+    let coordinator_ended: Option<watch::Receiver<bool>>;
     // The instant since which the registry's pool is owed to the live journals
     // (#189), and whether this incarnation holds it a while (#387,
     // `crate::observe::scenario::ADMIT_LATE`; drawn only where a registry is followed).
@@ -2128,87 +2132,23 @@ where
     // The books an admitted machine's cache is offered (#505 (stranded
     // admitted machine)): its follow's folds, and a book its cell
     // coordinator handed it when its fold was stuck.
-    let mut offered_books = None;
-    if let Some(CellMachine::Admitted { machine, cache }) = machine.clone() {
-        offered_books = Some(cache.subscribe());
-        // An admitted machine answers its admission beside the journals
-        // placed on it (#474), follows the registry for its cache (#211)
-        // and registers the address it advertises now (#349).
-        machine.serve_beside(
+    let Hosted {
+        offered_books,
+        unregistered: hosted_unregistered,
+        coordinator_ended: hosted_coordinator,
+    } = match machine {
+        Some(machine) => machine.serve(
             &providers,
             &rpc_handle,
-            &tunables,
-            cache,
-            node_audit.call_observer(),
-            incarnation_shutdown.clone(),
-        )?;
-    }
-    if let Some(CellMachine::Founded {
-        cell: formed,
-        cache,
-    }) = machine
-    {
-        // Every founding member answers the cell's views (#399).
-        crate::machine::views::spawn(
-            &providers,
-            &rpc_handle,
-            &formed,
-            &tunables,
-            incarnation_shutdown.clone(),
-        )?;
-        // It asks the coordinator to register the address it advertises
-        // now (#349): the cell may know another one.
-        if let Some(election) = formed
-            .plan
-            .election
-            .is_set()
-            .then_some(formed.plan.election)
-        {
-            // A lone founding member is its own quorum: it needs no peer.
-            let moved = formed.plan.members.len() > 1
-                && formed
-                    .founders()
-                    .iter()
-                    .any(|(id, addr)| *id == formed.facts.node_id && *addr != formed.facts.addr);
-            let ended = crate::machine::register::spawn(
-                &providers,
-                &rpc_handle,
-                crate::machine::register::Registration {
-                    facts: formed.facts.serving(&rpc_handle),
-                    cell_id: formed.plan.cell_id,
-                    election,
-                    book: crate::machine::with_own(
-                        &formed.founders(),
-                        formed.facts.node_id,
-                        &formed.facts.addr,
-                    ),
-                },
-                &tunables,
-                incarnation_shutdown.clone(),
-            );
-            unregistered = moved.then_some(ended);
-        }
-        // Every founding member campaigns for the cell coordinator (#240):
-        // a moved one once its registration ended (#506 (renamed founder
-        // not registered)).
-        coordinator_ended = Some(crate::machine::coordinator::spawn(
-            &providers,
-            &rpc_handle,
-            &formed,
             &tunables,
             node_audit.call_observer(),
-            unregistered.clone(),
             (incarnation_shutdown.clone(), stopping.clone()),
-        ));
-        formed.serve(
-            &providers,
-            &rpc_handle,
-            &tunables,
-            cache.subscribe(),
-            node_audit.call_observer(),
-            incarnation_shutdown.clone(),
-        )?;
-    }
+        )?,
+        None => Hosted::default(),
+    };
+    let mut offered_books = offered_books;
+    unregistered = hosted_unregistered;
+    coordinator_ended = hosted_coordinator;
 
     // The replicas (#144) get a node's lane, as any peer. One lane per peer,
     // carrying every journal (#188: one `Deliver` per peer, a fair lane per

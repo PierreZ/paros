@@ -49,7 +49,7 @@ use paros_core::{
 };
 
 use crate::machine::{MachineRecord, ProviderDisk};
-use crate::matchmaker::MatchmakerStorage;
+use crate::roles::matchmaker::MatchmakerStorage;
 use crate::storage::LogStorage;
 use crate::{JournalMatchmakerStorage, JournalStorage, JournalStoreConfig};
 

@@ -11,7 +11,7 @@
 //! duel)), and `init` books neither. A step books them once they fit; the
 //! coordinator never records their refusal: they wait for room. A `users`
 //! tenant's birth footprint is booked, or refused, as a step of its
-//! creation (`super::universe::tenant_steps`, #225).
+//! creation (`crate::coordinator::universe::tenant_steps`, #225).
 
 use std::collections::BTreeSet;
 use std::ops::Bound::{Excluded, Unbounded};
@@ -26,7 +26,7 @@ use crate::model::registry::{GrantKey, Registry, Role, SystemCommand};
 
 /// The footprint steps of one coordinator term.
 #[derive(Debug)]
-pub(super) struct Footprints {
+pub(crate) struct Footprints {
     /// The cell tenant and, when this cell hosts it, the universe tenant:
     /// booked here, never by `init`.
     internal: Vec<TenantId>,
@@ -49,7 +49,7 @@ fn granted(registry: &Registry) -> BTreeSet<TenantId> {
 
 impl Footprints {
     /// The steps of a term whose cell's internal tenants are `internal`.
-    pub(super) fn new(internal: Vec<TenantId>) -> Self {
+    pub(crate) fn new(internal: Vec<TenantId>) -> Self {
         assert!(
             internal.iter().all(|tenant| tenant.0 != 0),
             "an internal tenant is set"
@@ -81,7 +81,7 @@ impl Footprints {
     /// when no footprint needs a step now, `None` when the write did not
     /// land: the term writes nothing more.
     #[tracing::instrument(level = "debug", skip_all)]
-    pub(super) async fn step<P: ParosProviders>(
+    pub(crate) async fn step<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
         cell: &mut CellSession,

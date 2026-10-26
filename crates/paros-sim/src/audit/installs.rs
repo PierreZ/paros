@@ -1,7 +1,7 @@
 //! The cell coordinator's installs (#653 (election term to installed
 //! leader)): a term won in the election journal leads the cell only once
 //! its coordinator installs the term's uuid on the cell control journal
-//! (`paros::machine::coordinator::serve_term`), a compare-and-set over the
+//! (`paros::coordinator::cell::serve_term`), a compare-and-set over the
 //! uuid it read. Each install is valid on its own, so the journal model
 //! passes a deposed term-T coordinator that reads term T+1's uuid and
 //! installs over it, while two coordinators take turns. What links the two

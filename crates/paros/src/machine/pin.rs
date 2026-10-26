@@ -21,7 +21,7 @@ use std::time::Duration;
 use crate::ParosProviders;
 use moonpool_core::LocalTimeProvider;
 
-use crate::frontend::{Authz, Denial, Operation, Request, Target};
+use crate::roles::frontend::{Authz, Denial, Operation, Request, Target};
 
 /// What an idle machine checks a call's token against: nothing (the
 /// network trusts the caller), or a pinned [`Authz`].

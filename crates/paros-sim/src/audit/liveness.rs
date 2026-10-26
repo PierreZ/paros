@@ -10,7 +10,7 @@
 //!   coordinator that wrote one.
 //! - **A slow mark never takes a quorum** (#361 (slow machines)): when the
 //!   coordinator marks a machine slow, at most a minority of the pool is
-//!   held slow (`paros::machine::slow::SlowJudge::cap`).
+//!   held slow (`paros::coordinator::cell::slow::SlowJudge::cap`).
 //! - **Gates** — a machine marked down, a machine back up without
 //!   re-placement, a rebooted machine registered again, a machine marked
 //!   slow and one fast again.
@@ -25,7 +25,7 @@ use std::collections::BTreeSet;
 use moonpool_sim::{assert_always, assert_reachable};
 use paros::NodeId;
 use paros::client::checkpoint::Checkpointable;
-use paros::machine::slow::SlowJudge;
+use paros::coordinator::cell::slow::SlowJudge;
 use paros::model::registry::{Registry, RegistryEvent, RegistryRefusal};
 
 /// The cell's registry fold, with every event judged as it is folded.

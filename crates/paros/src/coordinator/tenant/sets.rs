@@ -47,11 +47,11 @@ use crate::ParosProviders;
 use moonpool_rpc::RpcHandle;
 use paros_core::{JournalIdentifier, NodeId, TenantId};
 
-use super::moves::{Leaving, stays};
-use super::tenants::TenantDesk;
 use crate::client::cell::CellSession;
 use crate::client::journals::JournalAnswer;
 use crate::client::{Client, ReconfigureMatchmakersOutcome, Server};
+use crate::coordinator::tenant::TenantDesk;
+use crate::coordinator::tenant::moves::{Leaving, stays};
 use crate::model::placement::{self, Step, Want};
 use crate::model::registry::{Booking, BookingTarget, NodeStanding, Registry, Role};
 use crate::net::NodeClient;
@@ -70,7 +70,7 @@ pub fn set_of(tenant: TenantId) -> BookingTarget {
 
 /// What one set step did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum SetStep {
+pub(crate) enum SetStep {
     /// No set needs a step.
     Idle,
     /// A set waits: for an answer, a free machine or its handover.
@@ -90,7 +90,7 @@ pub(super) enum SetStep {
 
 /// The set moves of one coordinator term.
 #[derive(Debug, Default)]
-pub(super) struct Sets {
+pub(crate) struct Sets {
     /// The tenants whose set this term booked or handed over.
     started: BTreeSet<TenantId>,
     /// The tenants whose set this term found booked but not yet in force on
@@ -328,7 +328,7 @@ async fn set_in_force<P: ParosProviders>(
 impl Sets {
     /// The set moves of a new term; `ask_again` is the candidacy's BUGGIFY
     /// decision to ask the term's first finished move's handover again.
-    pub(super) fn new(ask_again: bool) -> Self {
+    pub(crate) fn new(ask_again: bool) -> Self {
         let sets = Self {
             ask_again,
             ..Self::default()
@@ -347,7 +347,7 @@ impl Sets {
     /// not land: the term writes nothing more.
     #[allow(clippy::too_many_lines)]
     #[tracing::instrument(level = "debug", skip_all)]
-    pub(super) async fn step<P: ParosProviders>(
+    pub(crate) async fn step<P: ParosProviders>(
         &mut self,
         (providers, rpc, names, client): (&P, &RpcHandle<P>, &Names, &Client<P>),
         cell: &mut CellSession,
@@ -365,9 +365,10 @@ impl Sets {
         let journal = JournalIdentifier::new(tenant, control);
         // The founding members serve every tenant's control journal: each
         // where the cell's address book says.
-        let book: BTreeMap<NodeId, Address> = super::address_book(cell.founders(), registry)
-            .into_iter()
-            .collect();
+        let book: BTreeMap<NodeId, Address> =
+            crate::model::machine::address_book(cell.founders(), registry)
+                .into_iter()
+                .collect();
         let servers: Vec<Server<P>> = book
             .iter()
             .map(|(id, addr)| Server {
@@ -620,7 +621,7 @@ impl Sets {
             .copied()
             .collect();
         for &(booking, slot) in &leaving {
-            super::tenants::release(client, cell, |b| *b == slot)
+            crate::coordinator::tenant::release(client, cell, |b| *b == slot)
                 .await
                 .ok()?;
             assert!(

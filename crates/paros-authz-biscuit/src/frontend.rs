@@ -12,7 +12,7 @@
 
 use std::time::{Duration, SystemTime};
 
-use paros::frontend::{self, Authz, Denial, Target};
+use paros::roles::frontend::{self, Authz, Denial, Target};
 
 use paros::model::fleet::RootKeyEntry;
 

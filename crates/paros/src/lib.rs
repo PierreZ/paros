@@ -29,32 +29,18 @@
 //! `Config::replica_count` is zero runs none, and the node driver's learner
 //! traffic reaches the pool alone.
 
-pub mod batcher;
 pub mod client;
-mod driver;
-pub mod frontend;
+pub mod coordinator;
 pub mod inspect;
 pub mod machine;
-mod matchmaker;
 pub mod model;
 pub mod net;
 pub mod observe;
-mod proxy;
-mod replica_tier;
+pub mod roles;
 pub mod storage;
 pub mod tunables;
 pub mod wire;
 
-pub use driver::reply::Reply;
-pub use driver::{
-    BelowFloor, BootKind, BootRefusal, ControlPlan, DriverTunables, JournalStores,
-    LOAD_INTERVAL_FLOOR, MAX_READ_RECORDS, RunError, command_hash, message_kind, parse_addr,
-    registration_history_hash, run_journals, run_node,
-};
-pub use matchmaker::{
-    HostedSet, MatchmakerStorage, MemMatchmakerStorage, Registrations,
-    matchmaker_storage_contract_suite, run_matchmaker,
-};
 pub use model::address::{Address, Names};
 pub use model::corruption::{CorruptionVerdict, IntegrityFault};
 pub use net::runtime::ParosProviders;
@@ -64,8 +50,18 @@ pub use observe::audit::{
     Audit, DelegationOutcome, Deployment, HistoryPage, LogReadAnswer, LogReadReport, NoAudit,
     StorageFaultDecision,
 };
-pub use proxy::{ProxyConfig, ProxyJournal, run_proxy};
-pub use replica_tier::run_replica;
+pub use roles::matchmaker::{
+    HostedSet, MatchmakerStorage, MemMatchmakerStorage, Registrations,
+    matchmaker_storage_contract_suite, run_matchmaker,
+};
+pub use roles::node::reply::Reply;
+pub use roles::node::{
+    BelowFloor, BootKind, BootRefusal, ControlPlan, DriverTunables, JournalStores,
+    LOAD_INTERVAL_FLOOR, MAX_READ_RECORDS, RunError, command_hash, message_kind, parse_addr,
+    registration_history_hash, run_journals, run_node,
+};
+pub use roles::proxy_leader::{ProxyConfig, ProxyJournal, run_proxy};
+pub use roles::replica::run_replica;
 pub use storage::journal::{
     JournalBootFacts, JournalMatchmakerStorage, JournalStorage, JournalStoreConfig,
 };

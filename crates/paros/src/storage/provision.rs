@@ -21,8 +21,8 @@
 
 use paros_core::{MatchmakerConfig, MustSync};
 
-use crate::driver::{BootRefusal, RunError};
-use crate::matchmaker::MatchmakerStorage;
+use crate::roles::matchmaker::MatchmakerStorage;
+use crate::roles::node::{BootRefusal, RunError};
 use crate::storage::LogStorage;
 
 /// What provisioning one store did.
@@ -102,7 +102,7 @@ mod tests {
     use paros_core::{Config, MatchmakerId, NodeId};
 
     use super::*;
-    use crate::matchmaker::MemMatchmakerStorage;
+    use crate::roles::matchmaker::MemMatchmakerStorage;
     use crate::storage::MemStorage;
 
     fn config(peers: &[u64]) -> Config {

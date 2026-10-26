@@ -58,35 +58,33 @@
 
 mod admitted;
 mod cache;
-mod capacity;
 mod cell_init;
-pub mod coordinator;
 mod disk;
 mod follow;
-mod footprints;
 mod formed;
 mod lifecycle;
 pub mod load;
 mod matchmakers;
-mod modes;
-mod moves;
 mod pin;
 pub(crate) mod register;
 mod resolve;
-mod roles;
-mod scrub;
-mod sets;
-pub mod slow;
 mod stores;
-mod tenants;
-mod universe;
 pub(crate) mod views;
 mod wait;
 
-use std::net::SocketAddr;
+use std::sync::Arc;
 
-use paros_core::NodeId;
+use moonpool_rpc::RpcHandle;
+use tokio_util::sync::CancellationToken;
 
+use crate::ParosProviders;
+use crate::client::CallObserver;
+use crate::storage::RunError;
+use crate::tunables::DriverTunables;
+use formed::FormedExt as _;
+
+pub use crate::coordinator::tenant::sets::{SET, set_of};
+pub use crate::roles::node::host::{CellHost, Hosted, MachineFacts, incarnation_of};
 pub use admitted::AdmittedMachine;
 pub use cache::spawn_writer;
 pub use disk::ProviderDisk;
@@ -94,16 +92,10 @@ pub(crate) use disk::{read_all, write_all};
 pub use formed::{FormationToken, FormedCell};
 pub use lifecycle::{MachineAddresses, MachineError, MachineSettings, run_machine};
 pub use pin::AdminPin;
-pub use sets::{SET, set_of};
 pub use stores::AuditScope;
 pub use wait::{CellLedger, Joined, wait_for_cell};
 
 pub use crate::model::machine::*;
-
-use crate::Address;
-use crate::Names;
-use crate::model::tags::Tag;
-use crate::wire::machine as wire;
 
 /// A machine of a cell as its node loop serves it (#474): a founding
 /// member, or a machine `cell add-machine` admitted, with the cache its
@@ -129,145 +121,124 @@ pub enum CellMachine {
     },
 }
 
-impl CellMachine {
-    /// The cell's control journals, as this machine knows them.
-    #[must_use]
-    pub fn control_journals(&self) -> ControlJournals {
+impl CellHost for CellMachine {
+    fn control_journals(&self) -> ControlJournals {
         match self {
             CellMachine::Founded { cell, .. } => cell.control_journals(),
             CellMachine::Admitted { machine, .. } => machine.admission.cell,
         }
     }
 
-    /// What the machine knows of itself.
-    #[must_use]
-    pub fn facts(&self) -> &MachineFacts {
+    fn facts(&self) -> &MachineFacts {
         match self {
             CellMachine::Founded { cell, .. } => &cell.facts,
             CellMachine::Admitted { machine, .. } => &machine.facts,
         }
     }
 
-    /// What the machine knows of itself, to update once it serves.
-    pub(crate) fn facts_mut(&mut self) -> &mut MachineFacts {
+    fn facts_mut(&mut self) -> &mut MachineFacts {
         match self {
             CellMachine::Founded { cell, .. } => &mut cell.facts,
             CellMachine::Admitted { machine, .. } => &mut machine.facts,
         }
     }
-}
 
-/// What a machine knows of itself before it has a cell.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MachineFacts {
-    /// Its identity, random, minted at format (#225).
-    pub node_id: NodeId,
-    /// Its class.
-    pub class: Class,
-    /// Its capacity, in the placement's units (opaque here).
-    pub capacity: u64,
-    /// Its zone and rack (#575: reserved tags).
-    pub locality: Locality,
-    /// Its name, for people (#399): a label, never its identity.
-    pub name: String,
-    /// The address it advertises (`PAROS_ADVERTISE`, #257): what its peers
-    /// and clients dial, a literal or a name resolved at dial time.
-    pub addr: Address,
-    /// The address it binds (`PAROS_LISTEN`, #257), never one read from the
-    /// cell plan or the registry.
-    pub listen: SocketAddr,
-    /// How it resolves the addresses it dials.
-    pub names: Names,
-    /// The RPC incarnation of the runtime that serves it now (moonpool-rpc's
-    /// `Incarnation`, new at every start): `0` until a runtime serves it
-    /// ([`MachineFacts::serving`]). The registry records it, and the cell
-    /// coordinator tells a reboot by it (#211).
-    pub incarnation: u128,
-    /// The encoded `InterfaceRef` of the [`MachineInterface`] group the
-    /// runtime that serves it now registered (#404 (static vs dynamic
-    /// endpoints)): empty while it serves none (idle, admitted, or before
-    /// [`MachineFacts::with_interface`]). The registry records it, and the
-    /// founding members' lanes dial `Deliver` through it.
-    ///
-    /// [`MachineInterface`]: crate::wire::methods::MachineInterface
-    pub machine_interface: Vec<u8>,
-    /// Its last full busyness window (#424), which every phase's `Load`
-    /// answers from.
-    pub load: load::LoadBoard,
-    /// Its metrics and phase (#366 (metrics)): the settings' handle, shared
-    /// by every phase and the node loop.
-    pub metrics: crate::observe::metrics::Metrics,
-}
-
-/// The incarnation of the RPC runtime `rpc`, or `0` once it stopped.
-pub(crate) fn incarnation_of<P: crate::ParosProviders>(rpc: &moonpool_rpc::RpcHandle<P>) -> u128 {
-    rpc.incarnation().map_or(0, moonpool_rpc::Incarnation::get)
-}
-
-impl MachineFacts {
-    /// These facts as the runtime `rpc` serves them: its incarnation set.
-    #[must_use]
-    pub(crate) fn serving<P: crate::ParosProviders>(
-        &self,
-        rpc: &moonpool_rpc::RpcHandle<P>,
-    ) -> Self {
-        let incarnation = incarnation_of(rpc);
-        // A group belongs to one runtime: another runtime serves none yet.
-        let machine_interface = if incarnation == self.incarnation {
-            self.machine_interface.clone()
-        } else {
-            Vec::new()
-        };
-        let facts = Self {
-            incarnation,
-            machine_interface,
-            ..self.clone()
-        };
-        assert_eq!(facts.node_id, self.node_id, "serving keeps the identity");
-        facts
-    }
-
-    /// These facts with `group` as the machine interface of the runtime
-    /// that serves them (#404 (static vs dynamic endpoints)).
-    ///
-    /// # Panics
-    ///
-    /// If `group` belongs to another runtime than the one these facts name
-    /// (a programmer error: call [`MachineFacts::serving`] first).
-    #[must_use]
-    pub(crate) fn with_interface(
-        &self,
-        group: &moonpool_rpc::ServiceGroup<crate::wire::methods::MachineInterface>,
-    ) -> Self {
-        let reference = group.interface_ref();
-        assert_eq!(
-            reference.endpoint().incarnation().get(),
-            self.incarnation,
-            "a machine interface is the serving runtime's"
-        );
-        assert!(self.incarnation != 0, "a served machine has an incarnation");
-        Self {
-            machine_interface: crate::net::published(&reference),
-            ..self.clone()
+    fn formed(&self) -> Option<&FormedCell> {
+        match self {
+            CellMachine::Founded { cell, .. } => Some(cell),
+            CellMachine::Admitted { .. } => None,
         }
     }
 
-    /// Who this machine is, in cell `cell_id` (0 while it is idle).
-    fn identify_ack(&self, cell_id: u64) -> wire::IdentifyAck {
-        wire::IdentifyAck {
-            node_id: self.node_id.0,
-            capacity: self.capacity,
-            tags: machine_tags(self.class, &self.locality)
-                .iter()
-                .map(Tag::to_wire)
-                .collect(),
-            addr: self.addr.to_string(),
-            name: self.name.clone(),
-            cell_id,
-            incarnation_high: incarnation_halves(self.incarnation).0,
-            incarnation_low: incarnation_halves(self.incarnation).1,
-            machine_interface: self.machine_interface.clone(),
-            registry_position: 0,
+    fn serve<P: ParosProviders>(
+        self,
+        providers: &P,
+        rpc_handle: &RpcHandle<P>,
+        tunables: &DriverTunables,
+        observer: Option<Arc<dyn CallObserver>>,
+        (incarnation_shutdown, stopping): (CancellationToken, CancellationToken),
+    ) -> Result<Hosted, RunError> {
+        let mut hosted = Hosted::default();
+        match self {
+            CellMachine::Admitted { machine, cache } => {
+                hosted.offered_books = Some(cache.subscribe());
+                // An admitted machine answers its admission beside the journals
+                // placed on it (#474), follows the registry for its cache (#211)
+                // and registers the address it advertises now (#349).
+                machine.serve_beside(
+                    providers,
+                    rpc_handle,
+                    tunables,
+                    cache,
+                    observer,
+                    incarnation_shutdown,
+                )?;
+            }
+            CellMachine::Founded {
+                cell: formed,
+                cache,
+            } => {
+                // Every founding member answers the cell's views (#399).
+                views::spawn(
+                    providers,
+                    rpc_handle,
+                    &formed,
+                    tunables,
+                    incarnation_shutdown.clone(),
+                )?;
+                // It asks the coordinator to register the address it advertises
+                // now (#349): the cell may know another one.
+                if let Some(election) = formed
+                    .plan
+                    .election
+                    .is_set()
+                    .then_some(formed.plan.election)
+                {
+                    // A lone founding member is its own quorum: it needs no peer.
+                    let moved = formed.plan.members.len() > 1
+                        && formed.founders().iter().any(|(id, addr)| {
+                            *id == formed.facts.node_id && *addr != formed.facts.addr
+                        });
+                    let ended = register::spawn(
+                        providers,
+                        rpc_handle,
+                        register::Registration {
+                            facts: formed.facts.serving(rpc_handle),
+                            cell_id: formed.plan.cell_id,
+                            election,
+                            book: with_own(
+                                &formed.founders(),
+                                formed.facts.node_id,
+                                &formed.facts.addr,
+                            ),
+                        },
+                        tunables,
+                        incarnation_shutdown.clone(),
+                    );
+                    hosted.unregistered = moved.then_some(ended);
+                }
+                // Every founding member campaigns for the cell coordinator (#240):
+                // a moved one once its registration ended (#506 (renamed founder
+                // not registered)).
+                hosted.coordinator_ended = Some(crate::coordinator::cell::spawn(
+                    providers,
+                    rpc_handle,
+                    &formed,
+                    tunables,
+                    observer.clone(),
+                    hosted.unregistered.clone(),
+                    (incarnation_shutdown.clone(), stopping),
+                ));
+                formed.serve(
+                    providers,
+                    rpc_handle,
+                    tunables,
+                    cache.subscribe(),
+                    observer,
+                    incarnation_shutdown,
+                )?;
+            }
         }
+        Ok(hosted)
     }
 }

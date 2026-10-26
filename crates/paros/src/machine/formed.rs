@@ -50,86 +50,45 @@ use paros_core::{Ballot, NodeId};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-use super::{Admission, CachedRegistry, CellPlan, Class, ControlJournals, MachineFacts};
+use super::{Admission, CachedRegistry, CellPlan, Class};
 use crate::net::{Inbound, serve_well_known};
+pub use crate::roles::node::host::{FormationToken, FormedCell};
 use crate::wire::machine as wire;
 use crate::wire::methods::{AdmitRpc, FormCellRpc, IdentifyRpc, PrepareCellRpc};
 use crate::{Address, DriverTunables, Names};
 
-/// A machine of a cell: what it knows of itself, the plan it accepted and
-/// the decree ballot it accepted it at — the record's commit point.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FormedCell {
-    /// The machine.
-    pub facts: MachineFacts,
-    /// The plan it formed.
-    pub plan: CellPlan,
-    /// The ballot it accepted the plan at.
-    pub ballot: Ballot,
-    /// The cached registry fold its disk held at start (#211), if any.
-    pub cached: Option<CachedRegistry>,
-    /// The token of the `FormCell` that formed it in this incarnation (#245
-    /// (Biscuit tokens)), in memory only: never in the record, so no bearer
-    /// token rests on the disk. `None` after a restart.
-    pub token: Option<FormationToken>,
-}
-
-/// The operator's `admin` token a machine was formed with, sent on by its
-/// teacher (see the module doc). Its `Debug` never shows the bytes.
-#[derive(Clone, PartialEq, Eq)]
-pub struct FormationToken(Vec<u8>);
-
-impl FormationToken {
-    /// The token `bytes` (empty on a machine with no pin).
-    #[must_use]
-    pub fn new(bytes: Vec<u8>) -> Self {
-        Self(bytes)
-    }
-}
-
-impl std::fmt::Debug for FormationToken {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "FormationToken({} bytes)", self.0.len())
-    }
-}
-
-impl FormedCell {
-    /// The control journals the cell's machines know (see
-    /// [`ControlJournals`]).
-    #[must_use]
-    pub fn control_journals(&self) -> ControlJournals {
-        self.plan.control_journals()
-    }
-
-    /// The founding members where this machine dials them at start: at the
-    /// addresses its cached registry fold names (#211), else the plan's.
-    /// The registry fold takes over once it passes the cache's position.
-    ///
-    /// # Panics
-    ///
-    /// Never: the assertion checks that every founding member keeps one
-    /// address.
-    #[must_use]
-    pub fn founders(&self) -> Vec<(NodeId, Address)> {
-        // The starting book lists the founding members first, then the
-        // cache's others: the founders are its head.
-        let mut founders = super::starting_book(&self.plan.members, self.cached.as_ref());
-        founders.truncate(self.plan.members.len());
-        assert_eq!(
-            founders.len(),
-            self.plan.members.len(),
-            "every founding member keeps one address"
-        );
-        founders
-    }
-
+/// A formed member's half of the cell decree (see the module doc), and
+/// what it serves beside its journals.
+pub(crate) trait FormedExt {
     /// This member's vote, as the decree reports it.
-    pub(super) fn vote(&self) -> wire::FormCell {
+    fn vote(&self) -> wire::FormCell;
+    /// The answer to a `PrepareCell`: this member's vote.
+    fn prepare_ack(&self) -> wire::PrepareCellAck;
+    /// The answer to a `FormCell`.
+    fn form_ack(&self, request: &wire::FormCell) -> wire::FormCellAck;
+    /// The answer to an `Admit`.
+    fn admit_ack(&self, request: &wire::Admit) -> wire::AdmitAck;
+    /// Serve the decree beside the journals.
+    #[allow(clippy::too_many_arguments)]
+    fn serve<P: ParosProviders>(
+        self,
+        providers: &P,
+        rpc: &RpcHandle<P>,
+        tunables: &DriverTunables,
+        books: watch::Receiver<Option<CachedRegistry>>,
+        observer: Option<std::sync::Arc<dyn crate::client::CallObserver>>,
+        shutdown: CancellationToken,
+    ) -> SimulationResult<()>;
+}
+
+impl FormedExt for FormedCell {
+    /// This member's vote, as the decree reports it.
+    fn vote(&self) -> wire::FormCell {
         self.plan.form_request(self.ballot)
     }
 
     /// Phase 1b from a formed member: its vote, whatever the ballot.
-    pub(super) fn prepare_ack(&self) -> wire::PrepareCellAck {
+    fn prepare_ack(&self) -> wire::PrepareCellAck {
         assert!(self.ballot.round != 0, "a formed member voted at a ballot");
         // A member by id: the address it advertises may have changed since
         // the plan (#349).
@@ -157,7 +116,7 @@ impl FormedCell {
     /// concurrent `cell init`s, the slower one's prepare done before the
     /// faster one's vote, were refused `other_cell_init` over the very cell
     /// they formed (seed 9979247141707847612 on #319's branch).
-    pub(super) fn form_ack(&self, request: &wire::FormCell) -> wire::FormCellAck {
+    fn form_ack(&self, request: &wire::FormCell) -> wire::FormCellAck {
         assert_eq!(self.facts.class, Class::Storage, "only storage forms");
         let refusal = match CellPlan::from_form(request) {
             Ok(plan) if plan == self.plan => "",
@@ -181,7 +140,7 @@ impl FormedCell {
     /// `Admit` at a founding member (#216): it is in its cell already, so an
     /// admission into that cell is acked and changes nothing; any other is
     /// refused.
-    pub(super) fn admit_ack(&self, request: &wire::Admit) -> wire::AdmitAck {
+    fn admit_ack(&self, request: &wire::Admit) -> wire::AdmitAck {
         let refusal = match Admission::from_wire(request) {
             Ok(admission) if admission.cell == self.control_journals() => "",
             Ok(_) => "other_cell",
@@ -202,7 +161,7 @@ impl FormedCell {
     ///
     /// An endpoint could not be registered.
     #[tracing::instrument(level = "debug", skip_all, fields(node = self.facts.node_id.0, cell = self.plan.cell_id))]
-    pub(crate) fn serve<P: ParosProviders>(
+    fn serve<P: ParosProviders>(
         mut self,
         providers: &P,
         rpc: &RpcHandle<P>,
@@ -236,12 +195,12 @@ impl FormedCell {
         // Every machine serves the batcher endpoint (#145) over the cell's
         // address book; the tenant coordinator books a tenant's batchers
         // (#604) and `Resolve` names them.
-        crate::batcher::spawn(
+        crate::roles::batcher::spawn(
             providers,
             rpc,
-            crate::batcher::BatcherSettings::from_tunables(tunables),
+            crate::roles::batcher::BatcherSettings::from_tunables(tunables),
             (
-                crate::batcher::BatcherBook {
+                crate::roles::batcher::BatcherBook {
                     nodes: super::with_own(&self.founders(), self.facts.node_id, &self.facts.addr),
                     updates: Some(books.clone()),
                     skip: None,
@@ -376,7 +335,7 @@ impl Teacher {
             "a teacher re-sends its own vote at its own ballot"
         );
         assert!(vote.token.is_empty(), "a vote carries no token");
-        vote.token = token.0;
+        vote.token = token.into_bytes();
         while !pending.is_empty() {
             if providers.time().sleep(self.period).await.is_err() {
                 return;

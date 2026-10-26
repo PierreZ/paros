@@ -191,7 +191,7 @@ impl Disk {
     /// Apply one durable write, in the order the batch surfaced it.
     ///
     /// The world hands `Truncate` in *after* the application apply below, for
-    /// the reason `paros::driver::ready` documents: a durable floor above the
+    /// the reason `paros::roles::node::ready` documents: a durable floor above the
     /// durable application prefix leaves a node whose apply stream can never be
     /// replayed.
     pub fn apply(&mut self, op: &WriteOp) {

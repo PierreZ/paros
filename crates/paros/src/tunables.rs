@@ -18,7 +18,7 @@ use std::time::Duration;
 pub const MAX_FRAME_BYTES: u32 = 4 << 20;
 
 /// A busy ratio leans fast again only this far below `slow_busy`, in
-/// thousandths (`crate::machine::slow`).
+/// thousandths (`crate::coordinator::cell::slow`).
 pub const BUSY_MARGIN: u32 = 200;
 
 /// How often a node advances its logical clock.
@@ -363,7 +363,7 @@ pub struct DriverTunables {
     /// jitter, not the machine.
     pub load_interval: Duration,
     /// The `Identify` round trip at or above which the cell coordinator
-    /// leans a machine slow (#361 (slow machines), `crate::machine::slow`),
+    /// leans a machine slow (#361 (slow machines), `crate::coordinator::cell::slow`),
     /// when it is also four times the round's median. Floor 1 ms; it should
     /// stay well above an ordinary round trip, or every machine leans slow
     /// and only the cap on marks holds the cell together.

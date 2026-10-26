@@ -24,7 +24,7 @@
 //! **A slow mark never takes a quorum** ([`SlowJudge::cap`]): at most a
 //! minority of the watched machines is held slow at once. A mark itself
 //! removes nothing: the tenant coordinator moves each journal off a slow
-//! machine like off a draining one (`super::moves`: book elsewhere,
+//! machine like off a draining one (`crate::coordinator::tenant::moves`: book elsewhere,
 //! reconfigure, then release), and placement books a slow machine last.
 //!
 //! Pure: no clock, I/O or randomness. The watch hands in the facts.

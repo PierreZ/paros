@@ -22,8 +22,8 @@ use paros_core::{
 use super::{
     CHOSEN_INDEX_LAG, JournalMatchmakerStorage, JournalStorage, JournalStoreConfig, encode,
 };
-use crate::matchmaker::{MatchmakerStorage, matchmaker_storage_contract_suite};
 use crate::model::corruption::CorruptionVerdict;
+use crate::roles::matchmaker::{MatchmakerStorage, matchmaker_storage_contract_suite};
 use crate::storage::{LogStorage, StorageError, StorageRecord, storage_contract_suite};
 
 type Node = JournalStorage<SimStorageProvider>;

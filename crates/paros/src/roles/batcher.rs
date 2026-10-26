@@ -45,12 +45,12 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use crate::client::{CallObserver, Client, ClientTunables, Server};
-use crate::driver::DriverTunables;
-use crate::driver::edge::RpcEdge;
 use crate::machine::CachedRegistry;
 use crate::net::NodeClient;
 use crate::net::inbound::{Inbound, ReplySender, serve_well_known};
 use crate::net::transport::Transport;
+use crate::roles::node::DriverTunables;
+use crate::roles::node::edge::RpcEdge;
 use crate::wire::methods::BatchWriteRpc;
 use crate::wire::public::WriteOutcome as WireWriteOutcome;
 use crate::wire::{FrontendVerdict, Write, WriteAck, common};

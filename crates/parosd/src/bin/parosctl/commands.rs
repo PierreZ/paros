@@ -12,7 +12,7 @@ use paros::client::{
     ClaimOutcome, Client, ReaderOutcome, ReconfigureOutcome, RetireOutcome, TruncateOutcome,
     WriteOptions, WriteOutcome, Writer, WriterOutcome,
 };
-use paros::frontend::Denial;
+use paros::roles::frontend::Denial;
 use paros::wire::common::Ballot;
 use paros::{
     InspectReply, JournalIdentifier, JournalView, LeaderUuid, QuorumSystem, RetireRequest, Seq,

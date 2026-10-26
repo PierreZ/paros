@@ -2,7 +2,7 @@
 //! `docs/architecture/03-2-machines.md` §3.2), so its cached registry fold stays current.
 //!
 //! A founding member serves the cell control journal and folds its own copy
-//! (`crate::driver::book`). An admitted machine serves no journal until
+//! (`crate::roles::node::book`). An admitted machine serves no journal until
 //! placement (#212), so it reads the registry through the cell's machines
 //! it knows, as any client does:
 //!

@@ -53,6 +53,12 @@
 //! BUGGIFY decisions (reuse a taken id once, an impatient term, a create
 //! abandoned after its bookings) were drawn there too.
 
+pub mod modes;
+pub mod moves;
+pub mod roles;
+pub mod scrub;
+pub mod sets;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
@@ -491,7 +497,7 @@ impl TenantDesk {
     /// A mode the cell cannot place now is refused and the refusal recorded
     /// (`Unplaceable` with no name), so it changes nothing and a retry reads
     /// it back; the coordinator's watch applies a recorded mode
-    /// ([`super::modes`]).
+    /// ([`crate::coordinator::tenant::modes`]).
     async fn configure<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
@@ -516,7 +522,7 @@ impl TenantDesk {
         };
         let storage = self.storage(cell.registry());
         // The machines placement may book, as the mode change counts them
-        // ([`super::modes`]): a mode wider than those never lands.
+        // ([`crate::coordinator::tenant::modes`]): a mode wider than those never lands.
         let eligible = placement::machines(cell.registry(), storage.iter().copied()).len();
         let count = placed_count(&desired, eligible);
         if count > eligible {
@@ -573,13 +579,13 @@ impl TenantDesk {
     /// The fold of `tenant`'s control journal `control`, claimed under the
     /// term's uuid and folded to its tail first when the desk does not hold
     /// it yet: the coordinator's watch reads a tenant's desired modes here
-    /// ([`super::modes`], [`super::sets`]).
+    /// ([`crate::coordinator::tenant::modes`], [`crate::coordinator::tenant::sets`]).
     ///
     /// # Errors
     ///
     /// `NotCoordinator` once a later term fenced the journal (the desk is
     /// then superseded), `Unavailable` when it could not be claimed or read.
-    pub(super) async fn tenant<P: ParosProviders>(
+    pub(crate) async fn tenant<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
         tenant: TenantId,
@@ -605,7 +611,7 @@ impl TenantDesk {
     /// # Errors
     ///
     /// The write did not land, or a later term fenced the journal.
-    pub(super) async fn record_placed<P: ParosProviders>(
+    pub(crate) async fn record_placed<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
         tenant: TenantId,
@@ -627,7 +633,7 @@ impl TenantDesk {
     /// # Errors
     ///
     /// The write did not land, or a later term fenced the journal.
-    pub(super) async fn record_scrub<P: ParosProviders>(
+    pub(crate) async fn record_scrub<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
         tenant: TenantId,
@@ -646,7 +652,7 @@ impl TenantDesk {
     /// founding members, registered or not, and every registered machine
     /// whose class stores. A draining or retired machine takes no new
     /// journal.
-    pub(super) fn storage(&self, registry: &Registry) -> BTreeSet<NodeId> {
+    pub(crate) fn storage(&self, registry: &Registry) -> BTreeSet<NodeId> {
         let mut storage: BTreeSet<NodeId> = self.founders.iter().copied().collect();
         storage.extend(
             registry
@@ -730,7 +736,7 @@ impl TenantDesk {
     /// # Panics
     ///
     /// If a grant books another number of slots than it asked for.
-    pub(super) async fn book<P: ParosProviders>(
+    pub(crate) async fn book<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
         cell: &mut CellSession,
@@ -760,7 +766,11 @@ impl TenantDesk {
                 tenant: want.target.tenant(),
                 slots,
             };
-            match super::capacity::grant(client, cell, &request, || self.mix(0xB00C)).await {
+            match crate::coordinator::cell::capacity::grant(client, cell, &request, || {
+                self.mix(0xB00C)
+            })
+            .await
+            {
                 CapacityAnswer::Granted(bookings) => {
                     assert_eq!(
                         bookings.len(),
@@ -978,7 +988,7 @@ impl TenantDesk {
     /// The next value of the desk's own sequence, salted with `salt`:
     /// derived from the seed and the draw count.
     /// A booking id from the candidacy's seed (#476): a capacity request's.
-    pub(super) fn draw_booking(&mut self) -> u64 {
+    pub(crate) fn draw_booking(&mut self) -> u64 {
         self.mix(0xB00C)
     }
 

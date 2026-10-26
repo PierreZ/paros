@@ -104,7 +104,7 @@ async fn run_joiner(
             Vec::new(),
             Vec::new(),
             Some(system_plan.clone()),
-            None,
+            None::<paros::roles::node::host::NoHost>,
             tunables,
             crate::tls::serving(ctx, paros::net::tls::Role::Machine, my_ip)?,
             ctx.shutdown().clone(),

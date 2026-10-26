@@ -40,8 +40,8 @@ use tokio::sync::mpsc;
 
 use super::formed::vote_ballot;
 use super::{CellPlan, Class, MachineFacts, ballot_from_wire, ballot_to_wire};
-use crate::driver::DriverTunables;
 use crate::net::well_known;
+use crate::roles::node::DriverTunables;
 use crate::wire::machine as wire;
 use crate::wire::methods::{FormCellRpc, PrepareCellRpc, WellKnownMethod};
 use crate::{Address, Names};

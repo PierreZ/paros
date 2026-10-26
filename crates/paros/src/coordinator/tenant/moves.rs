@@ -7,7 +7,7 @@
 //! 1. book a slot for the journal on another storage machine
 //!    (`crate::model::placement::plan` over the registered machines, with the slots
 //!    on the machines that stay as the current ones); the machine starts the
-//!    journal as a spare (`crate::driver::system`);
+//!    journal as a spare (`crate::roles::node::system`);
 //! 2. ask the journal's leader to reconfigure onto the machines that stay
 //!    and the new one (`Reconfigure`, named by its journal);
 //! 3. once that configuration is in force and the leader's GC watermark has
@@ -24,7 +24,7 @@
 //!
 //! A machine the coordinator marked down and has not heard from for
 //! `machine_replace_after` is left the same way (#475 (re-place after the
-//! Down bound)): the watch names it gone ([`super::coordinator::Watch`]), and
+//! Down bound)): the watch names it gone ([`crate::coordinator::cell::Watch`]), and
 //! its slots move as a draining machine's do. It stays registered, so it
 //! takes new slots again once it answers.
 //!
@@ -37,7 +37,7 @@
 //! A slot outside the configuration in force on a journal whose machines
 //! all stay (a move an earlier term started off a machine that answered
 //! again before the move ended) is the mode change's to release
-//! (`super::modes`), which records the configuration in force first. A move
+//! (`crate::coordinator::tenant::modes`), which records the configuration in force first. A move
 //! that released it would also release the slot a mode change booked
 //! before its reconfiguration, at every round.
 
@@ -48,10 +48,10 @@ use crate::ParosProviders;
 use moonpool_rpc::RpcHandle;
 use paros_core::{AcceptorConfig, JournalIdentifier, NodeId};
 
-use super::tenants::{TenantDesk, placed_count};
 use crate::client::cell::CellSession;
 use crate::client::journals::JournalAnswer;
 use crate::client::{Client, ReconfigureOutcome, RetireOutcome, Server};
+use crate::coordinator::tenant::{TenantDesk, placed_count};
 use crate::model::placement::{self, Want};
 use crate::model::registry::{Booking, BookingTarget, NodeStanding, Registry, Role};
 use crate::model::tenant::Desired;
@@ -62,7 +62,7 @@ use crate::{Address, Names};
 
 /// What one move step did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum MoveStep {
+pub(crate) enum MoveStep {
     /// No journal holds a slot on a draining machine.
     Idle,
     /// A move waits: for a leader, a free machine, a configuration in force
@@ -82,7 +82,7 @@ pub(super) enum MoveStep {
 
 impl MoveStep {
     /// Whether the step started or advanced a move that is not done.
-    pub(super) fn in_flight(self) -> bool {
+    pub(crate) fn in_flight(self) -> bool {
         matches!(self, Self::Booked | Self::Reconfigured)
     }
 }
@@ -90,7 +90,7 @@ impl MoveStep {
 /// The moves of one coordinator term: the journals whose move this term
 /// started a step of.
 #[derive(Debug, Default)]
-pub(super) struct Moves {
+pub(crate) struct Moves {
     started: BTreeSet<JournalIdentifier>,
     /// The journal the last step took: the next step takes the next one,
     /// so a move that waits holds no other back.
@@ -99,19 +99,19 @@ pub(super) struct Moves {
 
 /// What a watch round says of the machines a term's steps place on.
 #[derive(Clone, Debug, Default)]
-pub(super) struct Leaving {
+pub(crate) struct Leaving {
     /// Down past the re-placement bound (#475): their roles move.
-    pub(super) gone: BTreeSet<NodeId>,
+    pub(crate) gone: BTreeSet<NodeId>,
     /// Covered by an open maintenance window (#359): a slow mark (#361
     /// (slow machines)) moves none of their roles, as a down mark does not.
-    pub(super) held: BTreeSet<NodeId>,
+    pub(crate) held: BTreeSet<NodeId>,
 }
 
 /// Whether a slot on `node` stays where it is: the machine is registered
 /// (not draining, not retired), not held slow outside an open maintenance
 /// window (#361 (slow machines), #359), and not `gone` (down past the
 /// re-placement bound, #475).
-pub(super) fn stays(registry: &Registry, leaving: &Leaving, node: NodeId) -> bool {
+pub(crate) fn stays(registry: &Registry, leaving: &Leaving, node: NodeId) -> bool {
     let registered = registry
         .get(node)
         .is_some_and(|n| n.standing == NodeStanding::Registered);
@@ -192,7 +192,7 @@ fn next_move(
 
 /// The first of the `count` servers of `nodes` that answers an `Inspect` of
 /// `journal` as its leader, with its answer.
-pub(super) async fn leader_of<P: ParosProviders>(
+pub(crate) async fn leader_of<P: ParosProviders>(
     nodes: &Client<P>,
     count: usize,
     journal: JournalIdentifier,
@@ -210,7 +210,7 @@ pub(super) async fn leader_of<P: ParosProviders>(
 /// Retire the old member at server `index` of `nodes` from `journal`, with
 /// the GC watermark of the leader's answer `reply` as its evidence. Its
 /// answer changes nothing: the watermark already proves it is forgotten.
-pub(super) async fn retire<P: ParosProviders>(
+pub(crate) async fn retire<P: ParosProviders>(
     nodes: &Client<P>,
     index: Option<usize>,
     journal: JournalIdentifier,
@@ -246,7 +246,7 @@ async fn live<P: ParosProviders>(
 /// The storage machines a move or a mode change may book for a journal of
 /// `registry`, as `desk` names them: never a draining one, nor one `gone`
 /// (#475).
-pub(super) fn bookable(
+pub(crate) fn bookable(
     registry: &Registry,
     desk: &TenantDesk,
     gone: &BTreeSet<NodeId>,
@@ -344,7 +344,7 @@ async fn record_shrunk<P: ParosProviders>(
 }
 
 /// Whether ballot `a` is at or above ballot `b`.
-pub(super) fn at_or_above(a: Option<&Ballot>, b: Option<&Ballot>) -> bool {
+pub(crate) fn at_or_above(a: Option<&Ballot>, b: Option<&Ballot>) -> bool {
     let key = |ballot: &Ballot| (ballot.round, ballot.node);
     match (a, b) {
         (Some(a), Some(b)) => key(a) >= key(b),
@@ -361,9 +361,10 @@ fn journal_nodes<P: ParosProviders>(
     cell: &CellSession,
     slots: &[(u64, Booking)],
 ) -> Option<(Client<P>, Vec<NodeId>)> {
-    let book: BTreeMap<NodeId, Address> = super::cell_book(cell.founders(), cell.registry())
-        .into_iter()
-        .collect();
+    let book: BTreeMap<NodeId, Address> =
+        crate::model::machine::cell_book(cell.founders(), cell.registry())
+            .into_iter()
+            .collect();
     let servers: Vec<(NodeId, Server<P>)> = slots
         .iter()
         .filter_map(|(_, b)| {
@@ -398,7 +399,7 @@ impl Moves {
     /// machine's does. `None` when a write did not land: the term writes
     /// nothing more.
     #[tracing::instrument(level = "debug", skip_all)]
-    pub(super) async fn step<P: ParosProviders>(
+    pub(crate) async fn step<P: ParosProviders>(
         &mut self,
         (providers, rpc, names, client): (&P, &RpcHandle<P>, &Names, &Client<P>),
         cell: &mut CellSession,
@@ -555,7 +556,7 @@ impl Moves {
             // And only a machine that leaves for good, a draining one: a
             // slow (#361) or gone (#475) machine stays registered and takes
             // slots again, so its member is released, never retired, as a
-            // mode change's is (`super::modes`). A retired identity booked
+            // mode change's is (`crate::coordinator::tenant::modes`). A retired identity booked
             // again is a member lost for good. Recipe 8829326179751023212
             // 4788036:12833132764577949844 on a063911: "gc: a leader never
             // runs a grid configuration naming a retired identity".
@@ -572,7 +573,7 @@ impl Moves {
                 let index = ids.iter().position(|id| *id == slot.node);
                 retire(nodes, index, journal, reply).await;
             }
-            super::tenants::release(client, cell, |b| *b == slot)
+            crate::coordinator::tenant::release(client, cell, |b| *b == slot)
                 .await
                 .ok()?;
             assert!(

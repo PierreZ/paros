@@ -14,7 +14,7 @@
 //! 2. **Finish in-flight work**: admit every machine the registry holds that
 //!    is neither a founding member nor retired. `Admit` is idempotent, so a
 //!    machine an earlier term admitted answers that it is in the cell. Then
-//!    follow the universe directory ([`super::universe`]): join the cell to
+//!    follow the universe directory ([`crate::coordinator::universe`]): join the cell to
 //!    the universe when the directory holds the cell and the cell has not
 //!    joined (`JoinFleet`, #513 (fleet Init duel)), and write the cell's step
 //!    of each tenant operation in flight (`HostTenant` for a `REGISTERING`
@@ -53,7 +53,7 @@
 //!    PR #684 (lost set excuse)). Only changes are
 //!    written, never a heartbeat. Each round also times each `Identify`
 //!    and asks every machine that answered for its `Load`, and judges from
-//!    those facts which machines are alive but slow ([`super::slow`], #361
+//!    those facts which machines are alive but slow ([`crate::coordinator::cell::slow`], #361
 //!    (slow machines)): a change of judgement is written `MachineSlow`,
 //!    and the moves take each journal off a slow machine like off a
 //!    draining one. Each round also follows the universe
@@ -79,7 +79,7 @@
 //! coordinator** of every tenant its cell hosts (#210, until #212 and
 //! #225): it answers the journal requests sent to the interface it
 //! published, writing each tenant's control journal under its term uuid
-//! ([`super::tenants`]). A group whose term ended answers `not_coordinator`
+//! ([`crate::coordinator::tenant`]). A group whose term ended answers `not_coordinator`
 //! until it is dropped. A tenant control journal that refuses the term uuid
 //! ends the term as a refused cell control journal does: the desk stops and
 //! the coordinator resigns, so no write under that uuid follows.
@@ -96,6 +96,10 @@
 //! step, a slow install, a set's handover asked again) are drawn on the node loop before the task starts, and the backoff
 //! jitter and the journal ids derive from the seed.
 
+pub mod capacity;
+pub mod footprints;
+pub mod slow;
+
 use std::collections::BTreeMap;
 use std::sync::{Arc, PoisonError};
 use std::time::Duration;
@@ -106,16 +110,6 @@ use moonpool_rpc::{AccessClass, RpcHandle, ServiceGroup};
 use paros_core::{JournalIdentifier, LeaderUuid, NodeId, TenantId};
 use tokio_util::sync::CancellationToken;
 
-use super::capacity;
-use super::footprints::Footprints;
-use super::modes::Modes;
-use super::moves::Moves;
-use super::roles::Roles;
-use super::scrub::{ScrubPace, Scrubs};
-use super::sets::{SetStep, Sets};
-use super::slow::{Sample, SlowBounds, SlowJudge};
-use super::tenants::TenantDesk;
-use super::{CellPlan, ControlJournals, FormedCell, incarnation_from_halves};
 use crate::client::capacity::{CapacityAnswer, CapacityRequest};
 use crate::client::cell::CellSession;
 use crate::client::checkpoint::{CheckpointPolicy, Folder, LoadOutcome, load};
@@ -126,9 +120,19 @@ use crate::client::fleet::{Interrupted, Stage, Step as FleetStep};
 use crate::client::journals::{JournalAnswer, JournalRequest};
 use crate::client::universe::{JoinAnswer, JoinRequest};
 use crate::client::{CallObserver, ClaimOutcome, Client, Server, bootstrap};
+use crate::coordinator::cell::footprints::Footprints;
+use crate::coordinator::cell::slow::{Sample, SlowBounds, SlowJudge};
+use crate::coordinator::tenant::TenantDesk;
+use crate::coordinator::tenant::modes::Modes;
+use crate::coordinator::tenant::moves::Moves;
+use crate::coordinator::tenant::roles::Roles;
+use crate::coordinator::tenant::scrub::{ScrubPace, Scrubs};
+use crate::coordinator::tenant::sets::{SetStep, Sets};
 use crate::model::fleet::FleetDirectory;
+use crate::model::machine::{CellPlan, ControlJournals, incarnation_from_halves};
 use crate::model::registry::{MaintenanceScope, NodeStanding, Registry, SystemCommand};
 use crate::net::{Inbound, NodeClient, ReplySender};
+use crate::roles::node::host::FormedCell;
 use crate::wire::machine as wire;
 use crate::wire::methods::{
     CapacityRequestRpc, CoordinatorInterface, JoinUniverseRpc, JournalRequestRpc, RegisterRpc,
@@ -347,7 +351,7 @@ async fn open_term<P: ParosProviders>(
     // does not land ends the term's session, as a refused admission does.
     if session.is_open() {
         let mut directory = Folder::new(FleetDirectory::default());
-        let _ = super::universe::follow(client, &mut session, &mut directory).await;
+        let _ = crate::coordinator::universe::follow(client, &mut session, &mut directory).await;
     }
     let open = session.is_open().then_some(session);
     (TermDuty::Served { admitted }, open)
@@ -372,7 +376,7 @@ pub struct Watch {
     /// that hears one again does not undo a move before the registry
     /// records it up. Once it is up, it is bookable again: a slot a move
     /// left outside the configuration in force is the mode change's
-    /// (`super::modes`), as it is for a later term, and a journal a move
+    /// (`crate::coordinator::tenant::modes`), as it is for a later term, and a journal a move
     /// shrank grows back onto it. A slot no move releases (a deleted
     /// journal's, a tenant's) must not keep it gone for the term.
     departed: std::collections::BTreeSet<NodeId>,
@@ -696,7 +700,7 @@ impl Watch {
         let timeout = client.tunables().request_timeout;
         // Each machine where the cell's address book says it is (#349).
         let machines: BTreeMap<NodeId, Address> =
-            super::cell_book(session.founders(), session.registry())
+            crate::model::machine::cell_book(session.founders(), session.registry())
                 .into_iter()
                 .collect();
         // The slots of the tenants the cell dropped go back to it (#212
@@ -712,11 +716,12 @@ impl Watch {
         // The cell's side of an `init` (#513 (fleet Init duel)) and of each
         // tenant operation in flight (#225): the operator waits for it, and
         // claims nothing here.
-        wrote += super::universe::follow(client, session, &mut self.directory).await?;
+        wrote += crate::coordinator::universe::follow(client, session, &mut self.directory).await?;
         if !dropped.is_empty() {
-            wrote +=
-                super::tenants::release(client, session, |b| dropped.contains(&b.target.tenant()))
-                    .await?;
+            wrote += crate::coordinator::tenant::release(client, session, |b| {
+                dropped.contains(&b.target.tenant())
+            })
+            .await?;
             moonpool_assertions::reachable!("coordinator: a dropped tenant's slots are released");
         }
         let watched: Vec<NodeId> = machines
@@ -951,7 +956,7 @@ impl Watch {
             Some(node) if node.incarnation != incarnation => {
                 // A reboot of a registered machine: it registers again, as
                 // the incarnation that answered (up, by its registration).
-                let (class, locality) = super::identity_tags(ack)?;
+                let (class, locality) = crate::model::machine::identity_tags(ack)?;
                 if class != node.class {
                     return None;
                 }
@@ -1028,7 +1033,11 @@ pub(crate) fn cell_client<P: ParosProviders>(
 ) -> Client<P> {
     // This member at the address it advertises now (#349), the others where
     // its cached registry fold dials them, else at the plan's (#211).
-    let book = super::with_own(&formed.founders(), formed.facts.node_id, &formed.facts.addr);
+    let book = crate::model::machine::with_own(
+        &formed.founders(),
+        formed.facts.node_id,
+        &formed.facts.addr,
+    );
     let servers = book
         .iter()
         .map(|(id, addr)| Server {
@@ -1071,7 +1080,11 @@ fn followed_book(
     registry: &Registry,
     (me, own): (NodeId, &Address),
 ) -> Vec<(NodeId, Address)> {
-    let book = super::with_own(&super::address_book(&plan.members, registry), me, own);
+    let book = crate::model::machine::with_own(
+        &crate::model::machine::address_book(&plan.members, registry),
+        me,
+        own,
+    );
     assert_eq!(
         book.len(),
         plan.members.len(),
@@ -1569,7 +1582,7 @@ async fn campaign<P: ParosProviders>(
                             Ok(_) if watch.ran() => {
                                 if let Some((_, desk)) = desk.as_mut() {
                                     let ctx = (&providers, &rpc, &names, &client);
-                                    let mut gone = super::moves::Leaving {
+                                    let mut gone = crate::coordinator::tenant::moves::Leaving {
                                         gone: watch.gone(session.registry(), client.now()),
                                         held: watch.held(session.registry(), client.now()),
                                     };
@@ -1943,7 +1956,7 @@ async fn answer_until<P: ParosProviders>(
                     (Ok(request), Some(_)) => match watching.as_mut() {
                         None => JoinAnswer::Unavailable,
                         Some((session, _)) => {
-                            let answer = super::universe::join(client, session, &request).await;
+                            let answer = crate::coordinator::universe::join(client, session, &request).await;
                             if !session.is_open() {
                                 park(watching, parked);
                             }
@@ -1972,7 +1985,7 @@ async fn book_naming<P: ParosProviders>(
     client: &Client<P>,
     id: NodeId,
 ) -> Option<Vec<(NodeId, Address)>> {
-    let book = super::cell_book(session.founders(), session.registry());
+    let book = crate::model::machine::cell_book(session.founders(), session.registry());
     if book.iter().any(|(member, _)| *member == id) {
         return Some(book);
     }
@@ -1985,7 +1998,10 @@ async fn book_naming<P: ParosProviders>(
         "a refreshed fold never goes back"
     );
     moonpool_assertions::reachable!("coordinator: a register catches its fold up first");
-    Some(super::cell_book(session.founders(), session.registry()))
+    Some(crate::model::machine::cell_book(
+        session.founders(),
+        session.registry(),
+    ))
 }
 
 /// Answer a machine's `Register` (#349): register the address it advertises
@@ -2020,7 +2036,7 @@ async fn register<P: ParosProviders>(
     };
     let (Ok(addr), Some((class, locality))) = (
         Address::parse(&identity.addr),
-        super::identity_tags(&identity),
+        crate::model::machine::identity_tags(&identity),
     ) else {
         return refuse("malformed");
     };
@@ -2107,7 +2123,7 @@ async fn register<P: ParosProviders>(
         park(watching, parked);
         return refuse("unavailable");
     }
-    let book = super::cell_book(session.founders(), session.registry());
+    let book = crate::model::machine::cell_book(session.founders(), session.registry());
     if !book.iter().any(|entry| *entry == (id, addr.clone())) {
         // The registry refused it (a changed class): the book stands.
         return refuse("unknown_machine");

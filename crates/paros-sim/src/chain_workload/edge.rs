@@ -4,7 +4,7 @@
 //! `max_bytes`). On a coin, the owner then sends that node a batch exactly
 //! at one limit, which the edge must let through, and then one record or
 //! one byte past it, which the edge must refuse. Without this no write ever
-//! sat on the `<=` of `paros::driver::calls::batch_too_large`: the
+//! sat on the `<=` of `paros::roles::node::calls::batch_too_large`: the
 //! workload's batches are at most four records of 16 KiB, far under the
 //! default limits.
 //!

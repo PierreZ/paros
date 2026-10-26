@@ -219,7 +219,7 @@ mod tests {
             "opentelemetry_sdk::metrics",
             "hyper_util",
         ];
-        let kept = ["paros::driver", "parosd", "moonpool_rpc", "towers"];
+        let kept = ["paros::roles::node", "parosd", "moonpool_rpc", "towers"];
         let target = |name: &'static str| {
             tracing::Metadata::new(
                 "span",

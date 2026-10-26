@@ -1,7 +1,7 @@
 //! How a paros runtime protects its sessions: [`Transport`], the one choice
 //! every listening driver ([`run_journals`](crate::run_journals),
 //! [`run_machine`](crate::machine::run_machine),
-//! [`run_frontend`](crate::frontend::run_frontend), the matchmaker, proxy
+//! [`run_frontend`](crate::roles::frontend::run_frontend), the matchmaker, proxy
 //! and replica roles) and every client runtime makes once, at its start.
 //!
 //! Not the peer lanes (`driver/transport.rs`): those choose *what* a node

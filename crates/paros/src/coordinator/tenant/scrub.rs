@@ -14,7 +14,7 @@
 //!
 //! 1. The pass reads the live journals in id order, each from its first
 //!    slot. A page asks every machine that holds an acceptor slot of the
-//!    journal for the same range (`Scrub`, `crate::driver::scrub`). It is
+//!    journal for the same range (`Scrub`, `crate::roles::node::scrub`). It is
 //!    never a quorum read: a quorum read returns one good copy and hides the
 //!    rot on the other copies.
 //! 2. Each acceptor checks the records' checksums locally and answers each
@@ -47,22 +47,22 @@ use crate::ParosProviders;
 use moonpool_rpc::RpcHandle;
 use paros_core::{JournalId, JournalIdentifier, NodeId, TenantId};
 
-use super::tenants::TenantDesk;
 use crate::client::cell::CellSession;
 use crate::client::journals::JournalAnswer;
 use crate::client::{Client, Server};
-use crate::driver::scrub::SCRUB_PAGE_BYTES;
+use crate::coordinator::tenant::TenantDesk;
 use crate::model::registry::{BookingTarget, Registry, Role};
 use crate::model::tenant::{ScrubCounts, ScrubProgress};
 use crate::net::NodeClient;
+use crate::roles::node::scrub::SCRUB_PAGE_BYTES;
 use crate::wire::{ScrubReply, ScrubRequest};
 use crate::{Address, Names};
 
 /// The most pages one step reads.
-pub(super) const PAGES_PER_STEP: usize = 8;
+pub(crate) const PAGES_PER_STEP: usize = 8;
 
 /// The pages read between two flushes of the progress.
-pub(super) const FLUSH_PAGES: usize = 4;
+pub(crate) const FLUSH_PAGES: usize = 4;
 
 const _: () = assert!(PAGES_PER_STEP >= 1 && FLUSH_PAGES >= 1);
 
@@ -110,7 +110,7 @@ struct Scrubber {
 
 /// What one scrub step did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum ScrubStep {
+pub(crate) enum ScrubStep {
     /// No tenant to scrub, or the next pass is not due.
     Idle,
     /// A tenant waits: for its bucket, its acceptors or its control journal.
@@ -121,7 +121,7 @@ pub(super) enum ScrubStep {
 
 /// The scrubbers of one coordinator term.
 #[derive(Debug)]
-pub(super) struct Scrubs {
+pub(crate) struct Scrubs {
     pace: ScrubPace,
     tenants: BTreeMap<TenantId, Scrubber>,
     /// The tenant the last step took: the next step takes the next one.
@@ -205,7 +205,7 @@ fn judge(from: u64, answers: &[ScrubReply]) -> Judged {
 
 impl Scrubs {
     /// The scrubbers of a term that reads at `pace`.
-    pub(super) fn new(pace: ScrubPace) -> Self {
+    pub(crate) fn new(pace: ScrubPace) -> Self {
         Self {
             pace,
             tenants: BTreeMap::new(),
@@ -224,7 +224,7 @@ impl Scrubs {
     /// tenant control journal: the term writes nothing more.
     #[tracing::instrument(level = "debug", skip_all)]
     #[allow(clippy::too_many_lines)]
-    pub(super) async fn step<P: ParosProviders>(
+    pub(crate) async fn step<P: ParosProviders>(
         &mut self,
         (providers, rpc, names, client): (&P, &RpcHandle<P>, &Names, &Client<P>),
         cell: &CellSession,
@@ -297,9 +297,10 @@ impl Scrubs {
                 "scrub_pass_late"
             );
         }
-        let book: BTreeMap<NodeId, Address> = super::cell_book(cell.founders(), registry)
-            .into_iter()
-            .collect();
+        let book: BTreeMap<NodeId, Address> =
+            crate::model::machine::cell_book(cell.founders(), registry)
+                .into_iter()
+                .collect();
         let mut stepped = ScrubStep::Waiting;
         for _ in 0..PAGES_PER_STEP {
             if scrubber.tokens <= 0 {

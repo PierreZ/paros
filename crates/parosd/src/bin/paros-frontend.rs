@@ -6,7 +6,7 @@
 //! frontend checks each call's Biscuit token against the root public keys
 //! it trusts, resolves the call's names (`paros://<tenant>/<journal>`) to
 //! the ids the machines know, and forwards the call and its answer. The
-//! frontend is the library's, `paros::frontend::run_frontend`: the same
+//! frontend is the library's, `paros::roles::frontend::run_frontend`: the same
 //! code the deterministic simulation runs. This binary holds only its
 //! runtime wiring and configuration. It holds no key and no state.
 //!
@@ -52,8 +52,8 @@ use std::time::{Duration, SystemTime};
 use clap::Parser;
 use moonpool_core::{CompioProviders, CompioResolver};
 use paros::client::ClientTunables;
-use paros::frontend::{FrontendSettings, run_frontend};
 use paros::net::tls::{ClientCertificates, Files, Pem};
+use paros::roles::frontend::{FrontendSettings, run_frontend};
 use paros::{Address, DriverTunables, Names, NoAudit};
 use paros_authz_biscuit::{BiscuitAuthz, KeyRing, RootPublicKey, since_epoch};
 use tokio_util::sync::CancellationToken;

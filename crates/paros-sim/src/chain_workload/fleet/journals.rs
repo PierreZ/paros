@@ -41,8 +41,8 @@ use std::time::Duration;
 
 use moonpool_sim::{Providers, TimeProvider};
 use paros::Pass;
-use paros::frontend::Denial;
 use paros::model::name::JournalName;
+use paros::roles::frontend::Denial;
 
 use super::FleetOps;
 use super::cell::Cell;

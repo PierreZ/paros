@@ -50,20 +50,20 @@ use paros_core::{
     ReadState, ReplicaNode, Slot, TenantId, WriteOp,
 };
 
-use crate::driver::JournalStores;
-use crate::driver::log_reads::{JournalReads, ReadLimits};
 use crate::net::transport::Transport;
+use crate::roles::node::JournalStores;
+use crate::roles::node::log_reads::{JournalReads, ReadLimits};
 use tokio_util::sync::CancellationToken;
 
-use crate::driver::boot::check_format_marker;
-use crate::driver::edge::{ReplicaInbox, RpcEdge, edge_reporter};
-use crate::driver::ready::{persist_writes, report_applied, storage_fault_crash};
-use crate::driver::reply::{Reply, answer};
-use crate::driver::transport::{LaneOpener, Outbound, send_messages};
-use crate::driver::{BootKind, DriverTunables, RunError};
 use crate::net::ReplySender;
 use crate::observe::audit::Audit;
 use crate::observe::events::{message_kind, message_route};
+use crate::roles::node::boot::check_format_marker;
+use crate::roles::node::edge::{ReplicaInbox, RpcEdge, edge_reporter};
+use crate::roles::node::ready::{persist_writes, report_applied, storage_fault_crash};
+use crate::roles::node::reply::{Reply, answer};
+use crate::roles::node::transport::{LaneOpener, Outbound, send_messages};
+use crate::roles::node::{BootKind, DriverTunables, RunError};
 use crate::storage::LogStorage;
 use crate::wire::{
     InspectRefusal, InspectReply, InspectTarget, Read, ReadAck, journal_state_to_proto,
@@ -285,7 +285,7 @@ fn open_read<A: Audit>(
             if rows >= 2 && acks == rows && moonpool_buggify::buggify_fault_with_prob!(0.10) =>
         {
             moonpool_assertions::reachable!("grid: the driver overrides a quorum read's row");
-            Some(crate::driver::log_reads::next_row(ctx, rows))
+            Some(crate::roles::node::log_reads::next_row(ctx, rows))
         }
         _ => None,
     });

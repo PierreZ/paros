@@ -61,12 +61,12 @@ use paros_core::JournalIdentifier;
 use tokio_util::sync::CancellationToken;
 
 use crate::client::ClientTunables;
-use crate::driver::DriverTunables;
-use crate::driver::edge::{Plain, RpcEdge};
 use crate::model::name::JournalName;
 use crate::net::inbound::{Inbound, ReplySender, serve_well_known};
 use crate::net::transport::Transport;
 use crate::observe::audit::Audit;
+use crate::roles::node::DriverTunables;
+use crate::roles::node::edge::{Plain, RpcEdge};
 use crate::wire::methods::{
     FrontReadRpc, FrontSetJournalTagsRpc, FrontSetLeaderRpc, FrontTruncateRpc, FrontWriteRpc,
 };

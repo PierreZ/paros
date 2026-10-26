@@ -5,7 +5,7 @@
 //!
 //! One step per watch round, after the footprint step, in turn over the
 //! hosted tenants: release one batcher slot on a machine that leaves
-//! (draining, held slow, or gone, `super::moves::stays`), else book or
+//! (draining, held slow, or gone, `crate::coordinator::tenant::moves::stays`), else book or
 //! release the slots that make the count, with `crate::model::placement` (one
 //! slot per machine, zones in round robin, least-loaded first). The count
 //! is capped at the `stateless` machines that can take a slot, so a cell
@@ -14,7 +14,7 @@
 //! later term finishes what an earlier one started.
 //!
 //! A batcher slot is placement only: every machine serves the batcher
-//! endpoint (`crate::batcher`), and `Resolve` names the machines the
+//! endpoint (`crate::roles::batcher`), and `Resolve` names the machines the
 //! registry books a tenant's batchers on, which is where its clients send
 //! their multi-writer writes. The counts of frontends and proxy leaders are
 //! recorded and not placed yet (#604).
@@ -25,18 +25,18 @@ use std::ops::Bound::{Excluded, Unbounded};
 use crate::ParosProviders;
 use paros_core::{NodeId, TenantId};
 
-use super::moves::{Leaving, stays};
-use super::tenants::TenantDesk;
 use crate::client::Client;
 use crate::client::cell::CellSession;
 use crate::client::journals::JournalAnswer;
+use crate::coordinator::tenant::TenantDesk;
+use crate::coordinator::tenant::moves::{Leaving, stays};
 use crate::machine::Class;
 use crate::model::placement::{self, Step, Want};
 use crate::model::registry::{Booking, BookingTarget, NodeStanding, Registry, Role, SystemCommand};
 
 /// What one role step did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum RoleStep {
+pub(crate) enum RoleStep {
     /// No hosted tenant, or the tenant in turn holds its count.
     Idle,
     /// The tenant's control journal could not be read.
@@ -49,7 +49,7 @@ pub(super) enum RoleStep {
 
 /// The role steps of one coordinator term.
 #[derive(Debug, Default)]
-pub(super) struct Roles {
+pub(crate) struct Roles {
     /// The tenant the last step took: the next step takes the next one.
     last: Option<TenantId>,
 }
@@ -91,7 +91,7 @@ impl Roles {
     /// tenant control journals). `None` when a write did not land: the term
     /// writes nothing more.
     #[tracing::instrument(level = "debug", skip_all)]
-    pub(super) async fn step<P: ParosProviders>(
+    pub(crate) async fn step<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
         cell: &mut CellSession,

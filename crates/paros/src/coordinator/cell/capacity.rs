@@ -34,7 +34,7 @@ fn answer_of(grant: &Grant) -> CapacityAnswer {
 /// Decide `request` through the term's session `cell`, each booking id
 /// drawn with `draw`.
 #[tracing::instrument(level = "debug", skip_all, fields(tenant = request.tenant.0, request = request.request))]
-pub(super) async fn grant<P: ParosProviders>(
+pub(crate) async fn grant<P: ParosProviders>(
     client: &Client<P>,
     cell: &mut CellSession,
     request: &CapacityRequest,

@@ -7,7 +7,7 @@
 //!
 //! 1. book the acceptor slots the new mode lacks on other storage machines
 //!    (`crate::model::placement::plan`, with the journal's slots as the current
-//!    ones); the machine starts the journal as a spare (`crate::driver::system`);
+//!    ones); the machine starts the journal as a spare (`crate::roles::node::system`);
 //! 2. ask the journal's leader to reconfigure onto the new members under the
 //!    new quorum system (`Reconfigure`, named by its journal). A smaller mode
 //!    keeps the slots placement does not release; the cross-configuration
@@ -15,7 +15,7 @@
 //! 3. once that configuration is in force, record it in the tenant control
 //!    journal (`Placed`, what views show), then, once the leader's GC
 //!    watermark has reached it, release the slot of each member it left.
-//!    Unlike a move off a draining machine (`super::moves`), it retires no
+//!    Unlike a move off a draining machine (`crate::coordinator::tenant::moves`), it retires no
 //!    member: the machine stays bookable, a later mode may place the
 //!    journal on it again, and a retired identity never comes back to its
 //!    journal. The release stops the journal there, its store kept.
@@ -29,9 +29,9 @@
 //! machine to place on: the move would release it at once. A slot outside
 //! the configuration in force on a journal whose machines all stay is the
 //! change's alone: its last step records the configuration, then releases
-//! it (`super::moves` releases none). A desired mode the cell cannot place
+//! it (`crate::coordinator::tenant::moves` releases none). A desired mode the cell cannot place
 //! waits: a configure judged it placeable when it was asked
-//! (`super::tenants`), and slots free up again.
+//! (`crate::coordinator::tenant`), and slots free up again.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound::{Excluded, Unbounded};
@@ -40,11 +40,11 @@ use crate::ParosProviders;
 use moonpool_rpc::RpcHandle;
 use paros_core::{AcceptorConfig, JournalIdentifier, NodeId, QuorumSystem, TenantId};
 
-use super::moves::{at_or_above, bookable, leader_of, stays};
-use super::tenants::{TenantDesk, placed_count};
 use crate::client::cell::CellSession;
 use crate::client::journals::JournalAnswer;
 use crate::client::{Client, ReconfigureOutcome, Server};
+use crate::coordinator::tenant::moves::{at_or_above, bookable, leader_of, stays};
+use crate::coordinator::tenant::{TenantDesk, placed_count};
 use crate::model::placement::{self, Step, Want};
 use crate::model::registry::{Booking, BookingTarget, Registry, Role};
 use crate::model::tenant::Desired;
@@ -53,7 +53,7 @@ use crate::{Address, Names};
 
 /// What one mode step did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum ModeStep {
+pub(crate) enum ModeStep {
     /// No journal's placement differs from its desired mode.
     Idle,
     /// A change waits: for a leader, a free machine, a configuration in
@@ -73,7 +73,7 @@ pub(super) enum ModeStep {
 
 impl ModeStep {
     /// Whether the step started or advanced a change that is not done.
-    pub(super) fn in_flight(self) -> bool {
+    pub(crate) fn in_flight(self) -> bool {
         matches!(self, Self::Booked | Self::Reconfigured)
     }
 }
@@ -81,7 +81,7 @@ impl ModeStep {
 /// The mode changes of one coordinator term: the journals whose change
 /// this term started a step of.
 #[derive(Debug, Default)]
-pub(super) struct Modes {
+pub(crate) struct Modes {
     started: BTreeSet<JournalIdentifier>,
     /// The journal the last step took: the next step takes the next one,
     /// so a change that waits holds no other back.
@@ -130,12 +130,12 @@ impl Modes {
     /// `gone` is the move's. `None` when a write did not land: the term
     /// writes nothing more.
     #[tracing::instrument(level = "debug", skip_all)]
-    pub(super) async fn step<P: ParosProviders>(
+    pub(crate) async fn step<P: ParosProviders>(
         &mut self,
         (providers, rpc, names, client): (&P, &RpcHandle<P>, &Names, &Client<P>),
         cell: &mut CellSession,
         desk: &mut TenantDesk,
-        gone: &super::moves::Leaving,
+        gone: &crate::coordinator::tenant::moves::Leaving,
     ) -> Option<ModeStep> {
         let Some(change) = self.next(client, cell, desk, gone).await? else {
             return Some(ModeStep::Idle);
@@ -144,9 +144,10 @@ impl Modes {
         self.last = Some(journal);
         let registry = cell.registry();
         // The journal's machines, each where the cell's address book says.
-        let book: BTreeMap<NodeId, Address> = super::cell_book(cell.founders(), registry)
-            .into_iter()
-            .collect();
+        let book: BTreeMap<NodeId, Address> =
+            crate::model::machine::cell_book(cell.founders(), registry)
+                .into_iter()
+                .collect();
         let servers: Vec<(NodeId, Server<P>)> = change
             .slots
             .iter()
@@ -227,7 +228,7 @@ impl Modes {
         client: &Client<P>,
         cell: &CellSession,
         desk: &mut TenantDesk,
-        gone: &super::moves::Leaving,
+        gone: &crate::coordinator::tenant::moves::Leaving,
     ) -> Option<Option<Change>> {
         let registry = cell.registry();
         let hosted: Vec<(TenantId, paros_core::JournalId)> = registry
@@ -248,7 +249,7 @@ impl Modes {
                 let identifier = JournalIdentifier::new(tenant, id);
                 let slots = slots(registry, identifier);
                 // A journal on a draining, slow or gone machine is the
-                // move's (`super::moves`, the same `stays`); one with no slot
+                // move's (`crate::coordinator::tenant::moves`, the same `stays`); one with no slot
                 // was never placed by this cell.
                 if slots.is_empty() || slots.iter().any(|(_, b)| !stays(registry, gone, b.node)) {
                     continue;
@@ -423,7 +424,7 @@ impl Modes {
             moonpool_assertions::reachable!("coordinator: a mode change records its placement");
         }
         for &(booking, slot) in &leaving {
-            super::tenants::release(client, cell, |b| *b == slot)
+            crate::coordinator::tenant::release(client, cell, |b| *b == slot)
                 .await
                 .ok()?;
             assert!(

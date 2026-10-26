@@ -14,13 +14,11 @@
 //! skips its first window, so `Load` is answered with no window yet) is
 //! drawn by the caller, never in the task.
 
-use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use crate::ParosProviders;
 use moonpool_core::{
-    Detach, DiskSpace, LocalTaskProvider, LocalTimeProvider, SimulationResult, SystemProvider,
-    SystemSample,
+    Detach, LocalTaskProvider, LocalTimeProvider, SimulationResult, SystemProvider, SystemSample,
 };
 use moonpool_rpc::RpcHandle;
 use paros_core::{JournalId, JournalIdentifier, TenantId};
@@ -33,59 +31,7 @@ use crate::observe::metrics::{CallKind, JournalUsage, Metrics};
 use crate::wire::machine as wire;
 use crate::wire::methods::LoadRpc;
 
-/// One full window, as the machine sampled it.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Window {
-    /// How busy the machine was.
-    pub busyness: Busyness,
-    /// The first sample's instant, on the system provider's clock.
-    pub start_at: Duration,
-    /// The second sample's instant, on the system provider's clock.
-    pub end_at: Duration,
-    /// When the window ended, on the time provider's clock.
-    pub ended: Duration,
-    /// The data disk's space at the window's end, when the system provider
-    /// knows it (#360 (disk full)).
-    pub space: Option<DiskSpace>,
-}
-
-/// Where a machine keeps its last full window: shared by the monitor that
-/// writes it and every phase's `Load` server that reads it.
-#[derive(Clone, Default)]
-pub struct LoadBoard(Arc<Mutex<Option<Window>>>);
-
-impl LoadBoard {
-    /// The last full window, if any.
-    #[must_use]
-    pub fn window(&self) -> Option<Window> {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
-    }
-
-    fn publish(&self, window: Window) {
-        assert!(window.end_at > window.start_at, "a window has a length");
-        assert!(window.busyness.in_range(), "a published window is in range");
-        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = Some(window);
-    }
-}
-
-impl std::fmt::Debug for LoadBoard {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_tuple("LoadBoard").field(&self.window()).finish()
-    }
-}
-
-/// Two boards are equal when they are the same board: the board is the
-/// machine's, never a value.
-impl PartialEq for LoadBoard {
-    fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.0, &other.0)
-    }
-}
-
-impl Eq for LoadBoard {}
+pub use crate::model::load::{LoadBoard, Window};
 
 /// Start sampling the machine's counters every `interval`, for the disk
 /// that holds `data_dir`, onto `board`, until `shutdown`. `skip_first`
