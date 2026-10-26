@@ -64,13 +64,13 @@ deleted the exact slot in the question, and the peer reports "nothing accepted
 here" when the truth is "I no longer know". Two values can then be chosen for one
 slot. So paros makes the floor a **decided value**.
 
-A decided slot holds a `Command` (`crates/lib/paros-core/src/types.rs`), which is
+A decided slot holds a `Command` (`crates/lib/paros-core/src/journal/command.rs`), which is
 either a `Write(Entry)` with a writer's batch of opaque records or one of
 paros's own `Control` commands: `Truncate { leader, up_to }`, `SetLeader { new, old }` and the
 `Noop` gap filler. The acceptors and the replication path do not tell the
 variants apart, exactly as Compartmentalized Paxos treats a `Noop`. Only the
 **learner's walk** interprets a slot: it judges each one, in slot order, with
-the journal state machine (`JournalState::apply`, `journal_state.rs`). A client
+the journal state machine (`JournalState::apply`, `journal/state.rs`). A client
 asks the leader to truncate with the `Truncate` RPC, naming `up_to`, the first
 position it still needs, and its writer fence, its leader uuid (#241); the leader
 proposes `Control::Truncate` into the next slot, and a non-leader redirects the
@@ -173,7 +173,7 @@ never rejoins; see [the wiped node](@/paxos/beyond-multi-paxos.md#the-wiped-node
 | The truncation command | `Control::Truncate` (`types.rs`) |
 | The client's request | the `Truncate` RPC (`paros::client::Writer::truncate`, `Client::truncate`), `ColocatedNode::propose_control` |
 | The fence | `JournalState::is_current`, `Outcome::TruncateRefused`, `TruncateAck.refused` |
-| The journal state it raises | `JournalState::first_seq`, `JournalState::apply` (`journal_state.rs`) |
+| The journal state it raises | `JournalState::first_seq`, `JournalState::apply` (`journal/state.rs`) |
 | The local prefix drop | `ColocatedNode::compact`, `WriteOp::Truncate` (its `sealed` state) |
 | The answer below the floor | `serve_catchup`, `Message::TrimmedTo` (`node/catch_up.rs`) |
 | The jump | `ColocatedNode::on_trimmed_to`, `Replica::trim_to`, `Acceptor::trim_to` |

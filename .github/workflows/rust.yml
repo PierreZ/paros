@@ -42,6 +42,9 @@ jobs:
       # #722 (three products): foo.rs + foo/, no mod.rs, no #[path] includes.
       - name: Check the module style
         run: scripts/check-module-style.sh
+      # #730 (paros-core rework): foundations <- roles <- deployments.
+      - name: Check the paros-core layers
+        run: scripts/check-core-layers.sh
 
   test:
     runs-on: ubuntu-latest

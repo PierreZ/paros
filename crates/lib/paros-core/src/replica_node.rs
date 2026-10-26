@@ -116,13 +116,13 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::contract::config::Config;
 use crate::contract::limits::Limits;
+use crate::contract::limits::READ_TTL_TICKS;
 use crate::contract::message::{Audience, Message};
 use crate::contract::storage::Storage;
 use crate::contract::write::WriteOp;
 use crate::journal::state::JournalState;
 use crate::journal::{Command, Seq};
 use crate::membership::{AcceptorConfig, QuorumSystem, ReplicaId};
-use crate::node::READ_TTL_TICKS;
 use crate::quorum_read::ReadState;
 use crate::quorum_read::{QuorumReads, ReadBasis};
 use crate::replica::Replica;

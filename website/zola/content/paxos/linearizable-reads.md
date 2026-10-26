@@ -157,7 +157,7 @@ is always one a read through this node can already see.
 | The evidence | `PreRead{reply_to, ctx}`, `PreReadAck{watermark}`, `Acceptor::vote_watermark` |
 | Settle and serve | `QuorumReads::fold`, `QuorumReads::serve`, `Replica::covers` |
 | The driver seam | `Ready::read_states`, `ReadState{ctx, index}` |
-| The verdict at apply | `JournalState::apply`, `Outcome` (`journal_state.rs`) |
+| The verdict at apply | `JournalState::apply`, `Outcome` (`journal/state.rs`) |
 | A retry's answer | `Outcome::Duplicate`, answered from the fold (`paros::driver::calls`) |
 
 ## Proven, not asserted

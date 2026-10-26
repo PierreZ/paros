@@ -60,7 +60,7 @@ The mechanism has a name from the literature: **piggybacking** — attaching ext
 information to a message already being sent, so it travels at no extra cost. A
 `Promise` is never a bare "yes": it carries every value the acceptor accepted with
 the ballot it was accepted at. In paros those ride in `Message::Promise`
-(`crates/lib/paros-core/src/message.rs`), filled by `Acceptor::promise_page`
+(`crates/lib/paros-core/src/contract/message.rs`), filled by `Acceptor::promise_page`
 (`acceptor.rs`). It is also how a node that *missed* a decision catches up: it
 proposes, the chosen value comes back piggybacked, and it is forced to adopt it —
 learning the consensus in the act of trying to overwrite it. That is narrower than
@@ -88,7 +88,7 @@ the reply leaves" is where [persist before send](@/paxos/restart-safety.md) bite
 
 In paros the role is `Acceptor` (`crates/lib/paros-core/src/acceptor.rs`):
 `Acceptor::promised` is the promise, durable as `HardState.max_promised_ballot`
-(`state.rs`); `Acceptor::records` is the log. `Acceptor::prepare` answers the report-
+(`contract/hard_state.rs`); `Acceptor::records` is the log. `Acceptor::prepare` answers the report-
 and-fence question and `Acceptor::admit` the record-a-vote one — both refusing exactly
 `ballot < promised` — each emitting the `AcceptorWrite` the driver must flush before the
 reply leaves. Everything else in the protocol exists only to feed those two answers a

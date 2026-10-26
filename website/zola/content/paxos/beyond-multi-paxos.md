@@ -219,7 +219,7 @@ hole. The rule that closes both is in the next section.
 `Rounds::stalled` (`proposer/rounds.rs`);
 `Delegation`, `ColocatedNode::propose_in`, `ColocatedNode::take_back_delegated`
 (`node.rs`, `node/phase2.rs`); `Party`, `Audience::Proxy` (`message.rs`);
-`Config::proxy_count` (`state.rs`); `ProxyConfig`, `ProxyJournal`; the model checker `proxy_model.rs`; the
+`Config::proxy_count` (`contract/config.rs`); `ProxyConfig`, `ProxyJournal`; the model checker `models/proxy.rs`; the
 example `paros-core/examples/proxy_leader.rs`; the driver `paros::run_proxy`
 (`paros/src/proxy/mod.rs`), the harness's `ProxyProcess` and `PROXY_GROUP`
 (`paros-sim/src/process/`, `roles.rs`), the audit's
@@ -317,7 +317,7 @@ Phase 1 reads.
 
 **In the code.** `ReplicaNode`, `ReplicaReady`, `ReplicaCounters`
 (`replica_node.rs`, whose module doc holds the coupling analysis);
-`Config::replica_count`, `Config::reply_owner` (`state.rs`);
+`Config::replica_count`, `Config::reply_owner` (`contract/config.rs`);
 `ReplicaId` (`membership/ids.rs`); `WriteOp::Learned` (`write.rs`); the example
 `paros-core/examples/replica_tier.rs`; the driver `paros::run_replica`
 (`paros/src/replica_tier/mod.rs`), the harness's `ReplicaProcess` and
@@ -522,7 +522,7 @@ maximum over the stop quorum.
 **In the code.** `MatchmakerSet { generation, members }`,
 `MatchmakerSet::has_quorum` (`membership/matchmaker_set.rs`); `MatchmakerReconfigurer`
 (`matchmaker/reconfigurer.rs`); the decree (`decree.rs`, generic since #277); the checker
-(`matchmaker/handover_model.rs`). Design notes:
+(`models/handover.rs`). Design notes:
 `docs/analysis/consensus/matchmaker-gc-and-generations.md` and
 `docs/analysis/consensus/matchmaker-interaction-verification.md`. Play it:
 [`act4/matchmaker-generations`](../../play/#act4/matchmaker-generations).

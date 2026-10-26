@@ -59,7 +59,7 @@ use crate::proxy_leader::ProxyLeader;
 use crate::types::{Ballot, NodeId, Slot, Value};
 
 /// Seeds per campaign (`PROXY_MODEL_SEEDS` overrides; a long run is
-/// `PROXY_MODEL_SEEDS=5000 cargo nextest run -p paros-core proxy_model`).
+/// `PROXY_MODEL_SEEDS=5000 cargo nextest run -p paros-core models::proxy`).
 const SEEDS: u64 = 300;
 /// Chaotic steps per seed (`PROXY_MODEL_STEPS` overrides).
 const CHAOS_STEPS: usize = 600;

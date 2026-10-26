@@ -227,7 +227,7 @@ batch) and holds **no protocol tally of its own**:
 - `acceptor.rs` (+ `acceptor/retention.rs`, the floor-moving ops) — promise, records, floor, CTRL
 - `proposer.rs` (+ `proposer/rounds.rs` the standalone Phase-2 tally, `proposer/authority.rs`
   the standing authority) — election, repair probe, recovery
-- `replica.rs` — chosen prefix, apply walk, journal fold · `journal_state.rs` — the one
+- `replica.rs` — chosen prefix, apply walk, journal fold · `journal/state.rs` — the one
   journal-control state machine, judged at apply
 - `quorum_read.rs` — leaderless reads · `collector.rs` — the leader-side GC tally
 - `membership/` — `AcceptorConfig`, `MatchmakerSet`, `QuorumSystem`
@@ -235,6 +235,14 @@ batch) and holds **no protocol tally of its own**:
   — the registry and its generation handover · `decree.rs` — the generic single-decree
   Paxos (`Decree<Id, V>`): the handover's successor and `cell init`'s plan (#277)
 - `proxy_leader.rs`, `replica_node.rs` — the second and third deployments
+
+Beside the roles, the **foundations**: `types.rs` (the Paxos scalars), `journal/` (what the log
+carries), `contract/` (what a driver honors: `Message`, `WriteOp`, `Storage`, `MemStorage`,
+`HardState`, `Config`, `Limits`) and `retained.rs`. The three layers point down only
+(foundations ← roles ← deployments, #730 (paros-core rework)): a role never uses a deployment,
+and a deployment never uses another (`scripts/check-core-layers.sh`). Every module is `pub`;
+the root re-exports only what a driver loop needs. A deployment takes its `Limits` at
+construction and reports its counters in one snapshot (`ColocatedNode::counters`).
 
 The map is `crates/lib/paros-core/AGENTS.md`. **A component must not acquire knowledge merely because
 the current deployment colocates it**: the proposer builds no message, the acceptor never reads
@@ -315,7 +323,7 @@ configuration, not a transitional state. Before touching `on_check_leader`, `Ele
 
 Depth: module docs of `matchmaking.rs`, `node/matchmaking.rs`, `node/reconfigure.rs`,
 `node/gc.rs` (`may_retire`), `matchmaker.rs`, `matchmaker/reconfigurer.rs`,
-`matchmaker/handover_model.rs`; `docs/analysis/consensus/matchmaker-gc-and-generations.md` and
+`models/handover.rs`; `docs/analysis/consensus/matchmaker-gc-and-generations.md` and
 `matchmaker-interaction-verification.md`.
 
 ## Journals, system journals, storage, boot safety
@@ -587,7 +595,7 @@ in this list:
 
 Elsewhere: `website/` holds everything a browser loads (decided on 2026-10-13): `website/zola/` (the website, Zola + Goyo, #254; `website/zola/AGENTS.md`, the `update-the-site` skill; built by `website/zola/build.sh`), `website/play/` (the game's app), `website/sandbox/` (the sandbox page); `scripts/build-wasm.sh` builds and stages both; the Rust behind them stays in `crates/`,
 `docs/architecture/`, `docs/analysis/` (design notes), `docs/references/` (papers and source
-references), `scripts/` (`sancov-rustc.sh`, `build-wasm.sh`, `check-sim-wasm.sh`, `check-dockerfile-toolchain.sh`, `check-module-style.sh`, `mutants-report.sh`), `.claude/skills/` and
+references), `scripts/` (`sancov-rustc.sh`, `build-wasm.sh`, `check-sim-wasm.sh`, `check-dockerfile-toolchain.sh`, `check-module-style.sh`, `check-core-layers.sh`, `mutants-report.sh`), `.claude/skills/` and
 `.claude/agents/`.
 
 Publishing mirrors moonpool: library crates share a release-plz `version_group` with per-crate

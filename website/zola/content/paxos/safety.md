@@ -136,7 +136,7 @@ Multi-Paxos, the leader's heartbeat resend of un-acked `Accept`s.
 
 | Paxos Made Simple | paros |
 |---|---|
-| highest promised prepare number | `Acceptor::promised`, durable as `HardState.max_promised_ballot` (`state.rs`) |
+| highest promised prepare number | `Acceptor::promised`, durable as `HardState.max_promised_ballot` (`contract/hard_state.rs`) |
 | highest accepted proposal | `Acceptor::records`, a `Slot -> (Ballot, Command)` map persisted per record via `AcceptorWrite::AppendAccepted` (`write.rs`) |
 | promise rule (P1a) | `ballot > promised` in `Acceptor::prepare` (`acceptor.rs`) |
 | vote rule | `ballot >= promised` in `Acceptor::admit` |

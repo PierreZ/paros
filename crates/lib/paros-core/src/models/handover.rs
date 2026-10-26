@@ -92,7 +92,7 @@ use crate::membership::{MatchmakerGeneration, MatchmakerId, MatchmakerSet};
 use crate::types::{Ballot, NodeId};
 
 /// Seeds per campaign (`HANDOVER_MODEL_SEEDS` overrides; a long run is
-/// `HANDOVER_MODEL_SEEDS=5000 cargo nextest run -p paros-core handover_model`).
+/// `HANDOVER_MODEL_SEEDS=5000 cargo nextest run -p paros-core models::handover`).
 const SEEDS: u64 = 400;
 
 /// The journals of the set (`1..=JOURNALS`, #190): every registration,
