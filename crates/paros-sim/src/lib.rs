@@ -413,9 +413,9 @@ const MACHINE_GRACE_MS: std::ops::Range<usize> = 1_000..3_000;
 /// unwinnable run: it enters with replicated fault patterns, which keep a
 /// quorum's copies clean. Phantom writes lose an acknowledged vote no quorum
 /// survives; a failed disk needs a storage watchdog in the driver;
-/// degradation episodes are a performance knob; a failed writeback
-/// (fsyncgate, moonpool#355) leaves bytes a re-opened store reads as durable
-/// (#720 (fsyncgate)). Each has an issue to lift its mask.
+/// degradation episodes are a performance knob. Each has an issue to lift
+/// its mask. Failed writebacks (fsyncgate, moonpool#355) run unmasked: every
+/// store open syncs and drops the cache first (#720 (fsyncgate)).
 fn storage_fault_mask() -> StorageFaultMask {
     StorageFaultMask::all()
         .without(StorageFault::Corruption)
@@ -424,7 +424,6 @@ fn storage_fault_mask() -> StorageFaultMask {
         .without(StorageFault::PhantomWrite)
         .without(StorageFault::Degradation)
         .without(StorageFault::DiskFailure)
-        .without(StorageFault::WritebackError)
 }
 
 /// Fresh main-campaign builder. Keeping all state behind process/workload

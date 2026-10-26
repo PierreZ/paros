@@ -75,12 +75,19 @@ masked (#176).
 **The storage contract.** paros's stores are moonpool-journal's (`paros::journal`), and the
 simulation must give them at least the chaos the harness's in-memory stores carry today (decided
 on 2026-10-04, #176, #202). Every storage fault moonpool can inject is eventually in contract.
-Four families start masked through moonpool's `storage_fault_mask` (moonpool#292), each with
+Three families start masked through moonpool's `storage_fault_mask` (moonpool#292), each with
 an issue to lift the mask: phantom writes (a write acknowledged as synced that never lands loses
 an acknowledged vote, which no quorum survives), a hung disk (`DiskFailure`: it needs a storage
-watchdog in the driver), stall/throttle episodes (`Degradation`) and failed writebacks
-(`WritebackError`, fsyncgate, moonpool#355: a retried sync succeeds with the bytes not durable,
-and a re-opened journal reads them as durable; masked on 2026-10-23, #720 (fsyncgate)). Barrier violations ("sync
+watchdog in the driver) and stall/throttle episodes (`Degradation`). Failed writebacks
+(`WritebackError`, fsyncgate, moonpool#355) run unmasked (#720 (fsyncgate), decided on
+2026-10-26). The kernel marks the pages it could not write clean: a retried sync succeeds with
+the bytes not durable, and the page cache keeps serving them, across a process restart too. So
+a fail-stop does not help, and a rewrite of the files can tear records that were durable. Every
+store open (boot, restart, the re-open after a quarantine) first settles the store
+(`paros::journal::settle`): it syncs each file, drops its clean cached pages
+(`StorageFile::drop_cache`, `posix_fadvise(DONTNEED)`, moonpool#361), and syncs the
+directories. The open then reads what the device holds. A storage fault still quarantines its
+journal, not the process. Barrier violations ("sync
 lies") and moonpool's slow-disk extremes run unmasked (decided on 2026-10-06, #176): no moonpool
 profile draws barrier violations, and the slow-disk extremes are a performance knob the mask
 does not cover; if paros does not stay live on them, that is a finding, not a knob to clamp.

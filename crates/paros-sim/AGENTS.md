@@ -239,7 +239,7 @@ then admitted; it may stop after the registration and is resumed by the client's
 `shape.rs`: `ROUND_TRIP_FLOOR_MS = 250` (`:48`), `CONNECT_FLOOR_MS = 1_000` (a connect and its TLS handshake, two round trips on the slowest link: the driver's and the client's connect timeouts), `INTERNAL_CALL_FLOOR_MS` (a connect and a peer-confirmed read on the slowest link: a machine's `internal_request_timeout`, #565), `ENTRY_BLOCKS_FLOOR = 17` (`:657`),
 `PERSIST_BLOCKS_FLOOR = 2` (`:665`), `FOUNDER_COUNTS = [1, 3]`, `MIN_BOOTSTRAP = 3` (`:939`). `chaos_surfaces()` = `Network(Swarm)` +
 five per-group attritions + the acceptor-and-proxy `Outage(Swarm)` + `BuggifyKnobs` + `Storage(Swarm)` + `Cpu(Swarm)` (moonpool's CPU model, #424 (busyness metrics)) + two `GrayFailure(Swarm)` regimes, one slow acceptor (`ACCEPTOR_GROUP`) and one slow machine (`MACHINE_GROUP`), each `max_slow = 1`; `BitFlip` masked; storage masked to
-crash damage, failed syncs, short transfers and lost directory entries (`storage_fault_mask()`:
+crash damage, failed syncs, failed writebacks (fsyncgate, #720), short transfers and lost directory entries (`storage_fault_mask()`:
 rot, phantom writes, degradation and disk failure stay out, #176); `prob_wipe = 0` except on the machines (`MACHINE_WIPE_WEIGHT`, #246; `wipe_budget(1, WipeHeal::Signal)`, moonpool #344 (rolling wipes)); `prob_graceful = 0` except on the machines (`MACHINE_GRACEFUL_WEIGHT`, and the frontends, a 1–3 s grace `MACHINE_GRACE_MS`, #560 (clean Ctrl-C shutdown): the shipped clean stop runs, `shape.rs` draws `shutdown_within` 0–4 s).
 Deps: `paros`, `moonpool-sim` (`exploration`, `Cargo.toml:20`), `moonpool-rpc` (`:29`) — pin
 shared with `paros` and `parosd`.

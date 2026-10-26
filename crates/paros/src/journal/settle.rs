@@ -1,20 +1,26 @@
 //! Make a store's files durable as they stand (#348): the probe an
-//! operator runs before it trusts a format marker it can read.
+//! operator runs before it trusts a format marker it can read, and the
+//! first step of every store open (#720 (fsyncgate)).
 //!
 //! A sync that fails leaves its writes in the file image: the process that
 //! wrote them reads them back, but a power loss can still drop them. So a
 //! marker a living process reads after a failed format sync is staged, not
-//! landed. [`settle`] syncs every file of the store and every directory on
-//! the way to it; once it returns `Ok`, what a reader sees is what a crash
-//! keeps. It writes no byte of its own, so it never changes what the next
-//! boot finds.
+//! landed. A failed writeback is worse (fsyncgate): the kernel marks the
+//! pages it could not write clean, so a retried sync succeeds and flushes
+//! nothing, and the page cache keeps serving the bytes, across a process
+//! restart too. [`settle`] syncs every file of the store, then drops its
+//! clean cached pages, and syncs every directory on the way to it; once it
+//! returns `Ok`, what a reader sees is what the device holds and a crash
+//! keeps. It writes no byte of its own: a rewrite would make the stranded
+//! pages durable, but a crash during it can tear records that were.
 
 use std::io;
 
 use moonpool_core::{LocalStorageFile, LocalStorageProvider, OpenOptions};
 
-/// Sync every file in `dir` and every directory from the root down to
-/// `dir`. A `dir` that does not exist holds nothing to make durable.
+/// Sync every file in `dir` and drop its cached pages, then sync every
+/// directory from the root down to `dir`. A `dir` that does not exist
+/// holds nothing to make durable.
 ///
 /// # Errors
 ///
@@ -32,6 +38,9 @@ pub async fn settle<S: LocalStorageProvider>(provider: &S, dir: &str) -> io::Res
             .open(&format!("{dir}/{name}"), OpenOptions::read_write())
             .await?;
         file.sync_all().await?;
+        // Dirty pages are durable now; what is left cached and clean may
+        // be a failed writeback's, which only the device can disprove.
+        file.drop_cache().await?;
     }
     sync_names(provider, dir).await
 }

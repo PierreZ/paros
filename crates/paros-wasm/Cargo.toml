@@ -75,8 +75,8 @@ ts-rs = { version = "12", features = ["serde-compat"], optional = true }
 paros = { path = "../paros", version = "0.2.0", optional = true }
 # The simulator without its exploration and Tokio features builds for
 # wasm32-unknown-unknown. The pin is the one every paros crate shares.
-moonpool-sim = { git = "https://github.com/PierreZ/moonpool", rev = "5c67a50422ba8a72aa307c6076d5142ef9d2d1df", default-features = false, optional = true }
-moonpool-rpc = { git = "https://github.com/PierreZ/moonpool", rev = "5c67a50422ba8a72aa307c6076d5142ef9d2d1df", default-features = false, features = ["prost"], optional = true }
+moonpool-sim = { git = "https://github.com/PierreZ/moonpool", rev = "9493056dab06be41222753c25629e2061dee6ad0", default-features = false, optional = true }
+moonpool-rpc = { git = "https://github.com/PierreZ/moonpool", rev = "9493056dab06be41222753c25629e2061dee6ad0", default-features = false, features = ["prost"], optional = true }
 async-trait = { version = "0.1", optional = true }
 tracing = { version = "0.1", optional = true }
 tokio-util = { version = "0.7", optional = true }
