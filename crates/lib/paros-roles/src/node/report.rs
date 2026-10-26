@@ -3,9 +3,8 @@
 //! the held-reply bookkeeping a step-down performs.
 
 use moonpool_core::RandomProvider;
-use paros_core::{
-    Ballot, ColocatedNode, HandoffCounters, LeadershipOrigin, NodeId, NodeRole, RepairCounters,
-};
+use paros_core::node::{HandoffCounters, LeadershipOrigin, NodeRole, RepairCounters};
+use paros_core::{Ballot, ColocatedNode, NodeId};
 use paros_net::runtime::ParosProviders;
 
 use paros_observe::audit::Audit;

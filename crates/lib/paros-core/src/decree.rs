@@ -16,7 +16,7 @@
 //! - **The matchmaker handover** (`matchmaker/reconfigurer.rs`): the
 //!   successor set, over the matchmakers of `M_g` under a majority — paros
 //!   supports **majority matchmaker quorums only**
-//!   ([`MatchmakerSet::has_quorum`](crate::MatchmakerSet::has_quorum) is the
+//!   ([`MatchmakerSet::has_quorum`](crate::membership::MatchmakerSet::has_quorum) is the
 //!   same rule), and the handover is safe exactly under that model.
 //! - **`cell init`** (#277, `paros::machine`): the cell plan, over the
 //!   listed founding members, every one of them in both quorums.
@@ -74,7 +74,7 @@ pub enum AcceptFold<V> {
 /// configuration.
 ///
 /// The matchmaker handover shows it in
-/// [`ReconfigurerPhase::Deciding`](crate::ReconfigurerPhase) so a driver can
+/// [`ReconfigurerPhase::Deciding`](crate::matchmaker::ReconfigurerPhase) so a driver can
 /// see *where* the decree stands — its ballot, the value in flight, whether
 /// P2c adopted a prior vote, the promise that preempted it — and everything
 /// it *does* is its caller's to drive.

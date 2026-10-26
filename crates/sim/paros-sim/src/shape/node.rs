@@ -288,8 +288,8 @@ impl NodeShape {
             // recovery span several pages, the window `advance_recovery`
             // paces; the campaign rarely opens 64 rounds at once.
             recovery_page: buggify_knob!(
-                paros::core::LEADER_RECOVERY_BATCH,
-                1_usize..paros::core::LEADER_RECOVERY_BATCH + 1
+                paros::core::contract::limits::RECOVERY_BATCH,
+                1_usize..paros::core::contract::limits::RECOVERY_BATCH + 1
             ),
             // The page sizes the core's 64-entry ceilings bound (#338). The
             // campaign rarely fills a 64-entry page, so each extreme is a
@@ -303,10 +303,19 @@ impl NodeShape {
             // paging candidate re-sends its `Prepare` to the peers that
             // answered on every tick, which keeps their election clocks
             // quiet (#428 (paging livelock)).
-            promise_page: buggify_knob!(paros::core::PROMISE_BATCH, 1_usize..5_usize),
-            resend_page: buggify_knob!(paros::core::RESEND_BATCH, 1_usize..5_usize),
-            apply_page: buggify_knob!(paros::core::APPLY_BATCH, 1_usize..5_usize),
-            registry_page: buggify_knob!(paros::core::REGISTRY_PAGE, 1_usize..5_usize),
+            promise_page: buggify_knob!(
+                paros::core::contract::limits::PROMISE_BATCH,
+                1_usize..5_usize
+            ),
+            resend_page: buggify_knob!(
+                paros::core::contract::limits::RESEND_BATCH,
+                1_usize..5_usize
+            ),
+            apply_page: buggify_knob!(paros::core::contract::limits::APPLY_BATCH, 1_usize..5_usize),
+            registry_page: buggify_knob!(
+                paros::core::contract::limits::REGISTRY_PAGE,
+                1_usize..5_usize
+            ),
             // The delegated round's take-back budget (#142), in
             // re-delegations (one per beat). Floor 1: a round taken back
             // after a single re-delegation runs colocated while its proxy
@@ -594,23 +603,23 @@ pub(crate) fn pair_extremes(drawn: &DriverTunables, defaults: &DriverTunables) {
         // BUGGIFY pairing: the handover stall budget extreme genuinely runs.
         assert_reachable!("a node runs with an extreme handover stall budget");
     }
-    if drawn.recovery_page != paros::core::LEADER_RECOVERY_BATCH {
+    if drawn.recovery_page != paros::core::contract::limits::RECOVERY_BATCH {
         // BUGGIFY pairing: the recovery page extreme genuinely runs.
         assert_reachable!("a node runs with a small recovery page");
     }
-    if drawn.promise_page != paros::core::PROMISE_BATCH {
+    if drawn.promise_page != paros::core::contract::limits::PROMISE_BATCH {
         // BUGGIFY pairing: the promise page extreme genuinely runs.
         assert_reachable!("a node runs with a small promise page");
     }
-    if drawn.resend_page != paros::core::RESEND_BATCH {
+    if drawn.resend_page != paros::core::contract::limits::RESEND_BATCH {
         // BUGGIFY pairing: the re-send page extreme genuinely runs.
         assert_reachable!("a node runs with a small re-send page");
     }
-    if drawn.apply_page != paros::core::APPLY_BATCH {
+    if drawn.apply_page != paros::core::contract::limits::APPLY_BATCH {
         // BUGGIFY pairing: the apply page extreme genuinely runs.
         assert_reachable!("a node runs with a small apply page");
     }
-    if drawn.registry_page != paros::core::REGISTRY_PAGE {
+    if drawn.registry_page != paros::core::contract::limits::REGISTRY_PAGE {
         // BUGGIFY pairing: the registry page extreme genuinely runs.
         assert_reachable!("a node runs with a small registry page");
     }

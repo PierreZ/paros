@@ -24,7 +24,7 @@ use paros::client::Client;
 use paros::client::bootstrap::control_journals;
 use paros::client::fleet::read_directory;
 use paros::client::journals::{self, JournalAnswer, JournalOp, JournalRequest};
-use paros::core::{JournalIdentifier, TenantId, WriterMode};
+use paros::core::journal::{JournalIdentifier, TenantId, WriterMode};
 use paros::model::address::Names;
 use paros::model::fleet::TenantState;
 use paros::model::tags::{Tags, UserTags};
@@ -360,7 +360,15 @@ async fn ready_tenant(
     client: &ParosClient,
     out: &Printer,
     tenant_name: &str,
-) -> Result<(TenantId, paros::core::JournalId, JournalIdentifier, Tags), Ending> {
+) -> Result<
+    (
+        TenantId,
+        paros::core::journal::JournalId,
+        JournalIdentifier,
+        Tags,
+    ),
+    Ending,
+> {
     let Some(cell) = control_journals(client).await else {
         note("no server named its cell's control journals: is the cell initialized?");
         return Err(Ending::Unreachable);
@@ -587,7 +595,7 @@ fn report(
 /// tombstone.
 async fn list(
     client: &ParosClient,
-    (name, tenant, control): (&str, TenantId, paros::core::JournalId),
+    (name, tenant, control): (&str, TenantId, paros::core::journal::JournalId),
     (selector, tenant_tags): (Option<&str>, &Tags),
     labels: &Labels,
     out: &Printer,

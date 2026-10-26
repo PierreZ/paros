@@ -22,11 +22,11 @@ use std::time::Duration;
 
 use moonpool_sim::{SimContext, assert_always, assert_reachable};
 use paros::client::{SetLeaderOutcome, WriteOutcome, Writer};
-use paros::core::Command;
-use paros::core::Entry;
-use paros::core::JournalIdentifier;
-use paros::core::Seq;
 use paros::core::Value;
+use paros::core::journal::Command;
+use paros::core::journal::Entry;
+use paros::core::journal::JournalIdentifier;
+use paros::core::journal::Seq;
 use paros::roles::node::command_hash;
 
 use super::rpc::{set_leader_once, within, write_once};

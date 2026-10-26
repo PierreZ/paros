@@ -17,7 +17,8 @@
 //! `Script` plays the level, choosing messages by what they are rather than by
 //! id and answering every prompt with the answer `paros-core` itself gives.
 
-use paros_core::{NodeId, QuorumSystem, Slot};
+use paros_core::membership::QuorumSystem;
+use paros_core::{NodeId, Slot};
 
 use crate::paxos::action::{Action, ActionKind};
 use crate::paxos::auto::AutomationFlag;

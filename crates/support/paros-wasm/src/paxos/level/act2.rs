@@ -20,7 +20,9 @@
 
 use std::collections::BTreeMap;
 
-use paros_core::{Ballot, Command, Entry, LeaderUuid, NodeId, QuorumSystem, Seq, Slot, Value};
+use paros_core::journal::{Command, Entry, LeaderUuid, Seq};
+use paros_core::membership::QuorumSystem;
+use paros_core::{Ballot, NodeId, Slot, Value};
 
 use crate::paxos::action::{Action, ActionKind, Seam};
 use crate::paxos::auto::AutomationFlag;

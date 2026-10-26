@@ -12,7 +12,8 @@
 //! nothing: a single-writer client that meets a multi-writer journal never
 //! writes unfenced, and the reverse.
 
-use paros_core::{Entry, JournalIdentifier, LeaderUuid, Seq, Value};
+use paros_core::Value;
+use paros_core::journal::{Entry, JournalIdentifier, LeaderUuid, Seq};
 
 use paros_wire::{Truncate, Write};
 

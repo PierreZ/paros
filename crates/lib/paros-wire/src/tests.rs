@@ -3,10 +3,10 @@
 
 use std::collections::BTreeMap;
 
-use paros_core::{
-    Ballot, Command, Control, Entry, JournalState, LeaderUuid, Message, NodeId, Party, ProxyId,
-    Seq, Slot, Value,
-};
+use paros_core::contract::Party;
+use paros_core::journal::{Command, Control, Entry, JournalState, LeaderUuid, Seq};
+use paros_core::membership::ProxyId;
+use paros_core::{Ballot, Message, NodeId, Slot, Value};
 use prost::Message as ProstMessage;
 
 use super::consensus::message_from_proto;
@@ -93,9 +93,9 @@ fn every_variant() -> Vec<Message> {
             reply_to: NodeId(1),
             ballot,
             from_slot: Slot(5),
-            config: Some(paros_core::AcceptorConfig::new(
+            config: Some(paros_core::membership::AcceptorConfig::new(
                 vec![NodeId(3), NodeId(1), NodeId(4)],
-                paros_core::QuorumSystem::Majority,
+                paros_core::membership::QuorumSystem::Majority,
             )),
         },
         Message::Promise {
@@ -133,9 +133,9 @@ fn every_variant() -> Vec<Message> {
             ballot,
             slot: Slot(6),
             command: command.clone(),
-            config: Some(paros_core::AcceptorConfig::new(
+            config: Some(paros_core::membership::AcceptorConfig::new(
                 vec![NodeId(1), NodeId(2), NodeId(3)],
-                paros_core::QuorumSystem::Majority,
+                paros_core::membership::QuorumSystem::Majority,
             )),
         },
         Message::Accepted {
@@ -193,9 +193,9 @@ fn every_variant() -> Vec<Message> {
             from: NodeId(0),
             ballot,
             commit: Some(Slot(2)),
-            config: Some(paros_core::AcceptorConfig::new(
+            config: Some(paros_core::membership::AcceptorConfig::new(
                 vec![NodeId(0), NodeId(2)],
-                paros_core::QuorumSystem::Majority,
+                paros_core::membership::QuorumSystem::Majority,
             )),
             fence: Some(Slot(1)),
         },
@@ -249,9 +249,9 @@ fn every_variant() -> Vec<Message> {
                 ),
                 (Slot(6), Command::Control(Control::Noop)),
             ]),
-            config: Some(paros_core::AcceptorConfig::new(
+            config: Some(paros_core::membership::AcceptorConfig::new(
                 vec![NodeId(1), NodeId(2), NodeId(3)],
-                paros_core::QuorumSystem::Majority,
+                paros_core::membership::QuorumSystem::Majority,
             )),
         },
         // The empty tail: a fully settled leader hands over the frontier
@@ -274,11 +274,13 @@ fn every_variant() -> Vec<Message> {
 #[test]
 #[allow(clippy::too_many_lines)]
 fn matchmaker_contract_round_trips() {
-    use paros_core::{
-        AcceptorConfig, BootstrapPage, GcAck, GcRequest, JournalId, JournalRegistry, MatchOutcome,
-        MatchRefusal, MatchReply, MatchRequest, MatchmakerGeneration, MatchmakerId,
-        MatchmakerPhase, MatchmakerSet, QuorumSystem, ReconfigureReply, ReconfigureRequest,
-        Registration, TenantId,
+    use paros_core::journal::{JournalId, TenantId};
+    use paros_core::matchmaker::{
+        BootstrapPage, GcAck, GcRequest, JournalRegistry, MatchOutcome, MatchRefusal, MatchReply,
+        MatchRequest, MatchmakerPhase, ReconfigureReply, ReconfigureRequest, Registration,
+    };
+    use paros_core::membership::{
+        AcceptorConfig, MatchmakerGeneration, MatchmakerId, MatchmakerSet, QuorumSystem,
     };
     // #190: every request names its tenant and journal, and both survive.
     let tenant = TenantId(0xA1);
@@ -606,10 +608,9 @@ fn matchmaker_contract_round_trips() {
 fn a_page_cursor_of_journal_zero_is_refused() {
     use super::matchmaker::reconfigure_reply::Kind as ReplyKind;
     use super::matchmaker::reconfigure_request::Kind as RequestKind;
-    use paros_core::{
-        JournalId, MatchmakerGeneration as g, MatchmakerId, MatchmakerSet, ReconfigureReply,
-        ReconfigureRequest, TenantId,
-    };
+    use paros_core::journal::{JournalId, TenantId};
+    use paros_core::matchmaker::{ReconfigureReply, ReconfigureRequest};
+    use paros_core::membership::{MatchmakerGeneration as g, MatchmakerId, MatchmakerSet};
     let set = |generation: u64, members: &[u64]| {
         MatchmakerSet::new(
             g(generation),
@@ -693,7 +694,7 @@ fn message_protobuf_round_trips() {
 /// panic.
 #[test]
 fn a_labeled_configuration_round_trips_and_bad_labels_are_refused() {
-    use paros_core::{AcceptorConfig, FailureDomain, QuorumSystem};
+    use paros_core::membership::{AcceptorConfig, FailureDomain, QuorumSystem};
 
     use super::codec::{config_from_proto, config_to_proto};
 
@@ -743,6 +744,6 @@ fn a_labeled_configuration_round_trips_and_bad_labels_are_refused() {
         "one member, two labels"
     );
     let mut long = wire;
-    long.domains[0].az = "z".repeat(paros_core::MAX_FAILURE_DOMAIN_BYTES + 1);
+    long.domains[0].az = "z".repeat(paros_core::membership::MAX_FAILURE_DOMAIN_BYTES + 1);
     assert!(config_from_proto(Some(long)).is_err(), "a name too long");
 }

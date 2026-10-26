@@ -16,8 +16,9 @@ use super::{
     drain_match_requests, ucmd,
 };
 use crate::contract::limits::Limits;
-use crate::matchmaker::REGISTRY_PAGE;
-use crate::matchmaking::{MatchFold, Matchmaking, RegisteredPage, RegistrationKind};
+use crate::contract::limits::REGISTRY_PAGE;
+use crate::matchmaker::RegistrationKind;
+use crate::matchmaking::{MatchFold, Matchmaking, RegisteredPage};
 use crate::membership::ProxyId;
 use crate::node::ColocatedNode;
 
@@ -251,7 +252,7 @@ fn a_match_reply_from_a_stranger_matchmaker_is_ignored() {
     let reply = |mm| MatchReply {
         matchmaker: MatchmakerId(mm),
         to: NodeId(0),
-        journal: crate::JournalId::UNSET,
+        journal: crate::journal::JournalId::UNSET,
         ballot: b,
         generation: MatchmakerGeneration(0),
         outcome: MatchOutcome::Registered {

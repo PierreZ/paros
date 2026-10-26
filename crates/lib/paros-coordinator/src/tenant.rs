@@ -62,7 +62,9 @@ pub mod sets;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
-use paros_core::{AcceptorConfig, JournalId, JournalIdentifier, LeaderUuid, NodeId, TenantId};
+use paros_core::NodeId;
+use paros_core::journal::{JournalId, JournalIdentifier, LeaderUuid, TenantId};
+use paros_core::membership::AcceptorConfig;
 use paros_net::runtime::ParosProviders;
 
 use paros_client::capacity::{CapacityAnswer, CapacityRequest, Wanted};
@@ -355,7 +357,12 @@ impl TenantDesk {
         &mut self,
         client: &Client<P>,
         request: &JournalRequest,
-        (name, writer, desired, store): (&[u8], paros_core::WriterMode, Desired, StoreDurability),
+        (name, writer, desired, store): (
+            &[u8],
+            paros_core::journal::WriterMode,
+            Desired,
+            StoreDurability,
+        ),
         tags: &paros_model::tags::UserTags,
         cell: Option<&mut CellSession>,
     ) -> JournalAnswer {

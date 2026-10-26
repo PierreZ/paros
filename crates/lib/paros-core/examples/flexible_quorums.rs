@@ -76,12 +76,12 @@
 use std::collections::BTreeMap;
 
 use paros_core::acceptor::{AcceptOutcome, Acceptor, PrepareOutcome};
+use paros_core::journal::{Command, Control, Entry, LeaderUuid, Seq};
+use paros_core::membership::{AcceptorConfig, QuorumSystem};
 use paros_core::proposer::{Campaign, PromiseFold, Proposer, RecoveryPolicy, RecoveryStep};
 use paros_core::replica::Replica;
-use paros_core::{
-    AcceptorConfig, Ballot, Command, Control, Entry, Fingerprint, LeaderUuid, NodeId, QuorumSystem,
-    Seq, Slot, Value, WriteOp,
-};
+use paros_core::types::Fingerprint;
+use paros_core::{Ballot, NodeId, Slot, Value, WriteOp};
 
 const N1: NodeId = NodeId(1);
 const N2: NodeId = NodeId(2);
@@ -154,10 +154,10 @@ impl Node {
             acceptor: Acceptor::new(Ballot::zero(), BTreeMap::new(), Slot(0), BTreeMap::new()),
             proposer: Proposer::new(),
             replica: Replica::from_boot(
-                paros_core::WriterMode::Single,
+                paros_core::journal::WriterMode::Single,
                 None,
                 Slot(0),
-                paros_core::JournalState::default(),
+                paros_core::journal::JournalState::default(),
                 &BTreeMap::new(),
             ),
             disk: Vec::new(),
@@ -173,7 +173,7 @@ impl Node {
         match self.acceptor.prepare(ballot, from_slot, &mut self.disk) {
             PrepareOutcome::Promised { .. } => Ok(self
                 .acceptor
-                .promise_page(from_slot, paros_core::PROMISE_BATCH)
+                .promise_page(from_slot, paros_core::contract::limits::PROMISE_BATCH)
                 .accepted),
             PrepareOutcome::Refused | PrepareOutcome::BelowFloor => Err(self.acceptor.promised()),
         }

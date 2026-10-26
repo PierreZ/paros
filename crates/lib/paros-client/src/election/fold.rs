@@ -46,7 +46,7 @@
 //! Anything in the journal that is not an election record (no [`MAGIC`]) is
 //! ignored.
 
-use paros_core::LeaderUuid;
+use paros_core::journal::LeaderUuid;
 use prost::Message;
 
 use paros_wire::election as wire;

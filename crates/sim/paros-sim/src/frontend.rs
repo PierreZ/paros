@@ -39,7 +39,7 @@ use moonpool_sim::{
     assert_always, assert_reachable,
 };
 use paros::client::ClientTunables;
-use paros::core::JournalIdentifier;
+use paros::core::journal::JournalIdentifier;
 use paros::machine::AdminPin;
 use paros::model::address::Address;
 use paros::model::fleet::RootKeyEntry;

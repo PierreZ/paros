@@ -38,7 +38,7 @@ use crate::types::Ballot;
 ///   reconfiguration (the module doc's *Generations*), reconstructed from the
 ///   surviving quorum — never repaired in place.
 /// - **Per-record writes are what make the seams honest.** The driver applies
-///   one [`MatchmakerWriteOp`](crate::MatchmakerWriteOp) per record and fsyncs the batch before the
+///   one [`MatchmakerWriteOp`](crate::matchmaker::MatchmakerWriteOp) per record and fsyncs the batch before the
 ///   reply leaves; a boot that reads records back one by one is the read-side
 ///   pair of that write ordering, and the audit compares the two.
 ///

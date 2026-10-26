@@ -2,9 +2,11 @@
 
 use std::collections::BTreeSet;
 
-use paros_core::{
-    ColocatedNode, Delegation, Fingerprint, Message, NodeRole, ProxyId, ReconfigurerPhase, Slot,
-};
+use paros_core::matchmaker::ReconfigurerPhase;
+use paros_core::membership::ProxyId;
+use paros_core::node::{Delegation, NodeRole};
+use paros_core::types::Fingerprint;
+use paros_core::{ColocatedNode, Message, Slot};
 use paros_observe::events::{message_kind, message_route};
 
 use super::report::HandoffContext;

@@ -6,10 +6,10 @@
 //! accessor lives beside the verb that fills it: `compacts()` beside
 //! `compact`, `handoffs()` and `handoff_refusal()` beside `relinquish`.
 
-use paros_core::{
-    Ballot, ColocatedNode, Command, Control, Entry, HANDOFF_BATCH, LeadershipOrigin, MatchmakerId,
-    Message, NodeId, ProposeResult, QuorumSystem, Seq, Slot, Value,
-};
+use paros_core::journal::{Command, Control, Entry, Seq};
+use paros_core::membership::{MatchmakerId, QuorumSystem};
+use paros_core::node::{HANDOFF_BATCH, LeadershipOrigin, ProposeResult};
+use paros_core::{Ballot, ColocatedNode, Message, NodeId, Slot, Value};
 
 use crate::paxos::action::{ActionError, ActionErrorCode};
 use crate::paxos::narration::{NarrationKind, many, say, who};
@@ -503,7 +503,7 @@ impl World {
         let issued = self.take_event();
         let proposed = entry.clone();
         let result = self.drive(id, index, move |node| {
-            node.propose_in(proposed, column, paros_core::Delegation::Auto)
+            node.propose_in(proposed, column, paros_core::node::Delegation::Auto)
         });
         let admitted = match result {
             Some(ProposeResult::NotLeader(hint)) => {
@@ -677,7 +677,7 @@ impl World {
                     .map_or(Slot(0), |(slot, _)| *slot)
             });
             let outcome = state.apply(
-                paros_core::WriterMode::Single,
+                paros_core::journal::WriterMode::Single,
                 &Command::Write(entry.clone()),
                 |at| replica.accepted_at(at),
             );
@@ -689,10 +689,10 @@ impl World {
         let answer = match (result, judged) {
             (Some(ProposeResult::Accepted(slot)), Some((outcome, original, next))) => match outcome
             {
-                paros_core::Outcome::Duplicate { .. } => {
+                paros_core::journal::Outcome::Duplicate { .. } => {
                     RetryAnswer::Applied(original.unwrap_or(slot))
                 }
-                paros_core::Outcome::Accepted { .. } => RetryAnswer::Fresh(slot),
+                paros_core::journal::Outcome::Accepted { .. } => RetryAnswer::Fresh(slot),
                 _ if entry.seq > next => RetryAnswer::InFlight(slot),
                 _ => RetryAnswer::Refused,
             },

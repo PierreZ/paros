@@ -29,7 +29,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 use moonpool_buggify::hint::Strike;
 use moonpool_core::{Detach, LocalStorageProvider, LocalTaskProvider, SimulationResult};
 use moonpool_rpc::RpcHandle;
-use paros_core::{JournalId, JournalIdentifier, MatchmakerConfig, TenantId};
+use paros_core::journal::{JournalId, JournalIdentifier, TenantId};
+use paros_core::matchmaker::MatchmakerConfig;
 use paros_net::runtime::ParosProviders;
 use tokio_util::sync::CancellationToken;
 
@@ -241,7 +242,9 @@ where
         "every set has a bootstrap generation"
     );
     let inbox = MatchmakerInbox::serve(rpc, machine)?;
-    let page = tunables.registry_page.clamp(1, paros_core::REGISTRY_PAGE);
+    let page = tunables
+        .registry_page
+        .clamp(1, paros_core::contract::limits::REGISTRY_PAGE);
     assert!(page >= 1, "a registry page holds a registration");
     let (alive, ended) = paros_roles::node::HostEnded::pair();
     providers

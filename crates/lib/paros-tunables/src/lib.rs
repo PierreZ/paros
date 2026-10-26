@@ -328,7 +328,7 @@ pub struct DriverTunables {
     /// `Limits::recovery_page`) before the driver advances the
     /// batch. A per-node size, never on the wire. Floor 1: a one-slot page
     /// still drains the recovery, one `Ready` per slot. The ceiling is
-    /// [`paros_core::LEADER_RECOVERY_BATCH`], the default; a larger value
+    /// [`paros_core::contract::limits::RECOVERY_BATCH`], the default; a larger value
     /// runs the ceiling.
     pub recovery_page: usize,
     /// The most accepted records and faulty entries one `Promise` page
@@ -336,26 +336,26 @@ pub struct DriverTunables {
     /// `Limits::promise_page`). A per-node size: a receiver
     /// checks a page against the core's ceiling, never against its own
     /// size. Floor 1: a one-entry page still walks the suffix, one round
-    /// trip per entry. The ceiling is [`paros_core::PROMISE_BATCH`], the
+    /// trip per entry. The ceiling is [`paros_core::contract::limits::PROMISE_BATCH`], the
     /// default; a larger value runs the ceiling.
     pub promise_page: usize,
     /// The most open rounds one re-send page carries (#338,
     /// `Limits::resend_page`). A per-node size, never on the
     /// wire. Floor 1: the cursor still visits every open round, one per
-    /// beat. The ceiling is [`paros_core::RESEND_BATCH`], the default.
+    /// beat. The ceiling is [`paros_core::contract::limits::RESEND_BATCH`], the default.
     pub resend_page: usize,
     /// The most chosen slots one apply walk folds before it yields (#338,
     /// `Limits::apply_page`). A
     /// per-node size, never on the wire. Floor 1: the walk still folds the
     /// whole prefix, one slot per `Ready`. The ceiling is
-    /// [`paros_core::APPLY_BATCH`], the default.
+    /// [`paros_core::contract::limits::APPLY_BATCH`], the default.
     pub apply_page: usize,
     /// The most registrations one matchmaker answer carries before its
     /// continuation cursor (#338, `Limits::registry_page`). A
     /// per-matchmaker size: a candidate checks a page against the core's
     /// ceiling. Floor 1: a one-registration page still delivers the whole
     /// history, one round trip per registration. The ceiling is
-    /// [`paros_core::REGISTRY_PAGE`], the default.
+    /// [`paros_core::contract::limits::REGISTRY_PAGE`], the default.
     pub registry_page: usize,
     /// How often a machine samples its busyness counters (#424): the length
     /// of the window `Load` answers with. FDB's `WORKER_LOGGING_INTERVAL`
@@ -494,11 +494,11 @@ impl Default for DriverTunables {
             election_compact_after: ELECTION_COMPACT_AFTER,
             machine_down_after: MACHINE_DOWN_AFTER,
             machine_replace_after: MACHINE_REPLACE_AFTER,
-            recovery_page: paros_core::LEADER_RECOVERY_BATCH,
-            promise_page: paros_core::PROMISE_BATCH,
-            resend_page: paros_core::RESEND_BATCH,
-            apply_page: paros_core::APPLY_BATCH,
-            registry_page: paros_core::REGISTRY_PAGE,
+            recovery_page: paros_core::contract::limits::RECOVERY_BATCH,
+            promise_page: paros_core::contract::limits::PROMISE_BATCH,
+            resend_page: paros_core::contract::limits::RESEND_BATCH,
+            apply_page: paros_core::contract::limits::APPLY_BATCH,
+            registry_page: paros_core::contract::limits::REGISTRY_PAGE,
             load_interval: LOAD_INTERVAL,
             slow_rtt: SLOW_RTT,
             slow_busy_permille: SLOW_BUSY_PERMILLE,
@@ -698,12 +698,20 @@ impl DriverTunables {
         let limits = paros_core::Limits {
             recovery_page: self
                 .recovery_page
-                .clamp(1, paros_core::LEADER_RECOVERY_BATCH),
-            promise_page: self.promise_page.clamp(1, paros_core::PROMISE_BATCH),
-            resend_page: self.resend_page.clamp(1, paros_core::RESEND_BATCH),
-            apply_page: self.apply_page.clamp(1, paros_core::APPLY_BATCH),
+                .clamp(1, paros_core::contract::limits::RECOVERY_BATCH),
+            promise_page: self
+                .promise_page
+                .clamp(1, paros_core::contract::limits::PROMISE_BATCH),
+            resend_page: self
+                .resend_page
+                .clamp(1, paros_core::contract::limits::RESEND_BATCH),
+            apply_page: self
+                .apply_page
+                .clamp(1, paros_core::contract::limits::APPLY_BATCH),
             read_window: self.read_retry_ticks,
-            registry_page: self.registry_page.clamp(1, paros_core::REGISTRY_PAGE),
+            registry_page: self
+                .registry_page
+                .clamp(1, paros_core::contract::limits::REGISTRY_PAGE),
         };
         limits.assert_valid();
         limits
@@ -796,7 +804,7 @@ const RECONFIGURE_TIMEOUT_ELECTIONS: u64 = 4;
 // An election timeout spans at least two beats, so a live leader always
 // beats before a follower's clock fires; a quarantine outlasts an election;
 // a proxy evicts a round only after its leader would have taken it back.
-const _: () = assert!(ELECTION_TIMEOUT_BASE >= 2 * paros_core::HEARTBEAT_TICKS);
+const _: () = assert!(ELECTION_TIMEOUT_BASE >= 2 * paros_core::node::HEARTBEAT_TICKS);
 const _: () = assert!(QUARANTINE_TICKS > ELECTION_TIMEOUT_BASE);
 const _: () = assert!(PROXY_ROUND_RESENDS > PROXY_TAKE_BACK_RESENDS);
 const _: () = assert!(PARTITION_MOVE_RESENDS > 0);

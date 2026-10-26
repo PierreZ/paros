@@ -25,12 +25,12 @@ use paros::client::journals::{self, JournalAnswer, JournalOp, JournalRequest};
 use paros::client::{
     ClaimOutcome, Client, ClientTunables, Reader, ReaderOutcome, Server, Writer, WriterOutcome,
 };
-use paros::core::JournalId;
-use paros::core::JournalIdentifier;
 use paros::core::NodeId;
-use paros::core::TenantId;
 use paros::core::Value;
-use paros::core::WriterMode;
+use paros::core::journal::JournalId;
+use paros::core::journal::JournalIdentifier;
+use paros::core::journal::TenantId;
+use paros::core::journal::WriterMode;
 use paros::model::address::Address;
 use paros::model::address::Names;
 use paros::model::fleet::TenantKind;

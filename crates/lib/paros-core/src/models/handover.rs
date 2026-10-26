@@ -644,7 +644,7 @@ impl World {
         let page = if seed.is_multiple_of(2) {
             1 + usize::try_from(seed / 2 % 2).unwrap_or(0)
         } else {
-            crate::matchmaker::REGISTRY_PAGE
+            crate::contract::limits::REGISTRY_PAGE
         };
         let sites = (0..POOL)
             .map(|i| {

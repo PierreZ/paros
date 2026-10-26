@@ -63,10 +63,10 @@ use paros::client::checkpoint::{CheckpointPolicy, Checkpointer, Folder, LoadOutc
 use paros::client::fleet::{FleetRefusal, FleetSession, Interrupted, Run, Stage, Step};
 use paros::client::names::{TenantResolution, resolve_tenant};
 use paros::client::{ClaimOutcome, Writer};
-use paros::core::JournalId;
-use paros::core::JournalIdentifier;
 use paros::core::NodeId;
-use paros::core::TenantId;
+use paros::core::journal::JournalId;
+use paros::core::journal::JournalIdentifier;
+use paros::core::journal::TenantId;
 use paros::machine::ControlJournals;
 use paros::model::fleet::{CellState, FleetDirectory, TenantKind, TenantState};
 use paros::model::registry::{NodeStanding, Registry};

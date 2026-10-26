@@ -47,7 +47,7 @@
 //! [`follow`] reads the directory at the pointer ([`directory_reader`]),
 //! and the tenant steps above run as in the cell that hosts the universe.
 
-use paros_core::{JournalIdentifier, TenantId};
+use paros_core::journal::{JournalIdentifier, TenantId};
 use paros_net::runtime::ParosProviders;
 
 use paros_client::Client;
@@ -397,7 +397,8 @@ fn note(registry: &Registry, step: &SystemCommand) {
 
 #[cfg(test)]
 mod tests {
-    use paros_core::{JournalId, JournalIdentifier, NodeId, TenantId};
+    use paros_core::NodeId;
+    use paros_core::journal::{JournalId, JournalIdentifier, TenantId};
 
     use super::*;
     use paros_client::checkpoint::Checkpointable;

@@ -25,7 +25,8 @@
 
 use std::collections::BTreeMap;
 
-use paros_core::{NodeId, TenantId};
+use paros_core::NodeId;
+use paros_core::journal::TenantId;
 
 use crate::machine::Class;
 use crate::placement::{self, Machine};

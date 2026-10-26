@@ -35,13 +35,13 @@ use moonpool_sim::{
     assert_reachable,
 };
 use paros::core::Config;
-use paros::core::JournalId;
-use paros::core::JournalIdentifier;
 use paros::core::NodeId;
-use paros::core::QuorumSystem;
 use paros::core::Slot;
 use paros::core::Storage;
-use paros::core::TenantId;
+use paros::core::journal::JournalId;
+use paros::core::journal::JournalIdentifier;
+use paros::core::journal::TenantId;
+use paros::core::membership::QuorumSystem;
 use paros::storage::LogStorage;
 use tokio_util::sync::CancellationToken;
 

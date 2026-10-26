@@ -21,7 +21,7 @@
 use core::fmt;
 use core::str::FromStr;
 
-use paros_core::JournalIdentifier;
+use paros_core::journal::JournalIdentifier;
 
 /// The URI scheme of a journal name.
 pub const SCHEME: &str = "paros://";
@@ -317,7 +317,7 @@ pub fn match_prefix(prefix: &str, candidates: impl IntoIterator<Item = u64>) -> 
 
 #[cfg(test)]
 mod tests {
-    use paros_core::{JournalId, TenantId};
+    use paros_core::journal::{JournalId, TenantId};
 
     use super::*;
 

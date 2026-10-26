@@ -22,7 +22,8 @@ use std::io;
 
 use moonpool_buggify::hint::Strike;
 use moonpool_core::{LocalStorageFile, LocalStorageProvider, OpenOptions};
-use paros_core::{JournalIdentifier, NodeId};
+use paros_core::NodeId;
+use paros_core::journal::JournalIdentifier;
 
 use super::{CellPlan, journal_config};
 use paros_storage::journal::JournalStorage;
@@ -116,7 +117,7 @@ impl<S: LocalStorageProvider + Clone> ProviderDisk<S> {
     ///
     /// When `tenant` is unset: a set is named by its tenant.
     #[must_use]
-    pub fn matchmaker_dir(&self, tenant: paros_core::TenantId) -> String {
+    pub fn matchmaker_dir(&self, tenant: paros_core::journal::TenantId) -> String {
         assert!(tenant.0 != 0, "a matchmaker set is named by a set tenant");
         format!("{}/matchmakers/{}", self.root, tenant.0)
     }

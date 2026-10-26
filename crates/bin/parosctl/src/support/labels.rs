@@ -10,7 +10,7 @@
 use std::collections::BTreeMap;
 
 use paros::client::views::{ViewOutcome, ask, request};
-use paros::core::{JournalIdentifier, TenantId};
+use paros::core::journal::{JournalIdentifier, TenantId};
 use paros::model::view::Scope;
 use paros::wire::view::{CellQuery, ViewReply, view_request::Query};
 

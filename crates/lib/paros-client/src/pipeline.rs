@@ -35,7 +35,8 @@
 
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
-use paros_core::{Entry, JournalIdentifier, JournalView, LeaderUuid, Seq, Value};
+use paros_core::Value;
+use paros_core::journal::{Entry, JournalIdentifier, JournalView, LeaderUuid, Seq};
 use paros_net::runtime::ParosProviders;
 use tokio::sync::watch;
 

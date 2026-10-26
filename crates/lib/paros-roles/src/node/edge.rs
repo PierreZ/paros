@@ -26,9 +26,11 @@ use std::sync::Arc;
 
 use moonpool_core::{SimulationError, SimulationResult};
 use moonpool_rpc::{RpcHandle, ServiceGroup};
-use paros_core::{
-    GcAck, GcRequest, JournalIdentifier, MatchReply, MatchRequest, Message, Party,
-    ReconfigureReply, ReconfigureRequest,
+use paros_core::Message;
+use paros_core::contract::Party;
+use paros_core::journal::JournalIdentifier;
+use paros_core::matchmaker::{
+    GcAck, GcRequest, MatchReply, MatchRequest, ReconfigureReply, ReconfigureRequest,
 };
 use paros_net::runtime::ParosProviders;
 use tokio::sync::mpsc;

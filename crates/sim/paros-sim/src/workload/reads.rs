@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use moonpool_sim::assert_always;
 use paros::client::ReadOutcome;
-use paros::core::JournalIdentifier;
+use paros::core::journal::JournalIdentifier;
 
 use super::write::WrittenCommand;
 use crate::audit::AuditWorld;

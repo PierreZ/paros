@@ -12,16 +12,16 @@
 
 use moonpool_core::CompioStorageProvider;
 use paros::core::Ballot;
-use paros::core::Command;
 use paros::core::Config;
-use paros::core::Entry;
-use paros::core::LeaderUuid;
-use paros::core::MustSync;
 use paros::core::NodeId;
-use paros::core::Seq;
 use paros::core::Slot;
 use paros::core::Storage;
 use paros::core::Value;
+use paros::core::contract::MustSync;
+use paros::core::journal::Command;
+use paros::core::journal::Entry;
+use paros::core::journal::LeaderUuid;
+use paros::core::journal::Seq;
 use paros::roles::matchmaker::MatchmakerStorage;
 use paros::roles::matchmaker::matchmaker_storage_contract_suite;
 use paros::storage::LogStorage;
@@ -41,7 +41,7 @@ fn runtime() -> compio::runtime::Runtime {
 fn config() -> Config {
     Config {
         peers: vec![NodeId(0)],
-        ..Config::new(NodeId(0), paros::core::JournalIdentifier::UNSET)
+        ..Config::new(NodeId(0), paros::core::journal::JournalIdentifier::UNSET)
     }
 }
 
@@ -88,7 +88,7 @@ async fn open_registry(dir: &str) -> Registry {
     let mut registry = JournalMatchmakerStorage::new(
         CompioStorageProvider::new(),
         dir,
-        paros::core::JournalIdentifier::UNSET,
+        paros::core::journal::JournalIdentifier::UNSET,
         layout(Durability::Batched),
     );
     registry

@@ -26,7 +26,7 @@ use paros::client::checkpoint::CheckpointPolicy;
 use paros::client::fleet::{Step, TagTarget, read_directory};
 use paros::client::journals::{self, JournalAnswer, JournalOp, JournalRequest};
 use paros::core::NodeId;
-use paros::core::TenantId;
+use paros::core::journal::TenantId;
 use paros::model::fleet::{TenantKind, TenantState};
 use paros::model::registry::NodeStanding;
 use paros::model::tags::{MAX_TAGS, Tag, Tags, UserTags};

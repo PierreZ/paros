@@ -2,7 +2,8 @@
 //! paros serves (the read-index path retired, #243) — and the one place it
 //! is answered.
 
-use paros_core::{NodeId, ReadState, Slot};
+use paros_core::quorum_read::ReadState;
+use paros_core::{NodeId, Slot};
 
 use crate::paxos::action::ActionError;
 use crate::paxos::narration::{NarrationKind, prefix_at, say, who};

@@ -28,7 +28,8 @@
 
 use moonpool_core::{Detach, LocalTaskProvider, LocalTimeProvider, SimulationResult};
 use moonpool_rpc::RpcHandle;
-use paros_core::{NodeId, TenantId};
+use paros_core::NodeId;
+use paros_core::journal::TenantId;
 use paros_net::runtime::ParosProviders;
 use tokio_util::sync::CancellationToken;
 
@@ -225,7 +226,7 @@ impl<P: ParosProviders> Desk<P> {
     /// `name`, when given) that could be read.
     async fn read_tenants(&self, name: Option<&[u8]>) -> Vec<TenantControl> {
         let registry = self.registry.state();
-        let wanted: Vec<(TenantId, paros_core::JournalId)> = registry
+        let wanted: Vec<(TenantId, paros_core::journal::JournalId)> = registry
             .hosted()
             .filter_map(|t| registry.hosted_tenant(t).map(|h| (t, h)))
             .filter(|(_, h)| name.is_none_or(|n| h.name == n))
@@ -233,7 +234,7 @@ impl<P: ParosProviders> Desk<P> {
             .collect();
         let mut read = Vec::new();
         for (tenant, control) in wanted {
-            let journal = paros_core::JournalIdentifier::new(tenant, control);
+            let journal = paros_core::journal::JournalIdentifier::new(tenant, control);
             if let Ok(fold) = read_tenant_control(&self.client, 0, journal).await {
                 read.push(fold);
             }

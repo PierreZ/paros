@@ -7,10 +7,12 @@
 //! that completed a quorum: a straggler that arrives before the close widens
 //! the reconstruction, exactly as `paros::roles::node::run_node` has it.
 
-use paros_core::{
-    ColocatedNode, MatchOutcome, MatchReply, MatchRequest, MatchStep, MatchmakerId, MatchmakerSet,
-    NodeId, ReconfigureReply, ReconfigureRequest, ReconfigurerStep,
+use paros_core::matchmaker::{
+    MatchOutcome, MatchReply, MatchRequest, ReconfigureReply, ReconfigureRequest, ReconfigurerStep,
 };
+use paros_core::membership::{MatchmakerId, MatchmakerSet};
+use paros_core::node::MatchStep;
+use paros_core::{ColocatedNode, NodeId};
 
 use crate::paxos::narration::{NarrationKind, many, who};
 
@@ -435,8 +437,8 @@ impl World {
         self.narrate(NarrationKind::Matchmaking, text);
     }
 
-    fn narrate_gc_step(&mut self, id: NodeId, step: &paros_core::GcStep) {
-        use paros_core::GcStep;
+    fn narrate_gc_step(&mut self, id: NodeId, step: &paros_core::collector::GcStep) {
+        use paros_core::collector::GcStep;
         let text = match step {
             GcStep::Ignored => return,
             GcStep::Acked { remaining } => format!(

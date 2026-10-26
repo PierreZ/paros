@@ -5,7 +5,9 @@
 //! survives a crash — so the stage never blanks a node out and the player can
 //! see what a restart is about to read back.
 
-use paros_core::{NodeId, QuorumSystem, ReconfigurerPhase};
+use paros_core::NodeId;
+use paros_core::matchmaker::ReconfigurerPhase;
+use paros_core::membership::QuorumSystem;
 
 use crate::paxos::view::{
     AttemptView, ChosenView, ClientView, ElectionView, GapView, GcView, GridCellView,

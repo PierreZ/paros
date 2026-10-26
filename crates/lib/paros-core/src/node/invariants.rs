@@ -94,7 +94,7 @@ impl ColocatedNode {
             "a recovery page is never empty"
         );
         assert!(
-            self.limits.recovery_page <= crate::proposer::RECOVERY_BATCH,
+            self.limits.recovery_page <= crate::contract::limits::RECOVERY_BATCH,
             "a recovery page never exceeds its ceiling"
         );
         // So do the promise and re-send page sizes (#338).
@@ -103,12 +103,12 @@ impl ColocatedNode {
             "a promise page is never empty"
         );
         assert!(
-            self.limits.promise_page <= crate::acceptor::PROMISE_BATCH,
+            self.limits.promise_page <= crate::contract::limits::PROMISE_BATCH,
             "a promise page never exceeds its ceiling"
         );
         assert!(self.limits.resend_page > 0, "a re-send page is never empty");
         assert!(
-            self.limits.resend_page <= crate::proposer::RESEND_BATCH,
+            self.limits.resend_page <= crate::contract::limits::RESEND_BATCH,
             "a re-send page never exceeds its ceiling"
         );
         // The apply page the replica walks is the node's, and the read

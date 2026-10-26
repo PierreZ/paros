@@ -222,16 +222,20 @@
 use std::collections::BTreeMap;
 
 use paros_core::acceptor::{AcceptOutcome, Acceptor, PrepareOutcome};
-use paros_core::matchmaking::{MatchFold, Matchmaking, RegisteredPage};
-use paros_core::proposer::{Campaign, PromiseFold, Proposer};
-use paros_core::{
-    AcceptorConfig, AcceptorWrite, Ballot, Command, Entry, Fingerprint, JournalId, LeaderUuid,
-    Limits, MatchOutcome, MatchPurpose, MatchRefusal, MatchReply, MatchRequest, Matchmaker,
-    MatchmakerConfig, MatchmakerGeneration, MatchmakerId, MatchmakerPhase, MatchmakerReconfigurer,
-    MatchmakerSet, MemRegistry, NodeId, QuorumSystem, ReconfigureReply, ReconfigureRequest,
-    ReconfigurerPhase, ReconfigurerStep, Registration, RegistrationKind, RegistryStorage, Seq,
-    Slot, Value,
+use paros_core::contract::AcceptorWrite;
+use paros_core::journal::{Command, Entry, JournalId, LeaderUuid, Seq};
+use paros_core::matchmaker::{
+    MatchOutcome, MatchPurpose, MatchRefusal, MatchReply, MatchRequest, MatchmakerConfig,
+    MatchmakerPhase, MemRegistry, ReconfigureReply, ReconfigureRequest, ReconfigurerPhase,
+    ReconfigurerStep, Registration, RegistrationKind, RegistryStorage,
 };
+use paros_core::matchmaking::{MatchFold, Matchmaking, RegisteredPage};
+use paros_core::membership::{
+    AcceptorConfig, MatchmakerGeneration, MatchmakerId, MatchmakerSet, QuorumSystem,
+};
+use paros_core::proposer::{Campaign, PromiseFold, Proposer};
+use paros_core::types::Fingerprint;
+use paros_core::{Ballot, Limits, Matchmaker, MatchmakerReconfigurer, NodeId, Slot, Value};
 
 const N1: NodeId = NodeId(1);
 const N2: NodeId = NodeId(2);
@@ -330,7 +334,7 @@ impl AcceptorNode {
         match self.role.prepare(ballot, from_slot, &mut self.disk) {
             PrepareOutcome::Promised { .. } => Ok(self
                 .role
-                .promise_page(from_slot, paros_core::PROMISE_BATCH)
+                .promise_page(from_slot, paros_core::contract::limits::PROMISE_BATCH)
                 .accepted),
             PrepareOutcome::Refused | PrepareOutcome::BelowFloor => Err(self.role.promised()),
         }
@@ -364,7 +368,7 @@ fn acceptor(pool: &mut [AcceptorNode], id: NodeId) -> &mut AcceptorNode {
 /// A matchmaker's disk. The library's reference [`MemRegistry`] holds the
 /// durable scalars (the watermark, the freeze, the decree record) and the
 /// per-ballot registration records, and knows the meaning of each
-/// [`MatchmakerWriteOp`](paros_core::MatchmakerWriteOp). Beside it sit two
+/// [`MatchmakerWriteOp`](paros_core::matchmaker::MatchmakerWriteOp). Beside it sit two
 /// counters whose only purpose is to make the fsync ordering visible in the
 /// trace.
 ///
@@ -401,7 +405,7 @@ impl Disk {
 ///
 /// The role decides; the process persists. Every reply the role queues sits
 /// behind a batch of writes in its
-/// [`MatchmakerReady`](paros_core::MatchmakerReady), and the contract is the
+/// [`MatchmakerReady`](paros_core::matchmaker::MatchmakerReady), and the contract is the
 /// acceptor's persist-before-send rule in the registry's words: **writes
 /// first, fsync, then the reply, then `advance`**. Why it matters: a
 /// `Registered` reply tells a candidate "every later leader will be told
@@ -934,7 +938,7 @@ type Voters = BTreeMap<MatchmakerId, Acceptor<Vec<MatchmakerId>>>;
 /// proposer `Proposer<MatchmakerId, Vec<MatchmakerId>>`, the quorum a
 /// majority of the *current* matchmakers, the slot always zero — and the
 /// code that decides is character for character the same library code.
-/// This is what `paros_core::Decree` runs inside the real handover below.
+/// This is what `paros_core::decree::Decree` runs inside the real handover below.
 /// (The matchmakers there keep the acceptor's two scalars as their durable
 /// `DecreeRecord`, written to disk before each `Promised`/`Accepted` reply.)
 ///

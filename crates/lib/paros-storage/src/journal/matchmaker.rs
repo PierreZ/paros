@@ -72,10 +72,12 @@ use std::ops::Range;
 
 use moonpool_buggify::hint::Strike;
 use moonpool_journal::{Batch, Entry, ID_SIZE, Id, Journal, ReadError, State};
-use paros_core::{
-    Ballot, JournalId, JournalIdentifier, MatchmakerConfig, MatchmakerGeneration,
-    MatchmakerHardState, Registration, RegistryStorage,
+use paros_core::Ballot;
+use paros_core::journal::{JournalId, JournalIdentifier};
+use paros_core::matchmaker::{
+    MatchmakerConfig, MatchmakerHardState, Registration, RegistryStorage,
 };
+use paros_core::membership::MatchmakerGeneration;
 use serde::{Deserialize, Serialize};
 
 use super::{

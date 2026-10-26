@@ -114,7 +114,6 @@ pub mod ready;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::ReadState;
 use crate::contract::config::Config;
 use crate::contract::limits::Limits;
 use crate::contract::message::{Audience, Message};
@@ -124,6 +123,7 @@ use crate::journal::state::JournalState;
 use crate::journal::{Command, Seq};
 use crate::membership::{AcceptorConfig, QuorumSystem, ReplicaId};
 use crate::node::READ_TTL_TICKS;
+use crate::quorum_read::ReadState;
 use crate::quorum_read::{QuorumReads, ReadBasis};
 use crate::replica::Replica;
 use crate::types::{Ballot, NodeId, Slot};
@@ -913,9 +913,9 @@ impl ReplicaNode {
     /// If an assertion on its own invariants, preconditions or postconditions
     /// fails: a programmer error, never an operating condition.
     #[must_use]
-    pub fn read_log(&self, from: Seq, limit: usize, max_bytes: usize) -> crate::LogRead {
+    pub fn read_log(&self, from: Seq, limit: usize, max_bytes: usize) -> crate::replica::LogRead {
         let read = self.replica.read(from, limit, max_bytes);
-        if let crate::LogRead::Page(page) = &read {
+        if let crate::replica::LogRead::Page(page) = &read {
             assert!(
                 page.state == self.replica.journal().view(),
                 "a page names the fold's head"

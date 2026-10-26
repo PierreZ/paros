@@ -193,7 +193,7 @@ fn blocked_slot_waits_then_resolves_case1_from_a_straggler() {
         Some(val(40)),
         "the straggler's clean copy was recovered, not overwritten"
     );
-    let crate::RepairCounters { case1, case2, .. } = nodes[0].repair_counters();
+    let crate::node::RepairCounters { case1, case2, .. } = nodes[0].repair_counters();
     assert_eq!(case1, 1);
     assert_eq!(case2, 0);
 }
@@ -388,7 +388,7 @@ fn a_trim_point_jump_drops_a_faulty_record_below_it() {
     n.step(Message::TrimmedTo {
         from: NodeId(0),
         point: Slot(2),
-        state: crate::JournalState::default(),
+        state: crate::journal::JournalState::default(),
     });
     assert!(
         n.acceptor().faulty().is_empty(),

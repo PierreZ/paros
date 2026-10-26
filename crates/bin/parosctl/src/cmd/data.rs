@@ -11,7 +11,9 @@ use paros::client::{
     ClaimOutcome, Client, ReaderOutcome, ReconfigureOutcome, RetireOutcome, TruncateOutcome,
     WriteOptions, WriteOutcome, Writer, WriterOutcome,
 };
-use paros::core::{JournalIdentifier, JournalView, LeaderUuid, QuorumSystem, Seq, Value};
+use paros::core::Value;
+use paros::core::journal::{JournalIdentifier, JournalView, LeaderUuid, Seq};
+use paros::core::membership::QuorumSystem;
 use paros::roles::frontend::Denial;
 use paros::wire::common::Ballot;
 use paros::wire::{

@@ -323,11 +323,11 @@ impl Game {
             Action::Wipe { node } => self.log_world()?.wipe(NodeId(*node))?,
             Action::CrashMatchmaker { matchmaker } => {
                 self.log_world()?
-                    .crash_matchmaker(paros_core::MatchmakerId(*matchmaker))?;
+                    .crash_matchmaker(paros_core::membership::MatchmakerId(*matchmaker))?;
             }
             Action::RestartMatchmaker { matchmaker } => {
                 self.log_world()?
-                    .restart_matchmaker(paros_core::MatchmakerId(*matchmaker))?;
+                    .restart_matchmaker(paros_core::membership::MatchmakerId(*matchmaker))?;
             }
             Action::Reconfigure {
                 node,
@@ -335,7 +335,7 @@ impl Game {
                 quorum,
             } => {
                 let system = quorum.map_or(
-                    paros_core::QuorumSystem::Majority,
+                    paros_core::membership::QuorumSystem::Majority,
                     action::QuorumSpec::system,
                 );
                 let world = self.log_world()?;
@@ -355,7 +355,7 @@ impl Game {
             Action::ReconfigureMatchmakers { node, members } => {
                 let members = members
                     .iter()
-                    .map(|id| paros_core::MatchmakerId(*id))
+                    .map(|id| paros_core::membership::MatchmakerId(*id))
                     .collect();
                 self.log_world()?
                     .reconfigure_matchmakers(NodeId(*node), members)?;

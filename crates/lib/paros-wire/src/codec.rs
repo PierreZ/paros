@@ -3,10 +3,12 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use paros_core::{
-    AcceptorConfig, Ballot, Command, Control, Entry, FailureDomain, JournalState, JournalView,
-    LeaderUuid, NodeId, Party, ProxyId, QuorumSystem, Seq, Value, WriterMode,
+use paros_core::contract::Party;
+use paros_core::journal::{
+    Command, Control, Entry, JournalState, JournalView, LeaderUuid, Seq, WriterMode,
 };
+use paros_core::membership::{AcceptorConfig, FailureDomain, ProxyId, QuorumSystem};
+use paros_core::{Ballot, NodeId, Value};
 
 use super::{InspectReply, Reconfigure, common, internal};
 

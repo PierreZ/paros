@@ -13,10 +13,10 @@ use paros::client::{
     MatchmakersRefusal, ReconfigureMatchmakersOutcome, ReconfigureOutcome, RetireOutcome,
     RetireRefusal,
 };
-use paros::core::JournalIdentifier;
-use paros::core::QuorumSystem;
-use paros::core::ReconfigureRefusal;
-use paros::core::TenantId;
+use paros::core::journal::JournalIdentifier;
+use paros::core::journal::TenantId;
+use paros::core::membership::QuorumSystem;
+use paros::core::node::ReconfigureRefusal;
 use paros::wire::RetireRequest;
 use paros::wire::WireQuorumSystem;
 use paros::wire::quorum_system_from_proto;
@@ -999,7 +999,7 @@ async fn compose(
     state: &moonpool_sim::StateHandle,
     journal: JournalIdentifier,
     members: &[u64],
-    system: paros::core::QuorumSystem,
+    system: paros::core::membership::QuorumSystem,
     target: usize,
 ) -> ReconfigureOutcome {
     let nodes: Vec<paros::core::NodeId> =

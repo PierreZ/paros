@@ -1,6 +1,6 @@
 //! What the cell records of the universe (#232, §3.7): the tenants it hosts, the universe pointer and the fleet registration.
 
-use paros_core::{JournalId, JournalIdentifier, TenantId};
+use paros_core::journal::{JournalId, JournalIdentifier, TenantId};
 use paros_wire::system as wire;
 
 // The cell control journal has no fixed identifier (§3.8): a deployment draws

@@ -34,13 +34,13 @@ pub struct ClientId(pub u64);
 impl ClientId {
     /// The uuid this client leads under.
     #[must_use]
-    pub fn uuid(self) -> paros_core::LeaderUuid {
-        paros_core::LeaderUuid(u128::from(self.0) + 1)
+    pub fn uuid(self) -> paros_core::journal::LeaderUuid {
+        paros_core::journal::LeaderUuid(u128::from(self.0) + 1)
     }
 
     /// The client that leads under `uuid`, if it is one of a level's.
     #[must_use]
-    pub fn of(uuid: paros_core::LeaderUuid) -> Option<Self> {
+    pub fn of(uuid: paros_core::journal::LeaderUuid) -> Option<Self> {
         uuid.0
             .checked_sub(1)
             .and_then(|id| u64::try_from(id).ok())
@@ -61,11 +61,14 @@ mod verbs;
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use paros_core::journal::Command;
+use paros_core::matchmaker::{
+    GcAck, GcRequest, MatchReply, MatchRequest, ReconfigureReply, ReconfigureRequest,
+};
+use paros_core::membership::{AcceptorConfig, MatchmakerId, QuorumSystem};
 use paros_core::proposer::RecoveryStep;
 use paros_core::{
-    AcceptorConfig, Ballot, ColocatedNode, Command, Config, GcAck, GcRequest, Limits, MatchReply,
-    MatchRequest, MatchmakerId, MatchmakerReconfigurer, Message, NodeId, QuorumSystem,
-    ReconfigureReply, ReconfigureRequest, Slot,
+    Ballot, ColocatedNode, Config, Limits, MatchmakerReconfigurer, Message, NodeId, Slot,
 };
 
 use crate::paxos::action::{ActionError, ActionErrorCode, Seam};
@@ -762,10 +765,14 @@ fn unknown_node(id: NodeId) -> ActionError {
 
 /// The `quorum_system` string a [`crate::paxos::view::NodeView`] carries.
 #[must_use]
-pub fn quorum_name(system: paros_core::QuorumSystem) -> String {
+pub fn quorum_name(system: paros_core::membership::QuorumSystem) -> String {
     match system {
-        paros_core::QuorumSystem::Majority => "majority".to_string(),
-        paros_core::QuorumSystem::Flexible { q1, q2 } => format!("flexible q1={q1} q2={q2}"),
-        paros_core::QuorumSystem::Grid { rows, cols, .. } => format!("grid {rows}x{cols}"),
+        paros_core::membership::QuorumSystem::Majority => "majority".to_string(),
+        paros_core::membership::QuorumSystem::Flexible { q1, q2 } => {
+            format!("flexible q1={q1} q2={q2}")
+        }
+        paros_core::membership::QuorumSystem::Grid { rows, cols, .. } => {
+            format!("grid {rows}x{cols}")
+        }
     }
 }

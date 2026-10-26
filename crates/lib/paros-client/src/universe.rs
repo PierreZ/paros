@@ -21,7 +21,7 @@ use std::time::Duration;
 
 use moonpool_core::LocalTimeProvider;
 use moonpool_rpc::RpcHandle;
-use paros_core::{JournalId, JournalIdentifier, TenantId};
+use paros_core::journal::{JournalId, JournalIdentifier, TenantId};
 use paros_net::runtime::ParosProviders;
 
 use super::Client;

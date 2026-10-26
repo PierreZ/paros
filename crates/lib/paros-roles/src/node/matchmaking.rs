@@ -9,10 +9,13 @@ use std::time::Duration;
 
 use moonpool_core::{Detach, LocalTaskProvider, LocalTimeProvider};
 use moonpool_rpc::RpcError;
-use paros_core::{
-    Ballot, ColocatedNode, GcAck, GcRequest, MatchOutcome, MatchReply, MatchRequest, MatchStep,
-    MatchmakerId, NodeId, ReconfigureReply, ReconfigureRequest, Slot, TenantId,
+use paros_core::journal::TenantId;
+use paros_core::matchmaker::{
+    GcAck, GcRequest, MatchOutcome, MatchReply, MatchRequest, ReconfigureReply, ReconfigureRequest,
 };
+use paros_core::membership::MatchmakerId;
+use paros_core::node::MatchStep;
+use paros_core::{Ballot, ColocatedNode, NodeId, Slot};
 use paros_net::runtime::ParosProviders;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;

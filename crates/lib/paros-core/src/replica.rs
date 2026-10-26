@@ -51,7 +51,7 @@ use crate::journal::state::{JournalState, JournalView, Outcome, WriterMode};
 use crate::journal::{Command, Entry, Seq};
 use crate::types::{Ballot, Slot, Value};
 
-pub use crate::contract::limits::APPLY_BATCH;
+use crate::contract::limits::APPLY_BATCH;
 
 /// The answer to a journal read ([`Replica::read`], #204).
 #[derive(Clone, Debug, PartialEq, Eq)]

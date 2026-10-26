@@ -5,10 +5,13 @@
 
 use std::collections::BTreeMap;
 
-use paros_core::{
-    AcceptorWrite, Ballot, ColocatedNode, Command, GcRequest, MatchRequest, MatchmakerId, Message,
-    NodeId, NodeRole, Outcome, Party, QuorumSystem, ReadState, Slot, WriteOp,
-};
+use paros_core::contract::{AcceptorWrite, Party};
+use paros_core::journal::{Command, Outcome};
+use paros_core::matchmaker::{GcRequest, MatchRequest};
+use paros_core::membership::{MatchmakerId, QuorumSystem};
+use paros_core::node::NodeRole;
+use paros_core::quorum_read::ReadState;
+use paros_core::{Ballot, ColocatedNode, Message, NodeId, Slot, WriteOp};
 
 use moonpool_buggify::hint::Strike;
 use paros_observe::audit::{Audit, StorageFaultDecision};
@@ -209,8 +212,8 @@ pub(crate) struct Taken {
     /// The durable writes, in the order the core queued them; the flush
     /// takes them.
     pub(crate) writes: Vec<WriteOp>,
-    /// Whether the flush must fsync ([`paros_core::MustSync`]).
-    pub(crate) must_sync: paros_core::MustSync,
+    /// Whether the flush must fsync ([`paros_core::contract::MustSync`]).
+    pub(crate) must_sync: paros_core::contract::MustSync,
     /// The node's promise once the batch was taken: no write of the batch
     /// lies above it.
     pub(crate) promised: Ballot,
@@ -268,7 +271,7 @@ pub(crate) async fn take_ready<A: Audit>(
     // prefix, and there is none (#186) — a floor only ever moves inside the
     // durable chosen prefix, which the same flush carries.
     let writes: Vec<WriteOp> = ready.writes().to_vec();
-    let must_sync = paros_core::MustSync::for_batch(&writes);
+    let must_sync = paros_core::contract::MustSync::for_batch(&writes);
     // The deployment map, applied: the core hands out audiences (one entry
     // per fan-out), the driver turns each into the parties its own map
     // names — the node ids of the pool, or the one proxy leader a
@@ -547,7 +550,10 @@ pub(crate) fn report_applied<A: Audit>(
         // claim alike; every other verdict is of its command's kind.
         if matches!(outcome, Outcome::WrongMode(_)) {
             assert!(
-                !matches!(command, Command::Control(paros_core::Control::Noop)),
+                !matches!(
+                    command,
+                    Command::Control(paros_core::journal::Control::Noop)
+                ),
                 "a wrong-mode refusal answers a call, never a noop"
             );
         } else {
@@ -558,7 +564,10 @@ pub(crate) fn report_applied<A: Audit>(
         }
         assert!(
             matches!(outcome, Outcome::Noop)
-                == matches!(command, Command::Control(paros_core::Control::Noop)),
+                == matches!(
+                    command,
+                    Command::Control(paros_core::journal::Control::Noop)
+                ),
             "only a Noop folds to Noop"
         );
     }
@@ -587,7 +596,7 @@ pub(crate) fn report_applied<A: Audit>(
 pub(crate) async fn persist_writes<S: LogStorage, A: Audit>(
     storage: &mut S,
     writes: &[WriteOp],
-    must_sync: paros_core::MustSync,
+    must_sync: paros_core::contract::MustSync,
     promised: Ballot,
     self_id: u64,
     audit: &A,
@@ -620,7 +629,7 @@ pub(crate) async fn persist_writes<S: LogStorage, A: Audit>(
     );
     if writes.iter().any(WriteOp::needs_sync) {
         assert!(
-            must_sync == paros_core::MustSync::Sync,
+            must_sync == paros_core::contract::MustSync::Sync,
             "a promise, a vote or a floor is always flushed with an fsync"
         );
     }
@@ -682,7 +691,7 @@ pub(crate) async fn persist_writes<S: LogStorage, A: Audit>(
         // advance).
         tracing::info!(
             node = self_id,
-            sync = (must_sync == paros_core::MustSync::Sync),
+            sync = (must_sync == paros_core::contract::MustSync::Sync),
             writes = u64::try_from(writes.len()).unwrap_or(u64::MAX),
             "synced"
         );

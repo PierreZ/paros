@@ -3,7 +3,7 @@
 //! Diagnostics — a claim made on the way, a truncation gap a reader
 //! jumped — go to stderr in both modes.
 
-use paros::core::JournalView;
+use paros::core::journal::JournalView;
 use serde_json::{Value, json};
 
 /// The output mode.

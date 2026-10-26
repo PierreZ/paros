@@ -1,4 +1,4 @@
-use paros_core::{JournalId, JournalIdentifier};
+use paros_core::journal::{JournalId, JournalIdentifier};
 use prost::Message;
 
 use super::*;

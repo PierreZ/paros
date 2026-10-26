@@ -3,8 +3,9 @@
 
 use std::collections::BTreeMap;
 
+use paros_core::journal::Command;
 use paros_core::proposer::RecoveryStep;
-use paros_core::{Ballot, Command, NodeId, Slot};
+use paros_core::{Ballot, NodeId, Slot};
 
 use crate::paxos::view::{show_ballot, show_command};
 
@@ -186,7 +187,7 @@ impl Prompt {
 
     /// A grid leader is about to propose into `slot`. Which column takes it?
     ///
-    /// Judged by [`paros_core::AcceptorConfig::column_of`] on the
+    /// Judged by [`paros_core::membership::AcceptorConfig::column_of`] on the
     /// configuration in force: the column is `slot % cols`, a pure function of
     /// the slot. `expected` is that answer, and `columns` is how many the grid
     /// has.

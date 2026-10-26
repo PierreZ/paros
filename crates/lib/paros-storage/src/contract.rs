@@ -3,7 +3,9 @@
 
 use std::future::Future;
 
-use paros_core::{Ballot, Command, MustSync, Slot};
+use paros_core::contract::MustSync;
+use paros_core::journal::Command;
+use paros_core::{Ballot, Slot};
 
 use super::LogStorage;
 
@@ -38,7 +40,8 @@ pub async fn storage_contract_suite<S, Fresh, Reopened>(
     Fresh: Future<Output = S>,
     Reopened: Future<Output = S>,
 {
-    use paros_core::{Entry, JournalState, LeaderUuid, Seq, Value};
+    use paros_core::Value;
+    use paros_core::journal::{Entry, JournalState, LeaderUuid, Seq};
     let ballot = |round: u64| Ballot {
         round,
         node: paros_core::NodeId(0),

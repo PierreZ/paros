@@ -71,12 +71,16 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use moonpool_sim::{TimeProvider, assert_always, assert_reachable};
 use paros::client::{MatchmakersRefusal, RetireRefusal};
-use paros::core::{
-    AcceptorConfig, Ballot, Command, GcAck, GcStep, Handoff, JournalIdentifier, MatchRefusal,
-    MatchmakerHardState, MatchmakerId, MatchmakerPhase, MatchmakerSet, Message, NodeId, Party,
-    PendingBootstrap, ProxyId, ReconfigureReply, ReconfigureRequest, ReconfigureResult,
-    ReconfigurerStep, Registration, RegistrationKind, Slot,
+use paros::core::collector::GcStep;
+use paros::core::contract::Party;
+use paros::core::journal::{Command, JournalIdentifier};
+use paros::core::matchmaker::{
+    GcAck, MatchRefusal, MatchmakerHardState, MatchmakerPhase, PendingBootstrap, ReconfigureReply,
+    ReconfigureRequest, ReconfigurerStep, Registration, RegistrationKind,
 };
+use paros::core::membership::{AcceptorConfig, MatchmakerId, MatchmakerSet, ProxyId};
+use paros::core::node::{Handoff, ReconfigureResult};
+use paros::core::{Ballot, Message, NodeId, Slot};
 use paros::net::EdgeRejection;
 use paros::observe::audit::{Audit, Deployment, HistoryPage, LogReadReport, StorageFaultDecision};
 use paros::roles::node::{BootRefusal, command_hash, message_kind};
@@ -476,7 +480,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         slot: Slot,
         vhash: u64,
         command: &Command,
-        outcome: Option<&paros::core::Outcome>,
+        outcome: Option<&paros::core::journal::Outcome>,
     ) {
         NodeAudit::applied(self, node, slot, vhash, command, outcome);
     }
@@ -573,7 +577,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         node: NodeId,
         slot: Slot,
         command: &Command,
-        outcome: &paros::core::Outcome,
+        outcome: &paros::core::journal::Outcome,
     ) {
         NodeAudit::answered(self, node, slot, command, outcome);
     }
@@ -586,7 +590,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         NodeAudit::log_read_served(self, node, report);
     }
 
-    fn log_read_not_held(&self, node: NodeId, from: paros::core::Seq) {
+    fn log_read_not_held(&self, node: NodeId, from: paros::core::journal::Seq) {
         NodeAudit::log_read_not_held(self, node, from);
     }
 
@@ -828,7 +832,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         matchmaker: MatchmakerId,
         set: &MatchmakerSet,
         phase: MatchmakerPhase,
-        scalars: &paros::core::MatchmakerHardState,
+        scalars: &paros::core::matchmaker::MatchmakerHardState,
         registry: &BTreeMap<Ballot, Registration>,
         gc_watermark: Ballot,
     ) {
@@ -846,7 +850,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
     fn matchmaker_in_flight(
         &self,
         matchmaker: MatchmakerId,
-        writes: Option<&[paros::core::MatchmakerWriteOp]>,
+        writes: Option<&[paros::core::matchmaker::MatchmakerWriteOp]>,
     ) {
         NodeAudit::matchmaker_in_flight(self, matchmaker, writes);
     }
@@ -1220,8 +1224,8 @@ mod tests {
     use paros::core::Ballot;
     use paros::core::Message;
     use paros::core::NodeId;
-    use paros::core::ProxyId;
     use paros::core::Slot;
+    use paros::core::membership::ProxyId;
 
     use super::state::{AuditState, Floor};
     use super::{AuditWorld, NodeAudit};

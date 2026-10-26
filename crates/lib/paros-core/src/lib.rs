@@ -52,7 +52,7 @@
 //! 3. `matchmaker.rs` — configuration discovery through the [`Matchmaker`]
 //!    and the [`matchmaking::Matchmaking`] phase, reconfiguration, and the
 //!    matchmaker set itself chosen by the same single-decree Paxos over
-//!    `Vec<MatchmakerId>`, persisted through a [`MemRegistry`].
+//!    `Vec<MatchmakerId>`, persisted through a [`matchmaker::MemRegistry`].
 //!
 //! Beside them, `flexible_quorums.rs`, `acceptor_grid.rs` and
 //! `quorum_read.rs` change the *data* the same roles run over, and
@@ -68,16 +68,16 @@ mod probe;
 
 pub mod acceptor;
 pub mod batcher;
-mod collector;
+pub mod collector;
 pub mod contract;
 pub mod decree;
 pub mod journal;
-mod matchmaker;
+pub mod matchmaker;
 pub mod matchmaking;
 pub mod membership;
 #[cfg(test)]
 mod models;
-mod node;
+pub mod node;
 pub mod proposer;
 pub mod proxy_leader;
 pub mod quorum_read;
@@ -86,39 +86,14 @@ pub mod replica_node;
 pub mod retained;
 #[cfg(test)]
 mod test_support;
-mod types;
+pub mod types;
 
-pub use batcher::{Batch, BatchLimits, Batcher, Unbatcher};
-pub use contract::{
-    AcceptorWrite, Audience, Config, HardState, Limits, Message, MustSync, Party, Storage, WriteOp,
-};
-pub use decree::Decree;
-pub use journal::{
-    Command, Control, Entry, JournalId, JournalIdentifier, JournalState, JournalView, LeaderUuid,
-    Outcome, Seq, TenantId, WriterMode, command_fingerprint,
-};
-pub use matchmaker::{
-    BootstrapPage, DecreeRecord, GcAck, GcOutcome, GcRequest, JournalRegistry, JournalScalars,
-    MatchOutcome, MatchPurpose, MatchRefusal, MatchReply, MatchRequest, Matchmaker,
-    MatchmakerConfig, MatchmakerHardState, MatchmakerPhase, MatchmakerReady,
-    MatchmakerReconfigurer, MatchmakerWriteOp, MemRegistry, PendingBootstrap, REGISTRY_PAGE,
-    ReconfigureReply, ReconfigureRequest, ReconfigurerPhase, ReconfigurerReady, ReconfigurerStep,
-    Reconstruction, Registration, RegistrationKind, RegistryStorage, StartRefusal, SuccessorDecree,
-};
-pub use membership::{
-    AcceptorConfig, FailureDomain, MAX_FAILURE_DOMAIN_BYTES, MatchmakerGeneration, MatchmakerId,
-    MatchmakerSet, ProxyId, QuorumSystem, ReplicaId, ZoneRule,
-};
-pub use node::{
-    APPLY_BATCH, BeliefSource, ColocatedNode, Delegation, GcStep, HANDOFF_BATCH,
-    HANDOFF_FENCE_ELECTIONS, HEARTBEAT_TICKS, Handoff, HandoffCounters, LEADER_RECOVERY_BATCH,
-    LeadershipOrigin, MatchStep, MembershipCounters, NodeCounters, NodeRole, PROMISE_BATCH,
-    ProposeResult, REPAIR_TIMEOUT_ELECTIONS, RESEND_BATCH, Ready, ReconfigureRefusal,
-    ReconfigureResult, RepairCounters,
-};
-pub use proxy_leader::{ProxyLeader, ProxyReady};
-pub use quorum_read::{PreReadFold, QuorumRead, QuorumReads, ReadBasis, ReadState};
-pub use replica::{LogPage, LogRead};
-pub use replica_node::{ReplicaCounters, ReplicaNode, ReplicaReady};
-pub use retained::RetainedWindow;
-pub use types::{Ballot, Fingerprint, NodeId, Slot, Value};
+// The root holds what a driver needs to write its loop: the deployments,
+// the contract and the Paxos scalars. Every other item has one path, under
+// its module.
+pub use contract::{Config, HardState, Limits, Message, Storage, WriteOp};
+pub use matchmaker::{Matchmaker, MatchmakerReconfigurer};
+pub use node::{ColocatedNode, Ready};
+pub use proxy_leader::ProxyLeader;
+pub use replica_node::ReplicaNode;
+pub use types::{Ballot, NodeId, Slot, Value};

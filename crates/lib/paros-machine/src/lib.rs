@@ -11,7 +11,7 @@
 //!
 //! **`cell init` is a single-decree Paxos on the cell plan** (decided on
 //! 2026-10-09, #277): paros eats its own food, so the one-shot decision is
-//! paros-core's [`Decree`](paros_core::Decree) over the shared
+//! paros-core's [`Decree`](paros_core::decree::Decree) over the shared
 //! [`Proposer`](paros_core::proposer::Proposer) and
 //! [`Acceptor`](paros_core::acceptor::Acceptor), the matchmaker handover's
 //! machinery. The machine that receives `CellInit` is the proposer; every

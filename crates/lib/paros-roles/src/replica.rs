@@ -44,10 +44,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use moonpool_buggify::hint::Strike;
 use moonpool_core::{LocalTimeProvider, RandomProvider, SimulationError, SimulationResult};
-use paros_core::{
-    Ballot, Command, JournalId, JournalIdentifier, MustSync, NodeId, Outcome, Party, QuorumSystem,
-    ReadState, ReplicaNode, Slot, TenantId, WriteOp,
-};
+use paros_core::contract::{MustSync, Party};
+use paros_core::journal::{Command, JournalId, JournalIdentifier, Outcome, TenantId};
+use paros_core::membership::QuorumSystem;
+use paros_core::quorum_read::ReadState;
+use paros_core::{Ballot, NodeId, ReplicaNode, Slot, WriteOp};
 use paros_net::runtime::ParosProviders;
 
 use crate::node::JournalStores;
@@ -96,7 +97,7 @@ struct Drained {
     head: Option<Slot>,
 }
 
-/// Run the [`ReplicaReady`](paros_core::ReplicaReady) handshake once, in the
+/// Run the [`ReplicaReady`](paros_core::replica_node::ReplicaReady) handshake once, in the
 /// node driver's order and with its seams: persist the learned records, the
 /// chosen index and a decided floor (the `BeforeSync` seam inside), send the
 /// catch-up requests (after the `AfterSyncBeforeSend` seam), report the
@@ -120,7 +121,7 @@ async fn drain<S: LogStorage, A: Audit>(
         .messages()
         .iter()
         .filter_map(|(audience, msg)| match audience {
-            paros_core::Audience::Node(to) => Some((Party::Node(*to), msg.clone())),
+            paros_core::contract::Audience::Node(to) => Some((Party::Node(*to), msg.clone())),
             _ => None,
         })
         .collect();

@@ -44,7 +44,8 @@ use std::ops::Bound::{Excluded, Unbounded};
 use std::time::Duration;
 
 use moonpool_rpc::RpcHandle;
-use paros_core::{JournalId, JournalIdentifier, NodeId, TenantId};
+use paros_core::NodeId;
+use paros_core::journal::{JournalId, JournalIdentifier, TenantId};
 use paros_net::runtime::ParosProviders;
 
 use crate::tenant::TenantDesk;

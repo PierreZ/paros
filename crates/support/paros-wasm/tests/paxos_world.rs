@@ -8,10 +8,10 @@
 
 use std::collections::BTreeSet;
 
-use paros_core::{
-    Ballot, Command, Config, Control, JournalId, MatchmakerId, Message, NodeId, NodeRole, Outcome,
-    QuorumSystem, Slot,
-};
+use paros_core::journal::{Command, Control, JournalId, Outcome};
+use paros_core::membership::{MatchmakerId, QuorumSystem};
+use paros_core::node::NodeRole;
+use paros_core::{Ballot, Config, Message, NodeId, Slot};
 use paros_wasm::paxos::action::Seam;
 use paros_wasm::paxos::prompt::{PromptKind, Verdict};
 use paros_wasm::paxos::world::matchmakers::MatchmakerProcess;
@@ -32,7 +32,7 @@ fn config(id: NodeId, peers: &[NodeId], system: QuorumSystem) -> Config {
     Config {
         peers: peers.to_vec(),
         quorum_system: system,
-        ..Config::new(id, paros_core::JournalIdentifier::UNSET)
+        ..Config::new(id, paros_core::journal::JournalIdentifier::UNSET)
     }
 }
 
@@ -1619,7 +1619,7 @@ fn matchmaker_cluster(
                 matchmakers: set.clone(),
                 matchmaker_pool: all.clone(),
                 proxy_count: 0,
-                ..Config::new(*id, paros_core::JournalIdentifier::UNSET)
+                ..Config::new(*id, paros_core::journal::JournalIdentifier::UNSET)
             })
         })
         .collect();
@@ -1931,14 +1931,20 @@ fn a_matchmaker_set_handover_chooses_one_successor() {
             .role()
             .expect("running");
         assert_eq!(role.set().generation.0, 1, "matchmaker {id} serves g1");
-        assert_eq!(role.phase(), paros_core::MatchmakerPhase::Active);
+        assert_eq!(
+            role.phase(),
+            paros_core::matchmaker::MatchmakerPhase::Active
+        );
     }
     let departed = world
         .matchmaker(MatchmakerId(2))
         .expect("deployed")
         .role()
         .expect("running");
-    assert_eq!(departed.phase(), paros_core::MatchmakerPhase::Stopped);
+    assert_eq!(
+        departed.phase(),
+        paros_core::matchmaker::MatchmakerPhase::Stopped
+    );
     assert!(departed.successor().is_some(), "m2 points at the successor");
     assert_eq!(
         world

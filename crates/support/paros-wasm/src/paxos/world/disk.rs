@@ -43,9 +43,9 @@
 
 use std::collections::BTreeMap;
 
-use paros_core::{
-    AcceptorWrite, Ballot, Command, Config, HardState, JournalState, Slot, Storage, WriteOp,
-};
+use paros_core::contract::AcceptorWrite;
+use paros_core::journal::{Command, JournalState};
+use paros_core::{Ballot, Config, HardState, Slot, Storage, WriteOp};
 
 /// One node's disk.
 #[derive(Clone, Debug)]

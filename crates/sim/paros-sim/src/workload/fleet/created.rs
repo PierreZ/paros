@@ -36,8 +36,8 @@ use paros::client::{
     ClaimOutcome, Pipeline, ReaderOutcome, TruncateOutcome, WriteOptions, WriteOutcome, Writer,
     WriterOutcome, multi,
 };
-use paros::core::JournalIdentifier;
 use paros::core::Value;
+use paros::core::journal::JournalIdentifier;
 
 use super::FleetOps;
 use crate::audit::{AckedWrite, AuditWorld, audit_world_named};

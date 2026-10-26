@@ -36,9 +36,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use moonpool_sim::{StateHandle, assert_always, assert_reachable, assert_sometimes};
-use paros::core::{
-    AcceptorConfig, JournalId, JournalIdentifier, NodeId, QuorumSystem, TenantId, WriterMode,
-};
+use paros::core::NodeId;
+use paros::core::journal::{JournalId, JournalIdentifier, TenantId, WriterMode};
+use paros::core::membership::{AcceptorConfig, QuorumSystem};
 use paros::model::tenant::{RequestOutcome, StoreDurability, TenantEvent, TenantRefusal};
 
 const TENANT_BOARD_KEY: &str = "paros-tenant-board";
@@ -72,7 +72,7 @@ pub(crate) struct TenantBoard {
     /// Every created journal's acceptor configuration at its create (#362
     /// (background scrubbing): the cold-rot scenario rots only a journal
     /// that keeps a clean copy on a quorum).
-    configs: BTreeMap<JournalIdentifier, paros::core::AcceptorConfig>,
+    configs: BTreeMap<JournalIdentifier, paros::core::membership::AcceptorConfig>,
     /// Every created journal's writer mode (#241).
     modes: BTreeMap<JournalIdentifier, WriterMode>,
     /// Every created journal's store durability (#599 (durability mode per
@@ -138,10 +138,10 @@ pub(crate) fn lock(board: &Mutex<TenantBoard>) -> MutexGuard<'_, TenantBoard> {
 /// where a partition survives a failure (`F >= 1`: three acceptors per
 /// partition or more) and the placement spans three zones or more
 /// (`paros::model::placement::zone_rule_binds`).
-fn zone_spread(config: &paros::core::AcceptorConfig, lsn: u64) {
+fn zone_spread(config: &paros::core::membership::AcceptorConfig, lsn: u64) {
     let spread = config.distinct_domains().len();
     let per_partition = match config.quorum_system() {
-        paros::core::QuorumSystem::Grid { rows, .. } => rows,
+        paros::core::membership::QuorumSystem::Grid { rows, .. } => rows,
         _ => config.members().len(),
     };
     let binds = per_partition >= 3 && spread >= 3;
@@ -178,7 +178,7 @@ impl TenantBoard {
     pub(crate) fn live_config(
         &self,
         journal: JournalIdentifier,
-    ) -> Option<&paros::core::AcceptorConfig> {
+    ) -> Option<&paros::core::membership::AcceptorConfig> {
         if self.deleted.contains_key(&journal) {
             return None;
         }
@@ -567,19 +567,20 @@ impl TenantBoard {
     }
 
     /// `node` applied `command` (#450): never a call a frontend had to deny.
-    pub(crate) fn applied(&self, node: NodeId, command: &paros::core::Command) {
+    pub(crate) fn applied(&self, node: NodeId, command: &paros::core::journal::Command) {
         if self.denied_payloads.is_empty() && self.denied_leaders.is_empty() {
             return;
         }
         let denied = match command {
-            paros::core::Command::Write(entry) => entry
+            paros::core::journal::Command::Write(entry) => entry
                 .records
                 .iter()
                 .any(|record| self.denied_payloads.contains(&record.0)),
-            paros::core::Command::Control(paros::core::Control::SetLeader { new, .. }) => {
-                self.denied_leaders.contains(&new.0)
-            }
-            paros::core::Command::Control(_) => false,
+            paros::core::journal::Command::Control(paros::core::journal::Control::SetLeader {
+                new,
+                ..
+            }) => self.denied_leaders.contains(&new.0),
+            paros::core::journal::Command::Control(_) => false,
         };
         assert_always!(
             !denied,

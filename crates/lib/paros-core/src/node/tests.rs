@@ -5,11 +5,11 @@ use std::collections::BTreeMap;
 
 use super::{
     BeliefSource, ColocatedNode, Delegation, HANDOFF_BATCH, HANDOFF_FENCE_ELECTIONS,
-    LEADER_RECOVERY_BATCH, LeadershipOrigin, MatchStep, NodeRole, PROMISE_BATCH, ProposeResult,
-    READ_TTL_TICKS, ReadState, ReconfigureRefusal, ReconfigureResult,
+    LeadershipOrigin, MatchStep, NodeRole, ProposeResult, READ_TTL_TICKS, ReadState,
+    ReconfigureRefusal, ReconfigureResult,
 };
 use crate::contract::hard_state::HardState;
-use crate::contract::limits::Limits;
+use crate::contract::limits::{Limits, PROMISE_BATCH, RECOVERY_BATCH};
 use crate::contract::mem_storage::MemStorage;
 use crate::contract::message::{Message, Party};
 use crate::matchmaker::{
@@ -20,7 +20,7 @@ use crate::membership::{AcceptorConfig, MatchmakerGeneration, MatchmakerId};
 use crate::node::ready::Ready;
 
 /// The journal every test node serves.
-const J: crate::JournalId = crate::JournalId::UNSET;
+const J: crate::journal::JournalId = crate::journal::JournalId::UNSET;
 use crate::journal::{Command, Control, Entry, LeaderUuid, Seq, command_fingerprint};
 use crate::types::{Ballot, NodeId, Slot, Value};
 

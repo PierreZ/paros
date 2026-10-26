@@ -28,7 +28,7 @@ use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use moonpool_sim::{StateHandle, assert_reachable, assert_sometimes};
-use paros::core::JournalIdentifier;
+use paros::core::journal::JournalIdentifier;
 
 use crate::shape::JournalPlan;
 

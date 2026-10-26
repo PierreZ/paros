@@ -105,7 +105,7 @@ use crate::proposer::RecoveryPolicy;
 /// Maximum slots one [`Message::Relinquish`] transfers (`decided` + `pending`).
 /// A leader whose own chosen prefix trails its allocator by more than this is
 /// refused a handoff and keeps leading; the bound keeps the payload the same
-/// shape as one [`PROMISE_BATCH`](crate::PROMISE_BATCH) page.
+/// shape as one [`PROMISE_BATCH`](crate::contract::limits::PROMISE_BATCH) page.
 pub const HANDOFF_BATCH: usize = crate::Limits::DEFAULT.promise_page;
 
 /// Election timeouts a handoff leader may hold an uncovered inherited fence
@@ -116,13 +116,13 @@ pub const HANDOFF_BATCH: usize = crate::Limits::DEFAULT.promise_page;
 /// ordinary election, which does run Phase 1, recover the log. Multiplies the
 /// driver-supplied randomized election timeout, so the window inherits its
 /// per-seed jitter — the same shape as
-/// [`REPAIR_TIMEOUT_ELECTIONS`](crate::REPAIR_TIMEOUT_ELECTIONS).
+/// [`REPAIR_TIMEOUT_ELECTIONS`](crate::node::REPAIR_TIMEOUT_ELECTIONS).
 pub const HANDOFF_FENCE_ELECTIONS: u64 = 3;
 
 // A handoff ships its whole tail in one page, the size of a promise page; a
 // fence deadline of zero would resign every handoff leader on its first tick.
 const _: () = assert!(HANDOFF_BATCH > 0);
-const _: () = assert!(HANDOFF_BATCH <= crate::PROMISE_BATCH);
+const _: () = assert!(HANDOFF_BATCH <= crate::contract::limits::PROMISE_BATCH);
 const _: () = assert!(HANDOFF_FENCE_ELECTIONS > 0);
 
 /// How a node came to hold its current leadership.

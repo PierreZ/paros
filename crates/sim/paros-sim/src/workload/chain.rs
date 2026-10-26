@@ -9,10 +9,10 @@
 //! on the state after every record, and the audit checks exactly that
 //! (`AuditWorld::fold_applied`).
 
-use paros::core::Command;
-use paros::core::Control;
-use paros::core::LeaderUuid;
-use paros::core::Seq;
+use paros::core::journal::Command;
+use paros::core::journal::Control;
+use paros::core::journal::LeaderUuid;
+use paros::core::journal::Seq;
 
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;

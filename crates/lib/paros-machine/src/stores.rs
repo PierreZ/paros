@@ -20,7 +20,9 @@ use std::sync::{Arc, PoisonError};
 use moonpool_buggify::hint::Strike;
 use moonpool_core::{LocalStorageProvider, SimulationResult};
 use moonpool_rpc::RpcHandle;
-use paros_core::{Config, JournalIdentifier, MatchmakerConfig, NodeId};
+use paros_core::journal::JournalIdentifier;
+use paros_core::matchmaker::MatchmakerConfig;
+use paros_core::{Config, NodeId};
 use paros_net::runtime::ParosProviders;
 use tokio_util::sync::CancellationToken;
 
@@ -400,7 +402,7 @@ where
         .map(Some)
     }
 
-    fn book_sets(&mut self, tenants: std::collections::BTreeSet<paros_core::TenantId>) {
+    fn book_sets(&mut self, tenants: std::collections::BTreeSet<paros_core::journal::TenantId>) {
         let mut sets = self.sets.lock().unwrap_or_else(PoisonError::into_inner);
         if *sets != tenants {
             tracing::info!(

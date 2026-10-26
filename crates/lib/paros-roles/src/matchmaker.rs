@@ -6,12 +6,12 @@
 //! production and deterministic simulation; the harness adapts a moonpool
 //! `Process` to it exactly as it adapts the node. The loop serves the
 //! matchmaker RPC contract, feeds each request into the core, and drains every
-//! [`MatchmakerReady`](paros_core::MatchmakerReady) in **persist → fsync →
+//! [`MatchmakerReady`](paros_core::matchmaker::MatchmakerReady) in **persist → fsync →
 //! reply** order: a `Registered` reply leaves only once its registration is
 //! durable, the registry's version of the acceptor's persist-before-`Promise`
 //! rule — and the same order carries a freeze (`StopAck`), a pending
 //! bootstrap, a decree promise or vote, and an activation (#125). The registry
-//! is read back through the core's [`RegistryStorage`](paros_core::RegistryStorage)
+//! is read back through the core's [`RegistryStorage`](paros_core::matchmaker::RegistryStorage)
 //! port and written through [`MatchmakerStorage`] — the node's `Storage` /
 //! `LogStorage` split, mirrored so the log's CTRL recovery applies to the
 //! registry (see [`storage`]).
@@ -28,11 +28,13 @@
 use std::collections::BTreeMap;
 
 use moonpool_buggify::hint::Strike;
-use paros_core::{
-    GcAck, GcOutcome, GcRequest, JournalId, JournalIdentifier, Limits, MatchOutcome, MatchReply,
-    Matchmaker, MatchmakerConfig, MatchmakerId, MatchmakerSet, MatchmakerWriteOp, ReconfigureReply,
-    TenantId,
+use paros_core::journal::{JournalId, JournalIdentifier, TenantId};
+use paros_core::matchmaker::{
+    GcAck, GcOutcome, GcRequest, MatchOutcome, MatchReply, MatchmakerConfig, MatchmakerWriteOp,
+    ReconfigureReply,
 };
+use paros_core::membership::{MatchmakerId, MatchmakerSet};
+use paros_core::{Limits, Matchmaker};
 use paros_net::runtime::ParosProviders;
 use tokio_util::sync::CancellationToken;
 
@@ -216,7 +218,7 @@ struct Drained {
     reconfigure_replies: Vec<ReconfigureReply>,
 }
 
-/// Run the [`MatchmakerReady`](paros_core::MatchmakerReady) handshake once:
+/// Run the [`MatchmakerReady`](paros_core::matchmaker::MatchmakerReady) handshake once:
 /// persist the batch's writes, fsync them, report them, and hand back the
 /// replies the caller may now send. The two hints sit exactly where a
 /// real crash would matter: before the fsync (the batch is lost whole, no
@@ -872,7 +874,7 @@ impl<'f, F> Host<'f, F> {
                     );
                     // A bootstrap names the journals the successor inherits:
                     // each gets its audit port before the activation reports.
-                    if let paros_core::ReconfigureRequest::Bootstrap { bootstrap, .. } = &request {
+                    if let paros_core::matchmaker::ReconfigureRequest::Bootstrap { bootstrap, .. } = &request {
                         for journal in bootstrap.registries.keys() {
                             seat.port(*journal);
                         }
@@ -1120,7 +1122,9 @@ where
     let id = config.id;
     // The registry page size (#338): the tunable, capped at the core's
     // ceiling (an operator's override is external input, never a panic).
-    let page = tunables.registry_page.clamp(1, paros_core::REGISTRY_PAGE);
+    let page = tunables
+        .registry_page
+        .clamp(1, paros_core::contract::limits::REGISTRY_PAGE);
     let mut hosted: BTreeMap<TenantId, Seat<'_, S, A, F>> = BTreeMap::new();
     for set in sets {
         let tenant = set.tenant;

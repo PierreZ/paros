@@ -74,7 +74,8 @@ mod tests;
 
 use moonpool_core::DirectIo;
 use moonpool_journal::{CommitError, Durable, ID_SIZE, Id, JournalConfig, OpenError};
-use paros_core::{Ballot, JournalIdentifier, NodeId};
+use paros_core::journal::JournalIdentifier;
+use paros_core::{Ballot, NodeId};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 

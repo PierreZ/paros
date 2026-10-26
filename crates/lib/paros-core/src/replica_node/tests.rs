@@ -20,7 +20,7 @@ fn config(id: u64) -> Config {
     Config {
         peers: ACCEPTORS.iter().copied().map(NodeId).collect(),
         replica_count: REPLICAS.len(),
-        ..Config::new(NodeId(id), crate::JournalIdentifier::UNSET)
+        ..Config::new(NodeId(id), crate::journal::JournalIdentifier::UNSET)
     }
 }
 
@@ -40,7 +40,7 @@ struct Tier {
     disks: Vec<MemStorage>,
     applied: Vec<Vec<(Slot, Command)>>,
     /// The quorum reads each replica served, in order.
-    served: Vec<Vec<crate::ReadState>>,
+    served: Vec<Vec<crate::quorum_read::ReadState>>,
 }
 
 impl Tier {
@@ -283,7 +283,7 @@ fn a_replica_serves_a_quorum_read_once_it_applied_the_row_watermark() {
     assert_eq!(tier.applied_slots(0), vec![0, 1, 2]);
     assert_eq!(
         tier.served[0],
-        vec![crate::ReadState {
+        vec![crate::quorum_read::ReadState {
             ctx: 7,
             index: Some(Slot(2))
         }]
@@ -417,7 +417,7 @@ fn the_reply_owner_is_the_slot_modulo_the_replica_count() {
     assert!(ReplicaId(1).is_in(2));
     assert!(!ReplicaId(2).is_in(2));
     assert_eq!(
-        Config::new(NodeId(0), crate::JournalIdentifier::UNSET).reply_owner(Slot(5)),
+        Config::new(NodeId(0), crate::journal::JournalIdentifier::UNSET).reply_owner(Slot(5)),
         None
     );
 }

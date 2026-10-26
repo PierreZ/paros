@@ -7,8 +7,8 @@
 use std::collections::BTreeMap;
 
 use super::{
-    Ballot, ColocatedNode, Command, Control, Entry, LEADER_RECOVERY_BATCH, LeaderUuid, MemStorage,
-    Message, NodeId, NodeRole, PROMISE_BATCH, Party, ProposeResult, Ready, Seq, Slot, Value,
+    Ballot, ColocatedNode, Command, Control, Entry, LeaderUuid, MemStorage, Message, NodeId,
+    NodeRole, PROMISE_BATCH, Party, ProposeResult, RECOVERY_BATCH, Ready, Seq, Slot, Value,
     campaign, command_fingerprint, drain_with, terminal_promise,
 };
 use crate::contract::limits::Limits;
@@ -139,7 +139,7 @@ fn promise_suffix_and_leader_recovery_are_paged() {
             panic!("leader recovery exposes its bounded Ready chunk");
         };
         assert!(
-            started <= LEADER_RECOVERY_BATCH,
+            started <= RECOVERY_BATCH,
             "a leader starts at most one bounded recovery chunk per Ready ({started})"
         );
         recovery_pages += 1;
@@ -190,7 +190,7 @@ fn gap_fill_releases_the_chosen_prefix_in_bounded_chunks() {
     loop {
         let ready = gapped.ready();
         assert!(
-            ready.writes().len() <= LEADER_RECOVERY_BATCH + 1,
+            ready.writes().len() <= RECOVERY_BATCH + 1,
             "a gap fill releases at most one bounded chosen-prefix write chunk ({})",
             ready.writes().len()
         );

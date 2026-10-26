@@ -8,7 +8,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use moonpool_sim::{assert_always, assert_reachable, assert_sometimes, assert_sometimes_all};
-use paros::core::{AcceptorConfig, Ballot, HEARTBEAT_TICKS, NodeId, Party, QuorumSystem, Slot};
+use paros::core::contract::Party;
+use paros::core::membership::{AcceptorConfig, QuorumSystem};
+use paros::core::node::HEARTBEAT_TICKS;
+use paros::core::{Ballot, NodeId, Slot};
 
 use super::client::{LinHistory, check_linearizable};
 use super::matchmaker::MatchmakerAudit;
@@ -33,7 +36,7 @@ pub(super) struct DeposedStreak {
     /// Ticks this node has run while `deposed` held.
     pub(super) ticks: u64,
     /// Consecutive ticks with no beat observed at this ballot. A leader beats
-    /// every [`paros::core::HEARTBEAT_TICKS`] ticks, so more than one whole beat
+    /// every [`paros::core::node::HEARTBEAT_TICKS`] ticks, so more than one whole beat
     /// period of silence means it stepped down — but *one* period of silence
     /// does not: the send seam's drop (`drop_at_send`) skips `Audit::sent`, so a
     /// fully dropped beat is invisible here, and a single beatless tick used

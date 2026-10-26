@@ -26,7 +26,8 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use moonpool_rpc::RpcHandle;
-use paros_core::{LeaderUuid, NodeId};
+use paros_core::NodeId;
+use paros_core::journal::LeaderUuid;
 use paros_net::runtime::ParosProviders;
 
 use super::Client;

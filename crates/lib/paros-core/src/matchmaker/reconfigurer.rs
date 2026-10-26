@@ -498,7 +498,7 @@ impl MatchmakerReconfigurer {
     /// Drain the queued requests. Holds the unique borrow until
     /// [`ReconfigurerReady::advance`], so a second `ready()` before
     /// `advance()` is a compile error — the same gate
-    /// [`crate::MatchmakerReady`] and [`crate::Ready`] put on their batches.
+    /// [`crate::matchmaker::MatchmakerReady`] and [`crate::Ready`] put on their batches.
     pub fn ready(&mut self) -> ReconfigurerReady<'_> {
         ReconfigurerReady { reconfigurer: self }
     }

@@ -69,6 +69,11 @@ impl Collector {
     /// The campaign of a freshly won leadership at `generation`, judging
     /// Region 1 by `fence` and retiring out of `prior` (`H_b`, empty when
     /// nothing below the ballot survived the watermark).
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn new(
         generation: MatchmakerGeneration,
@@ -141,6 +146,11 @@ impl Collector {
 
     /// The floor made effective at a matchmaker quorum, and the acceptors it
     /// retired — `None` until the quorum holds.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn effective(&self) -> Option<(Ballot, &[NodeId])> {
         let effective = self
@@ -184,6 +194,11 @@ impl Collector {
     /// Start the ack tally over at `generation`: acks from a replaced
     /// generation say nothing about the new one's quorum. A no-op once the
     /// floor is effective, or at the generation already addressed.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     pub fn reset_for_generation(&mut self, generation: MatchmakerGeneration) {
         if self.effective.is_none() && self.generation != generation {
             self.requested = false;
@@ -203,6 +218,11 @@ impl Collector {
 
     /// A configured peer reported its chosen index at this ballot (the
     /// monotone half of Region 1's tally).
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     pub fn note_chosen(&mut self, from: NodeId, chosen: Option<Slot>) {
         let before = self.peer_chosen.get(&from).copied();
         if let Some(chosen) = chosen {

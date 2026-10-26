@@ -27,7 +27,8 @@ use std::future::Future;
 use std::task::Poll;
 
 use moonpool_core::RandomProvider;
-use paros_core::{ColocatedNode, JournalIdentifier, NodeId, Slot, TenantId};
+use paros_core::journal::{JournalIdentifier, TenantId};
+use paros_core::{ColocatedNode, NodeId, Slot};
 use paros_net::runtime::ParosProviders;
 
 use paros_observe::audit::Audit;
@@ -154,7 +155,7 @@ pub trait JournalStores {
     /// opener that hosts sets beside the journals opens a set outside the
     /// bootstrap generation only when it is booked here. The default does
     /// nothing.
-    fn book_sets(&mut self, tenants: std::collections::BTreeSet<paros_core::TenantId>) {
+    fn book_sets(&mut self, tenants: std::collections::BTreeSet<paros_core::journal::TenantId>) {
         let _ = tenants;
     }
 

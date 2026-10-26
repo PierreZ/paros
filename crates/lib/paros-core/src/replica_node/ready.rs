@@ -1,10 +1,10 @@
 //! The replica's [`ReplicaReady`] batch.
 
 use super::ReplicaNode;
-use crate::ReadState;
 use crate::contract::message::{Audience, Message};
 use crate::contract::write::WriteOp;
 use crate::journal::Command;
+use crate::quorum_read::ReadState;
 use crate::types::{Ballot, Slot};
 
 /// One batch of a replica's work, and the compile-time gate that enforces
@@ -67,7 +67,7 @@ impl ReplicaReady<'_> {
     /// the node's [`crate::Ready::committed`] contract. `ballot` is the one
     /// this replica's learned record holds.
     #[must_use]
-    pub fn committed(&self) -> &[(Slot, Ballot, Command, crate::Outcome)] {
+    pub fn committed(&self) -> &[(Slot, Ballot, Command, crate::journal::Outcome)] {
         self.node.replica.committed()
     }
 

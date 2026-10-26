@@ -1,5 +1,5 @@
 use super::*;
-use crate::{JournalId, TenantId};
+use crate::journal::{JournalId, TenantId};
 
 fn journal(n: u64) -> JournalIdentifier {
     JournalIdentifier::new(TenantId(1), JournalId(n))

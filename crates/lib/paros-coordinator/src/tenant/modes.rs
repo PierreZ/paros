@@ -37,7 +37,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound::{Excluded, Unbounded};
 
 use moonpool_rpc::RpcHandle;
-use paros_core::{AcceptorConfig, JournalIdentifier, NodeId, QuorumSystem, TenantId};
+use paros_core::NodeId;
+use paros_core::journal::{JournalIdentifier, TenantId};
+use paros_core::membership::{AcceptorConfig, QuorumSystem};
 use paros_net::runtime::ParosProviders;
 
 use crate::tenant::moves::{at_or_above, bookable, leader_of, stays};
@@ -232,7 +234,7 @@ impl Modes {
         gone: &crate::tenant::moves::Leaving,
     ) -> Option<Option<Change>> {
         let registry = cell.registry();
-        let hosted: Vec<(TenantId, paros_core::JournalId)> = registry
+        let hosted: Vec<(TenantId, paros_core::journal::JournalId)> = registry
             .hosted()
             .filter(|tenant| !registry.dropped(*tenant))
             .filter_map(|tenant| registry.hosted_tenant(tenant).map(|h| (tenant, h.control)))

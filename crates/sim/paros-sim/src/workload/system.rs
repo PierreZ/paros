@@ -42,13 +42,13 @@ use paros::client::checkpoint::{
     OpenOutcome,
 };
 use paros::client::{Answered, Attempted, CallObserver, ClaimOutcome, TruncateOutcome, Writer};
-use paros::core::Command;
-use paros::core::Entry;
-use paros::core::JournalIdentifier;
-use paros::core::LeaderUuid;
 use paros::core::NodeId;
-use paros::core::Seq;
 use paros::core::Value;
+use paros::core::journal::Command;
+use paros::core::journal::Entry;
+use paros::core::journal::JournalIdentifier;
+use paros::core::journal::LeaderUuid;
+use paros::core::journal::Seq;
 use paros::model::registry::{
     BookingTarget, Class, NodeStanding, Registry, RegistryEvent, Role, SystemCommand, SystemEvent,
     registry_event,
@@ -406,8 +406,8 @@ impl CallObserver for Announce {
     /// own client; the callers' writes, not this one, are the history.
     fn merged(&self, write: &paros::wire::Write) {
         let journal = JournalIdentifier::new(
-            paros::core::TenantId(write.tenant),
-            paros::core::JournalId(write.journal),
+            paros::core::journal::TenantId(write.tenant),
+            paros::core::journal::JournalId(write.journal),
         );
         audit_world_named(&self.state, journal).note_appended(deposed::write_hash(write));
         moonpool_sim::assert_reachable!("batcher: a merged write joins its journal's appended set");
@@ -516,8 +516,8 @@ impl SystemOps {
         let mut target = usize::try_from(draw % targets.len() as u64).unwrap_or(0);
         // A multi-writer journal (#241) takes unfenced writes and no claim:
         // its seq is assigned at apply.
-        let unfenced =
-            (audit.mode() == paros::core::WriterMode::Multi).then_some((LeaderUuid::UNSET, 0));
+        let unfenced = (audit.mode() == paros::core::journal::WriterMode::Multi)
+            .then_some((LeaderUuid::UNSET, 0));
         if unfenced.is_some() {
             assert_reachable!("system: a client appends unfenced to a multi-writer journal");
         }

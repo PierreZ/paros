@@ -11,7 +11,7 @@ use moonpool_rpc::{
     RpcHandle, RpcInterface, ServiceClient, WellKnownRef,
 };
 
-use paros_core::{JournalId, JournalIdentifier, TenantId};
+use paros_core::journal::{JournalId, JournalIdentifier, TenantId};
 use paros_model::address::Address;
 use paros_model::address::Names;
 use paros_model::name::JournalName;

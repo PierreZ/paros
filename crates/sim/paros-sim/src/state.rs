@@ -7,7 +7,7 @@
 use std::sync::{Arc, Mutex};
 
 use moonpool_sim::StateHandle;
-use paros::core::JournalIdentifier;
+use paros::core::journal::JournalIdentifier;
 
 /// The key of `journal`'s copy of a per-journal singleton (#188): `base`
 /// suffixed by the identifier. Every journal gets its own audit world and its own

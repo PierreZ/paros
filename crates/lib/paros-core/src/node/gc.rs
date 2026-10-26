@@ -102,7 +102,7 @@
 //!
 //! What survives is therefore not the *record* but a **durable monotone
 //! scalar** the watermark never touches:
-//! [`MatchmakerHardState::effective`](crate::MatchmakerHardState::effective).
+//! [`MatchmakerHardState::effective`](crate::matchmaker::MatchmakerHardState::effective).
 //! Each matchmaker raises it when it registers a flagged request, reports it
 //! in every `Registered` reply beside the history, and carries it into every
 //! successor generation; the candidate folds the maximum of what the

@@ -60,7 +60,7 @@ pub struct Config {
     /// wire carries exactly today's messages; the `None` arm, like an empty
     /// `matchmakers`. With a count, a leader delegates the Phase 2 of every
     /// slot it allocates on a settled leadership to `ProxyId(slot %
-    /// proxy_count)` ([`crate::ProxyId::of`]), and only the count is
+    /// proxy_count)` ([`crate::membership::ProxyId::of`]), and only the count is
     /// protocol data: which process answers to a `ProxyId` is the driver's
     /// deployment map, so a dead proxy is replaced without editing this.
     pub proxy_count: usize,

@@ -2,7 +2,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use paros_core::{JournalId, NodeId, TenantId};
+use paros_core::NodeId;
+use paros_core::journal::{JournalId, TenantId};
 use paros_wire::system as wire;
 use prost::Message as _;
 

@@ -210,8 +210,8 @@ pub fn withhold_gc() -> bool {
 /// If an assertion on its own invariants fails: a programmer error, never
 /// an operating condition.
 pub fn hold_candidate<'a>(
-    user: impl IntoIterator<Item = &'a paros_core::JournalIdentifier>,
-) -> Option<paros_core::JournalIdentifier> {
+    user: impl IntoIterator<Item = &'a paros_core::journal::JournalIdentifier>,
+) -> Option<paros_core::journal::JournalIdentifier> {
     let mut user = user.into_iter();
     let first = *user.next()?;
     let mut count = 1_usize;
@@ -231,8 +231,8 @@ pub fn hold_candidate<'a>(
 /// [`hold_candidate`]'s answer at boot.
 #[must_use]
 pub fn hold_journal(
-    candidate: Option<paros_core::JournalIdentifier>,
-    journal: paros_core::JournalIdentifier,
+    candidate: Option<paros_core::journal::JournalIdentifier>,
+    journal: paros_core::journal::JournalIdentifier,
 ) -> bool {
     if candidate != Some(journal) {
         return false;
@@ -260,7 +260,7 @@ pub fn lose_verdict() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use paros_core::{JournalId, JournalIdentifier, TenantId};
+    use paros_core::journal::{JournalId, JournalIdentifier, TenantId};
 
     fn id(journal: u64) -> JournalIdentifier {
         JournalIdentifier::new(TenantId(1), JournalId(journal))

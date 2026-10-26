@@ -48,7 +48,7 @@ use crate::contract::write::AcceptorWrite;
 use crate::retained::RetainedWindow;
 use crate::types::{Ballot, Slot};
 
-pub use crate::contract::limits::PROMISE_BATCH;
+use crate::contract::limits::PROMISE_BATCH;
 
 /// What a `Prepare` did at this acceptor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

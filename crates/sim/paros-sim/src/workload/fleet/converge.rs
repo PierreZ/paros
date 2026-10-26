@@ -31,8 +31,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use moonpool_sim::{SimContext, TimeProvider, assert_reachable, assert_sometimes};
-use paros::core::JournalIdentifier;
-use paros::core::TenantId;
+use paros::core::journal::JournalIdentifier;
+use paros::core::journal::TenantId;
 
 use super::cell::Cell;
 use crate::audit::AuditWorld;

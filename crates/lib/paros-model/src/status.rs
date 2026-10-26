@@ -17,14 +17,15 @@
 //! shows a word only after it held for a while ([`Hysteresis`]), so a
 //! journal whose machine flaps does not flap with it.
 //!
-//! Every quorum question crosses `paros_core::AcceptorConfig`: this module
+//! Every quorum question crosses `paros_core::membership::AcceptorConfig`: this module
 //! counts nothing itself. Pure and provider-free: no I/O, no clock of its
 //! own, no randomness.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
-use paros_core::{AcceptorConfig, NodeId, QuorumSystem};
+use paros_core::NodeId;
+use paros_core::membership::{AcceptorConfig, QuorumSystem};
 
 use paros_wire::config_from_proto;
 use paros_wire::view as wire;

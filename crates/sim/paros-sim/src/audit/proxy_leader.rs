@@ -1,7 +1,9 @@
 //! The proxy leader's reports (§3.1, #142), and the leader's side of a delegation.
 
 use moonpool_sim::{TimeProvider, assert_reachable};
-use paros::core::{Ballot, Message, NodeId, Party, ProxyId, Slot};
+use paros::core::contract::Party;
+use paros::core::membership::ProxyId;
+use paros::core::{Ballot, Message, NodeId, Slot};
 use paros::roles::node::command_hash;
 
 use super::NodeAudit;

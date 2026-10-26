@@ -27,7 +27,9 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use moonpool_core::RandomProvider;
-use paros_core::{Ballot, ColocatedNode, Handoff, JournalIdentifier, NodeId, NodeRole};
+use paros_core::journal::JournalIdentifier;
+use paros_core::node::{Handoff, NodeRole};
+use paros_core::{Ballot, ColocatedNode, NodeId};
 use paros_net::runtime::ParosProviders;
 
 use super::DriverTunables;
@@ -238,7 +240,7 @@ impl Stop {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use paros_core::{JournalId, TenantId};
+    use paros_core::journal::{JournalId, TenantId};
 
     fn journal() -> JournalIdentifier {
         JournalIdentifier::new(TenantId(7), JournalId(9))

@@ -15,7 +15,8 @@
 //! plays the level and answers every prompt with the answer `paros-core`
 //! itself gives.
 
-use paros_core::{Config, MatchmakerId, NodeId, QuorumSystem, Slot};
+use paros_core::membership::{MatchmakerId, QuorumSystem};
+use paros_core::{Config, NodeId, Slot};
 
 use crate::paxos::action::{Action, ActionKind, BallotSpec, Phase};
 use crate::paxos::auto::AutomationFlag;
@@ -133,7 +134,7 @@ fn deployed(
                 matchmakers: set.clone(),
                 matchmaker_pool: all.clone(),
                 proxy_count: 0,
-                ..Config::new(*id, paros_core::JournalIdentifier::UNSET)
+                ..Config::new(*id, paros_core::journal::JournalIdentifier::UNSET)
             })
         })
         .collect();
@@ -1245,7 +1246,7 @@ the matchmaker does with it.",
                 .filter(|process| {
                     process.role().is_some_and(|role| {
                         role.set().generation.0 == 1
-                            && role.phase() == paros_core::MatchmakerPhase::Active
+                            && role.phase() == paros_core::matchmaker::MatchmakerPhase::Active
                     })
                 })
                 .map(|process| process.id().0)

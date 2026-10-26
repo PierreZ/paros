@@ -289,7 +289,7 @@ impl Matchmaker {
     /// rather than the role's two ops, and an empty report means there is
     /// nothing to persist.
     ///
-    /// [`MatchmakerWriteOp::SetScalars`]: crate::MatchmakerWriteOp::SetScalars
+    /// [`MatchmakerWriteOp::SetScalars`]: crate::matchmaker::MatchmakerWriteOp::SetScalars
     fn store_decree(
         &mut self,
         acceptor: &Acceptor<Vec<MatchmakerId>>,

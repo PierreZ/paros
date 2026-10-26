@@ -10,7 +10,7 @@ use super::{journal_config, main_config};
 use crate::audit::{NodeAudit, audit_world_for};
 use crate::roles::Deployment;
 use paros::core::NodeId;
-use paros::core::ProxyId;
+use paros::core::membership::ProxyId;
 use paros::roles::node::RunError;
 use paros::roles::node::parse_addr;
 use paros::roles::proxy_leader::ProxyConfig;

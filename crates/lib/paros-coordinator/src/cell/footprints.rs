@@ -16,7 +16,7 @@
 use std::collections::BTreeSet;
 use std::ops::Bound::{Excluded, Unbounded};
 
-use paros_core::TenantId;
+use paros_core::journal::TenantId;
 use paros_net::runtime::ParosProviders;
 
 use paros_client::Client;

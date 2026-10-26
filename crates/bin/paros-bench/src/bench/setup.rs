@@ -8,7 +8,7 @@ use paros::client::bootstrap::control_journals;
 use paros::client::fleet::{Step, read_directory};
 use paros::client::journals::{self, JournalAnswer, JournalOp, JournalRequest};
 use paros::client::{ClaimOutcome, Client, Pipeline};
-use paros::core::{JournalId, JournalIdentifier, TenantId, WriterMode};
+use paros::core::journal::{JournalId, JournalIdentifier, TenantId, WriterMode};
 use paros::model::fleet::TenantState;
 use paros::model::tenant::{StoreDurability, Survives};
 use parosctl::cmd::tenant::{leader_seed, nonzero, refusal_text, session};

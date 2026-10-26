@@ -133,7 +133,7 @@ fn restart_rebuilds_state_from_hard_state() {
     assert_eq!(n.replica().folded(), Slot(2));
     assert!(matches!(
         n.replica().outcome_at(Slot(1)),
-        Some(crate::Outcome::Refused(_))
+        Some(crate::journal::Outcome::Refused(_))
     ));
     assert_eq!(n.replica().outcome_at(Slot(2)), None);
 }
@@ -504,29 +504,29 @@ fn a_write_is_judged_at_apply_on_every_node() {
     for n in &nodes {
         assert!(matches!(
             n.replica().outcome_at(claim),
-            Some(crate::Outcome::Leader(s)) if s.leader == Some(LeaderUuid(7))
+            Some(crate::journal::Outcome::Leader(s)) if s.leader == Some(LeaderUuid(7))
         ));
         assert_eq!(
             n.replica().outcome_at(slots[0]),
-            Some(&crate::Outcome::Accepted {
+            Some(&crate::journal::Outcome::Accepted {
                 seq: Seq(0),
                 count: 1
             })
         );
         assert_eq!(
             n.replica().outcome_at(slots[2]),
-            Some(&crate::Outcome::Duplicate {
+            Some(&crate::journal::Outcome::Duplicate {
                 seq: Seq(0),
                 count: 1
             })
         );
         assert!(matches!(
             n.replica().outcome_at(slots[3]),
-            Some(crate::Outcome::Refused(_))
+            Some(crate::journal::Outcome::Refused(_))
         ));
         assert!(matches!(
             n.replica().outcome_at(slots[4]),
-            Some(crate::Outcome::Refused(_))
+            Some(crate::journal::Outcome::Refused(_))
         ));
         assert_eq!(n.replica().journal().next_seq, Seq(2));
     }

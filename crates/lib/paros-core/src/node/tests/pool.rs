@@ -7,7 +7,7 @@
 //! naming a matchmaker outside it is ignored until the pool admits it.
 
 use super::*;
-use crate::MatchmakerSet;
+use crate::membership::MatchmakerSet;
 
 /// Plain Multi-Paxos: the pool is the membership, and it never moves.
 #[test]

@@ -1,6 +1,7 @@
 //! One registry entry ([`SystemCommand`]) and the grants it books (#476): their types and their wire form.
 
-use paros_core::{JournalId, NodeId, TenantId};
+use paros_core::NodeId;
+use paros_core::journal::{JournalId, TenantId};
 use paros_wire::system as wire;
 use prost::Message as _;
 

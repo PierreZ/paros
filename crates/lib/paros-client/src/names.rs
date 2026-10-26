@@ -30,7 +30,7 @@
 
 use std::collections::BTreeMap;
 
-use paros_core::{JournalIdentifier, TenantId};
+use paros_core::journal::{JournalIdentifier, TenantId};
 use paros_net::runtime::ParosProviders;
 
 use super::Client;
@@ -368,7 +368,9 @@ impl JournalNames {
 
 #[cfg(test)]
 mod tests {
-    use paros_core::{AcceptorConfig, JournalId, NodeId, QuorumSystem, WriterMode};
+    use paros_core::NodeId;
+    use paros_core::journal::{JournalId, WriterMode};
+    use paros_core::membership::{AcceptorConfig, QuorumSystem};
 
     use super::*;
     use paros_model::tenant::{Desired, TenantCommand};

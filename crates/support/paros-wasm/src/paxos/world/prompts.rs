@@ -9,10 +9,11 @@
 //! `paros-core` do with this message?" without doing it — which is what lets a
 //! wrong answer cost a mistake instead of a state.
 
+use paros_core::contract::AcceptorWrite;
+use paros_core::journal::{Command, Entry};
+use paros_core::membership::QuorumSystem;
 use paros_core::proposer::Proposer;
-use paros_core::{
-    AcceptorWrite, Ballot, Command, Entry, Message, NodeId, QuorumSystem, Slot, WriteOp,
-};
+use paros_core::{Ballot, Message, NodeId, Slot, WriteOp};
 
 use crate::paxos::prompt::{Prompt, PromptKind, RepairCase};
 use crate::paxos::world::World;
@@ -51,7 +52,7 @@ impl World {
             return None;
         };
         let node = self.nodes[index].as_ref()?;
-        if node.role() != paros_core::NodeRole::Candidate {
+        if node.role() != paros_core::node::NodeRole::Candidate {
             return None;
         }
         let election = node.proposer().election()?;
@@ -87,7 +88,7 @@ impl World {
     /// takes the slot it is about to allocate?
     ///
     /// Judged by the configuration's own
-    /// [`column_of`](paros_core::AcceptorConfig::column_of), so the answer is
+    /// [`column_of`](paros_core::membership::AcceptorConfig::column_of), so the answer is
     /// the rule itself and not a modulus restated here.
     pub(super) fn grid_column_prompt(&mut self, to: NodeId, index: usize) -> Option<Prompt> {
         if !self.policy.manual.contains(&PromptKind::GridColumn) {
@@ -146,7 +147,9 @@ impl World {
         };
         let node = self.nodes[index].as_ref()?;
         let mut clone = node.quorum_reads().clone();
-        if clone.fold(*ctx, *from, *watermark, *config_since) != paros_core::PreReadFold::Counted {
+        if clone.fold(*ctx, *from, *watermark, *config_since)
+            != paros_core::quorum_read::PreReadFold::Counted
+        {
             return None;
         }
         // What the row settled on, and whether this node may answer with it:
@@ -319,7 +322,7 @@ impl World {
         let before = clone.journal();
         let mut state = before;
         let outcome = state.apply(
-            paros_core::WriterMode::Single,
+            paros_core::journal::WriterMode::Single,
             &Command::Write(entry.clone()),
             |at| clone.accepted_at(at),
         );

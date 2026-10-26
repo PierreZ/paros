@@ -12,9 +12,9 @@ use std::time::Duration;
 
 use moonpool_sim::{SimContext, TimeProvider, assert_always, assert_reachable};
 use paros::client::checkpoint::LoadOutcome;
-use paros::core::JournalIdentifier;
 use paros::core::NodeId;
-use paros::core::TenantId;
+use paros::core::journal::JournalIdentifier;
+use paros::core::journal::TenantId;
 use paros::machine::Class;
 use paros::model::address::Address;
 use paros::model::registry::{NodeStanding, Registry, Role};

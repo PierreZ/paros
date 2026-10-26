@@ -430,13 +430,13 @@ fn recovering_leader(page: usize) -> ColocatedNode {
 
 #[test]
 fn leader_recovery_is_split_across_ready_batches() {
-    let mut n = recovering_leader(LEADER_RECOVERY_BATCH);
+    let mut n = recovering_leader(RECOVERY_BATCH);
     let ready = n.ready();
-    assert_eq!(ready.recovery_batch(), Some((LEADER_RECOVERY_BATCH, 0, 66)));
+    assert_eq!(ready.recovery_batch(), Some((RECOVERY_BATCH, 0, 66)));
     ready.advance();
     n.advance_recovery();
     let ready = n.ready();
-    assert_eq!(ready.recovery_batch(), Some((LEADER_RECOVERY_BATCH, 0, 2)));
+    assert_eq!(ready.recovery_batch(), Some((RECOVERY_BATCH, 0, 2)));
     ready.advance();
     n.advance_recovery();
     let ready = n.ready();
@@ -493,7 +493,7 @@ fn a_recovery_page_above_its_ceiling_is_refused() {
         0,
         &[0, 1, 2],
         Limits {
-            recovery_page: LEADER_RECOVERY_BATCH + 1,
+            recovery_page: RECOVERY_BATCH + 1,
             ..Limits::DEFAULT
         },
     );

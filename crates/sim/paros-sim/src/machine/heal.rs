@@ -23,7 +23,7 @@
 use std::collections::BTreeMap;
 
 use moonpool_sim::{StateHandle, WipeLedger, assert_always, assert_reachable};
-use paros::core::JournalIdentifier;
+use paros::core::journal::JournalIdentifier;
 use paros::model::registry::{Registry, RegistryEvent};
 
 use super::{MachineBoard, lock, machine_board};

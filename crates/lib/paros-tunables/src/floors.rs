@@ -17,7 +17,7 @@
 use std::fmt;
 use std::time::Duration;
 
-use paros_core::HEARTBEAT_TICKS;
+use paros_core::node::HEARTBEAT_TICKS;
 
 use super::DriverTunables;
 

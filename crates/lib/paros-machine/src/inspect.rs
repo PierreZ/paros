@@ -43,10 +43,9 @@ mod scratch;
 mod tests;
 
 use moonpool_core::LocalStorageProvider;
-use paros_core::{
-    Ballot, Command, Config, JournalId, JournalIdentifier, JournalState, MatchmakerConfig,
-    MatchmakerHardState, NodeId, RegistryStorage, Slot, Storage, TenantId,
-};
+use paros_core::journal::{Command, JournalId, JournalIdentifier, JournalState, TenantId};
+use paros_core::matchmaker::{MatchmakerConfig, MatchmakerHardState, RegistryStorage};
+use paros_core::{Ballot, Config, NodeId, Slot, Storage};
 
 use crate::{MachineRecord, ProviderDisk};
 use paros_storage::LogStorage;

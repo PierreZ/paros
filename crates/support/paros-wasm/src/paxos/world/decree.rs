@@ -17,11 +17,12 @@
 use std::collections::BTreeMap;
 
 use paros_core::acceptor::{AcceptOutcome, Acceptor, PrepareOutcome};
+use paros_core::contract::AcceptorWrite;
+use paros_core::journal::{Command, Entry, LeaderUuid, Seq};
+use paros_core::membership::{AcceptorConfig, QuorumSystem};
 use paros_core::proposer::{Campaign, Proposer};
-use paros_core::{
-    AcceptorConfig, AcceptorWrite, Ballot, Command, Entry, Fingerprint, LeaderUuid, Message,
-    NodeId, QuorumSystem, Seq, Slot, Value,
-};
+use paros_core::types::Fingerprint;
+use paros_core::{Ballot, Message, NodeId, Slot, Value};
 
 use crate::paxos::action::{ActionError, ActionErrorCode, Phase};
 use crate::paxos::narration::{
@@ -622,7 +623,7 @@ impl DecreeWorld {
                 PrepareOutcome::Promised { .. } => {
                     let page = acceptor
                         .role
-                        .promise_page(DECREE, paros_core::PROMISE_BATCH);
+                        .promise_page(DECREE, paros_core::contract::limits::PROMISE_BATCH);
                     Message::Promise {
                         from: to,
                         ballot,
@@ -848,7 +849,7 @@ impl DecreeWorld {
             let own = self.proposers[index]
                 .value
                 .clone()
-                .unwrap_or(Command::Control(paros_core::Control::Noop));
+                .unwrap_or(Command::Control(paros_core::journal::Control::Noop));
             let reported = self.proposers[index]
                 .role
                 .clone()
@@ -882,7 +883,7 @@ impl DecreeWorld {
         let own = self.proposers[index]
             .value
             .clone()
-            .unwrap_or(Command::Control(paros_core::Control::Noop));
+            .unwrap_or(Command::Control(paros_core::journal::Control::Noop));
         let candidate = outcome
             .recovered
             .get(&DECREE)
@@ -937,7 +938,7 @@ impl DecreeWorld {
                 proposer,
                 to,
                 Message::Accept {
-                    reply_to: paros_core::Party::Node(proposer),
+                    reply_to: paros_core::contract::Party::Node(proposer),
                     leader: proposer,
                     ballot,
                     slot: DECREE,
@@ -996,7 +997,7 @@ impl DecreeWorld {
                 to,
                 *member,
                 Message::Commit {
-                    from: paros_core::Party::Node(to),
+                    from: paros_core::contract::Party::Node(to),
                     ballot: at,
                     slot: DECREE,
                     command: command.clone(),

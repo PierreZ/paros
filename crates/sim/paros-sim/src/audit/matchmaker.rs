@@ -89,11 +89,14 @@ use std::ops::Bound;
 use std::sync::{Arc, Mutex};
 
 use moonpool_sim::{TimeProvider, assert_always, assert_reachable, assert_sometimes};
-use paros::core::{
-    AcceptorConfig, Ballot, GcAck, JournalId, MatchRefusal, MatchmakerHardState, MatchmakerId,
-    MatchmakerPhase, MatchmakerSet, NodeId, PendingBootstrap, REGISTRY_PAGE, ReconfigureReply,
+use paros::core::contract::limits::REGISTRY_PAGE;
+use paros::core::journal::JournalId;
+use paros::core::matchmaker::{
+    GcAck, MatchRefusal, MatchmakerHardState, MatchmakerPhase, PendingBootstrap, ReconfigureReply,
     ReconfigureRequest, Registration, RegistrationKind,
 };
+use paros::core::membership::{AcceptorConfig, MatchmakerId, MatchmakerSet};
+use paros::core::{Ballot, NodeId};
 use paros::observe::audit::{HistoryPage, StorageFaultDecision};
 use paros::roles::node::BootRefusal;
 use paros::storage::StorageError;
@@ -2049,7 +2052,7 @@ impl<T: TimeProvider> NodeAudit<T> {
         matchmaker: MatchmakerId,
         set: &MatchmakerSet,
         phase: MatchmakerPhase,
-        scalars: &paros::core::MatchmakerHardState,
+        scalars: &paros::core::matchmaker::MatchmakerHardState,
         registry: &BTreeMap<Ballot, Registration>,
         gc_watermark: Ballot,
     ) {
@@ -2070,7 +2073,7 @@ impl<T: TimeProvider> NodeAudit<T> {
     pub(super) fn matchmaker_in_flight(
         &self,
         matchmaker: MatchmakerId,
-        writes: Option<&[paros::core::MatchmakerWriteOp]>,
+        writes: Option<&[paros::core::matchmaker::MatchmakerWriteOp]>,
     ) {
         let Some(writes) = writes else {
             self.world.note_registry_in_flight(matchmaker.0, None);
@@ -2080,17 +2083,17 @@ impl<T: TimeProvider> NodeAudit<T> {
         let ops: Vec<RegistryOp> = writes
             .iter()
             .filter_map(|op| match op {
-                paros::core::MatchmakerWriteOp::Register {
+                paros::core::matchmaker::MatchmakerWriteOp::Register {
                     journal: written,
                     ballot,
                     registration,
                 } => (*written == journal)
                     .then(|| RegistryOp::Register(*ballot, registration.clone())),
-                paros::core::MatchmakerWriteOp::SetGcWatermark { .. } => None,
-                paros::core::MatchmakerWriteOp::SetScalars(scalars) => {
+                paros::core::matchmaker::MatchmakerWriteOp::SetGcWatermark { .. } => None,
+                paros::core::matchmaker::MatchmakerWriteOp::SetScalars(scalars) => {
                     Some(RegistryOp::Scalars(scalars.clone()))
                 }
-                paros::core::MatchmakerWriteOp::InstallRegistry {
+                paros::core::matchmaker::MatchmakerWriteOp::InstallRegistry {
                     scalars,
                     registrations,
                 } => Some(RegistryOp::Install(

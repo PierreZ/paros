@@ -26,9 +26,9 @@ use paros::client::checkpoint::{CheckpointPolicy, Folder, LoadOutcome};
 use paros::client::fleet::{CellJoin, FleetRefusal, FleetSession, Run, Step};
 use paros::client::initialize::{InitParams, InitRun};
 use paros::client::resolve::Resolution;
-use paros::core::JournalIdentifier;
 use paros::core::NodeId;
-use paros::core::TenantId;
+use paros::core::journal::JournalIdentifier;
+use paros::core::journal::TenantId;
 use paros::model::fleet::{CellState, FleetDirectory};
 use paros::model::name::JournalName;
 use paros::model::registry::Registry;
@@ -46,7 +46,8 @@ const NAME: &[u8] = b"hooli";
 const CELL_NAME: &str = "cell-second";
 
 /// The local id a frontend call binds the tenant's journal name to.
-const LOCAL: JournalIdentifier = JournalIdentifier::new(TenantId(1), paros::core::JournalId(1));
+const LOCAL: JournalIdentifier =
+    JournalIdentifier::new(TenantId(1), paros::core::journal::JournalId(1));
 
 /// The second cell as the run knows it, shared by every operator.
 #[derive(Default)]

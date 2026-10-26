@@ -20,12 +20,12 @@ use paros::client::{
     Answered, Attempted, CallObserver, ReadOutcome, Resolution, ResolveReport, SetLeaderOutcome,
     TruncateOutcome, WriteOutcome, write_request,
 };
-use paros::core::Command;
-use paros::core::Control;
-use paros::core::Entry;
-use paros::core::JournalIdentifier;
-use paros::core::LeaderUuid;
-use paros::core::Seq;
+use paros::core::journal::Command;
+use paros::core::journal::Control;
+use paros::core::journal::Entry;
+use paros::core::journal::JournalIdentifier;
+use paros::core::journal::LeaderUuid;
+use paros::core::journal::Seq;
 use paros::wire::Read;
 use paros::wire::Write;
 use paros::wire::leader_from_proto;

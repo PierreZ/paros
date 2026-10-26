@@ -171,11 +171,12 @@
 use std::collections::BTreeMap;
 
 use paros_core::acceptor::{AcceptOutcome, Acceptor, PrepareOutcome};
+use paros_core::contract::AcceptorWrite;
+use paros_core::journal::{Command, Entry, LeaderUuid, Seq};
+use paros_core::membership::{AcceptorConfig, QuorumSystem};
 use paros_core::proposer::{Campaign, PromiseFold, Proposer};
-use paros_core::{
-    AcceptorConfig, AcceptorWrite, Ballot, Command, Entry, Fingerprint, LeaderUuid, NodeId,
-    QuorumSystem, Seq, Slot, Value,
-};
+use paros_core::types::Fingerprint;
+use paros_core::{Ballot, NodeId, Slot, Value};
 
 /// The one decision. Paros's roles are written over a *log* of numbered
 /// slots (the next lesson fills many); single-decree Paxos is the same

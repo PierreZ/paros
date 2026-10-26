@@ -32,10 +32,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use moonpool_core::{LocalTimeProvider, SimulationError};
-use paros_core::{
-    AcceptorConfig, Audience, Ballot, JournalIdentifier, Message, NodeId, Party, ProxyId,
-    ProxyLeader, Slot,
-};
+use paros_core::contract::{Audience, Party};
+use paros_core::journal::JournalIdentifier;
+use paros_core::membership::{AcceptorConfig, ProxyId};
+use paros_core::{Ballot, Message, NodeId, ProxyLeader, Slot};
 use paros_net::runtime::ParosProviders;
 use tokio_util::sync::CancellationToken;
 
@@ -164,7 +164,7 @@ fn report_delegation<A: Audit>(
     );
 }
 
-/// Run the [`ProxyReady`](paros_core::ProxyReady) handshake once: report
+/// Run the [`ProxyReady`](paros_core::proxy_leader::ProxyReady) handshake once: report
 /// every message the batch carries at the instant it is about to leave —
 /// each fan-out, each decision, each relayed refusal — resolve every
 /// audience through the deployment map as a proxy sends

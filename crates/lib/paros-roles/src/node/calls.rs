@@ -1,7 +1,7 @@
 //! The journal calls a node holds open (#204): a `Write`, a `SetLeader` or a
 //! `Truncate`, each proposed into one slot and answered only once that slot
 //! applies, with the verdict the journal state machine gave there
-//! ([`paros_core::Outcome`]).
+//! ([`paros_core::journal::Outcome`]).
 //!
 //! The safety rule is the judgement at apply: whatever is checked before a
 //! slot is proposed (a propose-time refusal is allowed as an optimisation,
@@ -14,7 +14,8 @@
 //! gets no verdict ([`Call::no_verdict`]) — ambiguous to the client, which
 //! retries, and a retried `Write` is answered from the log itself.
 
-use paros_core::{ColocatedNode, Command, Control, Entry, LeaderUuid, NodeId, Outcome, Seq};
+use paros_core::journal::{Command, Control, Entry, LeaderUuid, Outcome, Seq};
+use paros_core::{ColocatedNode, NodeId};
 
 use super::reply::Reply;
 use paros_net::ReplySender;

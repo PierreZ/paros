@@ -1,4 +1,4 @@
-use paros_core::JournalId;
+use paros_core::journal::JournalId;
 
 use super::*;
 use crate::status::Word;

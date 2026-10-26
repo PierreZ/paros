@@ -8,7 +8,7 @@
 //! it reached; the fold keeps the newest one and refuses a record behind it,
 //! so a stale term's flush never moves a pass back.
 
-use paros_core::JournalId;
+use paros_core::journal::JournalId;
 
 use paros_wire::tenant as wire;
 

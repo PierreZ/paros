@@ -31,12 +31,12 @@ use crate::audit::{AuditWorld, NodeAudit, audit_world};
 use crate::roles::{
     ACCEPTOR_GROUP, Deployment, MATCHMAKER_GROUP, PROXY_GROUP, REPLICA_GROUP, Role, replica_node_id,
 };
-use paros::core::AcceptorConfig;
 use paros::core::Config;
-use paros::core::JournalIdentifier;
-use paros::core::MatchmakerId;
 use paros::core::NodeId;
-use paros::core::ReplicaId;
+use paros::core::journal::JournalIdentifier;
+use paros::core::membership::AcceptorConfig;
+use paros::core::membership::MatchmakerId;
+use paros::core::membership::ReplicaId;
 use paros::roles::node::parse_addr;
 
 mod contract;

@@ -16,10 +16,11 @@
 //! [`QuorumReads`]: crate::quorum_read::QuorumReads
 
 use super::{BeliefSource, ColocatedNode, Message, NodeId, NodeRole, ReadState, Slot};
+use crate::journal::{Command, Control};
 use crate::membership::QuorumSystem;
+use crate::node::{Delegation, ProposeResult};
 use crate::quorum_read::PreReadFold;
 use crate::types::Ballot;
-use crate::{Command, Control, Delegation, ProposeResult};
 
 pub(crate) use crate::contract::limits::READ_TTL_TICKS;
 
@@ -28,7 +29,7 @@ impl ColocatedNode {
     /// Paxos §3.4): ask the row [`AcceptorConfig::row_of`] derives for `ctx`
     /// — under the configuration this node believes in force — for their
     /// vote watermarks, settle on the maximum once the row answered whole,
-    /// and surface a [`ReadState`](super::ReadState) carrying `ctx` through
+    /// and surface a [`ReadState`] carrying `ctx` through
     /// [`Ready::read_states`] once this node's chosen prefix covers it
     /// ([`Replica::covers`]).
     ///
@@ -48,7 +49,7 @@ impl ColocatedNode {
     /// If an internal invariant is broken (a programmer error, never an
     /// operating condition): a driver token is opened at most once.
     ///
-    /// [`AcceptorConfig::row_of`]: crate::AcceptorConfig::row_of
+    /// [`AcceptorConfig::row_of`]: crate::membership::AcceptorConfig::row_of
     /// [`Ready::read_states`]: crate::Ready::read_states
     /// [`Replica::covers`]: crate::replica::Replica::covers
     pub fn quorum_read(&mut self, ctx: u64) {
@@ -69,8 +70,8 @@ impl ColocatedNode {
     ///
     /// As [`ColocatedNode::quorum_read`].
     ///
-    /// [`AcceptorConfig::row_of`]: crate::AcceptorConfig::row_of
-    /// [`AcceptorConfig::read_row`]: crate::AcceptorConfig::read_row
+    /// [`AcceptorConfig::row_of`]: crate::membership::AcceptorConfig::row_of
+    /// [`AcceptorConfig::read_row`]: crate::membership::AcceptorConfig::read_row
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, ctx)))]
     pub fn quorum_read_in(&mut self, ctx: u64, row: Option<usize>) {
         let me = self.config.id;
@@ -230,7 +231,7 @@ impl ColocatedNode {
     /// asked either of them was ever served, no claim was ever sent, and the
     /// run ended with four slots chosen).
     ///
-    /// [`Control::Noop`]: crate::Control::Noop
+    /// [`Control::Noop`]: crate::journal::Control::Noop
     fn fill_to_watermark(&mut self, watermark: Option<Slot>) {
         let Some(watermark) = watermark else {
             return;

@@ -403,7 +403,7 @@ fn a_trim_point_jump_moves_the_prefix_and_never_the_promise() {
     n.step(Message::TrimmedTo {
         from: NodeId(0),
         point: Slot(6),
-        state: crate::JournalState {
+        state: crate::journal::JournalState {
             leader: Some(LeaderUuid(7)),
             term: 1,
             next_seq: Seq(4),
@@ -445,7 +445,7 @@ fn a_trim_point_jump_moves_the_prefix_and_never_the_promise() {
     n.step(Message::TrimmedTo {
         from: NodeId(0),
         point: Slot(4),
-        state: crate::JournalState::default(),
+        state: crate::journal::JournalState::default(),
     });
     assert_eq!(n.hard_state().chosen_index, Some(Slot(5)));
     assert_eq!(n.acceptor().first_slot(), Slot(6));
@@ -477,7 +477,7 @@ fn a_trim_point_jump_advances_over_an_out_of_order_chosen_slot() {
     x.step(Message::TrimmedTo {
         from: NodeId(2),
         point: Slot(10),
-        state: crate::JournalState::default(),
+        state: crate::journal::JournalState::default(),
     });
     let _ = drain(&mut x);
 

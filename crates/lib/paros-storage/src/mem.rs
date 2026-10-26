@@ -3,7 +3,9 @@
 
 use std::collections::BTreeMap;
 
-use paros_core::{Ballot, Command, Config, HardState, JournalState, MustSync, Slot, Storage};
+use paros_core::contract::MustSync;
+use paros_core::journal::{Command, JournalState};
+use paros_core::{Ballot, Config, HardState, Slot, Storage};
 
 use super::{LogStorage, StorageError};
 
@@ -181,7 +183,7 @@ mod tests {
             || {
                 std::future::ready(MemStorage::new(Config {
                     peers: vec![NodeId(0)],
-                    ..Config::new(NodeId(0), paros_core::JournalIdentifier::UNSET)
+                    ..Config::new(NodeId(0), paros_core::journal::JournalIdentifier::UNSET)
                 }))
             },
             // In-memory writes are immediately visible: a reboot is the same

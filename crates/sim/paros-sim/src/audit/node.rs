@@ -3,10 +3,12 @@
 use std::collections::BTreeSet;
 
 use moonpool_sim::{TimeProvider, assert_always, assert_reachable};
-use paros::core::{
-    AcceptorConfig, Ballot, Command, HANDOFF_BATCH, Handoff, JournalIdentifier,
-    LEADER_RECOVERY_BATCH, Message, NodeId, PROMISE_BATCH, Party, ProxyId, QuorumSystem, Slot,
-};
+use paros::core::contract::Party;
+use paros::core::contract::limits::{PROMISE_BATCH, RECOVERY_BATCH};
+use paros::core::journal::{Command, JournalIdentifier};
+use paros::core::membership::{AcceptorConfig, ProxyId, QuorumSystem};
+use paros::core::node::{HANDOFF_BATCH, Handoff};
+use paros::core::{Ballot, Message, NodeId, Slot};
 use paros::observe::audit::{Deployment, LogReadAnswer, LogReadReport};
 use paros::roles::node::command_hash;
 
@@ -103,11 +105,13 @@ impl<T: TimeProvider> NodeAudit<T> {
         let mut dropped: Vec<(u64, Ballot, u64)> = Vec::new();
         for op in writes {
             let (slot, ballot, command) = match op {
-                paros::core::WriteOp::Acceptor(paros::core::AcceptorWrite::AppendAccepted {
-                    slot,
-                    ballot,
-                    value,
-                }) => (slot, ballot, value),
+                paros::core::WriteOp::Acceptor(
+                    paros::core::contract::AcceptorWrite::AppendAccepted {
+                        slot,
+                        ballot,
+                        value,
+                    },
+                ) => (slot, ballot, value),
                 paros::core::WriteOp::Learned {
                     slot,
                     ballot,
@@ -244,7 +248,7 @@ impl<T: TimeProvider> NodeAudit<T> {
         slot: Slot,
         vhash: u64,
         command: &Command,
-        outcome: Option<&paros::core::Outcome>,
+        outcome: Option<&paros::core::journal::Outcome>,
     ) {
         let mut st = self.state();
         if st.replicas.contains(&node.0) {
@@ -290,7 +294,7 @@ impl<T: TimeProvider> NodeAudit<T> {
             assert_always!(
                 !matches!(
                     outcome,
-                    Some(paros::core::Outcome::Accepted { .. } | paros::core::Outcome::Duplicate { .. })
+                    Some(paros::core::journal::Outcome::Accepted { .. } | paros::core::journal::Outcome::Duplicate { .. })
                 ),
                 "journal: a write under another tenant's fence is refused at apply",
                 { "node" => node.0, "slot" => slot.0 }
@@ -303,7 +307,10 @@ impl<T: TimeProvider> NodeAudit<T> {
         if let Some(board) = &self.tenants {
             tenants::lock(board).applied(node, command);
         }
-        let takes_slot = !matches!(command, Command::Control(paros::core::Control::Noop));
+        let takes_slot = !matches!(
+            command,
+            Command::Control(paros::core::journal::Control::Noop)
+        );
         self.journal_applied(node, takes_slot.then_some(vhash));
     }
 
@@ -721,7 +728,7 @@ impl<T: TimeProvider> NodeAudit<T> {
         node: NodeId,
         slot: Slot,
         command: &Command,
-        outcome: &paros::core::Outcome,
+        outcome: &paros::core::journal::Outcome,
     ) {
         // #189, #210: a node acknowledges no write to a journal after
         // folding its tombstone; nor any other call (#449).
@@ -756,7 +763,7 @@ impl<T: TimeProvider> NodeAudit<T> {
         // Decision 1 of #144: the node asked acks, and the slot's reply
         // owner — a replica, a different process by construction — is noted
         // so the gate can prove it applied what it would have answered.
-        if let Some(owner) = paros::core::ReplicaId::of(slot, st.replica_count) {
+        if let Some(owner) = paros::core::membership::ReplicaId::of(slot, st.replica_count) {
             let owner = crate::roles::replica_node_id(owner).0;
             if owner != node.0 {
                 let first = st.acked_by_other.entry(owner).or_insert(slot.0);
@@ -764,21 +771,22 @@ impl<T: TimeProvider> NodeAudit<T> {
             }
         }
         match outcome {
-            paros::core::Outcome::Accepted { .. } | paros::core::Outcome::Duplicate { .. } => {
+            paros::core::journal::Outcome::Accepted { .. }
+            | paros::core::journal::Outcome::Duplicate { .. } => {
                 if st.leader_change_ms.is_some() {
                     st.ack_after_leader_change = true;
                 }
                 // The retry edge the reply-drop location exists for: a
                 // write's verdict was dropped, and a retry was answered from
                 // the log.
-                if matches!(outcome, paros::core::Outcome::Duplicate { .. })
+                if matches!(outcome, paros::core::journal::Outcome::Duplicate { .. })
                     && st.propose_reply_dropped
                 {
                     st.dedup_after_dropped_reply = true;
                 }
             }
             // Feeds the "chain: compact takes effect" outcome gate.
-            paros::core::Outcome::Trimmed(_) => st.compact_ack_accepted = true,
+            paros::core::journal::Outcome::Trimmed(_) => st.compact_ack_accepted = true,
             _ => {}
         }
     }
@@ -871,7 +879,7 @@ impl<T: TimeProvider> NodeAudit<T> {
         st.journal_read_on_replica |= st.replicas.contains(&node.0);
     }
 
-    pub(super) fn log_read_not_held(&self, node: NodeId, from: paros::core::Seq) {
+    pub(super) fn log_read_not_held(&self, node: NodeId, from: paros::core::journal::Seq) {
         let st = self.state();
         // `LogRead::NotHeld` (#448): the record exists in the journal, but
         // in a slot below this node's floor, which rose ahead of its fold
@@ -1444,7 +1452,7 @@ impl<T: TimeProvider> NodeAudit<T> {
             { "started" => started, "remaining" => remaining, "page" => page }
         );
         assert_always!(
-            (1..=LEADER_RECOVERY_BATCH as u64).contains(&page),
+            (1..=RECOVERY_BATCH as u64).contains(&page),
             "a recovery page size lies within its tunable range",
             { "page" => page }
         );

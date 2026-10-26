@@ -14,7 +14,8 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use paros_core::{Command, Entry, JournalIdentifier, JournalState, NodeId, Seq, Slot, WriterMode};
+use paros_core::journal::{Command, Entry, JournalIdentifier, JournalState, Seq, WriterMode};
+use paros_core::{NodeId, Slot};
 
 use super::{DiskImage, StoreImage};
 use paros_client::checkpoint::{Checkpointable, Folder};
@@ -156,7 +157,7 @@ fn prefix_records(store: &StoreImage) -> (u64, Vec<(u64, Vec<u8>)>) {
             break;
         };
         let outcome = state.apply(mode, command, |seq: Seq| accepted.get(&seq.0));
-        if let (paros_core::Outcome::Accepted { seq, count }, Command::Write(entry)) =
+        if let (paros_core::journal::Outcome::Accepted { seq, count }, Command::Write(entry)) =
             (outcome, command)
         {
             assert_eq!(

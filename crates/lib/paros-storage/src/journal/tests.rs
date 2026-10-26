@@ -14,10 +14,11 @@ use std::net::IpAddr;
 use moonpool_core::{LocalStorageFile, LocalStorageProvider, OpenOptions};
 use moonpool_journal::Durability;
 use moonpool_sim::{SimStorageProvider, SimWorld, StorageConfiguration};
-use paros_core::{
-    AcceptorConfig, Ballot, Command, Config, Entry, JournalId, JournalState, LeaderUuid, MustSync,
-    NodeId, QuorumSystem, Registration, RegistryStorage, Seq, Slot, Storage, Value,
-};
+use paros_core::contract::MustSync;
+use paros_core::journal::{Command, Entry, JournalId, JournalState, LeaderUuid, Seq};
+use paros_core::matchmaker::{Registration, RegistryStorage};
+use paros_core::membership::{AcceptorConfig, QuorumSystem};
+use paros_core::{Ballot, Config, NodeId, Slot, Storage, Value};
 
 use super::{
     CHOSEN_INDEX_LAG, JournalMatchmakerStorage, JournalStorage, JournalStoreConfig, encode,
@@ -65,7 +66,7 @@ where
 fn config() -> Config {
     Config {
         peers: vec![NodeId(0)],
-        ..Config::new(NodeId(0), paros_core::JournalIdentifier::UNSET)
+        ..Config::new(NodeId(0), paros_core::journal::JournalIdentifier::UNSET)
     }
 }
 
@@ -110,7 +111,7 @@ async fn open_registry(provider: SimStorageProvider, dir: &str) -> Result<Regist
     let mut registry = JournalMatchmakerStorage::new(
         provider,
         dir,
-        paros_core::JournalIdentifier::UNSET,
+        paros_core::journal::JournalIdentifier::UNSET,
         compact(),
     );
     registry.boot_scan().await?;
@@ -463,7 +464,7 @@ fn peek_formatted_reads_the_marker_without_opening_the_store() {
     runtime().block_on(async {
         let mut sim = sim(6);
         run(&mut sim, |provider| async move {
-            let id = paros_core::JournalIdentifier::UNSET;
+            let id = paros_core::journal::JournalIdentifier::UNSET;
             assert!(
                 !Node::peek_formatted(&provider, "p", id)
                     .await
@@ -624,7 +625,7 @@ async fn open_chunked(
     let mut registry = JournalMatchmakerStorage::new(
         provider,
         dir,
-        paros_core::JournalIdentifier::UNSET,
+        paros_core::journal::JournalIdentifier::UNSET,
         JournalStoreConfig {
             meta_chunk,
             ..compact()
@@ -677,9 +678,13 @@ fn scalars_larger_than_the_metainfo_survive_a_reboot_in_chunks() {
                 );
                 // The format probe reads the header alone.
                 assert!(
-                    !Registry::peek_formatted(&provider, dir, paros_core::JournalIdentifier::UNSET)
-                        .await
-                        .expect("peek")
+                    !Registry::peek_formatted(
+                        &provider,
+                        dir,
+                        paros_core::journal::JournalIdentifier::UNSET
+                    )
+                    .await
+                    .expect("peek")
                 );
             }
         })

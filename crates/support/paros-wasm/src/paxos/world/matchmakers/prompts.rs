@@ -1,9 +1,9 @@
 //! The three questions the matchmaker plane raises, and the clones they are
 //! judged on.
 
-use paros_core::{
-    Ballot, MatchOutcome, MatchReply, MatchRequest, MatchmakerId, NodeId, RegistrationKind,
-};
+use paros_core::matchmaker::{MatchOutcome, MatchReply, MatchRequest, RegistrationKind};
+use paros_core::membership::MatchmakerId;
+use paros_core::{Ballot, NodeId};
 
 use crate::paxos::prompt::{Prompt, PromptKind};
 use crate::paxos::world::World;

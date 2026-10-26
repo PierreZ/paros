@@ -6,10 +6,10 @@
 
 use std::collections::BTreeSet;
 
-use paros_core::{
-    AcceptorConfig, Ballot, ColocatedNode, MatchmakerId, NodeId, ReconfigureRefusal,
-    ReconfigureResult, StartRefusal,
-};
+use paros_core::matchmaker::StartRefusal;
+use paros_core::membership::{AcceptorConfig, MatchmakerId};
+use paros_core::node::{ReconfigureRefusal, ReconfigureResult};
+use paros_core::{Ballot, ColocatedNode, NodeId};
 
 use paros_model::machine::ControlJournals;
 use paros_observe::audit::Audit;

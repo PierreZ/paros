@@ -56,7 +56,7 @@ use std::time::Duration;
 use moonpool_core::{
     Detach, LocalTaskProvider, LocalTimeProvider, RandomProvider, SimulationResult,
 };
-use paros_core::JournalIdentifier;
+use paros_core::journal::JournalIdentifier;
 use paros_net::runtime::ParosProviders;
 use tokio_util::sync::CancellationToken;
 
@@ -525,7 +525,10 @@ where
         Ok(parts) => parts,
         Err(denied) => return denied,
     };
-    let unset = JournalIdentifier::new(paros_core::TenantId(0), paros_core::JournalId(0));
+    let unset = JournalIdentifier::new(
+        paros_core::journal::TenantId(0),
+        paros_core::journal::JournalId(0),
+    );
     let (journal, name) = match admit(shared, &entry, unset, Operation::SetTags, draws).await {
         Ok((journal, Some(name))) => (journal, name),
         Ok((_, None)) => return tags_denied(Denial::Malformed),
@@ -709,7 +712,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
-    use paros_core::{JournalId, TenantId};
+    use paros_core::journal::{JournalId, TenantId};
 
     use super::*;
 

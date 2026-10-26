@@ -82,7 +82,7 @@ impl FaultInjector for LaggingReplica {
         else {
             return Ok(());
         };
-        let id = crate::roles::replica_node_id(paros::core::ReplicaId(rank)).0;
+        let id = crate::roles::replica_node_id(paros::core::membership::ReplicaId(rank)).0;
         loop {
             if crate::past_cutoff(time.now(), LATE_WINDOW) || ctx.chaos_shutdown().is_cancelled() {
                 return Ok(());

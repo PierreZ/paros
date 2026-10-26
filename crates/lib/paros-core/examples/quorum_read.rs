@@ -71,10 +71,10 @@
 use std::collections::BTreeMap;
 
 use paros_core::contract::MemStorage;
-use paros_core::{
-    ColocatedNode, Command, Config, Entry, LeaderUuid, Message, NodeId, QuorumSystem, ReadState,
-    Seq, Slot, Value,
-};
+use paros_core::journal::{Command, Entry, LeaderUuid, Seq};
+use paros_core::membership::QuorumSystem;
+use paros_core::quorum_read::ReadState;
+use paros_core::{ColocatedNode, Config, Message, NodeId, Slot, Value};
 
 /// Two rows of three: rows `{0, 1, 2}` and `{3, 4, 5}`, columns `{0, 3}`,
 /// `{1, 4}` and `{2, 5}`.
@@ -84,7 +84,7 @@ fn fresh(id: u64) -> ColocatedNode {
     let config = Config {
         peers: (0..6).map(NodeId).collect(),
         quorum_system: GRID,
-        ..Config::new(NodeId(id), paros_core::JournalIdentifier::UNSET)
+        ..Config::new(NodeId(id), paros_core::journal::JournalIdentifier::UNSET)
     };
     ColocatedNode::new(&MemStorage::new(config), paros_core::Limits::DEFAULT)
 }

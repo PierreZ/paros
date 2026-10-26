@@ -163,7 +163,7 @@ impl<Id: Copy + Ord> Authority<Id> {
     /// later ballot has decided anything behind this leader's back. A
     /// Phase-2 quorum of this ballot's configuration that acked at this
     /// ballot answers it: every future Phase-1 quorum intersects it
-    /// ([`crate::QuorumSystem::cross_intersects`]), so a successor's election
+    /// ([`crate::membership::QuorumSystem::cross_intersects`]), so a successor's election
     /// must meet an acceptor that still held this ballot's promise. Under a
     /// flexible quorum system that is a strictly weaker requirement than a
     /// Phase-1 quorum, which is exactly why the tag matters.

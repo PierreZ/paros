@@ -301,7 +301,7 @@ impl ColocatedNode {
     /// Queue an `Accept` for `slot`: to every Phase-2 addressee of the
     /// active configuration in `column` except this node — the Phase-2
     /// fan-out, whose addressee list comes from the membership boundary
-    /// ([`AcceptorConfig::phase2_addressees`](crate::AcceptorConfig::phase2_addressees)),
+    /// ([`AcceptorConfig::phase2_addressees`](crate::membership::AcceptorConfig::phase2_addressees)),
     /// never from iterating the membership here — or, with `proxy`, to that
     /// proxy alone as the **delegation** (#142): the same message, with
     /// `reply_to` naming the proxy that will fold the `Accepted`s and, on a

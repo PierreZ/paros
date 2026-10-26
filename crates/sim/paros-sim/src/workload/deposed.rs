@@ -16,12 +16,12 @@ use std::sync::{Mutex, PoisonError};
 
 use moonpool_sim::{assert_always, assert_reachable};
 use paros::client::{Answered, Attempted, CallObserver, TruncateOutcome, WriteOutcome};
-use paros::core::Command;
-use paros::core::Entry;
-use paros::core::JournalIdentifier;
-use paros::core::LeaderUuid;
-use paros::core::Seq;
 use paros::core::Value;
+use paros::core::journal::Command;
+use paros::core::journal::Entry;
+use paros::core::journal::JournalIdentifier;
+use paros::core::journal::LeaderUuid;
+use paros::core::journal::Seq;
 
 /// The uuid a fenced attempt carries (#241): a `Write`'s or a `Truncate`'s
 /// leader uuid, when set.

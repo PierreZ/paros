@@ -5,7 +5,7 @@ use std::future::Future;
 
 use moonpool_sim::{assert_always, assert_reachable};
 use paros::client::{TruncateOutcome, Writer};
-use paros::core::LeaderUuid;
+use paros::core::journal::LeaderUuid;
 use paros::wire::Truncate;
 use paros::wire::leader_uuid_to_proto;
 

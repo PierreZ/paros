@@ -20,7 +20,10 @@
 //! discriminant ([`control_kind`]) so the renderer styles a `Truncate`
 //! differently from a client's `alpha` without parsing either.
 
-use paros_core::{Ballot, Command, Control, NodeRole, QuorumSystem, Slot};
+use paros_core::journal::{Command, Control};
+use paros_core::membership::QuorumSystem;
+use paros_core::node::NodeRole;
+use paros_core::{Ballot, Slot};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -782,7 +785,7 @@ impl SlotView {
 
 /// A matchmaker set, rendered.
 #[must_use]
-pub fn matchmaker_set_view(set: &paros_core::MatchmakerSet) -> MatchmakerSetView {
+pub fn matchmaker_set_view(set: &paros_core::membership::MatchmakerSet) -> MatchmakerSetView {
     MatchmakerSetView {
         generation: set.generation.0,
         members: set.members().iter().map(|m| m.0).collect(),
@@ -791,10 +794,14 @@ pub fn matchmaker_set_view(set: &paros_core::MatchmakerSet) -> MatchmakerSetView
 
 /// The [`RegistrationKindView`] for a core registration kind.
 #[must_use]
-pub fn registration_kind_view(kind: paros_core::RegistrationKind) -> RegistrationKindView {
+pub fn registration_kind_view(
+    kind: paros_core::matchmaker::RegistrationKind,
+) -> RegistrationKindView {
     match kind {
-        paros_core::RegistrationKind::Belief => RegistrationKindView::Belief,
-        paros_core::RegistrationKind::Reconfiguration => RegistrationKindView::Reconfiguration,
+        paros_core::matchmaker::RegistrationKind::Belief => RegistrationKindView::Belief,
+        paros_core::matchmaker::RegistrationKind::Reconfiguration => {
+            RegistrationKindView::Reconfiguration
+        }
     }
 }
 
@@ -802,7 +809,7 @@ pub fn registration_kind_view(kind: paros_core::RegistrationKind) -> Registratio
 #[must_use]
 pub fn registration_view(
     ballot: Ballot,
-    registration: &paros_core::Registration,
+    registration: &paros_core::matchmaker::Registration,
 ) -> RegistrationView {
     RegistrationView {
         ballot: show_ballot(ballot),
@@ -813,12 +820,14 @@ pub fn registration_view(
 
 /// The [`MatchmakerPhaseView`] for a core matchmaker phase.
 #[must_use]
-pub fn matchmaker_phase_view(phase: paros_core::MatchmakerPhase) -> MatchmakerPhaseView {
+pub fn matchmaker_phase_view(
+    phase: paros_core::matchmaker::MatchmakerPhase,
+) -> MatchmakerPhaseView {
     match phase {
-        paros_core::MatchmakerPhase::Fresh => MatchmakerPhaseView::Fresh,
-        paros_core::MatchmakerPhase::Inactive => MatchmakerPhaseView::Inactive,
-        paros_core::MatchmakerPhase::Active => MatchmakerPhaseView::Active,
-        paros_core::MatchmakerPhase::Stopped => MatchmakerPhaseView::Stopped,
+        paros_core::matchmaker::MatchmakerPhase::Fresh => MatchmakerPhaseView::Fresh,
+        paros_core::matchmaker::MatchmakerPhase::Inactive => MatchmakerPhaseView::Inactive,
+        paros_core::matchmaker::MatchmakerPhase::Active => MatchmakerPhaseView::Active,
+        paros_core::matchmaker::MatchmakerPhase::Stopped => MatchmakerPhaseView::Stopped,
     }
 }
 

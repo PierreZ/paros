@@ -5,16 +5,18 @@
 //! [`Matchmaker`] role, the static [`MatchmakerConfig`] it boots with, and a
 //! [`MemRegistry`] disk it writes to and reboots from. A reply never leaves
 //! ahead of an unsynced write, and every batch is acknowledged with
-//! [`paros_core::MatchmakerReady::advance`] — a batch that is dropped instead
+//! [`paros_core::matchmaker::MatchmakerReady::advance`] — a batch that is dropped instead
 //! stays pending, and the next one applies its writes a second time.
 
 use std::collections::BTreeMap;
 
-use paros_core::{
-    Ballot, GcAck, GcOutcome, GcRequest, JournalId, Limits, MatchReply, MatchRequest, Matchmaker,
-    MatchmakerConfig, MatchmakerHardState, MatchmakerId, MemRegistry, ReconfigureReply,
-    ReconfigureRequest, Registration,
+use paros_core::journal::JournalId;
+use paros_core::matchmaker::{
+    GcAck, GcOutcome, GcRequest, MatchReply, MatchRequest, MatchmakerConfig, MatchmakerHardState,
+    MemRegistry, ReconfigureReply, ReconfigureRequest, Registration,
 };
+use paros_core::membership::MatchmakerId;
+use paros_core::{Ballot, Limits, Matchmaker};
 
 /// One matchmaker's disk: the library's own [`MemRegistry`], plus the two
 /// counters that make the flush order visible.

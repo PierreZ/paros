@@ -5,8 +5,9 @@
 use std::collections::BTreeMap;
 
 use paros_core::acceptor::Acceptor;
+use paros_core::journal::Command;
 use paros_core::replica::Replica;
-use paros_core::{Ballot, Command, NodeId, Slot};
+use paros_core::{Ballot, NodeId, Slot};
 
 use crate::paxos::view::{show_ballot, show_command};
 

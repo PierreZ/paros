@@ -304,7 +304,7 @@ impl World {
             matchmakers: Vec::new(),
             matchmaker_pool: Vec::new(),
             proxy_count: PROXIES,
-            ..Config::new(id, crate::JournalIdentifier::UNSET)
+            ..Config::new(id, crate::journal::JournalIdentifier::UNSET)
         }
     }
 

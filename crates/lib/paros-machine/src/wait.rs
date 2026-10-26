@@ -10,9 +10,10 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use moonpool_core::LocalTimeProvider;
+use paros_core::Ballot;
 use paros_core::acceptor::{AcceptOutcome, Acceptor, PrepareOutcome};
+use paros_core::contract::AcceptorWrite;
 use paros_core::decree::DECREE_SLOT;
-use paros_core::{AcceptorWrite, Ballot};
 use paros_net::runtime::ParosProviders;
 use tokio_util::sync::CancellationToken;
 

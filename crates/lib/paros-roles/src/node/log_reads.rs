@@ -6,9 +6,9 @@
 //! replica — opens a quorum read in its core, which asks a Phase-1 quorum of
 //! the acceptors for their vote watermarks, and the read is parked here,
 //! keyed by the core's `ctx` token, until the core surfaces it confirmed
-//! ([`paros_core::ReadState`]) — the row answered whole and this process's
+//! ([`paros_core::quorum_read::ReadState`]) — the row answered whole and this process's
 //! journal fold covers the maximum. Only then is the page served, from the
-//! fold ([`paros_core::LogRead`], a pure read): every write acknowledged
+//! fold ([`paros_core::replica::LogRead`], a pure read): every write acknowledged
 //! before the read opened is in it. No read goes through the leader.
 //!
 //! A confirmed read with nothing to return yet — it starts at or past the
@@ -27,7 +27,10 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use paros_core::{LogRead, NodeId, ReadState, Seq, Slot};
+use paros_core::journal::Seq;
+use paros_core::quorum_read::ReadState;
+use paros_core::replica::LogRead;
+use paros_core::{NodeId, Slot};
 
 use paros_net::ReplySender;
 use paros_observe::audit::{Audit, LogReadAnswer, LogReadReport};

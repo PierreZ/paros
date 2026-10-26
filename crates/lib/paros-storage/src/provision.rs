@@ -19,7 +19,8 @@
 //! provisioning record), because a store cannot tell an interrupted
 //! provisioning from a completed one.
 
-use paros_core::{MatchmakerConfig, MustSync};
+use paros_core::contract::MustSync;
+use paros_core::matchmaker::MatchmakerConfig;
 
 use crate::LogStorage;
 use crate::boot::{BootRefusal, RunError};
@@ -99,7 +100,8 @@ pub async fn provision_matchmaker_store<S: MatchmakerStorage>(
 
 #[cfg(test)]
 mod tests {
-    use paros_core::{Config, MatchmakerId, NodeId};
+    use paros_core::membership::MatchmakerId;
+    use paros_core::{Config, NodeId};
 
     use super::*;
     use crate::MemStorage;
@@ -109,7 +111,7 @@ mod tests {
         Config {
             peers: peers.iter().copied().map(NodeId).collect(),
             nodes: peers.iter().copied().map(NodeId).collect(),
-            ..Config::new(NodeId(0), paros_core::JournalIdentifier::UNSET)
+            ..Config::new(NodeId(0), paros_core::journal::JournalIdentifier::UNSET)
         }
     }
 

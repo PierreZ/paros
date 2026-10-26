@@ -33,7 +33,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::JournalIdentifier;
+use crate::journal::JournalIdentifier;
 
 /// The flush rule's bounds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

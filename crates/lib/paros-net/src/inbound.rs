@@ -11,7 +11,9 @@ use moonpool_rpc::{
     AccessClass, IncomingRequest, InterfaceMethod, ReplyHandle, RequestStream, RpcConfig,
     RpcHandle, RpcMethod, ServiceGroup,
 };
-use paros_core::{JournalId, JournalIdentifier, Message, Party, TenantId};
+use paros_core::Message;
+use paros_core::contract::Party;
+use paros_core::journal::{JournalId, JournalIdentifier, TenantId};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 

@@ -64,7 +64,7 @@ pub(crate) async fn check_format_marker<S: LogStorage, A: Audit>(
                 .await
                 .map_err(|e| storage_fault_crash(audit, self_id, e))?;
             storage
-                .sync(paros_core::MustSync::Sync)
+                .sync(paros_core::contract::MustSync::Sync)
                 .await
                 .map_err(|e| storage_fault_crash(audit, self_id, e))?;
             tracing::info!(node = self_id, "store_formatted");

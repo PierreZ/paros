@@ -405,10 +405,10 @@ impl ColocatedNode {
     /// If an assertion on its own invariants, preconditions or postconditions
     /// fails: a programmer error, never an operating condition.
     #[must_use]
-    pub fn read_log(&self, from: Seq, limit: usize, max_bytes: usize) -> crate::LogRead {
+    pub fn read_log(&self, from: Seq, limit: usize, max_bytes: usize) -> crate::replica::LogRead {
         let read = self.replica.read(from, limit, max_bytes);
         // A read is served from the fold's head, as it stands.
-        if let crate::LogRead::Page(page) = &read {
+        if let crate::replica::LogRead::Page(page) = &read {
             assert!(
                 page.state == self.replica.journal().view(),
                 "a page names the fold's head"

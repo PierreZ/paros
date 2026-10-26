@@ -2,7 +2,8 @@
 
 use std::collections::BTreeSet;
 
-use paros_core::{ColocatedNode, NodeId, QuorumSystem};
+use paros_core::membership::QuorumSystem;
+use paros_core::{ColocatedNode, NodeId};
 
 /// The most doublings of a moved round's budget (#533 (move a stuck
 /// round)): a round that moved `m` times waits
@@ -151,7 +152,7 @@ pub(crate) fn slow_members(
 /// column is a Phase-2 quorum, so the choice is always valid; it only
 /// prefers fast acceptors. `None` keeps the core's choice.
 pub(crate) fn fast_column(
-    config: &paros_core::AcceptorConfig,
+    config: &paros_core::membership::AcceptorConfig,
     slot: paros_core::Slot,
     is_slow: impl Fn(NodeId) -> bool,
 ) -> Option<usize> {
@@ -182,7 +183,7 @@ pub(crate) fn fast_column(
 /// holds none: the twin of [`fast_column`], under the same condition as the
 /// row override (a full column, so every row is a read quorum).
 pub(crate) fn fast_row(
-    config: &paros_core::AcceptorConfig,
+    config: &paros_core::membership::AcceptorConfig,
     ctx: u64,
     slow: impl Fn(NodeId) -> bool,
 ) -> Option<usize> {

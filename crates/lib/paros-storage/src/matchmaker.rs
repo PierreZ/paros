@@ -8,7 +8,7 @@
 //! durable state back through it once, at construction, record by record — and
 //! [`MatchmakerStorage`] is the [`LogStorage`](crate::LogStorage) twin: the
 //! driver owns every write, applies each
-//! [`MatchmakerWriteOp`](paros_core::MatchmakerWriteOp) through the matching
+//! [`MatchmakerWriteOp`](paros_core::matchmaker::MatchmakerWriteOp) through the matching
 //! method here, then [`sync`](MatchmakerStorage::sync)s the batch **before** its
 //! reply leaves (persist-before-reply).
 //!
@@ -37,11 +37,15 @@
 //! matchmaker-specific disk-fault story, only the generic one applied to one
 //! more record family.
 
-use paros_core::{
-    AcceptorConfig, Ballot, JournalId, MatchmakerConfig, MatchmakerGeneration, MatchmakerHardState,
-    MatchmakerId, MatchmakerPhase, MatchmakerSet, MatchmakerWriteOp, MemRegistry, NodeId,
-    QuorumSystem, Registration, RegistryStorage,
+use paros_core::journal::JournalId;
+use paros_core::matchmaker::{
+    MatchmakerConfig, MatchmakerHardState, MatchmakerPhase, MatchmakerWriteOp, MemRegistry,
+    Registration, RegistryStorage,
 };
+use paros_core::membership::{
+    AcceptorConfig, MatchmakerGeneration, MatchmakerId, MatchmakerSet, QuorumSystem,
+};
+use paros_core::{Ballot, NodeId};
 use std::collections::BTreeMap;
 use std::future::Future;
 

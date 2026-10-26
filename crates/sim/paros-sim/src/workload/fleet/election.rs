@@ -25,9 +25,9 @@ use paros::client::election::{
     Candidate, Election, ElectionFold, ElectionTunables, Step, hand_off, read_election,
 };
 use paros::coordinator::cell::{TermDuty, serve_term};
-use paros::core::JournalIdentifier;
-use paros::core::LeaderUuid;
 use paros::core::NodeId;
+use paros::core::journal::JournalIdentifier;
+use paros::core::journal::LeaderUuid;
 
 use super::{Cell, FleetOps};
 

@@ -20,7 +20,8 @@ use std::time::Duration;
 
 use moonpool_core::LocalTimeProvider;
 use moonpool_rpc::{InterfaceMethod, InterfaceRef, RpcError, RpcHandle};
-use paros_core::{AcceptorConfig, JournalId, JournalIdentifier, TenantId, WriterMode};
+use paros_core::journal::{JournalId, JournalIdentifier, TenantId, WriterMode};
+use paros_core::membership::AcceptorConfig;
 use paros_net::runtime::ParosProviders;
 
 use super::Client;

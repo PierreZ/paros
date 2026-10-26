@@ -29,7 +29,7 @@ fn rotated_registries() -> Vec<Matchmaker> {
 }
 
 const G0: MatchmakerGeneration = MatchmakerGeneration(0);
-const J: crate::JournalId = crate::JournalId::UNSET;
+const J: crate::journal::JournalId = crate::journal::JournalId::UNSET;
 
 /// A fresh incarnation of node 3 on the six-node pool whose bootstrap is
 /// `{0, 1, 2}`: what every member of the rotated set boots as.

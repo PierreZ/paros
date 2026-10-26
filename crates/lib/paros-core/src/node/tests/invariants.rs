@@ -213,7 +213,7 @@ fn a_stale_trim_point_never_rewinds_a_frontier() {
     nodes[1].step(Message::TrimmedTo {
         from: NodeId(0),
         point: floor,
-        state: crate::JournalState::default(),
+        state: crate::journal::JournalState::default(),
     });
     assert_eq!(nodes[1].hard_state(), before);
     assert_eq!(nodes[1].acceptor().first_slot(), floor);

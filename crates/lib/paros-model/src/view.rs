@@ -18,9 +18,9 @@
 //! Every entity carries its name: what `parosctl` prints (hex ids are for
 //! local debugging only). Pure and provider-free: no I/O, no randomness.
 
-use paros_core::{
-    AcceptorConfig, JournalId, JournalIdentifier, NodeId, QuorumSystem, TenantId, WriterMode,
-};
+use paros_core::NodeId;
+use paros_core::journal::{JournalId, JournalIdentifier, TenantId, WriterMode};
+use paros_core::membership::{AcceptorConfig, QuorumSystem};
 
 use std::time::Duration;
 

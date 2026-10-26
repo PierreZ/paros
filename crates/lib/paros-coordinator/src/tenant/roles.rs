@@ -22,7 +22,8 @@
 use std::collections::BTreeSet;
 use std::ops::Bound::{Excluded, Unbounded};
 
-use paros_core::{NodeId, TenantId};
+use paros_core::NodeId;
+use paros_core::journal::TenantId;
 use paros_net::runtime::ParosProviders;
 
 use crate::tenant::TenantDesk;

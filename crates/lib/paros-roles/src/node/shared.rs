@@ -1,11 +1,11 @@
 //! The node loop's handles: [`NodeLoop`], the fixed context of every arm's settle tail, and [`Shared`], what every journal's steps share.
 
 use moonpool_core::{LocalTimeProvider, RandomProvider};
-use paros_core::{
-    ColocatedNode, Control, MatchRefusal, MatchStep, MatchmakerGeneration, MatchmakerId,
-    MatchmakerSet, Message, NodeId, NodeRole, QuorumSystem, ReconfigureReply, ReconfigureRequest,
-    TenantId,
-};
+use paros_core::journal::{Control, TenantId};
+use paros_core::matchmaker::{MatchRefusal, ReconfigureReply, ReconfigureRequest};
+use paros_core::membership::{MatchmakerGeneration, MatchmakerId, MatchmakerSet, QuorumSystem};
+use paros_core::node::{MatchStep, NodeRole};
+use paros_core::{ColocatedNode, Message, NodeId};
 use paros_net::ReplySender;
 use paros_net::runtime::ParosProviders;
 use paros_observe::audit::Audit;

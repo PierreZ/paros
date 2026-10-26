@@ -1,6 +1,7 @@
 //! What the registry records of a node: its roles and bookings, its standing, its liveness and slow facts, and the maintenance windows (#359).
 
-use paros_core::{JournalId, JournalIdentifier, NodeId, TenantId};
+use paros_core::NodeId;
+use paros_core::journal::{JournalId, JournalIdentifier, TenantId};
 
 use crate::machine::{Class, Locality, machine_tags};
 use crate::tags::{Tags, UserTags};

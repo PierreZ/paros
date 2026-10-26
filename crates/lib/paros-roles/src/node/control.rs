@@ -2,7 +2,10 @@
 
 use std::collections::BTreeSet;
 
-use paros_core::{JournalId, JournalIdentifier, MatchmakerId, Message, NodeId, Party, TenantId};
+use paros_core::contract::Party;
+use paros_core::journal::{JournalId, JournalIdentifier, TenantId};
+use paros_core::membership::MatchmakerId;
+use paros_core::{Message, NodeId};
 use paros_model::registry::{NodeStanding, RegistryEvent, SystemEvent};
 use paros_model::tenant::TenantEvent;
 use paros_net::MatchmakerClient;
@@ -156,8 +159,8 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
                             id,
                             (&founders, &[], 0),
                             (
-                                paros_core::QuorumSystem::Majority,
-                                paros_core::WriterMode::Single,
+                                paros_core::membership::QuorumSystem::Majority,
+                                paros_core::journal::WriterMode::Single,
                                 paros_model::tenant::StoreDurability::Ordered,
                             ),
                             Seat::Member,
@@ -223,8 +226,8 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
                             id,
                             (&founders, &[], 0),
                             (
-                                paros_core::QuorumSystem::Majority,
-                                paros_core::WriterMode::Single,
+                                paros_core::membership::QuorumSystem::Majority,
+                                paros_core::journal::WriterMode::Single,
                                 paros_model::tenant::StoreDurability::Ordered,
                             ),
                             Seat::Member,
@@ -274,10 +277,10 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
         &mut self,
         follower: &ControlFollower<P>,
         id: JournalIdentifier,
-        (members, domains, cell_id): (&[NodeId], &[paros_core::FailureDomain], u64),
+        (members, domains, cell_id): (&[NodeId], &[paros_core::membership::FailureDomain], u64),
         (quorum_system, writer, store): (
-            paros_core::QuorumSystem,
-            paros_core::WriterMode,
+            paros_core::membership::QuorumSystem,
+            paros_core::journal::WriterMode,
             paros_model::tenant::StoreDurability,
         ),
         seat: Seat,

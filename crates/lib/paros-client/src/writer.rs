@@ -19,7 +19,8 @@
 
 use paros_net::runtime::ParosProviders;
 
-use paros_core::{Entry, JournalIdentifier, JournalView, LeaderUuid, Seq, Value};
+use paros_core::Value;
+use paros_core::journal::{Entry, JournalIdentifier, JournalView, LeaderUuid, Seq};
 use paros_model::authz::Denial;
 
 use super::outcome::{ClaimOutcome, TruncateOutcome, WriteOutcome};

@@ -40,7 +40,8 @@ use std::time::Duration;
 
 use moonpool_core::{Detach, LocalTaskProvider, LocalTimeProvider};
 use moonpool_rpc::RpcHandle;
-use paros_core::{JournalIdentifier, NodeId};
+use paros_core::NodeId;
+use paros_core::journal::JournalIdentifier;
 use paros_net::runtime::ParosProviders;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;

@@ -44,7 +44,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound::{Excluded, Unbounded};
 
 use moonpool_rpc::RpcHandle;
-use paros_core::{JournalIdentifier, NodeId, TenantId};
+use paros_core::NodeId;
+use paros_core::journal::{JournalIdentifier, TenantId};
 use paros_net::runtime::ParosProviders;
 
 use crate::tenant::TenantDesk;
@@ -222,7 +223,7 @@ async fn desired_size<P: ParosProviders>(
     client: &Client<P>,
     cell: &CellSession,
     desk: &mut TenantDesk,
-    (tenant, control): (TenantId, paros_core::JournalId),
+    (tenant, control): (TenantId, paros_core::journal::JournalId),
     (in_force, booked): (usize, usize),
 ) -> Option<Option<usize>> {
     match desk.tenant(client, tenant, control).await {

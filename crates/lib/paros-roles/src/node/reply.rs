@@ -5,7 +5,8 @@
 //! mirror is the matchmaker-plane duplicate ([`maybe_duplicate`]). Both are
 //! inert in production and silent in the recovery tail (#294).
 
-use paros_core::{MatchmakerId, NodeId};
+use paros_core::NodeId;
+use paros_core::membership::MatchmakerId;
 use tokio::sync::mpsc;
 
 use paros_net::ReplySender;

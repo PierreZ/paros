@@ -3,7 +3,8 @@
 use std::sync::PoisonError;
 
 use moonpool_sim::{StateHandle, assert_reachable, buggify_knob};
-use paros::core::{FailureDomain, NodeId, QuorumSystem};
+use paros::core::NodeId;
+use paros::core::membership::{FailureDomain, QuorumSystem};
 
 use crate::shape::registry;
 use crate::shape::scenarios::{departed_straggler, slow_link, stalled_proxy};
@@ -218,9 +219,9 @@ pub(crate) fn acceptor_config(
     state: &StateHandle,
     members: Vec<NodeId>,
     system: QuorumSystem,
-) -> paros::core::AcceptorConfig {
+) -> paros::core::membership::AcceptorConfig {
     if acceptor_zones(state) == 0 {
-        return paros::core::AcceptorConfig::new(members, system);
+        return paros::core::membership::AcceptorConfig::new(members, system);
     }
     let labeled = members
         .into_iter()
@@ -229,7 +230,7 @@ pub(crate) fn acceptor_config(
             (node, domain)
         })
         .collect();
-    paros::core::AcceptorConfig::zoned(labeled, system)
+    paros::core::membership::AcceptorConfig::zoned(labeled, system)
 }
 
 /// The run's **quorum-system policy** (#140, #141), drawn once per seed by

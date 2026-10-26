@@ -20,7 +20,7 @@ use moonpool_core::{
     Detach, LocalTaskProvider, LocalTimeProvider, SimulationResult, SystemProvider, SystemSample,
 };
 use moonpool_rpc::RpcHandle;
-use paros_core::{JournalId, JournalIdentifier, TenantId};
+use paros_core::journal::{JournalId, JournalIdentifier, TenantId};
 use paros_net::runtime::ParosProviders;
 use tokio_util::sync::CancellationToken;
 

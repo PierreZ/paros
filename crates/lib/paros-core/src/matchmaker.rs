@@ -67,7 +67,7 @@
 //! loses its disk would be unreplaceable. Following §5 of the paper, the
 //! matchmaker set carries a **generation**, and generation `g + 1` is chosen
 //! by a **single-decree Paxos instance whose acceptors are generation `g`'s
-//! matchmakers** ([`crate::DecreeRecord`] is the durable half every
+//! matchmakers** ([`crate::matchmaker::DecreeRecord`] is the durable half every
 //! matchmaker keeps). The handover is stop-the-world, which is acceptable
 //! because matchmakers are idle whenever a leader is stable:
 //!
@@ -150,7 +150,7 @@ use crate::types::{Ballot, NodeId};
 /// A journal this set holds no record for reads as this registry.
 static EMPTY_REGISTRY: BTreeMap<Ballot, Registration> = BTreeMap::new();
 
-pub use crate::contract::limits::REGISTRY_PAGE;
+use crate::contract::limits::REGISTRY_PAGE;
 
 /// One bounded page of a registry window (`[from, ballot)` of one journal's
 /// registry, in ballot order): at most `limit` records, and the ballot the

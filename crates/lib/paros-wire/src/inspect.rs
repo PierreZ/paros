@@ -9,7 +9,7 @@
 //! that does not ask for the node alone is refused, never read as "the
 //! node's first journal".
 
-use paros_core::{JournalId, JournalIdentifier, TenantId};
+use paros_core::journal::{JournalId, JournalIdentifier, TenantId};
 
 use super::{InspectReply, InspectRequest};
 

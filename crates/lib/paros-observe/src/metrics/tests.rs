@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use paros_core::{JournalId, JournalIdentifier, TenantId};
+use paros_core::journal::{JournalId, JournalIdentifier, TenantId};
 
 use super::{CallKind, CallOutcome, Metrics, Phase};
 

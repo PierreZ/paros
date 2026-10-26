@@ -48,11 +48,12 @@
 //! Further reading: Whittaker et al., *Scaling Replicated State Machines
 //! with Compartmentalization* (2021), §2.3 and §3.3.
 
+use paros_core::contract::Audience;
 use paros_core::contract::MemStorage;
-use paros_core::{
-    Audience, ColocatedNode, Command, Config, Control, Entry, LeaderUuid, LogRead, Message, NodeId,
-    ReplicaId, ReplicaNode, Seq, Slot, Value,
-};
+use paros_core::journal::{Command, Control, Entry, LeaderUuid, Seq};
+use paros_core::membership::ReplicaId;
+use paros_core::replica::LogRead;
+use paros_core::{ColocatedNode, Config, Message, NodeId, ReplicaNode, Slot, Value};
 
 const ACCEPTORS: [u64; 3] = [0, 1, 2];
 const REPLICAS: [u64; 2] = [10, 11];
@@ -65,7 +66,7 @@ fn config(id: u64) -> Config {
     Config {
         peers: ACCEPTORS.iter().copied().map(NodeId).collect(),
         replica_count: REPLICAS.len(),
-        ..Config::new(NodeId(id), paros_core::JournalIdentifier::UNSET)
+        ..Config::new(NodeId(id), paros_core::journal::JournalIdentifier::UNSET)
     }
 }
 

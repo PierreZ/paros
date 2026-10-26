@@ -36,7 +36,7 @@
 //! This is the one place the protocol's notion of "the configuration in
 //! force" is decided, and it is **not** a value chosen by Paxos. A
 //! configuration becomes authoritative the moment a leader's
-//! *reconfiguration* registration ([`crate::Registration::reconfiguration`])
+//! *reconfiguration* registration ([`crate::matchmaker::Registration::reconfiguration`])
 //! has landed at a **matchmaker quorum** — before, and independently of,
 //! any Phase 1 or Phase 2 the new acceptor set ever completes. From then on,
 //! quorum intersection puts that record in every later campaign's histories,
@@ -65,7 +65,7 @@
 //! campaigns above it. What it must never forget is the **fact**, which is
 //! why every matchmaker also holds the effective configuration as a durable
 //! monotone scalar the watermark does not touch
-//! ([`crate::MatchmakerHardState::effective`]) and reports it beside every
+//! ([`crate::matchmaker::MatchmakerHardState::effective`]) and reports it beside every
 //! history. `Matchmaking::fold` takes the maximum of the two, so a campaign
 //! whose replies show an empty history still learns the configuration in
 //! force (review finding P1: without the scalar, an ordinary leader's GC
@@ -94,7 +94,7 @@
 //!   configuration this node believes is in force, and a node that was down
 //!   or partitioned through a reconfiguration believes an old one. The ledger
 //!   distinguishes a **reconfiguration** registration (a leader's explicit
-//!   change, [`crate::Registration::reconfiguration`]) from a candidate's
+//!   change, [`crate::matchmaker::Registration::reconfiguration`]) from a candidate's
 //!   belief, and the highest-ballot reconfiguration the quorum's histories
 //!   name is the **effective configuration**. When it differs from the one an
 //!   ordinary campaign just registered, the candidate abandons the campaign,
@@ -108,7 +108,7 @@
 //!   cannot know that); GC retires it later (#123), the flagged one
 //!   included — the effective configuration outlives its record as the
 //!   durable scalar every `Registered` reply reports
-//!   ([`crate::MatchmakerHardState::effective`]).
+//!   ([`crate::matchmaker::MatchmakerHardState::effective`]).
 //! - **A membership probe** (#173) is the one matchmaker round trip that is
 //!   not a campaign: a node whose belief is only the bootstrap default asks
 //!   a quorum for the effective configuration and registers nothing
@@ -503,7 +503,7 @@ impl ColocatedNode {
     ///   the one it registered abandons the campaign and adopts that
     ///   configuration instead — `StaleConfiguration`, the rule that keeps a
     ///   superseded configuration from being reinstated by a candidate that
-    ///   missed the change (see [`crate::Registration`]).
+    ///   missed the change (see [`crate::matchmaker::Registration`]).
     /// - `Refused`: the campaign is abandoned and this node steps back to
     ///   follower; a refusal's ballot is diagnostic only (a `Stale` or
     ///   `BelowWatermark` refusal raises the round floor the next campaign

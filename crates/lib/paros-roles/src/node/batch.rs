@@ -1,6 +1,7 @@
 //! The group-commit batch (#613 (settle off the node loop)): what ends a batch, the inputs held while it flies, and the calls parked on their slot.
 
-use paros_core::{ColocatedNode, NodeId, NodeRole, ProposeResult};
+use paros_core::node::{NodeRole, ProposeResult};
+use paros_core::{ColocatedNode, NodeId};
 use paros_net::runtime::ParosProviders;
 use paros_observe::audit::Audit;
 
@@ -26,8 +27,8 @@ pub(crate) struct Phase {
     pub(crate) reasks: u64,
     pub(crate) quorum_lost: u64,
     pub(crate) watermark_fills: u64,
-    pub(crate) repair: paros_core::RepairCounters,
-    pub(crate) handoff: paros_core::HandoffCounters,
+    pub(crate) repair: paros_core::node::RepairCounters,
+    pub(crate) handoff: paros_core::node::HandoffCounters,
     pub(crate) generation: u64,
     pub(crate) needs_timeout: bool,
 }

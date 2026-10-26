@@ -98,7 +98,7 @@ pub(crate) struct SentDown {
 /// is judged (see the module doc).
 pub(crate) fn judge_sent(
     state: &StateHandle,
-    journal: paros::core::JournalIdentifier,
+    journal: paros::core::journal::JournalIdentifier,
     records: &[Vec<u8>],
     now: Duration,
 ) {

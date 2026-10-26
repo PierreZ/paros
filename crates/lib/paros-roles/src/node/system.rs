@@ -46,7 +46,10 @@ use moonpool_core::{
     Detach, LocalTaskProvider, LocalTimeProvider, SimulationError, SimulationResult,
 };
 use moonpool_rpc::RpcHandle;
-use paros_core::{JournalIdentifier, LogPage, LogRead, NodeId, Party, Seq, TenantId};
+use paros_core::NodeId;
+use paros_core::contract::Party;
+use paros_core::journal::{JournalIdentifier, Seq, TenantId};
+use paros_core::replica::{LogPage, LogRead};
 use paros_net::runtime::ParosProviders;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -104,7 +107,7 @@ pub struct ControlPlan {
     /// is born with (#190): on a machine, the founding members, which host
     /// every tenant's set until placement (#212). Empty on a deployment
     /// without matchmakers.
-    pub matchmakers: Vec<paros_core::MatchmakerId>,
+    pub matchmakers: Vec<paros_core::membership::MatchmakerId>,
     /// The journals a node outside the founding members joins **as a
     /// spare** once the registry admits it: each a configuration template
     /// (its journal, bootstrap membership, quorum system, matchmakers) whose
@@ -140,7 +143,7 @@ pub(crate) struct ControlFollower<P: ParosProviders> {
     fixed: BTreeSet<NodeId>,
     founders: Vec<NodeId>,
     /// The matchmaker set a created journal is born with (#190).
-    matchmakers: Vec<paros_core::MatchmakerId>,
+    matchmakers: Vec<paros_core::membership::MatchmakerId>,
     registry: Folder<Registry>,
     /// The registry's identifier.
     registry_key: JournalIdentifier,
@@ -305,7 +308,7 @@ impl<P: ParosProviders> ControlFollower<P> {
     }
 
     /// The matchmaker set a journal created here is born with (#190).
-    pub(crate) fn matchmakers(&self) -> &[paros_core::MatchmakerId] {
+    pub(crate) fn matchmakers(&self) -> &[paros_core::membership::MatchmakerId] {
         &self.matchmakers
     }
 
@@ -490,7 +493,7 @@ impl<P: ParosProviders> ControlFollower<P> {
     }
 
     /// The cell hosts `tenant` (its control journal `control`): follow it.
-    fn host(&mut self, tenant: TenantId, control: paros_core::JournalId) {
+    fn host(&mut self, tenant: TenantId, control: paros_core::journal::JournalId) {
         if self.dropped.contains(&tenant) {
             return;
         }

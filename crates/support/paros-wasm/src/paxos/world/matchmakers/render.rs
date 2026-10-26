@@ -1,7 +1,8 @@
 //! How the matchmaker plane draws: one [`MessageView`] per wire entry, the
 //! clause a refusal carries, and which tier each end of the wire belongs to.
 
-use paros_core::{MatchOutcome, NodeId, ReconfigureReply, ReconfigureRequest};
+use paros_core::NodeId;
+use paros_core::matchmaker::{MatchOutcome, ReconfigureReply, ReconfigureRequest};
 
 use crate::paxos::narration::many;
 use crate::paxos::view::{MessageView, PartyView, show_ballot};
@@ -196,32 +197,34 @@ pub(crate) fn plane_view(entry: &InFlight) -> Option<MessageView> {
 
 /// Why a matchmaker refused a registration, in one clause.
 #[must_use]
-pub(crate) fn why(refusal: &paros_core::MatchRefusal) -> String {
+pub(crate) fn why(refusal: &paros_core::matchmaker::MatchRefusal) -> String {
     match refusal {
-        paros_core::MatchRefusal::Stale { highest } => format!(
+        paros_core::matchmaker::MatchRefusal::Stale { highest } => format!(
             "it has already registered {}, and a ballot must be above every registered one",
             show_ballot(*highest)
         ),
-        paros_core::MatchRefusal::BelowWatermark { watermark } => format!(
+        paros_core::matchmaker::MatchRefusal::BelowWatermark { watermark } => format!(
             "its watermark is {}, and nothing below a watermark registers again",
             show_ballot(*watermark)
         ),
-        paros_core::MatchRefusal::Stopped {
+        paros_core::matchmaker::MatchRefusal::Stopped {
             successor: Some(set),
         } => format!(
             "it is frozen, and its successor is generation {} = {}",
             set.generation.0,
             show_set(set.members())
         ),
-        paros_core::MatchRefusal::Stopped { successor: None } => {
+        paros_core::matchmaker::MatchRefusal::Stopped { successor: None } => {
             "it is frozen, and no successor is chosen yet".to_string()
         }
-        paros_core::MatchRefusal::Generation { current } => format!(
+        paros_core::matchmaker::MatchRefusal::Generation { current } => format!(
             "it now serves generation {} = {}",
             current.generation.0,
             show_set(current.members())
         ),
-        paros_core::MatchRefusal::Inactive => "it serves no generation: it is a spare".to_string(),
+        paros_core::matchmaker::MatchRefusal::Inactive => {
+            "it serves no generation: it is a spare".to_string()
+        }
     }
 }
 

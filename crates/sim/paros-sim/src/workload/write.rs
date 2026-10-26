@@ -6,10 +6,10 @@ use std::time::Duration;
 
 use moonpool_sim::{assert_always, assert_reachable, assert_sometimes, buggify_with_prob};
 use paros::client::{Resolution, TruncateOutcome, WriteOptions, WriteOutcome, Writer};
-use paros::core::Command;
-use paros::core::Entry;
-use paros::core::LeaderUuid;
 use paros::core::Value;
+use paros::core::journal::Command;
+use paros::core::journal::Entry;
+use paros::core::journal::LeaderUuid;
 use paros::roles::node::command_hash;
 
 use crate::audit::{AckedWrite, AuditWorld};

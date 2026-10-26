@@ -21,7 +21,7 @@ use paros::client::fleet::read_directory;
 use paros::client::names::{
     JournalResolution, NameResolution, TenantResolution, Unreadable, read_tenant_control, resolve,
 };
-use paros::core::{JournalId, JournalIdentifier, TenantId};
+use paros::core::journal::{JournalId, JournalIdentifier, TenantId};
 use paros::model::name::{
     Abbreviations, JournalName, PrefixMatch, match_prefix, parse_full, parse_prefix,
 };

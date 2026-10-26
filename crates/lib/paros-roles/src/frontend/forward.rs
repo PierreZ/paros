@@ -6,7 +6,7 @@ use std::future::Future;
 
 use moonpool_core::LocalTimeProvider;
 use moonpool_rpc::{Execution, RpcError};
-use paros_core::{JournalId, JournalIdentifier, TenantId};
+use paros_core::journal::{JournalId, JournalIdentifier, TenantId};
 use paros_net::runtime::ParosProviders;
 
 use super::{Denial, Draws, Operation, Shared};

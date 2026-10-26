@@ -1,7 +1,8 @@
 //! The network's reports: drops, duplicates, failed deliveries and edge rejections.
 
 use moonpool_sim::{TimeProvider, assert_reachable};
-use paros::core::{Message, NodeId, Party};
+use paros::core::contract::Party;
+use paros::core::{Message, NodeId};
 use paros::net::EdgeRejection;
 
 use super::NodeAudit;

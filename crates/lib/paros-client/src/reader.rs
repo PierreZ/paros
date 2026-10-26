@@ -5,7 +5,7 @@
 //! it will never read — as [`ReaderOutcome::Gap`]: a reader that skipped it
 //! silently would hand its caller a fold with a hole it cannot see.
 
-use paros_core::{JournalIdentifier, JournalView};
+use paros_core::journal::{JournalIdentifier, JournalView};
 use paros_net::runtime::ParosProviders;
 
 use super::Client;

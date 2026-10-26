@@ -24,11 +24,11 @@ use paros::client::{
     ClaimOutcome, ReadOutcome, Retarget, SetLeaderOutcome, TruncateOutcome, WriteOutcome, Writer,
     WriterOutcome,
 };
-use paros::core::Entry;
-use paros::core::JournalIdentifier;
-use paros::core::LeaderUuid;
-use paros::core::QuorumSystem;
-use paros::core::TenantId;
+use paros::core::journal::Entry;
+use paros::core::journal::JournalIdentifier;
+use paros::core::journal::LeaderUuid;
+use paros::core::journal::TenantId;
+use paros::core::membership::QuorumSystem;
 use paros::wire::Truncate;
 use paros::wire::leader_uuid_to_proto;
 
@@ -568,14 +568,14 @@ impl Workload for ChainWorkload {
                 // truncations. A created journal runs in the mode its
                 // create drew (#241).
                 let mode = if crate::machine::is_election(ctx.state(), journal) {
-                    paros::core::WriterMode::Multi
+                    paros::core::journal::WriterMode::Multi
                 } else if let Some(mode) = created.get(&journal) {
                     if !attempts.is_empty() {
                         assert_reachable!("journal: a created journal's history is searched");
                     }
                     *mode
                 } else {
-                    paros::core::WriterMode::Single
+                    paros::core::journal::WriterMode::Single
                 };
                 crate::audit::check_control_history(attempts, mode);
             }
@@ -840,7 +840,9 @@ impl ChainWorkload {
                 .iter()
                 .enumerate()
                 .map(|(rank, ip)| {
-                    let id = crate::roles::replica_node_id(paros::core::ReplicaId(rank as u64));
+                    let id = crate::roles::replica_node_id(paros::core::membership::ReplicaId(
+                        rank as u64,
+                    ));
                     (id.0, ip.clone())
                 })
                 .collect()
@@ -987,7 +989,7 @@ impl ChainWorkload {
         let reader = config.reader && usize::try_from(client_id).unwrap_or(0) >= journal_count;
         // A multi-writer journal (#241) has no owner: every client of it
         // that writes appends, with no claim and no fence (`multi`).
-        let multi_writer = audit.mode() == paros::core::WriterMode::Multi;
+        let multi_writer = audit.mode() == paros::core::journal::WriterMode::Multi;
         // Its leader uuids derive from a random seed of its own (#241).
         let mut writer = Writer::new(journal, ctx.random().random::<u128>());
         // The system-journal operations (#189), and whether the run runs
@@ -1598,7 +1600,7 @@ impl ChainWorkload {
                         });
                         let results = join_all(attempts).await;
                         let mut committed: Option<(u64, u64, usize)> = None;
-                        let mut refused: Option<paros::core::JournalView> = None;
+                        let mut refused: Option<paros::core::journal::JournalView> = None;
                         for (attempt_target, result) in targets.into_iter().zip(results) {
                             match result {
                                 WriteOutcome::Written { seq, count, .. } => {

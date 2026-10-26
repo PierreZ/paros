@@ -63,10 +63,11 @@ pub(crate) struct MachineBoard {
     pub(crate) lost: BTreeSet<u64>,
     /// Every election journal a formatting plan named (#240): multi-writer
     /// journals, which the audit models as such.
-    pub(crate) elections: BTreeSet<paros::core::JournalIdentifier>,
+    pub(crate) elections: BTreeSet<paros::core::journal::JournalIdentifier>,
     /// The cell control journal each election journal's terms install on
     /// (#653 (election term to installed leader)), by election journal.
-    pub(crate) governs: BTreeMap<paros::core::JournalIdentifier, paros::core::JournalIdentifier>,
+    pub(crate) governs:
+        BTreeMap<paros::core::journal::JournalIdentifier, paros::core::journal::JournalIdentifier>,
     /// The address an operator founded another cell on (#216): a machine
     /// that replaced a wiped member of the run's cell, alone in its own.
     pub(crate) other_founder: Option<Address>,
@@ -201,7 +202,10 @@ pub(crate) fn formed_cell(state: &StateHandle) -> Option<ControlJournals> {
 }
 
 /// Whether `journal` is a cell's election journal (#240): multi-writer.
-pub(crate) fn is_election(state: &StateHandle, journal: paros::core::JournalIdentifier) -> bool {
+pub(crate) fn is_election(
+    state: &StateHandle,
+    journal: paros::core::journal::JournalIdentifier,
+) -> bool {
     lock(&machine_board(state)).elections.contains(&journal)
 }
 
@@ -210,8 +214,8 @@ pub(crate) fn is_election(state: &StateHandle, journal: paros::core::JournalIden
 pub(crate) fn governed(
     state: &StateHandle,
 ) -> Vec<(
-    paros::core::JournalIdentifier,
-    paros::core::JournalIdentifier,
+    paros::core::journal::JournalIdentifier,
+    paros::core::journal::JournalIdentifier,
 )> {
     lock(&machine_board(state))
         .governs

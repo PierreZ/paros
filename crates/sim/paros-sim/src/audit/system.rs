@@ -38,7 +38,8 @@ use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use moonpool_sim::{StateHandle, assert_always, assert_reachable, assert_sometimes};
-use paros::core::{JournalIdentifier, NodeId};
+use paros::core::NodeId;
+use paros::core::journal::JournalIdentifier;
 use paros::machine::CachedRegistry;
 use paros::model::address::Address;
 use paros::model::registry::{Class, Registry, RegistryEvent, RegistryRefusal};

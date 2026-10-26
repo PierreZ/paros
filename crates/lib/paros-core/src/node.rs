@@ -40,7 +40,6 @@ pub use self::reconfigure::{ReconfigureRefusal, ReconfigureResult};
 pub use self::replication::HEARTBEAT_TICKS;
 use crate::acceptor::Acceptor;
 use crate::collector::Collector;
-pub use crate::collector::GcStep;
 use crate::contract::config::Config;
 use crate::contract::hard_state::HardState;
 use crate::contract::limits::Limits;
@@ -55,19 +54,6 @@ use crate::proposer::{Proposer, Round};
 use crate::quorum_read::{QuorumReads, ReadBasis, ReadState};
 use crate::replica::Replica;
 use crate::types::{Ballot, NodeId, Slot};
-
-/// Maximum accepted records carried by one [`Message::Promise`] page — the
-/// acceptor's own bound, re-exported for the driver.
-pub use crate::acceptor::PROMISE_BATCH;
-/// Maximum recovered or gap-fill Phase-2 rounds started in one recovery pump —
-/// the proposer's own bound, re-exported for the driver.
-pub use crate::proposer::RECOVERY_BATCH as LEADER_RECOVERY_BATCH;
-/// Maximum open rounds one re-send page carries — the ceiling of
-/// [`Limits::resend_page`], re-exported for the driver.
-pub use crate::proposer::RESEND_BATCH;
-/// Maximum chosen slots one apply walk folds — the ceiling of
-/// [`Limits::apply_page`], re-exported for the driver.
-pub use crate::replica::APPLY_BATCH;
 
 /// Election timeouts a leader's blocked repair probe may stay open before the
 /// leader resigns (CTRL §4.2): a leader that cannot finish recovery — e.g.
@@ -107,7 +93,7 @@ pub enum NodeRole {
 
 /// The outcome of [`ColocatedNode::propose`], telling the driver how to answer the
 /// client: redirect on `NotLeader`, or hold the reply for `Accepted` until the
-/// slot is applied and answer from its [`crate::Outcome`] (#204) — a proposal
+/// slot is applied and answer from its [`crate::journal::Outcome`] (#204) — a proposal
 /// is never judged here, only at apply.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProposeResult {
@@ -166,12 +152,12 @@ pub enum BeliefSource {
 /// the wiring between them.
 ///
 /// `paros-core` is not one state machine but a small set of roles — the
-/// [`Acceptor`](crate::acceptor::Acceptor) (the durable promise, the accepted
+/// [`Acceptor`] (the durable promise, the accepted
 /// log, the compaction floor, the CTRL tri-state), the
-/// [`Proposer`](crate::proposer::Proposer) (the Phase-1 election, its repair
+/// [`Proposer`] (the Phase-1 election, its repair
 /// probe, the Phase-2 rounds, the bounded recovery, the allocator and the
 /// leadership's standing authority) and the
-/// [`Replica`](crate::replica::Replica) (the chosen prefix, the apply walk,
+/// [`Replica`] (the chosen prefix, the apply walk,
 /// the journal fold). Each is its own type and decides its own
 /// questions. This is the deployment Multi-Paxos names: all three on every
 /// node, plus what only a colocation can own —
@@ -1080,7 +1066,7 @@ impl ColocatedNode {
         &self.pending_messages
     }
 
-    pub(crate) fn pending_committed(&self) -> &[(Slot, Ballot, Command, crate::Outcome)] {
+    pub(crate) fn pending_committed(&self) -> &[(Slot, Ballot, Command, crate::journal::Outcome)] {
         let committed = self.replica.committed();
         // Persist-before-apply: every surfaced entry is inside the chosen
         // index this same batch makes durable.

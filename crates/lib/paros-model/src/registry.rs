@@ -69,7 +69,8 @@ pub use crate::machine::Class;
 
 use crate::machine::{Locality, incarnation_halves};
 use crate::tags::UserTags;
-use paros_core::{NodeId, TenantId};
+use paros_core::NodeId;
+use paros_core::journal::TenantId;
 use paros_wire::system as wire;
 use std::collections::{BTreeMap, BTreeSet};
 

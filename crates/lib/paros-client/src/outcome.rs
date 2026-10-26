@@ -6,7 +6,8 @@
 //! **ambiguous**, never "not done": the node may have run the call.
 
 use moonpool_rpc::RpcError;
-use paros_core::{JournalView, ReconfigureRefusal};
+use paros_core::journal::JournalView;
+use paros_core::node::ReconfigureRefusal;
 
 use paros_model::authz::Denial;
 use paros_wire::FrontendVerdict;

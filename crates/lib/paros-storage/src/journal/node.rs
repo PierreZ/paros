@@ -5,7 +5,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use moonpool_buggify::hint::Strike;
 use moonpool_core::LocalStorageProvider;
 use moonpool_journal::{Batch, Journal, ReadError, Recovery};
-use paros_core::{Ballot, Command, Config, HardState, JournalState, MustSync, Slot, Storage};
+use paros_core::contract::MustSync;
+use paros_core::journal::{Command, JournalState};
+use paros_core::{Ballot, Config, HardState, Slot, Storage};
 use serde::{Deserialize, Serialize};
 
 use super::{
@@ -163,7 +165,7 @@ impl<P: LocalStorageProvider> JournalStorage<P> {
     pub async fn peek_formatted(
         provider: &P,
         dir: &str,
-        journal: paros_core::JournalIdentifier,
+        journal: paros_core::journal::JournalIdentifier,
     ) -> Result<bool, StorageError> {
         let Some(bytes) = Journal::peek_meta(provider, dir, store_id(journal))
             .await
@@ -743,7 +745,7 @@ impl<P: LocalStorageProvider> LogStorage for JournalStorage<P> {
             let scrubbed = match own {
                 Some((own_ballot, own_command)) if intact => ScrubbedSlot::Intact {
                     ballot: *own_ballot,
-                    digest: paros_core::command_fingerprint(own_command),
+                    digest: paros_core::journal::command_fingerprint(own_command),
                 },
                 _ => {
                     if own.is_some() {

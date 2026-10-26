@@ -2,7 +2,9 @@
 
 use std::collections::BTreeMap;
 
-use paros_core::{Ballot, Command, Message, NodeId, Party, Slot};
+use paros_core::contract::Party;
+use paros_core::journal::Command;
+use paros_core::{Ballot, Message, NodeId, Slot};
 
 use super::codec::{
     ballot_from_proto, ballot_to_proto, command_from_proto, command_to_proto, config_from_proto,

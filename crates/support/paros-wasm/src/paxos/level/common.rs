@@ -2,7 +2,9 @@
 //! the worlds they build, what a goal reads off them, and the action
 //! shorthands a reference is written in.
 
-use paros_core::{Command, Config, NodeId, QuorumSystem};
+use paros_core::journal::Command;
+use paros_core::membership::QuorumSystem;
+use paros_core::{Config, NodeId};
 
 use crate::paxos::action::Action;
 use crate::paxos::auto::AutomationFlag;
@@ -63,7 +65,7 @@ pub(super) fn config(id: NodeId, size: u64, system: QuorumSystem) -> Config {
     Config {
         peers: peers(size),
         quorum_system: system,
-        ..Config::new(id, paros_core::JournalIdentifier::UNSET)
+        ..Config::new(id, paros_core::journal::JournalIdentifier::UNSET)
     }
 }
 
@@ -111,7 +113,7 @@ pub(super) fn accepted(world: &WorldKind, node: u64) -> Vec<String> {
         .filter(|(slot, _)| {
             matches!(
                 replica.outcome_at(*slot),
-                Some(paros_core::Outcome::Accepted { .. })
+                Some(paros_core::journal::Outcome::Accepted { .. })
             )
         })
         .map(|(_, command)| show_command(command))

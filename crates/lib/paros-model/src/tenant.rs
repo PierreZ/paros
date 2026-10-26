@@ -36,7 +36,8 @@
 
 use std::collections::BTreeMap;
 
-use paros_core::{AcceptorConfig, JournalId, QuorumSystem, TenantId, WriterMode};
+use paros_core::journal::{JournalId, TenantId, WriterMode};
+use paros_core::membership::{AcceptorConfig, QuorumSystem};
 use prost::Message as _;
 
 use crate::checkpoint::{Checkpointable, Folded};

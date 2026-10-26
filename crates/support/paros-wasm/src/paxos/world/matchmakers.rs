@@ -4,8 +4,8 @@
 //! This is `crates/lib/paros-core/examples/matchmaker.rs` with the parts the
 //! example hard-codes turned into player choices. The example's
 //! `MatchmakerNode` — a [`Matchmaker`](paros_core::Matchmaker) role, the
-//! static [`MatchmakerConfig`](paros_core::MatchmakerConfig) it boots with, and
-//! a [`MemRegistry`](paros_core::MemRegistry) disk it writes to
+//! static [`MatchmakerConfig`](paros_core::matchmaker::MatchmakerConfig) it boots with, and
+//! a [`MemRegistry`](paros_core::matchmaker::MemRegistry) disk it writes to
 //! and reboots from — is [`MatchmakerProcess`] here, and its `deliver_match` /
 //! `deliver_reconfigure` are the two methods below: **step, persist, take the
 //! reply, advance**, in that order and never another.
@@ -48,7 +48,8 @@ mod prompts;
 mod render;
 mod verbs;
 
-use paros_core::{MatchmakerId, NodeId};
+use paros_core::NodeId;
+use paros_core::membership::MatchmakerId;
 
 pub(crate) use process::JOURNAL;
 pub use process::{MatchmakerProcess, RegistryDisk};

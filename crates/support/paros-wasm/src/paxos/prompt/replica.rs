@@ -3,7 +3,8 @@
 
 use std::collections::BTreeMap;
 
-use paros_core::{Entry, JournalState, NodeId, Outcome, Slot};
+use paros_core::journal::{Entry, JournalState, Outcome};
+use paros_core::{NodeId, Slot};
 
 use super::{Choice, Prompt, PromptKind};
 use crate::paxos::narration;
@@ -195,7 +196,7 @@ impl Prompt {}
 
 /// The journal's writer as a prompt names it: the level's client that leads
 /// it, or nobody.
-fn writer_text(folded: &paros_core::JournalState) -> String {
+fn writer_text(folded: &paros_core::journal::JournalState) -> String {
     folded
         .leader
         .and_then(crate::paxos::world::ClientId::of)

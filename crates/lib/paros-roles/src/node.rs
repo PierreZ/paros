@@ -94,10 +94,12 @@ use journals::{Journals, SingleStore};
 use matchmaking::{MatchmakerLinks, folded_answer, report_match_step};
 use metered::{Meter, journal_names};
 use moonpool_core::{LocalTimeProvider, RandomProvider, SimulationError, SimulationResult};
-use paros_core::{
-    Entry, GcAck, JournalId, JournalIdentifier, MatchReply, MatchStep, MatchmakerId, Message,
-    NodeId, Party, ProxyId, ReconfigureReply, ReconfigurerStep, Seq, TenantId, Value,
-};
+use paros_core::contract::Party;
+use paros_core::journal::{Entry, JournalId, JournalIdentifier, Seq, TenantId};
+use paros_core::matchmaker::{GcAck, MatchReply, ReconfigureReply, ReconfigurerStep};
+use paros_core::membership::{MatchmakerId, ProxyId};
+use paros_core::node::MatchStep;
+use paros_core::{Message, NodeId, Value};
 use paros_model::machine::ControlJournals;
 use paros_net::MatchmakerClient;
 use paros_net::runtime::ParosProviders;
@@ -995,7 +997,7 @@ where
                     node = self_id,
                     matchmaker = matchmaker.0,
                     round = ballot.round,
-                    registered = matches!(reply.outcome, paros_core::MatchOutcome::Registered { .. }),
+                    registered = matches!(reply.outcome, paros_core::matchmaker::MatchOutcome::Registered { .. }),
                     "match_reply_received"
                 );
                 let folded = folded_answer(&reply);
@@ -1178,7 +1180,7 @@ where
                 // that journal, and keeps serving the others (#188). No
                 // journal has a default (#439 (operator calls name their
                 // journal)): an unset one, or one not live here, is refused.
-                let asked = JournalIdentifier::new(TenantId(req.tenant), paros_core::JournalId(req.journal));
+                let asked = JournalIdentifier::new(TenantId(req.tenant), paros_core::journal::JournalId(req.journal));
                 let Some((&journal, rt)) = journals.named(asked) else {
                     moonpool_assertions::reachable!("operator: a retirement names a journal the node does not serve");
                     let refusal = RetireRefusal::UnknownJournal;
@@ -1198,7 +1200,7 @@ where
                 // it (`no_matchmakers`). No journal has a default (#439
                 // (operator calls name their journal)): an unset one, or one
                 // not live here, is refused `unknown_journal`.
-                let asked = JournalIdentifier::new(TenantId(req.tenant), paros_core::JournalId(req.journal));
+                let asked = JournalIdentifier::new(TenantId(req.tenant), paros_core::journal::JournalId(req.journal));
                 let Some((&journal, rt)) = journals.named(asked) else {
                     moonpool_assertions::reachable!("operator: a reconfiguration names a journal the node does not serve");
                     shared.with(&node_audit).answer(Reply::Reconfigure, reply, operator::unknown_journal());
@@ -1221,7 +1223,7 @@ where
                 // settle tail makes its rewrite durable before the answer
                 // leaves. No journal has a default: an unset one, or one not
                 // live here, is refused.
-                let asked = JournalIdentifier::new(TenantId(req.tenant), paros_core::JournalId(req.journal));
+                let asked = JournalIdentifier::new(TenantId(req.tenant), paros_core::journal::JournalId(req.journal));
                 let Some((&journal, rt)) = journals.named(asked) else {
                     let _ = reply.send(scrub::refused("unknown_journal"));
                     continue;

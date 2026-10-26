@@ -7,10 +7,13 @@ use std::net::IpAddr;
 
 use moonpool_core::{LocalStorageProvider, OpenOptions};
 use moonpool_sim::{SimStorageProvider, SimWorld, StorageConfiguration};
-use paros_core::{
-    Ballot, Command, Config, Control, Entry, JournalId, JournalIdentifier, JournalState,
-    LeaderUuid, MatchmakerConfig, MatchmakerId, MustSync, NodeId, Seq, Slot, TenantId, Value,
+use paros_core::contract::MustSync;
+use paros_core::journal::{
+    Command, Control, Entry, JournalId, JournalIdentifier, JournalState, LeaderUuid, Seq, TenantId,
 };
+use paros_core::matchmaker::MatchmakerConfig;
+use paros_core::membership::MatchmakerId;
+use paros_core::{Ballot, Config, NodeId, Slot, Value};
 
 use super::{inspect, names};
 use crate::{CellPlan, Class, MachineRecord, read_all, write_all};

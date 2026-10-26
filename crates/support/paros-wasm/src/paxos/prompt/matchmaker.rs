@@ -3,7 +3,8 @@
 
 use std::collections::BTreeMap;
 
-use paros_core::{Ballot, MatchmakerId, NodeId};
+use paros_core::membership::MatchmakerId;
+use paros_core::{Ballot, NodeId};
 
 use crate::paxos::view::show_ballot;
 
@@ -182,19 +183,23 @@ impl Prompt {
         ballot: Ballot,
         asked: u64,
         held: u64,
-        phase: paros_core::MatchmakerPhase,
-        refusal: Option<&paros_core::MatchRefusal>,
+        phase: paros_core::matchmaker::MatchmakerPhase,
+        refusal: Option<&paros_core::matchmaker::MatchRefusal>,
     ) -> Self {
         let b = show_ballot(ballot);
         let standing = match phase {
-            paros_core::MatchmakerPhase::Active => format!("it serves generation {held}"),
-            paros_core::MatchmakerPhase::Stopped => {
+            paros_core::matchmaker::MatchmakerPhase::Active => {
+                format!("it serves generation {held}")
+            }
+            paros_core::matchmaker::MatchmakerPhase::Stopped => {
                 format!("it is frozen for generation {held}")
             }
-            paros_core::MatchmakerPhase::Inactive => {
+            paros_core::matchmaker::MatchmakerPhase::Inactive => {
                 "it serves no generation, because it is a spare".to_string()
             }
-            paros_core::MatchmakerPhase::Fresh => "no node ever wrote anything here".to_string(),
+            paros_core::matchmaker::MatchmakerPhase::Fresh => {
+                "no node ever wrote anything here".to_string()
+            }
         };
         let expected = if refusal.is_some() { "refuse" } else { "serve" };
         let mut explanations = BTreeMap::new();

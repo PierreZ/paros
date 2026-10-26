@@ -476,13 +476,13 @@ mod tests {
                 (NodeId(7), addr.clone()),
                 (NodeId(9), addr),
             ],
-            control: paros_core::JournalIdentifier::new(
-                paros_core::TenantId(1),
-                paros_core::JournalId(1),
+            control: paros_core::journal::JournalIdentifier::new(
+                paros_core::journal::TenantId(1),
+                paros_core::journal::JournalId(1),
             ),
-            election: paros_core::JournalIdentifier::new(
-                paros_core::TenantId(1),
-                paros_core::JournalId(2),
+            election: paros_core::journal::JournalIdentifier::new(
+                paros_core::journal::TenantId(1),
+                paros_core::journal::JournalId(2),
             ),
             fleet: None,
             journals: Vec::new(),

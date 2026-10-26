@@ -95,7 +95,8 @@ use std::time::Duration;
 
 use moonpool_core::LocalTimeProvider;
 use moonpool_rpc::RpcHandle;
-use paros_core::{JournalIdentifier, JournalView, LeaderUuid, QuorumSystem, TenantId};
+use paros_core::journal::{JournalIdentifier, JournalView, LeaderUuid, TenantId};
+use paros_core::membership::QuorumSystem;
 use paros_net::runtime::ParosProviders;
 use tokio_util::sync::CancellationToken;
 
@@ -1287,7 +1288,7 @@ impl<P: ParosProviders> Client<P> {
     pub async fn reconfigure_to(
         &self,
         journal: JournalIdentifier,
-        config: &paros_core::AcceptorConfig,
+        config: &paros_core::membership::AcceptorConfig,
         target: usize,
     ) -> ReconfigureOutcome {
         let members: Vec<u64> = config.members().iter().map(|n| n.0).collect();
@@ -1354,7 +1355,7 @@ impl<P: ParosProviders> Client<P> {
                     server = next;
                 }
                 ReconfigureOutcome::Refused {
-                    refusal: paros_core::ReconfigureRefusal::Unsettled,
+                    refusal: paros_core::node::ReconfigureRefusal::Unsettled,
                     ..
                 } => {
                     if !self.pause(self.tunables.retry_backoff).await {

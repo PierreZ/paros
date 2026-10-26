@@ -2,11 +2,12 @@
 //! policy around [`paros_core::MatchmakerReconfigurer`], which holds no clock
 //! and no durable state of its own.
 
-use paros_core::{
-    Limits, MatchmakerGeneration, MatchmakerId, MatchmakerReconfigurer, MatchmakerSet, NodeId,
+use paros_core::matchmaker::{
     PendingBootstrap, ReconfigureReply, ReconfigureRequest, ReconfigurerPhase, ReconfigurerStep,
     Reconstruction, StartRefusal,
 };
+use paros_core::membership::{MatchmakerGeneration, MatchmakerId, MatchmakerSet};
+use paros_core::{Limits, MatchmakerReconfigurer, NodeId};
 
 use super::report::Cadence;
 use paros_observe::audit::Audit;
@@ -43,7 +44,7 @@ impl HandoverDriver {
         let reconfigurer = MatchmakerReconfigurer::new(
             node,
             Limits {
-                registry_page: page.clamp(1, paros_core::REGISTRY_PAGE),
+                registry_page: page.clamp(1, paros_core::contract::limits::REGISTRY_PAGE),
                 ..Limits::DEFAULT
             },
         );

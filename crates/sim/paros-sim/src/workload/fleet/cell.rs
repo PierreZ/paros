@@ -14,7 +14,7 @@ use moonpool_sim::{
 use paros::client::bootstrap::{self, InitOutcome};
 use paros::client::fleet::{FleetRefusal, Stage};
 use paros::client::initialize::{InitParams, InitRefusal, InitRun, Initialized};
-use paros::core::JournalIdentifier;
+use paros::core::journal::JournalIdentifier;
 use paros::machine::ControlJournals;
 
 use super::super::system::Announce;

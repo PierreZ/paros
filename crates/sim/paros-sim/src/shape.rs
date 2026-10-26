@@ -293,7 +293,7 @@ pub(crate) fn boot(state: &StateHandle, ip: &str) -> Incarnation {
 mod tests {
     use super::*;
     use crate::shape::quorum::grid_layouts;
-    use paros::core::QuorumSystem;
+    use paros::core::membership::QuorumSystem;
 
     /// The mechanism, not a seed: a second boot of the same node returns the
     /// first boot's shape without drawing again, while another node gets its

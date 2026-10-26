@@ -86,7 +86,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 
-use paros::core::{JournalView, LeaderUuid, WriterMode};
+use paros::core::journal::{JournalView, LeaderUuid, WriterMode};
 
 use crate::workload::chain::splitmix;
 
@@ -1342,10 +1342,10 @@ fn mix128(x: u128) -> u128 {
 #[cfg(test)]
 mod tests {
     use super::{Attempt, Call, Seen, check, judged};
-    use paros::core::JournalView;
-    use paros::core::LeaderUuid;
-    use paros::core::Seq;
-    use paros::core::WriterMode;
+    use paros::core::journal::JournalView;
+    use paros::core::journal::LeaderUuid;
+    use paros::core::journal::Seq;
+    use paros::core::journal::WriterMode;
 
     /// Client `k`'s leader uuid (the unset uuid is never one).
     fn u(k: u64) -> LeaderUuid {

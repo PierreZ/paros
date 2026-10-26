@@ -392,7 +392,7 @@ fn member(registry: Option<&Registry>, id: NodeId, addr: &Address) -> wire::Memb
 /// place is left out), with its machine interface.
 fn batchers_of(
     registry: &Registry,
-    tenant: paros_core::TenantId,
+    tenant: paros_core::journal::TenantId,
     book: &[(NodeId, Address)],
 ) -> Vec<wire::Member> {
     let nodes: std::collections::BTreeSet<NodeId> = registry

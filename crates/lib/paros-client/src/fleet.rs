@@ -89,7 +89,8 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use paros_core::{JournalIdentifier, NodeId, TenantId};
+use paros_core::NodeId;
+use paros_core::journal::{JournalIdentifier, TenantId};
 use paros_net::runtime::ParosProviders;
 
 use super::Client;

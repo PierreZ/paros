@@ -36,7 +36,7 @@ pub(super) struct SimStores<'a> {
 
 /// The directory a journal's store lives in on a node's simulated disk
 /// (#187, #188: one directory per journal, by its identifier, #235).
-pub(super) fn journal_dir(journal: paros::core::JournalIdentifier) -> String {
+pub(super) fn journal_dir(journal: paros::core::journal::JournalIdentifier) -> String {
     format!("paros/journals/{}/{}", journal.tenant.0, journal.journal.0)
 }
 
@@ -66,7 +66,7 @@ async fn resolve_seat_provisioning(ctx: &SimContext, seat: &Seat, ip: &str) {
 pub(super) async fn resolve_journal_provisioning(
     ctx: &SimContext,
     world: &Mutex<StorageWorld>,
-    journal: paros::core::JournalIdentifier,
+    journal: paros::core::journal::JournalIdentifier,
     ip: &str,
 ) {
     let ambiguous = world
@@ -97,13 +97,16 @@ pub(super) async fn resolve_journal_provisioning(
 }
 
 impl SimStores<'_> {
-    fn seat(&self, journal: paros::core::JournalIdentifier) -> Option<&Seat> {
+    fn seat(&self, journal: paros::core::journal::JournalIdentifier) -> Option<&Seat> {
         self.seats.iter().find(|seat| seat.journal == journal)
     }
 
     /// A port on `journal`'s audit world and no journal's board — for a
     /// journal this node holds no seat for, and for the node's own facts.
-    fn world_audit(&self, journal: paros::core::JournalIdentifier) -> NodeAudit<SimTimeProvider> {
+    fn world_audit(
+        &self,
+        journal: paros::core::journal::JournalIdentifier,
+    ) -> NodeAudit<SimTimeProvider> {
         let audit = NodeAudit::new(
             self.ctx.time().clone(),
             audit_world_for(self.ctx.state(), journal),
@@ -119,7 +122,7 @@ impl JournalStores for SimStores<'_> {
     type Store = LedgeredJournal;
     type Audit = NodeAudit<SimTimeProvider>;
 
-    fn journals(&self) -> Vec<paros::core::JournalIdentifier> {
+    fn journals(&self) -> Vec<paros::core::journal::JournalIdentifier> {
         self.seats
             .iter()
             .filter(|seat| !seat.created)
@@ -129,7 +132,7 @@ impl JournalStores for SimStores<'_> {
 
     async fn open(
         &mut self,
-        journal: paros::core::JournalIdentifier,
+        journal: paros::core::journal::JournalIdentifier,
     ) -> Option<(Self::Store, BootKind)> {
         let seat = self.seat(journal).filter(|seat| !seat.deleted)?;
         resolve_seat_provisioning(self.ctx, seat, self.ip).await;
@@ -198,7 +201,7 @@ impl JournalStores for SimStores<'_> {
         Some((store, boot))
     }
 
-    fn audit(&self, journal: paros::core::JournalIdentifier) -> Self::Audit {
+    fn audit(&self, journal: paros::core::journal::JournalIdentifier) -> Self::Audit {
         self.seat(journal)
             .map_or_else(|| self.world_audit(journal), |seat| seat.audit.clone())
     }
@@ -217,7 +220,7 @@ impl JournalStores for SimStores<'_> {
     /// every ask names the ordered default.
     fn create(
         &mut self,
-        journal: paros::core::JournalIdentifier,
+        journal: paros::core::journal::JournalIdentifier,
         config: Config,
         durability: paros::storage::journal::Durability,
     ) -> bool {
@@ -243,7 +246,7 @@ impl JournalStores for SimStores<'_> {
     /// a one-journal node's fail-stop exit, rather than at a re-open the run
     /// may end before (a node that serves the system journals keeps running
     /// with the journal down; witness 18183308543219257601).
-    fn quarantined(&mut self, journal: paros::core::JournalIdentifier) {
+    fn quarantined(&mut self, journal: paros::core::journal::JournalIdentifier) {
         if let Some(seat) = self.seat(journal)
             && seat
                 .world
@@ -256,7 +259,7 @@ impl JournalStores for SimStores<'_> {
         }
     }
 
-    fn delete(&mut self, journal: paros::core::JournalIdentifier) {
+    fn delete(&mut self, journal: paros::core::journal::JournalIdentifier) {
         if let Some(seat) = self.seats.iter_mut().find(|seat| seat.journal == journal) {
             seat.deleted = true;
         }

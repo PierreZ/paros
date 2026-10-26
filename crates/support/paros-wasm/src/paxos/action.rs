@@ -94,14 +94,14 @@ pub enum QuorumSpec {
 impl QuorumSpec {
     /// The core quorum system it names.
     #[must_use]
-    pub fn system(self) -> paros_core::QuorumSystem {
+    pub fn system(self) -> paros_core::membership::QuorumSystem {
         match self {
-            QuorumSpec::Majority => paros_core::QuorumSystem::Majority,
-            QuorumSpec::Flexible { q1, q2 } => paros_core::QuorumSystem::Flexible {
+            QuorumSpec::Majority => paros_core::membership::QuorumSystem::Majority,
+            QuorumSpec::Flexible { q1, q2 } => paros_core::membership::QuorumSystem::Flexible {
                 q1: usize::try_from(q1).unwrap_or(usize::MAX),
                 q2: usize::try_from(q2).unwrap_or(usize::MAX),
             },
-            QuorumSpec::Grid { rows, cols } => paros_core::QuorumSystem::grid(
+            QuorumSpec::Grid { rows, cols } => paros_core::membership::QuorumSystem::grid(
                 usize::try_from(rows).unwrap_or(usize::MAX),
                 usize::try_from(cols).unwrap_or(usize::MAX),
             ),

@@ -29,11 +29,11 @@ use std::time::Duration;
 
 use moonpool_sim::{SimContext, assert_always, assert_reachable};
 use paros::client::{SetLeaderOutcome, TruncateOutcome, WriteOutcome, Writer, write_request};
-use paros::core::Command;
-use paros::core::Control;
-use paros::core::JournalIdentifier;
-use paros::core::TenantId;
 use paros::core::Value;
+use paros::core::journal::Command;
+use paros::core::journal::Control;
+use paros::core::journal::JournalIdentifier;
+use paros::core::journal::TenantId;
 use paros::wire::Truncate;
 use paros::wire::leader_uuid_to_proto;
 

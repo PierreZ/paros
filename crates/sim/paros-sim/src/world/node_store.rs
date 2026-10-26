@@ -16,13 +16,13 @@ use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 use moonpool_sim::{SimStorageProvider, StateHandle, assert_reachable};
 use paros::core::Ballot;
-use paros::core::Command;
 use paros::core::Config;
 use paros::core::HardState;
-use paros::core::JournalState;
-use paros::core::MustSync;
 use paros::core::Slot;
 use paros::core::Storage;
+use paros::core::contract::MustSync;
+use paros::core::journal::Command;
+use paros::core::journal::JournalState;
 use paros::storage::LogStorage;
 use paros::storage::StorageError;
 use paros::storage::journal::JournalStorage;

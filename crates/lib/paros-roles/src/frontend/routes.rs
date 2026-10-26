@@ -19,7 +19,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use moonpool_rpc::RpcHandle;
-use paros_core::{JournalIdentifier, TenantId};
+use paros_core::journal::{JournalIdentifier, TenantId};
 use paros_net::runtime::ParosProviders;
 
 use super::{Shared, lock};

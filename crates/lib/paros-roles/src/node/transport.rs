@@ -13,7 +13,10 @@ use moonpool_core::{
     Detach, LocalTaskProvider, LocalTimeProvider, SimulationError, SimulationResult,
 };
 use moonpool_rpc::{InterfaceRef, RpcError, RpcHandle, ServiceClient};
-use paros_core::{Audience, JournalIdentifier, Message, NodeId, Party, ProxyId};
+use paros_core::contract::{Audience, Party};
+use paros_core::journal::JournalIdentifier;
+use paros_core::membership::ProxyId;
+use paros_core::{Message, NodeId};
 use paros_net::runtime::ParosProviders;
 use prost::Message as ProstMessage;
 use tokio_util::sync::CancellationToken;

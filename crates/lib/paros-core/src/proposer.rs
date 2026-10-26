@@ -1,7 +1,7 @@
 //! The **proposer** component: the leader-side tallies of Multi-Paxos — the
 //! Phase-1 election, its CTRL repair probe, the per-slot Phase-2 rounds and
 //! the bounded recovery a fresh leadership drains — judged over a
-//! [`QuorumSystem`](crate::QuorumSystem), never over a raw count.
+//! [`QuorumSystem`](crate::membership::QuorumSystem), never over a raw count.
 //!
 //! The component holds **volatile** state only: everything here dies whole
 //! when a leadership does ([`Proposer::abandon`]), and none of it is ever
@@ -29,7 +29,7 @@
 //! `Id`, the identity its quorums are counted in (node ids for the acceptor
 //! pool, matchmaker ids for the handover's decree over `M_g`), and `V`, the
 //! value its rounds carry — of which it needs only
-//! [`Fingerprint`](crate::Fingerprint), the "which value is this" an
+//! [`Fingerprint`](crate::types::Fingerprint), the "which value is this" an
 //! `Accepted` reports. The node deployment is `Proposer<NodeId, Command>`.
 //!
 //! [`ColocatedNode`](crate::ColocatedNode) is the wiring: it opens the phases, feeds the
@@ -49,7 +49,7 @@ pub use self::election::Election;
 pub use self::probe::{RepairProbe, RepairQuery};
 pub use self::recovery::{Recovery, RecoveryPolicy, RecoveryStep};
 pub use self::rounds::{Custody, PendingAccept, Round, Rounds};
-use crate::acceptor::PROMISE_BATCH;
+use crate::contract::limits::PROMISE_BATCH;
 use crate::membership::AcceptorConfig;
 use crate::types::{Ballot, Slot};
 
@@ -57,7 +57,7 @@ use crate::types::{Ballot, Slot};
 /// where its `Prepare` started, who has answered **completely**, and where
 /// each non-terminal answerer's next page must begin.
 ///
-/// A `Promise` is paged ([`crate::PROMISE_BATCH`]), so both Phase-1-shaped
+/// A `Promise` is paged ([`crate::contract::limits::PROMISE_BATCH`]), so both Phase-1-shaped
 /// tallies — the election and the leader's repair probe — run the same
 /// six-step fold: refuse a page for another ballot or from a sender already
 /// done, refuse one whose shape or cursor is wrong, merge what it carries,
@@ -386,7 +386,7 @@ fn merge_report<V: PartialEq>(
     );
 }
 
-pub use crate::contract::limits::{RECOVERY_BATCH, RESEND_BATCH};
+use crate::contract::limits::RESEND_BATCH;
 
 /// The proposer component (see the module doc), over the acceptor identity
 /// `Id` its tallies count and the value `V` its rounds carry.

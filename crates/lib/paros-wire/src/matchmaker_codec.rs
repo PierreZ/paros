@@ -3,12 +3,14 @@
 
 use std::collections::BTreeMap;
 
-use paros_core::{
-    AcceptorConfig, Ballot, BootstrapPage, GcAck, GcRequest, JournalId, JournalRegistry,
-    MatchOutcome, MatchRefusal, MatchReply, MatchRequest, MatchmakerGeneration, MatchmakerId,
-    MatchmakerPhase, MatchmakerSet, NodeId, ReconfigureReply, ReconfigureRequest, Registration,
-    RegistrationKind, TenantId,
+use paros_core::journal::{JournalId, TenantId};
+use paros_core::matchmaker::{
+    BootstrapPage, GcAck, GcRequest, JournalRegistry, MatchOutcome, MatchRefusal, MatchReply,
+    MatchRequest, MatchmakerPhase, ReconfigureReply, ReconfigureRequest, Registration,
+    RegistrationKind,
 };
+use paros_core::membership::{AcceptorConfig, MatchmakerGeneration, MatchmakerId, MatchmakerSet};
+use paros_core::{Ballot, NodeId};
 
 use super::codec::{
     ballot_from_proto, ballot_to_proto, config_from_proto, config_to_proto, unique_map,

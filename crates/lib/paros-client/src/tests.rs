@@ -4,7 +4,9 @@
 //! The policy loops are judged by the simulation, which runs them.
 
 use moonpool_rpc::{ErrorReason, RpcError};
-use paros_core::{JournalIdentifier, JournalView, LeaderUuid, ReconfigureRefusal, Seq, Value};
+use paros_core::Value;
+use paros_core::journal::{JournalIdentifier, JournalView, LeaderUuid, Seq};
+use paros_core::node::ReconfigureRefusal;
 
 use super::outcome::{
     MatchmakersRefusal, ReadOutcome, ReconfigureMatchmakersOutcome, ReconfigureOutcome,
@@ -318,11 +320,14 @@ fn every_refusal_label_the_node_sends_is_typed() {
 fn a_read_back_proof_is_withheld_where_two_own_writes_overlap() {
     // Hunt seed 8440881997986470091: two empty-record batches tile the
     // positions of a four-record write sent after the writer rolled back.
-    let journal = JournalIdentifier::new(paros_core::TenantId(7), paros_core::JournalId(9));
+    let journal = JournalIdentifier::new(
+        paros_core::journal::TenantId(7),
+        paros_core::journal::JournalId(9),
+    );
     let mut writer = Writer::new(journal, 7);
     let uuid = leader_uuid(7, 0);
     writer.won(&state(Some(uuid), 0, 0));
-    let pair = |seq| paros_core::Entry {
+    let pair = |seq| paros_core::journal::Entry {
         leader: uuid,
         seq: Seq(seq),
         records: vec![Value(Vec::new()); 2],
@@ -384,7 +389,10 @@ fn a_pipeline_reopened_behind_an_unsettled_write_proves_no_lane_inside_it() {
 
 #[test]
 fn a_writer_owns_only_what_it_claimed_and_stops_when_superseded() {
-    let journal = JournalIdentifier::new(paros_core::TenantId(7), paros_core::JournalId(9));
+    let journal = JournalIdentifier::new(
+        paros_core::journal::TenantId(7),
+        paros_core::journal::JournalId(9),
+    );
     let mut writer = Writer::new(journal, 7);
     let first = leader_uuid(7, 0);
     assert_eq!(writer.uuid(), first);
@@ -491,7 +499,10 @@ fn derived_leader_uuids_are_set_and_distinct() {
 
 #[test]
 fn a_reader_resumes_at_the_floor_and_reports_the_gap() {
-    let journal = JournalIdentifier::new(paros_core::TenantId(7), paros_core::JournalId(9));
+    let journal = JournalIdentifier::new(
+        paros_core::journal::TenantId(7),
+        paros_core::journal::JournalId(9),
+    );
     let mut reader = Reader::new(journal, 3);
     let request = reader.request(16, 50);
     assert_eq!(
@@ -537,7 +548,10 @@ fn a_reader_resumes_at_the_floor_and_reports_the_gap() {
 
 /// A pipeline over a writer that won `journal` at position `next`.
 fn leading_lanes(next: u64) -> (super::pipeline::Lanes, LeaderUuid) {
-    let journal = JournalIdentifier::new(paros_core::TenantId(7), paros_core::JournalId(9));
+    let journal = JournalIdentifier::new(
+        paros_core::journal::TenantId(7),
+        paros_core::journal::JournalId(9),
+    );
     let mut writer = Writer::new(journal, 11);
     let uuid = writer.uuid();
     writer.won(&state(Some(uuid), next, 0));
@@ -553,7 +567,10 @@ fn a_pipeline_gives_consecutive_positions_and_waits_out_an_early_write() {
     use super::WriterOutcome;
     use super::pipeline::{Admit, Folded, Lanes, Resumed};
 
-    let journal = JournalIdentifier::new(paros_core::TenantId(7), paros_core::JournalId(9));
+    let journal = JournalIdentifier::new(
+        paros_core::journal::TenantId(7),
+        paros_core::journal::JournalId(9),
+    );
     let idle = Lanes::new(Writer::new(journal, 3));
     assert_eq!(idle.admit(), Admit::NotOwner);
 

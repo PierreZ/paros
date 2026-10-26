@@ -23,7 +23,7 @@ use crate::types::{Ballot, Slot};
 ///
 /// 1. **Persist** [`Ready::writes`] to stable storage, applying each
 ///    [`WriteOp`] in order; fsync the batch first if any op
-///    [`needs_sync`](WriteOp::needs_sync) (the [`crate::MustSync`] contract).
+///    [`needs_sync`](WriteOp::needs_sync) (the [`crate::contract::MustSync`] contract).
 /// 2. **Send** [`Ready::messages`] to peers — *only after* step 1 is durable. A
 ///    `Promise`/`Accepted` published before its durable write is on disk is a
 ///    safety violation (a crash could un-promise / un-accept).
@@ -156,7 +156,7 @@ impl<'a> Ready<'a> {
     /// If an assertion on its own invariants, preconditions or postconditions
     /// fails: a programmer error, never an operating condition.
     #[must_use]
-    pub fn committed(&self) -> &[(Slot, Ballot, Command, crate::Outcome)] {
+    pub fn committed(&self) -> &[(Slot, Ballot, Command, crate::journal::Outcome)] {
         let committed = self.node.pending_committed();
         // The walk moves forward: each slot once, in slot order.
         assert!(

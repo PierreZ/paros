@@ -5,7 +5,8 @@
 
 use std::time::Duration;
 
-use paros_core::{JournalIdentifier, LeaderUuid, Value};
+use paros_core::Value;
+use paros_core::journal::{JournalIdentifier, LeaderUuid};
 use paros_net::runtime::ParosProviders;
 
 use super::reader::{Reader, ReaderOutcome};
@@ -552,7 +553,10 @@ mod tests {
         // The toy state is every entry's bytes, so the log since the start
         // is exactly the state's size.
         let mut lazy = Checkpointer::new(
-            JournalIdentifier::new(paros_core::TenantId(7), paros_core::JournalId(9)),
+            JournalIdentifier::new(
+                paros_core::journal::TenantId(7),
+                paros_core::journal::JournalId(9),
+            ),
             1,
             Log::default(),
             policy(2),
@@ -562,7 +566,10 @@ mod tests {
         assert!(!lazy.due(Duration::from_secs(1)), "4 bytes against 2 × 4");
         assert!(lazy.due(Duration::from_secs(10)), "the clock says");
         let mut eager = Checkpointer::new(
-            JournalIdentifier::new(paros_core::TenantId(7), paros_core::JournalId(9)),
+            JournalIdentifier::new(
+                paros_core::journal::TenantId(7),
+                paros_core::journal::JournalId(9),
+            ),
             1,
             Log::default(),
             policy(1),

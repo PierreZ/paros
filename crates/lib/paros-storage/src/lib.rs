@@ -9,7 +9,9 @@
 use std::fmt;
 use std::future::Future;
 
-use paros_core::{Ballot, Command, Config, JournalState, MustSync, Slot, Storage};
+use paros_core::contract::MustSync;
+use paros_core::journal::{Command, JournalState};
+use paros_core::{Ballot, Config, Slot, Storage};
 
 use paros_model::corruption::{CorruptionVerdict, IntegrityFault};
 
@@ -221,7 +223,7 @@ impl std::error::Error for StorageError {}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ScrubbedSlot {
     /// The record passed its checksum and is the one the store holds: its
-    /// ballot and the [`paros_core::command_fingerprint`] of its value, which
+    /// ballot and the [`paros_core::journal::command_fingerprint`] of its value, which
     /// a scrubber compares across acceptors.
     Intact {
         /// The ballot the record was accepted under.
@@ -474,7 +476,7 @@ pub trait LogStorage: Storage {
                     slot,
                     ScrubbedSlot::Intact {
                         ballot,
-                        digest: paros_core::command_fingerprint(&command),
+                        digest: paros_core::journal::command_fingerprint(&command),
                     },
                 );
             }

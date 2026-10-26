@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use moonpool_sim::{SimContext, StateHandle, assert_always};
 use paros::client::ReadOutcome;
-use paros::core::JournalIdentifier;
+use paros::core::journal::JournalIdentifier;
 
 use crate::audit::AuditWorld;
 use crate::client::ChainClient;

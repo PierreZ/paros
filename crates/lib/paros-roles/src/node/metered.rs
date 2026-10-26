@@ -14,7 +14,8 @@
 //! against its own fold of them.
 
 use moonpool_core::LocalTimeProvider;
-use paros_core::{JournalIdentifier, NodeId};
+use paros_core::NodeId;
+use paros_core::journal::JournalIdentifier;
 
 use paros_model::machine::ControlJournals;
 use paros_net::ReplySender;

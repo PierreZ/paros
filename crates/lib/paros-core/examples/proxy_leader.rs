@@ -58,10 +58,11 @@
 use std::collections::BTreeMap;
 
 use paros_core::contract::MemStorage;
-use paros_core::{
-    ColocatedNode, Config, Delegation, Entry, LeaderUuid, Message, NodeId, Party, ProxyId,
-    ProxyLeader, QuorumSystem, Seq, Slot, Value,
-};
+use paros_core::contract::Party;
+use paros_core::journal::{Entry, LeaderUuid, Seq};
+use paros_core::membership::{ProxyId, QuorumSystem};
+use paros_core::node::Delegation;
+use paros_core::{ColocatedNode, Config, Message, NodeId, ProxyLeader, Slot, Value};
 
 /// Two rows of three: rows `{0, 1, 2}` and `{3, 4, 5}`, columns `{0, 3}`,
 /// `{1, 4}` and `{2, 5}`.
@@ -76,7 +77,7 @@ fn fresh(id: u64) -> ColocatedNode {
         peers: (0..NODES).map(NodeId).collect(),
         quorum_system: GRID,
         proxy_count: PROXIES,
-        ..Config::new(NodeId(id), paros_core::JournalIdentifier::UNSET)
+        ..Config::new(NodeId(id), paros_core::journal::JournalIdentifier::UNSET)
     };
     ColocatedNode::new(&MemStorage::new(config), paros_core::Limits::DEFAULT)
 }
@@ -263,7 +264,7 @@ impl Cluster {
             None,
             delegation,
         );
-        let paros_core::ProposeResult::Accepted(slot) = result else {
+        let paros_core::node::ProposeResult::Accepted(slot) = result else {
             panic!("the leader admits the proposal: {result:?}");
         };
         self.drain(leader);
@@ -281,7 +282,10 @@ fn main() {
             .map(|p| {
                 Some(ProxyLeader::new(
                     ProxyId(p as u64),
-                    paros_core::AcceptorConfig::new((0..NODES).map(NodeId).collect(), GRID),
+                    paros_core::membership::AcceptorConfig::new(
+                        (0..NODES).map(NodeId).collect(),
+                        GRID,
+                    ),
                 ))
             })
             .collect(),
@@ -381,7 +385,7 @@ fn a_dead_proxy(cluster: &mut Cluster) {
         None,
         Delegation::To(ProxyId(1)),
     );
-    let paros_core::ProposeResult::Accepted(slot) = result else {
+    let paros_core::node::ProposeResult::Accepted(slot) = result else {
         panic!("admitted");
     };
     cluster.drain(leader);
@@ -416,7 +420,7 @@ fn a_dead_proxy(cluster: &mut Cluster) {
     // Proxy 1 comes back, empty.
     *cluster.proxy(ProxyId(1)) = Some(ProxyLeader::new(
         ProxyId(1),
-        paros_core::AcceptorConfig::new((0..NODES).map(NodeId).collect(), GRID),
+        paros_core::membership::AcceptorConfig::new((0..NODES).map(NodeId).collect(), GRID),
     ));
 }
 
@@ -433,7 +437,7 @@ fn a_handoff_mid_round(cluster: &mut Cluster) {
         None,
         Delegation::Auto,
     );
-    let paros_core::ProposeResult::Accepted(slot) = result else {
+    let paros_core::node::ProposeResult::Accepted(slot) = result else {
         panic!("admitted");
     };
     // The core's own rule, which a handoff successor re-derives without

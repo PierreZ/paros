@@ -1,5 +1,6 @@
 use super::*;
-use crate::{NodeId, QuorumSystem};
+use crate::NodeId;
+use crate::membership::QuorumSystem;
 
 fn zoned(members: &[(u64, &str)], quorum_system: QuorumSystem) -> AcceptorConfig {
     AcceptorConfig::zoned(

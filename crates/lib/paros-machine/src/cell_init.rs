@@ -30,11 +30,12 @@ use std::time::Duration;
 
 use moonpool_core::{Detach, LocalTaskProvider, LocalTimeProvider, RandomProvider};
 use moonpool_rpc::RpcHandle;
+use paros_core::decree::Decree;
 use paros_core::decree::{AcceptFold, DecreePromise};
-use paros_core::{
-    AcceptorConfig, Ballot, Decree, Fingerprint, JournalId, JournalIdentifier, NodeId,
-    QuorumSystem, TenantId,
-};
+use paros_core::journal::{JournalId, JournalIdentifier, TenantId};
+use paros_core::membership::{AcceptorConfig, QuorumSystem};
+use paros_core::types::Fingerprint;
+use paros_core::{Ballot, NodeId};
 use paros_net::runtime::ParosProviders;
 use tokio::sync::mpsc;
 

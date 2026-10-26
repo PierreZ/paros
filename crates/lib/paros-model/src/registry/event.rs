@@ -1,6 +1,7 @@
 //! What a registry record folded to ([`RegistryEvent`]), or why it changed nothing ([`RegistryRefusal`]).
 
-use paros_core::{JournalId, NodeId, TenantId};
+use paros_core::NodeId;
+use paros_core::journal::{JournalId, TenantId};
 
 use crate::checkpoint::Folded;
 use crate::machine::Class;

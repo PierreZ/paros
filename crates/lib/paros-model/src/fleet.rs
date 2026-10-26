@@ -62,7 +62,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use paros_core::{JournalId, JournalIdentifier, TenantId};
+use paros_core::journal::{JournalId, JournalIdentifier, TenantId};
 use prost::Message as _;
 
 use crate::address::Address;

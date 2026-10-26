@@ -10,12 +10,11 @@ use super::{
     BTreeMap, Ballot, BeliefSource, ColocatedNode, Command, Control, Delegation, LeadershipOrigin,
     Message, NodeId, NodeRole, Slot,
 };
+use crate::contract::limits::RECOVERY_BATCH;
 use crate::matchmaker::RegistrationKind;
 use crate::matchmaking::Matchmaking;
 use crate::membership::AcceptorConfig;
-use crate::proposer::{
-    Campaign, PromiseFold, RECOVERY_BATCH, Recovery, RecoveryPolicy, RecoveryStep,
-};
+use crate::proposer::{Campaign, PromiseFold, Recovery, RecoveryPolicy, RecoveryStep};
 
 impl ColocatedNode {
     // ---- election / leadership --------------------------------------------

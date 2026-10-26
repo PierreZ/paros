@@ -38,7 +38,10 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use moonpool_core::{LocalStorageProvider, LocalTimeProvider, RandomProvider};
-use paros_core::{Ballot, Config, JournalIdentifier, MatchmakerConfig, MatchmakerId, NodeId};
+use paros_core::journal::JournalIdentifier;
+use paros_core::matchmaker::MatchmakerConfig;
+use paros_core::membership::MatchmakerId;
+use paros_core::{Ballot, Config, NodeId};
 use paros_net::runtime::ParosProviders;
 use tokio_util::sync::CancellationToken;
 

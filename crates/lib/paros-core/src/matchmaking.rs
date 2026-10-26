@@ -50,7 +50,7 @@
 //! other's abandoned beliefs and flip-flop forever. GC collects the flagged
 //! *record* like any other, so every matchmaker also reports the effective
 //! configuration as a durable scalar beside its history
-//! ([`crate::MatchmakerHardState::effective`]) and the fold takes the
+//! ([`crate::matchmaker::MatchmakerHardState::effective`]) and the fold takes the
 //! maximum of the two.
 //!
 //! # The membership probe
@@ -67,11 +67,12 @@ pub use probe::MembershipProbe;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::matchmaker::{MatchOutcome, MatchRefusal, MatchReply, REGISTRY_PAGE, Registration};
+use crate::contract::limits::REGISTRY_PAGE;
+use crate::matchmaker::{MatchOutcome, MatchRefusal, MatchReply, Registration};
 use crate::membership::{AcceptorConfig, MatchmakerId, MatchmakerSet};
 use crate::types::Ballot;
 
-pub use crate::matchmaker::RegistrationKind;
+use crate::matchmaker::RegistrationKind;
 
 /// One `MatchB` page as the phase folds it: the `Registered` half of a
 /// [`MatchOutcome`], decoded ([`RegisteredPage::from_outcome`]).

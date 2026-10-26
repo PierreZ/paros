@@ -3,7 +3,7 @@
 use std::sync::PoisonError;
 
 use moonpool_sim::{StateHandle, assert_always, assert_reachable, buggify_knob};
-use paros::core::{JournalId, JournalIdentifier, TenantId, WriterMode};
+use paros::core::journal::{JournalId, JournalIdentifier, TenantId, WriterMode};
 use paros::storage::journal::JournalStoreConfig;
 
 use crate::shape::registry;

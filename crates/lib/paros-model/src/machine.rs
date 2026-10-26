@@ -9,7 +9,9 @@ mod record;
 
 use std::collections::BTreeSet;
 
-use paros_core::{Ballot, Fingerprint, JournalId, JournalIdentifier, NodeId, TenantId};
+use paros_core::journal::{JournalId, JournalIdentifier, TenantId};
+use paros_core::types::Fingerprint;
+use paros_core::{Ballot, NodeId};
 
 pub use book::{address_book, cell_book, with_own};
 pub use cache::{CacheSink, CachedRegistry, newer, starting_book};
@@ -333,11 +335,11 @@ impl CellPlan {
     ///
     /// Never: one matchmaker per member, by construction.
     #[must_use]
-    pub fn matchmakers(&self) -> Vec<paros_core::MatchmakerId> {
-        let matchmakers: Vec<paros_core::MatchmakerId> = self
+    pub fn matchmakers(&self) -> Vec<paros_core::membership::MatchmakerId> {
+        let matchmakers: Vec<paros_core::membership::MatchmakerId> = self
             .members
             .iter()
-            .map(|(id, _)| paros_core::MatchmakerId(id.0))
+            .map(|(id, _)| paros_core::membership::MatchmakerId(id.0))
             .collect();
         assert_eq!(
             matchmakers.len(),

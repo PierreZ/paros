@@ -29,7 +29,9 @@ const AUDIT_WORLD_KEY: &str = "paros-audit-world";
 const AUDIT_WORLDS_KEY: &str = "paros-audit-worlds";
 
 /// Every journal that has an [`AuditWorld`] this iteration, in id order.
-fn audit_worlds(state: &StateHandle) -> Arc<Mutex<BTreeSet<paros::core::JournalIdentifier>>> {
+fn audit_worlds(
+    state: &StateHandle,
+) -> Arc<Mutex<BTreeSet<paros::core::journal::JournalIdentifier>>> {
     crate::state::published(state, AUDIT_WORLDS_KEY, BTreeSet::new)
 }
 
@@ -44,12 +46,12 @@ pub(crate) fn audit_world(state: &StateHandle) -> Arc<AuditWorld> {
 /// gates are all keyed by journal without any of them knowing.
 pub(crate) fn audit_world_for(
     state: &StateHandle,
-    journal: paros::core::JournalIdentifier,
+    journal: paros::core::journal::JournalIdentifier,
 ) -> Arc<AuditWorld> {
     let world = published_world(state, journal);
     // Every journal no plan, election or tenant names is a system journal
     // (a control journal, the registry): single-writer.
-    world.settle(writer_mode(state, journal).unwrap_or(paros::core::WriterMode::Single));
+    world.settle(writer_mode(state, journal).unwrap_or(paros::core::journal::WriterMode::Single));
     world
 }
 
@@ -59,7 +61,7 @@ pub(crate) fn audit_world_for(
 /// The first machine that serves the journal settles it.
 pub(crate) fn audit_world_named(
     state: &StateHandle,
-    journal: paros::core::JournalIdentifier,
+    journal: paros::core::journal::JournalIdentifier,
 ) -> Arc<AuditWorld> {
     let world = published_world(state, journal);
     if let Some(mode) = writer_mode(state, journal) {
@@ -71,7 +73,7 @@ pub(crate) fn audit_world_named(
 /// The published [`AuditWorld`] of `journal`, its mode not settled.
 fn published_world(
     state: &StateHandle,
-    journal: paros::core::JournalIdentifier,
+    journal: paros::core::journal::JournalIdentifier,
 ) -> Arc<AuditWorld> {
     let state_handle = state;
     let main = crate::shape::identifiers(state).main;
@@ -94,9 +96,9 @@ fn published_world(
                         state_handle,
                         &crate::state::journal_key(
                             TENANT_SETS_KEY,
-                            paros::core::JournalIdentifier::new(
+                            paros::core::journal::JournalIdentifier::new(
                                 journal.tenant,
-                                paros::core::JournalId::UNSET,
+                                paros::core::journal::JournalId::UNSET,
                             ),
                         ),
                         super::matchmaker::TenantSets::default,
@@ -106,9 +108,9 @@ fn published_world(
                         state_handle,
                         &crate::state::journal_key(
                             TENANT_STOPS_KEY,
-                            paros::core::JournalIdentifier::new(
+                            paros::core::journal::JournalIdentifier::new(
                                 journal.tenant,
-                                paros::core::JournalId::UNSET,
+                                paros::core::journal::JournalId::UNSET,
                             ),
                         ),
                         super::matchmaker::TenantStops::default,
@@ -120,9 +122,9 @@ fn published_world(
                         state_handle,
                         &crate::state::journal_key(
                             TENANT_BOOTSTRAPS_KEY,
-                            paros::core::JournalIdentifier::new(
+                            paros::core::journal::JournalIdentifier::new(
                                 journal.tenant,
-                                paros::core::JournalId::UNSET,
+                                paros::core::journal::JournalId::UNSET,
                             ),
                         ),
                         super::matchmaker::TenantBootstraps::default,
@@ -132,9 +134,9 @@ fn published_world(
                         state_handle,
                         &crate::state::journal_key(
                             TENANT_RECONSTRUCTIONS_KEY,
-                            paros::core::JournalIdentifier::new(
+                            paros::core::journal::JournalIdentifier::new(
                                 journal.tenant,
-                                paros::core::JournalId::UNSET,
+                                paros::core::journal::JournalId::UNSET,
                             ),
                         ),
                         super::matchmaker::TenantReconstructions::default,
@@ -155,14 +157,14 @@ fn published_world(
 /// starts it). `None` for any other journal.
 fn writer_mode(
     state: &StateHandle,
-    journal: paros::core::JournalIdentifier,
-) -> Option<paros::core::WriterMode> {
+    journal: paros::core::journal::JournalIdentifier,
+) -> Option<paros::core::journal::WriterMode> {
     let plan = crate::shape::journals(state);
     if plan.ids.contains(&journal) {
         return Some(plan.mode(journal));
     }
     if crate::machine::is_election(state, journal) {
-        return Some(paros::core::WriterMode::Multi);
+        return Some(paros::core::journal::WriterMode::Multi);
     }
     super::tenants::lock(&super::tenants::tenant_board(state)).mode(journal)
 }
@@ -173,21 +175,21 @@ pub(crate) struct AuditWorld {
     state: Mutex<AuditState>,
     /// The run's deployment journal ([`crate::shape::Identifiers::main`]); `None`
     /// for a private checker outside any run.
-    main: Option<paros::core::JournalIdentifier>,
+    main: Option<paros::core::journal::JournalIdentifier>,
     /// This journal's writer mode (#241), set once it is known: a call
     /// can name a created journal before any machine folded its creation.
-    mode: OnceLock<paros::core::WriterMode>,
+    mode: OnceLock<paros::core::journal::WriterMode>,
 }
 
 impl AuditWorld {
     /// The run's deployment journal, when this checker belongs to a run.
-    pub(crate) fn main(&self) -> Option<paros::core::JournalIdentifier> {
+    pub(crate) fn main(&self) -> Option<paros::core::journal::JournalIdentifier> {
         self.main
     }
 
     /// This journal's writer mode (#241). A machine and a workload reach a
     /// journal only through [`audit_world_for`], which settles it.
-    pub(crate) fn mode(&self) -> paros::core::WriterMode {
+    pub(crate) fn mode(&self) -> paros::core::journal::WriterMode {
         let mode = self.mode.get().copied();
         assert_always!(
             mode.is_some(),
@@ -198,7 +200,7 @@ impl AuditWorld {
 
     /// Learn this journal's writer mode, once. The model judges nothing
     /// before: a machine applies a slot only once the creation is folded.
-    fn settle(&self, mode: paros::core::WriterMode) {
+    fn settle(&self, mode: paros::core::journal::WriterMode) {
         if let Some(known) = self.mode.get() {
             assert_always!(
                 *known == mode,
@@ -494,9 +496,9 @@ impl AuditWorld {
     /// (see `MatchmakerAudit::landed_in_flight`).
     pub(crate) fn note_registry_recovered(
         &self,
-        matchmaker: paros::core::MatchmakerId,
-        scalars: &paros::core::MatchmakerHardState,
-        registry: &BTreeMap<paros::core::Ballot, paros::core::Registration>,
+        matchmaker: paros::core::membership::MatchmakerId,
+        scalars: &paros::core::matchmaker::MatchmakerHardState,
+        registry: &BTreeMap<paros::core::Ballot, paros::core::matchmaker::Registration>,
     ) {
         let mut st = self.lock();
         let ops = st
@@ -512,7 +514,7 @@ impl AuditWorld {
                     st.matchmaker.scalars_persisted(matchmaker, &written);
                 }
                 super::matchmaker::RegistryOp::Install(installed, registrations) => {
-                    let set = paros::core::MatchmakerSet::new(
+                    let set = paros::core::membership::MatchmakerSet::new(
                         installed.generation,
                         installed.members.clone(),
                     );
@@ -920,7 +922,7 @@ impl AuditWorld {
 #[tracing::instrument(level = "debug", skip_all)]
 pub(crate) fn check_run(
     state: &StateHandle,
-    journal: paros::core::JournalIdentifier,
+    journal: paros::core::journal::JournalIdentifier,
     history: &ClientHistory,
     clients: usize,
 ) -> u64 {
@@ -950,7 +952,7 @@ pub(crate) fn check_run(
 #[tracing::instrument(level = "debug", skip_all)]
 pub(crate) fn check_every_world(
     state: &StateHandle,
-    judged: &BTreeSet<paros::core::JournalIdentifier>,
+    judged: &BTreeSet<paros::core::journal::JournalIdentifier>,
 ) -> u64 {
     let worlds = audit_worlds(state)
         .lock()

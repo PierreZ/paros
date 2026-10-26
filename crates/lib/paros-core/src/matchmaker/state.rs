@@ -248,8 +248,8 @@ pub struct JournalScalars {
 ///
 /// The per-ballot registrations are deliberately **not** here: they are
 /// persisted one record at a time and read back one record at a time through
-/// [`RegistryStorage`](crate::RegistryStorage), exactly as the accepted log is split from
-/// [`crate::HardState`]. See [`RegistryStorage`](crate::RegistryStorage) for why.
+/// [`RegistryStorage`](crate::matchmaker::RegistryStorage), exactly as the accepted log is split from
+/// [`crate::HardState`]. See [`RegistryStorage`](crate::matchmaker::RegistryStorage) for why.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]

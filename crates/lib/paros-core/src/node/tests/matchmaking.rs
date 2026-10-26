@@ -9,7 +9,7 @@ use crate::contract::limits::Limits;
 
 /// The journal every node of these tests serves (`Config::new` with
 /// `JournalIdentifier::UNSET`).
-const J: crate::JournalId = crate::JournalId::UNSET;
+const J: crate::journal::JournalId = crate::journal::JournalId::UNSET;
 
 /// Reply to `n`'s open matchmaking from `mms`, folding every answer.
 fn run_matchmaking(n: &mut ColocatedNode, mms: &mut [Matchmaker]) -> Vec<MatchStep> {
@@ -938,7 +938,7 @@ fn an_ordinary_registration_never_raises_the_effective_configuration() {
 /// `members` — what a matchmaker's first page looks like when its registry
 /// does not fit in one answer.
 fn full_page(members: &[u64]) -> BTreeMap<Ballot, Registration> {
-    (1..=crate::matchmaker::REGISTRY_PAGE)
+    (1..=crate::contract::limits::REGISTRY_PAGE)
         .map(|round| belief(ballot(round as u64, 1), members))
         .collect()
 }
@@ -1006,7 +1006,7 @@ fn a_paged_answer_counts_only_once_its_last_page_lands() {
 fn a_registry_larger_than_a_page_answers_a_prefix_and_a_cursor() {
     let mut mm = registries(1);
     let mm = &mut mm[0];
-    let page = crate::matchmaker::REGISTRY_PAGE;
+    let page = crate::contract::limits::REGISTRY_PAGE;
     for round in 1..=page + 1 {
         mm.step(MatchRequest::new(
             J,
@@ -1238,7 +1238,7 @@ fn a_page_that_starts_at_a_raised_watermark_above_the_cursor_is_taken() {
 /// names its own configuration, so none is left out of a page.
 #[test]
 fn a_floor_raised_over_the_cursor_between_two_pages_still_completes_the_campaign() {
-    let page = crate::matchmaker::REGISTRY_PAGE as u64;
+    let page = crate::contract::limits::REGISTRY_PAGE as u64;
     let mut mms = registries(1);
     for round in 1..=page + 1 {
         mms[0].step(MatchRequest::new(

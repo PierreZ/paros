@@ -19,7 +19,9 @@
 
 use std::collections::BTreeMap;
 
-use paros_core::{JournalIdentifier, LogRead, NodeId, Seq};
+use paros_core::NodeId;
+use paros_core::journal::{JournalIdentifier, Seq};
+use paros_core::replica::LogRead;
 
 use super::journals::Journals;
 use super::transport::PeerTarget;

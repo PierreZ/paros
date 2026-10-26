@@ -20,11 +20,12 @@
 
 use std::collections::BTreeMap;
 
+use paros_core::journal::{Command, Control};
+use paros_core::matchmaker::{GcRequest, MatchReply, MatchRequest};
+use paros_core::membership::MatchmakerId;
 use paros_core::proposer::RecoveryStep;
-use paros_core::{
-    Ballot, ColocatedNode, Command, Control, GcRequest, MatchReply, MatchRequest, MatchmakerId,
-    Message, NodeId, ReadState, Slot, WriteOp,
-};
+use paros_core::quorum_read::ReadState;
+use paros_core::{Ballot, ColocatedNode, Message, NodeId, Slot, WriteOp};
 
 use crate::paxos::action::Seam;
 use crate::paxos::narration::{self, NarrationKind, NodeSnapshot, many, who};
@@ -250,7 +251,7 @@ impl World {
         let Some(message @ Message::Promise { .. }) = arriving else {
             return;
         };
-        if node.role() != paros_core::NodeRole::Candidate {
+        if node.role() != paros_core::node::NodeRole::Candidate {
             return;
         }
         let Some(mut clone) = proposer_with_promise(node.proposer(), message) else {

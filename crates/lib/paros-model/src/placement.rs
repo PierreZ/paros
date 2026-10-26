@@ -46,7 +46,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use paros_core::{AcceptorConfig, FailureDomain, NodeId, QuorumSystem};
+use paros_core::NodeId;
+use paros_core::membership::{AcceptorConfig, FailureDomain, QuorumSystem};
 
 use crate::machine::Class;
 use crate::registry::{Booking, BookingTarget, NodeStanding, Registry, Role};
@@ -436,7 +437,7 @@ fn rank(seed: u64, value: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use paros_core::{JournalId, JournalIdentifier, TenantId};
+    use paros_core::journal::{JournalId, JournalIdentifier, TenantId};
 
     fn machine(node: u64, zone: &str, capacity: u64) -> Machine {
         Machine {

@@ -20,10 +20,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use paros_core::{
-    Ballot, ColocatedNode, Command, LeadershipOrigin, Message, NodeId, NodeRole, QuorumSystem,
-    Slot, proposer::Round,
-};
+use paros_core::journal::Command;
+use paros_core::membership::QuorumSystem;
+use paros_core::node::{LeadershipOrigin, NodeRole};
+use paros_core::{Ballot, ColocatedNode, Message, NodeId, Slot, proposer::Round};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -767,7 +767,10 @@ fn describe_sent(
             acc
         });
     for (slot, (ballot, command, fan_out)) in accepts {
-        let noop = matches!(command, Command::Control(paros_core::Control::Noop));
+        let noop = matches!(
+            command,
+            Command::Control(paros_core::journal::Control::Noop)
+        );
         if let Some(column) = system.column_of(slot) {
             let voters: Vec<NodeId> = sent
                 .iter()

@@ -5,10 +5,13 @@ use std::ops::Bound;
 
 use moonpool_sim::{TimeProvider, assert_always, assert_reachable, assert_sometimes};
 use paros::client::{MatchmakersRefusal, RetireRefusal};
-use paros::core::{
-    AcceptorConfig, Ballot, GcAck, GcStep, MatchRefusal, MatchmakerId, MatchmakerSet, NodeId,
-    ReconfigureReply, ReconfigureResult, ReconfigurerStep, Registration, RegistrationKind, Slot,
+use paros::core::collector::GcStep;
+use paros::core::matchmaker::{
+    GcAck, MatchRefusal, ReconfigureReply, ReconfigurerStep, Registration, RegistrationKind,
 };
+use paros::core::membership::{AcceptorConfig, MatchmakerId, MatchmakerSet};
+use paros::core::node::ReconfigureResult;
+use paros::core::{Ballot, NodeId, Slot};
 use paros::roles::node::BootRefusal;
 
 use super::NodeAudit;

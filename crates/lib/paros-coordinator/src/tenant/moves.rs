@@ -45,7 +45,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound::{Excluded, Unbounded};
 
 use moonpool_rpc::RpcHandle;
-use paros_core::{AcceptorConfig, JournalIdentifier, NodeId};
+use paros_core::NodeId;
+use paros_core::journal::JournalIdentifier;
+use paros_core::membership::AcceptorConfig;
 use paros_net::runtime::ParosProviders;
 
 use crate::tenant::{TenantDesk, placed_count};

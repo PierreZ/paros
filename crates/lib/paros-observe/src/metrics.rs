@@ -49,7 +49,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use paros_core::JournalIdentifier;
+use paros_core::journal::JournalIdentifier;
 use prometheus::{
     Counter, CounterVec, Gauge, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts, Registry,
 };

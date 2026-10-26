@@ -50,7 +50,9 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
-use paros_core::{Ballot, Config, JournalIdentifier, NodeId, QuorumSystem, WriterMode};
+use paros_core::journal::{JournalIdentifier, WriterMode};
+use paros_core::membership::QuorumSystem;
+use paros_core::{Ballot, Config, NodeId};
 
 use super::{Admission, CellPlan, Class, ControlJournals, Locality};
 use crate::address::Address;
@@ -358,7 +360,7 @@ pub fn journal_config(plan: &CellPlan, node_id: NodeId, journal: JournalIdentifi
 #[cfg(test)]
 mod tests {
     use super::*;
-    use paros_core::{JournalId, TenantId};
+    use paros_core::journal::{JournalId, TenantId};
 
     fn ballot(round: u64) -> Ballot {
         Ballot {

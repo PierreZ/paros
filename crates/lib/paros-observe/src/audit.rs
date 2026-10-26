@@ -20,13 +20,17 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use paros_core::{
-    AcceptorConfig, Ballot, Command, GcAck, GcStep, Handoff, JournalIdentifier, JournalView,
-    LogRead, MatchRefusal, MatchmakerHardState, MatchmakerId, MatchmakerPhase, MatchmakerSet,
-    Message, NodeId, Outcome, Party, PendingBootstrap, ProxyId, ReconfigureReply,
-    ReconfigureRequest, ReconfigureResult, ReconfigurerStep, Registration, RegistrationKind, Seq,
-    Slot, Value, WriteOp,
+use paros_core::collector::GcStep;
+use paros_core::contract::Party;
+use paros_core::journal::{Command, JournalIdentifier, JournalView, Outcome, Seq};
+use paros_core::matchmaker::{
+    GcAck, MatchRefusal, MatchmakerHardState, MatchmakerPhase, PendingBootstrap, ReconfigureReply,
+    ReconfigureRequest, ReconfigurerStep, Registration, RegistrationKind,
 };
+use paros_core::membership::{AcceptorConfig, MatchmakerId, MatchmakerSet, ProxyId};
+use paros_core::node::{Handoff, ReconfigureResult};
+use paros_core::replica::LogRead;
+use paros_core::{Ballot, Message, NodeId, Slot, Value, WriteOp};
 
 use crate::metrics::{CallKind, CallOutcome};
 use paros_client::CallObserver;
@@ -1029,7 +1033,7 @@ pub trait Audit {
         matchmaker: MatchmakerId,
         set: &MatchmakerSet,
         phase: MatchmakerPhase,
-        scalars: &paros_core::MatchmakerHardState,
+        scalars: &paros_core::matchmaker::MatchmakerHardState,
         registry: &BTreeMap<Ballot, Registration>,
         gc_watermark: Ballot,
     ) {
@@ -1042,7 +1046,7 @@ pub trait Audit {
     fn matchmaker_in_flight(
         &self,
         matchmaker: MatchmakerId,
-        writes: Option<&[paros_core::MatchmakerWriteOp]>,
+        writes: Option<&[paros_core::matchmaker::MatchmakerWriteOp]>,
     ) {
     }
 
