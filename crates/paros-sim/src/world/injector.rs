@@ -1149,17 +1149,7 @@ pub(crate) async fn flip(provider: &SimStorageProvider, region: &LayoutRegion) -
     for byte in &mut bytes {
         *byte ^= 0xA5;
     }
-    let mut written = 0;
-    for _ in 0..WRITE_ATTEMPTS {
-        if written == bytes.len() {
-            break;
-        }
-        match file.write_at(at + written as u64, &bytes[written..]).await {
-            Ok(0) | Err(_) => {}
-            Ok(n) => written += n,
-        }
-    }
-    if written != bytes.len() {
+    if !write_all(&file, at, &bytes).await {
         return false;
     }
     // Written, not synced (#441 (metainfo twin)): a kill here leaves the
@@ -1170,12 +1160,33 @@ pub(crate) async fn flip(provider: &SimStorageProvider, region: &LayoutRegion) -
         assert_reachable!("journal store: a kill lands before an injection is synced");
     }
     hinted.await;
-    for _ in 0..WRITE_ATTEMPTS {
+    for attempt in 0..WRITE_ATTEMPTS {
+        // A failed writeback leaves the flip clean and not durable, and a
+        // retried sync then flushes nothing (#720 (fsyncgate)): each retry
+        // writes the flip again first.
+        if attempt > 0 && !write_all(&file, at, &bytes).await {
+            return false;
+        }
         if file.sync_all().await.is_ok() {
             return true;
         }
     }
     false
+}
+
+/// Write all of `bytes` at `at`, in at most [`WRITE_ATTEMPTS`] transfers.
+async fn write_all<F: StorageFile>(file: &F, at: u64, bytes: &[u8]) -> bool {
+    let mut written = 0;
+    for _ in 0..WRITE_ATTEMPTS {
+        if written == bytes.len() {
+            break;
+        }
+        match file.write_at(at + written as u64, &bytes[written..]).await {
+            Ok(0) | Err(_) => {}
+            Ok(n) => written += n,
+        }
+    }
+    written == bytes.len()
 }
 
 /// Judge what the journal reported at open against what was injected (see

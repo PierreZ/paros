@@ -2959,7 +2959,9 @@ where
                     if journals.live.contains_key(&journal) {
                         // A re-open after a storage fault boots on what the
                         // failed sync left in the file image, durable or
-                        // not, until the journal's next sync (#348).
+                        // not, until the journal's next sync (#348); the
+                        // open dropped the pages a failed writeback left
+                        // clean (#720 (fsyncgate)).
                         let hinted = moonpool_buggify::hint!("journal re-opened, not synced", 0.5);
                         if hinted.strike() == moonpool_buggify::hint::Strike::Killed {
                             moonpool_assertions::reachable!(
