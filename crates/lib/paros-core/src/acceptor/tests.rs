@@ -1,8 +1,8 @@
 use super::*;
+use crate::contract::write::WriteOp;
 use crate::journal::state::JournalState;
 use crate::journal::{Command, Entry, LeaderUuid, Seq};
 use crate::types::{NodeId, Value};
-use crate::write::WriteOp;
 
 fn ballot(round: u64) -> Ballot {
     Ballot {

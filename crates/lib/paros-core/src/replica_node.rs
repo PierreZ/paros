@@ -113,17 +113,17 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::ReadState;
+use crate::contract::config::Config;
+use crate::contract::message::{Audience, Message};
+use crate::contract::storage::Storage;
+use crate::contract::write::WriteOp;
 use crate::journal::state::JournalState;
 use crate::journal::{Command, Seq};
 use crate::membership::{AcceptorConfig, QuorumSystem, ReplicaId};
-use crate::message::{Audience, Message};
 use crate::node::READ_TTL_TICKS;
 use crate::quorum_read::{QuorumReads, ReadBasis};
 use crate::replica::Replica;
-use crate::state::Config;
-use crate::storage::Storage;
 use crate::types::{Ballot, NodeId, Slot};
-use crate::write::WriteOp;
 
 /// Monotone counters this incarnation, for the driver's audit report and
 /// the examples: what a replica did, never what it decided.

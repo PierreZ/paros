@@ -46,10 +46,10 @@
 
 use std::collections::BTreeMap;
 
+use crate::contract::write::WriteOp;
 use crate::journal::state::{JournalState, JournalView, Outcome, WriterMode};
 use crate::journal::{Command, Entry, Seq};
 use crate::types::{Ballot, Slot, Value};
-use crate::write::WriteOp;
 
 /// Maximum slots the contiguous apply walk releases in one batch — the
 /// ceiling of the page [`Replica::advance`] walks ([`Replica::set_apply_page`],

@@ -13,9 +13,9 @@
 //! beside the same private `drop_prefix`.
 
 use super::Acceptor;
+use crate::contract::write::WriteOp;
 use crate::journal::state::JournalState;
 use crate::types::Slot;
-use crate::write::WriteOp;
 
 impl<V: Clone + PartialEq> Acceptor<V> {
     /// Drop every record and faulty entry below `first`, raise the floor to

@@ -254,7 +254,7 @@ fn truncate_control_command_raises_the_floor_cluster_wide_on_apply() {
 
 #[test]
 fn compact_below_the_current_floor_is_a_no_op() {
-    use crate::write::WriteOp;
+    use crate::contract::write::WriteOp;
 
     let mut nodes = cluster_with_three_chosen();
     let leader = &mut nodes[0];
@@ -275,7 +275,7 @@ fn compact_below_the_current_floor_is_a_no_op() {
 
 #[test]
 fn a_compact_batch_requires_fsync() {
-    use crate::write::WriteOp;
+    use crate::contract::write::WriteOp;
 
     let mut nodes = cluster_with_three_chosen();
     let leader = &mut nodes[0];
@@ -390,7 +390,7 @@ fn below_floor_catchup_request_is_answered_with_the_trim_point() {
 
 #[test]
 fn a_trim_point_jump_moves_the_prefix_and_never_the_promise() {
-    use crate::write::WriteOp;
+    use crate::contract::write::WriteOp;
 
     // A node that missed a trimmed prefix learns the trim point 6: it jumps
     // its chosen prefix to 5, raises its floor to 6, and keeps its promise

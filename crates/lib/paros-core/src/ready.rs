@@ -1,13 +1,13 @@
 //! The [`Ready`] borrow guard: one batch of work, and the compile-time gate that
 //! enforces "one batch in flight".
 
+use crate::contract::message::{Audience, Message};
+use crate::contract::write::{AcceptorWrite, WriteOp};
 use crate::journal::Command;
 use crate::matchmaker::{GcRequest, MatchRequest};
 use crate::membership::MatchmakerId;
-use crate::message::{Audience, Message};
 use crate::node::{ColocatedNode, ReadState};
 use crate::types::{Ballot, Slot};
-use crate::write::{AcceptorWrite, WriteOp};
 
 /// A single batch of work the caller must process, and a **compile-time gate**
 /// enforcing one batch in flight.

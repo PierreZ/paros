@@ -1,6 +1,6 @@
 use super::{Ballot, ColocatedNode, Message, NodeId, NodeRole, PULL_FALLBACK_BEATS, Slot};
+use crate::contract::message::Audience;
 use crate::membership::AcceptorConfig;
-use crate::message::Audience;
 
 /// The leader's heartbeat cadence, in ticks: a leader beats on **every**
 /// tick ([`ColocatedNode::tick`] broadcasts unconditionally), so this is

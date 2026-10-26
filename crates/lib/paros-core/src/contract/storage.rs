@@ -1,8 +1,9 @@
 //! The read-only [`Storage`] port the core depends on.
 
+use crate::contract::config::Config;
+use crate::contract::hard_state::HardState;
 use crate::journal::Command;
 use crate::journal::state::JournalState;
-use crate::state::{Config, HardState};
 use crate::types::{Ballot, Slot};
 
 /// A read-only recovery/serving port. The **application** implements it and owns

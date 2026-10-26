@@ -131,9 +131,9 @@
 
 use std::collections::BTreeMap;
 
+use crate::contract::message::{Audience, Message, Party};
 use crate::journal::{Command, command_fingerprint};
 use crate::membership::{AcceptorConfig, ProxyId};
-use crate::message::{Audience, Message, Party};
 use crate::proposer::Rounds;
 use crate::types::{Ballot, NodeId, Slot};
 

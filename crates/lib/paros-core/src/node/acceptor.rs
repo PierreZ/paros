@@ -10,8 +10,8 @@ use super::{
     command_fingerprint,
 };
 use crate::acceptor::{AcceptOutcome, PrepareOutcome};
+use crate::contract::write::AcceptorWrite;
 use crate::membership::AcceptorConfig;
-use crate::write::AcceptorWrite;
 
 impl ColocatedNode {
     // ---- acceptor ---------------------------------------------------------

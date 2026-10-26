@@ -3,7 +3,7 @@ use super::*;
 
 #[test]
 fn promise_and_accept_batches_require_fsync() {
-    use crate::write::WriteOp;
+    use crate::contract::write::WriteOp;
 
     // An acceptor promoting its promise on a higher Prepare must fsync before it
     // replies Promise.

@@ -46,15 +46,16 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 use super::support::{Mailbox, Rng, env_or};
+use crate::contract::config::Config;
+use crate::contract::hard_state::HardState;
+use crate::contract::message::{Message, Party};
+use crate::contract::storage::Storage;
+use crate::contract::write::{AcceptorWrite, WriteOp};
 use crate::journal::{Command, LeaderUuid, Seq, command_fingerprint};
 use crate::membership::{AcceptorConfig, ProxyId, QuorumSystem};
-use crate::message::{Message, Party};
 use crate::node::{ColocatedNode, Delegation, ProposeResult};
 use crate::proxy_leader::ProxyLeader;
-use crate::state::{Config, HardState};
-use crate::storage::Storage;
 use crate::types::{Ballot, NodeId, Slot, Value};
-use crate::write::{AcceptorWrite, WriteOp};
 
 /// Seeds per campaign (`PROXY_MODEL_SEEDS` overrides; a long run is
 /// `PROXY_MODEL_SEEDS=5000 cargo nextest run -p paros-core proxy_model`).

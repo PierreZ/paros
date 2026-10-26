@@ -44,9 +44,9 @@ mod retention;
 
 use std::collections::BTreeMap;
 
+use crate::contract::write::AcceptorWrite;
 use crate::retained::RetainedWindow;
 use crate::types::{Ballot, Slot};
-use crate::write::AcceptorWrite;
 
 /// Maximum accepted records and faulty entries carried by one promise page —
 /// the ceiling on the `limit` [`Acceptor::promise_page`] takes, and the reason

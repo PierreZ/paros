@@ -5,14 +5,15 @@
 use std::collections::BTreeMap;
 
 use super::{ReplicaNode, ReplicaReady};
+use crate::contract::config::Config;
+use crate::contract::hard_state::HardState;
+use crate::contract::message::{Audience, Message};
+use crate::contract::storage::Storage;
+use crate::contract::write::{AcceptorWrite, WriteOp};
 use crate::journal::{Command, Control, Entry, LeaderUuid, Seq};
 use crate::membership::ReplicaId;
-use crate::message::{Audience, Message};
 use crate::node::ColocatedNode;
-use crate::state::{Config, HardState};
-use crate::storage::Storage;
 use crate::types::{Ballot, NodeId, Slot, Value};
-use crate::write::{AcceptorWrite, WriteOp};
 
 const ACCEPTORS: [u64; 3] = [0, 1, 2];
 const REPLICAS: [u64; 2] = [10, 11];
@@ -275,7 +276,7 @@ fn a_replica_never_votes() {
         config: None,
     });
     tier.replicas[0].step(Message::Accept {
-        reply_to: crate::message::Party::Node(NodeId(0)),
+        reply_to: crate::contract::message::Party::Node(NodeId(0)),
         leader: NodeId(0),
         ballot,
         slot: Slot(0),

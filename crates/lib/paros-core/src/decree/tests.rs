@@ -1,10 +1,10 @@
 use super::{AcceptFold, Decree, DecreePromise};
 use crate::acceptor::{AcceptOutcome, Acceptor, PrepareOutcome};
+use crate::contract::write::AcceptorWrite;
 use crate::membership::{
     AcceptorConfig, MatchmakerGeneration, MatchmakerId, MatchmakerSet, QuorumSystem,
 };
 use crate::types::{Ballot, NodeId, Slot};
-use crate::write::AcceptorWrite;
 use std::collections::BTreeMap;
 
 fn ballot(round: u64, node: u64) -> Ballot {

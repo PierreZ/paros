@@ -8,15 +8,16 @@ use super::{
     LEADER_RECOVERY_BATCH, LeadershipOrigin, MatchStep, NodeRole, PROMISE_BATCH, ProposeResult,
     READ_TTL_TICKS, ReadState, ReconfigureRefusal, ReconfigureResult,
 };
+use crate::contract::config::Config;
+use crate::contract::hard_state::HardState;
+use crate::contract::message::{Message, Party};
+use crate::contract::storage::Storage;
 use crate::matchmaker::{
     MatchOutcome, MatchRefusal, MatchReply, MatchRequest, Matchmaker, MatchmakerConfig,
     Registration,
 };
 use crate::membership::{AcceptorConfig, MatchmakerGeneration, MatchmakerId};
-use crate::message::{Message, Party};
 use crate::ready::Ready;
-use crate::state::{Config, HardState};
-use crate::storage::Storage;
 
 /// The journal every test node serves.
 const J: crate::JournalId = crate::JournalId::UNSET;

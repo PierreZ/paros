@@ -29,19 +29,20 @@ pub use self::replication::HEARTBEAT_TICKS;
 use crate::acceptor::Acceptor;
 use crate::collector::Collector;
 pub use crate::collector::GcStep;
+use crate::contract::config::Config;
+use crate::contract::hard_state::HardState;
+use crate::contract::message::{Audience, Message, Party};
+use crate::contract::storage::Storage;
+use crate::contract::write::WriteOp;
 use crate::journal::{Command, Control, Entry, Seq, command_fingerprint};
 use crate::matchmaker::{GcRequest, MatchRequest};
 use crate::matchmaking::{Matchmaking, MembershipProbe};
 use crate::membership::{AcceptorConfig, MatchmakerId, MatchmakerSet, ProxyId, QuorumSystem};
-use crate::message::{Audience, Message, Party};
 use crate::proposer::{Proposer, Round};
 use crate::quorum_read::{QuorumReads, ReadBasis};
 use crate::ready::Ready;
 use crate::replica::Replica;
-use crate::state::{Config, HardState};
-use crate::storage::Storage;
 use crate::types::{Ballot, NodeId, Slot};
-use crate::write::WriteOp;
 
 /// Maximum accepted records carried by one [`Message::Promise`] page — the
 /// acceptor's own bound, re-exported for the driver.
