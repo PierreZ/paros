@@ -20,8 +20,8 @@ use paros::client::ReadOutcome;
 use paros::core::JournalIdentifier;
 
 use crate::audit::AuditWorld;
-use crate::workload::chain::{ChainState, user_command_hash};
 use crate::client::ChainClient;
+use crate::workload::chain::{ChainState, user_command_hash};
 
 const FENCE_KEY: &str = "paros-chain-trim-fence";
 

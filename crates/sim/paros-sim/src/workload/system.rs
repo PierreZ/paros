@@ -60,9 +60,9 @@ use super::deposed;
 use super::rpc::{CallLog, read_once, set_leader_once, within, write_once};
 use crate::audit::system::{lock as board_lock, system_board};
 use crate::audit::{audit_world_for, audit_world_named};
-use crate::workload::chain::user_command_hash;
 use crate::client::ChainClient;
 use crate::shape::JoinerMachine;
+use crate::workload::chain::user_command_hash;
 
 /// How many asks a system write spends before it calls the outcome
 /// ambiguous.

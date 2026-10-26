@@ -9,8 +9,8 @@ use moonpool_sim::{
 
 use super::Down;
 use super::RoleRig;
-use super::node::OperatorEdit;
 use super::arm_role;
+use super::node::OperatorEdit;
 use super::stay_down;
 use crate::audit::{AuditWorld, NodeAudit, audit_world_for};
 use crate::world::registry_store::LedgeredRegistry;

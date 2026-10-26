@@ -32,8 +32,8 @@ use paros::wire::leader_from_proto;
 use paros::wire::leader_uuid_from_proto;
 
 use crate::audit::{Attempt, Call, Seen};
-use crate::workload::chain::user_command_hash;
 use crate::client::ChainClient;
+use crate::workload::chain::user_command_hash;
 
 /// One client's journal calls as the linearizability checker reads them
 /// (#205): every attempt at its own journal, recorded **at the RPC seam** —

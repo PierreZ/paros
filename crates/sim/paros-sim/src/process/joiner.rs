@@ -4,10 +4,10 @@ use async_trait::async_trait;
 use moonpool_sim::{Process, SimContext, SimulationError, SimulationResult, assert_always};
 
 use super::RoleRig;
-use super::node::Seat;
-use super::node::system_plan;
 use super::arm_role;
 use super::dispatch;
+use super::node::Seat;
+use super::node::system_plan;
 use super::ranked;
 use super::stores::SimStores;
 use super::stores::resolve_provisioning;

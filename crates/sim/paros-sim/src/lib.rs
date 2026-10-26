@@ -44,13 +44,13 @@ use moonpool_sim::{
     StorageFault, StorageFaultMask, WipeHeal, WorkloadCount,
 };
 
-use crate::workload::ChainWorkload;
 use crate::lifecycle::ScriptedLifecycle;
 use crate::machine::MachineProcess;
 use crate::process::{JoinerProcess, MatchmakerProcess, NodeProcess, ProxyProcess, ReplicaProcess};
 use crate::roles::{
     ACCEPTOR_GROUP, FRONTEND_GROUP, MACHINE_GROUP, MATCHMAKER_GROUP, PROXY_GROUP, REPLICA_GROUP,
 };
+use crate::workload::ChainWorkload;
 
 /// An optional slot or watermark as a signed trace/detail value: `None`
 /// (the empty prefix, nothing seen yet) is `-1`, and a value too large for

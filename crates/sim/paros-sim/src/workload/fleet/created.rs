@@ -41,11 +41,11 @@ use paros::core::Value;
 
 use super::FleetOps;
 use crate::audit::{AckedWrite, AuditWorld, audit_world_named};
-use crate::workload::chain::user_command_hash;
+use crate::client::ChainClient;
 use crate::workload::ChainWorkload;
 use crate::workload::MAX_BATCH_RECORDS;
+use crate::workload::chain::user_command_hash;
 use crate::workload::config::ChainConfig;
-use crate::client::ChainClient;
 
 /// The most pages a paging read takes.
 const PAGES: usize = 64;

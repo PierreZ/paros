@@ -1473,13 +1473,11 @@ fn machine_audits(
                     .on_machines(&state, audit_addr.clone())
                     .with_tenants(crate::audit::tenants::tenant_board(&state))
                     .on_registry(registry.clone(), plane)
-                    .with_calls(Arc::new(
-                        crate::workload::system::Announce::of_machine(
-                            &state,
-                            time.clone(),
-                            MACHINE_CLIENT_BASE + rank as u64,
-                        ),
-                    ))
+                    .with_calls(Arc::new(crate::workload::system::Announce::of_machine(
+                        &state,
+                        time.clone(),
+                        MACHINE_CLIENT_BASE + rank as u64,
+                    )))
             }
             AuditScope::Journal(journal) => {
                 NodeAudit::new(time.clone(), crate::audit::audit_world_for(&state, journal))

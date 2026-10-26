@@ -14,8 +14,8 @@ use paros::client::{ClaimOutcome, WriteOutcome, Writer};
 
 use super::rpc::{self, within};
 use super::{ChainConfig, ChainWorkload, Submission, WrittenCommand, claim};
-use crate::workload::chain::hash_text;
 use crate::client::ChainClient;
+use crate::workload::chain::hash_text;
 
 impl ChainWorkload {
     /// Send `burst` — writes at consecutive positions, each to its target —

@@ -47,10 +47,10 @@ mod proxy_leader;
 mod replica;
 mod stores;
 
-use node::run_acceptor;
 pub(crate) use contract::ContractSuiteWorkload;
 pub(crate) use joiner::{IdleProcess, JoinerProcess};
 use matchmaker::run_matchmaker_role;
+use node::run_acceptor;
 use proxy_leader::run_proxy_role;
 use replica::run_replica_role;
 

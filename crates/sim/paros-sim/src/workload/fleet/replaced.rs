@@ -43,10 +43,7 @@ impl FleetOps {
     /// The operation the scenario forces on this operator next, if any:
     /// `ADMIT` while the replacement is idle, then `FLEET_INIT` once it is
     /// admitted. Client 0 only, and never in the middle of an operation.
-    pub(in crate::workload) fn replaced_founder_op(
-        &mut self,
-        ctx: &SimContext,
-    ) -> Option<u8> {
+    pub(in crate::workload) fn replaced_founder_op(&mut self, ctx: &SimContext) -> Option<u8> {
         if self.client_id != 0
             || self.pending.is_some()
             || !crate::shape::replaced_founder(ctx.state())

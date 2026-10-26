@@ -33,8 +33,8 @@ use paros::wire::Truncate;
 use paros::wire::leader_uuid_to_proto;
 
 use crate::audit::{AuditWorld, ClientHistory, audit_world_for, check_run};
-use crate::workload::chain::{hash_text, trace_truncate};
 use crate::client::{ChainClient, ClientRuntime, client_rpc_config};
+use crate::workload::chain::{hash_text, trace_truncate};
 
 pub(crate) mod chain;
 mod config;
