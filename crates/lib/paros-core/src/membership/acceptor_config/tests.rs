@@ -191,8 +191,7 @@ fn flexible_larger_than_the_membership_is_unconstructible() {
 /// split that admits the *deduplicated* size is what counts.
 #[test]
 fn well_formedness_is_judged_over_the_deduplicated_membership() {
-    let config =
-        AcceptorConfig::new(nodes([2, 1, 2, 1]), QuorumSystem::Flexible { q1: 2, q2: 1 });
+    let config = AcceptorConfig::new(nodes([2, 1, 2, 1]), QuorumSystem::Flexible { q1: 2, q2: 1 });
     assert_eq!(config.members(), nodes([1, 2]));
     assert!(config.is_well_formed());
 }

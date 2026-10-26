@@ -129,9 +129,7 @@ fn set_leader_is_a_compare_and_set_and_raises_the_term() {
         set_leader(2, Some(1)),
     ]);
     assert!(matches!(outcomes[0], Outcome::Leader(v) if v.leader == Some(LeaderUuid(1))));
-    assert!(
-        matches!(outcomes[1], Outcome::LeaderRefused(v) if v.leader == Some(LeaderUuid(1)))
-    );
+    assert!(matches!(outcomes[1], Outcome::LeaderRefused(v) if v.leader == Some(LeaderUuid(1))));
     assert!(matches!(outcomes[2], Outcome::Leader(_)));
     assert_eq!(state.leader, Some(LeaderUuid(2)));
     assert_eq!(state.term, 2);
@@ -173,9 +171,7 @@ fn truncate_is_fenced_like_a_write() {
     ]);
     assert!(matches!(outcomes[0], Outcome::TruncateRefused(v) if v.leader.is_none()));
     assert!(matches!(outcomes[3], Outcome::TruncateRefused(v) if v.first_seq == Seq(0)));
-    assert!(
-        matches!(outcomes[5], Outcome::TruncateRefused(v) if v.leader == Some(LeaderUuid(2)))
-    );
+    assert!(matches!(outcomes[5], Outcome::TruncateRefused(v) if v.leader == Some(LeaderUuid(2))));
     assert!(matches!(outcomes[6], Outcome::Trimmed(v) if v.first_seq == Seq(1)));
     assert_eq!(state.first_seq, Seq(1));
 }

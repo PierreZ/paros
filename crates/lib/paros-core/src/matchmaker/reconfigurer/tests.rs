@@ -193,7 +193,9 @@ fn a_handover_replaces_one_matchmaker_by_a_spare() {
             .any(|s| matches!(s, ReconfigurerStep::Proposing { adopted: false, .. }))
     );
     let steps = exchange(&mut r, &mut pool, &[]);
-    assert!(steps.iter().any(|s| matches!(s, ReconfigurerStep::Chosen { successor } if *successor == set(1, &[0, 1, 3]))));
+    assert!(steps.iter().any(
+        |s| matches!(s, ReconfigurerStep::Chosen { successor } if *successor == set(1, &[0, 1, 3]))
+    ));
     let steps = exchange(&mut r, &mut pool, &[]);
     assert!(
         steps
@@ -315,8 +317,7 @@ fn a_reconstruction_counts_same_ballot_disagreements() {
     // Two matchmakers register the *same* ballot with different
     // configurations — impossible with one proposer per ballot, which
     // is exactly why the audit wants to hear about it.
-    let cfg =
-        |n: u64| AcceptorConfig::new(vec![NodeId(n), NodeId(n + 1)], QuorumSystem::Majority);
+    let cfg = |n: u64| AcceptorConfig::new(vec![NodeId(n), NodeId(n + 1)], QuorumSystem::Majority);
     let b = Ballot {
         round: 1,
         node: NodeId(9),

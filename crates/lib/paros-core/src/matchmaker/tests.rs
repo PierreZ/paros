@@ -8,8 +8,7 @@ use crate::types::NodeId;
 /// restart from the durable install.
 #[test]
 fn activation_applies_the_higher_of_the_local_and_reconstructed_floors() {
-    let cfg =
-        |n: u64| AcceptorConfig::new(vec![NodeId(n), NodeId(n + 1)], QuorumSystem::Majority);
+    let cfg = |n: u64| AcceptorConfig::new(vec![NodeId(n), NodeId(n + 1)], QuorumSystem::Majority);
     // Matchmaker 0, a member of M_0 = {0, 1, 2}: registers ballots 1..=6
     // and hears a GarbageA raising its floor to ballot 5.
     let mut mm = fresh(0);
@@ -282,9 +281,9 @@ fn a_losing_bootstrap_is_dropped_when_the_successor_is_learned() {
         "the losing bootstrap is gone"
     );
     assert!(
-        writes
-            .iter()
-            .any(|w| matches!(w, MatchmakerWriteOp::SetScalars(scalars) if scalars.pending.is_empty())),
+        writes.iter().any(
+            |w| matches!(w, MatchmakerWriteOp::SetScalars(scalars) if scalars.pending.is_empty())
+        ),
         "the prune is durable"
     );
     // And the loser cannot come back: a resent bootstrap for a settled
