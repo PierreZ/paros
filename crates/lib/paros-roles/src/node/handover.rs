@@ -3,7 +3,7 @@
 //! and no durable state of its own.
 
 use paros_core::{
-    MatchmakerGeneration, MatchmakerId, MatchmakerReconfigurer, MatchmakerSet, NodeId,
+    Limits, MatchmakerGeneration, MatchmakerId, MatchmakerReconfigurer, MatchmakerSet, NodeId,
     PendingBootstrap, ReconfigureReply, ReconfigureRequest, ReconfigurerPhase, ReconfigurerStep,
     Reconstruction, StartRefusal,
 };
@@ -40,8 +40,13 @@ impl HandoverDriver {
     /// nobody finished replacing. `page` bounds the journals one handover
     /// message carries (`DriverTunables::registry_page`, #439).
     pub(crate) fn new(node: NodeId, page: usize) -> Self {
-        let mut reconfigurer = MatchmakerReconfigurer::new(node);
-        reconfigurer.set_page(page.clamp(1, paros_core::REGISTRY_PAGE));
+        let reconfigurer = MatchmakerReconfigurer::new(
+            node,
+            Limits {
+                registry_page: page.clamp(1, paros_core::REGISTRY_PAGE),
+                ..Limits::DEFAULT
+            },
+        );
         let driver = Self {
             reconfigurer,
             resend: Cadence::default(),

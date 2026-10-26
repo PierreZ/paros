@@ -226,7 +226,7 @@ use paros_core::matchmaking::{MatchFold, Matchmaking, RegisteredPage};
 use paros_core::proposer::{Campaign, PromiseFold, Proposer};
 use paros_core::{
     AcceptorConfig, AcceptorWrite, Ballot, Command, Entry, Fingerprint, JournalId, LeaderUuid,
-    MatchOutcome, MatchPurpose, MatchRefusal, MatchReply, MatchRequest, Matchmaker,
+    Limits, MatchOutcome, MatchPurpose, MatchRefusal, MatchReply, MatchRequest, Matchmaker,
     MatchmakerConfig, MatchmakerGeneration, MatchmakerId, MatchmakerPhase, MatchmakerReconfigurer,
     MatchmakerSet, MemRegistry, NodeId, QuorumSystem, ReconfigureReply, ReconfigureRequest,
     ReconfigurerPhase, ReconfigurerStep, Registration, RegistrationKind, RegistryStorage, Seq,
@@ -372,7 +372,7 @@ fn acceptor(pool: &mut [AcceptorNode], id: NodeId) -> &mut AcceptorNode {
 /// core's own recovery port, [`RegistryStorage`], which `MemRegistry`
 /// implements: a [`Matchmaker`] is *constructed from* a disk, reading the
 /// scalars once and the registry record by record, so a reboot is
-/// `Matchmaker::new(config, &disk)` and nothing else. Part 2 relies on that
+/// `Matchmaker::new(config, &disk, limits)` and nothing else. Part 2 relies on that
 /// to prove a registration survives a crash.
 #[derive(Clone, Debug, Default)]
 struct Disk {
@@ -425,7 +425,7 @@ impl MatchmakerNode {
         };
         let disk = Disk::default();
         Self {
-            role: Matchmaker::new(&config, &disk.store),
+            role: Matchmaker::new(&config, &disk.store, Limits::DEFAULT),
             config,
             disk,
         }
@@ -478,7 +478,7 @@ impl MatchmakerNode {
     /// built from the disk through the core's recovery port. Whatever the
     /// old role knew that the disk did not is gone — which is the point.
     fn reboot(&mut self) {
-        self.role = Matchmaker::new(&self.config, &self.disk.store);
+        self.role = Matchmaker::new(&self.config, &self.disk.store, Limits::DEFAULT);
     }
 }
 
@@ -1327,7 +1327,7 @@ fn part_handover(matchmakers: &mut [MatchmakerNode]) {
     // successor still inherits all three, whichever members answer.
     let m_0 = m_0();
     let m_1 = m_1();
-    let mut reconfigurer = MatchmakerReconfigurer::new(N3);
+    let mut reconfigurer = MatchmakerReconfigurer::new(N3, Limits::DEFAULT);
     reconfigurer
         .start(&m_0, m_1.members().to_vec())
         .expect("starts");

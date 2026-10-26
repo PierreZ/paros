@@ -48,6 +48,7 @@ use std::fmt::Write as _;
 use super::support::{Mailbox, Rng, env_or};
 use crate::contract::config::Config;
 use crate::contract::hard_state::HardState;
+use crate::contract::limits::Limits;
 use crate::contract::message::{Message, Party};
 use crate::contract::storage::Storage;
 use crate::contract::write::{AcceptorWrite, WriteOp};
@@ -380,10 +381,13 @@ impl World {
             self.reach.node_rebooted += 1;
         }
         let site = self.site(id);
-        let mut node = ColocatedNode::new(&Boot {
-            disk: &site.disk,
-            config,
-        });
+        let mut node = ColocatedNode::new(
+            &Boot {
+                disk: &site.disk,
+                config,
+            },
+            Limits::DEFAULT,
+        );
         let timeout = 3 + self.rng.below(6);
         node.set_election_timeout(timeout);
         self.site(id).live = Some(node);

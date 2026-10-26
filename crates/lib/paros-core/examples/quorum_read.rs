@@ -108,7 +108,7 @@ fn fresh(id: u64) -> ColocatedNode {
         quorum_system: GRID,
         ..Config::new(NodeId(id), paros_core::JournalIdentifier::UNSET)
     };
-    ColocatedNode::new(&FreshStore { config })
+    ColocatedNode::new(&FreshStore { config }, paros_core::Limits::DEFAULT)
 }
 
 /// A large `CheckQuorum` window: this example steps messages by hand and

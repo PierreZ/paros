@@ -3,6 +3,7 @@
 //! repair pump, and the §5.1.1 mixed-epoch named regression.
 
 use super::*;
+use crate::contract::limits::Limits;
 
 /// Keep every message except the ones that would let slot 3's round complete
 /// beyond the intended holders: the proposer's `Accepted` acks, every
@@ -25,7 +26,7 @@ fn rebooted_with_rot(rotted: &[u64]) -> ColocatedNode {
     for &slot in rotted {
         storage.rot(Slot(slot));
     }
-    ColocatedNode::new(&storage)
+    ColocatedNode::new(&storage, Limits::DEFAULT)
 }
 
 #[test]
@@ -93,7 +94,7 @@ fn accept_repairs_a_faulty_slot_in_place() {
     assert!(nodes[1].acceptor().records().contains_key(&Slot(3)));
     let mut storage = TestStorage::from_node(&nodes[1]);
     storage.rot(Slot(3));
-    let mut n = ColocatedNode::new(&storage);
+    let mut n = ColocatedNode::new(&storage, Limits::DEFAULT);
     assert_eq!(n.acceptor().faulty().len(), 1);
 
     // The leader re-sends its pending Accept: the fresh record replaces the
@@ -129,12 +130,12 @@ fn full_none_quorum_noop_fills_over_an_excluded_faulty_reporter() {
     deliver_filtered(&mut nodes, q, |to, m| keep_slot3_undecided(to, m, true));
     let mut storage = TestStorage::from_node(&nodes[1]);
     storage.rot(Slot(3));
-    nodes[1] = ColocatedNode::new(&storage);
+    nodes[1] = ColocatedNode::new(&storage, Limits::DEFAULT);
     // Node 0 must forget its own copy of slot 3 (it proposed it), so the
     // quorum genuinely reports none: rebuild node 0 from a log without it.
     let mut s0 = TestStorage::from_node(&nodes[0]);
     s0.accepted.remove(&Slot(3));
-    nodes[0] = ColocatedNode::new(&s0);
+    nodes[0] = ColocatedNode::new(&s0, Limits::DEFAULT);
 
     // Node 2 campaigns: Q1 = {0, 2} reports none at slot 3; node 1 reports
     // faulty. {0, 2} is a full quorum of none — the slot is decided Noop even
@@ -166,7 +167,7 @@ fn blocked_slot_waits_then_resolves_case1_from_a_straggler() {
     // self-accept), so the identity survives but the value is lost.
     let mut s0 = TestStorage::from_node(&nodes[0]);
     s0.rot(Slot(3));
-    nodes[0] = ColocatedNode::new(&s0);
+    nodes[0] = ColocatedNode::new(&s0, Limits::DEFAULT);
 
     // Node 0 campaigns; node 2 answers (none at slot 3), node 1's promise is
     // withheld. Tally at slot 3: self faulty(b), node 2 none — one qualifying
@@ -208,7 +209,7 @@ fn recovery_timeout_steps_the_leader_down() {
     deliver_filtered(&mut nodes, q, |to, m| keep_slot3_undecided(to, m, true));
     let mut s0 = TestStorage::from_node(&nodes[0]);
     s0.rot(Slot(3));
-    nodes[0] = ColocatedNode::new(&s0);
+    nodes[0] = ColocatedNode::new(&s0, Limits::DEFAULT);
     campaign(&mut nodes[0]);
     let q = drain(&mut nodes[0]);
     deliver_filtered(&mut nodes, q, |to, _m| to != NodeId(1));
@@ -242,7 +243,7 @@ fn faulty_chosen_slot_heals_via_catchup() {
     let nodes = cluster_with_three_chosen();
     let mut storage = TestStorage::from_node(&nodes[1]);
     storage.rot(Slot(1));
-    let mut n = ColocatedNode::new(&storage);
+    let mut n = ColocatedNode::new(&storage, Limits::DEFAULT);
     // The fold stops at the rotted slot: it is chosen, its value is not
     // here, and folding past it would judge slot 2 against the wrong state.
     assert_eq!(n.replica().fold_hole(), Some(Slot(1)));
@@ -300,7 +301,7 @@ fn a_faulty_chosen_record_holds_the_walk_until_the_fold_heals() {
     let nodes = cluster_with_three_chosen();
     let mut storage = TestStorage::from_node(&nodes[1]);
     storage.rot(Slot(1));
-    let mut n = ColocatedNode::new(&storage);
+    let mut n = ColocatedNode::new(&storage, Limits::DEFAULT);
     let _ = drain(&mut n);
     let record = |s: u64| {
         nodes[0]
@@ -354,7 +355,7 @@ fn serve_catchup_stops_at_the_servers_own_faulty_hole() {
     let nodes = cluster_with_three_chosen();
     let mut storage = TestStorage::from_node(&nodes[1]);
     storage.rot(Slot(1));
-    let mut n = ColocatedNode::new(&storage);
+    let mut n = ColocatedNode::new(&storage, Limits::DEFAULT);
     n.step(Message::CatchUpRequest {
         from: NodeId(2),
         from_slot: Slot(0),
@@ -380,7 +381,7 @@ fn a_trim_point_jump_drops_a_faulty_record_below_it() {
     let nodes = cluster_with_three_chosen();
     let mut storage = TestStorage::from_node(&nodes[1]);
     storage.rot(Slot(1));
-    let mut n = ColocatedNode::new(&storage);
+    let mut n = ColocatedNode::new(&storage, Limits::DEFAULT);
     assert!(!n.acceptor().faulty().is_empty());
     let chosen = n.hard_state().chosen_index;
 
@@ -434,9 +435,9 @@ fn ctrl_5_1_1_mixed_epoch_three_decisions_in_one_election() {
     s3.accepted.insert(Slot(0), (ballot(2, 1), b.clone()));
 
     let mut nodes = [
-        ColocatedNode::new(&s1),
-        ColocatedNode::new(&s2),
-        ColocatedNode::new(&s3),
+        ColocatedNode::new(&s1, Limits::DEFAULT),
+        ColocatedNode::new(&s2, Limits::DEFAULT),
+        ColocatedNode::new(&s3, Limits::DEFAULT),
     ];
     // S2 — a leader with faulty entries may be elected.
     make_leader(&mut nodes, 1);

@@ -78,6 +78,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 use super::support::{Mailbox, Rng, env_or};
+use crate::contract::limits::Limits;
 use crate::journal::JournalId;
 use crate::matchmaker::{
     MatchOutcome, MatchRefusal, MatchReply, MatchRequest, Matchmaker, MatchmakerConfig,
@@ -141,18 +142,24 @@ impl Site {
         if self.live.is_none() && *self.disk.hard_state() != MatchmakerHardState::default() {
             self.restarted = true;
         }
-        let mut live = Matchmaker::new(&self.config, &self.disk);
-        live.set_registry_page(self.page);
-        self.live = Some(live);
+        let limits = Limits {
+            registry_page: self.page,
+            ..Limits::DEFAULT
+        };
+        self.live = Some(Matchmaker::new(&self.config, &self.disk, limits));
     }
 }
 
 /// A fresh reconfigurer for `node` that pages its bootstraps by `page`
 /// (#439).
 fn paged(node: NodeId, page: usize) -> MatchmakerReconfigurer {
-    let mut reconfigurer = MatchmakerReconfigurer::new(node);
-    reconfigurer.set_page(page);
-    reconfigurer
+    MatchmakerReconfigurer::new(
+        node,
+        Limits {
+            registry_page: page,
+            ..Limits::DEFAULT
+        },
+    )
 }
 
 /// A node's open matchmaking campaign: the real candidate tally over the

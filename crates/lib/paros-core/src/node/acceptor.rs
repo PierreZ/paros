@@ -108,7 +108,9 @@ impl ColocatedNode {
                     self.ballot >= ballot,
                     "the operating ballot follows a raised promise"
                 );
-                let page = self.acceptor.promise_page(from_slot, self.promise_page);
+                let page = self
+                    .acceptor
+                    .promise_page(from_slot, self.limits.promise_page);
                 // The paging paths a small promise page makes run (#338): a
                 // suffix over several pages, and a full page that mixes
                 // readable and faulty entries (the merge order decides it).

@@ -325,7 +325,7 @@ pub struct DriverTunables {
     /// that costs work, never a wrong answer.
     pub machine_replace_after: Duration,
     /// The most rounds one page of a leader's recovery visits (#330,
-    /// `ColocatedNode::set_recovery_page`) before the driver advances the
+    /// `Limits::recovery_page`) before the driver advances the
     /// batch. A per-node size, never on the wire. Floor 1: a one-slot page
     /// still drains the recovery, one `Ready` per slot. The ceiling is
     /// [`paros_core::LEADER_RECOVERY_BATCH`], the default; a larger value
@@ -333,25 +333,25 @@ pub struct DriverTunables {
     pub recovery_page: usize,
     /// The most accepted records and faulty entries one `Promise` page
     /// carries before its continuation cursor (#338,
-    /// `ColocatedNode::set_promise_page`). A per-node size: a receiver
+    /// `Limits::promise_page`). A per-node size: a receiver
     /// checks a page against the core's ceiling, never against its own
     /// size. Floor 1: a one-entry page still walks the suffix, one round
     /// trip per entry. The ceiling is [`paros_core::PROMISE_BATCH`], the
     /// default; a larger value runs the ceiling.
     pub promise_page: usize,
     /// The most open rounds one re-send page carries (#338,
-    /// `ColocatedNode::set_resend_page`). A per-node size, never on the
+    /// `Limits::resend_page`). A per-node size, never on the
     /// wire. Floor 1: the cursor still visits every open round, one per
     /// beat. The ceiling is [`paros_core::RESEND_BATCH`], the default.
     pub resend_page: usize,
     /// The most chosen slots one apply walk folds before it yields (#338,
-    /// `ColocatedNode::set_apply_page`, `ReplicaNode::set_apply_page`). A
+    /// `Limits::apply_page`). A
     /// per-node size, never on the wire. Floor 1: the walk still folds the
     /// whole prefix, one slot per `Ready`. The ceiling is
     /// [`paros_core::APPLY_BATCH`], the default.
     pub apply_page: usize,
     /// The most registrations one matchmaker answer carries before its
-    /// continuation cursor (#338, `Matchmaker::set_registry_page`). A
+    /// continuation cursor (#338, `Limits::registry_page`). A
     /// per-matchmaker size: a candidate checks a page against the core's
     /// ceiling. Floor 1: a one-registration page still delivers the whole
     /// history, one round trip per registration. The ceiling is
@@ -683,6 +683,32 @@ const _: () = assert!(SCRUB_PAGE >= 1);
 const _: () = assert!(SCRUB_PAGE <= scrub::SCRUB_PAGE);
 
 impl DriverTunables {
+    /// The core's limits a deployment boots under (#730 (paros-core
+    /// rework)): each page capped at the core's ceiling (an operator's
+    /// override is external input, never a panic), and the driver's read
+    /// window, which the core keeps at least as long (#386): a fast tick
+    /// must not make the core drop a read first.
+    ///
+    /// # Panics
+    ///
+    /// If the capped limits are not valid: a programmer error, never an
+    /// operating condition.
+    #[must_use]
+    pub fn limits(&self) -> paros_core::Limits {
+        let limits = paros_core::Limits {
+            recovery_page: self
+                .recovery_page
+                .clamp(1, paros_core::LEADER_RECOVERY_BATCH),
+            promise_page: self.promise_page.clamp(1, paros_core::PROMISE_BATCH),
+            resend_page: self.resend_page.clamp(1, paros_core::RESEND_BATCH),
+            apply_page: self.apply_page.clamp(1, paros_core::APPLY_BATCH),
+            read_window: self.read_retry_ticks,
+            registry_page: self.registry_page.clamp(1, paros_core::REGISTRY_PAGE),
+        };
+        limits.assert_valid();
+        limits
+    }
+
     /// The library client tunables of a machine's own clients (#457): the
     /// client's defaults, with the request and read timeouts and the
     /// re-send budget and pause these tunables name.

@@ -1,14 +1,15 @@
 //! Quorum reads (#143): the leaderless read path, pinned at the node.
 
-#[allow(clippy::wildcard_imports)]
 use super::*;
+#[allow(clippy::wildcard_imports)]
+use crate::contract::limits::Limits;
 
 /// A six-node `2 × 3` grid over `0..6`: rows `{0, 1, 2}` and `{3, 4, 5}`,
 /// columns `{0, 3}`, `{1, 4}` and `{2, 5}`.
 fn grid_node(id: u64) -> ColocatedNode {
     let mut storage = TestStorage::new(id, &[0, 1, 2, 3, 4, 5]);
     storage.config.quorum_system = crate::membership::QuorumSystem::grid(2, 3);
-    ColocatedNode::new(&storage)
+    ColocatedNode::new(&storage, Limits::DEFAULT)
 }
 
 /// A grid cluster led by node 0 with slots `0..=2` chosen everywhere.

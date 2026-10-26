@@ -380,7 +380,7 @@ pub(crate) async fn finish_ready<A: Audit>(
     } = taken;
 
     if let Some(batch) = recovery_batch {
-        report_recovery_batch(audit, self_id, batch, node.recovery_page());
+        report_recovery_batch(audit, self_id, batch, node.limits().recovery_page);
     }
 
     // Hint: the batch is durable, its messages have not left. A crash here

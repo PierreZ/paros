@@ -51,13 +51,7 @@ use crate::journal::state::{JournalState, JournalView, Outcome, WriterMode};
 use crate::journal::{Command, Entry, Seq};
 use crate::types::{Ballot, Slot, Value};
 
-/// Maximum slots the contiguous apply walk releases in one batch — the
-/// ceiling of the page [`Replica::advance`] walks ([`Replica::set_apply_page`],
-/// #338), so one `Ready` never hands the driver an unbounded run.
-pub const APPLY_BATCH: usize = 64;
-
-// A walk that releases nothing per batch would never apply a slot.
-const _: () = assert!(APPLY_BATCH > 0);
+pub use crate::contract::limits::APPLY_BATCH;
 
 /// The answer to a journal read ([`Replica::read`], #204).
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -12,6 +12,7 @@ use super::{
     Acceptor, BTreeMap, Ballot, BeliefSource, ColocatedNode, Command, Config, Counters,
     HandoffCounters, LeadershipOrigin, NodeRole, Proposer, Replica, Slot, Storage,
 };
+use crate::contract::limits::Limits;
 use crate::membership::{MatchmakerGeneration, MatchmakerSet};
 use crate::quorum_read::QuorumReads;
 
@@ -21,15 +22,24 @@ impl ColocatedNode {
     /// journal fold are rebuilt from the durable `accepted` log, the
     /// `chosen_index` and the sealed journal state at the floor.
     ///
+    /// The node runs under `limits` for this incarnation: its page sizes,
+    /// and its read window raised to the floor.
+    ///
     /// # Panics
     ///
-    /// If the configuration is malformed (membership not sorted/deduplicated,
+    /// If `limits` breaks [`Limits::assert_valid`], the configuration is
+    /// malformed (membership not sorted/deduplicated,
     /// or missing this node's own id) or the durable state violates the write
     /// ordering contract (a floor past the chosen prefix). A broken invariant
     /// here means corrupted storage or a broken storage implementation;
     /// crashing beats running on it.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all))]
-    pub fn new<S: Storage>(storage: &S) -> Self {
+    pub fn new<S: Storage>(storage: &S, limits: Limits) -> Self {
+        limits.assert_valid();
+        let limits = Limits {
+            read_window: limits.kept_read_window(),
+            ..limits
+        };
         let (hard_state, config) = storage.initial_state();
         assert_config_shape(&config);
         let acceptors = config.bootstrap();
@@ -42,13 +52,14 @@ impl ColocatedNode {
         let ballot = hard_state.max_promised_ballot;
 
         let (first_slot, accepted, faulty) = read_back_log(storage, hard_state.max_promised_ballot);
-        let replica = Replica::from_boot(
+        let mut replica = Replica::from_boot(
             config.writer_mode,
             hard_state.chosen_index,
             first_slot,
             storage.sealed_state(),
             &accepted,
         );
+        replica.set_apply_page(limits.apply_page);
 
         // Next free slot: one past the highest accepted entry (readable or
         // faulty), or (when the log is empty, e.g. fully truncated) one past
@@ -110,10 +121,7 @@ impl ColocatedNode {
             pending_read_states: Vec::new(),
             quorum_reads: QuorumReads::new(),
             pending_recovery_batch: None,
-            recovery_page: crate::proposer::RECOVERY_BATCH,
-            promise_page: crate::acceptor::PROMISE_BATCH,
-            resend_page: crate::proposer::RESEND_BATCH,
-            read_window: super::READ_TTL_TICKS,
+            limits,
             tick_count: 0,
             role: NodeRole::Follower,
             leader: None,

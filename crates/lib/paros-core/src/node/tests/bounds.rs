@@ -11,6 +11,7 @@ use super::{
     NodeId, NodeRole, PROMISE_BATCH, Party, ProposeResult, Ready, Seq, Slot, TestStorage, Value,
     campaign, command_fingerprint, drain_with, terminal_promise,
 };
+use crate::contract::limits::Limits;
 
 const SUFFIX_LEN: u64 = 2 * PROMISE_BATCH as u64 + 2;
 
@@ -29,7 +30,7 @@ fn take_ready(node: &mut ColocatedNode) -> ReadyOutput {
 }
 
 fn candidate(id: u64) -> (ColocatedNode, Ballot) {
-    let mut node = ColocatedNode::new(&TestStorage::new(id, &[0, 1, 2]));
+    let mut node = ColocatedNode::new(&TestStorage::new(id, &[0, 1, 2]), Limits::DEFAULT);
     campaign(&mut node);
     let ballot = node.ballot();
     let _ = take_ready(&mut node);
@@ -52,7 +53,7 @@ fn promise_suffix_and_leader_recovery_are_paged() {
             .accepted
             .insert(Slot(slot), (Ballot::zero(), command(slot)));
     }
-    let mut acceptor = ColocatedNode::new(&storage);
+    let mut acceptor = ColocatedNode::new(&storage, Limits::DEFAULT);
     let mut cursor = Slot(0);
     let mut pages = 0_usize;
     let mut entries_seen = 0_usize;
@@ -159,7 +160,7 @@ fn promise_suffix_and_leader_recovery_are_paged() {
 /// Accepted ack into an unbounded Ready write batch.
 #[test]
 fn gap_fill_releases_the_chosen_prefix_in_bounded_chunks() {
-    let mut gapped = ColocatedNode::new(&TestStorage::new(0, &[0, 1, 2]));
+    let mut gapped = ColocatedNode::new(&TestStorage::new(0, &[0, 1, 2]), Limits::DEFAULT);
     let prior = Ballot {
         round: 1,
         node: NodeId(1),

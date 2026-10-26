@@ -1,5 +1,6 @@
-#[allow(clippy::wildcard_imports)]
 use super::*;
+#[allow(clippy::wildcard_imports)]
+use crate::contract::limits::Limits;
 
 #[test]
 fn promise_and_accept_batches_require_fsync() {
@@ -106,7 +107,7 @@ fn chosen_value_survives_restart_over_a_stale_accept() {
 
     // Restart: rebuild from the durable state (scalars + accepted log).
     let storage = TestStorage::from_node(&n);
-    let restarted = ColocatedNode::new(&storage);
+    let restarted = ColocatedNode::new(&storage, Limits::DEFAULT);
 
     assert_eq!(
         chosen_at(&restarted, 0),

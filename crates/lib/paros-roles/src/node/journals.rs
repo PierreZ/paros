@@ -324,7 +324,8 @@ pub(crate) async fn boot_journal<P: ParosProviders, S: LogStorage, A: Audit>(
         .await
         .map_err(|e| storage_fault_crash(&audit, self_id, e))?;
     check_format_marker(&mut storage, boot, self_id, &audit).await?;
-    let mut node = ColocatedNode::new(&storage);
+    let limits = tunables.limits();
+    let mut node = ColocatedNode::new(&storage, limits);
     // The core booted from exactly this store's configuration.
     assert!(
         node.config().id.0 == self_id,
@@ -339,41 +340,27 @@ pub(crate) async fn boot_journal<P: ParosProviders, S: LogStorage, A: Audit>(
         "a booted journal has its first timeout"
     );
     audit.election_timeout_set(NodeId(self_id), first_timeout);
-    // The recovery page size (#330): the tunable, capped at the core's
-    // ceiling (an operator's override is external input, never a panic).
-    let page = tunables
-        .recovery_page
-        .clamp(1, paros_core::LEADER_RECOVERY_BATCH);
-    node.set_recovery_page(page);
+    // The page sizes (#330, #338) and the read window (#386) the core
+    // booted under are the driver's.
+    let booted = node.limits();
     assert!(
-        node.recovery_page() == page,
+        booted.recovery_page == limits.recovery_page,
         "a booted journal runs the driver's recovery page"
     );
-    // The promise, re-send and apply page sizes (#338), each capped at the
-    // core's ceiling in the same way.
-    let promise_page = tunables.promise_page.clamp(1, paros_core::PROMISE_BATCH);
-    node.set_promise_page(promise_page);
-    let resend_page = tunables.resend_page.clamp(1, paros_core::RESEND_BATCH);
-    node.set_resend_page(resend_page);
-    let apply_page = tunables.apply_page.clamp(1, paros_core::APPLY_BATCH);
-    node.set_apply_page(apply_page);
     assert!(
-        node.promise_page() == promise_page,
+        booted.promise_page == limits.promise_page,
         "a booted journal runs the driver's promise page"
     );
     assert!(
-        node.resend_page() == resend_page,
+        booted.resend_page == limits.resend_page,
         "a booted journal runs the driver's re-send page"
     );
     assert!(
-        node.apply_page() == apply_page,
+        booted.apply_page == limits.apply_page,
         "a booted journal runs the driver's apply page"
     );
-    // The core keeps a quorum read as long as the driver waits on it
-    // (#386): a fast tick must not make the core drop a read first.
-    node.set_read_window(tunables.read_retry_ticks);
     assert!(
-        node.read_window() >= tunables.read_retry_ticks,
+        booted.read_window >= tunables.read_retry_ticks,
         "a booted journal keeps its reads as long as its driver waits"
     );
     let last = Deltas::new(&node);

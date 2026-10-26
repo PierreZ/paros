@@ -116,6 +116,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::ReadState;
 use crate::contract::config::Config;
+use crate::contract::limits::Limits;
 use crate::contract::message::{Audience, Message};
 use crate::contract::storage::Storage;
 use crate::contract::write::WriteOp;
@@ -184,10 +185,10 @@ pub struct ReplicaNode {
     /// The open quorum reads (§3.4): a row's watermarks, then this
     /// replica's own applied prefix.
     quorum_reads: QuorumReads<NodeId>,
-    /// How many ticks an open quorum read may wait (#386): at least
-    /// `READ_TTL_TICKS` (20 ticks) and the driver's window
-    /// ([`ReplicaNode::set_read_window`]).
-    read_window: u64,
+    /// The page sizes and the read window this replica runs under, fixed at
+    /// boot ([`ReplicaNode::new`]): an open quorum read waits at least
+    /// `READ_TTL_TICKS` (20 ticks) and the driver's window (#386).
+    limits: Limits,
     /// Logical time, for the reads' TTL.
     tick_count: u64,
     pending_writes: Vec<WriteOp>,
@@ -205,15 +206,24 @@ impl ReplicaNode {
     /// order) are learned again rather than treated as in flight, and the
     /// walk runs once: the first batch may carry the prefix they complete.
     ///
+    /// The replica runs under `limits` for this incarnation: its apply page
+    /// and its read window, raised to the floor.
+    ///
     /// # Panics
     ///
-    /// If the configuration is malformed (an unsorted or duplicated pool, a
+    /// If `limits` breaks [`Limits::assert_valid`], the configuration is
+    /// malformed (an unsorted or duplicated pool, a
     /// bootstrap membership outside it, or a replica id *inside* it — a
     /// replica is never a member of anything) or the durable state breaks
     /// the write ordering (a floor past the chosen prefix, a hole in the
     /// retained chosen prefix).
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all))]
-    pub fn new<S: Storage>(storage: &S) -> Self {
+    pub fn new<S: Storage>(storage: &S, limits: Limits) -> Self {
+        limits.assert_valid();
+        let limits = Limits {
+            read_window: limits.kept_read_window(),
+            ..limits
+        };
         let (hard_state, config) = storage.initial_state();
         assert_replica_config_shape(&config);
         let floor = storage.first_slot();
@@ -250,13 +260,14 @@ impl ReplicaNode {
                 "every retained slot below a replica's chosen prefix has a durable record"
             );
         }
-        let replica = Replica::from_boot(
+        let mut replica = Replica::from_boot(
             config.writer_mode,
             chosen_index,
             floor,
             storage.sealed_state(),
             &below,
         );
+        replica.set_apply_page(limits.apply_page);
         let acceptors = config.bootstrap();
         let mut node = Self {
             config,
@@ -269,7 +280,7 @@ impl ReplicaNode {
             acceptors_since: Ballot::zero(),
             read_basis: None,
             quorum_reads: QuorumReads::new(),
-            read_window: READ_TTL_TICKS,
+            limits,
             tick_count: 0,
             pending_writes: Vec::new(),
             pending_messages: Vec::new(),
@@ -363,38 +374,12 @@ impl ReplicaNode {
         self.assert_invariants();
     }
 
-    /// The driver hands the replica its own read window (#386): the replica
-    /// keeps an open quorum read at least that long, never less than
-    /// `READ_TTL_TICKS` (20 ticks) (see `ColocatedNode::set_read_window`).
-    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(replica = self.config.id.0, ticks)))]
-    pub fn set_read_window(&mut self, ticks: u64) {
-        self.read_window = ticks.max(READ_TTL_TICKS);
-        assert!(
-            self.read_window >= ticks,
-            "the core keeps a read as long as its driver waits"
-        );
-        assert!(
-            self.read_window >= READ_TTL_TICKS,
-            "a read window is never shorter than its floor"
-        );
-    }
-
-    /// The driver sets the apply page size (#338): the most chosen slots
-    /// one apply walk folds before it yields (see
-    /// `ColocatedNode::set_apply_page`).
-    ///
-    /// # Panics
-    ///
-    /// If `page` is zero or above [`crate::APPLY_BATCH`]: a programmer
-    /// error, never an operating condition.
-    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(replica = self.config.id.0, page)))]
-    pub fn set_apply_page(&mut self, page: usize) {
-        self.replica.set_apply_page(page);
-        assert!(
-            self.replica.apply_page() == page,
-            "the driver's apply page is in force"
-        );
-        self.assert_invariants();
+    /// The page sizes and the read window this replica runs under, fixed
+    /// at boot. The read window is the one the core keeps: the driver's,
+    /// raised to its floor.
+    #[must_use]
+    pub fn limits(&self) -> Limits {
+        self.limits
     }
 
     /// Advance logical time by one tick: while a faulty record is open, pull the decided range from its first missing
@@ -411,10 +396,11 @@ impl ReplicaNode {
         let ticks = self.tick_count;
         self.tick_count += 1;
         assert!(
-            self.read_window >= READ_TTL_TICKS,
+            self.limits.read_window >= READ_TTL_TICKS,
             "a read window keeps its floor"
         );
-        self.quorum_reads.expire(self.tick_count, self.read_window);
+        self.quorum_reads
+            .expire(self.tick_count, self.limits.read_window);
         self.serve_quorum_reads();
         let first_faulty = self.faulty.first().copied();
         if let Some(from_slot) = first_faulty {

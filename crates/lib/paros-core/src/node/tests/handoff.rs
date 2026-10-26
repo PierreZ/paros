@@ -4,14 +4,16 @@
 //! transferred authority and every refusal path, so a regression names the rule
 //! it broke instead of surfacing as a rare seed.
 
+use std::collections::BTreeSet;
+
 use super::{
     ColocatedNode, Command, Control, HANDOFF_BATCH, HANDOFF_FENCE_ELECTIONS, LeadershipOrigin,
     Message, NO_CHECK_QUORUM, NodeId, NodeRole, Party, ProposeResult, Slot, TestStorage, ballot,
     campaign, chosen_at, cluster, cluster_with_three_chosen, deliver_all, deliver_filtered, drain,
     entry, make_leader, node, ucmd, val,
 };
+use crate::contract::limits::Limits;
 use crate::proposer::RecoveryPolicy;
-use std::collections::BTreeSet;
 
 /// Pull the single `Relinquish` a leader queued, panicking if there is not
 /// exactly one.
@@ -226,7 +228,7 @@ fn a_restart_cannot_resurrect_a_relinquished_authority() {
     // and restarts believing it still owns B" scenario. Leadership is volatile,
     // so the reboot is itself the fence: a Follower whose only route back to
     // leadership campaigns at a strictly higher round.
-    let rebooted = ColocatedNode::new(&TestStorage::from_node(&nodes[0]));
+    let rebooted = ColocatedNode::new(&TestStorage::from_node(&nodes[0]), Limits::DEFAULT);
     assert_eq!(rebooted.role(), NodeRole::Follower);
     assert_eq!(rebooted.leadership_origin(), LeadershipOrigin::Elected);
     nodes[0] = rebooted;
@@ -334,7 +336,7 @@ fn a_successor_that_crashes_after_installing_leaves_an_ordinary_election_behind(
     // The successor dies with the authority. Leadership is volatile, so its
     // reboot is a Follower — nobody holds the ballot, and the ordinary election
     // is the only way back.
-    nodes[1] = ColocatedNode::new(&TestStorage::from_node(&nodes[1]));
+    nodes[1] = ColocatedNode::new(&TestStorage::from_node(&nodes[1]), Limits::DEFAULT);
     assert_eq!(nodes[1].role(), NodeRole::Follower);
     nodes[1].set_election_timeout(NO_CHECK_QUORUM);
     assert!(nodes.iter().all(|n| !n.is_leader()));
@@ -418,7 +420,7 @@ fn an_open_repair_or_recovery_blocks_the_handoff() {
     let mut with_rot = cluster_with_three_chosen();
     let mut disk = TestStorage::from_node(&with_rot[0]);
     disk.rot(Slot(1));
-    with_rot[0] = ColocatedNode::new(&disk);
+    with_rot[0] = ColocatedNode::new(&disk, Limits::DEFAULT);
     with_rot[0].set_election_timeout(NO_CHECK_QUORUM);
     assert!(!with_rot[0].acceptor().faulty().is_empty());
     assert!(!with_rot[0].can_relinquish());
@@ -448,7 +450,7 @@ fn a_successor_that_needs_phase_1_repair_refuses_the_handoff() {
     let mut nodes = cluster_with_three_chosen();
     let mut disk = TestStorage::from_node(&nodes[1]);
     disk.rot(Slot(1));
-    nodes[1] = ColocatedNode::new(&disk);
+    nodes[1] = ColocatedNode::new(&disk, Limits::DEFAULT);
     nodes[1].set_election_timeout(NO_CHECK_QUORUM);
     assert!(!nodes[1].acceptor().faulty().is_empty());
 

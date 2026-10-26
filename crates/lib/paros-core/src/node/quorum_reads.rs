@@ -21,17 +21,7 @@ use crate::quorum_read::PreReadFold;
 use crate::types::Ballot;
 use crate::{Command, Control, Delegation, ProposeResult};
 
-/// Ticks a pending quorum read — waiting for its row to answer whole, or for
-/// the replica to cover the index it settled on — may wait before the node
-/// garbage-collects it (lost acks, an unreachable row). Dropped silently: a
-/// read carries no durable obligation, and the driver owns the client reply
-/// (its retry sweep answers first, well inside this window). A watermark
-/// raised by an accept that never decided needs the next leader's gap fill
-/// to be covered, which is why the window is not shorter than an election.
-pub(crate) const READ_TTL_TICKS: u64 = 20;
-
-// A read must outlive the tick it opened in, or no row could ever answer it.
-const _: () = assert!(READ_TTL_TICKS > 0);
+pub(crate) use crate::contract::limits::READ_TTL_TICKS;
 
 impl ColocatedNode {
     /// **Leaderless read** entry point, on any node (#143, Compartmentalized
@@ -299,7 +289,7 @@ impl ColocatedNode {
     /// have covered since.
     pub(super) fn tick_quorum_reads(&mut self) {
         let now = self.tick_count;
-        self.quorum_reads.expire(now, self.read_window());
+        self.quorum_reads.expire(now, self.limits.read_window);
         self.serve_quorum_reads();
     }
 }

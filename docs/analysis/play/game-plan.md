@@ -139,7 +139,7 @@ traffic on each tick when the heartbeat automation is on, and otherwise sets the
 timeout to the no-check-quorum sentinel exactly as `examples/quorum_read.rs:116` does.
 
 **Crash and restart.** `Crash { node }` drops the `ColocatedNode` and keeps the disk;
-`Restart { node }` is `ColocatedNode::new(&disk)`. `CrashAt { node, seam }` is the Act II seam
+`Restart { node }` is `ColocatedNode::new(&disk, limits)`. `CrashAt { node, seam }` is the Act II seam
 level: the pending `Ready` batch is cut before sync (nothing durable, nothing sent) or after
 sync before send (writes durable, messages lost). `Wipe { node }` (Act IV) clears the disk; the
 format-marker refusal is then the core's.

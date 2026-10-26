@@ -19,6 +19,7 @@ fn pool(n: u64, bootstrap: &[u64]) -> Vec<Matchmaker> {
                     bootstrap: ids(bootstrap),
                 },
                 &MemRegistry::default(),
+                Limits::DEFAULT,
             )
         })
         .collect()
@@ -105,7 +106,7 @@ fn route(
 #[test]
 fn a_lost_learned_from_an_activated_member_is_recovered_by_the_re_sent_chosen() {
     let mut pool = pool(4, &[0, 1, 2]);
-    let mut r = MatchmakerReconfigurer::new(NodeId(7));
+    let mut r = MatchmakerReconfigurer::new(NodeId(7), Limits::DEFAULT);
     r.start(&set(0, &[0, 1, 2]), ids(&[0, 1, 3]))
         .expect("start");
     exchange(&mut r, &mut pool, &[]);
@@ -164,7 +165,7 @@ fn a_lost_learned_from_an_activated_member_is_recovered_by_the_re_sent_chosen() 
 #[test]
 fn a_handover_replaces_one_matchmaker_by_a_spare() {
     let mut pool = pool(4, &[0, 1, 2]);
-    let mut r = MatchmakerReconfigurer::new(NodeId(7));
+    let mut r = MatchmakerReconfigurer::new(NodeId(7), Limits::DEFAULT);
     r.start(&set(0, &[0, 1, 2]), ids(&[0, 1, 3]))
         .expect("start");
     assert!(r.is_busy());
@@ -221,7 +222,7 @@ fn a_handover_replaces_one_matchmaker_by_a_spare() {
 #[test]
 fn a_duplicate_ack_is_ignored_and_never_resets_the_stall_clock() {
     let mut pool = pool(5, &[0, 1, 2, 3, 4]);
-    let mut r = MatchmakerReconfigurer::new(NodeId(7));
+    let mut r = MatchmakerReconfigurer::new(NodeId(7), Limits::DEFAULT);
     r.start(&set(0, &[0, 1, 2, 3, 4]), ids(&[0, 1, 2]))
         .expect("start");
     // One freeze: counted, three short of the quorum of five.
@@ -263,7 +264,7 @@ fn a_duplicate_ack_is_ignored_and_never_resets_the_stall_clock() {
 #[test]
 fn a_short_decree_quorum_reports_what_is_missing() {
     let mut pool = pool(6, &[0, 1, 2, 3, 4]);
-    let mut r = MatchmakerReconfigurer::new(NodeId(7));
+    let mut r = MatchmakerReconfigurer::new(NodeId(7), Limits::DEFAULT);
     r.start(&set(0, &[0, 1, 2, 3, 4]), ids(&[0, 1, 5]))
         .expect("start");
     // Freeze a quorum, bootstrap every proposed member, open the decree.
@@ -332,7 +333,7 @@ fn a_reconstruction_counts_same_ballot_disagreements() {
         ));
         disagreeing[i].ready().advance();
     }
-    let mut r = MatchmakerReconfigurer::new(NodeId(7));
+    let mut r = MatchmakerReconfigurer::new(NodeId(7), Limits::DEFAULT);
     r.finish(&set(0, &[0, 1, 2])).expect("finish");
     // Freeze both disagreeing members before the beat closes the stop.
     deliver(&mut r, &mut disagreeing, &[2]);
@@ -351,7 +352,7 @@ fn a_reconstruction_counts_same_ballot_disagreements() {
         ));
         mm.ready().advance();
     }
-    let mut r = MatchmakerReconfigurer::new(NodeId(7));
+    let mut r = MatchmakerReconfigurer::new(NodeId(7), Limits::DEFAULT);
     r.finish(&set(0, &[0, 1, 2])).expect("finish");
     deliver(&mut r, &mut agreeing, &[2]);
     assert_eq!(r.close_stop().expect("closes").disagreements, 0);
@@ -365,7 +366,7 @@ fn a_reconstruction_counts_same_ballot_disagreements() {
 #[test]
 fn a_learner_that_only_recorded_does_not_count_for_the_successor() {
     let mut pool = pool(4, &[0, 1, 2]);
-    let mut r = MatchmakerReconfigurer::new(NodeId(7));
+    let mut r = MatchmakerReconfigurer::new(NodeId(7), Limits::DEFAULT);
     r.start(&set(0, &[0, 1, 2]), ids(&[0, 1, 3]))
         .expect("start");
     while !matches!(r.phase(), ReconfigurerPhase::Publishing { .. }) {
@@ -415,7 +416,7 @@ fn a_learner_that_only_recorded_does_not_count_for_the_successor() {
 #[test]
 fn a_dead_matchmaker_is_replaced_without_its_cooperation() {
     let mut pool = pool(4, &[0, 1, 2]);
-    let mut r = MatchmakerReconfigurer::new(NodeId(7));
+    let mut r = MatchmakerReconfigurer::new(NodeId(7), Limits::DEFAULT);
     r.start(&set(0, &[0, 1, 2]), ids(&[0, 1, 3]))
         .expect("start");
     for _ in 0..8 {
@@ -437,8 +438,8 @@ fn a_dead_matchmaker_is_replaced_without_its_cooperation() {
 #[test]
 fn concurrent_incompatible_proposals_are_serialized_by_the_decree() {
     let mut pool = pool(6, &[0, 1, 2]);
-    let mut r1 = MatchmakerReconfigurer::new(NodeId(1));
-    let mut r2 = MatchmakerReconfigurer::new(NodeId(2));
+    let mut r1 = MatchmakerReconfigurer::new(NodeId(1), Limits::DEFAULT);
+    let mut r2 = MatchmakerReconfigurer::new(NodeId(2), Limits::DEFAULT);
     r1.start(&set(0, &[0, 1, 2]), ids(&[0, 1, 3])).expect("r1");
     r2.start(&set(0, &[0, 1, 2]), ids(&[1, 2, 4])).expect("r2");
     // Both freeze and bootstrap.
@@ -486,14 +487,14 @@ fn concurrent_incompatible_proposals_are_serialized_by_the_decree() {
 #[test]
 fn a_late_reconfigurer_adopts_the_successor_it_finds() {
     let mut pool = pool(5, &[0, 1, 2]);
-    let mut r1 = MatchmakerReconfigurer::new(NodeId(1));
+    let mut r1 = MatchmakerReconfigurer::new(NodeId(1), Limits::DEFAULT);
     r1.start(&set(0, &[0, 1, 2]), ids(&[0, 1, 3])).expect("r1");
     for _ in 0..8 {
         exchange(&mut r1, &mut pool, &[]);
         r1.resend();
     }
     assert!(!r1.is_busy());
-    let mut r2 = MatchmakerReconfigurer::new(NodeId(2));
+    let mut r2 = MatchmakerReconfigurer::new(NodeId(2), Limits::DEFAULT);
     r2.start(&set(0, &[0, 1, 2]), ids(&[2, 4])).expect("r2");
     let steps = exchange(&mut r2, &mut pool, &[]);
     assert!(
@@ -508,7 +509,7 @@ fn a_late_reconfigurer_adopts_the_successor_it_finds() {
 #[test]
 fn a_nacked_decree_reopens_above_the_refusing_promise() {
     let mut pool = pool(4, &[0, 1, 2]);
-    let mut r = MatchmakerReconfigurer::new(NodeId(1));
+    let mut r = MatchmakerReconfigurer::new(NodeId(1), Limits::DEFAULT);
     r.start(&set(0, &[0, 1, 2]), ids(&[0, 1, 3]))
         .expect("start");
     // The freeze completes with no decree promise anywhere...
@@ -561,7 +562,7 @@ fn a_nacked_decree_reopens_above_the_refusing_promise() {
 #[test]
 fn a_second_refusal_of_a_preempted_decree_is_ignored_and_raises_the_floor() {
     let mut pool = pool(4, &[0, 1, 2]);
-    let mut r = MatchmakerReconfigurer::new(NodeId(1));
+    let mut r = MatchmakerReconfigurer::new(NodeId(1), Limits::DEFAULT);
     r.start(&set(0, &[0, 1, 2]), ids(&[0, 1, 3]))
         .expect("start");
     exchange(&mut r, &mut pool, &[]);
@@ -644,7 +645,7 @@ fn a_decree_opens_above_the_stop_quorums_promises() {
         ready.advance();
     }
     // Its fresh incarnation starts from nothing.
-    let mut r = MatchmakerReconfigurer::new(NodeId(1));
+    let mut r = MatchmakerReconfigurer::new(NodeId(1), Limits::DEFAULT);
     r.start(&set(0, &[0, 1, 2]), ids(&[0, 1, 3]))
         .expect("start");
     exchange(&mut r, &mut pool, &[]);

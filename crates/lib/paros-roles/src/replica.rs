@@ -66,24 +66,11 @@ use paros_observe::events::{message_kind, message_route};
 use paros_storage::LogStorage;
 use paros_storage::boot::{BootKind, RunError};
 use paros_tunables::DriverTunables;
+
 use paros_wire::{
     InspectRefusal, InspectReply, InspectTarget, Read, ReadAck, journal_state_to_proto,
     quorum_system_to_proto,
 };
-
-/// Hand a booted replica the driver's tunables: it keeps a quorum read as
-/// long as the driver waits (#386), and walks the driver's apply page,
-/// capped at the core's ceiling (#338; an operator's override is external
-/// input, never a panic).
-fn tune(replica: &mut ReplicaNode, tunables: &DriverTunables) {
-    replica.set_read_window(tunables.read_retry_ticks);
-    let apply_page = tunables.apply_page.clamp(1, paros_core::APPLY_BATCH);
-    replica.set_apply_page(apply_page);
-    assert!(
-        replica.replica().apply_page() == apply_page,
-        "a booted replica runs the driver's apply page"
-    );
-}
 
 /// Report a (re)boot: the chosen index this replica rebuilt from its log
 /// and its floor. Nothing is replayed — a replica runs no application
@@ -395,13 +382,19 @@ async fn boot_journals<P: ParosProviders, J: JournalStores>(
             )));
         }
         self_id = Some(id);
-        let mut replica = ReplicaNode::new(&storage);
+        let limits = tunables.limits();
+        let replica = ReplicaNode::new(&storage, limits);
         if replica.config().journal != journal {
             return Err(RunError::Infra(SimulationError::InvalidState(
                 "a replica's store names its own journal".into(),
             )));
         }
-        tune(&mut replica, tunables);
+        // The replica keeps a quorum read as long as the driver waits
+        // (#386), and walks the driver's apply page (#338).
+        assert!(
+            replica.replica().apply_page() == limits.apply_page,
+            "a booted replica runs the driver's apply page"
+        );
         report_boot(&replica, id, &audit);
         journals.insert(
             journal,

@@ -106,7 +106,7 @@ use crate::proposer::RecoveryPolicy;
 /// A leader whose own chosen prefix trails its allocator by more than this is
 /// refused a handoff and keeps leading; the bound keeps the payload the same
 /// shape as one [`PROMISE_BATCH`](crate::PROMISE_BATCH) page.
-pub const HANDOFF_BATCH: usize = crate::PROMISE_BATCH;
+pub const HANDOFF_BATCH: usize = crate::Limits::DEFAULT.promise_page;
 
 /// Election timeouts a handoff leader may hold an uncovered inherited fence
 /// before resigning. The successor skipped Phase 1, so it never *recovered* the

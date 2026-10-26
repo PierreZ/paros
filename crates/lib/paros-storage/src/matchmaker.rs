@@ -346,6 +346,7 @@ pub async fn matchmaker_storage_contract_suite<S, Fresh, Reopened>(
                 bootstrap: vec![MatchmakerId(0)],
             },
             s,
+            paros_core::Limits::DEFAULT,
         );
         assert_eq!(
             *booted.hard_state(),

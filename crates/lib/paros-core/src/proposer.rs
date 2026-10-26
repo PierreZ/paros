@@ -318,7 +318,7 @@ fn slot_decidable<Id: Copy + Ord>(
 /// most the advertised bound across both tri-state maps, keeps them disjoint,
 /// and advances its continuation past everything it reported. A page with a
 /// cursor carries at least one entry: the sender's own page size
-/// (`ColocatedNode::set_promise_page`, #338) is a per-node tunable under
+/// ([`crate::Limits::promise_page`], #338) is a per-node tunable under
 /// [`PROMISE_BATCH`], so the receiver cannot ask for an exactly full page.
 fn promise_page_shape_valid<V>(
     expected: Slot,
@@ -386,17 +386,7 @@ fn merge_report<V: PartialEq>(
     );
 }
 
-/// Maximum recovered or gap-fill Phase-2 rounds one leader-recovery pump
-/// starts — the bound the bounded recovery this role holds is drained by.
-pub const RECOVERY_BATCH: usize = 64;
-
-/// Maximum in-flight rounds one fair re-send page carries — the bound this
-/// role enforces in [`Proposer::resend_page`].
-pub const RESEND_BATCH: usize = 64;
-
-// A page bound of zero would stall the recovery and the re-send for good.
-const _: () = assert!(RECOVERY_BATCH > 0);
-const _: () = assert!(RESEND_BATCH > 0);
+pub use crate::contract::limits::{RECOVERY_BATCH, RESEND_BATCH};
 
 /// The proposer component (see the module doc), over the acceptor identity
 /// `Id` its tallies count and the value `V` its rounds carry.

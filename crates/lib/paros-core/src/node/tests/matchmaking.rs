@@ -5,6 +5,7 @@
 //! of **every** prior configuration, never of their union.
 
 use super::*;
+use crate::contract::limits::Limits;
 
 /// The journal every node of these tests serves (`Config::new` with
 /// `JournalIdentifier::UNSET`).
@@ -1075,9 +1076,18 @@ fn a_registry_larger_than_a_page_answers_a_prefix_and_a_cursor() {
 /// `q1 = n` Phase 1 won through the recovery tail.
 #[test]
 fn a_page_leaves_out_a_belief_a_later_registration_repeats() {
-    let mut mm = registries(1);
-    let mm = &mut mm[0];
-    mm.set_registry_page(1);
+    let mut mm = Matchmaker::new(
+        &MatchmakerConfig {
+            id: MatchmakerId(0),
+            bootstrap: (0..1).map(MatchmakerId).collect(),
+        },
+        &crate::matchmaker::MemRegistry::default(),
+        Limits {
+            registry_page: 1,
+            ..Limits::DEFAULT
+        },
+    );
+    let mm = &mut mm;
     // Rounds 1..=40: one belief repeated by every failed campaign, a
     // reconfiguration to the same members at 20, and a second belief at 30.
     for round in 1..=40_u64 {

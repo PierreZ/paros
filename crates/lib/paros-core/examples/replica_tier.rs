@@ -119,17 +119,23 @@ impl Deployment {
             acceptors: ACCEPTORS
                 .iter()
                 .map(|id| {
-                    ColocatedNode::new(&FreshStore {
-                        config: config(*id),
-                    })
+                    ColocatedNode::new(
+                        &FreshStore {
+                            config: config(*id),
+                        },
+                        paros_core::Limits::DEFAULT,
+                    )
                 })
                 .collect(),
             replicas: REPLICAS
                 .iter()
                 .map(|id| {
-                    ReplicaNode::new(&FreshStore {
-                        config: config(*id),
-                    })
+                    ReplicaNode::new(
+                        &FreshStore {
+                            config: config(*id),
+                        },
+                        paros_core::Limits::DEFAULT,
+                    )
                 })
                 .collect(),
             applied: vec![Vec::new(); REPLICAS.len()],

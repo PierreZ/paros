@@ -11,7 +11,7 @@
 use std::collections::BTreeMap;
 
 use paros_core::{
-    Ballot, GcAck, GcOutcome, GcRequest, JournalId, MatchReply, MatchRequest, Matchmaker,
+    Ballot, GcAck, GcOutcome, GcRequest, JournalId, Limits, MatchReply, MatchRequest, Matchmaker,
     MatchmakerConfig, MatchmakerHardState, MatchmakerId, MemRegistry, ReconfigureReply,
     ReconfigureRequest, Registration,
 };
@@ -20,7 +20,7 @@ use paros_core::{
 /// counters that make the flush order visible.
 ///
 /// The **write** half is [`MemRegistry::apply`]; the **read** half is the
-/// core's recovery port, so a reboot is `Matchmaker::new(&config, &store)` and
+/// core's recovery port, so a reboot is `Matchmaker::new(&config, &store, limits)` and
 /// nothing else — which is what makes a registration survive a crash here for
 /// the same reason it survives one in production.
 #[derive(Clone, Debug, Default)]
@@ -106,7 +106,7 @@ impl MatchmakerProcess {
             synced: 0,
         };
         Self {
-            role: Some(Matchmaker::new(&config, disk.store())),
+            role: Some(Matchmaker::new(&config, disk.store(), Limits::DEFAULT)),
             config,
             disk,
         }
@@ -143,7 +143,11 @@ impl MatchmakerProcess {
 
     /// Rebuild the role from the disk, through the core's recovery port.
     pub(super) fn reboot(&mut self) {
-        self.role = Some(Matchmaker::new(&self.config, self.disk.store()));
+        self.role = Some(Matchmaker::new(
+            &self.config,
+            self.disk.store(),
+            Limits::DEFAULT,
+        ));
     }
 
     /// Persist one batch: apply every write, fsync, and only then let the

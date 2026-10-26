@@ -51,15 +51,15 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::decree::{AcceptFold, DecreePromise};
-use crate::membership::{AcceptorConfig, QuorumSystem};
-
 use super::SuccessorDecree;
 use super::{
     JournalRegistry, MatchmakerId, MatchmakerSet, PendingBootstrap, REGISTRY_PAGE,
     ReconfigureReply, ReconfigureRequest, raise_effective,
 };
+use crate::contract::limits::Limits;
+use crate::decree::{AcceptFold, DecreePromise};
 use crate::journal::JournalId;
+use crate::membership::{AcceptorConfig, QuorumSystem};
 use crate::types::{Ballot, NodeId};
 
 /// Why [`MatchmakerReconfigurer::start`] refused a request.
@@ -312,10 +312,10 @@ pub struct MatchmakerReconfigurer {
     /// Driver ticks since the running phase last made progress (see
     /// [`MatchmakerReconfigurer::stalled_for`]).
     elapsed: u64,
-    /// The most journals one bootstrap page carries (#439): a tunable in
-    /// `1..=REGISTRY_PAGE`, the constant by default
-    /// ([`MatchmakerReconfigurer::set_page`]).
-    page: usize,
+    /// The limits this reconfigurer runs under, fixed at construction
+    /// ([`MatchmakerReconfigurer::new`]): the most journals one bootstrap
+    /// page carries (#439), [`Limits::registry_page`].
+    limits: Limits,
     /// The smallest page a frozen member cut its report at in this handover
     /// (#439): the bootstrap is paged no wider, so a successor meets pages
     /// no larger than the set's own members send.
@@ -323,21 +323,24 @@ pub struct MatchmakerReconfigurer {
 }
 
 impl MatchmakerReconfigurer {
-    /// An idle reconfigurer for `node`.
+    /// An idle reconfigurer for `node`, that pages its bootstraps by
+    /// `limits.registry_page`.
     ///
     /// # Panics
     ///
-    /// If an assertion on its own invariants, preconditions or postconditions
-    /// fails: a programmer error, never an operating condition.
+    /// If `limits` breaks [`Limits::assert_valid`], or an assertion on its
+    /// own invariants, preconditions or postconditions fails: a programmer
+    /// error, never an operating condition.
     #[must_use]
-    pub fn new(node: NodeId) -> Self {
+    pub fn new(node: NodeId, limits: Limits) -> Self {
+        limits.assert_valid();
         let reconfigurer = Self {
             node,
             round: 0,
             phase: ReconfigurerPhase::Idle,
             pending: Vec::new(),
             elapsed: 0,
-            page: REGISTRY_PAGE,
+            limits,
             cut: None,
         };
         assert!(!reconfigurer.is_busy(), "a fresh reconfigurer is idle");
@@ -345,22 +348,10 @@ impl MatchmakerReconfigurer {
         reconfigurer
     }
 
-    /// The driver sets the bootstrap page size (#439): the most journals
-    /// one `Bootstrap` carries. A small page makes a reconstruction span
-    /// several pages.
-    ///
-    /// # Panics
-    ///
-    /// If `page` is zero or above [`REGISTRY_PAGE`]: a programmer error,
-    /// never an operating condition.
-    pub fn set_page(&mut self, page: usize) {
-        assert!(page > 0, "a bootstrap page carries a journal");
-        assert!(
-            page <= REGISTRY_PAGE,
-            "a bootstrap page never exceeds its ceiling"
-        );
-        self.page = page;
-        assert!(self.page == page, "the driver's page is in force");
+    /// The limits this reconfigurer runs under.
+    #[must_use]
+    pub fn limits(&self) -> Limits {
+        self.limits
     }
 
     /// The handover's per-phase invariants: who may have answered, which
@@ -894,10 +885,12 @@ impl MatchmakerReconfigurer {
     /// page, no wider than the smallest page a frozen member cut its report
     /// at.
     fn bootstrap_page(&self) -> usize {
-        let page = self.cut.map_or(self.page, |cut| cut.min(self.page));
+        let page = self.cut.map_or(self.limits.registry_page, |cut| {
+            cut.min(self.limits.registry_page)
+        });
         assert!(page > 0, "a bootstrap page carries a journal");
         assert!(
-            page <= self.page,
+            page <= self.limits.registry_page,
             "a bootstrap page is no wider than the driver's"
         );
         page
@@ -1165,7 +1158,9 @@ impl MatchmakerReconfigurer {
                     }
                     // `bootstrap_page` borrows all of `self`; the phase is
                     // borrowed here, so read the two fields it reads.
-                    let page = self.cut.map_or(self.page, |cut| cut.min(self.page));
+                    let page = self.cut.map_or(self.limits.registry_page, |cut| {
+                        cut.min(self.limits.registry_page)
+                    });
                     self.pending.push((
                         from,
                         ReconfigureRequest::Bootstrap {

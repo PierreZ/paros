@@ -63,7 +63,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use paros_core::proposer::RecoveryStep;
 use paros_core::{
-    AcceptorConfig, Ballot, ColocatedNode, Command, Config, GcAck, GcRequest, MatchReply,
+    AcceptorConfig, Ballot, ColocatedNode, Command, Config, GcAck, GcRequest, Limits, MatchReply,
     MatchRequest, MatchmakerId, MatchmakerReconfigurer, Message, NodeId, QuorumSystem,
     ReconfigureReply, ReconfigureRequest, Slot,
 };
@@ -352,11 +352,11 @@ impl World {
         let reconfigurers: Vec<MatchmakerReconfigurer> = pool
             .iter()
             .copied()
-            .map(MatchmakerReconfigurer::new)
+            .map(|node| MatchmakerReconfigurer::new(node, Limits::DEFAULT))
             .collect();
         let nodes: Vec<Option<ColocatedNode>> = disks
             .iter()
-            .map(|disk| Some(ColocatedNode::new(disk)))
+            .map(|disk| Some(ColocatedNode::new(disk, Limits::DEFAULT)))
             .collect();
         let count = disks.len();
         let mut world = Self {

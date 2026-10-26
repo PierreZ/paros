@@ -33,6 +33,7 @@ use crate::collector::Collector;
 pub use crate::collector::GcStep;
 use crate::contract::config::Config;
 use crate::contract::hard_state::HardState;
+use crate::contract::limits::Limits;
 use crate::contract::message::{Audience, Message, Party};
 use crate::contract::storage::Storage;
 use crate::contract::write::WriteOp;
@@ -52,10 +53,10 @@ pub use crate::acceptor::PROMISE_BATCH;
 /// the proposer's own bound, re-exported for the driver.
 pub use crate::proposer::RECOVERY_BATCH as LEADER_RECOVERY_BATCH;
 /// Maximum open rounds one re-send page carries — the ceiling of
-/// [`ColocatedNode::set_resend_page`], re-exported for the driver.
+/// [`Limits::resend_page`], re-exported for the driver.
 pub use crate::proposer::RESEND_BATCH;
 /// Maximum chosen slots one apply walk folds — the ceiling of
-/// [`ColocatedNode::set_apply_page`], re-exported for the driver.
+/// [`Limits::apply_page`], re-exported for the driver.
 pub use crate::replica::APPLY_BATCH;
 
 /// Election timeouts a leader's blocked repair probe may stay open before the
@@ -294,25 +295,12 @@ pub struct ColocatedNode {
     /// [`Ready::advance`] clears it and [`ColocatedNode::advance_recovery`]
     /// schedules the next.
     pending_recovery_batch: Option<(usize, usize, usize)>,
-    /// The most rounds one recovery page visits (#330): a node tunable in
-    /// `1..=LEADER_RECOVERY_BATCH`, the constant by default. The driver
-    /// sets it once at boot ([`ColocatedNode::set_recovery_page`]); a small
-    /// page makes a leader's recovery span several pages.
-    recovery_page: usize,
-    /// The most entries one promise page carries (#338): a node tunable in
-    /// `1..=PROMISE_BATCH`, the constant by default, set at boot
-    /// ([`ColocatedNode::set_promise_page`]). A receiver checks a page
-    /// against the ceiling, so a mixed cell is legal.
-    promise_page: usize,
-    /// The most rounds one re-send page carries (#338): a node tunable in
-    /// `1..=RESEND_BATCH`, the constant by default, set at boot
-    /// ([`ColocatedNode::set_resend_page`]).
-    resend_page: usize,
-    /// How many ticks an open quorum read may wait before the node drops
-    /// it (#386): at least `READ_TTL_TICKS` (20 ticks), and at least the driver's
-    /// own read window ([`ColocatedNode::set_read_window`]), so the core
-    /// never drops a read its driver still waits on.
-    read_window: u64,
+    /// The page sizes and the read window this node runs under (#330,
+    /// #338, #386), fixed at boot ([`ColocatedNode::new`]). The read window
+    /// is kept at least `READ_TTL_TICKS` (20 ticks) and at least the
+    /// driver's own, so the core never drops a read its driver still waits
+    /// on.
+    limits: Limits,
 
     /// Logical clock, advanced by [`ColocatedNode::tick`].
     tick_count: u64,
@@ -1149,7 +1137,7 @@ impl ColocatedNode {
             return;
         }
         let marks = self.durable_marks();
-        let pending = self.proposer.resend_page(self.resend_page);
+        let pending = self.proposer.resend_page(self.limits.resend_page);
         // A re-send carries the leadership's own rounds, nothing else.
         assert!(
             pending.iter().all(|accept| accept.ballot == self.ballot),
@@ -1479,173 +1467,12 @@ impl ColocatedNode {
         );
     }
 
-    /// The driver sets the recovery page size (#330): the most rounds one
-    /// page of a leader's recovery visits before the driver advances the
-    /// batch. A per-node size, never on the wire, so a mixed cell is legal.
-    /// Set it at boot, before the node can lead.
-    ///
-    /// # Panics
-    ///
-    /// If `page` is zero or above [`LEADER_RECOVERY_BATCH`], or a recovery
-    /// page is pending: a programmer error, never an operating condition.
-    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, page)))]
-    pub fn set_recovery_page(&mut self, page: usize) {
-        assert!(page > 0, "a recovery page visits at least one slot");
-        assert!(
-            page <= LEADER_RECOVERY_BATCH,
-            "a recovery page never exceeds its ceiling"
-        );
-        assert!(
-            self.pending_recovery_batch.is_none(),
-            "the page size never changes under a pending page"
-        );
-        self.recovery_page = page;
-        assert!(
-            self.recovery_page == page,
-            "the driver's page size is in force"
-        );
-    }
-
-    /// The driver sets the promise page size (#338): the most accepted
-    /// records and faulty entries one `Promise` carries before its
-    /// continuation cursor. A per-node size: a receiver checks a page
-    /// against [`PROMISE_BATCH`], never against its own size, so a mixed
-    /// cell is legal. A small page makes a Phase 1 span several pages.
-    ///
-    /// # Panics
-    ///
-    /// If `page` is zero or above [`PROMISE_BATCH`]: a programmer error,
-    /// never an operating condition.
-    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, page)))]
-    pub fn set_promise_page(&mut self, page: usize) {
-        assert!(page > 0, "a promise page carries at least one entry");
-        assert!(
-            page <= PROMISE_BATCH,
-            "a promise page never exceeds its ceiling"
-        );
-        self.promise_page = page;
-        assert!(
-            self.promise_page == page,
-            "the driver's promise page is in force"
-        );
-        self.assert_invariants();
-    }
-
-    /// The most entries one promise page carries (#338), in
-    /// `1..=PROMISE_BATCH`.
-    ///
-    /// # Panics
-    ///
-    /// If an assertion on its own invariants fails: a programmer error,
-    /// never an operating condition.
+    /// The page sizes and the read window this node runs under, fixed at
+    /// boot. The read window is the one the core keeps: the driver's,
+    /// raised to its floor.
     #[must_use]
-    pub fn promise_page(&self) -> usize {
-        assert!(self.promise_page > 0, "a promise page is never empty");
-        assert!(
-            self.promise_page <= PROMISE_BATCH,
-            "a promise page never exceeds its ceiling"
-        );
-        self.promise_page
-    }
-
-    /// The driver sets the re-send page size (#338): the most open rounds
-    /// one [`ColocatedNode::resend_pending`] re-sends. A per-node size,
-    /// never on the wire. A small page makes the open rounds span several
-    /// pages, so the cursor wraps.
-    ///
-    /// # Panics
-    ///
-    /// If `page` is zero or above [`RESEND_BATCH`]: a programmer error,
-    /// never an operating condition.
-    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, page)))]
-    pub fn set_resend_page(&mut self, page: usize) {
-        assert!(page > 0, "a re-send page carries at least one round");
-        assert!(
-            page <= RESEND_BATCH,
-            "a re-send page never exceeds its ceiling"
-        );
-        self.resend_page = page;
-        assert!(
-            self.resend_page == page,
-            "the driver's re-send page is in force"
-        );
-        self.assert_invariants();
-    }
-
-    /// The most open rounds one re-send page carries (#338), in
-    /// `1..=RESEND_BATCH`.
-    ///
-    /// # Panics
-    ///
-    /// If an assertion on its own invariants fails: a programmer error,
-    /// never an operating condition.
-    #[must_use]
-    pub fn resend_page(&self) -> usize {
-        assert!(self.resend_page > 0, "a re-send page is never empty");
-        assert!(
-            self.resend_page <= RESEND_BATCH,
-            "a re-send page never exceeds its ceiling"
-        );
-        self.resend_page
-    }
-
-    /// The driver sets the apply page size (#338): the most chosen slots
-    /// one apply walk folds before it yields ([`Replica::set_apply_page`]).
-    /// A per-node size, never on the wire.
-    ///
-    /// # Panics
-    ///
-    /// If `page` is zero or above [`APPLY_BATCH`]: a programmer error,
-    /// never an operating condition.
-    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, page)))]
-    pub fn set_apply_page(&mut self, page: usize) {
-        self.replica.set_apply_page(page);
-        assert!(
-            self.replica.apply_page() == page,
-            "the driver's apply page is in force"
-        );
-        self.assert_invariants();
-    }
-
-    /// The most chosen slots one apply walk folds (#338), in
-    /// `1..=APPLY_BATCH`.
-    #[must_use]
-    pub fn apply_page(&self) -> usize {
-        self.replica.apply_page()
-    }
-
-    /// The driver hands the core its own read window (#386): the ticks it
-    /// waits on a read before it answers the client unserved. The core
-    /// then keeps an open quorum read at least that long, never less than
-    /// `READ_TTL_TICKS` (20 ticks). Both windows count this node's ticks, so a fast
-    /// tick and a slow link cannot make the core drop a read first. A
-    /// per-node window, never on the wire.
-    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, ticks)))]
-    pub fn set_read_window(&mut self, ticks: u64) {
-        self.read_window = ticks.max(READ_TTL_TICKS);
-        assert!(
-            self.read_window >= ticks,
-            "the core keeps a read as long as its driver waits"
-        );
-        assert!(
-            self.read_window >= READ_TTL_TICKS,
-            "a read window is never shorter than its floor"
-        );
-    }
-
-    /// The ticks an open quorum read may wait before the node drops it
-    /// ([`ColocatedNode::set_read_window`]).
-    ///
-    /// # Panics
-    ///
-    /// If the window fell below its floor: a programmer error.
-    #[must_use]
-    pub fn read_window(&self) -> u64 {
-        assert!(
-            self.read_window >= READ_TTL_TICKS,
-            "a read window keeps its floor"
-        );
-        self.read_window
+    pub fn limits(&self) -> Limits {
+        self.limits
     }
 
     /// The election timeout in force (in ticks; zero until the driver set
@@ -2512,26 +2339,12 @@ impl ColocatedNode {
                 gap_fills <= started,
                 "a recovery page fills only rounds it started"
             );
-            assert!(started <= self.recovery_page, "a recovery page is bounded");
+            assert!(
+                started <= self.limits.recovery_page,
+                "a recovery page is bounded"
+            );
         }
         self.pending_recovery_batch
-    }
-
-    /// The most rounds one recovery page visits (#330), in
-    /// `1..=LEADER_RECOVERY_BATCH`.
-    ///
-    /// # Panics
-    ///
-    /// If an assertion on its own invariants fails: a programmer error,
-    /// never an operating condition.
-    #[must_use]
-    pub fn recovery_page(&self) -> usize {
-        assert!(self.recovery_page > 0, "a recovery page is never empty");
-        assert!(
-            self.recovery_page <= LEADER_RECOVERY_BATCH,
-            "a recovery page never exceeds its ceiling"
-        );
-        self.recovery_page
     }
 
     pub(crate) fn clear_pending(&mut self) {

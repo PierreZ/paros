@@ -1,5 +1,6 @@
-#[allow(clippy::wildcard_imports)]
 use super::*;
+#[allow(clippy::wildcard_imports)]
+use crate::contract::limits::Limits;
 
 #[test]
 fn election_fires_after_timeout_and_becomes_candidate() {
@@ -264,7 +265,7 @@ fn promise_suffix_is_served_in_bounded_pages() {
             ),
         );
     }
-    let mut n = ColocatedNode::new(&storage);
+    let mut n = ColocatedNode::new(&storage, Limits::DEFAULT);
     let prepared = ballot(1, 1);
     let mut cursor = Slot(0);
     let mut pages = Vec::new();
@@ -378,8 +379,14 @@ fn a_same_ballot_continuation_closes_a_different_stale_leadership() {
 /// A leader that won over a promise quorum reporting `2 * PROMISE_BATCH + 2`
 /// accepted slots, with `page` as its recovery page size (#330).
 fn recovering_leader(page: usize) -> ColocatedNode {
-    let mut n = node(0, &[0, 1, 2]);
-    n.set_recovery_page(page);
+    let mut n = limited_node(
+        0,
+        &[0, 1, 2],
+        Limits {
+            recovery_page: page,
+            ..Limits::DEFAULT
+        },
+    );
     campaign(&mut n);
     let _ = drain(&mut n);
     let camp = n.ballot();
@@ -443,7 +450,7 @@ fn a_small_recovery_page_spans_more_pages() {
     // 130 recovered slots at seven per page: eighteen full pages and a
     // last page of four, every one bounded by the node's own page size.
     let mut n = recovering_leader(7);
-    assert_eq!(n.recovery_page(), 7);
+    assert_eq!(n.limits().recovery_page, 7);
     let mut pages = 0_usize;
     let mut total = 0_usize;
     loop {
@@ -469,15 +476,27 @@ fn a_small_recovery_page_spans_more_pages() {
 #[test]
 #[should_panic(expected = "a recovery page visits at least one slot")]
 fn a_zero_recovery_page_is_refused() {
-    let mut n = node(0, &[0, 1, 2]);
-    n.set_recovery_page(0);
+    let _ = limited_node(
+        0,
+        &[0, 1, 2],
+        Limits {
+            recovery_page: 0,
+            ..Limits::DEFAULT
+        },
+    );
 }
 
 #[test]
 #[should_panic(expected = "a recovery page never exceeds its ceiling")]
 fn a_recovery_page_above_its_ceiling_is_refused() {
-    let mut n = node(0, &[0, 1, 2]);
-    n.set_recovery_page(LEADER_RECOVERY_BATCH + 1);
+    let _ = limited_node(
+        0,
+        &[0, 1, 2],
+        Limits {
+            recovery_page: LEADER_RECOVERY_BATCH + 1,
+            ..Limits::DEFAULT
+        },
+    );
 }
 
 #[test]

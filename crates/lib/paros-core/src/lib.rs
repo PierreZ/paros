@@ -88,7 +88,7 @@ mod types;
 
 pub use batcher::{Batch, BatchLimits, Batcher, Unbatcher};
 pub use contract::{
-    AcceptorWrite, Audience, Config, HardState, Message, MustSync, Party, Storage, WriteOp,
+    AcceptorWrite, Audience, Config, HardState, Limits, Message, MustSync, Party, Storage, WriteOp,
 };
 pub use decree::Decree;
 pub use journal::{

@@ -9,6 +9,7 @@ use super::{
     ColocatedNode, Delegation, Message, NO_CHECK_QUORUM, NodeId, NodeRole, Party, ProposeResult,
     Slot, TestStorage, campaign, cluster, deliver_all, drain, entry, make_leader, ucmd,
 };
+use crate::contract::limits::Limits;
 use crate::contract::message::Audience;
 use crate::journal::command_fingerprint;
 use crate::membership::ProxyId;
@@ -18,7 +19,7 @@ use crate::proxy_leader::ProxyLeader;
 fn proxied_node(id: u64, proxies: usize) -> ColocatedNode {
     let mut storage = TestStorage::new(id, &[0, 1, 2]);
     storage.config.proxy_count = proxies;
-    ColocatedNode::new(&storage)
+    ColocatedNode::new(&storage, Limits::DEFAULT)
 }
 
 fn proxied_cluster(proxies: usize) -> [ColocatedNode; 3] {

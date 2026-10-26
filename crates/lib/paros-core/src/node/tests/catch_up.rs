@@ -1,5 +1,6 @@
-#[allow(clippy::wildcard_imports)]
 use super::*;
+#[allow(clippy::wildcard_imports)]
+use crate::contract::limits::Limits;
 
 #[test]
 fn follower_missing_only_slot_zero_catches_up_on_an_idle_beat() {
@@ -305,7 +306,7 @@ fn restart_from_truncated_storage_rebuilds_floor_and_next_slot() {
     assert!(leader.acceptor().records().is_empty());
 
     let storage = TestStorage::from_node(leader);
-    let restarted = ColocatedNode::new(&storage);
+    let restarted = ColocatedNode::new(&storage, Limits::DEFAULT);
     assert_eq!(
         restarted.acceptor().first_slot(),
         Slot(3),

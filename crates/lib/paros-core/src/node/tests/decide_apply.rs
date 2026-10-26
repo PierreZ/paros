@@ -1,5 +1,6 @@
-#[allow(clippy::wildcard_imports)]
 use super::*;
+#[allow(clippy::wildcard_imports)]
+use crate::contract::limits::Limits;
 
 #[test]
 fn leader_streams_multiple_slots_and_all_nodes_agree() {
@@ -119,7 +120,7 @@ fn restart_rebuilds_state_from_hard_state() {
         accepted,
         ..TestStorage::new(1, &[0, 1, 2])
     };
-    let n = ColocatedNode::new(&storage);
+    let n = ColocatedNode::new(&storage, Limits::DEFAULT);
     assert_eq!(n.ballot(), ballot(2, 0), "resumes the promised ballot");
     assert_eq!(
         n.proposer().next_slot(),
@@ -226,7 +227,7 @@ fn a_replayed_commit_for_a_known_slot_still_advances_the_prefix() {
 fn grid_node(id: u64) -> ColocatedNode {
     let mut storage = TestStorage::new(id, &[0, 1, 2, 3, 4, 5]);
     storage.config.quorum_system = crate::membership::QuorumSystem::grid(2, 3);
-    ColocatedNode::new(&storage)
+    ColocatedNode::new(&storage, Limits::DEFAULT)
 }
 
 fn accept_targets(queue: &[(NodeId, Message)]) -> Vec<NodeId> {
@@ -560,6 +561,6 @@ fn a_truncation_seals_the_journal_state_a_restart_folds_from() {
         assert_eq!(n.replica().journal_base().next_seq, Seq(2));
     }
     let storage = TestStorage::from_node(&nodes[1]);
-    let rebooted = ColocatedNode::new(&storage);
+    let rebooted = ColocatedNode::new(&storage, Limits::DEFAULT);
     assert_eq!(rebooted.replica().journal(), nodes[1].replica().journal());
 }

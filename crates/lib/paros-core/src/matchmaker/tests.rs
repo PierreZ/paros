@@ -84,7 +84,7 @@ fn activation_applies_the_higher_of_the_local_and_reconstructed_floors() {
         expected
     );
     // The restart reads back exactly that.
-    let rebooted = Matchmaker::new(&mmconfig(0, &[0, 1, 2]), &image(&mm));
+    let rebooted = Matchmaker::new(&mmconfig(0, &[0, 1, 2]), &image(&mm), Limits::DEFAULT);
     assert_eq!(*rebooted.set(), successor);
     assert_eq!(rebooted.gc_watermark(J), ballot(5, 1));
     assert_eq!(
@@ -134,7 +134,11 @@ fn mmconfig(id: u64, bootstrap: &[u64]) -> MatchmakerConfig {
 }
 
 fn fresh(id: u64) -> Matchmaker {
-    Matchmaker::new(&mmconfig(id, &[0, 1, 2]), &MemRegistry::default())
+    Matchmaker::new(
+        &mmconfig(id, &[0, 1, 2]),
+        &MemRegistry::default(),
+        Limits::DEFAULT,
+    )
 }
 
 fn ballot(round: u64, node: u64) -> Ballot {
@@ -251,7 +255,11 @@ fn a_chosen_contradicting_the_recorded_successor_is_refused() {
 fn a_losing_bootstrap_is_dropped_when_the_successor_is_learned() {
     // Matchmaker 3 is a spare of M_0 = {0, 1, 2}: it is a member of the
     // proposed {0, 1, 3} and of nothing else.
-    let mut mm = Matchmaker::new(&mmconfig(3, &[0, 1, 2]), &MemRegistry::default());
+    let mut mm = Matchmaker::new(
+        &mmconfig(3, &[0, 1, 2]),
+        &MemRegistry::default(),
+        Limits::DEFAULT,
+    );
     assert_eq!(mm.phase(), MatchmakerPhase::Inactive);
     let losing = set(1, &[0, 1, 3]);
     let mut history = BTreeMap::new();
@@ -541,7 +549,7 @@ fn a_restart_answers_exactly_as_the_original_would_have() {
     mm.step(request(2, ballot(2, 2), &[0, 1, 2, 3]));
     drain(&mut mm);
     // A reboot walks the durable records back through the port.
-    let mut rebooted = Matchmaker::new(&mmconfig(2, &[0, 1, 2]), &image(&mm));
+    let mut rebooted = Matchmaker::new(&mmconfig(2, &[0, 1, 2]), &image(&mm), Limits::DEFAULT);
     rebooted.step(request(1, ballot(3, 1), &[1, 2, 3]));
     mm.step(request(1, ballot(3, 1), &[1, 2, 3]));
     let (_, expected) = drain(&mut mm);
@@ -569,7 +577,7 @@ fn a_registry_below_its_watermark_refuses_to_boot() {
             BTreeMap::from([(ballot(1, 1), Registration::belief(config(&[0])))]),
         )]),
     );
-    let _ = Matchmaker::new(&mmconfig(0, &[0]), &store);
+    let _ = Matchmaker::new(&mmconfig(0, &[0]), &store, Limits::DEFAULT);
 }
 
 #[test]
@@ -595,7 +603,11 @@ fn a_fresh_matchmaker_resolves_its_phase_from_the_bootstrap_set() {
     let member = fresh(0);
     assert_eq!(member.phase(), MatchmakerPhase::Active);
     assert_eq!(*member.set(), set(0, &[0, 1, 2]));
-    let mut spare = Matchmaker::new(&mmconfig(7, &[0, 1, 2]), &MemRegistry::default());
+    let mut spare = Matchmaker::new(
+        &mmconfig(7, &[0, 1, 2]),
+        &MemRegistry::default(),
+        Limits::DEFAULT,
+    );
     assert_eq!(spare.phase(), MatchmakerPhase::Inactive);
     spare.step(request(1, ballot(1, 1), &[0, 1, 2]));
     let (writes, replies) = drain(&mut spare);
@@ -669,7 +681,7 @@ fn a_stop_freezes_durably_and_is_idempotent() {
     // Frozen, and still frozen after a reboot.
     for mm in [
         &mut mm.clone(),
-        &mut Matchmaker::new(&mmconfig(0, &[0, 1, 2]), &image(&mm)),
+        &mut Matchmaker::new(&mmconfig(0, &[0, 1, 2]), &image(&mm), Limits::DEFAULT),
     ] {
         mm.step(request(1, ballot(2, 1), &[0, 1, 2]));
         let (writes, replies) = drain(mm);
@@ -832,7 +844,7 @@ fn a_chosen_successor_activates_its_pending_bootstrap() {
     );
     // A reboot lands in generation 1 with the installed registry (plus
     // the one registration generation 1 took above).
-    let rebooted = Matchmaker::new(&mmconfig(0, &[0, 1, 2]), &image(&mm));
+    let rebooted = Matchmaker::new(&mmconfig(0, &[0, 1, 2]), &image(&mm), Limits::DEFAULT);
     assert_eq!(*rebooted.set(), successor);
     assert_eq!(rebooted.registry(J).len(), 3);
 }

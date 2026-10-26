@@ -2,7 +2,7 @@
 //! the two durability seams, restart, the boot an erased disk earns, and the
 //! damage a disk can take.
 
-use paros_core::{Ballot, ColocatedNode, NodeId, Slot};
+use paros_core::{Ballot, ColocatedNode, Limits, NodeId, Slot};
 
 use crate::paxos::action::{ActionError, ActionErrorCode, Seam};
 use crate::paxos::narration::{NarrationKind, at, many, who};
@@ -162,7 +162,7 @@ impl World {
             self.refuse_boot(id, index);
             return Ok(());
         }
-        let mut node = ColocatedNode::new(&self.disks[index]);
+        let mut node = ColocatedNode::new(&self.disks[index], Limits::DEFAULT);
         node.set_election_timeout(self.election_timeouts[index]);
         self.nodes[index] = Some(node);
         self.armed_seams[index] = None;

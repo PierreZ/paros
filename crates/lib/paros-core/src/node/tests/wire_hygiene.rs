@@ -15,6 +15,7 @@ use super::{
     NodeId, Party, Registration, Slot, TestStorage, ballot, campaign, cfg, deployed_node, drain,
     drain_match_requests, ucmd,
 };
+use crate::contract::limits::Limits;
 use crate::matchmaker::REGISTRY_PAGE;
 use crate::matchmaking::{MatchFold, Matchmaking, RegisteredPage, RegistrationKind};
 use crate::membership::ProxyId;
@@ -183,7 +184,7 @@ fn a_page_from_a_registered_matchmaker_is_ignored() {
 fn proxied_follower() -> ColocatedNode {
     let mut storage = TestStorage::new(1, &[0, 1, 2]);
     storage.config.proxy_count = 1;
-    ColocatedNode::new(&storage)
+    ColocatedNode::new(&storage, Limits::DEFAULT)
 }
 
 fn accept(reply_to: Party) -> Message {

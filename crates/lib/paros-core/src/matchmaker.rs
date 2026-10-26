@@ -141,6 +141,7 @@ pub use self::state::{
 };
 pub(crate) use self::state::{raise_effective, resolved_phase, resolved_set};
 pub use self::storage::{MemRegistry, RegistryStorage};
+use crate::contract::limits::Limits;
 use crate::journal::JournalId;
 use crate::membership::{AcceptorConfig, MatchmakerGeneration, MatchmakerId, MatchmakerSet};
 use crate::retained::RetainedWindow;
@@ -149,20 +150,7 @@ use crate::types::{Ballot, NodeId};
 /// A journal this set holds no record for reads as this registry.
 static EMPTY_REGISTRY: BTreeMap<Ballot, Registration> = BTreeMap::new();
 
-/// The most registrations one `MatchB` page carries
-/// ([`MatchOutcome::Registered`]). A registry retains one record per ballot
-/// above its watermark, and a cluster that elects often between two GC
-/// rounds accumulates them; answering the whole ledger in one message is
-/// the same unbounded reply the log's `Promise` is paged to avoid
-/// ([`crate::PROMISE_BATCH`]). A candidate re-asks with a cursor until the
-/// answer is complete, and only a complete answer counts toward its
-/// matchmaker quorum. The ceiling of a matchmaker's own page size
-/// ([`Matchmaker::set_registry_page`], #338): a candidate checks a page
-/// against this ceiling, never the sender's size.
-pub const REGISTRY_PAGE: usize = 64;
-
-// A registry page that carries nothing could never deliver a history.
-const _: () = assert!(REGISTRY_PAGE > 0);
+pub use crate::contract::limits::REGISTRY_PAGE;
 
 /// One bounded page of a registry window (`[from, ballot)` of one journal's
 /// registry, in ballot order): at most `limit` records, and the ballot the
@@ -280,10 +268,10 @@ pub struct Matchmaker {
     pending_writes: Vec<MatchmakerWriteOp>,
     pending_replies: Vec<MatchReply>,
     pending_reconfigure_replies: Vec<ReconfigureReply>,
-    /// The most registrations one page carries (#338): a tunable in
-    /// `1..=REGISTRY_PAGE`, the constant by default
-    /// ([`Matchmaker::set_registry_page`]).
-    page: usize,
+    /// The limits this matchmaker runs under, fixed at boot
+    /// ([`Matchmaker::new`]): the most registrations one page carries
+    /// (#338), [`Limits::registry_page`].
+    limits: Limits,
 }
 
 impl Matchmaker {
@@ -295,16 +283,20 @@ impl Matchmaker {
     /// without a write: a bootstrap member is active for generation 0, any
     /// other matchmaker inactive.
     ///
+    /// The matchmaker pages its answers by `limits.registry_page`.
+    ///
     /// # Panics
     ///
-    /// If the durable state violates the registry contract — a ballot the
+    /// If `limits` breaks [`Limits::assert_valid`], or the durable state
+    /// violates the registry contract — a ballot the
     /// walk names but the port cannot serve, a registration below the
     /// watermark, a malformed configuration. That means corrupted storage that
     /// evaded the scan or a broken storage implementation; crashing beats
     /// answering from it.
     #[must_use]
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(matchmaker = config.id.0)))]
-    pub fn new<S: RegistryStorage>(config: &MatchmakerConfig, storage: &S) -> Self {
+    pub fn new<S: RegistryStorage>(config: &MatchmakerConfig, storage: &S, limits: Limits) -> Self {
+        limits.assert_valid();
         let hard_state = storage.initial_state();
         let mut ledgers: BTreeMap<JournalId, BTreeMap<Ballot, Registration>> = BTreeMap::new();
         for (journal, ballot) in storage.registered() {
@@ -365,43 +357,16 @@ impl Matchmaker {
             pending_writes: Vec::new(),
             pending_replies: Vec::new(),
             pending_reconfigure_replies: Vec::new(),
-            page: REGISTRY_PAGE,
+            limits,
         };
         matchmaker.assert_invariants();
         matchmaker
     }
 
-    /// The driver sets the registry page size (#338): the most
-    /// registrations one `Registered` answer carries before its
-    /// continuation cursor. A per-matchmaker size: a candidate checks a
-    /// page against [`REGISTRY_PAGE`], never against a size of its own, so
-    /// a mixed set is legal. A small page makes a history span several
-    /// pages.
-    ///
-    /// # Panics
-    ///
-    /// If `page` is zero or above [`REGISTRY_PAGE`]: a programmer error,
-    /// never an operating condition.
-    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(matchmaker = self.config.id.0, page)))]
-    pub fn set_registry_page(&mut self, page: usize) {
-        assert!(
-            page > 0,
-            "a registry page carries at least one registration"
-        );
-        assert!(
-            page <= REGISTRY_PAGE,
-            "a registry page never exceeds its ceiling"
-        );
-        self.page = page;
-        assert!(self.page == page, "the driver's registry page is in force");
-        self.assert_invariants();
-    }
-
-    /// The most registrations one page carries (#338), in
-    /// `1..=REGISTRY_PAGE`.
+    /// The limits this matchmaker runs under, fixed at boot.
     #[must_use]
-    pub fn registry_page(&self) -> usize {
-        self.page
+    pub fn limits(&self) -> Limits {
+        self.limits
     }
 
     /// This matchmaker's identity.
@@ -701,12 +666,12 @@ impl Matchmaker {
             "a page starts at the cursor it names"
         );
         assert!(
-            history.len() <= self.page,
+            history.len() <= self.limits.registry_page,
             "a page carries at most REGISTRY_PAGE registrations"
         );
         if next_from_ballot.is_some() {
             assert!(
-                history.len() == self.page,
+                history.len() == self.limits.registry_page,
                 "a continuation cursor follows a full page"
             );
         }
@@ -951,7 +916,9 @@ impl Matchmaker {
         // below `ballot`, and the cursor the candidate re-asks with (`None`
         // means the answer is complete).
         let (history, next_from_ballot) = match self.registries.get(&journal) {
-            Some(window) => history_page(window.range(from_ballot..ballot), self.page),
+            Some(window) => {
+                history_page(window.range(from_ballot..ballot), self.limits.registry_page)
+            }
             None => (BTreeMap::new(), None),
         };
         assert!(
@@ -1030,9 +997,12 @@ impl Matchmaker {
     /// construction: [`AcceptorConfig::new`](crate::membership::AcceptorConfig::new) is its only constructor.)
     fn assert_invariants(&self) {
         // The page size stays inside its tunable range (#338).
-        assert!(self.page > 0, "a registry page is never empty");
         assert!(
-            self.page <= REGISTRY_PAGE,
+            self.limits.registry_page > 0,
+            "a registry page is never empty"
+        );
+        assert!(
+            self.limits.registry_page <= REGISTRY_PAGE,
             "a registry page never exceeds its ceiling"
         );
         for (journal, window) in &self.registries {

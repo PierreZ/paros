@@ -4,7 +4,7 @@
 //! port `paros-core` boots a [`ColocatedNode`](paros_core::ColocatedNode) from,
 //! plus the write side the world applies a [`Ready`](paros_core::Ready) batch's
 //! [`WriteOp`]s to. A crash drops the node and keeps the disk; a restart is
-//! `ColocatedNode::new(&disk)` — which is why the disk lives in the world and
+//! `ColocatedNode::new(&disk, limits)` — which is why the disk lives in the world and
 //! not inside the node.
 //!
 //! The `applied` log is the *application's* state, not paros's: the world

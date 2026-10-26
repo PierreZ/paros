@@ -150,7 +150,7 @@ impl Matchmaker {
             self.phase() == MatchmakerPhase::Stopped,
             "a stop leaves the generation frozen"
         );
-        let (registries, next) = self.frozen_page(after, self.page);
+        let (registries, next) = self.frozen_page(after, self.limits.registry_page);
         if next.is_some() {
             probe!(reachable, "handover: a frozen registry spans several pages");
         }

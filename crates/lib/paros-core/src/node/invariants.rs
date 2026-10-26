@@ -89,21 +89,37 @@ impl ColocatedNode {
         self.replica.assert_invariants(self.acceptor.first_slot());
         self.proposer.assert_invariants();
         // The recovery page size stays inside its tunable range (#330).
-        assert!(self.recovery_page > 0, "a recovery page is never empty");
         assert!(
-            self.recovery_page <= crate::proposer::RECOVERY_BATCH,
+            self.limits.recovery_page > 0,
+            "a recovery page is never empty"
+        );
+        assert!(
+            self.limits.recovery_page <= crate::proposer::RECOVERY_BATCH,
             "a recovery page never exceeds its ceiling"
         );
         // So do the promise and re-send page sizes (#338).
-        assert!(self.promise_page > 0, "a promise page is never empty");
         assert!(
-            self.promise_page <= crate::acceptor::PROMISE_BATCH,
+            self.limits.promise_page > 0,
+            "a promise page is never empty"
+        );
+        assert!(
+            self.limits.promise_page <= crate::acceptor::PROMISE_BATCH,
             "a promise page never exceeds its ceiling"
         );
-        assert!(self.resend_page > 0, "a re-send page is never empty");
+        assert!(self.limits.resend_page > 0, "a re-send page is never empty");
         assert!(
-            self.resend_page <= crate::proposer::RESEND_BATCH,
+            self.limits.resend_page <= crate::proposer::RESEND_BATCH,
             "a re-send page never exceeds its ceiling"
+        );
+        // The apply page the replica walks is the node's, and the read
+        // window keeps its floor (#386).
+        assert!(
+            self.replica.apply_page() == self.limits.apply_page,
+            "the driver's apply page is in force"
+        );
+        assert!(
+            self.limits.read_window >= super::READ_TTL_TICKS,
+            "a read window keeps its floor"
         );
         // The repair clock lives inside the probe it times, so closing a
         // probe — by a decision, a commit, a trim-point jump or an

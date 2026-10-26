@@ -29,7 +29,7 @@ use std::collections::BTreeMap;
 
 use moonpool_buggify::hint::Strike;
 use paros_core::{
-    GcAck, GcOutcome, GcRequest, JournalId, JournalIdentifier, MatchOutcome, MatchReply,
+    GcAck, GcOutcome, GcRequest, JournalId, JournalIdentifier, Limits, MatchOutcome, MatchReply,
     Matchmaker, MatchmakerConfig, MatchmakerId, MatchmakerSet, MatchmakerWriteOp, ReconfigureReply,
     TenantId,
 };
@@ -45,6 +45,7 @@ use paros_observe::events::{config_hash, reconfigure_kind, reconfigure_reply_kin
 use paros_storage::StorageError;
 use paros_storage::boot::{BootKind, BootRefusal, RunError};
 use paros_tunables::DriverTunables;
+
 use paros_wire::Addressed;
 
 pub use paros_storage::matchmaker::{
@@ -789,7 +790,7 @@ impl<'f, F> Host<'f, F> {
                     );
                     if let Some(answer) = answer {
                         assert!(answer.journal == journal, "a reply echoes its request's journal");
-                        let page_limit = seat.matchmaker.registry_page();
+                        let page_limit = seat.matchmaker.limits().registry_page;
                         report_reply(seat.ports.port(journal), &answer, page_limit);
                         // A lost reply is a legal outcome: the registration stands
                         // and the requester's retry is the same request again,
@@ -999,10 +1000,13 @@ where
     // The sans-IO core, bootstrapped from durable storage through the
     // read-only port (scalars once, then record by record); re-report the
     // recovered registry so the oracles see this incarnation's belief.
-    let mut matchmaker = Matchmaker::new(config, &storage);
-    matchmaker.set_registry_page(page);
+    let limits = Limits {
+        registry_page: page,
+        ..Limits::DEFAULT
+    };
+    let matchmaker = Matchmaker::new(config, &storage, limits);
     assert!(
-        matchmaker.registry_page() == page,
+        matchmaker.limits().registry_page == page,
         "a booted matchmaker runs the driver's registry page"
     );
     for journal in matchmaker.journals() {

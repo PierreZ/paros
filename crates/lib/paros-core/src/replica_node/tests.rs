@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 use super::{ReplicaNode, ReplicaReady};
 use crate::contract::config::Config;
 use crate::contract::hard_state::HardState;
+use crate::contract::limits::Limits;
 use crate::contract::message::{Audience, Message};
 use crate::contract::storage::Storage;
 use crate::contract::write::{AcceptorWrite, WriteOp};
@@ -126,9 +127,12 @@ impl Tier {
         Self {
             nodes: ACCEPTORS
                 .iter()
-                .map(|id| ColocatedNode::new(&Disk::new(config(*id))))
+                .map(|id| ColocatedNode::new(&Disk::new(config(*id)), Limits::DEFAULT))
                 .collect(),
-            replicas: disks.iter().map(ReplicaNode::new).collect(),
+            replicas: disks
+                .iter()
+                .map(|disk| ReplicaNode::new(disk, Limits::DEFAULT))
+                .collect(),
             disks,
             applied: vec![Vec::new(); REPLICAS.len()],
             served: vec![Vec::new(); REPLICAS.len()],
@@ -389,7 +393,7 @@ fn a_replica_reboots_from_its_learned_records() {
     tier.propose(2, commit_to(10, 1));
     tier.propose(3, |_, _| true);
     assert_eq!(tier.applied_slots(0), vec![0]);
-    let rebooted = ReplicaNode::new(&tier.disks[0]);
+    let rebooted = ReplicaNode::new(&tier.disks[0], Limits::DEFAULT);
     assert_eq!(rebooted.replica().chosen_index(), Some(Slot(0)));
     assert!(
         rebooted.replica().is_chosen(Slot(2)),
@@ -496,5 +500,5 @@ fn the_reply_owner_is_the_slot_modulo_the_replica_count() {
 #[test]
 #[should_panic(expected = "a replica is never in the node pool")]
 fn a_replica_inside_the_pool_refuses_to_boot() {
-    let _ = ReplicaNode::new(&Disk::new(config(1)));
+    let _ = ReplicaNode::new(&Disk::new(config(1)), Limits::DEFAULT);
 }

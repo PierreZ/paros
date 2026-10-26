@@ -196,7 +196,7 @@ impl<'a> Ready<'a> {
                 "a recovery page fills only rounds it started"
             );
             assert!(
-                started <= self.node.recovery_page(),
+                started <= self.node.limits().recovery_page,
                 "a recovery page is bounded"
             );
         }

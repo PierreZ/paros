@@ -10,6 +10,7 @@ use super::{
 };
 use crate::contract::config::Config;
 use crate::contract::hard_state::HardState;
+use crate::contract::limits::Limits;
 use crate::contract::message::{Message, Party};
 use crate::contract::storage::Storage;
 use crate::matchmaker::{
@@ -104,7 +105,12 @@ impl Storage for TestStorage {
 }
 
 fn node(id: u64, members: &[u64]) -> ColocatedNode {
-    ColocatedNode::new(&TestStorage::new(id, members))
+    limited_node(id, members, Limits::DEFAULT)
+}
+
+/// [`node`] under `limits`.
+fn limited_node(id: u64, members: &[u64], limits: Limits) -> ColocatedNode {
+    ColocatedNode::new(&TestStorage::new(id, members), limits)
 }
 
 /// A fresh `N`-node cluster `node(0..N)` over the membership `0..N`.
@@ -120,7 +126,7 @@ fn deployed_node(id: u64, members: &[u64], pool: &[u64], matchmakers: u64) -> Co
     let mut storage = TestStorage::new(id, members);
     storage.config.nodes = pool.iter().copied().map(NodeId).collect();
     storage.config.matchmakers = (0..matchmakers).map(MatchmakerId).collect();
-    ColocatedNode::new(&storage)
+    ColocatedNode::new(&storage, Limits::DEFAULT)
 }
 
 /// Fire the election clock on `n` once: a node on its bootstrap belief
@@ -190,6 +196,7 @@ fn registries(n: u64) -> Vec<Matchmaker> {
                     bootstrap: (0..n).map(MatchmakerId).collect(),
                 },
                 &crate::matchmaker::MemRegistry::default(),
+                Limits::DEFAULT,
             )
         })
         .collect()

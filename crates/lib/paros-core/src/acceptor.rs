@@ -48,16 +48,7 @@ use crate::contract::write::AcceptorWrite;
 use crate::retained::RetainedWindow;
 use crate::types::{Ballot, Slot};
 
-/// Maximum accepted records and faulty entries carried by one promise page —
-/// the ceiling on the `limit` [`Acceptor::promise_page`] takes, and the reason
-/// a `Promise` carries a continuation cursor. A node's own page size
-/// (`ColocatedNode::set_promise_page`, #338) lies in `1..=PROMISE_BATCH`, so a
-/// receiver checks a page against this ceiling, never the sender's size.
-pub const PROMISE_BATCH: usize = 64;
-
-// A page that cannot carry one entry could never make progress through a
-// faulty or accepted suffix: the continuation cursor would never advance.
-const _: () = assert!(PROMISE_BATCH > 0);
+pub use crate::contract::limits::PROMISE_BATCH;
 
 /// What a `Prepare` did at this acceptor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
