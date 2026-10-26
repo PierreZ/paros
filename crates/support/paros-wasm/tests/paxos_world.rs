@@ -625,7 +625,7 @@ fn the_leader_recovery_prompt_fills_the_permanent_gap() {
     let leader = world.node(NodeId(1)).expect("running");
     assert_eq!(leader.replica().chosen_gap(), None, "the gap is closed");
     assert!(
-        leader.election_gap_fills() >= 1,
+        leader.counters().election_gap_fills >= 1,
         "and it was closed with a Noop"
     );
 }

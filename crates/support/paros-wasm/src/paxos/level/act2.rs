@@ -656,7 +656,7 @@ permission to fill the slot.",
         "Control::Noop",
         "RecoveryStep::Fill",
         "Replica::chosen_gap",
-        "ColocatedNode::election_gap_fills",
+        "NodeCounters::election_gap_fills",
     ],
     automation_on: &[
         AutomationFlag::AcceptorReplies,

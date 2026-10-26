@@ -98,7 +98,7 @@ fn report_handoff<A: Audit>(
     self_id: u64,
     audit: &A,
 ) -> bool {
-    let handoff = node.handoff_counters();
+    let handoff = node.counters().handoff;
     // The counters are monotone per incarnation, and the delta tracker was
     // seeded from this incarnation's.
     assert!(
@@ -179,12 +179,12 @@ impl Deltas {
     pub(crate) fn new(node: &ColocatedNode) -> Self {
         Self {
             role: node.role(),
-            quorum_lost: node.quorum_lost_step_downs(),
-            watermark_fills: node.watermark_fills(),
-            repair: node.repair_counters(),
-            handoff: node.handoff_counters(),
+            quorum_lost: node.counters().quorum_lost_step_downs,
+            watermark_fills: node.counters().watermark_fills,
+            repair: node.counters().repair,
+            handoff: node.counters().handoff,
             matchmaking: None,
-            matchmaking_timeouts: node.matchmaking_timeouts(),
+            matchmaking_timeouts: node.counters().matchmaking_timeouts,
             matchmaker_generation: node.matchmaker_set().map_or(0, |set| set.generation.0),
             failed_campaigns: 0,
         }
@@ -313,7 +313,7 @@ pub(crate) fn maintain<P: ParosProviders, A: Audit>(
     }
     // Surface any repair progress (Stage 8): in-place heals, straggler
     // resolutions, and recovery-timeout resignations.
-    let repair = node.repair_counters();
+    let repair = node.counters().repair;
     if repair != *last_repair {
         *last_repair = repair;
         let RepairCounters {
@@ -352,7 +352,7 @@ pub(crate) fn maintain<P: ParosProviders, A: Audit>(
     // Surface an election timeout that re-asked an open matchmaking (#120)
     // instead of abandoning it: the campaign's ballot travels with it so the
     // audit can hold the clock to "moved nothing".
-    let timeouts = node.matchmaking_timeouts();
+    let timeouts = node.counters().matchmaking_timeouts;
     if timeouts != *last_matchmaking_timeouts {
         *last_matchmaking_timeouts = timeouts;
         let ballot = node.ballot();
@@ -365,14 +365,14 @@ pub(crate) fn maintain<P: ParosProviders, A: Audit>(
         );
     }
     // Surface any CheckQuorum step-down the batch's tick performed (#95).
-    let quorum_lost = node.quorum_lost_step_downs();
+    let quorum_lost = node.counters().quorum_lost_step_downs;
     if quorum_lost > *last_quorum_lost {
         let count = quorum_lost - *last_quorum_lost;
         *last_quorum_lost = quorum_lost;
         audit.quorum_lost(NodeId(self_id), count);
         tracing::info!(node = self_id, count, "leader_quorum_lost");
     }
-    let watermark_fills = node.watermark_fills();
+    let watermark_fills = node.counters().watermark_fills;
     if watermark_fills > *last_watermark_fills {
         let count = watermark_fills - *last_watermark_fills;
         *last_watermark_fills = watermark_fills;
@@ -390,7 +390,7 @@ pub(crate) fn maintain<P: ParosProviders, A: Audit>(
         // higher-ballot commit and the state is no longer distinguishable.
         let ballot = node.ballot();
         let promised = node.hard_state().max_promised_ballot;
-        let gaps = node.election_gap_fills();
+        let gaps = node.counters().election_gap_fills;
         audit.elected(NodeId(self_id), ballot, promised, gaps, node.acceptors());
         tracing::info!(
             node = self_id,

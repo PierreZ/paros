@@ -358,6 +358,7 @@ impl World {
     /// How many slots `id`'s repair probe is still blocked on.
     #[must_use]
     pub fn blocked_repairs(&self, id: NodeId) -> usize {
-        self.node(id).map_or(0, ColocatedNode::blocked_repairs)
+        self.node(id)
+            .map_or(0, |node| node.counters().blocked_repairs)
     }
 }

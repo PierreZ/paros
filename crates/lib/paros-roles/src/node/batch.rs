@@ -44,11 +44,11 @@ impl Phase {
             probe: node
                 .membership_probe()
                 .map(paros_core::matchmaking::MembershipProbe::ballot),
-            reasks: node.matchmaking_timeouts(),
-            quorum_lost: node.quorum_lost_step_downs(),
-            watermark_fills: node.watermark_fills(),
-            repair: node.repair_counters(),
-            handoff: node.handoff_counters(),
+            reasks: node.counters().matchmaking_timeouts,
+            quorum_lost: node.counters().quorum_lost_step_downs,
+            watermark_fills: node.counters().watermark_fills,
+            repair: node.counters().repair,
+            handoff: node.counters().handoff,
             generation: node.matchmaker_set().map_or(0, |set| set.generation.0),
             needs_timeout: node.needs_election_timeout(),
         };

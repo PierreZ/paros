@@ -479,6 +479,37 @@ pub struct MembershipCounters {
     pub pre_reads_refused_unheard: u64,
 }
 
+/// Every observability counter of a node, in one read
+/// ([`ColocatedNode::counters`]): monotone per incarnation unless a field
+/// says otherwise, read by the driver's audit report and by the examples,
+/// and never a decision.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NodeCounters {
+    /// The repair counters (Stage 8).
+    pub repair: RepairCounters,
+    /// The campaign-membership counters (#122, #260).
+    pub membership: MembershipCounters,
+    /// The cooperative-handoff counters.
+    pub handoff: HandoffCounters,
+    /// Undecided holes filled with a [`Control::Noop`] when this node won
+    /// its *current* leadership: 0 on a node that has never led, and re-set
+    /// at each election it wins.
+    pub election_gap_fills: u64,
+    /// Slots this node, as a settled leader, filled with a
+    /// [`Control::Noop`] because a pre-read reported a vote watermark at or
+    /// past its allocator frontier.
+    pub watermark_fills: u64,
+    /// `CheckQuorum` step-downs (#95): full election-timeout windows
+    /// without an ack quorum.
+    pub quorum_lost_step_downs: u64,
+    /// Election timeouts that re-sent an open matchmaking phase's requests
+    /// instead of abandoning the campaign (#120).
+    pub matchmaking_timeouts: u64,
+    /// The blocked slots the leader's open repair probe still holds (0 when
+    /// no probe is open). A gauge, not monotone.
+    pub blocked_repairs: usize,
+}
+
 impl ColocatedNode {
     /// The single wire entry point: every peer message is a [`Message`],
     /// routed by variant and role. The clock is a separate input
@@ -1824,7 +1855,7 @@ impl ColocatedNode {
     /// If an assertion on its own invariants, preconditions or postconditions
     /// fails: a programmer error, never an operating condition.
     #[must_use]
-    pub fn membership_counters(&self) -> MembershipCounters {
+    fn membership_counters(&self) -> MembershipCounters {
         let counters = MembershipCounters {
             campaigns_skipped: self.counters.non_member_campaigns_skipped,
             step_downs: self.counters.non_member_step_downs,
@@ -1865,7 +1896,7 @@ impl ColocatedNode {
     /// If an assertion on its own invariants, preconditions or postconditions
     /// fails: a programmer error, never an operating condition.
     #[must_use]
-    pub fn matchmaking_timeouts(&self) -> u64 {
+    fn matchmaking_timeouts(&self) -> u64 {
         if self.counters.matchmaking_timeouts > 0 {
             assert!(
                 self.config.has_matchmakers(),
@@ -2127,7 +2158,7 @@ impl ColocatedNode {
     /// If an assertion on its own invariants, preconditions or postconditions
     /// fails: a programmer error, never an operating condition.
     #[must_use]
-    pub fn election_gap_fills(&self) -> u64 {
+    fn election_gap_fills(&self) -> u64 {
         // Every fill took a slot below the frontier.
         assert!(
             self.counters.election_gap_fills <= self.proposer.next_slot().0,
@@ -2146,7 +2177,7 @@ impl ColocatedNode {
     /// If an assertion on its own invariants, preconditions or postconditions
     /// fails: a programmer error, never an operating condition.
     #[must_use]
-    pub fn watermark_fills(&self) -> u64 {
+    fn watermark_fills(&self) -> u64 {
         assert!(
             self.counters.watermark_fills <= self.proposer.next_slot().0,
             "watermark fills never outnumber the allocated slots"
@@ -2159,7 +2190,7 @@ impl ColocatedNode {
     /// hearing an ack quorum and demoted itself. The driver reads the delta per
     /// batch and reports it through its audit port.
     #[must_use]
-    pub fn quorum_lost_step_downs(&self) -> u64 {
+    fn quorum_lost_step_downs(&self) -> u64 {
         self.counters.quorum_lost_step_downs
     }
 
@@ -2188,7 +2219,7 @@ impl ColocatedNode {
     /// port, so a simulation can prove each handoff and refusal path is
     /// genuinely reached.
     #[must_use]
-    pub fn handoff_counters(&self) -> HandoffCounters {
+    fn handoff_counters(&self) -> HandoffCounters {
         self.handoff
     }
 
@@ -2202,7 +2233,7 @@ impl ColocatedNode {
     /// If an assertion on its own invariants, preconditions or postconditions
     /// fails: a programmer error, never an operating condition.
     #[must_use]
-    pub fn blocked_repairs(&self) -> usize {
+    fn blocked_repairs(&self) -> usize {
         let blocked = self.proposer.probe().map_or(0, |p| p.blocked().len());
         if blocked > 0 {
             assert!(
@@ -2213,10 +2244,31 @@ impl ColocatedNode {
         blocked
     }
 
+    /// Every observability counter this incarnation, in one read, for the
+    /// driver's audit report.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
+    #[must_use]
+    pub fn counters(&self) -> NodeCounters {
+        NodeCounters {
+            repair: self.repair_counters(),
+            membership: self.membership_counters(),
+            handoff: self.handoff_counters(),
+            election_gap_fills: self.election_gap_fills(),
+            watermark_fills: self.watermark_fills(),
+            quorum_lost_step_downs: self.quorum_lost_step_downs(),
+            matchmaking_timeouts: self.matchmaking_timeouts(),
+            blocked_repairs: self.blocked_repairs(),
+        }
+    }
+
     /// Monotone repair counters this incarnation, for the driver's audit
     /// report.
     #[must_use]
-    pub fn repair_counters(&self) -> RepairCounters {
+    fn repair_counters(&self) -> RepairCounters {
         RepairCounters {
             repaired: self.acceptor.faulty_repaired(),
             case1: self.counters.repair_case1,
