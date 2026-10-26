@@ -14,7 +14,7 @@ use std::time::{Duration, SystemTime};
 
 use paros::frontend::{self, Authz, Denial, Target};
 
-use paros::fleet::RootKeyEntry;
+use paros::model::fleet::RootKeyEntry;
 
 use crate::{KeyRing, Operation, Refusal, Request, RootPublicKey, TargetKind, Token, authorize};
 

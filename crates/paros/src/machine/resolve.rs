@@ -48,11 +48,11 @@ use crate::client::bootstrap::cell_members;
 use crate::client::checkpoint::{Folder, LoadOutcome, load};
 use crate::client::names::{TenantResolution, tenant_in};
 use crate::client::{Client, ClientTunables, Server};
-use crate::fleet::FleetDirectory;
+use crate::model::fleet::FleetDirectory;
+use crate::model::registry::Registry;
 use crate::rpc::machine as wire;
 use crate::rpc::methods::ResolveRpc;
 use crate::rpc::{Inbound, NodeClient, serve_well_known};
-use crate::system::Registry;
 
 /// What a machine answers `Resolve` from.
 pub(crate) struct Resolver {
@@ -398,8 +398,8 @@ fn batchers_of(
     let nodes: std::collections::BTreeSet<NodeId> = registry
         .bookings()
         .filter(|(_, b)| {
-            b.role == crate::system::Role::Batcher
-                && b.target == crate::system::BookingTarget::Tenant { tenant }
+            b.role == crate::model::registry::Role::Batcher
+                && b.target == crate::model::registry::BookingTarget::Tenant { tenant }
         })
         .map(|(_, b)| b.node)
         .collect();

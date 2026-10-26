@@ -3,11 +3,11 @@
 //! any other client of its cell would read it.
 //!
 //! A request names one query and the caller's scope claim. The member
-//! decides the scope ([`crate::view::authorize`]), reads the cell's journals
+//! decides the scope ([`crate::model::view::authorize`]), reads the cell's journals
 //! through a [`Client`] over the founding members — the registry, the
 //! universe directory when the cell hosts it, the election journal and the
 //! hosted tenants' control journals — and builds the answer with
-//! [`crate::view`], filtered by the scope before it leaves. The registry and
+//! [`crate::model::view`], filtered by the scope before it leaves. The registry and
 //! the directory folds are kept between requests and caught up at each one;
 //! the answer names the positions it was folded at.
 //!
@@ -38,14 +38,16 @@ use crate::client::Client;
 use crate::client::checkpoint::{Folder, LoadOutcome, load};
 use crate::client::election::read_election;
 use crate::client::names::read_tenant_control;
-use crate::fleet::FleetDirectory;
+use crate::model::fleet::FleetDirectory;
+use crate::model::registry::Registry;
+use crate::model::status::Hysteresis;
+use crate::model::tenant::TenantControl;
+use crate::model::view::{
+    CellFacts, Scope, authorize, cell_view, refusal, tenant_view, universe_view,
+};
 use crate::rpc::methods::ViewRpc;
 use crate::rpc::view as wire;
 use crate::rpc::{Inbound, serve_well_known};
-use crate::status::Hysteresis;
-use crate::system::Registry;
-use crate::tenant::TenantControl;
-use crate::view::{CellFacts, Scope, authorize, cell_view, refusal, tenant_view, universe_view};
 
 /// The views' endpoint.
 type Requests = Inbound<ViewRpc, wire::ViewRequest, wire::ViewReply>;

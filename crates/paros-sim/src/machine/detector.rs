@@ -29,7 +29,7 @@ use std::time::Duration;
 
 use moonpool_sim::{StateHandle, assert_always};
 use paros::Address;
-use paros::system::SystemCommand;
+use paros::model::registry::SystemCommand;
 
 use super::{lock, machine_board};
 

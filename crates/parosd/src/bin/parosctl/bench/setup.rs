@@ -8,8 +8,8 @@ use paros::client::bootstrap::control_journals;
 use paros::client::fleet::{Step, read_directory};
 use paros::client::journals::{self, JournalAnswer, JournalOp, JournalRequest};
 use paros::client::{ClaimOutcome, Client, Pipeline};
-use paros::fleet::TenantState;
-use paros::tenant::{StoreDurability, Survives};
+use paros::model::fleet::TenantState;
+use paros::model::tenant::{StoreDurability, Survives};
 use paros::{JournalId, JournalIdentifier, TenantId, WriterMode};
 
 use crate::Runtime;
@@ -122,7 +122,7 @@ pub async fn journals(
                 name: name.clone().into_bytes(),
                 writer: WriterMode::Single,
                 desired: Some(topology.desired()),
-                tags: paros::tags::UserTags::none(),
+                tags: paros::model::tags::UserTags::none(),
                 store,
             },
         };

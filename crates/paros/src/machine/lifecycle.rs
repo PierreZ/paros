@@ -42,14 +42,14 @@ use moonpool_core::{LocalStorageProvider, LocalTimeProvider, RandomProvider};
 use paros_core::{Ballot, Config, JournalIdentifier, MatchmakerConfig, MatchmakerId, NodeId};
 use tokio_util::sync::CancellationToken;
 
-use super::record::{MachineRecord, journal_config};
 use super::stores::{AuditScope, MachineStores};
 use super::{
     AdminPin, Admission, AdmittedMachine, CachedRegistry, CellLedger, CellMachine, CellPlan, Class,
     FormedCell, Joined, Locality, MachineFacts, ProviderDisk,
 };
 use crate::ControlPlan;
-use crate::metrics::{Metrics, Phase};
+use crate::model::machine::{MachineRecord, journal_config};
+use crate::observe::metrics::{Metrics, Phase};
 use crate::transport::Transport;
 use crate::{Address, Audit, DriverTunables, Names, RunError};
 
@@ -73,10 +73,10 @@ pub struct MachineSettings {
     /// or nothing.
     pub pin: AdminPin,
     /// Where it records its metrics and phase (#366 (metrics)):
-    /// [`Metrics::off`](crate::metrics::Metrics::off) records nothing, and
+    /// [`Metrics::off`](crate::observe::metrics::Metrics::off) records nothing, and
     /// the machine serves the same either way. `parosd` serves it on
     /// `/metrics`, `/healthz` and `/readyz`.
-    pub metrics: crate::metrics::Metrics,
+    pub metrics: crate::observe::metrics::Metrics,
 }
 
 /// A machine's two addresses (#257, `docs/architecture/03-2-machines.md` §3.2): what it

@@ -1,5 +1,5 @@
 //! **Name resolution** (#239, `docs/architecture/03-5-frontend-and-resolver.md` §3.5): a journal name,
-//! `paros://<tenant>/<journal>` ([`crate::name::JournalName`]), to the
+//! `paros://<tenant>/<journal>` ([`crate::model::name::JournalName`]), to the
 //! [`JournalIdentifier`] the protocol carries.
 //!
 //! Two hops, each a fold of a control journal read to its tail:
@@ -36,9 +36,9 @@ use paros_core::{JournalIdentifier, TenantId};
 use super::Client;
 use super::checkpoint::{Folder, LoadOutcome, load};
 use super::fleet::read_directory;
-use crate::fleet::{FleetDirectory, TenantKind, TenantState};
-use crate::name::JournalName;
-use crate::tenant::TenantControl;
+use crate::model::fleet::{FleetDirectory, TenantKind, TenantState};
+use crate::model::name::JournalName;
+use crate::model::tenant::TenantControl;
 
 /// What resolving a tenant's name came to.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -371,7 +371,7 @@ mod tests {
     use paros_core::{AcceptorConfig, JournalId, NodeId, QuorumSystem, WriterMode};
 
     use super::*;
-    use crate::tenant::{Desired, TenantCommand};
+    use crate::model::tenant::{Desired, TenantCommand};
 
     fn create(request: u64, id: u64, name: &[u8]) -> Vec<u8> {
         TenantCommand::CreateJournal {
@@ -381,8 +381,8 @@ mod tests {
             writer: WriterMode::Single,
             desired: Desired::DEFAULT,
             config: AcceptorConfig::new(vec![NodeId(1)], QuorumSystem::Majority),
-            tags: crate::tags::UserTags::none(),
-            store: crate::tenant::StoreDurability::Ordered,
+            tags: crate::model::tags::UserTags::none(),
+            store: crate::model::tenant::StoreDurability::Ordered,
         }
         .encode()
     }

@@ -6,7 +6,7 @@
 //! earlier one started:
 //!
 //! 1. book the acceptor slots the new mode lacks on other storage machines
-//!    (`crate::placement::plan`, with the journal's slots as the current
+//!    (`crate::model::placement::plan`, with the journal's slots as the current
 //!    ones); the machine starts the journal as a spare (`crate::driver::system`);
 //! 2. ask the journal's leader to reconfigure onto the new members under the
 //!    new quorum system (`Reconfigure`, named by its journal). A smaller mode
@@ -45,10 +45,10 @@ use super::tenants::{TenantDesk, placed_count};
 use crate::client::cell::CellSession;
 use crate::client::journals::JournalAnswer;
 use crate::client::{Client, ReconfigureOutcome, Server};
-use crate::placement::{self, Step, Want};
+use crate::model::placement::{self, Step, Want};
+use crate::model::registry::{Booking, BookingTarget, Registry, Role};
+use crate::model::tenant::Desired;
 use crate::rpc::NodeClient;
-use crate::system::{Booking, BookingTarget, Registry, Role};
-use crate::tenant::Desired;
 use crate::{Address, Names};
 
 /// What one mode step did.
@@ -451,7 +451,7 @@ impl Modes {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tenant::Durability;
+    use crate::model::tenant::Durability;
 
     fn desired(failures_per_partition: u32, partitions: u32) -> Desired {
         Desired {

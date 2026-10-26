@@ -37,7 +37,7 @@ use paros::NodeId;
 use paros::client::cell::{CellSession, Removal};
 use paros::client::checkpoint::CheckpointPolicy;
 use paros::machine::Class;
-use paros::system::{BookingTarget, NodeStanding, Registry, Role};
+use paros::model::registry::{BookingTarget, NodeStanding, Registry, Role};
 
 use super::FleetOps;
 

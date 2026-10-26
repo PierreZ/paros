@@ -27,9 +27,9 @@ use paros::client::cell::CellSession;
 use paros::client::checkpoint::CheckpointPolicy;
 use paros::client::fleet::{Step, TagTarget, read_directory};
 use paros::client::journals::{self, JournalAnswer, JournalOp, JournalRequest};
-use paros::fleet::{TenantKind, TenantState};
-use paros::system::NodeStanding;
-use paros::tags::{MAX_TAGS, Tag, Tags, UserTags};
+use paros::model::fleet::{TenantKind, TenantState};
+use paros::model::registry::NodeStanding;
+use paros::model::tags::{MAX_TAGS, Tag, Tags, UserTags};
 use paros::wire::common as wire;
 use paros::wire::view as view_wire;
 
@@ -111,7 +111,8 @@ pub(in crate::chain_workload) fn drawn(state: &StateHandle) -> UserTags {
 pub(in crate::chain_workload) fn judge(state: &StateHandle, target: &Target, held: &Tags) {
     let held = pairs(held);
     assert_always!(
-        held.iter().all(|(k, _)| !paros::tags::is_reserved(k)),
+        held.iter()
+            .all(|(k, _)| !paros::model::tags::is_reserved(k)),
         "tags: a user tag never holds a reserved key"
     );
     assert_always!(
@@ -136,7 +137,7 @@ pub(in crate::chain_workload) fn judge(state: &StateHandle, target: &Target, hel
 fn user_of(tags: &[wire::Tag]) -> Option<Tags> {
     let user: Vec<wire::Tag> = tags
         .iter()
-        .filter(|t| !paros::tags::is_reserved(&t.key))
+        .filter(|t| !paros::model::tags::is_reserved(&t.key))
         .cloned()
         .collect();
     Tags::from_wire(user).ok()
@@ -150,7 +151,7 @@ pub(in crate::chain_workload) fn judge_view(
     reply: &view_wire::ViewReply,
     admin: bool,
 ) {
-    use paros::tags::reserved;
+    use paros::model::tags::reserved;
     let known = [
         reserved::KIND,
         reserved::ROLE,
@@ -177,14 +178,14 @@ pub(in crate::chain_workload) fn judge_view(
         .chain(reply.cells.iter().flat_map(|c| &c.tags));
     for tag in all {
         assert_always!(
-            !paros::tags::is_reserved(&tag.key) || known.contains(&tag.key.as_str()),
+            !paros::model::tags::is_reserved(&tag.key) || known.contains(&tag.key.as_str()),
             "tags: a view shows only known reserved tags"
         );
     }
     for m in &reply.machines {
         if admin {
             assert_always!(
-                paros::tags::value_of(&m.tags, reserved::CLASS).is_some(),
+                paros::model::tags::value_of(&m.tags, reserved::CLASS).is_some(),
                 "tags: an admin view shows every machine's class",
                 { "node" => m.node_id }
             );

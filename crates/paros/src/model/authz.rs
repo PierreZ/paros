@@ -14,7 +14,7 @@
 
 use std::time::Duration;
 
-use crate::fleet::RootKeyEntry;
+use crate::model::fleet::RootKeyEntry;
 use crate::rpc::FrontendVerdict;
 
 /// The call a token is checked for.

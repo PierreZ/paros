@@ -1,4 +1,4 @@
-//! The node loop's metering (#366 (metrics), [`crate::metrics`]): every
+//! The node loop's metering (#366 (metrics), [`crate::observe::metrics`]): every
 //! data-plane call that reaches a journal this node runs is counted where
 //! the loop takes it, and its answer is timed and counted by outcome and
 //! bytes where the answer leaves, through the reply handle
@@ -16,9 +16,9 @@
 use moonpool_core::LocalTimeProvider;
 use paros_core::{JournalIdentifier, NodeId};
 
-use crate::audit::Audit;
 use crate::machine::ControlJournals;
-use crate::metrics::{CallKind, CallOutcome, Metrics};
+use crate::observe::audit::Audit;
+use crate::observe::metrics::{CallKind, CallOutcome, Metrics};
 use crate::rpc::{ReadAck, ReplySender, SetLeaderAck, TruncateAck, WriteAck, WriteOutcome};
 
 use super::system::ControlFollower;

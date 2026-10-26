@@ -54,7 +54,7 @@ use prometheus::{
     Counter, CounterVec, Gauge, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts, Registry,
 };
 
-use crate::load::Busyness;
+use crate::model::load::Busyness;
 
 /// The labels that name a journal: its names, then its ids in hex.
 const JOURNAL_LABELS: [&str; 4] = ["tenant", "journal", "tenant_id", "journal_id"];

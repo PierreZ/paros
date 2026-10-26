@@ -32,8 +32,8 @@ use crate::Address;
 use crate::client::CallObserver;
 use crate::driver::BootRefusal;
 use crate::machine::{CachedRegistry, CellPlan, MachineRecord};
-use crate::metrics::{CallKind, CallOutcome};
-use crate::name::JournalName;
+use crate::model::name::JournalName;
+use crate::observe::metrics::{CallKind, CallOutcome};
 use crate::rpc::{EdgeRejection, MatchmakersRefusal, RetireRefusal};
 use crate::storage::StorageError;
 
@@ -268,7 +268,7 @@ pub trait Audit {
         node: NodeId,
         journal: JournalIdentifier,
         seq: u64,
-        event: &crate::system::SystemEvent,
+        event: &crate::model::registry::SystemEvent,
     ) {
     }
 
@@ -284,7 +284,7 @@ pub trait Audit {
         journal: JournalIdentifier,
         seq: u64,
         verified: Option<bool>,
-        state: &crate::system::Registry,
+        state: &crate::model::registry::Registry,
     ) {
     }
 
@@ -293,7 +293,7 @@ pub trait Audit {
     fn journal_started(&self, node: NodeId, journal: JournalIdentifier) {}
 
     /// This node held this port's journal for one beat
-    /// (`crate::scenario::HOLD_JOURNAL`, #188): it skipped the journal's
+    /// (`crate::observe::scenario::HOLD_JOURNAL`, #188): it skipped the journal's
     /// tick, and it drops the journal's inbound peer messages while the
     /// hold lasts. The non-interference oracle keys on it: the journal's
     /// siblings must keep committing.
@@ -557,7 +557,7 @@ pub trait Audit {
     /// The driver deliberately dropped this one client-facing reply after the
     /// server state advanced (the reply seam's inline location for its kind,
     /// #318, or for a write the lost-verdict scenario's named location,
-    /// [`LOSE_VERDICTS`](crate::scenario::LOSE_VERDICTS)).
+    /// [`LOSE_VERDICTS`](crate::observe::scenario::LOSE_VERDICTS)).
     fn client_reply_dropped(&self, node: NodeId, reply: crate::Reply) {}
 
     /// A data-plane `call` reached `journal` on this node, which records

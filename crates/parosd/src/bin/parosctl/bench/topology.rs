@@ -2,13 +2,13 @@
 //! the plain majority with acceptor grids under the same load. A topology
 //! `RxC` is `C` acceptor partitions of `R` acceptors each: `R = 2F+1`, so
 //! it is the durability `F` per partition over `C` partitions
-//! (`paros::tenant::Durability`). `3x1` is the plain majority of three;
+//! (`paros::model::tenant::Durability`). `3x1` is the plain majority of three;
 //! `3x3` is nine acceptors, each slot decided by two of one column.
 
 use std::fmt;
 use std::str::FromStr;
 
-use paros::tenant::{Desired, Durability, MAX_FAILURES_PER_PARTITION};
+use paros::model::tenant::{Desired, Durability, MAX_FAILURES_PER_PARTITION};
 
 /// One journal topology: `rows` acceptors in each of `columns` partitions.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

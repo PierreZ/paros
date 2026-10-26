@@ -30,8 +30,8 @@ use moonpool_sim::{Slowness, SystemSample};
 use paros::Address;
 use paros::client::load::{LoadOutcome, ask_all};
 use paros::client::views::{ViewOutcome, ask, request};
-use paros::load::Busyness;
-use paros::view::Scope;
+use paros::model::load::Busyness;
+use paros::model::view::Scope;
 use paros::wire::machine::LoadAck;
 use paros::wire::view::{CellQuery, view_request::Query};
 
@@ -218,14 +218,17 @@ fn busyness_of(ack: &LoadAck) -> Busyness {
         cores: ack.cores,
         machine_cpu: ack.machine_cpu,
         run_loop_busy: ack.has_run_loop.then_some(ack.run_loop_busy),
-        disk: ack.disk.as_ref().map(|disk| paros::load::DiskBusyness {
-            device: disk.device.clone(),
-            busy: disk.busy,
-            queue_depth: disk.queue_depth,
-            reads_hz: disk.reads_hz,
-            writes_hz: disk.writes_hz,
-            read_bps: disk.read_bps,
-            write_bps: disk.write_bps,
-        }),
+        disk: ack
+            .disk
+            .as_ref()
+            .map(|disk| paros::model::load::DiskBusyness {
+                device: disk.device.clone(),
+                busy: disk.busy,
+                queue_depth: disk.queue_depth,
+                reads_hz: disk.reads_hz,
+                writes_hz: disk.writes_hz,
+                read_bps: disk.read_bps,
+                write_bps: disk.write_bps,
+            }),
     }
 }

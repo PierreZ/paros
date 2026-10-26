@@ -31,8 +31,8 @@ use paros::client::journals::{self, JournalAnswer, JournalOp, JournalRequest};
 use paros::client::names::{JournalNames, JournalResolution};
 use paros::client::{ClaimOutcome, ReadOutcome, WriteOptions, WriteOutcome};
 use paros::client::{Writer, WriterOutcome};
-use paros::fleet::{TenantKind, TenantState};
-use paros::tenant::{Desired, Durability, StoreDurability};
+use paros::model::fleet::{TenantKind, TenantState};
+use paros::model::tenant::{Desired, Durability, StoreDurability};
 use paros::{JournalIdentifier, TenantId, Value, WriterMode};
 
 use std::collections::BTreeSet;
@@ -42,7 +42,7 @@ use std::time::Duration;
 use moonpool_sim::{Providers, TimeProvider};
 use paros::Pass;
 use paros::frontend::Denial;
-use paros::name::JournalName;
+use paros::model::name::JournalName;
 
 use super::FleetOps;
 use super::cell::Cell;
@@ -183,7 +183,7 @@ impl FleetOps {
                     assert_reachable!("journals: a configure names the tenant's role counts");
                     let batchers = u32::try_from((payload >> 40) % 4).unwrap_or(0);
                     let others = u32::try_from((payload >> 44) % 3).unwrap_or(0);
-                    paros::tenant::TenantRoles::new(others, others, batchers)
+                    paros::model::tenant::TenantRoles::new(others, others, batchers)
                         .expect("the counts are within the cap")
                 });
                 JournalOp::Configure {
@@ -304,7 +304,7 @@ impl FleetOps {
 
     /// The user tags a create of `name` in `tenant` is born with (#575
     /// (key:value tags)), recorded on the run's tag board.
-    fn birth_tags(&self, tenant: TenantId, name: &[u8]) -> paros::tags::UserTags {
+    fn birth_tags(&self, tenant: TenantId, name: &[u8]) -> paros::model::tags::UserTags {
         let tags = super::tags::drawn(&self.state);
         super::tags::note(
             &self.state,
@@ -648,7 +648,7 @@ impl FleetOps {
         assert_always!(
             !matches!(
                 tenant.outcome(request.request),
-                Some(paros::tenant::RequestOutcome::Created(_))
+                Some(paros::model::tenant::RequestOutcome::Created(_))
             ),
             "tenant: a retried request is answered with its recorded outcome",
             { "tenant" => request.tenant.0, "taken_by" => taken_by.0 }
@@ -705,7 +705,7 @@ impl FleetOps {
                 {
                     assert_always!(
                         tenant.outcome(request.request)
-                            == Some(paros::tenant::RequestOutcome::Unplaceable),
+                            == Some(paros::model::tenant::RequestOutcome::Unplaceable),
                         "journals: a refused configure changes nothing",
                         { "tenant" => request.tenant.0 }
                     );
@@ -1289,7 +1289,7 @@ fn batchers_configure(payload: u64) -> JournalOp {
         name: None,
         desired: Desired::DEFAULT,
         roles: Some(
-            paros::tenant::TenantRoles::new(others, others, batchers)
+            paros::model::tenant::TenantRoles::new(others, others, batchers)
                 .expect("the counts are within the cap"),
         ),
     }

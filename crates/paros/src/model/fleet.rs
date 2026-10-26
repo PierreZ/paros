@@ -8,7 +8,7 @@
 //! This module is the one reading of the fleet tenant's entries: the typed
 //! [`FleetEntry`] a fleet operation writes (one record per position) and the
 //! pure fold [`FleetDirectory`] every reader runs over them in position order. Like the
-//! system journals' folds ([`crate::system`]) it is a function of the log
+//! system journals' folds ([`crate::model::registry`]) it is a function of the log
 //! alone, so every reader that folded a prefix agrees on it; and like them it
 //! is not an application (#186): the core keeps the records opaque.
 //!
@@ -66,10 +66,10 @@ use paros_core::{JournalId, JournalIdentifier, TenantId};
 use prost::Message as _;
 
 use crate::Address;
-use crate::client::checkpoint::{Checkpointable, Folded};
+use crate::model::checkpoint::{Checkpointable, Folded};
+use crate::model::tags::{Tag, TagError, Tags, UserTags, reserved};
+pub use crate::model::tenant::Survives;
 use crate::rpc::fleet as wire;
-use crate::tags::{Tag, TagError, Tags, UserTags, reserved};
-pub use crate::tenant::Survives;
 
 mod keys;
 
@@ -77,7 +77,7 @@ pub use keys::RootKeyEntry;
 use keys::{KeyChange, RootKeys};
 
 /// The metadata version this fold speaks: written into every entry, and
-/// into the cell's side of the registration (`crate::system`). `2` since
+/// into the cell's side of the registration (`crate::model::registry`). `2` since
 /// the tenant entry carries a set of groups and no placement (#243); `3`
 /// since the universe entry holds root public keys (#245 (Biscuit
 /// tokens)); `4` since tenants and cells carry tags and the tenant
@@ -1206,7 +1206,7 @@ impl FleetDirectory {
 
     /// Fold the record at position `seq` of the fleet tenant's journal (in position order; a gap
     /// is simply skipped). A checkpoint record is not an entry: fold through
-    /// a [`Folder`](crate::client::checkpoint::Folder).
+    /// a [`Folder`](crate::model::checkpoint::Folder).
     ///
     /// # Panics
     ///
@@ -1753,7 +1753,7 @@ impl From<KeyChange> for FleetEvent {
 }
 
 /// The event a [`Folded`] fleet record is reported as (see
-/// [`crate::system::registry_event`]). `None` for a record the fold skipped
+/// [`crate::model::registry::registry_event`]). `None` for a record the fold skipped
 /// or a checkpoint run record.
 #[must_use]
 pub fn fleet_event(folded: Folded<FleetEvent>) -> Option<FleetEvent> {

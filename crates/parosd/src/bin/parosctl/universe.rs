@@ -20,7 +20,7 @@ use paros::Address;
 use paros::client::Client;
 use paros::client::bootstrap::{control_journals, majority_cell};
 use paros::client::fleet::{CellJoin, Step, read_directory};
-use paros::fleet::RootKeyEntry;
+use paros::model::fleet::RootKeyEntry;
 use paros_authz_biscuit::RootPublicKey;
 use serde_json::json;
 
@@ -215,7 +215,7 @@ async fn add_cell(
     name: &str,
     patience: Duration,
 ) -> Ending {
-    if let Err(error) = paros::name::check_label(name) {
+    if let Err(error) = paros::model::name::check_label(name) {
         note(&format!("bad cell name {name:?}: {error}"));
         return Ending::Refused;
     }

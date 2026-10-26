@@ -39,12 +39,12 @@ use std::collections::BTreeMap;
 use paros_core::{AcceptorConfig, JournalId, QuorumSystem, TenantId, WriterMode};
 use prost::Message as _;
 
-use crate::client::checkpoint::{Checkpointable, Folded};
+use crate::model::checkpoint::{Checkpointable, Folded};
+use crate::model::tags::UserTags;
 use crate::rpc::tenant as wire;
 use crate::rpc::{
     config_from_proto, config_to_proto, writer_mode_from_proto, writer_mode_to_proto,
 };
-use crate::tags::UserTags;
 
 mod scrub;
 
@@ -843,7 +843,7 @@ pub enum TenantEvent {
     },
     /// A checkpoint (#230): every position below `covers_up_to` is in the
     /// state the fold now holds. Never folded from an entry: a reader of the
-    /// journal through a [`crate::client::checkpoint::Folder`] reports it.
+    /// journal through a [`crate::model::checkpoint::Folder`] reports it.
     Checkpoint {
         /// The checkpoint's horizon, the position of its run's `Begin`.
         covers_up_to: u64,

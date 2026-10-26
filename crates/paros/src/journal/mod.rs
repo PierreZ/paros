@@ -78,7 +78,7 @@ use paros_core::{Ballot, JournalIdentifier, NodeId};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use crate::corruption::{CorruptionVerdict, IntegrityFault};
+use crate::model::corruption::{CorruptionVerdict, IntegrityFault};
 use crate::storage::{MetadataFault, StorageError, StorageRecord, WriteOutcome};
 
 pub use matchmaker::JournalMatchmakerStorage;

@@ -27,9 +27,9 @@ use paros::client::checkpoint::{CheckpointPolicy, Folder, LoadOutcome};
 use paros::client::fleet::{CellJoin, FleetRefusal, FleetSession, Run, Step};
 use paros::client::initialize::{InitParams, InitRun};
 use paros::client::resolve::Resolution;
-use paros::fleet::{CellState, FleetDirectory};
-use paros::name::JournalName;
-use paros::system::Registry;
+use paros::model::fleet::{CellState, FleetDirectory};
+use paros::model::name::JournalName;
+use paros::model::registry::Registry;
 use paros::{JournalIdentifier, NodeId, TenantId};
 
 use super::super::system::Announce;
@@ -495,8 +495,8 @@ impl FleetOps {
         for (tenant, entry) in directory.tenants() {
             // The cell's own cell tenant is in the directory, never hosted.
             if entry.cell_id == cell_id
-                && entry.kind == paros::fleet::TenantKind::Users
-                && entry.state == paros::fleet::TenantState::Ready
+                && entry.kind == paros::model::fleet::TenantKind::Users
+                && entry.state == paros::model::fleet::TenantState::Ready
             {
                 assert_always!(
                     registry.hosts(tenant),

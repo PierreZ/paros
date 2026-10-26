@@ -19,7 +19,7 @@
 
 use crate::ParosProviders;
 
-use crate::frontend::Denial;
+use crate::model::authz::Denial;
 use paros_core::{Entry, JournalIdentifier, JournalView, LeaderUuid, Seq, Value};
 
 use super::outcome::{ClaimOutcome, TruncateOutcome, WriteOutcome};

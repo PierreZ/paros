@@ -114,7 +114,9 @@ fn check(config: &Config, actions: &[Action]) -> Result<(), String> {
     for action in &actions[1..] {
         match &action.op {
             Op::Init { .. } => return Err("init runs once, as the first step".into()),
-            Op::CreateJournal { mode, .. } if mode.parse::<paros::tenant::Desired>().is_err() => {
+            Op::CreateJournal { mode, .. }
+                if mode.parse::<paros::model::tenant::Desired>().is_err() =>
+            {
                 return Err(format!(
                     "no mode {mode}: single, double, triple or grid:RxC"
                 ));

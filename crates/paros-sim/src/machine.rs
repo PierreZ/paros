@@ -170,11 +170,11 @@ pub(crate) struct MachineBoard {
     remove_asked: BTreeSet<u64>,
     /// The audit's fold of the calls every machine metered (#366
     /// (metrics)): what the machines' counters must add up to.
-    metered: paros::metrics::Totals,
+    metered: paros::observe::metrics::Totals,
     /// Each machine's metrics by its process address (#366 (metrics)): a
     /// reboot gets the metrics it had, as a real `/metrics` keeps counting
     /// on the same host, and the oracle reads every one.
-    metrics: BTreeMap<String, paros::metrics::Metrics>,
+    metrics: BTreeMap<String, paros::observe::metrics::Metrics>,
     /// When each machine's process last started `run_machine`, by
     /// advertised address (#654 (live machine marked down)).
     started: BTreeMap<Address, Duration>,
@@ -196,7 +196,7 @@ pub(crate) struct MaintenanceNote {
     pub(crate) node: u64,
     /// The window's scope: the machine, or its zone (#661 (maintenance
     /// windows)).
-    pub(crate) scope: paros::system::MaintenanceScope,
+    pub(crate) scope: paros::model::registry::MaintenanceScope,
     /// When the operator sent the entry, in simulated time: the window
     /// opens no earlier.
     pub(crate) sent: Duration,
@@ -204,7 +204,7 @@ pub(crate) struct MaintenanceNote {
     pub(crate) length: Duration,
     /// The bookings held on the machine when the operator sent it: each id
     /// and its journal or set.
-    pub(crate) slots: Vec<(u64, paros::system::BookingTarget)>,
+    pub(crate) slots: Vec<(u64, paros::model::registry::BookingTarget)>,
 }
 
 impl MachineBoard {
@@ -426,7 +426,7 @@ pub(crate) fn note_maintenance(state: &StateHandle, note: MaintenanceNote) {
 /// longer than `at`.
 pub(crate) fn note_window_cut(
     state: &StateHandle,
-    scope: &paros::system::MaintenanceScope,
+    scope: &paros::model::registry::MaintenanceScope,
     at: Duration,
 ) {
     let board = machine_board(state);
@@ -1076,16 +1076,16 @@ impl Process for MachineProcess {
 /// The metrics machine `ctx` records on (#366 (metrics)): the ones the
 /// board keeps for its address, unless the seed runs its machines without
 /// metrics ([`crate::shape::unmetered`]).
-fn machine_metrics(ctx: &SimContext) -> paros::metrics::Metrics {
+fn machine_metrics(ctx: &SimContext) -> paros::observe::metrics::Metrics {
     if crate::shape::unmetered(ctx.state()) {
         assert_reachable!("metrics: the machines run without metrics");
-        return paros::metrics::Metrics::off();
+        return paros::observe::metrics::Metrics::off();
     }
     let board = machine_board(ctx.state());
     lock(&board)
         .metrics
         .entry(ctx.my_ip().to_string())
-        .or_insert_with(paros::metrics::Metrics::on)
+        .or_insert_with(paros::observe::metrics::Metrics::on)
         .clone()
 }
 
@@ -1938,7 +1938,7 @@ pub(crate) fn formatting(
 
 /// A machine counted a data-plane call (#366 (metrics),
 /// `Audit::call_received`).
-pub(crate) fn metered_call(board: &Mutex<MachineBoard>, call: paros::metrics::CallKind) {
+pub(crate) fn metered_call(board: &Mutex<MachineBoard>, call: paros::observe::metrics::CallKind) {
     lock(board).metered.received(call);
 }
 
@@ -1946,7 +1946,7 @@ pub(crate) fn metered_call(board: &Mutex<MachineBoard>, call: paros::metrics::Ca
 /// accepted and `read` bytes served (#366 (metrics), `Audit::call_answered`).
 pub(crate) fn metered_answer(
     board: &Mutex<MachineBoard>,
-    call: paros::metrics::CallKind,
+    call: paros::observe::metrics::CallKind,
     written: u64,
     read: u64,
 ) {
@@ -1963,9 +1963,9 @@ pub(crate) fn check_metrics(ctx: &SimContext) {
     let board = machine_board(ctx.state());
     let (machines, counted, folded) = {
         let board = lock(&board);
-        let mut counted = paros::metrics::Totals::default();
+        let mut counted = paros::observe::metrics::Totals::default();
         for metrics in board.metrics.values() {
-            counted.add(&paros::metrics::Totals::of(metrics));
+            counted.add(&paros::observe::metrics::Totals::of(metrics));
         }
         (board.metrics.len(), counted, board.metered)
     };

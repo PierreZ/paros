@@ -35,9 +35,9 @@ use super::checkpoint::{CheckpointOutcome, CheckpointPolicy, Checkpointer, OpenO
 use super::fleet::{
     FleetRefusal, Interrupted, Run, Stage, Step, append, going_round, open, retry, settle,
 };
-use crate::frontend::Denial;
 use crate::machine::{Admission, ControlJournals};
-use crate::system::{MaintenanceScope, NodeStanding, Registry, SystemCommand};
+use crate::model::authz::Denial;
+use crate::model::registry::{MaintenanceScope, NodeStanding, Registry, SystemCommand};
 use crate::{Address, Names};
 
 /// The most steps one admission takes: a registration and an `Admit`, each
@@ -544,7 +544,7 @@ impl CellSession {
         client: &Client<P>,
         first: usize,
         (node, request): (NodeId, u64),
-        tags: &crate::tags::UserTags,
+        tags: &crate::model::tags::UserTags,
     ) -> Result<bool, Interrupted> {
         self.open(client, first).await?;
         if self.registry().tagged(request) {

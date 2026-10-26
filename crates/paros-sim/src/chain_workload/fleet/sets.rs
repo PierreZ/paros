@@ -13,7 +13,7 @@ use std::time::Duration;
 use moonpool_sim::{SimContext, TimeProvider, assert_always, assert_reachable};
 use paros::client::checkpoint::LoadOutcome;
 use paros::machine::Class;
-use paros::system::{NodeStanding, Registry, Role};
+use paros::model::registry::{NodeStanding, Registry, Role};
 use paros::{Address, JournalIdentifier, NodeId, TenantId};
 
 use crate::client::ChainClient;

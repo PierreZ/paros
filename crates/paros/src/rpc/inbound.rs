@@ -18,13 +18,9 @@ use tokio_util::sync::CancellationToken;
 use super::internal;
 use super::message_from_proto;
 use super::methods::{DeliverRpc, MachineInterface, WellKnownMethod};
-use crate::driver::DriverTunables;
+use crate::tunables::DriverTunables;
 
-/// Largest frame a paros runtime accepts or produces: a full delivery batch
-/// (the driver's 3 MiB batch cap) plus envelope headroom. A client runtime
-/// takes the same limit, or a large `Read` page would fail `ReplyTooLarge`
-/// on its side.
-pub const MAX_FRAME_BYTES: u32 = 4 << 20;
+pub use crate::tunables::MAX_FRAME_BYTES;
 
 /// The runtime configuration every paros role serves and calls with, shaped
 /// by the driver's tunables: the default per-endpoint queue is the client

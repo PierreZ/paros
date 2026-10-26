@@ -1,6 +1,6 @@
 //! The names an inspected disk holds (#365): the cell's journals this disk
 //! keeps a copy of, folded over each store's accepted prefix, answer the
-//! administrative cell view ([`crate::view::cell_view`]) the way a founding
+//! administrative cell view ([`crate::model::view::cell_view`]) the way a founding
 //! member answers it online.
 //!
 //! The fold walks the slots the store holds contiguously from its floor,
@@ -20,11 +20,11 @@ use super::{DiskImage, StoreImage};
 use crate::Address;
 use crate::client::checkpoint::{Checkpointable, Folder};
 use crate::client::election::ElectionFold;
-use crate::fleet::FleetDirectory;
-use crate::status::Hysteresis;
-use crate::system::Registry;
-use crate::tenant::TenantControl;
-use crate::view::{CellFacts, Scope, cell_view};
+use crate::model::fleet::FleetDirectory;
+use crate::model::registry::Registry;
+use crate::model::status::Hysteresis;
+use crate::model::tenant::TenantControl;
+use crate::model::view::{CellFacts, Scope, cell_view};
 use crate::wire::view::ViewReply;
 
 /// The administrative cell view this disk's copies of the cell's journals

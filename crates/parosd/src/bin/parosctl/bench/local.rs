@@ -16,7 +16,7 @@ use std::time::Duration;
 use moonpool_core::{CompioProviders, CompioResolver, CompioStorageProvider};
 use paros::client::initialize::{self, InitParams, InitRun};
 use paros::machine::{AdminPin, Class, MachineAddresses, MachineSettings, ProviderDisk};
-use paros::metrics::Metrics;
+use paros::observe::metrics::Metrics;
 use paros::{Address, DriverTunables, Names, NoAudit, Transport};
 use tokio_util::sync::CancellationToken;
 

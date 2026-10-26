@@ -33,8 +33,8 @@ use moonpool_sim::{
 use paros::client::checkpoint::LoadOutcome;
 use paros::client::journals;
 use paros::machine::Class;
-use paros::system::{BookingTarget, NodeStanding, Registry, Role};
-use paros::tenant::TenantControl;
+use paros::model::registry::{BookingTarget, NodeStanding, Registry, Role};
+use paros::model::tenant::TenantControl;
 use paros::{JournalIdentifier, NodeId, TenantId};
 
 use super::cell::Cell;
@@ -256,7 +256,7 @@ fn judge(
 /// footprint granted, and a footprint's coordinator slots are on
 /// `stateless` machines, one live at most; gates: a footprint whole after
 /// chaos, and a tenant's coordinator on a `stateless` machine. A slot is
-/// live on a registered machine that is up, as `paros::footprint::fix`
+/// live on a registered machine that is up, as `paros::model::footprint::fix`
 /// judges it: a slot on a draining machine is leaving, and `fix` books its
 /// successor before it releases it, one watch round apart (a drain of a
 /// batcher's machine that holds the coordinator, #145 (batchers), read
@@ -265,21 +265,21 @@ fn judge(
 fn footprints(registry: &Registry) {
     for tenant in registry.hosted() {
         assert_always!(
-            registry.footprint(tenant).is_some_and(paros::system::Grant::granted),
+            registry.footprint(tenant).is_some_and(paros::model::registry::Grant::granted),
             "footprint: every tenant the cell hosts has its footprint",
             { "tenant" => tenant.0 }
         );
     }
-    let birth = paros::footprint::Footprint::birth();
+    let birth = paros::model::footprint::Footprint::birth();
     for (key, grant) in registry.grants() {
-        let paros::system::GrantKey::Footprint(tenant) = key else {
+        let paros::model::registry::GrantKey::Footprint(tenant) = key else {
             continue;
         };
         if !grant.granted() || registry.dropped(tenant) {
             continue;
         }
         let target = BookingTarget::Tenant { tenant };
-        let held: Vec<paros::system::Booking> = registry
+        let held: Vec<paros::model::registry::Booking> = registry
             .bookings()
             .filter(|(_, b)| b.target == target)
             .map(|(_, b)| *b)

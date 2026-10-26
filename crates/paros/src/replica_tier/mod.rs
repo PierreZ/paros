@@ -55,7 +55,6 @@ use crate::driver::log_reads::{JournalReads, ReadLimits};
 use crate::transport::Transport;
 use tokio_util::sync::CancellationToken;
 
-use crate::audit::Audit;
 use crate::driver::boot::check_format_marker;
 use crate::driver::edge::{ReplicaInbox, RpcEdge, edge_reporter};
 use crate::driver::events::{message_kind, message_route};
@@ -63,6 +62,7 @@ use crate::driver::ready::{persist_writes, report_applied, storage_fault_crash};
 use crate::driver::reply::{Reply, answer};
 use crate::driver::transport::{LaneOpener, Outbound, send_messages};
 use crate::driver::{BootKind, DriverTunables, RunError};
+use crate::observe::audit::Audit;
 use crate::rpc::{
     InspectRefusal, InspectReply, InspectTarget, Read, ReadAck, ReplySender,
     journal_state_to_proto, quorum_system_to_proto,

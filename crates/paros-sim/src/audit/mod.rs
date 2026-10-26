@@ -1405,11 +1405,11 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         node: NodeId,
         journal: JournalIdentifier,
         seq: u64,
-        event: &paros::system::SystemEvent,
+        event: &paros::model::registry::SystemEvent,
     ) {
         match event {
-            paros::system::SystemEvent::Registry(event) => {
-                if let paros::system::RegistryEvent::TenantDropped { tenant } = event
+            paros::model::registry::SystemEvent::Registry(event) => {
+                if let paros::model::registry::RegistryEvent::TenantDropped { tenant } = event
                     && let Some(board) = &self.tenants
                 {
                     tenants::lock(board).tenant_dropped(*tenant);
@@ -1421,7 +1421,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
                     crate::machine::registry_folded(state, journal, seq, event);
                 }
             }
-            paros::system::SystemEvent::Tenant(event) => {
+            paros::model::registry::SystemEvent::Tenant(event) => {
                 if let Some(board) = &self.tenants {
                     tenants::lock(board).folded(node, journal, seq, event);
                 }
@@ -1435,7 +1435,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         journal: JournalIdentifier,
         seq: u64,
         verified: Option<bool>,
-        state: &paros::system::Registry,
+        state: &paros::model::registry::Registry,
     ) {
         // A machine that restored its fold from this checkpoint learns the
         // tenants the cell dropped from it, never from a `TenantDropped`
@@ -1891,7 +1891,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         &self,
         _node: NodeId,
         _journal: JournalIdentifier,
-        call: paros::metrics::CallKind,
+        call: paros::observe::metrics::CallKind,
     ) {
         if let Some((board, _)) = &self.machines {
             crate::machine::metered_call(board, call);
@@ -1902,7 +1902,10 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         &self,
         _node: NodeId,
         _journal: JournalIdentifier,
-        (call, _): (paros::metrics::CallKind, paros::metrics::CallOutcome),
+        (call, _): (
+            paros::observe::metrics::CallKind,
+            paros::observe::metrics::CallOutcome,
+        ),
         written: u64,
         read: u64,
     ) {

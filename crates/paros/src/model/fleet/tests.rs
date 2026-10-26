@@ -1,5 +1,5 @@
 use super::*;
-use crate::tags::UserTags;
+use crate::model::tags::UserTags;
 
 const FLEET: u64 = 0xf1ee7;
 const CELL: u64 = 0xce11;
@@ -747,7 +747,7 @@ fn the_reserved_tags_decide_who_moves() {
         .find(|t| t.tenant == cell_control().tenant.0)
         .unwrap();
     for tag in &mut cell.tags {
-        if tag.key == crate::tags::reserved::MOVABLE {
+        if tag.key == crate::model::tags::reserved::MOVABLE {
             tag.value = "true".into();
         }
     }

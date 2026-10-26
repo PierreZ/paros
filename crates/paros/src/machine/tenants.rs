@@ -30,7 +30,7 @@
 //! founding members serve journals until journals move onto admitted
 //! machines, so they are the machines a create may use: one acceptor
 //! partition takes as many as it asks for, at most all of them, and more
-//! acceptor partitions need all their acceptors (#523). Inside them, [`crate::placement::plan`] picks the members
+//! acceptor partitions need all their acceptors (#523). Inside them, [`crate::model::placement::plan`] picks the members
 //! (zone by zone, least-loaded first, ties by a draw seeded with the
 //! tenant), and the coordinator books one acceptor slot on each in the cell
 //! control journal, through the term's cell session, *before* it writes the
@@ -67,18 +67,18 @@ use crate::client::checkpoint::{
 use crate::client::fleet::Interrupted;
 use crate::client::journals::{JournalAnswer, JournalOp, JournalRequest};
 use crate::client::{ClaimOutcome, Client, ClientTunables, WriterOutcome};
-use crate::placement::{self, Shortfall, Step, Want};
-use crate::system::{
+use crate::model::placement::{self, Shortfall, Step, Want};
+use crate::model::registry::{
     Booking, BookingTarget, GrantKey, NodeStanding, Registry, Role, SystemCommand,
 };
-use crate::tenant::{
+use crate::model::tenant::{
     ConfigureTarget, Description, Desired, RequestOutcome, StoreDurability, TenantCommand,
     TenantControl, TenantRoles,
 };
 
 /// What `HostTenant` records of a tenant: its control journal, its name and
 /// what it survives.
-type Hosted = (JournalId, Vec<u8>, crate::tenant::Survives);
+type Hosted = (JournalId, Vec<u8>, crate::model::tenant::Survives);
 
 /// How many ids one create draws before it answers unavailable: an
 /// `IdTaken` costs one, and a random 64-bit id is taken almost never.
@@ -350,7 +350,7 @@ impl TenantDesk {
         client: &Client<P>,
         request: &JournalRequest,
         (name, writer, desired, store): (&[u8], paros_core::WriterMode, Desired, StoreDurability),
-        tags: &crate::tags::UserTags,
+        tags: &crate::model::tags::UserTags,
         cell: Option<&mut CellSession>,
     ) -> JournalAnswer {
         let tenant = request.tenant;
@@ -631,7 +631,7 @@ impl TenantDesk {
         &mut self,
         client: &Client<P>,
         tenant: TenantId,
-        progress: crate::tenant::ScrubProgress,
+        progress: crate::model::tenant::ScrubProgress,
     ) -> Result<(), JournalAnswer> {
         let command = TenantCommand::Scrubbed(progress);
         let written = self.append(client, tenant, &command).await;

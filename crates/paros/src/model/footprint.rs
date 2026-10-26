@@ -28,9 +28,9 @@ use std::collections::BTreeMap;
 use paros_core::{NodeId, TenantId};
 
 use crate::machine::Class;
-use crate::placement::{self, Machine};
-use crate::system::{BookingTarget, NodeStanding, Registry, Role, Slot};
-use crate::tenant::Durability;
+use crate::model::placement::{self, Machine};
+use crate::model::registry::{BookingTarget, NodeStanding, Registry, Role, Slot};
+use crate::model::tenant::Durability;
 
 /// The durability a tenant is born with: its footprint's. A creation does
 /// not name one yet, and a journal's own durability books its own slots.
@@ -264,7 +264,7 @@ pub enum Fix {
 #[must_use]
 pub fn fix(registry: &Registry, tenant: TenantId, footprint: &Footprint) -> Option<Fix> {
     let target = BookingTarget::Tenant { tenant };
-    let held: Vec<(u64, crate::system::Booking)> = registry
+    let held: Vec<(u64, crate::model::registry::Booking)> = registry
         .bookings()
         .filter(|(_, b)| b.target == target)
         .map(|(id, b)| (id, *b))
@@ -336,7 +336,7 @@ pub fn fix(registry: &Registry, tenant: TenantId, footprint: &Footprint) -> Opti
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::system::{GrantKey, RegistryEvent, SystemCommand};
+    use crate::model::registry::{GrantKey, RegistryEvent, SystemCommand};
 
     fn register(reg: &mut Registry, seq: u64, id: u64, class: Class, capacity: u64) {
         let command = SystemCommand::RegisterNode {

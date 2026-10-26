@@ -23,7 +23,6 @@ use moonpool_rpc::RpcHandle;
 use paros_core::{JournalIdentifier, TenantId};
 
 use super::{Shared, lock};
-use crate::audit::Audit;
 use crate::client::bootstrap::majority_cell;
 use crate::client::checkpoint::{Folder, LoadOutcome, load};
 use crate::client::fleet::read_directory;
@@ -31,10 +30,11 @@ use crate::client::names::{
     JournalNames, JournalResolution, TenantResolution, Unreadable, resolve_journal, tenant_in,
 };
 use crate::client::{Client, Server};
-use crate::fleet::{FleetDirectory, RootKeyEntry};
-use crate::name::JournalName;
+use crate::model::fleet::{FleetDirectory, RootKeyEntry};
+use crate::model::name::JournalName;
+use crate::model::registry::Registry;
+use crate::observe::audit::Audit;
 use crate::rpc::NodeClient;
-use crate::system::Registry;
 
 /// What resolving a name came to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -15,8 +15,8 @@ use paros_core::{
 use super::{inspect, names};
 use crate::machine::{CellPlan, Class, MachineRecord, read_all, write_all};
 use crate::matchmaker::MatchmakerStorage;
+use crate::model::registry::SystemCommand;
 use crate::storage::LogStorage;
-use crate::system::SystemCommand;
 use crate::{Address, JournalMatchmakerStorage, JournalStorage, JournalStoreConfig};
 
 fn runtime() -> tokio::runtime::Runtime {

@@ -13,8 +13,8 @@
 //!
 //! 1. **Class and capacity.** An instance goes only to a machine of its
 //!    role's class with a free slot, as the registry judges a booking at
-//!    apply ([`crate::system::RegistryRefusal::WrongClass`],
-//!    [`crate::system::RegistryRefusal::NoCapacity`]), and only to a
+//!    apply ([`crate::model::registry::RegistryRefusal::WrongClass`],
+//!    [`crate::model::registry::RegistryRefusal::NoCapacity`]), and only to a
 //!    machine that serves the cell: a founding member, or one the cell
 //!    coordinator saw admitted ([`Registry::serves`], #511).
 //! 2. **One machine, one storage instance.** A machine never holds two
@@ -49,7 +49,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use paros_core::{AcceptorConfig, FailureDomain, NodeId, QuorumSystem};
 
 use crate::machine::Class;
-use crate::system::{Booking, BookingTarget, NodeStanding, Registry, Role};
+use crate::model::registry::{Booking, BookingTarget, NodeStanding, Registry, Role};
 
 /// A machine as the placement sees it: what the registry holds of it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -719,7 +719,7 @@ mod tests {
 
     #[test]
     fn a_registered_machine_is_offered_only_once_it_serves() {
-        use crate::system::SystemCommand;
+        use crate::model::registry::SystemCommand;
         let register = |id: u64| SystemCommand::RegisterNode {
             id: NodeId(id),
             addr: format!("n{id}"),

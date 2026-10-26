@@ -1,5 +1,5 @@
 //! The cell coordinator keeps every tenant's footprint whole (#476,
-//! `crate::footprint`): one step per watch round, in turn over the tenants
+//! `crate::model::footprint`): one step per watch round, in turn over the tenants
 //! whose footprint the cell granted and did not drop (the cell tenant and
 //! the universe tenant too). A step places a tenant's coordinator on a
 //! `stateless` machine, places a dead one again, or moves a storage slot
@@ -21,8 +21,8 @@ use paros_core::TenantId;
 
 use crate::client::Client;
 use crate::client::cell::CellSession;
-use crate::footprint::{self, Fix, Footprint};
-use crate::system::{GrantKey, Registry, Role, SystemCommand};
+use crate::model::footprint::{self, Fix, Footprint};
+use crate::model::registry::{GrantKey, Registry, Role, SystemCommand};
 
 /// The footprint steps of one coordinator term.
 #[derive(Debug)]

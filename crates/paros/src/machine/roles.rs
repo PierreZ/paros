@@ -6,7 +6,7 @@
 //! One step per watch round, after the footprint step, in turn over the
 //! hosted tenants: release one batcher slot on a machine that leaves
 //! (draining, held slow, or gone, `super::moves::stays`), else book or
-//! release the slots that make the count, with `crate::placement` (one
+//! release the slots that make the count, with `crate::model::placement` (one
 //! slot per machine, zones in round robin, least-loaded first). The count
 //! is capped at the `stateless` machines that can take a slot, so a cell
 //! without one places none and a cell that grows places the rest later.
@@ -31,8 +31,8 @@ use crate::client::Client;
 use crate::client::cell::CellSession;
 use crate::client::journals::JournalAnswer;
 use crate::machine::Class;
-use crate::placement::{self, Step, Want};
-use crate::system::{Booking, BookingTarget, NodeStanding, Registry, Role, SystemCommand};
+use crate::model::placement::{self, Step, Want};
+use crate::model::registry::{Booking, BookingTarget, NodeStanding, Registry, Role, SystemCommand};
 
 /// What one role step did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

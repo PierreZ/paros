@@ -55,7 +55,7 @@ pub struct InitArgs {
     #[arg(
         long,
         default_value_t = initialize::FAILURES_PER_PARTITION,
-        value_parser = clap::value_parser!(u32).range(0..=i64::from(paros::tenant::MAX_FAILURES_PER_PARTITION))
+        value_parser = clap::value_parser!(u32).range(0..=i64::from(paros::model::tenant::MAX_FAILURES_PER_PARTITION))
     )]
     failures_per_partition: u32,
     /// How long the decree may take to form the cell, and the cell to elect
@@ -92,7 +92,7 @@ pub struct InitArgs {
 
 /// A name for people: no `/`, no space, no control character.
 fn label(text: &str) -> Result<String, String> {
-    paros::name::check_label(text)
+    paros::model::name::check_label(text)
         .map(|()| text.to_string())
         .map_err(|e| e.to_string())
 }

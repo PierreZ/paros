@@ -7,8 +7,8 @@
 //! - **Reserved keys**, under [`RESERVED_PREFIX`] (`paros/`). Only the
 //!   control plane writes them, each through its own command, so a user can
 //!   never fake one. Each entity's fold parses its reserved tags into typed
-//!   policies (`crate::fleet::TenantKind`, `crate::fleet::Movable`,
-//!   `crate::machine::Class`, `crate::fleet::CellKind`) and never reads the
+//!   policies (`crate::model::fleet::TenantKind`, `crate::model::fleet::Movable`,
+//!   `crate::machine::Class`, `crate::model::fleet::CellKind`) and never reads the
 //!   string again: policies are explicit types, never flags. [`reserved`]
 //!   names every reserved key.
 //! - **User keys**: any other key. paros never interprets them. A

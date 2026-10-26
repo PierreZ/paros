@@ -39,10 +39,10 @@ use moonpool_sim::{
     assert_always, assert_reachable,
 };
 use paros::client::ClientTunables;
-use paros::fleet::RootKeyEntry;
 use paros::frontend::{FrontendSettings, run_frontend};
 use paros::machine::AdminPin;
-use paros::name::JournalName;
+use paros::model::fleet::RootKeyEntry;
+use paros::model::name::JournalName;
 use paros::{Address, Audit, DriverTunables, JournalIdentifier};
 use paros_authz_biscuit::{
     BiscuitAuthz, Class, Entropy, Grant, KeyRing, MAX_BLOCKS, Restriction, Role, RootKey, Token,

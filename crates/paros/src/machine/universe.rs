@@ -55,10 +55,10 @@ use crate::client::cell::CellSession;
 use crate::client::checkpoint::{Folder, LoadOutcome, load};
 use crate::client::fleet::Interrupted;
 use crate::client::universe::{JoinAnswer, JoinRequest};
-use crate::fleet::{CellState, FleetDirectory, METADATA_VERSION, TenantKind, TenantState};
-use crate::footprint::{self, Footprint};
 use crate::machine::ControlJournals;
-use crate::system::{GrantKey, HostedTenant, Registry, SystemCommand};
+use crate::model::fleet::{CellState, FleetDirectory, METADATA_VERSION, TenantKind, TenantState};
+use crate::model::footprint::{self, Footprint};
+use crate::model::registry::{GrantKey, HostedTenant, Registry, SystemCommand};
 
 /// The `JoinFleet` the universe directory `directory` asks of the cell
 /// `journals` names: the directory holds a fleet and an entry for this
@@ -401,7 +401,7 @@ mod tests {
 
     use super::*;
     use crate::client::checkpoint::Checkpointable;
-    use crate::fleet::{FleetCommand, FleetEntry};
+    use crate::model::fleet::{FleetCommand, FleetEntry};
 
     fn journals() -> ControlJournals {
         ControlJournals {
@@ -439,7 +439,7 @@ mod tests {
                 cell_id: 10,
                 control: JournalIdentifier::new(TenantId(11), JournalId(12)),
                 name: Vec::new(),
-                kind: crate::fleet::CellKind::default(),
+                kind: crate::model::fleet::CellKind::default(),
                 endpoint: Vec::new(),
             },
         );
@@ -453,7 +453,7 @@ mod tests {
                 cell_id: journals.cell_id,
                 control: JournalIdentifier::new(TenantId(5), JournalId(13)),
                 name: Vec::new(),
-                kind: crate::fleet::CellKind::default(),
+                kind: crate::model::fleet::CellKind::default(),
                 endpoint: Vec::new(),
             },
         );
@@ -465,7 +465,7 @@ mod tests {
                 cell_id: journals.cell_id,
                 control: journals.cell,
                 name: Vec::new(),
-                kind: crate::fleet::CellKind::default(),
+                kind: crate::model::fleet::CellKind::default(),
                 endpoint: Vec::new(),
             },
         );
@@ -517,7 +517,7 @@ mod tests {
                 cell_id: journals.cell_id,
                 control: journals.cell,
                 name: Vec::new(),
-                kind: crate::fleet::CellKind::default(),
+                kind: crate::model::fleet::CellKind::default(),
                 endpoint: Vec::new(),
             },
             FleetCommand::MarkCell {
@@ -528,8 +528,8 @@ mod tests {
                 control: JournalIdentifier::new(TenantId(20), JournalId(21)),
                 name: b"a".to_vec(),
                 cell_id: journals.cell_id,
-                survives: crate::tenant::Survives::Az,
-                tags: crate::tags::UserTags::none(),
+                survives: crate::model::tenant::Survives::Az,
+                tags: crate::model::tags::UserTags::none(),
             },
         ];
         for (seq, command) in (0..).zip(commands) {
@@ -652,7 +652,7 @@ mod tests {
         assert!(
             registry
                 .footprint(tenant)
-                .is_some_and(crate::system::Grant::granted)
+                .is_some_and(crate::model::registry::Grant::granted)
         );
         let steps = tenant_steps(&directory, &registry, journals.cell_id);
         assert_eq!(steps.len(), 1);

@@ -28,7 +28,7 @@
 //!   create an `internal` one. The fleet tenant registers it `REGISTERING` with its
 //!   identifier and its cell assignment (the one `READY` cell in M9). The
 //!   cell coordinator reads the entry, books the tenant's footprint
-//!   (`GrantCapacity`, [`crate::footprint`], #476 (tenant footprint)) and
+//!   (`GrantCapacity`, [`crate::model::footprint`], #476 (tenant footprint)) and
 //!   hosts the tenant (`HostTenant`, [`crate::machine`], #225). The operator
 //!   waits for both ([`Interrupted::NotHosted`]; while a founding member
 //!   is not registered and not marked down, the cell refuses no footprint,
@@ -100,13 +100,13 @@ use super::checkpoint::{
 use super::outcome::ClaimOutcome;
 use super::writer::{Writer, WriterOutcome};
 use crate::Address;
-use crate::fleet::CellKind;
-use crate::fleet::RootKeyEntry;
-use crate::fleet::{CellState, FleetCommand, FleetDirectory, FleetEntry, TenantState};
 use crate::machine::ControlJournals;
-use crate::system::{FleetRegistration, Registry};
-use crate::tags::UserTags;
-use crate::tenant::Survives;
+use crate::model::fleet::CellKind;
+use crate::model::fleet::RootKeyEntry;
+use crate::model::fleet::{CellState, FleetCommand, FleetDirectory, FleetEntry, TenantState};
+use crate::model::registry::{FleetRegistration, Registry};
+use crate::model::tags::UserTags;
+use crate::model::tenant::Survives;
 
 /// An idle cell that `universe add-cell` joins to the universe (#232
 /// (multiple cells)): learned from its machines' node-only `Inspect`.
@@ -281,7 +281,7 @@ pub enum FleetRefusal {
         /// The machine.
         node: NodeId,
         /// Why.
-        denial: crate::frontend::Denial,
+        denial: crate::model::authz::Denial,
     },
 }
 
@@ -960,7 +960,7 @@ impl FleetSession {
     /// endpoint while the directory records none). `None` before the
     /// directory is folded, or with no machine to name.
     #[must_use]
-    pub fn universe_pointer(&self) -> Option<crate::system::UniversePointer> {
+    pub fn universe_pointer(&self) -> Option<crate::model::registry::UniversePointer> {
         let directory = self.directory.state();
         directory.fleet()?;
         let hosts = directory
@@ -968,7 +968,7 @@ impl FleetSession {
             .map(|cell| directory.endpoint(cell).to_vec())
             .filter(|hosts| !hosts.is_empty())
             .unwrap_or_else(|| self.endpoint.clone());
-        (!hosts.is_empty()).then_some(crate::system::UniversePointer {
+        (!hosts.is_empty()).then_some(crate::model::registry::UniversePointer {
             directory: self.fleet,
             hosts,
         })

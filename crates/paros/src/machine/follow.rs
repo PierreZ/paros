@@ -34,8 +34,8 @@ use super::{CacheSink, CachedRegistry, ControlJournals, MachineFacts, cell_book}
 use crate::client::bootstrap::cell_members;
 use crate::client::checkpoint::{Folder, LoadOutcome, load};
 use crate::client::{Client, ClientTunables, Server};
+use crate::model::registry::Registry;
 use crate::rpc::NodeClient;
-use crate::system::Registry;
 use crate::{Address, DriverTunables};
 
 /// What an admitted machine's follow reads, and where it starts.

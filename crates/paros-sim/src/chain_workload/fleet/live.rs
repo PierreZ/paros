@@ -18,7 +18,7 @@ use paros::Address;
 use paros::client::checkpoint::LoadOutcome;
 use paros::client::load::{LoadOutcome as Load, ask_all};
 use paros::machine::slow::{BUSY_MARGIN, Sample};
-use paros::system::NodeStanding;
+use paros::model::registry::NodeStanding;
 
 use super::cell::Cell;
 use super::{FleetOps, judged_cell};

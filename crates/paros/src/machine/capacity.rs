@@ -17,7 +17,7 @@ use crate::ParosProviders;
 use crate::client::Client;
 use crate::client::capacity::{CapacityAnswer, CapacityRequest};
 use crate::client::cell::CellSession;
-use crate::system::{Grant, GrantKey, Slot, SystemCommand};
+use crate::model::registry::{Grant, GrantKey, Slot, SystemCommand};
 
 /// How many booking ids one slot draws before the request answers
 /// unavailable: a random 64-bit id is spent almost never.

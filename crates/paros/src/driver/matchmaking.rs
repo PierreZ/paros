@@ -17,8 +17,8 @@ use paros_core::{
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::audit::Audit;
 use crate::driver::events::{reconfigure_kind, registration_history_hash};
+use crate::observe::audit::Audit;
 use crate::rpc::{
     Addressed, MatchmakerClient, garbage_collect_ack_from_wire, match_reply_from_wire,
     reconfigure_reply_from_wire, wire_garbage_collect, wire_match_request,

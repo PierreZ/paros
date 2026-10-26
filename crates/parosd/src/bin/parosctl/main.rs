@@ -573,8 +573,8 @@ fn asker<'a>(runtime: &'a Runtime, global: &Global) -> views::Asker<'a> {
         names: &runtime.names,
         servers: global.addrs(),
         scope: match &global.as_tenant {
-            Some(tenant) => paros::view::Scope::Tenant(tenant.as_bytes().to_vec()),
-            None => paros::view::Scope::Admin,
+            Some(tenant) => paros::model::view::Scope::Tenant(tenant.as_bytes().to_vec()),
+            None => paros::model::view::Scope::Admin,
         },
         timeout: global.timeout(),
     }

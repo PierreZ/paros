@@ -14,7 +14,7 @@
 //! ambiguous.
 //!
 //! A client reads a system journal exactly as a node follows it: `Read` from
-//! position 0 and the same pure fold (`paros::system`), so what it reads
+//! position 0 and the same pure fold (`paros::model::registry`), so what it reads
 //! back is what every node applied. On a seed that runs no system journals
 //! the request is still sent, and must be refused as naming an unknown
 //! journal — the same parity a `Reconfigure` keeps on a plain seed.
@@ -42,7 +42,7 @@ use paros::client::checkpoint::{
     OpenOutcome,
 };
 use paros::client::{Answered, Attempted, CallObserver, ClaimOutcome, TruncateOutcome, Writer};
-use paros::system::{
+use paros::model::registry::{
     BookingTarget, Class, NodeStanding, Registry, RegistryEvent, Role, SystemCommand, SystemEvent,
     registry_event,
 };

@@ -8,7 +8,7 @@
 use paros_core::{MatchmakerId, NodeId};
 use tokio::sync::mpsc;
 
-use crate::audit::Audit;
+use crate::observe::audit::Audit;
 use crate::rpc::ReplySender;
 
 /// A client-facing reply the driver is about to send.
@@ -135,7 +135,7 @@ fn drop_reply(kind: Reply) -> bool {
 ///
 /// The drop is the kind's own location ([`drop_reply`]), or, for a write,
 /// the lost-verdict scenario's named location
-/// ([`LOSE_VERDICTS`](crate::scenario::LOSE_VERDICTS), #318 E).
+/// ([`LOSE_VERDICTS`](crate::observe::scenario::LOSE_VERDICTS), #318 E).
 pub(crate) fn answer<T, A: Audit>(
     audit: &A,
     node: NodeId,
@@ -143,7 +143,7 @@ pub(crate) fn answer<T, A: Audit>(
     waiter: ReplySender<T>,
     ack: T,
 ) {
-    if (kind == Reply::Write && crate::scenario::lose_verdict()) || drop_reply(kind) {
+    if (kind == Reply::Write && crate::observe::scenario::lose_verdict()) || drop_reply(kind) {
         audit.client_reply_dropped(node, kind);
         tracing::info!(node = node.0, reply = kind.label(), "client_reply_dropped");
     } else {

@@ -45,9 +45,9 @@
 mod book;
 pub(crate) mod boot;
 mod calls;
-mod config;
 pub(crate) mod edge;
 pub(crate) mod events;
+mod exit;
 mod flight;
 mod handover;
 mod journals;
@@ -62,16 +62,13 @@ pub(crate) mod scrub;
 mod stop;
 mod system;
 pub(crate) mod transport;
-mod tunables;
 
-pub use config::{
-    BootKind, BootRefusal, DriverTunables, LOAD_INTERVAL_FLOOR, MAX_READ_RECORDS, RunError,
-    parse_addr,
-};
+pub use crate::net::address::parse_addr;
+pub use crate::tunables::{BelowFloor, DriverTunables, LOAD_INTERVAL_FLOOR, MAX_READ_RECORDS};
 pub use events::{command_hash, message_kind, registration_history_hash};
+pub use exit::{BootKind, BootRefusal, RunError};
 pub use journals::{HostEnded, JournalStores};
 pub use system::ControlPlan;
-pub use tunables::BelowFloor;
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -86,17 +83,17 @@ use paros_core::{
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
-use crate::audit::Audit;
 use crate::machine::{CellMachine, ControlJournals};
-use crate::metrics::{CallKind, Metrics};
+use crate::model::registry::{NodeStanding, RegistryEvent, SystemEvent};
+use crate::model::tenant::TenantEvent;
+use crate::observe::audit::Audit;
+use crate::observe::metrics::{CallKind, Metrics};
 use crate::rpc::{
     InspectRefusal, InspectTarget, MatchmakerClient, MatchmakersRefusal, ReadAck,
     ReconfigureMatchmakersAck, ReplySender, RetireAck, RetireRefusal, SetLeaderAck, TruncateAck,
     WriteAck, leader_from_proto, leader_uuid_from_proto,
 };
 use crate::storage::LogStorage;
-use crate::system::{NodeStanding, RegistryEvent, SystemEvent};
-use crate::tenant::TenantEvent;
 use crate::transport::Transport;
 use reply::Reply;
 
@@ -155,7 +152,7 @@ impl<P: ParosProviders, A: Audit> NodeLoop<'_, P, A> {
         let (promised, chosen) = (taken.promised_before, taken.chosen_before);
         let mut outbox = finish_ready(node, self.out, waiters, self.audit, taken).await;
         let reported = fold_head(node);
-        if !outbox.gc_requests.is_empty() && crate::scenario::withhold_gc() {
+        if !outbox.gc_requests.is_empty() && crate::observe::scenario::withhold_gc() {
             tracing::info!(node = self.self_id, "gc_requests_withheld");
             outbox.gc_requests.clear();
         }
@@ -552,7 +549,8 @@ impl<P: ParosProviders, A: Audit> NodeLoop<'_, P, A> {
         // it campaigns again at once, so its next leadership's delegations
         // meet the rounds a proxy still holds for this one.
         if !handed_off && node.role() == NodeRole::Leader {
-            let again = !node.delegated_rounds().is_empty() && crate::scenario::resign_delegating();
+            let again = !node.delegated_rounds().is_empty()
+                && crate::observe::scenario::resign_delegating();
             if again || moonpool_buggify::buggify_fault_with_prob!(0.004) {
                 moonpool_assertions::reachable!("the driver voluntarily resigns leadership");
                 audit.stepped_down(NodeId(self_id));
@@ -1064,7 +1062,7 @@ impl<P: ParosProviders> Shared<'_, P> {
         // The open GC request's re-send (#123): its own cadence
         // (`gc_resend_ticks`) and its own BUGGIFY location.
         if gc_resend.tick_if(node.gc_pending(), tunables.gc_resend_ticks) {
-            if crate::scenario::withhold_gc() {
+            if crate::observe::scenario::withhold_gc() {
                 tracing::info!(node = self_id, "gc_requests_withheld");
             } else if moonpool_buggify::buggify_fault_with_prob!(0.5) {
                 // Skipping a due re-send is always safe: a skipped beat
@@ -1287,7 +1285,7 @@ fn initiate_handoff(ctx: &HandoffContext) -> bool {
     };
     // The handoff-storm scenario's location (#484 (silent driver fault
     // sites)): drawn after the shape's own, so the shape keeps its gate.
-    let fired = fired || crate::scenario::hand_off();
+    let fired = fired || crate::observe::scenario::hand_off();
     if fired {
         // BUGGIFY pairing: each shape fires on some seed, split so that
         // saturation cannot hide one shape behind another's samples.
@@ -1466,7 +1464,7 @@ fn phase2_column(slot: paros_core::Slot, cols: usize) -> Option<usize> {
 /// column or row choice reads them, and without a control plan.
 fn slow_members(
     node: &ColocatedNode,
-    registry: Option<&crate::system::Registry>,
+    registry: Option<&crate::model::registry::Registry>,
 ) -> BTreeSet<NodeId> {
     let (QuorumSystem::Grid { .. }, Some(registry)) = (node.acceptors().quorum_system(), registry)
     else {
@@ -1722,7 +1720,7 @@ fn park_call<S, A: Audit, P: ParosProviders>(
 ///
 /// Every rare-but-valid choice of the driver is an inline BUGGIFY site, inert
 /// in production (#294, #318); a simulation harness forces the per-seed ones
-/// by name ([`crate::scenario`]).
+/// by name ([`crate::observe::scenario`]).
 ///
 /// `audit` is pure observation: the driver reports every
 /// externally meaningful transition to it, and nothing it does can change the
@@ -1969,10 +1967,10 @@ where
     // fault took the last one.
     let follows = system.is_some();
     // The journal this node may hold for a scenario (#188,
-    // `crate::scenario::HOLD_JOURNAL`): the highest of the user journals it
+    // `crate::observe::scenario::HOLD_JOURNAL`): the highest of the user journals it
     // boots serving, when there are several.
     let hold_candidate =
-        crate::scenario::hold_candidate(ids.iter().filter(|id| !control.contains(id)));
+        crate::observe::scenario::hold_candidate(ids.iter().filter(|id| !control.contains(id)));
 
     // Stage 7 per journal, before the core reads a byte: the boot scan and
     // the format marker (#147). A journal that fails to boot is quarantined
@@ -2125,9 +2123,9 @@ where
     let mut coordinator_ended: Option<watch::Receiver<bool>> = None;
     // The instant since which the registry's pool is owed to the live journals
     // (#189), and whether this incarnation holds it a while (#387,
-    // `crate::scenario::ADMIT_LATE`; drawn only where a registry is followed).
+    // `crate::observe::scenario::ADMIT_LATE`; drawn only where a registry is followed).
     let mut admission_owed: Option<std::time::Duration> = None;
-    let late_admitter = system.is_some() && crate::scenario::late_admitter();
+    let late_admitter = system.is_some() && crate::observe::scenario::late_admitter();
     // The books an admitted machine's cache is offered (#505 (stranded
     // admitted machine)): its follow's folds, and a book its cell
     // coordinator handed it when its fold was stuck.
@@ -2574,7 +2572,7 @@ where
                     tracing::info!(node = self_id, journal = %journal, from = %from, "unpooled_message_refused");
                     continue;
                 }
-                let held = crate::scenario::hold_journal(hold_candidate, journal);
+                let held = crate::observe::scenario::hold_journal(hold_candidate, journal);
                 let Some(rt) = journals.live.get_mut(&journal).filter(|_| !held) else {
                     tracing::info!(node = self_id, journal = %journal, held, "journal_message_dropped");
                     continue;
@@ -2919,7 +2917,7 @@ where
                     admission_owed.get_or_insert(time.now());
                 }
                 admit_owed(&mut journals, f, &mut admission_owed, late_admitter, time.now());
-                if behind && !crate::scenario::lag_follow() {
+                if behind && !crate::observe::scenario::lag_follow() {
                     moonpool_assertions::reachable!("driver: a short follow page opens the next read at once");
                     f.poll_remote(&providers, |journal| journals.live.contains_key(&journal));
                 }
@@ -3024,7 +3022,7 @@ where
                 for journal in live {
                     let audits = tenant_audits(&journals, &stores, journal.tenant);
                     let Some(rt) = journals.live.get_mut(&journal) else { continue };
-                    if crate::scenario::hold_journal(hold_candidate, journal) {
+                    if crate::observe::scenario::hold_journal(hold_candidate, journal) {
                         rt.audit.journal_held(NodeId(self_id));
                         tracing::info!(node = self_id, journal = %journal, "journal_held");
                         continue;
@@ -3100,7 +3098,7 @@ where
                     }
                     // A held admission lands once its hold is over (#387).
                     admit_owed(&mut journals, f, &mut admission_owed, late_admitter, time.now());
-                    if !crate::scenario::lag_follow() {
+                    if !crate::observe::scenario::lag_follow() {
                         f.poll_remote(&providers, |journal| journals.live.contains_key(&journal));
                     }
                 }
@@ -3305,7 +3303,7 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
                             (
                                 paros_core::QuorumSystem::Majority,
                                 paros_core::WriterMode::Single,
-                                crate::tenant::StoreDurability::Ordered,
+                                crate::model::tenant::StoreDurability::Ordered,
                             ),
                             Seat::Member,
                         )
@@ -3372,7 +3370,7 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
                             (
                                 paros_core::QuorumSystem::Majority,
                                 paros_core::WriterMode::Single,
-                                crate::tenant::StoreDurability::Ordered,
+                                crate::model::tenant::StoreDurability::Ordered,
                             ),
                             Seat::Member,
                         )
@@ -3425,7 +3423,7 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
         (quorum_system, writer, store): (
             paros_core::QuorumSystem,
             paros_core::WriterMode,
-            crate::tenant::StoreDurability,
+            crate::model::tenant::StoreDurability,
         ),
         seat: Seat,
     ) -> bool {
@@ -3500,11 +3498,11 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
         let booked: BTreeSet<JournalIdentifier> = follower
             .registry()
             .bookings()
-            .filter(|(_, b)| b.node == me && b.role == crate::system::Role::Acceptor)
+            .filter(|(_, b)| b.node == me && b.role == crate::model::registry::Role::Acceptor)
             .filter_map(|(_, b)| match b.target {
-                crate::system::BookingTarget::Journal(journal) => Some(journal),
-                crate::system::BookingTarget::Set { .. }
-                | crate::system::BookingTarget::Tenant { .. } => None,
+                crate::model::registry::BookingTarget::Journal(journal) => Some(journal),
+                crate::model::registry::BookingTarget::Set { .. }
+                | crate::model::registry::BookingTarget::Tenant { .. } => None,
             })
             .collect();
         // The matchmaker sets booked here (#501 (matchmaker sets off the
@@ -3512,9 +3510,9 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
         let sets: BTreeSet<TenantId> = follower
             .registry()
             .bookings()
-            .filter(|(_, b)| b.node == me && b.role == crate::system::Role::Matchmaker)
+            .filter(|(_, b)| b.node == me && b.role == crate::model::registry::Role::Matchmaker)
             // A footprint's matchmaker slot (#476) reserves room only.
-            .filter(|(_, b)| matches!(b.target, crate::system::BookingTarget::Set { .. }))
+            .filter(|(_, b)| matches!(b.target, crate::model::registry::BookingTarget::Set { .. }))
             .map(|(_, b)| b.target.tenant())
             .collect();
         self.stores.book_sets(sets);
@@ -3754,7 +3752,7 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
 }
 
 /// Admit the registry's pool into every live journal when an admission is
-/// owed, unless this node holds it late ([`crate::scenario::ADMIT_LATE`],
+/// owed, unless this node holds it late ([`crate::observe::scenario::ADMIT_LATE`],
 /// #387): then it stays owed, and a later call admits it.
 fn admit_owed<P: ParosProviders, S, A>(
     journals: &mut Journals<S, A>,
@@ -3764,7 +3762,7 @@ fn admit_owed<P: ParosProviders, S, A>(
     now: std::time::Duration,
 ) {
     let Some(since) = *owed else { return };
-    if crate::scenario::admit_held(late, since, now) {
+    if crate::observe::scenario::admit_held(late, since, now) {
         return;
     }
     admit_pool(journals, follower);

@@ -39,7 +39,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use moonpool_sim::{StateHandle, assert_always, assert_reachable, assert_sometimes};
 use paros::machine::CachedRegistry;
-use paros::system::{Class, Registry, RegistryEvent, RegistryRefusal};
+use paros::model::registry::{Class, Registry, RegistryEvent, RegistryRefusal};
 use paros::{Address, JournalIdentifier, NodeId};
 
 const SYSTEM_BOARD_KEY: &str = "paros-system-board";
@@ -424,7 +424,7 @@ impl SystemBoard {
         lsn: u64,
         booking: u64,
         node: NodeId,
-        role: paros::system::Role,
+        role: paros::model::registry::Role,
     ) {
         let machine = self.machines.get(&node.0).copied();
         assert_always!(
@@ -511,7 +511,8 @@ impl SystemBoard {
                 // it is not judged.
                 model.addresses.clear();
                 for (id, registered) in state.nodes() {
-                    let addr = (registered.standing != paros::system::NodeStanding::Retired)
+                    let addr = (registered.standing
+                        != paros::model::registry::NodeStanding::Retired)
                         .then_some(registered.addr.as_str());
                     model.readdress(id.0, seq, addr);
                 }

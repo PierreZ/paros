@@ -21,9 +21,9 @@ use moonpool_core::{CompioProviders, LocalProviders, RandomProvider};
 use paros::client::Client;
 use paros::client::bootstrap::control_journals;
 use paros::client::fleet::{FleetRefusal, FleetSession, Interrupted, Run, Stage, Step, TagTarget};
-use paros::fleet::TenantState;
 use paros::machine::ControlJournals;
-use paros::system::Registry;
+use paros::model::fleet::TenantState;
+use paros::model::registry::Registry;
 use paros::{JournalId, JournalIdentifier, NodeId, TenantId};
 use serde_json::json;
 
@@ -60,7 +60,7 @@ pub enum TenantCommand {
         /// What its journals survive: `az` (a zone, the default) or
         /// `region` (#252). Fixed at creation.
         #[arg(long, default_value = "az")]
-        survives: paros::tenant::Survives,
+        survives: paros::model::tenant::Survives,
         /// A user tag, `key:value`, repeated (#575 (key:value tags)). A
         /// `paros/` key is refused.
         #[arg(long = "tag")]
@@ -455,7 +455,7 @@ pub async fn set_tags(
 }
 
 /// User tags as `k:v,…`, or `-` for none.
-pub fn tags_label(tags: &paros::tags::UserTags) -> String {
+pub fn tags_label(tags: &paros::model::tags::UserTags) -> String {
     if tags.is_empty() {
         "-".to_string()
     } else {

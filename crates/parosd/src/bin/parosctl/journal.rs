@@ -24,9 +24,9 @@ use paros::client::Client;
 use paros::client::bootstrap::control_journals;
 use paros::client::fleet::read_directory;
 use paros::client::journals::{self, JournalAnswer, JournalOp, JournalRequest};
-use paros::fleet::TenantState;
-use paros::tags::{Tags, UserTags};
-use paros::tenant::{
+use paros::model::fleet::TenantState;
+use paros::model::tags::{Tags, UserTags};
+use paros::model::tenant::{
     Desired, Durability, MAX_FAILURES_PER_PARTITION, StoreDurability, TenantRoles,
 };
 use paros::{JournalIdentifier, Names, TenantId, WriterMode};
@@ -143,7 +143,7 @@ pub async fn tag_through_frontends(
     let Ok(tags) = user_tags(&tags) else {
         return Ending::Refused;
     };
-    let Ok(journal) = paros::name::JournalName::new(&tenant, &name) else {
+    let Ok(journal) = paros::model::name::JournalName::new(&tenant, &name) else {
         note(&format!("bad journal name {tenant}/{name}"));
         return Ending::Refused;
     };

@@ -17,13 +17,13 @@
 use paros_core::{ColocatedNode, Command, Control, Entry, LeaderUuid, NodeId, Outcome, Seq};
 
 use super::reply::Reply;
-use crate::audit::Audit;
+use crate::observe::audit::Audit;
 use crate::rpc::{
     ReplySender, SetLeaderAck, TruncateAck, WriteAck, WriteOutcome, journal_view_to_proto,
 };
 
-use super::config::DriverTunables;
 use super::reply::answer;
+use crate::tunables::DriverTunables;
 
 /// One held journal call.
 pub(crate) enum Call {

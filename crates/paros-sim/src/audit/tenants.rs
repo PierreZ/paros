@@ -36,7 +36,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use moonpool_sim::{StateHandle, assert_always, assert_reachable, assert_sometimes};
-use paros::tenant::{RequestOutcome, StoreDurability, TenantEvent, TenantRefusal};
+use paros::model::tenant::{RequestOutcome, StoreDurability, TenantEvent, TenantRefusal};
 use paros::{
     AcceptorConfig, JournalId, JournalIdentifier, NodeId, QuorumSystem, TenantId, WriterMode,
 };
@@ -137,7 +137,7 @@ pub(crate) fn lock(board: &Mutex<TenantBoard>) -> MutexGuard<'_, TenantBoard> {
 /// rule where the rule binds, so it survives any one zone. The rule binds
 /// where a partition survives a failure (`F >= 1`: three acceptors per
 /// partition or more) and the placement spans three zones or more
-/// (`paros::placement::zone_rule_binds`).
+/// (`paros::model::placement::zone_rule_binds`).
 fn zone_spread(config: &paros::AcceptorConfig, lsn: u64) {
     let spread = config.distinct_domains().len();
     let per_partition = match config.quorum_system() {
@@ -394,7 +394,7 @@ impl TenantBoard {
     fn configured(
         &mut self,
         control: JournalIdentifier,
-        (request, id, desired): (u64, Option<JournalId>, &paros::tenant::Desired),
+        (request, id, desired): (u64, Option<JournalId>, &paros::model::tenant::Desired),
         lsn: u64,
     ) {
         // A journal's mode changes only for a journal its tenant created
@@ -608,7 +608,7 @@ impl TenantBoard {
 /// A scrub record folded at `lsn` (#362 (background scrubbing)). The
 /// scrubber compares the copies of one slot under one ballot: Paxos accepts
 /// one value per slot per ballot, so they never differ.
-fn scrubbed(lsn: u64, progress: &paros::tenant::ScrubProgress) {
+fn scrubbed(lsn: u64, progress: &paros::model::tenant::ScrubProgress) {
     assert_always!(
         progress.mismatched_total == 0,
         "scrub: the copies of a slot under one ballot hold one value",

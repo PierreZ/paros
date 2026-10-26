@@ -34,8 +34,7 @@ use paros_core::{
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use super::config::DriverTunables;
-use crate::audit::Audit;
+use crate::observe::audit::Audit;
 use crate::rpc::Addressed;
 use crate::rpc::methods::{
     GarbageCollectRpc, InspectRpc, MachineInterface, MatchmakeRpc, MatchmakerReconfigureRpc,
@@ -48,6 +47,7 @@ use crate::rpc::{
     wire_garbage_collect_ack, wire_match_reply, wire_reconfigure_reply,
 };
 use crate::transport::{RuntimeFuture, Transport};
+use crate::tunables::DriverTunables;
 
 /// The edge's rejection callback for the driver serving as `me`: each
 /// rejection is reported to `audit` as [`Audit::edge_rejected`], stamped with

@@ -63,9 +63,9 @@ use paros::client::checkpoint::{CheckpointPolicy, Checkpointer, Folder, LoadOutc
 use paros::client::fleet::{FleetRefusal, FleetSession, Interrupted, Run, Stage, Step};
 use paros::client::names::{TenantResolution, resolve_tenant};
 use paros::client::{ClaimOutcome, Writer};
-use paros::fleet::{CellState, FleetDirectory, TenantKind, TenantState};
 use paros::machine::ControlJournals;
-use paros::system::{NodeStanding, Registry};
+use paros::model::fleet::{CellState, FleetDirectory, TenantKind, TenantState};
+use paros::model::registry::{NodeStanding, Registry};
 use paros::{JournalId, JournalIdentifier, NodeId, TenantId};
 
 use crate::audit::liveness::JudgedRegistry;

@@ -34,16 +34,14 @@ use std::time::Duration;
 
 use paros_core::NodeId;
 
+use crate::model::registry::SlowFacts;
 use crate::rpc::machine as wire;
-use crate::system::SlowFacts;
 
 /// A round trip leans slow only at or above this many times the round's
 /// median: a coordinator that is slow itself sees every round trip long.
 pub const RTT_FACTOR: u32 = 4;
 
-/// A busy ratio leans fast again only this far below `slow_busy`, in
-/// thousandths.
-pub const BUSY_MARGIN: u32 = 200;
+pub use crate::tunables::BUSY_MARGIN;
 
 /// The thresholds of the judgement, from the driver's tunables.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

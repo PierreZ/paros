@@ -8,7 +8,7 @@ use paros_core::{
     Ballot, ColocatedNode, HandoffCounters, LeadershipOrigin, NodeId, NodeRole, RepairCounters,
 };
 
-use crate::audit::Audit;
+use crate::observe::audit::Audit;
 
 use super::ready::ClientWaiters;
 

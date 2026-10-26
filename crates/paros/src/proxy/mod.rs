@@ -39,11 +39,11 @@ use paros_core::{
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::audit::{Audit, DelegationOutcome};
 use crate::driver::edge::{RpcEdge, edge_reporter};
 use crate::driver::events::{command_hash, message_kind, message_route};
 use crate::driver::transport::{LaneOpener, Outbound, send_messages};
 use crate::driver::{DriverTunables, RunError};
+use crate::observe::audit::{Audit, DelegationOutcome};
 use crate::rpc::serve_deliveries;
 use crate::transport::Transport;
 
@@ -437,12 +437,12 @@ where
                 } else {
                     tracing::info!(proxy = id.0, journal = %journal, kind, "msg_received");
                 }
-                // The stalled-proxy scenario (`crate::scenario::STALL_PROXY`,
+                // The stalled-proxy scenario (`crate::observe::scenario::STALL_PROXY`,
                 // #341): the proxy drops the acceptors' answers it hears, so
                 // its rounds stay open. Drawn only for an answer, where the
                 // decision has an effect.
                 if matches!(msg, Message::Accepted { .. } | Message::Nack { .. })
-                    && crate::scenario::stall_proxy()
+                    && crate::observe::scenario::stall_proxy()
                 {
                     tracing::info!(proxy = id.0, "proxy_answer_dropped");
                     continue;

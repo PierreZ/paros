@@ -29,7 +29,7 @@ use std::time::Duration;
 
 use paros_core::{LogRead, NodeId, ReadState, Seq, Slot};
 
-use crate::audit::{Audit, LogReadAnswer, LogReadReport};
+use crate::observe::audit::{Audit, LogReadAnswer, LogReadReport};
 use crate::rpc::{Read, ReadAck, ReplySender, journal_view_to_proto};
 
 use super::DriverTunables;

@@ -17,7 +17,7 @@ use paros::NodeId;
 use paros::client::cell::CellSession;
 use paros::client::checkpoint::CheckpointPolicy;
 use paros::client::fleet::{FleetRefusal, Run, Stage, Step};
-use paros::system::Registry;
+use paros::model::registry::Registry;
 
 use super::{FleetOps, reach};
 

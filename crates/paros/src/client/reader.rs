@@ -10,7 +10,7 @@ use paros_core::{JournalIdentifier, JournalView};
 
 use super::Client;
 use super::outcome::ReadOutcome;
-use crate::frontend::Denial;
+use crate::model::authz::Denial;
 use crate::rpc::Read;
 
 /// What one step of a [`Reader`] came back with.

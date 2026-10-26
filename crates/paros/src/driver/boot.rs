@@ -6,11 +6,11 @@
 
 use paros_core::{Ballot, ColocatedNode, NodeId, Slot};
 
-use crate::audit::{Audit, Deployment};
+use crate::observe::audit::{Audit, Deployment};
 use crate::storage::LogStorage;
 
-use super::config::{BootKind, BootRefusal, RunError};
 use super::events::command_hash;
+use super::exit::{BootKind, BootRefusal, RunError};
 use super::ready::{report_applied, storage_fault_crash};
 
 /// #147: judge the operator's claim against the store's format marker,

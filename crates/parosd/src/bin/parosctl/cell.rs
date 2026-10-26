@@ -29,7 +29,7 @@ use paros::client::Client;
 use paros::client::bootstrap::{cell_members, control_journals};
 use paros::client::cell::{CellSession, Removal};
 use paros::client::fleet::Step;
-use paros::system::MaintenanceScope;
+use paros::model::registry::MaintenanceScope;
 use paros::{Address, NodeId};
 use serde_json::json;
 
@@ -398,7 +398,7 @@ fn registered_machine(session: &CellSession, labels: &Labels, machine: &str) -> 
     let registered: Vec<u64> = session.registry().nodes().map(|(id, _)| id.0).collect();
     match labels.machine_named(machine, &registered) {
         Some(id) => Some(NodeId(id)),
-        None => match paros::name::parse_full(machine) {
+        None => match paros::model::name::parse_full(machine) {
             Some(id) if registered.contains(&id) => Some(NodeId(id)),
             _ => None,
         },

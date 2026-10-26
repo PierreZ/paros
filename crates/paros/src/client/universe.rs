@@ -26,9 +26,9 @@ use paros_core::{JournalId, JournalIdentifier, TenantId};
 
 use super::Client;
 use super::journals::{Coordinator, coordinator};
+use crate::model::registry::UniversePointer;
 use crate::rpc::machine as wire;
 use crate::rpc::methods::JoinUniverseRpc;
-use crate::system::UniversePointer;
 use crate::{Address, Names};
 
 /// How long a retry waits after an answer that decided nothing.

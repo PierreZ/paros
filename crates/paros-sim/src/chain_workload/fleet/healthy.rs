@@ -1,7 +1,7 @@
 //! Every journal heals after chaos (#475 (re-place after the Down bound),
 //! #191 (status)): once chaos ends, every live journal whose shape the cell
 //! can hold shows healthy, as `parosctl status` judges it from an admin cell
-//! view (`paros::status::observe`). A member that died for good, or stayed
+//! view (`paros::model::status::observe`). A member that died for good, or stayed
 //! down past `machine_replace_after`, has its slot re-placed; one that
 //! answers again rejoins in place.
 //!
@@ -31,9 +31,9 @@ use moonpool_sim::{SimContext, TimeProvider, assert_always, assert_reachable};
 use paros::client::checkpoint::LoadOutcome;
 use paros::client::views::{ViewOutcome, ask, request};
 use paros::machine::Class;
-use paros::status::{Member, Word, judge, member, observe, placed};
-use paros::system::{NodeStanding, Registry};
-use paros::view::Scope;
+use paros::model::registry::{NodeStanding, Registry};
+use paros::model::status::{Member, Word, judge, member, observe, placed};
+use paros::model::view::Scope;
 use paros::wire::view::{CellQuery, JournalView, ViewReply, view_request::Query};
 use paros::{
     JournalIdentifier, MatchmakerGeneration, MatchmakerId, MatchmakerSet, NodeId, TenantId,

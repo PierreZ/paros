@@ -9,7 +9,7 @@ use paros_core::{
 };
 
 use super::report::Cadence;
-use crate::audit::Audit;
+use crate::observe::audit::Audit;
 use crate::rpc::MatchmakersRefusal;
 
 /// The node driver's handover state: the sans-IO

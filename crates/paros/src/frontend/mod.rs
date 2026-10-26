@@ -43,11 +43,10 @@
 //! never in a call's task: a cold cache, a stale resolution answered as
 //! unknown, a call routed to a server other than the known leader.
 
-mod authz;
 mod forward;
 mod routes;
 
-pub use authz::{Authz, Denial, Operation, Request, Target};
+pub use crate::model::authz::{Authz, Denial, Operation, Request, Target};
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -61,11 +60,11 @@ use moonpool_core::{
 use paros_core::JournalIdentifier;
 use tokio_util::sync::CancellationToken;
 
-use crate::audit::Audit;
 use crate::client::ClientTunables;
 use crate::driver::DriverTunables;
 use crate::driver::edge::{Plain, RpcEdge};
-use crate::name::JournalName;
+use crate::model::name::JournalName;
+use crate::observe::audit::Audit;
 use crate::rpc::inbound::{Inbound, ReplySender, serve_well_known};
 use crate::rpc::methods::{
     FrontReadRpc, FrontSetJournalTagsRpc, FrontSetLeaderRpc, FrontTruncateRpc, FrontWriteRpc,
@@ -487,11 +486,11 @@ fn refuse_tags(call: FrontSetJournalTags, reply: ReplySender<SetJournalTagsAck>)
 /// internal journal carries no user tag a tenant sets), with an id.
 fn well_formed_tags(
     call: FrontSetJournalTags,
-) -> Result<(Entry, crate::tags::UserTags), SetJournalTagsAck> {
+) -> Result<(Entry, crate::model::tags::UserTags), SetJournalTagsAck> {
     let Some(entry) = call.entry else {
         return Err(tags_denied(Denial::Malformed));
     };
-    let tags = crate::tags::UserTags::from_wire(call.tags);
+    let tags = crate::model::tags::UserTags::from_wire(call.tags);
     let (Ok(tags), false, true) = (tags, entry.tenant.is_empty(), call.request != 0) else {
         moonpool_assertions::reachable!("frontend: a malformed tag request is denied");
         return Err(tags_denied(Denial::Malformed));

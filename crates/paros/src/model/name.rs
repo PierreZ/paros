@@ -6,8 +6,8 @@
 //! location: it has no host. The wire carries the
 //! `(TenantId, JournalId)` [`JournalIdentifier`] alone; a name is a label and
 //! the id is the identity. A tenant's name lives in the universe directory
-//! (`crate::fleet::FleetDirectory`), a journal's in its tenant's control
-//! journal (`crate::tenant::TenantControl`). The entry roles resolve them
+//! (`crate::model::fleet::FleetDirectory`), a journal's in its tenant's control
+//! journal (`crate::model::tenant::TenantControl`). The entry roles resolve them
 //! (`crate::client::names`); past them nothing knows a name.
 //!
 //! Where an id is still printed for operators, it is printed as abbreviated

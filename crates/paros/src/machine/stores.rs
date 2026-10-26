@@ -25,9 +25,9 @@ use paros_core::{Config, JournalIdentifier, MatchmakerConfig, NodeId};
 use tokio_util::sync::CancellationToken;
 
 use super::matchmakers::SetBookings;
-use super::record::MachineRecord;
 use super::{CacheSink, CachedRegistry, ProviderDisk};
 use crate::journal::Durability;
+use crate::model::machine::MachineRecord;
 use crate::storage::{StorageError, StorageRecord, WriteOutcome};
 use crate::{
     Audit, BootKind, DriverTunables, JournalStorage, JournalStoreConfig, JournalStores, RunError,

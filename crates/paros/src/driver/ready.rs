@@ -10,14 +10,14 @@ use paros_core::{
     NodeId, NodeRole, Outcome, Party, QuorumSystem, ReadState, Slot, WriteOp,
 };
 
-use crate::audit::{Audit, StorageFaultDecision};
+use crate::observe::audit::{Audit, StorageFaultDecision};
 use moonpool_buggify::hint::Strike;
 
 use crate::storage::{LogStorage, StorageError};
 
 use super::calls::Call;
-use super::config::RunError;
 use super::events::command_hash;
+use super::exit::RunError;
 use super::transport::{Outbound, send_messages};
 
 /// The client replies this node is holding open: the journal calls that

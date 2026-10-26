@@ -10,7 +10,7 @@
 //!
 //! Everything comes from one or two views (`paros::client::views`); the
 //! words and the counts are computed by the cell and by
-//! `paros::status::summarize`, never here. Names only: hex ids are for
+//! `paros::model::status::summarize`, never here. Names only: hex ids are for
 //! `--json`.
 
 use std::collections::BTreeMap;
@@ -20,9 +20,9 @@ use clap::Args;
 use paros::client::load::LoadOutcome;
 use paros::client::views::{ViewOutcome, ask, request};
 use paros::machine::load::usage_from_wire;
-use paros::metrics::{CallKind, JournalUsage};
-use paros::status::{Member, Summary, Word, member, summarize};
-use paros::view::Scope;
+use paros::model::status::{Member, Summary, Word, member, summarize};
+use paros::model::view::Scope;
+use paros::observe::metrics::{CallKind, JournalUsage};
 use paros::wire::view::{self as wire, TenantQuery, UniverseQuery, view_request::Query};
 use serde_json::{Value, json};
 
@@ -257,7 +257,7 @@ async fn tenant_status(asker: &Asker<'_>, out: &Printer, name: &str) -> Ending {
         .map(|m| {
             [
                 names[&m.node_id].clone(),
-                crate::views::tag(&m.tags, paros::tags::reserved::ZONE),
+                crate::views::tag(&m.tags, paros::model::tags::reserved::ZONE),
                 machine_state(m),
                 footprint.get(&m.node_id).copied().unwrap_or(0).to_string(),
             ]

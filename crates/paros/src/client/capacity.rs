@@ -22,9 +22,9 @@ use paros_core::{JournalId, JournalIdentifier, NodeId, TenantId};
 use super::Client;
 use super::journals::{Coordinator, coordinator};
 use crate::Names;
+use crate::model::registry::{BookingTarget, Role};
 use crate::rpc::machine as wire;
 use crate::rpc::methods::CapacityRequestRpc;
-use crate::system::{BookingTarget, Role};
 
 /// How long a retry waits after an answer that decided nothing.
 const RETRY_PAUSE: Duration = Duration::from_millis(200);

@@ -2,7 +2,7 @@
 //! metrics to a collector over OTLP/gRPC (`PAROS_OTLP_*`).
 //!
 //! The metrics are recorded once, in the machine's `prometheus` registry
-//! ([`paros::metrics::Metrics`]); `/metrics` renders it and this module
+//! ([`paros::observe::metrics::Metrics`]); `/metrics` renders it and this module
 //! reads it. Each paros family becomes one observable instrument (a
 //! counter for a `_total`, a gauge otherwise) whose callback reads that
 //! family's series from the registry at every push, labels included. The
@@ -22,7 +22,7 @@ use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
 use opentelemetry_sdk::trace::{SdkTracer, SdkTracerProvider};
-use paros::metrics::{FamilyKind, Metrics};
+use paros::observe::metrics::{FamilyKind, Metrics};
 
 use crate::settings::Settings;
 

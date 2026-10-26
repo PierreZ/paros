@@ -38,12 +38,12 @@ use paros_core::{
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::audit::{Audit, HistoryPage, StorageFaultDecision};
 use crate::driver::edge::{MatchmakerInbox, RpcEdge};
 use crate::driver::events::{config_hash, reconfigure_kind, reconfigure_reply_kind};
 use crate::driver::reply::Reply;
 use crate::driver::reply::match_answer;
 use crate::driver::{BootKind, BootRefusal, DriverTunables, RunError};
+use crate::observe::audit::{Audit, HistoryPage, StorageFaultDecision};
 use crate::rpc::Addressed;
 use crate::storage::StorageError;
 use crate::transport::Transport;

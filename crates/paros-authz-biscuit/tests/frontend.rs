@@ -3,8 +3,8 @@
 
 use std::time::{Duration, SystemTime};
 
-use paros::fleet::RootKeyEntry;
 use paros::frontend::{Authz, Denial, Operation, Request, Target};
+use paros::model::fleet::RootKeyEntry;
 use paros_authz_biscuit::{
     BiscuitAuthz, Entropy, Grant, KeyRing, Role, RootKey, mint, since_epoch,
 };

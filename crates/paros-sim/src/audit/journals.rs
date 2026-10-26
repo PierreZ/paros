@@ -13,7 +13,7 @@
 //!   journal's identity), and a journal a storage fault quarantined on a node
 //!   sends nothing from that node until it re-opens;
 //! - **liveness** — a journal keeps committing while a sibling on the same
-//!   nodes is held for the chaos window (`paros::scenario::HOLD_JOURNAL`) or
+//!   nodes is held for the chaos window (`paros::observe::scenario::HOLD_JOURNAL`) or
 //!   still recovering from the hold, and a node keeps running its other
 //!   journals' protocol (it sends their beats, votes and acks) while one is
 //!   quarantined;
@@ -133,7 +133,7 @@ impl JournalBoard {
     }
 
     /// Some node held `journal` for a beat (#188,
-    /// `paros::scenario::HOLD_JOURNAL`): the driver reports it, so the
+    /// `paros::observe::scenario::HOLD_JOURNAL`): the driver reports it, so the
     /// board knows the held journal without a copy of the driver's choice.
     pub(crate) fn held(&mut self, journal: JournalIdentifier) {
         self.held.insert(journal);

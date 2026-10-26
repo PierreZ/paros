@@ -11,8 +11,8 @@ use paros_core::{
     ReconfigureResult, StartRefusal,
 };
 
-use crate::audit::Audit;
 use crate::machine::ControlJournals;
+use crate::observe::audit::Audit;
 use crate::rpc::{
     InspectReply, MatchmakersRefusal, Reconfigure, ReconfigureAck, RetireAck, RetireRefusal,
     RetireRequest, WireQuorumSystem, common, journal_state_to_proto, quorum_system_from_proto,

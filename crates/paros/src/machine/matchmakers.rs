@@ -2,7 +2,7 @@
 //! tenant's matchmaker set is born on the cell's founding members, the
 //! bootstrap generation, so every journal a machine serves is born with its
 //! tenant's set. The cell coordinator then places each set with
-//! `crate::placement` and hands it over onto the machines it booked (#501
+//! `crate::model::placement` and hands it over onto the machines it booked (#501
 //! (matchmaker sets off the founders)): any storage machine of the cell,
 //! founding or admitted, hosts a later generation of a set the registry
 //! books on it.

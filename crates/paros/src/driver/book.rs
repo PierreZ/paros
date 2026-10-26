@@ -24,9 +24,9 @@ use paros_core::{JournalIdentifier, LogRead, NodeId, Seq};
 use super::journals::Journals;
 use super::transport::PeerTarget;
 use crate::Address;
-use crate::client::checkpoint::Folder;
 use crate::machine::{CachedRegistry, FormedCell, address_book, cell_book};
-use crate::system::Registry;
+use crate::model::checkpoint::Folder;
+use crate::model::registry::Registry;
 
 /// The records one local read of the registry takes.
 const BOOK_READ_RECORDS: usize = 256;

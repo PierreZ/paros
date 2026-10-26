@@ -54,7 +54,7 @@ use std::time::Duration;
 use clap::Parser;
 use moonpool_core::{CompioProviders, CompioResolver, CompioStorageProvider};
 use paros::machine::{MachineAddresses, MachineError, MachineSettings, ProviderDisk};
-use paros::metrics::Metrics;
+use paros::observe::metrics::Metrics;
 use paros::{Address, BootRefusal, Names, NoAudit, RunError};
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
@@ -144,7 +144,7 @@ async fn run(settings: Settings, metrics: Metrics) -> ExitCode {
         .name
         .clone()
         .unwrap_or_else(|| host(&addresses.advertise));
-    if let Err(error) = paros::name::check_label(&name) {
+    if let Err(error) = paros::model::name::check_label(&name) {
         return invalid(&format!("PAROS_NAME {name:?}: {error}"));
     }
     // The pin's wall clock is `epoch + time.now()`, read as the providers

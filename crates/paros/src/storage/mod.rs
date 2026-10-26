@@ -11,7 +11,7 @@ use std::future::Future;
 
 use paros_core::{Ballot, Command, Config, JournalState, MustSync, Slot, Storage};
 
-use crate::corruption::{CorruptionVerdict, IntegrityFault};
+use crate::model::corruption::{CorruptionVerdict, IntegrityFault};
 
 /// The durable record a storage operation (and therefore a storage fault) hit.
 ///

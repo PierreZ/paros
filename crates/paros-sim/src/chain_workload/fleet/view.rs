@@ -36,8 +36,8 @@ use moonpool_sim::{
     SimContext, assert_always, assert_reachable, assert_sometimes, buggify_with_prob,
 };
 use paros::client::views::{ViewOutcome, ask, request};
-use paros::status::{Word, placed, summarize};
-use paros::view::{Scope, within_tenant_scope};
+use paros::model::status::{Word, placed, summarize};
+use paros::model::view::{Scope, within_tenant_scope};
 use paros::wire::view::{CellQuery, TenantQuery, UniverseQuery, ViewReply, view_request::Query};
 
 use super::{FleetOps, NAMES};
@@ -342,7 +342,7 @@ fn judge_status(ctx: &SimContext, reply: &ViewReply, admin: bool, client: u64) {
         for m in reply.machines.iter().filter(|m| m.standing != "retired") {
             *listed
                 .entry(
-                    paros::tags::value_of(&m.tags, paros::tags::reserved::CLASS)
+                    paros::model::tags::value_of(&m.tags, paros::model::tags::reserved::CLASS)
                         .unwrap_or("-")
                         .to_string(),
                 )
@@ -361,7 +361,7 @@ fn judge_status(ctx: &SimContext, reply: &ViewReply, admin: bool, client: u64) {
 }
 
 /// The word `journal`'s own triple gives, derived independently of
-/// `paros::status::judge`: the members up and not retired are live, and of
+/// `paros::model::status::judge`: the members up and not retired are live, and of
 /// those the ones not draining stay.
 fn expected_word(reply: &ViewReply, journal: &paros::wire::view::JournalView) -> Option<Word> {
     let placed = placed(journal)?;

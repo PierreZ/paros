@@ -1,13 +1,25 @@
-//! Driver configuration and the wiring both drivers share: the per-node
-//! tunables, the transport constants they default to, the address parser, and
-//! the driver's typed exit ([`RunError`]).
+//! The tunables layer: every role's per-node [`DriverTunables`], the
+//! transport constants they default to, their floors ([`BelowFloor`]), the
+//! client's [`ClientTunables`] and the RPC frame limit. Plain data, no I/O.
 
-use std::net::SocketAddr;
+mod client;
+mod floors;
+pub mod scrub;
+
+pub use client::{CheckpointPolicy, ClientTunables};
+pub use floors::BelowFloor;
+
 use std::time::Duration;
 
-use moonpool_core::{SimulationError, SimulationResult};
+/// Largest frame a paros runtime accepts or produces: a full delivery batch
+/// (the driver's 3 MiB batch cap) plus envelope headroom. A client runtime
+/// takes the same limit, or a large `Read` page would fail `ReplyTooLarge`
+/// on its side.
+pub const MAX_FRAME_BYTES: u32 = 4 << 20;
 
-use crate::storage::StorageError;
+/// A busy ratio leans fast again only this far below `slow_busy`, in
+/// thousandths (`crate::machine::slow`).
+pub const BUSY_MARGIN: u32 = 200;
 
 /// How often a node advances its logical clock.
 const TICK_INTERVAL: Duration = Duration::from_millis(50);
@@ -39,7 +51,7 @@ const PEER_INBOX_CAPACITY: usize = 1024;
 // A delivery batch must fit one RPC frame with room for its envelope, a
 // mailbox must hold at least one whole batch, and a keep-alive must time out
 // before the next one is due.
-const _: () = assert!(DELIVERY_BATCH_BYTES < crate::rpc::MAX_FRAME_BYTES as usize);
+const _: () = assert!(DELIVERY_BATCH_BYTES < MAX_FRAME_BYTES as usize);
 const _: () = assert!(DELIVERY_BATCH > 0);
 const _: () = assert!(PEER_QUEUE_CAPACITY >= DELIVERY_BATCH);
 const _: () = assert!(KEEP_ALIVE_TIMEOUT.as_millis() < KEEP_ALIVE_INTERVAL.as_millis());
@@ -365,7 +377,7 @@ pub struct DriverTunables {
     /// machines)): the hysteresis. Floor 1.
     pub slow_rounds: u32,
     /// How long a journal's new status word must hold before a founding
-    /// member shows it (#191 (status), `crate::status::Hysteresis`).
+    /// member shows it (#191 (status), `crate::model::status::Hysteresis`).
     /// Floor 0: every answer shows its own word. A hold shorter than the
     /// cell coordinator's failure detector (`machine_down_after`) hides
     /// little, since the registry's liveness moves no faster than that.
@@ -529,7 +541,7 @@ const MAX_BATCH_BYTES: u64 = 1 << 20;
 
 // The byte limit leaves the frame room for the request's other fields and
 // the records' framing (#241).
-const _: () = assert!(MAX_BATCH_BYTES <= (crate::rpc::MAX_FRAME_BYTES as u64) / 2);
+const _: () = assert!(MAX_BATCH_BYTES <= (MAX_FRAME_BYTES as u64) / 2);
 const _: () = assert!(MAX_BATCH_RECORDS >= 1);
 
 /// Ticks a parked read reply may wait for its quorum read to be served before
@@ -555,8 +567,8 @@ const MAX_READ_BYTES: u64 = 64 * 1024;
 // that carried it).
 const _: () = assert!(MAX_READ_RECORDS >= 1);
 const _: () = assert!(MAX_READ_BYTES >= 1);
-const _: () = assert!(MAX_READ_BYTES < crate::rpc::MAX_FRAME_BYTES as u64);
-const _: () = assert!(MAX_BATCH_BYTES < crate::rpc::MAX_FRAME_BYTES as u64);
+const _: () = assert!(MAX_READ_BYTES < MAX_FRAME_BYTES as u64);
+const _: () = assert!(MAX_BATCH_BYTES < MAX_FRAME_BYTES as u64);
 /// Default [`DriverTunables::election_lease`]: four renewals, and well past
 /// the simulated client's one-second deadline.
 const ELECTION_LEASE: Duration = Duration::from_secs(2);
@@ -593,7 +605,7 @@ const SLOW_BUSY_PERMILLE: u32 = 900;
 /// Default [`DriverTunables::slow_rounds`]: three watch rounds.
 const SLOW_ROUNDS: u32 = 3;
 
-const _: () = assert!(SLOW_BUSY_PERMILLE > crate::machine::slow::BUSY_MARGIN);
+const _: () = assert!(SLOW_BUSY_PERMILLE > BUSY_MARGIN);
 const _: () = assert!(SLOW_BUSY_PERMILLE <= 1000);
 
 /// Default [`DriverTunables::status_hold`]: two failure-detector periods.
@@ -668,7 +680,7 @@ const _: () = assert!(ADMISSION_ROUNDS >= 1);
 const _: () = assert!(SCRUB_RATE >= SCRUB_RATE_FLOOR);
 const _: () = assert!(SCRUB_PASS_WITHIN.as_millis() >= SCRUB_PASS_WITHIN_FLOOR.as_millis());
 const _: () = assert!(SCRUB_PAGE >= 1);
-const _: () = assert!(SCRUB_PAGE <= super::scrub::SCRUB_PAGE);
+const _: () = assert!(SCRUB_PAGE <= scrub::SCRUB_PAGE);
 
 impl DriverTunables {
     /// The library client tunables of a machine's own clients (#457): the
@@ -680,13 +692,13 @@ impl DriverTunables {
     /// If an assertion on its own postconditions fails: a programmer error,
     /// never an operating condition.
     #[must_use]
-    pub fn internal_client(&self) -> crate::client::ClientTunables {
-        let client = crate::client::ClientTunables {
+    pub fn internal_client(&self) -> ClientTunables {
+        let client = ClientTunables {
             request_timeout: self.internal_request_timeout,
             read_timeout: self.internal_request_timeout,
             retry_budget: self.internal_retry_budget,
             retry_backoff: self.internal_retry_backoff,
-            ..crate::client::ClientTunables::default()
+            ..ClientTunables::default()
         };
         assert_eq!(
             client.request_timeout, client.read_timeout,
@@ -765,158 +777,3 @@ const _: () = assert!(PARTITION_MOVE_RESENDS > 0);
 const _: () = assert!(ELECTION_BACKOFF_DOUBLINGS >= 2);
 const _: () = assert!(READ_RETRY_TICKS > 0);
 const _: () = assert!(RECONFIGURE_TIMEOUT_ELECTIONS > 0);
-
-/// Parse an IP (which may lack a port) into a socket-address string, defaulting to
-/// port 4500 (the moonpool sim convention). The simulation's parser: it takes
-/// literal addresses only, and `parosd` resolves its hostnames itself, once,
-/// at startup (#209), before any driver sees an address.
-///
-/// # Errors
-///
-/// Returns an error if `ip` is not a parseable network address.
-///
-/// # Panics
-///
-/// If an assertion on its own invariants, preconditions or postconditions
-/// fails: a programmer error, never an operating condition.
-pub fn parse_addr(ip: &str) -> SimulationResult<String> {
-    let addr_str = if ip.contains(':') {
-        ip.to_string()
-    } else {
-        format!("{ip}:4500")
-    };
-    assert!(addr_str.contains(':'), "an address always names its port");
-    assert!(addr_str.contains(':'), "an address always names its port");
-    addr_str
-        .parse::<SocketAddr>()
-        .map(|addr| addr.to_string())
-        .map_err(|e| SimulationError::InvalidState(format!("bad addr: {e}")))
-}
-
-/// What the operator claims about the store [`crate::run_node`] is handed
-/// (#147): configuration data, never inferred from the store's contents.
-///
-/// The claim is judged against the store's **format marker**
-/// ([`crate::LogStorage::is_formatted`]): a store that has ever belonged to
-/// a member carries one, written by the driver on the identity's first boot
-/// and never removed. An existing member whose store carries no marker has
-/// lost its disk — *amnesia*, not a clean crash — and its durable promise
-/// with it; booting it would answer a Phase 1 with "nothing accepted" for
-/// slots it once voted on, so the driver refuses
-/// ([`BootRefusal::Amnesia`]). A first boot on a store that already carries
-/// a marker is two identities on one disk, refused as well
-/// ([`BootRefusal::AlreadyFormatted`]).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BootKind {
-    /// This identity has never been provisioned: the store is empty and the
-    /// driver formats it (writes the marker, durably) before the core reads
-    /// anything.
-    FirstBoot,
-    /// This identity was provisioned before: the store must carry the marker.
-    ExistingMember,
-}
-
-/// Why [`crate::run_node`] refused to boot (#147): the operator's
-/// [`BootKind`] claim and the store's format marker disagree. An operating
-/// error — a result value, never an assert — because the claim is external
-/// input.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BootRefusal {
-    /// An existing member's store carries no format marker: the disk was
-    /// lost, and the durable promise with it. The identity never rejoins;
-    /// the cluster replaces it by reconfiguration.
-    Amnesia,
-    /// A first boot found a store already formatted: another identity's
-    /// disk, or a provisioning mistake. Nothing is written.
-    AlreadyFormatted,
-    /// An existing member's store was formatted under another configuration
-    /// than the one the operator hands it now (#207): the bootstrap
-    /// membership, the quorum system, the counts or the identity changed
-    /// across a restart. These are safety inputs, never edited in place —
-    /// the operator restores the configuration the store was provisioned
-    /// with, and changes the membership by reconfiguration. Nothing is
-    /// written.
-    ConfigMismatch,
-}
-
-impl BootRefusal {
-    /// The refusal's stable label, for traces and exit reports.
-    #[must_use]
-    pub fn label(self) -> &'static str {
-        match self {
-            BootRefusal::Amnesia => "amnesia",
-            BootRefusal::AlreadyFormatted => "already_formatted",
-            BootRefusal::ConfigMismatch => "config_mismatch",
-        }
-    }
-}
-
-/// Why a driver loop stopped, typed — the shared exit of every provider-generic
-/// driver in this crate ([`crate::run_node`] and [`crate::run_matchmaker`]).
-/// The driver's *domain* outcomes — a crash it
-/// decided to take — are first-class variants a caller matches on; a moonpool
-/// [`SimulationError`] appears only wrapped in [`RunError::Infra`], for genuine
-/// provider/infrastructure failures. The simulation's error type never carries
-/// a protocol-layer decision.
-#[derive(Debug)]
-pub enum RunError {
-    /// A [`crate::LogStorage`] (or [`crate::MatchmakerStorage`]) call failed
-    /// and the driver took its fail-stop crash
-    /// decision — never an incidental error propagation. In **production**
-    /// this is a crash-only process exit; recovery is the next boot. In
-    /// simulation the loop recovers the same way: re-run the
-    /// driver against whatever the disk *actually* holds (the recovery
-    /// path must be correct for both outcomes of an ambiguous write; see
-    /// [`crate::WriteOutcome`]).
-    Storage(StorageError),
-    /// The driver refused to boot this identity on this store (#147): the
-    /// operator's [`BootKind`] claim and the store's format marker disagree.
-    /// Nothing was written and no message left; the identity stays down
-    /// until the operator resolves the claim (an amnesiac member is replaced
-    /// by reconfiguration, never rebooted).
-    Refused(BootRefusal),
-    /// A provider/infrastructure failure (bind, listen, address parsing): the
-    /// only place a [`SimulationError`] escapes the driver, and a genuine
-    /// failure — never a recovery signal.
-    Infra(SimulationError),
-}
-
-impl std::fmt::Display for RunError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            RunError::Storage(e) => write!(f, "storage fault, crashing: {e}"),
-            RunError::Refused(BootRefusal::Amnesia) => write!(
-                f,
-                "boot refused: an existing member's store carries no format marker (amnesia)"
-            ),
-            RunError::Refused(BootRefusal::AlreadyFormatted) => {
-                write!(
-                    f,
-                    "boot refused: a first boot on a store that is already formatted"
-                )
-            }
-            RunError::Refused(BootRefusal::ConfigMismatch) => write!(
-                f,
-                "boot refused: the store was formatted under another configuration \
-                 (restore the configuration it was provisioned with)"
-            ),
-            RunError::Infra(e) => write!(f, "infrastructure failure: {e}"),
-        }
-    }
-}
-
-impl std::error::Error for RunError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            RunError::Storage(e) => Some(e),
-            RunError::Infra(e) => Some(e),
-            RunError::Refused(_) => None,
-        }
-    }
-}
-
-impl From<SimulationError> for RunError {
-    fn from(e: SimulationError) -> Self {
-        RunError::Infra(e)
-    }
-}

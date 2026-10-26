@@ -6,7 +6,7 @@
 //! nodes that serve the cell control journal), the founding members the
 //! registry folds start from, and the spares a registered node joins. Every
 //! node folds each journal with the same pure folds a client reads back
-//! through ([`crate::system`], [`crate::tenant`]): a node reads its own
+//! through ([`crate::model::registry`], [`crate::model::tenant`]): a node reads its own
 //! chosen prefix after each tick when it serves the journal, and otherwise
 //! keeps one long-polling `Read` per journal open against a seed. The public
 //! `Read` *is* how a seed serves a node outside the pool: no peer message
@@ -51,19 +51,19 @@ use paros_core::{JournalIdentifier, LogPage, LogRead, NodeId, Party, Seq, Tenant
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::client::checkpoint::{Folded, Folder};
+use crate::model::checkpoint::{Folded, Folder};
+use crate::model::registry::{Registry, RegistryEvent, SystemEvent, registry_event};
+use crate::model::tenant::{TenantControl, TenantEvent, tenant_event};
 use crate::rpc::{NodeClient, Read, ReadAck};
-use crate::system::{Registry, RegistryEvent, SystemEvent, registry_event};
-use crate::tenant::{TenantControl, TenantEvent, tenant_event};
 
 /// A checkpoint the registry fold met: its position, how it was folded
 /// (`Some(equal)` verified, `None` restored) and the registry the fold held
 /// right after it, see [`crate::Audit::checkpoint_folded`].
 pub(crate) type FoldedCheckpoint = (u64, Option<bool>, Registry);
 
-use super::config::DriverTunables;
 use super::journals::Journals;
 use super::transport::peer_target;
+use crate::tunables::DriverTunables;
 
 /// The records one follow read asks for: enough that a control journal's
 /// history arrives in a few pages (the server's byte budget keeps the page
@@ -87,7 +87,7 @@ pub struct ControlPlan {
     /// This machine's class (#211, its `MachineFacts::class`): a
     /// `stateless` machine never serves a journal — neither one a tenant
     /// creates naming it nor a spare's.
-    pub class: crate::system::Class,
+    pub class: crate::model::registry::Class,
     /// The nodes that serve the cell control journal, with their addresses:
     /// a node that does not serve a control journal follows it from here.
     pub seeds: Vec<(NodeId, String)>,
@@ -123,7 +123,7 @@ pub(crate) struct Followed {
 /// The node's follow of the control journals, and their folds.
 pub(crate) struct ControlFollower<P: ParosProviders> {
     self_id: NodeId,
-    class: crate::system::Class,
+    class: crate::model::registry::Class,
     /// The nodes a remote read goes to, in turn, by id: each dialed where
     /// the node last learned it is (#505 (stranded admitted machine)).
     seeds: Vec<(NodeId, NodeClient<P>)>,
@@ -344,7 +344,7 @@ impl<P: ParosProviders> ControlFollower<P> {
     /// Whether this machine takes acceptor work (#211): a `storage` one. A
     /// `stateless` machine never serves a journal.
     pub(crate) fn takes_storage_work(&self) -> bool {
-        self.class == crate::system::Class::Storage
+        self.class == crate::model::registry::Class::Storage
     }
 
     /// The checkpoints the registry fold met since the last call.

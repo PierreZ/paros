@@ -95,7 +95,7 @@ pub struct BenchArgs {
         default_value = "ordered",
         value_parser = crate::journal::parse_store_durability
     )]
-    store_durability: paros::tenant::StoreDurability,
+    store_durability: paros::model::tenant::StoreDurability,
     /// How many concurrent clients, each one call at a time. The clients
     /// of one journal each keep their write in flight on it at once.
     #[arg(long, default_value = "8", value_parser = clap::value_parser!(u64).range(1..))]

@@ -25,14 +25,14 @@ use paros_core::{
 use std::time::Duration;
 
 use crate::Address;
-use crate::fleet::{FleetDirectory, TenantKind};
 use crate::machine::{Class, Locality, machine_tags};
+use crate::model::fleet::{FleetDirectory, TenantKind};
+use crate::model::registry::{NodeStanding, Registry};
+use crate::model::status::{Hysteresis, fill};
+use crate::model::tags::{Tag, reserved};
+use crate::model::tenant::TenantControl;
 use crate::rpc::config_to_proto;
 use crate::rpc::view as wire;
-use crate::status::{Hysteresis, fill};
-use crate::system::{NodeStanding, Registry};
-use crate::tags::{Tag, reserved};
-use crate::tenant::TenantControl;
 
 /// Who asks, as the cell decided it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -150,9 +150,11 @@ impl CellFacts<'_> {
             .filter(|(_, booking)| booking.node == id)
             .map(|(booking, b)| {
                 let (journal, set, tenant_level) = match b.target {
-                    crate::system::BookingTarget::Journal(journal) => (journal.journal.0, 0, false),
-                    crate::system::BookingTarget::Set { set, .. } => (0, set, false),
-                    crate::system::BookingTarget::Tenant { .. } => (0, 0, true),
+                    crate::model::registry::BookingTarget::Journal(journal) => {
+                        (journal.journal.0, 0, false)
+                    }
+                    crate::model::registry::BookingTarget::Set { set, .. } => (0, set, false),
+                    crate::model::registry::BookingTarget::Tenant { .. } => (0, 0, true),
                 };
                 wire::BookingView {
                     booking,
@@ -292,11 +294,11 @@ impl CellFacts<'_> {
     /// judged in its desired shape. A journal with no slot (one no
     /// coordinator placed) is placed where it was created.
     fn placed(&self, journal: JournalIdentifier, created: &AcceptorConfig) -> AcceptorConfig {
-        let target = crate::system::BookingTarget::Journal(journal);
+        let target = crate::model::registry::BookingTarget::Journal(journal);
         let slots: Vec<NodeId> = self
             .registry
             .bookings()
-            .filter(|(_, b)| b.role == crate::system::Role::Acceptor && b.target == target)
+            .filter(|(_, b)| b.role == crate::model::registry::Role::Acceptor && b.target == target)
             .map(|(_, b)| b.node)
             .collect();
         if slots.is_empty() {
@@ -317,7 +319,10 @@ impl CellFacts<'_> {
     fn tenant_tags(&self, tenant: TenantId, kind: TenantKind) -> Vec<crate::rpc::common::Tag> {
         self.directory
             .and_then(|d| d.tenant(tenant))
-            .map_or_else(|| kind.default_tags(), crate::fleet::TenantEntry::all_tags)
+            .map_or_else(
+                || kind.default_tags(),
+                crate::model::fleet::TenantEntry::all_tags,
+            )
             .to_wire()
     }
 
@@ -347,7 +352,9 @@ impl CellFacts<'_> {
             placed: Some(config_to_proto(&placed)),
             // A journal the cell made stores ordered (#599 (durability mode
             // per journal)).
-            store_durability: crate::tenant::StoreDurability::Ordered.as_str().to_string(),
+            store_durability: crate::model::tenant::StoreDurability::Ordered
+                .as_str()
+                .to_string(),
             ..wire::JournalView::default()
         }
     }
@@ -375,7 +382,7 @@ fn standing(standing: NodeStanding, booked: u64) -> &'static str {
 
 /// The scrubber's progress as a view shows it (#362 (background
 /// scrubbing)).
-fn scrub_view(progress: &crate::tenant::ScrubProgress) -> wire::ScrubView {
+fn scrub_view(progress: &crate::model::tenant::ScrubProgress) -> wire::ScrubView {
     wire::ScrubView {
         pass: progress.pass,
         done: progress.done,

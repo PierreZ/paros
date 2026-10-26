@@ -24,7 +24,7 @@ use std::collections::BTreeMap;
 
 use moonpool_sim::{StateHandle, WipeLedger, assert_always, assert_reachable};
 use paros::JournalIdentifier;
-use paros::system::{Registry, RegistryEvent};
+use paros::model::registry::{Registry, RegistryEvent};
 
 use super::{MachineBoard, lock, machine_board};
 

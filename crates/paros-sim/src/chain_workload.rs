@@ -1911,7 +1911,7 @@ impl ChainWorkload {
                         .registry_step(
                             ctx,
                             &nodes,
-                            Some(paros::system::NodeStanding::Registered),
+                            Some(paros::model::registry::NodeStanding::Registered),
                             raw_payload,
                         )
                         .await;
@@ -1921,7 +1921,7 @@ impl ChainWorkload {
                         .registry_step(
                             ctx,
                             &nodes,
-                            Some(paros::system::NodeStanding::Draining),
+                            Some(paros::model::registry::NodeStanding::Draining),
                             raw_payload,
                         )
                         .await;

@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use paros_core::HEARTBEAT_TICKS;
 
-use super::config::DriverTunables;
+use super::DriverTunables;
 
 /// The production tick: a leader beats every 100 ms (etcd's heartbeat).
 const TICK: Duration = Duration::from_millis(100);
@@ -262,14 +262,14 @@ impl DriverTunables {
             (
                 "load_interval",
                 ms(self.load_interval),
-                ms(super::config::LOAD_INTERVAL_FLOOR),
+                ms(super::LOAD_INTERVAL_FLOOR),
             ),
             ("slow_rtt", ms(self.slow_rtt), 1),
             // A busy bound leaves room to lean fast again (#361).
             (
                 "slow_busy_permille",
                 u64::from(self.slow_busy_permille),
-                u64::from(crate::machine::slow::BUSY_MARGIN) + 1,
+                u64::from(super::BUSY_MARGIN) + 1,
             ),
             ("slow_rounds", u64::from(self.slow_rounds), 1),
             ("status_hold", ms(self.status_hold), 0),
@@ -285,15 +285,11 @@ impl DriverTunables {
             ),
             ("internal_retry_backoff", ms(self.internal_retry_backoff), 0),
             ("resolve_answer_within", ms(self.resolve_answer_within), 1),
-            (
-                "scrub_rate",
-                self.scrub_rate,
-                super::config::SCRUB_RATE_FLOOR,
-            ),
+            ("scrub_rate", self.scrub_rate, super::SCRUB_RATE_FLOOR),
             (
                 "scrub_pass_within",
                 ms(self.scrub_pass_within),
-                ms(super::config::SCRUB_PASS_WITHIN_FLOOR),
+                ms(super::SCRUB_PASS_WITHIN_FLOOR),
             ),
             ("scrub_page", count(self.scrub_page), 1),
             ("shutdown_within", ms(self.shutdown_within), 0),

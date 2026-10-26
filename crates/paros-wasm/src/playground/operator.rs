@@ -25,9 +25,9 @@ use paros::client::journals::{self, JournalAnswer, JournalOp, JournalRequest};
 use paros::client::{
     ClaimOutcome, Client, ClientTunables, Reader, ReaderOutcome, Server, Writer, WriterOutcome,
 };
-use paros::fleet::TenantKind;
-use paros::system::Registry;
-use paros::tenant::Desired;
+use paros::model::fleet::TenantKind;
+use paros::model::registry::Registry;
+use paros::model::tenant::Desired;
 use paros::{
     Address, JournalId, JournalIdentifier, Names, NodeClient, NodeId, TenantId, Transport, Value,
     WriterMode,
@@ -369,8 +369,8 @@ impl Desk {
                 name: name.as_bytes().to_vec(),
                 writer: WriterMode::Single,
                 desired: Some(desired),
-                tags: paros::tags::UserTags::none(),
-                store: paros::tenant::StoreDurability::Ordered,
+                tags: paros::model::tags::UserTags::none(),
+                store: paros::model::tenant::StoreDurability::Ordered,
             },
         };
         let answer = journals::request(

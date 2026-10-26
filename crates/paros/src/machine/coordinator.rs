@@ -126,13 +126,13 @@ use crate::client::fleet::{Interrupted, Stage, Step as FleetStep};
 use crate::client::journals::{JournalAnswer, JournalRequest};
 use crate::client::universe::{JoinAnswer, JoinRequest};
 use crate::client::{CallObserver, ClaimOutcome, Client, Server, bootstrap};
-use crate::fleet::FleetDirectory;
+use crate::model::fleet::FleetDirectory;
+use crate::model::registry::{MaintenanceScope, NodeStanding, Registry, SystemCommand};
 use crate::rpc::machine as wire;
 use crate::rpc::methods::{
     CapacityRequestRpc, CoordinatorInterface, JoinUniverseRpc, JournalRequestRpc, RegisterRpc,
 };
 use crate::rpc::{Inbound, NodeClient, ReplySender};
-use crate::system::{MaintenanceScope, NodeStanding, Registry, SystemCommand};
 use crate::{Address, DriverTunables, Names};
 
 /// A served term's session and its watch over the cell's machines (#211).
@@ -1224,7 +1224,7 @@ pub(crate) fn spawn<P: ParosProviders>(
         lose_resign: moonpool_buggify::buggify_with_prob!(0.5),
         linger: moonpool_buggify::buggify_with_prob!(0.5),
         quit_mid_move: moonpool_buggify::buggify_fault_with_prob!(0.5)
-            || crate::scenario::quit_mid_move(),
+            || crate::observe::scenario::quit_mid_move(),
         slow_install: moonpool_buggify::buggify_with_prob!(0.3),
         ask_again: moonpool_buggify::buggify_with_prob!(0.3),
         scrub: ScrubPace::of(tunables),

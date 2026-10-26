@@ -8,7 +8,7 @@
 //! journals, the universe directory's tenants, a tenant's journals) or the
 //! full 16 digits.
 //!
-//! Ids print as abbreviated hex (`paros::name::Abbreviations`); `--json`
+//! Ids print as abbreviated hex (`paros::model::name::Abbreviations`); `--json`
 //! keeps them whole.
 
 use std::fmt;
@@ -21,7 +21,7 @@ use paros::client::fleet::read_directory;
 use paros::client::names::{
     JournalResolution, NameResolution, TenantResolution, Unreadable, read_tenant_control, resolve,
 };
-use paros::name::{
+use paros::model::name::{
     Abbreviations, JournalName, PrefixMatch, match_prefix, parse_full, parse_prefix,
 };
 use paros::{JournalId, JournalIdentifier, TenantId};
@@ -244,7 +244,7 @@ fn one(what: &str, prefix: &str, candidates: impl IntoIterator<Item = u64>) -> R
 /// Resolve an `id:` reference: full ids as they are, a prefix among the
 /// journals `parosctl` can list.
 async fn by_ids(client: &ParosClient, tenant: &str, journal: &str) -> Result<Resolved, Ending> {
-    let full = |p: &str| paros::name::parse_full(p);
+    let full = |p: &str| paros::model::name::parse_full(p);
     let known = if full(tenant).is_some() && full(journal).is_some() {
         Vec::new()
     } else {
@@ -302,7 +302,8 @@ impl NodeRef {
 /// A node id as given in `ID=HOST:PORT`: its full 16 hex digits.
 pub fn parse_node_id(text: &str) -> Result<u64, String> {
     let prefix = parse_prefix(text).map_err(|e| e.to_string())?;
-    paros::name::parse_full(&prefix).ok_or_else(|| "a node id is its 16 hex digits".to_string())
+    paros::model::name::parse_full(&prefix)
+        .ok_or_else(|| "a node id is its 16 hex digits".to_string())
 }
 
 #[cfg(test)]

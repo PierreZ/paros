@@ -1,7 +1,7 @@
 //! The administrative views from the caller's side (#399): send one
 //! `View` to the servers of one cell, in order, until one answers.
 //!
-//! A view is a request to one cell (`crate::view`): the caller names the
+//! A view is a request to one cell (`crate::model::view`): the caller names the
 //! cell by the servers it asks, and the answer says which cell answered.
 //! The servers filter the answer by the caller's scope; the caller prints
 //! it as it came. Every attempt is one at-most-once call; a view changes
@@ -13,10 +13,10 @@ use crate::ParosProviders;
 use moonpool_core::LocalTimeProvider;
 use moonpool_rpc::RpcHandle;
 
+use crate::model::view::Scope;
 use crate::rpc::methods::ViewRpc;
 use crate::rpc::view as wire;
 use crate::rpc::well_known;
-use crate::view::Scope;
 use crate::{Address, Names};
 
 /// What a view came to.

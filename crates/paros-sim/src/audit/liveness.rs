@@ -26,7 +26,7 @@ use moonpool_sim::{assert_always, assert_reachable};
 use paros::NodeId;
 use paros::client::checkpoint::Checkpointable;
 use paros::machine::slow::SlowJudge;
-use paros::system::{Registry, RegistryEvent, RegistryRefusal};
+use paros::model::registry::{Registry, RegistryEvent, RegistryRefusal};
 
 /// The cell's registry fold, with every event judged as it is folded.
 #[derive(Clone, Debug)]

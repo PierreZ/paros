@@ -29,50 +29,39 @@
 //! `Config::replica_count` is zero runs none, and the node driver's learner
 //! traffic reaches the pool alone.
 
-mod address;
-mod audit;
 pub mod batcher;
 pub mod client;
-mod corruption;
 mod driver;
-pub mod fleet;
-pub mod footprint;
 pub mod frontend;
 pub mod inspect;
 pub mod journal;
-pub mod load;
 pub mod machine;
 mod matchmaker;
-pub mod metrics;
-pub mod name;
-pub mod placement;
+pub mod model;
+pub mod net;
+pub mod observe;
 mod provision;
 mod proxy;
 mod replica_tier;
 mod rpc;
 mod runtime;
-pub mod scenario;
-pub mod status;
 mod storage;
-pub mod system;
-pub mod tags;
-pub mod tenant;
 #[cfg(feature = "tls")]
 pub mod tls;
 pub mod transport;
-pub mod view;
+pub mod tunables;
 
-pub use address::{Address, Names};
-pub use audit::{
-    Audit, DelegationOutcome, Deployment, HistoryPage, LogReadAnswer, LogReadReport, NoAudit,
-    StorageFaultDecision,
-};
-pub use corruption::{CorruptionVerdict, IntegrityFault};
 pub use driver::reply::Reply;
 pub use driver::{
     BelowFloor, BootKind, BootRefusal, ControlPlan, DriverTunables, JournalStores,
     LOAD_INTERVAL_FLOOR, MAX_READ_RECORDS, RunError, command_hash, message_kind, parse_addr,
     registration_history_hash, run_journals, run_node,
+};
+pub use model::address::{Address, Names};
+pub use model::corruption::{CorruptionVerdict, IntegrityFault};
+pub use observe::audit::{
+    Audit, DelegationOutcome, Deployment, HistoryPage, LogReadAnswer, LogReadReport, NoAudit,
+    StorageFaultDecision,
 };
 pub use rpc::{
     EdgeRejection, InspectRefusal, InspectReply, InspectRequest, InspectTarget, MAX_FRAME_BYTES,

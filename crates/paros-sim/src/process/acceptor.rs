@@ -106,7 +106,7 @@ pub(super) async fn run_acceptor(
         audit: _,
     } = arm_role(ctx, my_ip);
     // The seed's scenarios decide the driver's named BUGGIFY locations
-    // (`paros::scenario`) before the node's first beat; each draw is fixed
+    // (`paros::observe::scenario`) before the node's first beat; each draw is fixed
     // by its first caller.
     crate::shape::withhold_gc(ctx.state());
     crate::shape::lost_verdict(ctx.state());
@@ -590,7 +590,9 @@ pub(super) fn system_plan(
         .iter()
         .enumerate()
         .find(|(rank, _)| crate::roles::joiner_node_id(*rank) == self_id)
-        .map_or(paros::system::Class::Storage, |(_, machine)| machine.class);
+        .map_or(paros::model::registry::Class::Storage, |(_, machine)| {
+            machine.class
+        });
     (
         ControlPlan {
             self_id,

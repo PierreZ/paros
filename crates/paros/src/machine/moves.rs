@@ -5,7 +5,7 @@
 //! earlier one started:
 //!
 //! 1. book a slot for the journal on another storage machine
-//!    (`crate::placement::plan` over the registered machines, with the slots
+//!    (`crate::model::placement::plan` over the registered machines, with the slots
 //!    on the machines that stay as the current ones); the machine starts the
 //!    journal as a spare (`crate::driver::system`);
 //! 2. ask the journal's leader to reconfigure onto the machines that stay
@@ -52,11 +52,11 @@ use super::tenants::{TenantDesk, placed_count};
 use crate::client::cell::CellSession;
 use crate::client::journals::JournalAnswer;
 use crate::client::{Client, ReconfigureOutcome, RetireOutcome, Server};
-use crate::placement::{self, Want};
+use crate::model::placement::{self, Want};
+use crate::model::registry::{Booking, BookingTarget, NodeStanding, Registry, Role};
+use crate::model::tenant::Desired;
 use crate::rpc::common::Ballot;
 use crate::rpc::{InspectReply, NodeClient, RetireRequest};
-use crate::system::{Booking, BookingTarget, NodeStanding, Registry, Role};
-use crate::tenant::Desired;
 use crate::{Address, Names};
 
 /// What one move step did.

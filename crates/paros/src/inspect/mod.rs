@@ -30,7 +30,7 @@
 //! Hex ids are for local debugging only. [`names`] folds the cell's journals
 //! this disk holds (the registry, the universe directory, the election
 //! journal, the hosted tenants' control journals) over each store's
-//! accepted prefix, and answers the administrative cell view ([`crate::view`]) from
+//! accepted prefix, and answers the administrative cell view ([`crate::model::view`]) from
 //! them, so the inspection names machines, tenants and journals as
 //! `parosctl` does online. A disk that holds none of them (an admitted
 //! machine that serves only tenant journals) names nothing, and its ids

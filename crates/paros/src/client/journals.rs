@@ -11,7 +11,7 @@
 //! does not decide it (no coordinator, a coordinator change, a timeout). The
 //! coordinator writes the request to the tenant's control journal, and the
 //! fold judges it at apply and records its outcome under the id
-//! ([`crate::tenant::TenantControl`]): a retry reads that outcome back, so
+//! ([`crate::model::tenant::TenantControl`]): a retry reads that outcome back, so
 //! it acts once. A list is a plain read: fold the control journal.
 //!
 //! The library draws no randomness: the request id is the caller's.
@@ -26,14 +26,14 @@ use paros_core::{AcceptorConfig, JournalId, JournalIdentifier, TenantId, WriterM
 use super::Client;
 use super::checkpoint::{Folder, LoadOutcome, load};
 use super::election::{Candidate, read_election};
+use crate::model::tags::UserTags;
+use crate::model::tenant::{Desired, StoreDurability, TenantControl, TenantRoles};
 use crate::rpc::in_group;
 use crate::rpc::machine as wire;
 use crate::rpc::methods::{CoordinatorInterface, JournalRequestRpc};
 use crate::rpc::{
     config_from_proto, config_to_proto, writer_mode_from_proto, writer_mode_to_proto,
 };
-use crate::tags::UserTags;
-use crate::tenant::{Desired, StoreDurability, TenantControl, TenantRoles};
 use crate::{Address, Names};
 
 /// What a request asks for.
@@ -338,7 +338,7 @@ impl JournalAnswer {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FrontTagged {
     /// The frontend refused the call itself: no machine saw it.
-    Denied(crate::frontend::Denial),
+    Denied(crate::model::authz::Denial),
     /// The tenant coordinator's answer, as the frontend relayed it.
     /// `Unavailable` and `NotCoordinator` decide nothing: send the same
     /// request again.
@@ -352,7 +352,7 @@ pub enum FrontTagged {
 /// `frontend`, under the idempotency id `request`: one attempt (#575).
 pub async fn tag_through_frontend<P: ParosProviders>(
     frontend: &crate::rpc::NodeClient<P>,
-    name: &crate::name::JournalName,
+    name: &crate::model::name::JournalName,
     request: u64,
     tags: &UserTags,
 ) -> FrontTagged {
@@ -361,7 +361,7 @@ pub async fn tag_through_frontend<P: ParosProviders>(
         .await
     {
         Err(_) => FrontTagged::Lost,
-        Ok(ack) => match crate::frontend::Denial::of(ack.frontend()) {
+        Ok(ack) => match crate::model::authz::Denial::of(ack.frontend()) {
             Some(denial) => FrontTagged::Denied(denial),
             None if ack.frontend() == crate::rpc::FrontendVerdict::Unanswered => FrontTagged::Lost,
             None => FrontTagged::Answered(JournalAnswer::from_wire(wire::JournalRequestAck {
@@ -502,7 +502,7 @@ pub async fn request<P: ParosProviders>(
 pub async fn tag_through<P: ParosProviders>(
     providers: &P,
     frontends: &Client<P>,
-    (name, request): (&crate::name::JournalName, u64),
+    (name, request): (&crate::model::name::JournalName, u64),
     tags: &UserTags,
     patience: Duration,
 ) -> FrontTagged {

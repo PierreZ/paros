@@ -962,7 +962,7 @@ struct Registry {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct JoinerMachine {
     /// Its class.
-    pub(crate) class: paros::system::Class,
+    pub(crate) class: paros::model::registry::Class,
     /// The role slots of its class it advertises.
     pub(crate) capacity: u64,
 }
@@ -1091,7 +1091,7 @@ pub(crate) fn entry_capacity(state: &StateHandle) -> u64 {
 }
 
 /// Whether the run's nodes withhold every GC request for the chaos window
-/// (`paros::scenario::WITHHOLD_GC`, #263): drawn once per seed, its own
+/// (`paros::observe::scenario::WITHHOLD_GC`, #263): drawn once per seed, its own
 /// BUGGIFY location, which decides the driver's named location. A leader that collects nothing keeps every prior
 /// configuration answerable, which is what makes a straggler a
 /// reconfiguration removed still worth waiting for: the departed-straggler
@@ -1106,7 +1106,7 @@ pub(crate) fn withhold_gc(state: &StateHandle) -> bool {
         // Its fired gate sits where the answer has an effect (the driver's
         // named location), not at the draw.
         let withhold = scenario || moonpool_sim::buggify_with_prob!(0.5);
-        moonpool_sim::set_activation(paros::scenario::WITHHOLD_GC, withhold);
+        moonpool_sim::set_activation(paros::observe::scenario::WITHHOLD_GC, withhold);
         withhold
     })
 }
@@ -1185,7 +1185,7 @@ pub(crate) fn bare_quorum(state: &StateHandle) -> bool {
 /// write before any read-back, two locations whose product fired the gate
 /// on 9 of 2,929 checks (1,400 hunt seeds on `main`). On a scenario seed
 /// every node drops write replies at the location's rate
-/// (`paros::scenario::LOSE_VERDICTS`) and every ambiguous write is re-sent
+/// (`paros::observe::scenario::LOSE_VERDICTS`) and every ambiguous write is re-sent
 /// at once (`ChainWorkload`). Each ingredient keeps its own coin on the
 /// other seeds. Rates in 600 hunt seeds (#446 (a gate that never fires
 /// cannot fail the sweep), three hunts): a scenario seed loses a write's
@@ -1198,7 +1198,7 @@ pub(crate) fn lost_verdict(state: &StateHandle) -> bool {
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     *guard.lost_verdict.get_or_insert_with(|| {
         let lose = moonpool_sim::buggify_with_prob!(1.0);
-        moonpool_sim::set_activation(paros::scenario::LOSE_VERDICTS, lose);
+        moonpool_sim::set_activation(paros::observe::scenario::LOSE_VERDICTS, lose);
         lose
     })
 }
@@ -1211,7 +1211,7 @@ pub(crate) fn lost_verdict(state: &StateHandle) -> bool {
 /// scenario the gate fired on about 0.1% of seeds (2,000 hunt seeds, after
 /// #210 (tenant control journal) removed the directory's create that named
 /// an unregistered joiner). On a scenario seed every node opens its follow
-/// reads late (`paros::scenario::LAG_FOLLOW`), the seed runs the system
+/// reads late (`paros::observe::scenario::LAG_FOLLOW`), the seed runs the system
 /// journals ([`system_journals`]), and a client that registers a joiner
 /// reconfigures onto it next whatever the swarm mask (`ChainWorkload`):
 /// the gate fired on 0 of 417 checks (600 hunt seeds) before these
@@ -1230,7 +1230,7 @@ pub(crate) fn lost_verdict(state: &StateHandle) -> bool {
 /// follower is, and each ingredient keeps its own coin on the other
 /// seeds.
 ///
-/// The scenario also turns on `paros::scenario::ADMIT_LATE` (#387
+/// The scenario also turns on `paros::observe::scenario::ADMIT_LATE` (#387
 /// (unpooled joiner in a configuration)): half the nodes, drawn at boot,
 /// admit the registry's pool 2 s after their fold owes it. A leader that
 /// admitted a joiner then sends a configuration naming it to members whose
@@ -1243,8 +1243,8 @@ pub(crate) fn lagging_fold(state: &StateHandle) -> bool {
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     *guard.lagging_fold.get_or_insert_with(|| {
         let lag = moonpool_sim::buggify_with_prob!(1.0);
-        moonpool_sim::set_activation(paros::scenario::LAG_FOLLOW, lag);
-        moonpool_sim::set_activation(paros::scenario::ADMIT_LATE, lag);
+        moonpool_sim::set_activation(paros::observe::scenario::LAG_FOLLOW, lag);
+        moonpool_sim::set_activation(paros::observe::scenario::ADMIT_LATE, lag);
         lag
     })
 }
@@ -1410,7 +1410,7 @@ pub(crate) fn zone_outage(state: &StateHandle) -> bool {
 /// journal. With the drain after a create, 11 finished in 400. Four move
 /// gates stay in `gates::RARE` until #498 (moves in the sweep). Every
 /// coordinator term of a scenario seed resigns once mid-move
-/// (`paros::scenario::QUIT_MID_MOVE`), so a successor term finishes a move
+/// (`paros::observe::scenario::QUIT_MID_MOVE`), so a successor term finishes a move
 /// on most seeds that finish one (#215 (zones)).
 /// Rare-but-valid: an operator may drain a machine at any time.
 #[tracing::instrument(level = "debug", skip_all)]
@@ -1425,7 +1425,7 @@ pub(crate) fn drained_machine(state: &StateHandle) -> bool {
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     *guard.drained_machine.get_or_insert_with(|| {
         let drained = !other && moonpool_sim::buggify_with_prob!(1.0);
-        moonpool_sim::set_activation(paros::scenario::QUIT_MID_MOVE, drained);
+        moonpool_sim::set_activation(paros::observe::scenario::QUIT_MID_MOVE, drained);
         drained
     })
 }
@@ -1839,8 +1839,8 @@ pub(crate) fn matchmaker_registry_page(state: &StateHandle, drawn: usize) -> usi
 /// within a few beats on almost every seed, and a grid is two knobs deep,
 /// so no seed in `1..=300` lined them up. On a scenario seed every proxy
 /// drops the `Accepted`s and `Nack`s it hears for the chaos window
-/// (`paros::scenario::STALL_PROXY`), a leader that holds delegated rounds
-/// resigns now and then (`paros::scenario::RESIGN_DELEGATING`), and the run
+/// (`paros::observe::scenario::STALL_PROXY`), a leader that holds delegated rounds
+/// resigns now and then (`paros::observe::scenario::RESIGN_DELEGATING`), and the run
 /// runs an acceptor grid
 /// where the pool tiles one ([`quorum_policy`]). Each ingredient keeps its
 /// own coin on the other seeds. Rates in 600 hunt seeds (#446 (a gate that
@@ -1855,8 +1855,8 @@ pub(crate) fn stalled_proxy(state: &StateHandle) -> bool {
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     *guard.stalled_proxy.get_or_insert_with(|| {
         let stall = moonpool_sim::buggify_with_prob!(1.0);
-        moonpool_sim::set_activation(paros::scenario::STALL_PROXY, stall);
-        moonpool_sim::set_activation(paros::scenario::RESIGN_DELEGATING, stall);
+        moonpool_sim::set_activation(paros::observe::scenario::STALL_PROXY, stall);
+        moonpool_sim::set_activation(paros::observe::scenario::RESIGN_DELEGATING, stall);
         stall
     })
 }
@@ -1950,7 +1950,7 @@ pub(crate) fn acceptor_config(
 /// of the chaos window on about half the seeds, so in 810 hunt seeds a
 /// second handoff in one run fired on none and a handoff lost at the send
 /// seam on 7. On a scenario seed a transferable leader also hands off on
-/// about a third of its beats in the window (`paros::scenario::HAND_OFF`):
+/// about a third of its beats in the window (`paros::observe::scenario::HAND_OFF`):
 /// in 1,000 hunt seeds a second handoff then fired on 35 and a lost one on
 /// 25. Rare-but-valid: any leader may hand off at any time.
 #[tracing::instrument(level = "debug", skip_all)]
@@ -1959,7 +1959,7 @@ pub(crate) fn handoff_storm(state: &StateHandle) -> bool {
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     *guard.handoff_storm.get_or_insert_with(|| {
         let storm = moonpool_sim::buggify_with_prob!(0.5);
-        moonpool_sim::set_activation(paros::scenario::HAND_OFF, storm);
+        moonpool_sim::set_activation(paros::observe::scenario::HAND_OFF, storm);
         if storm {
             assert_reachable!("a run draws the handoff-storm scenario");
         }
@@ -2245,9 +2245,9 @@ pub(crate) fn joiner_machines(state: &StateHandle, count: usize) -> Vec<JoinerMa
                 .map(|rank| {
                     let class = if rank > 0 && moonpool_sim::sim_random_bool(0.5) {
                         assert_reachable!("registry: a joiner is a stateless machine");
-                        paros::system::Class::Stateless
+                        paros::model::registry::Class::Stateless
                     } else {
-                        paros::system::Class::Storage
+                        paros::model::registry::Class::Storage
                     };
                     JoinerMachine { class, capacity }
                 })
@@ -2328,7 +2328,7 @@ fn founder_capacity(full: bool, floor: u64, capacity: u64) -> u64 {
 /// founder holds every tenant's footprint and journals, so it keeps room
 /// for twice the births and the default room besides.
 fn machine_capacity(batchers: bool) -> (u64, u64) {
-    let floor = 3 * paros::footprint::Footprint::birth().storage();
+    let floor = 3 * paros::model::footprint::Footprint::birth().storage();
     let capacity = floor + buggify_knob!(8_u64, 1_u64..4_u64);
     let capacity = if batchers {
         capacity.max(2 * floor + 8)
@@ -2549,7 +2549,7 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
 /// (`crate::process::journal_config`, #193). On a
 /// multi-journal seed a second location draws whether the driver's named
 /// location holds one journal on every node for the chaos window
-/// (`paros::scenario::HOLD_JOURNAL`): its siblings must keep committing.
+/// (`paros::observe::scenario::HOLD_JOURNAL`): its siblings must keep committing.
 /// Each node holds the highest user journal it boots serving: the same one
 /// on every acceptor, possibly a lower one on a joiner that serves fewer.
 /// The driver reports each hold (`Audit::journal_held`), so the journal
@@ -2594,7 +2594,7 @@ pub(crate) fn journals(state: &StateHandle) -> JournalPlan {
             }
             ids.sort_unstable();
             if ids.len() < 2 {
-                moonpool_sim::set_activation(paros::scenario::HOLD_JOURNAL, false);
+                moonpool_sim::set_activation(paros::observe::scenario::HOLD_JOURNAL, false);
                 return JournalPlan {
                     ids,
                     multi: Vec::new(),
@@ -2607,7 +2607,7 @@ pub(crate) fn journals(state: &StateHandle) -> JournalPlan {
             // Its fired gate sits where the hold has an effect (the driver's
             // named location), not at the draw.
             moonpool_sim::set_activation(
-                paros::scenario::HOLD_JOURNAL,
+                paros::observe::scenario::HOLD_JOURNAL,
                 moonpool_sim::buggify_with_prob!(0.5),
             );
             // The writer mode is fixed when a journal is created (#241): each

@@ -82,8 +82,8 @@ use super::{
     JournalStoreConfig, ballot_id, commit_error, decode, encode, id_ballot, open_error, store_id,
     undecodable,
 };
-use crate::corruption::{CorruptionVerdict, IntegrityFault};
 use crate::matchmaker::{MatchmakerStorage, Registrations};
+use crate::model::corruption::{CorruptionVerdict, IntegrityFault};
 use crate::storage::{StorageError, StorageRecord, WriteOutcome};
 
 /// The kind byte of a registration's identity.

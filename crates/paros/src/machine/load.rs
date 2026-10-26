@@ -4,7 +4,7 @@
 //! [`spawn_monitor`] starts one task per machine run: it samples moonpool's
 //! cumulative counters (`SystemProvider`, for the disk that holds the
 //! machine's data directory) every `load_interval`, and keeps the last full
-//! window ([`crate::load::Busyness`]) on the machine's [`LoadBoard`]. Every
+//! window ([`crate::model::load::Busyness`]) on the machine's [`LoadBoard`]. Every
 //! phase of the machine (idle, admitted, founding member) serves `Load` from
 //! that board ([`serve`]): pulled when an operator asks, never pushed and
 //! never written into a journal, as FDB's status pulls from its workers.
@@ -27,8 +27,8 @@ use paros_core::{JournalId, JournalIdentifier, TenantId};
 use tokio_util::sync::CancellationToken;
 
 use super::MachineFacts;
-use crate::load::Busyness;
-use crate::metrics::{CallKind, JournalUsage, Metrics};
+use crate::model::load::Busyness;
+use crate::observe::metrics::{CallKind, JournalUsage, Metrics};
 use crate::rpc::machine as wire;
 use crate::rpc::methods::LoadRpc;
 use crate::rpc::{Inbound, serve_well_known};

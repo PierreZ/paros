@@ -3,7 +3,7 @@
 //! while it runs; paros already has the right tool — a replicated log — so
 //! the cell's machines and capacity are a journal of their own, and every
 //! node learns them by reading it. A tenant's journals live in its own
-//! control journal ([`crate::tenant`], #210).
+//! control journal ([`crate::model::tenant`], #210).
 //!
 //! This module is the one reading of its entries: the typed
 //! [`SystemCommand`] a writer appends (one record per position, encoded by
@@ -44,7 +44,7 @@
 //!   The cell's side of the fleet (#229, §3.7): `JoinFleet` records, once,
 //!   the fleet this cell belongs to and its own `cell_id` (`init` step 3),
 //!   and `HostTenant` / `DropTenant` the tenants it hosts — the cell's
-//!   tenant list, which the fleet directory ([`crate::fleet`]) must equal.
+//!   tenant list, which the fleet directory ([`crate::model::fleet`]) must equal.
 //!   `HostTenant` records the tenant's control journal, name and
 //!   `survives` ([`HostedTenant`], #210). Every one names its fleet, and an
 //!   entry naming another fleet than the one the cell joined is refused; a
@@ -64,12 +64,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use paros_core::{JournalId, JournalIdentifier, NodeId, TenantId};
 use prost::Message as _;
 
-use crate::client::checkpoint::{Checkpointable, Folded};
 pub use crate::machine::Class;
 use crate::machine::{
     Locality, incarnation_from_halves, incarnation_halves, machine_tags, parse_machine_tags,
 };
-use crate::tags::{Tag, Tags, UserTags};
+use crate::model::checkpoint::{Checkpointable, Folded};
+use crate::model::tags::{Tag, Tags, UserTags};
 
 use crate::rpc::system as wire;
 
@@ -582,7 +582,7 @@ impl SystemCommand {
                 hosted: HostedTenant {
                     control: JournalId(host.control_journal),
                     name: host.name,
-                    survives: crate::tenant::Survives::from_wire(host.survives)?,
+                    survives: crate::model::tenant::Survives::from_wire(host.survives)?,
                 },
             },
             Kind::DropTenant(drop) => SystemCommand::DropTenant {
@@ -1262,7 +1262,7 @@ pub struct HostedTenant {
     /// The tenant's name.
     pub name: Vec<u8>,
     /// What it survives (#252).
-    pub survives: crate::tenant::Survives,
+    pub survives: crate::model::tenant::Survives,
 }
 
 /// The **universe pointer** (#232 (multiple cells), §3.7): where a cell
@@ -1367,7 +1367,7 @@ impl Registry {
 
     /// Fold the record at position `seq` of the registry (in position
     /// order). A checkpoint record is not an entry: fold through a
-    /// [`Folder`](crate::client::checkpoint::Folder), which restores it.
+    /// [`Folder`](crate::model::checkpoint::Folder), which restores it.
     ///
     /// # Panics
     ///
@@ -1640,7 +1640,7 @@ impl Registry {
         if joined.fleet_id == 0 || joined.cell_id == 0 {
             return RegistryEvent::Refused(RegistryRefusal::Malformed);
         }
-        if joined.version == 0 || joined.version > crate::fleet::METADATA_VERSION {
+        if joined.version == 0 || joined.version > crate::model::fleet::METADATA_VERSION {
             return RegistryEvent::Refused(RegistryRefusal::Unsupported);
         }
         match self.fleet {
@@ -2342,7 +2342,7 @@ impl Checkpointable for Registry {
                 HostedTenant {
                     control: JournalId(h.control_journal),
                     name: h.name,
-                    survives: crate::tenant::Survives::from_wire(h.survives)?,
+                    survives: crate::model::tenant::Survives::from_wire(h.survives)?,
                 },
             );
         }
@@ -2463,7 +2463,7 @@ pub enum SystemEvent {
     /// A cell control journal (registry) record.
     Registry(RegistryEvent),
     /// A tenant control journal record (#210).
-    Tenant(crate::tenant::TenantEvent),
+    Tenant(crate::model::tenant::TenantEvent),
 }
 
 #[cfg(test)]
@@ -2473,7 +2473,7 @@ mod tests {
         HostedTenant {
             control: JournalId(control),
             name: b"acme".to_vec(),
-            survives: crate::tenant::Survives::Az,
+            survives: crate::model::tenant::Survives::Az,
         }
     }
 
@@ -2957,7 +2957,7 @@ mod tests {
         if let Some(wire::system_entry::Kind::RegisterNode(register)) = &mut forged.kind {
             register
                 .tags
-                .retain(|tag| tag.key != crate::tags::reserved::CLASS);
+                .retain(|tag| tag.key != crate::model::tags::reserved::CLASS);
         }
         assert_eq!(
             reg.fold(6, &forged.encode_to_vec()),
@@ -3032,7 +3032,7 @@ mod tests {
 
     #[test]
     fn a_registered_genesis_node_crosses_a_checkpoint() {
-        use crate::client::checkpoint::{Folded, Folder, run};
+        use crate::model::checkpoint::{Folded, Folder, run};
         // A founding member registers its address (#349), then the owner
         // checkpoints: a fold that restores there keeps the address.
         let records = [register(7, Class::Storage, 1)];
@@ -3061,7 +3061,7 @@ mod tests {
 
     #[test]
     fn a_registry_restored_from_its_checkpoint_is_the_registry_folded_whole() {
-        use crate::client::checkpoint::{Folded, Folder, run};
+        use crate::model::checkpoint::{Folded, Folder, run};
         let records = [
             register(100, Class::Storage, 2),
             register(200, Class::Stateless, 1),
@@ -3170,7 +3170,10 @@ mod tests {
             RegistryEvent::Refused(RegistryRefusal::OtherFleet { fleet_id: fleet })
         );
         assert_eq!(
-            registry.fold(4, &join(fleet, cell, crate::fleet::METADATA_VERSION + 1)),
+            registry.fold(
+                4,
+                &join(fleet, cell, crate::model::fleet::METADATA_VERSION + 1)
+            ),
             RegistryEvent::Refused(RegistryRefusal::Unsupported)
         );
         assert_eq!(

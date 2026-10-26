@@ -6,7 +6,7 @@
 //! the registry and the set's journals hold now, so any later term finishes
 //! a move an earlier one started:
 //!
-//! 1. book the slots the set lacks (`crate::placement::plan` over the
+//! 1. book the slots the set lacks (`crate::model::placement::plan` over the
 //!    registered storage machines, `Role::Matchmaker`, with the slots on the
 //!    machines that stay as the current ones): a set born on the founding
 //!    members holds none, so its first move books every member; a machine
@@ -52,9 +52,9 @@ use super::tenants::TenantDesk;
 use crate::client::cell::CellSession;
 use crate::client::journals::JournalAnswer;
 use crate::client::{Client, ReconfigureMatchmakersOutcome, Server};
-use crate::placement::{self, Step, Want};
+use crate::model::placement::{self, Step, Want};
+use crate::model::registry::{Booking, BookingTarget, NodeStanding, Registry, Role};
 use crate::rpc::{InspectReply, NodeClient};
-use crate::system::{Booking, BookingTarget, NodeStanding, Registry, Role};
 use crate::{Address, Names};
 
 /// The id of a tenant's one matchmaker set inside its tenant (§3.4: one set

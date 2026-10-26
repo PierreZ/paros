@@ -19,16 +19,7 @@ use paros_core::{ColocatedNode, Slot};
 
 use crate::rpc::{ScrubReply, ScrubRequest, ballot_to_proto, internal};
 use crate::storage::{LogStorage, ScrubbedSlot};
-
-/// The most records one scrub page reads: the ceiling on a request's
-/// `limit`, so one answer stays inside a frame.
-pub const SCRUB_PAGE: usize = 256;
-
-/// The most payload bytes one scrub page reads, the ceiling on a request's
-/// `max_bytes`.
-pub const SCRUB_PAGE_BYTES: u64 = 1 << 20;
-
-const _: () = assert!(SCRUB_PAGE > 0 && SCRUB_PAGE_BYTES > 0);
+pub use crate::tunables::scrub::{SCRUB_PAGE, SCRUB_PAGE_BYTES};
 
 /// What one page did on this node: the answer, and whether the core holds
 /// repairs the settle tail must make durable first.

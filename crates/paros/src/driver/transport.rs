@@ -18,13 +18,13 @@ use paros_core::{Audience, JournalIdentifier, Message, NodeId, Party, ProxyId};
 use prost::Message as ProstMessage;
 use tokio_util::sync::CancellationToken;
 
-use crate::audit::Audit;
+use crate::observe::audit::Audit;
 use crate::rpc::methods::{DeliverRpc, MachineInterface};
 use crate::rpc::{in_group, internal, message_to_proto, well_known};
 use crate::{Address, Names};
 
-use super::config::{DELIVERY_BATCH, DELIVERY_BATCH_BYTES, DriverTunables};
 use super::events::{command_hash, message_kind, message_route, proto_message_kind};
+use crate::tunables::{DELIVERY_BATCH, DELIVERY_BATCH_BYTES, DriverTunables};
 
 /// One peer's bounded, lossy, **keep-newest** outbound mailbox (the etcd
 /// stream-mailbox shape). The consensus driver never waits for network I/O:

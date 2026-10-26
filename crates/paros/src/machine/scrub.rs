@@ -5,7 +5,7 @@
 //!
 //! Eat your own food: the scrubber is the tenant coordinator's duty, so it
 //! is elected with it, and its progress is an entry of the tenant's control
-//! journal ([`TenantCommand::Scrubbed`](crate::tenant::TenantCommand)), so a
+//! journal ([`TenantCommand::Scrubbed`](crate::model::tenant::TenantCommand)), so a
 //! newly elected coordinator resumes where the last one stopped.
 //!
 //! One step per watch round, after the footprint step, in turn over the
@@ -52,9 +52,9 @@ use crate::client::cell::CellSession;
 use crate::client::journals::JournalAnswer;
 use crate::client::{Client, Server};
 use crate::driver::scrub::SCRUB_PAGE_BYTES;
+use crate::model::registry::{BookingTarget, Registry, Role};
+use crate::model::tenant::{ScrubCounts, ScrubProgress};
 use crate::rpc::{NodeClient, ScrubReply, ScrubRequest};
-use crate::system::{BookingTarget, Registry, Role};
-use crate::tenant::{ScrubCounts, ScrubProgress};
 use crate::{Address, Names};
 
 /// The most pages one step reads.

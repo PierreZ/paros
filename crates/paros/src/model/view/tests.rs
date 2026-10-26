@@ -1,14 +1,16 @@
 use paros_core::JournalId;
 
 use super::*;
-use crate::status::Word;
+use crate::model::status::Word;
 
 /// Status words shown at once, at the instant zero.
 fn words(status: &mut Hysteresis) -> (&mut Hysteresis, Duration) {
     (status, Duration::ZERO)
 }
-use crate::system::{BookingTarget, Class, GrantKey, HostedTenant, Role, Slot, SystemCommand};
-use crate::tenant::Survives;
+use crate::model::registry::{
+    BookingTarget, Class, GrantKey, HostedTenant, Role, Slot, SystemCommand,
+};
+use crate::model::tenant::Survives;
 
 const CELL: u64 = 0xce11;
 const FLEET: u64 = 0xf1ee7;
@@ -52,7 +54,7 @@ fn registry() -> Registry {
         SystemCommand::JoinFleet {
             fleet_id: FLEET,
             cell_id: CELL,
-            version: crate::fleet::METADATA_VERSION,
+            version: crate::model::fleet::METADATA_VERSION,
             universe: None,
         },
         // Its footprint (#476), on the founder that registered.
@@ -163,11 +165,12 @@ fn a_tenant_scope_sees_only_its_own_spread() {
     assert_eq!(used, [1, 2]);
     assert_eq!(reply.machines[0].name, "alpha");
     assert_eq!(
-        crate::tags::value_of(&reply.machines[0].tags, crate::tags::reserved::ZONE),
+        crate::model::tags::value_of(&reply.machines[0].tags, crate::model::tags::reserved::ZONE),
         Some("zone-a")
     );
     assert!(
-        crate::tags::value_of(&reply.machines[0].tags, crate::tags::reserved::CLASS).is_none(),
+        crate::model::tags::value_of(&reply.machines[0].tags, crate::model::tags::reserved::CLASS)
+            .is_none(),
         "a tenant scope sees no machine's class"
     );
     // An admin asking the same view sees the addresses.
@@ -205,7 +208,7 @@ fn every_journal_carries_its_status_word() {
         assert_eq!(journal.observed, "healthy");
         assert_eq!(journal.word, "healthy");
         assert_eq!(
-            crate::status::observe(journal, &reply.machines),
+            crate::model::status::observe(journal, &reply.machines),
             Some(Word::Healthy)
         );
     }

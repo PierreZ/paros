@@ -11,7 +11,7 @@
 use paros_core::NodeId;
 
 use crate::Address;
-use crate::system::{NodeStanding, Registry};
+use crate::model::registry::{NodeStanding, Registry};
 
 /// The address peers dial for each founding member of `founders`: the
 /// address `registry` holds for it when it registered one (#349), else the
@@ -62,7 +62,7 @@ pub fn cell_book(founders: &[(NodeId, Address)], registry: &Registry) -> Vec<(No
 /// `members` as machine `me` dials them: its own entry at the address it
 /// advertises now (`own`), which the plan or the registry may not hold yet
 /// (#349: a machine that moved reaches itself there).
-pub(crate) fn with_own(
+pub fn with_own(
     members: &[(NodeId, Address)],
     me: NodeId,
     own: &Address,
@@ -84,7 +84,7 @@ pub(crate) fn with_own(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::system::{Class, SystemCommand};
+    use crate::model::registry::{Class, SystemCommand};
 
     fn register(registry: &mut Registry, seq: u64, id: u64, addr: &str) {
         let record = SystemCommand::RegisterNode {

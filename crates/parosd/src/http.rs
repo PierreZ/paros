@@ -3,7 +3,7 @@
 //!
 //! | path | answer |
 //! |---|---|
-//! | `/metrics` | `200`, every metric of the machine in the Prometheus text format (`paros::metrics`) |
+//! | `/metrics` | `200`, every metric of the machine in the Prometheus text format (`paros::observe::metrics`) |
 //! | `/healthz` | `200`: the process is alive and answers |
 //! | `/readyz` | `200` once the machine is a cell member whose stores opened; `503` with its phase before |
 //!
@@ -18,7 +18,7 @@ use futures::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use moonpool_core::{
     CompioNetworkProvider, CompioTcpStream, LocalNetworkProvider, LocalTcpListener,
 };
-use paros::metrics::Metrics;
+use paros::observe::metrics::Metrics;
 use tokio_util::sync::CancellationToken;
 
 /// The longest request head read; a longer one is refused.
@@ -156,7 +156,7 @@ async fn answer(mut stream: CompioTcpStream, metrics: &Metrics) -> std::io::Resu
 
 #[cfg(test)]
 mod tests {
-    use paros::metrics::Metrics;
+    use paros::observe::metrics::Metrics;
 
     use super::route;
 

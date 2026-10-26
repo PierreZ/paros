@@ -263,7 +263,8 @@ pub fn summarize(reply: &wire::ViewReply) -> Summary {
             summary.available += 1;
         }
         if m.standing != "retired" {
-            let class = crate::tags::value_of(&m.tags, crate::tags::reserved::CLASS).unwrap_or("");
+            let class = crate::model::tags::value_of(&m.tags, crate::model::tags::reserved::CLASS)
+                .unwrap_or("");
             let slots = summary.slots.entry(class.to_string()).or_default();
             slots.0 += m.booked;
             slots.1 += m.capacity;

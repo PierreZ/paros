@@ -30,14 +30,15 @@ use crate::ParosProviders;
 use moonpool_core::RandomProvider;
 use paros_core::{ColocatedNode, JournalIdentifier, NodeId, Slot, TenantId};
 
-use crate::audit::Audit;
+use crate::observe::audit::Audit;
 use crate::storage::{LogStorage, StorageError};
 
 use super::boot::{check_format_marker, report_boot_state};
-use super::config::{BootKind, DriverTunables, RunError};
+use super::exit::{BootKind, RunError};
 use super::flight::{Flight, Flush, Input, Landing};
 use super::ready::{ClientWaiters, storage_fault_crash};
 use super::report::{Cadence, Deltas, draw_election_timeout};
+use crate::tunables::DriverTunables;
 
 /// The end of what a node's stores host beside its journals
 /// ([`JournalStores::host_on_edge`]): resolves once the hosted task ended,

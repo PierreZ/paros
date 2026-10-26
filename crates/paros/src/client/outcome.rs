@@ -8,7 +8,7 @@
 use moonpool_rpc::RpcError;
 use paros_core::{JournalView, ReconfigureRefusal};
 
-use crate::frontend::Denial;
+use crate::model::authz::Denial;
 use crate::rpc::FrontendVerdict;
 use crate::rpc::public::WriteOutcome as WireWriteOutcome;
 pub use crate::rpc::{MatchmakersRefusal, RetireRefusal};

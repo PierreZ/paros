@@ -29,7 +29,7 @@ use moonpool_core::CompioProviders;
 use moonpool_rpc::RpcHandle;
 use paros::client::load::{LoadOutcome, ask_all};
 use paros::client::views::{ViewOutcome, ask, request};
-use paros::view::Scope;
+use paros::model::view::Scope;
 use paros::wire::view::{self as wire, CellQuery, TenantQuery, UniverseQuery, view_request::Query};
 use paros::{Address, Names};
 use serde_json::{Value, json};
@@ -256,7 +256,7 @@ pub(crate) fn machine_state(m: &wire::MachineView) -> String {
 /// `parosctl machine …`.
 /// The value of the tag `key` (#575 (key:value tags)), or `-`.
 pub(crate) fn tag(tags: &[paros::wire::common::Tag], key: &str) -> String {
-    paros::tags::value_of(tags, key).map_or_else(|| "-".to_string(), str::to_string)
+    paros::model::tags::value_of(tags, key).map_or_else(|| "-".to_string(), str::to_string)
 }
 
 /// Every tag as `k:v`, comma-joined, or `-` (#575 (key:value tags)).
@@ -264,7 +264,8 @@ pub(crate) fn tags_text(tags: &[paros::wire::common::Tag]) -> String {
     if tags.is_empty() {
         "-".to_string()
     } else {
-        paros::tags::Tags::from_wire(tags.to_vec()).map_or_else(|_| "?".to_string(), |t| t.label())
+        paros::model::tags::Tags::from_wire(tags.to_vec())
+            .map_or_else(|_| "?".to_string(), |t| t.label())
     }
 }
 
@@ -272,7 +273,7 @@ pub(crate) fn tags_text(tags: &[paros::wire::common::Tag]) -> String {
 pub(crate) fn user_tags_text(tags: &[paros::wire::common::Tag]) -> String {
     let user: Vec<paros::wire::common::Tag> = tags
         .iter()
-        .filter(|t| !paros::tags::is_reserved(&t.key))
+        .filter(|t| !paros::model::tags::is_reserved(&t.key))
         .cloned()
         .collect();
     tags_text(&user)
@@ -280,8 +281,8 @@ pub(crate) fn user_tags_text(tags: &[paros::wire::common::Tag]) -> String {
 
 /// The selector `-l` gives, empty without one; else the command's end
 /// (#575 (key:value tags)).
-pub(crate) fn selector(text: Option<&str>) -> Result<paros::tags::Selector, Ending> {
-    text.map(str::parse::<paros::tags::Selector>)
+pub(crate) fn selector(text: Option<&str>) -> Result<paros::model::tags::Selector, Ending> {
+    text.map(str::parse::<paros::model::tags::Selector>)
         .transpose()
         .map(Option::unwrap_or_default)
         .map_err(|error| {
@@ -293,11 +294,11 @@ pub(crate) fn selector(text: Option<&str>) -> Result<paros::tags::Selector, Endi
 /// Whether `tags` (a view's) match `selector`. Tags a view cannot parse
 /// match no term.
 pub(crate) fn selected(
-    selector: &paros::tags::Selector,
+    selector: &paros::model::tags::Selector,
     tags: &[paros::wire::common::Tag],
 ) -> bool {
     selector.is_empty()
-        || paros::tags::Tags::from_wire(tags.to_vec())
+        || paros::model::tags::Tags::from_wire(tags.to_vec())
             .is_ok_and(|tags| selector.matches(&tags, None))
 }
 
@@ -342,11 +343,11 @@ pub async fn machine(asker: &Asker<'_>, out: &Printer, args: MachineArgs) -> End
                         "name:            {}\naddress:         {}\nclass:           {}\nslots:           {} booked of {}\nzone:            {}\nrack:            {}\ntags:            {}\nstanding:        {}\nstate:           {}\nfounding member: {}\ncell:            {}",
                         machine_names(&reply)[&m.node_id],
                         m.addr,
-                        tag(&m.tags, paros::tags::reserved::CLASS),
+                        tag(&m.tags, paros::model::tags::reserved::CLASS),
                         m.booked,
                         m.capacity,
-                        tag(&m.tags, paros::tags::reserved::ZONE),
-                        tag(&m.tags, paros::tags::reserved::RACK),
+                        tag(&m.tags, paros::model::tags::reserved::ZONE),
+                        tag(&m.tags, paros::model::tags::reserved::RACK),
                         user_tags_text(&m.tags),
                         m.standing,
                         machine_state(m),
@@ -397,9 +398,9 @@ async fn machine_list(
             [
                 machine_names(&reply)[&m.node_id].clone(),
                 m.addr.clone(),
-                tag(&m.tags, paros::tags::reserved::CLASS),
+                tag(&m.tags, paros::model::tags::reserved::CLASS),
                 format!("{}/{}", m.booked, m.capacity),
-                tag(&m.tags, paros::tags::reserved::ZONE),
+                tag(&m.tags, paros::model::tags::reserved::ZONE),
                 m.standing.clone(),
                 machine_state(m),
                 cpu,
@@ -563,7 +564,7 @@ pub async fn cell_list(asker: &Asker<'_>, out: &Printer, chosen: Option<&str>) -
         .map(|c| {
             [
                 text(&c.name),
-                tag(&c.tags, paros::tags::reserved::KIND),
+                tag(&c.tags, paros::model::tags::reserved::KIND),
                 c.state.clone(),
                 c.tenants.to_string(),
                 user_tags_text(&c.tags),
@@ -641,7 +642,8 @@ pub async fn cell_show(asker: &Asker<'_>, out: &Printer, cell: Option<&str>) -> 
     let mut standing: BTreeMap<&str, usize> = BTreeMap::new();
     for m in &reply.machines {
         if m.standing != "retired" {
-            let class = paros::tags::value_of(&m.tags, paros::tags::reserved::CLASS).unwrap_or("-");
+            let class = paros::model::tags::value_of(&m.tags, paros::model::tags::reserved::CLASS)
+                .unwrap_or("-");
             let entry = slots.entry(class).or_default();
             entry.0 += m.booked;
             entry.1 += m.capacity;
@@ -753,7 +755,7 @@ pub async fn tenant_show(asker: &Asker<'_>, out: &Printer, name: &str) -> Ending
         .map(|m| {
             [
                 names[&m.node_id].clone(),
-                tag(&m.tags, paros::tags::reserved::ZONE),
+                tag(&m.tags, paros::model::tags::reserved::ZONE),
                 machine_state(m),
                 footprint.get(&m.node_id).copied().unwrap_or(0).to_string(),
             ]

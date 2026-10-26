@@ -23,7 +23,7 @@ use super::{
     ReconfigureMatchmakersAck, RetireAck, RetireRequest, ScrubReply, ScrubRequest,
     SetJournalTagsAck, SetLeader, SetLeaderAck, Truncate, TruncateAck, Write, WriteAck,
 };
-use crate::name::JournalName;
+use crate::model::name::JournalName;
 use crate::{Address, Names};
 use paros_core::{JournalId, JournalIdentifier, TenantId};
 

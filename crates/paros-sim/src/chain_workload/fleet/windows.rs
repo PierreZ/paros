@@ -22,7 +22,7 @@ use moonpool_sim::{RandomProvider, SimContext, TimeProvider, assert_reachable, b
 use paros::NodeId;
 use paros::client::cell::CellSession;
 use paros::client::checkpoint::CheckpointPolicy;
-use paros::system::{BookingTarget, MaintenanceScope, NodeStanding};
+use paros::model::registry::{BookingTarget, MaintenanceScope, NodeStanding};
 
 use super::FleetOps;
 

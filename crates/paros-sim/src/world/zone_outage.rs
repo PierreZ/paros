@@ -3,7 +3,7 @@
 //! down at once for a few seconds through moonpool's own `crash_for`, while
 //! operators create tenants and journals and write to them. The founding
 //! members stand one per zone, and the tenant coordinator places each
-//! journal under the zone rule (`paros::placement`), so the cell's control
+//! journal under the zone rule (`paros::model::placement`), so the cell's control
 //! journals and every journal whose durability survives a failure must keep
 //! committing without that zone (`crate::chain_workload::fleet`).
 //!

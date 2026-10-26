@@ -46,10 +46,10 @@ use super::bootstrap::{self, InitOutcome};
 use super::cell::CellSession;
 use super::election::read_election;
 use super::fleet::{FleetRefusal, FleetSession, Interrupted, Stage, Step};
-use crate::fleet::RootKeyEntry;
 use crate::machine::ControlJournals;
-use crate::system::Registry;
-use crate::tenant::Durability;
+use crate::model::fleet::RootKeyEntry;
+use crate::model::registry::Registry;
+use crate::model::tenant::Durability;
 use crate::{Address, Names};
 
 /// What a whole `init` came to.
