@@ -231,7 +231,7 @@ impl Connector {
     /// frontend)), in the order the client indexes them: every call carries
     /// `pass`. A frontend never names a node, so the ids are ranks. Its
     /// observer is the actor's side of the deposed-actor oracle
-    /// (`chain_workload::deposed::ActorFence`): the frontend logs the calls.
+    /// (`workload::deposed::ActorFence`): the frontend logs the calls.
     pub(crate) fn through(
         &self,
         frontends: &[paros::model::address::Address],
@@ -256,7 +256,7 @@ impl Connector {
         paros::client::Client::new(&self.providers, servers, self.tunables)
             .with_shutdown(self.shutdown.clone())
             .with_observer(std::sync::Arc::new(
-                crate::chain_workload::deposed::ActorFence::new(self.client),
+                crate::workload::deposed::ActorFence::new(self.client),
             ))
     }
 }

@@ -135,7 +135,7 @@ pub(crate) struct AckedWrite {
 
 /// The hash a record is kept under (`user_command_hash` of its bytes).
 pub(crate) fn record_hash(record: &[u8]) -> u64 {
-    crate::chain::user_command_hash(record)
+    crate::workload::chain::user_command_hash(record)
 }
 
 impl JournalModel {

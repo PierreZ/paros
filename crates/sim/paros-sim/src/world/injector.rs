@@ -654,7 +654,7 @@ impl StorageWorld {
     /// Whether the custody ledger holds a decided slot a loss could leave
     /// bare: a member of its deciding configuration never held it and every
     /// copy is settled (see [`Self::short_of_a_member`]). The bare-quorum
-    /// scenario strikes on it (`super::bare_outage`).
+    /// scenario strikes on it (`super::scenarios::bare_outage`).
     pub(crate) fn holds_short_slot(&self, decided: &BTreeMap<u64, Vec<u64>>) -> bool {
         let live: Vec<(&String, &Custody)> = self
             .custody
@@ -669,7 +669,7 @@ impl StorageWorld {
             .any(|(slot, _)| Self::short_of_a_member(&live, *slot, decided))
     }
 
-    /// The split floor (#409, `super::split_floor`), if one shows: the
+    /// The split floor (#409, `super::scenarios::split_floor`), if one shows: the
     /// acceptors whose floor is the highest (the ahead ones), and the
     /// lowest decided slot below it that an acceptor behind them still
     /// holds, at or above every behind acceptor's floor. Settled or not.
@@ -695,7 +695,7 @@ impl StorageWorld {
         Some((ahead, slot))
     }
 
-    /// Plan the split-floor outage's loss (#409, `super::split_floor`):
+    /// Plan the split-floor outage's loss (#409, `super::scenarios::split_floor`):
     /// at the split floor ([`Self::split_floor`]), lose every copy of the
     /// slot the acceptors behind it hold. The slot is chosen and truncated
     /// on the ahead acceptors, so nothing is lost: a leader blocked on it

@@ -9,7 +9,7 @@ use moonpool_sim::{
 
 use super::Down;
 use super::RoleRig;
-use super::acceptor::OperatorEdit;
+use super::node::OperatorEdit;
 use super::arm_role;
 use super::stay_down;
 use crate::audit::{AuditWorld, NodeAudit, audit_world_for};
@@ -309,7 +309,7 @@ pub(super) async fn run_matchmaker_role(
 /// freeze, so a handover can leave a set of two, and the loss of either
 /// member would leave a set no node can ever reach.
 fn spared(state: &moonpool_sim::StateHandle, id: MatchmakerId) -> bool {
-    let spared = crate::world::thin_sets::thin_sets(state).spares(id.0);
+    let spared = crate::world::scenarios::thin_sets::thin_sets(state).spares(id.0);
     if !spared {
         assert_reachable!("matchmaker: a thin set holds a matchmaker loss back");
     }

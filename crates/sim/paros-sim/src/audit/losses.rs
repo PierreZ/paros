@@ -757,7 +757,7 @@ impl AuditState {
     /// latest campaign asked, durably truncated past `slot`: it serves its
     /// trim point (`Message::TrimmedTo`) to any node that asks below it, so
     /// no copy of the slot is needed again (#409 (repair probe blocked below
-    /// a trim point), the split-floor outage, `crate::world::split_floor`).
+    /// a trim point), the split-floor outage, `crate::world::scenarios::split_floor`).
     /// A replica serves no catch-up.
     fn trimmed_past(&self, slot: u64, down: &BTreeSet<u64>) -> bool {
         let asked = self.asked_configurations();

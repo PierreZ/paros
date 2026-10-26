@@ -56,7 +56,7 @@ use paros::core::JournalIdentifier;
 use moonpool_sim::{HintVeto, OutageVeto, StateHandle, assert_always, assert_reachable};
 
 use super::StorageWorld;
-use super::thin_sets::ThinSets;
+use super::scenarios::thin_sets::ThinSets;
 
 /// The [`StateHandle`] key of the run's [`Commits`].
 const COMMITS_KEY: &str = "paros-commits-in-flight";

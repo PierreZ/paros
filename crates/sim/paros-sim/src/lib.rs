@@ -20,8 +20,6 @@
 //! [`Process`]: moonpool_sim::Process
 
 mod audit;
-mod chain;
-mod chain_workload;
 mod client;
 mod frontend;
 mod lifecycle;
@@ -31,6 +29,7 @@ mod roles;
 mod shape;
 mod state;
 mod tls;
+mod workload;
 mod world;
 
 pub use moonpool_sim::{AssertKind, AssertionStats, SimulationReport};
@@ -45,7 +44,7 @@ use moonpool_sim::{
     StorageFault, StorageFaultMask, WipeHeal, WorkloadCount,
 };
 
-use crate::chain_workload::ChainWorkload;
+use crate::workload::ChainWorkload;
 use crate::lifecycle::ScriptedLifecycle;
 use crate::machine::MachineProcess;
 use crate::process::{JoinerProcess, MatchmakerProcess, NodeProcess, ProxyProcess, ReplicaProcess};
@@ -154,7 +153,7 @@ pub(crate) const JOINER_POOL_RANGE: std::ops::RangeInclusive<usize> = 0..=2;
 /// (`crate::shape::machine_layout`). One is the one-founder cell; two is a
 /// cell whose majority is both founders, or a founder and a waiting machine;
 /// three a cell that keeps a quorum through one founder's loss (#213 (three
-/// founding members), `crate::world::downed_founder`); four leaves room for
+/// founding members), `crate::world::scenarios::downed_founder`); four leaves room for
 /// admitted storage machines a journal moves between (#474 (journals on
 /// admitted machines)).
 pub(crate) const MACHINE_POOL_RANGE: std::ops::RangeInclusive<usize> = 1..=4;
@@ -237,7 +236,7 @@ pub(crate) fn in_chaos() -> bool {
 
 /// Whether `now` is at least `after` past the chaos cutoff; false while
 /// chaos lasts. A scenario that may strike a bounded time into the quiet
-/// tail (`world::late_outage::LATE_WINDOW`) times itself with it.
+/// tail (`world::scenarios::late_outage::LATE_WINDOW`) times itself with it.
 pub(crate) fn past_cutoff(now: Duration, after: Duration) -> bool {
     moonpool_sim::chaos_ended_at().is_some_and(|at| now >= at + after)
 }
@@ -458,20 +457,20 @@ fn chain_builder(digest: Option<DigestSink>) -> SimulationBuilder {
         .enable_chaos(chaos_surfaces())
         .fault_factory(|| Box::new(ScriptedLifecycle))
         .fault_factory(|| Box::new(crate::world::outage::OutageLosses))
-        .fault_factory(|| Box::new(crate::world::late_outage::LateOutage))
-        .fault_factory(|| Box::new(crate::world::bare_outage::BareOutage))
-        .fault_factory(|| Box::new(crate::world::wiped_founder::WipedFounder))
-        .fault_factory(|| Box::new(crate::world::silent_machine::SilentMachine))
-        .fault_factory(|| Box::new(crate::world::gone_machine::GoneMachine))
-        .fault_factory(|| Box::new(crate::world::slow_machine::SlowMachine))
-        .fault_factory(|| Box::new(crate::world::disk_full::DiskFull))
-        .fault_factory(|| Box::new(crate::world::downed_founder::DownedFounder))
-        .fault_factory(|| Box::new(crate::world::zone_outage::ZoneOutage))
-        .fault_factory(|| Box::new(crate::world::moved_founder::MovedFounder))
-        .fault_factory(|| Box::new(crate::world::replaced_founder::ReplacedFounder))
-        .fault_factory(|| Box::new(crate::world::lagging_acceptor::LaggingAcceptor))
-        .fault_factory(|| Box::new(crate::world::split_floor::SplitFloor))
-        .fault_factory(|| Box::new(crate::world::lagging_replica::LaggingReplica))
+        .fault_factory(|| Box::new(crate::world::scenarios::late_outage::LateOutage))
+        .fault_factory(|| Box::new(crate::world::scenarios::bare_outage::BareOutage))
+        .fault_factory(|| Box::new(crate::world::scenarios::wiped_founder::WipedFounder))
+        .fault_factory(|| Box::new(crate::world::scenarios::silent_machine::SilentMachine))
+        .fault_factory(|| Box::new(crate::world::scenarios::gone_machine::GoneMachine))
+        .fault_factory(|| Box::new(crate::world::scenarios::slow_machine::SlowMachine))
+        .fault_factory(|| Box::new(crate::world::scenarios::disk_full::DiskFull))
+        .fault_factory(|| Box::new(crate::world::scenarios::downed_founder::DownedFounder))
+        .fault_factory(|| Box::new(crate::world::scenarios::zone_outage::ZoneOutage))
+        .fault_factory(|| Box::new(crate::world::scenarios::moved_founder::MovedFounder))
+        .fault_factory(|| Box::new(crate::world::scenarios::replaced_founder::ReplacedFounder))
+        .fault_factory(|| Box::new(crate::world::scenarios::lagging_acceptor::LaggingAcceptor))
+        .fault_factory(|| Box::new(crate::world::scenarios::split_floor::SplitFloor))
+        .fault_factory(|| Box::new(crate::world::scenarios::lagging_replica::LaggingReplica))
         .chaos_duration(CHAOS_CAP)
         .chaos_until_run_ends()
         .swarm_operations()

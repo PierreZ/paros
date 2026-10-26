@@ -1127,7 +1127,7 @@ pub(crate) fn withhold_gc(state: &StateHandle) -> bool {
 /// and a correlated outage that lands loses the most recent slot most of
 /// the successor never held down to one clean copy on a member the
 /// rotation superseded, that member back last (`crate::world::outage`,
-/// `crate::world::late_outage`): the newest configuration alone would
+/// `crate::world::scenarios::late_outage`): the newest configuration alone would
 /// then decide the slot with a no-op, so only the cross-configuration
 /// Phase 1 keeps it (#267). Each ingredient keeps its own coin on the
 /// other seeds. Its fired gate sits where the outage's loss takes the
@@ -1168,7 +1168,7 @@ pub(crate) fn reused_name(state: &StateHandle) -> bool {
 /// outage landing while that member still lacks it, and every copy lost:
 /// three coins whose product fired the gate on 3 of 2,094 checks (1,000
 /// hunt seeds; 0 on `main`); with the scenario, 42 of 2,898 (1,400). On
-/// a scenario seed, `crate::world::bare_outage` strikes the moment the
+/// a scenario seed, `crate::world::scenarios::bare_outage` strikes the moment the
 /// custody ledger holds such a slot and plans the bare loss on it, so the
 /// Phase-1 tally reads `faulty, faulty, none` and the no-op fill must be
 /// refused. Each ingredient keeps its own coin on the other seeds.
@@ -1262,8 +1262,8 @@ pub(crate) fn lagging_fold(state: &StateHandle) -> bool {
 /// so the product almost never lines up: 2 wipes during `init` in 500 hunt
 /// seeds without the scenario; 37 with it.
 /// On a scenario
-/// seed, client 0 runs `init` first (`crate::chain_workload`), and
-/// `crate::world::wiped_founder` wipes a founder through moonpool's
+/// seed, client 0 runs `init` first (`crate::workload`), and
+/// `crate::world::scenarios::wiped_founder` wipes a founder through moonpool's
 /// `CrashAndWipe` at one of two moments: once every founder promised and
 /// none voted, or once a founder voted and another did not. The founders
 /// that kept their disks choose the plan while they are a majority; else
@@ -1285,7 +1285,7 @@ pub(crate) fn wiped_founder(state: &StateHandle) -> bool {
 /// cache followed the move, and the machine restarted: the machines'
 /// attrition and the rename knob lined that up 0 times in 300 hunt seeds.
 /// On a scenario seed the machines advertise names, and
-/// `crate::world::moved_founder` crashes a founding member that comes back
+/// `crate::world::scenarios::moved_founder` crashes a founding member that comes back
 /// under a new name, then a machine
 /// whose cache names the founder's new name. Rare-but-valid: a machine that
 /// comes back under a new name is (#349).
@@ -1308,10 +1308,10 @@ pub(crate) fn moved_founder(state: &StateHandle) -> bool {
 /// replaced it, and an operator that knows the cell runs `init` again: a
 /// 2,000-seed hunt never lined the three up. On a scenario seed the layout
 /// lists three founders or more where the machines allow it
-/// ([`machine_layout`]), client 0 runs `init` first (`crate::chain_workload`),
-/// `crate::world::replaced_founder` wipes a founder once every founder
+/// ([`machine_layout`]), client 0 runs `init` first (`crate::workload`),
+/// `crate::world::scenarios::replaced_founder` wipes a founder once every founder
 /// formed, and client 0 admits the replacement, then runs `init` again
-/// (`crate::chain_workload::fleet`). Each ingredient keeps its own coin on
+/// (`crate::workload::fleet`). Each ingredient keeps its own coin on
 /// the other seeds. Rates in 600 hunt seeds (#446 (a gate that never fires
 /// cannot fail the sweep), three hunts): the cell forms over the replacing
 /// machine 48 to 62 times, client 0 runs `init` again 6 to 8 times, and
@@ -1340,7 +1340,7 @@ pub(crate) fn replaced_founder(state: &StateHandle) -> bool {
 /// scenario seed the layout lists three founders or more where the
 /// machines allow it ([`machine_layout`]), client 0 runs `init` first and
 /// every client creates tenants as often as the weight family allows
-/// (`crate::chain_workload`), and `crate::world::downed_founder` holds one
+/// (`crate::workload`), and `crate::world::scenarios::downed_founder` holds one
 /// founder down for 6–10 s, during `init` or once the cell formed.
 /// Each ingredient keeps its own coin on the other seeds. Rare-but-valid: a
 /// founder down for a few seconds is.
@@ -1376,7 +1376,7 @@ pub(crate) fn downed_founder(state: &StateHandle) -> bool {
 /// founding members where the machines allow it, machine `r` stands in
 /// zone `zone-<r % 3>` ([`machine_layout`]), client 0 runs `init` first and
 /// every client creates tenants and journals as often as the weight family
-/// allows (`crate::chain_workload`), and `crate::world::zone_outage` takes
+/// allows (`crate::workload`), and `crate::world::scenarios::zone_outage` takes
 /// every machine of one zone down for 10–16 s (6–10 s in the tail) once the cell formed. Each
 /// ingredient keeps its own coin on the other seeds. Rare-but-valid: a
 /// zone outage is the failure the zone rule exists for.
@@ -1410,7 +1410,7 @@ pub(crate) fn zone_outage(state: &StateHandle) -> bool {
 /// as often as the weight family allows, and an `ADMIT` drains an admitted
 /// machine that holds a journal's slot another storage machine could take,
 /// one at a time, at an `ADMIT` or right after a create, with every client
-/// at the steps knob's top (`crate::chain_workload`). Draining at `ADMIT`
+/// at the steps knob's top (`crate::workload`). Draining at `ADMIT`
 /// alone, 8 moves finished in 800 hunt seeds: most drains came before any
 /// journal. With the drain after a create, 11 finished in 400. Four move
 /// gates stay in `gates::RARE` until #498 (moves in the sweep). Every
@@ -1441,7 +1441,7 @@ pub(crate) fn drained_machine(state: &StateHandle) -> bool {
 /// picks the machine as it would pick one to drain, one that holds a
 /// journal's slot another storage machine could take, and, on a coin,
 /// opens a maintenance window over it or its zone first (#359); then
-/// `crate::world::gone_machine` crashes it for longer than every
+/// `crate::world::scenarios::gone_machine` crashes it for longer than every
 /// `machine_replace_after` the knob draws. The cell coordinator must mark
 /// it down, then re-place its roles once the bound and any window passed.
 /// A machine down past the bound needs a journal on an admitted machine
@@ -1471,7 +1471,7 @@ pub(crate) fn gone_machine(state: &StateHandle) -> bool {
 /// allow it ([`machine_layout`]), client 0 runs `init` first, every client
 /// runs `TENANT` and `CREATE_JOURNAL` as often as the weight family allows
 /// at the steps knob's top, and half the journal creates are configures
-/// (`crate::chain_workload`). Each ingredient keeps its own coin on the
+/// (`crate::workload`). Each ingredient keeps its own coin on the
 /// other seeds. Rare-but-valid: an operator may configure at any time.
 #[tracing::instrument(level = "debug", skip_all)]
 pub(crate) fn changed_mode(state: &StateHandle) -> bool {
@@ -1494,7 +1494,7 @@ pub(crate) fn changed_mode(state: &StateHandle) -> bool {
 /// seed the layout lists three founders or more where the machines allow it
 /// ([`machine_layout`]), client 0 runs `init` first, every client runs
 /// `TENANT` and `CREATE_JOURNAL` as often as the weight family allows at the
-/// steps knob's top (`crate::chain_workload`), and `crate::world::cold_rot`
+/// steps knob's top (`crate::workload`), and `crate::world::scenarios::cold_rot`
 /// rots one cold record of a created journal on one machine, at most once
 /// per journal. Rare-but-valid: a disk loses bits at rest.
 #[tracing::instrument(level = "debug", skip_all)]
@@ -1527,7 +1527,7 @@ pub(crate) fn cold_rot(state: &StateHandle) -> bool {
 /// keeps a machine only on a layout of four.
 /// A second cell needs a `storage` machine `init` does not list, still idle
 /// when an operator forms the cell on it, and `TENANT` steps after that for
-/// its later phases (`crate::chain_workload::fleet::second_cell`). Each
+/// its later phases (`crate::workload::fleet::second_cell`). Each
 /// is a coin on its own, and `ADMIT` takes the idle machines first: no
 /// second cell formed in 400 hunt seeds without the scenario. On a
 /// scenario seed the layout leaves the last machine unlisted and `storage`,
@@ -1572,7 +1572,7 @@ pub(crate) fn batchers(state: &StateHandle) -> bool {
 /// configure in a tenant names its default with two or three batchers, a
 /// created journal takes the data plane, a multi-writer one a burst
 /// through the batchers, and an operator drains a batcher's machine once
-/// per run in the chaos window (`crate::chain_workload`). In 600
+/// per run in the chaos window (`crate::workload`). In 600
 /// single-seed hunts before and after: a tenant's batchers booked on 3 and
 /// 30 seeds, a batcher's machine drained on 0 and 23, a batcher lane that
 /// held several writes on 0 and 18.
@@ -1605,7 +1605,7 @@ pub(crate) fn batchers_among(state: &StateHandle, machines: usize) -> bool {
 /// a machine of a formed cell to die during the run and stay down longer
 /// than a usual reboot, which the machines' attrition almost never lines up
 /// (1 machine marked down, and none back up, in 1,000 hunt seeds without
-/// the scenario). On a scenario seed `crate::world::silent_machine` crashes
+/// the scenario). On a scenario seed `crate::world::scenarios::silent_machine` crashes
 /// one machine of the cell once it formed, and holds it down past every
 /// `machine_down_after` the knob draws. Rare-but-valid: a machine down for
 /// a few seconds is.
@@ -1626,9 +1626,9 @@ pub(crate) fn silent_machine(state: &StateHandle) -> bool {
 /// a slow machine is idle: in 2,000 hunt seeds without the scenario, the
 /// disk and the CPU gates fired on 0 of 3,354 checks each; with it, on
 /// 1,761 and 162 of 24,635. On a scenario seed client 0 runs `init`
-/// first (`crate::chain_workload`), every machine samples at the 1 s floor
+/// first (`crate::workload`), every machine samples at the 1 s floor
 /// of `load_interval` ([`boot`]), the clients ask `LOAD` as often as its
-/// weight family allows, and `crate::world::slow_machine` slows a founding
+/// weight family allows, and `crate::world::scenarios::slow_machine` slows a founding
 /// member of the formed cell for a few seconds. Each ingredient keeps its
 /// own coin on the other seeds. Rare-but-valid: a slow machine is.
 #[tracing::instrument(level = "debug", skip_all)]
@@ -1659,7 +1659,7 @@ const _: () = assert!(120_000 <= crate::CHAOS_CAP.as_millis());
 /// once per seed, its own BUGGIFY location. Metrics are observation only,
 /// so a run without them must pass the same oracles as a run with them;
 /// on a metered run the counters must match the audit's own fold of the
-/// calls (`crate::chain_workload`'s check).
+/// calls (`crate::workload`'s check).
 #[tracing::instrument(level = "debug", skip_all)]
 pub(crate) fn unmetered(state: &StateHandle) -> bool {
     let registry = registry(state);
@@ -1697,7 +1697,7 @@ pub(crate) fn untagged(state: &StateHandle) -> bool {
 /// `TENANT` and `CREATE_JOURNAL` as often as the weight family allows at
 /// the steps knob's top, a batched create names the default mode (one
 /// failure) on seven draws in eight, and each create first appends to
-/// journals the client created before (`crate::chain_workload`). The
+/// journals the client created before (`crate::workload`). The
 /// machines' attrition kills a machine only inside a batched commit with a
 /// copy to spare (`crate::world::cut`), so the cell lives to create and
 /// append, and the kills it asks for land where the scenario needs them.
@@ -1755,7 +1755,7 @@ pub(crate) fn racing_floor(state: &StateHandle) -> bool {
 /// Whether the run draws the **disk-full scenario** (#360 (disk full)):
 /// drawn once per seed, its own BUGGIFY location. The machines' and the
 /// acceptors' disks fill and grow back during the chaos window
-/// (`crate::world::disk_full`), so a store meets `ENOSPC`, goes read-only
+/// (`crate::world::scenarios::disk_full`), so a store meets `ENOSPC`, goes read-only
 /// and comes back, and the cell coordinator marks a machine low on space.
 /// No other ingredient: the workload's own writes fill the room a strike
 /// leaves.
@@ -2004,7 +2004,7 @@ pub(crate) fn slow_link(state: &StateHandle) -> bool {
 /// its peers' floors: a node down while the others truncate past what it
 /// holds. The journal truncates little in the chaos window and the
 /// attrition brings a node back fast: the mutation hunt's 300 seeds met 4
-/// jumps. On a scenario seed `crate::world::lagging_acceptor` holds one
+/// jumps. On a scenario seed `crate::world::scenarios::lagging_acceptor` holds one
 /// acceptor down until a peer's floor passes its chosen prefix, and every
 /// client compacts at every truncation step (`ChainWorkload`): 7 jumps in
 /// the same 300 seeds (35 scenario seeds). The node comes back below the
@@ -2030,7 +2030,7 @@ pub(crate) fn lagging_acceptor(state: &StateHandle) -> bool {
 /// acceptor's floor passed a slot its peers still hold, every peer's copy
 /// of that slot is lost, and the ahead acceptor is out of the winning
 /// quorum: 0 such jumps in 900 hunt seeds without it. On a scenario seed
-/// `crate::world::split_floor` strikes the outage at that split and holds
+/// `crate::world::scenarios::split_floor` strikes the outage at that split and holds
 /// the ahead acceptor down last, and every client compacts at every
 /// truncation step (`ChainWorkload`). Each ingredient keeps its own coin on
 /// the other seeds. Rare-but-valid: a correlated outage is, and so is a
@@ -2059,7 +2059,7 @@ pub(crate) fn split_floor(state: &StateHandle) -> bool {
 /// that ends a page: a replica rebooted behind the cell, with a small apply
 /// page. Attrition brings a replica back fast and the apply page is small on
 /// few seeds: 1 red in 1,000 hunt seeds, with a local amplification. On a
-/// scenario seed `crate::world::lagging_replica` holds one replica down
+/// scenario seed `crate::world::scenarios::lagging_replica` holds one replica down
 /// until the cell decided `lagging_replica::AHEAD` slots past its prefix,
 /// and every replica walks a small apply page ([`replica_apply_page`]).
 /// Each ingredient keeps its own coin on the other seeds. Rare-but-valid: a
@@ -2109,8 +2109,8 @@ pub(crate) const PERSIST_BLOCKS_FLOOR: u32 = 2;
 // block of slack for the encoding and the entry header.
 const _: () = assert!(
     (ENTRY_BLOCKS_FLOOR as u64 - 1) * paros::storage::journal::BLOCK as u64
-        >= crate::chain_workload::MAX_BATCH_RECORDS
-            * crate::chain_workload::MAX_LARGE_COMMAND_BYTES as u64
+        >= crate::workload::MAX_BATCH_RECORDS
+            * crate::workload::MAX_LARGE_COMMAND_BYTES as u64
 );
 const _: () = assert!(PERSIST_BLOCKS_FLOOR >= 1);
 
@@ -2213,7 +2213,7 @@ pub(crate) fn founder_ranks(state: &StateHandle, pool: usize) -> Vec<u64> {
 /// of a system append on a seed without system journals. The rarest fleet
 /// gate ("a tenant removal resumed after a crash") is bounded by the
 /// `TENANT` weight, the name alphabet and the removal's own crash location
-/// in `chain_workload/fleet.rs`, not by this draw.
+/// in `workload/fleet.rs`, not by this draw.
 #[tracing::instrument(level = "debug", skip(state))]
 pub(crate) fn system_journals(state: &StateHandle) -> bool {
     let lagging = lagging_fold(state);

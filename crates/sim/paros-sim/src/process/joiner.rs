@@ -4,8 +4,8 @@ use async_trait::async_trait;
 use moonpool_sim::{Process, SimContext, SimulationError, SimulationResult, assert_always};
 
 use super::RoleRig;
-use super::acceptor::Seat;
-use super::acceptor::system_plan;
+use super::node::Seat;
+use super::node::system_plan;
 use super::arm_role;
 use super::dispatch;
 use super::ranked;

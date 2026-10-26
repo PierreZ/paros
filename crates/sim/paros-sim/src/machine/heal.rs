@@ -16,8 +16,8 @@
 //! A founding member never heals: the cell tenant's own matchmaker set
 //! never moves off the founders (`paros::machine::sets`), and no booking
 //! records that. So at most one founder is wiped per run, by the attrition
-//! or by a scenario (`crate::world::wiped_founder`,
-//! `crate::world::replaced_founder`), whose scripted wipes count in the
+//! or by a scenario (`crate::world::scenarios::wiped_founder`,
+//! `crate::world::scenarios::replaced_founder`), whose scripted wipes count in the
 //! same ledger.
 
 use std::collections::BTreeMap;

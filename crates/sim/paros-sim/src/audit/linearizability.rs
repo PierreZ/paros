@@ -90,7 +90,7 @@ use paros::core::JournalView;
 use paros::core::LeaderUuid;
 use paros::core::WriterMode;
 
-use crate::chain::splitmix;
+use crate::workload::chain::splitmix;
 
 /// The records a page carries at most, whatever the limit asked: the
 /// largest `max_read_records` a node draws (`paros::roles::node::MAX_READ_RECORDS`,

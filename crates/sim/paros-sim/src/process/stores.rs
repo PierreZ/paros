@@ -6,7 +6,7 @@ use moonpool_sim::SimStorageProvider;
 use moonpool_sim::{SimContext, SimTimeProvider, assert_always, assert_reachable};
 
 use super::Down;
-use super::acceptor::Seat;
+use super::node::Seat;
 use super::stay_down;
 use crate::audit::{NodeAudit, audit_world_for};
 use crate::world::node_store::LedgeredJournal;

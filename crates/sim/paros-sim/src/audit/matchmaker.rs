@@ -291,7 +291,7 @@ pub(super) struct MatchmakerAudit {
     /// proposes or a matchmaker activates is recorded, so the
     /// matchmaker-loss budget never takes a member of a set that cannot
     /// spare it.
-    pub(super) thin: crate::world::thin_sets::ThinSets,
+    pub(super) thin: crate::world::scenarios::thin_sets::ThinSets,
     /// Refusals folded, by kind (diagnostics only).
     refusal_counts: BTreeMap<&'static str, u64>,
     /// Per node: handovers started, abandoned, and the last step folded

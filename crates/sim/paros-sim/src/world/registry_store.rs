@@ -71,7 +71,7 @@ pub(crate) struct LedgeredRegistry {
     cut_budget: Option<usize>,
     /// The run's thin matchmaker sets and this matchmaker's id: a cut never
     /// takes a member of a set that cannot spare it (#496).
-    thin: (super::thin_sets::ThinSets, u64),
+    thin: (super::scenarios::thin_sets::ThinSets, u64),
 }
 
 impl LedgeredRegistry {
@@ -90,7 +90,7 @@ impl LedgeredRegistry {
         cut_budget: Option<usize>,
         matchmaker: u64,
     ) -> Self {
-        let thin = (super::thin_sets::thin_sets(&state), matchmaker);
+        let thin = (super::scenarios::thin_sets::thin_sets(&state), matchmaker);
         Self {
             inner: JournalMatchmakerStorage::new(
                 provider,

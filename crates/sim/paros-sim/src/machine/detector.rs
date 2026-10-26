@@ -11,7 +11,7 @@
 //! `MachineDown` follows an `Identify` that got no answer: when the whole
 //! span of that ask lies in the quiet tail, the machine listened throughout
 //! and no machine was slow, nothing excuses the silence. The final fleet
-//! check judges the end state too (`chain_workload::fleet::live`).
+//! check judges the end state too (`workload::fleet::live`).
 //!
 //! A `MachineDown` is judged [`NOTED`] after it was sent, never as it is
 //! sent: the board notes a kill when the killed task drops, a scheduler

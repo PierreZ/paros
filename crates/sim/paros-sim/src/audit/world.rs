@@ -114,7 +114,7 @@ fn published_world(
                         super::matchmaker::TenantStops::default,
                     ))
                     .clone();
-                    state.matchmaker.thin = crate::world::thin_sets::thin_sets(state_handle);
+                    state.matchmaker.thin = crate::world::scenarios::thin_sets::thin_sets(state_handle);
                     state.matchmaker.bootstrapped = (*crate::state::published_arc(
                         state_handle,
                         &crate::state::journal_key(
@@ -567,7 +567,7 @@ impl AuditWorld {
     /// Whether a leadership won under a configuration that removed a member
     /// of the bootstrap one (#263, #278): the removal took effect, the
     /// departed straggler's first half, what the late outage waits for
-    /// (`crate::world::late_outage`). A configuration merely registered at
+    /// (`crate::world::scenarios::late_outage`). A configuration merely registered at
     /// one matchmaker does not count: the outage once struck 3 ms after a
     /// lone registration, mid-reconfiguration, outside the scenario the
     /// budget describes.
@@ -578,7 +578,7 @@ impl AuditWorld {
     /// Whether a peer's durable floor passed `node`'s chosen prefix (#340):
     /// `node` holds nothing a peer still serves, so its next catch-up meets
     /// a trim point. The lagging-acceptor scenario holds `node` down until
-    /// then (`crate::world::lagging_acceptor`).
+    /// then (`crate::world::scenarios::lagging_acceptor`).
     pub(crate) fn floor_passed(&self, node: u64) -> bool {
         let st = self.lock();
         let held = st.decided_prefix.get(&node).copied().unwrap_or(0);
@@ -594,7 +594,7 @@ impl AuditWorld {
     /// `replica`'s chosen prefix (#550 (replica serves an unreported fold
     /// page)): the replica's next catch-up is a backlog its apply walk
     /// pages through. The lagging-replica scenario holds the replica down
-    /// until then (`crate::world::lagging_replica`).
+    /// until then (`crate::world::scenarios::lagging_replica`).
     pub(crate) fn cell_ahead_of(&self, replica: u64, slots: u64) -> bool {
         let st = self.lock();
         let held = st.decided_prefix.get(&replica).copied().unwrap_or(0);

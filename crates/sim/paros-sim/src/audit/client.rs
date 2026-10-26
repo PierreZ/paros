@@ -65,7 +65,7 @@ impl ClientHistory {
         self.client = client;
     }
 
-    /// Hand over the attempts the RPC seam logged (`chain_workload`'s
+    /// Hand over the attempts the RPC seam logged (`workload`'s
     /// `CallLog`).
     pub(crate) fn set_attempts(&mut self, attempts: Vec<Attempt>) {
         self.attempts = attempts;

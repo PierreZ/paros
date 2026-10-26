@@ -654,7 +654,7 @@ pub(crate) fn process_ip(state: &StateHandle, addr: &Address) -> Option<String> 
 }
 
 /// The founding member the wiped-founder scenario wipes now
-/// (`crate::world::wiped_founder`), if the run is at its moment: an operator
+/// (`crate::world::scenarios::wiped_founder`), if the run is at its moment: an operator
 /// sent `init`, and either every founder promised and none voted
 /// (`after_vote` false: a founder other than `cell init`'s receiver), or a
 /// founder voted and another did not (`after_vote` true: that one). Only a
@@ -703,7 +703,7 @@ pub(crate) fn wipe_target(
 }
 
 /// The founding member the replaced-founder scenario wipes now
-/// (`crate::world::replaced_founder`, #423), if the run is at its moment:
+/// (`crate::world::scenarios::replaced_founder`, #423), if the run is at its moment:
 /// every founder of a cell of three or more formed and up, every renamed
 /// founder registered at its new name, and no machine was wiped yet. The highest-ranked founder, so the cell keeps a majority
 /// of its members. The answer is the founder's process IP, what the wipe
@@ -783,7 +783,7 @@ pub(crate) fn replacement(state: &StateHandle) -> Option<Replacement> {
 }
 
 /// The founding member the moved-founder scenario crashes first
-/// (`crate::world::moved_founder`, #211), once every founding member formed:
+/// (`crate::world::scenarios::moved_founder`, #211), once every founding member formed:
 /// a live one `may_rename` lets come back under a new name, once another
 /// machine of the cell cached the registry. Its next reboot is a rename.
 /// `None` before that, or when none may.
@@ -847,7 +847,7 @@ pub(crate) fn cached_mover(state: &StateHandle, dead: impl Fn(&str) -> bool) -> 
 }
 
 /// The machine the silent-machine scenario crashes now
-/// (`crate::world::silent_machine`), once the cell formed: a live machine
+/// (`crate::world::scenarios::silent_machine`), once the cell formed: a live machine
 /// the cell admitted, else, on a cell of at least three founding members
 /// that all formed and are up, a founder (the others keep a majority and
 /// one of them leads), unless the downed-founder scenario takes one down (#213 (three
@@ -890,7 +890,7 @@ pub(crate) fn silent_target(state: &StateHandle, dead: impl Fn(&str) -> bool) ->
 }
 
 /// The founding member the downed-founder scenario holds down now
-/// (`crate::world::downed_founder`, #213 (three founding members)): on a
+/// (`crate::world::scenarios::downed_founder`, #213 (three founding members)): on a
 /// cell of at least three founders, none wiped and every one alive, the
 /// highest-ranked founder, once an operator sent `init`. With `formed`, only
 /// once every founder formed; else only while the cell is not formed yet.
@@ -945,7 +945,7 @@ pub(crate) fn founder_down_through(state: &StateHandle, from: Duration, until: D
 }
 
 /// The machines the zone-outage scenario takes down now
-/// (`crate::world::zone_outage`, #215 (zones)): every live machine in
+/// (`crate::world::scenarios::zone_outage`, #215 (zones)): every live machine in
 /// `zone`, once an operator sent `init`, on a cell of three founding
 /// members or more, none wiped, every one alive and formed. The founders
 /// stand one per zone on a scenario seed, so the others keep a majority.
@@ -1023,7 +1023,7 @@ pub(crate) fn zone_down_through(state: &StateHandle, from: Duration, until: Dura
 }
 
 /// The machine the slow-machine scenario slows now
-/// (`crate::world::slow_machine`, #424 (busyness metrics)), once the cell
+/// (`crate::world::scenarios::slow_machine`, #424 (busyness metrics)), once the cell
 /// formed: the first live founding member that formed. It hosts the cell's
 /// journals, so it has real disk and CPU work to be slow at. `None` before
 /// that.
@@ -1474,7 +1474,7 @@ fn machine_audits(
                     .with_tenants(crate::audit::tenants::tenant_board(&state))
                     .on_registry(registry.clone(), plane)
                     .with_calls(Arc::new(
-                        crate::chain_workload::system::Announce::of_machine(
+                        crate::workload::system::Announce::of_machine(
                             &state,
                             time.clone(),
                             MACHINE_CLIENT_BASE + rank as u64,
@@ -1554,7 +1554,7 @@ async fn run_machine_role(
         ctx.task()
             .spawn_task(
                 "paros-cold-rot",
-                crate::world::cold_rot::run(
+                crate::world::scenarios::cold_rot::run(
                     ctx.storage().clone(),
                     ctx.time().clone(),
                     ctx.state().clone(),

@@ -534,7 +534,7 @@ async fn run_frontend_role(
     let audit = FrontendAudit {
         state: ctx.state().clone(),
         calls: Arc::new(
-            crate::chain_workload::system::Announce::of_machine(
+            crate::workload::system::Announce::of_machine(
                 ctx.state(),
                 ctx.time().clone(),
                 FRONTEND_CLIENT_BASE + rank as u64,
@@ -564,7 +564,7 @@ const FRONTEND_CLIENT_BASE: u64 = 1 << 33;
 #[derive(Clone)]
 struct FrontendAudit {
     state: StateHandle,
-    calls: Arc<crate::chain_workload::system::Announce>,
+    calls: Arc<crate::workload::system::Announce>,
 }
 
 impl Audit for FrontendAudit {
