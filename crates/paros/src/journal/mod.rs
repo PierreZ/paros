@@ -87,8 +87,8 @@ pub use matchmaker::JournalMatchmakerStorage;
 pub use moonpool_core::LayoutRegion;
 pub use moonpool_journal::{BLOCK, Durability, Geometry, Layout};
 pub use node::{CHOSEN_INDEX_LAG, JournalBootFacts, JournalStorage};
-pub use settle::settle;
 pub(crate) use settle::sync_names;
+pub use settle::{drop_caches, settle};
 
 /// How a journal store lays out and writes its journal.
 ///
@@ -280,18 +280,20 @@ fn open_error(error: &OpenError, scalars: StorageRecord) -> StorageError {
 /// What a failed commit means: before any write the batch is known absent;
 /// after, part of it may be on disk (the journal poisons itself for exactly
 /// that reason), the fsyncgate ambiguity the driver resolves by crashing.
-/// Settle a store before its open reads it: what a failed writeback left
-/// in the page cache reads as written and is not durable (#720
-/// (fsyncgate)), in this process and the next, so the open reads only what
-/// the device holds.
-async fn settle_for_open<P: moonpool_core::LocalStorageProvider>(
+/// Drop a store's cached pages before its open reads it: what a failed
+/// writeback left in the page cache reads as written and is not durable
+/// (#720 (fsyncgate)), in this process and the next, so the open reads
+/// what the device holds.
+async fn drop_caches_for_open<P: moonpool_core::LocalStorageProvider>(
     provider: &P,
     dir: &str,
 ) -> Result<(), StorageError> {
-    settle(provider, dir).await.map_err(|_| StorageError::Io {
-        record: StorageRecord::Store,
-        outcome: WriteOutcome::Unknown,
-    })
+    drop_caches(provider, dir)
+        .await
+        .map_err(|_| StorageError::Io {
+            record: StorageRecord::Store,
+            outcome: WriteOutcome::Unknown,
+        })
 }
 
 fn commit_error(error: &CommitError) -> StorageError {

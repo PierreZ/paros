@@ -222,7 +222,7 @@ impl<P: LocalStorageProvider> JournalStorage<P> {
     /// [`LogStorage::boot_scan`].
     #[tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0))]
     async fn load(&mut self) -> Result<(), StorageError> {
-        super::settle_for_open(&self.provider, &self.dir).await?;
+        super::drop_caches_for_open(&self.provider, &self.dir).await?;
         let opened = Journal::open(
             self.provider.clone(),
             &self.dir,

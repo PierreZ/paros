@@ -415,7 +415,7 @@ const MACHINE_GRACE_MS: std::ops::Range<usize> = 1_000..3_000;
 /// survives; a failed disk needs a storage watchdog in the driver;
 /// degradation episodes are a performance knob. Each has an issue to lift
 /// its mask. Failed writebacks (fsyncgate, moonpool#355) run unmasked: every
-/// store open syncs and drops the cache first (#720 (fsyncgate)).
+/// store open drops the cache first (#720 (fsyncgate)).
 fn storage_fault_mask() -> StorageFaultMask {
     StorageFaultMask::all()
         .without(StorageFault::Corruption)

@@ -373,7 +373,7 @@ impl<P: LocalStorageProvider> JournalMatchmakerStorage<P> {
 
     #[tracing::instrument(level = "debug", skip_all, fields(dir = %self.dir))]
     async fn load(&mut self) -> Result<(), StorageError> {
-        super::settle_for_open(&self.provider, &self.dir).await?;
+        super::drop_caches_for_open(&self.provider, &self.dir).await?;
         let opened = Journal::open(
             self.provider.clone(),
             &self.dir,

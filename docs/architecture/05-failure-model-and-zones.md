@@ -83,10 +83,11 @@ watchdog in the driver) and stall/throttle episodes (`Degradation`). Failed writ
 2026-10-26). The kernel marks the pages it could not write clean: a retried sync succeeds with
 the bytes not durable, and the page cache keeps serving them, across a process restart too. So
 a fail-stop does not help, and a rewrite of the files can tear records that were durable. Every
-store open (boot, restart, the re-open after a quarantine) first settles the store
-(`paros::journal::settle`): it syncs each file, drops its clean cached pages
-(`StorageFile::drop_cache`, `posix_fadvise(DONTNEED)`, moonpool#361), and syncs the
-directories. The open then reads what the device holds. A storage fault still quarantines its
+store open (boot, restart, the re-open after a quarantine) first drops the clean cached pages
+of the store's files (`paros::journal::drop_caches`, `StorageFile::drop_cache`,
+`posix_fadvise(DONTNEED)`, moonpool#361). The open then reads what the device holds. It does
+not sync: a dirty page a failed commit left still reads as written and lands at the next sync
+(#348), and a sync at every open could fail and take the open with it. A storage fault still quarantines its
 journal, not the process. Barrier violations ("sync
 lies") and moonpool's slow-disk extremes run unmasked (decided on 2026-10-06, #176): no moonpool
 profile draws barrier violations, and the slow-disk extremes are a performance knob the mask
