@@ -6,7 +6,8 @@ use crate::contract::write::{AcceptorWrite, WriteOp};
 use crate::journal::Command;
 use crate::matchmaker::{GcRequest, MatchRequest};
 use crate::membership::MatchmakerId;
-use crate::node::{ColocatedNode, ReadState};
+use crate::node::ColocatedNode;
+use crate::quorum_read::ReadState;
 use crate::types::{Ballot, Slot};
 
 /// A single batch of work the caller must process, and a **compile-time gate**

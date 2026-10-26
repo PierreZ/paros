@@ -537,5 +537,19 @@ impl<Id: Copy + Ord> QuorumReads<Id> {
     }
 }
 
+/// A served quorum read, surfaced via [`crate::Ready::read_states`]: a whole row
+/// answered the read's `PreRead` with vote watermarks whose maximum is
+/// `index`, and this node's chosen prefix covered `index` by the time it
+/// surfaced — the linearization point a read at `ctx` observes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReadState {
+    /// The driver-supplied correlation token from [`crate::ColocatedNode::quorum_read`].
+    pub ctx: u64,
+    /// The read index: the maximum vote watermark the read's row reported
+    /// (`None` = empty prefix). The node's chosen index is at or past it
+    /// when it surfaces.
+    pub index: Option<Slot>,
+}
+
 #[cfg(test)]
 mod tests;

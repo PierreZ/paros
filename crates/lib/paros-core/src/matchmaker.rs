@@ -117,10 +117,10 @@
 
 mod generation;
 mod message;
+pub mod ready;
 mod reconfigurer;
 mod state;
 mod storage;
-mod write;
 
 use std::collections::BTreeMap;
 
@@ -130,6 +130,7 @@ pub use self::message::{
     GcAck, GcRequest, MatchOutcome, MatchPurpose, MatchRefusal, MatchReply, MatchRequest,
     ReconfigureReply, ReconfigureRequest,
 };
+pub use self::ready::{MatchmakerReady, MatchmakerWriteOp};
 pub use self::reconfigurer::{
     MatchmakerReconfigurer, ReconfigurerPhase, ReconfigurerReady, ReconfigurerStep, Reconstruction,
     StartRefusal,
@@ -140,7 +141,6 @@ pub use self::state::{
 };
 pub(crate) use self::state::{raise_effective, resolved_phase, resolved_set};
 pub use self::storage::{MemRegistry, RegistryStorage};
-pub use self::write::{MatchmakerReady, MatchmakerWriteOp};
 use crate::journal::JournalId;
 use crate::membership::{AcceptorConfig, MatchmakerGeneration, MatchmakerId, MatchmakerSet};
 use crate::retained::RetainedWindow;

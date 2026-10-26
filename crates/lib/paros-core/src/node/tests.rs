@@ -17,7 +17,7 @@ use crate::matchmaker::{
     Registration,
 };
 use crate::membership::{AcceptorConfig, MatchmakerGeneration, MatchmakerId};
-use crate::ready::Ready;
+use crate::node::ready::Ready;
 
 /// The journal every test node serves.
 const J: crate::JournalId = crate::JournalId::UNSET;

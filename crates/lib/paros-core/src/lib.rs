@@ -81,7 +81,6 @@ mod node;
 pub mod proposer;
 pub mod proxy_leader;
 pub mod quorum_read;
-mod ready;
 pub mod replica;
 pub mod replica_node;
 pub mod retained;
@@ -112,12 +111,11 @@ pub use node::{
     APPLY_BATCH, BeliefSource, ColocatedNode, Delegation, GcStep, HANDOFF_BATCH,
     HANDOFF_FENCE_ELECTIONS, HEARTBEAT_TICKS, Handoff, HandoffCounters, LEADER_RECOVERY_BATCH,
     LeadershipOrigin, MatchStep, MembershipCounters, NodeRole, PROMISE_BATCH, ProposeResult,
-    REPAIR_TIMEOUT_ELECTIONS, RESEND_BATCH, ReadState, ReconfigureRefusal, ReconfigureResult,
+    REPAIR_TIMEOUT_ELECTIONS, RESEND_BATCH, Ready, ReconfigureRefusal, ReconfigureResult,
     RepairCounters,
 };
 pub use proxy_leader::{ProxyLeader, ProxyReady};
-pub use quorum_read::{PreReadFold, QuorumRead, QuorumReads, ReadBasis};
-pub use ready::Ready;
+pub use quorum_read::{PreReadFold, QuorumRead, QuorumReads, ReadBasis, ReadState};
 pub use replica::{LogPage, LogRead};
 pub use replica_node::{ReplicaCounters, ReplicaNode, ReplicaReady};
 pub use retained::RetainedWindow;

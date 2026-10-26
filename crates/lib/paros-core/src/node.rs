@@ -14,6 +14,7 @@ mod learn;
 mod matchmaking;
 mod phase2;
 mod quorum_reads;
+pub mod ready;
 mod reconfigure;
 mod replication;
 
@@ -24,6 +25,7 @@ pub use self::handoff::{
     HANDOFF_BATCH, HANDOFF_FENCE_ELECTIONS, Handoff, HandoffCounters, LeadershipOrigin,
 };
 pub use self::matchmaking::MatchStep;
+pub use self::ready::Ready;
 pub use self::reconfigure::{ReconfigureRefusal, ReconfigureResult};
 pub use self::replication::HEARTBEAT_TICKS;
 use crate::acceptor::Acceptor;
@@ -39,8 +41,7 @@ use crate::matchmaker::{GcRequest, MatchRequest};
 use crate::matchmaking::{Matchmaking, MembershipProbe};
 use crate::membership::{AcceptorConfig, MatchmakerId, MatchmakerSet, ProxyId, QuorumSystem};
 use crate::proposer::{Proposer, Round};
-use crate::quorum_read::{QuorumReads, ReadBasis};
-use crate::ready::Ready;
+use crate::quorum_read::{QuorumReads, ReadBasis, ReadState};
 use crate::replica::Replica;
 use crate::types::{Ballot, NodeId, Slot};
 
@@ -127,20 +128,6 @@ pub enum Delegation {
     Colocated,
     /// Hand this round to this proxy.
     To(ProxyId),
-}
-
-/// A served quorum read, surfaced via [`Ready::read_states`]: a whole row
-/// answered the read's `PreRead` with vote watermarks whose maximum is
-/// `index`, and this node's chosen prefix covered `index` by the time it
-/// surfaced — the linearization point a read at `ctx` observes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ReadState {
-    /// The driver-supplied correlation token from [`ColocatedNode::quorum_read`].
-    pub ctx: u64,
-    /// The read index: the maximum vote watermark the read's row reported
-    /// (`None` = empty prefix). The node's chosen index is at or past it
-    /// when it surfaces.
-    pub index: Option<Slot>,
 }
 
 /// Where a node's belief about the acceptor configuration in force came
