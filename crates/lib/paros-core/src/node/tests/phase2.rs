@@ -6,8 +6,8 @@
 //! it broke.
 
 use super::{
-    ColocatedNode, Delegation, Message, NO_CHECK_QUORUM, NodeId, NodeRole, Party, ProposeResult,
-    Slot, TestStorage, campaign, cluster, deliver_all, drain, entry, make_leader, ucmd,
+    ColocatedNode, Delegation, MemStorage, Message, NO_CHECK_QUORUM, NodeId, NodeRole, Party,
+    ProposeResult, Slot, campaign, cluster, deliver_all, drain, entry, make_leader, ucmd,
 };
 use crate::contract::limits::Limits;
 use crate::contract::message::Audience;
@@ -17,7 +17,7 @@ use crate::proxy_leader::ProxyLeader;
 
 /// A three-node plain deployment with `proxies` proxy leaders.
 fn proxied_node(id: u64, proxies: usize) -> ColocatedNode {
-    let mut storage = TestStorage::new(id, &[0, 1, 2]);
+    let mut storage = MemStorage::for_node(id, &[0, 1, 2]);
     storage.config.proxy_count = proxies;
     ColocatedNode::new(&storage, Limits::DEFAULT)
 }

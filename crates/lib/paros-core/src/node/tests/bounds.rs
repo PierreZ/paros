@@ -7,8 +7,8 @@
 use std::collections::BTreeMap;
 
 use super::{
-    Ballot, ColocatedNode, Command, Control, Entry, LEADER_RECOVERY_BATCH, LeaderUuid, Message,
-    NodeId, NodeRole, PROMISE_BATCH, Party, ProposeResult, Ready, Seq, Slot, TestStorage, Value,
+    Ballot, ColocatedNode, Command, Control, Entry, LEADER_RECOVERY_BATCH, LeaderUuid, MemStorage,
+    Message, NodeId, NodeRole, PROMISE_BATCH, Party, ProposeResult, Ready, Seq, Slot, Value,
     campaign, command_fingerprint, drain_with, terminal_promise,
 };
 use crate::contract::limits::Limits;
@@ -30,7 +30,7 @@ fn take_ready(node: &mut ColocatedNode) -> ReadyOutput {
 }
 
 fn candidate(id: u64) -> (ColocatedNode, Ballot) {
-    let mut node = ColocatedNode::new(&TestStorage::new(id, &[0, 1, 2]), Limits::DEFAULT);
+    let mut node = ColocatedNode::new(&MemStorage::for_node(id, &[0, 1, 2]), Limits::DEFAULT);
     campaign(&mut node);
     let ballot = node.ballot();
     let _ = take_ready(&mut node);
@@ -47,7 +47,7 @@ fn candidate(id: u64) -> (ColocatedNode, Ballot) {
 fn promise_suffix_and_leader_recovery_are_paged() {
     let (mut candidate, ballot) = candidate(1);
 
-    let mut storage = TestStorage::new(0, &[0, 1, 2]);
+    let mut storage = MemStorage::for_node(0, &[0, 1, 2]);
     for slot in 0..SUFFIX_LEN {
         storage
             .accepted
@@ -160,7 +160,7 @@ fn promise_suffix_and_leader_recovery_are_paged() {
 /// Accepted ack into an unbounded Ready write batch.
 #[test]
 fn gap_fill_releases_the_chosen_prefix_in_bounded_chunks() {
-    let mut gapped = ColocatedNode::new(&TestStorage::new(0, &[0, 1, 2]), Limits::DEFAULT);
+    let mut gapped = ColocatedNode::new(&MemStorage::for_node(0, &[0, 1, 2]), Limits::DEFAULT);
     let prior = Ballot {
         round: 1,
         node: NodeId(1),

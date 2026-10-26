@@ -255,7 +255,7 @@ fn a_non_member_nack_cannot_depose_a_campaign() {
 
 #[test]
 fn promise_suffix_is_served_in_bounded_pages() {
-    let mut storage = TestStorage::new(0, &[0, 1, 2]);
+    let mut storage = MemStorage::for_node(0, &[0, 1, 2]);
     for slot in 0..130 {
         storage.accepted.insert(
             Slot(slot),

@@ -305,7 +305,7 @@ fn restart_from_truncated_storage_rebuilds_floor_and_next_slot() {
     leader.compact(Slot(2)); // full compaction: floor -> 3, accepted empty
     assert!(leader.acceptor().records().is_empty());
 
-    let storage = TestStorage::from_node(leader);
+    let storage = MemStorage::from_node(leader);
     let restarted = ColocatedNode::new(&storage, Limits::DEFAULT);
     assert_eq!(
         restarted.acceptor().first_slot(),

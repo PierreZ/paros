@@ -48,35 +48,16 @@
 //! Further reading: Whittaker et al., *Scaling Replicated State Machines
 //! with Compartmentalization* (2021), §2.3 and §3.3.
 
+use paros_core::contract::MemStorage;
 use paros_core::{
-    Audience, Ballot, ColocatedNode, Command, Config, Control, Entry, HardState, LeaderUuid,
-    LogRead, Message, NodeId, ReplicaId, ReplicaNode, Seq, Slot, Storage, Value,
+    Audience, ColocatedNode, Command, Config, Control, Entry, LeaderUuid, LogRead, Message, NodeId,
+    ReplicaId, ReplicaNode, Seq, Slot, Value,
 };
 
 const ACCEPTORS: [u64; 3] = [0, 1, 2];
 const REPLICAS: [u64; 2] = [10, 11];
 /// A large `CheckQuorum` window: this example steps messages by hand.
 const NO_CHECK_QUORUM: u64 = 1_000_000;
-
-/// An empty store: every process boots fresh.
-struct FreshStore {
-    config: Config,
-}
-
-impl Storage for FreshStore {
-    fn initial_state(&self) -> (HardState, Config) {
-        (HardState::default(), self.config.clone())
-    }
-    fn accepted(&self, _slot: Slot) -> Option<(Ballot, Command)> {
-        None
-    }
-    fn first_slot(&self) -> Slot {
-        Slot(0)
-    }
-    fn last_slot(&self) -> Slot {
-        Slot(0)
-    }
-}
 
 /// The deployment data every process shares: the acceptors and the
 /// replica count.
@@ -119,23 +100,13 @@ impl Deployment {
             acceptors: ACCEPTORS
                 .iter()
                 .map(|id| {
-                    ColocatedNode::new(
-                        &FreshStore {
-                            config: config(*id),
-                        },
-                        paros_core::Limits::DEFAULT,
-                    )
+                    ColocatedNode::new(&MemStorage::new(config(*id)), paros_core::Limits::DEFAULT)
                 })
                 .collect(),
             replicas: REPLICAS
                 .iter()
                 .map(|id| {
-                    ReplicaNode::new(
-                        &FreshStore {
-                            config: config(*id),
-                        },
-                        paros_core::Limits::DEFAULT,
-                    )
+                    ReplicaNode::new(&MemStorage::new(config(*id)), paros_core::Limits::DEFAULT)
                 })
                 .collect(),
             applied: vec![Vec::new(); REPLICAS.len()],

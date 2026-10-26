@@ -106,7 +106,7 @@ fn chosen_value_survives_restart_over_a_stale_accept() {
     );
 
     // Restart: rebuild from the durable state (scalars + accepted log).
-    let storage = TestStorage::from_node(&n);
+    let storage = MemStorage::from_node(&n);
     let restarted = ColocatedNode::new(&storage, Limits::DEFAULT);
 
     assert_eq!(

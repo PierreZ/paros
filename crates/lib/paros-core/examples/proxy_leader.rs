@@ -57,9 +57,10 @@
 
 use std::collections::BTreeMap;
 
+use paros_core::contract::MemStorage;
 use paros_core::{
-    Ballot, ColocatedNode, Command, Config, Delegation, Entry, HardState, LeaderUuid, Message,
-    NodeId, Party, ProxyId, ProxyLeader, QuorumSystem, Seq, Slot, Storage, Value,
+    ColocatedNode, Config, Delegation, Entry, LeaderUuid, Message, NodeId, Party, ProxyId,
+    ProxyLeader, QuorumSystem, Seq, Slot, Value,
 };
 
 /// Two rows of three: rows `{0, 1, 2}` and `{3, 4, 5}`, columns `{0, 3}`,
@@ -70,26 +71,6 @@ const PROXIES: usize = 2;
 /// The driver's take-back budget: re-delegations a proxy may swallow.
 const TAKE_BACK_AFTER: u64 = 2;
 
-/// An empty store: every node boots fresh.
-struct FreshStore {
-    config: Config,
-}
-
-impl Storage for FreshStore {
-    fn initial_state(&self) -> (HardState, Config) {
-        (HardState::default(), self.config.clone())
-    }
-    fn accepted(&self, _slot: Slot) -> Option<(Ballot, Command)> {
-        None
-    }
-    fn first_slot(&self) -> Slot {
-        Slot(0)
-    }
-    fn last_slot(&self) -> Slot {
-        Slot(0)
-    }
-}
-
 fn fresh(id: u64) -> ColocatedNode {
     let config = Config {
         peers: (0..NODES).map(NodeId).collect(),
@@ -97,7 +78,7 @@ fn fresh(id: u64) -> ColocatedNode {
         proxy_count: PROXIES,
         ..Config::new(NodeId(id), paros_core::JournalIdentifier::UNSET)
     };
-    ColocatedNode::new(&FreshStore { config }, paros_core::Limits::DEFAULT)
+    ColocatedNode::new(&MemStorage::new(config), paros_core::Limits::DEFAULT)
 }
 
 /// A large `CheckQuorum` window: this example steps messages by hand.

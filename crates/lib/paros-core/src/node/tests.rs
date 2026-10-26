@@ -8,11 +8,10 @@ use super::{
     LEADER_RECOVERY_BATCH, LeadershipOrigin, MatchStep, NodeRole, PROMISE_BATCH, ProposeResult,
     READ_TTL_TICKS, ReadState, ReconfigureRefusal, ReconfigureResult,
 };
-use crate::contract::config::Config;
 use crate::contract::hard_state::HardState;
 use crate::contract::limits::Limits;
+use crate::contract::mem_storage::MemStorage;
 use crate::contract::message::{Message, Party};
-use crate::contract::storage::Storage;
 use crate::matchmaker::{
     MatchOutcome, MatchRefusal, MatchReply, MatchRequest, Matchmaker, MatchmakerConfig,
     Registration,
@@ -25,92 +24,13 @@ const J: crate::JournalId = crate::JournalId::UNSET;
 use crate::journal::{Command, Control, Entry, LeaderUuid, Seq, command_fingerprint};
 use crate::types::{Ballot, NodeId, Slot, Value};
 
-/// In-memory [`Storage`] seeded with an explicit initial state (for restart
-/// tests): the durable scalars plus a per-slot accepted log.
-struct TestStorage {
-    hard_state: HardState,
-    accepted: BTreeMap<Slot, (Ballot, Command)>,
-    config: Config,
-    first_slot: Slot,
-    /// Recoverable faulty entries the simulated boot scan classified (Stage 8).
-    faulty: Vec<(Slot, Ballot)>,
-    /// The journal state sealed at the floor (#204).
-    sealed: crate::JournalState,
-}
-
-impl TestStorage {
-    fn new(id: u64, members: &[u64]) -> Self {
-        Self {
-            hard_state: HardState::default(),
-            accepted: BTreeMap::new(),
-            config: Config {
-                peers: members.iter().copied().map(NodeId).collect(),
-                quorum_system: crate::membership::QuorumSystem::Majority,
-                nodes: Vec::new(),
-                matchmakers: Vec::new(),
-                matchmaker_pool: Vec::new(),
-                proxy_count: 0,
-                ..Config::new(NodeId(id), crate::JournalIdentifier::UNSET)
-            },
-            first_slot: Slot(0),
-            faulty: Vec::new(),
-            sealed: crate::JournalState::default(),
-        }
-    }
-
-    /// Snapshot a live node's durable state (scalars + accepted log + compaction
-    /// floor) into a fresh storage, the way a real driver's persisted disk would
-    /// look, for building the "restart from durable storage" path in tests.
-    fn from_node(n: &ColocatedNode) -> Self {
-        Self {
-            hard_state: n.hard_state(),
-            accepted: n.acceptor().records().clone(),
-            config: n.config().clone(),
-            first_slot: n.acceptor().first_slot(),
-            faulty: Vec::new(),
-            sealed: n.replica().journal_base(),
-        }
-    }
-
-    /// Rot the accepted record at `slot`: the value is lost, the identity
-    /// `(slot, ballot)` survives — the boot scan's recoverable classification.
-    fn rot(&mut self, slot: Slot) {
-        let (ballot, _) = self
-            .accepted
-            .remove(&slot)
-            .expect("rot targets a persisted record");
-        self.faulty.push((slot, ballot));
-    }
-}
-
-impl Storage for TestStorage {
-    fn initial_state(&self) -> (HardState, Config) {
-        (self.hard_state, self.config.clone())
-    }
-    fn accepted(&self, slot: Slot) -> Option<(Ballot, Command)> {
-        self.accepted.get(&slot).cloned()
-    }
-    fn first_slot(&self) -> Slot {
-        self.first_slot
-    }
-    fn last_slot(&self) -> Slot {
-        self.accepted.keys().next_back().copied().unwrap_or(Slot(0))
-    }
-    fn faulty_entries(&self) -> Vec<(Slot, Ballot)> {
-        self.faulty.clone()
-    }
-    fn sealed_state(&self) -> crate::JournalState {
-        self.sealed
-    }
-}
-
 fn node(id: u64, members: &[u64]) -> ColocatedNode {
     limited_node(id, members, Limits::DEFAULT)
 }
 
 /// [`node`] under `limits`.
 fn limited_node(id: u64, members: &[u64], limits: Limits) -> ColocatedNode {
-    ColocatedNode::new(&TestStorage::new(id, members), limits)
+    ColocatedNode::new(&MemStorage::for_node(id, members), limits)
 }
 
 /// A fresh `N`-node cluster `node(0..N)` over the membership `0..N`.
@@ -123,7 +43,7 @@ fn cluster<const N: usize>() -> [ColocatedNode; N] {
 /// addressable pool `pool` (a superset holding the spares), and `matchmakers`
 /// matchmakers.
 fn deployed_node(id: u64, members: &[u64], pool: &[u64], matchmakers: u64) -> ColocatedNode {
-    let mut storage = TestStorage::new(id, members);
+    let mut storage = MemStorage::for_node(id, members);
     storage.config.nodes = pool.iter().copied().map(NodeId).collect();
     storage.config.matchmakers = (0..matchmakers).map(MatchmakerId).collect();
     ColocatedNode::new(&storage, Limits::DEFAULT)

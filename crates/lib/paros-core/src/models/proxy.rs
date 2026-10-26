@@ -49,10 +49,10 @@ use super::support::{Mailbox, Rng, env_or};
 use crate::contract::config::Config;
 use crate::contract::hard_state::HardState;
 use crate::contract::limits::Limits;
+use crate::contract::mem_storage::MemStorage;
 use crate::contract::message::{Message, Party};
-use crate::contract::storage::Storage;
 use crate::contract::write::{AcceptorWrite, WriteOp};
-use crate::journal::{Command, LeaderUuid, Seq, command_fingerprint};
+use crate::journal::{LeaderUuid, Seq, command_fingerprint};
 use crate::membership::{AcceptorConfig, ProxyId, QuorumSystem};
 use crate::node::{ColocatedNode, Delegation, ProposeResult};
 use crate::proxy_leader::ProxyLeader;
@@ -76,69 +76,9 @@ const DRAIN_STEPS: usize = 4_000;
 /// before a stall is a finding.
 const SETTLE_ROUNDS: usize = 200;
 
-/// A node's disk: the durable state a reboot boots from, fed by the
-/// `WriteOp`s its batches persist. The one place the model reads a
-/// "durable accept" from.
-#[derive(Clone, Default)]
-struct Disk {
-    hard_state: HardState,
-    accepted: BTreeMap<Slot, (Ballot, Command)>,
-}
-
-impl Disk {
-    fn apply(&mut self, op: &WriteOp) {
-        match op {
-            WriteOp::Acceptor(AcceptorWrite::SetPromise(b)) => {
-                self.hard_state.max_promised_ballot = self.hard_state.max_promised_ballot.max(*b);
-            }
-            WriteOp::Acceptor(AcceptorWrite::AppendAccepted {
-                slot,
-                ballot,
-                value,
-            }) => {
-                self.accepted.insert(*slot, (*ballot, value.clone()));
-            }
-            WriteOp::SetChosenIndex(s) => self.hard_state.chosen_index = Some(*s),
-            // The model never proposes a `Truncate`, so no node trims.
-            WriteOp::Truncate { .. } | WriteOp::TrimmedTo { .. } => {
-                unreachable!("the proxy model never compacts")
-            }
-            // Only a `ReplicaNode` learns without accepting; the model runs none.
-            WriteOp::Learned { .. } => unreachable!("the proxy model runs no replica tier"),
-        }
-    }
-}
-
-/// The disk plus the deployment's configuration, as a `Storage` a reboot
-/// reads.
-struct Boot<'a> {
-    disk: &'a Disk,
-    config: Config,
-}
-
-impl Storage for Boot<'_> {
-    fn initial_state(&self) -> (HardState, Config) {
-        (self.disk.hard_state, self.config.clone())
-    }
-    fn accepted(&self, slot: Slot) -> Option<(Ballot, Command)> {
-        self.disk.accepted.get(&slot).cloned()
-    }
-    fn first_slot(&self) -> Slot {
-        Slot(0)
-    }
-    fn last_slot(&self) -> Slot {
-        self.disk
-            .accepted
-            .keys()
-            .next_back()
-            .copied()
-            .unwrap_or(Slot(0))
-    }
-}
-
 /// One node: its disk and the live state machine when it is up.
 struct Site {
-    disk: Disk,
+    disk: MemStorage,
     live: Option<ColocatedNode>,
 }
 
@@ -318,12 +258,7 @@ impl World {
             rng,
             config,
             pool,
-            sites: (0..n)
-                .map(|_| Site {
-                    disk: Disk::default(),
-                    live: None,
-                })
-                .collect(),
+            sites: Vec::new(),
             proxies: (0..PROXIES)
                 .map(|_| Proxy {
                     live: None,
@@ -342,6 +277,13 @@ impl World {
             proxy_counters: vec![crate::proxy_leader::ProxyCounters::default(); PROXIES],
             trace: std::env::var("PROXY_MODEL_TRACE").is_ok(),
         };
+        // Each node's disk boots it under its own configuration.
+        world.sites = (0..n)
+            .map(|id| Site {
+                disk: MemStorage::new(world.node_config(NodeId(id))),
+                live: None,
+            })
+            .collect();
         if grid {
             world.reach.grid_seed += 1;
         }
@@ -375,19 +317,12 @@ impl World {
     }
 
     fn boot_node(&mut self, id: NodeId) {
-        let config = self.node_config(id);
         let site = self.site(id);
-        if site.disk.hard_state != HardState::default() {
+        if site.disk.hard_state() != HardState::default() {
             self.reach.node_rebooted += 1;
         }
         let site = self.site(id);
-        let mut node = ColocatedNode::new(
-            &Boot {
-                disk: &site.disk,
-                config,
-            },
-            Limits::DEFAULT,
-        );
+        let mut node = ColocatedNode::new(&site.disk, Limits::DEFAULT);
         let timeout = 3 + self.rng.below(6);
         node.set_election_timeout(timeout);
         self.site(id).live = Some(node);
@@ -442,7 +377,7 @@ impl World {
             return;
         }
         for op in &writes {
-            self.site(id).disk.apply(op);
+            self.site(id).disk.apply(std::slice::from_ref(op));
             if let WriteOp::Acceptor(AcceptorWrite::AppendAccepted {
                 slot,
                 ballot,
@@ -910,8 +845,8 @@ impl World {
             let _ = write!(
                 out,
                 "\n  node {i}: promised {:?} chosen_index {:?} live={} role={:?} next_slot={:?} rounds={:?} delegated={:?}",
-                site.disk.hard_state.max_promised_ballot,
-                site.disk.hard_state.chosen_index,
+                site.disk.hard_state().max_promised_ballot,
+                site.disk.hard_state().chosen_index,
                 site.live.is_some(),
                 site.live.as_ref().map(ColocatedNode::role),
                 site.live.as_ref().map(|n| n.proposer().next_slot()),

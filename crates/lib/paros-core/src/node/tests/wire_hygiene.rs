@@ -11,8 +11,8 @@
 use std::collections::BTreeMap;
 
 use super::{
-    Ballot, MatchOutcome, MatchReply, MatchStep, MatchmakerGeneration, MatchmakerId, Message,
-    NodeId, Party, Registration, Slot, TestStorage, ballot, campaign, cfg, deployed_node, drain,
+    Ballot, MatchOutcome, MatchReply, MatchStep, MatchmakerGeneration, MatchmakerId, MemStorage,
+    Message, NodeId, Party, Registration, Slot, ballot, campaign, cfg, deployed_node, drain,
     drain_match_requests, ucmd,
 };
 use crate::contract::limits::Limits;
@@ -182,7 +182,7 @@ fn a_page_from_a_registered_matchmaker_is_ignored() {
 
 /// A follower of a three-node deployment with one proxy leader.
 fn proxied_follower() -> ColocatedNode {
-    let mut storage = TestStorage::new(1, &[0, 1, 2]);
+    let mut storage = MemStorage::for_node(1, &[0, 1, 2]);
     storage.config.proxy_count = 1;
     ColocatedNode::new(&storage, Limits::DEFAULT)
 }

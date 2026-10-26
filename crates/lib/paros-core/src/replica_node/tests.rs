@@ -2,15 +2,12 @@
 //! and two replicas over a hand-driven network, the leader's `Audience::Learners`
 //! reaching the replicas as a deployment map would route it.
 
-use std::collections::BTreeMap;
-
 use super::{ReplicaNode, ReplicaReady};
 use crate::contract::config::Config;
-use crate::contract::hard_state::HardState;
 use crate::contract::limits::Limits;
+use crate::contract::mem_storage::MemStorage;
 use crate::contract::message::{Audience, Message};
-use crate::contract::storage::Storage;
-use crate::contract::write::{AcceptorWrite, WriteOp};
+use crate::contract::write::WriteOp;
 use crate::journal::{Command, Control, Entry, LeaderUuid, Seq};
 use crate::membership::ReplicaId;
 use crate::node::ColocatedNode;
@@ -18,81 +15,6 @@ use crate::types::{Ballot, NodeId, Slot, Value};
 
 const ACCEPTORS: [u64; 3] = [0, 1, 2];
 const REPLICAS: [u64; 2] = [10, 11];
-
-/// A durable store both deployments boot from and a batch's writes land in.
-#[derive(Clone)]
-struct Disk {
-    config: Config,
-    hard_state: HardState,
-    records: BTreeMap<Slot, (Ballot, Command)>,
-    first_slot: Slot,
-    sealed: crate::JournalState,
-}
-
-impl Disk {
-    fn new(config: Config) -> Self {
-        Self {
-            config,
-            hard_state: HardState::default(),
-            records: BTreeMap::new(),
-            first_slot: Slot(0),
-            sealed: crate::JournalState::default(),
-        }
-    }
-
-    fn apply(&mut self, op: &WriteOp) {
-        match op {
-            WriteOp::Acceptor(AcceptorWrite::SetPromise(b)) => {
-                self.hard_state.max_promised_ballot = *b;
-            }
-            WriteOp::Acceptor(AcceptorWrite::AppendAccepted {
-                slot,
-                ballot,
-                value: command,
-            })
-            | WriteOp::Learned {
-                slot,
-                ballot,
-                command,
-            } => {
-                self.records.insert(*slot, (*ballot, command.clone()));
-            }
-            WriteOp::SetChosenIndex(s) => self.hard_state.chosen_index = Some(*s),
-            WriteOp::Truncate { first, sealed } => {
-                self.sealed = *sealed;
-                self.first_slot = self.first_slot.max(*first);
-                self.records = self.records.split_off(&self.first_slot);
-            }
-            WriteOp::TrimmedTo { point, state } => {
-                self.sealed = *state;
-                let boundary = Slot(point.0 - 1);
-                if self.hard_state.chosen_index.is_none_or(|ci| ci < boundary) {
-                    self.hard_state.chosen_index = Some(boundary);
-                }
-                self.first_slot = self.first_slot.max(*point);
-                self.records = self.records.split_off(&self.first_slot);
-            }
-        }
-    }
-}
-
-impl Storage for Disk {
-    fn initial_state(&self) -> (HardState, Config) {
-        (self.hard_state, self.config.clone())
-    }
-    fn accepted(&self, slot: Slot) -> Option<(Ballot, Command)> {
-        self.records.get(&slot).cloned()
-    }
-    fn first_slot(&self) -> Slot {
-        self.first_slot
-    }
-    fn last_slot(&self) -> Slot {
-        self.records.keys().next_back().copied().unwrap_or(Slot(0))
-    }
-    fn sealed_state(&self) -> crate::JournalState {
-        self.sealed
-    }
-}
 
 fn config(id: u64) -> Config {
     Config {
@@ -115,7 +37,7 @@ fn cmd(seq: u64) -> Command {
 struct Tier {
     nodes: Vec<ColocatedNode>,
     replicas: Vec<ReplicaNode>,
-    disks: Vec<Disk>,
+    disks: Vec<MemStorage>,
     applied: Vec<Vec<(Slot, Command)>>,
     /// The quorum reads each replica served, in order.
     served: Vec<Vec<crate::ReadState>>,
@@ -123,11 +45,14 @@ struct Tier {
 
 impl Tier {
     fn new() -> Self {
-        let disks: Vec<Disk> = REPLICAS.iter().map(|id| Disk::new(config(*id))).collect();
+        let disks: Vec<MemStorage> = REPLICAS
+            .iter()
+            .map(|id| MemStorage::new(config(*id)))
+            .collect();
         Self {
             nodes: ACCEPTORS
                 .iter()
-                .map(|id| ColocatedNode::new(&Disk::new(config(*id)), Limits::DEFAULT))
+                .map(|id| ColocatedNode::new(&MemStorage::new(config(*id)), Limits::DEFAULT))
                 .collect(),
             replicas: disks
                 .iter()
@@ -171,7 +96,7 @@ impl Tier {
                 !matches!(op, WriteOp::Acceptor(_)),
                 "a replica never writes a vote"
             );
-            self.disks[r].apply(op);
+            self.disks[r].apply(std::slice::from_ref(op));
         }
         self.applied[r].extend(
             ready
@@ -429,7 +354,7 @@ fn a_replica_executes_a_decided_truncate_and_seals_its_journal_state() {
     for r in 0..REPLICAS.len() {
         assert_eq!(tier.replicas[r].first_slot(), Slot(3));
         assert_eq!(tier.disks[r].first_slot, Slot(3));
-        assert!(!tier.disks[r].records.contains_key(&Slot(2)));
+        assert!(!tier.disks[r].accepted.contains_key(&Slot(2)));
         assert_eq!(
             tier.disks[r].sealed.next_seq,
             Seq(2),
@@ -500,5 +425,5 @@ fn the_reply_owner_is_the_slot_modulo_the_replica_count() {
 #[test]
 #[should_panic(expected = "a replica is never in the node pool")]
 fn a_replica_inside_the_pool_refuses_to_boot() {
-    let _ = ReplicaNode::new(&Disk::new(config(1)), Limits::DEFAULT);
+    let _ = ReplicaNode::new(&MemStorage::new(config(1)), Limits::DEFAULT);
 }

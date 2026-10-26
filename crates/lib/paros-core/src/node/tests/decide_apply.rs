@@ -115,10 +115,10 @@ fn restart_rebuilds_state_from_hard_state() {
         max_promised_ballot: ballot(2, 0),
         chosen_index: Some(Slot(1)),
     };
-    let storage = TestStorage {
+    let storage = MemStorage {
         hard_state,
         accepted,
-        ..TestStorage::new(1, &[0, 1, 2])
+        ..MemStorage::for_node(1, &[0, 1, 2])
     };
     let n = ColocatedNode::new(&storage, Limits::DEFAULT);
     assert_eq!(n.ballot(), ballot(2, 0), "resumes the promised ballot");
@@ -225,7 +225,7 @@ fn a_replayed_commit_for_a_known_slot_still_advances_the_prefix() {
 /// A six-node `2 × 3` grid over `0..6`: rows `{0, 1, 2}` and `{3, 4, 5}`,
 /// columns `{0, 3}`, `{1, 4}` and `{2, 5}`.
 fn grid_node(id: u64) -> ColocatedNode {
-    let mut storage = TestStorage::new(id, &[0, 1, 2, 3, 4, 5]);
+    let mut storage = MemStorage::for_node(id, &[0, 1, 2, 3, 4, 5]);
     storage.config.quorum_system = crate::membership::QuorumSystem::grid(2, 3);
     ColocatedNode::new(&storage, Limits::DEFAULT)
 }
@@ -560,7 +560,7 @@ fn a_truncation_seals_the_journal_state_a_restart_folds_from() {
         assert_eq!(n.replica().journal().first_seq, Seq(2));
         assert_eq!(n.replica().journal_base().next_seq, Seq(2));
     }
-    let storage = TestStorage::from_node(&nodes[1]);
+    let storage = MemStorage::from_node(&nodes[1]);
     let rebooted = ColocatedNode::new(&storage, Limits::DEFAULT);
     assert_eq!(rebooted.replica().journal(), nodes[1].replica().journal());
 }

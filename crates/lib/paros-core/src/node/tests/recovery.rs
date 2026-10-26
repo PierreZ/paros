@@ -22,7 +22,7 @@ fn keep_slot3_undecided(to: NodeId, m: &Message, isolate_node2: bool) -> bool {
 /// lost, identity kept).
 fn rebooted_with_rot(rotted: &[u64]) -> ColocatedNode {
     let nodes = cluster_with_three_chosen();
-    let mut storage = TestStorage::from_node(&nodes[1]);
+    let mut storage = MemStorage::from_node(&nodes[1]);
     for &slot in rotted {
         storage.rot(Slot(slot));
     }
@@ -92,7 +92,7 @@ fn accept_repairs_a_faulty_slot_in_place() {
     // holds an accepted-but-unchosen record at slot 3.
     deliver_filtered(&mut nodes, q, |to, m| keep_slot3_undecided(to, m, false));
     assert!(nodes[1].acceptor().records().contains_key(&Slot(3)));
-    let mut storage = TestStorage::from_node(&nodes[1]);
+    let mut storage = MemStorage::from_node(&nodes[1]);
     storage.rot(Slot(3));
     let mut n = ColocatedNode::new(&storage, Limits::DEFAULT);
     assert_eq!(n.acceptor().faulty().len(), 1);
@@ -128,12 +128,12 @@ fn full_none_quorum_noop_fills_over_an_excluded_faulty_reporter() {
     let _ = nodes[0].propose(entry(1, 4, 40));
     let q = drain(&mut nodes[0]);
     deliver_filtered(&mut nodes, q, |to, m| keep_slot3_undecided(to, m, true));
-    let mut storage = TestStorage::from_node(&nodes[1]);
+    let mut storage = MemStorage::from_node(&nodes[1]);
     storage.rot(Slot(3));
     nodes[1] = ColocatedNode::new(&storage, Limits::DEFAULT);
     // Node 0 must forget its own copy of slot 3 (it proposed it), so the
     // quorum genuinely reports none: rebuild node 0 from a log without it.
-    let mut s0 = TestStorage::from_node(&nodes[0]);
+    let mut s0 = MemStorage::from_node(&nodes[0]);
     s0.accepted.remove(&Slot(3));
     nodes[0] = ColocatedNode::new(&s0, Limits::DEFAULT);
 
@@ -165,7 +165,7 @@ fn blocked_slot_waits_then_resolves_case1_from_a_straggler() {
     deliver_filtered(&mut nodes, q, |to, m| keep_slot3_undecided(to, m, true));
     // Node 0 reboots with its own copy of slot 3 rotted (it was the proposer's
     // self-accept), so the identity survives but the value is lost.
-    let mut s0 = TestStorage::from_node(&nodes[0]);
+    let mut s0 = MemStorage::from_node(&nodes[0]);
     s0.rot(Slot(3));
     nodes[0] = ColocatedNode::new(&s0, Limits::DEFAULT);
 
@@ -207,7 +207,7 @@ fn recovery_timeout_steps_the_leader_down() {
     let _ = nodes[0].propose(entry(1, 4, 40));
     let q = drain(&mut nodes[0]);
     deliver_filtered(&mut nodes, q, |to, m| keep_slot3_undecided(to, m, true));
-    let mut s0 = TestStorage::from_node(&nodes[0]);
+    let mut s0 = MemStorage::from_node(&nodes[0]);
     s0.rot(Slot(3));
     nodes[0] = ColocatedNode::new(&s0, Limits::DEFAULT);
     campaign(&mut nodes[0]);
@@ -241,7 +241,7 @@ fn recovery_timeout_steps_the_leader_down() {
 #[test]
 fn faulty_chosen_slot_heals_via_catchup() {
     let nodes = cluster_with_three_chosen();
-    let mut storage = TestStorage::from_node(&nodes[1]);
+    let mut storage = MemStorage::from_node(&nodes[1]);
     storage.rot(Slot(1));
     let mut n = ColocatedNode::new(&storage, Limits::DEFAULT);
     // The fold stops at the rotted slot: it is chosen, its value is not
@@ -299,7 +299,7 @@ fn faulty_chosen_slot_heals_via_catchup() {
 #[test]
 fn a_faulty_chosen_record_holds_the_walk_until_the_fold_heals() {
     let nodes = cluster_with_three_chosen();
-    let mut storage = TestStorage::from_node(&nodes[1]);
+    let mut storage = MemStorage::from_node(&nodes[1]);
     storage.rot(Slot(1));
     let mut n = ColocatedNode::new(&storage, Limits::DEFAULT);
     let _ = drain(&mut n);
@@ -353,7 +353,7 @@ fn a_faulty_chosen_record_holds_the_walk_until_the_fold_heals() {
 #[test]
 fn serve_catchup_stops_at_the_servers_own_faulty_hole() {
     let nodes = cluster_with_three_chosen();
-    let mut storage = TestStorage::from_node(&nodes[1]);
+    let mut storage = MemStorage::from_node(&nodes[1]);
     storage.rot(Slot(1));
     let mut n = ColocatedNode::new(&storage, Limits::DEFAULT);
     n.step(Message::CatchUpRequest {
@@ -379,7 +379,7 @@ fn serve_catchup_stops_at_the_servers_own_faulty_hole() {
 #[test]
 fn a_trim_point_jump_drops_a_faulty_record_below_it() {
     let nodes = cluster_with_three_chosen();
-    let mut storage = TestStorage::from_node(&nodes[1]);
+    let mut storage = MemStorage::from_node(&nodes[1]);
     storage.rot(Slot(1));
     let mut n = ColocatedNode::new(&storage, Limits::DEFAULT);
     assert!(!n.acceptor().faulty().is_empty());
@@ -418,19 +418,19 @@ fn ctrl_5_1_1_mixed_epoch_three_decisions_in_one_election() {
     // path raises the promise in the same flushed batch), and the boot
     // read-back re-asserts it — so each crafted storage carries a promise at
     // its highest accepted ballot.
-    let mut s1 = TestStorage::new(0, &[0, 1, 2]);
+    let mut s1 = MemStorage::for_node(0, &[0, 1, 2]);
     s1.hard_state.max_promised_ballot = ballot(1, 0);
     s1.accepted.insert(Slot(0), (ballot(1, 0), a));
     s1.rot(Slot(0));
 
-    let mut s2 = TestStorage::new(1, &[0, 1, 2]);
+    let mut s2 = MemStorage::for_node(1, &[0, 1, 2]);
     s2.hard_state.max_promised_ballot = ballot(3, 1);
     s2.accepted.insert(Slot(0), (ballot(2, 1), b.clone()));
     s2.accepted.insert(Slot(1), (ballot(3, 1), c));
     s2.rot(Slot(0));
     s2.rot(Slot(1));
 
-    let mut s3 = TestStorage::new(2, &[0, 1, 2]);
+    let mut s3 = MemStorage::for_node(2, &[0, 1, 2]);
     s3.hard_state.max_promised_ballot = ballot(2, 1);
     s3.accepted.insert(Slot(0), (ballot(2, 1), b.clone()));
 

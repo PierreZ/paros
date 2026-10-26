@@ -70,37 +70,15 @@
 
 use std::collections::BTreeMap;
 
+use paros_core::contract::MemStorage;
 use paros_core::{
-    Ballot, ColocatedNode, Command, Config, Entry, HardState, LeaderUuid, Message, NodeId,
-    QuorumSystem, ReadState, Seq, Slot, Storage, Value,
+    ColocatedNode, Command, Config, Entry, LeaderUuid, Message, NodeId, QuorumSystem, ReadState,
+    Seq, Slot, Value,
 };
 
 /// Two rows of three: rows `{0, 1, 2}` and `{3, 4, 5}`, columns `{0, 3}`,
 /// `{1, 4}` and `{2, 5}`.
 const GRID: QuorumSystem = QuorumSystem::grid(2, 3);
-
-/// An empty store: every node boots fresh, as a first boot does.
-struct FreshStore {
-    config: Config,
-}
-
-impl Storage for FreshStore {
-    fn initial_state(&self) -> (HardState, Config) {
-        (HardState::default(), self.config.clone())
-    }
-
-    fn accepted(&self, _slot: Slot) -> Option<(Ballot, Command)> {
-        None
-    }
-
-    fn first_slot(&self) -> Slot {
-        Slot(0)
-    }
-
-    fn last_slot(&self) -> Slot {
-        Slot(0)
-    }
-}
 
 fn fresh(id: u64) -> ColocatedNode {
     let config = Config {
@@ -108,7 +86,7 @@ fn fresh(id: u64) -> ColocatedNode {
         quorum_system: GRID,
         ..Config::new(NodeId(id), paros_core::JournalIdentifier::UNSET)
     };
-    ColocatedNode::new(&FreshStore { config }, paros_core::Limits::DEFAULT)
+    ColocatedNode::new(&MemStorage::new(config), paros_core::Limits::DEFAULT)
 }
 
 /// A large `CheckQuorum` window: this example steps messages by hand and

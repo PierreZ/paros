@@ -7,7 +7,7 @@ use crate::contract::limits::Limits;
 /// A six-node `2 × 3` grid over `0..6`: rows `{0, 1, 2}` and `{3, 4, 5}`,
 /// columns `{0, 3}`, `{1, 4}` and `{2, 5}`.
 fn grid_node(id: u64) -> ColocatedNode {
-    let mut storage = TestStorage::new(id, &[0, 1, 2, 3, 4, 5]);
+    let mut storage = MemStorage::for_node(id, &[0, 1, 2, 3, 4, 5]);
     storage.config.quorum_system = crate::membership::QuorumSystem::grid(2, 3);
     ColocatedNode::new(&storage, Limits::DEFAULT)
 }

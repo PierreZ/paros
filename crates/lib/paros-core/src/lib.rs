@@ -84,6 +84,8 @@ pub mod quorum_read;
 pub mod replica;
 pub mod replica_node;
 pub mod retained;
+#[cfg(test)]
+mod test_support;
 mod types;
 
 pub use batcher::{Batch, BatchLimits, Batcher, Unbatcher};
