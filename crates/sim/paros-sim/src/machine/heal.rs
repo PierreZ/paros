@@ -30,7 +30,7 @@ use super::{MachineBoard, lock, machine_board};
 
 /// The live bookings of every registry the machines fold, by registry.
 #[derive(Default)]
-pub(super) struct CellBookings {
+pub(crate) struct CellBookings {
     registries: BTreeMap<JournalIdentifier, Bookings>,
 }
 
