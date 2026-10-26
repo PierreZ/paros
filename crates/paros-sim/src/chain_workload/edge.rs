@@ -19,7 +19,8 @@
 
 use moonpool_sim::{assert_always, assert_reachable, buggify_with_prob};
 use paros::client::{WriteOutcome, Writer};
-use paros::{DriverTunables, Value};
+use paros::core::Value;
+use paros::roles::node::DriverTunables;
 
 use crate::audit::AuditWorld;
 use crate::chain::user_command_hash;

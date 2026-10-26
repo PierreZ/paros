@@ -19,7 +19,7 @@
 //!    (`paros::machine::wait_for_cell`): `Identify`, the cell decree's two
 //!    phases as an acceptor, and `CellInit` as its proposer (#277). It never
 //!    forms a cell on its own (#216).
-//! 3. **Serve.** A formed machine runs `paros::run_journals` over its
+//! 3. **Serve.** A formed machine runs `paros::roles::node::run_journals` over its
 //!    cell's plan: the cell control and election journals and the fleet
 //!    tenant's — every identifier drawn at `cell init`, none fixed — plain
 //!    Multi-Paxos over the founding members, and every journal its tenants
@@ -54,8 +54,12 @@ use std::time::Duration;
 use clap::Parser;
 use moonpool_core::{CompioProviders, CompioResolver, CompioStorageProvider};
 use paros::machine::{MachineAddresses, MachineError, MachineSettings, ProviderDisk};
+use paros::model::address::Address;
+use paros::model::address::Names;
+use paros::observe::audit::NoAudit;
 use paros::observe::metrics::Metrics;
-use paros::{Address, BootRefusal, Names, NoAudit, RunError};
+use paros::roles::node::BootRefusal;
+use paros::roles::node::RunError;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::Layer as _;
@@ -187,7 +191,7 @@ async fn run(settings: Settings, metrics: Metrics) -> ExitCode {
     let disk = ProviderDisk::new(
         CompioStorageProvider::new(),
         settings.data_dir.to_string_lossy(),
-        paros::JournalStoreConfig::default(),
+        paros::storage::journal::JournalStoreConfig::default(),
     );
     let ran = Box::pin(paros::machine::run_machine(
         CompioProviders::new(),

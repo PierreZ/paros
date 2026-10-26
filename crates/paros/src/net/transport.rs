@@ -1,5 +1,5 @@
 //! How a paros runtime protects its sessions: [`Transport`], the one choice
-//! every listening driver ([`run_journals`](crate::run_journals),
+//! every listening driver ([`run_journals`](crate::roles::node::run_journals),
 //! [`run_machine`](crate::machine::run_machine),
 //! [`run_frontend`](crate::roles::frontend::run_frontend), the matchmaker, proxy
 //! and replica roles) and every client runtime makes once, at its start.
@@ -19,7 +19,7 @@ use std::future::Future;
 use std::io;
 use std::pin::Pin;
 
-use crate::ParosProviders;
+use crate::net::runtime::ParosProviders;
 use moonpool_rpc::{RpcConfig, RpcDriver, RpcHandle};
 
 /// A runtime's driving future: it resolves only when the runtime fails for

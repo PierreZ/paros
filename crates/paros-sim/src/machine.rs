@@ -51,11 +51,14 @@ use moonpool_sim::{
     Process, ScriptedResolver, SimContext, SimTimeProvider, SimulationError, SimulationResult,
     StateHandle, TaskProvider, assert_always, assert_reachable, assert_sometimes,
 };
+use paros::core::Ballot;
+use paros::core::NodeId;
 use paros::machine::{
     AuditScope, CachedRegistry, CellPlan, ControlJournals, MachineAddresses, MachineError,
     MachineRecord, MachineSettings, ProviderDisk,
 };
-use paros::{Address, Ballot, NodeId, RunError};
+use paros::model::address::Address;
+use paros::roles::node::RunError;
 
 use crate::audit::NodeAudit;
 use crate::audit::journals::journal_board;
@@ -119,10 +122,10 @@ pub(crate) struct MachineBoard {
     lost: BTreeSet<u64>,
     /// Every election journal a formatting plan named (#240): multi-writer
     /// journals, which the audit models as such.
-    elections: BTreeSet<paros::JournalIdentifier>,
+    elections: BTreeSet<paros::core::JournalIdentifier>,
     /// The cell control journal each election journal's terms install on
     /// (#653 (election term to installed leader)), by election journal.
-    governs: BTreeMap<paros::JournalIdentifier, paros::JournalIdentifier>,
+    governs: BTreeMap<paros::core::JournalIdentifier, paros::core::JournalIdentifier>,
     /// The address an operator founded another cell on (#216): a machine
     /// that replaced a wiped member of the run's cell, alone in its own.
     other_founder: Option<Address>,
@@ -257,7 +260,7 @@ pub(crate) fn formed_cell(state: &StateHandle) -> Option<ControlJournals> {
 }
 
 /// Whether `journal` is a cell's election journal (#240): multi-writer.
-pub(crate) fn is_election(state: &StateHandle, journal: paros::JournalIdentifier) -> bool {
+pub(crate) fn is_election(state: &StateHandle, journal: paros::core::JournalIdentifier) -> bool {
     lock(&machine_board(state)).elections.contains(&journal)
 }
 
@@ -265,7 +268,10 @@ pub(crate) fn is_election(state: &StateHandle, journal: paros::JournalIdentifier
 /// journal its terms install on (#653 (election term to installed leader)).
 pub(crate) fn governed(
     state: &StateHandle,
-) -> Vec<(paros::JournalIdentifier, paros::JournalIdentifier)> {
+) -> Vec<(
+    paros::core::JournalIdentifier,
+    paros::core::JournalIdentifier,
+)> {
     lock(&machine_board(state))
         .governs
         .iter()
@@ -1117,13 +1123,13 @@ fn operator_table(state: &StateHandle) -> ScriptedResolver {
 }
 
 /// How the workload's clients resolve the machines' addresses (#257).
-pub(crate) fn names(state: &StateHandle) -> paros::Names {
-    paros::Names::new(operator_table(state))
+pub(crate) fn names(state: &StateHandle) -> paros::model::address::Names {
+    paros::model::address::Names::new(operator_table(state))
 }
 
 /// How the machines resolve each other's addresses (#257, #349).
-fn machine_names(state: &StateHandle) -> paros::Names {
-    paros::Names::new(name_table(state))
+fn machine_names(state: &StateHandle) -> paros::model::address::Names {
+    paros::model::address::Names::new(name_table(state))
 }
 
 /// Point `host` at `ip` in both tables.
@@ -1528,7 +1534,7 @@ async fn run_machine_role(
     // Ordered: a crash never leaves a batch ambiguous, which a one-member
     // cell could never repair. A journal a tenant created stores under the
     // mode its create recorded instead (#599 (durability mode per journal)).
-    let store_layout = paros::JournalStoreConfig {
+    let store_layout = paros::storage::journal::JournalStoreConfig {
         durability: paros::storage::journal::Durability::Ordered,
         ..crate::shape::journal_layout(ctx.state())
     };
@@ -1633,7 +1639,7 @@ impl Drop for Ended {
     }
 }
 
-/// A machine read its record at boot ([`paros::Audit::machine_booted`]):
+/// A machine read its record at boot ([`paros::observe::audit::Audit::machine_booted`]):
 /// the boot facts that need the run's layout. An empty disk where a record
 /// was is a wipe (moonpool's `CrashAndWipe`): the machine there is a new
 /// one, and the old one's vote is gone with its disk.
@@ -1695,7 +1701,7 @@ pub(crate) fn booted(
 }
 
 /// Machine `node` tried to write its cached registry fold (#211,
-/// [`paros::Audit::registry_cached`]), `durable` when the write landed: a
+/// [`paros::observe::audit::Audit::registry_cached`]), `durable` when the write landed: a
 /// durable cache only moves forward.
 pub(crate) fn registry_cached(
     board: &Mutex<MachineBoard>,
@@ -1734,7 +1740,7 @@ pub(crate) fn registry_cached(
 }
 
 /// Machine `node` booted into its cell with `cache` (#211,
-/// [`paros::Audit::registry_cache_read`]): a cache the machine wrote, never
+/// [`paros::observe::audit::Audit::registry_cache_read`]): a cache the machine wrote, never
 /// another's or one it never offered.
 pub(crate) fn registry_cache_read(
     board: &Mutex<MachineBoard>,
@@ -1795,7 +1801,7 @@ fn judge_minted(board: &MachineBoard, addr: &Address, node: u64) {
 }
 
 /// A machine rewrote its record durably
-/// ([`paros::Audit::machine_recorded`]), as a reachable each: two proposers'
+/// ([`paros::observe::audit::Audit::machine_recorded`]), as a reachable each: two proposers'
 /// ballots met at one machine (a promise raised over another machine's),
 /// and a plan was accepted at a second ballot — a later `cell init`
 /// finished what an earlier one proposed (P2c).
@@ -1905,7 +1911,7 @@ pub(crate) fn recorded(board: &Mutex<MachineBoard>, addr: &Address, record: &Mac
 }
 
 /// A machine is about to format `plan`'s stores
-/// ([`paros::Audit::cell_formatting`]): only after an operator's `init`,
+/// ([`paros::observe::audit::Audit::cell_formatting`]): only after an operator's `init`,
 /// only on a founding member, and over exactly the founders.
 pub(crate) fn formatting(
     board: &Mutex<MachineBoard>,

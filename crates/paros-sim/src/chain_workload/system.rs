@@ -42,11 +42,17 @@ use paros::client::checkpoint::{
     OpenOutcome,
 };
 use paros::client::{Answered, Attempted, CallObserver, ClaimOutcome, TruncateOutcome, Writer};
+use paros::core::Command;
+use paros::core::Entry;
+use paros::core::JournalIdentifier;
+use paros::core::LeaderUuid;
+use paros::core::NodeId;
+use paros::core::Seq;
+use paros::core::Value;
 use paros::model::registry::{
     BookingTarget, Class, NodeStanding, Registry, RegistryEvent, Role, SystemCommand, SystemEvent,
     registry_event,
 };
-use paros::{Command, Entry, JournalIdentifier, LeaderUuid, NodeId, Seq, Value};
 
 use paros::client::{ReadOutcome, SetLeaderOutcome, WriteOutcome};
 
@@ -375,7 +381,7 @@ impl CallObserver for Announce {
         }
     }
 
-    fn resolving(&self, write: &paros::Write) -> Option<u64> {
+    fn resolving(&self, write: &paros::wire::Write) -> Option<u64> {
         let (index, _, log) = self.entry(Attempted::Write(write).journal())?;
         let token = log.resolving(write)?;
         Some((index as u64) << TOKEN_JOURNAL_SHIFT | token)
@@ -398,10 +404,10 @@ impl CallObserver for Announce {
     /// (batchers)): the journal may apply it, so it joins the journal's
     /// appended set. Its records are the callers', each submitted by its
     /// own client; the callers' writes, not this one, are the history.
-    fn merged(&self, write: &paros::Write) {
+    fn merged(&self, write: &paros::wire::Write) {
         let journal = JournalIdentifier::new(
-            paros::TenantId(write.tenant),
-            paros::JournalId(write.journal),
+            paros::core::TenantId(write.tenant),
+            paros::core::JournalId(write.journal),
         );
         audit_world_named(&self.state, journal).note_appended(deposed::write_hash(write));
         moonpool_sim::assert_reachable!("batcher: a merged write joins its journal's appended set");
@@ -434,7 +440,7 @@ impl SystemOps {
                 .enumerate()
                 .zip(machines)
                 .filter_map(|((rank, ip), machine)| {
-                    paros::parse_addr(ip)
+                    paros::roles::node::parse_addr(ip)
                         .ok()
                         .map(|addr| (crate::roles::joiner_node_id(rank), addr, *machine))
                 })
@@ -510,7 +516,8 @@ impl SystemOps {
         let mut target = usize::try_from(draw % targets.len() as u64).unwrap_or(0);
         // A multi-writer journal (#241) takes unfenced writes and no claim:
         // its seq is assigned at apply.
-        let unfenced = (audit.mode() == paros::WriterMode::Multi).then_some((LeaderUuid::UNSET, 0));
+        let unfenced =
+            (audit.mode() == paros::core::WriterMode::Multi).then_some((LeaderUuid::UNSET, 0));
         if unfenced.is_some() {
             assert_reachable!("system: a client appends unfenced to a multi-writer journal");
         }
@@ -565,7 +572,9 @@ impl SystemOps {
                 seq: Seq(position),
                 records: vec![Value(record.clone())],
             };
-            audit.note_appended(paros::command_hash(&Command::Write(entry.clone())));
+            audit.note_appended(paros::roles::node::command_hash(&Command::Write(
+                entry.clone(),
+            )));
             let write = write_once(nodes, journal, node, &entry, false, false);
             match within(ctx, self.timeout, WriteOutcome::Ambiguous, write).await {
                 WriteOutcome::Written { seq, .. } => return Appended::At(seq),

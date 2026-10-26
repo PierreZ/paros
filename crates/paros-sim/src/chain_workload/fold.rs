@@ -16,8 +16,8 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use moonpool_sim::{SimContext, StateHandle, assert_always};
-use paros::JournalIdentifier;
 use paros::client::ReadOutcome;
+use paros::core::JournalIdentifier;
 
 use crate::audit::AuditWorld;
 use crate::chain::{ChainState, user_command_hash};
@@ -222,7 +222,7 @@ impl Fold {
                 return false;
             }
             let from = self.cursor;
-            let request = paros::Read {
+            let request = paros::wire::Read {
                 journal: self.journal.journal.0,
                 tenant: self.journal.tenant.0,
                 from_seq: from,

@@ -2,8 +2,8 @@
 //! one journal owes every other, and what the journal owes its clients.
 //!
 //! The core judges every `Write`, `SetLeader` and `Truncate` at apply, in
-//! slot order ([`paros::journal_state`]); each node reports the verdict it
-//! reached at each slot it walked ([`paros::Audit::applied`]). This model
+//! slot order ([`paros::core::journal_state`]); each node reports the verdict it
+//! reached at each slot it walked ([`paros::observe::audit::Audit::applied`]). This model
 //! folds those reports — never a second implementation of the journal — and
 //! asserts the invariants of `docs/architecture/06-verification.md`, section 6:
 //!
@@ -37,7 +37,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use moonpool_sim::{assert_always, assert_reachable, assert_sometimes};
-use paros::{Command, Control, JournalView, LeaderUuid, Outcome, WriterMode};
+use paros::core::Command;
+use paros::core::Control;
+use paros::core::JournalView;
+use paros::core::LeaderUuid;
+use paros::core::Outcome;
+use paros::core::WriterMode;
 
 /// The write a slot decided, as the model keeps it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -22,7 +22,7 @@
 use std::collections::BTreeSet;
 use std::ops::Bound::{Excluded, Unbounded};
 
-use crate::ParosProviders;
+use crate::net::runtime::ParosProviders;
 use paros_core::{NodeId, TenantId};
 
 use crate::client::Client;
@@ -30,7 +30,7 @@ use crate::client::cell::CellSession;
 use crate::client::journals::JournalAnswer;
 use crate::coordinator::tenant::TenantDesk;
 use crate::coordinator::tenant::moves::{Leaving, stays};
-use crate::machine::Class;
+use crate::model::machine::Class;
 use crate::model::placement::{self, Step, Want};
 use crate::model::registry::{Booking, BookingTarget, NodeStanding, Registry, Role, SystemCommand};
 

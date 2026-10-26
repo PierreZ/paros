@@ -47,7 +47,7 @@
 //! [`follow`] reads the directory at the pointer ([`directory_reader`]),
 //! and the tenant steps above run as in the cell that hosts the universe.
 
-use crate::ParosProviders;
+use crate::net::runtime::ParosProviders;
 use paros_core::{JournalIdentifier, TenantId};
 
 use crate::client::Client;
@@ -55,9 +55,9 @@ use crate::client::cell::CellSession;
 use crate::client::checkpoint::{Folder, LoadOutcome, load};
 use crate::client::fleet::Interrupted;
 use crate::client::universe::{JoinAnswer, JoinRequest};
-use crate::machine::ControlJournals;
 use crate::model::fleet::{CellState, FleetDirectory, METADATA_VERSION, TenantKind, TenantState};
 use crate::model::footprint::{self, Footprint};
+use crate::model::machine::ControlJournals;
 use crate::model::registry::{GrantKey, HostedTenant, Registry, SystemCommand};
 
 /// The `JoinFleet` the universe directory `directory` asks of the cell
@@ -494,9 +494,9 @@ mod tests {
         SystemCommand::RegisterNode {
             id: NodeId(1),
             addr: "n1".to_owned(),
-            class: crate::machine::Class::Storage,
+            class: crate::model::machine::Class::Storage,
             capacity,
-            locality: crate::machine::Locality::default(),
+            locality: crate::model::machine::Locality::default(),
             name: String::new(),
             incarnation: 1,
             machine_interface: Vec::new(),

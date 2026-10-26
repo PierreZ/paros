@@ -15,11 +15,18 @@
 use std::sync::{Mutex, PoisonError, Weak};
 
 use moonpool_sim::{SimStorageProvider, StateHandle, assert_reachable, assert_sometimes};
-use paros::{
-    Ballot, JournalId, JournalIdentifier, JournalMatchmakerStorage, MatchmakerConfig,
-    MatchmakerHardState, MatchmakerStorage, Registration, Registrations, RegistryStorage,
-    StorageError, TenantId,
-};
+use paros::core::Ballot;
+use paros::core::JournalId;
+use paros::core::JournalIdentifier;
+use paros::core::MatchmakerConfig;
+use paros::core::MatchmakerHardState;
+use paros::core::Registration;
+use paros::core::RegistryStorage;
+use paros::core::TenantId;
+use paros::roles::matchmaker::MatchmakerStorage;
+use paros::roles::matchmaker::Registrations;
+use paros::storage::StorageError;
+use paros::storage::journal::JournalMatchmakerStorage;
 
 use super::StorageWorld;
 use super::cut::{Budget, InFlight, Owner, release_parked};
@@ -76,7 +83,7 @@ impl LedgeredRegistry {
     pub(crate) fn new(
         provider: SimStorageProvider,
         tenant: TenantId,
-        layout: paros::JournalStoreConfig,
+        layout: paros::storage::journal::JournalStoreConfig,
         world: Weak<Mutex<StorageWorld>>,
         ip: String,
         state: StateHandle,

@@ -31,17 +31,20 @@ use paros::client::journals::{self, JournalAnswer, JournalOp, JournalRequest};
 use paros::client::names::{JournalNames, JournalResolution};
 use paros::client::{ClaimOutcome, ReadOutcome, WriteOptions, WriteOutcome};
 use paros::client::{Writer, WriterOutcome};
+use paros::core::JournalIdentifier;
+use paros::core::TenantId;
+use paros::core::Value;
+use paros::core::WriterMode;
 use paros::model::fleet::{TenantKind, TenantState};
 use paros::model::tenant::{Desired, Durability, StoreDurability};
-use paros::{JournalIdentifier, TenantId, Value, WriterMode};
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 
 use moonpool_sim::{Providers, TimeProvider};
-use paros::Pass;
 use paros::model::name::JournalName;
+use paros::net::Pass;
 use paros::roles::frontend::Denial;
 
 use super::FleetOps;
@@ -52,7 +55,7 @@ use crate::frontend::{self, Presented};
 
 /// The identifier a call by name is bound to on the client: the frontend
 /// never reads it (#192 (the frontend)).
-const LOCAL: JournalIdentifier = JournalIdentifier::new(TenantId(1), paros::JournalId(1));
+const LOCAL: JournalIdentifier = JournalIdentifier::new(TenantId(1), paros::core::JournalId(1));
 
 /// The journal names a request is drawn from: few, so two requests race for
 /// one often.
@@ -636,7 +639,7 @@ impl FleetOps {
         cell: &Cell,
         control: JournalIdentifier,
         request: &JournalRequest,
-        taken_by: paros::JournalId,
+        taken_by: paros::core::JournalId,
     ) {
         if control.tenant != request.tenant {
             return;

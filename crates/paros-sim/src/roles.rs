@@ -33,7 +33,10 @@
 use std::net::IpAddr;
 
 use moonpool_sim::{WorkloadTopology, assert_always};
-use paros::{MatchmakerId, NodeId, ProxyId, ReplicaId};
+use paros::core::MatchmakerId;
+use paros::core::NodeId;
+use paros::core::ProxyId;
+use paros::core::ReplicaId;
 
 /// The process group of the paros nodes (`NodeProcess::name`).
 pub(crate) const ACCEPTOR_GROUP: &str = "paros-node";

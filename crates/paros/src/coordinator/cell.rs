@@ -104,7 +104,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, PoisonError};
 use std::time::Duration;
 
-use crate::ParosProviders;
+use crate::net::runtime::ParosProviders;
 use moonpool_core::{Detach, LocalTaskProvider, LocalTimeProvider, RandomProvider};
 use moonpool_rpc::{AccessClass, RpcHandle, ServiceGroup};
 use paros_core::{JournalIdentifier, LeaderUuid, NodeId, TenantId};
@@ -128,16 +128,18 @@ use crate::coordinator::tenant::moves::Moves;
 use crate::coordinator::tenant::roles::Roles;
 use crate::coordinator::tenant::scrub::{ScrubPace, Scrubs};
 use crate::coordinator::tenant::sets::{SetStep, Sets};
+use crate::model::address::Address;
+use crate::model::address::Names;
 use crate::model::fleet::FleetDirectory;
 use crate::model::machine::{CellPlan, ControlJournals, incarnation_from_halves};
 use crate::model::registry::{MaintenanceScope, NodeStanding, Registry, SystemCommand};
 use crate::net::{Inbound, NodeClient, ReplySender};
 use crate::roles::node::host::FormedCell;
+use crate::tunables::DriverTunables;
 use crate::wire::machine as wire;
 use crate::wire::methods::{
     CapacityRequestRpc, CoordinatorInterface, JoinUniverseRpc, JournalRequestRpc, RegisterRpc,
 };
-use crate::{Address, DriverTunables, Names};
 
 /// A served term's session and its watch over the cell's machines (#211).
 type Watching = Option<(CellSession, Watch)>;

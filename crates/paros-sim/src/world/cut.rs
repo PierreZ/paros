@@ -51,7 +51,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 
-use paros::JournalIdentifier;
+use paros::core::JournalIdentifier;
 
 use moonpool_sim::{HintVeto, OutageVeto, StateHandle, assert_always, assert_reachable};
 

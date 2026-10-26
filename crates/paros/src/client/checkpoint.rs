@@ -5,7 +5,7 @@
 
 use std::time::Duration;
 
-use crate::ParosProviders;
+use crate::net::runtime::ParosProviders;
 use paros_core::{JournalIdentifier, LeaderUuid, Value};
 
 use super::reader::{Reader, ReaderOutcome};

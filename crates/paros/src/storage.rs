@@ -343,7 +343,7 @@ pub trait LogStorage: Storage {
     /// been provisioned — written once by [`format`](LogStorage::format) on
     /// the identity's first boot, before any protocol state, and never
     /// removed. The driver judges the operator's
-    /// [`BootKind`](crate::BootKind) claim against it: an existing member
+    /// [`BootKind`](crate::storage::boot::BootKind) claim against it: an existing member
     /// whose store has no marker has lost its disk, and its durable promise
     /// with it, and is refused rather than rejoined; an existing member
     /// whose store was formatted under another [`Config`] than the one the

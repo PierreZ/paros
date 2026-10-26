@@ -24,7 +24,7 @@
 
 use std::sync::Arc;
 
-use crate::ParosProviders;
+use crate::net::runtime::ParosProviders;
 use moonpool_core::{SimulationError, SimulationResult};
 use moonpool_rpc::{RpcHandle, ServiceGroup};
 use paros_core::{

@@ -9,7 +9,7 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use crate::ParosProviders;
+use crate::net::runtime::ParosProviders;
 use moonpool_core::{
     Detach, LocalTaskProvider, LocalTimeProvider, SimulationError, SimulationResult,
 };
@@ -18,11 +18,12 @@ use paros_core::{Audience, JournalIdentifier, Message, NodeId, Party, ProxyId};
 use prost::Message as ProstMessage;
 use tokio_util::sync::CancellationToken;
 
+use crate::model::address::Address;
+use crate::model::address::Names;
 use crate::net::{in_group, well_known};
 use crate::observe::audit::Audit;
 use crate::wire::methods::{DeliverRpc, MachineInterface};
 use crate::wire::{internal, message_to_proto};
-use crate::{Address, Names};
 
 use crate::observe::events::{command_hash, message_kind, message_route, proto_message_kind};
 use crate::tunables::{DELIVERY_BATCH, DELIVERY_BATCH_BYTES, DriverTunables};
@@ -427,7 +428,7 @@ fn is_cumulative(kind: &str) -> bool {
 /// The driver's outbound side: every peer's mailboxes, every proxy leader's
 /// mailbox (#142; empty on a deployment without proxies), and the sender's
 /// identity for the observability events — a node, or a proxy leader running
-/// [`run_proxy`](crate::run_proxy), which sends through exactly this handle.
+/// [`run_proxy`](crate::roles::proxy_leader::run_proxy), which sends through exactly this handle.
 /// Bundled so `take_ready` and `finish_ready` take one handle.
 pub(crate) struct Outbound {
     /// Every peer's lane, by node: one lane carries every class, since

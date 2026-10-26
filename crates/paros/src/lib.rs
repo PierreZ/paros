@@ -41,48 +41,12 @@ pub mod storage;
 pub mod tunables;
 pub mod wire;
 
-pub use model::address::{Address, Names};
-pub use model::corruption::{CorruptionVerdict, IntegrityFault};
-pub use net::runtime::ParosProviders;
-pub use net::transport::Transport;
-pub use net::{EdgeRejection, NodeClient, Pass};
-pub use observe::audit::{
-    Audit, DelegationOutcome, Deployment, HistoryPage, LogReadAnswer, LogReadReport, NoAudit,
-    StorageFaultDecision,
-};
-pub use roles::matchmaker::{
-    HostedSet, MatchmakerStorage, MemMatchmakerStorage, Registrations,
-    matchmaker_storage_contract_suite, run_matchmaker,
-};
-pub use roles::node::reply::Reply;
-pub use roles::node::{
-    BelowFloor, BootKind, BootRefusal, ControlPlan, DriverTunables, JournalStores,
-    LOAD_INTERVAL_FLOOR, MAX_READ_RECORDS, RunError, command_hash, message_kind, parse_addr,
-    registration_history_hash, run_journals, run_node,
-};
-pub use roles::proxy_leader::{ProxyConfig, ProxyJournal, run_proxy};
-pub use roles::replica::run_replica;
-pub use storage::journal::{
-    JournalBootFacts, JournalMatchmakerStorage, JournalStorage, JournalStoreConfig,
-};
-pub use storage::provision::{Provisioned, provision_matchmaker_store, provision_store};
-pub use storage::{
-    LogStorage, MemStorage, MetadataFault, ScrubPage, ScrubbedSlot, StorageError, StorageRecord,
-    WriteOutcome, command_bytes, storage_contract_suite,
-};
-pub use tunables::MAX_FRAME_BYTES;
-pub use wire::{
-    InspectRefusal, InspectReply, InspectRequest, InspectTarget, Read, ReadAck, Reconfigure,
-    ReconfigureAck, ReconfigureMatchmakers, ReconfigureMatchmakersAck, RetireAck, RetireRequest,
-    SetLeader, SetLeaderAck, Truncate, TruncateAck, WireQuorumSystem, Write, WriteAck,
-    journal_state_from_proto, journal_state_to_proto, journal_view_from_proto,
-    journal_view_to_proto, leader_from_proto, leader_uuid_from_proto, leader_uuid_to_proto,
-    quorum_system_from_proto, quorum_system_to_proto,
-};
+pub use paros_core as core;
 
-// The whole sans-IO core, re-exported: the roles (`acceptor`, `proposer`,
-// `replica`, `matchmaking`, `membership`, `retained`), `ColocatedNode`, the
-// matchmaker, and every message, record and scalar type they exchange. No core
-// name collides with a name `paros` defines itself, so a user reaches both
-// through one path.
-pub use paros_core::*;
+pub use machine::run_machine;
+pub use roles::batcher::run_batcher;
+pub use roles::frontend::run_frontend;
+pub use roles::matchmaker::run_matchmaker;
+pub use roles::node::{run_journals, run_node};
+pub use roles::proxy_leader::run_proxy;
+pub use roles::replica::run_replica;

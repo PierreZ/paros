@@ -54,7 +54,7 @@ mod fold;
 use std::collections::VecDeque;
 use std::time::Duration;
 
-use crate::ParosProviders;
+use crate::net::runtime::ParosProviders;
 use paros_core::{JournalIdentifier, LeaderUuid};
 
 pub use fold::{Candidate, Change, ElectionFold, ElectionRecord, Leader, MAGIC};

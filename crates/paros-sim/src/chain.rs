@@ -9,7 +9,10 @@
 //! on the state after every record, and the audit checks exactly that
 //! (`AuditWorld::fold_applied`).
 
-use paros::{Command, Control, LeaderUuid, Seq};
+use paros::core::Command;
+use paros::core::Control;
+use paros::core::LeaderUuid;
+use paros::core::Seq;
 
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
@@ -78,7 +81,7 @@ pub(crate) fn trace_truncate(leader: LeaderUuid, up_to: u64) {
         up_to: Seq(up_to),
     });
     tracing::info!(
-        cmd = %hash_text(paros::command_hash(&command)),
+        cmd = %hash_text(paros::roles::node::command_hash(&command)),
         up_to,
         "chain_control_submitted"
     );

@@ -216,7 +216,7 @@ impl LinHistory {
 /// journal). Run once, after every
 /// client's run: every one of them writes these journals.
 #[tracing::instrument(level = "debug", skip_all, fields(attempts = attempts.len()))]
-pub(crate) fn check_control_history(attempts: Vec<Attempt>, mode: paros::WriterMode) {
+pub(crate) fn check_control_history(attempts: Vec<Attempt>, mode: paros::core::WriterMode) {
     if attempts.is_empty() {
         return;
     }
@@ -244,7 +244,7 @@ const LIN_SEARCH_BUDGET: u64 = 5_000_000;
 /// last client of the journal merged: a sub-history of some clients is not a
 /// history (a read shows records another client wrote).
 #[tracing::instrument(level = "debug", skip_all)]
-pub(super) fn check_linearizable(h: &LinHistory, mode: paros::WriterMode) {
+pub(super) fn check_linearizable(h: &LinHistory, mode: paros::core::WriterMode) {
     let verdict = super::linearizability::check(&h.attempts, mode, LIN_SEARCH_BUDGET);
     if verdict.exhausted {
         eprintln!(

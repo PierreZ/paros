@@ -53,7 +53,7 @@ use std::fmt::Write as _;
 use paros_core::{Ballot, Config, JournalIdentifier, NodeId, QuorumSystem, WriterMode};
 
 use super::{Admission, CellPlan, Class, ControlJournals, Locality};
-use crate::Address;
+use crate::model::address::Address;
 
 /// Parse a journal identifier written `<tenant>/<journal>` (#235).
 fn parse_identifier(text: &str) -> Option<JournalIdentifier> {

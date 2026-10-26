@@ -9,7 +9,13 @@ use super::replica_book;
 use super::{journal_config, main_config};
 use crate::audit::{NodeAudit, audit_world_for};
 use crate::roles::Deployment;
-use paros::{NodeId, ProxyConfig, ProxyId, ProxyJournal, RunError, parse_addr, run_proxy};
+use paros::core::NodeId;
+use paros::core::ProxyId;
+use paros::roles::node::RunError;
+use paros::roles::node::parse_addr;
+use paros::roles::proxy_leader::ProxyConfig;
+use paros::roles::proxy_leader::ProxyJournal;
+use paros::roles::proxy_leader::run_proxy;
 
 /// A proxy leader (#142): the provider-generic proxy driver, with no disk and
 /// no recovery loop — the only exit it has is an infrastructure failure or the

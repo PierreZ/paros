@@ -25,7 +25,9 @@ use paros::client::election::{
     Candidate, Election, ElectionFold, ElectionTunables, Step, hand_off, read_election,
 };
 use paros::coordinator::cell::{TermDuty, serve_term};
-use paros::{JournalIdentifier, LeaderUuid, NodeId};
+use paros::core::JournalIdentifier;
+use paros::core::LeaderUuid;
+use paros::core::NodeId;
 
 use super::{Cell, FleetOps};
 
@@ -86,7 +88,7 @@ impl FleetOps {
         // Every founding member, reached or not: an admission the term
         // finishes names them all.
         let members: Vec<NodeId> = cell.members.iter().copied().map(NodeId).collect();
-        let founders: Vec<(NodeId, paros::Address)> = cell
+        let founders: Vec<(NodeId, paros::model::address::Address)> = cell
             .servers
             .iter()
             .map(|(id, addr)| (NodeId(*id), addr.clone()))
@@ -189,7 +191,7 @@ impl FleetOps {
 async fn leave(
     election: &mut Election<moonpool_sim::SimProviders>,
     cell: &Cell,
-    founders: &[(NodeId, paros::Address)],
+    founders: &[(NodeId, paros::model::address::Address)],
     leader: &paros::client::election::Leader,
     draw: u64,
 ) -> bool {

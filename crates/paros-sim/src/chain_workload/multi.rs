@@ -29,10 +29,15 @@ use futures::future::join_all;
 use moonpool_sim::{SimContext, TimeProvider, assert_always, assert_reachable, buggify_with_prob};
 use paros::client::multi::{append_entry, append_request, open_truncate_request};
 use paros::client::{Retarget, SetLeaderOutcome, TruncateOutcome, WriteOptions, WriteOutcome};
-use paros::{
-    Command, Entry, JournalIdentifier, LeaderUuid, Seq, Truncate, Value, command_hash,
-    leader_uuid_to_proto,
-};
+use paros::core::Command;
+use paros::core::Entry;
+use paros::core::JournalIdentifier;
+use paros::core::LeaderUuid;
+use paros::core::Seq;
+use paros::core::Value;
+use paros::roles::node::command_hash;
+use paros::wire::Truncate;
+use paros::wire::leader_uuid_to_proto;
 
 use super::rpc::{CallLog, judged_truncate, judged_write, set_leader_once, within, write_once};
 use super::{

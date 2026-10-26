@@ -12,7 +12,7 @@
 //! elected cell coordinator is still every tenant's coordinator, so its
 //! request is a call into its own session.
 
-use crate::ParosProviders;
+use crate::net::runtime::ParosProviders;
 
 use crate::client::Client;
 use crate::client::capacity::{CapacityAnswer, CapacityRequest};

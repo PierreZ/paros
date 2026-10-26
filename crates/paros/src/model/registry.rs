@@ -64,17 +64,17 @@ use std::collections::{BTreeMap, BTreeSet};
 use paros_core::{JournalId, JournalIdentifier, NodeId, TenantId};
 use prost::Message as _;
 
-pub use crate::machine::Class;
-use crate::machine::{
+use crate::model::checkpoint::{Checkpointable, Folded};
+pub use crate::model::machine::Class;
+use crate::model::machine::{
     Locality, incarnation_from_halves, incarnation_halves, machine_tags, parse_machine_tags,
 };
-use crate::model::checkpoint::{Checkpointable, Folded};
 use crate::model::tags::{Tag, Tags, UserTags};
 
 use crate::wire::system as wire;
 
 // The cell control journal has no fixed identifier (§3.8): a deployment draws
-// it and hands it to whoever folds it (`crate::ControlPlan`).
+// it and hands it to whoever folds it (`crate::roles::node::ControlPlan`).
 
 /// One system-journal entry, as a client appends it and a fold reads it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1273,7 +1273,7 @@ pub struct UniversePointer {
     /// The universe directory: the universe tenant's control journal.
     pub directory: JournalIdentifier,
     /// Machines of the cell that hosts it, by node id and address.
-    pub hosts: Vec<(u64, crate::Address)>,
+    pub hosts: Vec<(u64, crate::model::address::Address)>,
 }
 
 type PointerWire = (u64, u64, Vec<wire::UniverseHost>);
@@ -1327,7 +1327,7 @@ fn pointer_from_wire(
     let hosts = hosts
         .into_iter()
         .map(|h| {
-            let addr = crate::Address::parse(&h.addr)
+            let addr = crate::model::address::Address::parse(&h.addr)
                 .map_err(|_| "a universe host's address does not parse")?;
             if h.node_id == 0 {
                 return Err("a universe host names no node");
@@ -2489,7 +2489,7 @@ mod tests {
                 addr: "10.0.5.1:4500".into(),
                 class: Class::Storage,
                 capacity: 3,
-                locality: crate::machine::Locality::zone("rack-a"),
+                locality: crate::model::machine::Locality::zone("rack-a"),
                 name: "storage-7".into(),
                 incarnation: (7_u128 << 64) | 9,
                 machine_interface: vec![1, 2, 3],
@@ -2539,7 +2539,10 @@ mod tests {
                 version: 4,
                 universe: Some(UniversePointer {
                     directory: JournalIdentifier::new(TenantId(5), JournalId(6)),
-                    hosts: vec![(7, crate::Address::parse("10.0.0.7:4500").unwrap())],
+                    hosts: vec![(
+                        7,
+                        crate::model::address::Address::parse("10.0.0.7:4500").unwrap(),
+                    )],
                 }),
             },
             SystemCommand::ReleaseCapacity { booking: 7 },
@@ -2637,7 +2640,7 @@ mod tests {
             addr: format!("n{id}"),
             class,
             capacity,
-            locality: crate::machine::Locality::default(),
+            locality: crate::model::machine::Locality::default(),
             name: format!("m{id}"),
             incarnation: u128::from(id),
             machine_interface: Vec::new(),

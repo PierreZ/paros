@@ -9,7 +9,8 @@ use clap::Args;
 use moonpool_core::CompioProviders;
 use moonpool_rpc::RpcHandle;
 use paros::client::resolve::{Resolution, resolve};
-use paros::{Address, Names};
+use paros::model::address::Address;
+use paros::model::address::Names;
 use serde_json::json;
 
 use crate::Ending;

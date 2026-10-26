@@ -5,7 +5,7 @@
 //! Closing a freeze ([`paros_core::MatchmakerReconfigurer::close_stop`]) and
 //! abandoning a stalled handover both happen on a **beat**, never on the reply
 //! that completed a quorum: a straggler that arrives before the close widens
-//! the reconstruction, exactly as `paros::run_node` has it.
+//! the reconstruction, exactly as `paros::roles::node::run_node` has it.
 
 use paros_core::{
     ColocatedNode, MatchOutcome, MatchReply, MatchRequest, MatchStep, MatchmakerId, MatchmakerSet,
@@ -304,7 +304,7 @@ impl World {
                 // The freeze is **not** closed here. An ack that completes the
                 // quorum only makes the close possible; the close itself waits
                 // for a beat, so a straggler that arrives in between widens the
-                // reconstruction. `paros::run_node` closes it under
+                // reconstruction. `paros::roles::node::run_node` closes it under
                 // `resend_due` for the same reason.
                 self.queue_reconfigurer(index);
             }
@@ -619,7 +619,7 @@ impl World {
     }
 
     /// The driver's own half of a completed handover: the node that drove it
-    /// adopts the set it published, exactly as `paros::run_node` does.
+    /// adopts the set it published, exactly as `paros::roles::node::run_node` does.
     fn adopt_set(&mut self, index: usize, set: &MatchmakerSet) {
         let id = self.pool[index];
         self.drive(id, index, move |node| {

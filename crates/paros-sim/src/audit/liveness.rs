@@ -23,9 +23,9 @@
 use std::collections::BTreeSet;
 
 use moonpool_sim::{assert_always, assert_reachable};
-use paros::NodeId;
 use paros::client::checkpoint::Checkpointable;
 use paros::coordinator::cell::slow::SlowJudge;
+use paros::core::NodeId;
 use paros::model::registry::{Registry, RegistryEvent, RegistryRefusal};
 
 /// The cell's registry fold, with every event judged as it is folded.

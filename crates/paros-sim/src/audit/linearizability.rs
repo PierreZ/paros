@@ -86,15 +86,17 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 
-use paros::{JournalView, LeaderUuid, WriterMode};
+use paros::core::JournalView;
+use paros::core::LeaderUuid;
+use paros::core::WriterMode;
 
 use crate::chain::splitmix;
 
 /// The records a page carries at most, whatever the limit asked: the
-/// largest `max_read_records` a node draws (`paros::MAX_READ_RECORDS`,
+/// largest `max_read_records` a node draws (`paros::roles::node::MAX_READ_RECORDS`,
 /// #241). A node with a smaller maximum serves a shorter page, which the
 /// model accepts like any page cut by the tail.
-const PAGE_RECORDS: u64 = paros::MAX_READ_RECORDS;
+const PAGE_RECORDS: u64 = paros::roles::node::MAX_READ_RECORDS;
 
 /// One call a client made of its journal: what it asked.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -1342,7 +1344,10 @@ fn mix128(x: u128) -> u128 {
 #[cfg(test)]
 mod tests {
     use super::{Attempt, Call, Seen, check, judged};
-    use paros::{JournalView, LeaderUuid, Seq, WriterMode};
+    use paros::core::JournalView;
+    use paros::core::LeaderUuid;
+    use paros::core::Seq;
+    use paros::core::WriterMode;
 
     /// Client `k`'s leader uuid (the unset uuid is never one).
     fn u(k: u64) -> LeaderUuid {

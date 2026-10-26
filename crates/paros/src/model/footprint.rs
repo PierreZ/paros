@@ -27,7 +27,7 @@ use std::collections::BTreeMap;
 
 use paros_core::{NodeId, TenantId};
 
-use crate::machine::Class;
+use crate::model::machine::Class;
 use crate::model::placement::{self, Machine};
 use crate::model::registry::{BookingTarget, NodeStanding, Registry, Role, Slot};
 use crate::model::tenant::Durability;
@@ -344,7 +344,7 @@ mod tests {
             addr: format!("n{id}"),
             class,
             capacity,
-            locality: crate::machine::Locality::default(),
+            locality: crate::model::machine::Locality::default(),
             name: String::new(),
             incarnation: 1,
             machine_interface: Vec::new(),

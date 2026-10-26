@@ -42,7 +42,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
-use crate::ParosProviders;
+use crate::net::runtime::ParosProviders;
 use moonpool_core::{
     Detach, LocalTaskProvider, LocalTimeProvider, SimulationError, SimulationResult,
 };
@@ -59,7 +59,7 @@ use crate::wire::{Read, ReadAck};
 
 /// A checkpoint the registry fold met: its position, how it was folded
 /// (`Some(equal)` verified, `None` restored) and the registry the fold held
-/// right after it, see [`crate::Audit::checkpoint_folded`].
+/// right after it, see [`crate::observe::audit::Audit::checkpoint_folded`].
 pub(crate) type FoldedCheckpoint = (u64, Option<bool>, Registry);
 
 use super::journals::Journals;
@@ -130,7 +130,7 @@ pub(crate) struct ControlFollower<P: ParosProviders> {
     seeds: Vec<(NodeId, NodeClient<P>)>,
     /// What a moved seed is dialed again through.
     rpc: RpcHandle<P>,
-    names: crate::Names,
+    names: crate::model::address::Names,
     /// The position of the newest book the node adopted from outside its
     /// fold (#505 (stranded admitted machine)): a registration the fold
     /// meets below it is older than that book and moves no seed.
@@ -149,7 +149,7 @@ pub(crate) struct ControlFollower<P: ParosProviders> {
     /// The tenants the cell dropped: every journal of theirs is unknown here.
     dropped: BTreeSet<TenantId>,
     /// Checkpoints the registry fold met since the driver last took them:
-    /// `(seq, verified, state)`, see [`crate::Audit::checkpoint_folded`].
+    /// `(seq, verified, state)`, see [`crate::observe::audit::Audit::checkpoint_folded`].
     checkpoints: Vec<FoldedCheckpoint>,
     /// Control journals with a remote read in flight.
     outstanding: BTreeSet<JournalIdentifier>,
@@ -182,7 +182,7 @@ impl<P: ParosProviders> ControlFollower<P> {
     pub(crate) fn new(
         plan: &ControlPlan,
         rpc: &RpcHandle<P>,
-        names: &crate::Names,
+        names: &crate::model::address::Names,
         fixed: impl IntoIterator<Item = NodeId>,
         tunables: &DriverTunables,
         shutdown: CancellationToken,
@@ -246,7 +246,7 @@ impl<P: ParosProviders> ControlFollower<P> {
     /// registry fold or from a book its cell coordinator handed it (#505
     /// (stranded admitted machine)). A node that is no seed is ignored.
     /// Whether the seed moved.
-    pub(crate) fn reseed(&mut self, id: NodeId, addr: &crate::Address) -> bool {
+    pub(crate) fn reseed(&mut self, id: NodeId, addr: &crate::model::address::Address) -> bool {
         assert!(id != self.self_id, "a node is never its own seed");
         let count = self.seeds.len();
         let Some((_, client)) = self
@@ -277,15 +277,15 @@ impl<P: ParosProviders> ControlFollower<P> {
     pub(crate) fn adopt(
         &mut self,
         position: u64,
-        book: &[(NodeId, crate::Address)],
-    ) -> Vec<(NodeId, crate::Address)> {
+        book: &[(NodeId, crate::model::address::Address)],
+    ) -> Vec<(NodeId, crate::model::address::Address)> {
         if position <= self.adopted {
             return Vec::new();
         }
         self.adopted = position;
         let me = self.self_id;
         let seeds: Vec<NodeId> = self.seeds.iter().map(|(id, _)| *id).collect();
-        let moved: Vec<(NodeId, crate::Address)> = book
+        let moved: Vec<(NodeId, crate::model::address::Address)> = book
             .iter()
             .filter(|(id, _)| *id != me && seeds.contains(id))
             .filter(|(id, addr)| self.reseed(*id, addr))
@@ -565,7 +565,7 @@ impl<P: ParosProviders> ControlFollower<P> {
                     | RegistryEvent::Reregistered { id, addr, .. }
                         if *id != self.self_id && seq >= self.adopted =>
                     {
-                        if let Ok(addr) = crate::Address::parse(addr) {
+                        if let Ok(addr) = crate::model::address::Address::parse(addr) {
                             self.reseed(*id, &addr);
                         }
                     }

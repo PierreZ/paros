@@ -41,7 +41,7 @@ use std::fmt::Write as _;
 use paros_core::NodeId;
 use tokio::sync::watch;
 
-use crate::Address;
+use crate::model::address::Address;
 
 /// The cell's address book at one position of the registry fold.
 #[derive(Clone, Debug, PartialEq, Eq)]

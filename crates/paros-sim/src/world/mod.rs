@@ -53,7 +53,7 @@ pub(crate) fn storage_world(state: &StateHandle) -> Arc<Mutex<StorageWorld>> {
 /// is per journal and a journal's faults never excuse another's.
 pub(crate) fn storage_world_for(
     state: &StateHandle,
-    journal: paros::JournalIdentifier,
+    journal: paros::core::JournalIdentifier,
 ) -> Arc<Mutex<StorageWorld>> {
     crate::state::published(
         state,
@@ -909,7 +909,7 @@ pub(crate) struct StorageFaultStats {
 /// Fold the storage world's ground truth (empty world = no faults).
 pub(crate) fn storage_fault_stats(
     handle: &StateHandle,
-    journal: paros::JournalIdentifier,
+    journal: paros::core::JournalIdentifier,
 ) -> StorageFaultStats {
     let world = storage_world_for(handle, journal);
     let guard = world.lock().unwrap_or_else(PoisonError::into_inner);
@@ -964,7 +964,7 @@ pub(crate) fn storage_fault_stats(
 /// keeps serving — and its reconfigurations never name one of them.
 pub(crate) fn parked_nodes(
     handle: &StateHandle,
-    journal: paros::JournalIdentifier,
+    journal: paros::core::JournalIdentifier,
 ) -> BTreeSet<String> {
     let world = storage_world_for(handle, journal);
     let guard = world.lock().unwrap_or_else(PoisonError::into_inner);
@@ -1008,7 +1008,7 @@ pub(crate) struct CorruptionStats {
 
 pub(crate) fn corruption_stats(
     handle: &StateHandle,
-    journal: paros::JournalIdentifier,
+    journal: paros::core::JournalIdentifier,
 ) -> CorruptionStats {
     let world = storage_world_for(handle, journal);
     let guard = world.lock().unwrap_or_else(PoisonError::into_inner);
@@ -1025,7 +1025,7 @@ pub(crate) fn corruption_stats(
 /// [`crate::audit`]). The per-family verdicts are judged at each boot
 /// ([`injector::judge`]); what is left for the end of the run is the counts.
 #[tracing::instrument(level = "debug", skip_all)]
-pub(crate) fn check_storage_gates(handle: &StateHandle, journal: paros::JournalIdentifier) {
+pub(crate) fn check_storage_gates(handle: &StateHandle, journal: paros::core::JournalIdentifier) {
     let stats = storage_fault_stats(handle, journal);
     let corruption = corruption_stats(handle, journal);
     let detected = crate::audit::audit_world_for(handle, journal).storage_faults_detected();

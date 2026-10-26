@@ -5,12 +5,14 @@ use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use crate::ParosProviders;
+use crate::net::runtime::ParosProviders;
 use moonpool_rpc::{
     AccessClass, BootstrapAddress, Endpoint, ErrorReason, InterfaceMethod, InterfaceRef, RpcError,
     RpcHandle, RpcInterface, ServiceClient, WellKnownRef,
 };
 
+use crate::model::address::Address;
+use crate::model::address::Names;
 use crate::model::name::JournalName;
 use crate::wire::methods::{
     BatchWriteRpc, FrontReadRpc, FrontSetJournalTagsRpc, FrontSetLeaderRpc, FrontTruncateRpc,
@@ -24,7 +26,6 @@ use crate::wire::{
     ReconfigureMatchmakersAck, RetireAck, RetireRequest, ScrubReply, ScrubRequest,
     SetJournalTagsAck, SetLeader, SetLeaderAck, Truncate, TruncateAck, Write, WriteAck,
 };
-use crate::{Address, Names};
 use paros_core::{JournalId, JournalIdentifier, TenantId};
 
 /// `M`'s well-known endpoint at `addr`, bound to the runtime `rpc`: calls

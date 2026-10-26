@@ -92,12 +92,28 @@ use moonpool_sim::{assert_always, assert_reachable, assert_sometimes};
 
 use super::state::AuditState;
 use paros::client::{MatchmakersRefusal, RetireRefusal};
-use paros::{
-    AcceptorConfig, Ballot, BootRefusal, GcAck, GcStep, HistoryPage, JournalId, MatchRefusal,
-    MatchmakerHardState, MatchmakerId, MatchmakerPhase, MatchmakerSet, NodeId, PendingBootstrap,
-    REGISTRY_PAGE, ReconfigureReply, ReconfigureResult, ReconfigurerStep, Registration,
-    RegistrationKind, Slot, StorageFaultDecision,
-};
+use paros::core::AcceptorConfig;
+use paros::core::Ballot;
+use paros::core::GcAck;
+use paros::core::GcStep;
+use paros::core::JournalId;
+use paros::core::MatchRefusal;
+use paros::core::MatchmakerHardState;
+use paros::core::MatchmakerId;
+use paros::core::MatchmakerPhase;
+use paros::core::MatchmakerSet;
+use paros::core::NodeId;
+use paros::core::PendingBootstrap;
+use paros::core::REGISTRY_PAGE;
+use paros::core::ReconfigureReply;
+use paros::core::ReconfigureResult;
+use paros::core::ReconfigurerStep;
+use paros::core::Registration;
+use paros::core::RegistrationKind;
+use paros::core::Slot;
+use paros::observe::audit::HistoryPage;
+use paros::observe::audit::StorageFaultDecision;
+use paros::roles::node::BootRefusal;
 
 /// One write a journal registry's commit carries (#176), reported before
 /// the commit starts ([`MatchmakerAudit::note_in_flight`]): a power cut may
@@ -411,7 +427,7 @@ pub(super) struct MatchmakerAudit {
 /// cartesian product over every copy each matchmaker sent (five matchmakers
 /// answering ten times each is 100,000 combinations) and strictly weaker
 /// than what the candidate itself knows: which copy it folded. It now says
-/// so ([`paros::Audit::match_registered_by`]).
+/// so ([`paros::observe::audit::Audit::match_registered_by`]).
 ///
 /// Returns the distinct ballot sequences the folded histories had, for the
 /// "histories differ between matchmakers" gate.
@@ -545,10 +561,10 @@ fn folded_effective(campaign: &Campaign) -> Option<(Ballot, AcceptorConfig)> {
 }
 
 /// The digest of one history copy, computed exactly as the driver computes
-/// the one it reports ([`paros::registration_history_hash`]) — the two must
+/// the one it reports ([`paros::roles::node::registration_history_hash`]) — the two must
 /// agree or the point check below could never match.
 fn history_digest(history: &[(Ballot, Registration)]) -> u64 {
-    paros::registration_history_hash(history.iter().map(|(ballot, r)| (ballot, r)))
+    paros::roles::node::registration_history_hash(history.iter().map(|(ballot, r)| (ballot, r)))
 }
 
 /// Whether a matchmaker whose folded generation scalars are `folded` serves

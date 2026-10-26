@@ -18,7 +18,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use crate::ParosProviders;
+use crate::net::runtime::ParosProviders;
 use moonpool_rpc::RpcHandle;
 use paros_core::{JournalIdentifier, TenantId};
 

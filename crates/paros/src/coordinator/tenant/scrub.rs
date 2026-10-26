@@ -43,7 +43,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound::{Excluded, Unbounded};
 use std::time::Duration;
 
-use crate::ParosProviders;
+use crate::net::runtime::ParosProviders;
 use moonpool_rpc::RpcHandle;
 use paros_core::{JournalId, JournalIdentifier, NodeId, TenantId};
 
@@ -51,12 +51,13 @@ use crate::client::cell::CellSession;
 use crate::client::journals::JournalAnswer;
 use crate::client::{Client, Server};
 use crate::coordinator::tenant::TenantDesk;
+use crate::model::address::Address;
+use crate::model::address::Names;
 use crate::model::registry::{BookingTarget, Registry, Role};
 use crate::model::tenant::{ScrubCounts, ScrubProgress};
 use crate::net::NodeClient;
 use crate::roles::node::scrub::SCRUB_PAGE_BYTES;
 use crate::wire::{ScrubReply, ScrubRequest};
-use crate::{Address, Names};
 
 /// The most pages one step reads.
 pub(crate) const PAGES_PER_STEP: usize = 8;
@@ -79,7 +80,7 @@ pub(crate) struct ScrubPace {
 
 impl ScrubPace {
     /// The pace the driver's tunables name.
-    pub(crate) fn of(tunables: &crate::DriverTunables) -> Self {
+    pub(crate) fn of(tunables: &crate::tunables::DriverTunables) -> Self {
         let pace = Self {
             rate: tunables.scrub_rate,
             pass_within: tunables.scrub_pass_within,

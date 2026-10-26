@@ -10,7 +10,7 @@
 
 use std::time::Duration;
 
-use paros::DriverTunables;
+use paros::roles::node::DriverTunables;
 
 /// One overridable field: its name and how a parsed value is stored.
 enum Field {

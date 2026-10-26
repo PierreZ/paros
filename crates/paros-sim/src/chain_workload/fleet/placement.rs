@@ -32,10 +32,12 @@ use moonpool_sim::{
 };
 use paros::client::checkpoint::LoadOutcome;
 use paros::client::journals;
+use paros::core::JournalIdentifier;
+use paros::core::NodeId;
+use paros::core::TenantId;
 use paros::machine::Class;
 use paros::model::registry::{BookingTarget, NodeStanding, Registry, Role};
 use paros::model::tenant::TenantControl;
-use paros::{JournalIdentifier, NodeId, TenantId};
 
 use super::cell::Cell;
 use super::judged_cell;
@@ -119,7 +121,7 @@ async fn read(
         .into_iter()
         .filter(|id| cell.state().registry().is_slow(*id))
         .collect();
-    let hosted: Vec<(TenantId, paros::JournalId)> = cell
+    let hosted: Vec<(TenantId, paros::core::JournalId)> = cell
         .state()
         .registry()
         .hosted()
@@ -160,7 +162,9 @@ async fn read(
 }
 
 /// Every live journal's recorded placement, in id order.
-fn placements(control: &TenantControl) -> Vec<(paros::JournalId, paros::AcceptorConfig)> {
+fn placements(
+    control: &TenantControl,
+) -> Vec<(paros::core::JournalId, paros::core::AcceptorConfig)> {
     control
         .live()
         .map(|(id, journal)| (id, journal.placed.clone()))

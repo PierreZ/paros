@@ -48,7 +48,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use paros_core::{AcceptorConfig, FailureDomain, NodeId, QuorumSystem};
 
-use crate::machine::Class;
+use crate::model::machine::Class;
 use crate::model::registry::{Booking, BookingTarget, NodeStanding, Registry, Role};
 
 /// A machine as the placement sees it: what the registry holds of it.
@@ -725,7 +725,7 @@ mod tests {
             addr: format!("n{id}"),
             class: Class::Storage,
             capacity: 2,
-            locality: crate::machine::Locality::zone("z"),
+            locality: crate::model::machine::Locality::zone("z"),
             name: format!("m{id}"),
             incarnation: u128::from(id),
             machine_interface: Vec::new(),

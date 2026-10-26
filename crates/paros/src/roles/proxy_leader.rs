@@ -1,7 +1,7 @@
 //! The provider-generic **proxy leader driver** (#142, Compartmentalized
 //! Paxos §3.1) — the I/O layer that owns a sans-IO
 //! [`paros_core::ProxyLeader`], the third driver beside
-//! [`run_node`](crate::run_node) and [`run_matchmaker`](crate::run_matchmaker).
+//! [`run_node`](crate::roles::node::run_node) and [`run_matchmaker`](crate::roles::matchmaker::run_matchmaker).
 //!
 //! Written once over `P: ParosProviders`, so the *same* loop runs in
 //! production and deterministic simulation; the harness adapts a moonpool
@@ -31,7 +31,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::ParosProviders;
+use crate::net::runtime::ParosProviders;
 use moonpool_core::{LocalTimeProvider, SimulationError};
 use paros_core::{
     AcceptorConfig, Audience, Ballot, JournalIdentifier, Message, NodeId, Party, ProxyId,
@@ -45,7 +45,8 @@ use crate::observe::audit::{Audit, DelegationOutcome};
 use crate::observe::events::{command_hash, message_kind, message_route};
 use crate::roles::node::edge::{RpcEdge, edge_reporter};
 use crate::roles::node::transport::{LaneOpener, Outbound, send_messages};
-use crate::roles::node::{DriverTunables, RunError};
+use crate::storage::boot::RunError;
+use crate::tunables::DriverTunables;
 
 /// One journal a proxy leader serves (#193): its identifier and the
 /// bootstrap acceptor configuration the proxy fans out to until a
@@ -394,7 +395,7 @@ where
         from: me,
         // No cell plan reaches this role yet: it runs on no machine.
         cell_id: 0,
-        names: crate::Names::literal(),
+        names: crate::model::address::Names::literal(),
     };
     let peer_queues = lanes.open_all(
         edge.handle(),

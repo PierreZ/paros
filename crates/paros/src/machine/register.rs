@@ -38,7 +38,7 @@
 
 use std::time::Duration;
 
-use crate::ParosProviders;
+use crate::net::runtime::ParosProviders;
 use moonpool_core::{Detach, LocalTaskProvider, LocalTimeProvider};
 use moonpool_rpc::RpcHandle;
 use paros_core::{JournalIdentifier, NodeId};
@@ -50,8 +50,9 @@ use crate::client::bootstrap::{self, RegisterOutcome};
 use crate::client::election::read_election;
 use crate::client::journals::Coordinator;
 use crate::client::{Client, Server};
+use crate::model::address::Address;
 use crate::net::NodeClient;
-use crate::{Address, DriverTunables};
+use crate::tunables::DriverTunables;
 
 /// What a machine's registration asks, and of whom.
 pub(crate) struct Registration {

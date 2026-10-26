@@ -15,10 +15,17 @@ use super::stay_down;
 use crate::audit::{AuditWorld, NodeAudit, audit_world_for};
 use crate::world::registry_store::LedgeredRegistry;
 use crate::world::storage_world;
-use paros::{
-    BootKind, BootRefusal, HostedSet, JournalId, JournalIdentifier, MatchmakerConfig, MatchmakerId,
-    RunError, TenantId, parse_addr, run_matchmaker,
-};
+use paros::core::JournalId;
+use paros::core::JournalIdentifier;
+use paros::core::MatchmakerConfig;
+use paros::core::MatchmakerId;
+use paros::core::TenantId;
+use paros::roles::matchmaker::HostedSet;
+use paros::roles::matchmaker::run_matchmaker;
+use paros::roles::node::BootKind;
+use paros::roles::node::BootRefusal;
+use paros::roles::node::RunError;
+use paros::roles::node::parse_addr;
 
 /// A matchmaker: the provider-generic registry driver inside the same
 /// recovery loop as the node — a fail-stop storage fault unwinds
@@ -96,7 +103,7 @@ pub(super) async fn run_matchmaker_role(
     // simulated disk, with the seed's commit protocol and the compact
     // geometry (a registry's installs carry every live registration in one
     // batch; the acceptors' geometry knob is not theirs to shrink).
-    let layout = paros::JournalStoreConfig {
+    let layout = paros::storage::journal::JournalStoreConfig {
         geometry: crate::shape::COMPACT_GEOMETRY,
         ..crate::shape::journal_layout(ctx.state())
     };
@@ -219,7 +226,7 @@ pub(super) async fn run_matchmaker_role(
                 // verdict): the matchmaker is the run's one matchmaker loss,
                 // down for the run and replaced by a handover, like a wiped
                 // one.
-                if matches!(failure, paros::StorageError::Corruption { .. }) {
+                if matches!(failure, paros::storage::StorageError::Corruption { .. }) {
                     // Only the budgeted cut may leave a registry this way;
                     // any other is a fault beyond the budget.
                     let cut = world

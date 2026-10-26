@@ -2,7 +2,7 @@
 //! election-timeout draw, the leadership/handoff/membership transitions, and
 //! the held-reply bookkeeping a step-down performs.
 
-use crate::ParosProviders;
+use crate::net::runtime::ParosProviders;
 use moonpool_core::RandomProvider;
 use paros_core::{
     Ballot, ColocatedNode, HandoffCounters, LeadershipOrigin, NodeId, NodeRole, RepairCounters,

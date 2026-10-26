@@ -29,10 +29,10 @@
 use std::sync::Arc;
 
 use moonpool_sim::{SimContext, SimulationError, SimulationResult, StateHandle, assert_reachable};
-use paros::Transport;
 use paros::net::tls::{
     Authority, ClientCertificates, KeySeed, Material, ProviderUtc, Role, UtcTime, Validity,
 };
+use paros::net::transport::Transport;
 
 use crate::frontend::EPOCH;
 use crate::state::published_arc;

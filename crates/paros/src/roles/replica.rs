@@ -1,7 +1,7 @@
 //! The provider-generic **replica driver** (#144, Compartmentalized Paxos
 //! §3.3) — the I/O layer that owns a sans-IO [`paros_core::ReplicaNode`],
-//! the fourth driver beside [`run_node`](crate::run_node),
-//! [`run_matchmaker`](crate::run_matchmaker) and [`run_proxy`](crate::run_proxy).
+//! the fourth driver beside [`run_node`](crate::roles::node::run_node),
+//! [`run_matchmaker`](crate::roles::matchmaker::run_matchmaker) and [`run_proxy`](crate::roles::proxy_leader::run_proxy).
 //!
 //! Written once over `P: ParosProviders`, so the *same* loop runs in
 //! production and deterministic simulation. The loop serves the node
@@ -42,7 +42,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::ParosProviders;
+use crate::net::runtime::ParosProviders;
 use moonpool_buggify::hint::Strike;
 use moonpool_core::{LocalTimeProvider, RandomProvider, SimulationError, SimulationResult};
 use paros_core::{
@@ -63,8 +63,9 @@ use crate::roles::node::edge::{ReplicaInbox, RpcEdge, edge_reporter};
 use crate::roles::node::ready::{persist_writes, report_applied, storage_fault_crash};
 use crate::roles::node::reply::{Reply, answer};
 use crate::roles::node::transport::{LaneOpener, Outbound, send_messages};
-use crate::roles::node::{BootKind, DriverTunables, RunError};
 use crate::storage::LogStorage;
+use crate::storage::boot::{BootKind, RunError};
+use crate::tunables::DriverTunables;
 use crate::wire::{
     InspectRefusal, InspectReply, InspectTarget, Read, ReadAck, journal_state_to_proto,
     quorum_system_to_proto,
@@ -632,7 +633,7 @@ fn acceptor_lanes<P: ParosProviders, A: Audit + Clone + Send + Sync + 'static>(
         from: me,
         // No cell plan reaches this role yet: it runs on no machine.
         cell_id: 0,
-        names: crate::Names::literal(),
+        names: crate::model::address::Names::literal(),
     };
     let peer_queues = lanes.open_all(
         edge.handle(),

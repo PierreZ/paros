@@ -2,14 +2,14 @@
 //! beside the machine that writes each newer book the node loop offers.
 //! The cache itself is [`crate::model::machine::CachedRegistry`].
 
-use crate::ParosProviders;
+use crate::net::runtime::ParosProviders;
 use moonpool_core::{Detach, LocalStorageProvider, LocalTaskProvider};
 use paros_core::NodeId;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use super::ProviderDisk;
-use crate::Audit;
+use crate::observe::audit::Audit;
 
 use crate::model::machine::newer;
 use crate::model::machine::{CacheSink, CachedRegistry};

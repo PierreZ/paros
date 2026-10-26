@@ -29,7 +29,13 @@ use std::time::Duration;
 
 use moonpool_sim::{SimContext, assert_always, assert_reachable};
 use paros::client::{SetLeaderOutcome, TruncateOutcome, WriteOutcome, Writer, write_request};
-use paros::{Command, Control, JournalIdentifier, TenantId, Truncate, Value, leader_uuid_to_proto};
+use paros::core::Command;
+use paros::core::Control;
+use paros::core::JournalIdentifier;
+use paros::core::TenantId;
+use paros::core::Value;
+use paros::wire::Truncate;
+use paros::wire::leader_uuid_to_proto;
 
 use super::rpc::within;
 use crate::client::ChainClient;
@@ -97,12 +103,12 @@ async fn served(
         };
         // Sent to the other journal, whose slot may hold it (#652): its
         // fence refuses it there.
-        crate::audit::audit_world_for(ctx.state(), other).note_appended(paros::command_hash(
-            &Command::Control(Control::Truncate {
+        crate::audit::audit_world_for(ctx.state(), other).note_appended(
+            paros::roles::node::command_hash(&Command::Control(Control::Truncate {
                 leader: entry.leader,
                 up_to: entry.seq,
-            }),
-        ));
+            })),
+        );
         let mut at = target;
         for _ in 0..REDIRECTS {
             let ask = nodes.truncate_attempt(at, request);
@@ -132,8 +138,9 @@ async fn served(
     assert_reachable!("chain: a client writes to another tenant's journal under its own fence");
     // Sent to the other journal (a slot of it may hold the write), never to
     // be accepted there: its audit judges every verdict on it.
-    crate::audit::audit_world_for(ctx.state(), other)
-        .note_foreign(paros::command_hash(&Command::Write(entry.clone())));
+    crate::audit::audit_world_for(ctx.state(), other).note_foreign(
+        paros::roles::node::command_hash(&Command::Write(entry.clone())),
+    );
     let mut at = target;
     for _ in 0..REDIRECTS {
         let ask = nodes.write_attempt(at, write_request(other, &entry), None);

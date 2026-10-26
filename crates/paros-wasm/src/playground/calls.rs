@@ -5,8 +5,8 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use paros::Write;
 use paros::client::{Answered, Attempted, CallObserver, ResolveReport};
+use paros::wire::Write;
 
 /// Logs every attempt and answer of one client.
 #[derive(Default)]

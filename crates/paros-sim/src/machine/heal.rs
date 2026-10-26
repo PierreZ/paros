@@ -23,7 +23,7 @@
 use std::collections::BTreeMap;
 
 use moonpool_sim::{StateHandle, WipeLedger, assert_always, assert_reachable};
-use paros::JournalIdentifier;
+use paros::core::JournalIdentifier;
 use paros::model::registry::{Registry, RegistryEvent};
 
 use super::{MachineBoard, lock, machine_board};
@@ -154,7 +154,7 @@ pub(crate) fn heal_wiped(state: &StateHandle) {
 }
 
 /// A machine folded `event` at `seq` of the registry `journal`
-/// ([`paros::Audit::system_folded`]).
+/// ([`paros::observe::audit::Audit::system_folded`]).
 pub(crate) fn registry_folded(
     state: &StateHandle,
     journal: JournalIdentifier,
@@ -170,7 +170,7 @@ pub(crate) fn registry_folded(
 }
 
 /// A machine folded the checkpoint at `seq` of the registry `journal`
-/// ([`paros::Audit::checkpoint_folded`]).
+/// ([`paros::observe::audit::Audit::checkpoint_folded`]).
 pub(crate) fn registry_restored(
     state: &StateHandle,
     journal: JournalIdentifier,

@@ -21,10 +21,13 @@ use moonpool_core::{CompioProviders, LocalProviders, RandomProvider};
 use paros::client::Client;
 use paros::client::bootstrap::control_journals;
 use paros::client::fleet::{FleetRefusal, FleetSession, Interrupted, Run, Stage, Step, TagTarget};
+use paros::core::JournalId;
+use paros::core::JournalIdentifier;
+use paros::core::NodeId;
+use paros::core::TenantId;
 use paros::machine::ControlJournals;
 use paros::model::fleet::TenantState;
 use paros::model::registry::Registry;
-use paros::{JournalId, JournalIdentifier, NodeId, TenantId};
 use serde_json::json;
 
 use crate::Ending;

@@ -71,7 +71,7 @@ pub use system::ControlPlan;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::ParosProviders;
+use crate::net::runtime::ParosProviders;
 use moonpool_core::{LocalTimeProvider, RandomProvider, SimulationError, SimulationResult};
 use paros_core::{
     ColocatedNode, Control, Delegation, Entry, Fingerprint, GcAck, JournalId, JournalIdentifier,
@@ -1725,7 +1725,7 @@ fn park_call<S, A: Audit, P: ParosProviders>(
 ///
 /// `audit` is pure observation: the driver reports every
 /// externally meaningful transition to it, and nothing it does can change the
-/// run. Production passes [`NoAudit`](crate::NoAudit).
+/// run. Production passes [`NoAudit`](crate::observe::audit::NoAudit).
 ///
 /// # Errors
 ///
@@ -2079,7 +2079,7 @@ where
     // resolved at dial time (#257): its control-journal seeds too.
     let names = machine
         .as_ref()
-        .map_or_else(crate::Names::literal, |machine| {
+        .map_or_else(crate::model::address::Names::literal, |machine| {
             machine.facts().names.clone()
         });
     let (mut follower, mut follow_answers, _follow_open) = if let Some(plan) = &system {

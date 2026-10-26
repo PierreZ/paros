@@ -1,6 +1,6 @@
 //! The client's observation port: every attempt at the four journal calls,
 //! reported where it is sent and where its answer is judged — the seam a
-//! history checker reads, the way [`crate::Audit`] is the driver's.
+//! history checker reads, the way [`crate::observe::audit::Audit`] is the driver's.
 //!
 //! Observation, never perturbation: an observer returns nothing the client
 //! acts on (its token is only handed back), draws no randomness, and

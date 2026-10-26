@@ -50,7 +50,7 @@
 //! mid-operation, a started `init` `READY`, every live node's registry fold
 //! at the tail.
 
-use paros::Address;
+use paros::model::address::Address;
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::time::Duration;
@@ -63,10 +63,13 @@ use paros::client::checkpoint::{CheckpointPolicy, Checkpointer, Folder, LoadOutc
 use paros::client::fleet::{FleetRefusal, FleetSession, Interrupted, Run, Stage, Step};
 use paros::client::names::{TenantResolution, resolve_tenant};
 use paros::client::{ClaimOutcome, Writer};
+use paros::core::JournalId;
+use paros::core::JournalIdentifier;
+use paros::core::NodeId;
+use paros::core::TenantId;
 use paros::machine::ControlJournals;
 use paros::model::fleet::{CellState, FleetDirectory, TenantKind, TenantState};
 use paros::model::registry::{NodeStanding, Registry};
-use paros::{JournalId, JournalIdentifier, NodeId, TenantId};
 
 use crate::audit::liveness::JudgedRegistry;
 use crate::client::{ChainClient, Connector};
@@ -1268,7 +1271,8 @@ impl FleetOps {
                 .await;
             let learn = |journal| self.note_journals([journal]);
             placement::placements_booked(ctx, cell, ctx.time().now() + FLEET_SETTLE, learn).await;
-            let connect = |servers: &[(u64, paros::Address)]| self.connect(ctx, servers);
+            let connect =
+                |servers: &[(u64, paros::model::address::Address)]| self.connect(ctx, servers);
             sets::sets_booked(ctx, cell, ctx.time().now() + FLEET_SETTLE, connect).await;
             // Every journal the cell can hold heals (#475 (re-place after
             // the Down bound)).

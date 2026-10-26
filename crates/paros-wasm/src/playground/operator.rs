@@ -25,13 +25,19 @@ use paros::client::journals::{self, JournalAnswer, JournalOp, JournalRequest};
 use paros::client::{
     ClaimOutcome, Client, ClientTunables, Reader, ReaderOutcome, Server, Writer, WriterOutcome,
 };
+use paros::core::JournalId;
+use paros::core::JournalIdentifier;
+use paros::core::NodeId;
+use paros::core::TenantId;
+use paros::core::Value;
+use paros::core::WriterMode;
+use paros::model::address::Address;
+use paros::model::address::Names;
 use paros::model::fleet::TenantKind;
 use paros::model::registry::Registry;
 use paros::model::tenant::Desired;
-use paros::{
-    Address, JournalId, JournalIdentifier, Names, NodeClient, NodeId, TenantId, Transport, Value,
-    WriterMode,
-};
+use paros::net::NodeClient;
+use paros::net::transport::Transport;
 use tokio_util::sync::CancellationToken;
 
 use crate::playground::calls::CallTrace;
@@ -191,7 +197,7 @@ async fn wait_until(ctx: &SimContext, at_ms: u64) -> bool {
 /// reply fits.
 fn rpc_config() -> RpcConfig {
     RpcConfig {
-        max_frame_bytes: paros::MAX_FRAME_BYTES,
+        max_frame_bytes: paros::tunables::MAX_FRAME_BYTES,
         ..RpcConfig::default()
     }
 }

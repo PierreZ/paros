@@ -11,9 +11,9 @@
 //!    on its own (#216).
 //! 3. **Serve.** A machine that `cell add-machine` admitted (#216) serves
 //!    the machine contract and a node-only `Inspect` with its cell
-//!    ([`super::AdmittedMachine`]), and runs [`crate::run_journals`] over
+//!    ([`super::AdmittedMachine`]), and runs [`crate::roles::node::run_journals`] over
 //!    no plan journal: it serves the journals placed on it (#474).
-//!    A formed machine runs [`crate::run_journals`] over its
+//!    A formed machine runs [`crate::roles::node::run_journals`] over its
 //!    cell's plan, every journal plain Multi-Paxos over the founding members
 //!    ([`journal_config`]), and keeps answering the decree from its record
 //!    ([`super::FormedCell`]). Every start after formation is an existing
@@ -37,7 +37,7 @@ use std::net::SocketAddr;
 
 use std::time::Duration;
 
-use crate::ParosProviders;
+use crate::net::runtime::ParosProviders;
 use moonpool_core::{LocalStorageProvider, LocalTimeProvider, RandomProvider};
 use paros_core::{Ballot, Config, JournalIdentifier, MatchmakerConfig, MatchmakerId, NodeId};
 use tokio_util::sync::CancellationToken;
@@ -47,11 +47,15 @@ use super::{
     AdminPin, Admission, AdmittedMachine, CachedRegistry, CellLedger, CellMachine, CellPlan, Class,
     FormedCell, Joined, Locality, MachineFacts, ProviderDisk,
 };
-use crate::ControlPlan;
+use crate::model::address::Address;
+use crate::model::address::Names;
 use crate::model::machine::{MachineRecord, journal_config};
 use crate::net::transport::Transport;
+use crate::observe::audit::Audit;
 use crate::observe::metrics::{Metrics, Phase};
-use crate::{Address, Audit, DriverTunables, Names, RunError};
+use crate::roles::node::ControlPlan;
+use crate::storage::boot::RunError;
+use crate::tunables::DriverTunables;
 
 /// What a machine is configured with: the operator's half of its record.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -663,7 +667,7 @@ where
     );
     tracing::info!(machine = %cell.facts.name, addr = %cell.facts.addr, %listen, "machine_serving");
     cell.facts.metrics.set_phase(Phase::Serving);
-    crate::run_journals(
+    crate::roles::node::run_journals(
         providers,
         stores,
         node_id,
@@ -782,7 +786,7 @@ where
     let listen = admitted.facts.listen;
     tracing::info!(machine = %admitted.facts.name, addr = %admitted.facts.addr, %listen, "machine_serving_admitted_journals");
     admitted.facts.metrics.set_phase(Phase::Serving);
-    crate::run_journals(
+    crate::roles::node::run_journals(
         providers,
         stores,
         node_id,

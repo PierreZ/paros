@@ -3,21 +3,24 @@
 use async_trait::async_trait;
 use moonpool_sim::{SimContext, SimulationResult, assert_always};
 
-use paros::{Config, NodeId};
+use paros::core::Config;
+use paros::core::NodeId;
 
 use moonpool_sim::SimStorageProvider;
 
 /// The two contract suites against the library's journal stores
-/// ([`paros::JournalStorage`], [`paros::JournalMatchmakerStorage`]) on the
+/// ([`paros::storage::journal::JournalStorage`], [`paros::storage::journal::JournalMatchmakerStorage`]) on the
 /// simulated disk, each store in a directory of its own.
 #[tracing::instrument(level = "debug", skip_all)]
 async fn journal_contract_suites(provider: SimStorageProvider) {
-    use paros::{
-        JournalMatchmakerStorage, JournalStorage, JournalStoreConfig, LogStorage, MatchmakerStorage,
-    };
+    use paros::roles::matchmaker::MatchmakerStorage;
+    use paros::storage::LogStorage;
+    use paros::storage::journal::JournalMatchmakerStorage;
+    use paros::storage::journal::JournalStorage;
+    use paros::storage::journal::JournalStoreConfig;
     let config = Config {
         peers: vec![NodeId(0)],
-        ..Config::new(NodeId(0), paros::JournalIdentifier::UNSET)
+        ..Config::new(NodeId(0), paros::core::JournalIdentifier::UNSET)
     };
     let store = JournalStoreConfig {
         geometry: crate::shape::COMPACT_GEOMETRY,
@@ -42,10 +45,14 @@ async fn journal_contract_suites(provider: SimStorageProvider) {
         drop(old);
         open_node(provider.clone(), dir, config.clone())
     };
-    Box::pin(paros::storage_contract_suite(fresh, reopen)).await;
+    Box::pin(paros::storage::storage_contract_suite(fresh, reopen)).await;
     let open_registry = |provider: SimStorageProvider, dir: String| async move {
-        let mut registry =
-            JournalMatchmakerStorage::new(provider, dir, paros::JournalIdentifier::UNSET, store);
+        let mut registry = JournalMatchmakerStorage::new(
+            provider,
+            dir,
+            paros::core::JournalIdentifier::UNSET,
+            store,
+        );
         registry
             .boot_scan()
             .await
@@ -65,7 +72,7 @@ async fn journal_contract_suites(provider: SimStorageProvider) {
         drop(old);
         open_registry(provider.clone(), dir)
     };
-    Box::pin(paros::matchmaker_storage_contract_suite(
+    Box::pin(paros::roles::matchmaker::matchmaker_storage_contract_suite(
         fresh_registry,
         reopen_registry,
     ))
@@ -73,11 +80,11 @@ async fn journal_contract_suites(provider: SimStorageProvider) {
 }
 
 /// The **contract-suite workload** (issue #21 item F): runs the shared
-/// [`paros::storage_contract_suite`] and
-/// [`paros::matchmaker_storage_contract_suite`] against the library's journal
+/// [`paros::storage::storage_contract_suite`] and
+/// [`paros::roles::matchmaker::matchmaker_storage_contract_suite`] against the library's journal
 /// stores over the simulation's own disk, inside one quiet iteration, so the
 /// stores the simulation runs can never drift from the trait contract
-/// [`paros::MemStorage`] pins.
+/// [`paros::storage::MemStorage`] pins.
 pub(crate) struct ContractSuiteWorkload;
 
 #[async_trait]
@@ -95,14 +102,19 @@ impl moonpool_sim::Workload for ContractSuiteWorkload {
         // reopen reads back exactly the last sync — the read-side pair of
         // the driver's persist-before-reply ordering.
         {
-            use paros::{
-                AcceptorConfig, Ballot, JournalId, JournalMatchmakerStorage, JournalStoreConfig,
-                MatchmakerStorage, NodeId, Registration, RegistryStorage,
-            };
+            use paros::core::AcceptorConfig;
+            use paros::core::Ballot;
+            use paros::core::JournalId;
+            use paros::core::NodeId;
+            use paros::core::Registration;
+            use paros::core::RegistryStorage;
+            use paros::roles::matchmaker::MatchmakerStorage;
+            use paros::storage::journal::JournalMatchmakerStorage;
+            use paros::storage::journal::JournalStoreConfig;
             let j = JournalId(1);
             let config = Registration::belief(AcceptorConfig::new(
                 vec![NodeId(0)],
-                paros::QuorumSystem::Majority,
+                paros::core::QuorumSystem::Majority,
             ));
             let ballot = |round: u64| Ballot {
                 round,
@@ -112,7 +124,7 @@ impl moonpool_sim::Workload for ContractSuiteWorkload {
                 JournalMatchmakerStorage::new(
                     ctx.storage().clone(),
                     "journal-contract/mm-unsynced",
-                    paros::JournalIdentifier::UNSET,
+                    paros::core::JournalIdentifier::UNSET,
                     JournalStoreConfig {
                         geometry: crate::shape::COMPACT_GEOMETRY,
                         ..JournalStoreConfig::default()

@@ -24,12 +24,15 @@ use paros::client::Client;
 use paros::client::bootstrap::control_journals;
 use paros::client::fleet::read_directory;
 use paros::client::journals::{self, JournalAnswer, JournalOp, JournalRequest};
+use paros::core::JournalIdentifier;
+use paros::core::TenantId;
+use paros::core::WriterMode;
+use paros::model::address::Names;
 use paros::model::fleet::TenantState;
 use paros::model::tags::{Tags, UserTags};
 use paros::model::tenant::{
     Desired, Durability, MAX_FAILURES_PER_PARTITION, StoreDurability, TenantRoles,
 };
-use paros::{JournalIdentifier, Names, TenantId, WriterMode};
 use serde_json::json;
 
 use crate::Ending;
@@ -359,7 +362,7 @@ async fn ready_tenant(
     client: &ParosClient,
     out: &Printer,
     tenant_name: &str,
-) -> Result<(TenantId, paros::JournalId, JournalIdentifier, Tags), Ending> {
+) -> Result<(TenantId, paros::core::JournalId, JournalIdentifier, Tags), Ending> {
     let Some(cell) = control_journals(client).await else {
         note("no server named its cell's control journals: is the cell initialized?");
         return Err(Ending::Unreachable);
@@ -586,7 +589,7 @@ fn report(
 /// tombstone.
 async fn list(
     client: &ParosClient,
-    (name, tenant, control): (&str, TenantId, paros::JournalId),
+    (name, tenant, control): (&str, TenantId, paros::core::JournalId),
     (selector, tenant_tags): (Option<&str>, &Tags),
     labels: &Labels,
     out: &Printer,

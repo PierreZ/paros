@@ -32,10 +32,15 @@ use std::time::Duration;
 
 use moonpool_sim::{StateHandle, assert_always, assert_reachable, buggify_knob};
 
-use paros::{
-    DriverTunables, FailureDomain, JournalId, JournalIdentifier, JournalStoreConfig, NodeId,
-    QuorumSystem, TenantId, WriterMode,
-};
+use paros::core::FailureDomain;
+use paros::core::JournalId;
+use paros::core::JournalIdentifier;
+use paros::core::NodeId;
+use paros::core::QuorumSystem;
+use paros::core::TenantId;
+use paros::core::WriterMode;
+use paros::roles::node::DriverTunables;
+use paros::storage::journal::JournalStoreConfig;
 
 /// Well-known [`StateHandle`] key of the per-iteration registry.
 const SHAPE_KEY: &str = "paros-node-shapes";
@@ -258,8 +263,8 @@ impl NodeShape {
             // knows (`MAX_READ_RECORDS`), so a shorter page than the client
             // asked is the server's limit, never a lost record (#241).
             max_read_records: buggify_knob!(
-                paros::MAX_READ_RECORDS,
-                1_u64..paros::MAX_READ_RECORDS + 1
+                paros::roles::node::MAX_READ_RECORDS,
+                1_u64..paros::roles::node::MAX_READ_RECORDS + 1
             ),
             // Floor 1: a page that can hold a record always holds one, so a
             // tiny budget serves one record per page (#241).
@@ -319,8 +324,8 @@ impl NodeShape {
             // recovery span several pages, the window `advance_recovery`
             // paces; the campaign rarely opens 64 rounds at once.
             recovery_page: buggify_knob!(
-                paros::LEADER_RECOVERY_BATCH,
-                1_usize..paros::LEADER_RECOVERY_BATCH + 1
+                paros::core::LEADER_RECOVERY_BATCH,
+                1_usize..paros::core::LEADER_RECOVERY_BATCH + 1
             ),
             // The page sizes the core's 64-entry ceilings bound (#338). The
             // campaign rarely fills a 64-entry page, so each extreme is a
@@ -334,10 +339,10 @@ impl NodeShape {
             // paging candidate re-sends its `Prepare` to the peers that
             // answered on every tick, which keeps their election clocks
             // quiet (#428 (paging livelock)).
-            promise_page: buggify_knob!(paros::PROMISE_BATCH, 1_usize..5_usize),
-            resend_page: buggify_knob!(paros::RESEND_BATCH, 1_usize..5_usize),
-            apply_page: buggify_knob!(paros::APPLY_BATCH, 1_usize..5_usize),
-            registry_page: buggify_knob!(paros::REGISTRY_PAGE, 1_usize..5_usize),
+            promise_page: buggify_knob!(paros::core::PROMISE_BATCH, 1_usize..5_usize),
+            resend_page: buggify_knob!(paros::core::RESEND_BATCH, 1_usize..5_usize),
+            apply_page: buggify_knob!(paros::core::APPLY_BATCH, 1_usize..5_usize),
+            registry_page: buggify_knob!(paros::core::REGISTRY_PAGE, 1_usize..5_usize),
             // The delegated round's take-back budget (#142), in
             // re-delegations (one per beat). Floor 1: a round taken back
             // after a single re-delegation runs colocated while its proxy
@@ -625,23 +630,23 @@ fn pair_extremes(drawn: &DriverTunables, defaults: &DriverTunables) {
         // BUGGIFY pairing: the handover stall budget extreme genuinely runs.
         assert_reachable!("a node runs with an extreme handover stall budget");
     }
-    if drawn.recovery_page != paros::LEADER_RECOVERY_BATCH {
+    if drawn.recovery_page != paros::core::LEADER_RECOVERY_BATCH {
         // BUGGIFY pairing: the recovery page extreme genuinely runs.
         assert_reachable!("a node runs with a small recovery page");
     }
-    if drawn.promise_page != paros::PROMISE_BATCH {
+    if drawn.promise_page != paros::core::PROMISE_BATCH {
         // BUGGIFY pairing: the promise page extreme genuinely runs.
         assert_reachable!("a node runs with a small promise page");
     }
-    if drawn.resend_page != paros::RESEND_BATCH {
+    if drawn.resend_page != paros::core::RESEND_BATCH {
         // BUGGIFY pairing: the re-send page extreme genuinely runs.
         assert_reachable!("a node runs with a small re-send page");
     }
-    if drawn.apply_page != paros::APPLY_BATCH {
+    if drawn.apply_page != paros::core::APPLY_BATCH {
         // BUGGIFY pairing: the apply page extreme genuinely runs.
         assert_reachable!("a node runs with a small apply page");
     }
-    if drawn.registry_page != paros::REGISTRY_PAGE {
+    if drawn.registry_page != paros::core::REGISTRY_PAGE {
         // BUGGIFY pairing: the registry page extreme genuinely runs.
         assert_reachable!("a node runs with a small registry page");
     }
@@ -1914,7 +1919,7 @@ pub(crate) fn acceptor_domain(state: &StateHandle, node: NodeId) -> Option<Failu
 }
 
 /// The failure domains of `peers`, in order, on a labeled seed; empty on an
-/// unlabeled one: a [`paros::Config`]'s `peer_domains`.
+/// unlabeled one: a [`paros::core::Config`]'s `peer_domains`.
 pub(crate) fn peer_domains(state: &StateHandle, peers: &[NodeId]) -> Vec<FailureDomain> {
     peers
         .iter()
@@ -1929,9 +1934,9 @@ pub(crate) fn acceptor_config(
     state: &StateHandle,
     members: Vec<NodeId>,
     system: QuorumSystem,
-) -> paros::AcceptorConfig {
+) -> paros::core::AcceptorConfig {
     if acceptor_zones(state) == 0 {
-        return paros::AcceptorConfig::new(members, system);
+        return paros::core::AcceptorConfig::new(members, system);
     }
     let labeled = members
         .into_iter()
@@ -1940,7 +1945,7 @@ pub(crate) fn acceptor_config(
             (node, domain)
         })
         .collect();
-    paros::AcceptorConfig::zoned(labeled, system)
+    paros::core::AcceptorConfig::zoned(labeled, system)
 }
 
 /// Whether the run draws the **handoff-storm scenario** (#484 (silent driver
@@ -2657,7 +2662,7 @@ pub(crate) fn boot(state: &StateHandle, ip: &str) -> Incarnation {
         if slow_machine {
             // The slow-machine scenario: a full window every second, so
             // one falls inside the slow time.
-            shape.tunables.load_interval = paros::LOAD_INTERVAL_FLOOR;
+            shape.tunables.load_interval = paros::roles::node::LOAD_INTERVAL_FLOOR;
         }
         if moved_founder {
             // The moved-founder scenario: a renamed founder registers its
@@ -2851,7 +2856,7 @@ pub(crate) fn config_floor(pool: usize, has_matchmakers: bool) -> usize {
 /// Multi-Paxos deployment and the shape of every existing axis. A seed that
 /// deploys matchmakers may instead draw a **subset** (a run with
 /// `has_matchmakers == false` never draws — a plain deployment's membership
-/// must include every node, per `paros::Config::peers`), leaving the other
+/// must include every node, per `paros::core::Config::peers`), leaving the other
 /// nodes as *spares*: addressable pool members outside every configuration
 /// until a `Reconfigure` pulls them in. Two knob locations, each its own
 /// per-seed activation: the subset *size* (floor [`MIN_BOOTSTRAP`], ceiling

@@ -12,12 +12,19 @@ use paros::client::{
     ClaimOutcome, Client, ReaderOutcome, ReconfigureOutcome, RetireOutcome, TruncateOutcome,
     WriteOptions, WriteOutcome, Writer, WriterOutcome,
 };
+use paros::core::JournalIdentifier;
+use paros::core::JournalView;
+use paros::core::LeaderUuid;
+use paros::core::QuorumSystem;
+use paros::core::Seq;
+use paros::core::Value;
 use paros::roles::frontend::Denial;
+use paros::wire::InspectReply;
+use paros::wire::RetireRequest;
+use paros::wire::WireQuorumSystem;
 use paros::wire::common::Ballot;
-use paros::{
-    InspectReply, JournalIdentifier, JournalView, LeaderUuid, QuorumSystem, RetireRequest, Seq,
-    Value, WireQuorumSystem, journal_state_from_proto, quorum_system_from_proto,
-};
+use paros::wire::journal_state_from_proto;
+use paros::wire::quorum_system_from_proto;
 use serde_json::{Value as Json, json};
 
 use crate::Ending;

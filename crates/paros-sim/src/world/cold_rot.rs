@@ -34,9 +34,15 @@ use moonpool_sim::{
     OpenOptions, SimStorageProvider, StateHandle, StorageFile, StorageProvider, TimeProvider,
     assert_reachable,
 };
-use paros::{
-    Config, JournalId, JournalIdentifier, LogStorage, NodeId, QuorumSystem, Slot, Storage, TenantId,
-};
+use paros::core::Config;
+use paros::core::JournalId;
+use paros::core::JournalIdentifier;
+use paros::core::NodeId;
+use paros::core::QuorumSystem;
+use paros::core::Slot;
+use paros::core::Storage;
+use paros::core::TenantId;
+use paros::storage::LogStorage;
 use tokio_util::sync::CancellationToken;
 
 /// The key of the run's rot budget.
@@ -116,7 +122,11 @@ pub(crate) async fn run<T: TimeProvider>(
     provider: SimStorageProvider,
     time: T,
     state: StateHandle,
-    (root, layout, rank): (&'static str, paros::JournalStoreConfig, usize),
+    (root, layout, rank): (
+        &'static str,
+        paros::storage::journal::JournalStoreConfig,
+        usize,
+    ),
     shutdown: CancellationToken,
 ) {
     while !shutdown.is_cancelled() {
@@ -167,7 +177,11 @@ pub(crate) async fn run<T: TimeProvider>(
 async fn rot(
     provider: &SimStorageProvider,
     state: &StateHandle,
-    (root, layout, rank): (&'static str, paros::JournalStoreConfig, usize),
+    (root, layout, rank): (
+        &'static str,
+        paros::storage::journal::JournalStoreConfig,
+        usize,
+    ),
     journal: JournalIdentifier,
 ) -> bool {
     let dir = format!("{root}/journals/{}/{}", journal.tenant.0, journal.journal.0);
@@ -192,7 +206,7 @@ async fn rot(
     // The copy, opened with the shipped store's boot scan: its layout is
     // the original's for every record whose place a later write never
     // moved.
-    let mut store = paros::JournalStorage::new(
+    let mut store = paros::storage::journal::JournalStorage::new(
         provider.clone(),
         &copy,
         Config::new(NodeId(0), journal),
@@ -235,7 +249,7 @@ async fn rot(
 /// A cold slot of the scanned `store` and its entry's region: one of the
 /// lower half of the held slots, so the next batches never write near it.
 fn aim(
-    store: &paros::JournalStorage<SimStorageProvider>,
+    store: &paros::storage::journal::JournalStorage<SimStorageProvider>,
 ) -> Option<(Slot, paros::storage::journal::LayoutRegion)> {
     let first = store.first_slot().0;
     let last = store.last_slot().0;

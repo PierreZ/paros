@@ -36,7 +36,8 @@ use paros::client::{
     ClaimOutcome, Pipeline, ReaderOutcome, TruncateOutcome, WriteOptions, WriteOutcome, Writer,
     WriterOutcome, multi,
 };
-use paros::{JournalIdentifier, Value};
+use paros::core::JournalIdentifier;
+use paros::core::Value;
 
 use super::FleetOps;
 use crate::audit::{AckedWrite, AuditWorld, audit_world_named};
@@ -134,7 +135,7 @@ impl FleetOps {
     /// sent again after a pause, up to [`BURSTS`] bursts.
     pub(super) async fn batched_created(
         &mut self,
-        servers: &[(u64, paros::Address)],
+        servers: &[(u64, paros::model::address::Address)],
         journal: JournalIdentifier,
         first: usize,
     ) {
@@ -393,7 +394,7 @@ impl FleetOps {
         // the leader's limits takes (`paros::roles::batcher::TIGHT_RECORDS`): it
         // goes alone, and a merged write passes the limits sooner.
         let wide = buggify_with_prob!(0.3);
-        let writes: Vec<(Vec<u64>, paros::Write)> = (0..self.config.pipeline_depth)
+        let writes: Vec<(Vec<u64>, paros::wire::Write)> = (0..self.config.pipeline_depth)
             .map(|_| {
                 // Never more than the workload's largest write
                 // (`MAX_BATCH_RECORDS`), which one store entry holds.

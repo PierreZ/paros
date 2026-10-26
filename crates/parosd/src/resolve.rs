@@ -5,15 +5,15 @@
 //!
 //! A listen address is resolved **once, at startup** ([`resolve`]): a
 //! machine binds where it is. An address a machine or a client **dials** is
-//! kept as a name ([`paros::Address`]) and resolved at dial time by the
-//! library (`paros::Names`, #257), so a machine whose IP changes behind its
+//! kept as a name ([`paros::model::address::Address`]) and resolved at dial time by the
+//! library (`paros::model::address::Names`, #257), so a machine whose IP changes behind its
 //! name is reached again with no restart. One exception: a name that
 //! stands for several machines (a Compose network alias, #216) is expanded
 //! here into their literal addresses ([`expand`]).
 
 use std::net::{SocketAddr, ToSocketAddrs};
 
-use paros::Address;
+use paros::model::address::Address;
 
 /// `entry` (`HOST:PORT`) as the addresses to dial: a literal as it is, a
 /// name that resolves to one machine kept as the name (resolved again at

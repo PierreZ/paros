@@ -1,5 +1,5 @@
 //! [`JournalMatchmakerStorage`]: the matchmaker's
-//! [`MatchmakerStorage`](crate::MatchmakerStorage) on `moonpool-journal`.
+//! [`MatchmakerStorage`](crate::storage::matchmaker::MatchmakerStorage) on `moonpool-journal`.
 //!
 //! Each registration is an entry at a registration number of its own, its
 //! ballot and its generation in the entry's identity, its journal in the
@@ -62,8 +62,8 @@
 //! registration"). Damage
 //! the journal reports ambiguous (the last batch of a one-sync commit, where
 //! a crash and rot look alike) is
-//! [`Undecidable`](crate::CorruptionVerdict::Undecidable); anywhere else
-//! [`Corrupted`](crate::CorruptionVerdict::Corrupted).
+//! [`Undecidable`](crate::model::corruption::CorruptionVerdict::Undecidable); anywhere else
+//! [`Corrupted`](crate::model::corruption::CorruptionVerdict::Corrupted).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -83,7 +83,7 @@ use super::{
     undecodable,
 };
 use crate::model::corruption::{CorruptionVerdict, IntegrityFault};
-use crate::roles::matchmaker::{MatchmakerStorage, Registrations};
+use crate::storage::matchmaker::{MatchmakerStorage, Registrations};
 use crate::storage::{StorageError, StorageRecord, WriteOutcome};
 
 /// The kind byte of a registration's identity.

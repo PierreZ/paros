@@ -62,7 +62,7 @@ pub mod sets;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
-use crate::ParosProviders;
+use crate::net::runtime::ParosProviders;
 use paros_core::{AcceptorConfig, JournalId, JournalIdentifier, LeaderUuid, NodeId, TenantId};
 
 use crate::client::capacity::{CapacityAnswer, CapacityRequest, Wanted};
@@ -1096,7 +1096,7 @@ fn zone_plan(
     let first = placement::plan(want, machines, current, seed).map_err(ZonePlan::Short)?;
     if !placement::zone_rule_binds(
         desired.durability.failures_per_partition,
-        crate::machine::Class::Storage,
+        crate::model::machine::Class::Storage,
         machines,
     ) {
         return Ok(first);

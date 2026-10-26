@@ -14,14 +14,14 @@
 
 use std::time::Duration;
 
-use crate::ParosProviders;
+use crate::net::runtime::ParosProviders;
 use moonpool_core::LocalTimeProvider;
 use moonpool_rpc::RpcHandle;
 use paros_core::{JournalId, JournalIdentifier, NodeId, TenantId};
 
 use super::Client;
 use super::journals::{Coordinator, coordinator};
-use crate::Names;
+use crate::model::address::Names;
 use crate::model::registry::{BookingTarget, Role};
 use crate::wire::machine as wire;
 use crate::wire::methods::CapacityRequestRpc;

@@ -12,7 +12,8 @@ use moonpool_sim::{
     LocalTaskProvider, SimContext, SimProviders, SimulationError, SimulationResult,
 };
 use paros::client::{ClientTunables, Server};
-use paros::{NodeClient, parse_addr};
+use paros::net::NodeClient;
+use paros::roles::node::parse_addr;
 use tokio_util::sync::{CancellationToken, DropGuard};
 
 /// A workload's client to one server.
@@ -131,7 +132,7 @@ pub(crate) fn client_rpc_config(
 ) -> RpcConfig {
     let mut config = RpcConfig {
         // The nodes' own limit, so a large `Inspect` reply fits.
-        max_frame_bytes: paros::MAX_FRAME_BYTES,
+        max_frame_bytes: paros::tunables::MAX_FRAME_BYTES,
         connect_timeout,
         ..RpcConfig::default()
     };
@@ -150,7 +151,7 @@ pub(crate) struct Connector {
     shutdown: CancellationToken,
     tunables: ClientTunables,
     /// The run's name table (#257): the machines' advertised names.
-    names: paros::Names,
+    names: paros::model::address::Names,
     /// The workload client's id, named by its observers' detail maps.
     client: u64,
 }
@@ -172,13 +173,13 @@ impl Connector {
     }
 
     /// How the clients resolve the machines' advertised names (#257).
-    pub(crate) fn names(&self) -> &paros::Names {
+    pub(crate) fn names(&self) -> &paros::model::address::Names {
         &self.names
     }
 
     /// The library client of `servers` (`(node id, advertised address)`, in
     /// the order the client indexes them), each resolved at every call.
-    pub(crate) fn client(&self, servers: &[(u64, paros::Address)]) -> ChainClient {
+    pub(crate) fn client(&self, servers: &[(u64, paros::model::address::Address)]) -> ChainClient {
         moonpool_sim::assert_always!(
             !servers.is_empty(),
             "client: a client over learned servers names at least one"
@@ -197,7 +198,7 @@ impl Connector {
     /// The library client of the batchers at `servers` (#145 (batchers)):
     /// every machine serves the batcher endpoint, so a client of a
     /// multi-writer journal sends its writes to any of them.
-    pub(crate) fn batched(&self, servers: &[(u64, paros::Address)]) -> ChainClient {
+    pub(crate) fn batched(&self, servers: &[(u64, paros::model::address::Address)]) -> ChainClient {
         moonpool_sim::assert_always!(
             !servers.is_empty(),
             "client: a client over learned servers names at least one"
@@ -233,8 +234,8 @@ impl Connector {
     /// (`chain_workload::deposed::ActorFence`): the frontend logs the calls.
     pub(crate) fn through(
         &self,
-        frontends: &[paros::Address],
-        pass: &std::sync::Arc<paros::Pass>,
+        frontends: &[paros::model::address::Address],
+        pass: &std::sync::Arc<paros::net::Pass>,
     ) -> ChainClient {
         moonpool_sim::assert_always!(
             !frontends.is_empty(),

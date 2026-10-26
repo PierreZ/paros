@@ -17,14 +17,16 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use crate::client::CallObserver;
+use crate::model::address::Address;
+use crate::model::address::Names;
 use crate::model::machine::{
     CachedRegistry, CellPlan, Class, ControlJournals, Locality, incarnation_halves, machine_tags,
 };
 use crate::model::tags::Tag;
+use crate::net::runtime::ParosProviders;
 use crate::storage::RunError;
 use crate::tunables::DriverTunables;
 use crate::wire::machine as wire;
-use crate::{Address, Names, ParosProviders};
 
 /// What a machine knows of itself before it has a cell.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -69,14 +71,19 @@ pub struct MachineFacts {
 }
 
 /// The incarnation of the RPC runtime `rpc`, or `0` once it stopped.
-pub fn incarnation_of<P: crate::ParosProviders>(rpc: &moonpool_rpc::RpcHandle<P>) -> u128 {
+pub fn incarnation_of<P: crate::net::runtime::ParosProviders>(
+    rpc: &moonpool_rpc::RpcHandle<P>,
+) -> u128 {
     rpc.incarnation().map_or(0, moonpool_rpc::Incarnation::get)
 }
 
 impl MachineFacts {
     /// These facts as the runtime `rpc` serves them: its incarnation set.
     #[must_use]
-    pub fn serving<P: crate::ParosProviders>(&self, rpc: &moonpool_rpc::RpcHandle<P>) -> Self {
+    pub fn serving<P: crate::net::runtime::ParosProviders>(
+        &self,
+        rpc: &moonpool_rpc::RpcHandle<P>,
+    ) -> Self {
         let incarnation = incarnation_of(rpc);
         // A group belongs to one runtime: another runtime serves none yet.
         let machine_interface = if incarnation == self.incarnation {

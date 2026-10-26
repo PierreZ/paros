@@ -32,9 +32,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Parser;
-use paros::Transport;
 use paros::machine::{AdminPin, Class};
 use paros::net::tls::{ClientCertificates, Files, Pem};
+use paros::net::transport::Transport;
 use paros_authz_biscuit::{BiscuitAuthz, KeyRing, RootPublicKey};
 
 /// The variables this module reads.
@@ -326,7 +326,9 @@ mod tests {
         .expect("valid");
         let transport = tls.transport();
         assert!(
-            transport.as_ref().is_ok_and(paros::Transport::is_encrypted),
+            transport
+                .as_ref()
+                .is_ok_and(paros::net::transport::Transport::is_encrypted),
             "{transport:?}"
         );
         // A file and its text together are refused: one source per item.

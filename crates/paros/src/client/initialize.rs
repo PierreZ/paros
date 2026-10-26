@@ -37,7 +37,7 @@
 
 use std::time::Duration;
 
-use crate::ParosProviders;
+use crate::net::runtime::ParosProviders;
 use moonpool_rpc::RpcHandle;
 use paros_core::NodeId;
 
@@ -46,11 +46,12 @@ use super::bootstrap::{self, InitOutcome};
 use super::cell::CellSession;
 use super::election::read_election;
 use super::fleet::{FleetRefusal, FleetSession, Interrupted, Stage, Step};
-use crate::machine::ControlJournals;
+use crate::model::address::Address;
+use crate::model::address::Names;
 use crate::model::fleet::RootKeyEntry;
+use crate::model::machine::ControlJournals;
 use crate::model::registry::Registry;
 use crate::model::tenant::Durability;
-use crate::{Address, Names};
 
 /// What a whole `init` came to.
 #[derive(Clone, Debug, PartialEq, Eq)]

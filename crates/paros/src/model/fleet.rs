@@ -65,7 +65,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use paros_core::{JournalId, JournalIdentifier, TenantId};
 use prost::Message as _;
 
-use crate::Address;
+use crate::model::address::Address;
 use crate::model::checkpoint::{Checkpointable, Folded};
 use crate::model::tags::{Tag, TagError, Tags, UserTags, reserved};
 pub use crate::model::tenant::Survives;

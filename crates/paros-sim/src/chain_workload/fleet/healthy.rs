@@ -30,14 +30,17 @@ use std::time::Duration;
 use moonpool_sim::{SimContext, TimeProvider, assert_always, assert_reachable};
 use paros::client::checkpoint::LoadOutcome;
 use paros::client::views::{ViewOutcome, ask, request};
+use paros::core::JournalIdentifier;
+use paros::core::MatchmakerGeneration;
+use paros::core::MatchmakerId;
+use paros::core::MatchmakerSet;
+use paros::core::NodeId;
+use paros::core::TenantId;
 use paros::machine::Class;
 use paros::model::registry::{NodeStanding, Registry};
 use paros::model::status::{Member, Word, judge, member, observe, placed};
 use paros::model::view::Scope;
 use paros::wire::view::{CellQuery, JournalView, ViewReply, view_request::Query};
-use paros::{
-    JournalIdentifier, MatchmakerGeneration, MatchmakerId, MatchmakerSet, NodeId, TenantId,
-};
 
 use super::cell::Cell;
 use super::sets::in_force;

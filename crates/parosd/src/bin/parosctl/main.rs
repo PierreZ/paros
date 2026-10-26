@@ -45,8 +45,9 @@ use clap::{Args, Parser, Subcommand};
 use moonpool_core::{CompioProviders, CompioResolver};
 use moonpool_rpc::{RpcConfig, RpcHandle};
 use paros::client::{Client, ClientTunables, bootstrap};
+use paros::model::address::Address;
+use paros::model::address::Names;
 use paros::net::tls::{Files, Pem};
-use paros::{Address, Names};
 
 use crate::output::Printer;
 
@@ -326,7 +327,7 @@ struct Runtime {
 
 fn runtime(global: &Global) -> Result<Runtime, String> {
     let config = RpcConfig {
-        max_frame_bytes: paros::MAX_FRAME_BYTES,
+        max_frame_bytes: paros::tunables::MAX_FRAME_BYTES,
         ..RpcConfig::default()
     };
     let transport = Files {
@@ -386,7 +387,7 @@ fn frontend_client(runtime: &Runtime, global: &Global) -> Result<Client<CompioPr
     let token = global.token()?.ok_or_else(|| {
         "no token for the frontends: pass --token or --token-file, or set PAROS_TOKEN".to_string()
     })?;
-    let pass = std::sync::Arc::new(paros::Pass::new(token));
+    let pass = std::sync::Arc::new(paros::net::Pass::new(token));
     let mut servers = Vec::new();
     for (index, entry) in global.frontends.iter().enumerate() {
         let address =
@@ -395,7 +396,7 @@ fn frontend_client(runtime: &Runtime, global: &Global) -> Result<Client<CompioPr
             // A frontend has no node id: the index names it, and no answer
             // through it ever names a node.
             id: index as u64 + 1,
-            node: paros::NodeClient::frontend(
+            node: paros::net::NodeClient::frontend(
                 &runtime.rpc,
                 runtime.names.clone(),
                 address,

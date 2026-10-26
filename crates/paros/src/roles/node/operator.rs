@@ -11,7 +11,7 @@ use paros_core::{
     ReconfigureResult, StartRefusal,
 };
 
-use crate::machine::ControlJournals;
+use crate::model::machine::ControlJournals;
 use crate::observe::audit::Audit;
 use crate::wire::{
     InspectReply, MatchmakersRefusal, Reconfigure, ReconfigureAck, RetireAck, RetireRefusal,

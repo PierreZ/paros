@@ -44,7 +44,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound::{Excluded, Unbounded};
 
-use crate::ParosProviders;
+use crate::net::runtime::ParosProviders;
 use moonpool_rpc::RpcHandle;
 use paros_core::{AcceptorConfig, JournalIdentifier, NodeId};
 
@@ -52,13 +52,14 @@ use crate::client::cell::CellSession;
 use crate::client::journals::JournalAnswer;
 use crate::client::{Client, ReconfigureOutcome, RetireOutcome, Server};
 use crate::coordinator::tenant::{TenantDesk, placed_count};
+use crate::model::address::Address;
+use crate::model::address::Names;
 use crate::model::placement::{self, Want};
 use crate::model::registry::{Booking, BookingTarget, NodeStanding, Registry, Role};
 use crate::model::tenant::Desired;
 use crate::net::NodeClient;
 use crate::wire::common::Ballot;
 use crate::wire::{InspectReply, RetireRequest};
-use crate::{Address, Names};
 
 /// What one move step did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

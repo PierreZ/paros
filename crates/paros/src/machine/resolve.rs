@@ -36,18 +36,18 @@
 
 use std::time::Duration;
 
-use crate::ParosProviders;
+use crate::net::runtime::ParosProviders;
 use moonpool_core::{Detach, LocalTaskProvider, LocalTimeProvider, SimulationResult};
 use moonpool_rpc::RpcHandle;
 use paros_core::NodeId;
 use tokio_util::sync::CancellationToken;
 
 use super::{ControlJournals, MachineFacts, cell_book};
-use crate::Address;
 use crate::client::bootstrap::cell_members;
 use crate::client::checkpoint::{Folder, LoadOutcome, load};
 use crate::client::names::{TenantResolution, tenant_in};
 use crate::client::{Client, ClientTunables, Server};
+use crate::model::address::Address;
 use crate::model::fleet::FleetDirectory;
 use crate::model::registry::Registry;
 use crate::net::{Inbound, NodeClient, serve_well_known};

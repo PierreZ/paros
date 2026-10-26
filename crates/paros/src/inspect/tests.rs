@@ -14,10 +14,13 @@ use paros_core::{
 
 use super::{inspect, names};
 use crate::machine::{CellPlan, Class, MachineRecord, read_all, write_all};
+use crate::model::address::Address;
 use crate::model::registry::SystemCommand;
-use crate::roles::matchmaker::MatchmakerStorage;
 use crate::storage::LogStorage;
-use crate::{Address, JournalMatchmakerStorage, JournalStorage, JournalStoreConfig};
+use crate::storage::journal::JournalMatchmakerStorage;
+use crate::storage::journal::JournalStorage;
+use crate::storage::journal::JournalStoreConfig;
+use crate::storage::matchmaker::MatchmakerStorage;
 
 fn runtime() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_current_thread()

@@ -3,7 +3,7 @@
 //! cell learned from the run that formed it or through `Inspect` at the
 //! machines — never from the harness (§3.8: no identifier is fixed).
 
-use paros::Address;
+use paros::model::address::Address;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -11,10 +11,10 @@ use moonpool_sim::{Providers as _, TimeProvider as _};
 use moonpool_sim::{
     SimContext, assert_always, assert_reachable, assert_sometimes, buggify_with_prob,
 };
-use paros::JournalIdentifier;
 use paros::client::bootstrap::{self, InitOutcome};
 use paros::client::fleet::{FleetRefusal, Stage};
 use paros::client::initialize::{InitParams, InitRefusal, InitRun, Initialized};
+use paros::core::JournalIdentifier;
 use paros::machine::ControlJournals;
 
 use super::super::system::Announce;

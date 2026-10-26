@@ -6,7 +6,7 @@
 //! The split is the node's, mirrored on purpose: [`RegistryStorage`] is to the
 //! matchmaker what [`paros_core::Storage`] is to the node — the core reads its
 //! durable state back through it once, at construction, record by record — and
-//! [`MatchmakerStorage`] is the [`LogStorage`](crate::LogStorage) twin: the
+//! [`MatchmakerStorage`] is the [`LogStorage`](crate::storage::LogStorage) twin: the
 //! driver owns every write, applies each
 //! [`MatchmakerWriteOp`](paros_core::MatchmakerWriteOp) through the matching
 //! method here, then [`sync`](MatchmakerStorage::sync)s the batch **before** its
@@ -48,17 +48,17 @@ use std::future::Future;
 use crate::storage::StorageError;
 
 /// The write side of matchmaker storage: **semantic per-record ops**, the
-/// [`LogStorage`](crate::LogStorage) twin over the [`RegistryStorage`] port.
+/// [`LogStorage`](crate::storage::LogStorage) twin over the [`RegistryStorage`] port.
 ///
 /// The seam is **async** exactly as the node's is (see *Async seam* on
-/// [`LogStorage`](crate::LogStorage)): every method here may touch the
+/// [`LogStorage`](crate::storage::LogStorage)): every method here may touch the
 /// device, so every one returns a `Send` future the driver awaits in
 /// persist-before-reply order; an implementation writes plain `async fn`s.
 /// The [`RegistryStorage`] read port stays synchronous, answered from what
 /// [`boot_scan`](MatchmakerStorage::boot_scan) loaded.
 pub trait MatchmakerStorage: RegistryStorage {
     /// Boot-time integrity scan, run once per incarnation **before** the core
-    /// reads the store (the [`LogStorage::boot_scan`](crate::LogStorage::boot_scan)
+    /// reads the store (the [`LogStorage::boot_scan`](crate::storage::LogStorage::boot_scan)
     /// twin): verify every registration record and the watermark scalar,
     /// classify every mismatch, discard only a crash-truncatable tail (a
     /// registration is acknowledged only after its fsync, so an un-synced
@@ -76,12 +76,12 @@ pub trait MatchmakerStorage: RegistryStorage {
     /// The configuration this registry was **formatted** with (#183,
     /// #207), or `None` on a registry that carries no format marker — the
     /// matchmaker twin of
-    /// [`LogStorage::formatted_config`](crate::LogStorage::formatted_config).
+    /// [`LogStorage::formatted_config`](crate::storage::LogStorage::formatted_config).
     /// The marker is the durable proof that the matchmaker this registry
     /// belongs to has been provisioned — written once by
     /// [`format`](MatchmakerStorage::format) on its first boot, before any
     /// registry state, and never removed. The driver judges the operator's
-    /// [`BootKind`](crate::BootKind) claim against it: an existing
+    /// [`BootKind`](crate::storage::boot::BootKind) claim against it: an existing
     /// matchmaker whose store has no marker has lost its disk — every
     /// registration, the GC watermark and the generation scalars with it —
     /// and is refused rather than rejoined, because an empty registry

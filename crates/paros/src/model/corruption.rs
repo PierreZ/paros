@@ -1,7 +1,7 @@
 //! The typed **corruption verdict** a store surfaces (Stage 7, CTRL-shaped):
 //! the fault family a failed integrity check caught ([`IntegrityFault`]) and
 //! what it means to the driver ([`CorruptionVerdict`]), carried as data on
-//! [`StorageError::Corruption`](crate::StorageError::Corruption). Nothing
+//! [`StorageError::Corruption`](crate::storage::StorageError::Corruption). Nothing
 //! downstream parses strings or rescans traces.
 //!
 //! The classification itself is the journal's (`moonpool-journal`, CLSTORE:
@@ -15,7 +15,7 @@ use std::fmt;
 
 /// The fault family a failed integrity check surfaced — *how* the detector
 /// caught the record, carried as data on
-/// [`StorageError::Corruption`](crate::StorageError::Corruption) so the
+/// [`StorageError::Corruption`](crate::storage::StorageError::Corruption) so the
 /// simulation can correlate injected fault ↔ surfaced error without string
 /// parsing, and so Stage 8 can weigh families differently.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

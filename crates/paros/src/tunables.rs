@@ -172,7 +172,7 @@ pub struct DriverTunables {
     /// network I/O, and current heartbeats/resends repair anything dropped
     /// here (overflow evicts the oldest message, keep-newest). The extreme (a
     /// handful of slots) makes mailbox overflow —
-    /// [`Audit::dropped_at_mailbox`](crate::Audit::dropped_at_mailbox)
+    /// [`Audit::dropped_at_mailbox`](crate::observe::audit::Audit::dropped_at_mailbox)
     /// — a likely event instead of a rare one.
     pub peer_queue_capacity: usize,
     /// Maximum Paxos messages packed into one `Deliver` request. A small

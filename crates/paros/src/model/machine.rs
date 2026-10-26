@@ -15,7 +15,7 @@ pub use book::{address_book, cell_book, with_own};
 pub use cache::{CacheSink, CachedRegistry, newer, starting_book};
 pub use record::{MachineRecord, journal_config};
 
-use crate::Address;
+use crate::model::address::Address;
 use crate::model::tags::{Tag, TagError, Tags, UserTags, reserved};
 use crate::wire::machine as wire;
 

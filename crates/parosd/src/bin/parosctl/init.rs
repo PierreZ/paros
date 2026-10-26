@@ -26,9 +26,9 @@ use std::time::Duration;
 
 use clap::Args;
 use moonpool_core::CompioProviders;
-use paros::Address;
 use paros::client::Client;
 use paros::client::initialize::{self, InitParams, InitRefusal, InitRun, Initialized, Unreachable};
+use paros::model::address::Address;
 use serde_json::json;
 
 use crate::Ending;

@@ -13,8 +13,10 @@ use moonpool_sim::{
     RandomProvider, SimContext, assert_always, assert_reachable, buggify_with_prob,
 };
 use paros::client::capacity::{self, CapacityAnswer, CapacityRequest, Wanted};
+use paros::core::JournalIdentifier;
+use paros::core::NodeId;
+use paros::core::TenantId;
 use paros::model::registry::{BookingTarget, Class, Role};
-use paros::{JournalIdentifier, NodeId, TenantId};
 
 use super::FleetOps;
 use super::cell::Cell;

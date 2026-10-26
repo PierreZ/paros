@@ -115,7 +115,7 @@ impl FleetOps {
         &mut self,
         ctx: &SimContext,
         cell: &super::cell::Cell,
-        servers: &[paros::Address],
+        servers: &[paros::model::address::Address],
         draw: u64,
     ) {
         let time = ctx.time().clone();
@@ -366,7 +366,7 @@ fn judge_status(ctx: &SimContext, reply: &ViewReply, admin: bool, client: u64) {
 fn expected_word(reply: &ViewReply, journal: &paros::wire::view::JournalView) -> Option<Word> {
     let placed = placed(journal)?;
     let machine = |id: u64| reply.machines.iter().find(|m| m.node_id == id);
-    let live: std::collections::BTreeSet<paros::NodeId> = placed
+    let live: std::collections::BTreeSet<paros::core::NodeId> = placed
         .members()
         .iter()
         .copied()

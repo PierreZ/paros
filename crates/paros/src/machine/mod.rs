@@ -77,8 +77,8 @@ use std::sync::Arc;
 use moonpool_rpc::RpcHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::ParosProviders;
 use crate::client::CallObserver;
+use crate::net::runtime::ParosProviders;
 use crate::storage::RunError;
 use crate::tunables::DriverTunables;
 use formed::FormedExt as _;

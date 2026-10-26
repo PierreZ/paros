@@ -26,7 +26,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::task::Poll;
 
-use crate::ParosProviders;
+use crate::net::runtime::ParosProviders;
 use moonpool_core::RandomProvider;
 use paros_core::{ColocatedNode, JournalIdentifier, NodeId, Slot, TenantId};
 
@@ -196,12 +196,12 @@ pub trait JournalStores {
     /// The node's registry fold reached a new book (#211): an opener that
     /// keeps a cached registry fold beside its stores caches it. Never
     /// waits on the disk. The default keeps nothing.
-    fn cache_registry(&self, cache: crate::machine::CachedRegistry) {
+    fn cache_registry(&self, cache: crate::model::machine::CachedRegistry) {
         let _ = cache;
     }
 }
 
-/// The one-journal node [`crate::run_node`] runs: the store it was handed,
+/// The one-journal node [`crate::roles::node::run_node`] runs: the store it was handed,
 /// once. A quarantine never re-opens it — a one-journal node that loses its
 /// journal has nothing left and exits with the fault, the pre-#188 rule.
 pub(crate) struct SingleStore<S, A> {

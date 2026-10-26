@@ -31,7 +31,7 @@
 //! # What the world decides, and what it does not
 //!
 //! Two decisions here are the **driver's**, exactly as they are in
-//! `paros::run_node`, and the game gives them to the player's clock rather than
+//! `paros::roles::node::run_node`, and the game gives them to the player's clock rather than
 //! to an ack:
 //!
 //! - **closing a freeze** ([`paros_core::MatchmakerReconfigurer::close_stop`])

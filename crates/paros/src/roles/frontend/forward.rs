@@ -4,7 +4,7 @@
 
 use std::future::Future;
 
-use crate::ParosProviders;
+use crate::net::runtime::ParosProviders;
 use moonpool_core::LocalTimeProvider;
 use moonpool_rpc::{Execution, RpcError};
 use paros_core::{JournalId, JournalIdentifier, TenantId};

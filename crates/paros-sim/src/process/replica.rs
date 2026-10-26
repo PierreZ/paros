@@ -15,10 +15,17 @@ use crate::roles::{Deployment, replica_node_id};
 use crate::world::StorageWorld;
 use crate::world::node_store::LedgeredJournal;
 use crate::world::storage_world_for;
-use paros::{
-    BootKind, Config, JournalIdentifier, JournalStorage, JournalStoreConfig, JournalStores, NodeId,
-    ReplicaId, RunError, parse_addr, run_replica,
-};
+use paros::core::Config;
+use paros::core::JournalIdentifier;
+use paros::core::NodeId;
+use paros::core::ReplicaId;
+use paros::roles::node::BootKind;
+use paros::roles::node::JournalStores;
+use paros::roles::node::RunError;
+use paros::roles::node::parse_addr;
+use paros::roles::replica::run_replica;
+use paros::storage::journal::JournalStorage;
+use paros::storage::journal::JournalStoreConfig;
 
 /// A replica's configuration of every journal of the run (#193): the main
 /// journal's bootstrap membership it learns from, outside the pool, and the
@@ -188,7 +195,7 @@ pub(super) async fn run_replica_role(
             stores,
             parse_addr(my_ip)?,
             members.clone(),
-            paros::DriverTunables {
+            paros::roles::node::DriverTunables {
                 apply_page: crate::shape::replica_apply_page(
                     ctx.state(),
                     incarnation.shape.tunables.apply_page,

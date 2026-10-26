@@ -1,5 +1,5 @@
 //! The driver's observability helpers: the small pure functions that turn a
-//! domain value into the stable field a trace or an [`Audit`](crate::Audit)
+//! domain value into the stable field a trace or an [`Audit`](crate::observe::audit::Audit)
 //! callback carries (value/command hashes, message labels, the
 //! ballot-carrying route triple). The tracing event names themselves are
 //! string literals at their emit sites, for humans only: nothing reads the
@@ -82,8 +82,8 @@ pub fn value_hash(bytes: &[u8]) -> u64 {
 /// encoding of its metadata, so every node agrees on the per-slot hash the audit
 /// compares (a control command decided for a slot is the same on all nodes).
 ///
-/// Public so an [`Audit`](crate::Audit) implementation can hash a `Command` it observes on the
-/// wire ([`Audit::sent`](crate::Audit::sent)) with the *same* function the driver uses for the
+/// Public so an [`Audit`](crate::observe::audit::Audit) implementation can hash a `Command` it observes on the
+/// wire ([`Audit::sent`](crate::observe::audit::Audit::sent)) with the *same* function the driver uses for the
 /// durable-write and apply callbacks.
 ///
 /// # Panics
@@ -243,7 +243,7 @@ fn reconfigure_outcome_unchecked(result: ReconfigureResult) -> (bool, &'static s
 /// field on the `msg_sent` / `msg_received` events. Public so an [`Audit`]
 /// implementation can tally by the same labels the driver traces with.
 ///
-/// [`Audit`]: crate::Audit
+/// [`Audit`]: crate::observe::audit::Audit
 ///
 /// # Panics
 ///

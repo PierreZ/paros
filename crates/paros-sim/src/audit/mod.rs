@@ -65,19 +65,50 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use moonpool_sim::{TimeProvider, assert_always, assert_reachable};
 use paros::client::{MatchmakersRefusal, RetireRefusal};
-use paros::{
-    AcceptorConfig, Audit, Ballot, BootRefusal, Command, Deployment, EdgeRejection, GcAck, GcStep,
-    HANDOFF_BATCH, Handoff, HistoryPage, JournalIdentifier, LEADER_RECOVERY_BATCH, LogReadAnswer,
-    LogReadReport, MatchRefusal, MatchmakerHardState, MatchmakerId, MatchmakerPhase, MatchmakerSet,
-    Message, NodeId, PROMISE_BATCH, Party, PendingBootstrap, ProxyId, QuorumSystem,
-    ReconfigureReply, ReconfigureRequest, ReconfigureResult, ReconfigurerStep, Registration,
-    RegistrationKind, Slot, StorageError, StorageFaultDecision, StorageRecord, command_hash,
-    message_kind,
-};
+use paros::core::AcceptorConfig;
+use paros::core::Ballot;
+use paros::core::Command;
+use paros::core::GcAck;
+use paros::core::GcStep;
+use paros::core::HANDOFF_BATCH;
+use paros::core::Handoff;
+use paros::core::JournalIdentifier;
+use paros::core::LEADER_RECOVERY_BATCH;
+use paros::core::MatchRefusal;
+use paros::core::MatchmakerHardState;
+use paros::core::MatchmakerId;
+use paros::core::MatchmakerPhase;
+use paros::core::MatchmakerSet;
+use paros::core::Message;
+use paros::core::NodeId;
+use paros::core::PROMISE_BATCH;
+use paros::core::Party;
+use paros::core::PendingBootstrap;
+use paros::core::ProxyId;
+use paros::core::QuorumSystem;
+use paros::core::ReconfigureReply;
+use paros::core::ReconfigureRequest;
+use paros::core::ReconfigureResult;
+use paros::core::ReconfigurerStep;
+use paros::core::Registration;
+use paros::core::RegistrationKind;
+use paros::core::Slot;
+use paros::net::EdgeRejection;
+use paros::observe::audit::Audit;
+use paros::observe::audit::Deployment;
+use paros::observe::audit::HistoryPage;
+use paros::observe::audit::LogReadAnswer;
+use paros::observe::audit::LogReadReport;
+use paros::observe::audit::StorageFaultDecision;
+use paros::roles::node::BootRefusal;
+use paros::roles::node::command_hash;
+use paros::roles::node::message_kind;
+use paros::storage::StorageError;
+use paros::storage::StorageRecord;
 
 use self::state::AuditState;
 
-/// One node's view of the shared checker, handed to `paros::run_node`; it stamps simulated time on
+/// One node's view of the shared checker, handed to `paros::roles::node::run_node`; it stamps simulated time on
 /// the observations that need it and forwards everything else unchanged.
 ///
 /// The driver hands each peer-delivery task its own handle to the audit (the
@@ -97,7 +128,10 @@ pub(crate) struct NodeAudit<T> {
     /// control journals.
     tenants: Option<Arc<Mutex<tenants::TenantBoard>>>,
     /// The run's machine board (#246), on a machine's own port.
-    machines: Option<(Arc<Mutex<crate::machine::MachineBoard>>, paros::Address)>,
+    machines: Option<(
+        Arc<Mutex<crate::machine::MachineBoard>>,
+        paros::model::address::Address,
+    )>,
     /// The run's state, on a machine's own port: where a wiped machine is
     /// signaled healed (moonpool #344 (rolling wipes), `crate::machine::heal`).
     wipes: Option<moonpool_sim::StateHandle>,
@@ -187,7 +221,7 @@ impl<T: TimeProvider> NodeAudit<T> {
     pub(crate) fn on_machines(
         mut self,
         state: &moonpool_sim::StateHandle,
-        addr: paros::Address,
+        addr: paros::model::address::Address,
     ) -> Self {
         self.machines = Some((crate::machine::machine_board(state), addr));
         self.wipes = Some(state.clone());
@@ -501,12 +535,12 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
     /// run on a bare disk, are judged alike (#454 (control plane meets
     /// chaos): witness 7140828428648307805, a machine killed inside a
     /// commit that overwrote two round-4 accepts at round 5).
-    fn commit_started(&self, node: NodeId, writes: &[paros::WriteOp]) {
+    fn commit_started(&self, node: NodeId, writes: &[paros::core::WriteOp]) {
         let floor = writes
             .iter()
             .filter_map(|op| match op {
-                paros::WriteOp::Truncate { first, .. } => Some(*first),
-                paros::WriteOp::TrimmedTo { point, .. } => Some(*point),
+                paros::core::WriteOp::Truncate { first, .. } => Some(*first),
+                paros::core::WriteOp::TrimmedTo { point, .. } => Some(*point),
                 _ => None,
             })
             .max();
@@ -514,19 +548,19 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         let mut dropped: Vec<(u64, Ballot, u64)> = Vec::new();
         for op in writes {
             let (slot, ballot, command) = match op {
-                paros::WriteOp::Acceptor(paros::AcceptorWrite::AppendAccepted {
+                paros::core::WriteOp::Acceptor(paros::core::AcceptorWrite::AppendAccepted {
                     slot,
                     ballot,
                     value,
                 }) => (slot, ballot, value),
-                paros::WriteOp::Learned {
+                paros::core::WriteOp::Learned {
                     slot,
                     ballot,
                     command,
                 } => (slot, ballot, command),
                 _ => continue,
             };
-            let vhash = paros::command_hash(command);
+            let vhash = paros::roles::node::command_hash(command);
             if floor.is_some_and(|floor| *slot < floor) {
                 dropped.push((slot.0, *ballot, vhash));
             } else {
@@ -655,7 +689,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         slot: Slot,
         vhash: u64,
         command: &Command,
-        outcome: Option<&paros::Outcome>,
+        outcome: Option<&paros::core::Outcome>,
     ) {
         let mut st = self.state();
         if st.replicas.contains(&node.0) {
@@ -701,7 +735,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             assert_always!(
                 !matches!(
                     outcome,
-                    Some(paros::Outcome::Accepted { .. } | paros::Outcome::Duplicate { .. })
+                    Some(paros::core::Outcome::Accepted { .. } | paros::core::Outcome::Duplicate { .. })
                 ),
                 "journal: a write under another tenant's fence is refused at apply",
                 { "node" => node.0, "slot" => slot.0 }
@@ -714,7 +748,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         if let Some(board) = &self.tenants {
             tenants::lock(board).applied(node, command);
         }
-        let takes_slot = !matches!(command, Command::Control(paros::Control::Noop));
+        let takes_slot = !matches!(command, Command::Control(paros::core::Control::Noop));
         self.journal_applied(node, takes_slot.then_some(vhash));
     }
 
@@ -1232,7 +1266,13 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         self.state().last_gap.insert(node.0, (hole.0, above.0));
     }
 
-    fn answered(&self, node: NodeId, slot: Slot, command: &Command, outcome: &paros::Outcome) {
+    fn answered(
+        &self,
+        node: NodeId,
+        slot: Slot,
+        command: &Command,
+        outcome: &paros::core::Outcome,
+    ) {
         // #189, #210: a node acknowledges no write to a journal after
         // folding its tombstone; nor any other call (#449).
         if let (Some(board), Some((journal, _))) = (&self.tenants, &self.journal) {
@@ -1266,7 +1306,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         // Decision 1 of #144: the node asked acks, and the slot's reply
         // owner — a replica, a different process by construction — is noted
         // so the gate can prove it applied what it would have answered.
-        if let Some(owner) = paros::ReplicaId::of(slot, st.replica_count) {
+        if let Some(owner) = paros::core::ReplicaId::of(slot, st.replica_count) {
             let owner = crate::roles::replica_node_id(owner).0;
             if owner != node.0 {
                 let first = st.acked_by_other.entry(owner).or_insert(slot.0);
@@ -1274,19 +1314,21 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             }
         }
         match outcome {
-            paros::Outcome::Accepted { .. } | paros::Outcome::Duplicate { .. } => {
+            paros::core::Outcome::Accepted { .. } | paros::core::Outcome::Duplicate { .. } => {
                 if st.leader_change_ms.is_some() {
                     st.ack_after_leader_change = true;
                 }
                 // The retry edge the reply-drop location exists for: a
                 // write's verdict was dropped, and a retry was answered from
                 // the log.
-                if matches!(outcome, paros::Outcome::Duplicate { .. }) && st.propose_reply_dropped {
+                if matches!(outcome, paros::core::Outcome::Duplicate { .. })
+                    && st.propose_reply_dropped
+                {
                     st.dedup_after_dropped_reply = true;
                 }
             }
             // Feeds the "chain: compact takes effect" outcome gate.
-            paros::Outcome::Trimmed(_) => st.compact_ack_accepted = true,
+            paros::core::Outcome::Trimmed(_) => st.compact_ack_accepted = true,
             _ => {}
         }
     }
@@ -1379,7 +1421,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         st.journal_read_on_replica |= st.replicas.contains(&node.0);
     }
 
-    fn log_read_not_held(&self, node: NodeId, from: paros::Seq) {
+    fn log_read_not_held(&self, node: NodeId, from: paros::core::Seq) {
         let st = self.state();
         // `LogRead::NotHeld` (#448): the record exists in the journal, but
         // in a slot below this node's floor, which rose ahead of its fold
@@ -1873,7 +1915,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
 
     fn machine_booted(
         &self,
-        addr: &paros::Address,
+        addr: &paros::model::address::Address,
         record: Option<&paros::machine::MachineRecord>,
     ) {
         // The board knows a machine by its rank's address (#349): a renamed
@@ -1940,7 +1982,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
 
     fn cell_formatting(
         &self,
-        addr: &paros::Address,
+        addr: &paros::model::address::Address,
         node: NodeId,
         plan: &paros::machine::CellPlan,
         _leftovers: bool,
@@ -2042,16 +2084,16 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         }
     }
 
-    fn client_reply_dropped(&self, _node: NodeId, reply: paros::Reply) {
+    fn client_reply_dropped(&self, _node: NodeId, reply: paros::observe::reply::Reply) {
         let mut st = self.state();
         if matches!(
             reply,
-            paros::Reply::Redirect
-                | paros::Reply::ReadUnserved
-                | paros::Reply::Truncate
-                | paros::Reply::Reconfigure
-                | paros::Reply::ReconfigureMatchmakers
-                | paros::Reply::Retire
+            paros::observe::reply::Reply::Redirect
+                | paros::observe::reply::Reply::ReadUnserved
+                | paros::observe::reply::Reply::Truncate
+                | paros::observe::reply::Reply::Reconfigure
+                | paros::observe::reply::Reply::ReconfigureMatchmakers
+                | paros::observe::reply::Reply::Retire
         ) {
             // Nothing committed behind these: the client sees a deadline and
             // retries blind. No dedup edge to track, only the reach.
@@ -2065,10 +2107,10 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             st.reply_dropped,
             "a committed client reply is dropped at the reply seam"
         );
-        if matches!(reply, paros::Reply::Write) {
+        if matches!(reply, paros::observe::reply::Reply::Write) {
             st.propose_reply_dropped = true;
         }
-        if matches!(reply, paros::Reply::LogRead) {
+        if matches!(reply, paros::observe::reply::Reply::LogRead) {
             reach_once!(
                 st.read_reply_dropped,
                 "a confirmed read reply is dropped at the reply seam"
@@ -2276,7 +2318,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         matchmaker: MatchmakerId,
         set: &MatchmakerSet,
         phase: MatchmakerPhase,
-        scalars: &paros::MatchmakerHardState,
+        scalars: &paros::core::MatchmakerHardState,
         registry: &BTreeMap<Ballot, Registration>,
         gc_watermark: Ballot,
     ) {
@@ -2297,7 +2339,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
     fn matchmaker_in_flight(
         &self,
         matchmaker: MatchmakerId,
-        writes: Option<&[paros::MatchmakerWriteOp]>,
+        writes: Option<&[paros::core::MatchmakerWriteOp]>,
     ) {
         let Some(writes) = writes else {
             self.world.note_registry_in_flight(matchmaker.0, None);
@@ -2307,17 +2349,17 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         let ops: Vec<matchmaker::RegistryOp> = writes
             .iter()
             .filter_map(|op| match op {
-                paros::MatchmakerWriteOp::Register {
+                paros::core::MatchmakerWriteOp::Register {
                     journal: written,
                     ballot,
                     registration,
                 } => (*written == journal)
                     .then(|| matchmaker::RegistryOp::Register(*ballot, registration.clone())),
-                paros::MatchmakerWriteOp::SetGcWatermark { .. } => None,
-                paros::MatchmakerWriteOp::SetScalars(scalars) => {
+                paros::core::MatchmakerWriteOp::SetGcWatermark { .. } => None,
+                paros::core::MatchmakerWriteOp::SetScalars(scalars) => {
                     Some(matchmaker::RegistryOp::Scalars(scalars.clone()))
                 }
-                paros::MatchmakerWriteOp::InstallRegistry {
+                paros::core::MatchmakerWriteOp::InstallRegistry {
                     scalars,
                     registrations,
                 } => Some(matchmaker::RegistryOp::Install(
@@ -2725,7 +2767,11 @@ mod tests {
     use std::time::Duration;
 
     use moonpool_sim::{TimeError, TimeProvider, has_always_violations, reset_always_violations};
-    use paros::{Ballot, Message, NodeId, ProxyId, Slot};
+    use paros::core::Ballot;
+    use paros::core::Message;
+    use paros::core::NodeId;
+    use paros::core::ProxyId;
+    use paros::core::Slot;
 
     use super::state::{AuditState, Floor};
     use super::{Audit, AuditWorld, NodeAudit};

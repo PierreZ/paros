@@ -49,8 +49,9 @@ use moonpool_sim::{
     OpenOptions, SimStorageProvider, StorageFile, StorageProvider, assert_always, assert_reachable,
     buggify_with_prob,
 };
+use paros::storage::StorageError;
+use paros::storage::journal::JournalBootFacts;
 use paros::storage::journal::{Layout, LayoutRegion};
-use paros::{JournalBootFacts, StorageError};
 
 use super::StorageWorld;
 use super::outage::{LossShape, PlannedLoss};

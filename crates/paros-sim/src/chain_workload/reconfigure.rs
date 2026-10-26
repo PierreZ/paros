@@ -13,10 +13,13 @@ use paros::client::{
     MatchmakersRefusal, ReconfigureMatchmakersOutcome, ReconfigureOutcome, RetireOutcome,
     RetireRefusal,
 };
-use paros::{
-    JournalIdentifier, QuorumSystem, ReconfigureRefusal, RetireRequest, TenantId, WireQuorumSystem,
-    quorum_system_from_proto,
-};
+use paros::core::JournalIdentifier;
+use paros::core::QuorumSystem;
+use paros::core::ReconfigureRefusal;
+use paros::core::TenantId;
+use paros::wire::RetireRequest;
+use paros::wire::WireQuorumSystem;
+use paros::wire::quorum_system_from_proto;
 
 use super::system::SystemOps;
 use super::{ChainWorkload, Step, adopt_plane_leader, weighted_index};
@@ -362,7 +365,7 @@ impl ChainWorkload {
                 next.iter().filter(|m| live.contains(m)).copied().collect();
             let system = successor_system(next.len());
             let columns: BTreeSet<usize> = (0..next.len() as u64)
-                .filter_map(|slot| system.column_of(paros::Slot(slot)))
+                .filter_map(|slot| system.column_of(paros::core::Slot(slot)))
                 .collect();
             let phase2 = if columns.is_empty() {
                 system.is_phase2_quorum(next, &live_members)
@@ -996,10 +999,11 @@ async fn compose(
     state: &moonpool_sim::StateHandle,
     journal: JournalIdentifier,
     members: &[u64],
-    system: paros::QuorumSystem,
+    system: paros::core::QuorumSystem,
     target: usize,
 ) -> ReconfigureOutcome {
-    let nodes: Vec<paros::NodeId> = members.iter().copied().map(paros::NodeId).collect();
+    let nodes: Vec<paros::core::NodeId> =
+        members.iter().copied().map(paros::core::NodeId).collect();
     let distinct = nodes
         .iter()
         .collect::<std::collections::BTreeSet<_>>()

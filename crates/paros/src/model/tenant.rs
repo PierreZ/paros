@@ -135,10 +135,10 @@ impl StoreDurability {
 
     /// The store's commit protocol.
     #[must_use]
-    pub fn journal(self) -> crate::storage::journal::Durability {
+    pub fn journal(self) -> moonpool_journal::Durability {
         match self {
-            StoreDurability::Ordered => crate::storage::journal::Durability::Ordered,
-            StoreDurability::Batched => crate::storage::journal::Durability::Batched,
+            StoreDurability::Ordered => moonpool_journal::Durability::Ordered,
+            StoreDurability::Batched => moonpool_journal::Durability::Batched,
         }
     }
 

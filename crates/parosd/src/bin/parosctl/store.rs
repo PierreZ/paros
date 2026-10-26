@@ -21,11 +21,18 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use clap::{Args, Subcommand};
 use moonpool_core::CompioStorageProvider;
+use paros::core::Ballot;
+use paros::core::Command;
+use paros::core::Config;
+use paros::core::Control;
+use paros::core::QuorumSystem;
+use paros::core::Slot;
+use paros::core::WriterMode;
 use paros::inspect::{
     DiskImage, JournalImage, SetImage, SetStoreImage, StoreImage, inspect, names,
 };
 use paros::machine::MachineRecord;
-use paros::{Ballot, Command, Config, Control, JournalStoreConfig, QuorumSystem, Slot, WriterMode};
+use paros::storage::journal::JournalStoreConfig;
 use serde_json::{Value as Json, json};
 
 use crate::Ending;
@@ -331,7 +338,7 @@ fn print_set(out: &Printer, labels: &Labels, image: &SetImage) {
                 "members": members,
                 "journals": scalars.journals.iter().map(|(journal, s)| json!({
                     "journal": journal.0,
-                    "name": labels.journal(paros::JournalIdentifier::new(image.tenant, *journal)),
+                    "name": labels.journal(paros::core::JournalIdentifier::new(image.tenant, *journal)),
                     "gc_watermark": ballot_json(s.gc_watermark, labels),
                 })).collect::<Vec<_>>(),
                 "registrations": store.registered.iter().map(|(journal, ballot)| json!({

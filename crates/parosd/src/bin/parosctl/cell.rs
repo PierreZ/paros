@@ -29,8 +29,9 @@ use paros::client::Client;
 use paros::client::bootstrap::{cell_members, control_journals};
 use paros::client::cell::{CellSession, Removal};
 use paros::client::fleet::Step;
+use paros::core::NodeId;
+use paros::model::address::Address;
 use paros::model::registry::MaintenanceScope;
-use paros::{Address, NodeId};
 use serde_json::json;
 
 use crate::Ending;

@@ -29,9 +29,10 @@ use moonpool_core::CompioProviders;
 use moonpool_rpc::RpcHandle;
 use paros::client::load::{LoadOutcome, ask_all};
 use paros::client::views::{ViewOutcome, ask, request};
+use paros::model::address::Address;
+use paros::model::address::Names;
 use paros::model::view::Scope;
 use paros::wire::view::{self as wire, CellQuery, TenantQuery, UniverseQuery, view_request::Query};
-use paros::{Address, Names};
 use serde_json::{Value, json};
 
 use crate::Ending;

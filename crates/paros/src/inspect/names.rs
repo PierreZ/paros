@@ -17,9 +17,9 @@ use std::time::Duration;
 use paros_core::{Command, Entry, JournalIdentifier, JournalState, NodeId, Seq, Slot, WriterMode};
 
 use super::{DiskImage, StoreImage};
-use crate::Address;
 use crate::client::checkpoint::{Checkpointable, Folder};
 use crate::client::election::ElectionFold;
+use crate::model::address::Address;
 use crate::model::fleet::FleetDirectory;
 use crate::model::registry::Registry;
 use crate::model::status::Hysteresis;

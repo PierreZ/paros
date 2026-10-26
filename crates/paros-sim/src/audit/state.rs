@@ -8,7 +8,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use moonpool_sim::{assert_always, assert_reachable, assert_sometimes, assert_sometimes_all};
-use paros::{AcceptorConfig, Ballot, HEARTBEAT_TICKS, NodeId, Party, QuorumSystem, Slot};
+use paros::core::AcceptorConfig;
+use paros::core::Ballot;
+use paros::core::HEARTBEAT_TICKS;
+use paros::core::NodeId;
+use paros::core::Party;
+use paros::core::QuorumSystem;
+use paros::core::Slot;
 
 use super::client::{LinHistory, check_linearizable};
 use super::matchmaker::MatchmakerAudit;
@@ -33,7 +39,7 @@ pub(super) struct DeposedStreak {
     /// Ticks this node has run while `deposed` held.
     pub(super) ticks: u64,
     /// Consecutive ticks with no beat observed at this ballot. A leader beats
-    /// every [`paros::HEARTBEAT_TICKS`] ticks, so more than one whole beat
+    /// every [`paros::core::HEARTBEAT_TICKS`] ticks, so more than one whole beat
     /// period of silence means it stepped down — but *one* period of silence
     /// does not: the send seam's drop (`drop_at_send`) skips `Audit::sent`, so a
     /// fully dropped beat is invisible here, and a single beatless tick used
@@ -236,10 +242,10 @@ pub(super) struct AuditState {
     /// reported — the monotonicity watermark for those reports alone (the
     /// folded [`Floor`] also absorbs installs and ground-truth flushes, which
     /// can legally outrun a reordered stale truncate; see
-    /// [`NodeAudit::truncated`](paros::Audit::truncated)).
+    /// [`NodeAudit::truncated`](paros::observe::audit::Audit::truncated)).
     pub(super) truncate_watermark: BTreeMap<u64, u64>,
     /// Per node: the highest floor its driver ever staged
-    /// ([`NodeAudit::floor_requested`](paros::Audit::floor_requested)),
+    /// ([`NodeAudit::floor_requested`](paros::observe::audit::Audit::floor_requested)),
     /// reported or not. A crash inside the floor's commit can leave it
     /// durable unreported; only a slot below it may be missing from a
     /// recovered log without a corruption crash to explain it.
@@ -310,7 +316,7 @@ pub(super) struct AuditState {
     /// Per node: its deposed-heartbeat streak (#95, see [`DeposedStreak`]).
     pub(super) deposed_streaks: BTreeMap<u64, DeposedStreak>,
     /// Per node: the election timeout in force (ticks), from
-    /// [`paros::Audit::election_timeout_set`].
+    /// [`paros::observe::audit::Audit::election_timeout_set`].
     pub(super) election_timeouts: BTreeMap<u64, u64>,
     pub(super) leader_round: BTreeMap<u64, u64>,
     pub(super) leader_rounds: BTreeSet<u64>,
@@ -353,7 +359,7 @@ pub(super) struct AuditState {
     /// needs a stale leader learning a foreign decision for a slot it admitted.
     pub(super) waiter_superseded: bool,
     /// Typed Stage-6 write/fsync crash decisions folded in
-    /// ([`Audit::storage_fault`](paros::Audit::storage_fault) with `Io`/`FsyncFailed`).
+    /// ([`Audit::storage_fault`](paros::observe::audit::Audit::storage_fault) with `Io`/`FsyncFailed`).
     pub(super) storage_faults_detected: u64,
     pub(super) storage_fault_crashed: bool,
     /// A full disk made a store read-only (#360 (disk full)).
@@ -410,7 +416,7 @@ pub(super) struct AuditState {
     /// boot must not keep explaining gaps forever.
     pub(super) reported_faulty: BTreeMap<u64, BTreeSet<u64>>,
     /// Faulty reports staged since the node's last boot report: the scan
-    /// speaks *before* [`Audit::recovered`](paros::Audit::recovered) fires, so the swap-in happens
+    /// speaks *before* [`Audit::recovered`](paros::observe::audit::Audit::recovered) fires, so the swap-in happens
     /// there — the boot report is the incarnation edge.
     pub(super) faulty_staged: BTreeMap<u64, BTreeSet<u64>>,
     /// Per `(node, slot)`: the ballot the node's last boot reported its
@@ -420,7 +426,7 @@ pub(super) struct AuditState {
     /// (witness 4059871466191551614: an accept at round 3 reported, the
     /// boot finding the round-1 record faulty).
     pub(super) faulty_ballots: BTreeMap<(u64, u64), (u64, u64)>,
-    /// Repair progress observed (from [`Audit::repair_progress`](paros::Audit::repair_progress)): in-place
+    /// Repair progress observed (from [`Audit::repair_progress`](paros::observe::audit::Audit::repair_progress)): in-place
     /// repairs, straggler Case-1 re-proposals, Case-2 no-op fills, and
     /// recovery-timeout resignations.
     pub(super) repaired_seen: bool,
@@ -631,12 +637,12 @@ impl AuditState {
     pub(super) fn observe_prepare_send(&mut self, node: u64, to: u64, ballot: Ballot) {
         let in_config = self
             .config_of(ballot)
-            .is_some_and(|c| c.contains(paros::NodeId(to)));
+            .is_some_and(|c| c.contains(paros::core::NodeId(to)));
         let prior = self.prior_of(ballot);
         if self.config_of(ballot).is_none() && prior.is_none() {
             return;
         }
-        let in_prior = prior.is_some_and(|p| p.iter().any(|c| c.contains(paros::NodeId(to))));
+        let in_prior = prior.is_some_and(|p| p.iter().any(|c| c.contains(paros::core::NodeId(to))));
         assert_always!(
             in_config || in_prior,
             "reconfiguration: a Prepare reaches only the ballot's configuration and its prior configurations",
@@ -655,7 +661,7 @@ impl AuditState {
             .insert(node);
         if self
             .config_of(ballot)
-            .is_some_and(|c| !c.contains(paros::NodeId(node)))
+            .is_some_and(|c| !c.contains(paros::core::NodeId(node)))
         {
             reach_once!(
                 self.removed_member_promised,
@@ -701,7 +707,7 @@ impl AuditState {
     pub(super) fn observe_accept_send(&mut self, from: Party, to: u64, ballot: Ballot) {
         let Some(addressed_member) = self
             .config_of(ballot)
-            .map(|config| config.contains(paros::NodeId(to)))
+            .map(|config| config.contains(paros::core::NodeId(to)))
         else {
             return;
         };
@@ -713,7 +719,7 @@ impl AuditState {
         if self
             .bootstrap
             .as_ref()
-            .is_some_and(|b| !b.contains(paros::NodeId(to)))
+            .is_some_and(|b| !b.contains(paros::core::NodeId(to)))
         {
             reach_once!(
                 self.joined_member_accepted,
@@ -729,10 +735,10 @@ impl AuditState {
         // predicate the core's Phase-1 completion asks — rather than
         // re-derived here as arithmetic; a sender outside a configuration
         // never counts toward it.
-        let mut promised: BTreeSet<paros::NodeId> = self
+        let mut promised: BTreeSet<paros::core::NodeId> = self
             .promise_senders
             .get(&(ballot.round, ballot.node.0))
-            .map(|s| s.iter().map(|n| paros::NodeId(*n)).collect())
+            .map(|s| s.iter().map(|n| paros::core::NodeId(*n)).collect())
             .unwrap_or_default();
         promised.insert(ballot.node);
         let uncovered = prior
@@ -1125,7 +1131,8 @@ impl AuditState {
             .or(self.bootstrap.as_ref());
         let holders = self.accept_sets.entry(key).or_default();
         holders.insert(node);
-        let voters: BTreeSet<paros::NodeId> = holders.iter().map(|n| paros::NodeId(*n)).collect();
+        let voters: BTreeSet<paros::core::NodeId> =
+            holders.iter().map(|n| paros::core::NodeId(*n)).collect();
         if config.is_some_and(|c| c.has_phase2_quorum(&voters)) {
             match self.decided.get(&slot) {
                 None => {
@@ -1246,11 +1253,11 @@ impl AuditState {
         let Some(config) = self.config_of(ballot) else {
             return;
         };
-        let above: BTreeSet<paros::NodeId> = self
+        let above: BTreeSet<paros::core::NodeId> = self
             .promised
             .iter()
             .filter(|(_, p)| **p > ballot)
-            .map(|(n, _)| paros::NodeId(*n))
+            .map(|(n, _)| paros::core::NodeId(*n))
             .collect();
         let outvoted = config.has_phase1_quorum(&above);
         let timeout = self.election_timeouts.get(&node).copied().unwrap_or(0);
@@ -1288,7 +1295,7 @@ impl AuditState {
     pub(super) fn observe_ack_received(&mut self, node: u64, from: u64, ballot: Ballot) {
         let in_config = self
             .config_of(ballot)
-            .is_some_and(|c| c.contains(paros::NodeId(from)));
+            .is_some_and(|c| c.contains(paros::core::NodeId(from)));
         if !in_config {
             return;
         }
@@ -1400,10 +1407,10 @@ impl AuditState {
         // third booted the created journal at floor 0 and voted, and the
         // live tally there held only its own vote.
         if slot >= self.pruned_floor {
-            let voters: BTreeSet<paros::NodeId> = self
+            let voters: BTreeSet<paros::core::NodeId> = self
                 .accept_sets
                 .get(&key)
-                .map(|holders| holders.iter().map(|n| paros::NodeId(*n)).collect())
+                .map(|holders| holders.iter().map(|n| paros::core::NodeId(*n)).collect())
                 .unwrap_or_default();
             let backed = self
                 .config_of(ballot)
@@ -1459,7 +1466,7 @@ impl AuditState {
     /// cluster can actually observe (a proposal on the wire), never against a
     /// node's own `role` flag. Two nodes exercising one ballot for overlapping
     /// slots is exactly how two different values get chosen for one slot, and
-    /// the sibling check in [`NodeAudit::sent`](paros::Audit::sent) ("one ballot proposes at most
+    /// the sibling check in [`NodeAudit::sent`](paros::observe::audit::Audit::sent) ("one ballot proposes at most
     /// one command for a slot") is the consequence this exists to prevent
     /// upstream of.
     pub(super) fn observe_authority_use(&mut self, node: u64, ballot: Ballot) {

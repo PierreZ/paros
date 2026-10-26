@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::future::Future;
 use std::time::Duration;
 
-use crate::ParosProviders;
+use crate::net::runtime::ParosProviders;
 use moonpool_core::{Detach, LocalTaskProvider, LocalTimeProvider};
 use moonpool_rpc::RpcError;
 use paros_core::{

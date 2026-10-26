@@ -8,8 +8,8 @@
 use std::collections::BTreeSet;
 
 use moonpool_sim::{assert_always, assert_reachable, assert_sometimes, buggify_with_prob};
-use paros::TenantId;
 use paros::client::resolve::{Resolution, resolve};
+use paros::core::TenantId;
 
 use super::{FleetOps, removed_in, with_names};
 

@@ -12,7 +12,11 @@ use super::ranked;
 use super::stores::SimStores;
 use super::stores::resolve_provisioning;
 use crate::roles::{Deployment, Role};
-use paros::{MatchmakerId, NodeId, RunError, parse_addr, run_journals};
+use paros::core::MatchmakerId;
+use paros::core::NodeId;
+use paros::roles::node::RunError;
+use paros::roles::node::parse_addr;
+use paros::roles::node::run_journals;
 
 /// A joiner in the simulation (#189): its own process group, a node outside
 /// the genesis pool. On a seed that runs the system journals it follows the

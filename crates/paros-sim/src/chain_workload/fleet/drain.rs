@@ -33,9 +33,9 @@
 use std::collections::BTreeSet;
 
 use moonpool_sim::{SimContext, assert_reachable, buggify_with_prob};
-use paros::NodeId;
 use paros::client::cell::{CellSession, Removal};
 use paros::client::checkpoint::CheckpointPolicy;
+use paros::core::NodeId;
 use paros::machine::Class;
 use paros::model::registry::{BookingTarget, NodeStanding, Registry, Role};
 
@@ -69,7 +69,7 @@ impl FleetOps {
             return false;
         };
         let members: Vec<NodeId> = cell.members.iter().copied().map(NodeId).collect();
-        let founders: Vec<(NodeId, paros::Address)> = cell
+        let founders: Vec<(NodeId, paros::model::address::Address)> = cell
             .servers
             .iter()
             .map(|(id, addr)| (NodeId(*id), addr.clone()))
@@ -222,7 +222,7 @@ impl FleetOps {
             return false;
         };
         let members: Vec<NodeId> = cell.members.iter().copied().map(NodeId).collect();
-        let founders: Vec<(NodeId, paros::Address)> = cell
+        let founders: Vec<(NodeId, paros::model::address::Address)> = cell
             .servers
             .iter()
             .map(|(id, addr)| (NodeId(*id), addr.clone()))

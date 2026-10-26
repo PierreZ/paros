@@ -8,9 +8,12 @@ use paros::client::bootstrap::control_journals;
 use paros::client::fleet::{Step, read_directory};
 use paros::client::journals::{self, JournalAnswer, JournalOp, JournalRequest};
 use paros::client::{ClaimOutcome, Client, Pipeline};
+use paros::core::JournalId;
+use paros::core::JournalIdentifier;
+use paros::core::TenantId;
+use paros::core::WriterMode;
 use paros::model::fleet::TenantState;
 use paros::model::tenant::{StoreDurability, Survives};
-use paros::{JournalId, JournalIdentifier, TenantId, WriterMode};
 
 use crate::Runtime;
 use crate::fleet::{leader_seed, nonzero, refusal_text, session};

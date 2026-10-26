@@ -5,7 +5,7 @@
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
-use crate::ParosProviders;
+use crate::net::runtime::ParosProviders;
 use moonpool_core::{Detach, LocalTaskProvider, SimulationError, SimulationResult};
 use moonpool_rpc::{
     AccessClass, IncomingRequest, InterfaceMethod, ReplyHandle, RequestStream, RpcConfig,
@@ -216,7 +216,7 @@ pub enum EdgeRejection {
 }
 
 /// The edge's observation callback: the driver installs one that forwards to
-/// its [`Audit`](crate::Audit), stamped with the node's identity.
+/// its [`Audit`](crate::observe::audit::Audit), stamped with the node's identity.
 pub type OnReject = Arc<dyn Fn(EdgeRejection) + Send + Sync>;
 
 /// Serve the `Deliver` lane on its own task until the runtime ends or

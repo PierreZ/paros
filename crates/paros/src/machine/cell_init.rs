@@ -28,7 +28,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
-use crate::ParosProviders;
+use crate::net::runtime::ParosProviders;
 use moonpool_core::{Detach, LocalTaskProvider, LocalTimeProvider, RandomProvider};
 use moonpool_rpc::RpcHandle;
 use paros_core::decree::{AcceptFold, DecreePromise};
@@ -40,11 +40,12 @@ use tokio::sync::mpsc;
 
 use super::formed::vote_ballot;
 use super::{CellPlan, Class, MachineFacts, ballot_from_wire, ballot_to_wire};
+use crate::model::address::Address;
+use crate::model::address::Names;
 use crate::net::well_known;
-use crate::roles::node::DriverTunables;
+use crate::tunables::DriverTunables;
 use crate::wire::machine as wire;
 use crate::wire::methods::{FormCellRpc, PrepareCellRpc, WellKnownMethod};
-use crate::{Address, Names};
 
 /// A random identifier: a random tenant and a random journal, both set (no id
 /// is fixed, `docs/architecture/03-8-identifiers-checkpoints-recovery-security.md` §3.8).

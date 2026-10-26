@@ -16,27 +16,32 @@ use std::sync::{Mutex, PoisonError};
 
 use moonpool_sim::{assert_always, assert_reachable};
 use paros::client::{Answered, Attempted, CallObserver, TruncateOutcome, WriteOutcome};
-use paros::{Command, Entry, JournalIdentifier, LeaderUuid, Seq, Value};
+use paros::core::Command;
+use paros::core::Entry;
+use paros::core::JournalIdentifier;
+use paros::core::LeaderUuid;
+use paros::core::Seq;
+use paros::core::Value;
 
 /// The uuid a fenced attempt carries (#241): a `Write`'s or a `Truncate`'s
 /// leader uuid, when set.
 pub(super) fn fence_of(attempt: Attempted<'_>) -> Option<LeaderUuid> {
     match attempt {
-        Attempted::Write(write) => Some(paros::leader_uuid_from_proto(write.leader)),
-        Attempted::Truncate(truncate) => Some(paros::leader_uuid_from_proto(truncate.leader)),
+        Attempted::Write(write) => Some(paros::wire::leader_uuid_from_proto(write.leader)),
+        Attempted::Truncate(truncate) => Some(paros::wire::leader_uuid_from_proto(truncate.leader)),
         Attempted::SetLeader(_) | Attempted::Read(_) => None,
     }
     .filter(|uuid| uuid.is_set())
 }
 
 /// The command hash of `write`, the identity a re-send keeps.
-pub(super) fn write_hash(write: &paros::Write) -> u64 {
+pub(super) fn write_hash(write: &paros::wire::Write) -> u64 {
     let entry = Entry {
-        leader: paros::leader_uuid_from_proto(write.leader),
+        leader: paros::wire::leader_uuid_from_proto(write.leader),
         seq: Seq(write.seq),
         records: write.records.iter().cloned().map(Value).collect(),
     };
-    paros::command_hash(&Command::Write(entry))
+    paros::roles::node::command_hash(&Command::Write(entry))
 }
 
 /// Judge a fenced call leaving under `uuid` to `journal` from `client`:
@@ -142,7 +147,7 @@ impl CallObserver for ActorFence {
         }
     }
 
-    fn resolving(&self, _write: &paros::Write) -> Option<u64> {
+    fn resolving(&self, _write: &paros::wire::Write) -> Option<u64> {
         None
     }
 

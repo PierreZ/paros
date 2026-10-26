@@ -9,15 +9,16 @@
 
 use std::time::Duration;
 
-use crate::ParosProviders;
+use crate::net::runtime::ParosProviders;
 use moonpool_core::LocalTimeProvider;
 use moonpool_rpc::RpcHandle;
 
+use crate::model::address::Address;
+use crate::model::address::Names;
 use crate::model::view::Scope;
 use crate::net::well_known;
 use crate::wire::methods::ViewRpc;
 use crate::wire::view as wire;
-use crate::{Address, Names};
 
 /// What a view came to.
 #[derive(Clone, Debug, PartialEq)]

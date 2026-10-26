@@ -1,5 +1,5 @@
-//! The **durable stores**: [`JournalStorage`] ([`LogStorage`](crate::LogStorage)) and
-//! [`JournalMatchmakerStorage`] ([`MatchmakerStorage`](crate::MatchmakerStorage)), both on
+//! The **durable stores**: [`JournalStorage`] ([`LogStorage`](crate::storage::LogStorage)) and
+//! [`JournalMatchmakerStorage`] ([`MatchmakerStorage`](crate::storage::matchmaker::MatchmakerStorage)), both on
 //! `moonpool-journal`, the CLSTORE journal over moonpool's storage providers,
 //! so the same stores run over Tokio's filesystem in production and over the
 //! simulator's disk in tests.
@@ -63,7 +63,7 @@
 //!
 //! The in-memory image is loaded once, by the boot scan, and every
 //! synchronous accessor answers from it: the contract on
-//! [`LogStorage::boot_scan`](crate::LogStorage::boot_scan).
+//! [`LogStorage::boot_scan`](crate::storage::LogStorage::boot_scan).
 
 mod matchmaker;
 mod node;
@@ -92,7 +92,7 @@ pub use settle::{drop_caches, settle};
 
 /// How a journal store lays out and writes its journal.
 ///
-/// A plain data struct, like [`DriverTunables`](crate::DriverTunables): a
+/// A plain data struct, like [`DriverTunables`](crate::tunables::DriverTunables): a
 /// production deployment keeps the defaults, a simulation shrinks the
 /// geometry so rollover and prefix truncation are cheap to reach and draws
 /// the durability per seed.

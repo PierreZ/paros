@@ -21,10 +21,12 @@ use paros::client::fleet::read_directory;
 use paros::client::names::{
     JournalResolution, NameResolution, TenantResolution, Unreadable, read_tenant_control, resolve,
 };
+use paros::core::JournalId;
+use paros::core::JournalIdentifier;
+use paros::core::TenantId;
 use paros::model::name::{
     Abbreviations, JournalName, PrefixMatch, match_prefix, parse_full, parse_prefix,
 };
-use paros::{JournalId, JournalIdentifier, TenantId};
 
 use crate::Ending;
 use crate::labels::Labels;
@@ -99,7 +101,7 @@ pub async fn journal(client: &ParosClient, reference: &JournalRef) -> Result<Res
 /// frontend)): a name is sent as it is, bound to a local identifier the
 /// frontend never reads; ids name an internal journal (an `admin` token)
 /// and must be whole, since `parosctl` lists nothing through a frontend.
-fn through_frontend(pass: &paros::Pass, reference: &JournalRef) -> Result<Resolved, Ending> {
+fn through_frontend(pass: &paros::net::Pass, reference: &JournalRef) -> Result<Resolved, Ending> {
     match reference {
         JournalRef::Name(name) => {
             let local = JournalIdentifier::new(TenantId(1), JournalId(1));

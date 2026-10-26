@@ -26,7 +26,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use crate::ParosProviders;
+use crate::net::runtime::ParosProviders;
 use moonpool_core::RandomProvider;
 use paros_core::{Ballot, ColocatedNode, Handoff, JournalIdentifier, NodeId, NodeRole};
 

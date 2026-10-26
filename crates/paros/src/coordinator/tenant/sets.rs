@@ -1,6 +1,6 @@
 //! The tenant coordinator's matchmaker sets (#501 (matchmaker sets off the
 //! founders), §3.4): every tenant's set is born on the founding members (the
-//! bootstrap generation, `crate::machine::CellPlan::matchmakers`), and the
+//! bootstrap generation, `crate::model::machine::CellPlan::matchmakers`), and the
 //! coordinator places it on the cell's storage machines, then moves it off
 //! a draining machine, one step per watch round. Every step starts from what
 //! the registry and the set's journals hold now, so any later term finishes
@@ -43,7 +43,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound::{Excluded, Unbounded};
 
-use crate::ParosProviders;
+use crate::net::runtime::ParosProviders;
 use moonpool_rpc::RpcHandle;
 use paros_core::{JournalIdentifier, NodeId, TenantId};
 
@@ -52,11 +52,12 @@ use crate::client::journals::JournalAnswer;
 use crate::client::{Client, ReconfigureMatchmakersOutcome, Server};
 use crate::coordinator::tenant::TenantDesk;
 use crate::coordinator::tenant::moves::{Leaving, stays};
+use crate::model::address::Address;
+use crate::model::address::Names;
 use crate::model::placement::{self, Step, Want};
 use crate::model::registry::{Booking, BookingTarget, NodeStanding, Registry, Role};
 use crate::net::NodeClient;
 use crate::wire::InspectReply;
-use crate::{Address, Names};
 
 /// The id of a tenant's one matchmaker set inside its tenant (§3.4: one set
 /// per tenant; a booking target's set id is never `0`).

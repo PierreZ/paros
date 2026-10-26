@@ -52,10 +52,10 @@ use std::time::{Duration, Instant, SystemTime};
 
 use clap::Args;
 use moonpool_core::{CompioProviders, LocalProviders, RandomProvider};
-use paros::Value;
 use paros::client::{
     Client, Pipeline, Reader, ReaderOutcome, TruncateOutcome, Writer, WriterOutcome,
 };
+use paros::core::Value;
 use tokio_util::sync::CancellationToken;
 
 use crate::output::note;

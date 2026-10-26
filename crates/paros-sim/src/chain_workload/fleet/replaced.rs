@@ -14,7 +14,7 @@
 //! chaos), where it took a matchmaker set's slot for good).
 
 use moonpool_sim::{SimContext, assert_reachable};
-use paros::Address;
+use paros::model::address::Address;
 
 use super::FleetOps;
 use crate::machine::Replacement;

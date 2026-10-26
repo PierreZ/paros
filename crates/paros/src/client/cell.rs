@@ -25,7 +25,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use crate::ParosProviders;
+use crate::net::runtime::ParosProviders;
 use moonpool_rpc::RpcHandle;
 use paros_core::{LeaderUuid, NodeId};
 
@@ -35,10 +35,11 @@ use super::checkpoint::{CheckpointOutcome, CheckpointPolicy, Checkpointer, OpenO
 use super::fleet::{
     FleetRefusal, Interrupted, Run, Stage, Step, append, going_round, open, retry, settle,
 };
-use crate::machine::{Admission, ControlJournals};
+use crate::model::address::Address;
+use crate::model::address::Names;
 use crate::model::authz::Denial;
+use crate::model::machine::{Admission, ControlJournals};
 use crate::model::registry::{MaintenanceScope, NodeStanding, Registry, SystemCommand};
-use crate::{Address, Names};
 
 /// The most steps one admission takes: a registration and an `Admit`, each
 /// decided afresh, so a run that needs more is going round.
@@ -238,7 +239,7 @@ impl CellSession {
         let registry = self.cell.state();
         // A founding member registered its address (#349): its registered
         // address replaces the plan's.
-        let founders = crate::machine::address_book(&self.founders, registry);
+        let founders = crate::model::machine::address_book(&self.founders, registry);
         let registered = registry
             .nodes()
             .filter(|(id, n)| n.standing != NodeStanding::Retired && !founder(*id))
@@ -318,7 +319,7 @@ impl CellSession {
                 cell_id: identity.cell_id,
             });
         }
-        let Some((class, locality)) = crate::machine::identity_tags(&identity) else {
+        let Some((class, locality)) = crate::model::machine::identity_tags(&identity) else {
             return Step::Refused(FleetRefusal::Unset);
         };
         let Ok(advertised) = Address::parse(&identity.addr) else {
@@ -341,7 +342,7 @@ impl CellSession {
                     capacity: identity.capacity,
                     locality,
                     name: identity.name,
-                    incarnation: crate::machine::incarnation_from_halves(
+                    incarnation: crate::model::machine::incarnation_from_halves(
                         identity.incarnation_high,
                         identity.incarnation_low,
                     ),

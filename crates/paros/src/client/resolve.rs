@@ -14,16 +14,17 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use crate::ParosProviders;
+use crate::net::runtime::ParosProviders;
 use moonpool_rpc::RpcHandle;
 use paros_core::{JournalId, JournalIdentifier, NodeId, TenantId};
 
 use super::Server;
 use super::bootstrap::call_once;
+use crate::model::address::Address;
+use crate::model::address::Names;
 use crate::net::NodeClient;
 use crate::wire::machine as wire;
 use crate::wire::methods::ResolveRpc;
-use crate::{Address, Names};
 
 /// Which references serve a tenant, as one machine of its cell answered.
 #[derive(Clone, Debug, PartialEq, Eq)]

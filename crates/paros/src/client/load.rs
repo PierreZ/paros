@@ -11,14 +11,15 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use crate::ParosProviders;
+use crate::net::runtime::ParosProviders;
 use moonpool_core::{Detach, LocalTaskProvider};
 use moonpool_rpc::RpcHandle;
 
 use crate::client::bootstrap::call_once;
+use crate::model::address::Address;
+use crate::model::address::Names;
 use crate::wire::machine as wire;
 use crate::wire::methods::LoadRpc;
-use crate::{Address, Names};
 
 /// What one machine's `Load` came to.
 #[derive(Clone, Debug, PartialEq)]

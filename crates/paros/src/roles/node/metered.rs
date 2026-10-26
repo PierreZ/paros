@@ -16,7 +16,7 @@
 use moonpool_core::LocalTimeProvider;
 use paros_core::{JournalIdentifier, NodeId};
 
-use crate::machine::ControlJournals;
+use crate::model::machine::ControlJournals;
 use crate::net::ReplySender;
 use crate::observe::audit::Audit;
 use crate::observe::metrics::{CallKind, CallOutcome, Metrics};
@@ -30,7 +30,7 @@ use super::system::ControlFollower;
 /// as `(control)`, `(election)` and `(directory)`, a tenant's control
 /// journal as `(control)`, a tenant's journal by its name. A journal whose
 /// names this node does not know is labelled with its ids in hex.
-pub(crate) fn journal_names<P: crate::ParosProviders>(
+pub(crate) fn journal_names<P: crate::net::runtime::ParosProviders>(
     follower: Option<&ControlFollower<P>>,
     cell: Option<&ControlJournals>,
     journal: JournalIdentifier,

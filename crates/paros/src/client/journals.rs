@@ -18,7 +18,7 @@
 
 use std::time::Duration;
 
-use crate::ParosProviders;
+use crate::net::runtime::ParosProviders;
 use moonpool_core::LocalTimeProvider;
 use moonpool_rpc::{InterfaceMethod, InterfaceRef, RpcError, RpcHandle};
 use paros_core::{AcceptorConfig, JournalId, JournalIdentifier, TenantId, WriterMode};
@@ -26,6 +26,8 @@ use paros_core::{AcceptorConfig, JournalId, JournalIdentifier, TenantId, WriterM
 use super::Client;
 use super::checkpoint::{Folder, LoadOutcome, load};
 use super::election::{Candidate, read_election};
+use crate::model::address::Address;
+use crate::model::address::Names;
 use crate::model::tags::UserTags;
 use crate::model::tenant::{Desired, StoreDurability, TenantControl, TenantRoles};
 use crate::net::in_group;
@@ -34,7 +36,6 @@ use crate::wire::methods::{CoordinatorInterface, JournalRequestRpc};
 use crate::wire::{
     config_from_proto, config_to_proto, writer_mode_from_proto, writer_mode_to_proto,
 };
-use crate::{Address, Names};
 
 /// What a request asks for.
 #[derive(Clone, Debug, PartialEq, Eq)]

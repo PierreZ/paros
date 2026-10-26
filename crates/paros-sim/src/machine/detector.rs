@@ -28,7 +28,7 @@
 use std::time::Duration;
 
 use moonpool_sim::{StateHandle, assert_always};
-use paros::Address;
+use paros::model::address::Address;
 use paros::model::registry::SystemCommand;
 
 use super::{lock, machine_board};
@@ -98,7 +98,7 @@ pub(crate) struct SentDown {
 /// is judged (see the module doc).
 pub(crate) fn judge_sent(
     state: &StateHandle,
-    journal: paros::JournalIdentifier,
+    journal: paros::core::JournalIdentifier,
     records: &[Vec<u8>],
     now: Duration,
 ) {

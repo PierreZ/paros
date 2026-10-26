@@ -7,16 +7,16 @@
 //! operator's next `ADMIT`. On its own BUGGIFY location, an operator founds
 //! another cell on a wiped member's address instead (`other_cell`).
 
-use paros::Address;
+use paros::model::address::Address;
 
 use moonpool_sim::{Providers as _, TimeProvider as _};
 use moonpool_sim::{
     SimContext, assert_always, assert_reachable, assert_sometimes, buggify_with_prob,
 };
-use paros::NodeId;
 use paros::client::cell::CellSession;
 use paros::client::checkpoint::CheckpointPolicy;
 use paros::client::fleet::{FleetRefusal, Run, Stage, Step};
+use paros::core::NodeId;
 use paros::model::registry::Registry;
 
 use super::{FleetOps, reach};

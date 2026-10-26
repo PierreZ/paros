@@ -1,7 +1,7 @@
 //! Provisioning ahead of the first start (#208): format a store durably,
 //! once, as the operator's own act — never as part of a plain start.
 //!
-//! A driver started as [`BootKind::FirstBoot`](crate::BootKind) formats its
+//! A driver started as [`BootKind::FirstBoot`](crate::storage::boot::BootKind) formats its
 //! store itself before the core reads a byte; that is how the simulation
 //! provisions. A production deployment separates the two: `parosd
 //! provision` formats every store of an identity and exits, and every
@@ -21,9 +21,9 @@
 
 use paros_core::{MatchmakerConfig, MustSync};
 
-use crate::roles::matchmaker::MatchmakerStorage;
-use crate::roles::node::{BootRefusal, RunError};
 use crate::storage::LogStorage;
+use crate::storage::boot::{BootRefusal, RunError};
+use crate::storage::matchmaker::MatchmakerStorage;
 
 /// What provisioning one store did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -102,8 +102,8 @@ mod tests {
     use paros_core::{Config, MatchmakerId, NodeId};
 
     use super::*;
-    use crate::roles::matchmaker::MemMatchmakerStorage;
     use crate::storage::MemStorage;
+    use crate::storage::matchmaker::MemMatchmakerStorage;
 
     fn config(peers: &[u64]) -> Config {
         Config {

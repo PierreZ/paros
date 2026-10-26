@@ -89,7 +89,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use crate::ParosProviders;
+use crate::net::runtime::ParosProviders;
 use paros_core::{JournalIdentifier, NodeId, TenantId};
 
 use super::Client;
@@ -99,11 +99,11 @@ use super::checkpoint::{
 };
 use super::outcome::ClaimOutcome;
 use super::writer::{Writer, WriterOutcome};
-use crate::Address;
-use crate::machine::ControlJournals;
+use crate::model::address::Address;
 use crate::model::fleet::CellKind;
 use crate::model::fleet::RootKeyEntry;
 use crate::model::fleet::{CellState, FleetCommand, FleetDirectory, FleetEntry, TenantState};
+use crate::model::machine::ControlJournals;
 use crate::model::registry::{FleetRegistration, Registry};
 use crate::model::tags::UserTags;
 use crate::model::tenant::Survives;
@@ -340,7 +340,7 @@ pub enum Interrupted {
     /// admission (#216). Its admission may have landed.
     MachineUnreachable {
         /// The machine's address.
-        addr: crate::Address,
+        addr: crate::model::address::Address,
     },
     /// The run took its step budget without ending: other operators keep
     /// moving the journals under it.
@@ -1049,7 +1049,7 @@ impl FleetSession {
         &mut self,
         providers: &P,
         rpc: &moonpool_rpc::RpcHandle<P>,
-        names: &crate::Names,
+        names: &crate::model::address::Names,
         client: &Client<P>,
         first: usize,
         joining: &CellJoin,

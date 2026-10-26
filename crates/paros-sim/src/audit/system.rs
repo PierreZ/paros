@@ -38,9 +38,11 @@ use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use moonpool_sim::{StateHandle, assert_always, assert_reachable, assert_sometimes};
+use paros::core::JournalIdentifier;
+use paros::core::NodeId;
 use paros::machine::CachedRegistry;
+use paros::model::address::Address;
 use paros::model::registry::{Class, Registry, RegistryEvent, RegistryRefusal};
-use paros::{Address, JournalIdentifier, NodeId};
 
 const SYSTEM_BOARD_KEY: &str = "paros-system-board";
 
@@ -452,7 +454,7 @@ impl SystemBoard {
     }
 
     /// `node` folded a checkpoint of the registry `journal` at `seq`
-    /// (#230): `verified` as [`paros::Audit::checkpoint_folded`] reports it.
+    /// (#230): `verified` as [`paros::observe::audit::Audit::checkpoint_folded`] reports it.
     /// `state` is the registry the node's fold holds right after it: the
     /// booking model is checked against it where the model stands at the
     /// checkpoint, and resumes from it where a truncation took positions no

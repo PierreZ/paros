@@ -24,9 +24,9 @@ use paros_core::{
 
 use std::time::Duration;
 
-use crate::Address;
-use crate::machine::{Class, Locality, machine_tags};
+use crate::model::address::Address;
 use crate::model::fleet::{FleetDirectory, TenantKind};
+use crate::model::machine::{Class, Locality, machine_tags};
 use crate::model::registry::{NodeStanding, Registry};
 use crate::model::status::{Hysteresis, fill};
 use crate::model::tags::{Tag, reserved};
@@ -143,7 +143,7 @@ impl CellFacts<'_> {
     fn machine(&self, id: NodeId) -> wire::MachineView {
         let founder = self.founders.iter().find(|(f, _)| *f == id);
         let liveness = self.registry.liveness(id);
-        let (high, low) = crate::machine::incarnation_halves(liveness.incarnation);
+        let (high, low) = crate::model::machine::incarnation_halves(liveness.incarnation);
         let bookings = self
             .registry
             .bookings()
@@ -328,7 +328,7 @@ impl CellFacts<'_> {
 
     /// A journal the cell made on its founding members (a control journal,
     /// the election journal, the universe directory): desired on every
-    /// founding member, a majority (`crate::machine::journal_config`).
+    /// founding member, a majority (`crate::model::machine::journal_config`).
     fn founders_journal(
         &self,
         journal: JournalId,

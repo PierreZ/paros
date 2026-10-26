@@ -30,7 +30,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::ParosProviders;
+use crate::net::runtime::ParosProviders;
 use paros_core::{JournalIdentifier, TenantId};
 
 use super::Client;

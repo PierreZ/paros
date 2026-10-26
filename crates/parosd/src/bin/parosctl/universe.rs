@@ -16,10 +16,10 @@ use std::time::Duration;
 
 use clap::{Args, Subcommand};
 use moonpool_core::CompioProviders;
-use paros::Address;
 use paros::client::Client;
 use paros::client::bootstrap::{control_journals, majority_cell};
 use paros::client::fleet::{CellJoin, Step, read_directory};
+use paros::model::address::Address;
 use paros::model::fleet::RootKeyEntry;
 use paros_authz_biscuit::RootPublicKey;
 use serde_json::json;

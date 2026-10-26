@@ -1,5 +1,5 @@
 //! The sim-side adapter: the moonpool [`Process`]es that run the
-//! provider-generic [`paros::run_node`] and [`paros::run_matchmaker`] drivers
+//! provider-generic [`paros::roles::node::run_node`] and [`paros::roles::matchmaker::run_matchmaker`] drivers
 //! under `SimProviders`.
 //!
 //! All the driver logic lives in `paros`; this bridges the sim boundary. Each
@@ -31,9 +31,13 @@ use crate::audit::{AuditWorld, NodeAudit, audit_world};
 use crate::roles::{
     ACCEPTOR_GROUP, Deployment, MATCHMAKER_GROUP, PROXY_GROUP, REPLICA_GROUP, Role, replica_node_id,
 };
-use paros::{
-    AcceptorConfig, Config, JournalIdentifier, MatchmakerId, NodeId, ReplicaId, parse_addr,
-};
+use paros::core::AcceptorConfig;
+use paros::core::Config;
+use paros::core::JournalIdentifier;
+use paros::core::MatchmakerId;
+use paros::core::NodeId;
+use paros::core::ReplicaId;
+use paros::roles::node::parse_addr;
 
 mod acceptor;
 mod contract;

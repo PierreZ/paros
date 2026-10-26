@@ -16,7 +16,7 @@
 use std::collections::BTreeSet;
 use std::ops::Bound::{Excluded, Unbounded};
 
-use crate::ParosProviders;
+use crate::net::runtime::ParosProviders;
 use paros_core::TenantId;
 
 use crate::client::Client;

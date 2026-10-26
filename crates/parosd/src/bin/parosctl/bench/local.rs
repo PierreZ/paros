@@ -16,8 +16,12 @@ use std::time::Duration;
 use moonpool_core::{CompioProviders, CompioResolver, CompioStorageProvider};
 use paros::client::initialize::{self, InitParams, InitRun};
 use paros::machine::{AdminPin, Class, MachineAddresses, MachineSettings, ProviderDisk};
+use paros::model::address::Address;
+use paros::model::address::Names;
+use paros::net::transport::Transport;
+use paros::observe::audit::NoAudit;
 use paros::observe::metrics::Metrics;
-use paros::{Address, DriverTunables, Names, NoAudit, Transport};
+use paros::roles::node::DriverTunables;
 use tokio_util::sync::CancellationToken;
 
 use crate::Runtime;
@@ -140,7 +144,7 @@ async fn machine(
     let disk = ProviderDisk::new(
         CompioStorageProvider::new(),
         dir.to_string_lossy(),
-        paros::JournalStoreConfig::default(),
+        paros::storage::journal::JournalStoreConfig::default(),
     );
     let ran = Box::pin(paros::machine::run_machine(
         CompioProviders::new(),

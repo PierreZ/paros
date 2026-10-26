@@ -28,14 +28,14 @@ use paros_core::{
     Slot, Value, WriteOp,
 };
 
-use crate::Address;
 use crate::client::CallObserver;
-use crate::machine::{CachedRegistry, CellPlan, MachineRecord};
+use crate::model::address::Address;
+use crate::model::machine::{CachedRegistry, CellPlan, MachineRecord};
 use crate::model::name::JournalName;
 use crate::net::EdgeRejection;
 use crate::observe::metrics::{CallKind, CallOutcome};
-use crate::roles::node::BootRefusal;
 use crate::storage::StorageError;
+use crate::storage::boot::BootRefusal;
 use crate::wire::{MatchmakersRefusal, RetireRefusal};
 
 /// The driver's reaction to a [`StorageError`]. Stage 6 has exactly one honest
@@ -187,7 +187,7 @@ pub struct HistoryPage<'a> {
     pub page_limit: usize,
 }
 
-/// Provider-generic observation port for [`run_node`](crate::run_node).
+/// Provider-generic observation port for [`run_node`](crate::roles::node::run_node).
 ///
 /// Pure observation: implementations must not influence the driver (that is
 /// the inline BUGGIFY sites' job) and must not block — a callback
@@ -525,13 +525,13 @@ pub trait Audit {
     fn cell_formatting(&self, addr: &Address, node: NodeId, plan: &CellPlan, leftovers: bool) {}
 
     /// The driver refused to boot this identity (#147): the operator's
-    /// [`BootKind`](crate::BootKind) claim and the store's format marker
+    /// [`BootKind`](crate::storage::boot::BootKind) claim and the store's format marker
     /// disagree. Reported at the instant of the decision, before the
-    /// [`RunError::Refused`](crate::RunError::Refused) exit; nothing was
+    /// [`RunError::Refused`](crate::storage::boot::RunError::Refused) exit; nothing was
     /// written and no message left.
     fn boot_refused(&self, node: NodeId, refusal: BootRefusal) {}
 
-    /// A [`LogStorage`](crate::LogStorage) call surfaced `error` and the
+    /// A [`LogStorage`](crate::storage::LogStorage) call surfaced `error` and the
     /// driver decided `decision` — reported at the instant of the decision,
     /// before the crash unwinds. The error carries the fault kind, the record
     /// identity, and the durability outcome as data, so a checker can fold
@@ -559,7 +559,7 @@ pub trait Audit {
     /// server state advanced (the reply seam's inline location for its kind,
     /// #318, or for a write the lost-verdict scenario's named location,
     /// [`LOSE_VERDICTS`](crate::observe::scenario::LOSE_VERDICTS)).
-    fn client_reply_dropped(&self, node: NodeId, reply: crate::Reply) {}
+    fn client_reply_dropped(&self, node: NodeId, reply: crate::observe::reply::Reply) {}
 
     /// A data-plane `call` reached `journal` on this node, which records
     /// metrics (#366 (metrics)): what `paros_calls_total` counts. Reported
@@ -585,7 +585,7 @@ pub trait Audit {
     /// This Ready batch started `started` inherited or gap-fill accept rounds,
     /// including `gap_fills` fresh no-ops; `remaining` slots are deferred.
     /// `page` is the node's recovery page size, the bound `started` stays
-    /// under ([`crate::DriverTunables::recovery_page`], #330).
+    /// under ([`crate::tunables::DriverTunables::recovery_page`], #330).
     fn recovery_batch(
         &self,
         node: NodeId,
@@ -598,7 +598,7 @@ pub trait Audit {
 
     /// This node's election timeout base was doubled `doublings` times: its
     /// previous campaigns expired with no leader known (the election
-    /// backoff, [`crate::DriverTunables::election_backoff_doublings`]).
+    /// backoff, [`crate::tunables::DriverTunables::election_backoff_doublings`]).
     fn election_backoff(&self, node: NodeId, doublings: u32) {}
 
     /// This node now runs with an election timeout of `ticks` (the driver's
@@ -1162,14 +1162,14 @@ pub trait Audit {
     }
 
     /// The matchmaker driver refused to boot this matchmaker (#183): the
-    /// operator's [`BootKind`](crate::BootKind) claim and the registry's
+    /// operator's [`BootKind`](crate::storage::boot::BootKind) claim and the registry's
     /// format marker disagree. The [`Audit::boot_refused`] twin, reported
     /// at the instant of the decision, before the
-    /// [`RunError::Refused`](crate::RunError::Refused) exit; nothing was
+    /// [`RunError::Refused`](crate::storage::boot::RunError::Refused) exit; nothing was
     /// written and no reply left.
     fn matchmaker_boot_refused(&self, matchmaker: MatchmakerId, refusal: BootRefusal) {}
 
-    /// A [`MatchmakerStorage`](crate::MatchmakerStorage) call surfaced `error`
+    /// A [`MatchmakerStorage`](crate::storage::matchmaker::MatchmakerStorage) call surfaced `error`
     /// and the driver decided `decision` (see [`Audit::storage_fault`]).
     fn matchmaker_storage_fault(
         &self,

@@ -1839,7 +1839,7 @@ fn a_freeze_closes_on_a_beat_and_not_on_the_ack_that_completed_it() {
     // The ack that completes the quorum only makes the close possible. Closing
     // is the **driver's** decision, taken on a beat, so a straggler that
     // arrives in between widens the reconstruction the successor is built
-    // from. `paros::run_node` closes the freeze under `resend_due` for exactly
+    // from. `paros::roles::node::run_node` closes the freeze under `resend_due` for exactly
     // this reason, and the core's own P5 finding is about a driver that closed
     // it early.
     let mut world = matchmaker_cluster(&[0, 1, 2], &[0, 1, 2], &[0, 1, 2], &[3]);

@@ -36,7 +36,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound::{Excluded, Unbounded};
 
-use crate::ParosProviders;
+use crate::net::runtime::ParosProviders;
 use moonpool_rpc::RpcHandle;
 use paros_core::{AcceptorConfig, JournalIdentifier, NodeId, QuorumSystem, TenantId};
 
@@ -45,11 +45,12 @@ use crate::client::journals::JournalAnswer;
 use crate::client::{Client, ReconfigureOutcome, Server};
 use crate::coordinator::tenant::moves::{at_or_above, bookable, leader_of, stays};
 use crate::coordinator::tenant::{TenantDesk, placed_count};
+use crate::model::address::Address;
+use crate::model::address::Names;
 use crate::model::placement::{self, Step, Want};
 use crate::model::registry::{Booking, BookingTarget, Registry, Role};
 use crate::model::tenant::Desired;
 use crate::net::NodeClient;
-use crate::{Address, Names};
 
 /// What one mode step did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

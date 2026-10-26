@@ -17,7 +17,7 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, PoisonError};
 
-use crate::ParosProviders;
+use crate::net::runtime::ParosProviders;
 use moonpool_buggify::hint::Strike;
 use moonpool_core::{LocalStorageProvider, SimulationResult};
 use moonpool_rpc::RpcHandle;
@@ -27,11 +27,15 @@ use tokio_util::sync::CancellationToken;
 use super::matchmakers::SetBookings;
 use super::{CacheSink, CachedRegistry, ProviderDisk};
 use crate::model::machine::MachineRecord;
+use crate::observe::audit::Audit;
+use crate::roles::node::JournalStores;
+use crate::storage::boot::BootKind;
+use crate::storage::boot::RunError;
 use crate::storage::journal::Durability;
+use crate::storage::journal::JournalStorage;
+use crate::storage::journal::JournalStoreConfig;
 use crate::storage::{StorageError, StorageRecord, WriteOutcome};
-use crate::{
-    Audit, BootKind, DriverTunables, JournalStorage, JournalStoreConfig, JournalStores, RunError,
-};
+use crate::tunables::DriverTunables;
 
 /// Which audit port a machine's facts report to, named by the caller of
 /// [`super::run_machine`] (`parosd` passes `NoAudit` for all three).
@@ -212,9 +216,9 @@ impl<S: LocalStorageProvider + Clone + 'static, F> MachineStores<S, F> {
         (config, durability): (Config, Durability),
     ) -> bool {
         let mut store = self.store(journal, config, durability);
-        match crate::provision_store(&mut store).await {
+        match crate::storage::provision::provision_store(&mut store).await {
             Ok(provisioned) => {
-                if provisioned == crate::Provisioned::Resumed {
+                if provisioned == crate::storage::provision::Provisioned::Resumed {
                     moonpool_assertions::reachable!(
                         "machine: a created journal's provisioning resumed from the disk"
                     );

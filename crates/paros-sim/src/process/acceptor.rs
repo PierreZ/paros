@@ -19,10 +19,15 @@ use crate::audit::journals::{journal_board, lock as board_lock};
 use crate::audit::{AuditWorld, NodeAudit, audit_world_for};
 use crate::roles::Deployment;
 use crate::world::{ParkReason, StorageWorld, storage_world_for};
-use paros::{
-    BootRefusal, Config, ControlPlan, MatchmakerId, NodeId, ProxyId, RunError, parse_addr,
-    run_journals,
-};
+use paros::core::Config;
+use paros::core::MatchmakerId;
+use paros::core::NodeId;
+use paros::core::ProxyId;
+use paros::roles::node::BootRefusal;
+use paros::roles::node::ControlPlan;
+use paros::roles::node::RunError;
+use paros::roles::node::parse_addr;
+use paros::roles::node::run_journals;
 
 /// An acceptor: the provider-generic node driver inside the crash/recovery
 /// loop (see the module doc).
@@ -84,7 +89,7 @@ pub(super) async fn run_acceptor(
         matchmaker_pool,
         proxy_count: proxies.len(),
         replica_count: deployment.replica_count(),
-        writer_mode: paros::WriterMode::Single,
+        writer_mode: paros::core::WriterMode::Single,
     };
     // The run's journals (#188): the static list every node serves (1–3,
     // matchmaker seeds included, #190) and the one held on every node for
@@ -461,7 +466,7 @@ impl<C: Clone> OperatorEdit<C> {
 /// One journal's seat on an acceptor process (#188): its configuration, its
 /// storage world, its audit world and its audit port.
 pub(super) struct Seat {
-    pub(super) journal: paros::JournalIdentifier,
+    pub(super) journal: paros::core::JournalIdentifier,
     pub(super) config: Config,
     pub(super) world: Arc<Mutex<StorageWorld>>,
     pub(super) checker: Arc<AuditWorld>,
@@ -487,7 +492,7 @@ impl Seat {
     /// own audit world and port, reporting to the system board too.
     pub(super) fn quiet(
         ctx: &SimContext,
-        journal: paros::JournalIdentifier,
+        journal: paros::core::JournalIdentifier,
         config: Config,
         system: &Arc<Mutex<crate::audit::system::SystemBoard>>,
     ) -> Self {
@@ -550,7 +555,7 @@ fn system_rig(
         let journal = identifiers.registry;
         let config = Config {
             peers: seeds.clone(),
-            quorum_system: paros::QuorumSystem::Majority,
+            quorum_system: paros::core::QuorumSystem::Majority,
             ..Config::new(self_rank, journal)
         };
         seats.push(Seat::quiet(ctx, journal, config, &board));
@@ -652,6 +657,6 @@ fn spare_template(ctx: &SimContext, deployment: &Deployment) -> Option<Config> {
         matchmaker_pool: (0..matchmaker_len as u64).map(MatchmakerId).collect(),
         proxy_count: 0,
         replica_count: 0,
-        writer_mode: paros::WriterMode::Single,
+        writer_mode: paros::core::WriterMode::Single,
     })
 }

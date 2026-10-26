@@ -26,18 +26,18 @@
 //! member that answers from a fold it did not catch up, as a lagging member
 //! would) is drawn on the node loop before the task starts.
 
-use crate::ParosProviders;
+use crate::net::runtime::ParosProviders;
 use moonpool_core::{Detach, LocalTaskProvider, LocalTimeProvider, SimulationResult};
 use moonpool_rpc::RpcHandle;
 use paros_core::{NodeId, TenantId};
 use tokio_util::sync::CancellationToken;
 
 use super::{CellPlan, FormedCell};
-use crate::Address;
 use crate::client::Client;
 use crate::client::checkpoint::{Folder, LoadOutcome, load};
 use crate::client::election::read_election;
 use crate::client::names::read_tenant_control;
+use crate::model::address::Address;
 use crate::model::fleet::FleetDirectory;
 use crate::model::registry::Registry;
 use crate::model::status::Hysteresis;
@@ -80,7 +80,7 @@ pub(crate) fn spawn<P: ParosProviders>(
     providers: &P,
     rpc: &RpcHandle<P>,
     formed: &FormedCell,
-    tunables: &crate::DriverTunables,
+    tunables: &crate::tunables::DriverTunables,
     shutdown: CancellationToken,
 ) -> SimulationResult<()> {
     if formed.plan.members.is_empty() {
@@ -225,7 +225,7 @@ impl<P: ParosProviders> Desk<P> {
     /// `name`, when given) that could be read.
     async fn read_tenants(&self, name: Option<&[u8]>) -> Vec<TenantControl> {
         let registry = self.registry.state();
-        let wanted: Vec<(TenantId, crate::JournalId)> = registry
+        let wanted: Vec<(TenantId, paros_core::JournalId)> = registry
             .hosted()
             .filter_map(|t| registry.hosted_tenant(t).map(|h| (t, h)))
             .filter(|(_, h)| name.is_none_or(|n| h.name == n))
@@ -233,7 +233,7 @@ impl<P: ParosProviders> Desk<P> {
             .collect();
         let mut read = Vec::new();
         for (tenant, control) in wanted {
-            let journal = crate::JournalIdentifier::new(tenant, control);
+            let journal = paros_core::JournalIdentifier::new(tenant, control);
             if let Ok(fold) = read_tenant_control(&self.client, 0, journal).await {
                 read.push(fold);
             }

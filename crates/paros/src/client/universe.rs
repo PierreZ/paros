@@ -19,17 +19,18 @@
 
 use std::time::Duration;
 
-use crate::ParosProviders;
+use crate::net::runtime::ParosProviders;
 use moonpool_core::LocalTimeProvider;
 use moonpool_rpc::RpcHandle;
 use paros_core::{JournalId, JournalIdentifier, TenantId};
 
 use super::Client;
 use super::journals::{Coordinator, coordinator};
+use crate::model::address::Address;
+use crate::model::address::Names;
 use crate::model::registry::UniversePointer;
 use crate::wire::machine as wire;
 use crate::wire::methods::JoinUniverseRpc;
-use crate::{Address, Names};
 
 /// How long a retry waits after an answer that decided nothing.
 const RETRY_PAUSE: Duration = Duration::from_millis(200);

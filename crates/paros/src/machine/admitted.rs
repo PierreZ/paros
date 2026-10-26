@@ -3,7 +3,7 @@
 //! journals and the cell's machines it knew then — and on every start it
 //! finds its cell there, with no configuration and no peer to ask.
 //!
-//! It runs the node loop of the cell's machines ([`crate::run_journals`],
+//! It runs the node loop of the cell's machines ([`crate::roles::node::run_journals`],
 //! #474) and serves every journal placed on it: the registry books an
 //! acceptor slot of the journal on it, and the journal's tenant created it
 //! (`crate::roles::node::system`). It follows the control journals from the
@@ -35,7 +35,7 @@
 
 use std::collections::BTreeSet;
 
-use crate::ParosProviders;
+use crate::net::runtime::ParosProviders;
 use moonpool_core::{Detach, LocalTaskProvider, SimulationResult};
 use moonpool_rpc::RpcHandle;
 use tokio_util::sync::CancellationToken;
@@ -43,9 +43,9 @@ use tokio_util::sync::CancellationToken;
 use paros_core::NodeId;
 
 use super::{Admission, CacheSink, CachedRegistry, MachineFacts};
-use crate::Address;
+use crate::model::address::Address;
 use crate::net::{Inbound, serve_well_known};
-use crate::roles::node::DriverTunables;
+use crate::tunables::DriverTunables;
 use crate::wire::machine as wire;
 use crate::wire::methods::{AdmitRpc, CellInitRpc, FormCellRpc, IdentifyRpc, PrepareCellRpc};
 

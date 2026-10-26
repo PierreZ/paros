@@ -5,11 +5,11 @@ use moonpool_core::SimulationError;
 
 use crate::storage::StorageError;
 
-/// What the operator claims about the store [`crate::run_node`] is handed
+/// What the operator claims about the store [`crate::roles::node::run_node`] is handed
 /// (#147): configuration data, never inferred from the store's contents.
 ///
 /// The claim is judged against the store's **format marker**
-/// ([`crate::LogStorage::is_formatted`]): a store that has ever belonged to
+/// ([`crate::storage::LogStorage::is_formatted`]): a store that has ever belonged to
 /// a member carries one, written by the driver on the identity's first boot
 /// and never removed. An existing member whose store carries no marker has
 /// lost its disk — *amnesia*, not a clean crash — and its durable promise
@@ -28,7 +28,7 @@ pub enum BootKind {
     ExistingMember,
 }
 
-/// Why [`crate::run_node`] refused to boot (#147): the operator's
+/// Why [`crate::roles::node::run_node`] refused to boot (#147): the operator's
 /// [`BootKind`] claim and the store's format marker disagree. An operating
 /// error — a result value, never an assert — because the claim is external
 /// input.
@@ -64,7 +64,7 @@ impl BootRefusal {
 }
 
 /// Why a driver loop stopped, typed — the shared exit of every provider-generic
-/// driver in this crate ([`crate::run_node`] and [`crate::run_matchmaker`]).
+/// driver in this crate ([`crate::roles::node::run_node`] and [`crate::roles::matchmaker::run_matchmaker`]).
 /// The driver's *domain* outcomes — a crash it
 /// decided to take — are first-class variants a caller matches on; a moonpool
 /// [`SimulationError`] appears only wrapped in [`RunError::Infra`], for genuine
@@ -72,14 +72,14 @@ impl BootRefusal {
 /// a protocol-layer decision.
 #[derive(Debug)]
 pub enum RunError {
-    /// A [`crate::LogStorage`] (or [`crate::MatchmakerStorage`]) call failed
+    /// A [`crate::storage::LogStorage`] (or [`crate::storage::matchmaker::MatchmakerStorage`]) call failed
     /// and the driver took its fail-stop crash
     /// decision — never an incidental error propagation. In **production**
     /// this is a crash-only process exit; recovery is the next boot. In
     /// simulation the loop recovers the same way: re-run the
     /// driver against whatever the disk *actually* holds (the recovery
     /// path must be correct for both outcomes of an ambiguous write; see
-    /// [`crate::WriteOutcome`]).
+    /// [`crate::storage::WriteOutcome`]).
     Storage(StorageError),
     /// The driver refused to boot this identity on this store (#147): the
     /// operator's [`BootKind`] claim and the store's format marker disagree.

@@ -6,7 +6,12 @@
 use async_trait::async_trait;
 use moonpool_sim::{Process, SimContext, SimulationError, SimulationResult};
 use paros::machine::{Class, MachineAddresses, MachineError, MachineSettings, ProviderDisk};
-use paros::{Address, DriverTunables, Names, NoAudit, RunError, Transport};
+use paros::model::address::Address;
+use paros::model::address::Names;
+use paros::net::transport::Transport;
+use paros::observe::audit::NoAudit;
+use paros::roles::node::DriverTunables;
+use paros::roles::node::RunError;
 
 /// The process group of the machines, `10.0.1.{1..}` in index order.
 pub const MACHINE_GROUP: &str = "paros-machine";
@@ -91,14 +96,14 @@ async fn run_machine(ctx: &SimContext) -> SimulationResult<()> {
     // Segments of a few blocks: a browser holds every simulated disk
     // in memory, and the default 64 MiB segment per journal would not
     // fit. The protocol and every commit are the shipped ones.
-    let layout = paros::JournalStoreConfig {
+    let layout = paros::storage::journal::JournalStoreConfig {
         durability: paros::storage::journal::Durability::Ordered,
         geometry: paros::storage::journal::Geometry {
             persist_blocks: 8,
             gap_blocks: 0,
             entry_blocks: 16,
         },
-        ..paros::JournalStoreConfig::default()
+        ..paros::storage::journal::JournalStoreConfig::default()
     };
     // parosd's supervisor: a run that ended on a storage failure starts
     // again on the same disk.

@@ -11,20 +11,21 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use crate::ParosProviders;
+use crate::net::runtime::ParosProviders;
 use moonpool_core::LocalTimeProvider;
 use moonpool_rpc::{ErrorReason, RpcHandle};
 use paros_core::{JournalId, JournalIdentifier, TenantId};
 
 use super::Client;
-use crate::machine::{Admission, CellPlan, ControlJournals};
+use crate::model::address::Address;
+use crate::model::address::Names;
+use crate::model::machine::{Admission, CellPlan, ControlJournals};
 use crate::net::well_known;
 use crate::wire::machine as wire;
 use crate::wire::methods::{
     AdmitRpc, CellInitRpc, IdentifyRpc, InspectRpc, RegisterRpc, WellKnownMethod,
 };
 use crate::wire::{InspectReply, InspectRequest};
-use crate::{Address, Names};
 
 /// One attempt of `M` at `target`, its address resolved now through `names`
 /// (#257), within `timeout`: `None` when the name does not resolve or

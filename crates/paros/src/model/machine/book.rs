@@ -10,7 +10,7 @@
 
 use paros_core::NodeId;
 
-use crate::Address;
+use crate::model::address::Address;
 use crate::model::registry::{NodeStanding, Registry};
 
 /// The address peers dial for each founding member of `founders`: the
@@ -92,7 +92,7 @@ mod tests {
             addr: addr.into(),
             class: Class::Storage,
             capacity: 1,
-            locality: crate::machine::Locality::default(),
+            locality: crate::model::machine::Locality::default(),
             name: format!("m{id}"),
             incarnation: 1,
             machine_interface: Vec::new(),

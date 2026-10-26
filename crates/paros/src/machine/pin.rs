@@ -18,7 +18,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::ParosProviders;
+use crate::net::runtime::ParosProviders;
 use moonpool_core::LocalTimeProvider;
 
 use crate::roles::frontend::{Authz, Denial, Operation, Request, Target};

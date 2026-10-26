@@ -55,7 +55,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use moonpool_sim::{assert_always, assert_reachable, assert_sometimes};
-use paros::{AcceptorConfig, Ballot, NodeId};
+use paros::core::AcceptorConfig;
+use paros::core::Ballot;
+use paros::core::NodeId;
 
 use super::state::AuditState;
 

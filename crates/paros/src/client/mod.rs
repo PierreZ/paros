@@ -93,7 +93,7 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use crate::ParosProviders;
+use crate::net::runtime::ParosProviders;
 use moonpool_core::LocalTimeProvider;
 use moonpool_rpc::RpcHandle;
 use paros_core::{JournalIdentifier, JournalView, LeaderUuid, QuorumSystem, TenantId};
@@ -110,12 +110,13 @@ pub use pipeline::{Pipeline, Pipelined, Ticket};
 pub use reader::{Reader, ReaderOutcome};
 pub use writer::{Learned, Writer, WriterOutcome, leader_uuid, write_request};
 
+use crate::model::address::Address;
+use crate::model::address::Names;
 use crate::net::NodeClient;
 use crate::wire::{
     InspectReply, Read, Reconfigure, ReconfigureMatchmakers, RetireRequest, SetLeader, Truncate,
     Write, leader_uuid_from_proto, leader_uuid_to_proto, quorum_system_to_proto,
 };
-use crate::{Address, Names};
 
 /// Where an attempt goes after a redirect, a transport error or an
 /// ambiguous outcome. Every rule is a valid client; which one is the
@@ -399,7 +400,7 @@ impl<P: ParosProviders> Client<P> {
     ///
     /// If `addrs` is empty.
     #[must_use]
-    pub fn elsewhere(&self, addrs: &[(u64, crate::Address)]) -> Self {
+    pub fn elsewhere(&self, addrs: &[(u64, crate::model::address::Address)]) -> Self {
         let base = &self.servers[0].node;
         let servers = addrs
             .iter()

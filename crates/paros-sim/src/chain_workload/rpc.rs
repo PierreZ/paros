@@ -20,10 +20,16 @@ use paros::client::{
     Answered, Attempted, CallObserver, ReadOutcome, Resolution, ResolveReport, SetLeaderOutcome,
     TruncateOutcome, WriteOutcome, write_request,
 };
-use paros::{
-    Command, Control, Entry, JournalIdentifier, LeaderUuid, Read, Seq, Write, leader_from_proto,
-    leader_uuid_from_proto,
-};
+use paros::core::Command;
+use paros::core::Control;
+use paros::core::Entry;
+use paros::core::JournalIdentifier;
+use paros::core::LeaderUuid;
+use paros::core::Seq;
+use paros::wire::Read;
+use paros::wire::Write;
+use paros::wire::leader_from_proto;
+use paros::wire::leader_uuid_from_proto;
 
 use crate::audit::{Attempt, Call, Seen};
 use crate::chain::user_command_hash;
@@ -258,7 +264,7 @@ impl CallObserver for CallLog {
 
 /// A `Write` as the history records it: its fence, its position and one
 /// hash per record.
-/// The command hash (`paros::command_hash`) of an attempt that takes a
+/// The command hash (`paros::roles::node::command_hash`) of an attempt that takes a
 /// slot (#652): a `Write`, a `Truncate` or a `SetLeader`, as the node
 /// proposes it; `None` for a `Read`.
 pub(crate) fn command_of(attempt: Attempted<'_>) -> Option<u64> {
@@ -274,7 +280,7 @@ pub(crate) fn command_of(attempt: Attempted<'_>) -> Option<u64> {
             old: leader_from_proto(s.old),
         },
     };
-    Some(paros::command_hash(&Command::Control(command)))
+    Some(paros::roles::node::command_hash(&Command::Control(command)))
 }
 
 fn write_call(write: &Write) -> Call {

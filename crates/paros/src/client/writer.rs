@@ -17,7 +17,7 @@
 //! whose answer was lost is asked again under the same uuid, and a journal
 //! already naming it is adopted, never claimed twice.
 
-use crate::ParosProviders;
+use crate::net::runtime::ParosProviders;
 
 use crate::model::authz::Denial;
 use paros_core::{Entry, JournalIdentifier, JournalView, LeaderUuid, Seq, Value};

@@ -25,8 +25,9 @@ use moonpool_core::{LocalStorageFile, LocalStorageProvider, OpenOptions};
 use paros_core::{JournalIdentifier, NodeId};
 
 use super::{CellPlan, journal_config};
+use crate::storage::journal::JournalStorage;
+use crate::storage::journal::JournalStoreConfig;
 use crate::storage::journal::sync_names;
-use crate::{JournalStorage, JournalStoreConfig};
 
 /// The machine record's file name under the root.
 const RECORD: &str = "machine";
@@ -281,7 +282,7 @@ impl<S: LocalStorageProvider + Clone> ProviderDisk<S> {
     }
 
     /// Format the store of every journal `plan` names for member `node_id`
-    /// ([`crate::provision_store`]). An interrupted run resumes: a store
+    /// ([`crate::storage::provision::provision_store`]). An interrupted run resumes: a store
     /// already formatted under the same configuration is left as it is, and
     /// made durable as it stands ([`crate::storage::journal::settle`], #348).
     ///
@@ -306,10 +307,10 @@ impl<S: LocalStorageProvider + Clone> ProviderDisk<S> {
                 journal_config(plan, node_id, journal),
                 self.layout,
             );
-            let provisioned = crate::provision_store(&mut store)
+            let provisioned = crate::storage::provision::provision_store(&mut store)
                 .await
                 .map_err(|e| format!("journal {journal}: {e}"))?;
-            if provisioned == crate::Provisioned::Resumed {
+            if provisioned == crate::storage::provision::Provisioned::Resumed {
                 // A marker this process can read may be one a failed sync
                 // left staged (#348): the vote that follows names it.
                 crate::storage::journal::settle(&self.provider, &self.journal_dir(journal))

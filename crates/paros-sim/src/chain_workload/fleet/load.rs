@@ -27,9 +27,9 @@ use std::time::Duration;
 
 use moonpool_sim::{SimContext, assert_always, assert_reachable, assert_sometimes};
 use moonpool_sim::{Slowness, SystemSample};
-use paros::Address;
 use paros::client::load::{LoadOutcome, ask_all};
 use paros::client::views::{ViewOutcome, ask, request};
+use paros::model::address::Address;
 use paros::model::load::Busyness;
 use paros::model::view::Scope;
 use paros::wire::machine::LoadAck;
@@ -169,7 +169,7 @@ fn judge(ctx: &SimContext, ack: &LoadAck, ip: Option<IpAddr>) -> Option<(Slownes
         "load: a machine's CPU is busy over 90%"
     );
     assert_always!(
-        busyness.elapsed >= paros::LOAD_INTERVAL_FLOOR,
+        busyness.elapsed >= paros::roles::node::LOAD_INTERVAL_FLOOR,
         "load: a window is never shorter than the floor",
         { "elapsed_ns" => ack.elapsed_ns }
     );

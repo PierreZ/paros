@@ -14,10 +14,10 @@
 use std::time::Duration;
 
 use moonpool_sim::{SimContext, TimeProvider, assert_always, assert_reachable, assert_sometimes};
-use paros::Address;
 use paros::client::checkpoint::LoadOutcome;
 use paros::client::load::{LoadOutcome as Load, ask_all};
 use paros::coordinator::cell::slow::{BUSY_MARGIN, Sample};
+use paros::model::address::Address;
 use paros::model::registry::NodeStanding;
 
 use super::cell::Cell;

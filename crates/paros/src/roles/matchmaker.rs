@@ -1,5 +1,5 @@
 //! The provider-generic **matchmaker driver** — the I/O layer that owns a
-//! sans-IO [`paros_core::Matchmaker`], the twin of [`run_node`](crate::run_node)
+//! sans-IO [`paros_core::Matchmaker`], the twin of [`run_node`](crate::roles::node::run_node)
 //! for the registry role.
 //!
 //! Written once over `P: ParosProviders`, so the *same* loop runs in
@@ -27,7 +27,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::ParosProviders;
+use crate::net::runtime::ParosProviders;
 use moonpool_buggify::hint::Strike;
 use paros_core::{
     GcAck, GcOutcome, GcRequest, JournalId, JournalIdentifier, MatchOutcome, MatchReply,
@@ -42,8 +42,9 @@ use crate::observe::events::{config_hash, reconfigure_kind, reconfigure_reply_ki
 use crate::roles::node::edge::{MatchmakerInbox, RpcEdge};
 use crate::roles::node::reply::Reply;
 use crate::roles::node::reply::match_answer;
-use crate::roles::node::{BootKind, BootRefusal, DriverTunables, RunError};
 use crate::storage::StorageError;
+use crate::storage::boot::{BootKind, BootRefusal, RunError};
+use crate::tunables::DriverTunables;
 use crate::wire::Addressed;
 
 pub use crate::storage::matchmaker::{
@@ -1074,7 +1075,7 @@ where
 ///
 /// # Errors
 ///
-/// The exit is typed exactly like [`run_node`](crate::run_node)'s:
+/// The exit is typed exactly like [`run_node`](crate::roles::node::run_node)'s:
 /// [`RunError::Storage`] for a
 /// fail-stop storage fault, [`RunError::Refused`] when a boot claim and
 /// a registry's format marker disagree, [`RunError::Infra`] for a genuine

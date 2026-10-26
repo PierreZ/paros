@@ -49,9 +49,11 @@ use paros_core::{
 };
 
 use crate::machine::{MachineRecord, ProviderDisk};
-use crate::roles::matchmaker::MatchmakerStorage;
 use crate::storage::LogStorage;
-use crate::{JournalMatchmakerStorage, JournalStorage, JournalStoreConfig};
+use crate::storage::journal::JournalMatchmakerStorage;
+use crate::storage::journal::JournalStorage;
+use crate::storage::journal::JournalStoreConfig;
+use crate::storage::matchmaker::MatchmakerStorage;
 
 pub use names::names;
 use scratch::Scratch;

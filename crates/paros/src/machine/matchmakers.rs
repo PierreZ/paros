@@ -26,7 +26,7 @@
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use crate::ParosProviders;
+use crate::net::runtime::ParosProviders;
 use moonpool_buggify::hint::Strike;
 use moonpool_core::{Detach, LocalStorageProvider, LocalTaskProvider, SimulationResult};
 use moonpool_rpc::RpcHandle;
@@ -34,10 +34,13 @@ use paros_core::{JournalId, JournalIdentifier, MatchmakerConfig, TenantId};
 use tokio_util::sync::CancellationToken;
 
 use super::ProviderDisk;
+use crate::observe::audit::Audit;
 use crate::roles::matchmaker::{Host, HostedSet, SetOpener};
 use crate::roles::node::edge::MatchmakerInbox;
+use crate::storage::boot::BootKind;
 use crate::storage::journal::JournalMatchmakerStorage;
-use crate::{Audit, BootKind, DriverTunables, Provisioned};
+use crate::storage::provision::Provisioned;
+use crate::tunables::DriverTunables;
 
 /// The identity a set's store is stamped with: its tenant and the unset
 /// journal (a set's store is no journal's).
@@ -114,7 +117,8 @@ impl<S: LocalStorageProvider + Clone + 'static> MachineSets<S> {
             "a set is provisioned once"
         );
         let mut store = self.store(tenant);
-        match crate::provision_matchmaker_store(&mut store, &self.config).await {
+        match crate::storage::provision::provision_matchmaker_store(&mut store, &self.config).await
+        {
             Ok(Provisioned::Formatted) => {}
             Ok(Provisioned::Resumed) => {
                 moonpool_assertions::reachable!(

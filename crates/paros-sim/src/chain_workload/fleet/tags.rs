@@ -21,12 +21,12 @@ use moonpool_sim::{
     RandomProvider, SimContext, assert_always, assert_reachable, assert_sometimes,
     buggify_with_prob,
 };
-use paros::NodeId;
-use paros::TenantId;
 use paros::client::cell::CellSession;
 use paros::client::checkpoint::CheckpointPolicy;
 use paros::client::fleet::{Step, TagTarget, read_directory};
 use paros::client::journals::{self, JournalAnswer, JournalOp, JournalRequest};
+use paros::core::NodeId;
+use paros::core::TenantId;
 use paros::model::fleet::{TenantKind, TenantState};
 use paros::model::registry::NodeStanding;
 use paros::model::tags::{MAX_TAGS, Tag, Tags, UserTags};
@@ -403,7 +403,7 @@ impl FleetOps {
             return;
         };
         let members: Vec<NodeId> = cell.members.iter().copied().map(NodeId).collect();
-        let founders: Vec<(NodeId, paros::Address)> = cell
+        let founders: Vec<(NodeId, paros::model::address::Address)> = cell
             .servers
             .iter()
             .map(|(id, addr)| (NodeId(*id), addr.clone()))
