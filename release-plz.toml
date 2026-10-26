@@ -108,6 +108,16 @@ name = "parosd"
 release = false
 publish = false
 
+[[package]]
+name = "parosctl"
+release = false
+publish = false
+
+[[package]]
+name = "paros-bench"
+release = false
+publish = false
+
 # Changelog configuration
 [changelog]
 header = """

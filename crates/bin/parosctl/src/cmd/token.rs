@@ -12,9 +12,9 @@ use clap::{Args, Subcommand, ValueEnum};
 use paros_authz_biscuit::{Grant, KeyRing, Restriction, Role, RootKey, RootPublicKey, Token};
 use serde_json::json;
 
-use crate::Ending;
-use crate::key::{entropy, read, write_new};
-use crate::output::{Printer, note};
+use crate::cmd::key::{entropy, read, write_new};
+use crate::support::connect::Ending;
+use crate::support::output::{Printer, note};
 
 /// `parosctl token`.
 #[derive(Args, Debug)]

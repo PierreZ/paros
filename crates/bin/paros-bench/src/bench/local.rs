@@ -1,4 +1,4 @@
-//! `parosctl bench --local N` (#194 (throughput benchmark)): a cell of N
+//! `paros-bench --local N` (#194 (throughput benchmark)): a cell of N
 //! machines in this process, on loopback, each with its stores in a fresh
 //! directory on a real filesystem with real syncs.
 //!
@@ -16,16 +16,14 @@ use std::time::Duration;
 use moonpool_core::{CompioProviders, CompioResolver, CompioStorageProvider};
 use paros::client::initialize::{self, InitParams, InitRun};
 use paros::machine::{AdminPin, Class, MachineAddresses, MachineSettings, ProviderDisk};
-use paros::model::address::Address;
-use paros::model::address::Names;
+use paros::model::address::{Address, Names};
 use paros::net::transport::Transport;
 use paros::observe::audit::NoAudit;
 use paros::observe::metrics::Metrics;
 use paros::roles::node::DriverTunables;
+use parosctl::cmd::tenant::{leader_seed, nonzero};
+use parosctl::support::connect::Runtime;
 use tokio_util::sync::CancellationToken;
-
-use crate::Runtime;
-use crate::fleet::{leader_seed, nonzero};
 
 /// A local cell: its machines' addresses and the directory of their
 /// stores, until [`LocalCell::stop`].
@@ -44,7 +42,7 @@ pub struct LocalCell {
 /// The directory, a port or the runtime could not be had.
 pub fn start(count: u64, parent: &Path) -> Result<LocalCell, String> {
     let dir = parent.join(format!(
-        "parosctl-bench-{}-{}",
+        "paros-bench-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -180,7 +178,9 @@ impl LocalCell {
             failures_per_partition: initialize::FAILURES_PER_PARTITION,
             idle: false,
         };
-        let connect = |servers: &[(u64, Address)]| crate::client(runtime, servers, patience);
+        let connect = |servers: &[(u64, Address)]| {
+            parosctl::support::connect::client(runtime, servers, patience)
+        };
         let run = initialize::initialize(
             &runtime.providers,
             &runtime.rpc,

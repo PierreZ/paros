@@ -31,11 +31,11 @@ use paros::client::initialize::{self, InitParams, InitRefusal, InitRun, Initiali
 use paros::model::address::Address;
 use serde_json::json;
 
-use crate::Ending;
-use crate::fleet::{interrupted, leader_seed, nonzero, refusal_text, steps};
-use crate::labels::Labels;
-use crate::output::{Printer, note};
-use crate::views::Asker;
+use crate::cmd::tenant::{interrupted, leader_seed, nonzero, refusal_text, steps};
+use crate::support::connect::Ending;
+use crate::support::labels::Labels;
+use crate::support::output::{Printer, note};
+use crate::support::view::Asker;
 
 /// `parosctl init`.
 #[derive(Args, Debug)]
@@ -115,8 +115,8 @@ impl InitArgs {
             .map(|m| m.trim())
             .filter(|m| !m.is_empty())
         {
-            for addr in
-                crate::resolve::expand(entry).map_err(|e| format!("bad member {entry:?}: {e}"))?
+            for addr in paros::net::resolve::expand(entry)
+                .map_err(|e| format!("bad member {entry:?}: {e}"))?
             {
                 if !members.contains(&addr) {
                     members.push(addr);
@@ -140,9 +140,9 @@ pub async fn run(
     token: Vec<u8>,
 ) -> Ending {
     let root_key = match (&args.root_public_key, &args.root_public_key_json) {
-        (Some(path), _) => Some(crate::universe::read_key(path)),
+        (Some(path), _) => Some(crate::cmd::universe::read_key(path)),
         (None, Some(text)) => Some(
-            crate::universe::key_entry(text)
+            crate::cmd::universe::key_entry(text)
                 .map_err(|error| format!("PAROSCTL_ROOT_PUBLIC_KEY_JSON: {error}")),
         ),
         (None, None) => None,

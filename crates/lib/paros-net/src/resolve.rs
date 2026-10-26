@@ -5,15 +5,15 @@
 //!
 //! A listen address is resolved **once, at startup** ([`resolve`]): a
 //! machine binds where it is. An address a machine or a client **dials** is
-//! kept as a name ([`paros::model::address::Address`]) and resolved at dial time by the
-//! library (`paros::model::address::Names`, #257), so a machine whose IP changes behind its
+//! kept as a name ([`Address`]) and resolved at dial time by the
+//! library (`paros_model::address::Names`, #257), so a machine whose IP changes behind its
 //! name is reached again with no restart. One exception: a name that
 //! stands for several machines (a Compose network alias, #216) is expanded
 //! here into their literal addresses ([`expand`]).
 
 use std::net::{SocketAddr, ToSocketAddrs};
 
-use paros::model::address::Address;
+use paros_model::address::Address;
 
 /// `entry` (`HOST:PORT`) as the addresses to dial: a literal as it is, a
 /// name that resolves to one machine kept as the name (resolved again at
@@ -23,10 +23,6 @@ use paros::model::address::Address;
 /// # Errors
 ///
 /// `entry` is malformed, or the name does not resolve (yet).
-#[allow(
-    dead_code,
-    reason = "parosctl's (its servers and founding members); parosd resolves one listen address"
-)]
 pub fn expand(entry: &str) -> Result<Vec<Address>, String> {
     let address = Address::parse(entry)?;
     if address.literal().is_some() {
@@ -67,10 +63,6 @@ pub fn check_shape(addr: &str) -> Result<(), String> {
 /// # Errors
 ///
 /// `addr` is malformed, or the name does not resolve (yet).
-#[allow(
-    dead_code,
-    reason = "parosd's (its listen address); parosctl dials names as they are"
-)]
 pub fn resolve(addr: &str) -> Result<SocketAddr, String> {
     check_shape(addr)?;
     if let Ok(literal) = addr.parse::<SocketAddr>() {
@@ -99,10 +91,6 @@ pub fn resolve(addr: &str) -> Result<SocketAddr, String> {
 /// # Errors
 ///
 /// `addr` is malformed, or the name does not resolve (yet).
-#[allow(
-    dead_code,
-    reason = "parosctl's (its servers and founding members); parosd resolves one listen address"
-)]
 pub fn resolve_all(addr: &str) -> Result<Vec<SocketAddr>, String> {
     check_shape(addr)?;
     if let Ok(literal) = addr.parse::<SocketAddr>() {

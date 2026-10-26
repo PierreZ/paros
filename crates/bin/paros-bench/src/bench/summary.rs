@@ -1,7 +1,7 @@
 //! The bench's report as one JSON document (#194 (throughput benchmark)):
 //! the throughput and the latency percentiles of every call, and what the
 //! numbers depend on: the commit, the command line, the CPU count, the
-//! kernel and the filesystem of the stores. `parosctl --json bench` prints
+//! kernel and the filesystem of the stores. `paros-bench --json` prints
 //! it in place of the text tables.
 
 use std::path::Path;
@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 
 use super::histograms::{Call, Calls};
 
-/// The commit `parosctl` was built from (`build.rs`), or `unknown`.
+/// The commit `paros-bench` was built from (`build.rs`), or `unknown`.
 pub fn commit() -> &'static str {
     option_env!("PAROS_COMMIT").unwrap_or("unknown")
 }

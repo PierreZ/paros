@@ -13,8 +13,8 @@ use moonpool_core::{RandomProvider, TokioRandomProvider};
 use paros_authz_biscuit::{Entropy, RootKey, RootPublicKey};
 use serde_json::json;
 
-use crate::Ending;
-use crate::output::{Printer, note};
+use crate::support::connect::Ending;
+use crate::support::output::{Printer, note};
 
 /// `parosctl key`.
 #[derive(Args, Debug)]

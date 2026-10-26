@@ -44,7 +44,7 @@
 
 mod http;
 mod otel;
-mod resolve;
+use paros::net::resolve;
 mod settings;
 mod tunables;
 

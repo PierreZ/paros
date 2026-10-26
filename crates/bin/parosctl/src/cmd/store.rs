@@ -21,13 +21,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use clap::{Args, Subcommand};
 use moonpool_core::CompioStorageProvider;
-use paros::core::Ballot;
-use paros::core::Command;
-use paros::core::Config;
-use paros::core::Control;
-use paros::core::QuorumSystem;
-use paros::core::Slot;
-use paros::core::WriterMode;
+use paros::core::{Ballot, Command, Config, Control, QuorumSystem, Slot, WriterMode};
 use paros::inspect::{
     DiskImage, JournalImage, SetImage, SetStoreImage, StoreImage, inspect, names,
 };
@@ -35,9 +29,9 @@ use paros::machine::MachineRecord;
 use paros::storage::journal::JournalStoreConfig;
 use serde_json::{Value as Json, json};
 
-use crate::Ending;
-use crate::labels::Labels;
-use crate::output::{Printer, note, record_text};
+use crate::support::connect::Ending;
+use crate::support::labels::Labels;
+use crate::support::output::{Printer, note, record_text};
 
 /// `parosctl store`.
 #[derive(Args, Debug)]

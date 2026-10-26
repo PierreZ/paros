@@ -244,7 +244,7 @@ fn encode(histogram: &Histogram<u64>) -> String {
 }
 
 /// The reading half of the export, for the tool that merges runs (#194
-/// (throughput benchmark)); only the tests use it in `parosctl`.
+/// (throughput benchmark)); only the tests use it in `paros-bench`.
 #[cfg_attr(not(test), allow(dead_code))]
 pub mod read {
     use std::path::Path;

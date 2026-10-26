@@ -4,7 +4,6 @@
 
 use std::time::Duration;
 
-use crate::labels::Labels;
 use clap::Args;
 use moonpool_core::{CompioProviders, LocalProviders, RandomProvider};
 use paros::client::bootstrap::control_journals_of;
@@ -12,24 +11,19 @@ use paros::client::{
     ClaimOutcome, Client, ReaderOutcome, ReconfigureOutcome, RetireOutcome, TruncateOutcome,
     WriteOptions, WriteOutcome, Writer, WriterOutcome,
 };
-use paros::core::JournalIdentifier;
-use paros::core::JournalView;
-use paros::core::LeaderUuid;
-use paros::core::QuorumSystem;
-use paros::core::Seq;
-use paros::core::Value;
+use paros::core::{JournalIdentifier, JournalView, LeaderUuid, QuorumSystem, Seq, Value};
 use paros::roles::frontend::Denial;
-use paros::wire::InspectReply;
-use paros::wire::RetireRequest;
-use paros::wire::WireQuorumSystem;
 use paros::wire::common::Ballot;
-use paros::wire::journal_state_from_proto;
-use paros::wire::quorum_system_from_proto;
+use paros::wire::{
+    InspectReply, RetireRequest, WireQuorumSystem, journal_state_from_proto,
+    quorum_system_from_proto,
+};
 use serde_json::{Value as Json, json};
 
-use crate::Ending;
-use crate::names::{JournalRef, NodeRef, Resolved};
-use crate::output::{Printer, note, record_text, state_json, state_text};
+use crate::support::connect::Ending;
+use crate::support::labels::Labels;
+use crate::support::names::{JournalRef, NodeRef, Resolved};
+use crate::support::output::{Printer, note, record_text, state_json, state_text};
 
 type ParosClient = Client<CompioProviders>;
 
@@ -173,7 +167,7 @@ pub async fn write(
     out: &Printer,
     args: WriteArgs,
 ) -> Ending {
-    let journal = match crate::names::journal(client, &args.journal).await {
+    let journal = match crate::support::names::journal(client, &args.journal).await {
         Ok(journal) => journal,
         Err(ending) => return ending,
     };
@@ -370,7 +364,7 @@ pub struct ReadArgs {
 /// `parosctl read`: page from `--from` to the tail (or `--limit`), one line
 /// per record; a truncated range is reported and skipped, never hidden.
 pub async fn read(client: &ParosClient, out: &Printer, args: ReadArgs) -> Ending {
-    let resolved = match crate::names::journal(client, &args.journal).await {
+    let resolved = match crate::support::names::journal(client, &args.journal).await {
         Ok(journal) => journal,
         Err(ending) => return ending,
     };
@@ -461,7 +455,7 @@ pub struct TailArgs {
 /// document) per record as it lands; a truncation the reader falls behind
 /// is reported and skipped.
 pub async fn tail(client: &ParosClient, out: &Printer, args: TailArgs) -> Ending {
-    let resolved = match crate::names::journal(client, &args.journal).await {
+    let resolved = match crate::support::names::journal(client, &args.journal).await {
         Ok(journal) => journal,
         Err(ending) => return ending,
     };
@@ -538,7 +532,7 @@ pub async fn truncate(
     out: &Printer,
     args: TruncateArgs,
 ) -> Ending {
-    let resolved = match crate::names::journal(client, &args.journal).await {
+    let resolved = match crate::support::names::journal(client, &args.journal).await {
         Ok(journal) => journal,
         Err(ending) => return ending,
     };
@@ -622,7 +616,7 @@ pub async fn set_leader(
     out: &Printer,
     args: SetLeaderArgs,
 ) -> Ending {
-    let resolved = match crate::names::journal(client, &args.journal).await {
+    let resolved = match crate::support::names::journal(client, &args.journal).await {
         Ok(journal) => journal,
         Err(ending) => return ending,
     };
@@ -723,7 +717,7 @@ pub async fn inspect(
     let Some(journal) = args.journal else {
         return inspect_nodes(client, labels, out).await;
     };
-    let journal = match crate::names::journal(client, &journal).await {
+    let journal = match crate::support::names::journal(client, &journal).await {
         Ok(journal) => journal.journal,
         Err(ending) => return ending,
     };
@@ -904,7 +898,7 @@ pub async fn reconfigure(
             Err(ending) => return ending,
         }
     }
-    let journal = match crate::names::journal(client, &args.journal).await {
+    let journal = match crate::support::names::journal(client, &args.journal).await {
         Ok(journal) => journal,
         Err(ending) => return ending,
     };
@@ -1012,7 +1006,7 @@ pub async fn retire(
         ));
         return Ending::Refused;
     };
-    let journal = match crate::names::journal(client, &args.journal).await {
+    let journal = match crate::support::names::journal(client, &args.journal).await {
         Ok(journal) => journal.journal,
         Err(ending) => return ending,
     };

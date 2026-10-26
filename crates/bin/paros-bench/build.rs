@@ -1,4 +1,4 @@
-//! The commit `parosctl bench` reports (#194 (throughput benchmark)):
+//! The commit `paros-bench` reports (#194 (throughput benchmark)):
 //! `PAROS_COMMIT` from the environment, else `git rev-parse HEAD`, else
 //! nothing (an image built without `.git`).
 

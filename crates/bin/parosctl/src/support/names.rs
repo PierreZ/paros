@@ -21,16 +21,14 @@ use paros::client::fleet::read_directory;
 use paros::client::names::{
     JournalResolution, NameResolution, TenantResolution, Unreadable, read_tenant_control, resolve,
 };
-use paros::core::JournalId;
-use paros::core::JournalIdentifier;
-use paros::core::TenantId;
+use paros::core::{JournalId, JournalIdentifier, TenantId};
 use paros::model::name::{
     Abbreviations, JournalName, PrefixMatch, match_prefix, parse_full, parse_prefix,
 };
 
-use crate::Ending;
-use crate::labels::Labels;
-use crate::output::note;
+use crate::support::connect::Ending;
+use crate::support::labels::Labels;
+use crate::support::output::note;
 
 type ParosClient = Client<CompioProviders>;
 

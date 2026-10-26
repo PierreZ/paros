@@ -2,7 +2,7 @@
 //! only, so every command names a machine, a cell, the universe, a tenant
 //! and a journal by its name.
 //!
-//! [`Labels`] is one admin cell view (`crate::views`) of the servers' cell,
+//! [`Labels`] is one admin cell view (`crate::support::view`) of the servers' cell,
 //! read once per command: its machines, its tenants and their journals.
 //! Anything the view does not name — no answer, an entity of another cell
 //! — prints as its short hex id, the debugging form.
@@ -10,13 +10,12 @@
 use std::collections::BTreeMap;
 
 use paros::client::views::{ViewOutcome, ask, request};
-use paros::core::JournalIdentifier;
-use paros::core::TenantId;
+use paros::core::{JournalIdentifier, TenantId};
 use paros::model::view::Scope;
 use paros::wire::view::{CellQuery, ViewReply, view_request::Query};
 
-use crate::output::{record_text, short};
-use crate::views::Asker;
+use crate::support::output::{record_text, short};
+use crate::support::view::Asker;
 
 /// The names one cell view gave.
 #[derive(Clone, Debug, Default)]

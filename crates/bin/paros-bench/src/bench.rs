@@ -1,4 +1,4 @@
-//! `parosctl bench` (#517 (`parosctl bench`), #194 (throughput benchmark)):
+//! `paros-bench` (#517 (`parosctl bench`), #194 (throughput benchmark)):
 //! the load generator. It runs clients against a cell over `paros::client`
 //! and prints throughput and latency per call, after `CockroachDB`'s load
 //! generator. The cell is the servers (`--servers`), or a cell of N
@@ -58,8 +58,8 @@ use paros::client::{
 use paros::core::Value;
 use tokio_util::sync::CancellationToken;
 
-use crate::output::note;
-use crate::{Ending, Runtime};
+use parosctl::support::connect::{Ending, Runtime};
+use parosctl::support::output::note;
 
 use histograms::{Call, Calls, Export, Registry};
 use mix::Mix;
@@ -71,7 +71,7 @@ type ParosClient = Client<CompioProviders>;
 /// The console prints its header again after this many ticks.
 const HEADER_EVERY: u64 = 20;
 
-/// `parosctl bench`.
+/// `paros-bench`.
 #[derive(Args, Debug)]
 pub struct BenchArgs {
     /// The tenant to write in, by name; created when missing.
@@ -93,7 +93,7 @@ pub struct BenchArgs {
     #[arg(
         long,
         default_value = "ordered",
-        value_parser = crate::journal::parse_store_durability
+        value_parser = parosctl::cmd::journal::parse_store_durability
     )]
     store_durability: paros::model::tenant::StoreDurability,
     /// How many concurrent clients, each one call at a time. The clients
@@ -393,7 +393,7 @@ pub fn finish(runs: &[Measured], json: bool) -> Ending {
     Ending::Success
 }
 
-/// `parosctl bench` against the cell `client` reaches (`servers`, their
+/// `paros-bench` against the cell `client` reaches (`servers`, their
 /// ids): each topology in turn on the same cell, under the same seed. The
 /// first that fails ends the bench. `json` prints one report per topology.
 pub async fn run(

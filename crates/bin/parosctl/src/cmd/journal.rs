@@ -24,9 +24,7 @@ use paros::client::Client;
 use paros::client::bootstrap::control_journals;
 use paros::client::fleet::read_directory;
 use paros::client::journals::{self, JournalAnswer, JournalOp, JournalRequest};
-use paros::core::JournalIdentifier;
-use paros::core::TenantId;
-use paros::core::WriterMode;
+use paros::core::{JournalIdentifier, TenantId, WriterMode};
 use paros::model::address::Names;
 use paros::model::fleet::TenantState;
 use paros::model::tags::{Tags, UserTags};
@@ -35,10 +33,10 @@ use paros::model::tenant::{
 };
 use serde_json::json;
 
-use crate::Ending;
-use crate::fleet::nonzero;
-use crate::labels::Labels;
-use crate::output::{Printer, note, record_text, table};
+use crate::cmd::tenant::nonzero;
+use crate::support::connect::Ending;
+use crate::support::labels::Labels;
+use crate::support::output::{Printer, note, record_text, table};
 
 type ParosClient = Client<CompioProviders>;
 
@@ -197,7 +195,7 @@ fn parse_writers(text: &str) -> Result<WriterMode, String> {
 }
 
 /// `--store-durability` (#599 (durability mode per journal)).
-pub(crate) fn parse_store_durability(text: &str) -> Result<StoreDurability, String> {
+pub fn parse_store_durability(text: &str) -> Result<StoreDurability, String> {
     text.parse().map_err(|why: &str| why.to_string())
 }
 
@@ -594,7 +592,7 @@ async fn list(
     labels: &Labels,
     out: &Printer,
 ) -> Ending {
-    let selector = match crate::views::selector(selector) {
+    let selector = match crate::support::view::selector(selector) {
         Ok(selector) => selector,
         Err(ending) => return ending,
     };

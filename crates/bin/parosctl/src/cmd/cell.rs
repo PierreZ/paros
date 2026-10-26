@@ -21,6 +21,7 @@
 //! universe directory, or a registered machine's in the cell control
 //! journal, whole, under an idempotency id drawn for the run.
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use clap::{Args, Subcommand};
@@ -32,13 +33,18 @@ use paros::client::fleet::Step;
 use paros::core::NodeId;
 use paros::model::address::Address;
 use paros::model::registry::MaintenanceScope;
+use paros::wire::view::UniverseQuery;
+use paros::wire::view::view_request::Query;
 use serde_json::json;
 
-use crate::Ending;
-use crate::fleet::{interrupted, leader_seed, refused, steps};
-use crate::labels::Labels;
-use crate::output::{Printer, note};
-use crate::views::Asker;
+use crate::cmd::tenant::{interrupted, leader_seed, refused, steps};
+use crate::support::connect::Ending;
+use crate::support::labels::Labels;
+use crate::support::output::{Printer, note, table};
+use crate::support::view::{
+    Asker, coordinator_text, indent, machine_names, reply_json, selected, selector, tag, text,
+    user_tags_text,
+};
 
 /// `parosctl cell`.
 #[derive(Args, Debug)]
@@ -153,11 +159,12 @@ pub async fn run(
         }
         CellAdminCommand::Tag { cell, tags } => {
             let ids: Vec<u64> = servers.iter().map(|(id, _)| *id).collect();
-            let mut fleet = match crate::fleet::open_session(asker.providers, client, &ids).await {
-                Ok(fleet) => fleet,
-                Err(ending) => return ending,
-            };
-            return crate::fleet::set_tags(
+            let mut fleet =
+                match crate::cmd::tenant::open_session(asker.providers, client, &ids).await {
+                    Ok(fleet) => fleet,
+                    Err(ending) => return ending,
+                };
+            return crate::cmd::tenant::set_tags(
                 asker.providers,
                 client,
                 (out, labels),
@@ -168,7 +175,7 @@ pub async fn run(
             )
             .await;
         }
-        _ => unreachable!("the views are answered in crate::views"),
+        _ => unreachable!("the views are answered in crate::support::view"),
     };
     let target = match Address::parse(&addr) {
         Ok(target) => target,
@@ -415,7 +422,7 @@ async fn tag_machine(
     machine: &str,
     texts: &[String],
 ) -> Ending {
-    let tags = match crate::journal::user_tags(texts) {
+    let tags = match crate::cmd::journal::user_tags(texts) {
         Ok(tags) => tags,
         Err(ending) => return ending,
     };
@@ -430,7 +437,7 @@ async fn tag_machine(
         note(&format!("no registered machine is named {machine}"));
         return Ending::Refused;
     };
-    let request = crate::fleet::nonzero(asker.providers);
+    let request = crate::cmd::tenant::nonzero(asker.providers);
     match session
         .set_machine_tags(client, 0, (node, request), &tags)
         .await
@@ -441,10 +448,10 @@ async fn tag_machine(
                     format!(
                         "tagged machine={} tags={}",
                         labels.machine(node.0),
-                        crate::fleet::tags_label(&tags)
+                        crate::cmd::tenant::tags_label(&tags)
                     )
                 },
-                || json!({ "outcome": "tagged", "node": node.0, "tags": crate::fleet::tags_label(&tags) }),
+                || json!({ "outcome": "tagged", "node": node.0, "tags": crate::cmd::tenant::tags_label(&tags) }),
             );
             Ending::Success
         }
@@ -483,6 +490,103 @@ async fn drain(
         }
         Err(stop) => interrupted(&stop),
     }
+}
+
+// `cell list` and `cell show`: views of the cell (#399).
+
+/// `parosctl cell list`: the universe's cells.
+pub async fn cell_list(asker: &Asker<'_>, out: &Printer, chosen: Option<&str>) -> Ending {
+    let chosen = match selector(chosen) {
+        Ok(chosen) => chosen,
+        Err(ending) => return ending,
+    };
+    let mut reply = match asker.ask(Query::Universe(UniverseQuery {})).await {
+        Ok(reply) => reply,
+        Err(ending) => return ending,
+    };
+    reply.cells.retain(|c| selected(&chosen, &c.tags));
+    let rows: Vec<[String; 5]> = reply
+        .cells
+        .iter()
+        .map(|c| {
+            [
+                text(&c.name),
+                tag(&c.tags, paros::model::tags::reserved::KIND),
+                c.state.clone(),
+                c.tenants.to_string(),
+                user_tags_text(&c.tags),
+            ]
+        })
+        .collect();
+    out.emit(
+        || {
+            format!(
+                "universe {}\n{}",
+                text(&reply.universe_name),
+                table(["CELL", "KIND", "STATE", "TENANTS", "TAGS"], &rows)
+            )
+        },
+        || reply_json(&reply),
+    );
+    Ending::Success
+}
+
+/// `parosctl cell show [<cell>]`: the cell's state, its coordinator, its
+/// slots per class and its machines by standing.
+pub async fn cell_show(asker: &Asker<'_>, out: &Printer, cell: Option<&str>) -> Ending {
+    let reply = match asker.cell(cell).await {
+        Ok(reply) => reply,
+        Err(ending) => return ending,
+    };
+    let names = machine_names(&reply);
+    let mut slots: BTreeMap<&str, (u64, u64)> = BTreeMap::new();
+    let mut standing: BTreeMap<&str, usize> = BTreeMap::new();
+    for m in &reply.machines {
+        if m.standing != "retired" {
+            let class = paros::model::tags::value_of(&m.tags, paros::model::tags::reserved::CLASS)
+                .unwrap_or("-");
+            let entry = slots.entry(class).or_default();
+            entry.0 += m.booked;
+            entry.1 += m.capacity;
+        }
+        *standing.entry(m.standing.as_str()).or_default() += 1;
+    }
+    let down = reply.machines.iter().filter(|m| !m.up).count();
+    let slow = reply.machines.iter().filter(|m| m.up && m.slow).count();
+    let users = reply.tenants.iter().filter(|t| t.kind == "users").count();
+    let slot_rows: Vec<[String; 4]> = slots
+        .iter()
+        .map(|(class, (booked, total))| {
+            [
+                (*class).to_string(),
+                booked.to_string(),
+                total.saturating_sub(*booked).to_string(),
+                total.to_string(),
+            ]
+        })
+        .collect();
+    out.emit(
+        || {
+            format!(
+                "cell:         {}\nuniverse:     {}\nstate:        {}\ncoordinator:  {}\nmachines:     {} ({}; {} down, {} slow)\ntenants:      {users}\nslots:\n{}",
+                text(&reply.cell_name),
+                text(&reply.universe_name),
+                if reply.cell_state.is_empty() { "-" } else { &reply.cell_state },
+                coordinator_text(&reply, &names),
+                reply.machines.len(),
+                standing
+                    .iter()
+                    .map(|(s, n)| format!("{n} {s}"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                down,
+                slow,
+                indent(&table(["CLASS", "BOOKED", "FREE", "TOTAL"], &slot_rows)),
+            )
+        },
+        || reply_json(&reply),
+    );
+    Ending::Success
 }
 
 #[cfg(test)]

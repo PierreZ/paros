@@ -24,11 +24,11 @@ use paros::model::fleet::RootKeyEntry;
 use paros_authz_biscuit::RootPublicKey;
 use serde_json::json;
 
-use crate::Ending;
-use crate::fleet::{interrupted, open_session, refused, steps};
-use crate::labels::Labels;
-use crate::output::{Printer, note};
-use crate::views::Asker;
+use crate::cmd::tenant::{interrupted, open_session, refused, steps};
+use crate::support::connect::Ending;
+use crate::support::labels::Labels;
+use crate::support::output::{Printer, note};
+use crate::support::view::Asker;
 
 /// `parosctl universe`.
 #[derive(Args, Debug)]
@@ -91,7 +91,7 @@ enum KeyCommand {
 ///
 /// The file cannot be read, or holds no Ed25519 key.
 pub fn read_key(path: &Path) -> Result<RootKeyEntry, String> {
-    let text = crate::key::read(path)?;
+    let text = crate::cmd::key::read(path)?;
     key_entry(&text).map_err(|e| format!("{}: {e}", path.display()))
 }
 

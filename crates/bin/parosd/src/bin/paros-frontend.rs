@@ -42,8 +42,7 @@
 //! | 1 | the runtime, the bind or the listener failed |
 //! | 2 | an invalid configuration |
 
-#[path = "../resolve.rs"]
-mod resolve;
+use paros::net::resolve;
 
 use std::process::ExitCode;
 use std::sync::Arc;

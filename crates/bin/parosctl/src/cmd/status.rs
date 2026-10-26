@@ -26,9 +26,9 @@ use paros::observe::metrics::{CallKind, JournalUsage};
 use paros::wire::view::{self as wire, TenantQuery, UniverseQuery, view_request::Query};
 use serde_json::{Value, json};
 
-use crate::Ending;
-use crate::output::{Printer, table};
-use crate::views::{
+use crate::support::connect::Ending;
+use crate::support::output::{Printer, table};
+use crate::support::view::{
     Asker, coordinator_text, indent, journal_label, machine_names, machine_state, reply_json, text,
 };
 
@@ -236,7 +236,7 @@ async fn tenant_status(asker: &Asker<'_>, out: &Printer, name: &str) -> Ending {
         Err(ending) => return ending,
     };
     let Some(tenant) = reply.tenants.first() else {
-        crate::output::note("the cell answered no tenant");
+        crate::support::output::note("the cell answered no tenant");
         return Ending::Refused;
     };
     let summary = summarize(&reply);
@@ -257,7 +257,7 @@ async fn tenant_status(asker: &Asker<'_>, out: &Printer, name: &str) -> Ending {
         .map(|m| {
             [
                 names[&m.node_id].clone(),
-                crate::views::tag(&m.tags, paros::model::tags::reserved::ZONE),
+                crate::support::view::tag(&m.tags, paros::model::tags::reserved::ZONE),
                 machine_state(m),
                 footprint.get(&m.node_id).copied().unwrap_or(0).to_string(),
             ]
@@ -379,7 +379,7 @@ impl Usage {
                 .journals
                 .iter()
                 .find(|j| j.journal == id)
-                .map_or_else(|| crate::output::short(id), journal_label)
+                .map_or_else(|| crate::support::output::short(id), journal_label)
         };
         let row = |name: String, counts: [u64; 6]| {
             [

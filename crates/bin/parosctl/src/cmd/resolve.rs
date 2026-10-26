@@ -9,12 +9,11 @@ use clap::Args;
 use moonpool_core::CompioProviders;
 use moonpool_rpc::RpcHandle;
 use paros::client::resolve::{Resolution, resolve};
-use paros::model::address::Address;
-use paros::model::address::Names;
+use paros::model::address::{Address, Names};
 use serde_json::json;
 
-use crate::Ending;
-use crate::output::{Printer, note, record_text, short};
+use crate::support::connect::Ending;
+use crate::support::output::{Printer, note, record_text, short};
 
 /// `parosctl resolve`.
 #[derive(Args, Debug)]

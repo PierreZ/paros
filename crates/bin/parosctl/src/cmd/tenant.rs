@@ -14,6 +14,7 @@
 //! interrupted creation stays `REGISTERING` until it is deleted (or, with
 //! #225, finished by the coordinator).
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use clap::{Args, Subcommand};
@@ -21,18 +22,21 @@ use moonpool_core::{CompioProviders, LocalProviders, RandomProvider};
 use paros::client::Client;
 use paros::client::bootstrap::control_journals;
 use paros::client::fleet::{FleetRefusal, FleetSession, Interrupted, Run, Stage, Step, TagTarget};
-use paros::core::JournalId;
-use paros::core::JournalIdentifier;
-use paros::core::NodeId;
-use paros::core::TenantId;
+use paros::core::{JournalId, JournalIdentifier, NodeId, TenantId};
 use paros::machine::ControlJournals;
 use paros::model::fleet::TenantState;
 use paros::model::registry::Registry;
+use paros::wire::view::view_request::Query;
+use paros::wire::view::{TenantQuery, UniverseQuery};
 use serde_json::json;
 
-use crate::Ending;
-use crate::labels::Labels;
-use crate::output::{Printer, note};
+use crate::support::connect::Ending;
+use crate::support::labels::Labels;
+use crate::support::output::{Printer, note, table};
+use crate::support::view::{
+    Asker, coordinator_text, indent, journal_label, machine_names, machine_state, reply_json,
+    selected, selector, tag, tags_text, text, user_tags_text,
+};
 
 type ParosClient = Client<CompioProviders>;
 
@@ -344,7 +348,7 @@ pub async fn run(
             tags,
             cell,
         } => {
-            let tags = match crate::journal::user_tags(&tags) {
+            let tags = match crate::cmd::journal::user_tags(&tags) {
                 Ok(tags) => tags,
                 Err(ending) => return ending,
             };
@@ -416,7 +420,7 @@ pub async fn run(
             .await
         }
         TenantCommand::List { .. } | TenantCommand::Show { .. } => {
-            unreachable!("the views are answered in crate::views")
+            unreachable!("the views are answered in crate::support::view")
         }
     }
 }
@@ -432,7 +436,7 @@ pub async fn set_tags(
     name: &str,
     texts: &[String],
 ) -> Ending {
-    let tags = match crate::journal::user_tags(texts) {
+    let tags = match crate::cmd::journal::user_tags(texts) {
         Ok(tags) => tags,
         Err(ending) => return ending,
     };
@@ -524,4 +528,132 @@ async fn cell_named(client: &ParosClient, fleet: &FleetSession, cell: &str) -> R
         note(&format!("the universe holds no cell named {cell}"));
         Ending::Refused
     })
+}
+
+// `tenant list` and `tenant show`: views of the cell (#399).
+
+/// `parosctl tenant list`: the universe's tenants, the internal ones (the
+/// universe tenant, the cell tenants) included.
+pub async fn tenant_list(asker: &Asker<'_>, out: &Printer, chosen: Option<&str>) -> Ending {
+    let chosen = match selector(chosen) {
+        Ok(chosen) => chosen,
+        Err(ending) => return ending,
+    };
+    let mut reply = match asker.ask(Query::Universe(UniverseQuery {})).await {
+        Ok(reply) => reply,
+        Err(ending) => return ending,
+    };
+    reply.tenants.retain(|t| selected(&chosen, &t.tags));
+    let cells: BTreeMap<u64, String> = reply
+        .cells
+        .iter()
+        .map(|c| (c.cell_id, text(&c.name)))
+        .collect();
+    let rows: Vec<[String; 6]> = reply
+        .tenants
+        .iter()
+        .map(|t| {
+            [
+                text(&t.name),
+                t.kind.clone(),
+                cells
+                    .get(&t.cell_id)
+                    .cloned()
+                    .unwrap_or_else(|| "-".to_string()),
+                t.state.clone(),
+                t.survives.clone(),
+                user_tags_text(&t.tags),
+            ]
+        })
+        .collect();
+    out.emit(
+        || {
+            table(
+                ["TENANT", "KIND", "CELL", "STATE", "SURVIVES", "TAGS"],
+                &rows,
+            )
+        },
+        || reply_json(&reply),
+    );
+    Ending::Success
+}
+
+/// `parosctl tenant show <tenant>`.
+pub async fn tenant_show(asker: &Asker<'_>, out: &Printer, name: &str) -> Ending {
+    let reply = match asker
+        .ask(Query::Tenant(TenantQuery {
+            name: name.as_bytes().to_vec(),
+        }))
+        .await
+    {
+        Ok(reply) => reply,
+        Err(ending) => return ending,
+    };
+    let Some(tenant) = reply.tenants.first() else {
+        note("the cell answered no tenant");
+        return Ending::Refused;
+    };
+    let names = machine_names(&reply);
+    let members = |ids: &[u64]| {
+        ids.iter()
+            .map(|id| names.get(id).cloned().unwrap_or_else(|| "-".to_string()))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let journal_rows: Vec<[String; 6]> = tenant
+        .journals
+        .iter()
+        .map(|j| {
+            [
+                journal_label(j),
+                j.writer.clone(),
+                j.store_durability.clone(),
+                j.desired.clone(),
+                members(&j.acceptors),
+                if j.matchmakers.is_empty() {
+                    "-".to_string()
+                } else {
+                    members(&j.matchmakers)
+                },
+            ]
+        })
+        .collect();
+    let mut footprint: BTreeMap<u64, usize> = BTreeMap::new();
+    for j in &tenant.journals {
+        for id in &j.acceptors {
+            *footprint.entry(*id).or_default() += 1;
+        }
+    }
+    let machine_rows: Vec<[String; 4]> = reply
+        .machines
+        .iter()
+        .map(|m| {
+            [
+                names[&m.node_id].clone(),
+                tag(&m.tags, paros::model::tags::reserved::ZONE),
+                machine_state(m),
+                footprint.get(&m.node_id).copied().unwrap_or(0).to_string(),
+            ]
+        })
+        .collect();
+    out.emit(
+        || {
+            format!(
+                "tenant:       {}\ncell:         {}\nstate:        {}\ntags:         {}\nsurvives:     {}\ncoordinator:  {}\njournals:\n{}\nmachines:\n{}",
+                text(&tenant.name),
+                text(&reply.cell_name),
+                tenant.state,
+                tags_text(&tenant.tags),
+                tenant.survives,
+                coordinator_text(&reply, &names),
+                indent(&table(
+                    ["JOURNAL", "WRITER", "STORE", "DESIRED", "ACCEPTORS", "MATCHMAKERS"],
+                    &journal_rows
+                )),
+                indent(&table(["MACHINE", "ZONE", "STATE", "ACCEPTOR SLOTS"], &machine_rows)),
+            )
+        },
+        || reply_json(&reply),
+    );
+    Ending::Success
 }

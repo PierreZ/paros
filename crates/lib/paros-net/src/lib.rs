@@ -5,6 +5,7 @@
 pub mod address;
 pub mod clients;
 pub mod inbound;
+pub mod resolve;
 pub mod runtime;
 #[cfg(feature = "tls")]
 pub mod tls;

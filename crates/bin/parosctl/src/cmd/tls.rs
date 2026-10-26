@@ -29,9 +29,9 @@ use paros::net::tls::{
 };
 use serde_json::{Value, json};
 
-use crate::Ending;
-use crate::key::{parse_label, read, write_new};
-use crate::output::{Printer, note, table};
+use crate::cmd::key::{parse_label, read, write_new};
+use crate::support::connect::Ending;
+use crate::support::output::{Printer, note, table};
 
 /// How far back a new certificate's window starts: a host whose clock is
 /// a little behind the issuer's still accepts it.
