@@ -39,6 +39,9 @@ jobs:
       - uses: DeterminateSystems/magic-nix-cache-action@main
       - name: Run cargo fmt
         run: nix develop --command cargo fmt --all -- --check
+      # #722 (three products): foo.rs + foo/, no mod.rs, no #[path] includes.
+      - name: Check the module style
+        run: scripts/check-module-style.sh
 
   test:
     runs-on: ubuntu-latest

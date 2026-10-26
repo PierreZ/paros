@@ -88,7 +88,7 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
 - **A reusable moonpool gap** (simulator infrastructure, not a paros bug) becomes a focused issue
   in `PierreZ/moonpool`; keep paros-side defense in depth meanwhile (`upstream-to-moonpool`).
   When paros needs the fix, improve moonpool autonomously (decided on 2026-10-09): open the
-  moonpool PR, merge it once its CI is green, then advance paros's pin (all thirteen lines).
+  moonpool PR, merge it once its CI is green, then advance paros's pin (the six `moonpool-*` lines of the root `[workspace.dependencies]` and `paros-core`'s own `moonpool-assertions` line).
 - **Name every issue and PR number** (decided on 2026-10-10): write a short name next to it,
   e.g. "#216 (finish bootstrap)", in chats, comments, PR descriptions and commit messages.
 - **Never edit a `CHANGELOG.md` by hand**: release-plz generates it; the commit message is where
@@ -112,6 +112,17 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
 - **Organize as you grow**: a module holds one concern; split a file the moment it holds a
   second. Deleting is part of every change: a superseded axis, type, flag or gate goes in the
   PR that supersedes it.
+- **Layers point down only** (decided on 2026-10-24, #722 (three products)): each layer of the
+  library is its own crate, and a crate depends only on the layers below it (see *Layout*). Put
+  new code in the lowest layer that can hold it. A type that two layers share moves down; a call
+  up goes through a port (a trait the upper layer implements, as `CellHost`).
+- **One module style** (#722 (three products)): a module with children is `foo.rs` beside
+  `foo/`, never `foo/mod.rs`, and no file is included with `#[path]`. CI runs
+  `scripts/check-module-style.sh`.
+- **Paper names are the vocabulary** (#722 (three products)): a role keeps the name of
+  Compartmentalized Paxos (proxy leader, acceptor grid, replica, leaderless read, batcher,
+  unbatcher) or Matchmaker Paxos (matchmaker, matchmaking) in `paros-core`, `paros-roles`,
+  `paros-sim` and the docs.
 
 ## Simulation rules
 
@@ -515,45 +526,73 @@ Procedure: the `simulation-driven-fix` skill.
 
 ## Layout
 
-Cargo workspace, every package under `crates/`. Dependency stack: `paros-core` ← `paros` ←
-`paros-sim` ← `paros-sim-runner`, and `paros` ← `parosd`; `paros` ← `paros-authz-biscuit` ←
-`parosd`, `paros-sim`. Each crate's `AGENTS.md` is its map.
+Cargo workspace, every package under `crates/`, grouped by product (#722 (three products)).
+Each crate's `AGENTS.md` is its map.
+
+`crates/lib/`, the library, one crate per layer. Each layer depends only on the ones above it
+in this list:
 
 - `paros-core` — the sans-IO roles and `ColocatedNode`; dependency-free with
   `default-features = false`, wasm-safe; sancov crate-under-test. Its optional, default-on
   `assertions` feature (#317) adds `moonpool-assertions` for coverage probes only.
-- `paros` — the library: provider-generic drivers, RPC contract (`proto/`, built by
-  `prost-build`), stores, `paros::client`; wasm-safe and provider-free. Its `tls` feature
-  (`paros::tls`, on in `parosd` and `paros-sim`) adds TLS and mutual TLS (PR #509 (mutual TLS)).
-- `parosd` — the uniform `parosd` daemon on one compio thread (one binary per machine: `PAROS_*` config,
-  `node_id` minted at format, waits for `parosctl init`, #196), `paros-frontend` (#192 (the
-  frontend)) and `parosctl`
-  (`src/bin/parosctl/`), the CLI over `paros::client` (`publish = false`). The image and the
-  Compose toy are `Dockerfile` and `docker-compose.yml` at the root; `DEMO.md` is how to run it.
-- `paros-authz-biscuit` — Biscuit tokens (#245, #400): root keys, offline mint, derive and
-  seal, the verifier and its one policy, and `BiscuitAuthz`, the frontend's `Authz` (#192 (the
-  frontend)). It depends on `paros` for that trait; Biscuit never enters `paros` or
-  `paros-core`. `biscuit-auth` is pinned by git rev, so the crate is `publish = false`.
+- `paros-wire` — the RPC contract (`proto/`, built by `prost-build`) and its codecs.
+- `paros-model` — the pure folds and data types: the registry, tenants, the fleet directory,
+  tags, placement, footprints, status, views, load, checkpoints, the machine's data types.
+- `paros-tunables` — the driver's and the client's tunables and their floors.
+- `paros-storage` — the `LogStorage` seam, the moonpool-journal stores, provisioning, boot.
+- `paros-net` — addresses and name resolution, the transport, the RPC edge and its clients,
+  TLS (`tls` feature, PR #509 (mutual TLS)).
+- `paros-client` — `paros::client`, the library client of a cell.
+- `paros-observe` — the `Audit` port, metrics, named BUGGIFY locations, the reply seam.
+- `paros-roles` — one module per paper role, each with its `run_*` loop: `node`,
+  `proxy_leader`, `replica`, `batcher`, `matchmaker`, `frontend`.
+- `paros-coordinator` — the cell, tenant and universe coordinators.
+- `paros-machine` — one machine's lifecycle, `run_machine`, and `inspect`.
+- `paros` — the facade: each layer as a module (`paros::core`, `paros::model`, …) and the
+  `run_*` entry points. A program depends on `paros` alone. Wasm-safe and provider-free.
+
+`crates/bin/`, the binaries (`publish = false`):
+
+- `parosd` — the uniform daemon on one compio thread (one binary per machine: `PAROS_*` config,
+  `node_id` minted at format, waits for `parosctl init`, #196). The image and the Compose toy
+  are `Dockerfile` and `docker-compose.yml` at the root; `DEMO.md` is how to run it.
+  `paros-frontend` (#192 (the frontend)) is its second binary until #723 (frontend as a parosd
+  role).
+- `parosctl` — the CLI over `paros::client`: `main.rs` is the command tree, `cmd/` holds one
+  module per noun, `support/` what the commands share.
+- `paros-bench` — the load generator (#517, #194 (throughput benchmark)), against a cell or a
+  local one (`--local N`).
+
+`crates/sim/`, the harness:
+
 - `paros-sim` — the DST harness: processes, role map, storage ledger and injector, workload, audit.
 - `paros-sim-runner` — `sim-paros-chain` and `sim-paros-hunt` (`publish = false`).
+- `paros-sim-wasm-check` — the proof that a seed of `paros-sim` is the same run on wasm32 as
+  natively (#307): one fingerprint line per seed from the native binary and from the wasm
+  bundle under node (`scripts/check-sim-wasm.sh`).
+
+`crates/support/`:
+
+- `paros-authz-biscuit` — Biscuit tokens (#245, #400): root keys, offline mint, derive and
+  seal, the verifier and its one policy, and `BiscuitAuthz`, the frontend's `Authz` (#192 (the
+  frontend)). It depends on `paros` for that trait; Biscuit never enters the library.
+  `biscuit-auth` is pinned by git rev, so the crate is `publish = false`.
 - `paros-wasm` — the site's wasm tools, one crate with one feature per tool (#540, decided on
   2026-10-15), each built alone into its own bundle: `paxos`, the interactive Paxos game on
   `paros-core` only (the app is `website/play/`), and `playground`, the paros playground (#518):
   a paros universe on moonpool's simulated providers, the shipped `run_machine` and
   `paros::client`, replayed from a seed, a config and an action log (the page is
   `website/sandbox/`). Never depends on `paros-sim` or `parosd`.
-- `paros-sim-wasm-check` — the proof that a seed of `paros-sim` is the same run on wasm32 as
-  natively (#307): one fingerprint line per seed from the native binary and from the wasm
-  bundle under node (`scripts/check-sim-wasm.sh`).
 - `xtask` — `cargo xtask sim` (the sancov runner) and `cargo xtask mutants` (the mutation hunt, #269).
 
 Elsewhere: `website/` holds everything a browser loads (decided on 2026-10-13): `website/zola/` (the website, Zola + Goyo, #254; `website/zola/AGENTS.md`, the `update-the-site` skill; built by `website/zola/build.sh`), `website/play/` (the game's app), `website/sandbox/` (the sandbox page); `scripts/build-wasm.sh` builds and stages both; the Rust behind them stays in `crates/`,
 `docs/architecture/`, `docs/analysis/` (design notes), `docs/references/` (papers and source
-references), `scripts/` (`sancov-rustc.sh`, `build-wasm.sh`, `check-sim-wasm.sh`, `check-dockerfile-toolchain.sh`, `mutants-report.sh`), `.claude/skills/` and
+references), `scripts/` (`sancov-rustc.sh`, `build-wasm.sh`, `check-sim-wasm.sh`, `check-dockerfile-toolchain.sh`, `check-module-style.sh`, `mutants-report.sh`), `.claude/skills/` and
 `.claude/agents/`.
 
 Publishing mirrors moonpool: library crates share a release-plz `version_group` with per-crate
-`CHANGELOG.md`; binaries and xtask are `publish = false`. `paros`, `paros-sim` and `parosd` pin
-moonpool by **git** rev (thirteen lines across their `Cargo.toml`s, `paros-wasm` included, advanced together), so only
+`CHANGELOG.md`; binaries and xtask are `publish = false`. The workspace pins moonpool by
+**git** rev (the `moonpool-*` lines of the root `[workspace.dependencies]`, which every crate
+uses, advanced together with `paros-core`'s own line), so only
 `paros-core` is truly publishable: its one moonpool line (`moonpool-assertions`, optional) also
 carries a crates.io `version`, which a publish resolves instead of the git rev.
