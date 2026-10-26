@@ -1,0 +1,40 @@
+[package]
+name = "paros-roles"
+description = "paros's roles: the node, proxy leader, replica, batcher, matchmaker and frontend loops"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+documentation = "https://docs.rs/paros-roles"
+
+[dependencies]
+paros-core = { workspace = true, features = ["tracing", "assertions", "serde"] }
+paros-model = { workspace = true }
+paros-wire = { workspace = true }
+paros-tunables = { workspace = true }
+paros-storage = { workspace = true }
+paros-net = { workspace = true }
+paros-client = { workspace = true }
+paros-observe = { workspace = true }
+futures = { workspace = true }
+moonpool-assertions = { workspace = true }
+moonpool-buggify = { workspace = true }
+moonpool-core = { workspace = true, features = ["select"] }
+moonpool-journal = { workspace = true }
+moonpool-rpc = { workspace = true, features = ["prost"] }
+postcard = { workspace = true }
+prost = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+futures = { workspace = true, features = ["executor"] }
+moonpool-sim = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros"] }
+
+[lints]
+workspace = true

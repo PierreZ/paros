@@ -67,7 +67,7 @@ what the pivot remembers and two different values can never both be chosen; the 
 of the protocol exists to do exactly that. A majority is only the simplest way to
 guarantee the overlap — what safety actually needs is that every *Phase-1* quorum
 meets every *Phase-2* quorum, `q1 + q2 > n`, which is why paros asks that question
-through one boundary, `QuorumSystem` (`crates/paros-core/src/membership/quorum_system.rs`), and can
+through one boundary, `QuorumSystem` (`crates/lib/paros-core/src/membership/quorum_system.rs`), and can
 answer it with flexible or grid quorums instead.
 
 ## The invariant ladder
@@ -149,5 +149,5 @@ paros never proves this property by hand. The deterministic simulation asserts i
 every transition of every seed — **"at most one value is ever chosen for a slot"**,
 the property `P2` names, beside **"a durable accept quorum never decides two values
 for a slot"**, the same claim read off the disks rather than off the decisions
-(`crates/paros-sim/src/audit/`). The [crash and restart
+(`crates/sim/paros-sim/src/audit/`). The [crash and restart
 safety](@/paxos/restart-safety.md) chapter shows it catching a real bug.

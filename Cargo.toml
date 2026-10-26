@@ -1,6 +1,43 @@
 [workspace]
-members = ["crates/*"]
+members = ["crates/*/*"]
 resolver = "3"
+
+# One line per dependency the workspace shares. moonpool is pinned to one
+# commit on its `main` (it evolves fast; not the crates.io release): advance
+# the `rev` of the six moonpool lines here, and the one in
+# `crates/lib/paros-core/Cargo.toml`, together.
+[workspace.dependencies]
+paros = { path = "crates/lib/paros", version = "0.2.0" }
+paros-core = { path = "crates/lib/paros-core", version = "0.2.0", default-features = false }
+paros-wire = { path = "crates/lib/paros-wire", version = "0.2.0" }
+paros-model = { path = "crates/lib/paros-model", version = "0.2.0" }
+paros-tunables = { path = "crates/lib/paros-tunables", version = "0.2.0" }
+paros-storage = { path = "crates/lib/paros-storage", version = "0.2.0" }
+paros-net = { path = "crates/lib/paros-net", version = "0.2.0" }
+paros-client = { path = "crates/lib/paros-client", version = "0.2.0" }
+paros-observe = { path = "crates/lib/paros-observe", version = "0.2.0" }
+paros-roles = { path = "crates/lib/paros-roles", version = "0.2.0" }
+paros-coordinator = { path = "crates/lib/paros-coordinator", version = "0.2.0" }
+paros-machine = { path = "crates/lib/paros-machine", version = "0.2.0" }
+paros-sim = { path = "crates/sim/paros-sim", version = "0.2.0" }
+paros-authz-biscuit = { path = "crates/support/paros-authz-biscuit" }
+
+moonpool-core = { git = "https://github.com/PierreZ/moonpool", rev = "16640a2711197338b88c1bff7780052b840ac889", default-features = false }
+moonpool-rpc = { git = "https://github.com/PierreZ/moonpool", rev = "16640a2711197338b88c1bff7780052b840ac889", default-features = false }
+moonpool-journal = { git = "https://github.com/PierreZ/moonpool", rev = "16640a2711197338b88c1bff7780052b840ac889" }
+moonpool-buggify = { git = "https://github.com/PierreZ/moonpool", rev = "16640a2711197338b88c1bff7780052b840ac889" }
+moonpool-assertions = { git = "https://github.com/PierreZ/moonpool", rev = "16640a2711197338b88c1bff7780052b840ac889" }
+moonpool-sim = { git = "https://github.com/PierreZ/moonpool", rev = "16640a2711197338b88c1bff7780052b840ac889", default-features = false }
+
+prometheus = { version = "0.14", default-features = false }
+prost = "0.14"
+postcard = { version = "1", default-features = false, features = ["use-std"] }
+serde = { version = "1", features = ["derive"] }
+crc32c = "0.6"
+tracing = "0.1"
+futures = { version = "0.3", default-features = false, features = ["alloc", "async-await"] }
+tokio = { version = "1", features = ["sync"] }
+tokio-util = "0.7"
 
 [workspace.package]
 version = "0.2.0"

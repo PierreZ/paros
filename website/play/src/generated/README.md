@@ -1,8 +1,8 @@
 # Generated TypeScript bindings
 
 `cargo test -p paros-wasm --test paxos_bindings` writes this directory from the
-`ts_rs::TS` derives in `crates/paros-wasm/src/paxos/view.rs`, `action.rs`, `auto.rs`,
-`prompt.rs` and `level/mod.rs` (see `crates/paros-wasm/tests/paxos_bindings.rs`). The files are
+`ts_rs::TS` derives in `crates/support/paros-wasm/src/paxos/view.rs`, `action.rs`, `auto.rs`,
+`prompt.rs` and `level/mod.rs` (see `crates/support/paros-wasm/tests/paxos_bindings.rs`). The files are
 committed and CI fails on a diff, so never hand-edit them: change the Rust type
 and re-run the test.
 

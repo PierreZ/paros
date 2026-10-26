@@ -1,14 +1,14 @@
 ---
 name: working-on-the-client
-description: Change paros::client (crates/paros/src/client/ - Client, ClientTunables, Retarget, WriteOptions, Writer, Reader, the typed outcomes, CallObserver/NoObserver) or the parosctl CLI that wraps it, without breaking its rules - provider-generic and wasm-safe, no randomness, every outcome typed, a retry is the identical write, ambiguity is a result settled by Client::resolve, misbehaviours are explicit calls never defaults, every new ClientTunables field becomes a buggify_knob! in ChainConfig with a documented floor, every new library decision lands with a sometimes gate in the chain workload, and parosctl holds no policy (exit codes 0/3/4/5, --json). Use when touching the client library, a client policy (redirects, retries, claims, read resume), a parosctl command, or when the sim workload needs a client behaviour the library lacks.
+description: Change paros::client (crates/lib/paros/src/client/ - Client, ClientTunables, Retarget, WriteOptions, Writer, Reader, the typed outcomes, CallObserver/NoObserver) or the parosctl CLI that wraps it, without breaking its rules - provider-generic and wasm-safe, no randomness, every outcome typed, a retry is the identical write, ambiguity is a result settled by Client::resolve, misbehaviours are explicit calls never defaults, every new ClientTunables field becomes a buggify_knob! in ChainConfig with a documented floor, every new library decision lands with a sometimes gate in the chain workload, and parosctl holds no policy (exit codes 0/3/4/5, --json). Use when touching the client library, a client policy (redirects, retries, claims, read resume), a parosctl command, or when the sim workload needs a client behaviour the library lacks.
 ---
 
 # Working on the client
 
-`paros::client` (#221, `crates/paros/src/client/`) is the client's **policy**
+`paros::client` (#221, `crates/lib/paros/src/client/`) is the client's **policy**
 over the typed RPC stub `NodeClient`, written once and shipped twice: the
 chain workload drives it in the simulation (`ChainClient =
-paros::client::Client<SimProviders>`, `crates/paros-sim/src/client.rs`), and
+paros::client::Client<SimProviders>`, `crates/sim/paros-sim/src/client.rs`), and
 `parosctl` drives it over Tokio. The client the sweep and the
 linearizability checker judge is the client an operator runs. The module doc
 (`client/mod.rs`) is the contract; read it first.
@@ -43,7 +43,7 @@ linearizability checker judge is the client an operator runs. The module doc
 - **A retry is the identical write**: same leader uuid, position and
   bytes, so the log answers it as a `Duplicate`. There is no "retry with a
   fresh position" anywhere; the simulation's `CallLog` (`open_write` /
-  `close_write`, `crates/paros-sim/src/chain_workload/rpc.rs`) asserts it on
+  `close_write`, `crates/sim/paros-sim/src/chain_workload/rpc.rs`) asserts it on
   every attempt.
 - **Ambiguity is a result.** A write whose answer never came is
   `WriteOutcome::Ambiguous`, never "not done". `Client::resolve` settles it:
@@ -63,7 +63,7 @@ linearizability checker judge is the client an operator runs. The module doc
 - **Tunables are plain data with floors.** A new `ClientTunables` field
   documents its floor (the smallest value that is still a working client) and
   its `Default`, and in the same change becomes its own `buggify_knob!` field
-  in `ChainConfig` (`crates/paros-sim/src/chain_workload/config.rs`), mapped in
+  in `ChainConfig` (`crates/sim/paros-sim/src/chain_workload/config.rs`), mapped in
   `ChainConfig::tunables()` (and `truncate_tunables()` /
   `reconfigure_tunables()` / `matchmakers_tunables()` where a call family
   overrides it). Floors already in use: `write_redirect_limit` and
@@ -78,7 +78,7 @@ linearizability checker judge is the client an operator runs. The module doc
 
 ## parosctl
 
-`parosctl` (#220, `crates/parosd/src/bin/parosctl/`: `main.rs`, `commands.rs`,
+`parosctl` (#220, `crates/bin/parosd/src/bin/parosctl/`: `main.rs`, `commands.rs`,
 `output.rs`) is the etcdctl to the library's clientv3: commands `write`,
 `read`, `tail`, `truncate`, `set-leader`, `inspect`, `reconfigure`, `retire`;
 `--servers ID=HOST:PORT,...` (or `PAROSCTL_SERVERS`), `--timeout-ms`, and
@@ -93,10 +93,10 @@ arguments (clap).
 
 ## Tests and gates
 
-- `crates/paros/src/client/tests.rs`: the pure parts only (the judges, the
+- `crates/lib/paros/src/client/tests.rs`: the pure parts only (the judges, the
   writer's belief, the reader's cursor). The policy loops are judged by the
   simulation, which runs them; do not add a mocked-network unit test for one.
-- The simulation: the nextest smoke (`crates/paros-sim/tests/sim.rs`) for
+- The simulation: the nextest smoke (`crates/sim/paros-sim/tests/sim.rs`) for
   the safety oracles quickly, then `cargo xtask sim run paros-chain` to
   saturate the new gate (`/sim-sweep`); the retry-identity oracle and the
   linearizability search judge every attempt.

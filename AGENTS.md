@@ -178,7 +178,7 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   faster); replays and focused explorations stay in-process (`workers: 0`). Every workload
   and process is factory-created.
 
-Depth: the `sim-sweep` and `debug-a-seed` skills, `crates/paros-sim-runner/AGENTS.md`.
+Depth: the `sim-sweep` and `debug-a-seed` skills, `crates/sim/paros-sim-runner/AGENTS.md`.
 
 ## The harness in one paragraph
 
@@ -198,7 +198,7 @@ journal's model) and the shared `AuditWorld`. Roles come from moonpool process g
 `paros-machine`, `paros-frontend`) through the deployment/role map `paros_sim::roles`. The machines are `parosd`s
 running the shipped `run_machine` from an empty disk, formed into a cell by the workload's
 `init` (`paros::client::initialize`) over a per-seed layout (#246). No third workload, no per-scenario process type, no
-check that reads a trace. Depth: `crates/paros-sim/AGENTS.md` (the op-id table, the role map,
+check that reads a trace. Depth: `crates/sim/paros-sim/AGENTS.md` (the op-id table, the role map,
 the quorum-system and grid draws, the journal and storage coins).
 
 ## Architecture
@@ -225,7 +225,7 @@ batch) and holds **no protocol tally of its own**:
   Paxos (`Decree<Id, V>`): the handover's successor and `cell init`'s plan (#277)
 - `proxy_leader.rs`, `replica_node.rs` — the second and third deployments
 
-The map is `crates/paros-core/AGENTS.md`. **A component must not acquire knowledge merely because
+The map is `crates/lib/paros-core/AGENTS.md`. **A component must not acquire knowledge merely because
 the current deployment colocates it**: the proposer builds no message, the acceptor never reads
 the chosen prefix, the replica never sees a ballot tally; the caller hands each the data it
 needs. **Every quorum question crosses `membership/`**: predicates are phase-split
@@ -364,7 +364,7 @@ Depth: module docs of `matchmaking.rs`, `node/matchmaking.rs`, `node/reconfigure
   rejoins**: a trim jump restores the floor, not the promise. The acceptor set heals around it by
   reconfiguration; a wiped matchmaker is replaced by a handover.
 
-Depth: `crates/paros/AGENTS.md`; module docs of `driver/journals.rs`, `driver/system.rs`,
+Depth: `crates/lib/paros/AGENTS.md`; module docs of `driver/journals.rs`, `driver/system.rs`,
 `driver/boot.rs`, `storage/mod.rs`, `journal/mod.rs`, `matchmaker/mod.rs`.
 
 ## Turbulence layers
@@ -427,7 +427,7 @@ Three layers, and nothing crosses them:
   `PLATEAU_SEEDS`, `CHAOS_CAP`, `SETTLE`, `WAIT_SETTLE`) and schedule ceilings
   (`*_ITERATIONS`). Constants a correctness argument depends on (`MAX_TORN_TAIL`) are not tunables.
 
-Depth: the `adding-a-buggify-site` skill, `crates/paros/src/scenario.rs`.
+Depth: the `adding-a-buggify-site` skill, `crates/lib/paros/src/scenario.rs`.
 
 ## Audit, correctness, assertions, spans
 

@@ -1,0 +1,91 @@
+[package]
+name = "paros-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "The site's wasm tools: the Paxos game on paros-core (`paxos`) and the paros playground on moonpool's simulator (`playground`)"
+publish = false
+
+[lib]
+# `cdylib` for the wasm-bindgen bundles the browser loads, `rlib` for the
+# native tests and the playground binary.
+crate-type = ["cdylib", "rlib"]
+
+# Each feature is one wasm tool and one `.wasm` bundle, built alone
+# (`scripts/build-wasm.sh` builds with `--no-default-features --features <tool>`),
+# so a Paxos page never downloads the simulator. Both are on by default so
+# the workspace's native build, clippy and tests cover both tools.
+[features]
+default = ["paxos", "playground"]
+# The Paxos game (#308): `paros-core` driven by hand, and nothing else.
+paxos = ["dep:paros-core", "dep:ts-rs"]
+# The paros playground (#518): `paros` and moonpool's simulator, default
+# features off (no TLS, no exploration, no Tokio).
+playground = [
+  "dep:paros",
+  "dep:moonpool-sim",
+  "dep:moonpool-rpc",
+  "dep:async-trait",
+  "dep:tracing",
+  "dep:tokio-util",
+]
+
+[[bin]]
+name = "paros-playground"
+path = "src/bin/paros-playground.rs"
+required-features = ["playground"]
+
+[[test]]
+name = "paxos_bindings"
+required-features = ["paxos"]
+
+[[test]]
+name = "paxos_levels"
+required-features = ["paxos"]
+
+[[test]]
+name = "paxos_narration"
+required-features = ["paxos"]
+
+[[test]]
+name = "paxos_world"
+required-features = ["paxos"]
+
+[[test]]
+name = "playground_probe"
+required-features = ["playground"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# `paxos`: the sans-IO core alone, with its serde derives.
+paros-core = { workspace = true, default-features = false, features = [
+  "serde",
+], optional = true }
+# `serde-compat` (a default feature) is what makes the generated TypeScript
+# honour the `#[serde(tag = ..)]` / `#[serde(rename_all = ..)]` attributes.
+ts-rs = { version = "12", features = ["serde-compat"], optional = true }
+
+# `playground`: the library alone, with no TLS (rustls and ring are host
+# code): the machines run the shipped `run_machine`, the operator the shipped
+# client. Never `paros-sim` or `parosd`.
+paros = { workspace = true, optional = true }
+# The simulator without its exploration and Tokio features builds for
+# wasm32-unknown-unknown. The pin is the one every paros crate shares.
+moonpool-sim = { workspace = true, optional = true }
+moonpool-rpc = { workspace = true, features = ["prost"], optional = true }
+async-trait = { version = "0.1", optional = true }
+tracing = { version = "0.1", optional = true }
+tokio-util = { version = "0.7", optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# MUST stay exactly 0.2.129: the flake pins `wasm-bindgen-cli` 0.2.129, and the
+# CLI refuses a bundle produced by any other version of the crate.
+wasm-bindgen = "=0.2.129"
+console_error_panic_hook = "0.1"
+
+[lints]
+workspace = true

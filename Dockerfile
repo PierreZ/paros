@@ -10,7 +10,7 @@ ARG RUST_VERSION=1.99.1
 
 FROM rust:${RUST_VERSION}-slim-bookworm AS builder
 ARG RUST_VERSION
-# `crates/paros/build.rs` compiles the wire contract with prost-build.
+# `crates/lib/paros/build.rs` compiles the wire contract with prost-build.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends protobuf-compiler \
  && rm -rf /var/lib/apt/lists/*

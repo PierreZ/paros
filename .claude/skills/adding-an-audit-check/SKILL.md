@@ -1,12 +1,12 @@
 ---
 name: adding-an-audit-check
-description: Add or move a correctness check in paros the doctrine way - an Audit port callback in crates/paros/src/audit.rs reported once where the tracing event is, folded into O(1) state in paros_sim::audit (AuditState, MatchmakerAudit, ClientHistory, ChainState), asserted with moonpool macros (assert_always! with a detail map, assert_sometimes! for outcomes, reach_once! for causes), inside the 2048-slot / 256-bucket budget with stable message strings. Use when a fact a check needs is not visible, when a sometimes never fires, when tempted to read the trace, or when moving an existing assertion.
+description: Add or move a correctness check in paros the doctrine way - an Audit port callback in crates/lib/paros/src/audit.rs reported once where the tracing event is, folded into O(1) state in paros_sim::audit (AuditState, MatchmakerAudit, ClientHistory, ChainState), asserted with moonpool macros (assert_always! with a detail map, assert_sometimes! for outcomes, reach_once! for causes), inside the 2048-slot / 256-bucket budget with stable message strings. Use when a fact a check needs is not visible, when a sometimes never fires, when tempted to read the trace, or when moving an existing assertion.
 ---
 
 # Adding an audit check
 
 Correctness lives in the audit and in the workload's `check()`, never in
-trace scanning. The `Audit` port (`crates/paros/src/audit.rs`, production
+trace scanning. The `Audit` port (`crates/lib/paros/src/audit.rs`, production
 passes `NoAudit`) *reports* every externally meaningful transition, typed,
 once, at the instant it happens; `paros_sim::audit` folds each report into
 incremental state and asserts there. Nothing an `Audit` implementation does
@@ -27,7 +27,7 @@ is emitted**, with the same coordinates (`node`, `from`, `round`, `slot`).
 
 | Fact | Lives in |
 |---|---|
-| protocol safety per transition (promise monotonic across restart, one value per slot, floors, chosen prefix, storage gates) | `crates/paros-sim/src/audit/state.rs` (`AuditState`) |
+| protocol safety per transition (promise monotonic across restart, one value per slot, floors, chosen prefix, storage gates) | `crates/sim/paros-sim/src/audit/state.rs` (`AuditState`) |
 | registry, leader-side matchmaking, GC, generations | `audit/matchmaker.rs` (`MatchmakerAudit`) |
 | client-visible history: linearizability against the journal model | `audit/client.rs` (`ClientHistory`) and `audit/linearizability.rs`, fed by the workload, which alone knows its program order |
 | the application's fold (#186: paros runs no application, the client is it): one command and one state per LSN across clients, each client's fold in increasing LSN order, proposal validity | `ChainState` (`chain.rs`), folded by each client from what it `Read`s (`chain_workload/fold.rs`) and reported through `AuditWorld::fold_applied` (`audit/world.rs`); keep its message strings — they are the old application check's |

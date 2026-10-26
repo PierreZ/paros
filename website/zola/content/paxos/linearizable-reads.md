@@ -163,14 +163,14 @@ is always one a read through this node can already see.
 ## Proven, not asserted
 
 The client is the only party that knows its own program order, so this check lives
-in the workload. `ClientHistory` (`crates/paros-sim/src/audit/client.rs`) records
+in the workload. `ClientHistory` (`crates/sim/paros-sim/src/audit/client.rs`) records
 every operation the client issues. This stage asserted three conditions over that
 history: a committed read observes every write completed before it began,
 committed-read watermarks never move backwards, and a write issued after a
 committed read lands above its watermark. Since the journal API (#205) the history
 is judged whole instead: every attempt at `Write`, `Read`, `SetLeader` and
 `Truncate`, answered or not, is searched for a linearization against the
-sequential model of a journal (`crates/paros-sim/src/audit/linearizability.rs`),
+sequential model of a journal (`crates/sim/paros-sim/src/audit/linearizability.rs`),
 and the three conditions are special cases of what that search refuses. Nothing
 reads a trace back. Every later stage — storage faults, reconfiguration —
 inherits this client's-eye definition of "nothing was lost".

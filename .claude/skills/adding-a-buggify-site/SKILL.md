@@ -43,8 +43,8 @@ resend, resign, hand off, drop a reply, hold a mailbox, stretch a tick):
 5. **A per-seed scenario ingredient is a named location.** When a scenario
    needs the site on together with its other ingredients, use
    `moonpool_buggify::buggify_named!(LABEL, p)` with a `pub const` label in
-   `crates/paros/src/scenario.rs`, and decide it in the scenario's draw in
-   `crates/paros-sim/src/shape.rs` with `moonpool_sim::set_activation(LABEL,
+   `crates/lib/paros/src/scenario.rs`, and decide it in the scenario's draw in
+   `crates/sim/paros-sim/src/shape.rs` with `moonpool_sim::set_activation(LABEL,
    on)` (`WITHHOLD_GC`, `HOLD_JOURNAL`, `LOSE_VERDICTS` are the pattern).
    Never reword a label.
 
@@ -53,8 +53,8 @@ resend, resign, hand off, drop a reply, hold a mailbox, stretch a tick):
 For anything that shapes a run (a count, a window, a capacity, a rate):
 
 - **Workload tunables** live in `ChainConfig::for_timeline`
-  (`crates/paros-sim/src/chain_workload/config.rs`); **per-node driver tunables** in
-  `NodeShape::draw` (`crates/paros-sim/src/shape.rs`), which draws once per
+  (`crates/sim/paros-sim/src/chain_workload/config.rs`); **per-node driver tunables** in
+  `NodeShape::draw` (`crates/sim/paros-sim/src/shape.rs`), which draws once per
   logical node per seed and reuses the shape across restarts; **disk fault
   rates** in the injector's families (`world/injector.rs`); a cut mid-commit is a
   journal store's `hint!` rate, its copy budget in `world/cut.rs`.
@@ -72,7 +72,7 @@ For anything that shapes a run (a count, a window, a capacity, a rate):
   ceiling (`*_ITERATIONS`); constants a correctness argument depends on
   (`MAX_TORN_TAIL`) are not tunables and say so where defined.
 - A new production tunable is **born** as a `DriverTunables` field with a
-  default in `crates/paros/src/driver/config.rs`, then drawn in `NodeShape`.
+  default in `crates/lib/paros/src/driver/config.rs`, then drawn in `NodeShape`.
 
 ## Seams
 

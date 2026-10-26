@@ -1,0 +1,29 @@
+[package]
+name = "paros-wire"
+description = "paros's wire contract: the protobuf messages, their codecs to the core's types, and the RPC method markers"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+documentation = "https://docs.rs/paros-wire"
+
+[dependencies]
+paros-core = { workspace = true, features = ["tracing", "assertions", "serde"] }
+moonpool-rpc = { workspace = true, features = ["prost"] }
+prost = { workspace = true }
+tracing = { workspace = true }
+moonpool-assertions = { workspace = true }
+
+[dev-dependencies]
+futures = { workspace = true, features = ["executor"] }
+moonpool-sim = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros"] }
+
+[build-dependencies]
+prost-build = "0.14"
+
+[lints]
+workspace = true

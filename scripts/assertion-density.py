@@ -18,8 +18,8 @@ Run through Nix:
     nix shell nixpkgs#python3 -c python3 scripts/assertion-density.py
     nix shell nixpkgs#python3 -c python3 scripts/assertion-density.py --min 2 --per-module
 
-With no paths it measures the issue's scope: `crates/paros-core/src` and
-`crates/paros/src/driver`. Exit status is 1 when `--min` is given and a scope
+With no paths it measures the issue's scope: `crates/lib/paros-core/src` and
+`crates/lib/paros/src/driver`. Exit status is 1 when `--min` is given and a scope
 (or, with `--per-module`, any module) averages below it.
 """
 
@@ -31,7 +31,7 @@ import re
 import sys
 from dataclasses import dataclass, field
 
-DEFAULT_SCOPES = ["crates/paros-core/src", "crates/paros/src/driver"]
+DEFAULT_SCOPES = ["crates/lib/paros-core/src", "crates/lib/paros/src/driver"]
 
 ASSERT_RE = re.compile(r"(?<![A-Za-z0-9_])(assert|assert_eq|assert_ne)\s*!")
 CONST_ASSERT_RE = re.compile(r"const\s+_\s*:\s*\(\s*\)\s*=\s*\{?\s*assert\s*!")

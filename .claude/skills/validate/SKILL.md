@@ -17,7 +17,7 @@ Prefix every command with `nix develop --command` (or rely on direnv), in a
 local session and on Claude Code on the web alike. The flake's inputs are
 fetched over git, which the web session's egress policy allows (#727 (flake
 inputs over git)). The dev shell carries everything the gate needs: the pinned
-toolchain, `protobuf` for `crates/paros/build.rs`, `cargo-nextest`,
+toolchain, `protobuf` for `crates/lib/paros/build.rs`, `cargo-nextest`,
 `wasm-bindgen-cli`, `binaryen`, `nodejs_22` and the unwrapped clang for ring's
 wasm32 build. On the web, install Nix first if `nix-store` is missing, exactly
 as the root `AGENTS.md` describes.
@@ -48,7 +48,7 @@ RUN bash -c 'cd website/play && npm ci --no-audit --no-fund && npm run check && 
 RUN cargo xtask sim run-all                  # job: sim — the sancov sweep; see /sim-sweep
 ```
 
-Run the `wasm` job whenever the change touches `crates/paros-wasm`, a
+Run the `wasm` job whenever the change touches `crates/support/paros-wasm`, a
 `paros-core` type its views read, or `website/play/`: a stale binding in
 `website/play/src/generated` fails the diff, so commit the regenerated files.
 Run the `sim-wasm` job whenever the change touches how paros-sim draws (an
@@ -68,7 +68,7 @@ coverage gate that never fired, or convergence timeout. A docs-only change can s
 - **A public `paros-core` function that can panic needs a `# Panics` doc
   section** (pedantic `missing_panics_doc`); hard `assert!` is the house style
   there, so write the section rather than removing the assert.
-- **A nextest sim smoke failure** (`crates/paros-sim/tests/sim.rs`) is a safety-oracle violation or a determinism break, never
+- **A nextest sim smoke failure** (`crates/sim/paros-sim/tests/sim.rs`) is a safety-oracle violation or a determinism break, never
   a flake: replay the seed (`/debug-a-seed`).
 - **A wasm check failure** in `paros-core` usually means a new dependency or a
   `std::time`/`rand` use crept into the core; the core is dependency-free with

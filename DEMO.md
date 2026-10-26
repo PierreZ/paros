@@ -2,7 +2,7 @@
 
 A cell of `parosd` machines you start by hand, write to and read from. This is a demo, not a
 test: nothing in CI runs it (CI only builds the image). The walkthrough that explains what each
-step does is [`crates/parosd/README.md`](crates/parosd/README.md).
+step does is [`crates/bin/parosd/README.md`](crates/bin/parosd/README.md).
 
 No id is fixed: `init` draws the cell's control journals at random, and the tenant coordinator
 draws a journal's id when it creates the journal. A journal is named by its name,
@@ -240,7 +240,7 @@ keys in the universe, so `PAROS_FRONTEND_ROOT_PUBLIC_KEY` is optional.
 - `parosctl` exit codes: `0` success, `3` refused, `4` ambiguous (run it again), `5` no server
   answered.
 - A machine that exits with `78` refuses to start on purpose (amnesia, a changed class, a lost
-  identity): do not restart it blindly; see `crates/parosd/README.md`.
+  identity): do not restart it blindly; see `crates/bin/parosd/README.md`.
 - A restarted container can get a new IP. Its peers find it again at its name: each machine
   advertises its service name (`PAROS_ADVERTISE`, #257), and a peer resolves the name when it
   dials.

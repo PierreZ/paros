@@ -1,15 +1,15 @@
 ---
 name: upstream-to-moonpool
-description: Handle a moonpool limitation paros exposes - decide whether it is reusable simulator infrastructure (open a focused issue in PierreZ/moonpool with downstream evidence, the smallest API asked for, determinism constraints and acceptance criteria, keep paros-side defense in depth) or a paros bug (fix here), and advance the moonpool git pin (one rev on all thirteen moonpool lines across crates/paros-core/Cargo.toml, crates/paros/Cargo.toml, crates/paros-sim/Cargo.toml, crates/parosd/Cargo.toml and crates/paros-wasm/Cargo.toml) once the fix lands and the compatibility gates pass. Also use for any moonpool API question - consult the LLM docs first.
+description: Handle a moonpool limitation paros exposes - decide whether it is reusable simulator infrastructure (open a focused issue in PierreZ/moonpool with downstream evidence, the smallest API asked for, determinism constraints and acceptance criteria, keep paros-side defense in depth) or a paros bug (fix here), and advance the moonpool git pin (one rev on all thirteen moonpool lines across crates/lib/paros-core/Cargo.toml, crates/lib/paros/Cargo.toml, crates/sim/paros-sim/Cargo.toml, crates/bin/parosd/Cargo.toml and crates/support/paros-wasm/Cargo.toml) once the fix lands and the compatibility gates pass. Also use for any moonpool API question - consult the LLM docs first.
 ---
 
 # Upstreaming to moonpool
 
 paros depends on moonpool through a **git pin** (`rev = ...` on
 `moonpool-core`, `moonpool-rpc`, `moonpool-journal` and the `moonpool-sim`
-dev-dependency in `crates/paros/Cargo.toml`, on `moonpool-sim` and
-`moonpool-rpc` in `crates/paros-sim/Cargo.toml`, and on `moonpool-core`
-(with `tokio-providers`) and `moonpool-rpc` in `crates/parosd/Cargo.toml`; one
+dev-dependency in `crates/lib/paros/Cargo.toml`, on `moonpool-sim` and
+`moonpool-rpc` in `crates/sim/paros-sim/Cargo.toml`, and on `moonpool-core`
+(with `tokio-providers`) and `moonpool-rpc` in `crates/bin/parosd/Cargo.toml`; one
 rev, thirteen lines, five manifests). When paros work hits a wall in the simulator, the
 question is whose wall it is.
 

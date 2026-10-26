@@ -60,7 +60,7 @@ The mechanism has a name from the literature: **piggybacking** — attaching ext
 information to a message already being sent, so it travels at no extra cost. A
 `Promise` is never a bare "yes": it carries every value the acceptor accepted with
 the ballot it was accepted at. In paros those ride in `Message::Promise`
-(`crates/paros-core/src/message.rs`), filled by `Acceptor::promise_page`
+(`crates/lib/paros-core/src/message.rs`), filled by `Acceptor::promise_page`
 (`acceptor.rs`). It is also how a node that *missed* a decision catches up: it
 proposes, the chosen value comes back piggybacked, and it is forced to adopt it —
 learning the consensus in the act of trying to overwrite it. That is narrower than
@@ -86,7 +86,7 @@ obliged to re-propose. That split is what
 [`act1/be-the-acceptor`](../../play/#act1/be-the-acceptor) is built around; the "before
 the reply leaves" is where [persist before send](@/paxos/restart-safety.md) bites.
 
-In paros the role is `Acceptor` (`crates/paros-core/src/acceptor.rs`):
+In paros the role is `Acceptor` (`crates/lib/paros-core/src/acceptor.rs`):
 `Acceptor::promised` is the promise, durable as `HardState.max_promised_ballot`
 (`state.rs`); `Acceptor::records` is the log. `Acceptor::prepare` answers the report-
 and-fence question and `Acceptor::admit` the record-a-vote one — both refusing exactly
@@ -98,7 +98,7 @@ safe value.
 
 The simulation will never show two acceptors choosing different values: the audit
 asserts **"at most one value is ever chosen for a slot"** on every transition of
-every seed, in CI (`crates/paros-sim/src/audit/`). What it *will* show is proposers
+every seed, in CI (`crates/sim/paros-sim/src/audit/`). What it *will* show is proposers
 dueling without converging — every node has promised a different high ballot, so no
 ballot wins a promise quorum and nothing is chosen. That is a livelock: annoying,
 never unsafe, and it has a level of its own. Randomized election timeouts cure it

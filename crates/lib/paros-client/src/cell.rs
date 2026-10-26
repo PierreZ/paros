@@ -1,0 +1,786 @@
+//! **Cell operations** (#216, `docs/architecture/03-1-cell-tenant-and-bootstrap.md` §3.1): `cell
+//! add-machine`, an idempotent state machine over the cell tenant's control
+//! journal and the machine it admits, in the shape of the fleet operations
+//! ([`super::fleet`]): each step is one write, decided from what the journal
+//! and the machine hold now, so a crash at any step is answered by running
+//! the same operation again.
+//!
+//! An idle machine never joins a cell on its own. The admin call is the
+//! authority (etcd's `member add`):
+//!
+//! 1. **`Identify`** the machine. Already in this cell (admitted before, or a
+//!    founding member): done. In another cell: refused.
+//! 2. **`RegisterNode`** in the cell control journal, unless the registry
+//!    holds the machine already: its id, address, class, capacity and
+//!    failure domain. The registry is the cell's list of its machines.
+//! 3. **`Admit`** the machine: it records the cell, the control journals and
+//!    the cell's machines this session knows durably, then answers. An
+//!    admitted machine is always a registered one.
+//!
+//! The session writes the cell control journal as the session that last
+//! claimed it with `SetLeader`, under a leader uuid drawn from its seed,
+//! exactly as a fleet operation does (the cell coordinator of #225 takes
+//! these steps over once it exists). It draws no randomness.
+
+use std::collections::BTreeMap;
+use std::time::Duration;
+
+use moonpool_rpc::RpcHandle;
+use paros_core::{LeaderUuid, NodeId};
+use paros_net::runtime::ParosProviders;
+
+use super::Client;
+use super::bootstrap::{self, AdmitOutcome};
+use super::checkpoint::{CheckpointOutcome, CheckpointPolicy, Checkpointer, OpenOutcome};
+use super::fleet::{
+    FleetRefusal, Interrupted, Run, Stage, Step, append, going_round, open, retry, settle,
+};
+use paros_model::address::Address;
+use paros_model::address::Names;
+use paros_model::authz::Denial;
+use paros_model::machine::{Admission, ControlJournals};
+use paros_model::registry::{MaintenanceScope, NodeStanding, Registry, SystemCommand};
+
+/// The most steps one admission takes: a registration and an `Admit`, each
+/// decided afresh, so a run that needs more is going round.
+const MAX_STEPS: usize = 4;
+
+/// What `cell remove-machine` did (#359).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Removal {
+    /// The machine is retired: its `node_id` never comes back.
+    Removed,
+    /// It was retired already.
+    Unchanged,
+    /// The registry holds no machine with that id.
+    Unknown,
+    /// It is not draining: drain it first.
+    NotDraining,
+    /// It is draining, but roles are still booked on it.
+    NotDrained {
+        /// The slots booked on it.
+        slots: u64,
+    },
+}
+
+/// An operator's handle on a cell's control journal, for the cell
+/// operations.
+#[derive(Clone, Debug)]
+pub struct CellSession {
+    journals: ControlJournals,
+    /// Every founding member, by id, in id order: the registry's genesis
+    /// pool and an admission's founders, whether or not the caller reached
+    /// it.
+    members: Vec<NodeId>,
+    /// The founding members the caller knows, with their addresses: some
+    /// of `members`, never another machine.
+    founders: Vec<(NodeId, Address)>,
+    cell: Checkpointer<Registry>,
+    cell_open: bool,
+    /// The `admin` token every `Admit` carries (#245 (Biscuit tokens)):
+    /// empty for a cell coordinator, which holds none.
+    token: Vec<u8>,
+}
+
+impl CellSession {
+    /// A session over the cell `journals` names, writing its control journal
+    /// under leader uuids drawn from `seed`, folding it over the genesis
+    /// pool of `members` — every founding member, as the cell control
+    /// journal names them. `founders` are the founding members the caller
+    /// reached, with their addresses (a machine outside `members` is
+    /// dropped): a founder it did not reach is still a founder. The control journal is never checkpointed here.
+    #[must_use]
+    pub fn new(
+        journals: ControlJournals,
+        members: &[NodeId],
+        founders: Vec<(NodeId, Address)>,
+        seed: u128,
+        policy: CheckpointPolicy,
+    ) -> Self {
+        let (members, founders) = founding(members, founders);
+        let genesis = Registry::new(members.iter().copied());
+        Self {
+            journals,
+            members,
+            founders,
+            cell: Checkpointer::new(journals.cell, seed, genesis, policy),
+            cell_open: false,
+            token: Vec::new(),
+        }
+    }
+
+    /// Send `token`, the operator's `admin` token, with every `Admit`: a
+    /// machine with a pinned root key refuses an admission without it
+    /// (#245 (Biscuit tokens)).
+    #[must_use]
+    pub fn with_token(mut self, token: Vec<u8>) -> Self {
+        self.token = token;
+        self
+    }
+
+    /// A session like [`CellSession::new`] that writes the cell control
+    /// journal under the one leader uuid `uuid`: the cell coordinator's term
+    /// uuid (#240), installed by its first claim.
+    #[must_use]
+    pub fn with_leader(
+        journals: ControlJournals,
+        members: &[NodeId],
+        founders: Vec<(NodeId, Address)>,
+        uuid: LeaderUuid,
+        policy: CheckpointPolicy,
+    ) -> Self {
+        let (members, founders) = founding(members, founders);
+        let genesis = Registry::new(members.iter().copied());
+        Self {
+            journals,
+            members,
+            founders,
+            cell: Checkpointer::with_uuid(journals.cell, uuid, genesis, policy),
+            cell_open: false,
+            token: Vec::new(),
+        }
+    }
+
+    /// Claim the cell control journal under this session's uuid and fold it
+    /// to its tail, unless this session holds it already.
+    ///
+    /// # Errors
+    ///
+    /// The claim or the fold did not end (see [`Interrupted`]).
+    pub async fn open<P: ParosProviders>(
+        &mut self,
+        client: &Client<P>,
+        first: usize,
+    ) -> Result<(), Interrupted> {
+        if !self.cell_open {
+            open(&mut self.cell, client, first).await?;
+            self.cell_open = true;
+        }
+        Ok(())
+    }
+
+    /// [`CellSession::open`], claiming over `old` only (#653 (election term
+    /// to installed leader)): an elected coordinator installs its term only
+    /// over the leader it read before it read its election.
+    ///
+    /// # Errors
+    ///
+    /// The claim found another leader than `old`, or the claim or the fold
+    /// did not end (see [`Interrupted`]).
+    pub async fn open_over<P: ParosProviders>(
+        &mut self,
+        client: &Client<P>,
+        first: usize,
+        old: Option<LeaderUuid>,
+    ) -> Result<(), Interrupted> {
+        if !self.cell_open {
+            let journal = self.journals.cell;
+            match self.cell.open_over(client, first, old).await {
+                OpenOutcome::Open { .. } => {}
+                OpenOutcome::NotClaimed(outcome) => {
+                    return Err(Interrupted::NotClaimed { journal, outcome });
+                }
+                OpenOutcome::Behind(outcome) => {
+                    return Err(Interrupted::Behind { journal, outcome });
+                }
+            }
+            self.cell_open = true;
+        }
+        Ok(())
+    }
+
+    /// The cell's control journals this session writes.
+    #[must_use]
+    pub fn journals(&self) -> ControlJournals {
+        self.journals
+    }
+
+    /// The founding members this session knows, with their addresses.
+    #[must_use]
+    pub fn founders(&self) -> &[(NodeId, Address)] {
+        &self.founders
+    }
+
+    /// Every founding member, by id, in id order.
+    #[must_use]
+    pub fn members(&self) -> &[NodeId] {
+        &self.members
+    }
+
+    /// The cell's control journal as this session last folded it.
+    #[must_use]
+    pub fn registry(&self) -> &Registry {
+        self.cell.state()
+    }
+
+    /// The admission this session hands machine `node`: the cell, its
+    /// control journals, every founding member by id (reached or not: the
+    /// admitted machine's journals derive their matchmaker set from them),
+    /// and every machine of the cell it knows — the founding members it
+    /// reached and every registered machine not retired — by id and
+    /// address. Two ids at one address are a wiped machine's old id
+    /// beside its new one: `node`, the machine this admits, then a founder,
+    /// then the lowest id keeps the address, so every address names one
+    /// machine. `node` answered at `at` just now, so it is listed there,
+    /// and it wins that address even over the wiped founding member it
+    /// replaced (#323: the cell heals around that dead member). This holds
+    /// for a founding member the session did not reach too: it is in no
+    /// book the session holds, but it is still the machine admitted.
+    ///
+    /// # Panics
+    ///
+    /// The founding members are out of id order, which construction rules
+    /// out.
+    #[must_use]
+    pub fn admission(&self, node: NodeId, at: &Address) -> Admission {
+        let founder = |id: NodeId| self.members.contains(&id);
+        let rank = |id: NodeId| (id != node, !founder(id), id);
+        let mut by_addr: BTreeMap<Address, NodeId> = BTreeMap::new();
+        let registry = self.cell.state();
+        // A founding member registered its address (#349): its registered
+        // address replaces the plan's.
+        let founders = paros_model::machine::address_book(&self.founders, registry);
+        let registered = registry
+            .nodes()
+            .filter(|(id, n)| n.standing != NodeStanding::Retired && !founder(*id))
+            .filter_map(|(id, n)| Address::parse(&n.addr).ok().map(|addr| (id, addr)));
+        // `node` is listed once, where it answered: a founding member the
+        // session did not reach is in neither book above.
+        let others = founders
+            .into_iter()
+            .chain(registered)
+            .filter(|(id, _)| *id != node);
+        for (id, addr) in std::iter::once((node, at.clone())).chain(others) {
+            let held = by_addr.entry(addr).or_insert(id);
+            if rank(id) < rank(*held) {
+                *held = id;
+            }
+        }
+        let mut members: Vec<(NodeId, Address)> =
+            by_addr.into_iter().map(|(addr, id)| (id, addr)).collect();
+        members.sort_unstable();
+        members.dedup_by_key(|(id, _)| *id);
+        let admission = Admission {
+            cell: self.journals,
+            members,
+            founders: self.members.clone(),
+        };
+        assert!(
+            admission.founders.windows(2).all(|w| w[0] < w[1]),
+            "an admission's founders are in id order"
+        );
+        admission
+    }
+
+    /// One step of admitting the machine at `target` (#216), dialed through
+    /// `names`. Ends with the machine's id once it answers `Identify` with
+    /// this cell. The registration carries the address the machine
+    /// advertises (#257), which may differ from `target`. It reports
+    /// [`Stage::Admit`] only when the machine recorded the admission on this
+    /// step's `Admit`; a machine already in the cell acks it with nothing
+    /// recorded, and the step ends with no stage.
+    ///
+    /// # Panics
+    ///
+    /// Never on any input: the assertions check that a registration the
+    /// journal took is in the fold, and that the admission names the
+    /// machine it admits.
+    #[tracing::instrument(level = "trace", skip_all, fields(cell = self.journals.cell_id, %target))]
+    pub async fn admit_step<P: ParosProviders>(
+        &mut self,
+        providers: &P,
+        rpc: &RpcHandle<P>,
+        client: &Client<P>,
+        names: &Names,
+        first: usize,
+        target: &Address,
+    ) -> Step<NodeId> {
+        let ControlJournals { cell_id, cell, .. } = self.journals;
+        if cell_id == 0 || !cell.is_set() {
+            return Step::Refused(FleetRefusal::Unset);
+        }
+        let timeout = client.tunables().request_timeout;
+        let Some(identity) = bootstrap::identify(providers, rpc, names, target, timeout).await
+        else {
+            return Step::Interrupted(Interrupted::MachineUnreachable {
+                addr: target.clone(),
+            });
+        };
+        let node = NodeId(identity.node_id);
+        if identity.cell_id == cell_id {
+            return Step::Done {
+                result: node,
+                last: None,
+            };
+        }
+        if identity.cell_id != 0 {
+            return Step::Refused(FleetRefusal::OtherCell {
+                node,
+                cell_id: identity.cell_id,
+            });
+        }
+        let Some((class, locality)) = paros_model::machine::identity_tags(&identity) else {
+            return Step::Refused(FleetRefusal::Unset);
+        };
+        let Ok(advertised) = Address::parse(&identity.addr) else {
+            return Step::Refused(FleetRefusal::Unset);
+        };
+        if !self.cell_open {
+            if let Err(stop) = open(&mut self.cell, client, first).await {
+                return Step::Interrupted(stop);
+            }
+            self.cell_open = true;
+        }
+        match self.cell.state().get(node).map(|n| n.standing) {
+            Some(NodeStanding::Retired) => return Step::Refused(FleetRefusal::Retired { node }),
+            Some(_) => {}
+            None => {
+                let register = SystemCommand::RegisterNode {
+                    id: node,
+                    addr: advertised.to_string(),
+                    class,
+                    capacity: identity.capacity,
+                    locality,
+                    name: identity.name,
+                    incarnation: paros_model::machine::incarnation_from_halves(
+                        identity.incarnation_high,
+                        identity.incarnation_low,
+                    ),
+                    machine_interface: identity.machine_interface,
+                };
+                return match append(&mut self.cell, client, first, register.encode()).await {
+                    Ok(_) => {
+                        assert!(
+                            self.cell.state().get(node).is_some(),
+                            "a registration the journal took is in the fold"
+                        );
+                        // The registration landed: a checkpoint that did
+                        // not closes the session, and the next step opens
+                        // the journal afresh.
+                        let _ = self.checkpoint_if_due(client, first).await;
+                        Step::Advanced(Stage::RegisterMachine)
+                    }
+                    Err(stop) => {
+                        self.cell_open = false;
+                        Step::Interrupted(stop)
+                    }
+                };
+            }
+        }
+        let admission = self.admission(node, &advertised);
+        assert!(
+            admission.members.iter().any(|(id, _)| *id == node),
+            "an admission names the machine it admits"
+        );
+        let token = &self.token;
+        match bootstrap::admit(providers, rpc, names, target, &admission, token, timeout).await {
+            AdmitOutcome::Admitted => {
+                self.record_admission(client, first, node).await;
+                Step::Done {
+                    result: node,
+                    last: Some(Stage::Admit),
+                }
+            }
+            // Admitted between this step's `Identify` and its `Admit`, by
+            // another operator or by this one's earlier `Admit` whose answer
+            // was lost: this step recorded nothing, so it reports no stage.
+            // Only an idle machine checks the token, so the stage it would
+            // report is one a pinned machine refused this token for (#245
+            // (Biscuit tokens); hunt seed 13248167694958944547 on e0e605a).
+            AdmitOutcome::InCell => {
+                self.record_admission(client, first, node).await;
+                Step::Done {
+                    result: node,
+                    last: None,
+                }
+            }
+            AdmitOutcome::Refused(label) => admit_refused(&label, node, target),
+            AdmitOutcome::Unreachable => Step::Interrupted(Interrupted::MachineUnreachable {
+                addr: target.clone(),
+            }),
+        }
+    }
+
+    /// Record that `node` took its `Admit`, at once, so placement may book
+    /// it (#511 (placement books machines that never served)). The
+    /// coordinator's watch writes it when this write does not land: the
+    /// machine is admitted either way.
+    async fn record_admission<P: ParosProviders>(
+        &mut self,
+        client: &Client<P>,
+        first: usize,
+        node: NodeId,
+    ) {
+        assert!(self.cell_open, "an admission is recorded only once open");
+        if self.cell.state().serves(node) {
+            return;
+        }
+        let admitted = SystemCommand::MachineAdmitted { id: node };
+        if self.record(client, first, &admitted).await.is_ok() {
+            assert!(
+                self.cell.state().serves(node),
+                "a recorded admission serves the cell"
+            );
+        }
+    }
+
+    /// Checkpoint the cell control journal and truncate it to the
+    /// checkpoint when the session's policy finds it due (#230, #650), after
+    /// a write landed, as the fleet tenant's owner does. A checkpoint that
+    /// the fold is not ready for writes nothing and keeps the session open.
+    ///
+    /// # Errors
+    ///
+    /// The checkpoint is not known written: the owner's belief is unsure, so
+    /// the session closes and the next step opens the journal afresh.
+    async fn checkpoint_if_due<P: ParosProviders>(
+        &mut self,
+        client: &Client<P>,
+        first: usize,
+    ) -> Result<(), Interrupted> {
+        assert!(self.cell_open, "only an open session checkpoints");
+        if !self.cell.due(client.now()) {
+            return Ok(());
+        }
+        match self.cell.checkpoint(client, first).await {
+            CheckpointOutcome::Checkpointed { .. } => {
+                moonpool_assertions::reachable!(
+                    "cell: an owner checkpoints the cell control journal"
+                );
+                assert!(self.cell_open, "a checkpoint keeps the session open");
+                Ok(())
+            }
+            CheckpointOutcome::NotFolded => Ok(()),
+            CheckpointOutcome::NotWritten(outcome) => {
+                self.cell_open = false;
+                Err(Interrupted::NotWritten {
+                    journal: self.cell.writer().journal(),
+                    outcome,
+                })
+            }
+        }
+    }
+
+    /// Append `command` to the cell control journal as this session's
+    /// writer and fold it, from server `first` on: the cell coordinator's
+    /// own entries (liveness and re-registrations, #211). The session must
+    /// be open; an interrupted write closes it. A due checkpoint follows a
+    /// landed write (#650).
+    ///
+    /// # Errors
+    ///
+    /// The write did not land, or it landed and the checkpoint after it is
+    /// not known written (see [`Interrupted`]). Either way the session is
+    /// closed and the caller writes nothing more on it.
+    ///
+    /// # Panics
+    ///
+    /// If the session is not open (a programmer error).
+    pub async fn record<P: ParosProviders>(
+        &mut self,
+        client: &Client<P>,
+        first: usize,
+        command: &SystemCommand,
+    ) -> Result<(), Interrupted> {
+        assert!(self.cell_open, "a session records only once open");
+        let before = self.cell.folder().next_seq();
+        match append(&mut self.cell, client, first, command.encode()).await {
+            Ok(_) => {
+                assert!(
+                    self.cell.folder().next_seq() > before,
+                    "a recorded entry is in the fold"
+                );
+                self.checkpoint_if_due(client, first).await
+            }
+            Err(stop) => {
+                self.cell_open = false;
+                Err(stop)
+            }
+        }
+    }
+
+    /// `cell drain-machine` (#474 (journals on admitted machines)): mark the
+    /// registered machine `node` draining in the cell control journal,
+    /// unless it already is. The cell coordinator then moves every journal
+    /// off it. Whether this call drained it: the registry refuses to drain
+    /// a founding member.
+    ///
+    /// # Errors
+    ///
+    /// The session did not open, or the write did not land (see
+    /// [`Interrupted`]).
+    pub async fn drain<P: ParosProviders>(
+        &mut self,
+        client: &Client<P>,
+        first: usize,
+        node: NodeId,
+    ) -> Result<bool, Interrupted> {
+        self.open(client, first).await?;
+        let registered = |session: &Self| {
+            session
+                .registry()
+                .get(node)
+                .is_some_and(|n| n.standing == NodeStanding::Registered)
+        };
+        if !registered(self) {
+            return Ok(false);
+        }
+        self.record(client, first, &SystemCommand::DrainNode { id: node })
+            .await?;
+        Ok(!registered(self))
+    }
+
+    /// `machine tag` (#575 (key:value tags)): the registered machine
+    /// `node`'s user tags become `tags`, under the idempotency id
+    /// `request`, unless the registry applied that request already. Whether
+    /// the registry holds the request applied: a machine it does not hold,
+    /// or retired, is refused.
+    ///
+    /// # Errors
+    ///
+    /// The session did not open, or the write did not land (see
+    /// [`Interrupted`]).
+    pub async fn set_machine_tags<P: ParosProviders>(
+        &mut self,
+        client: &Client<P>,
+        first: usize,
+        (node, request): (NodeId, u64),
+        tags: &paros_model::tags::UserTags,
+    ) -> Result<bool, Interrupted> {
+        self.open(client, first).await?;
+        if self.registry().tagged(request) {
+            return Ok(true);
+        }
+        let command = SystemCommand::SetMachineTags {
+            request,
+            id: node,
+            tags: tags.clone(),
+        };
+        self.record(client, first, &command).await?;
+        Ok(self.registry().tagged(request))
+    }
+
+    /// `cell remove-machine` (#359): retire the drained machine `node` from
+    /// the cell for good. The registry tombstones its `node_id`: a machine
+    /// with that id never registers again. Only a machine that is draining
+    /// and holds no slot is removed: every role moved off it.
+    ///
+    /// # Panics
+    ///
+    /// The registry folded a `RetireNode` the session recorded and the
+    /// machine is not retired: a fold bug.
+    ///
+    /// # Errors
+    ///
+    /// The session did not open, or the write did not land (see
+    /// [`Interrupted`]).
+    pub async fn remove<P: ParosProviders>(
+        &mut self,
+        client: &Client<P>,
+        first: usize,
+        node: NodeId,
+    ) -> Result<Removal, Interrupted> {
+        self.open(client, first).await?;
+        let registry = self.registry();
+        match registry.get(node).map(|n| n.standing) {
+            None => return Ok(Removal::Unknown),
+            Some(NodeStanding::Retired) => return Ok(Removal::Unchanged),
+            Some(NodeStanding::Registered) => return Ok(Removal::NotDraining),
+            Some(NodeStanding::Draining) if registry.booked(node) > 0 => {
+                return Ok(Removal::NotDrained {
+                    slots: registry.booked(node),
+                });
+            }
+            Some(NodeStanding::Draining) => {}
+        }
+        self.record(client, first, &SystemCommand::RetireNode { id: node })
+            .await?;
+        let retired = self
+            .registry()
+            .get(node)
+            .is_some_and(|n| n.standing == NodeStanding::Retired);
+        assert!(retired, "a removal recorded retires its machine");
+        Ok(Removal::Removed)
+    }
+
+    /// `cell maintenance` (#359): open a maintenance window of `for_ms`
+    /// milliseconds over `scope`, a machine or a failure domain, or end it
+    /// (`for_ms` 0). The cell coordinator re-places no role of a machine
+    /// it covers while the window is open. Whether the registry took it: a
+    /// machine window names a machine of the pool.
+    ///
+    /// # Panics
+    ///
+    /// The session's fold did not move past the entry it recorded: a fold
+    /// bug.
+    ///
+    /// # Errors
+    ///
+    /// The session did not open, or the write did not land (see
+    /// [`Interrupted`]).
+    pub async fn maintenance<P: ParosProviders>(
+        &mut self,
+        client: &Client<P>,
+        first: usize,
+        scope: MaintenanceScope,
+        for_ms: u64,
+    ) -> Result<bool, Interrupted> {
+        self.open(client, first).await?;
+        if let MaintenanceScope::Machine(id) = &scope
+            && !self.registry().contains(*id)
+        {
+            return Ok(false);
+        }
+        let before = self.position();
+        self.record(
+            client,
+            first,
+            &SystemCommand::Maintenance {
+                scope: scope.clone(),
+                for_ms,
+            },
+        )
+        .await?;
+        assert!(self.position() > before, "a recorded window is in the fold");
+        let open = self
+            .registry()
+            .maintenance()
+            .any(|(s, w)| *s == scope && w.for_ms == for_ms);
+        Ok(open || for_ms == 0)
+    }
+
+    /// Fold the cell control journal to its tail again, while the session
+    /// holds it: another writer, an operator's `cell drain-machine`, appends
+    /// to it between this session's own writes (#474 (journals on admitted
+    /// machines)). Whether the fold reached the tail.
+    pub async fn refresh<P: ParosProviders>(&mut self, client: &Client<P>, first: usize) -> bool {
+        self.cell_open
+            && matches!(
+                self.cell.load(client, first, 0).await,
+                super::checkpoint::LoadOutcome::Loaded { .. }
+            )
+    }
+
+    /// The registry position this session's fold stands at: every entry
+    /// below it is folded.
+    #[must_use]
+    pub fn position(&self) -> u64 {
+        self.cell.folder().next_seq()
+    }
+
+    /// Send `Admit` again to the admitted machine `node` at `target`, with
+    /// the cell's machines this session knows now and the position its fold
+    /// stands at, once, within `timeout` (#505 (stranded admitted machine)).
+    /// The cell coordinator sends it to a machine whose registry fold is
+    /// stuck: every founding member its book names moved or was wiped, and
+    /// it adopts the newer book. Whether the machine acked it.
+    ///
+    /// # Panics
+    ///
+    /// If `node` is a founding member (a programmer error: the coordinator
+    /// sends this only to an admitted machine).
+    pub async fn readmit<P: ParosProviders>(
+        &self,
+        providers: &P,
+        rpc: &RpcHandle<P>,
+        names: &Names,
+        (node, target): (NodeId, &Address),
+        timeout: Duration,
+    ) -> bool {
+        let admission = self.admission(node, target);
+        assert!(
+            admission
+                .members
+                .iter()
+                .any(|(id, addr)| *id == node && addr == target),
+            "an admission sent again names its machine where it answered"
+        );
+        assert!(
+            !self.members.contains(&node),
+            "a founding member is never admitted again"
+        );
+        let position = self.position();
+        matches!(
+            bootstrap::admit_at(
+                providers,
+                rpc,
+                names,
+                target,
+                &admission,
+                &[],
+                position,
+                timeout
+            )
+            .await,
+            AdmitOutcome::Admitted | AdmitOutcome::InCell
+        )
+    }
+
+    /// Whether the session holds the cell control journal open.
+    #[must_use]
+    pub fn is_open(&self) -> bool {
+        self.cell_open
+    }
+
+    /// Admit the machine at `target`, dialed through `names`, to its end (see
+    /// [`CellSession::admit_step`]), taking an interrupted step again for up
+    /// to `patience` past the last written step.
+    // The session, the RPC runtime, the cell's client, the resolver, where
+    // to start, the machine and the patience: each is the caller's.
+    #[allow(clippy::too_many_arguments)]
+    #[tracing::instrument(level = "debug", skip_all, fields(cell = self.journals.cell_id, %target))]
+    pub async fn add_machine<P: ParosProviders>(
+        &mut self,
+        providers: &P,
+        rpc: &RpcHandle<P>,
+        client: &Client<P>,
+        names: &Names,
+        first: usize,
+        target: &Address,
+        patience: Duration,
+    ) -> Run<NodeId> {
+        let mut deadline = client.now() + patience;
+        let mut steps = Vec::new();
+        while steps.len() < MAX_STEPS {
+            let step = self
+                .admit_step(providers, rpc, client, names, first, target)
+                .await;
+            if retry(client, &step, &mut deadline, patience).await {
+                continue;
+            }
+            if let Some(end) = settle(step, &mut steps) {
+                return end;
+            }
+        }
+        going_round(steps)
+    }
+}
+
+/// `members` in id order, once each, and the reached `founders` among
+/// them: a reached machine outside the founding members is no founder.
+fn founding(
+    members: &[NodeId],
+    mut founders: Vec<(NodeId, Address)>,
+) -> (Vec<NodeId>, Vec<(NodeId, Address)>) {
+    let mut members = members.to_vec();
+    members.sort_unstable();
+    members.dedup();
+    founders.retain(|(id, _)| members.contains(id));
+    (members, founders)
+}
+
+/// What a machine's refusal of `Admit` comes to.
+fn admit_refused(label: &str, node: NodeId, target: &Address) -> Step<NodeId> {
+    if let Some(denial) = Denial::of_label(label) {
+        moonpool_assertions::reachable!("admit: a pinned machine refuses an admission's token");
+        return Step::Refused(FleetRefusal::Denied { node, denial });
+    }
+    match label {
+        "other_cell" => Step::Refused(FleetRefusal::OtherCell { node, cell_id: 0 }),
+        "in_cell_init" => Step::Refused(FleetRefusal::InCellInit { node }),
+        "malformed" => Step::Refused(FleetRefusal::Unset),
+        _ => Step::Interrupted(Interrupted::MachineUnreachable {
+            addr: target.clone(),
+        }),
+    }
+}

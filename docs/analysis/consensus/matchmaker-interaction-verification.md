@@ -13,7 +13,7 @@ evidence.
 Method. Each concern is read against the code with citations (a citation is a file and the
 line it held when this note was written; the symbol beside it outlives the line). Where a
 claim can be judged by the sans-IO handover model checker
-(`crates/paros-core/src/matchmaker/handover_model.rs`) it is written there as an assertion
+(`crates/lib/paros-core/src/matchmaker/handover_model.rs`) it is written there as an assertion
 judged after every step, and then shown to *bite*: a mutation of the rule it names must go
 red on the default seeds, and the line that goes red is recorded here. A concern the model
 cannot reach (it has no acceptors and no reboot of the *node's* volatile state) is verified
@@ -34,15 +34,15 @@ it only above `last_member_ballot`, the highest ballot a configuration naming it
 to. That scalar is volatile. Does a reboot open a window in which a node that is still a
 member accepts its own retirement?
 
-**What enforces it.** `ColocatedNode::may_retire` (`crates/paros-core/src/node/gc.rs:254`)
+**What enforces it.** `ColocatedNode::may_retire` (`crates/lib/paros-core/src/node/gc.rs:254`)
 requires four things: matchmakers, not an acceptor of the configuration the node believes
 in force, not the leader, and `watermark > last_member_ballot`. `last_member_ballot` is
-raised by `record_membership` (`crates/paros-core/src/node/helpers.rs:69`) from every
+raised by `record_membership` (`crates/lib/paros-core/src/node/helpers.rs:69`) from every
 assignment to `acceptors_since` — `learn_config`, `try_become_leader`, a handoff install
 (`node/handoff.rs:558`) and the adoption of an effective configuration
 (`node/matchmaking.rs:417`) — and the invariant checker pins that a member's fence is at
 least the ballot its configuration is bound to (`node/invariants.rs:114`). It boots at
-`Ballot::zero()` (`crates/paros-core/src/node/boot.rs:102`), beside the volatile `acceptors`
+`Ballot::zero()` (`crates/lib/paros-core/src/node/boot.rs:102`), beside the volatile `acceptors`
 that regresses to the bootstrap configuration.
 
 **Reading.** The window exists in the code and is exactly this: a node pulled in by a
@@ -60,7 +60,7 @@ became effective.
 has no node reboot of `ColocatedNode` state. The harness aims one retirement in ten at a
 *member* rather than at a retirable acceptor (`chain_workload/reconfigure.rs`, the `aim_at_member`
 coin, with the watermark it just read), and the audit's "gc: a node retires only after an
-effective floor named it retirable" (`crates/paros-sim/src/audit/matchmaker.rs`) is an
+effective floor named it retirable" (`crates/sim/paros-sim/src/audit/matchmaker.rs`) is an
 always-assertion on the retired node against the set the effective floor released.
 
 **The red witness (#165).** CI's coverage-guided sweep on #160 produced the recipe
@@ -105,7 +105,7 @@ the explorer is still the runner most likely to land in the state again.
 ## 2. Registry paging as protocol
 
 **The concern.** A matchmaker's history answer is paged (`REGISTRY_PAGE = 64`,
-`crates/paros-core/src/matchmaker.rs:158`) and the candidate re-asks from a cursor. Paging
+`crates/lib/paros-core/src/matchmaker.rs:158`) and the candidate re-asks from a cursor. Paging
 is protocol, not transport: a page lost, duplicated, reordered, or answered from a registry
 that moved between two pages must never let a campaign close with a hole in `H_b`, and must
 never wedge it.
@@ -113,7 +113,7 @@ never wedge it.
 **What enforces it.** `Matchmaker::page` (`matchmaker.rs:562`) answers at most
 `REGISTRY_PAGE` records from `max(cursor, watermark)` and names the next cursor only when
 the page was full (`matchmaker.rs:439–443`). The candidate's `Matchmaking::accepts`
-(`crates/paros-core/src/matchmaking.rs:238`) folds a page only from a matchmaker it asked,
+(`crates/lib/paros-core/src/matchmaking.rs:238`) folds a page only from a matchmaker it asked,
 at the cursor it owes (`page_next`, `matchmaking.rs:150`), and the fold maxes every reply's
 watermark into the closing one, above which the union is filtered at closure.
 
@@ -175,7 +175,7 @@ one. #134's P1 found that GC pruned its record. Two things must now hold: GC nev
 it, and a handover carries it into the successor generation.
 
 **What enforces it.** `MatchmakerHardState::effective` is a durable monotone scalar
-(`crates/paros-core/src/matchmaker/state.rs:112–121`), folded as a max on every
+(`crates/lib/paros-core/src/matchmaker/state.rs:112–121`), folded as a max on every
 registration and carried in every `Registered` reply; `advance_gc_watermark`
 (`matchmaker.rs:530`) moves the window's floor and leaves the scalar alone; the freeze reply
 carries it (`ReconfigureReply::Stopped { effective }`, `matchmaker/message.rs:316`) and the
@@ -314,7 +314,7 @@ at `handover_model.rs:848` on the default seeds and in the two-finisher case.
 
 **The concern.** #134 and #133 added durability seams on the matchmaker plane
 (`Seam::MatchBeforeSync`, `Seam::MatchAfterSyncBeforeReply` at the time; since #294 the
-two `hint!`s in `crates/paros/src/matchmaker/mod.rs`'s `drain`)
+two `hint!`s in `crates/lib/paros/src/matchmaker/mod.rs`'s `drain`)
 and a torn-batch crash. Every reply a matchmaker sends is a promise about its disk: the
 freeze, the pending bootstrap, the decree promise and vote, the activation, the
 registration. Is each one durable at the seam the reply leaves through?

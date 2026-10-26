@@ -14,7 +14,7 @@
 #   docker compose run --rm parosctl read T/J
 #   docker compose run --rm parosctl bench --tenant bench --journals 4 --clients 8 --duration 60s --ramp 10s
 #
-# The copy-paste demo is DEMO.md; the walkthrough is crates/parosd/README.md.
+# The copy-paste demo is DEMO.md; the walkthrough is crates/bin/parosd/README.md.
 # A machine mints its node id on
 # its first start and waits, configured with no peer; `init` forms the cell over the
 # three nodes it names (`cell init`'s founding members, #277) and claims its control journal. `storage4` and `stateless1` idle until `parosctl cell add-machine` admits them, then wait for placement,

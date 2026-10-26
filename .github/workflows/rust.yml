@@ -53,7 +53,7 @@ jobs:
       - name: Smoke the bench on a local cell
         run: nix develop --command cargo run -p parosd --bin parosctl -- bench --local 3 --duration 5s
 
-  # The teaching examples (`crates/paros-core/examples/`) drive the composable roles
+  # The teaching examples (`crates/lib/paros-core/examples/`) drive the composable roles
   # by hand and assert the property each one teaches, so running them is a test of
   # the public API's shape as much as of the protocol. They are linted under the
   # same pedantic clippy as the crate by the root clippy job's `--all-targets`.

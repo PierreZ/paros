@@ -80,7 +80,7 @@ tally changed when it landed.
 
 **In the code.** `QuorumSystem::Flexible`, `QuorumSystem::cross_intersects`,
 `AcceptorConfig::has_phase1_quorum`, `AcceptorConfig::has_phase2_quorum`
-(`crates/paros-core/src/membership/`); the example
+(`crates/lib/paros-core/src/membership/`); the example
 `paros-core/examples/flexible_quorums.rs`. Paper: Howard, Malkhi and Spiegelman,
 *Flexible Paxos* (`docs/references/papers/flexible-paxos/`). Play it:
 [`act4/flexible-quorums`](../../play/#act4/flexible-quorums).
@@ -650,12 +650,12 @@ as the old one. A formation interrupted between its formats and its commit
 resumes by reading the disk, the rule the simulation's operator follows too.
 
 **In the code.** `LogStorage::formatted_config`, `LogStorage::format`
-(`crates/paros/src/storage/mod.rs`); `BootKind::FirstBoot`,
+(`crates/lib/paros/src/storage/mod.rs`); `BootKind::FirstBoot`,
 `BootKind::ExistingMember`, `BootRefusal::Amnesia`,
-`BootRefusal::ConfigMismatch` (`crates/paros/src/driver/config.rs`);
-`Audit::boot_refused`; `provision_store` (`crates/paros/src/provision.rs`),
-`paros::machine::run_machine` and `MachineRecord` (`crates/paros/src/machine/`)
-and `parosd`'s `Record` (`crates/parosd/src/record.rs`). Play it:
+`BootRefusal::ConfigMismatch` (`crates/lib/paros/src/driver/config.rs`);
+`Audit::boot_refused`; `provision_store` (`crates/lib/paros/src/provision.rs`),
+`paros::machine::run_machine` and `MachineRecord` (`crates/lib/paros/src/machine/`)
+and `parosd`'s `Record` (`crates/bin/parosd/src/record.rs`). Play it:
 [`act4/the-wiped-node`](../../play/#act4/the-wiped-node).
 
 ## Many journals on one process
@@ -694,7 +694,7 @@ board carries what no single journal can see:
   window;
 - a node keeps serving its other journals while one is quarantined.
 
-**In the code.** `run_journals`, `JournalStores` (`crates/paros/src/driver/`,
-`journals.rs`); `PeerMailbox` (`crates/paros/src/driver/transport.rs`);
+**In the code.** `run_journals`, `JournalStores` (`crates/lib/paros/src/driver/`,
+`journals.rs`); `PeerMailbox` (`crates/lib/paros/src/driver/transport.rs`);
 `paros::scenario::HOLD_JOURNAL`, `Audit::journal_held`, `Audit::journal_quarantined`;
-`crates/paros-sim/src/audit/journals.rs`; `paros_sim::shape::journals`.
+`crates/sim/paros-sim/src/audit/journals.rs`; `paros_sim::shape::journals`.

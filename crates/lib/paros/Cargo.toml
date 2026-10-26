@@ -1,0 +1,40 @@
+[package]
+name = "paros"
+description = "Paxos in Rust: the library. One crate a program depends on, with one module per layer (core, model, wire, storage, net, client, roles, coordinator, machine)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+documentation = "https://docs.rs/paros"
+readme = "../../../README.md"
+
+# The facade: each layer is its own crate, so the compiler keeps the layers
+# apart (#722 (three products)), and this crate re-exports each one as a
+# module. Every layer is provider-generic and wasm-safe; the `parosd` crate
+# layers the production providers back on (#206).
+[dependencies]
+paros-core = { workspace = true, features = ["tracing", "assertions", "serde"] }
+paros-wire = { workspace = true }
+paros-model = { workspace = true }
+paros-tunables = { workspace = true }
+paros-storage = { workspace = true }
+paros-net = { workspace = true }
+paros-client = { workspace = true }
+paros-observe = { workspace = true }
+paros-roles = { workspace = true }
+paros-coordinator = { workspace = true }
+paros-machine = { workspace = true }
+
+[features]
+# Session protection for every paros runtime (`paros::net::tls`): TLS 1.3 and
+# mutual TLS through moonpool-rpc's upgrade, and the certificate authority
+# `parosctl tls` and the simulation issue certificates with. Off by default,
+# so the library stays wasm-safe (rustls and ring are host code); `parosd`
+# and `paros-sim` turn it on.
+tls = ["paros-net/tls"]
+
+[lints]
+workspace = true

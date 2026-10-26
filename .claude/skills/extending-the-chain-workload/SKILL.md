@@ -5,7 +5,7 @@ description: Add or change an operation in paros's ChainWorkload (the one main-c
 
 # Extending the chain workload
 
-`ChainWorkload` (`crates/paros-sim/src/chain_workload.rs`; the op ids and
+`ChainWorkload` (`crates/sim/paros-sim/src/chain_workload.rs`; the op ids and
 `ChainConfig` in `chain_workload/config.rs`) is the only
 main-campaign workload: one to three factory-created clients driving a
 chaotic pool through the journal API of #204 (`Write`, `Read`, `Truncate`,
@@ -56,8 +56,8 @@ the same rule.
 ## Calls go through the library client (#221)
 
 The workload drives every call through `paros::client`
-(`crates/paros/src/client/`, see `/working-on-the-client`), as
-`ChainClient = paros::client::Client<SimProviders>` (`crates/paros-sim/src/client.rs`):
+(`crates/lib/paros/src/client/`, see `/working-on-the-client`), as
+`ChainClient = paros::client::Client<SimProviders>` (`crates/sim/paros-sim/src/client.rs`):
 the client the sweep judges is the client `parosctl` ships. Do not
 re-implement a policy loop in the workload.
 
