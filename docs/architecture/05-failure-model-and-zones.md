@@ -87,7 +87,10 @@ store open (boot, restart, the re-open after a quarantine) first drops the clean
 of the store's files (`paros::journal::drop_caches`, `StorageFile::drop_cache`,
 `posix_fadvise(DONTNEED)`, moonpool#361). The open then reads what the device holds. It does
 not sync: a dirty page a failed commit left still reads as written and lands at the next sync
-(#348), and a sync at every open could fail and take the open with it. A storage fault still quarantines its
+(#348), and a sync at every open could fail and take the open with it. A one-sync commit
+(`Durability::Batched`, the matchmaker registry) could still keep a record and lose its entry.
+So when its sync fails, moonpool-journal writes the batch again and syncs again, at most three
+syncs (moonpool#362). The batch is not acknowledged yet, so that rewrite is safe. A storage fault still quarantines its
 journal, not the process. Barrier violations ("sync
 lies") and moonpool's slow-disk extremes run unmasked (decided on 2026-10-06, #176): no moonpool
 profile draws barrier violations, and the slow-disk extremes are a performance knob the mask
