@@ -8,13 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use moonpool_sim::{assert_always, assert_reachable, assert_sometimes, assert_sometimes_all};
-use paros::core::AcceptorConfig;
-use paros::core::Ballot;
-use paros::core::HEARTBEAT_TICKS;
-use paros::core::NodeId;
-use paros::core::Party;
-use paros::core::QuorumSystem;
-use paros::core::Slot;
+use paros::core::{AcceptorConfig, Ballot, HEARTBEAT_TICKS, NodeId, Party, QuorumSystem, Slot};
 
 use super::client::{LinHistory, check_linearizable};
 use super::matchmaker::MatchmakerAudit;

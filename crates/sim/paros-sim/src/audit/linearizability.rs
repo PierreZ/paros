@@ -86,9 +86,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 
-use paros::core::JournalView;
-use paros::core::LeaderUuid;
-use paros::core::WriterMode;
+use paros::core::{JournalView, LeaderUuid, WriterMode};
 
 use crate::workload::chain::splitmix;
 

@@ -36,13 +36,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use moonpool_sim::{StateHandle, assert_always, assert_reachable, assert_sometimes};
-use paros::core::AcceptorConfig;
-use paros::core::JournalId;
-use paros::core::JournalIdentifier;
-use paros::core::NodeId;
-use paros::core::QuorumSystem;
-use paros::core::TenantId;
-use paros::core::WriterMode;
+use paros::core::{
+    AcceptorConfig, JournalId, JournalIdentifier, NodeId, QuorumSystem, TenantId, WriterMode,
+};
 use paros::model::tenant::{RequestOutcome, StoreDurability, TenantEvent, TenantRefusal};
 
 const TENANT_BOARD_KEY: &str = "paros-tenant-board";

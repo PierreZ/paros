@@ -37,12 +37,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use moonpool_sim::{assert_always, assert_reachable, assert_sometimes};
-use paros::core::Command;
-use paros::core::Control;
-use paros::core::JournalView;
-use paros::core::LeaderUuid;
-use paros::core::Outcome;
-use paros::core::WriterMode;
+use paros::core::{Command, Control, JournalView, LeaderUuid, Outcome, WriterMode};
 
 /// The write a slot decided, as the model keeps it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

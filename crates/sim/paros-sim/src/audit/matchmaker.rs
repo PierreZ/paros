@@ -88,32 +88,17 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound;
 use std::sync::{Arc, Mutex};
 
-use moonpool_sim::{assert_always, assert_reachable, assert_sometimes};
-
-use super::state::AuditState;
-use paros::client::{MatchmakersRefusal, RetireRefusal};
-use paros::core::AcceptorConfig;
-use paros::core::Ballot;
-use paros::core::GcAck;
-use paros::core::GcStep;
-use paros::core::JournalId;
-use paros::core::MatchRefusal;
-use paros::core::MatchmakerHardState;
-use paros::core::MatchmakerId;
-use paros::core::MatchmakerPhase;
-use paros::core::MatchmakerSet;
-use paros::core::NodeId;
-use paros::core::PendingBootstrap;
-use paros::core::REGISTRY_PAGE;
-use paros::core::ReconfigureReply;
-use paros::core::ReconfigureResult;
-use paros::core::ReconfigurerStep;
-use paros::core::Registration;
-use paros::core::RegistrationKind;
-use paros::core::Slot;
-use paros::observe::audit::HistoryPage;
-use paros::observe::audit::StorageFaultDecision;
+use moonpool_sim::{TimeProvider, assert_always, assert_reachable, assert_sometimes};
+use paros::core::{
+    AcceptorConfig, Ballot, GcAck, JournalId, MatchRefusal, MatchmakerHardState, MatchmakerId,
+    MatchmakerPhase, MatchmakerSet, NodeId, PendingBootstrap, REGISTRY_PAGE, ReconfigureReply,
+    ReconfigureRequest, Registration, RegistrationKind,
+};
+use paros::observe::audit::{HistoryPage, StorageFaultDecision};
 use paros::roles::node::BootRefusal;
+use paros::storage::StorageError;
+
+use crate::audit::NodeAudit;
 
 /// One write a journal registry's commit carries (#176), reported before
 /// the commit starts ([`MatchmakerAudit::note_in_flight`]): a power cut may
@@ -131,76 +116,76 @@ pub(crate) enum RegistryOp {
 
 /// One matchmaker's folded registry.
 #[derive(Default)]
-struct Registry {
+pub(super) struct Registry {
     /// Durable registrations, exactly as the disk holds them (pruned by GC).
-    registered: BTreeMap<Ballot, Registration>,
+    pub(super) registered: BTreeMap<Ballot, Registration>,
     /// The durable watermark.
-    watermark: Ballot,
+    pub(super) watermark: Ballot,
     /// Pages a `Registered` reply escaped for, keyed by
     /// `(request ballot, page start)`, with the history each first answer
     /// carried (a re-answer of the same page may only shrink it).
-    replied: BTreeMap<(Ballot, Ballot), Vec<(Ballot, Registration)>>,
+    pub(super) replied: BTreeMap<(Ballot, Ballot), Vec<(Ballot, Registration)>>,
     /// Boots observed (1 after the first).
-    boots: u64,
+    pub(super) boots: u64,
     /// The durable generation state last persisted (or recovered):
     /// `(generation, phase)`. `None` until the first fold.
-    generation: Option<(u64, MatchmakerPhase)>,
+    pub(super) generation: Option<(u64, MatchmakerPhase)>,
     /// The highest **reconfiguration** registration this matchmaker ever
     /// made durable — never pruned, so a raised floor cannot hide it.
-    highest_reconfiguration: Option<Ballot>,
+    pub(super) highest_reconfiguration: Option<Ballot>,
     /// The ballot of the durable effective configuration scalar, from the
     /// last scalars this matchmaker persisted.
-    effective: Option<Ballot>,
+    pub(super) effective: Option<Ballot>,
 }
 
 /// One candidate's matchmaking phase for one ballot, as the fold sees it.
 /// One `Registered` reply as sent: the history it names, the watermark it
 /// reports, and the effective configuration it holds durably (which the
 /// history need not still show — GC drops the record, never the scalar).
-type ReplyCopy = (
+pub(super) type ReplyCopy = (
     Vec<(Ballot, Registration)>,
     Ballot,
     Option<(Ballot, AcceptorConfig)>,
 );
 /// A frozen registry as a `Stopped` reply carried it: `(watermark, history)`.
-type FrozenRegistry = (Ballot, Vec<(Ballot, Registration)>);
+pub(super) type FrozenRegistry = (Ballot, Vec<(Ballot, Registration)>);
 
 /// One reconstruction a handover bootstrapped: its watermark and the registry
 /// above it.
-type Reconstruction = (Ballot, BTreeMap<Ballot, Registration>);
+pub(super) type Reconstruction = (Ballot, BTreeMap<Ballot, Registration>);
 
 #[derive(Default)]
-struct Campaign {
+pub(super) struct Campaign {
     /// `C_b`, the configuration the campaign registers.
-    config: Option<AcceptorConfig>,
+    pub(super) config: Option<AcceptorConfig>,
     /// The `Registered` replies the matchmakers sent this candidate for this
     /// ballot: `matchmaker -> [(history, watermark)]`, every copy in send
     /// order (a re-sent request is answered again, possibly from a registry
     /// a floor was raised on in between). What the candidate may have
     /// received; it folds whichever copy reaches it first.
-    replies: BTreeMap<u64, Vec<ReplyCopy>>,
+    pub(super) replies: BTreeMap<u64, Vec<ReplyCopy>>,
     /// The floor proven effective at a matchmaker quorum when the campaign
     /// opened: every reply it can fold was sent after that, so quorum
     /// intersection puts the floor into the watermark it uses.
-    floor_at_start: Ballot,
+    pub(super) floor_at_start: Ballot,
     /// The matchmakers whose replies the candidate reported folding.
-    registered_by: BTreeSet<u64>,
+    pub(super) registered_by: BTreeSet<u64>,
     /// Per matchmaker, the copies the candidate *actually* folded — each
     /// named by watermark and history digest, one entry per page of a paged
     /// answer. The union and the maximum watermark a completion claims are
     /// re-derived from exactly these, never from a search over the copies
     /// the matchmakers sent.
-    folded: BTreeMap<u64, Vec<ReplyCopy>>,
+    pub(super) folded: BTreeMap<u64, Vec<ReplyCopy>>,
     /// A refusal was folded: the campaign is dead.
-    refused: bool,
+    pub(super) refused: bool,
     /// The matchmaking closed with a quorum; Phase 1 is licensed.
-    completed: bool,
+    pub(super) completed: bool,
     /// What the campaign registers. A `RegistrationKind::Reconfiguration`
     /// campaign's registration *is* the next effective configuration, so the
     /// stale-belief rule does not apply to it.
-    kind: RegistrationKind,
+    pub(super) kind: RegistrationKind,
     /// The matchmaker generation the campaign addressed.
-    generation: u64,
+    pub(super) generation: u64,
     /// The effective configuration when the campaign opened, from the
     /// audit's own never-pruned ledger ([`MatchmakerAudit::effective_at`]):
     /// the highest-ballot reconfiguration registration below this ballot
@@ -208,16 +193,16 @@ struct Campaign {
     /// Every reply this campaign can fold was sent after that, so quorum
     /// intersection hands the record to it — an ordinary campaign that
     /// completes must have registered exactly this configuration.
-    effective_at_start: Option<(Ballot, AcceptorConfig)>,
+    pub(super) effective_at_start: Option<(Ballot, AcceptorConfig)>,
 }
 
 /// One open membership probe (#173).
-struct OpenProbe {
+pub(super) struct OpenProbe {
     /// The effective configuration a quorum of the probed generation already
     /// held durably when it opened: what its answers cannot miss.
-    held: Option<(Ballot, AcceptorConfig)>,
+    pub(super) held: Option<(Ballot, AcceptorConfig)>,
     /// The generation it asked: whose quorum must answer before it closes.
-    generation: u64,
+    pub(super) generation: u64,
 }
 
 /// The fold and the flag set (independent sticky bits per gate).
@@ -231,39 +216,39 @@ pub(super) struct MatchmakerAudit {
     /// `None` only on an audit built outside a world (a unit test), which
     /// judges the unset journal.
     pub(super) journal: Option<JournalId>,
-    registries: BTreeMap<u64, Registry>,
+    pub(super) registries: BTreeMap<u64, Registry>,
     /// Every `(matchmaker, ballot) -> configuration` ever folded, **never**
     /// pruned: the write-once ledger a GC'd-then-reused ballot would trip.
-    ever: BTreeMap<(u64, Ballot), Registration>,
+    pub(super) ever: BTreeMap<(u64, Ballot), Registration>,
     /// The **reconfiguration** half of that ledger, indexed the way the
     /// effective-configuration question asks it: per ballot, the
     /// configuration a flagged registration named and every matchmaker that
     /// ever held it durably. Never pruned — GC drops the record from a
     /// matchmaker's disk, but the fact that a quorum once held it is what
     /// makes the configuration effective forever after.
-    reconfigurations: BTreeMap<Ballot, (AcceptorConfig, BTreeSet<u64>)>,
+    pub(super) reconfigurations: BTreeMap<Ballot, (AcceptorConfig, BTreeSet<u64>)>,
     /// Every leadership won, by its ballot, with the configuration it ran:
     /// a reconfiguration below a won leadership under another configuration
     /// was refused as stale by every matchmaker that registered the
     /// leadership, so a minority holds it and no campaign need adopt it
     /// (`ColocatedNode::probe_floor`, #278).
-    won: BTreeMap<Ballot, AcceptorConfig>,
+    pub(super) won: BTreeMap<Ballot, AcceptorConfig>,
     /// Every candidate's matchmaking phase, keyed by `(node, ballot)`.
-    campaigns: BTreeMap<(u64, Ballot), Campaign>,
+    pub(super) campaigns: BTreeMap<(u64, Ballot), Campaign>,
     /// Every open membership probe (#173), keyed by `(node, tag)`.
-    probes: BTreeMap<(u64, Ballot), OpenProbe>,
+    pub(super) probes: BTreeMap<(u64, Ballot), OpenProbe>,
     /// Nodes whose last membership probe closed on a heard reconfiguration
     /// that leaves them outside: their election clock re-probes (#270).
-    probed_outside: BTreeSet<u64>,
+    pub(super) probed_outside: BTreeSet<u64>,
     /// Per matchmaker generation, the configuration each **completed**
     /// campaign registered, by ballot — the reconstruction-completeness check
     /// reads exactly this, and reading it here keeps that check proportional
     /// to the generation's own campaigns instead of every campaign the run
     /// ever opened (campaigns are never pruned: the write-once ledger is what
     /// a reused ballot would trip).
-    completed_by_generation: BTreeMap<u64, BTreeMap<Ballot, Option<AcceptorConfig>>>,
+    pub(super) completed_by_generation: BTreeMap<u64, BTreeMap<Ballot, Option<AcceptorConfig>>>,
     /// The bootstrap matchmaker set (generation 0), from the boot reports.
-    bootstrap_set: Option<Vec<u64>>,
+    pub(super) bootstrap_set: Option<Vec<u64>>,
     /// The authoritative members of every generation seen (#125,
     /// invariant 1): generation 0 is the bootstrap set, each later one the
     /// value the successor decree chose. Shared by every journal of the
@@ -272,7 +257,7 @@ pub(super) struct MatchmakerAudit {
     pub(super) sets: TenantSets,
     /// Matchmakers the library refused to boot on a wiped registry (#183):
     /// each stays down for the run, and a handover replaces it.
-    refused: BTreeSet<u64>,
+    pub(super) refused: BTreeSet<u64>,
     /// Per `(node, generation)`: the `Stopped` replies the reconfigurer
     /// folded, by matchmaker — the exact frozen registries its
     /// reconstruction is the union of. Snapshotted at the fold: a matchmaker
@@ -293,16 +278,16 @@ pub(super) struct MatchmakerAudit {
     /// spare it.
     pub(super) thin: crate::world::scenarios::thin_sets::ThinSets,
     /// Refusals folded, by kind (diagnostics only).
-    refusal_counts: BTreeMap<&'static str, u64>,
+    pub(super) refusal_counts: BTreeMap<&'static str, u64>,
     /// Per node: handovers started, abandoned, and the last step folded
     /// (diagnostics only).
-    reconfigurer_trace: BTreeMap<u64, (u64, u64, String)>,
+    pub(super) reconfigurer_trace: BTreeMap<u64, (u64, u64, String)>,
     /// Per matchmaker: the last scalars persisted, summarized (diagnostics).
-    scalars_note: BTreeMap<u64, String>,
-    reconfigurer_aborted: bool,
-    reconfigurer_backed_off: bool,
-    decree_checked: bool,
-    activation_checked: bool,
+    pub(super) scalars_note: BTreeMap<u64, String>,
+    pub(super) reconfigurer_aborted: bool,
+    pub(super) reconfigurer_backed_off: bool,
+    pub(super) decree_checked: bool,
+    pub(super) activation_checked: bool,
     /// Per proposed `(generation, members)`: the matchmakers that durably
     /// hold its bootstrap, reported at its persist or read back at a boot
     /// (`recovered`). Shared by every journal of the tenant (#501
@@ -316,11 +301,11 @@ pub(super) struct MatchmakerAudit {
     /// generation too, because a reconfigurer holds no durable state and its
     /// rounds start over with every handover — a ballot alone names one value
     /// only *within* the generation it was voted in.
-    decree_proposals: BTreeMap<(u64, Ballot), Vec<u64>>,
+    pub(super) decree_proposals: BTreeMap<(u64, Ballot), Vec<u64>>,
     /// Per `(generation, decree ballot)`: the matchmakers that answered
     /// `Accepted` — the Phase-2 votes, counted from the replies themselves
     /// rather than from any reconfigurer's own tally.
-    decree_voters: BTreeMap<(u64, Ballot), BTreeSet<u64>>,
+    pub(super) decree_voters: BTreeMap<(u64, Ballot), BTreeSet<u64>>,
     /// Per proposed `(generation, members)`, per journal: the reconstructions
     /// bootstrapped for it, as `(watermark, history)`. More than one
     /// reconfigurer may bootstrap the same members from a different stop
@@ -330,88 +315,88 @@ pub(super) struct MatchmakerAudit {
     /// the journals its own node hosts.
     pub(super) bootstrap_histories: TenantReconstructions,
     /// The highest GC floor proven effective at a matchmaker quorum.
-    effective_floor: Ballot,
+    pub(super) effective_floor: Ballot,
     /// Nodes an effective floor named retirable.
-    retired_by_gc: BTreeSet<u64>,
+    pub(super) retired_by_gc: BTreeSet<u64>,
     /// `(node, watermark)` GC requests whose licence was judged (once each).
-    gc_judged: BTreeSet<(u64, Ballot)>,
+    pub(super) gc_judged: BTreeSet<(u64, Ballot)>,
     /// Per `(leader, acked watermark)`: the matchmakers that answered a GC
     /// request holding that floor. The **reported** acks, not a re-derivation
     /// from the registries' current watermarks: those are monotone, so
     /// re-deriving them can only ever hide a floor called effective too early.
-    gc_acks: BTreeMap<(u64, Ballot), BTreeSet<u64>>,
-    deployed: bool,
-    registered_any: bool,
-    history_nonempty: bool,
-    refused_stale: bool,
-    refused_below_watermark: bool,
-    duplicate_answered: bool,
-    watermark_raised: bool,
-    recovered_after_restart: bool,
+    pub(super) gc_acks: BTreeMap<(u64, Ballot), BTreeSet<u64>>,
+    pub(super) deployed: bool,
+    pub(super) registered_any: bool,
+    pub(super) history_nonempty: bool,
+    pub(super) refused_stale: bool,
+    pub(super) refused_below_watermark: bool,
+    pub(super) duplicate_answered: bool,
+    pub(super) watermark_raised: bool,
+    pub(super) recovered_after_restart: bool,
     // --- the leader-side phase (#120) ---
-    campaign_opened: bool,
-    campaign_completed: bool,
-    campaign_refused: bool,
-    clock_reasked: bool,
-    campaign_stale: bool,
-    probe_rejoined: bool,
-    reprobe_rejoined: bool,
-    late_answer_moved: bool,
-    campaign_kept_newer_fact: bool,
-    ledger_agreement_checked: bool,
+    pub(super) campaign_opened: bool,
+    pub(super) campaign_completed: bool,
+    pub(super) campaign_refused: bool,
+    pub(super) clock_reasked: bool,
+    pub(super) campaign_stale: bool,
+    pub(super) probe_rejoined: bool,
+    pub(super) reprobe_rejoined: bool,
+    pub(super) late_answer_moved: bool,
+    pub(super) campaign_kept_newer_fact: bool,
+    pub(super) ledger_agreement_checked: bool,
     /// Every configuration some completed campaign or started reconfiguration
     /// put on the wire — the only sources a candidate may learn a belief from
     /// (a leader's `Prepare`, `Heartbeat` or `Relinquish`), beside the
     /// bootstrap.
-    wire_configs: BTreeSet<AcceptorConfig>,
+    pub(super) wire_configs: BTreeSet<AcceptorConfig>,
     /// The bootstrap configuration, from the boot reports.
-    bootstrap: Option<AcceptorConfig>,
+    pub(super) bootstrap: Option<AcceptorConfig>,
     /// Per node: the highest round a `Stale` refusal named to it, which its
     /// next campaign must open strictly above.
-    refused_floor: BTreeMap<u64, u64>,
-    campaign_empty_history: bool,
-    answer_paged: bool,
-    campaign_union_several: bool,
-    campaign_disagreeing_histories: bool,
-    request_resent: bool,
-    reconfiguration_opened: bool,
+    pub(super) refused_floor: BTreeMap<u64, u64>,
+    pub(super) campaign_empty_history: bool,
+    pub(super) answer_paged: bool,
+    pub(super) campaign_union_several: bool,
+    pub(super) campaign_disagreeing_histories: bool,
+    pub(super) request_resent: bool,
+    pub(super) reconfiguration_opened: bool,
     // --- garbage collection (#123) ---
-    gc_requested: bool,
-    gc_effective: bool,
-    gc_retired_any: bool,
-    gc_refused: bool,
-    retire_accepted: bool,
-    retire_refused: bool,
-    node_retired: bool,
+    pub(super) gc_requested: bool,
+    pub(super) gc_effective: bool,
+    pub(super) gc_retired_any: bool,
+    pub(super) gc_refused: bool,
+    pub(super) retire_accepted: bool,
+    pub(super) retire_refused: bool,
+    pub(super) node_retired: bool,
     // --- generations (#125) ---
-    refused_stopped: bool,
-    refused_stopped_with_successor: bool,
-    refused_generation: bool,
-    refused_inactive: bool,
-    set_learned: bool,
-    reconfigurer_started_flag: bool,
-    reconfigurer_finishing: bool,
-    reconfigurer_bootstrapping: bool,
-    reconfigurer_deciding: bool,
-    reconfigurer_adopted: bool,
-    reconfigurer_preempted: bool,
-    reconfigurer_chosen: bool,
-    reconfigurer_done: bool,
+    pub(super) refused_stopped: bool,
+    pub(super) refused_stopped_with_successor: bool,
+    pub(super) refused_generation: bool,
+    pub(super) refused_inactive: bool,
+    pub(super) set_learned: bool,
+    pub(super) reconfigurer_started_flag: bool,
+    pub(super) reconfigurer_finishing: bool,
+    pub(super) reconfigurer_bootstrapping: bool,
+    pub(super) reconfigurer_deciding: bool,
+    pub(super) reconfigurer_adopted: bool,
+    pub(super) reconfigurer_preempted: bool,
+    pub(super) reconfigurer_chosen: bool,
+    pub(super) reconfigurer_done: bool,
     /// Per journal-backed matchmaker: the writes of the commit it has in
     /// flight, until the driver reports them or the next boot judges them.
-    in_flight: BTreeMap<u64, Vec<RegistryOp>>,
-    reconfigurer_superseded: bool,
-    matchmaker_frozen: bool,
-    matchmaker_bootstrapped_flag: bool,
-    matchmaker_activated_flag: bool,
-    matchmaker_departed: bool,
-    matchmaker_refused_step: bool,
-    matchmaker_lost: bool,
-    amnesia_refused: bool,
-    storage_fault: bool,
-    successor_republished: bool,
-    reconstruction_checked: bool,
-    handover_with_prior_registrations: bool,
+    pub(super) in_flight: BTreeMap<u64, Vec<RegistryOp>>,
+    pub(super) reconfigurer_superseded: bool,
+    pub(super) matchmaker_frozen: bool,
+    pub(super) matchmaker_bootstrapped_flag: bool,
+    pub(super) matchmaker_activated_flag: bool,
+    pub(super) matchmaker_departed: bool,
+    pub(super) matchmaker_refused_step: bool,
+    pub(super) matchmaker_lost: bool,
+    pub(super) amnesia_refused: bool,
+    pub(super) storage_fault: bool,
+    pub(super) successor_republished: bool,
+    pub(super) reconstruction_checked: bool,
+    pub(super) handover_with_prior_registrations: bool,
 }
 
 /// The union of every distinct configuration the registering replies name
@@ -431,7 +416,7 @@ pub(super) struct MatchmakerAudit {
 ///
 /// Returns the distinct ballot sequences the folded histories had, for the
 /// "histories differ between matchmakers" gate.
-fn check_folded_union(
+pub(super) fn check_folded_union(
     campaign: &Campaign,
     node: NodeId,
     ballot: Ballot,
@@ -474,7 +459,7 @@ fn check_folded_union(
 /// missing (under-reporting), nothing foreign — it starts at or above the
 /// durable watermark, and the continuation cursor is set exactly when the
 /// window did not fit.
-fn check_page_window(
+pub(super) fn check_page_window(
     matchmaker: MatchmakerId,
     ballot: Ballot,
     entry: &Registry,
@@ -532,7 +517,7 @@ fn check_page_window(
 /// leaves the scalar as the only witness, so a check that read the
 /// histories alone called a correct campaign a violation (hunt seed
 /// 7700272418432384839).
-fn folded_effective(campaign: &Campaign) -> Option<(Ballot, AcceptorConfig)> {
+pub(super) fn folded_effective(campaign: &Campaign) -> Option<(Ballot, AcceptorConfig)> {
     let shown = campaign
         .folded
         .values()
@@ -563,7 +548,7 @@ fn folded_effective(campaign: &Campaign) -> Option<(Ballot, AcceptorConfig)> {
 /// The digest of one history copy, computed exactly as the driver computes
 /// the one it reports ([`paros::roles::node::registration_history_hash`]) — the two must
 /// agree or the point check below could never match.
-fn history_digest(history: &[(Ballot, Registration)]) -> u64 {
+pub(super) fn history_digest(history: &[(Ballot, Registration)]) -> u64 {
     paros::roles::node::registration_history_hash(history.iter().map(|(ballot, r)| (ballot, r)))
 }
 
@@ -572,7 +557,7 @@ fn history_digest(history: &[(Ballot, Registration)]) -> u64 {
 /// or a scalar write (a decree vote) that left the phase untouched — by
 /// bootstrap membership, so a bootstrap member is active for generation 0
 /// and a spare is inactive.
-fn serves_generation(
+pub(super) fn serves_generation(
     folded: Option<(u64, MatchmakerPhase)>,
     generation: u64,
     bootstrap_member: bool,
@@ -586,7 +571,7 @@ fn serves_generation(
 
 /// The round of the first history entry that disagrees with what *any*
 /// matchmaker ever durably registered for that ballot, if one does.
-fn ledger_disagreement<'a>(
+pub(super) fn ledger_disagreement<'a>(
     ever: &BTreeMap<(u64, Ballot), Registration>,
     history: impl Iterator<Item = (&'a Ballot, &'a Registration)>,
 ) -> Option<u64> {
@@ -612,7 +597,7 @@ fn ledger_disagreement<'a>(
 /// existed the record *was* the only witness, an ordinary leader's GC erased
 /// it, and a stale candidate was elected under a superseded configuration
 /// (review finding P1).
-fn check_effective_survives(matchmaker: MatchmakerId, entry: &Registry) {
+pub(super) fn check_effective_survives(matchmaker: MatchmakerId, entry: &Registry) {
     let Some(highest) = entry.highest_reconfiguration else {
         return;
     };
@@ -629,7 +614,7 @@ fn check_effective_survives(matchmaker: MatchmakerId, entry: &Registry) {
 }
 
 /// A phase, for the detail maps.
-fn phase_name(phase: MatchmakerPhase) -> &'static str {
+pub(super) fn phase_name(phase: MatchmakerPhase) -> &'static str {
     match phase {
         MatchmakerPhase::Fresh => "fresh",
         MatchmakerPhase::Inactive => "inactive",
@@ -638,7 +623,7 @@ fn phase_name(phase: MatchmakerPhase) -> &'static str {
     }
 }
 
-fn union_above<'a>(
+pub(super) fn union_above<'a>(
     replies: &[&'a ReplyCopy],
     watermark: Ballot,
 ) -> (Vec<&'a AcceptorConfig>, BTreeSet<Vec<Ballot>>) {
@@ -663,25 +648,25 @@ fn union_above<'a>(
 pub(crate) struct TenantSets(Arc<Mutex<BTreeMap<u64, Vec<u64>>>>);
 
 impl TenantSets {
-    fn lock(&self) -> std::sync::MutexGuard<'_, BTreeMap<u64, Vec<u64>>> {
+    pub(super) fn lock(&self) -> std::sync::MutexGuard<'_, BTreeMap<u64, Vec<u64>>> {
         self.0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// `generation`'s members, when known.
-    fn get(&self, generation: u64) -> Option<Vec<u64>> {
+    pub(super) fn get(&self, generation: u64) -> Option<Vec<u64>> {
         self.lock().get(&generation).cloned()
     }
 
     /// Bind `generation` to `members` unless it is bound: the members it
     /// is bound to.
-    fn bind_first(&self, generation: u64, members: Vec<u64>) -> Vec<u64> {
+    pub(super) fn bind_first(&self, generation: u64, members: Vec<u64>) -> Vec<u64> {
         self.lock().entry(generation).or_insert(members).clone()
     }
 
     /// Every generation known.
-    fn generations(&self) -> Vec<u64> {
+    pub(super) fn generations(&self) -> Vec<u64> {
         self.lock().keys().copied().collect()
     }
 }
@@ -693,27 +678,27 @@ impl TenantSets {
 pub(crate) struct TenantBootstraps(Arc<Mutex<Holders>>);
 
 /// What [`TenantBootstraps`] holds.
-type Holders = BTreeMap<(u64, Vec<u64>), BTreeSet<u64>>;
+pub(super) type Holders = BTreeMap<(u64, Vec<u64>), BTreeSet<u64>>;
 
 impl TenantBootstraps {
-    fn lock(&self) -> std::sync::MutexGuard<'_, Holders> {
+    pub(super) fn lock(&self) -> std::sync::MutexGuard<'_, Holders> {
         self.0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// `matchmaker` durably holds the bootstrap of `(generation, members)`.
-    fn hold(&self, proposed: (u64, Vec<u64>), matchmaker: u64) {
+    pub(super) fn hold(&self, proposed: (u64, Vec<u64>), matchmaker: u64) {
         self.lock().entry(proposed).or_default().insert(matchmaker);
     }
 
     /// How many matchmakers durably hold the bootstrap of `proposed`.
-    fn holders(&self, proposed: &(u64, Vec<u64>)) -> usize {
+    pub(super) fn holders(&self, proposed: &(u64, Vec<u64>)) -> usize {
         self.lock().get(proposed).map_or(0, BTreeSet::len)
     }
 
     /// Whether `matchmaker` durably holds the bootstrap of `proposed`.
-    fn holds(&self, proposed: &(u64, Vec<u64>), matchmaker: u64) -> bool {
+    pub(super) fn holds(&self, proposed: &(u64, Vec<u64>), matchmaker: u64) -> bool {
         self.lock()
             .get(proposed)
             .is_some_and(|h| h.contains(&matchmaker))
@@ -729,17 +714,23 @@ impl TenantBootstraps {
 pub(crate) struct TenantReconstructions(Arc<Mutex<Reconstructions>>);
 
 /// What [`TenantReconstructions`] holds.
-type Reconstructions = BTreeMap<(u64, Vec<u64>), BTreeMap<JournalId, Vec<Reconstruction>>>;
+pub(super) type Reconstructions =
+    BTreeMap<(u64, Vec<u64>), BTreeMap<JournalId, Vec<Reconstruction>>>;
 
 impl TenantReconstructions {
-    fn lock(&self) -> std::sync::MutexGuard<'_, Reconstructions> {
+    pub(super) fn lock(&self) -> std::sync::MutexGuard<'_, Reconstructions> {
         self.0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// `candidate` was bootstrapped for `journal` onto `proposed`.
-    fn note(&self, proposed: (u64, Vec<u64>), journal: JournalId, candidate: Reconstruction) {
+    pub(super) fn note(
+        &self,
+        proposed: (u64, Vec<u64>),
+        journal: JournalId,
+        candidate: Reconstruction,
+    ) {
         let mut all = self.lock();
         let candidates = all.entry(proposed).or_default().entry(journal).or_default();
         if !candidates.contains(&candidate) {
@@ -749,7 +740,7 @@ impl TenantReconstructions {
 
     /// The reconstructions of `journal` onto `proposed`, once any
     /// reconstruction onto it is known; a journal it left out reads as blank.
-    fn candidates(
+    pub(super) fn candidates(
         &self,
         proposed: &(u64, Vec<u64>),
         journal: JournalId,
@@ -771,17 +762,18 @@ pub(crate) struct TenantStops(Arc<Mutex<StopAcks>>);
 
 /// What [`TenantStops`] holds: per matchmaker, its frozen registries and
 /// whether its report is whole (a report is paged, #439).
-type StopAcks = BTreeMap<(u64, u64), BTreeMap<u64, (BTreeMap<JournalId, FrozenRegistry>, bool)>>;
+pub(super) type StopAcks =
+    BTreeMap<(u64, u64), BTreeMap<u64, (BTreeMap<JournalId, FrozenRegistry>, bool)>>;
 
 impl TenantStops {
-    fn lock(&self) -> std::sync::MutexGuard<'_, StopAcks> {
+    pub(super) fn lock(&self) -> std::sync::MutexGuard<'_, StopAcks> {
         self.0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Forget what `node`'s handover of `generation` folded.
-    fn clear(&self, node: u64, generation: u64) {
+    pub(super) fn clear(&self, node: u64, generation: u64) {
         self.lock().remove(&(node, generation));
     }
 
@@ -789,7 +781,7 @@ impl TenantStops {
     /// `generation` folded it (every journal's port folds the same reply).
     /// A first page starts the report; a later one extends it, and `whole`
     /// marks its last page (#439).
-    fn insert(
+    pub(super) fn insert(
         &self,
         (node, generation, matchmaker): (u64, u64, u64),
         frozen: BTreeMap<JournalId, FrozenRegistry>,
@@ -811,7 +803,7 @@ impl TenantStops {
 
     /// `journal`'s piece of every ack `node`'s handover of `generation`
     /// folded (a matchmaker that held nothing for it reads blank).
-    fn folded(
+    pub(super) fn folded(
         &self,
         node: u64,
         generation: u64,
@@ -858,7 +850,7 @@ impl MatchmakerAudit {
 
     /// The matchmaker quorum of `generation`'s set (the bootstrap set until
     /// a generation is known).
-    fn quorum(&self, generation: u64) -> usize {
+    pub(super) fn quorum(&self, generation: u64) -> usize {
         self.sets
             .get(generation)
             .as_ref()
@@ -870,7 +862,7 @@ impl MatchmakerAudit {
 
     /// Whether `matchmaker` is a member of `generation`'s set (unknown
     /// generations count nobody).
-    fn member_of(&self, generation: u64, matchmaker: u64) -> bool {
+    pub(super) fn member_of(&self, generation: u64, matchmaker: u64) -> bool {
         self.sets
             .get(generation)
             .is_some_and(|m| m.contains(&matchmaker))
@@ -878,7 +870,7 @@ impl MatchmakerAudit {
 
     /// Fold one durable registration into the reconfiguration ledger: a
     /// belief is not a fact and never enters it.
-    fn note_reconfiguration(
+    pub(super) fn note_reconfiguration(
         &mut self,
         matchmaker: u64,
         ballot: Ballot,
@@ -902,7 +894,11 @@ impl MatchmakerAudit {
     /// campaign's histories — and it stays effective whether or not the
     /// record is still on any disk. `None` when no flagged registration ever
     /// reached a quorum of that generation.
-    fn effective_at(&self, generation: u64, below: Ballot) -> Option<(Ballot, AcceptorConfig)> {
+    pub(super) fn effective_at(
+        &self,
+        generation: u64,
+        below: Ballot,
+    ) -> Option<(Ballot, AcceptorConfig)> {
         let quorum = self.quorum(generation);
         self.reconfigurations
             .range(..below)
@@ -919,7 +915,7 @@ impl MatchmakerAudit {
 
     /// Invariant 1 of #125: record `members` as `generation`'s authoritative
     /// set, or check it against the one already known.
-    fn bind_set(&mut self, generation: u64, members: &[u64], source: &'static str) {
+    pub(super) fn bind_set(&mut self, generation: u64, members: &[u64], source: &'static str) {
         self.thin.note(members);
         let known = self.sets.bind_first(generation, members.to_vec());
         assert_always!(
@@ -935,7 +931,7 @@ impl MatchmakerAudit {
     }
 
     /// Whether `set` is the chosen (authoritative) set of its generation.
-    fn is_chosen(&self, set: &MatchmakerSet) -> bool {
+    pub(super) fn is_chosen(&self, set: &MatchmakerSet) -> bool {
         let members: Vec<u64> = set.members().iter().map(|m| m.0).collect();
         self.sets.get(set.generation.0) == Some(members)
     }
@@ -963,7 +959,7 @@ impl MatchmakerAudit {
     /// therefore the only acceptors it may ever call retirable. `None` when
     /// the audit has folded no registration below the watermark at all (the
     /// prior is unknown here and nothing is judged).
-    fn prior_members(&self, watermark: Ballot) -> Option<BTreeSet<u64>> {
+    pub(super) fn prior_members(&self, watermark: Ballot) -> Option<BTreeSet<u64>> {
         let mut members: BTreeSet<u64> = BTreeSet::new();
         let mut seen = false;
         for ((_, ballot), registration) in &self.ever {
@@ -1010,7 +1006,7 @@ impl MatchmakerAudit {
     /// of what the candidate was *told*; this one asks it of what is *true*,
     /// so a record dropped from every disk (a GC floor raised over it) cannot
     /// make the question unanswerable.
-    fn check_effective_configuration(&self, node: NodeId, ballot: Ballot) {
+    pub(super) fn check_effective_configuration(&self, node: NodeId, ballot: Ballot) {
         let Some(campaign) = self.campaigns.get(&(node.0, ballot)) else {
             return;
         };
@@ -1459,1011 +1455,6 @@ impl MatchmakerAudit {
                 reach_once!(
                     self.refused_inactive,
                     "generation: an inactive matchmaker refuses a proposer"
-                );
-            }
-        }
-    }
-
-    // ---- the leader-side matchmaking phase (#120) ---------------------------
-
-    /// The bootstrap configuration every node boots with.
-    pub(super) fn note_bootstrap(&mut self, bootstrap: &AcceptorConfig) {
-        self.bootstrap.get_or_insert_with(|| bootstrap.clone());
-    }
-
-    /// `node` booted (a first boot, an attrition restart, a seam-crash
-    /// recovery): its round floor is volatile and starts over from the
-    /// durable promise, so a refusal folded for its previous incarnation no
-    /// longer binds its next campaign (the hunt found the gate red on exactly
-    /// that — a node refused at round 1, restarted, and honestly campaigned
-    /// at round 2 again; one more refusal re-floors it).
-    pub(super) fn node_booted(&mut self, node: NodeId) {
-        self.refused_floor.remove(&node.0);
-        // A fresh incarnation probes from the bootstrap: naming it is not
-        // a re-probe's work.
-        self.probed_outside.remove(&node.0);
-    }
-
-    /// A candidate opened matchmaking for `ballot`, registering `config`
-    /// with `generation`'s matchmakers.
-    pub(super) fn campaign_started(
-        &mut self,
-        node: NodeId,
-        ballot: Ballot,
-        config: &AcceptorConfig,
-        kind: RegistrationKind,
-        generation: u64,
-    ) {
-        let reconfiguration = kind.is_reconfiguration();
-        // A refused candidate re-campaigns strictly above the round that
-        // refused it — never one round up from its own, which the same
-        // registration would refuse again (the leapfrog livelock).
-        if let Some(floor) = self.refused_floor.get(&node.0).copied() {
-            assert_always!(
-                ballot.round > floor,
-                "matchmaking: a refused candidate re-campaigns above the refuser's highest round",
-                { "node" => node.0, "round" => ballot.round, "floor" => floor }
-            );
-            self.refused_floor.remove(&node.0);
-        }
-        // A belief comes from a leader's wire or the bootstrap, never from
-        // the ledger: a plain campaign registers only a configuration some
-        // completed campaign or started reconfiguration already put on the
-        // wire (a `Prepare`, `Heartbeat` or `Relinquish` carries it), or the
-        // one every node boots with.
-        if !reconfiguration && self.bootstrap.is_some() {
-            let known =
-                self.bootstrap.as_ref() == Some(config) || self.wire_configs.contains(config);
-            assert_always!(
-                known,
-                "matchmaking: a candidate registers only the bootstrap or a configuration a leader put on the wire",
-                { "node" => node.0, "round" => ballot.round, "members" => config.members().len() }
-            );
-        }
-        if reconfiguration {
-            self.wire_configs.insert(config.clone());
-        }
-        // A campaign is opened once per ballot: the ballot is fresh.
-        let floor_at_start = self.effective_floor;
-        let effective_at_start = self.effective_at(generation, ballot);
-        let campaign = self.campaigns.entry((node.0, ballot)).or_default();
-        campaign.floor_at_start = floor_at_start;
-        campaign.effective_at_start = effective_at_start;
-        assert_always!(
-            campaign.config.is_none() && !campaign.completed,
-            "matchmaking: a campaign opens once per ballot",
-            { "node" => node.0, "round" => ballot.round }
-        );
-        assert_always!(
-            ballot.node == node,
-            "matchmaking: a campaign registers a ballot naming its own node",
-            { "node" => node.0, "bnode" => ballot.node.0 }
-        );
-        campaign.config = Some(config.clone());
-        campaign.kind = kind;
-        campaign.generation = generation;
-        reach_once!(
-            self.campaign_opened,
-            "matchmaking: a candidate opens a matchmaking phase"
-        );
-        if reconfiguration {
-            reach_once!(
-                self.reconfiguration_opened,
-                "matchmaking: a leader opens a reconfiguration campaign"
-            );
-        }
-    }
-
-    /// A candidate sent (or re-sent) its request to `matchmaker`.
-    pub(super) fn request_sent(&mut self, node: NodeId, matchmaker: MatchmakerId, ballot: Ballot) {
-        let campaign = self.campaigns.entry((node.0, ballot)).or_default();
-        // A request only ever leaves an open, unrefused, uncompleted campaign
-        // — the first send, or a re-send while the answer is outstanding.
-        assert_always!(
-            campaign.config.is_some() && !campaign.refused && !campaign.completed,
-            "matchmaking: a request leaves only an open campaign",
-            { "node" => node.0, "matchmaker" => matchmaker.0, "round" => ballot.round }
-        );
-        if campaign.replies.contains_key(&matchmaker.0)
-            || campaign.registered_by.contains(&matchmaker.0)
-        {
-            // The matchmaker already answered once: this is the re-send that
-            // meets the idempotent re-answer path.
-            reach_once!(
-                self.request_resent,
-                "matchmaking: a request is re-sent to a matchmaker that already answered"
-            );
-        }
-    }
-
-    /// The candidate's election clock fired on an open matchmaking and
-    /// re-asked instead of abandoning: the campaign it reports is the one
-    /// still open — never completed, never refused, at the same ballot.
-    pub(super) fn clock_reasked(&mut self, node: NodeId, ballot: Ballot) {
-        let campaign = self.campaigns.entry((node.0, ballot)).or_default();
-        assert_always!(
-            campaign.config.is_some() && !campaign.completed && !campaign.refused,
-            "matchmaking: the election clock re-asks an open campaign and moves nothing",
-            { "node" => node.0, "round" => ballot.round }
-        );
-        reach_once!(
-            self.clock_reasked,
-            "matchmaking: the election clock re-asks a pending matchmaking instead of abandoning it"
-        );
-    }
-
-    /// The candidate folded `matchmaker`'s registration.
-    /// Record the page a candidate reported folding: it must be one this
-    /// matchmaker actually sent for this ballot, named by its watermark and
-    /// history digest.
-    fn fold_page(
-        &mut self,
-        node: NodeId,
-        matchmaker: MatchmakerId,
-        ballot: Ballot,
-        watermark: Ballot,
-        history_hash: u64,
-    ) {
-        let campaign = self.campaigns.entry((node.0, ballot)).or_default();
-        // The reply it folded is one the matchmaker actually sent it — and,
-        // now that the candidate names *which* copy it folded, exactly one
-        // of them. A matchmaker answers a re-sent request again from a
-        // registry a floor may have been raised on in between, so the copies
-        // differ; matching the point is both cheaper than the cartesian
-        // search it replaces and strictly stronger.
-        let sent = campaign.replies.get(&matchmaker.0).and_then(|copies| {
-            copies
-                .iter()
-                .find(|(history, w, _)| *w == watermark && history_digest(history) == history_hash)
-                .cloned()
-        });
-        assert_always!(
-            sent.is_some(),
-            "matchmaking: a folded registration was sent by that matchmaker",
-            { "node" => node.0, "matchmaker" => matchmaker.0, "round" => ballot.round }
-        );
-        if let Some(copy) = sent {
-            campaign.folded.entry(matchmaker.0).or_default().push(copy);
-        }
-    }
-
-    /// The candidate folded a page that was not the last one (#P9): nothing
-    /// counts toward the quorum until the answer is complete.
-    pub(super) fn paged(
-        &mut self,
-        node: NodeId,
-        matchmaker: MatchmakerId,
-        ballot: Ballot,
-        watermark: Ballot,
-        history_hash: u64,
-    ) {
-        self.fold_page(node, matchmaker, ballot, watermark, history_hash);
-        let counted = self
-            .campaigns
-            .get(&(node.0, ballot))
-            .is_some_and(|c| c.registered_by.contains(&matchmaker.0));
-        assert_always!(
-            !counted,
-            "matchmaking: an incomplete answer never counts toward the quorum",
-            { "node" => node.0, "matchmaker" => matchmaker.0, "round" => ballot.round }
-        );
-        reach_once!(
-            self.answer_paged,
-            "matchmaking: a matchmaker answers a registration in pages"
-        );
-    }
-
-    pub(super) fn registered_by(
-        &mut self,
-        node: NodeId,
-        matchmaker: MatchmakerId,
-        ballot: Ballot,
-        remaining: usize,
-        watermark: Ballot,
-        history_hash: u64,
-    ) {
-        let generation = self
-            .campaigns
-            .get(&(node.0, ballot))
-            .map_or(0, |c| c.generation);
-        let quorum = self.quorum(generation);
-        self.fold_page(node, matchmaker, ballot, watermark, history_hash);
-        let campaign = self.campaigns.entry((node.0, ballot)).or_default();
-        campaign.registered_by.insert(matchmaker.0);
-        assert_always!(
-            remaining == quorum.saturating_sub(campaign.registered_by.len()),
-            "matchmaking: the remaining count is the quorum minus the registrations folded",
-            {
-                "node" => node.0,
-                "round" => ballot.round,
-                "remaining" => remaining,
-                "registered" => campaign.registered_by.len(),
-                "quorum" => quorum
-            }
-        );
-    }
-
-    /// The candidate's matchmaking closed with a quorum: Phase 1 opens.
-    pub(super) fn completed(
-        &mut self,
-        node: NodeId,
-        ballot: Ballot,
-        prior: &[AcceptorConfig],
-        watermark: Ballot,
-        registered_by: usize,
-        disagreements: u64,
-    ) {
-        let (generation, floor_at_start) = self
-            .campaigns
-            .get(&(node.0, ballot))
-            .map_or((0, Ballot::default()), |c| (c.generation, c.floor_at_start));
-        let quorum = self.quorum(generation);
-        // GC invariant 3: the watermark a campaign filters by is at or above
-        // every floor proven effective at a matchmaker quorum *before the
-        // campaign opened* — every reply it folds was sent after that, so
-        // quorum intersection plus the max rule (#120's invariant 3) is
-        // exactly what keeps a collected configuration out of every later
-        // `H`. A floor that became effective mid-campaign may legitimately
-        // be missed: the reply from the intersecting matchmaker can predate
-        // its ack (a stale but safe superset of `H`).
-        assert_always!(
-            watermark >= floor_at_start,
-            "gc: a campaign's watermark is at or above the effective floor",
-            {
-                "node" => node.0,
-                "round" => ballot.round,
-                "used_round" => watermark.round,
-                "floor_round" => floor_at_start.round
-            }
-        );
-        self.check_effective_configuration(node, ballot);
-        let campaign = self.campaigns.entry((node.0, ballot)).or_default();
-        // The closing fold happened on this ballot's last folded reply, so the
-        // registering set is complete here; it must be a quorum.
-        assert_always!(
-            registered_by >= quorum && campaign.registered_by.len() >= quorum,
-            "matchmaking: Phase 1 opens only on a matchmaker quorum",
-            {
-                "node" => node.0,
-                "round" => ballot.round,
-                "registered" => campaign.registered_by.len(),
-                "quorum" => quorum
-            }
-        );
-        assert_always!(
-            !campaign.refused,
-            "matchmaking: a refused campaign never reaches Phase 1",
-            { "node" => node.0, "round" => ballot.round }
-        );
-        // The write-once ledger already guarantees no two matchmakers
-        // disagree; the union's own count must agree.
-        assert_always!(
-            disagreements == 0,
-            "matchmaking: no two matchmakers disagree on a ballot's configuration",
-            { "node" => node.0, "round" => ballot.round, "disagreements" => disagreements }
-        );
-        let histories = check_folded_union(campaign, node, ballot, prior, watermark);
-        // The effective configuration (review of #132): the highest-ballot
-        // *reconfiguration* registration the folded replies name. An
-        // ordinary campaign completes only if it registered exactly that —
-        // a stale belief must have aborted instead (`campaign_stale`), so a
-        // superseded configuration is never reinstated by an election. A
-        // reconfiguration campaign is exempt: it is the next one.
-        // A reconfiguration below a leadership that won under another
-        // configuration is one that leadership's matchmaking quorum
-        // missed, held by a minority: the candidate keeps its belief over
-        // it (`probe_floor`; replay-main 9491883622406273044 on 832b116).
-        // A reconfiguration registered *above* the one the quorum shows,
-        // which the quorum missed (held by a minority, heard from one late
-        // probe answer or an earlier quorum), is the other half of the
-        // probe floor: the fact the candidate's belief matches. The
-        // candidate keeps it; it is newer than what the quorum shows, never
-        // superseded by it (replay-main 1859054409658602303 and
-        // 1861290827981239083 on 25f93b4).
-        let effective = folded_effective(campaign);
-        if !campaign.kind.is_reconfiguration()
-            && let Some((newest, config)) = effective
-        {
-            let below_a_leadership = self
-                .won
-                .range((Bound::Excluded(newest), Bound::Excluded(ballot)))
-                .any(|(_, ran)| *ran != config);
-            let newer_fact = campaign.config.as_ref().is_some_and(|mine| {
-                self.reconfigurations
-                    .range((Bound::Excluded(newest), Bound::Excluded(ballot)))
-                    .any(|(_, (registered, _))| registered == mine)
-            });
-            assert_always!(
-                campaign.config.as_ref() == Some(&config) || below_a_leadership || newer_fact,
-                "matchmaking: a completed ordinary campaign registered the effective configuration",
-                { "node" => node.0, "round" => ballot.round, "newest_round" => newest.round }
-            );
-            if campaign.config.as_ref() != Some(&config) && newer_fact {
-                reach_once!(
-                    self.campaign_kept_newer_fact,
-                    "matchmaking: a campaign keeps a reconfiguration its quorum missed"
-                );
-            }
-        }
-        campaign.completed = true;
-        let registered = campaign.config.clone();
-        // The per-matchmaker reply copies are scratch for the fold above and
-        // nothing reads them once the campaign closed; the keys stay (a
-        // late re-answer still has to be one this matchmaker sent).
-        for copies in campaign.replies.values_mut() {
-            copies.clear();
-            copies.shrink_to_fit();
-        }
-        campaign.folded.clear();
-        self.completed_by_generation
-            .entry(generation)
-            .or_default()
-            .insert(ballot, registered.clone());
-        if let Some(config) = registered {
-            // From here the configuration rides this campaign's `Prepare`s
-            // (and its heartbeats, if it wins): a belief others may learn.
-            self.wire_configs.insert(config);
-        }
-        reach_once!(
-            self.campaign_completed,
-            "matchmaking: a campaign closes with a matchmaker quorum"
-        );
-        if prior.is_empty() {
-            reach_once!(
-                self.campaign_empty_history,
-                "matchmaking: a campaign finds no prior configuration (Phase 1 trivially complete)"
-            );
-        }
-        if prior.len() > 1 {
-            reach_once!(
-                self.campaign_union_several,
-                "matchmaking: a campaign unions more than one prior configuration"
-            );
-        }
-        if histories.len() > 1 {
-            reach_once!(
-                self.campaign_disagreeing_histories,
-                "matchmaking: a campaign unions histories that differ between matchmakers"
-            );
-        }
-    }
-
-    /// The candidate abandoned an ordinary campaign because the quorum's
-    /// histories named a reconfiguration to another configuration, and
-    /// adopted the one registered at `newest`. That ballot must hold a
-    /// *reconfiguration* registration in the write-once ledger: only a
-    /// leader's explicit change ever moves a belief, never another
-    /// candidate's belief (the flip-flop of #132's hunt).
-    pub(super) fn campaign_stale(&mut self, node: NodeId, ballot: Ballot, newest: Ballot) {
-        let named = self
-            .ever
-            .range((0, newest)..=(u64::MAX, newest))
-            .find(|((_, b), _)| *b == newest)
-            .map(|(_, r)| r.kind.is_reconfiguration());
-        assert_always!(
-            named == Some(true),
-            "matchmaking: a stale-belief abort adopts a reconfiguration registration",
-            {
-                "node" => node.0,
-                "round" => ballot.round,
-                "newest_round" => newest.round,
-                "registered" => named.is_some()
-            }
-        );
-        let campaign = self.campaigns.entry((node.0, ballot)).or_default();
-        assert_always!(
-            !campaign.completed && !campaign.kind.is_reconfiguration(),
-            "matchmaking: a stale-configuration abort never follows Phase 1 and never hits a reconfiguration",
-            { "node" => node.0, "round" => ballot.round }
-        );
-        campaign.refused = true;
-        reach_once!(
-            self.campaign_stale,
-            "matchmaking: a candidate adopts the effective configuration and re-campaigns"
-        );
-    }
-
-    /// The candidate folded a refusal and abandoned the campaign.
-    /// A node opened a membership probe tagged `ballot` against
-    /// `generation`'s matchmakers (#173).
-    pub(super) fn probe_opened(&mut self, node: NodeId, ballot: Ballot, generation: u64) {
-        let ceiling = Ballot {
-            round: u64::MAX,
-            node: NodeId(u64::MAX),
-        };
-        let held = self.effective_at(generation, ceiling);
-        self.probes
-            .insert((node.0, ballot), OpenProbe { held, generation });
-    }
-
-    /// A node's membership probe closed (#173). A reconfiguration a
-    /// matchmaker quorum already held when the probe opened is in every
-    /// quorum of answers (each raised its effective scalar durably before
-    /// answering anything), so the configuration the probe adopted is at
-    /// least that one — the same intersection argument that hands a
-    /// campaign's matchmaking every earlier registration.
-    pub(super) fn probe_closed(
-        &mut self,
-        node: NodeId,
-        ballot: Ballot,
-        effective: Option<Ballot>,
-        member: bool,
-        answered_by: usize,
-    ) {
-        let opened = self.probes.remove(&(node.0, ballot));
-        // The probe's twin of the campaign's quorum check (#343): a probe
-        // closes only once a quorum of the set it asked has answered. An
-        // unknown probe (its opening lost to a reboot) counts against the
-        // bootstrap set.
-        let quorum = self.quorum(opened.as_ref().map_or(0, |p| p.generation));
-        assert_always!(
-            answered_by >= quorum,
-            "matchmaking: a membership probe closes only on a matchmaker quorum",
-            {
-                "node" => node.0,
-                "round" => ballot.round,
-                "answered" => answered_by,
-                "quorum" => quorum
-            }
-        );
-        let held = opened.and_then(|p| p.held);
-        let learned = held
-            .as_ref()
-            .is_none_or(|(at, _)| effective.is_some_and(|adopted| adopted >= *at));
-        assert_always!(
-            learned,
-            "matchmaking: a membership probe learns every reconfiguration a matchmaker quorum held when it opened",
-            {
-                "node" => node.0,
-                "held_round" => held.as_ref().map_or(0, |(at, _)| at.round),
-                "adopted_round" => effective.map_or(0, |at| at.round)
-            }
-        );
-        if member && effective.is_some() {
-            reach_once!(
-                self.probe_rejoined,
-                "matchmaking: a membership probe finds its node inside a reconfiguration and it campaigns"
-            );
-        }
-        if member && self.probed_outside.remove(&node.0) {
-            reach_once!(
-                self.reprobe_rejoined,
-                "matchmaking: a node outside its heard belief re-probes, is named and campaigns"
-            );
-        }
-        if !member && effective.is_some() {
-            self.probed_outside.insert(node.0);
-        }
-    }
-
-    /// A closed probe's late answer moved an outside node's belief (#278).
-    pub(super) fn probe_late(&mut self, node: NodeId, member: bool) {
-        reach_once!(
-            self.late_answer_moved,
-            "membership: a late probe answer moves an outside node's belief"
-        );
-        if member {
-            self.probed_outside.remove(&node.0);
-        }
-    }
-
-    pub(super) fn campaign_refused(
-        &mut self,
-        node: NodeId,
-        ballot: Ballot,
-        refusal: &MatchRefusal,
-    ) {
-        if self.probes.remove(&(node.0, ballot)).is_some() {
-            // A refused probe is simply spent: the node's next election
-            // timeout opens another.
-            return;
-        }
-        let campaign = self.campaigns.entry((node.0, ballot)).or_default();
-        assert_always!(
-            !campaign.completed,
-            "matchmaking: a refusal never lands on a campaign that already reached Phase 1",
-            { "node" => node.0, "round" => ballot.round }
-        );
-        campaign.refused = true;
-        // Dead campaign: the reply copies are scratch nothing reads again.
-        for copies in campaign.replies.values_mut() {
-            copies.clear();
-            copies.shrink_to_fit();
-        }
-        campaign.folded.clear();
-        if let MatchRefusal::Stale { highest } = refusal {
-            let floor = self.refused_floor.entry(node.0).or_default();
-            *floor = (*floor).max(highest.round);
-        }
-        reach_once!(
-            self.campaign_refused,
-            "matchmaking: a campaign is refused by a matchmaker"
-        );
-    }
-
-    /// The `sometimes` gates, evaluated once per run: **only** the deployment
-    /// draw itself, which every seed decides one way or the other.
-    ///
-    /// Everything else this fold observes is a `reachable` recorded at its own
-    /// transition — each is conditioned on the deployment draw *and* a rarer
-    /// event, and a per-sweep gate on such a conjunction would starve
-    /// saturation. That rule is also mechanical, not only stylistic: moonpool
-    /// keys an assertion slot by the **hash of its message**, so a `sometimes`
-    /// here sharing a string with the `reach_once!` at the transition is one
-    /// slot, not two, and whichever fires first decides the kind. Five gates
-    /// did exactly that (a configuration is registered, a reply carries a
-    /// prior configuration, a campaign closes with a matchmaker quorum, a
-    /// floor becomes effective, a handover completes) and are now recorded
-    /// only where they happen.
-    pub(super) fn check_gates(&self) {
-        assert_sometimes!(self.deployed, "matchmaker: a run deploys matchmakers");
-        assert_sometimes!(!self.deployed, "matchmaker: a run deploys no matchmakers");
-        if self.recovered_after_restart {
-            assert_reachable!("matchmaker: a matchmaker recovers its registry across a restart");
-        }
-    }
-
-    // ---- garbage collection (#123) ------------------------------------------
-
-    /// Whether a GC request at `(node, watermark)` still needs its licence
-    /// judged. The licence is judged **once** per pair, and re-deriving it is
-    /// an O(fence x members) walk the leader repeats on every re-send, so the
-    /// caller asks first and only then pays for the derivation.
-    pub(super) fn gc_needs_licence(&self, node: NodeId, watermark: Ballot) -> bool {
-        !self.gc_judged.contains(&(node.0, watermark))
-    }
-
-    /// A leader sent a GC request; `covered` is the audit's own re-derivation
-    /// of the forgettability condition (computed by the caller, which holds
-    /// the durable-record fold, and only when [`Self::gc_needs_licence`] says
-    /// it is still wanted), judged once per `(node, watermark)`.
-    pub(super) fn gc_requested(
-        &mut self,
-        node: NodeId,
-        watermark: Ballot,
-        handed: bool,
-        fence: Option<Slot>,
-        covered: Option<bool>,
-        uncovered: &str,
-    ) {
-        // A leader collects at its own ballot — the floor it raises is the
-        // ballot it registered above every configuration it may forget —
-        // or at the ballot its minter handed on to it (#529).
-        assert_always!(
-            watermark.node == node || handed,
-            "gc: a leader collects at its own ballot",
-            { "node" => node.0, "bnode" => watermark.node.0, "round" => watermark.round }
-        );
-        if self.gc_judged.insert((node.0, watermark))
-            && let Some(covered) = covered
-        {
-            assert_always!(
-                covered,
-                "gc: a GC request is licensed by a quorum holding the fence",
-                {
-                    "node" => node.0,
-                    "round" => watermark.round,
-                    "fence" => crate::signed_watermark(fence.map(|s| s.0)),
-                    "uncovered" => uncovered.to_string()
-                }
-            );
-        }
-        reach_once!(
-            self.gc_requested,
-            "gc: a leader asks the matchmakers to raise the floor"
-        );
-    }
-
-    /// A node abandoned a handover phase that made no progress for the
-    /// timeout: the frozen generation waits for the next finisher.
-    pub(super) fn reconfigurer_aborted(&mut self, node: NodeId) {
-        self.reconfigurer_trace.entry(node.0).or_default().1 += 1;
-        reach_once!(
-            self.reconfigurer_aborted,
-            "generation: a stalled handover is abandoned after its timeout"
-        );
-    }
-
-    /// A node's preempted successor decree waits a jittered backoff before
-    /// reopening.
-    pub(super) fn reconfigurer_backoff(&mut self) {
-        reach_once!(
-            self.reconfigurer_backed_off,
-            "generation: a preempted successor decree backs off before reopening"
-        );
-    }
-
-    /// A matchmaker answered a GC request.
-    pub(super) fn gc_replied(&mut self, matchmaker: MatchmakerId, ack: &GcAck) {
-        let entry = self.registries.entry(matchmaker.0).or_default();
-        // The ack reports the durable floor (the raise was folded first).
-        assert_always!(
-            ack.watermark == entry.watermark,
-            "gc: a garbage-collection ack carries the durable watermark",
-            {
-                "matchmaker" => matchmaker.0,
-                "reported_round" => ack.watermark.round,
-                "folded_round" => entry.watermark.round
-            }
-        );
-        if !ack.applied {
-            reach_once!(
-                self.gc_refused,
-                "gc: a garbage-collection request for another generation is refused"
-            );
-        }
-    }
-
-    /// The leader folded a GC ack.
-    pub(super) fn gc_step(
-        &mut self,
-        node: NodeId,
-        ack: &GcAck,
-        step: &GcStep,
-        config: Option<&AcceptorConfig>,
-    ) {
-        self.gc_acks
-            .entry((node.0, ack.watermark))
-            .or_default()
-            .insert(ack.matchmaker.0);
-        let GcStep::Effective { watermark, retired } = step else {
-            return;
-        };
-        // GC invariant 2 (issue invariant 5): the floor is held durably at a
-        // quorum of the addressed generation's set before it is called
-        // effective and before anything is retired.
-        let generation = ack.generation.0;
-        let holders = self
-            .registries
-            .iter()
-            .filter(|(id, _)| self.member_of(generation, **id))
-            .filter(|(_, r)| r.watermark >= *watermark)
-            .count();
-        let quorum = self.quorum(generation);
-        assert_always!(
-            holders >= quorum,
-            "gc: a floor reported effective is held durably by a matchmaker quorum",
-            {
-                "node" => node.0,
-                "round" => watermark.round,
-                "holders" => holders,
-                "quorum" => quorum
-            }
-        );
-        // The same claim from the acks the leader actually folded, and only
-        // from matchmakers the generation names: the core adds `ack.matchmaker`
-        // to its tally after checking its *own belief* about the set, so an
-        // ack from a matchmaker outside the authoritative generation is
-        // exactly what this catches.
-        let acked = self
-            .gc_acks
-            .iter()
-            .filter(|((leader, floor), _)| *leader == node.0 && *floor >= *watermark)
-            .flat_map(|(_, matchmakers)| matchmakers.iter().copied())
-            .filter(|matchmaker| self.member_of(generation, *matchmaker))
-            .collect::<BTreeSet<u64>>()
-            .len();
-        assert_always!(
-            acked >= quorum,
-            "gc: a floor is effective only once a quorum of the generation's matchmakers acked",
-            {
-                "node" => node.0,
-                "round" => watermark.round,
-                "generation" => generation,
-                "acked" => acked,
-                "quorum" => quorum
-            }
-        );
-        // GC invariant 3: a retirable acceptor is `members(H_b) \ C_b`, so it
-        // was a member of a configuration this floor forgets. Without this,
-        // a leader naming an arbitrary spare has its word taken for it: the
-        // operator parks a healthy node for the run and the convergence
-        // oracle excuses it *because the leader named it*.
-        if let Some(prior) = self.prior_members(*watermark) {
-            let outsider = retired.iter().find(|n| !prior.contains(&n.0)).map(|n| n.0);
-            assert_always!(
-                outsider.is_none(),
-                "gc: a retirable acceptor was a member of a prior configuration",
-                {
-                    "node" => node.0,
-                    "round" => watermark.round,
-                    "retired" => outsider.unwrap_or(u64::MAX),
-                    "prior" => prior.len()
-                }
-            );
-        }
-        // GC invariant 4: nothing the configuration in force needs is retired.
-        if let Some(config) = config {
-            let inside = retired.iter().find(|n| config.contains(**n)).map(|n| n.0);
-            assert_always!(
-                inside.is_none(),
-                "gc: a retired acceptor is outside the configuration in force",
-                { "node" => node.0, "round" => watermark.round, "retired" => inside.unwrap_or(u64::MAX) }
-            );
-        }
-        self.effective_floor = self.effective_floor.max(*watermark);
-        for n in retired {
-            self.retired_by_gc.insert(n.0);
-        }
-        reach_once!(
-            self.gc_effective,
-            "gc: a leader's floor becomes effective at a matchmaker quorum"
-        );
-        if !retired.is_empty() {
-            reach_once!(
-                self.gc_retired_any,
-                "gc: an effective floor names retirable acceptors"
-            );
-        }
-    }
-
-    /// A node answered an operator `Retire`.
-    pub(super) fn retire_acked(&mut self, accepted: bool) {
-        if accepted {
-            reach_once!(self.retire_accepted, "gc: a node accepts its retirement");
-        } else {
-            reach_once!(
-                self.retire_refused,
-                "gc: a node still in its configuration refuses to retire"
-            );
-        }
-    }
-
-    /// A node shut down for good on an operator's retirement.
-    pub(super) fn retired(&mut self, node: NodeId) {
-        assert_always!(
-            self.retired_by_gc.contains(&node.0),
-            "gc: a node retires only after an effective floor named it retirable",
-            { "node" => node.0 }
-        );
-        reach_once!(
-            self.node_retired,
-            "gc: a retired acceptor is genuinely shut down"
-        );
-    }
-
-    // ---- generations (#125) -------------------------------------------------
-
-    /// A node adopted `set` as its matchmaker set.
-    pub(super) fn set_learned(&mut self, node: NodeId, set: &MatchmakerSet) {
-        let chosen = self.is_chosen(set);
-        assert_always!(
-            chosen,
-            "generation: a node adopts only a chosen matchmaker set",
-            { "node" => node.0, "generation" => set.generation.0 }
-        );
-        reach_once!(
-            self.set_learned,
-            "generation: a node learns a later matchmaker generation"
-        );
-    }
-
-    /// A node started a handover from `old` (finishing one when the target
-    /// is `old`'s own membership).
-    pub(super) fn reconfigurer_started(
-        &mut self,
-        node: NodeId,
-        old: &MatchmakerSet,
-        target: &[MatchmakerId],
-    ) {
-        self.reconfigurer_trace.entry(node.0).or_default().0 += 1;
-        let chosen = self.is_chosen(old);
-        assert_always!(
-            chosen,
-            "generation: a handover replaces a chosen generation",
-            { "node" => node.0, "generation" => old.generation.0 }
-        );
-        // A fresh attempt folds its own freeze acks: an earlier attempt by
-        // this node (one its incarnation lost, or one abandoned) may have
-        // folded a different subset, and the reconstruction is judged
-        // against exactly the quorum this attempt reconstructs from.
-        self.stop_acks.clear(node.0, old.generation.0);
-        let members: Vec<u64> = old.members().iter().map(|m| m.0).collect();
-        if target.iter().map(|m| m.0).collect::<Vec<_>>() == members {
-            reach_once!(
-                self.reconfigurer_finishing,
-                "generation: a node finishes a handover whose reconfigurer died"
-            );
-        }
-        reach_once!(
-            self.reconfigurer_started_flag,
-            "generation: a matchmaker-set handover starts"
-        );
-    }
-
-    /// A node told a straggling matchmaker the chosen successor.
-    pub(super) fn successor_republished(&mut self, node: NodeId, set: &MatchmakerSet) {
-        let chosen = self.is_chosen(set);
-        assert_always!(
-            chosen,
-            "generation: a republished successor is the chosen set",
-            { "node" => node.0, "generation" => set.generation.0 }
-        );
-        reach_once!(
-            self.successor_republished,
-            "generation: a node republishes the chosen set to a straggling matchmaker"
-        );
-    }
-
-    /// The reconfigurer folded `reply` from `matchmaker` into `step`.
-    #[allow(clippy::too_many_lines)]
-    pub(super) fn reconfigurer_step(
-        &mut self,
-        node: NodeId,
-        matchmaker: MatchmakerId,
-        reply: &ReconfigureReply,
-        step: &ReconfigurerStep,
-    ) {
-        if !matches!(step, ReconfigurerStep::Ignored) {
-            self.reconfigurer_trace.entry(node.0).or_default().2 =
-                format!("{step:?}").chars().take(48).collect();
-        }
-        if let ReconfigureReply::Accepted {
-            matchmaker: voter,
-            generation,
-            ballot,
-        } = reply
-        {
-            self.decree_voters
-                .entry((generation.0, *ballot))
-                .or_default()
-                .insert(voter.0);
-        }
-        if let ReconfigureReply::Stopped {
-            generation,
-            after,
-            next,
-            registries,
-            ..
-        } = reply
-            && matches!(step, ReconfigurerStep::Stopped { .. })
-        {
-            let frozen = registries
-                .iter()
-                .map(|(journal, registry)| {
-                    let snapshot: Vec<(Ballot, Registration)> =
-                        registry.history.clone().into_iter().collect();
-                    (*journal, (registry.gc_watermark, snapshot))
-                })
-                .collect();
-            self.stop_acks.insert(
-                (node.0, generation.0, matchmaker.0),
-                frozen,
-                after.is_none(),
-                next.is_none(),
-            );
-        }
-        match step {
-            // The counted-but-short folds: progress the driver's stall
-            // clock reads, with nothing new to judge (the quorum-closing
-            // fold of each phase carries the claim).
-            ReconfigurerStep::Ignored
-            | ReconfigurerStep::Stopped { .. }
-            | ReconfigurerStep::Bootstrapped { .. }
-            | ReconfigurerStep::Promised { .. }
-            | ReconfigurerStep::Accepted { .. }
-            | ReconfigurerStep::Published { .. } => {}
-            ReconfigurerStep::Deciding { .. } => {
-                // Invariant 7: every proposed member holds the bootstrap.
-                if let ReconfigureReply::Bootstrapped { set, .. } = reply {
-                    let members: Vec<u64> = set.members().iter().map(|m| m.0).collect();
-                    let holders = self
-                        .bootstrapped
-                        .holders(&(set.generation.0, members.clone()));
-                    assert_always!(
-                        holders == members.len(),
-                        "generation: the decree opens only once every proposed member holds the bootstrap",
-                        { "node" => node.0, "generation" => set.generation.0, "holders" => holders, "members" => members.len() }
-                    );
-                }
-                reach_once!(
-                    self.reconfigurer_deciding,
-                    "generation: the successor decree opens over the old generation"
-                );
-            }
-            ReconfigurerStep::Proposing {
-                ballot,
-                members,
-                adopted,
-            } => {
-                // The generation decided over comes from the `Promised`
-                // reply that closed Phase 1, never from the successor's
-                // number.
-                if let ReconfigureReply::Promised { generation, .. } = reply {
-                    let proposed: Vec<u64> = members.iter().map(|m| m.0).collect();
-                    let first = self
-                        .decree_proposals
-                        .entry((generation.0, *ballot))
-                        .or_insert_with(|| proposed.clone());
-                    assert_always!(
-                        *first == proposed,
-                        "generation: one value is voted per decree ballot",
-                        {
-                            "node" => node.0,
-                            "generation" => generation.0,
-                            "round" => ballot.round,
-                            "first" => first.len(),
-                            "proposed" => proposed.len()
-                        }
-                    );
-                }
-                if *adopted {
-                    reach_once!(
-                        self.reconfigurer_adopted,
-                        "generation: a reconfigurer adopts a competing proposal already voted"
-                    );
-                }
-            }
-            ReconfigurerStep::Preempted { .. } => {
-                reach_once!(
-                    self.reconfigurer_preempted,
-                    "generation: a preempted decree reopens above the refusing promise"
-                );
-            }
-            ReconfigurerStep::Chosen { successor } => {
-                let members: Vec<u64> = successor.members().iter().map(|m| m.0).collect();
-                self.bind_set(successor.generation.0, &members, "chosen");
-                // The decree itself, from the wire: the set published is the
-                // value this node put to the vote, and a majority of the old
-                // generation voted for it at that one ballot. Until now the
-                // only proof of this lived in the sans-IO model checker,
-                // which never runs the driver's plumbing, its crash seams or
-                // its abandon path. The publishing reply names both
-                // coordinates, so the decree judged is exactly the one that
-                // just closed; skipped where the proposal was not observed (a
-                // `finish` that adopts an already-chosen set publishes
-                // without ever proposing).
-                if let ReconfigureReply::Accepted {
-                    generation, ballot, ..
-                } = reply
-                    && let Some(proposed) = self.decree_proposals.get(&(generation.0, *ballot))
-                {
-                    let generation = generation.0;
-                    let proposed = proposed.clone();
-                    let voted = self
-                        .decree_voters
-                        .get(&(generation, *ballot))
-                        .map_or(0, BTreeSet::len);
-                    let quorum = self.quorum(generation);
-                    assert_always!(
-                        proposed == members && voted >= quorum,
-                        "generation: a chosen set was voted by a majority of its old generation at one ballot",
-                        {
-                            "node" => node.0,
-                            "generation" => generation,
-                            "round" => ballot.round,
-                            "proposed" => proposed.len(),
-                            "chosen" => members.len(),
-                            "voted" => voted,
-                            "quorum" => quorum
-                        }
-                    );
-                    reach_once!(
-                        self.decree_checked,
-                        "generation: a chosen set is checked against its decree's votes"
-                    );
-                }
-                reach_once!(
-                    self.reconfigurer_chosen,
-                    "generation: a successor set is chosen by the decree"
-                );
-            }
-            ReconfigurerStep::Done { .. } => {
-                reach_once!(
-                    self.reconfigurer_done,
-                    "generation: a matchmaker-set handover completes"
-                );
-            }
-            ReconfigurerStep::Superseded { successor } => {
-                let chosen = self.is_chosen(successor);
-                assert_always!(
-                    chosen,
-                    "generation: a superseded reconfigurer adopts the chosen set",
-                    { "node" => node.0, "generation" => successor.generation.0 }
-                );
-                reach_once!(
-                    self.reconfigurer_superseded,
-                    "generation: a late reconfigurer adopts the successor already chosen"
                 );
             }
         }
@@ -3050,203 +2041,169 @@ impl MatchmakerAudit {
     }
 }
 
-/// The bodies of the matchmaker callbacks of `NodeAudit`'s `Audit` impl
-/// (#417) that read more of the shared state than [`MatchmakerAudit`]: the
-/// impl delegates each one here under the state's lock.
-impl AuditState {
+impl<T: TimeProvider> NodeAudit<T> {
+    // ---- the matchmaker registry (see `matchmaker`) -------------------------
+    #[tracing::instrument(level = "trace", skip_all, fields(matchmaker = matchmaker.0))]
+    pub(super) fn matchmaker_recovered(
+        &self,
+        matchmaker: MatchmakerId,
+        set: &MatchmakerSet,
+        phase: MatchmakerPhase,
+        scalars: &paros::core::MatchmakerHardState,
+        registry: &BTreeMap<Ballot, Registration>,
+        gc_watermark: Ballot,
+    ) {
+        // What the last commit had in flight and this boot shows landed is
+        // folded before the boot is judged (#190).
+        self.world
+            .note_registry_recovered(matchmaker, scalars, registry);
+        self.state().matchmaker.recovered(
+            matchmaker,
+            set,
+            phase,
+            &scalars.pending,
+            registry,
+            gc_watermark,
+        );
+    }
+
+    pub(super) fn matchmaker_in_flight(
+        &self,
+        matchmaker: MatchmakerId,
+        writes: Option<&[paros::core::MatchmakerWriteOp]>,
+    ) {
+        let Some(writes) = writes else {
+            self.world.note_registry_in_flight(matchmaker.0, None);
+            return;
+        };
+        let journal = self.state().matchmaker.journal();
+        let ops: Vec<RegistryOp> = writes
+            .iter()
+            .filter_map(|op| match op {
+                paros::core::MatchmakerWriteOp::Register {
+                    journal: written,
+                    ballot,
+                    registration,
+                } => (*written == journal)
+                    .then(|| RegistryOp::Register(*ballot, registration.clone())),
+                paros::core::MatchmakerWriteOp::SetGcWatermark { .. } => None,
+                paros::core::MatchmakerWriteOp::SetScalars(scalars) => {
+                    Some(RegistryOp::Scalars(scalars.clone()))
+                }
+                paros::core::MatchmakerWriteOp::InstallRegistry {
+                    scalars,
+                    registrations,
+                } => Some(RegistryOp::Install(
+                    scalars.clone(),
+                    registrations.get(&journal).cloned().unwrap_or_default(),
+                )),
+            })
+            .collect();
+        if !ops.is_empty() {
+            self.world.note_registry_in_flight(matchmaker.0, Some(ops));
+        }
+    }
+
+    pub(super) fn matchmaker_scalars_persisted(
+        &self,
+        matchmaker: MatchmakerId,
+        scalars: &MatchmakerHardState,
+    ) {
+        self.state()
+            .matchmaker
+            .scalars_persisted(matchmaker, scalars);
+    }
+
+    pub(super) fn reconfigurer_reconstructed(
+        &self,
+        node: NodeId,
+        generation: u64,
+        bootstrap: &PendingBootstrap,
+        disagreements: u64,
+    ) {
+        self.state()
+            .matchmaker
+            .reconstructed(node, generation, bootstrap, disagreements);
+    }
+
+    pub(super) fn matchmaker_activated(
+        &self,
+        matchmaker: MatchmakerId,
+        set: &MatchmakerSet,
+        gc_watermark: Ballot,
+        effective: Option<&(Ballot, AcceptorConfig)>,
+        registry: &BTreeMap<Ballot, Registration>,
+    ) {
+        self.state()
+            .matchmaker
+            .activated(matchmaker, set, gc_watermark, effective, registry);
+    }
+
+    pub(super) fn matchmaker_reconfigure_replied(
+        &self,
+        matchmaker: MatchmakerId,
+        _request: &ReconfigureRequest,
+        reply: &ReconfigureReply,
+    ) {
+        self.state()
+            .matchmaker
+            .reconfigure_replied(matchmaker, reply);
+    }
+
+    pub(super) fn matchmaker_gc_replied(&self, matchmaker: MatchmakerId, ack: &GcAck) {
+        self.state().matchmaker.gc_replied(matchmaker, ack);
+    }
+
     pub(super) fn match_registered(
-        &mut self,
+        &self,
         matchmaker: MatchmakerId,
         ballot: Ballot,
         registration: &Registration,
     ) {
-        self.matchmaker.registered(matchmaker, ballot, registration);
-        let config = &registration.config;
-        // The per-ballot configuration the quorum oracles count over: bound
-        // at its durable registration, before any leader could exercise it.
-        self.bind_config(ballot, config);
+        self.state()
+            .match_registered(matchmaker, ballot, registration);
     }
 
-    pub(super) fn gc_request_sent(&mut self, node: NodeId, watermark: Ballot, fence: Option<Slot>) {
-        // The leader re-sends its request every beat and the licence is judged
-        // once per `(node, watermark)`, so ask before deriving: everything
-        // below is an O(fence x members) walk whose answer would be dropped.
-        // The minter relinquished the ballot: a successor collects at it.
-        let handed = self
-            .authorities
-            .get(&(watermark.round, watermark.node.0))
-            .is_some_and(|a| a.retired.contains(&watermark.node.0));
-        if !self.matchmaker.gc_needs_licence(node, watermark) {
-            self.matchmaker
-                .gc_requested(node, watermark, handed, fence, None, "");
-            return;
-        }
-        // GC invariant 1, re-derived from the audit's own durable fold: a
-        // Phase-2 quorum of the configuration bound to the leader's ballot
-        // holds every slot up to the fence — a durable record carrying the
-        // decided value where the audit knows one (any record otherwise), or
-        // a compaction floor above the slot (the below-floor `Nack` is the
-        // acceptor's "already chosen"). `None` when the configuration is not
-        // known yet (then nothing is judged).
-        let mut uncovered: Vec<String> = Vec::new();
-        let covered = self.config_of(watermark).cloned().map(|config| {
-            let holders: BTreeSet<NodeId> = config
-                .members()
-                .iter()
-                .filter(|m| {
-                    let m = m.0;
-                    match fence {
-                        None => true,
-                        Some(fence) => {
-                            let gap = (0..=fence.0).find(|slot| {
-                                let floor = self.floor.get(&m).map_or(0, |f| f.now);
-                                if floor > *slot {
-                                    return false;
-                                }
-                                match (self.persisted.get(&(m, *slot)), self.chosen.get(slot)) {
-                                    (Some(held), Some(decided)) => held != decided,
-                                    (Some(_), None) => false,
-                                    (None, _) => true,
-                                }
-                            });
-                            if let Some(slot) = gap {
-                                let why = match self.persisted.get(&(m, slot)) {
-                                    Some(_) => "mismatch",
-                                    None => "missing",
-                                };
-                                uncovered.push(format!("{m}@{slot}:{why}"));
-                            }
-                            gap.is_none()
-                        }
-                    }
-                })
-                .copied()
-                .collect();
-            // Judged by the configuration's own quorum system, never by a
-            // count: the custody claim the leader's GC rests on is the same
-            // Phase-2 quorum question `Collector::covered` asks in the core.
-            config.has_phase2_quorum(&holders)
-        });
-        self.matchmaker.gc_requested(
-            node,
-            watermark,
-            handed,
-            fence,
-            covered,
-            &uncovered.join(","),
-        );
+    pub(super) fn gc_watermark_raised(&self, matchmaker: MatchmakerId, watermark: Ballot) {
+        self.state()
+            .matchmaker
+            .watermark_raised(matchmaker, watermark);
     }
 
-    pub(super) fn gc_step(&mut self, node: NodeId, ack: &GcAck, step: &GcStep) {
-        let config = self.config_of(ack.watermark).cloned();
-        self.matchmaker.gc_step(node, ack, step, config.as_ref());
-    }
-
-    pub(super) fn reconfigure_matchmakers_acked(&mut self, refusal: Option<MatchmakersRefusal>) {
-        if refusal.is_none() {
-            reach_once!(
-                self.reconfigure_matchmakers_started,
-                "generation: a client's matchmaker reconfiguration is started"
-            );
-        } else {
-            reach_once!(
-                self.reconfigure_matchmakers_refused,
-                "generation: a client's matchmaker reconfiguration is refused"
-            );
-        }
-    }
-
-    pub(super) fn retire_acked(&mut self, refusal: Option<RetireRefusal>) {
-        // The refusal legs the shared gate cannot tell apart. `not_collected`
-        // is the one #123's rule turns from a workload discipline into a
-        // protocol answer: the node is outside the configuration it believes
-        // in force, and still refuses, because nothing proves the cluster is
-        // done with the configurations it *was* in.
-        match refusal {
-            Some(RetireRefusal::NotCollected) => reach_once!(
-                self.retire_not_collected,
-                "gc: a retirement is refused for want of an effective floor"
-            ),
-            // The freshness leg (#165): outside the configuration it
-            // believes in force, but that belief predates the floor, so
-            // the node cannot tell whether the configuration the floor
-            // kept names it.
-            Some(RetireRefusal::Stale) => reach_once!(
-                self.retire_stale,
-                "gc: a retirement is refused on a belief older than the floor"
-            ),
-            Some(RetireRefusal::Leader) => reach_once!(
-                self.retire_leader,
-                "gc: a retirement is refused by the sitting leader"
-            ),
-            _ => {}
-        }
-        self.matchmaker.retire_acked(refusal.is_none());
-    }
-
-    pub(super) fn retired(&mut self, node: NodeId) {
-        self.matchmaker.retired(node);
-        self.retired.insert(node.0);
-    }
-
-    pub(super) fn matchmaking_completed(
-        &mut self,
-        node: NodeId,
-        ballot: Ballot,
-        prior: &[AcceptorConfig],
-        watermark: Ballot,
-        registered_by: usize,
-        disagreements: u64,
-    ) {
-        self.matchmaker
-            .completed(node, ballot, prior, watermark, registered_by, disagreements);
-        self.note_prior(node.0, ballot, prior);
-    }
-
-    pub(super) fn reconfigure_acked(&mut self, node: NodeId, result: ReconfigureResult) {
-        match result {
-            ReconfigureResult::Started(_) => {
-                assert_always!(
-                    self.matchmaker.has_matchmakers(),
-                    "reconfiguration: a deployment without matchmakers never starts one",
-                    { "node" => node.0 }
-                );
-                reach_once!(
-                    self.reconfigure_started,
-                    "reconfiguration: a reconfiguration request is started"
-                );
-            }
-            ReconfigureResult::Refused(_) | ReconfigureResult::NotLeader(_) => {
-                reach_once!(
-                    self.reconfigure_refused,
-                    "reconfiguration: a reconfiguration request is refused or redirected"
-                );
-            }
-        }
-    }
-
-    pub(super) fn matchmaker_boot_refused(
-        &mut self,
+    pub(super) fn match_replied(
+        &self,
         matchmaker: MatchmakerId,
-        refusal: BootRefusal,
+        to: NodeId,
+        ballot: Ballot,
+        generation: u64,
+        page: &HistoryPage<'_>,
     ) {
-        match refusal {
-            // #183: the library, not the harness, keeps a wiped registry out.
-            BootRefusal::Amnesia => self.matchmaker.boot_refused(matchmaker.0),
-            BootRefusal::AlreadyFormatted => {
-                assert_always!(
-                    false,
-                    "matchmaker: a first boot never meets a formatted registry",
-                    { "matchmaker" => matchmaker.0 }
-                );
-            }
-            // #207: an edited configuration is refused, then restored.
-            BootRefusal::ConfigMismatch => {
-                reach_once!(
-                    self.matchmaker_config_mismatch_refused,
-                    "matchmaker: the library refuses a restart under an edited configuration"
-                );
-            }
-        }
+        self.state()
+            .matchmaker
+            .replied(matchmaker, to, ballot, generation, page);
+    }
+
+    pub(super) fn match_refused(
+        &self,
+        matchmaker: MatchmakerId,
+        _to: NodeId,
+        ballot: Ballot,
+        refusal: MatchRefusal,
+    ) {
+        self.state().matchmaker.refused(matchmaker, ballot, refusal);
+    }
+
+    #[tracing::instrument(level = "trace", skip_all, fields(matchmaker = matchmaker.0, refusal = ?refusal))]
+    pub(super) fn matchmaker_boot_refused(&self, matchmaker: MatchmakerId, refusal: BootRefusal) {
+        self.state().matchmaker_boot_refused(matchmaker, refusal);
+    }
+
+    pub(super) fn matchmaker_storage_fault(
+        &self,
+        matchmaker: MatchmakerId,
+        _error: &StorageError,
+        decision: StorageFaultDecision,
+    ) {
+        self.state().matchmaker.storage_fault(matchmaker, decision);
     }
 }

@@ -16,8 +16,7 @@ use std::sync::{Mutex, PoisonError};
 
 use moonpool_sim::{StateHandle, assert_always, assert_reachable};
 use paros::client::election::ElectionRecord;
-use paros::core::JournalIdentifier;
-use paros::core::LeaderUuid;
+use paros::core::{JournalIdentifier, LeaderUuid};
 
 const TERMS_KEY: &str = "paros-installed-terms";
 
