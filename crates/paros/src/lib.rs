@@ -34,22 +34,16 @@ pub mod client;
 mod driver;
 pub mod frontend;
 pub mod inspect;
-pub mod journal;
 pub mod machine;
 mod matchmaker;
 pub mod model;
 pub mod net;
 pub mod observe;
-mod provision;
 mod proxy;
 mod replica_tier;
-mod rpc;
-mod runtime;
-mod storage;
-#[cfg(feature = "tls")]
-pub mod tls;
-pub mod transport;
+pub mod storage;
 pub mod tunables;
+pub mod wire;
 
 pub use driver::reply::Reply;
 pub use driver::{
@@ -57,43 +51,38 @@ pub use driver::{
     LOAD_INTERVAL_FLOOR, MAX_READ_RECORDS, RunError, command_hash, message_kind, parse_addr,
     registration_history_hash, run_journals, run_node,
 };
-pub use model::address::{Address, Names};
-pub use model::corruption::{CorruptionVerdict, IntegrityFault};
-pub use observe::audit::{
-    Audit, DelegationOutcome, Deployment, HistoryPage, LogReadAnswer, LogReadReport, NoAudit,
-    StorageFaultDecision,
-};
-pub use rpc::{
-    EdgeRejection, InspectRefusal, InspectReply, InspectRequest, InspectTarget, MAX_FRAME_BYTES,
-    NodeClient, Pass, Read, ReadAck, Reconfigure, ReconfigureAck, ReconfigureMatchmakers,
-    ReconfigureMatchmakersAck, RetireAck, RetireRequest, SetLeader, SetLeaderAck, Truncate,
-    TruncateAck, WireQuorumSystem, Write, WriteAck, journal_state_from_proto,
-    journal_state_to_proto, journal_view_from_proto, journal_view_to_proto, leader_from_proto,
-    leader_uuid_from_proto, leader_uuid_to_proto, quorum_system_from_proto, quorum_system_to_proto,
-};
-/// The wire contract: the RPC method markers ([`rpc::methods`]) and the
-/// generated protobuf bodies.
-pub mod wire {
-    pub use crate::rpc::methods;
-    pub use crate::rpc::{
-        checkpoint, common, election, fleet, internal, machine, matchmaker, public, system, tenant,
-        view,
-    };
-}
-pub use journal::{JournalBootFacts, JournalMatchmakerStorage, JournalStorage, JournalStoreConfig};
 pub use matchmaker::{
     HostedSet, MatchmakerStorage, MemMatchmakerStorage, Registrations,
     matchmaker_storage_contract_suite, run_matchmaker,
 };
-pub use provision::{Provisioned, provision_matchmaker_store, provision_store};
+pub use model::address::{Address, Names};
+pub use model::corruption::{CorruptionVerdict, IntegrityFault};
+pub use net::runtime::ParosProviders;
+pub use net::transport::Transport;
+pub use net::{EdgeRejection, NodeClient, Pass};
+pub use observe::audit::{
+    Audit, DelegationOutcome, Deployment, HistoryPage, LogReadAnswer, LogReadReport, NoAudit,
+    StorageFaultDecision,
+};
 pub use proxy::{ProxyConfig, ProxyJournal, run_proxy};
 pub use replica_tier::run_replica;
-pub use runtime::ParosProviders;
+pub use storage::journal::{
+    JournalBootFacts, JournalMatchmakerStorage, JournalStorage, JournalStoreConfig,
+};
+pub use storage::provision::{Provisioned, provision_matchmaker_store, provision_store};
 pub use storage::{
     LogStorage, MemStorage, MetadataFault, ScrubPage, ScrubbedSlot, StorageError, StorageRecord,
     WriteOutcome, command_bytes, storage_contract_suite,
 };
-pub use transport::Transport;
+pub use tunables::MAX_FRAME_BYTES;
+pub use wire::{
+    InspectRefusal, InspectReply, InspectRequest, InspectTarget, Read, ReadAck, Reconfigure,
+    ReconfigureAck, ReconfigureMatchmakers, ReconfigureMatchmakersAck, RetireAck, RetireRequest,
+    SetLeader, SetLeaderAck, Truncate, TruncateAck, WireQuorumSystem, Write, WriteAck,
+    journal_state_from_proto, journal_state_to_proto, journal_view_from_proto,
+    journal_view_to_proto, leader_from_proto, leader_uuid_from_proto, leader_uuid_to_proto,
+    quorum_system_from_proto, quorum_system_to_proto,
+};
 
 // The whole sans-IO core, re-exported: the roles (`acceptor`, `proposer`,
 // `replica`, `matchmaking`, `membership`, `retained`), `ColocatedNode`, the

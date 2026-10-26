@@ -8,8 +8,8 @@
 use paros_core::{MatchmakerId, NodeId};
 use tokio::sync::mpsc;
 
+use crate::net::ReplySender;
 use crate::observe::audit::Audit;
-use crate::rpc::ReplySender;
 
 /// A client-facing reply the driver is about to send.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

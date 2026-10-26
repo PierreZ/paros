@@ -24,7 +24,7 @@ use paros_core::{Entry, JournalIdentifier, JournalView, LeaderUuid, Seq, Value};
 
 use super::outcome::{ClaimOutcome, TruncateOutcome, WriteOutcome};
 use super::{Client, Resolution, WriteOptions};
-use crate::rpc::{Truncate, Write};
+use crate::wire::{Truncate, Write};
 
 /// What a writer learned from a journal state a verdict named.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -164,7 +164,7 @@ pub fn write_request(journal: JournalIdentifier, entry: &Entry) -> Write {
     Write {
         journal: journal.journal.0,
         tenant: journal.tenant.0,
-        leader: Some(crate::rpc::leader_uuid_to_proto(entry.leader)),
+        leader: Some(crate::wire::leader_uuid_to_proto(entry.leader)),
         seq: entry.seq.0,
         records: entry.records.iter().map(|r| r.0.clone()).collect(),
     }
@@ -421,7 +421,7 @@ impl Writer {
             journal: self.journal.journal.0,
             tenant: self.journal.tenant.0,
             up_to,
-            leader: Some(crate::rpc::leader_uuid_to_proto(leader)),
+            leader: Some(crate::wire::leader_uuid_to_proto(leader)),
         })
     }
 
@@ -435,7 +435,7 @@ impl Writer {
             journal: self.journal.journal.0,
             tenant: self.journal.tenant.0,
             up_to,
-            leader: Some(crate::rpc::leader_uuid_to_proto(self.fence())),
+            leader: Some(crate::wire::leader_uuid_to_proto(self.fence())),
         }
     }
 

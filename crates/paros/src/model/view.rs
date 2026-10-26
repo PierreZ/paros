@@ -31,8 +31,8 @@ use crate::model::registry::{NodeStanding, Registry};
 use crate::model::status::{Hysteresis, fill};
 use crate::model::tags::{Tag, reserved};
 use crate::model::tenant::TenantControl;
-use crate::rpc::config_to_proto;
-use crate::rpc::view as wire;
+use crate::wire::config_to_proto;
+use crate::wire::view as wire;
 
 /// Who asks, as the cell decided it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -316,7 +316,7 @@ impl CellFacts<'_> {
     /// The tags of `tenant`, a tenant of `kind`: the universe directory's
     /// entry's, else the reserved tags its kind is registered with (a cell
     /// that does not host the directory, or did not read it).
-    fn tenant_tags(&self, tenant: TenantId, kind: TenantKind) -> Vec<crate::rpc::common::Tag> {
+    fn tenant_tags(&self, tenant: TenantId, kind: TenantKind) -> Vec<crate::wire::common::Tag> {
         self.directory
             .and_then(|d| d.tenant(tenant))
             .map_or_else(

@@ -17,10 +17,9 @@
 use paros_core::{ColocatedNode, Command, Control, Entry, LeaderUuid, NodeId, Outcome, Seq};
 
 use super::reply::Reply;
+use crate::net::ReplySender;
 use crate::observe::audit::Audit;
-use crate::rpc::{
-    ReplySender, SetLeaderAck, TruncateAck, WriteAck, WriteOutcome, journal_view_to_proto,
-};
+use crate::wire::{SetLeaderAck, TruncateAck, WriteAck, WriteOutcome, journal_view_to_proto};
 
 use super::reply::answer;
 use crate::tunables::DriverTunables;

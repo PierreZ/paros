@@ -35,7 +35,7 @@ use std::time::Duration;
 use paros_core::NodeId;
 
 use crate::model::registry::SlowFacts;
-use crate::rpc::machine as wire;
+use crate::wire::machine as wire;
 
 /// A round trip leans slow only at or above this many times the round's
 /// median: a coordinator that is slow itself sees every round trip long.

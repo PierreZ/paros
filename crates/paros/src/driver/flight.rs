@@ -30,13 +30,14 @@ use std::time::Duration;
 
 use paros_core::Message;
 
+use crate::net::ReplySender;
 use crate::observe::audit::Audit;
-use crate::rpc::{Read, ReadAck, ReplySender};
 use crate::storage::LogStorage;
+use crate::wire::{Read, ReadAck};
 
 use super::calls::Call;
-use super::exit::RunError;
 use super::ready::{Taken, persist_writes};
+use crate::storage::boot::RunError;
 
 /// A flush in flight: the journal's store, given back when it lands, and
 /// the flush's verdict.

@@ -46,8 +46,6 @@ mod book;
 pub(crate) mod boot;
 mod calls;
 pub(crate) mod edge;
-pub(crate) mod events;
-mod exit;
 mod flight;
 mod handover;
 mod journals;
@@ -64,9 +62,9 @@ mod system;
 pub(crate) mod transport;
 
 pub use crate::net::address::parse_addr;
+pub use crate::observe::events::{command_hash, message_kind, registration_history_hash};
+pub use crate::storage::boot::{BootKind, BootRefusal, RunError};
 pub use crate::tunables::{BelowFloor, DriverTunables, LOAD_INTERVAL_FLOOR, MAX_READ_RECORDS};
-pub use events::{command_hash, message_kind, registration_history_hash};
-pub use exit::{BootKind, BootRefusal, RunError};
 pub use journals::{HostEnded, JournalStores};
 pub use system::ControlPlan;
 
@@ -86,20 +84,21 @@ use tokio_util::sync::CancellationToken;
 use crate::machine::{CellMachine, ControlJournals};
 use crate::model::registry::{NodeStanding, RegistryEvent, SystemEvent};
 use crate::model::tenant::TenantEvent;
+use crate::net::transport::Transport;
+use crate::net::{MatchmakerClient, ReplySender};
 use crate::observe::audit::Audit;
 use crate::observe::metrics::{CallKind, Metrics};
-use crate::rpc::{
-    InspectRefusal, InspectTarget, MatchmakerClient, MatchmakersRefusal, ReadAck,
-    ReconfigureMatchmakersAck, ReplySender, RetireAck, RetireRefusal, SetLeaderAck, TruncateAck,
-    WriteAck, leader_from_proto, leader_uuid_from_proto,
-};
 use crate::storage::LogStorage;
-use crate::transport::Transport;
+use crate::wire::{
+    InspectRefusal, InspectTarget, MatchmakersRefusal, ReadAck, ReconfigureMatchmakersAck,
+    RetireAck, RetireRefusal, SetLeaderAck, TruncateAck, WriteAck, leader_from_proto,
+    leader_uuid_from_proto,
+};
 use reply::Reply;
 
+use crate::observe::events::message_route;
 use calls::Call;
 use edge::{NodeInbox, RpcEdge, edge_reporter};
-use events::message_route;
 use flight::{Flight, Input};
 use handover::{HandoverDriver, TenantAudits};
 use journals::{JournalRt, Journals, SingleStore, boot_journal};
@@ -2025,7 +2024,7 @@ where
         .as_ref()
         .map(|_| {
             edge.handle()
-                .register_group::<crate::rpc::methods::MachineInterface>(
+                .register_group::<crate::wire::methods::MachineInterface>(
                     moonpool_rpc::AccessClass::Public,
                 )
                 .map_err(|e| {
@@ -2039,7 +2038,7 @@ where
     // learns the reference of each server it inspects.
     let machine_interface: Vec<u8> = machine_group
         .as_ref()
-        .map(|group| crate::rpc::published(&group.interface_ref()))
+        .map(|group| crate::net::published(&group.interface_ref()))
         .unwrap_or_default();
     assert_eq!(
         machine_interface.is_empty(),
@@ -2553,17 +2552,17 @@ where
                 // 3102364801525731724 on f8e629f (PR #679 (clean Ctrl-C shutdown)): "placement: a journal
                 // with a machine to go to leaves a draining one after
                 // chaos".
-                if events::message_sender(&msg) == Some(Party::Node(NodeId(self_id))) {
+                if crate::observe::events::message_sender(&msg) == Some(Party::Node(NodeId(self_id))) {
                     moonpool_assertions::reachable!(
                         "node: a message in this node's own name is ignored"
                     );
-                    tracing::info!(node = self_id, journal = %journal, kind = events::message_kind(&msg), "self_message_ignored");
+                    tracing::info!(node = self_id, journal = %journal, kind = crate::observe::events::message_kind(&msg), "self_message_ignored");
                     continue;
                 }
                 // The registry is the pool (#189): a node the fold has not
                 // admitted yet is refused before the core sees its message.
                 if let Some(f) = &follower
-                    && let Some(from) = events::message_sender(&msg)
+                    && let Some(from) = crate::observe::events::message_sender(&msg)
                     && !f.admits(from)
                 {
                     if let Party::Node(from) = from {
@@ -2684,7 +2683,7 @@ where
                     node = self_id,
                     tenant = tenant.0,
                     matchmaker = matchmaker.0,
-                    reply = events::reconfigure_reply_kind(&reply),
+                    reply = crate::observe::events::reconfigure_reply_kind(&reply),
                     step = ?step,
                     "reconfigurer_step"
                 );
@@ -3728,10 +3727,11 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
             };
             // A spare of the static plan: ordered, like every journal no
             // tenant created.
-            if !self
-                .stores
-                .create(journal, config, crate::journal::Durability::Ordered)
-            {
+            if !self.stores.create(
+                journal,
+                config,
+                crate::storage::journal::Durability::Ordered,
+            ) {
                 continue;
             }
             open_journal(

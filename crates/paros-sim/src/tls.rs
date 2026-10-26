@@ -2,7 +2,7 @@
 //! start of a seed turns TLS on for every runtime of the run, or leaves the
 //! run on plaintext. On a TLS seed the run has one certificate authority,
 //! drawn from the seed, and every process builds its transport with the
-//! shipped `paros::tls` code: the machines, the matchmakers, the proxies,
+//! shipped `paros::net::tls` code: the machines, the matchmakers, the proxies,
 //! the replicas, the joiners and the frontends serve and dial with a
 //! machine's or a frontend's certificate; the workload's clients dial with
 //! an admin's.
@@ -16,7 +16,7 @@
 //!
 //! **Fresh certificates at every boot.** A process issues its leaf when it
 //! boots, from a key drawn from the seed, so a reboot is also a
-//! certificate rotation. The issuer's own fault site (`paros::tls::Flaw`:
+//! certificate rotation. The issuer's own fault site (`paros::net::tls::Flaw`:
 //! short-lived, not yet valid, a name dropped, the wrong usage) fires as it
 //! would in `parosctl tls`; the harness reissues a flawed leaf, as an
 //! operator's deploy check would, so a run is never judged on a process
@@ -30,7 +30,7 @@ use std::sync::Arc;
 
 use moonpool_sim::{SimContext, SimulationError, SimulationResult, StateHandle, assert_reachable};
 use paros::Transport;
-use paros::tls::{
+use paros::net::tls::{
     Authority, ClientCertificates, KeySeed, Material, ProviderUtc, Role, UtcTime, Validity,
 };
 
@@ -97,7 +97,7 @@ impl SeedTls {
     /// A clean leaf for `name`, a `role`: a flawed one is reissued.
     fn material(&self, role: Role, name: &str) -> SimulationResult<Material> {
         for _ in 0..REISSUE_LIMIT {
-            let spec = paros::tls::leaf(UNIVERSE, role, name, &[], validity(), seed());
+            let spec = paros::net::tls::leaf(UNIVERSE, role, name, &[], validity(), seed());
             let issued = self
                 .authority
                 .issue(&spec)
@@ -129,7 +129,7 @@ pub(crate) fn serving(ctx: &SimContext, role: Role, name: &str) -> SimulationRes
         return Ok(Transport::Plaintext);
     };
     let material = tls.material(role, name)?;
-    paros::tls::serving(&material, tls.callers, clock(ctx)).map_err(tls_error)
+    paros::net::tls::serving(&material, tls.callers, clock(ctx)).map_err(tls_error)
 }
 
 /// The transport of a workload's client: plaintext on a plaintext seed;
@@ -148,5 +148,5 @@ pub(crate) fn dialing(ctx: &SimContext, name: &str) -> SimulationResult<Transpor
         assert_reachable!("tls: a client dials without a certificate");
         None
     };
-    paros::tls::dialing(&roots, certificate, clock(ctx)).map_err(tls_error)
+    paros::net::tls::dialing(&roots, certificate, clock(ctx)).map_err(tls_error)
 }

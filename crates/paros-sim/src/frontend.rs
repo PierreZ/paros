@@ -521,7 +521,7 @@ async fn run_frontend_role(
             )),
             ..DriverTunables::default()
         },
-        transport: crate::tls::serving(ctx, paros::tls::Role::Frontend, my_ip)?,
+        transport: crate::tls::serving(ctx, paros::net::tls::Role::Frontend, my_ip)?,
         client: ClientTunables {
             request_timeout: FORWARD_TIMEOUT,
             read_timeout: FORWARD_TIMEOUT,

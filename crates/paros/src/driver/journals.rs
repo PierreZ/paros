@@ -34,10 +34,10 @@ use crate::observe::audit::Audit;
 use crate::storage::{LogStorage, StorageError};
 
 use super::boot::{check_format_marker, report_boot_state};
-use super::exit::{BootKind, RunError};
 use super::flight::{Flight, Flush, Input, Landing};
 use super::ready::{ClientWaiters, storage_fault_crash};
 use super::report::{Cadence, Deltas, draw_election_timeout};
+use crate::storage::boot::{BootKind, RunError};
 use crate::tunables::DriverTunables;
 
 /// The end of what a node's stores host beside its journals
@@ -119,7 +119,7 @@ pub trait JournalStores {
         &mut self,
         journal: JournalIdentifier,
         config: paros_core::Config,
-        durability: crate::journal::Durability,
+        durability: crate::storage::journal::Durability,
     ) -> bool {
         let _ = (journal, config, durability);
         false
@@ -141,7 +141,7 @@ pub trait JournalStores {
         &mut self,
         providers: &P,
         rpc: &moonpool_rpc::RpcHandle<P>,
-        machine: Option<&moonpool_rpc::ServiceGroup<crate::rpc::methods::MachineInterface>>,
+        machine: Option<&moonpool_rpc::ServiceGroup<crate::wire::methods::MachineInterface>>,
         (tunables, cell_id): (&DriverTunables, u64),
         shutdown: tokio_util::sync::CancellationToken,
     ) -> moonpool_core::SimulationResult<Option<HostEnded>> {

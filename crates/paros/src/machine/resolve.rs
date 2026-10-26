@@ -50,9 +50,9 @@ use crate::client::names::{TenantResolution, tenant_in};
 use crate::client::{Client, ClientTunables, Server};
 use crate::model::fleet::FleetDirectory;
 use crate::model::registry::Registry;
-use crate::rpc::machine as wire;
-use crate::rpc::methods::ResolveRpc;
-use crate::rpc::{Inbound, NodeClient, serve_well_known};
+use crate::net::{Inbound, NodeClient, serve_well_known};
+use crate::wire::machine as wire;
+use crate::wire::methods::ResolveRpc;
 
 /// What a machine answers `Resolve` from.
 pub(crate) struct Resolver {

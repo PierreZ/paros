@@ -9,9 +9,9 @@ use paros_core::{Ballot, ColocatedNode, NodeId, Slot};
 use crate::observe::audit::{Audit, Deployment};
 use crate::storage::LogStorage;
 
-use super::events::command_hash;
-use super::exit::{BootKind, BootRefusal, RunError};
 use super::ready::{report_applied, storage_fault_crash};
+use crate::observe::events::command_hash;
+use crate::storage::boot::{BootKind, BootRefusal, RunError};
 
 /// #147: judge the operator's claim against the store's format marker,
 /// before the core reads a byte. The marker is what makes "a wiped identity

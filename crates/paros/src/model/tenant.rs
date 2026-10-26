@@ -41,8 +41,8 @@ use prost::Message as _;
 
 use crate::model::checkpoint::{Checkpointable, Folded};
 use crate::model::tags::UserTags;
-use crate::rpc::tenant as wire;
-use crate::rpc::{
+use crate::wire::tenant as wire;
+use crate::wire::{
     config_from_proto, config_to_proto, writer_mode_from_proto, writer_mode_to_proto,
 };
 
@@ -135,19 +135,19 @@ impl StoreDurability {
 
     /// The store's commit protocol.
     #[must_use]
-    pub fn journal(self) -> crate::journal::Durability {
+    pub fn journal(self) -> crate::storage::journal::Durability {
         match self {
-            StoreDurability::Ordered => crate::journal::Durability::Ordered,
-            StoreDurability::Batched => crate::journal::Durability::Batched,
+            StoreDurability::Ordered => crate::storage::journal::Durability::Ordered,
+            StoreDurability::Batched => crate::storage::journal::Durability::Batched,
         }
     }
 
     /// The wire value (`0` is `Ordered`, the default).
     #[must_use]
-    pub fn to_proto(self) -> crate::rpc::common::StoreDurability {
+    pub fn to_proto(self) -> crate::wire::common::StoreDurability {
         match self {
-            StoreDurability::Ordered => crate::rpc::common::StoreDurability::Ordered,
-            StoreDurability::Batched => crate::rpc::common::StoreDurability::Batched,
+            StoreDurability::Ordered => crate::wire::common::StoreDurability::Ordered,
+            StoreDurability::Batched => crate::wire::common::StoreDurability::Batched,
         }
     }
 
@@ -157,9 +157,9 @@ impl StoreDurability {
     ///
     /// The value names no store durability.
     pub fn from_proto(value: i32) -> Result<Self, &'static str> {
-        match crate::rpc::common::StoreDurability::try_from(value) {
-            Ok(crate::rpc::common::StoreDurability::Ordered) => Ok(StoreDurability::Ordered),
-            Ok(crate::rpc::common::StoreDurability::Batched) => Ok(StoreDurability::Batched),
+        match crate::wire::common::StoreDurability::try_from(value) {
+            Ok(crate::wire::common::StoreDurability::Ordered) => Ok(StoreDurability::Ordered),
+            Ok(crate::wire::common::StoreDurability::Batched) => Ok(StoreDurability::Batched),
             Err(_) => Err("an unknown store durability"),
         }
     }
@@ -698,7 +698,7 @@ impl TenantCommand {
 }
 
 /// A wire list of user tags, judged (#575).
-fn user_tags(tags: Vec<crate::rpc::common::Tag>) -> Result<UserTags, &'static str> {
+fn user_tags(tags: Vec<crate::wire::common::Tag>) -> Result<UserTags, &'static str> {
     UserTags::from_wire(tags).map_err(|_| "a user tag set is malformed, reserved or over the cap")
 }
 

@@ -18,11 +18,12 @@ use paros_core::{JournalId, JournalIdentifier, TenantId};
 
 use super::Client;
 use crate::machine::{Admission, CellPlan, ControlJournals};
-use crate::rpc::machine as wire;
-use crate::rpc::methods::{
+use crate::net::well_known;
+use crate::wire::machine as wire;
+use crate::wire::methods::{
     AdmitRpc, CellInitRpc, IdentifyRpc, InspectRpc, RegisterRpc, WellKnownMethod,
 };
-use crate::rpc::{InspectReply, InspectRequest, well_known};
+use crate::wire::{InspectReply, InspectRequest};
 use crate::{Address, Names};
 
 /// One attempt of `M` at `target`, its address resolved now through `names`

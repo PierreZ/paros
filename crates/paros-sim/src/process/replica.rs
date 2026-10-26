@@ -173,7 +173,7 @@ pub(super) async fn run_replica_role(
     // injected damage (a zero chaos window): the replica tier stays outside
     // the copy budget (#144).
     let layout = JournalStoreConfig {
-        durability: paros::journal::Durability::Ordered,
+        durability: paros::storage::journal::Durability::Ordered,
         ..crate::shape::journal_layout(ctx.state())
     };
     loop {
@@ -195,7 +195,7 @@ pub(super) async fn run_replica_role(
                 ),
                 ..incarnation.shape.tunables
             },
-            crate::tls::serving(ctx, paros::tls::Role::Machine, my_ip)?,
+            crate::tls::serving(ctx, paros::net::tls::Role::Machine, my_ip)?,
             ctx.shutdown().clone(),
         )
         .await

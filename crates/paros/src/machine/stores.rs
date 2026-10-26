@@ -26,8 +26,8 @@ use tokio_util::sync::CancellationToken;
 
 use super::matchmakers::SetBookings;
 use super::{CacheSink, CachedRegistry, ProviderDisk};
-use crate::journal::Durability;
 use crate::model::machine::MachineRecord;
+use crate::storage::journal::Durability;
 use crate::storage::{StorageError, StorageRecord, WriteOutcome};
 use crate::{
     Audit, BootKind, DriverTunables, JournalStorage, JournalStoreConfig, JournalStores, RunError,
@@ -223,7 +223,9 @@ impl<S: LocalStorageProvider + Clone + 'static, F> MachineStores<S, F> {
                     // before the record names the journal, or a power loss
                     // after the record would boot it as amnesia.
                     let dir = self.disk.journal_dir(journal);
-                    if let Err(error) = crate::journal::settle(self.disk.provider(), &dir).await {
+                    if let Err(error) =
+                        crate::storage::journal::settle(self.disk.provider(), &dir).await
+                    {
                         tracing::warn!(journal = %journal, %error, "created_journal_unsettled");
                         self.open_faults.insert(journal, disk_fault());
                         return false;
@@ -372,7 +374,7 @@ where
         &mut self,
         providers: &P,
         rpc: &RpcHandle<P>,
-        machine: Option<&moonpool_rpc::ServiceGroup<crate::rpc::methods::MachineInterface>>,
+        machine: Option<&moonpool_rpc::ServiceGroup<crate::wire::methods::MachineInterface>>,
         (tunables, cell_id): (&DriverTunables, u64),
         shutdown: CancellationToken,
     ) -> SimulationResult<Option<crate::driver::HostEnded>> {

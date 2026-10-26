@@ -17,9 +17,10 @@ use moonpool_core::LocalTimeProvider;
 use paros_core::{JournalIdentifier, NodeId};
 
 use crate::machine::ControlJournals;
+use crate::net::ReplySender;
 use crate::observe::audit::Audit;
 use crate::observe::metrics::{CallKind, CallOutcome, Metrics};
-use crate::rpc::{ReadAck, ReplySender, SetLeaderAck, TruncateAck, WriteAck, WriteOutcome};
+use crate::wire::{ReadAck, SetLeaderAck, TruncateAck, WriteAck, WriteOutcome};
 
 use super::system::ControlFollower;
 

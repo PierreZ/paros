@@ -4,14 +4,14 @@
 //! in a temporary directory, and a restart loop that drops a store
 //! mid-batch, the way a killed process leaves it.
 //!
-//! The crash loops of `paros::journal`'s own tests stay on the simulated
+//! The crash loops of `paros::storage::journal`'s own tests stay on the simulated
 //! disk: their fault models (unsynced sectors resolved at a crash, torn and
 //! misdirected writes) need a disk the test can crash, which a real one is
 //! not. What a real filesystem adds is the real thing underneath — files,
 //! directories, `fsync`, rename — and that is what these exercise.
 
 use moonpool_core::CompioStorageProvider;
-use paros::journal::Durability;
+use paros::storage::journal::Durability;
 use paros::{
     Ballot, Command, Config, Entry, JournalMatchmakerStorage, JournalStorage, JournalStoreConfig,
     LeaderUuid, LogStorage, MatchmakerStorage, MustSync, NodeId, Seq, Slot, Storage, Value,
@@ -51,8 +51,8 @@ fn compact() -> JournalStoreConfig {
     }
 }
 
-fn compact_geometry() -> paros::journal::Geometry {
-    paros::journal::Geometry {
+fn compact_geometry() -> paros::storage::journal::Geometry {
+    paros::storage::journal::Geometry {
         persist_blocks: 8,
         gap_blocks: 0,
         entry_blocks: 16,

@@ -499,8 +499,16 @@ pub fn command_bytes(command: &Command) -> u64 {
     }
 }
 
+pub mod boot;
 mod contract;
+pub mod journal;
+pub mod matchmaker;
 mod mem;
+pub mod provision;
 
+pub use boot::{BootKind, BootRefusal, RunError};
 pub use contract::storage_contract_suite;
+pub use matchmaker::{
+    MatchmakerStorage, MemMatchmakerStorage, Registrations, matchmaker_storage_contract_suite,
+};
 pub use mem::MemStorage;

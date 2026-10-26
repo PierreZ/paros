@@ -1,6 +1,6 @@
 //! The operator's durable probe (#348): before it reads a store's format
 //! marker to resolve an interrupted provisioning, it makes the store's
-//! files durable as they stand ([`paros::journal::settle`]). A marker a
+//! files durable as they stand ([`paros::storage::journal::settle`]). A marker a
 //! living process reads after a failed format sync is staged, not landed;
 //! once settled, the marker the probe reads is the one a crash keeps.
 //!
@@ -21,7 +21,7 @@ use super::wipe::SYNC_ATTEMPTS;
 #[tracing::instrument(level = "debug", skip_all, fields(dir = %dir))]
 pub(crate) async fn settle_store(provider: &SimStorageProvider, dir: &str) -> bool {
     for attempt in 0..SYNC_ATTEMPTS {
-        if paros::journal::settle(provider, dir).await.is_ok() {
+        if paros::storage::journal::settle(provider, dir).await.is_ok() {
             if attempt > 0 {
                 assert_reachable!("journal store: a provisioning probe retries a failed sync");
             }

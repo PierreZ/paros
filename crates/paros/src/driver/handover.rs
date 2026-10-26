@@ -10,7 +10,7 @@ use paros_core::{
 
 use super::report::Cadence;
 use crate::observe::audit::Audit;
-use crate::rpc::MatchmakersRefusal;
+use crate::wire::MatchmakersRefusal;
 
 /// The node driver's handover state: the sans-IO
 /// [`MatchmakerReconfigurer`] plus the two clocks the core deliberately does

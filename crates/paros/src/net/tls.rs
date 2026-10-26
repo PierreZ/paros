@@ -42,7 +42,7 @@ pub use moonpool_rpc::security::{FixedUtc, UtcClock, UtcTime};
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 pub use moonpool_rpc::security::SystemUtc;
 
-use crate::transport::Transport;
+use crate::net::transport::Transport;
 
 /// The DNS name every serving leaf proves, and every client expects.
 pub const SERVER_NAME: &str = "paros";

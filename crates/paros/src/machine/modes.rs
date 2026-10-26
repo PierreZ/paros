@@ -48,7 +48,7 @@ use crate::client::{Client, ReconfigureOutcome, Server};
 use crate::model::placement::{self, Step, Want};
 use crate::model::registry::{Booking, BookingTarget, Registry, Role};
 use crate::model::tenant::Desired;
-use crate::rpc::NodeClient;
+use crate::net::NodeClient;
 use crate::{Address, Names};
 
 /// What one mode step did.
@@ -173,7 +173,7 @@ impl Modes {
         let Some((at, reply)) = leader_of(&nodes, ids.len(), journal).await else {
             return Some(ModeStep::Waiting);
         };
-        let Ok(system) = crate::rpc::quorum_system_from_proto(&(&reply).into()) else {
+        let Ok(system) = crate::wire::quorum_system_from_proto(&(&reply).into()) else {
             return Some(ModeStep::Waiting);
         };
         // A gone machine takes no new slot: a move would release it at
@@ -395,7 +395,7 @@ impl Modes {
         cell: &mut CellSession,
         desk: &mut TenantDesk,
         change: &Change,
-        (in_force, reply): (AcceptorConfig, &crate::rpc::InspectReply),
+        (in_force, reply): (AcceptorConfig, &crate::wire::InspectReply),
     ) -> Option<ModeStep> {
         let journal = change.journal;
         let leaving: Vec<(u64, Booking)> = change

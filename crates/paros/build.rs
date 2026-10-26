@@ -10,7 +10,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The contracts, pointed at that module instead of re-generating the
     // shared types once per package.
     prost_build::Config::new()
-        .extern_path(".paros.common.v1", "crate::rpc::common")
+        .extern_path(".paros.common.v1", "crate::wire::common")
         .compile_protos(
             &[
                 "proto/paros.proto",

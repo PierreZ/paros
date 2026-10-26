@@ -54,7 +54,8 @@ use tokio_util::sync::CancellationToken;
 use crate::model::checkpoint::{Folded, Folder};
 use crate::model::registry::{Registry, RegistryEvent, SystemEvent, registry_event};
 use crate::model::tenant::{TenantControl, TenantEvent, tenant_event};
-use crate::rpc::{NodeClient, Read, ReadAck};
+use crate::net::NodeClient;
+use crate::wire::{Read, ReadAck};
 
 /// A checkpoint the registry fold met: its position, how it was folded
 /// (`Some(equal)` verified, `None` restored) and the registry the fold held

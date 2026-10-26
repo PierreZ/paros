@@ -510,7 +510,7 @@ impl AuditWorld {
             }
         }
         // The boot raised the effective scalar over the reconfigurations it
-        // keeps (`paros::journal::matchmaker`).
+        // keeps (`paros::storage::journal::matchmaker`).
         if let Some((ballot, _)) = scalars.effective(st.matchmaker.journal()) {
             let ballot = *ballot;
             st.matchmaker.raise_effective(matchmaker, ballot);

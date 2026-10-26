@@ -40,12 +40,12 @@ use paros_core::{
 use tokio_util::sync::CancellationToken;
 
 use crate::driver::edge::{RpcEdge, edge_reporter};
-use crate::driver::events::{command_hash, message_kind, message_route};
 use crate::driver::transport::{LaneOpener, Outbound, send_messages};
 use crate::driver::{DriverTunables, RunError};
+use crate::net::serve_deliveries;
+use crate::net::transport::Transport;
 use crate::observe::audit::{Audit, DelegationOutcome};
-use crate::rpc::serve_deliveries;
-use crate::transport::Transport;
+use crate::observe::events::{command_hash, message_kind, message_route};
 
 /// One journal a proxy leader serves (#193): its identifier and the
 /// bootstrap acceptor configuration the proxy fans out to until a

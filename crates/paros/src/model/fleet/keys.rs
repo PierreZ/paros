@@ -13,7 +13,7 @@
 use std::collections::BTreeMap;
 
 use super::FleetDirectoryRefusal;
-use crate::rpc::fleet as wire;
+use crate::wire::fleet as wire;
 
 /// The prefix of an Ed25519 public key in Biscuit's text form.
 const ED25519: &str = "ed25519/";

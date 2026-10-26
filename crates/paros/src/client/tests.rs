@@ -11,8 +11,8 @@ use super::outcome::{
     RetireOutcome, RetireRefusal, SetLeaderOutcome, TruncateOutcome, WriteOutcome,
 };
 use super::{ClaimOutcome, Learned, Reader, ReaderOutcome, Writer, leader_uuid};
-use crate::rpc::public::WriteOutcome as Wire;
-use crate::rpc::{
+use crate::wire::public::WriteOutcome as Wire;
+use crate::wire::{
     ReadAck, ReconfigureAck, ReconfigureMatchmakersAck, RetireAck, SetLeaderAck, TruncateAck,
     WriteAck, journal_view_to_proto, leader_uuid_from_proto,
 };

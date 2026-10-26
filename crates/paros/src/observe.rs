@@ -4,5 +4,6 @@
 //! ([`scenario`]). It changes no behaviour.
 
 pub mod audit;
+pub mod events;
 pub mod metrics;
 pub mod scenario;

@@ -218,7 +218,7 @@ async fn rot(
         }
         *rots += 1;
     }
-    let original = paros::journal::LayoutRegion {
+    let original = paros::storage::journal::LayoutRegion {
         path: region.path.replacen(&copy, &dir, 1),
         ..region
     };
@@ -236,7 +236,7 @@ async fn rot(
 /// lower half of the held slots, so the next batches never write near it.
 fn aim(
     store: &paros::JournalStorage<SimStorageProvider>,
-) -> Option<(Slot, paros::journal::LayoutRegion)> {
+) -> Option<(Slot, paros::storage::journal::LayoutRegion)> {
     let first = store.first_slot().0;
     let last = store.last_slot().0;
     let held: Vec<Slot> = (first..=last)

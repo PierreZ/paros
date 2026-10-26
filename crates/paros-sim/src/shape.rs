@@ -1064,12 +1064,12 @@ pub(crate) fn journal_layout(state: &StateHandle) -> JournalStoreConfig {
         // A matchmaker store's scalar chunk (#439): an extreme of 32 to
         // 256 bytes cuts the scalars of a set with a pending bootstrap into
         // several chunks. Floor 1.
-        let meta_chunk = buggify_knob!(paros::journal::META_CHUNK, 32_usize..257_usize);
+        let meta_chunk = buggify_knob!(paros::storage::journal::META_CHUNK, 32_usize..257_usize);
         JournalStoreConfig {
             durability: if batched {
-                paros::journal::Durability::Batched
+                paros::storage::journal::Durability::Batched
             } else {
-                paros::journal::Durability::Ordered
+                paros::storage::journal::Durability::Ordered
             },
             geometry: journal_geometry(),
             meta_chunk,
@@ -1086,7 +1086,7 @@ pub(crate) fn journal_layout(state: &StateHandle) -> JournalStoreConfig {
 /// `BatchTooLarge` at every sync, a stalled node, not a knob.
 pub(crate) fn entry_capacity(state: &StateHandle) -> u64 {
     let blocks = journal_layout(state).geometry.entry_blocks;
-    let block = u64::try_from(paros::journal::BLOCK).unwrap_or(u64::MAX);
+    let block = u64::try_from(paros::storage::journal::BLOCK).unwrap_or(u64::MAX);
     u64::from(blocks.saturating_sub(1)).saturating_mul(block)
 }
 
@@ -2103,7 +2103,7 @@ pub(crate) const PERSIST_BLOCKS_FLOOR: u32 = 2;
 // The entry log holds the largest write the workload can make, with a
 // block of slack for the encoding and the entry header.
 const _: () = assert!(
-    (ENTRY_BLOCKS_FLOOR as u64 - 1) * paros::journal::BLOCK as u64
+    (ENTRY_BLOCKS_FLOOR as u64 - 1) * paros::storage::journal::BLOCK as u64
         >= crate::chain_workload::MAX_BATCH_RECORDS
             * crate::chain_workload::MAX_LARGE_COMMAND_BYTES as u64
 );
@@ -2111,11 +2111,12 @@ const _: () = assert!(PERSIST_BLOCKS_FLOOR >= 1);
 
 /// A segment of a few blocks: 512 records and 64 KiB of entries, the base
 /// of the simulation's geometry draws and the matchmakers' fixed shape.
-pub(crate) const COMPACT_GEOMETRY: paros::journal::Geometry = paros::journal::Geometry {
-    persist_blocks: 8,
-    gap_blocks: 0,
-    entry_blocks: 16,
-};
+pub(crate) const COMPACT_GEOMETRY: paros::storage::journal::Geometry =
+    paros::storage::journal::Geometry {
+        persist_blocks: 8,
+        gap_blocks: 0,
+        entry_blocks: 16,
+    };
 
 /// The journal stores' segment geometry (#176, folded from #202): a
 /// `buggify_knob!` per region, so segment rollover, prefix deletion and the
@@ -2125,8 +2126,8 @@ pub(crate) const COMPACT_GEOMETRY: paros::journal::Geometry = paros::journal::Ge
 /// or grow either region. The gap stays empty. A deployment always runs
 /// the library's default geometry (#600 (drop the small layout)); only the
 /// simulation shrinks it, so a run crosses rollover often.
-fn journal_geometry() -> paros::journal::Geometry {
-    let geometry = paros::journal::Geometry {
+fn journal_geometry() -> paros::storage::journal::Geometry {
+    let geometry = paros::storage::journal::Geometry {
         persist_blocks: buggify_knob!(
             COMPACT_GEOMETRY.persist_blocks,
             PERSIST_BLOCKS_FLOOR..33_u32

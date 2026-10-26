@@ -106,7 +106,7 @@ async fn run_joiner(
             Some(system_plan.clone()),
             None,
             tunables,
-            crate::tls::serving(ctx, paros::tls::Role::Machine, my_ip)?,
+            crate::tls::serving(ctx, paros::net::tls::Role::Machine, my_ip)?,
             ctx.shutdown().clone(),
         ))
         .await

@@ -11,25 +11,25 @@ use moonpool_rpc::{
     RpcHandle, RpcInterface, ServiceClient, WellKnownRef,
 };
 
-use super::methods::{
+use crate::model::name::JournalName;
+use crate::wire::methods::{
     BatchWriteRpc, FrontReadRpc, FrontSetJournalTagsRpc, FrontSetLeaderRpc, FrontTruncateRpc,
     FrontWriteRpc, GarbageCollectRpc, InspectRpc, MachineInterface, MatchmakeRpc,
     MatchmakerReconfigureRpc, ReadRpc, ReconfigureMatchmakersRpc, ReconfigureRpc, RetireRpc,
     ScrubRpc, SetLeaderRpc, TruncateRpc, WellKnownMethod, WriteRpc,
 };
-use super::{
+use crate::wire::{
     Entry, FrontRead, FrontSetJournalTags, FrontSetLeader, FrontTruncate, FrontWrite, InspectReply,
     InspectRequest, Read, ReadAck, Reconfigure, ReconfigureAck, ReconfigureMatchmakers,
     ReconfigureMatchmakersAck, RetireAck, RetireRequest, ScrubReply, ScrubRequest,
     SetJournalTagsAck, SetLeader, SetLeaderAck, Truncate, TruncateAck, Write, WriteAck,
 };
-use crate::model::name::JournalName;
 use crate::{Address, Names};
 use paros_core::{JournalId, JournalIdentifier, TenantId};
 
 /// `M`'s well-known endpoint at `addr`, bound to the runtime `rpc`: calls
 /// reach whichever incarnation is serving that address.
-pub(crate) fn well_known<P: ParosProviders, M: WellKnownMethod>(
+pub fn well_known<P: ParosProviders, M: WellKnownMethod>(
     rpc: &RpcHandle<P>,
     addr: SocketAddr,
 ) -> ServiceClient<P, M> {
@@ -46,10 +46,7 @@ pub(crate) fn well_known<P: ParosProviders, M: WellKnownMethod>(
 /// *which instance*: the address inside a reference is the one the
 /// runtime bound, which may be a wildcard.
 #[must_use]
-pub(crate) fn aimed<I: RpcInterface>(
-    reference: &InterfaceRef<I>,
-    addr: SocketAddr,
-) -> InterfaceRef<I> {
+pub fn aimed<I: RpcInterface>(reference: &InterfaceRef<I>, addr: SocketAddr) -> InterfaceRef<I> {
     let endpoint = reference.endpoint();
     let aimed = InterfaceRef::new(
         Endpoint::new(addr, endpoint.incarnation(), endpoint.token()),
@@ -71,7 +68,7 @@ pub(crate) fn aimed<I: RpcInterface>(
 /// advertised address before it dials ([`aimed`]), so only the incarnation
 /// and the token of the published form are ever used.
 #[must_use]
-pub(crate) fn published<I: RpcInterface>(reference: &InterfaceRef<I>) -> Vec<u8> {
+pub fn published<I: RpcInterface>(reference: &InterfaceRef<I>) -> Vec<u8> {
     let addr = reference.endpoint().address();
     let reference = if addr.ip().is_unspecified() {
         let loopback: std::net::IpAddr = if addr.is_ipv4() {
@@ -93,7 +90,7 @@ pub(crate) fn published<I: RpcInterface>(reference: &InterfaceRef<I>) -> Vec<u8>
 
 /// Method `M` of the group `reference` names, at `addr`, bound to `rpc`:
 /// `None` when the reference does not name `I`.
-pub(crate) fn in_group<P: ParosProviders, I: RpcInterface, M: InterfaceMethod<I>>(
+pub fn in_group<P: ParosProviders, I: RpcInterface, M: InterfaceMethod<I>>(
     rpc: &RpcHandle<P>,
     reference: &InterfaceRef<I>,
     addr: SocketAddr,
@@ -572,7 +569,7 @@ impl<P: ParosProviders> NodeClient<P> {
 /// the interface refuses for good (the member restarted since it
 /// registered) marks it stale, and the link calls the well-known endpoint
 /// until the book names another interface.
-pub(crate) struct MatchmakerClient<P: ParosProviders> {
+pub struct MatchmakerClient<P: ParosProviders> {
     rpc: RpcHandle<P>,
     names: Names,
     target: Arc<Mutex<MatchmakerTarget>>,
@@ -600,7 +597,7 @@ impl<P: ParosProviders> Clone for MatchmakerClient<P> {
 impl<P: ParosProviders> MatchmakerClient<P> {
     /// The matchmaker serving at `address`, resolved through `names` at
     /// each call, called through `rpc`.
-    pub(crate) fn named(rpc: &RpcHandle<P>, names: Names, address: Address) -> Self {
+    pub fn named(rpc: &RpcHandle<P>, names: Names, address: Address) -> Self {
         Self {
             rpc: rpc.clone(),
             names,
@@ -615,7 +612,7 @@ impl<P: ParosProviders> MatchmakerClient<P> {
     /// Dial this matchmaker at `address`, through the hosting member's
     /// machine `interface` (#404; one that does not decode is none), from
     /// the next call on (#349).
-    pub(crate) fn readdress(&self, address: Address, interface: &[u8]) {
+    pub fn readdress(&self, address: Address, interface: &[u8]) {
         let interface = InterfaceRef::<MachineInterface>::from_bytes(interface).ok();
         let mut target = self.target.lock().unwrap_or_else(PoisonError::into_inner);
         if interface != target.interface {
@@ -671,7 +668,7 @@ impl<P: ParosProviders> MatchmakerClient<P> {
     }
 
     /// Register or probe (#120, #173).
-    pub(crate) async fn matchmake(
+    pub async fn matchmake(
         &self,
         request: &crate::wire::matchmaker::MatchRequest,
     ) -> Result<crate::wire::matchmaker::MatchReply, RpcError> {
@@ -679,7 +676,7 @@ impl<P: ParosProviders> MatchmakerClient<P> {
     }
 
     /// Raise a journal's GC watermark (#123).
-    pub(crate) async fn collect(
+    pub async fn collect(
         &self,
         request: &crate::wire::matchmaker::GarbageCollect,
     ) -> Result<crate::wire::matchmaker::GarbageCollectAck, RpcError> {
@@ -687,7 +684,7 @@ impl<P: ParosProviders> MatchmakerClient<P> {
     }
 
     /// One step of a matchmaker-set handover (#125).
-    pub(crate) async fn reconfigure(
+    pub async fn reconfigure(
         &self,
         request: &crate::wire::matchmaker::ReconfigureRequest,
     ) -> Result<crate::wire::matchmaker::ReconfigureReply, RpcError> {

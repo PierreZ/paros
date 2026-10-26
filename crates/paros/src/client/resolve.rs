@@ -20,9 +20,9 @@ use paros_core::{JournalId, JournalIdentifier, NodeId, TenantId};
 
 use super::Server;
 use super::bootstrap::call_once;
-use crate::rpc::NodeClient;
-use crate::rpc::machine as wire;
-use crate::rpc::methods::ResolveRpc;
+use crate::net::NodeClient;
+use crate::wire::machine as wire;
+use crate::wire::methods::ResolveRpc;
 use crate::{Address, Names};
 
 /// Which references serve a tenant, as one machine of its cell answered.

@@ -1656,7 +1656,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         let held = st.decided_prefix.get(&node.0).copied().unwrap_or(0);
         let booted = chosen_index.map_or(0, |s| s.0 + 1);
         assert_always!(
-            booted + paros::journal::CHOSEN_INDEX_LAG > held,
+            booted + paros::storage::journal::CHOSEN_INDEX_LAG > held,
             "a reboot rewinds the chosen index by less than a page",
             { "node" => node.0, "booted" => booted, "held" => held }
         );

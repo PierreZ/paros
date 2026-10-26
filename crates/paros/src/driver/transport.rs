@@ -18,12 +18,13 @@ use paros_core::{Audience, JournalIdentifier, Message, NodeId, Party, ProxyId};
 use prost::Message as ProstMessage;
 use tokio_util::sync::CancellationToken;
 
+use crate::net::{in_group, well_known};
 use crate::observe::audit::Audit;
-use crate::rpc::methods::{DeliverRpc, MachineInterface};
-use crate::rpc::{in_group, internal, message_to_proto, well_known};
+use crate::wire::methods::{DeliverRpc, MachineInterface};
+use crate::wire::{internal, message_to_proto};
 use crate::{Address, Names};
 
-use super::events::{command_hash, message_kind, message_route, proto_message_kind};
+use crate::observe::events::{command_hash, message_kind, message_route, proto_message_kind};
 use crate::tunables::{DELIVERY_BATCH, DELIVERY_BATCH_BYTES, DriverTunables};
 
 /// One peer's bounded, lossy, **keep-newest** outbound mailbox (the etcd

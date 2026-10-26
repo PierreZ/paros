@@ -15,7 +15,7 @@
 use std::time::Duration;
 
 use crate::model::fleet::RootKeyEntry;
-use crate::rpc::FrontendVerdict;
+use crate::wire::FrontendVerdict;
 
 /// The call a token is checked for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

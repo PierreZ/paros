@@ -64,16 +64,16 @@ use crate::client::ClientTunables;
 use crate::driver::DriverTunables;
 use crate::driver::edge::{Plain, RpcEdge};
 use crate::model::name::JournalName;
+use crate::net::inbound::{Inbound, ReplySender, serve_well_known};
+use crate::net::transport::Transport;
 use crate::observe::audit::Audit;
-use crate::rpc::inbound::{Inbound, ReplySender, serve_well_known};
-use crate::rpc::methods::{
+use crate::wire::methods::{
     FrontReadRpc, FrontSetJournalTagsRpc, FrontSetLeaderRpc, FrontTruncateRpc, FrontWriteRpc,
 };
-use crate::rpc::{
+use crate::wire::{
     Entry, FrontRead, FrontSetJournalTags, FrontSetLeader, FrontTruncate, FrontWrite,
     FrontendVerdict, SetJournalTagsAck,
 };
-use crate::transport::Transport;
 use crate::{Address, Names};
 use forward::Forwarded;
 use routes::{Resolved, Routes};

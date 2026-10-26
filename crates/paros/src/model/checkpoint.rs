@@ -47,7 +47,7 @@
 
 use prost::Message as _;
 
-use crate::rpc::checkpoint as wire;
+use crate::wire::checkpoint as wire;
 
 /// The prefix that marks a checkpoint run record. A record that does not
 /// start with it is an entry.

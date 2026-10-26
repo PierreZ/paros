@@ -14,10 +14,10 @@ use crate::client::{
     Answered, Attempted, CallObserver, Client, ReadOutcome, SetLeaderOutcome, TruncateOutcome,
     WriteOutcome,
 };
-use crate::rpc::public::WriteOutcome as WireWriteOutcome;
-use crate::rpc::{
-    FrontendVerdict, NodeClient, Read, ReadAck, SetLeader, SetLeaderAck, Truncate, TruncateAck,
-    Write, WriteAck,
+use crate::net::NodeClient;
+use crate::wire::public::WriteOutcome as WireWriteOutcome;
+use crate::wire::{
+    FrontendVerdict, Read, ReadAck, SetLeader, SetLeaderAck, Truncate, TruncateAck, Write, WriteAck,
 };
 
 /// What one answer from a machine means to the forwarding loop.

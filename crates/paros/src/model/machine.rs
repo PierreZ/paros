@@ -17,7 +17,7 @@ pub use record::{MachineRecord, journal_config};
 
 use crate::Address;
 use crate::model::tags::{Tag, TagError, Tags, UserTags, reserved};
-use crate::rpc::machine as wire;
+use crate::wire::machine as wire;
 
 /// The fleet's **control journals** as one cell knows them (§3.2, §3.8):
 /// the cell's id, the cell tenant's control journal and, on the cell that
@@ -569,8 +569,8 @@ impl Fingerprint for CellPlan {
     }
 }
 
-pub fn ballot_to_wire(ballot: Ballot) -> crate::rpc::common::Ballot {
-    crate::rpc::common::Ballot {
+pub fn ballot_to_wire(ballot: Ballot) -> crate::wire::common::Ballot {
+    crate::wire::common::Ballot {
         round: ballot.round,
         node: ballot.node.0,
     }
@@ -578,7 +578,7 @@ pub fn ballot_to_wire(ballot: Ballot) -> crate::rpc::common::Ballot {
 
 /// A ballot from the wire; an unset one decodes as `None` (the zero ballot
 /// is no decree's: every `init_id` is non-zero).
-pub fn ballot_from_wire(ballot: Option<&crate::rpc::common::Ballot>) -> Option<Ballot> {
+pub fn ballot_from_wire(ballot: Option<&crate::wire::common::Ballot>) -> Option<Ballot> {
     ballot
         .map(|b| Ballot {
             round: b.round,

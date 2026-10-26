@@ -69,7 +69,7 @@ use crate::Address;
 use crate::model::checkpoint::{Checkpointable, Folded};
 use crate::model::tags::{Tag, TagError, Tags, UserTags, reserved};
 pub use crate::model::tenant::Survives;
-use crate::rpc::fleet as wire;
+use crate::wire::fleet as wire;
 
 mod keys;
 
@@ -536,7 +536,7 @@ pub struct FleetEntry {
 
 /// A wire list of user tags, judged: a malformed or reserved tag, or a set
 /// over the cap, is refused (#575).
-fn user_tags(tags: Vec<crate::rpc::common::Tag>) -> Result<UserTags, &'static str> {
+fn user_tags(tags: Vec<crate::wire::common::Tag>) -> Result<UserTags, &'static str> {
     UserTags::from_wire(tags).map_err(|_| "a user tag set is malformed, reserved or over the cap")
 }
 

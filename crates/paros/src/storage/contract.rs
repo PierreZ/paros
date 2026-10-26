@@ -9,7 +9,7 @@ use super::LogStorage;
 
 /// The behavioral **contract suite** every [`LogStorage`] implementation must
 /// pass (issue #21 item F): one suite, run against both [`MemStorage`] and the
-/// journal store ([`crate::journal`], here and in `paros-sim` on the simulated
+/// journal store ([`crate::storage::journal`], here and in `paros-sim` on the simulated
 /// disk), so no implementation drifts from the trait contract. The fault
 /// budget stays *outside* this contract (#70): from the trait's point of view
 /// both implementations behave identically on the clean path this suite drives.

@@ -41,9 +41,9 @@ use tokio::sync::mpsc;
 use super::formed::vote_ballot;
 use super::{CellPlan, Class, MachineFacts, ballot_from_wire, ballot_to_wire};
 use crate::driver::DriverTunables;
-use crate::rpc::machine as wire;
-use crate::rpc::methods::{FormCellRpc, PrepareCellRpc, WellKnownMethod};
-use crate::rpc::well_known;
+use crate::net::well_known;
+use crate::wire::machine as wire;
+use crate::wire::methods::{FormCellRpc, PrepareCellRpc, WellKnownMethod};
 use crate::{Address, Names};
 
 /// A random identifier: a random tenant and a random journal, both set (no id

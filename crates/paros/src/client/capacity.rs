@@ -23,8 +23,8 @@ use super::Client;
 use super::journals::{Coordinator, coordinator};
 use crate::Names;
 use crate::model::registry::{BookingTarget, Role};
-use crate::rpc::machine as wire;
-use crate::rpc::methods::CapacityRequestRpc;
+use crate::wire::machine as wire;
+use crate::wire::methods::CapacityRequestRpc;
 
 /// How long a retry waits after an answer that decided nothing.
 const RETRY_PAUSE: Duration = Duration::from_millis(200);

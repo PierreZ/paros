@@ -1,4 +1,4 @@
-//! `parosctl tls` (`paros::tls`): the universe's certificates, offline.
+//! `parosctl tls` (`paros::net::tls`): the universe's certificates, offline.
 //!
 //! One command makes everything a deployment needs: `parosctl tls init`
 //! writes the authority, a certificate per machine, per frontend and per
@@ -8,7 +8,7 @@
 //!
 //! Every leaf names its holder `spiffe://<universe>/<role>/<name>`, and a
 //! machine's or a frontend's also proves `paros`, the name every client
-//! expects (`paros::tls::SERVER_NAME`). Keys are Ed25519 from the
+//! expects (`paros::net::tls::SERVER_NAME`). Keys are Ed25519 from the
 //! operating system's entropy. A file is never overwritten, and a key file
 //! is readable by its owner only.
 
@@ -18,12 +18,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use clap::{Args, Subcommand};
-use paros::tls::rustls::RootCertStore;
-use paros::tls::rustls::client::WebPkiServerVerifier;
-use paros::tls::rustls::client::danger::ServerCertVerifier;
-use paros::tls::rustls::pki_types::{ServerName, UnixTime};
-use paros::tls::rustls::server::WebPkiClientVerifier;
-use paros::tls::{
+use paros::net::tls::rustls::RootCertStore;
+use paros::net::tls::rustls::client::WebPkiServerVerifier;
+use paros::net::tls::rustls::client::danger::ServerCertVerifier;
+use paros::net::tls::rustls::pki_types::{ServerName, UnixTime};
+use paros::net::tls::rustls::server::WebPkiClientVerifier;
+use paros::net::tls::{
     Authority, CertificateDer, KeySeed, Role, SERVER_NAME, SubjectName, SystemUtc, UtcClock,
     UtcTime, Validity,
 };
@@ -335,7 +335,7 @@ fn issue(
             date(authority.validity().not_after)
         ));
     }
-    let spec = paros::tls::leaf(
+    let spec = paros::net::tls::leaf(
         &common.universe,
         role,
         name,
@@ -349,7 +349,7 @@ fn issue(
     Ok(Written {
         role: Some(role),
         name: name.to_string(),
-        identity: paros::tls::identity(&common.universe, role, name),
+        identity: paros::net::tls::identity(&common.universe, role, name),
         cert,
         key,
         not_after: issued.validity.not_after,
@@ -476,7 +476,7 @@ impl Summary {
                 .unwrap_or_default()
                 .to_string()
         };
-        let names = paros::tls::CertificateNames::of(der);
+        let names = paros::net::tls::CertificateNames::of(der);
         let mut listed: Vec<String> = names.uris.iter().map(|uri| format!("uri:{uri}")).collect();
         listed.extend(names.dns.iter().map(|dns| format!("dns:{dns}")));
         listed.extend(names.ips.iter().map(|ip| format!("ip:{ip}")));
@@ -560,7 +560,7 @@ impl Summary {
 }
 
 fn certificates(path: &Path) -> Result<Vec<CertificateDer<'static>>, String> {
-    let chain = paros::tls::read_certificates(read(path)?.as_bytes())
+    let chain = paros::net::tls::read_certificates(read(path)?.as_bytes())
         .map_err(|e| format!("{}: {e}", path.display()))?;
     if chain.is_empty() {
         return Err(format!("{}: no certificate", path.display()));
@@ -633,7 +633,7 @@ fn verify_checks(file: &Path, ca: &Path) -> Result<Vec<Check>, String> {
             .map_err(|e| format!("{}: {e}", ca.display()))?;
     }
     let roots = Arc::new(roots);
-    let provider = Arc::new(paros::tls::rustls::crypto::ring::default_provider());
+    let provider = Arc::new(paros::net::tls::rustls::crypto::ring::default_provider());
     let summary = Summary::of(&chain[0]).map_err(|e| format!("{}: {e}", file.display()))?;
     let now = UnixTime::since_unix_epoch(std::time::Duration::from_secs(now()?.unix_seconds()));
     let (leaf, intermediates) = chain.split_first().ok_or("an empty chain")?;
@@ -754,17 +754,17 @@ mod tests {
                 .all(|c| c.verdict.is_ok())
         );
         // The files the servers and parosctl read build their transports.
-        let files = paros::tls::Files {
-            cert: ("CERT", Some(paros::tls::Pem::File(&machine))),
+        let files = paros::net::tls::Files {
+            cert: ("CERT", Some(paros::net::tls::Pem::File(&machine))),
             key: (
                 "KEY",
-                Some(paros::tls::Pem::File(&dir.path().join("parosd-1.key"))),
+                Some(paros::net::tls::Pem::File(&dir.path().join("parosd-1.key"))),
             ),
-            ca: ("CA", Some(paros::tls::Pem::File(&ca))),
+            ca: ("CA", Some(paros::net::tls::Pem::File(&ca))),
         };
         assert!(
             files
-                .serving(paros::tls::ClientCertificates::Required)
+                .serving(paros::net::tls::ClientCertificates::Required)
                 .is_ok_and(|transport| transport.is_encrypted())
         );
         // A certificate that outlives its authority is refused.

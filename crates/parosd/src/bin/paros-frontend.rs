@@ -53,7 +53,7 @@ use clap::Parser;
 use moonpool_core::{CompioProviders, CompioResolver};
 use paros::client::ClientTunables;
 use paros::frontend::{FrontendSettings, run_frontend};
-use paros::tls::{ClientCertificates, Files, Pem};
+use paros::net::tls::{ClientCertificates, Files, Pem};
 use paros::{Address, DriverTunables, Names, NoAudit};
 use paros_authz_biscuit::{BiscuitAuthz, KeyRing, RootPublicKey, since_epoch};
 use tokio_util::sync::CancellationToken;

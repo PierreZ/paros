@@ -189,7 +189,7 @@ pub(super) async fn run_matchmaker_role(
                     Arc::downgrade(&world),
                     my_ip.to_string(),
                     ctx.state().clone(),
-                    (layout.durability == paros::journal::Durability::Batched)
+                    (layout.durability == paros::storage::journal::Durability::Batched)
                         .then_some(bootstrap.len()),
                     id.0,
                 ),
@@ -202,7 +202,7 @@ pub(super) async fn run_matchmaker_role(
             parse_addr(my_ip)?,
             config.clone(),
             shape.tunables,
-            crate::tls::serving(ctx, paros::tls::Role::Machine, my_ip)?,
+            crate::tls::serving(ctx, paros::net::tls::Role::Machine, my_ip)?,
             ctx.shutdown().clone(),
             audit,
         )

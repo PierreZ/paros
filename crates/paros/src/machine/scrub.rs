@@ -54,7 +54,8 @@ use crate::client::{Client, Server};
 use crate::driver::scrub::SCRUB_PAGE_BYTES;
 use crate::model::registry::{BookingTarget, Registry, Role};
 use crate::model::tenant::{ScrubCounts, ScrubProgress};
-use crate::rpc::{NodeClient, ScrubReply, ScrubRequest};
+use crate::net::NodeClient;
+use crate::wire::{ScrubReply, ScrubRequest};
 use crate::{Address, Names};
 
 /// The most pages one step reads.
@@ -432,8 +433,8 @@ impl Scrubs {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rpc::common::Ballot;
-    use crate::rpc::internal;
+    use crate::wire::common::Ballot;
+    use crate::wire::internal;
 
     fn slot(slot: u64, round: u64, digest: u64, damaged: bool) -> internal::ScrubbedSlot {
         internal::ScrubbedSlot {

@@ -10,14 +10,14 @@ use paros_core::{
     ReconfigureRequest, ReconfigureResult, Registration, Slot,
 };
 
-use crate::rpc::internal;
+use crate::wire::internal;
 
 /// A stable digest of an acceptor configuration (FNV-1a over the sorted
 /// membership and the quorum system), emitted as a trace field so a human
 /// reading the trace can compare configurations by equality without printing
 /// them. The audit callbacks carry the configuration itself.
 #[must_use]
-pub(crate) fn config_hash(config: &AcceptorConfig) -> u64 {
+pub fn config_hash(config: &AcceptorConfig) -> u64 {
     // The same byte sequence, tag for tag, the digest has always folded:
     // the membership length, each member, the quorum-system tag, its sizes.
     let mut bytes: Vec<u8> = Vec::new();
@@ -62,7 +62,7 @@ pub(crate) fn config_hash(config: &AcceptorConfig) -> u64 {
 /// A stable `u64` digest of a value's bytes (FNV-1a), emitted on observability
 /// events so an observer can compare chosen values by equality without
 /// carrying the raw payload through the trace.
-pub(crate) fn value_hash(bytes: &[u8]) -> u64 {
+pub fn value_hash(bytes: &[u8]) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for &b in bytes {
         h ^= u64::from(b);
@@ -178,7 +178,7 @@ where
 
 /// The trace label of one matchmaker-set reconfiguration request (#125).
 #[must_use]
-pub(crate) fn reconfigure_kind(request: &ReconfigureRequest) -> &'static str {
+pub fn reconfigure_kind(request: &ReconfigureRequest) -> &'static str {
     match request {
         ReconfigureRequest::Stop { .. } => "stop",
         ReconfigureRequest::Bootstrap { .. } => "bootstrap",
@@ -190,7 +190,7 @@ pub(crate) fn reconfigure_kind(request: &ReconfigureRequest) -> &'static str {
 
 /// The trace label of one matchmaker-set reconfiguration reply (#125).
 #[must_use]
-pub(crate) fn reconfigure_reply_kind(reply: &ReconfigureReply) -> &'static str {
+pub fn reconfigure_reply_kind(reply: &ReconfigureReply) -> &'static str {
     match reply {
         ReconfigureReply::Stopped { .. } => "stopped",
         ReconfigureReply::Bootstrapped { .. } => "bootstrapped",
@@ -206,7 +206,7 @@ pub(crate) fn reconfigure_reply_kind(reply: &ReconfigureReply) -> &'static str {
 /// with: `(accepted, the stable refusal label — empty when accepted, the
 /// round the reconfiguration campaigns at)`.
 #[must_use]
-pub(crate) fn reconfigure_outcome(result: ReconfigureResult) -> (bool, &'static str, Option<u64>) {
+pub fn reconfigure_outcome(result: ReconfigureResult) -> (bool, &'static str, Option<u64>) {
     let outcome = reconfigure_outcome_unchecked(result);
     // Accepted, label-free and carrying a round are one fact, said three ways.
     assert!(
@@ -288,7 +288,7 @@ fn message_kind_unchecked(m: &Message) -> &'static str {
 /// `None` on a leader that has chosen nothing (an empty prefix is not slot 0;
 /// see [`paros_core::Message::Heartbeat`]). The kinds with no ballot at all
 /// (the catch-up pair) return `None` outright.
-pub(crate) fn message_route(m: &Message) -> Option<(Party, Ballot, Option<Slot>)> {
+pub fn message_route(m: &Message) -> Option<(Party, Ballot, Option<Slot>)> {
     let route = message_route_unchecked(m);
     // The route's party and the sender are read from the same field: a
     // routed message's origin is its sender, never a second party.
@@ -352,7 +352,7 @@ fn message_route_unchecked(m: &Message) -> Option<(Party, Ballot, Option<Slot>)>
 /// (`from`, or `reply_to` for the kinds that ask for an answer). The
 /// system journals' pool filter (#189) reads it to refuse a node the
 /// registry has not admitted yet.
-pub(crate) fn message_sender(m: &Message) -> Option<Party> {
+pub fn message_sender(m: &Message) -> Option<Party> {
     match m {
         Message::Prepare { reply_to, .. } | Message::PreRead { reply_to, .. } => {
             Some(Party::Node(*reply_to))
@@ -376,7 +376,7 @@ pub(crate) fn message_sender(m: &Message) -> Option<Party> {
 /// A short, stable label for an encoded [`internal::ConsensusMessage`], for
 /// the mailbox-drop audit report (mirrors [`message_kind`], which needs the
 /// decoded domain [`Message`] the delivery task no longer has).
-pub(crate) fn proto_message_kind(m: &internal::ConsensusMessage) -> &'static str {
+pub fn proto_message_kind(m: &internal::ConsensusMessage) -> &'static str {
     use internal::consensus_message::Kind;
     match &m.kind {
         Some(Kind::Prepare(_)) => "prepare",

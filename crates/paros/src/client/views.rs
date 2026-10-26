@@ -14,9 +14,9 @@ use moonpool_core::LocalTimeProvider;
 use moonpool_rpc::RpcHandle;
 
 use crate::model::view::Scope;
-use crate::rpc::methods::ViewRpc;
-use crate::rpc::view as wire;
-use crate::rpc::well_known;
+use crate::net::well_known;
+use crate::wire::methods::ViewRpc;
+use crate::wire::view as wire;
 use crate::{Address, Names};
 
 /// What a view came to.

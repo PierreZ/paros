@@ -103,7 +103,7 @@ pub use crate::model::machine::*;
 use crate::Address;
 use crate::Names;
 use crate::model::tags::Tag;
-use crate::rpc::machine as wire;
+use crate::wire::machine as wire;
 
 /// A machine of a cell as its node loop serves it (#474): a founding
 /// member, or a machine `cell add-machine` admitted, with the cache its
@@ -237,7 +237,7 @@ impl MachineFacts {
     #[must_use]
     pub(crate) fn with_interface(
         &self,
-        group: &moonpool_rpc::ServiceGroup<crate::rpc::methods::MachineInterface>,
+        group: &moonpool_rpc::ServiceGroup<crate::wire::methods::MachineInterface>,
     ) -> Self {
         let reference = group.interface_ref();
         assert_eq!(
@@ -247,7 +247,7 @@ impl MachineFacts {
         );
         assert!(self.incarnation != 0, "a served machine has an incarnation");
         Self {
-            machine_interface: crate::rpc::published(&reference),
+            machine_interface: crate::net::published(&reference),
             ..self.clone()
         }
     }

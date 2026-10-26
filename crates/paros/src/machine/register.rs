@@ -50,7 +50,7 @@ use crate::client::bootstrap::{self, RegisterOutcome};
 use crate::client::election::read_election;
 use crate::client::journals::Coordinator;
 use crate::client::{Client, Server};
-use crate::rpc::NodeClient;
+use crate::net::NodeClient;
 use crate::{Address, DriverTunables};
 
 /// What a machine's registration asks, and of whom.

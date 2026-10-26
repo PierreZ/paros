@@ -13,14 +13,14 @@ use paros_core::{
 
 use crate::machine::ControlJournals;
 use crate::observe::audit::Audit;
-use crate::rpc::{
+use crate::wire::{
     InspectReply, MatchmakersRefusal, Reconfigure, ReconfigureAck, RetireAck, RetireRefusal,
     RetireRequest, WireQuorumSystem, common, journal_state_to_proto, quorum_system_from_proto,
     quorum_system_to_proto, zoned_members,
 };
 
-use super::events::reconfigure_outcome;
 use super::handover::HandoverDriver;
+use crate::observe::events::reconfigure_outcome;
 
 /// An online reconfiguration (#122): the leader moves to a fresh ballot
 /// registered with the new acceptor set. Refusable — a

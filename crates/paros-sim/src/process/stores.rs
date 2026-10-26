@@ -160,7 +160,7 @@ impl JournalStores for SimStores<'_> {
         let (layout, chaotic) = if seat.quiet {
             (
                 JournalStoreConfig {
-                    durability: paros::journal::Durability::Ordered,
+                    durability: paros::storage::journal::Durability::Ordered,
                     ..*layout
                 },
                 false,
@@ -182,7 +182,7 @@ impl JournalStores for SimStores<'_> {
             seat.checker.clone(),
             crate::world::node_store::DamagePolicy {
                 chaotic,
-                cut_budget: (layout.durability == paros::journal::Durability::Batched)
+                cut_budget: (layout.durability == paros::storage::journal::Durability::Batched)
                     .then(|| seat.floor.saturating_sub(seat.clean_copies)),
                 inject: !seat.quiet,
             },
@@ -212,10 +212,10 @@ impl JournalStores for SimStores<'_> {
         &mut self,
         journal: paros::JournalIdentifier,
         config: Config,
-        durability: paros::journal::Durability,
+        durability: paros::storage::journal::Durability,
     ) -> bool {
         assert_always!(
-            durability == paros::journal::Durability::Ordered,
+            durability == paros::storage::journal::Durability::Ordered,
             "journal store: a quiet seat is asked for an ordered store"
         );
         let Some(board) = &self.system else {

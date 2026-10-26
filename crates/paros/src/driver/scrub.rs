@@ -17,9 +17,9 @@
 
 use paros_core::{ColocatedNode, Slot};
 
-use crate::rpc::{ScrubReply, ScrubRequest, ballot_to_proto, internal};
 use crate::storage::{LogStorage, ScrubbedSlot};
 pub use crate::tunables::scrub::{SCRUB_PAGE, SCRUB_PAGE_BYTES};
+use crate::wire::{ScrubReply, ScrubRequest, ballot_to_proto, internal};
 
 /// What one page did on this node: the answer, and whether the core holds
 /// repairs the settle tail must make durable first.

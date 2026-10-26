@@ -15,10 +15,10 @@ use paros_core::{JournalId, JournalIdentifier, Message, Party, TenantId};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use super::internal;
-use super::message_from_proto;
-use super::methods::{DeliverRpc, MachineInterface, WellKnownMethod};
 use crate::tunables::DriverTunables;
+use crate::wire::internal;
+use crate::wire::message_from_proto;
+use crate::wire::methods::{DeliverRpc, MachineInterface, WellKnownMethod};
 
 pub use crate::tunables::MAX_FRAME_BYTES;
 
@@ -29,7 +29,7 @@ pub use crate::tunables::MAX_FRAME_BYTES;
 /// [`serve_deliveries`]), the connect budget is `connection_timeout`, and the
 /// liveness ping is the keep-alive pair (provider time, so a half-open
 /// connection is failed deterministically).
-pub(crate) fn rpc_config(tunables: &DriverTunables) -> RpcConfig {
+pub fn rpc_config(tunables: &DriverTunables) -> RpcConfig {
     let mut config = RpcConfig {
         max_frame_bytes: MAX_FRAME_BYTES,
         endpoint_queue_capacity: tunables.client_inbox_capacity,
@@ -47,7 +47,7 @@ pub(crate) fn rpc_config(tunables: &DriverTunables) -> RpcConfig {
 /// # Errors
 ///
 /// A registration the runtime refuses (never on a fresh listening runtime).
-pub(crate) fn serve_well_known<P: ParosProviders, M: WellKnownMethod>(
+pub fn serve_well_known<P: ParosProviders, M: WellKnownMethod>(
     rpc: &RpcHandle<P>,
 ) -> SimulationResult<RequestStream<M>> {
     rpc.register_well_known::<M>(M::ID, AccessClass::Public)
@@ -58,7 +58,7 @@ pub(crate) fn serve_well_known<P: ParosProviders, M: WellKnownMethod>(
 /// The one-shot answer to a request a driver loop holds: sending consumes
 /// it, dropping it is a broken promise (the caller's call fails at once,
 /// possibly executed) — the reply seam's drop.
-pub(crate) struct ReplySender<U>(Box<dyn FnOnce(U) -> bool>);
+pub struct ReplySender<U>(Box<dyn FnOnce(U) -> bool>);
 
 impl<U: 'static> ReplySender<U> {
     fn new<M: RpcMethod>(handle: ReplyHandle<M>, encode: fn(U) -> M::Reply) -> Self {
@@ -68,7 +68,7 @@ impl<U: 'static> ReplySender<U> {
 
 impl<U> ReplySender<U> {
     /// Answer; `false` when the session the request came on is gone.
-    pub(crate) fn send(self, reply: U) -> bool {
+    pub fn send(self, reply: U) -> bool {
         (self.0)(reply)
     }
 }
@@ -77,7 +77,7 @@ impl<U: 'static> ReplySender<U> {
     /// The same answer, with `observe` shown the reply just before it
     /// leaves (#366 (metrics)): an observer only, it cannot change the
     /// reply. A reply dropped unsent is never observed.
-    pub(crate) fn observed(self, observe: impl FnOnce(&U) + 'static) -> Self {
+    pub fn observed(self, observe: impl FnOnce(&U) + 'static) -> Self {
         Self(Box::new(move |reply| {
             observe(&reply);
             (self.0)(reply)
@@ -93,7 +93,7 @@ impl<U: 'static> ReplySender<U> {
 /// A machine also serves the method in its machine group (#404 (static vs
 /// dynamic endpoints), [`Inbound::in_group`]): both streams feed the same
 /// queue, under the same rules.
-pub(crate) struct Inbound<M: RpcMethod, T, U> {
+pub struct Inbound<M: RpcMethod, T, U> {
     stream: RequestStream<M>,
     /// The same method in the machine's group, while the group serves it.
     group: Option<RequestStream<M>>,
@@ -112,7 +112,7 @@ enum Heard<M: RpcMethod> {
 
 impl<M: RpcMethod, T, U: 'static> Inbound<M, T, U> {
     /// Wrap `stream` with the body codecs.
-    pub(crate) fn new(
+    pub fn new(
         stream: RequestStream<M>,
         decode: fn(M::Request) -> Result<T, &'static str>,
         encode: fn(U) -> M::Reply,
@@ -128,7 +128,7 @@ impl<M: RpcMethod, T, U: 'static> Inbound<M, T, U> {
     /// The next decodable request, `None` once the runtime is gone.
     /// Cancel-safe: the only awaits are the streams'.
     #[tracing::instrument(level = "trace", skip_all, fields(method = M::NAME))]
-    pub(crate) async fn recv(&mut self) -> Option<(T, ReplySender<U>)> {
+    pub async fn recv(&mut self) -> Option<(T, ReplySender<U>)> {
         loop {
             let heard = match self.group.as_mut() {
                 None => self
@@ -167,7 +167,7 @@ impl<M: RpcMethod, T, U: 'static> Inbound<M, T, U> {
     /// A request already queued, without waiting: `None` when none is, or
     /// the runtime is gone. One poll of [`Inbound::recv`], which is
     /// cancel-safe, so a request it does not return stays queued.
-    pub(crate) fn try_recv(&mut self) -> Option<(T, ReplySender<U>)> {
+    pub fn try_recv(&mut self) -> Option<(T, ReplySender<U>)> {
         futures::FutureExt::now_or_never(self.recv()).flatten()
     }
 }
@@ -180,7 +180,7 @@ impl<M: InterfaceMethod<MachineInterface>, T, U> Inbound<M, T, U> {
     /// # Errors
     ///
     /// A registration the group refuses.
-    pub(crate) fn in_group(
+    pub fn in_group(
         mut self,
         group: Option<&ServiceGroup<MachineInterface>>,
     ) -> SimulationResult<Self> {
@@ -197,7 +197,7 @@ impl<M: InterfaceMethod<MachineInterface>, T, U> Inbound<M, T, U> {
 
 impl<M: RpcMethod> Inbound<M, M::Request, M::Reply> {
     /// A method whose bodies the loop consumes exactly as they arrive.
-    pub(crate) fn plain(stream: RequestStream<M>) -> Self {
+    pub fn plain(stream: RequestStream<M>) -> Self {
         Self::new(stream, Ok, std::convert::identity)
     }
 }
@@ -217,7 +217,7 @@ pub enum EdgeRejection {
 
 /// The edge's observation callback: the driver installs one that forwards to
 /// its [`Audit`](crate::Audit), stamped with the node's identity.
-pub(crate) type OnReject = Arc<dyn Fn(EdgeRejection) + Send + Sync>;
+pub type OnReject = Arc<dyn Fn(EdgeRejection) + Send + Sync>;
 
 /// Serve the `Deliver` lane on its own task until the runtime ends or
 /// `shutdown` fires, and return the loop's side: a bounded queue of
@@ -245,7 +245,7 @@ pub(crate) type OnReject = Arc<dyn Fn(EdgeRejection) + Send + Sync>;
 // One lane's wiring: the runtime, its shape, the receiver's identity, its
 // observer, its lifetime and the machine's group.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn serve_deliveries<P: ParosProviders>(
+pub fn serve_deliveries<P: ParosProviders>(
     providers: &P,
     rpc: &RpcHandle<P>,
     capacity: usize,

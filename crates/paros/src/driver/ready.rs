@@ -16,9 +16,9 @@ use moonpool_buggify::hint::Strike;
 use crate::storage::{LogStorage, StorageError};
 
 use super::calls::Call;
-use super::events::command_hash;
-use super::exit::RunError;
 use super::transport::{Outbound, send_messages};
+use crate::observe::events::command_hash;
+use crate::storage::boot::RunError;
 
 /// The client replies this node is holding open: the journal calls that
 /// wait on their slot's verdict (#204), and the journal reads that wait on

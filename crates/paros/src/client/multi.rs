@@ -14,7 +14,7 @@
 
 use paros_core::{Entry, JournalIdentifier, LeaderUuid, Seq, Value};
 
-use crate::rpc::{Truncate, Write};
+use crate::wire::{Truncate, Write};
 
 /// The [`Entry`] a multi-writer write decides: the unset leader uuid and no
 /// position (the journal assigns one).

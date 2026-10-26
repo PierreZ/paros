@@ -679,7 +679,7 @@ impl Metrics {
 
     /// The machine answered a scrub page (#362 (background scrubbing)) of
     /// journal `_id`: what it read, found damaged and repaired.
-    pub(crate) fn scrubbed(&self, _id: JournalIdentifier, page: &crate::rpc::ScrubReply) {
+    pub(crate) fn scrubbed(&self, _id: JournalIdentifier, page: &crate::wire::ScrubReply) {
         let Some(families) = &self.0.families else {
             return;
         };

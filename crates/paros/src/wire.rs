@@ -84,10 +84,8 @@ pub mod view {
     include!(concat!(env!("OUT_DIR"), "/paros.view.v1.rs"));
 }
 
-pub(crate) mod client;
 mod codec;
 mod consensus;
-pub(crate) mod inbound;
 mod inspect;
 mod matchmaker_codec;
 pub mod methods;
@@ -95,12 +93,6 @@ mod refusal;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use client::{MatchmakerClient, in_group, published, well_known};
-pub use client::{NodeClient, Pass};
-pub use inbound::{EdgeRejection, MAX_FRAME_BYTES};
-pub(crate) use inbound::{
-    Inbound, OnReject, ReplySender, rpc_config, serve_deliveries, serve_well_known,
-};
 pub use inspect::{InspectRefusal, InspectTarget};
 pub use internal::{
     InspectReply, InspectRequest, RetireAck, RetireRequest, ScrubReply, ScrubRequest,

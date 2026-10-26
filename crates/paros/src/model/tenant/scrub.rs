@@ -10,7 +10,7 @@
 
 use paros_core::JournalId;
 
-use crate::rpc::tenant as wire;
+use crate::wire::tenant as wire;
 
 /// Where the scrubber stands and what it found.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

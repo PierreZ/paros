@@ -48,11 +48,12 @@ use crate::client::{CallObserver, Client, ClientTunables, Server};
 use crate::driver::DriverTunables;
 use crate::driver::edge::RpcEdge;
 use crate::machine::CachedRegistry;
-use crate::rpc::inbound::{Inbound, ReplySender, serve_well_known};
-use crate::rpc::methods::BatchWriteRpc;
-use crate::rpc::public::WriteOutcome as WireWriteOutcome;
-use crate::rpc::{FrontendVerdict, NodeClient, Write, WriteAck, common};
-use crate::transport::Transport;
+use crate::net::NodeClient;
+use crate::net::inbound::{Inbound, ReplySender, serve_well_known};
+use crate::net::transport::Transport;
+use crate::wire::methods::BatchWriteRpc;
+use crate::wire::public::WriteOutcome as WireWriteOutcome;
+use crate::wire::{FrontendVerdict, Write, WriteAck, common};
 use crate::{Address, Names};
 
 /// What a batcher is given to run.

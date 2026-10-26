@@ -49,8 +49,8 @@ use super::{
 };
 use crate::ControlPlan;
 use crate::model::machine::{MachineRecord, journal_config};
+use crate::net::transport::Transport;
 use crate::observe::metrics::{Metrics, Phase};
-use crate::transport::Transport;
 use crate::{Address, Audit, DriverTunables, Names, RunError};
 
 /// What a machine is configured with: the operator's half of its record.

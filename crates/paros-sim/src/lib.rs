@@ -738,7 +738,7 @@ pub fn explore_chain_seed(seed: u64, max_runs: u64) -> SimulationReport {
 }
 
 /// Run the shared `LogStorage` and `MatchmakerStorage` behavioral contract
-/// suites against the library's journal stores (`paros::journal`) on the
+/// suites against the library's journal stores (`paros::storage::journal`) on the
 /// simulation's own disk, inside one quiet iteration. `MemStorage` runs the
 /// identical suites as a `paros` unit test.
 #[must_use]

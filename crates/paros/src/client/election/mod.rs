@@ -63,7 +63,7 @@ use super::multi::{append_request, open_truncate_request};
 use super::outcome::{ReadOutcome, SetLeaderOutcome, TruncateOutcome, WriteOutcome};
 use super::writer::leader_uuid;
 use super::{Client, ReadReport, WriteOptions};
-use crate::rpc::Read;
+use crate::wire::Read;
 
 /// The pages one watch reads at most before it returns: a bound, not a
 /// target. The next watch resumes where this one stopped.

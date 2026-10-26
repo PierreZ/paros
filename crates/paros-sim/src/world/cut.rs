@@ -2,7 +2,7 @@
 //!
 //! The shipped stores name the moments of a commit with `hint!`:
 //! `moonpool-journal` inside one commit (entries written, records written,
-//! metainfo stale), and `paros::journal` between the commits of one sync.
+//! metainfo stale), and `paros::storage::journal` between the commits of one sync.
 //! The seed's attrition regime decides whether the process dies there. The
 //! harness only keeps the budget the simulator cannot see, through
 //! moonpool's [`HintVeto`]: a `Batched` commit cut partway may leave its

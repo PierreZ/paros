@@ -55,8 +55,9 @@ use crate::client::{Client, ReconfigureOutcome, RetireOutcome, Server};
 use crate::model::placement::{self, Want};
 use crate::model::registry::{Booking, BookingTarget, NodeStanding, Registry, Role};
 use crate::model::tenant::Desired;
-use crate::rpc::common::Ballot;
-use crate::rpc::{InspectReply, NodeClient, RetireRequest};
+use crate::net::NodeClient;
+use crate::wire::common::Ballot;
+use crate::wire::{InspectReply, RetireRequest};
 use crate::{Address, Names};
 
 /// What one move step did.
@@ -271,7 +272,7 @@ async fn record_in_force<P: ParosProviders>(
     let Some(control) = registry.hosted_tenant(journal.tenant).map(|h| h.control) else {
         return Some(false);
     };
-    let Ok(system) = crate::rpc::quorum_system_from_proto(&reply.into()) else {
+    let Ok(system) = crate::wire::quorum_system_from_proto(&reply.into()) else {
         return Some(false);
     };
     let mut members: Vec<NodeId> = reply.members.iter().copied().map(NodeId).collect();
@@ -446,7 +447,7 @@ impl Moves {
             return Some(MoveStep::Waiting);
         };
         let size = reply.members.len();
-        let Ok(system) = crate::rpc::quorum_system_from_proto(&(&reply).into()) else {
+        let Ok(system) = crate::wire::quorum_system_from_proto(&(&reply).into()) else {
             return Some(MoveStep::Waiting);
         };
         // The machines that stay hold as many members as the desired mode

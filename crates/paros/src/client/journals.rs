@@ -28,10 +28,10 @@ use super::checkpoint::{Folder, LoadOutcome, load};
 use super::election::{Candidate, read_election};
 use crate::model::tags::UserTags;
 use crate::model::tenant::{Desired, StoreDurability, TenantControl, TenantRoles};
-use crate::rpc::in_group;
-use crate::rpc::machine as wire;
-use crate::rpc::methods::{CoordinatorInterface, JournalRequestRpc};
-use crate::rpc::{
+use crate::net::in_group;
+use crate::wire::machine as wire;
+use crate::wire::methods::{CoordinatorInterface, JournalRequestRpc};
+use crate::wire::{
     config_from_proto, config_to_proto, writer_mode_from_proto, writer_mode_to_proto,
 };
 use crate::{Address, Names};
@@ -165,7 +165,7 @@ impl JournalRequest {
                 {
                     None
                 } else {
-                    Some(Desired::from_wire(Some(crate::rpc::tenant::Desired {
+                    Some(Desired::from_wire(Some(crate::wire::tenant::Desired {
                         replicas: create.replicas,
                         failures_per_partition: create.failures_per_partition,
                         partitions: create.partitions,
@@ -183,7 +183,7 @@ impl JournalRequest {
             },
             Op::Configure(configure) => JournalOp::Configure {
                 name: (!configure.name.is_empty()).then(|| configure.name.clone()),
-                desired: Desired::from_wire(Some(crate::rpc::tenant::Desired {
+                desired: Desired::from_wire(Some(crate::wire::tenant::Desired {
                     replicas: configure.replicas,
                     failures_per_partition: configure.failures_per_partition,
                     partitions: configure.partitions,
@@ -351,7 +351,7 @@ pub enum FrontTagged {
 /// Set the user tags of the journal `name` to `tags` through the frontend
 /// `frontend`, under the idempotency id `request`: one attempt (#575).
 pub async fn tag_through_frontend<P: ParosProviders>(
-    frontend: &crate::rpc::NodeClient<P>,
+    frontend: &crate::net::NodeClient<P>,
     name: &crate::model::name::JournalName,
     request: u64,
     tags: &UserTags,
@@ -363,7 +363,7 @@ pub async fn tag_through_frontend<P: ParosProviders>(
         Err(_) => FrontTagged::Lost,
         Ok(ack) => match crate::model::authz::Denial::of(ack.frontend()) {
             Some(denial) => FrontTagged::Denied(denial),
-            None if ack.frontend() == crate::rpc::FrontendVerdict::Unanswered => FrontTagged::Lost,
+            None if ack.frontend() == crate::wire::FrontendVerdict::Unanswered => FrontTagged::Lost,
             None => FrontTagged::Answered(JournalAnswer::from_wire(wire::JournalRequestAck {
                 outcome: ack.outcome,
                 journal: ack.journal,
@@ -606,7 +606,7 @@ mod tests {
             },
         }
         .to_wire();
-        if let Some(crate::rpc::machine::journal_request::Op::Configure(op)) = &mut no_partition.op
+        if let Some(crate::wire::machine::journal_request::Op::Configure(op)) = &mut no_partition.op
         {
             op.partitions = 0;
         }
@@ -626,7 +626,7 @@ mod tests {
     fn a_coordinator_needs_an_address_and_its_own_interface() {
         use moonpool_rpc::{AccessClass, Endpoint, EndpointToken, Incarnation};
 
-        use crate::rpc::methods::MachineInterface;
+        use crate::wire::methods::MachineInterface;
 
         let endpoint = Endpoint::new(
             "0.0.0.0:4500".parse().expect("an address"),
@@ -637,7 +637,7 @@ mod tests {
         let candidate = Candidate {
             id: 1,
             interface: "node1:4500".into(),
-            reference: crate::rpc::published(&reference),
+            reference: crate::net::published(&reference),
         };
         let coordinator = Coordinator::of(&candidate).expect("a published coordinator");
         // A wildcard-bound reference is published at the loopback.
@@ -653,7 +653,7 @@ mod tests {
         assert_eq!(coordinator.address.to_string(), "node1:4500");
         // Aimed at the resolved address, the reference keeps its instance.
         let resolved = "10.0.0.1:4500".parse().expect("an address");
-        let aimed = crate::rpc::client::aimed(&reference, resolved);
+        let aimed = crate::net::clients::aimed(&reference, resolved);
         assert_eq!(aimed.endpoint().address(), resolved);
         assert_eq!(aimed.endpoint().incarnation(), endpoint.incarnation());
         assert_eq!(aimed.endpoint().token(), endpoint.token());
@@ -665,7 +665,7 @@ mod tests {
         assert_eq!(Coordinator::of(&unpublished), None);
         let machine = InterfaceRef::<MachineInterface>::new(endpoint, AccessClass::Public);
         let other = Candidate {
-            reference: crate::rpc::published(&machine),
+            reference: crate::net::published(&machine),
             ..candidate
         };
         assert_eq!(Coordinator::of(&other), None);

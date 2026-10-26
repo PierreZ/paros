@@ -51,9 +51,9 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use super::{Admission, CachedRegistry, CellPlan, Class, ControlJournals, MachineFacts};
-use crate::rpc::machine as wire;
-use crate::rpc::methods::{AdmitRpc, FormCellRpc, IdentifyRpc, PrepareCellRpc};
-use crate::rpc::{Inbound, serve_well_known};
+use crate::net::{Inbound, serve_well_known};
+use crate::wire::machine as wire;
+use crate::wire::methods::{AdmitRpc, FormCellRpc, IdentifyRpc, PrepareCellRpc};
 use crate::{Address, DriverTunables, Names};
 
 /// A machine of a cell: what it knows of itself, the plan it accepted and

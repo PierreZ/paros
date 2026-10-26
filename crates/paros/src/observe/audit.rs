@@ -33,9 +33,10 @@ use crate::client::CallObserver;
 use crate::driver::BootRefusal;
 use crate::machine::{CachedRegistry, CellPlan, MachineRecord};
 use crate::model::name::JournalName;
+use crate::net::EdgeRejection;
 use crate::observe::metrics::{CallKind, CallOutcome};
-use crate::rpc::{EdgeRejection, MatchmakersRefusal, RetireRefusal};
 use crate::storage::StorageError;
+use crate::wire::{MatchmakersRefusal, RetireRefusal};
 
 /// The driver's reaction to a [`StorageError`]. Stage 6 has exactly one honest
 /// reaction — crash and re-enter the crash/recovery path — but the decision is

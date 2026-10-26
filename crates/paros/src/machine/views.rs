@@ -45,9 +45,9 @@ use crate::model::tenant::TenantControl;
 use crate::model::view::{
     CellFacts, Scope, authorize, cell_view, refusal, tenant_view, universe_view,
 };
-use crate::rpc::methods::ViewRpc;
-use crate::rpc::view as wire;
-use crate::rpc::{Inbound, serve_well_known};
+use crate::net::{Inbound, serve_well_known};
+use crate::wire::methods::ViewRpc;
+use crate::wire::view as wire;
 
 /// The views' endpoint.
 type Requests = Inbound<ViewRpc, wire::ViewRequest, wire::ViewReply>;

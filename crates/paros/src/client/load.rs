@@ -16,8 +16,8 @@ use moonpool_core::{Detach, LocalTaskProvider};
 use moonpool_rpc::RpcHandle;
 
 use crate::client::bootstrap::call_once;
-use crate::rpc::machine as wire;
-use crate::rpc::methods::LoadRpc;
+use crate::wire::machine as wire;
+use crate::wire::methods::LoadRpc;
 use crate::{Address, Names};
 
 /// What one machine's `Load` came to.

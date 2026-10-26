@@ -11,7 +11,7 @@ use paros_core::{JournalIdentifier, JournalView};
 use super::Client;
 use super::outcome::ReadOutcome;
 use crate::model::authz::Denial;
-use crate::rpc::Read;
+use crate::wire::Read;
 
 /// What one step of a [`Reader`] came back with.
 #[derive(Clone, Debug, PartialEq, Eq)]

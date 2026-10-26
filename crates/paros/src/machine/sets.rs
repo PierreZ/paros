@@ -54,7 +54,8 @@ use crate::client::journals::JournalAnswer;
 use crate::client::{Client, ReconfigureMatchmakersOutcome, Server};
 use crate::model::placement::{self, Step, Want};
 use crate::model::registry::{Booking, BookingTarget, NodeStanding, Registry, Role};
-use crate::rpc::{InspectReply, NodeClient};
+use crate::net::NodeClient;
+use crate::wire::InspectReply;
 use crate::{Address, Names};
 
 /// The id of a tenant's one matchmaker set inside its tenant (§3.4: one set

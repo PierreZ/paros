@@ -2596,7 +2596,7 @@ impl MatchmakerAudit {
     /// reports the boot (#176); cleared either way. A sync commits the
     /// registrations, then the metainfo (alone, one atomic metainfo write),
     /// then the clears, and a boot keeps only what the durable metainfo
-    /// vouches for (`paros::journal::matchmaker`), so: an install landed
+    /// vouches for (`paros::storage::journal::matchmaker`), so: an install landed
     /// exactly when the recovered generation is the one it installs, and
     /// then whole; a register landed when its registration is recovered and
     /// was never reported; the scalars landed when the recovered ones are

@@ -110,9 +110,10 @@ pub use pipeline::{Pipeline, Pipelined, Ticket};
 pub use reader::{Reader, ReaderOutcome};
 pub use writer::{Learned, Writer, WriterOutcome, leader_uuid, write_request};
 
-use crate::rpc::{
-    InspectReply, NodeClient, Read, Reconfigure, ReconfigureMatchmakers, RetireRequest, SetLeader,
-    Truncate, Write, leader_uuid_from_proto, leader_uuid_to_proto, quorum_system_to_proto,
+use crate::net::NodeClient;
+use crate::wire::{
+    InspectReply, Read, Reconfigure, ReconfigureMatchmakers, RetireRequest, SetLeader, Truncate,
+    Write, leader_uuid_from_proto, leader_uuid_to_proto, quorum_system_to_proto,
 };
 use crate::{Address, Names};
 
@@ -1292,7 +1293,7 @@ impl<P: ParosProviders> Client<P> {
         let domains = config
             .domains()
             .iter()
-            .map(crate::rpc::domain_to_proto)
+            .map(crate::wire::domain_to_proto)
             .collect();
         self.reconfigure_wire(
             journal,
@@ -1311,7 +1312,7 @@ impl<P: ParosProviders> Client<P> {
         &self,
         journal: JournalIdentifier,
         members: &[u64],
-        (domains, cell_id): (Vec<crate::rpc::common::FailureDomain>, u64),
+        (domains, cell_id): (Vec<crate::wire::common::FailureDomain>, u64),
         quorum_system: QuorumSystem,
         target: usize,
     ) -> ReconfigureOutcome {
@@ -1437,8 +1438,8 @@ impl<P: ParosProviders> Client<P> {
     pub async fn scrub(
         &self,
         target: usize,
-        request: crate::rpc::ScrubRequest,
-    ) -> Option<crate::rpc::ScrubReply> {
+        request: crate::wire::ScrubRequest,
+    ) -> Option<crate::wire::ScrubReply> {
         let node = self.node(target).clone();
         let probe = async move { node.scrub(&request).await.ok() };
         self.bounded(self.tunables.request_timeout, None, probe)

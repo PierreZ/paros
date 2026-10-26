@@ -1529,7 +1529,7 @@ async fn run_machine_role(
     // cell could never repair. A journal a tenant created stores under the
     // mode its create recorded instead (#599 (durability mode per journal)).
     let store_layout = paros::JournalStoreConfig {
-        durability: paros::journal::Durability::Ordered,
+        durability: paros::storage::journal::Durability::Ordered,
         ..crate::shape::journal_layout(ctx.state())
     };
     let disk = || ProviderDisk::new(ctx.storage().clone(), ROOT, store_layout);
@@ -1572,7 +1572,7 @@ async fn run_machine_role(
             addresses.clone(),
             names.clone(),
             tunables,
-            crate::tls::serving(ctx, paros::tls::Role::Machine, ctx.my_ip())?,
+            crate::tls::serving(ctx, paros::net::tls::Role::Machine, ctx.my_ip())?,
             ctx.shutdown().clone(),
         ))
         .await;

@@ -25,7 +25,7 @@ use core::fmt;
 use core::str::FromStr;
 use std::collections::BTreeMap;
 
-use crate::rpc::common as wire;
+use crate::wire::common as wire;
 
 /// The prefix of every reserved key: only the control plane writes one.
 pub const RESERVED_PREFIX: &str = "paros/";

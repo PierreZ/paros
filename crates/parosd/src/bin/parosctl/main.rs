@@ -45,7 +45,7 @@ use clap::{Args, Parser, Subcommand};
 use moonpool_core::{CompioProviders, CompioResolver};
 use moonpool_rpc::{RpcConfig, RpcHandle};
 use paros::client::{Client, ClientTunables, bootstrap};
-use paros::tls::{Files, Pem};
+use paros::net::tls::{Files, Pem};
 use paros::{Address, Names};
 
 use crate::output::Printer;

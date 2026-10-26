@@ -71,7 +71,7 @@ use crate::machine::{
 use crate::model::checkpoint::{Checkpointable, Folded};
 use crate::model::tags::{Tag, Tags, UserTags};
 
-use crate::rpc::system as wire;
+use crate::wire::system as wire;
 
 // The cell control journal has no fixed identifier (§3.8): a deployment draws
 // it and hands it to whoever folds it (`crate::ControlPlan`).

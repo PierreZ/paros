@@ -34,7 +34,7 @@ pub enum Provisioned {
     /// an interrupted provisioning formatted it, and nothing was written.
     /// The marker may be one a failed sync left staged in this process's
     /// file image: a caller that records the store as provisioned first
-    /// makes it durable ([`crate::journal::settle`], #348).
+    /// makes it durable ([`crate::storage::journal::settle`], #348).
     Resumed,
 }
 

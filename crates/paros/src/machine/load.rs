@@ -28,10 +28,10 @@ use tokio_util::sync::CancellationToken;
 
 use super::MachineFacts;
 use crate::model::load::Busyness;
+use crate::net::{Inbound, serve_well_known};
 use crate::observe::metrics::{CallKind, JournalUsage, Metrics};
-use crate::rpc::machine as wire;
-use crate::rpc::methods::LoadRpc;
-use crate::rpc::{Inbound, serve_well_known};
+use crate::wire::machine as wire;
+use crate::wire::methods::LoadRpc;
 
 /// One full window, as the machine sampled it.
 #[derive(Clone, Debug, PartialEq)]

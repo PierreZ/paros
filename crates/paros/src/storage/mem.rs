@@ -13,7 +13,7 @@ use super::{LogStorage, StorageError};
 /// accepted log are stored separately (never a single blob).
 ///
 /// The crash-testable store (fail-stop, corruption, protocol-aware recovery)
-/// is the journal store ([`crate::journal`]) on a real or simulated disk; the
+/// is the journal store ([`crate::storage::journal`]) on a real or simulated disk; the
 /// driver is generic over [`LogStorage`], so it swaps in without touching the
 /// loop.
 #[derive(Clone, Debug)]

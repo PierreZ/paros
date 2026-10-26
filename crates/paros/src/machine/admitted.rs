@@ -45,9 +45,9 @@ use paros_core::NodeId;
 use super::{Admission, CacheSink, CachedRegistry, MachineFacts};
 use crate::Address;
 use crate::driver::DriverTunables;
-use crate::rpc::machine as wire;
-use crate::rpc::methods::{AdmitRpc, CellInitRpc, FormCellRpc, IdentifyRpc, PrepareCellRpc};
-use crate::rpc::{Inbound, serve_well_known};
+use crate::net::{Inbound, serve_well_known};
+use crate::wire::machine as wire;
+use crate::wire::methods::{AdmitRpc, CellInitRpc, FormCellRpc, IdentifyRpc, PrepareCellRpc};
 
 /// A machine of a cell by admission: what it knows of itself, and the
 /// admission its record holds.

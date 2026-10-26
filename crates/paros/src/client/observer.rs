@@ -8,7 +8,7 @@
 
 use super::ResolveReport;
 use super::outcome::{ReadOutcome, SetLeaderOutcome, TruncateOutcome, WriteOutcome};
-use crate::rpc::{Read, SetLeader, Truncate, Write};
+use crate::wire::{Read, SetLeader, Truncate, Write};
 use paros_core::{JournalId, JournalIdentifier, TenantId};
 
 /// An attempt, as it leaves the client.

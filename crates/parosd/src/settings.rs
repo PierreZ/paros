@@ -34,7 +34,7 @@ use std::sync::Arc;
 use clap::Parser;
 use paros::Transport;
 use paros::machine::{AdminPin, Class};
-use paros::tls::{ClientCertificates, Files, Pem};
+use paros::net::tls::{ClientCertificates, Files, Pem};
 use paros_authz_biscuit::{BiscuitAuthz, KeyRing, RootPublicKey};
 
 /// The variables this module reads.
@@ -283,7 +283,7 @@ pub fn check_unknown(names: impl IntoIterator<Item = String>) -> Result<(), Stri
 #[cfg(test)]
 mod tests {
     use super::*;
-    use paros::tls::{Authority, KeySeed, Role, UtcTime, Validity, leaf};
+    use paros::net::tls::{Authority, KeySeed, Role, UtcTime, Validity, leaf};
     use paros_authz_biscuit::{Entropy, RootKey};
 
     fn settings(args: &[&str]) -> Result<Settings, clap::Error> {

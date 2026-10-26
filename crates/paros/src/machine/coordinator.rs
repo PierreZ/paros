@@ -128,11 +128,11 @@ use crate::client::universe::{JoinAnswer, JoinRequest};
 use crate::client::{CallObserver, ClaimOutcome, Client, Server, bootstrap};
 use crate::model::fleet::FleetDirectory;
 use crate::model::registry::{MaintenanceScope, NodeStanding, Registry, SystemCommand};
-use crate::rpc::machine as wire;
-use crate::rpc::methods::{
+use crate::net::{Inbound, NodeClient, ReplySender};
+use crate::wire::machine as wire;
+use crate::wire::methods::{
     CapacityRequestRpc, CoordinatorInterface, JoinUniverseRpc, JournalRequestRpc, RegisterRpc,
 };
-use crate::rpc::{Inbound, NodeClient, ReplySender};
 use crate::{Address, DriverTunables, Names};
 
 /// A served term's session and its watch over the cell's machines (#211).
@@ -201,7 +201,7 @@ impl TermGroup {
 
     /// The group's reference, encoded, as the election publishes it.
     fn reference(&self) -> Vec<u8> {
-        crate::rpc::published(&self.group.interface_ref())
+        crate::net::published(&self.group.interface_ref())
     }
 }
 
@@ -933,7 +933,7 @@ impl Watch {
         session: &CellSession,
         id: NodeId,
         addr: &Address,
-        ack: &crate::rpc::machine::IdentifyAck,
+        ack: &crate::wire::machine::IdentifyAck,
     ) -> Option<SystemCommand> {
         let incarnation = incarnation_from_halves(ack.incarnation_high, ack.incarnation_low);
         if incarnation == 0 {

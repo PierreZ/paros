@@ -26,8 +26,8 @@ use std::time::Duration;
 
 use paros_core::{AcceptorConfig, NodeId, QuorumSystem};
 
-use crate::rpc::config_from_proto;
-use crate::rpc::view as wire;
+use crate::wire::config_from_proto;
+use crate::wire::view as wire;
 
 /// How a journal stands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]

@@ -25,8 +25,6 @@
 //! A cell deployed without matchmakers never runs this loop; the node
 //! driver does not know it exists.
 
-mod storage;
-
 use std::collections::BTreeMap;
 
 use crate::ParosProviders;
@@ -39,16 +37,16 @@ use paros_core::{
 use tokio_util::sync::CancellationToken;
 
 use crate::driver::edge::{MatchmakerInbox, RpcEdge};
-use crate::driver::events::{config_hash, reconfigure_kind, reconfigure_reply_kind};
 use crate::driver::reply::Reply;
 use crate::driver::reply::match_answer;
 use crate::driver::{BootKind, BootRefusal, DriverTunables, RunError};
+use crate::net::transport::Transport;
 use crate::observe::audit::{Audit, HistoryPage, StorageFaultDecision};
-use crate::rpc::Addressed;
+use crate::observe::events::{config_hash, reconfigure_kind, reconfigure_reply_kind};
 use crate::storage::StorageError;
-use crate::transport::Transport;
+use crate::wire::Addressed;
 
-pub use storage::{
+pub use crate::storage::matchmaker::{
     MatchmakerStorage, MemMatchmakerStorage, Registrations, matchmaker_storage_contract_suite,
 };
 

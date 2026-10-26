@@ -33,8 +33,8 @@ use crate::client::{Client, Server};
 use crate::model::fleet::{FleetDirectory, RootKeyEntry};
 use crate::model::name::JournalName;
 use crate::model::registry::Registry;
+use crate::net::NodeClient;
 use crate::observe::audit::Audit;
-use crate::rpc::NodeClient;
 
 /// What resolving a name came to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

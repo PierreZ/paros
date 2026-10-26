@@ -29,8 +29,9 @@ use std::time::Duration;
 
 use paros_core::{LogRead, NodeId, ReadState, Seq, Slot};
 
+use crate::net::ReplySender;
 use crate::observe::audit::{Audit, LogReadAnswer, LogReadReport};
-use crate::rpc::{Read, ReadAck, ReplySender, journal_view_to_proto};
+use crate::wire::{Read, ReadAck, journal_view_to_proto};
 
 use super::DriverTunables;
 use super::reply::{Reply, answer};

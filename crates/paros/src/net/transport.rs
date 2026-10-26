@@ -13,7 +13,7 @@
 //! [`Transport::Plaintext`] is the default and the only choice without the
 //! `tls` feature, which keeps the library wasm-safe. With it,
 //! [`Transport::Tls`] carries moonpool's TLS upgrade, built by
-//! [`crate::tls`].
+//! [`crate::net::tls`].
 
 use std::future::Future;
 use std::io;
@@ -33,7 +33,7 @@ pub enum Transport {
     #[default]
     Plaintext,
     /// TLS 1.3 on every session, mutual when the server side asks for
-    /// client certificates ([`crate::tls`]).
+    /// client certificates ([`crate::net::tls`]).
     #[cfg(feature = "tls")]
     Tls(moonpool_rpc::security::tls::Tls),
 }

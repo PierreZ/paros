@@ -22,10 +22,10 @@ use super::{AdminPin, Admission, CellPlan, Class, MachineFacts, ballot_from_wire
 use crate::driver::edge::RpcEdge;
 use crate::driver::{DriverTunables, RunError};
 use crate::frontend::Operation;
-use crate::rpc::machine as wire;
-use crate::rpc::methods::{AdmitRpc, CellInitRpc, FormCellRpc, IdentifyRpc, PrepareCellRpc};
-use crate::rpc::{Inbound, ReplySender, serve_well_known};
-use crate::transport::Transport;
+use crate::net::transport::Transport;
+use crate::net::{Inbound, ReplySender, serve_well_known};
+use crate::wire::machine as wire;
+use crate::wire::methods::{AdmitRpc, CellInitRpc, FormCellRpc, IdentifyRpc, PrepareCellRpc};
 
 /// How long a waiting machine keeps its listener up after the answer that
 /// ends its wait, so the answer leaves before the listener closes.

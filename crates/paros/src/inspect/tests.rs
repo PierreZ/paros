@@ -305,8 +305,8 @@ fn compact() -> JournalStoreConfig {
     }
 }
 
-fn compact_geometry() -> crate::journal::Geometry {
-    crate::journal::Geometry {
+fn compact_geometry() -> crate::storage::journal::Geometry {
+    crate::storage::journal::Geometry {
         persist_blocks: 8,
         gap_blocks: 0,
         entry_blocks: 16,

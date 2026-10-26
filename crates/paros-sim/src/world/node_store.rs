@@ -298,7 +298,7 @@ impl LogStorage for LedgeredJournal {
         let regions = self.inner.regions();
         let layouts: Vec<_> = regions
             .iter()
-            .filter(|region| region.kind == paros::journal::Layout::ENTRY)
+            .filter(|region| region.kind == paros::storage::journal::Layout::ENTRY)
             .filter_map(|region| region.stripe)
             .filter_map(|slot| self.inner.layout(Slot(slot)).map(|at| (slot, at)))
             .collect();

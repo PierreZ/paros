@@ -35,8 +35,8 @@ use tokio_util::sync::CancellationToken;
 
 use super::ProviderDisk;
 use crate::driver::edge::MatchmakerInbox;
-use crate::journal::JournalMatchmakerStorage;
 use crate::matchmaker::{Host, HostedSet, SetOpener};
+use crate::storage::journal::JournalMatchmakerStorage;
 use crate::{Audit, BootKind, DriverTunables, Provisioned};
 
 /// The identity a set's store is stamped with: its tenant and the unset
@@ -123,7 +123,9 @@ impl<S: LocalStorageProvider + Clone + 'static> MachineSets<S> {
                 // The marker may be one a failed format sync left staged
                 // (#348): durable before the sets file names the set.
                 let dir = self.disk.matchmaker_dir(tenant);
-                if let Err(error) = crate::journal::settle(self.disk.provider(), &dir).await {
+                if let Err(error) =
+                    crate::storage::journal::settle(self.disk.provider(), &dir).await
+                {
                     tracing::warn!(tenant = tenant.0, %error, "matchmaker_set_unsettled");
                     return false;
                 }
@@ -219,7 +221,7 @@ impl<S: LocalStorageProvider + Clone + 'static> SetOpener for MachineSets<S> {
 pub(crate) fn spawn<P, S, A, F>(
     providers: &P,
     rpc: &RpcHandle<P>,
-    machine: Option<&moonpool_rpc::ServiceGroup<crate::rpc::methods::MachineInterface>>,
+    machine: Option<&moonpool_rpc::ServiceGroup<crate::wire::methods::MachineInterface>>,
     disk: ProviderDisk<S>,
     (config, booked, cell_id): (MatchmakerConfig, SetBookings, u64),
     tunables: &DriverTunables,

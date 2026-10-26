@@ -49,8 +49,8 @@
 use paros_core::LeaderUuid;
 use prost::Message;
 
-use crate::rpc::election as wire;
-use crate::rpc::{leader_uuid_from_proto, leader_uuid_to_proto};
+use crate::wire::election as wire;
+use crate::wire::{leader_uuid_from_proto, leader_uuid_to_proto};
 
 /// The prefix of every election record: a leading zero byte, the name, and a
 /// version.
