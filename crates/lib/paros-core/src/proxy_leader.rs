@@ -121,7 +121,7 @@
 //! configuration for the proxy's whole life and every delegation carries
 //! `None`.
 //!
-//! Proven by the sans-IO model checker beside it (`proxy_model.rs`): real
+//! Proven by the sans-IO model checker beside it (`models/proxy.rs`): real
 //! [`ColocatedNode`](crate::ColocatedNode)s and real `ProxyLeader`s over a
 //! lossy, reordering, duplicating scheduler, proxies crashed and rebooted
 //! empty, the leader handed off mid-round and re-elected, asserting after

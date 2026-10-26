@@ -77,16 +77,16 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
-use super::reconfigurer::{MatchmakerReconfigurer, ReconfigurerPhase, ReconfigurerStep};
-use super::{
+use super::support::{Mailbox, Rng, env_or};
+use crate::matchmaker::{
     MatchOutcome, MatchRefusal, MatchReply, MatchRequest, Matchmaker, MatchmakerConfig,
-    MatchmakerGeneration, MatchmakerHardState, MatchmakerId, MatchmakerPhase, MatchmakerSet,
-    MatchmakerWriteOp, MemRegistry, ReconfigureReply, ReconfigureRequest, Registration,
+    MatchmakerHardState, MatchmakerPhase, MatchmakerReconfigurer, MatchmakerWriteOp, MemRegistry,
+    ReconfigureReply, ReconfigureRequest, ReconfigurerPhase, ReconfigurerStep, Registration,
     RegistrationKind,
 };
 use crate::matchmaking::{MatchFold, Matchmaking, RegisteredPage};
 use crate::membership::{AcceptorConfig, QuorumSystem};
-use crate::model_support::{Mailbox, Rng, env_or};
+use crate::membership::{MatchmakerGeneration, MatchmakerId, MatchmakerSet};
 use crate::types::{Ballot, JournalId, NodeId};
 
 /// Seeds per campaign (`HANDOVER_MODEL_SEEDS` overrides; a long run is
@@ -636,7 +636,7 @@ impl World {
         let page = if seed.is_multiple_of(2) {
             1 + usize::try_from(seed / 2 % 2).unwrap_or(0)
         } else {
-            super::REGISTRY_PAGE
+            crate::matchmaker::REGISTRY_PAGE
         };
         let sites = (0..POOL)
             .map(|i| {
@@ -1044,7 +1044,7 @@ impl World {
         &mut self,
         to: MatchmakerId,
         step: impl FnOnce(&mut Matchmaker),
-        out: impl FnOnce(&super::MatchmakerReady<'_>) -> Vec<Envelope>,
+        out: impl FnOnce(&crate::matchmaker::MatchmakerReady<'_>) -> Vec<Envelope>,
     ) -> Vec<Envelope> {
         let chaos = self.chaos;
         let crash_before = chaos && self.rng.chance(1, 120);
@@ -2110,13 +2110,13 @@ impl World {
 
 impl Site {
     /// What a boot from this disk would resolve to — the core's own rule
-    /// ([`super::resolved_set`]), not a second copy of it.
+    /// ([`crate::matchmaker::resolved_set`]), not a second copy of it.
     fn disk_set(&self) -> MatchmakerSet {
-        super::resolved_set(self.disk.hard_state(), &self.config.bootstrap)
+        crate::matchmaker::resolved_set(self.disk.hard_state(), &self.config.bootstrap)
     }
 
     fn disk_phase(&self) -> MatchmakerPhase {
-        super::resolved_phase(
+        crate::matchmaker::resolved_phase(
             self.disk.hard_state(),
             self.config.id,
             &self.config.bootstrap,
@@ -2538,7 +2538,10 @@ fn a_second_handover_runs_on_the_activated_generation() {
 }
 
 /// The configuration `bootstrap` carries for `J` at `ballot`, if any.
-fn carried(bootstrap: &super::PendingBootstrap, ballot: Ballot) -> Option<&AcceptorConfig> {
+fn carried(
+    bootstrap: &crate::matchmaker::PendingBootstrap,
+    ballot: Ballot,
+) -> Option<&AcceptorConfig> {
     bootstrap
         .registries
         .get(&J)

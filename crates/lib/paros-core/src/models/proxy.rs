@@ -3,8 +3,8 @@
 //! machines — [`ColocatedNode`]s and [`ProxyLeader`]s, so the wiring that
 //! delegates, re-delegates, takes back and hands off is the wiring under
 //! test — with a scheduler in place of the network, the disks and the
-//! clock. The sibling of `matchmaker/handover_model.rs`, built on the same
-//! scaffolding (`model_support`).
+//! clock. The sibling of `models/handover.rs`, built on the same
+//! scaffolding (`models/support.rs`).
 //!
 //! Each seed draws a deployment (a majority of three, or a `2 × 2` grid of
 //! four, with two proxies) and a schedule: clients propose at whoever
@@ -45,9 +45,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
+use super::support::{Mailbox, Rng, env_or};
 use crate::membership::{AcceptorConfig, ProxyId, QuorumSystem};
 use crate::message::{Message, Party};
-use crate::model_support::{Mailbox, Rng, env_or};
 use crate::node::{ColocatedNode, Delegation, ProposeResult};
 use crate::proxy_leader::ProxyLeader;
 use crate::state::{Config, HardState};

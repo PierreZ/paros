@@ -116,8 +116,6 @@
 //! [`ReconfigureRequest::Chosen`].
 
 mod generation;
-#[cfg(test)]
-mod handover_model;
 mod message;
 mod reconfigurer;
 mod state;

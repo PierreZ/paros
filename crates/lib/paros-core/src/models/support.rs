@@ -1,7 +1,7 @@
 //! What every sans-IO **model checker** in this crate is built on: a seeded
 //! generator and a lossy mailbox. Test-only, dependency-free, and shared so
-//! the handover model (`matchmaker/handover_model.rs`) and the proxy model
-//! (`proxy_model.rs`) draw their schedules the same way and a reader of one
+//! the handover model (`models/handover.rs`) and the proxy model
+//! (`models/proxy.rs`) draw their schedules the same way and a reader of one
 //! can read the other.
 
 /// The environment variable `name` parsed as a `T`, or `default` when it is

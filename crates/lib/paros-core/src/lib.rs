@@ -76,12 +76,10 @@ pub mod matchmaking;
 pub mod membership;
 mod message;
 #[cfg(test)]
-mod model_support;
+mod models;
 mod node;
 pub mod proposer;
 pub mod proxy_leader;
-#[cfg(test)]
-mod proxy_model;
 pub mod quorum_read;
 mod ready;
 pub mod replica;

@@ -46,7 +46,7 @@
 //! fresh incarnation must not do is reuse a decree ballot its predecessor
 //! may have had a value accepted at: the `Stopped` replies carry each frozen
 //! member's decree promise, and the decree opens strictly above their
-//! maximum (the handover model checker, `super::handover_model`, found the
+//! maximum (the handover model checker, `crate::models::handover`, found the
 //! reuse on its seed 103 — two values at one ballot).
 
 use std::collections::{BTreeMap, BTreeSet};

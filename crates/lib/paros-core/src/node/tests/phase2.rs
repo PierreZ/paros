@@ -1,6 +1,6 @@
 //! Phase-2 delegation to a proxy leader (#142).
 //!
-//! The model checker (`proxy_model`) owns correctness; these tests pin the
+//! The model checker (`models::proxy`) owns correctness; these tests pin the
 //! *shape* of the wiring — what a delegation puts on the wire, what the
 //! leader keeps, how a round comes back — so a regression names the rule
 //! it broke.
