@@ -75,7 +75,8 @@ Simulation is the investment. Every milestone lands with its share of:
   in a multi-region cell every chosen slot's Phase-2 voters span two regions; a partition through
   the witness region, after which leadership settles (a liveness oracle in recovery mode); a
   client's two-hop resolution keeps succeeding through an outage of the universe tenant. In M12, with #253: the
-  witness region, the per-region pools and a move between cell kinds.
+  witness region, per-journal proxy leaders in the leader's region (#753 (per-journal proxies)) and a
+  move between cell kinds.
 - Setup under simulation (decided on 2026-10-09, #246): all of paros runs in the simulation,
   setup included. Simulated `parosd` machines run the shipped `paros::machine::run_machine`
   from an empty disk (format, a minted `node_id`, the machine record, the wait); the workload's

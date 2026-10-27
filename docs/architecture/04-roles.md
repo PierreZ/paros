@@ -3,15 +3,16 @@
 ## 4. Roles
 
 All six roles of Compartmentalized Paxos, plus the matchmakers of Matchmaker Paxos, each
-scalable independently per tenant by its coordinator:
+scalable independently by the tenant coordinator (proxy leaders, batchers and replicas per
+journal, decided on 2026-10-28, #753 (per-journal proxies)):
 
 | Role | Class | In paros |
 |---|---|---|
 | Leader (proposer) | storage | `Proposer` inside `ColocatedNode` |
-| Proxy leader | stateless | `ProxyLeader`, `run_proxy` |
+| Proxy leader | stateless | `ProxyLeader`, `run_proxy`; booked per journal by `proxies=` (0 means in the leader's process; decided on 2026-10-28, #753 (per-journal proxies)) |
 | Acceptor, grid quorums | storage | `Acceptor`, `QuorumSystem::Grid` |
 | Replica | storage | `ReplicaNode`, `run_replica`; serves `Read` |
-| Batcher | stateless | `paros_core::Batcher`, `paros::roles::batcher` (every machine serves it, `run_batcher` stand-alone); booked per tenant by `batchers=` (#145, #604); multi-writer journals only (section 2.4) |
+| Batcher | stateless | `paros_core::Batcher`, `paros::roles::batcher` (every machine serves it, `run_batcher` stand-alone); booked per journal by `batchers=` (0 means in the leader's process; per tenant until 2026-10-28, #145, #604, then per journal, #753 (per-journal proxies)); multi-writer journals only (section 2.4) |
 | Unbatcher | stateless | `paros_core::Unbatcher`, in the batcher's process (section 2.4) |
 | Matchmaker | storage | `Matchmaker`, `run_matchmaker`; one logical set per tenant, processes shared |
 | Frontend (the entry role) | stateless | `paros::roles::frontend` (every `parosd` serves it, `run_frontend` stand-alone for an embedder; #723 (frontend as a parosd role), decided on 2026-10-27); booked per tenant by `frontends=` (#604) and named by `Resolve`; authorizes, resolves names and forwards each call to the role that serves it (section 3.5). To build: one pool per `(tenant, region)` in a multi-region cell (section 3.4) |

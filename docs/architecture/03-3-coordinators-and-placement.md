@@ -24,7 +24,7 @@ has its tenant's matchmaker set (decided on 2026-10-04).
 
 **Where candidates run** (decided on 2026-10-04, amended on 2026-10-09, #240). The founding members
 campaign for the first cell coordinator over the election journal `cell init` creates on them,
-born at `failures-per-partition=1` (section 3.1). The cell and universe coordinators run on the founding members until a
+born at `machines=1` (section 3.1). The cell and universe coordinators run on the founding members until a
 `stateless` machine registers, then move there; the cell coordinator places tenant coordinators on
 `stateless` machines.
 
@@ -248,7 +248,7 @@ request RPC and the placement of tenant coordinators.
   records nothing for it. Footprint slots use the target `BookingTarget::Tenant { tenant }`:
   a tenant-level slot, so two of them may share a machine.
 - **What a footprint holds** (`paros::model::footprint`). At birth the durability is
-  `Durability::DEFAULT` (`failures-per-partition=1`, until a creation names one): one acceptor
+  `Durability::DEFAULT` (`machines=1`, until a creation names one): one acceptor
   quorum (2 slots), one quorum for the control journal (2 slots) and the matchmaker set
   (3 slots), on storage machines, plus one coordinator slot on a `stateless` machine. When no
   stateless machine serves with a free slot, the founding members host the coordinator and

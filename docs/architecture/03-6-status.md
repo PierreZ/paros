@@ -26,8 +26,8 @@ judged (`observed`) and the word the cell shows (`word`):
 
 Every quorum question goes through the placed `AcceptorConfig`. A journal the cell made
 (control, election, universe directory) is desired on every founding member, a majority. The
-words compare shapes only: a `failures-per-partition=0` journal is Healthy when its one member
-is up, and the zone rule (the `failures-per-partition=0` exemption, the degraded trap) comes with
+words compare shapes only: a `machines=0` journal is Healthy when its one member
+is up, and the zone rule (the `machines=0` exemption, the degraded trap) comes with
 #215. The desired column shows the durability's label, partition count included (#523). **Hysteresis**: the
 founding member that answers shows a new word only once it held for `status_hold` (a
 `DriverTunables` field; floor 0, which shows every answer's own word; production 20 s, two
@@ -36,6 +36,19 @@ directory cannot be read, the member still answers from the registry (static sta
 `parosctl status [--tenant t] [--cell c]` prints the universe line (when the servers' cell hosts
 its directory), the cell, its coordinator, the machines available, the slots per class and every
 journal's desired, current and available acceptors with its word.
+
+**Wants against has** (decided on 2026-10-28, #752 (wants against has)). Each journal in
+`parosctl status` shows its desired guarantee (its `survive`, section 3.4), its effective
+guarantee and the reason for any gap, for example:
+
+```
+wants 2 machines,1 zone · has 2 machines,0 zones · zone b lost, waiting for a 4th zone
+```
+
+The effective guarantee comes from the placed configuration, its failure domains and the
+members that are up. The reason comes from the same pure function as `configure --plan`
+(section 3.4): the shortfall and its cure. The word (Healthy, Degraded, Unavailable) stays; the
+wants and has line says why.
 
 **The first views** (#399, decided on 2026-10-10). Each view is a request to **one cell**, and the
 request chooses the cell: `parosctl` asks the servers it names, and a founding member of that

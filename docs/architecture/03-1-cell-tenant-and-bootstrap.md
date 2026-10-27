@@ -88,7 +88,8 @@ Today, `parosctl init --idle` is `cell init` alone: it forms an idle cell with n
   whether it won. paros has nothing elected before `cell init`, so the decree is that election.
 
   The first `2F+1` listed machines are the cell's **founding members**, with `F` from `parosctl
-  init --failures-per-partition` (default 1, so three founding members, decided on 2026-10-15:
+  init --failures-per-partition` (`machines` of `--survive` once #748 (survive) lands;
+  default 1, so three founding members, decided on 2026-10-15:
   before, every listed machine was a founding member, and seven listed machines gave the cell and
   tenant control journals seven acceptors). When fewer are listed, every listed machine is a
   founding member. `init` admits the other listed machines after the fleet steps, as `add-machine`
