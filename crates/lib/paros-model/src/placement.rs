@@ -173,13 +173,13 @@ pub fn zoned(members: &[NodeId], machines: &[Machine], system: QuorumSystem) -> 
 /// machines of the class span three zones or more (over two zones, no
 /// configuration survives one zone while no zone commits alone).
 #[must_use]
-pub fn zone_rule_binds(failures_per_partition: u32, class: Class, machines: &[Machine]) -> bool {
+pub fn zone_rule_binds(survive_machines: u32, class: Class, machines: &[Machine]) -> bool {
     let zones: BTreeSet<&str> = machines
         .iter()
         .filter(|m| m.class == class && domain(&m.zone).is_some())
         .map(|m| m.zone.as_str())
         .collect();
-    failures_per_partition >= 1 && zones.len() >= 3
+    survive_machines >= 1 && zones.len() >= 3
 }
 
 /// What a placement asks for: `count` instances of `role` for `target`.

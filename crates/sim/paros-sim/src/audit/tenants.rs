@@ -404,9 +404,9 @@ impl TenantBoard {
         // before (#214 (tenant modes)).
         if let Some(id) = id {
             let journal = JournalIdentifier::new(control.tenant, id);
-            // Its new placement survives `F` failures per partition (#599:
+            // Its new placement survives `machines` failures per acceptor partition (#599:
             // the cut budget takes the smallest of its life).
-            let failures = desired.durability.failures_per_partition;
+            let failures = desired.durability.survive_machines;
             self.tolerate(journal, usize::try_from(failures).unwrap_or(0));
             assert_always!(
                 self.created.get(&journal).is_some_and(|at| *at < lsn),

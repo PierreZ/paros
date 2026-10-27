@@ -57,7 +57,7 @@ fn tenants_write_read_and_show_their_topology() {
     let base = vec![
         at(0, Op::Init { machines: 4 }),
         tenant(100, "acme"),
-        journal(200, "acme", "orders", "failures-per-partition=1"),
+        journal(200, "acme", "orders", "machines=1"),
         write(300, "acme", "orders", 3),
     ];
     let first = run(&config, &base);
@@ -66,12 +66,7 @@ fn tenants_write_read_and_show_their_topology() {
 
     let mut actions = base.clone();
     actions.push(tenant(400, "globex"));
-    actions.push(journal(
-        500,
-        "globex",
-        "events",
-        "failures-per-partition=0,partitions=4",
-    ));
+    actions.push(journal(500, "globex", "events", "machines=0,partitions=4"));
     actions.push(write(600, "globex", "events", 2));
     actions.push(read(700, "acme", "orders", 3));
     let second = run(&config, &actions);

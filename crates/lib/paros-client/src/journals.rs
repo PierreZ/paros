@@ -109,7 +109,7 @@ impl JournalRequest {
                 name: name.clone(),
                 writer: writer_mode_to_proto(*writer).into(),
                 replicas: desired.map_or(0, |d| d.replicas),
-                failures_per_partition: desired.map_or(0, |d| d.durability.failures_per_partition),
+                survive_machines: desired.map_or(0, |d| d.durability.survive_machines),
                 // 0: the tenant's default.
                 partitions: desired.map_or(0, |d| d.durability.partitions),
                 tags: tags.to_wire(),
@@ -127,7 +127,7 @@ impl JournalRequest {
             } => Op::Configure(wire::ConfigureOp {
                 name: name.clone().unwrap_or_default(),
                 replicas: desired.replicas,
-                failures_per_partition: desired.durability.failures_per_partition,
+                survive_machines: desired.durability.survive_machines,
                 partitions: desired.durability.partitions,
                 roles: roles.is_some(),
                 frontends: roles.map_or(0, |r| r.frontends),
@@ -162,14 +162,14 @@ impl JournalRequest {
                 name: create.name.clone(),
                 writer: writer_mode_from_proto(create.writer)?,
                 desired: if create.partitions == 0
-                    && create.failures_per_partition == 0
+                    && create.survive_machines == 0
                     && create.replicas == 0
                 {
                     None
                 } else {
                     Some(Desired::from_wire(Some(paros_wire::tenant::Desired {
                         replicas: create.replicas,
-                        failures_per_partition: create.failures_per_partition,
+                        survive_machines: create.survive_machines,
                         partitions: create.partitions,
                     }))?)
                 },
@@ -187,7 +187,7 @@ impl JournalRequest {
                 name: (!configure.name.is_empty()).then(|| configure.name.clone()),
                 desired: Desired::from_wire(Some(paros_wire::tenant::Desired {
                     replicas: configure.replicas,
-                    failures_per_partition: configure.failures_per_partition,
+                    survive_machines: configure.survive_machines,
                     partitions: configure.partitions,
                 }))?,
                 roles: match (configure.roles, configure.name.is_empty()) {
@@ -555,11 +555,7 @@ mod tests {
             op: JournalOp::Create {
                 name: b"orders".to_vec(),
                 writer: WriterMode::Multi,
-                desired: Some(
-                    "failures-per-partition=0,partitions=3"
-                        .parse()
-                        .expect("a durability"),
-                ),
+                desired: Some("machines=0,partitions=3".parse().expect("a durability")),
                 tags: UserTags::parse(&["team:payments"]).expect("a tag"),
                 store: StoreDurability::Batched,
             },
@@ -589,7 +585,7 @@ mod tests {
                 tenant: TenantId(3),
                 op: JournalOp::Configure {
                     name,
-                    desired: "failures-per-partition=2".parse().expect("a durability"),
+                    desired: "machines=2".parse().expect("a durability"),
                     roles: None,
                 },
             };

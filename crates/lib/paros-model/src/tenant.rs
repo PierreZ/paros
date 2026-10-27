@@ -117,7 +117,7 @@ impl std::str::FromStr for Survives {
 /// per commit, and a crash inside a commit can then leave the last batch
 /// ambiguous. A journal repairs a lost batch only while each slot keeps a
 /// Phase-1 quorum of clean copies, so a `Batched` journal with one acceptor
-/// per partition (`failures_per_partition` 0) can stop for good after a
+/// per partition (`survive_machines` 0) can stop for good after a
 /// power loss inside a commit.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub enum StoreDurability {
@@ -186,9 +186,9 @@ impl std::str::FromStr for StoreDurability {
     }
 }
 
-/// The largest `failures_per_partition` a journal may ask for: seven
+/// The largest `survive_machines` a journal may ask for: seven
 /// acceptors per acceptor partition (#523, decided on 2026-10-14).
-pub const MAX_FAILURES_PER_PARTITION: u32 = 3;
+pub const MAX_SURVIVE_MACHINES: u32 = 3;
 
 /// A journal's durability (§3.4, #523): how many failures each acceptor
 /// partition survives, and over how many acceptor partitions its writes
@@ -203,7 +203,7 @@ pub const MAX_FAILURES_PER_PARTITION: u32 = 3;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Durability {
     /// `F`: the failures each acceptor partition survives, `0..=3`.
-    pub failures_per_partition: u32,
+    pub survive_machines: u32,
     /// `P`: the acceptor partitions, at least 1.
     pub partitions: u32,
 }
@@ -211,25 +211,25 @@ pub struct Durability {
 impl Durability {
     /// Three acceptors in one partition: the default.
     pub const DEFAULT: Durability = Durability {
-        failures_per_partition: 1,
+        survive_machines: 1,
         partitions: 1,
     };
 
-    /// A durability of `failures_per_partition` over `partitions`.
+    /// A durability of `survive_machines` over `partitions`.
     ///
     /// # Errors
     ///
-    /// `failures_per_partition` above [`MAX_FAILURES_PER_PARTITION`], or
+    /// `survive_machines` above [`MAX_SURVIVE_MACHINES`], or
     /// `partitions` of 0.
-    pub fn new(failures_per_partition: u32, partitions: u32) -> Result<Self, &'static str> {
-        if failures_per_partition > MAX_FAILURES_PER_PARTITION {
-            return Err("failures-per-partition is at most 3");
+    pub fn new(survive_machines: u32, partitions: u32) -> Result<Self, &'static str> {
+        if survive_machines > MAX_SURVIVE_MACHINES {
+            return Err("machines is at most 3");
         }
         if partitions == 0 {
             return Err("partitions is at least 1");
         }
         Ok(Durability {
-            failures_per_partition,
+            survive_machines,
             partitions,
         })
     }
@@ -237,7 +237,7 @@ impl Durability {
     /// The acceptors of one partition: `2F+1`.
     #[must_use]
     pub fn acceptors_per_partition(self) -> usize {
-        2 * self.failures_per_partition as usize + 1
+        2 * self.survive_machines as usize + 1
     }
 
     /// The acceptors it asks for: `(2F+1) × P`.
@@ -255,18 +255,15 @@ impl Durability {
         if self.partitions == 1 {
             QuorumSystem::Majority
         } else {
-            QuorumSystem::partitions(
-                self.failures_per_partition as usize,
-                self.partitions as usize,
-            )
+            QuorumSystem::partitions(self.survive_machines as usize, self.partitions as usize)
         }
     }
 
     /// Its label, with the derived numbers and always the partition count:
-    /// `1 per partition · 1 partition (any 1) · 3 acceptors`.
+    /// `survive 1 machine · 1 partition (any 1) · 3 acceptors`.
     #[must_use]
     pub fn label(self) -> String {
-        let f = self.failures_per_partition;
+        let f = self.survive_machines;
         let p = self.partitions;
         let partitions = if p == 1 { "partition" } else { "partitions" };
         let survives = if p == 1 {
@@ -276,7 +273,8 @@ impl Durability {
         };
         let n = self.acceptors();
         let acceptors = if n == 1 { "acceptor" } else { "acceptors" };
-        format!("{f} per partition · {p} {partitions} ({survives}) · {n} {acceptors}")
+        let machines = if f == 1 { "machine" } else { "machines" };
+        format!("survive {f} {machines} · {p} {partitions} ({survives}) · {n} {acceptors}")
     }
 }
 
@@ -319,7 +317,7 @@ impl Desired {
     #[must_use]
     pub fn to_wire(&self) -> wire::Desired {
         wire::Desired {
-            failures_per_partition: self.durability.failures_per_partition,
+            survive_machines: self.durability.survive_machines,
             partitions: self.durability.partitions,
             replicas: self.replicas,
         }
@@ -329,11 +327,11 @@ impl Desired {
     ///
     /// # Errors
     ///
-    /// No mode, `failures_per_partition` above 3 or no partition.
+    /// No mode, `survive_machines` above 3 or no partition.
     pub fn from_wire(desired: Option<wire::Desired>) -> Result<Self, &'static str> {
         let desired = desired.ok_or("no desired mode")?;
         Ok(Desired {
-            durability: Durability::new(desired.failures_per_partition, desired.partitions)?,
+            durability: Durability::new(desired.survive_machines, desired.partitions)?,
             replicas: desired.replicas,
         })
     }
@@ -342,23 +340,23 @@ impl Desired {
 impl std::str::FromStr for Desired {
     type Err = &'static str;
 
-    /// `failures-per-partition=F,partitions=P`, either part optional (the
+    /// `machines=F,partitions=P`, either part optional (the
     /// default is `F=1`, `P=1`), in any order.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let mut f = Durability::DEFAULT.failures_per_partition;
+        let mut f = Durability::DEFAULT.survive_machines;
         let mut p = Durability::DEFAULT.partitions;
         for part in s.split(',').map(str::trim).filter(|part| !part.is_empty()) {
             let (key, value) = part
                 .split_once('=')
-                .ok_or("a mode is failures-per-partition=F,partitions=P")?;
+                .ok_or("a mode is machines=F,partitions=P")?;
             let value: u32 = value
                 .trim()
                 .parse()
                 .map_err(|_| "a mode's value is a number")?;
             match key.trim() {
-                "failures-per-partition" => f = value,
+                "machines" => f = value,
                 "partitions" => p = value,
-                _ => return Err("a mode names failures-per-partition and partitions"),
+                _ => return Err("a mode names machines and partitions"),
             }
         }
         Ok(Desired {
@@ -982,18 +980,18 @@ impl TenantControl {
             .unwrap_or(Desired::DEFAULT)
     }
 
-    /// The largest `failures_per_partition` of the tenant: its default and
+    /// The largest `survive_machines` of the tenant: its default and
     /// every live journal's (§3.4: its matchmaker set has `2F+1`
     /// matchmakers, #214 (tenant modes)).
     #[must_use]
     pub fn largest_failures(&self) -> u32 {
         self.live()
-            .map(|(_, j)| j.desired.durability.failures_per_partition)
+            .map(|(_, j)| j.desired.durability.survive_machines)
             .chain(std::iter::once(
-                self.default_desired().durability.failures_per_partition,
+                self.default_desired().durability.survive_machines,
             ))
             .max()
-            .unwrap_or(Durability::DEFAULT.failures_per_partition)
+            .unwrap_or(Durability::DEFAULT.survive_machines)
     }
 
     /// Whether the tenant used `id` already (its control journal's, or any
@@ -1471,7 +1469,7 @@ mod tests {
                 cell_name: b"west-1".to_vec(),
                 desired: Desired {
                     durability: Durability {
-                        failures_per_partition: 2,
+                        survive_machines: 2,
                         partitions: 3,
                     },
                     replicas: 2,
@@ -1503,9 +1501,7 @@ mod tests {
             TenantCommand::Configure {
                 request: 12,
                 target: ConfigureTarget::Journal(JournalId(0x9e37)),
-                desired: "failures-per-partition=0,partitions=3"
-                    .parse()
-                    .expect("a mode"),
+                desired: "machines=0,partitions=3".parse().expect("a mode"),
                 roles: None,
             },
             TenantCommand::Configure {
@@ -1726,7 +1722,7 @@ mod tests {
     fn a_configure_changes_a_live_journal_or_the_default_and_a_retry_acts_once() {
         let mut t = fold();
         t.fold(0, &create(1, 11, b"a"));
-        let wide = "failures-per-partition=2";
+        let wide = "machines=2";
         assert_eq!(
             t.fold(
                 1,
@@ -1739,7 +1735,7 @@ mod tests {
             }
         );
         let journal = t.get(JournalId(11)).expect("created");
-        assert_eq!(journal.desired.durability.failures_per_partition, 2);
+        assert_eq!(journal.desired.durability.survive_machines, 2);
         // The writer mode and the bootstrap configuration never change.
         assert_eq!(journal.writer, WriterMode::Single);
         assert_eq!(journal.config, config(&[1, 2, 3]));
@@ -1814,11 +1810,7 @@ mod tests {
         );
         t.fold(
             2,
-            &configure(
-                2,
-                ConfigureTarget::TenantDefault,
-                "failures-per-partition=3",
-            ),
+            &configure(2, ConfigureTarget::TenantDefault, "machines=3"),
         );
         let mut restored = fold();
         restored
@@ -1999,29 +1991,22 @@ mod tests {
     #[test]
     fn desired_modes_parse() {
         assert_eq!("".parse::<Desired>(), Ok(Desired::DEFAULT));
+        assert_eq!("machines=1".parse::<Desired>(), Ok(Desired::DEFAULT));
         assert_eq!(
-            "failures-per-partition=1".parse::<Desired>(),
-            Ok(Desired::DEFAULT)
-        );
-        assert_eq!(
-            "partitions=3,failures-per-partition=1"
+            "partitions=3,machines=1"
                 .parse::<Desired>()
                 .map(|d| d.acceptors()),
             Ok(9)
         );
         assert_eq!(
-            "failures-per-partition=3"
-                .parse::<Desired>()
-                .map(|d| d.acceptors()),
+            "machines=3".parse::<Desired>().map(|d| d.acceptors()),
             Ok(7)
         );
         assert_eq!(
-            "failures-per-partition=0"
-                .parse::<Desired>()
-                .map(|d| d.acceptors()),
+            "machines=0".parse::<Desired>().map(|d| d.acceptors()),
             Ok(1)
         );
-        assert!("failures-per-partition=4".parse::<Desired>().is_err());
+        assert!("machines=4".parse::<Desired>().is_err());
         assert!("partitions=0".parse::<Desired>().is_err());
         assert!("double".parse::<Desired>().is_err());
         assert!("copies=3".parse::<Desired>().is_err());
@@ -2031,12 +2016,12 @@ mod tests {
     fn a_durability_shows_its_partition_count() {
         assert_eq!(
             Durability::DEFAULT.label(),
-            "1 per partition · 1 partition (any 1) · 3 acceptors"
+            "survive 1 machine · 1 partition (any 1) · 3 acceptors"
         );
         let spread = Durability::new(1, 3).expect("a durability");
         assert_eq!(
             spread.label(),
-            "1 per partition · 3 partitions (any 1, up to 3 spread) · 9 acceptors"
+            "survive 1 machine · 3 partitions (any 1, up to 3 spread) · 9 acceptors"
         );
         assert_eq!(
             spread.quorum_system(),
@@ -2050,13 +2035,13 @@ mod tests {
         let lone = Durability::new(0, 1).expect("a durability");
         assert_eq!(
             lone.label(),
-            "0 per partition · 1 partition (any 0) · 1 acceptor"
+            "survive 0 machines · 1 partition (any 0) · 1 acceptor"
         );
     }
 
     #[test]
     fn a_durability_round_trips_the_wire() {
-        for f in 0..=MAX_FAILURES_PER_PARTITION {
+        for f in 0..=MAX_SURVIVE_MACHINES {
             for p in 1..=4 {
                 let desired = Desired {
                     durability: Durability::new(f, p).expect("a durability"),

@@ -273,7 +273,7 @@ impl Desk {
             names: ("sandbox".into(), "cell-1".into()),
             token: Vec::new(),
             root_key: None,
-            failures_per_partition: paros::client::initialize::FAILURES_PER_PARTITION,
+            survive_machines: paros::client::initialize::SURVIVE_MACHINES,
             idle: false,
         };
         let run = initialize(
@@ -349,10 +349,7 @@ impl Desk {
         mode: &str,
     ) -> (bool, String) {
         let Ok(desired) = mode.parse::<Desired>() else {
-            return (
-                false,
-                format!("no mode {mode}: failures-per-partition=F,partitions=P"),
-            );
+            return (false, format!("no mode {mode}: machines=F,partitions=P"));
         };
         let Some(cell) = known.cell.as_ref() else {
             return (false, "no cell: init failed".into());

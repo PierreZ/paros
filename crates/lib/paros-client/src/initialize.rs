@@ -154,8 +154,8 @@ pub struct InitParams {
     /// first `2F+1` listed machines are the founding members, so the cell
     /// and tenant control journals have `2F+1` acceptors and survive `F`
     /// failures. `init` admits every other listed machine. The default is
-    /// [`FAILURES_PER_PARTITION`].
-    pub failures_per_partition: u32,
+    /// [`SURVIVE_MACHINES`].
+    pub survive_machines: u32,
     /// Form an idle cell (`cell init`, #232 (multiple cells)): no universe
     /// tenant and no fleet steps. `universe add-cell` joins it to a
     /// universe later. The run's fleet id is then `0`.
@@ -165,18 +165,18 @@ pub struct InitParams {
 /// The default `F` of the cell's control journals: three founding members,
 /// so the cell and tenant control journals have three acceptors however
 /// many machines `init` lists (decided on 2026-10-15).
-pub const FAILURES_PER_PARTITION: u32 = Durability::DEFAULT.failures_per_partition;
+pub const SURVIVE_MACHINES: u32 = Durability::DEFAULT.survive_machines;
 
-/// How many of `listed` machines found the cell for `failures_per_partition`:
+/// How many of `listed` machines found the cell for `survive_machines`:
 /// `2F+1`, or every listed machine when fewer are listed.
 ///
 /// # Panics
 ///
 /// Never: the count is at most `listed`, and at least one of them.
 #[must_use]
-pub fn founding_members(listed: usize, failures_per_partition: u32) -> usize {
+pub fn founding_members(listed: usize, survive_machines: u32) -> usize {
     let wanted = Durability {
-        failures_per_partition,
+        survive_machines,
         partitions: 1,
     }
     .acceptors_per_partition();
@@ -285,7 +285,7 @@ async fn coordinator<P: ParosProviders>(
 /// `connect` builds over the cell's servers. `listed` are the machines'
 /// advertised addresses (#257), each resolved through `names` as it is
 /// dialed. The founding members are the first `2F+1` listed
-/// ([`founding_members`], `F` from [`InitParams::failures_per_partition`]):
+/// ([`founding_members`], `F` from [`InitParams::survive_machines`]):
 /// a re-run lists the same machines in the same order.
 ///
 /// # Panics
@@ -307,10 +307,8 @@ pub async fn initialize<P: ParosProviders>(
     if listed.is_empty() {
         return InitRun::Unreachable(Unreachable::NoTarget);
     }
-    let (members, others) = listed.split_at(founding_members(
-        listed.len(),
-        params.failures_per_partition,
-    ));
+    let (members, others) =
+        listed.split_at(founding_members(listed.len(), params.survive_machines));
     assert!(!members.is_empty(), "a listed machine founds the cell");
     if !others.is_empty() {
         moonpool_assertions::reachable!("init: more machines are listed than found the cell");

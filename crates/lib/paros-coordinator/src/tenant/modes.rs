@@ -457,9 +457,9 @@ mod tests {
     use super::*;
     use paros_model::tenant::Durability;
 
-    fn desired(failures_per_partition: u32, partitions: u32) -> Desired {
+    fn desired(survive_machines: u32, partitions: u32) -> Desired {
         Desired {
-            durability: Durability::new(failures_per_partition, partitions).expect("a durability"),
+            durability: Durability::new(survive_machines, partitions).expect("a durability"),
             replicas: 0,
         }
     }

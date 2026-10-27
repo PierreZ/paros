@@ -24,7 +24,7 @@ must carry it. `SetLeader(new, old)` replaces the uuid only if the current one i
 For example, `cell init` is a single-decree Paxos over the founding members. A founding member
 that was down when the decree chose the plan learns it later from a formed member, which sends
 the operator's token again. `parosctl init` makes the first three listed machines the founding
-members and admits the others, so the control journals have three acceptors. `--failures-per-partition F` sets `2F+1` founding members.
+members and admits the others, so the control journals have three acceptors. `--survive machines=F` sets `2F+1` founding members.
 
 **Stopping a machine.** Ctrl-C (`SIGINT`) and `SIGTERM` stop a machine cleanly. The machine
 refuses new calls with `stopping`, so a client retries on another machine. It answers the calls

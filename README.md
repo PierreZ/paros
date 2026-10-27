@@ -56,7 +56,7 @@ Every session can run over TLS, mutual by default: `parosctl tls init` writes th
 authority and every certificate in one step.
 
 A journal's durability can change while it runs: `parosctl configure --tenant acme --journal
-orders --failures-per-partition 2` asks for five acceptors, and the tenant coordinator moves
+orders --survive machines=2` asks for five acceptors, and the tenant coordinator moves
 the journal there by reconfiguration, without losing a write (#214 (tenant modes)).
 
 A multi-writer journal can put many writers' writes in one slot through batchers (#145

@@ -49,15 +49,17 @@ pub struct InitArgs {
     /// stands for them all. The servers (`--servers`) by default.
     #[arg(long, value_delimiter = ',')]
     members: Vec<String>,
-    /// `F` of the cell's control journals (#523 (redundancy naming)): the
-    /// first `2F+1` listed machines found the cell, so its control journals
-    /// survive `F` failures. A re-run gives the same value.
+    /// What the cell's control journals survive, `machines=M` (#748
+    /// (survive)): the first `2M+1` listed machines found the cell, so its
+    /// control journals survive `M` failed machines. A re-run gives the same
+    /// value.
     #[arg(
-        long,
-        default_value_t = initialize::FAILURES_PER_PARTITION,
-        value_parser = clap::value_parser!(u32).range(0..=i64::from(paros::model::tenant::MAX_FAILURES_PER_PARTITION))
+        long = "survive",
+        value_name = "machines=M",
+        default_value = "machines=1",
+        value_parser = crate::cmd::journal::parse_survive
     )]
-    failures_per_partition: u32,
+    survive_machines: u32,
     /// How long the decree may take to form the cell, and the cell to elect
     /// its first leader, in milliseconds.
     #[arg(long, default_value = "30000")]
@@ -162,7 +164,7 @@ pub async fn run(
         names: (args.universe_name.clone(), args.cell_name.clone()),
         token,
         root_key,
-        failures_per_partition: args.failures_per_partition,
+        survive_machines: args.survive_machines,
         idle: args.idle,
     };
     let (providers, rpc, names) = (asker.providers, asker.rpc, asker.names);

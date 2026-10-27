@@ -286,7 +286,7 @@ message JournalRequest {
 }
 
 // Create journal `name`, written in `writer` mode, under a desired mode:
-// `failures_per_partition` (0 to 3) over `partitions` acceptor partitions (at
+// `survive_machines` (0 to 3) over `partitions` acceptor partitions (at
 // least 1, #523). `partitions` 0 takes the tenant's default mode (#214). `replicas` is the replica count. The coordinator draws the
 // id and picks the members: a caller never names one. Tags 3 to 5 held the
 // retired redundancy and grid.
@@ -296,7 +296,7 @@ message CreateJournalOp {
   bytes name = 1;
   paros.common.v1.WriterMode writer = 2;
   uint32 replicas = 6;
-  uint32 failures_per_partition = 7;
+  uint32 survive_machines = 7;
   uint32 partitions = 8;
   // Its first user tags (#575 (key:value tags)): a reserved key or a set
   // over the cap is `malformed`.
@@ -318,7 +318,7 @@ message DeleteJournalOp {
 message ConfigureOp {
   bytes name = 1;
   uint32 replicas = 2;
-  uint32 failures_per_partition = 3;
+  uint32 survive_machines = 3;
   uint32 partitions = 4;
   // The tenant's role counts (#604), on a tenant default only (no `name`):
   // set when `roles` is true, kept otherwise.

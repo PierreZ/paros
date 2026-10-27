@@ -29,7 +29,7 @@ use paros::model::address::Names;
 use paros::model::fleet::TenantState;
 use paros::model::tags::{Tags, UserTags};
 use paros::model::tenant::{
-    Desired, Durability, MAX_FAILURES_PER_PARTITION, StoreDurability, TenantRoles,
+    Desired, Durability, MAX_SURVIVE_MACHINES, StoreDurability, TenantRoles,
 };
 use serde_json::json;
 
@@ -199,15 +199,57 @@ pub fn parse_store_durability(text: &str) -> Result<StoreDurability, String> {
     text.parse().map_err(|why: &str| why.to_string())
 }
 
-/// A journal's durability on the command line (§3.4, #523): each acceptor
-/// partition has `2F+1` acceptors. A field not named takes its default
-/// (`F=1`, `P=1`); none named is no mode at all.
+/// `--survive machines=M,zones=Z,regions=R` (§3.4, #748 (survive)): what a
+/// journal must survive. It gives `machines`, 0 to 3. Zone and region
+/// survival (`zones=1`, `regions=1`) come with #748 (survive); until then
+/// only `0` is taken for them.
+///
+/// # Errors
+///
+/// A part that is not `key=number`, an unknown key, `machines` above 3, or
+/// `zones` or `regions` other than 0.
+pub fn parse_survive(text: &str) -> Result<u32, String> {
+    let mut machines = Durability::DEFAULT.survive_machines;
+    for part in text
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+    {
+        let (key, value) = part
+            .split_once('=')
+            .ok_or("survive is machines=M,zones=Z,regions=R")?;
+        let value: u32 = value
+            .trim()
+            .parse()
+            .map_err(|_| "a survive value is a number")?;
+        match key.trim() {
+            "machines" if value <= MAX_SURVIVE_MACHINES => machines = value,
+            "machines" => return Err(format!("machines is at most {MAX_SURVIVE_MACHINES}")),
+            "zones" | "regions" if value == 0 => {}
+            "zones" | "regions" => {
+                return Err(format!("{key}={value} is not built yet (#748 (survive))"));
+            }
+            _ => {
+                return Err(format!(
+                    "survive names machines, zones and regions, not {key}"
+                ));
+            }
+        }
+    }
+    Ok(machines)
+}
+
+/// A journal's durability on the command line (§3.4, #748 (survive)): each
+/// acceptor partition has `2F+1` acceptors, `F` the `machines` of
+/// `--survive`. A field not named takes its default (`machines=1`, `P=1`);
+/// none named is no mode at all.
 #[derive(Args, Debug, Clone, Copy)]
 pub struct DurabilityArgs {
-    /// `F`: the failures each acceptor partition survives, 0 to 3 (default
-    /// 1). Each acceptor partition has `2F+1` acceptors.
-    #[arg(long, value_parser = clap::value_parser!(u32).range(0..=i64::from(MAX_FAILURES_PER_PARTITION)))]
-    failures_per_partition: Option<u32>,
+    /// What the journal must survive: `machines=M,zones=Z,regions=R`.
+    /// `machines` is 0 to 3 (default 1), and each acceptor partition has
+    /// `2M+1` acceptors. `zones` and `regions` take only 0 for now.
+    #[arg(long = "survive", value_name = "machines=M,zones=Z,regions=R", value_parser = parse_survive)]
+    survive_machines: Option<u32>,
     /// `P`: the acceptor partitions a journal's writes spread over, at least
     /// 1 (default 1, the plain majority).
     #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
@@ -221,12 +263,12 @@ impl DurabilityArgs {
     ///
     /// Never: clap bounds both values.
     pub fn desired(self) -> Option<Desired> {
-        if self.failures_per_partition.is_none() && self.partitions.is_none() {
+        if self.survive_machines.is_none() && self.partitions.is_none() {
             return None;
         }
         let durability = Durability::new(
-            self.failures_per_partition
-                .unwrap_or(Durability::DEFAULT.failures_per_partition),
+            self.survive_machines
+                .unwrap_or(Durability::DEFAULT.survive_machines),
             self.partitions.unwrap_or(Durability::DEFAULT.partitions),
         )
         .expect("clap bounds the durability");
@@ -438,7 +480,7 @@ pub async fn configure(
     }
     let named_mode = args.durability.desired();
     if named_mode.is_none() && args.replicas.is_none() && !named_roles {
-        note("name a mode: --failures-per-partition, --partitions, --replicas or a role count");
+        note("name a mode: --survive, --partitions, --replicas or a role count");
         return Ending::Refused;
     }
     let (tenant, control, election, _) = match ready_tenant(client, out, &args.tenant).await {

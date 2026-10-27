@@ -213,7 +213,7 @@ predicates do. The tenant coordinator's create (`machine/tenants.rs`) labels the
 from the registry and owns the configuration with its cell; a move (`machine/moves.rs`) does the
 same for the machines that stay. **Where the rule binds** (the open question of #215, default
 taken on 2026-10-16; amended on 2026-10-28, #748 (survive)): a durability with
-`failures-per-partition` 1 or more, over storage machines that span three zones or more
+`machines` 1 or more, over storage machines that span three zones or more
 (`paros::model::placement::zone_rule_binds`). Over one or two zones no configuration can meet it,
 so the create is placed as before, without zone survival. Since 2026-10-28 the journal's
 `survive` says whether the rule binds (`zones=1` or `regions=1`), never the cell's shape: a

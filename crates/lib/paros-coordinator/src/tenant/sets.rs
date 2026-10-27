@@ -27,7 +27,7 @@
 //! answered its freeze, so a set in force can leave its booked machines
 //! after its move finished.
 //!
-//! The set has `2F+1` matchmakers, `F` the largest `failures_per_partition`
+//! The set has `2F+1` matchmakers, `F` the largest `survive_machines`
 //! of its tenant (its default and every live journal, at least 1), on at
 //! most every storage machine (#214 (tenant modes)): a set grows by booking
 //! the slots it lacks and shrinks by handing over onto the slots placement
@@ -164,7 +164,7 @@ fn next_set(
 }
 
 /// The size of a tenant's matchmaker set (§3.4, #214 (tenant modes)):
-/// `2F+1` matchmakers, `F` its largest `failures_per_partition` and at
+/// `2F+1` matchmakers, `F` its largest `survive_machines` and at
 /// least 1 (its control journal's), on at most `storage` machines.
 fn set_size(largest_failures: u32, storage: usize) -> usize {
     let f = usize::try_from(largest_failures.max(1)).unwrap_or(usize::MAX);
@@ -213,7 +213,7 @@ fn kept(
 }
 
 /// The size `tenant`'s set should have: `2F+1`, `F` the tenant's largest
-/// `failures_per_partition` (#214 (tenant modes)), at most every storage
+/// `survive_machines` (#214 (tenant modes)), at most every storage
 /// machine placement may book that can hold the set: one that holds a slot
 /// of it, or has a free slot. While its control journal `control` cannot be
 /// read: the size in force or the slots `booked`, the larger, once the set

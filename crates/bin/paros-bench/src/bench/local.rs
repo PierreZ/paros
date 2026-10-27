@@ -176,7 +176,7 @@ impl LocalCell {
             names: ("universe".into(), "local".into()),
             token: Vec::new(),
             root_key: None,
-            failures_per_partition: initialize::FAILURES_PER_PARTITION,
+            survive_machines: initialize::SURVIVE_MACHINES,
             idle: false,
         };
         let connect = |servers: &[(u64, Address)]| {
