@@ -174,14 +174,28 @@ where
         routes.rpc.clone()
     };
     let settings = &shared.settings;
-    let (journals, servers) = majority_cell(
+    // The founding members, else the frontend's own machine, a member of
+    // the one cell it fronts (#700 (a journal with a slot on an admitted
+    // machine never elects a leader)): a founding member that moved leaves
+    // its first address dark, and the registry then names where it went.
+    let timeout = settings.client.request_timeout;
+    let founders = majority_cell(
         &shared.providers,
         &rpc,
         &settings.names,
         &settings.cell,
-        settings.client.request_timeout,
-    )
-    .await?;
+        timeout,
+    );
+    let (journals, servers) = if let Some(found) = founders.await {
+        found
+    } else {
+        let host = std::slice::from_ref(&settings.host);
+        let found = majority_cell(&shared.providers, &rpc, &settings.names, host, timeout).await?;
+        moonpool_assertions::reachable!(
+            "frontend: the frontend learns its cell from its own machine"
+        );
+        found
+    };
     assert!(!servers.is_empty(), "a majority holds at least one server");
     let count = servers.len();
     // Each server through the machine interface its incarnation published
