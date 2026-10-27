@@ -49,7 +49,7 @@ use paros_client::names::{TenantResolution, tenant_in};
 use paros_client::{Client, ClientTunables, Server};
 use paros_model::address::Address;
 use paros_model::fleet::FleetDirectory;
-use paros_model::registry::Registry;
+use paros_model::registry::{Registry, Role};
 use paros_net::{Inbound, NodeClient, serve_well_known};
 use paros_wire::machine as wire;
 use paros_wire::methods::ResolveRpc;
@@ -286,7 +286,12 @@ impl Folds {
                     // registry books a `batcher` slot of the tenant on, at
                     // the address the book holds for it.
                     ack.batchers = registry
-                        .map(|registry| batchers_of(registry, tenant, &self.book))
+                        .map(|registry| booked_on(registry, tenant, Role::Batcher, &self.book))
+                        .unwrap_or_default();
+                    // Its frontends (#723 (frontend as a parosd role)),
+                    // likewise.
+                    ack.frontends = registry
+                        .map(|registry| booked_on(registry, tenant, Role::Frontend, &self.book))
                         .unwrap_or_default();
                 } else {
                     moonpool_assertions::reachable!(
@@ -387,19 +392,24 @@ fn member(registry: Option<&Registry>, id: NodeId, addr: &Address) -> wire::Memb
     }
 }
 
-/// The machines `registry` books a `batcher` slot of `tenant` on, each
-/// once, at the address `book` holds for it (a machine the book does not
-/// place is left out), with its machine interface.
-fn batchers_of(
+/// The machines `registry` books a `role` slot of `tenant` on (a batcher
+/// or a frontend), each once, at the address `book` holds for it (a
+/// machine the book does not place is left out), with its machine
+/// interface.
+fn booked_on(
     registry: &Registry,
     tenant: paros_core::journal::TenantId,
+    role: Role,
     book: &[(NodeId, Address)],
 ) -> Vec<wire::Member> {
+    assert!(
+        matches!(role, Role::Batcher | Role::Frontend),
+        "resolve names a tenant's batchers and frontends"
+    );
     let nodes: std::collections::BTreeSet<NodeId> = registry
         .bookings()
         .filter(|(_, b)| {
-            b.role == paros_model::registry::Role::Batcher
-                && b.target == paros_model::registry::BookingTarget::Tenant { tenant }
+            b.role == role && b.target == paros_model::registry::BookingTarget::Tenant { tenant }
         })
         .map(|(_, b)| b.node)
         .collect();
@@ -410,9 +420,17 @@ fn batchers_of(
             Some(member(Some(registry), *id, addr))
         })
         .collect();
-    assert!(members.len() <= nodes.len(), "a batcher is named once");
+    assert!(
+        members.len() <= nodes.len(),
+        "a booked machine is named once"
+    );
     if !members.is_empty() {
-        moonpool_assertions::reachable!("resolve: a machine names a tenant's batchers");
+        match role {
+            Role::Frontend => {
+                moonpool_assertions::reachable!("resolve: a machine names a tenant's frontends");
+            }
+            _ => moonpool_assertions::reachable!("resolve: a machine names a tenant's batchers"),
+        }
     }
     members
 }

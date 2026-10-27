@@ -84,6 +84,7 @@ impl FleetOps {
                 );
                 assert_reachable!("resolve: an entry machine resolves a tenant");
                 judge_batchers(resolved);
+                judge_frontends(resolved);
                 // The answer's references serve the data plane (#404
                 // (static vs dynamic endpoints)): the tenant's control
                 // journal, read through the machines it names.
@@ -263,5 +264,23 @@ fn judge_batchers(resolved: &paros::client::resolve::Resolved) {
     );
     if !resolved.batchers.is_empty() {
         assert_reachable!("resolve: a resolution names the tenant's batchers");
+    }
+}
+
+/// A tenant's frontends (#723 (frontend as a parosd role)) are machines of
+/// its cell, each named once.
+fn judge_frontends(resolved: &paros::client::resolve::Resolved) {
+    let named: BTreeSet<u64> = resolved.frontends.iter().map(|(id, _)| id.0).collect();
+    assert_always!(
+        named.len() == resolved.frontends.len()
+            && resolved
+                .frontends
+                .iter()
+                .all(|(id, _)| resolved.machines.iter().any(|(m, _)| m == id)),
+        "resolve: a tenant's frontends are machines of its cell, each once",
+        { "frontends" => resolved.frontends.len(), "machines" => resolved.machines.len() }
+    );
+    if !resolved.frontends.is_empty() {
+        assert_reachable!("resolve: a resolution names the tenant's frontends");
     }
 }

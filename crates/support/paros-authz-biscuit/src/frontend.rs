@@ -6,8 +6,8 @@
 //!
 //! **Which keys** (#245 (Biscuit tokens)): the universe entry's root public
 //! keys the request carries rule when there are any; else the ring this
-//! [`BiscuitAuthz`] was built with, the bootstrap pin (`paros-frontend`'s
-//! keys, `parosd --root-public-key`). A key of the entry that does not
+//! [`BiscuitAuthz`] was built with, the bootstrap pin
+//! (`parosd --root-public-key`). A key of the entry that does not
 //! parse is left out: it verifies nothing.
 
 use std::time::{Duration, SystemTime};

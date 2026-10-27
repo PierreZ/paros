@@ -40,13 +40,21 @@ pub async fn run(
                 .iter()
                 .map(|(_, addr)| addr.to_string())
                 .collect();
+            // The tenant's frontends (#723 (frontend as a parosd role)):
+            // where `--frontends` points a tenant's calls.
+            let frontends: Vec<String> = resolved
+                .frontends
+                .iter()
+                .map(|(_, addr)| addr.to_string())
+                .collect();
             out.emit(
                 || {
                     format!(
-                        "tenant={tenant} universe={} cell={} machines={}",
+                        "tenant={tenant} universe={} cell={} machines={} frontends={}",
                         named(&resolved.universe_name, resolved.universe_id),
                         named(&resolved.cell_name, resolved.cell_id),
-                        machines.join(",")
+                        machines.join(","),
+                        frontends.join(",")
                     )
                 },
                 || {
@@ -60,6 +68,11 @@ pub async fn run(
                         "universe_name": record_text(&resolved.universe_name),
                         "machines": resolved
                             .machines
+                            .iter()
+                            .map(|(id, addr)| json!({"node": id.0, "addr": addr.to_string()}))
+                            .collect::<Vec<_>>(),
+                        "frontends": resolved
+                            .frontends
                             .iter()
                             .map(|(id, addr)| json!({"node": id.0, "addr": addr.to_string()}))
                             .collect::<Vec<_>>(),

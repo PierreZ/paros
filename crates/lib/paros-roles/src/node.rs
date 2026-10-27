@@ -406,6 +406,7 @@ where
     // system journals' folds), named by the opener rather than borrowed
     // from a journal (#243).
     let node_audit = stores.node_audit();
+    let frontend_audit = stores.frontend_audit();
     // A node exits once it has nothing left to serve — on a static
     // deployment. A node that follows the system journals runs on with none
     // (a joiner waits for a tenant to name it) and exits only when a
@@ -583,7 +584,7 @@ where
             &providers,
             &rpc_handle,
             &tunables,
-            node_audit.call_observer(),
+            (node_audit.call_observer(), frontend_audit),
             (incarnation_shutdown.clone(), stopping.clone()),
         )?,
         None => Hosted::default(),

@@ -32,9 +32,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Parser;
+use paros::client::ClientTunables;
 use paros::machine::{AdminPin, Class};
 use paros::net::tls::{ClientCertificates, Files, Pem};
 use paros::net::transport::Transport;
+use paros::roles::frontend::FrontendRole;
 use paros_authz_biscuit::{BiscuitAuthz, KeyRing, RootPublicKey};
 
 /// The variables this module reads.
@@ -168,6 +170,11 @@ pub struct Settings {
     pub root_public_key_json: Option<String>,
 }
 
+/// One call a machine's frontend forwards, at most this long per attempt
+/// (#723 (frontend as a parosd role)): the bound `paros-frontend` had by
+/// default.
+const FRONTEND_TIMEOUT_MS: u64 = 5_000;
+
 impl Settings {
     /// The collector the spans go to, if any.
     pub fn traces_endpoint(&self) -> Option<&str> {
@@ -229,6 +236,38 @@ impl Settings {
         if self.root_public_key.is_empty() && self.root_public_key_json.is_none() {
             return Ok(AdminPin::open());
         }
+        Ok(AdminPin::new(
+            Arc::new(BiscuitAuthz::new(self.ring()?)),
+            epoch,
+        ))
+    }
+
+    /// The frontend it serves once it is in a cell (#723 (frontend as a
+    /// parosd role)): `BiscuitAuthz` over the root public keys it names, at
+    /// the wall clock `epoch`. The keys rule only until it read the
+    /// universe entry's (#245 (Biscuit tokens)); with none, it refuses every
+    /// frontend call until then.
+    ///
+    /// # Errors
+    ///
+    /// A key file that cannot be read or holds no key, or two keys under
+    /// one key id.
+    pub fn frontend(&self, epoch: std::time::Duration) -> Result<FrontendRole, String> {
+        // One forwarded attempt's bound: the machines' own answer bound.
+        let timeout = std::time::Duration::from_millis(FRONTEND_TIMEOUT_MS);
+        Ok(FrontendRole {
+            authz: Arc::new(BiscuitAuthz::new(self.ring()?)),
+            epoch,
+            client: ClientTunables {
+                request_timeout: timeout,
+                read_timeout: timeout,
+                ..ClientTunables::default()
+            },
+        })
+    }
+
+    /// The root public keys it names, possibly none.
+    fn ring(&self) -> Result<KeyRing, String> {
         let mut keys = Vec::with_capacity(self.root_public_key.len() + 1);
         if let Some(text) = &self.root_public_key_json {
             keys.push(
@@ -245,8 +284,7 @@ impl Settings {
                 })?,
             );
         }
-        let ring = KeyRing::new(keys).map_err(|error| format!("PAROS_ROOT_PUBLIC_KEY: {error}"))?;
-        Ok(AdminPin::new(Arc::new(BiscuitAuthz::new(ring)), epoch))
+        KeyRing::new(keys).map_err(|error| format!("PAROS_ROOT_PUBLIC_KEY: {error}"))
     }
 }
 

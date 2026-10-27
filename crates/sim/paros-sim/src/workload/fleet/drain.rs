@@ -312,13 +312,15 @@ fn movable(registry: &Registry, members: &[u64], node: NodeId) -> bool {
     })
 }
 
-/// A registered machine that holds a tenant's batcher slot (#145
-/// (batchers)), if any.
+/// A registered machine that holds a tenant's batcher or frontend slot
+/// (#145 (batchers), #723 (frontend as a parosd role)), if any: a drain
+/// moves both, which the tenant coordinator places to the tenant's counts.
 fn batcher_host(registry: &Registry) -> Option<NodeId> {
     registry
         .bookings()
         .filter(|(_, b)| {
-            b.role == Role::Batcher && matches!(b.target, BookingTarget::Tenant { .. })
+            matches!(b.role, Role::Batcher | Role::Frontend)
+                && matches!(b.target, BookingTarget::Tenant { .. })
         })
         .map(|(_, b)| b.node)
         .find(|node| {

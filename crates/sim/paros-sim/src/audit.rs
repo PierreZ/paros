@@ -123,6 +123,10 @@ pub(crate) struct NodeAudit<T> {
     /// port: a commit of a `Batched` journal registers there for the cut
     /// budget (#599 (durability mode per journal), `crate::world::cut`).
     cut: Option<(moonpool_sim::StateHandle, String)>,
+    /// The run's state, on a machine's frontend port (#723 (frontend as a
+    /// parosd role)): where its resolutions are judged
+    /// (`crate::frontend::judge_resolved`).
+    frontend: Option<moonpool_sim::StateHandle>,
 }
 
 impl<T: TimeProvider> NodeAudit<T> {
@@ -170,6 +174,7 @@ impl<T: TimeProvider> NodeAudit<T> {
             machines: None,
             wipes: None,
             calls: None,
+            frontend: None,
             cut: None,
         }
     }
@@ -186,6 +191,13 @@ impl<T: TimeProvider> NodeAudit<T> {
     /// appends they judge to `board` (#210).
     pub(crate) fn with_tenants(mut self, board: Arc<Mutex<tenants::TenantBoard>>) -> Self {
         self.tenants = Some(board);
+        self
+    }
+
+    /// This port judges a machine's frontend's resolutions in `state` (#723
+    /// (frontend as a parosd role)).
+    pub(crate) fn judging_frontend(mut self, state: moonpool_sim::StateHandle) -> Self {
+        self.frontend = Some(state);
         self
     }
 
@@ -444,6 +456,29 @@ impl<T: TimeProvider> NodeAudit<T> {
 impl<T: TimeProvider> Audit for NodeAudit<T> {
     fn call_observer(&self) -> Option<Arc<dyn paros::client::CallObserver>> {
         self.calls.clone()
+    }
+
+    fn frontend_resolved(
+        &self,
+        name: &paros::model::name::JournalName,
+        journal: JournalIdentifier,
+        control: JournalIdentifier,
+        at: u64,
+    ) {
+        if let Some(state) = &self.frontend {
+            crate::frontend::judge_resolved(state, name, (journal, control), at);
+        }
+    }
+
+    fn frontend_unknown(
+        &self,
+        name: &paros::model::name::JournalName,
+        control: JournalIdentifier,
+        at: u64,
+    ) {
+        if let Some(state) = &self.frontend {
+            crate::frontend::judge_unknown(state, name, control, at);
+        }
     }
 
     fn promised(&self, node: NodeId, ballot: Ballot) {

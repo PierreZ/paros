@@ -24,6 +24,7 @@ use paros_model::machine::{
 };
 use paros_model::tags::Tag;
 use paros_net::runtime::ParosProviders;
+use paros_observe::audit::Audit;
 use paros_storage::RunError;
 use paros_tunables::DriverTunables;
 use paros_wire::machine as wire;
@@ -68,6 +69,9 @@ pub struct MachineFacts {
     /// Its metrics and phase (#366 (metrics)): the settings' handle, shared
     /// by every phase and the node loop.
     pub metrics: paros_observe::metrics::Metrics,
+    /// The frontend it serves on its own edge once it is in a cell (#723
+    /// (frontend as a parosd role)), or `None`: the settings' role.
+    pub frontend: Option<crate::frontend::FrontendRole>,
 }
 
 /// The incarnation of the RPC runtime `rpc`, or `0` once it stopped.
@@ -259,17 +263,19 @@ pub trait CellHost: Clone {
 
     /// Start what the machine serves beside the journals on `rpc`, until
     /// `shutdown`; `stopping` is the clean stop the coordinator hands its
-    /// term on at.
+    /// term on at. `audits` holds the observer of the machine's own client's calls and
+    /// the audit port its frontend reports to (#723
+    /// (frontend as a parosd role)).
     ///
     /// # Errors
     ///
     /// When a service cannot be registered on `rpc`.
-    fn serve<P: ParosProviders>(
+    fn serve<P: ParosProviders, A: Audit + Clone + Send + Sync + 'static>(
         self,
         providers: &P,
         rpc: &RpcHandle<P>,
         tunables: &DriverTunables,
-        observer: Option<Arc<dyn CallObserver>>,
+        audits: (Option<Arc<dyn CallObserver>>, A),
         shutdown: (CancellationToken, CancellationToken),
     ) -> Result<Hosted, RunError>;
 }
@@ -295,12 +301,12 @@ impl CellHost for NoHost {
         match *self {}
     }
 
-    fn serve<P: ParosProviders>(
+    fn serve<P: ParosProviders, A: Audit + Clone + Send + Sync + 'static>(
         self,
         _: &P,
         _: &RpcHandle<P>,
         _: &DriverTunables,
-        _: Option<Arc<dyn CallObserver>>,
+        _: (Option<Arc<dyn CallObserver>>, A),
         _: (CancellationToken, CancellationToken),
     ) -> Result<Hosted, RunError> {
         match self {}

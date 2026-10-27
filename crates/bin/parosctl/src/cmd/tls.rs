@@ -415,9 +415,23 @@ fn init_text(written: &[Written]) -> String {
     let ca = &written[0].cert;
     text.push_str("\n\nSet these variables. Keep every .key file secret.\n");
     for w in &written[1..] {
+        // A frontend runs inside `parosd` (#723 (frontend as a parosd
+        // role)): a `frontend` leaf is for an embedder's own
+        // `run_frontend`, which reads no variable.
+        if w.role == Some(Role::Frontend) {
+            let _ = writeln!(
+                text,
+                "  embedded frontend {}: cert {} key {} ca {}",
+                w.name,
+                w.cert.display(),
+                w.key.display(),
+                ca.display()
+            );
+            continue;
+        }
         let (who, prefix) = match w.role {
             Some(Role::Machine) => ("parosd", "PAROS_TLS"),
-            Some(Role::Frontend) => ("paros-frontend", "PAROS_FRONTEND_TLS"),
+            Some(Role::Frontend) => unreachable!("a frontend leaf is written above"),
             Some(Role::Admin) => ("parosctl", "PAROSCTL_TLS"),
             Some(Role::Client) | None => ("client", "PAROSCTL_TLS"),
         };

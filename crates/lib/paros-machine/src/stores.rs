@@ -51,6 +51,9 @@ pub enum AuditScope {
     Node(JournalIdentifier),
     /// One journal's facts.
     Journal(JournalIdentifier),
+    /// The frontend the machine serves (#723 (frontend as a parosd role)):
+    /// its resolutions and the calls it forwards.
+    Frontend,
 }
 
 /// A formed machine's stores.
@@ -423,5 +426,9 @@ where
 
     fn node_audit(&self) -> A {
         (self.audits)(AuditScope::Node(self.home))
+    }
+
+    fn frontend_audit(&self) -> A {
+        (self.audits)(AuditScope::Frontend)
     }
 }

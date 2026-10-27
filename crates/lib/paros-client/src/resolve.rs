@@ -54,6 +54,10 @@ pub struct Resolved {
     /// The tenant's batchers (#145, #604): the machines the registry books
     /// a `batcher` slot of the tenant on. Empty when it has none.
     pub batchers: Vec<(NodeId, Address)>,
+    /// The tenant's frontends (#723 (frontend as a parosd role)): the
+    /// machines the registry books a `frontend` slot of the tenant on. Empty
+    /// when it has none.
+    pub frontends: Vec<(NodeId, Address)>,
 }
 
 /// What resolving a tenant through the entry endpoint came to.
@@ -214,15 +218,16 @@ pub fn from_wire(ack: &wire::ResolveAck) -> Resolution {
             (m.node_id != 0).then_some((NodeId(m.node_id), addr))
         })
         .collect();
-    let batchers: Option<Vec<(NodeId, Address)>> = ack
-        .batchers
-        .iter()
-        .map(|m| {
-            let addr = m.addr.parse::<Address>().ok()?;
-            (m.node_id != 0).then_some((NodeId(m.node_id), addr))
-        })
-        .collect();
-    let Some(batchers) = batchers else {
+    let members = |list: &[wire::Member]| -> Option<Vec<(NodeId, Address)>> {
+        list.iter()
+            .map(|m| {
+                let addr = m.addr.parse::<Address>().ok()?;
+                (m.node_id != 0).then_some((NodeId(m.node_id), addr))
+            })
+            .collect()
+    };
+    let (Some(batchers), Some(frontends)) = (members(&ack.batchers), members(&ack.frontends))
+    else {
         return Resolution::Malformed;
     };
     let well_formed = ack.cell_id != 0
@@ -247,6 +252,7 @@ pub fn from_wire(ack: &wire::ResolveAck) -> Resolution {
             universe_name: ack.universe_name.clone(),
             cell_name: ack.cell_name.clone(),
             batchers,
+            frontends,
         }),
         _ => Resolution::Malformed,
     }

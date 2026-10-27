@@ -11,7 +11,7 @@ Every `parosd` is uniform. **Identity** has three parts (decided on 2026-10-02, 
   (`PAROS_ADVERTISE`, below).
 - `incarnation`: moonpool-rpc's per-start `Incarnation`, carried in the `InterfaceRef`.
 
-**One thread** (decided on 2026-10-22): every `parosd`, `paros-frontend` and `parosctl` runs on
+**One thread** (decided on 2026-10-22): every `parosd` and `parosctl` runs on
 one compio runtime thread (io_uring on Linux, polling where a seccomp profile refuses it).
 The library is written against moonpool's local provider traits (`paros::ParosProviders`), so
 its futures need not be `Send`. The simulation runs the same code on `SimProviders`. The only
@@ -225,9 +225,9 @@ profile, floor 0): when it runs out, the loop returns anyway and logs `stop_time
 step that did not complete. A second signal exits at once with code 130, and so does a stop that
 is still running 5 s past its bound. Each of these is a crash, which recovery already handles, so
 no bound is a safety rule. Each step logs with the machine's name (`stop_started`,
-`stop_handoff_sent`, `stop_handoff_taken`, `stop_completed`). `paros-frontend` stops the same way
-with no leadership and no store: it refuses new calls (`stopping`), waits for the ones it took
-and returns. In the simulation, a stopping frontend sometimes waits out its whole bound,
+`stop_handoff_sent`, `stop_handoff_taken`, `stop_completed`). A machine's frontend (#723
+(frontend as a parosd role)) stops with it and holds no leadership and no store: it refuses new
+calls (`stopping`), waits for the ones it took and returns. In the simulation, a stopping frontend sometimes waits out its whole bound,
 as a frontend behind a slow load balancer does. It refuses the calls that still arrive.
 
 The simulation draws a graceful reboot for about a third of the machine and frontend groups'

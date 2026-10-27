@@ -54,10 +54,6 @@ pub(crate) const JOINER_GROUP: &str = "paros-joiner";
 /// into the cell by the workload's `init`. A machine mints its own
 /// `node_id`, so the map ranks it and names no identity.
 pub(crate) const MACHINE_GROUP: &str = "paros-machine";
-/// The process group of the frontends (`FrontendProcess::name`, #192 (the
-/// frontend)): the shipped `run_frontend` each, stateless, in front of the
-/// machines.
-pub(crate) const FRONTEND_GROUP: &str = "paros-frontend";
 
 /// Where the joiners' `NodeId`s start: above any genesis pool the campaign
 /// draws and below the replicas', so a joiner's identity collides with
@@ -106,8 +102,6 @@ pub(crate) enum Role {
     /// A machine (#246), ranked among the machines: its identity is the one
     /// it mints at format.
     Machine(usize),
-    /// A frontend (#192 (the frontend)), ranked among the frontends.
-    Frontend(usize),
 }
 
 /// The seed's deployment: sorted acceptor IPs (`NodeId(i)` ↔ `acceptors[i]`),
@@ -122,7 +116,6 @@ pub(crate) struct Deployment {
     replicas: Vec<String>,
     joiners: Vec<String>,
     machines: Vec<String>,
-    frontends: Vec<String>,
 }
 
 impl Deployment {
@@ -144,7 +137,6 @@ impl Deployment {
             replicas,
             joiners: Vec::new(),
             machines: Vec::new(),
-            frontends: Vec::new(),
         }
     }
 
@@ -159,12 +151,6 @@ impl Deployment {
     fn with_machines(mut self, mut machines: Vec<String>) -> Self {
         sort_ips(&mut machines);
         self.machines = machines;
-        self
-    }
-
-    fn with_frontends(mut self, mut frontends: Vec<String>) -> Self {
-        sort_ips(&mut frontends);
-        self.frontends = frontends;
         self
     }
 
@@ -185,23 +171,15 @@ impl Deployment {
         if let Some(rank) = self.joiners.iter().position(|j| j == ip) {
             return Some(Role::Joiner(joiner_node_id(rank)));
         }
-        if let Some(rank) = self.machines.iter().position(|m| m == ip) {
-            return Some(Role::Machine(rank));
-        }
-        self.frontends
+        self.machines
             .iter()
-            .position(|f| f == ip)
-            .map(Role::Frontend)
+            .position(|m| m == ip)
+            .map(Role::Machine)
     }
 
     /// The machines (#246), in rank order.
     pub(crate) fn machines(&self) -> &[String] {
         &self.machines
-    }
-
-    /// The frontends (#192 (the frontend)), in rank order.
-    pub(crate) fn frontends(&self) -> &[String] {
-        &self.frontends
     }
 
     /// The joiners (#189), in rank order: each joins as
@@ -257,11 +235,9 @@ pub(crate) fn deployment(topology: &WorkloadTopology) -> Deployment {
     let replicas = topology.ips_in_group(REPLICA_GROUP);
     let joiners = topology.ips_in_group(JOINER_GROUP);
     let machines = topology.ips_in_group(MACHINE_GROUP);
-    let frontends = topology.ips_in_group(FRONTEND_GROUP);
     let map = Deployment::from_groups(acceptors, matchmakers, proxies, replicas)
         .with_joiners(joiners)
-        .with_machines(machines)
-        .with_frontends(frontends);
+        .with_machines(machines);
     assert_always!(
         !map.acceptors.is_empty(),
         "a deployment names at least one acceptor",

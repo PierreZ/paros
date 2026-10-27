@@ -107,9 +107,9 @@ its ids, `id:<tenant>/<journal>` in hex, each half a unique prefix of an id that
 list, or all 16 digits. Since #210 (tenant control journal), the machines serve every tenant's
 control journal, so a name resolves both hops on `parosd`, and `init` creates no user journal.
 
-**Where the frontend stands** (#192 (the frontend), landed on 2026-10-11 in PR #412). `paros::roles::frontend`
-runs the frontend, and the `paros-frontend` binary ships it with `BiscuitAuthz`. The contract
-is the `Frontend` service in `proto/paros.proto`: each of the four calls with an `Entry` (the
+**Where the frontend stands** (#192 (the frontend), landed on 2026-10-11 in PR #412).
+`paros::roles::frontend` runs the frontend. The contract is the `Frontend` service in
+`proto/paros.proto`: each of the four calls with an `Entry` (the
 token, the tenant name and the journal name). The frontend does these steps for each call:
 
 1. It authorizes the call in names, before any I/O. A denied call reaches no machine. The
@@ -124,14 +124,24 @@ token, the tenant name and the journal name). The frontend does these steps for 
    to the next server after any failure.
 
 An entry with an empty tenant name names an internal journal by the call's ids, and only an
-`admin` token reaches it. Until placement books frontends (#476), a frontend fronts the cell's
-founding members, which it learns from a majority of their addresses. `Resolve` (#216 (finish bootstrap))
-names no frontend until frontends are booked slots (#476), so a client gets its
-frontends' addresses from its configuration (`parosctl --frontends`, `PAROS_TOKEN`). The simulation runs zero to two frontends per seed, the
-same code, with root keys drawn per seed: `init` writes the signing key, every frontend pins
+`admin` token reaches it.
+
+**The frontend is a role of `parosd`** (decided on 2026-10-27, #723 (frontend as a parosd
+role)). Every `parosd` serves the `Frontend` service on its own RPC edge, with the
+`BiscuitAuthz` it is given (the keys of `PAROS_ROOT_PUBLIC_KEY`), and forwards each call to the
+cell it belongs to. There is no separate frontend binary: `paros-frontend` and its
+`PAROS_FRONTEND_*` variables are gone. A slot is placement only, as for the batcher: the tenant
+coordinator books a tenant's `frontends=` count (#604 (role counts)) in `Role::Frontend` slots on
+the cell's `stateless` machines, one slot per machine, and releases a slot on a machine that
+leaves. `Resolve` names the machines that hold the tenant's frontend slots, so a client learns
+its frontends from the cell; `parosctl --frontends` and `PAROS_TOKEN` still name them by hand.
+`run_frontend` stays in `paros::roles::frontend` for an embedder.
+
+The simulation's machines serve the frontend, the same code as `parosd`, with root keys drawn
+per seed: `init` writes the signing key, every machine's frontend pins
 only that key, and on a BUGGIFY location an operator rotates a second key in through the
-universe entry (#245 (Biscuit tokens)). The workload calls the
-tenants' journals through them by name, with the tenant's own token, with tokens derived from it
+universe entry (#245 (Biscuit tokens)). The workload draws a `frontends=` count per tenant and
+calls the tenants' journals through its machines by name, with the tenant's own token, with tokens derived from it
 (read-only, its one journal), and with tokens that must
 be denied: another tenant's token, an expired token, a key that no list holds, bytes that are not
 a token, a tenant token on an internal journal, a read-only token on a write and a token derived
@@ -189,7 +199,7 @@ pairs and mints tokens for any role.
   the old one once its tokens expired.
 - **Which keys a check uses** (decided on 2026-10-15, #245). The keys in the universe entry
   rule once a frontend read any. Until then, or while the entry holds none, a frontend checks
-  against the keys it is configured with (`PAROS_FRONTEND_ROOT_PUBLIC_KEY`, now optional).
+  against the keys it is configured with (`PAROS_ROOT_PUBLIC_KEY`, optional).
   A frontend reads the keys with the universe directory and keeps the keys it read last while
   the directory cannot be read. A token refused as `invalid_token` makes it read the directory
   once more and check again, so a key added is trusted at its first use. A key removed stops
@@ -219,8 +229,8 @@ simulation can replay, and features that cannot are left out:
 - Biscuit stays out of `paros-core` and `paros` (its wasm32 clock needs JavaScript's
   `performance`): `paros` defines the `Authz` trait and carries tokens as opaque bytes; the
   Biscuit implementation is its own crate, `paros-authz-biscuit` (#400), used by `parosctl`,
-  the `paros-frontend` binary and `paros-sim` (#192 (the frontend)), and by `parosd` for its
-  bootstrap pin (#245).
+  `paros-sim` (#192 (the frontend)), and `parosd` for its frontend role (#723 (frontend as a
+  parosd role)) and its bootstrap pin (#245).
 
 **Routing goes through the universe tenant from M9.** The tenant name → `TenantId` → cell step is
 the resolver's from M12; until then the frontend resolves it from its fold of the universe directory,

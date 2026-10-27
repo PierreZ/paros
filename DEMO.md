@@ -230,8 +230,23 @@ parosctl universe key add /tmp/paros-demo/demo-2.public
 parosctl universe key remove demo-1
 ```
 
-`init` without a token is refused `forbidden` or `invalid_token` (exit 3). A frontend reads the
-keys in the universe, so `PAROS_FRONTEND_ROOT_PUBLIC_KEY` is optional.
+`init` without a token is refused `forbidden` or `invalid_token` (exit 3).
+
+## Through a frontend
+
+Every machine serves the frontend once it is in a cell (#723 (frontend as a parosd role)). A
+frontend checks each call's token against the keys in the universe, and resolves the journal by
+its name. The tenant coordinator books a tenant's frontends on the `stateless` machines, and
+`parosctl resolve` names them:
+
+```sh
+parosctl configure --tenant acme --frontends 1
+parosctl resolve acme      # frontends=…
+parosctl token mint --key /tmp/paros-demo/demo-1.private --role tenant --tenant acme --ttl 1h \
+  --subject acme --out /tmp/paros-demo/acme.token
+parosctl --frontends "$PAROSCTL_SERVERS" --token-file /tmp/paros-demo/acme.token \
+  write paros://acme/orders hello --leader 7
+```
 
 ## If something goes wrong
 

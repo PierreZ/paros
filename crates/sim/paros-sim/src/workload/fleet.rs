@@ -281,8 +281,11 @@ impl FleetOps {
         });
         Ok(Self {
             connector,
-            machines,
-            frontends: crate::frontend::frontend_addrs(deployment),
+            machines: machines.clone(),
+            // Every machine serves the frontend once it is in a cell (#723
+            // (frontend as a parosd role)): a client is configured with
+            // them all, and moves on past an idle one.
+            frontends: machines,
             layout,
             cell: None,
             patience,

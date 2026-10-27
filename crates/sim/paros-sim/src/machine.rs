@@ -205,6 +205,7 @@ async fn run_machine_role(
         name: format!("machine-{rank}"),
         pin: crate::frontend::machine_pin(ctx.state()),
         metrics: machine_metrics(ctx),
+        frontend: Some(crate::frontend::machine_frontend(ctx)?),
     };
     // Ordered: a crash never leaves a batch ambiguous, which a one-member
     // cell could never repair. A journal a tenant created stores under the

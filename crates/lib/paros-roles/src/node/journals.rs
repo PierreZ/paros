@@ -109,6 +109,13 @@ pub trait JournalStores {
     /// §3.8, #243).
     fn node_audit(&self) -> Self::Audit;
 
+    /// The audit port the frontend a machine serves reports to (#723
+    /// (frontend as a parosd role)): its resolutions and the calls it
+    /// forwards. The node's own port by default.
+    fn frontend_audit(&self) -> Self::Audit {
+        self.node_audit()
+    }
+
     /// Provision a store for `journal`, a journal a tenant's control journal
     /// created naming this node (#189, #210), or a spare's, under `config`,
     /// its commits under `durability` (the mode its create recorded, #599

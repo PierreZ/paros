@@ -14,7 +14,7 @@ categories.workspace = true
 # crate is just the DST harness on top: the `Process` adapter, workloads, oracles.
 paros = { workspace = true, features = ["tls"] }
 # The Biscuit authorization the frontends run (#192 (the frontend), #245):
-# the same `BiscuitAuthz` `paros-frontend` ships.
+# the same `BiscuitAuthz` `parosd` ships.
 paros-authz-biscuit = { workspace = true }
 
 # moonpool is pinned to a commit on `main` (not the crates.io release): it evolves

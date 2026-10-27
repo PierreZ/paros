@@ -28,7 +28,7 @@ image and the Compose toy are `Dockerfile` and `docker-compose.yml` at the repos
 - `src/tunables.rs` → `from_env`, `variables` → `DriverTunables::production()` plus a
   `PAROS_<FIELD>[_MS]` override per field, refused below its floor (#209); the cell election's
   `PAROS_ELECTION_LEASE_MS`, `PAROS_ELECTION_RENEW_MS`, `PAROS_ELECTION_COMPACT_AFTER` (#240).
-- `src/bin/paros-frontend.rs` → `paros-frontend` (#192 (the frontend)): `paros::roles::frontend::run_frontend` on one compio thread with `paros_authz_biscuit::BiscuitAuthz`; `PAROS_FRONTEND_LISTEN`, `PAROS_FRONTEND_CELL` (the founding members), `PAROS_FRONTEND_ROOT_PUBLIC_KEY` (`.public` files: the pin until it read the universe entry's keys; optional since #245 (Biscuit tokens)), `PAROS_FRONTEND_TIMEOUT_MS`; `PAROS_FRONTEND_TLS_*_PEM` and `PAROS_FRONTEND_ROOT_PUBLIC_KEY_JSON` take the text itself instead of a file; its wall clock is `SystemTime::now()` at start plus the provider's time.
+- The frontend role (#723 (frontend as a parosd role)): `Settings::frontend` builds the `FrontendRole` every machine serves on its own edge, `paros_authz_biscuit::BiscuitAuthz` over the keys of `PAROS_ROOT_PUBLIC_KEY` and `PAROS_ROOT_PUBLIC_KEY_JSON` (the pin until it read the universe entry's keys), 5 s per forwarded attempt; its wall clock is `SystemTime::now()` at start plus the provider's time, shared with the bootstrap pin.
 - `tests/real_fs.rs` → both storage contract suites on a real disk; a store dropped mid-batch
   reopens with every acked write; the machine record on a real disk.
 

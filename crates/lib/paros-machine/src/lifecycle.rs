@@ -84,6 +84,12 @@ pub struct MachineSettings {
     /// the machine serves the same either way. `parosd` serves it on
     /// `/metrics`, `/healthz` and `/readyz`.
     pub metrics: paros_observe::metrics::Metrics,
+    /// The frontend it serves once it is in a cell (#723 (frontend as a
+    /// parosd role)): the `Authz` it checks every call through
+    /// (`BiscuitAuthz` in `parosd`), or `None` to serve no frontend. The
+    /// tenant coordinator books a tenant's frontends on the `stateless`
+    /// machines, and `Resolve` names them.
+    pub frontend: Option<paros_roles::frontend::FrontendRole>,
 }
 
 /// A machine's two addresses (#257, `docs/architecture/03-2-machines.md` §3.2): what it
@@ -319,12 +325,13 @@ where
     let MachineAddresses { listen, advertise } = addresses;
     let record = identity(&providers, &disk, &audit, &advertise, settings).await?;
     assert_eq!(record.class, settings.class, "the class is fixed at format");
-    let facts = facts_of(
+    let mut facts = facts_of(
         &record,
         (advertise.clone(), listen),
         names,
         monitor(&providers, disk.root(), settings, &tunables, &shutdown),
     );
+    facts.frontend.clone_from(&settings.frontend);
     tracing::info!(
         machine = %facts.name,
         addr = %advertise,
@@ -576,6 +583,7 @@ fn facts_of(
         machine_interface: Vec::new(),
         load,
         metrics,
+        frontend: None,
     }
 }
 

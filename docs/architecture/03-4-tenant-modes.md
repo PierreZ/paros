@@ -92,14 +92,17 @@ tenant's default.
   default may carry `frontends=`, `proxy_leaders=` and `batchers=` (`TenantRoles`, each at most
   64; refused on a journal target). The tenant control journal records them, and its checkpoint
   keeps them. `parosctl configure --tenant T --batchers 3` sends them; a count that the command
-  does not name keeps the tenant's. The tenant coordinator applies `batchers=`: one step per
-  watch round, after the footprint step, in turn over the hosted tenants (`machine/roles.rs`).
-  It first releases a batcher slot on a machine that leaves. Then it books or releases slots
-  with `paros::model::placement` (`Role::Batcher`, `BookingTarget::Tenant`) until the tenant holds
-  `min(batchers, stateless machines that can take one)`. A cell with no `stateless` machine
-  places none. A cell that grows places the rest later.
-- **Still to do.** The counts of frontends and proxy leaders, and the `replicas=` mode field,
-  are recorded but not placed. `proxy_count` and `replica_count` sit in the core's `Config`
+  does not name keeps the tenant's. The tenant coordinator applies `batchers=` and, since #723
+  (frontend as a parosd role, decided on 2026-10-27), `frontends=`: one step per watch round,
+  after the footprint step, in turn over the hosted tenants and for each over the two roles
+  (`paros-coordinator`'s `tenant/roles.rs`). It first releases a slot of the role on a machine
+  that leaves. Then it books or releases slots with `paros::model::placement` (`Role::Batcher` or
+  `Role::Frontend`, `BookingTarget::Tenant`) until the tenant holds
+  `min(count, stateless machines that can take one)`. A cell with no `stateless` machine
+  places none. A cell that grows places the rest later. A slot is placement only: every machine
+  serves both endpoints, and `Resolve` names the booked machines.
+- **Still to do.** The count of proxy leaders and the `replicas=` mode field are recorded but
+  not placed. `proxy_count` and `replica_count` sit in the core's `Config`
   under the format marker, so placing them needs a change of that design.
 
 **`failures-per-partition=0` survives no zone** (decided on 2026-10-07, #215): a majority over one

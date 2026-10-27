@@ -61,6 +61,21 @@ pub(crate) fn machine_audits(
                     // under a budget (#599 (durability mode per journal)).
                     .with_cut_budget(state.clone(), my_ip.clone())
             }
+            // The frontend the machine serves (#723 (frontend as a parosd
+            // role)): each resolution judged against the tenant board, and
+            // each call it forwards joins its journal's history as client
+            // `FRONTEND_CLIENT_BASE + rank`, relayed and judged nowhere else
+            // (the actor that sent it is judged at its send).
+            AuditScope::Frontend => NodeAudit::new(time.clone(), crate::audit::audit_world(&state))
+                .judging_frontend(state.clone())
+                .with_calls(Arc::new(
+                    crate::workload::system::Announce::of_machine(
+                        &state,
+                        time.clone(),
+                        crate::frontend::FRONTEND_CLIENT_BASE + rank as u64,
+                    )
+                    .relaying(),
+                )),
         }
     }
 }

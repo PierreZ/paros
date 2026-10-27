@@ -35,7 +35,9 @@ impl FleetOps {
         }
         // Mostly a machine that serves the cell and has room, with a role of
         // its class, as a tenant coordinator asks; else any machine with a
-        // frontend slot, which may be refused.
+        // resolver slot, which may be refused. Never a frontend or a batcher:
+        // the tenant coordinator places those to the tenant's counts (#723
+        // (frontend as a parosd role)).
         let room: Vec<(u64, Role)> = if ctx.random().random_bool(0.8)
             && let Some(registry) = super::sets::registry(cell, 0).await
         {
@@ -44,7 +46,7 @@ impl FleetOps {
                 .filter(|(node, _)| registry.serves(*node) && registry.available(*node) > 0)
                 .map(|(node, n)| {
                     let role = match n.class {
-                        Class::Stateless => Role::Frontend,
+                        Class::Stateless => Role::Resolver,
                         Class::Storage => Role::Replica,
                     };
                     (node.0, role)
@@ -56,7 +58,7 @@ impl FleetOps {
         let (node, role) = if room.is_empty() {
             (
                 machines[ctx.random().random_range(0..machines.len())],
-                Role::Frontend,
+                Role::Resolver,
             )
         } else {
             room[ctx.random().random_range(0..room.len())]

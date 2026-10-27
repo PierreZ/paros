@@ -10,7 +10,7 @@
 //! **Which keys** (#245 (Biscuit tokens)): the universe entry's root public
 //! keys rule once the caller read any ([`Request::keys`]); before that, an
 //! implementation checks against the keys it was configured with (the
-//! bootstrap pin: `paros-frontend`'s, `parosd --root-public-key`).
+//! bootstrap pin: `parosd --root-public-key`).
 
 use std::time::Duration;
 

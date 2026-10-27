@@ -137,6 +137,7 @@ async fn machine(
         name: format!("local-{index}"),
         pin: AdminPin::open(),
         metrics: Metrics::on(),
+        frontend: None,
     };
     let addresses = MachineAddresses::new(listen, None)?;
     let disk = ProviderDisk::new(

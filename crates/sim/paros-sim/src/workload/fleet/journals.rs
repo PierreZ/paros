@@ -178,16 +178,24 @@ impl FleetOps {
                 };
                 let name = (!(payload >> 12).is_multiple_of(4)).then_some(name);
                 // The tenant default's configure names the tenant's role
-                // counts on a coin (#604): up to three batchers, and the
-                // recorded counts of frontends and proxy leaders. Always on
-                // a batchers seed, so a lower count releases a slot.
+                // counts on a coin (#604): up to three batchers and three
+                // frontends (#723 (frontend as a parosd role)), and the
+                // recorded count of proxy leaders. Always on a batchers
+                // seed, so a lower count releases a slot; there at least one
+                // frontend, so the batcher's machine the scenario drains
+                // holds one too.
                 let roles = (name.is_none()
                     && (crate::shape::batchers(ctx.state()) || buggify_with_prob!(0.6)))
                 .then(|| {
                     assert_reachable!("journals: a configure names the tenant's role counts");
                     let batchers = u32::try_from((payload >> 40) % 4).unwrap_or(0);
-                    let others = u32::try_from((payload >> 44) % 3).unwrap_or(0);
-                    paros::model::tenant::TenantRoles::new(others, others, batchers)
+                    let proxies = u32::try_from((payload >> 44) % 3).unwrap_or(0);
+                    let frontends = if crate::shape::batchers(ctx.state()) {
+                        1 + u32::try_from((payload >> 48) % 3).unwrap_or(0)
+                    } else {
+                        u32::try_from((payload >> 48) % 4).unwrap_or(0)
+                    };
+                    paros::model::tenant::TenantRoles::new(frontends, proxies, batchers)
                         .expect("the counts are within the cap")
                 });
                 JournalOp::Configure {

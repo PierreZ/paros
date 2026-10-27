@@ -376,9 +376,9 @@ message ResolveAck {
   // The cell that hosts the tenant, on "" and "other_cell".
   uint64 tenant_cell = 6;
   // The cell's machines, at the addresses its registry holds, with the
-  // machine interface it holds for each (#404), on "". A client sends its
-  // calls to them through those references until the frontend exists
-  // (#192); then this answer carries the tenant's frontends too.
+  // machine interface it holds for each (#404), on "". A client of the
+  // cell sends its calls to them through those references; a tenant's
+  // client sends them to `frontends`.
   repeated Member machines = 7;
   // The universe directory's position the answer was read at.
   uint64 at = 8;
@@ -396,6 +396,11 @@ message ResolveAck {
   // its machine interface. A client sends its multi-writer writes there
   // (`BatchWrite`). Empty when the tenant has none.
   repeated Member batchers = 13;
+  // On "": the tenant's frontends (#723 (frontend as a parosd role)), the
+  // machines its registry books a `frontend` slot of the tenant on, each
+  // at its address and with its machine interface. A client sends its
+  // calls there, with its token. Empty when the tenant has none.
+  repeated Member frontends = 14;
 }
 
 message Load {}

@@ -55,7 +55,9 @@ const SCHEME: &str = "spiffe://";
 pub enum Role {
     /// A `parosd` machine: it serves the cell and dials its peers.
     Machine,
-    /// A `paros-frontend`: it serves clients and dials the machines.
+    /// A frontend an embedder runs on its own edge (`run_frontend`): it
+    /// serves clients and dials the machines. A `parosd` serves its frontend
+    /// as a `Machine` (#723 (frontend as a parosd role)).
     Frontend,
     /// An operator's `parosctl`: it dials only.
     Admin,
@@ -369,8 +371,7 @@ impl<'a> Pem<'a> {
 }
 
 /// A process's three PEMs, each with the name of the setting that gave
-/// it, so an error names what to fix: what `parosd`, `paros-frontend` and
-/// `parosctl` read, from files or from their `*_PEM` variables.
+/// it, so an error names what to fix: what `parosd` and `parosctl` read, from files or from their `*_PEM` variables.
 ///
 /// A serving process takes all three or none: with none, its sessions
 /// are plaintext; with only some, the missing ones are an error, so a

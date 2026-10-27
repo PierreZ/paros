@@ -64,6 +64,11 @@ A multi-writer journal can put many writers' writes in one slot through batchers
 `stateless` machines, `parosctl resolve acme` names them, and each writer gets its own positions
 back.
 
+Every `parosd` is also a frontend (#723 (frontend as a parosd role)): it checks a Biscuit token,
+resolves `paros://<tenant>/<journal>` and forwards the call. `parosctl configure --tenant acme
+--frontends 2` books two on the cell's `stateless` machines, and `parosctl resolve acme` names
+them.
+
 A universe can hold more than one cell: `parosctl init --idle` forms a cell with no universe,
 `parosctl universe add-cell` joins it, and `parosctl tenant create --cell` puts a tenant in it.
 Any machine resolves a tenant to its cell. `parosctl universe remove-cell` removes an empty

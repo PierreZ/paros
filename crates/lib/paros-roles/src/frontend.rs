@@ -56,6 +56,7 @@ use std::time::Duration;
 use moonpool_core::{
     Detach, LocalTaskProvider, LocalTimeProvider, RandomProvider, SimulationResult,
 };
+use moonpool_rpc::RpcHandle;
 use paros_core::journal::JournalIdentifier;
 use paros_net::runtime::ParosProviders;
 use tokio_util::sync::CancellationToken;
@@ -91,15 +92,77 @@ pub struct FrontendSettings {
     /// The wall clock at its provider's zero, since the Unix epoch: a
     /// token's expiry is checked against `epoch + time.now()`.
     pub epoch: Duration,
-    /// Its RPC edge's shape (queue, connect budget, keep-alive).
+    /// Its RPC edge's shape (queue, connect budget, keep-alive) and its
+    /// clean stop's bound.
     pub tunables: DriverTunables,
-    /// How its sessions travel, served and dialed alike: the cell's
-    /// machines must make the same choice.
-    pub transport: Transport,
     /// How it calls the machines: each attempt's timeout, the redirects it
     /// follows, how long it waits for the cell to answer an `Inspect`.
     pub client: ClientTunables,
 }
+
+/// The frontend role a machine is given to serve (#723 (frontend as a
+/// parosd role)): the `Authz` it checks every call through and the wall
+/// clock that judges a token, beside the client policy it forwards with.
+/// A machine given none serves no frontend.
+#[derive(Clone)]
+pub struct FrontendRole {
+    /// What every call is checked against (`BiscuitAuthz` in `parosd`).
+    pub authz: Arc<dyn Authz>,
+    /// The wall clock at the provider's zero, since the Unix epoch.
+    pub epoch: Duration,
+    /// How it calls the machines.
+    pub client: ClientTunables,
+}
+
+impl FrontendRole {
+    /// The settings of the frontend a machine serves on its own edge: it
+    /// listens where the machine does and fronts `cell`, the founding
+    /// members' addresses.
+    ///
+    /// # Panics
+    ///
+    /// If `cell` is empty: a frontend fronts at least one machine.
+    #[must_use]
+    pub fn settings(
+        &self,
+        listen: SocketAddr,
+        cell: Vec<Address>,
+        names: Names,
+        tunables: DriverTunables,
+    ) -> FrontendSettings {
+        assert!(
+            !cell.is_empty(),
+            "a machine's frontend fronts a founding member"
+        );
+        FrontendSettings {
+            listen,
+            cell,
+            names,
+            epoch: self.epoch,
+            tunables,
+            client: self.client,
+        }
+    }
+}
+
+impl std::fmt::Debug for FrontendRole {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FrontendRole")
+            .field("epoch", &self.epoch)
+            .field("client", &self.client)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for FrontendRole {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.authz, &other.authz)
+            && self.epoch == other.epoch
+            && self.client == other.client
+    }
+}
+
+impl Eq for FrontendRole {}
 
 /// One call's own choices, drawn on the frontend's loop and carried to the
 /// call's task (a site never draws in a spawned task).
@@ -176,9 +239,12 @@ impl<P: ParosProviders, A> Drop for Running<P, A> {
 /// sees it is drained; `shutdown_within` is the bound that shapes a stop.
 const STOP_POLL: Duration = Duration::from_millis(50);
 
-/// Run a frontend until `shutdown`: bind `settings.listen`, learn the cell
-/// from its founding members, and serve the frontend contract, checking
-/// every call through `authz` and reporting resolutions to `audit`.
+/// Run a frontend on its own edge until `shutdown`: bind `settings.listen`
+/// with `transport`, learn the cell from its founding members, and serve
+/// the frontend contract, checking every call through `authz` and reporting
+/// resolutions to `audit`. A machine serves the same contract on its own
+/// edge instead ([`spawn`], #723 (frontend as a parosd role)); this entry
+/// stays for an embedder.
 ///
 /// `shutdown` begins a clean stop (#560 (clean Ctrl-C shutdown)): every new
 /// call is refused `stopping`, and the frontend returns once the calls it
@@ -196,6 +262,7 @@ const STOP_POLL: Duration = Duration::from_millis(50);
 #[tracing::instrument(level = "debug", skip_all, fields(listen = %settings.listen))]
 pub async fn run_frontend<P, A>(
     providers: P,
+    transport: Transport,
     settings: FrontendSettings,
     authz: Arc<dyn Authz>,
     audit: A,
@@ -205,27 +272,104 @@ where
     P: ParosProviders,
     A: Audit + Clone + Send + Sync + 'static,
 {
-    assert!(!settings.cell.is_empty(), "a frontend fronts a cell");
-    assert!(
-        settings.client.redirect_limit >= 1,
-        "a frontend follows at least one redirect"
-    );
+    check(&settings);
     let edge = RpcEdge::listen(
         &providers,
         &settings.listen.to_string(),
         "frontend",
         &settings.tunables,
-        &settings.transport,
+        &transport,
     )
     .await?;
     let rpc = edge.handle().clone();
-    let mut inbox = FrontendInbox {
-        write: Inbound::plain(serve_well_known(&rpc)?),
-        read: Inbound::plain(serve_well_known(&rpc)?),
-        truncate: Inbound::plain(serve_well_known(&rpc)?),
-        set_leader: Inbound::plain(serve_well_known(&rpc)?),
-        set_tags: Inbound::plain(serve_well_known(&rpc)?),
-    };
+    let inbox = FrontendInbox::on(&rpc)?;
+    moonpool_core::select! {
+        error = edge.run() => Err(error),
+        served = serve_frontend(providers, rpc, inbox, settings, (authz, audit), shutdown) => served,
+    }
+}
+
+/// Serve the frontend contract on the machine edge `rpc` until `shutdown`,
+/// in a task of its own (#723 (frontend as a parosd role)): the frontend
+/// role a machine serves beside its journals, at its own address.
+///
+/// # Errors
+///
+/// A registration the runtime refuses.
+///
+/// # Panics
+///
+/// If `settings.cell` is empty: a frontend fronts at least one machine.
+#[tracing::instrument(level = "debug", skip_all, fields(listen = %settings.listen))]
+pub fn spawn<P, A>(
+    providers: &P,
+    rpc: &RpcHandle<P>,
+    settings: FrontendSettings,
+    (authz, audit): (Arc<dyn Authz>, A),
+    shutdown: CancellationToken,
+) -> SimulationResult<()>
+where
+    P: ParosProviders,
+    A: Audit + Clone + Send + Sync + 'static,
+{
+    check(&settings);
+    let inbox = FrontendInbox::on(rpc)?;
+    let task = serve_frontend(
+        providers.clone(),
+        rpc.clone(),
+        inbox,
+        settings,
+        (authz, audit),
+        shutdown,
+    );
+    providers
+        .local_task()
+        .spawn_local_task("paros-frontend", async move {
+            if let Err(error) = task.await {
+                tracing::warn!(%error, "frontend_ended");
+            }
+        })
+        .detach();
+    moonpool_assertions::reachable!("frontend: a machine serves the frontend role");
+    Ok(())
+}
+
+/// A frontend's settings, checked before it serves.
+fn check(settings: &FrontendSettings) {
+    assert!(!settings.cell.is_empty(), "a frontend fronts a cell");
+    assert!(
+        settings.client.redirect_limit >= 1,
+        "a frontend follows at least one redirect"
+    );
+}
+
+impl FrontendInbox {
+    /// The frontend's queues, registered on `rpc`.
+    fn on<P: ParosProviders>(rpc: &RpcHandle<P>) -> SimulationResult<Self> {
+        Ok(Self {
+            write: Inbound::plain(serve_well_known(rpc)?),
+            read: Inbound::plain(serve_well_known(rpc)?),
+            truncate: Inbound::plain(serve_well_known(rpc)?),
+            set_leader: Inbound::plain(serve_well_known(rpc)?),
+            set_tags: Inbound::plain(serve_well_known(rpc)?),
+        })
+    }
+}
+
+/// The frontend's loop over the queues `inbox` of the edge `rpc`, until a
+/// clean stop ends.
+async fn serve_frontend<P, A>(
+    providers: P,
+    rpc: RpcHandle<P>,
+    mut inbox: FrontendInbox,
+    settings: FrontendSettings,
+    (authz, audit): (Arc<dyn Authz>, A),
+    shutdown: CancellationToken,
+) -> SimulationResult<()>
+where
+    P: ParosProviders,
+    A: Audit + Clone + Send + Sync + 'static,
+{
     tracing::info!(listen = %settings.listen, cell = settings.cell.len(), "frontend_starting");
     let shared = Arc::new(Shared {
         routes: Mutex::new(Routes::new(rpc)),
@@ -264,7 +408,6 @@ where
                     return Ok(());
                 }
             }
-            error = edge.run() => return Err(error),
             Some((FrontWrite { entry, call }, reply)) = inbox.write.recv() => {
                 if stop.is_some() {
                     refuse(call.as_ref(), reply);

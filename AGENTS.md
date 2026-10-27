@@ -206,7 +206,7 @@ writes, duplicates, dual submits) are explicit calls, never the library's defaul
 judged by the client's own history (`ClientHistory`, searched for a linearization against the
 journal's model) and the shared `AuditWorld`. Roles come from moonpool process groups
 (`paros-node`, `paros-matchmaker`, `paros-proxy`, `paros-replica`, `paros-joiner`,
-`paros-machine`, `paros-frontend`) through the deployment/role map `paros_sim::roles`. The machines are `parosd`s
+`paros-machine`; the machines serve the frontend, #723 (frontend as a parosd role)) through the deployment/role map `paros_sim::roles`. The machines are `parosd`s
 running the shipped `run_machine` from an empty disk, formed into a cell by the workload's
 `init` (`paros::client::initialize`) over a per-seed layout (#246). No third workload, no per-scenario process type, no
 check that reads a trace. Depth: `crates/sim/paros-sim/AGENTS.md` (the op-id table, the role map,
@@ -564,9 +564,8 @@ in this list:
 
 - `parosd` — the uniform daemon on one compio thread (one binary per machine: `PAROS_*` config,
   `node_id` minted at format, waits for `parosctl init`, #196). The image and the Compose toy
-  are `Dockerfile` and `docker-compose.yml` at the root; `DEMO.md` is how to run it.
-  `paros-frontend` (#192 (the frontend)) is its second binary until #723 (frontend as a parosd
-  role).
+  are `Dockerfile` and `docker-compose.yml` at the root; `DEMO.md` is how to run it. Every
+  `parosd` serves the frontend role with `BiscuitAuthz` (#723 (frontend as a parosd role)).
 - `parosctl` — the CLI over `paros::client`: `main.rs` is the command tree, `cmd/` holds one
   module per noun, `support/` what the commands share.
 - `paros-bench` — the load generator (#517, #194 (throughput benchmark)), against a cell or a

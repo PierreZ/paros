@@ -151,12 +151,15 @@ async fn run(settings: Settings, metrics: Metrics) -> ExitCode {
     if let Err(error) = paros::model::name::check_label(&name) {
         return invalid(&format!("PAROS_NAME {name:?}: {error}"));
     }
-    // The pin's wall clock is `epoch + time.now()`, read as the providers
-    // start (#245 (Biscuit tokens)).
-    let pin = match settings.pin(paros_authz_biscuit::since_epoch(
-        std::time::SystemTime::now(),
-    )) {
+    // The pin's and the frontend's wall clock is `epoch + time.now()`, read
+    // as the providers start (#245 (Biscuit tokens)).
+    let epoch = paros_authz_biscuit::since_epoch(std::time::SystemTime::now());
+    let pin = match settings.pin(epoch) {
         Ok(pin) => pin,
+        Err(error) => return invalid(&error),
+    };
+    let frontend = match settings.frontend(epoch) {
+        Ok(frontend) => frontend,
         Err(error) => return invalid(&error),
     };
     if pin.is_pinned() {
@@ -187,6 +190,7 @@ async fn run(settings: Settings, metrics: Metrics) -> ExitCode {
         name,
         pin,
         metrics,
+        frontend: Some(frontend),
     };
     let disk = ProviderDisk::new(
         CompioStorageProvider::new(),

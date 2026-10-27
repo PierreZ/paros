@@ -257,8 +257,9 @@ pub struct ConfigureArgs {
     /// many on the cell's `stateless` machines. Only without `--journal`.
     #[arg(long)]
     batchers: Option<u32>,
-    /// The tenant's frontends (recorded, #604 (role counts)). Only without
-    /// `--journal`.
+    /// The tenant's frontends (#723 (frontend as a parosd role)): the
+    /// coordinator books that many on the cell's `stateless` machines. Only
+    /// without `--journal`.
     #[arg(long)]
     frontends: Option<u32>,
     /// The tenant's proxy leaders (recorded, #604 (role counts)). Only

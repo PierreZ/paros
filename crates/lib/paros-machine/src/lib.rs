@@ -81,6 +81,7 @@ use tokio_util::sync::CancellationToken;
 use formed::FormedExt as _;
 use paros_client::CallObserver;
 use paros_net::runtime::ParosProviders;
+use paros_observe::audit::Audit;
 use paros_storage::RunError;
 use paros_tunables::DriverTunables;
 
@@ -122,6 +123,37 @@ pub enum CellMachine {
     },
 }
 
+impl CellMachine {
+    /// The founding members' addresses, where this machine dials them: the
+    /// cell its frontend fronts. An admitted machine that knows no founding
+    /// member's address fronts every machine it knows.
+    fn founder_addrs(&self) -> Vec<paros_model::address::Address> {
+        let addrs: Vec<paros_model::address::Address> = match self {
+            CellMachine::Founded { cell, .. } => {
+                cell.founders().into_iter().map(|(_, addr)| addr).collect()
+            }
+            CellMachine::Admitted { machine, .. } => {
+                let book = machine.book();
+                let founders: Vec<_> = book
+                    .iter()
+                    .filter(|(id, _)| machine.admission.founders.contains(id))
+                    .map(|(_, addr)| addr.clone())
+                    .collect();
+                if founders.is_empty() {
+                    book.into_iter().map(|(_, addr)| addr).collect()
+                } else {
+                    founders
+                }
+            }
+        };
+        assert!(
+            !addrs.is_empty(),
+            "a machine in a cell knows a machine of it"
+        );
+        addrs
+    }
+}
+
 impl CellHost for CellMachine {
     fn control_journals(&self) -> ControlJournals {
         match self {
@@ -151,15 +183,36 @@ impl CellHost for CellMachine {
         }
     }
 
-    fn serve<P: ParosProviders>(
+    fn serve<P: ParosProviders, A: Audit + Clone + Send + Sync + 'static>(
         self,
         providers: &P,
         rpc_handle: &RpcHandle<P>,
         tunables: &DriverTunables,
-        observer: Option<Arc<dyn CallObserver>>,
+        (observer, frontend_audit): (Option<Arc<dyn CallObserver>>, A),
         (incarnation_shutdown, stopping): (CancellationToken, CancellationToken),
     ) -> Result<Hosted, RunError> {
         let mut hosted = Hosted::default();
+        // Every machine given a frontend role serves it on its own edge, in
+        // front of the founding members (#723 (frontend as a parosd role)):
+        // the tenant coordinator books a tenant's frontends on the
+        // `stateless` machines and `Resolve` names them, as it does its
+        // batchers.
+        if let Some(role) = &self.facts().frontend {
+            let cell = self.founder_addrs();
+            let settings = role.settings(
+                self.facts().listen,
+                cell,
+                self.facts().names.clone(),
+                *tunables,
+            );
+            paros_roles::frontend::spawn(
+                providers,
+                rpc_handle,
+                settings,
+                (role.authz.clone(), frontend_audit),
+                incarnation_shutdown.clone(),
+            )?;
+        }
         match self {
             CellMachine::Admitted { machine, cache } => {
                 hosted.offered_books = Some(cache.subscribe());

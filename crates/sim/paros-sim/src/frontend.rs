@@ -1,15 +1,16 @@
-//! The frontends (#192 (the frontend)): the shipped
-//! `paros::roles::frontend::run_frontend` in front of the machines, with the
-//! Biscuit authorization `paros-frontend` ships
+//! The frontends (#192 (the frontend), #723 (frontend as a parosd role)):
+//! every machine serves the shipped `paros::roles::frontend` on its own edge
+//! once it is in a cell, with the Biscuit authorization `parosd` ships
 //! (`paros_authz_biscuit::BiscuitAuthz`, #245), and the passes the
 //! workload's clients present to them.
 //!
 //! A frontend is stateless: it fronts the cell's founding members, learns
-//! the cell from them, and caches its resolutions. Its group's attrition
-//! kills it like any process; it comes back with nothing cached. Its own
+//! the cell from them, and caches its resolutions. A machine's attrition
+//! kills it with the machine; it comes back with nothing cached. Its own
 //! choices (a cold cache, a stale resolution answered as unknown, a call
 //! routed to another server than the known leader) are inline BUGGIFY sites
-//! in `paros`.
+//! in `paros`. The tenant coordinator books a tenant's frontends on the
+//! `stateless` machines, and `Resolve` names them.
 //!
 //! The run's root keys are drawn per seed (#245 (Biscuit tokens)): every
 //! token is signed with one key, the one `init` writes in the universe
@@ -28,35 +29,23 @@
 //! near its expiry ([`Presented::ShortLived`]) is judged by the frontend's
 //! own clock; the client judges the answer against that bound.
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime};
 
-use async_trait::async_trait;
 use moonpool_sim::{
-    Process, SimContext, SimulationError, SimulationResult, StateHandle, TimeProvider,
-    assert_always, assert_reachable,
+    SimContext, SimulationError, SimulationResult, StateHandle, assert_always, assert_reachable,
 };
 use paros::client::ClientTunables;
 use paros::core::journal::JournalIdentifier;
 use paros::machine::AdminPin;
-use paros::model::address::Address;
 use paros::model::fleet::RootKeyEntry;
 use paros::model::name::JournalName;
-use paros::observe::audit::Audit;
-use paros::roles::frontend::{FrontendSettings, run_frontend};
-use paros::roles::node::DriverTunables;
+use paros::roles::frontend::FrontendRole;
 use paros_authz_biscuit::{
     BiscuitAuthz, Class, Entropy, Grant, KeyRing, MAX_BLOCKS, Restriction, Role, RootKey, Token,
     derive, mint, seal,
 };
-
-use crate::process::dispatch;
-use crate::roles::{FRONTEND_GROUP, Role as ProcessRole};
-
-/// The port every simulated frontend binds.
-const FRONTEND_PORT: u16 = 4600;
 
 /// The wall clock at the simulation's zero, since the Unix epoch: a fixed
 /// instant, so a token's expiry depends on the simulated time alone.
@@ -204,16 +193,6 @@ pub(crate) fn operator_token(state: &StateHandle, elapsed: Duration) -> Vec<u8> 
 /// The wall clock `elapsed` after the simulation's zero.
 fn wall(elapsed: Duration) -> SystemTime {
     SystemTime::UNIX_EPOCH + EPOCH + elapsed
-}
-
-/// The frontends' addresses, in rank order: what a client is configured
-/// with.
-pub(crate) fn frontend_addrs(deployment: &crate::roles::Deployment) -> Vec<Address> {
-    deployment
-        .frontends()
-        .iter()
-        .filter_map(|ip| Address::parse(&format!("{ip}:{FRONTEND_PORT}")).ok())
-        .collect()
 }
 
 /// The token a client presents: its kind, as the workload draws it.
@@ -435,63 +414,14 @@ pub(crate) fn token_expiring(
     )
 }
 
-/// A frontend in the simulation.
-pub(crate) struct FrontendProcess;
-
-impl FrontendProcess {
-    pub(crate) fn chaotic() -> Self {
-        Self
-    }
-}
-
-#[async_trait]
-impl Process for FrontendProcess {
-    fn name(&self) -> &'static str {
-        FRONTEND_GROUP
-    }
-
-    #[tracing::instrument(level = "debug", skip_all)]
-    async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-        ctx.run_local(self.name(), |ctx| async move {
-            let ctx = &ctx;
-            dispatch(
-                ctx,
-                "every frontend process is mapped to the frontend role",
-                "a frontend",
-                |role| match role {
-                    ProcessRole::Frontend(rank) => Some(rank),
-                    _ => None,
-                },
-                |deployment, rank, my_ip| async move {
-                    Box::pin(run_frontend_role(ctx, &deployment, rank, &my_ip)).await
-                },
-            )
-            .await
-        })
-        .await
-    }
-}
-
-/// Run the shipped frontend at `my_ip`, in front of the founding members.
-async fn run_frontend_role(
-    ctx: &SimContext,
-    deployment: &crate::roles::Deployment,
-    rank: usize,
-    my_ip: &str,
-) -> SimulationResult<()> {
-    let ip: std::net::IpAddr = my_ip
-        .parse()
-        .map_err(|e| SimulationError::InvalidState(format!("bad frontend ip {my_ip}: {e}")))?;
-    let layout = crate::shape::machine_layout(ctx.state(), deployment.machines().len());
-    let addrs = crate::machine::machine_addrs(ctx.state(), deployment)?;
-    let cell: Vec<Address> = addrs.into_iter().take(layout.founders).collect();
-    assert_always!(
-        !cell.is_empty(),
-        "frontend: a frontend fronts a founding member"
-    );
+/// The frontend role every machine serves (#723 (frontend as a parosd
+/// role)): the Biscuit authorization `parosd` ships, over the signing key
+/// `init` writes (a key rotated in later is trusted once the frontend read
+/// the universe entry again, #245), at a clock skewed from the minter's by
+/// a knob drawn at each boot (#450: default none, extreme up to
+/// [`MAX_SKEW`], either way).
+pub(crate) fn machine_frontend(ctx: &SimContext) -> SimulationResult<FrontendRole> {
     let keys = root_keys(ctx.state());
-    // #450: this frontend's clock is skewed from the minter's, a knob drawn
-    // at each boot (default none; extreme up to `MAX_SKEW`, either way).
     let skew = Duration::from_millis(moonpool_sim::buggify_knob!(
         0_u64,
         1_u64..u64::try_from(MAX_SKEW.as_millis()).unwrap_or(0) + 1
@@ -504,114 +434,69 @@ async fn run_frontend_role(
     if !skew.is_zero() {
         assert_reachable!("frontend: a frontend runs with a skewed clock");
     }
-    // The pin: the key `init` writes. A key rotated in later is trusted
-    // once the frontend read the universe entry again (#245).
     let ring = KeyRing::new([keys.signing.public()])
         .map_err(|e| SimulationError::InvalidState(format!("key ring: {e}")))?;
-    let settings = FrontendSettings {
-        listen: SocketAddr::new(ip, FRONTEND_PORT),
-        cell,
-        names: crate::machine::names(ctx.state()),
+    Ok(FrontendRole {
+        authz: Arc::new(BiscuitAuthz::new(ring)),
         epoch,
-        tunables: DriverTunables {
-            // A clean stop's bound (#560 (clean Ctrl-C shutdown)). Floor 0:
-            // a stop at once, the same as a crash. Around a forwarded call's
-            // own bound (`FORWARD_TIMEOUT`), so a call in flight at the stop
-            // outlives the bound on some seeds and ends inside it on others.
-            shutdown_within: Duration::from_millis(moonpool_sim::buggify_knob!(
-                300_u64,
-                0_u64..2_001_u64
-            )),
-            ..DriverTunables::default()
-        },
-        transport: crate::tls::serving(ctx, paros::net::tls::Role::Frontend, my_ip)?,
         client: ClientTunables {
             request_timeout: FORWARD_TIMEOUT,
             read_timeout: FORWARD_TIMEOUT,
             ..ClientTunables::default()
         },
-    };
-    let audit = FrontendAudit {
-        state: ctx.state().clone(),
-        calls: Arc::new(
-            crate::workload::system::Announce::of_machine(
-                ctx.state(),
-                ctx.time().clone(),
-                FRONTEND_CLIENT_BASE + rank as u64,
-            )
-            .relaying(),
-        ),
-    };
-    tracing::info!(ip = %ip, at = ?ctx.time().now(), "frontend_booting");
-    run_frontend(
-        ctx.providers().clone(),
-        settings,
-        Arc::new(BiscuitAuthz::new(ring)),
-        audit,
-        ctx.shutdown().clone(),
-    )
-    .await
+    })
 }
 
 /// The first client id a frontend's forwarded calls log under (#192 (the
 /// frontend)): above the machines' own clients (`1 << 32` on).
-const FRONTEND_CLIENT_BASE: u64 = 1 << 33;
+pub(crate) const FRONTEND_CLIENT_BASE: u64 = 1 << 33;
 
-/// What a frontend reports: each resolution, judged against the tenant
-/// board (the control journal as the machines folded it), and each call it
-/// forwards, which joins its journal's appended set and history as any
-/// client's does.
-#[derive(Clone)]
-struct FrontendAudit {
-    state: StateHandle,
-    calls: Arc<crate::workload::system::Announce>,
+/// A frontend's resolution of `name` to `journal` at `at`, judged against
+/// the tenant board (the control journal as the machines folded it).
+pub(crate) fn judge_resolved(
+    state: &StateHandle,
+    name: &JournalName,
+    (journal, control): (JournalIdentifier, JournalIdentifier),
+    at: u64,
+) {
+    assert_always!(
+        journal.tenant == control.tenant,
+        "frontend: a name resolves inside its tenant",
+        { "journal" => journal.to_string() }
+    );
+    let board = crate::audit::tenants::tenant_board(state);
+    let recorded =
+        crate::audit::tenants::lock(&board).named_at(control, name.journal().as_bytes(), at);
+    if let Ok(recorded) = recorded {
+        assert_always!(
+            recorded == Some(journal.journal),
+            "frontend: a resolved name is the journal its directory records there",
+            {
+                "at" => at,
+                "resolved" => journal.journal.0,
+                "recorded" => recorded.map_or(0, |j| j.0)
+            }
+        );
+        assert_reachable!("frontend: a resolution is judged against the directory");
+    }
 }
 
-impl Audit for FrontendAudit {
-    fn call_observer(&self) -> Option<Arc<dyn paros::client::CallObserver>> {
-        Some(self.calls.clone())
-    }
-
-    fn frontend_resolved(
-        &self,
-        name: &JournalName,
-        journal: JournalIdentifier,
-        control: JournalIdentifier,
-        at: u64,
-    ) {
+/// A frontend's answer that `name` is unknown at `at`, judged likewise.
+pub(crate) fn judge_unknown(
+    state: &StateHandle,
+    name: &JournalName,
+    control: JournalIdentifier,
+    at: u64,
+) {
+    let board = crate::audit::tenants::tenant_board(state);
+    let recorded =
+        crate::audit::tenants::lock(&board).named_at(control, name.journal().as_bytes(), at);
+    if let Ok(recorded) = recorded {
         assert_always!(
-            journal.tenant == control.tenant,
-            "frontend: a name resolves inside its tenant",
-            { "journal" => journal.to_string() }
+            recorded.is_none(),
+            "frontend: a name is answered unknown only where its directory holds no journal",
+            { "at" => at, "recorded" => recorded.map_or(0, |j| j.0) }
         );
-        let board = crate::audit::tenants::tenant_board(&self.state);
-        let recorded =
-            crate::audit::tenants::lock(&board).named_at(control, name.journal().as_bytes(), at);
-        if let Ok(recorded) = recorded {
-            assert_always!(
-                recorded == Some(journal.journal),
-                "frontend: a resolved name is the journal its directory records there",
-                {
-                    "at" => at,
-                    "resolved" => journal.journal.0,
-                    "recorded" => recorded.map_or(0, |j| j.0)
-                }
-            );
-            assert_reachable!("frontend: a resolution is judged against the directory");
-        }
-    }
-
-    fn frontend_unknown(&self, name: &JournalName, control: JournalIdentifier, at: u64) {
-        let board = crate::audit::tenants::tenant_board(&self.state);
-        let recorded =
-            crate::audit::tenants::lock(&board).named_at(control, name.journal().as_bytes(), at);
-        if let Ok(recorded) = recorded {
-            assert_always!(
-                recorded.is_none(),
-                "frontend: a name is answered unknown only where its directory holds no journal",
-                { "at" => at, "recorded" => recorded.map_or(0, |j| j.0) }
-            );
-            assert_reachable!("frontend: an unknown name is judged against the directory");
-        }
+        assert_reachable!("frontend: an unknown name is judged against the directory");
     }
 }

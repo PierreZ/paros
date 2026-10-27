@@ -47,9 +47,7 @@ use moonpool_sim::{
 use crate::lifecycle::ScriptedLifecycle;
 use crate::machine::MachineProcess;
 use crate::process::{JoinerProcess, MatchmakerProcess, NodeProcess, ProxyProcess, ReplicaProcess};
-use crate::roles::{
-    ACCEPTOR_GROUP, FRONTEND_GROUP, MACHINE_GROUP, MATCHMAKER_GROUP, PROXY_GROUP, REPLICA_GROUP,
-};
+use crate::roles::{ACCEPTOR_GROUP, MACHINE_GROUP, MATCHMAKER_GROUP, PROXY_GROUP, REPLICA_GROUP};
 use crate::workload::ChainWorkload;
 
 /// An optional slot or watermark as a signed trace/detail value: `None`
@@ -157,12 +155,6 @@ pub(crate) const JOINER_POOL_RANGE: std::ops::RangeInclusive<usize> = 0..=2;
 /// admitted storage machines a journal moves between (#474 (journals on
 /// admitted machines)).
 pub(crate) const MACHINE_POOL_RANGE: std::ops::RangeInclusive<usize> = 1..=4;
-/// Per-seed **frontend pool** draw (inclusive, #192 (the frontend)): the
-/// frontend process group (`crate::roles::FRONTEND_GROUP`), each the shipped
-/// `run_frontend` in front of the machines' founding members. Zero is a seed
-/// whose clients reach the machines alone; two let a client move on to
-/// another frontend when one is down.
-pub(crate) const FRONTEND_POOL_RANGE: std::ops::RangeInclusive<usize> = 0..=2;
 /// Per-seed concurrent-client draw (half-open: 1–3 clients). Multi-client runs
 /// are what give the linearizability checker conflicting concurrent histories
 /// to reject; single-client runs keep the cheap sequential fast path. Each
@@ -302,7 +294,7 @@ pub(crate) fn past_cutoff(now: Duration, after: Duration) -> bool {
 /// and the machine group, so `LOAD` meets a slow machine. A slow process is
 /// not a dead one: no liveness budget changes. Recovery mode makes every
 /// process healthy again, so the tail is still a genuine recovery.
-fn chaos_surfaces() -> [Chaos; 13] {
+fn chaos_surfaces() -> [Chaos; 12] {
     let regime = |victims: AttritionVictims| Attrition {
         max_dead: 1,
         prob_graceful: 0.0,
@@ -345,14 +337,6 @@ fn chaos_surfaces() -> [Chaos; 13] {
                 ..regime(AttritionVictims::group(MACHINE_GROUP))
             }
             .wipe_budget(1, WipeHeal::Signal),
-            mode: ChaosMode::Swarm,
-        },
-        Chaos::Attrition {
-            config: Attrition {
-                prob_graceful: MACHINE_GRACEFUL_WEIGHT,
-                grace_period_ms: Some(MACHINE_GRACE_MS),
-                ..regime(AttritionVictims::group(FRONTEND_GROUP))
-            },
             mode: ChaosMode::Swarm,
         },
         crate::world::outage::regime(),
@@ -447,9 +431,6 @@ fn chain_builder(digest: Option<DigestSink>) -> SimulationBuilder {
         .processes(REPLICA_POOL_RANGE, || Box::new(ReplicaProcess::chaotic()))
         .processes(JOINER_POOL_RANGE, || Box::new(JoinerProcess::chaotic()))
         .processes(MACHINE_POOL_RANGE, || Box::new(MachineProcess::chaotic()))
-        .processes(FRONTEND_POOL_RANGE, || {
-            Box::new(crate::frontend::FrontendProcess::chaotic())
-        })
         .link_latency(LinkLatencyConfig::default())
         .workloads(WorkloadCount::Random(CLIENT_COUNT_RANGE), move |_| {
             Box::new(ChainWorkload::new(digest.clone()))
