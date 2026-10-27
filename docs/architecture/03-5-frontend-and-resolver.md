@@ -97,7 +97,7 @@ shows as `<kind>:<name>` from its `paros/role` tag (`universe:acme`, `cell:paris
 never a resolvable name or an id: section 3.8's no-well-known-id rule stands.
 
 **Where names stand** (#239, landed on 2026-10-10). The library parses and prints
-`paros://<tenant>/<journal>` (`paros::name`) and resolves it in two hops
+`paros://<tenant>/<journal>` (`paros::model::name`) and resolves it in two hops
 (`paros::client::names`): the tenant name through the universe directory, where only a `READY`
 `users` tenant resolves; then the journal name through the tenant's control journal, the
 `TenantControl` fold (#210 (tenant control journal)), where only a live journal resolves. A client caches a resolution and drops it
@@ -107,7 +107,7 @@ its ids, `id:<tenant>/<journal>` in hex, each half a unique prefix of an id that
 list, or all 16 digits. Since #210 (tenant control journal), the machines serve every tenant's
 control journal, so a name resolves both hops on `parosd`, and `init` creates no user journal.
 
-**Where the frontend stands** (#192 (the frontend), landed on 2026-10-11 in PR #412). `paros::frontend`
+**Where the frontend stands** (#192 (the frontend), landed on 2026-10-11 in PR #412). `paros::roles::frontend`
 runs the frontend, and the `paros-frontend` binary ships it with `BiscuitAuthz`. The contract
 is the `Frontend` service in `proto/paros.proto`: each of the four calls with an `Entry` (the
 token, the tenant name and the journal name). The frontend does these steps for each call:

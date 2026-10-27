@@ -11,7 +11,7 @@ Code: `crates/lib/paros-core/src/node/gc.rs` (the leader's GC decision),
 `crates/lib/paros-core/src/matchmaker.rs` (generations, fencing, the durable decree
 acceptor), `crates/lib/paros-core/src/matchmaker/reconfigurer.rs` (the handover state
 machine), `crates/lib/paros-core/src/decree.rs` (the decree it decides with, generic since #277), and the
-harness's wipe / retire model in `crates/sim/paros-sim/src/world/mod.rs`.
+harness's wipe / retire model in `crates/sim/paros-sim/src/world.rs`.
 
 ## 1. Garbage collection: when may a configuration be forgotten?
 

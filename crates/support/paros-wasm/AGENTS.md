@@ -37,9 +37,9 @@ calls the core (a core `assert!` in wasm is an abort): every player-reachable re
 
 - `src/paxos.rs` → `Game`, `WasmGame` → level, world, automation flags, the action log that is the undo stack.
 - `src/paxos/action.rs` → `Action`, `ActionKind`, `ActionError` → every player verb and the one error type.
-- `src/paxos/world/decree/mod.rs` → `DecreeWorld` → Act I: bare `Proposer` + `Acceptor` at slot 0; phase *reach* is the network.
+- `src/paxos/world/decree.rs` → `DecreeWorld` → Act I: bare `Proposer` + `Acceptor` at slot 0; phase *reach* is the network.
 - `src/paxos/world/decree/render.rs` → the Act I view (acceptor and proposer share one `NodeView`).
-- `src/paxos/world/mod.rs` → `World`, `Party`, `Envelope`, `InFlight`, `WorldPolicy` → Act II on: constructors, `observe`, `settle`.
+- `src/paxos/world.rs` → `World`, `Party`, `Envelope`, `InFlight`, `WorldPolicy` → Act II on: constructors, `observe`, `settle`.
 - `src/paxos/world/verbs.rs` → wire, clock, client, handoff and prompt-answer verbs (`propose(.., column)`, `relinquish`).
 - `src/paxos/world/history.rs` → the client's record and linearizability judge; `World::proposed_values`.
 - `src/paxos/world/lifecycle.rs` → crash, the two seams, restart, wipe (boot refused, narrated), corrupt.
@@ -52,7 +52,7 @@ calls the core (a core `assert!` in wasm is an abort): every player-reachable re
 - `src/paxos/prompt/{mod,acceptor,proposer,replica,reads,storage,matchmaker}.rs` → `PromptKind`, `Choice`, `Prompt`, `Verdict`, `ALL_PROMPTS`; constructors by role.
 - `src/paxos/auto.rs` → `AutomationFlag`, `ALL_FLAGS` → automation as reward, and the delivery pump.
 - `src/paxos/narration.rs` → narration derived from the transition.
-- `src/paxos/level/mod.rs` → `Level`, `levels()`, `level(id)` · `src/paxos/level/common.rs` → shared worlds and shorthands.
+- `src/paxos/level.rs` → `Level`, `levels()`, `level(id)` · `src/paxos/level/common.rs` → shared worlds and shorthands.
 - `src/paxos/level/script.rs` → `Script` → records a reference solution by driving a real `Game`.
 - `src/paxos/level/act{1,2,3,4}.rs` → 6 + 7 + 5 + 10 = 28 levels.
 - `src/paxos/view.rs` → `GameView` and friends → the one contract the browser reads.

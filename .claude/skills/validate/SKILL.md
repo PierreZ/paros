@@ -17,7 +17,7 @@ Prefix every command with `nix develop --command` (or rely on direnv), in a
 local session and on Claude Code on the web alike. The flake's inputs are
 fetched over git, which the web session's egress policy allows (#727 (flake
 inputs over git)). The dev shell carries everything the gate needs: the pinned
-toolchain, `protobuf` for `crates/lib/paros/build.rs`, `cargo-nextest`,
+toolchain, `protobuf` for `crates/lib/paros-wire/build.rs`, `cargo-nextest`,
 `wasm-bindgen-cli`, `binaryen`, `nodejs_22` and the unwrapped clang for ring's
 wasm32 build. On the web, install Nix first if `nix-store` is missing, exactly
 as the root `AGENTS.md` describes.

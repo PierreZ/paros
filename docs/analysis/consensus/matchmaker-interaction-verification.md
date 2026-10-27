@@ -58,7 +58,7 @@ became effective.
 
 **Verification.** By reading and by the harness's oracle, not by a model claim: the model
 has no node reboot of `ColocatedNode` state. The harness aims one retirement in ten at a
-*member* rather than at a retirable acceptor (`chain_workload/reconfigure.rs`, the `aim_at_member`
+*member* rather than at a retirable acceptor (`workload/reconfigure.rs`, the `aim_at_member`
 coin, with the watermark it just read), and the audit's "gc: a node retires only after an
 effective floor named it retirable" (`crates/sim/paros-sim/src/audit/matchmaker.rs`) is an
 always-assertion on the retired node against the set the effective floor released.
@@ -82,7 +82,7 @@ at `Ballot::zero()`, the deaf node's below `w`. The leg is an equality because a
 *above* `w` fails the other way: a node of `C_w` that missed `w` and then heard a later
 configuration dropping it would pass every other leg for the old watermark, while `C_w`,
 which the floor did not collect, still names it (a review finding on the first draft, which
-used `>=`). The refusal leg is `"stale"` (`paros::driver::operator::retire`, reported only
+used `>=`). The refusal leg is `"stale"` (`paros::roles::node::operator::retire`, reported only
 when the fence leg passed, so `not_collected` keeps its meaning; the audit's reachable "gc: a
 retirement is refused on a belief older than the floor"). It ends when a beat at the
 leader's ballot reaches the node — beats go to the whole pool, removed members included —
@@ -314,7 +314,7 @@ at `models/handover.rs:848` on the default seeds and in the two-finisher case.
 
 **The concern.** #134 and #133 added durability seams on the matchmaker plane
 (`Seam::MatchBeforeSync`, `Seam::MatchAfterSyncBeforeReply` at the time; since #294 the
-two `hint!`s in `crates/lib/paros/src/matchmaker/mod.rs`'s `drain`)
+two `hint!`s in `crates/lib/paros-roles/src/matchmaker.rs`'s `drain`)
 and a torn-batch crash. Every reply a matchmaker sends is a promise about its disk: the
 freeze, the pending bootstrap, the decree promise and vote, the activation, the
 registration. Is each one durable at the seam the reply leaves through?

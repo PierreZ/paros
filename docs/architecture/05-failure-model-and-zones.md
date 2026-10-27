@@ -72,7 +72,7 @@ record), and that needs paros's placement and its stores' layout. So the injecto
 `paros-sim`, beside the harness's other disk-rot injectors. moonpool's random rot families stay
 masked (#176).
 
-**The storage contract.** paros's stores are moonpool-journal's (`paros::journal`), and the
+**The storage contract.** paros's stores are moonpool-journal's (`paros::storage::journal`), and the
 simulation must give them at least the chaos the harness's in-memory stores carry today (decided
 on 2026-10-04, #176, #202). Every storage fault moonpool can inject is eventually in contract.
 Three families start masked through moonpool's `storage_fault_mask` (moonpool#292), each with
@@ -84,7 +84,7 @@ watchdog in the driver) and stall/throttle episodes (`Degradation`). Failed writ
 the bytes not durable, and the page cache keeps serving them, across a process restart too. So
 a fail-stop does not help, and a rewrite of the files can tear records that were durable. Every
 store open (boot, restart, the re-open after a quarantine) first drops the clean cached pages
-of the store's files (`paros::journal::drop_caches`, `StorageFile::drop_cache`,
+of the store's files (`paros::storage::journal::drop_caches`, `StorageFile::drop_cache`,
 `posix_fadvise(DONTNEED)`, moonpool#361). The open then reads what the device holds. It does
 not sync: a dirty page a failed commit left still reads as written and lands at the next sync
 (#348), and a sync at every open could fail and take the open with it. A one-sync commit
@@ -213,7 +213,7 @@ predicates do. The tenant coordinator's create (`machine/tenants.rs`) labels the
 from the registry and owns the configuration with its cell; a move (`machine/moves.rs`) does the
 same for the machines that stay. **Where the rule binds** (the open question of #215, default
 taken on 2026-10-16): a durability with `failures-per-partition` 1 or more, over storage machines
-that span three zones or more (`paros::placement::zone_rule_binds`). Over one or two zones no
+that span three zones or more (`paros::model::placement::zone_rule_binds`). Over one or two zones no
 configuration can meet it, so the create is placed as before, without zone survival. Where it
 binds, a plan that breaks it is planned again under another tie-break draw, up to
 `placement::ZONE_DRAWS` (8), and the create is recorded `Unplaceable` when none holds (a

@@ -38,7 +38,7 @@ pub mod matchmaker {
 
 /// The cell control journal's entries (#189), generated from
 /// `proto/system.proto`: one record per slot of the node registry (the cell
-/// tenant's control journal, #235), read by `paros::system`.
+/// tenant's control journal, #235), read by `paros::model::registry`.
 pub mod system {
     #![allow(missing_docs, clippy::pedantic)]
     include!(concat!(env!("OUT_DIR"), "/paros.system.v1.rs"));
@@ -72,7 +72,7 @@ pub mod election {
 }
 
 /// A tenant's control journal entries (#210), generated from
-/// `proto/tenant.proto`: read by `paros::tenant`.
+/// `proto/tenant.proto`: read by `paros::model::tenant`.
 pub mod tenant {
     #![allow(missing_docs, clippy::pedantic)]
     include!(concat!(env!("OUT_DIR"), "/paros.tenant.v1.rs"));

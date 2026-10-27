@@ -195,7 +195,7 @@ ballot never decreases"** watches the promise (`crates/sim/paros-sim/src/audit/`
 
 The application lives where it lives in production: in the client. The
 simulation's chain client reads the journal and folds every record into its
-own `ChainState` (`crates/sim/paros-sim/src/chain_workload/fold.rs`), and the audit
+own `ChainState` (`crates/sim/paros-sim/src/workload/fold.rs`), and the audit
 checks that every client folds the same record to the same state. A fold needs
 every record from the start, so the harness keeps a shared **trim fence**: every
 truncation a client asks for is clamped below the cursor of every client still

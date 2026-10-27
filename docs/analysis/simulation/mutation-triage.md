@@ -153,9 +153,9 @@ mutants need. The stalled-proxy scenario (`shape::stalled_proxy`) turns on
 three ingredients together on one per-seed draw:
 
 - Every proxy drops the `Accepted`s and `Nack`s it hears for the chaos window
-  (`paros::scenario::STALL_PROXY`).
+  (`paros::observe::scenario::STALL_PROXY`).
 - A leader that holds delegated rounds resigns and campaigns again at once
-  (`paros::scenario::RESIGN_DELEGATING`).
+  (`paros::observe::scenario::RESIGN_DELEGATING`).
 - The run runs an acceptor grid where the pool tiles one.
 
 Two probes mark the states: "proxy: a leader takes a delegated round back on

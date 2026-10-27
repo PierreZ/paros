@@ -114,8 +114,8 @@ docker compose run --rm parosctl cell remove-machine storage4
 # second, then the totals. Ctrl-C stops it and still prints the totals. Add
 # `--mix write=80,read-tail=20` for reads that check every byte, `--rate 200` for an open
 # loop, `--histograms /tmp/h.json` for the raw histograms. Numbers compare runs on the same
-# machine. `parosctl bench --local 3` runs without Compose, on a cell in its own process.
-docker compose run --rm parosctl bench --tenant bench --journals 4 --clients 8 --duration 60s --ramp 10s
+# machine. `paros-bench --local 3` runs without Compose, on a cell in its own process.
+docker compose run --rm paros-bench --tenant bench --journals 4 --clients 8 --duration 60s --ramp 10s
 
 # Logs, and tear everything down (volumes included).
 docker compose logs node1

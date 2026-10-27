@@ -350,7 +350,7 @@ if pending_accepts && !moonpool_buggify::buggify_with_prob!(0.95) {
 |---|---|---|
 | `Seam::BeforeSync`, `AfterSyncBeforeSend` (`ready.rs`) | two `hint!` points, section 9 | hint |
 | `Seam::AfterPrepareSent` (#260) | `hint!("reconfiguring prepare sent")` after the send | hint |
-| `Seam::MatchBeforeSync`, `MatchAfterSyncBeforeReply` | two points in `matchmaker/mod.rs` | hint |
+| `Seam::MatchBeforeSync`, `MatchAfterSyncBeforeReply` | two points in `crates/lib/paros-roles/src/matchmaker.rs` | hint |
 | `Seam::CellPromised`, `CellFormatted` (`wait.rs`) | two points; `seam_crash` deleted | hint |
 | `world/power.rs` `PowerCut::around` | points between the sync's commits (paros) and inside `commit` (moonpool-journal); the copy budget a `HintVeto` (landed, #294 step 6) | hint |
 | `seam_crash_bias` ×10 | a higher rate literal on the write-side points (`hint!(.., 0.2)`) | rate |
@@ -360,7 +360,7 @@ if pending_accepts && !moonpool_buggify::buggify_with_prob!(0.95) {
 | `skip_*_resend`, `resign_leadership`, `stretch_tick_interval`, `expire_parked_read_early`, `skip_delegation`, mailbox hooks (`overtake`, `hold`, `reverse`, `evict`), election-timeout extremes, `abandon_reconfigurer` per phase | `buggify_with_prob!(p)` inline, same rates as `BuggifyHooks` | inline |
 | `drop_outgoing`, `duplicate_outgoing`, `drop_client_reply`, `duplicate_client_reply` | `buggify_with_prob!` at the send and the reply, one site per message kind that has its own gate | inline |
 | `handoff_target`, `phase2_column`, `read_row`, `proxy_for`, `initiate_handoff` | `buggify_pick!(p, n)` inline; `HandoffContext` stays as the tilt's input | inline |
-| `withhold_gc_requests`, `hold_journal`, `lose_verdicts` (per-seed latched) | `buggify_named!(label, p)` at the site; the scenario draw decides it with `set_activation` (done, #318 E: `paros::scenario`) | inline, scenario |
+| `withhold_gc_requests`, `hold_journal`, `lose_verdicts` (per-seed latched) | `buggify_named!(label, p)` at the site; the scenario draw decides it with `set_activation` (done, #318 E: `paros::observe::scenario`) | inline, scenario |
 | `DriverTunables` draws (`NodeShape`) | stay knobs, drawn by the harness: configuration, not a decision | unchanged |
 | `world/injector.rs` boot damage | stays: storage chaos aimed by `FaultFocus`; `upstream-to-moonpool` candidate | environment |
 | `ScriptedLifecycle`, `fleet.rs` target kill, late and bare outages | stay harness injectors over audit facts (FDB's `MachineAttrition`) | environment |

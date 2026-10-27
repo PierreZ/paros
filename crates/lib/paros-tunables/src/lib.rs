@@ -420,7 +420,7 @@ pub struct DriverTunables {
     /// only re-reads the same records back to back.
     pub scrub_pass_within: Duration,
     /// How many records one scrub request asks of one acceptor (#362).
-    /// Floor 1; the acceptor cuts a page at `paros::driver` `SCRUB_PAGE`
+    /// Floor 1; the acceptor cuts a page at `paros::roles::node` `SCRUB_PAGE`
     /// records and 1 MiB whatever the scrubber asks.
     pub scrub_page: usize,
     /// How long a clean stop may take (#560 (clean Ctrl-C shutdown)): the

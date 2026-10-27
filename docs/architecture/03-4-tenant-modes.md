@@ -65,7 +65,7 @@ tenant's default.
   [--partitions P] [--replicas R]` sends a `JournalRequest` with a `ConfigureOp`
   (`paros::client::journals::JournalOp::Configure`) and an idempotency id. The tenant
   coordinator judges whether the cell can place the mode now (as many storage machines as a
-  grid needs, a free slot for each new acceptor: `paros::placement::plan`), and writes
+  grid needs, a free slot for each new acceptor: `paros::model::placement::plan`), and writes
   `Configure` to the tenant's control journal, or records the refusal (`Unplaceable` with no
   name, so a retry reads it back). The fold changes the journal's `desired`, or the tenant's
   default, which a create that names no mode takes (`partitions` 0 on the wire). The answer
@@ -95,7 +95,7 @@ tenant's default.
   does not name keeps the tenant's. The tenant coordinator applies `batchers=`: one step per
   watch round, after the footprint step, in turn over the hosted tenants (`machine/roles.rs`).
   It first releases a batcher slot on a machine that leaves. Then it books or releases slots
-  with `paros::placement` (`Role::Batcher`, `BookingTarget::Tenant`) until the tenant holds
+  with `paros::model::placement` (`Role::Batcher`, `BookingTarget::Tenant`) until the tenant holds
   `min(batchers, stateless machines that can take one)`. A cell with no `stateless` machine
   places none. A cell that grows places the rest later.
 - **Still to do.** The counts of frontends and proxy leaders, and the `replicas=` mode field,

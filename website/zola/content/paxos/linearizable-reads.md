@@ -145,7 +145,7 @@ judges it at apply like any other slot (`JournalState::apply`): it is a
 `Duplicate` exactly when the log already holds that write at that position.
 The judgement at apply is the safety rule (a leader may refuse early from its
 own fold as an optimisation, never instead of it), and the driver answers a call
-only with the verdict its slot folded to (`paros::driver::calls`), so an acknowledged write
+only with the verdict its slot folded to (`paros::roles::node::calls`), so an acknowledged write
 is always one a read through this node can already see.
 
 ## Where this lives in paros
@@ -158,7 +158,7 @@ is always one a read through this node can already see.
 | Settle and serve | `QuorumReads::fold`, `QuorumReads::serve`, `Replica::covers` |
 | The driver seam | `Ready::read_states`, `ReadState{ctx, index}` |
 | The verdict at apply | `JournalState::apply`, `Outcome` (`journal/state.rs`) |
-| A retry's answer | `Outcome::Duplicate`, answered from the fold (`paros::driver::calls`) |
+| A retry's answer | `Outcome::Duplicate`, answered from the fold (`paros::roles::node::calls`) |
 
 ## Proven, not asserted
 

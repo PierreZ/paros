@@ -40,11 +40,11 @@ Every oracle message is a stable string and its detail map carries the ids
 - `audit/world.rs` — `AuditWorld`, `check_run` (the end-of-run convergence and
   chosen-gap claims) and `fold_applied`, the application check over the
   clients' folds of the journal (#186: the client is the application;
-  `ChainState` in `chain.rs`, the fold in `chain_workload/fold.rs`);
-- `audit/mod.rs` — the `Audit` port's implementation, `reach_once!`.
+  `ChainState` in `workload/chain.rs`, the fold in `workload/fold.rs`);
+- `audit.rs` — the `Audit` port's implementation, `reach_once!`.
 
 The message tells you which invariant; the check's code tells you which
-`Audit` callback fed it (`crates/lib/paros/src/audit.rs`), and that callback sits
+`Audit` callback fed it (`crates/lib/paros-observe/src/audit.rs`), and that callback sits
 next to the driver `tracing` event that reports the transition.
 
 ## 3. Walk back through the protocol
@@ -61,7 +61,7 @@ stale. The usual shapes:
   reconfiguration superseded;
 - a client retry that changed the write — leader uuid, position or
   bytes — and was treated as new (`CallLog`'s retry-identity check in
-  `chain_workload/rpc.rs` names it).
+  `workload/rpc.rs` names it).
 
 Use `tracing` for reading only; never add a check that scans it. Note what a
 replay actually shows: `sim-paros-hunt` installs no subscriber of its own

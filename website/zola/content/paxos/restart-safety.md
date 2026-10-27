@@ -153,7 +153,7 @@ because the commit index *is* the applied index, and the sweep saturated with se
 crashes on, a stronger guard than replaying the one seed that surfaced it. Since paros
 stopped running an application (#186) there is nothing left to replay at all: the
 recovered chosen index is the node's whole walked prefix, and the boot report
-(`report_boot_state`, `crates/lib/paros/src/driver/boot.rs`) hands it to the audit as one
+(`report_boot_state`, `crates/lib/paros-roles/src/node/boot.rs`) hands it to the audit as one
 transition. The application is a client that reads the log, and it keeps its own
 place in it.
 
@@ -163,5 +163,5 @@ anyway, so in steady state it once stayed where the last election left it. After
 restart of a cell, each new leader then re-proposed its whole log, and the cell answered
 nothing for 30 to 90 s (#602). Now a sync writes the metainfo for the chosen index alone
 once it runs `CHOSEN_INDEX_LAG` (64) slots ahead of the durable one
-(`crates/lib/paros/src/journal/node.rs`). The audit checks **"a reboot rewinds the chosen
+(`crates/lib/paros-storage/src/journal/node.rs`). The audit checks **"a reboot rewinds the chosen
 index by less than a page"** at every boot.

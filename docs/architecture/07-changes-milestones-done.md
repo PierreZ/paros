@@ -20,7 +20,7 @@ AGENTS.md.
   `HostTenant` (with the tenant's name and `survives`), and it is born on the founding members,
   plain Multi-Paxos, majority. It holds the tenant's description (no rendezvous name) and every
   journal create and delete, each a request with an idempotency id judged at apply
-  (`paros::tenant`). Until #476 and #225 the elected cell coordinator is the tenant coordinator
+  (`paros::model::tenant`). Until #476 and #225 the elected cell coordinator is the tenant coordinator
   of every hosted tenant: it fences each tenant control journal with its term uuid, answers
   `JournalRequest` at its published interface, and places journals on the founding members.
   Every machine follows the cell control journal and every hosted tenant's control journal

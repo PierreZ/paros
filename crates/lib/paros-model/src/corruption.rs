@@ -7,7 +7,7 @@
 //! The classification itself is the journal's (`moonpool-journal`, CLSTORE:
 //! a torn last batch discarded, a damaged entry whose persist record
 //! survived reported with its identity, an ambiguous last batch of a
-//! one-sync commit); `paros::journal` maps its states onto these verdicts.
+//! one-sync commit); `paros::storage::journal` maps its states onto these verdicts.
 //! The durable-record contract is
 //! `docs/analysis/storage/clstore-record-contract.md`.
 

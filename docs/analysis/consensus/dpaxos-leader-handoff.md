@@ -212,7 +212,7 @@ redirect clients to itself.
 Everything below lives in `paros-sim`; `paros-core` is never buggified (the perturbation
 is a caller that calls differently).
 
-**BUGGIFY locations** (inline in `crates/lib/paros/src/driver/mod.rs`, #318):
+**BUGGIFY locations** (inline in `crates/lib/paros-roles/src/node.rs`, #318):
 
 - `initiate_handoff`, split into three independent probabilities by the *shape* of the
   transfer — a leader still healing a hole (0.30), one with a non-empty tail (0.20), a

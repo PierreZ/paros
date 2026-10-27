@@ -156,7 +156,7 @@ steps the node down to `Follower` and waits (`on_nack` / `become_follower`), and
 in-code comment says plainly that "we do not immediately re-prepare: that, with the
 randomized timeout, is the dueling-proposer livelock fix." Second, the election timeout
 is **randomized** — the driver draws a fresh jittered value (`draw_election_timeout`,
-`crates/lib/paros/src/driver/`) so two followers rarely time out together. (Classic
+`crates/lib/paros-roles/src/node/`) so two followers rarely time out together. (Classic
 single-decree Paxos cures the same duel with exponential backoff; the randomized
 timeout is the Multi-Paxos equivalent.)
 

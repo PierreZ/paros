@@ -119,7 +119,7 @@ retirements wait for the GC watermark (`may_retire`).
 *Landed* (#212 (placement), 2026-10-11): the placement function and the acceptor bookings of a
 create.
 
-- **The function.** `paros::placement::plan` maps the desired count, the machines the registry
+- **The function.** `paros::model::placement::plan` maps the desired count, the machines the registry
   offers and the target's live bookings to steps: slots to book and bookings to release. It is
   pure, so a new coordinator that folds the same registry computes the same steps. Its rules are
   section 3.4's: class and free slot, no machine with two storage instances of one target, zone
@@ -133,7 +133,7 @@ create.
   `cell init` refuses every admission (`in_cell_init`, by design: a stalled `cell init` is
   safer than a machine in two cells). The cell coordinator's watch writes `MachineAdmitted`
   once a registered machine answers `Identify` with this cell's id (`Registry::serves`), and
-  `paros::placement::machines` offers a founding member or such a machine only.
+  `paros::model::placement::machines` offers a founding member or such a machine only.
 - **Booking before the create.** The tenant coordinator plans a create's acceptors over the
   cell's storage machines, founding or admitted (#474), and books one acceptor slot
   on each in the cell control journal, through the term's cell session, before it writes the
@@ -210,7 +210,7 @@ create.
   tenant's set is born on the founding members, the bootstrap generation, without a booking. At
   each watch round, after the journal move step, the tenant coordinator takes one step of one
   set, in turn over the hosted tenants (never the cell tenant: its set serves the elections
-  that choose the coordinator). A step books the slots the set lacks with `paros::placement`
+  that choose the coordinator). A step books the slots the set lacks with `paros::model::placement`
   (`Role::Matchmaker`, target `BookingTarget::Set { tenant, set: 1 }`, the bootstrap
   generation's size, the slots on machines that stay as the current ones), or asks a founding
   member to hand the set over onto the booked machines that stay (`ReconfigureMatchmakers`,
@@ -247,7 +247,7 @@ request RPC and the placement of tenant coordinators.
   fold refuses at apply (class, capacity, a spent id) refuses the whole grant, and the fold
   records nothing for it. Footprint slots use the target `BookingTarget::Tenant { tenant }`:
   a tenant-level slot, so two of them may share a machine.
-- **What a footprint holds** (`paros::footprint`). At birth the durability is
+- **What a footprint holds** (`paros::model::footprint`). At birth the durability is
   `Durability::DEFAULT` (`failures-per-partition=1`, until a creation names one): one acceptor
   quorum (2 slots), one quorum for the control journal (2 slots) and the matchmaker set
   (3 slots), on storage machines, plus one coordinator slot on a `stateless` machine. When no
@@ -277,7 +277,7 @@ request RPC and the placement of tenant coordinators.
   in process (`machine/capacity.rs`); `paros::client::capacity` is the remote caller.
 - **Placement of tenant coordinators.** At each watch round, after the journal and set steps,
   the cell coordinator takes one footprint step of one tenant, in turn
-  (`machine/footprints.rs`, `paros::footprint::fix`): it books a coordinator slot on a live
+  (`machine/footprints.rs`, `paros::model::footprint::fix`): it books a coordinator slot on a live
   stateless machine when the tenant has none or its machine is down, releases the dead one
   once replaced, books a missing storage slot, and moves a slot off a draining machine.
   Until the follow-up, the tenant coordinator actor still runs inside the cell coordinator's

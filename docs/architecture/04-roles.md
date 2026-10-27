@@ -11,7 +11,7 @@ scalable independently per tenant by its coordinator:
 | Proxy leader | stateless | `ProxyLeader`, `run_proxy` |
 | Acceptor, grid quorums | storage | `Acceptor`, `QuorumSystem::Grid` |
 | Replica | storage | `ReplicaNode`, `run_replica`; serves `Read` |
-| Batcher | stateless | `paros_core::Batcher`, `paros::batcher` (every machine serves it, `run_batcher` stand-alone); booked per tenant by `batchers=` (#145, #604); multi-writer journals only (section 2.4) |
+| Batcher | stateless | `paros_core::Batcher`, `paros::roles::batcher` (every machine serves it, `run_batcher` stand-alone); booked per tenant by `batchers=` (#145, #604); multi-writer journals only (section 2.4) |
 | Unbatcher | stateless | `paros_core::Unbatcher`, in the batcher's process (section 2.4) |
 | Matchmaker | storage | `Matchmaker`, `run_matchmaker`; one logical set per tenant, processes shared |
 | Frontend (the entry role) | stateless | to build: one pool per tenant, per `(tenant, region)` in a multi-region cell (section 3.4); authorizes, resolves names and forwards each call to the role that serves it (section 3.5) |

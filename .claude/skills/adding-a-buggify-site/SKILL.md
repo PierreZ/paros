@@ -23,8 +23,8 @@ For a timing or policy choice the provider-generic driver owns (skip a
 resend, resign, hand off, drop a reply, hold a mailbox, stretch a tick):
 
 1. Put a `moonpool_buggify::buggify_fault_with_prob!(p)` at the line that
-   makes the choice, one macro line per match arm (`driver/transport.rs`,
-   `driver/reply.rs`, `driver/mod.rs` are the pattern). A disruptive site is
+   makes the choice, one macro line per match arm (`crates/lib/paros-roles/src/node/transport.rs`,
+   `crates/lib/paros-roles/src/node/reply.rs`, `crates/lib/paros-roles/src/node.rs` are the pattern). A disruptive site is
    silent in the recovery tail by itself. If the core must expose the
    decision, add a method to `ColocatedNode` with an honest contract
    ("skipping is always safe; re-send is pure optimization"); the core gains
@@ -43,7 +43,7 @@ resend, resign, hand off, drop a reply, hold a mailbox, stretch a tick):
 5. **A per-seed scenario ingredient is a named location.** When a scenario
    needs the site on together with its other ingredients, use
    `moonpool_buggify::buggify_named!(LABEL, p)` with a `pub const` label in
-   `crates/lib/paros/src/scenario.rs`, and decide it in the scenario's draw in
+   `crates/lib/paros-observe/src/scenario.rs`, and decide it in the scenario's draw in
    `crates/sim/paros-sim/src/shape.rs` with `moonpool_sim::set_activation(LABEL,
    on)` (`WITHHOLD_GC`, `HOLD_JOURNAL`, `LOSE_VERDICTS` are the pattern).
    Never reword a label.
@@ -53,7 +53,7 @@ resend, resign, hand off, drop a reply, hold a mailbox, stretch a tick):
 For anything that shapes a run (a count, a window, a capacity, a rate):
 
 - **Workload tunables** live in `ChainConfig::for_timeline`
-  (`crates/sim/paros-sim/src/chain_workload/config.rs`); **per-node driver tunables** in
+  (`crates/sim/paros-sim/src/workload/config.rs`); **per-node driver tunables** in
   `NodeShape::draw` (`crates/sim/paros-sim/src/shape.rs`), which draws once per
   logical node per seed and reuses the shape across restarts; **disk fault
   rates** in the injector's families (`world/injector.rs`); a cut mid-commit is a
@@ -68,18 +68,18 @@ For anything that shapes a run (a count, a window, a capacity, a rate):
   connect timeouts at `CONNECT_FLOOR_MS`).
 - Never buggify an oracle threshold (`DEPOSED_TICK_SLACK` in
   `audit/state.rs`, `PLATEAU_SEEDS` and `CHAOS_DURATION_MS` in `lib.rs`,
-  `SETTLE` in `chain_workload/reads.rs`) or a schedule
+  `SETTLE` in `workload/reads.rs`) or a schedule
   ceiling (`*_ITERATIONS`); constants a correctness argument depends on
   (`MAX_TORN_TAIL`) are not tunables and say so where defined.
 - A new production tunable is **born** as a `DriverTunables` field with a
-  default in `crates/lib/paros/src/driver/config.rs`, then drawn in `NodeShape`.
+  default in `crates/lib/paros-tunables/src/lib.rs`, then drawn in `NodeShape`.
 
 ## Seams
 
 Process-level attrition cannot crash between a write and its sync. The
 drivers name those moments inline with moonpool's `hint!("label").await`
 (#294): the node driver's "batch staged, not synced" and "batch durable, not
-sent" (`driver/ready.rs`), the replica's "replica batch durable, not sent",
+sent" (`crates/lib/paros-roles/src/node/ready.rs`), the replica's "replica batch durable, not sent",
 the matchmaker's "registration staged, not synced" and "registration
 durable, reply not sent", and "reconfiguring prepare sent" (#260: a
 reconfiguring candidate dies after its `Prepare`s left, so its campaign never

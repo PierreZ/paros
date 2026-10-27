@@ -19,7 +19,7 @@ the `Authz` trait only; Biscuit never enters `paros` or `paros-core`.
   offline. Every caller value enters Datalog as a parameter, never as source text.
 - `src/verify.rs` → `POLICY`, `Request`, `TargetKind`, `Refusal`, `authorize`: the request facts,
   the one policy, the limits, the refusal kinds.
-- `src/frontend.rs` → `BiscuitAuthz`, `operation`, `since_epoch`: `paros::frontend::Authz` over
+- `src/frontend.rs` → `BiscuitAuthz`, `operation`, `since_epoch`: `paros::roles::frontend::Authz` over
   a `KeyRing` (#192 (the frontend)), or over the universe entry's keys when the request carries any (#245); a call's names and its frontend's clock become a `Request`,
   a `Refusal` becomes a `Denial`.
 - `tests/frontend.rs` → `BiscuitAuthz` through the `Authz` trait: a tenant's rights, `admin` on an

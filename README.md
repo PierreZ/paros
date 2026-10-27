@@ -30,12 +30,14 @@ acceptors ever choose different values.
 
 ## At a glance
 
-| Crate | Role |
-|-------|------|
-| [`paros-core`](crates/lib/paros-core) | sans-IO Multi-Paxos state machine: std-only, wasm-safe, zero deps with `default-features = false` (only `tracing` spans on by default) |
-| [`paros`](crates/lib/paros) | the provider-generic node driver, default storage, and RPC contract |
-| [`paros-sim`](crates/sim/paros-sim) | the deterministic-simulation harness: the workload, the fault world, the audit |
-| [`parosd`](crates/bin/parosd) | the `parosd` daemon, one uniform binary per machine, and `parosctl`, the CLI |
+The workspace holds three products, each in its own directory of `crates/` (#722 (three
+products)):
+
+| Product | Crates |
+|---------|--------|
+| The library, `crates/lib/` | [`paros-core`](crates/lib/paros-core), the sans-IO Multi-Paxos state machine (std-only, wasm-safe, zero deps with `default-features = false`); one crate per layer above it (wire, model, tunables, storage, net, client, observe, roles, coordinator, machine); and [`paros`](crates/lib/paros), the facade a program depends on |
+| The binaries, `crates/bin/` | [`parosd`](crates/bin/parosd), one uniform daemon per machine; [`parosctl`](crates/bin/parosctl), the CLI; [`paros-bench`](crates/bin/paros-bench), the load generator |
+| The harness, `crates/sim/` | [`paros-sim`](crates/sim/paros-sim), the deterministic-simulation harness (the workload, the fault world, the audit), and its runners |
 
 ## Run it
 
@@ -82,7 +84,7 @@ Each machine serves Prometheus metrics and two probes (`/metrics`, `/healthz`, `
 start first:
 
 ```sh
-parosctl bench --local 3 --duration 30s
+paros-bench --local 3 --duration 30s
 ```
 
 The copy-paste demo, with Docker Compose or three local processes, is

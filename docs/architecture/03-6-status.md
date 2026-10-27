@@ -14,7 +14,7 @@ caller's authorization: **role slots** per machine (class, total, booked, and wh
 slot), per tenant (its slots and footprint), per cell (free and booked per class) and for the
 universe (decided on 2026-10-04).
 
-**The words** (#191 (status), landed 2026-10-11; `paros::status`). Each journal of a cell or
+**The words** (#191 (status), landed 2026-10-11; `paros::model::status`). Each journal of a cell or
 tenant view carries its desired acceptor count, its placed configuration, the word the answer
 judged (`observed`) and the word the cell shows (`word`):
 
@@ -56,7 +56,7 @@ nothing. The RPC is `View` (`paros.view.View`, method `0x5041_0309`), with three
 its `paros/zone` and `paros/rack` tags and whether it is up. Any other query from a `tenant` caller is refused
 `forbidden`. The frontend checks tokens on the four data-plane calls since #192 (the frontend),
 but a `View` does not go through it yet: the caller states its scope and
-`paros::view::authorize` takes it as given. That function is the seam where the Biscuit roles of
+`paros::model::view::authorize` takes it as given. That function is the seam where the Biscuit roles of
 section 3.5 (`admin`, `tenant`, `view.detail`) will decide the scope.
 
 `parosctl` shows the views as tables, and `--json` gives one document for scripts:
@@ -75,7 +75,7 @@ uses FDB's key names.
 - **Measure.** moonpool's sixth provider, `SystemProvider`, gives cumulative counters: the
   process CPU time (`getrusage`), the machine CPU (`/proc/stat`), the run loop's busy time
   (the CPU time of `parosd`'s one compio thread) and the data disk (`/proc/diskstats`, found from the
-  data directory). `paros::load::Busyness::between` turns two samples into one window. It is
+  data directory). `paros::model::load::Busyness::between` turns two samples into one window. It is
   pure arithmetic; a counter that goes back gives no window.
 - **Sample.** Every machine samples itself every `load_interval` (default 5 s, floor 1 s,
   `PAROS_LOAD_INTERVAL_MS`) and keeps only its last full window.
@@ -99,7 +99,7 @@ uses FDB's key names.
   costs already charge sends and writes, and a charge goes only where a profile shows real work.
 
 **Metrics, probes and usage** (#366 (metrics, health and usage), landed 2026-10-15;
-`paros::metrics`). Every machine counts the data-plane calls it serves in a plain `prometheus`
+`paros::observe::metrics`). Every machine counts the data-plane calls it serves in a plain `prometheus`
 registry, provider-free and wasm-safe. The counters are for an operator, never for a decision:
 the code that serves never reads them.
 
@@ -151,7 +151,7 @@ the code that serves never reads them.
 - **Not yet.** A trace context carried in the RPC envelope (a span stops at its machine), an audit log that names each
   caller, and a metric for the store's sync time alone stay open in follow-up issues.
 
-**The benchmark** (#194 (throughput benchmark), landed 2026-10-15). `parosctl bench` runs
+**The benchmark** (#194 (throughput benchmark), landed 2026-10-15). `paros-bench` runs
 clients over `paros::client` against the servers (`--servers`) or against a cell of N machines
 it starts in its own process (`--local N`): the shipped `run_machine` on loopback, with its
 stores on a real filesystem with real syncs, formed by `paros::client::initialize`. The calls are
@@ -160,7 +160,7 @@ a schedule. The clients run closed loop, or open loop at `--rate` calls per seco
 call's latency counts from the moment it was due (no coordinated omission). `--json` prints one
 report: throughput (calls and bytes per second) and latency (mean, p50, p90, p99, p99.9, max)
 per call, with the commit, the command line, the CPU count, the kernel and the filesystem of a
-local cell's stores. CI only checks that `parosctl bench --local 3 --duration 5s` runs: numbers
+local cell's stores. CI only checks that `paros-bench --local 3 --duration 5s` runs: numbers
 on shared runners are noise. The baseline is posted on #194. `--topology 3x1,3x3` compares
 journal shapes (decided on 2026-10-16, asked to see whether a grid behaves better): each
 `ROWSxCOLUMNS` runs in turn under one seed on journals of its own, on a new local cell for

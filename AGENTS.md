@@ -345,12 +345,12 @@ Depth: module docs of `matchmaking.rs`, `node/matchmaking.rs`, `node/reconfigure
   A full disk (`StorageError::Full`, #360 (disk full)) is never a crash: the journal re-opens
   read-only (Phase 1 and reads, no Phase-2 vote) until `read_only_ticks` after the fault, and never ends the node.
 - **Control journals** (#189, #210): the node registry is the cell tenant's control journal
-  (`paros::system::Registry`), and every hosted tenant has its own control journal
-  (`paros::tenant::TenantControl`): its description and every journal it created, each create or
+  (`paros::model::registry::Registry`), and every hosted tenant has its own control journal
+  (`paros::model::tenant::TenantControl`): its description and every journal it created, each create or
   delete a request with an idempotency id judged at apply, its outcome recorded under that id. A
   node follows them through a `ControlPlan` (`None` is the static deployment). The tenant
   coordinator (the elected cell coordinator until #476, #225) draws a created journal's id, books
-  one acceptor slot per member in the registry with `paros::placement` before the create, and
+  one acceptor slot per member in the registry with `paros::model::placement` before the create, and
   records a create it has no slot for as `Unplaceable` (#212 (placement)); the
   fold refuses a used id (`IdTaken`: the coordinator redraws), and an id is never reused.
   Clients send requests with `paros::client::journals`. The core's pool grows, never shrinks
@@ -358,9 +358,9 @@ Depth: module docs of `matchmaking.rs`, `node/matchmaking.rs`, `node/reconfigure
   machine's class and capacity, judges capacity bookings at apply (#211), and is checkpointed
   and truncated with `paros::client::checkpoint` (#230); a `stateless` machine never serves a
   journal.
-- **The fleet tenant** (`paros::fleet`, #229; named *meta* until #244) holds the fleet directory
+- **The fleet tenant** (`paros::model::fleet`, #229; named *meta* until #244) holds the fleet directory
   (`FleetDirectory`): tenant → cell plus the cell entries, hosted by the fleet's one cell. Every
-  tenant has a set of groups (`paros::fleet::Groups`), fixed at registration: the fleet tenant
+  tenant has a set of groups (`paros::model::fleet::Groups`), fixed at registration: the fleet tenant
   `{internal, fleet}`, a cell tenant `{internal, cell}` (both created only by
   `init`/adding a cell), a served tenant `{users}` (the tenant API's); only `cell` forbids a move,
   and there is no per-tenant placement. Fleet operations (`init`'s fleet half, tenant create
@@ -372,7 +372,7 @@ Depth: module docs of `matchmaking.rs`, `node/matchmaking.rs`, `node/reconfigure
 - **The storage seam is async** (`LogStorage` / `MatchmakerStorage`: every device-touching method
   returns a `Send` future, awaited in persist-before-send order); the core's recovery ports
   stay synchronous, served from memory after `boot_scan`. Production stores are
-  `paros::journal` on `moonpool-journal`, a CLSTORE journal: the state itself (slot = position,
+  `paros::storage::journal` on `moonpool-journal`, a CLSTORE journal: the state itself (slot = position,
   ballot in the entry's identity, scalars in its two-copy metainfo), no fold, no checkpoint.
   `JournalStores::open` is async: an opener resolves an interrupted format from the disk at every
   open, a quarantined journal's re-open included.
@@ -383,8 +383,9 @@ Depth: module docs of `matchmaking.rs`, `node/matchmaking.rs`, `node/reconfigure
   rejoins**: a trim jump restores the floor, not the promise. The acceptor set heals around it by
   reconfiguration; a wiped matchmaker is replaced by a handover.
 
-Depth: `crates/lib/paros/AGENTS.md`; module docs of `driver/journals.rs`, `driver/system.rs`,
-`driver/boot.rs`, `storage/mod.rs`, `journal/mod.rs`, `matchmaker/mod.rs`.
+Depth: `crates/lib/paros-roles/AGENTS.md` and `crates/lib/paros-storage/AGENTS.md`; module docs of
+`paros-roles`'s `node/journals.rs`, `node/system.rs`, `node/boot.rs`, `matchmaker.rs`, and of
+`paros-storage`'s `lib.rs` and `journal.rs`.
 
 ## Turbulence layers
 
@@ -421,7 +422,7 @@ Three layers, and nothing crosses them:
   `LATE_WINDOW` into the tail and lasts 13–18 s, past every `machine_replace_after`
   (`paros_sim::world::gone_machine`, #475 (re-place after the Down bound)). Likewise on a seed that draws
   the lagging-fold scenario, half the nodes admit the registry's pool 2 s late
-  (`paros::scenario::ADMIT_LATE`, #387 (unpooled joiner)), in the tail too: the hold is a bound,
+  (`paros::observe::scenario::ADMIT_LATE`, #387 (unpooled joiner)), in the tail too: the hold is a bound,
   not a window, because most joiners register in the tail.
 - **`paros-core` is never buggified**: no RNG, knob or conditional compilation. A rare-but-valid
   decision is exposed as a method with an honest contract (`resend_pending`, `step_down`) and
@@ -429,7 +430,7 @@ Three layers, and nothing crosses them:
 - **Prong 1, the driver's choices are inline sites** (#294, #318): every per-call rare-but-valid
   choice is a `buggify_fault_with_prob!` at the line that makes it (silent in the recovery tail),
   with a `reachable!` beside it or a fired gate in the audit. A site that is one ingredient of a
-  per-seed scenario is a named location (`buggify_named!`, `paros::scenario`, #318 E): the
+  per-seed scenario is a named location (`buggify_named!`, `paros::observe::scenario`, #318 E): the
   harness turns it on with the scenario's other ingredients (`set_activation`). Draw a site only
   where its answer has an observable effect. A driver site draws **only on the node loop**,
   never in a spawned task; a decision a spawned task needs is carried to it.
@@ -446,7 +447,7 @@ Three layers, and nothing crosses them:
   `PLATEAU_SEEDS`, `CHAOS_CAP`, `SETTLE`, `WAIT_SETTLE`) and schedule ceilings
   (`*_ITERATIONS`). Constants a correctness argument depends on (`MAX_TORN_TAIL`) are not tunables.
 
-Depth: the `adding-a-buggify-site` skill, `crates/lib/paros/src/scenario.rs`.
+Depth: the `adding-a-buggify-site` skill, `crates/lib/paros-observe/src/scenario.rs`.
 
 ## Audit, correctness, assertions, spans
 

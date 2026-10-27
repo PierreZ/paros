@@ -145,7 +145,7 @@ judges every read.
 **In the code.** `QuorumRead`, `QuorumReads` (`quorum_read.rs`);
 `ColocatedNode::quorum_read(ctx)` and `quorum_read_in(ctx, row)`
 (`node/quorum_reads.rs`); the `Read` RPC (`paros.proto`), which the driver
-parks until the read is confirmed and serves from the fold (`driver/log_reads.rs`);
+parks until the read is confirmed and serves from the fold (`crates/lib/paros-roles/src/node/log_reads.rs`);
 `Acceptor::vote_watermark` (`acceptor.rs`); `Message::PreRead`,
 `Message::PreReadAck` (`message.rs`); `Replica::covers`, `Ready::read_states`.
 Paper: Whittaker et al., *Compartmentalized Paxos* §3.4, *Paxos Quorum Reads*.
@@ -221,7 +221,7 @@ hole. The rule that closes both is in the next section.
 (`node.rs`, `node/phase2.rs`); `Party`, `Audience::Proxy` (`message.rs`);
 `Config::proxy_count` (`contract/config.rs`); `ProxyConfig`, `ProxyJournal`; the model checker `models/proxy.rs`; the
 example `paros-core/examples/proxy_leader.rs`; the driver `paros::run_proxy`
-(`paros/src/proxy/mod.rs`), the harness's `ProxyProcess` and `PROXY_GROUP`
+(`crates/lib/paros-roles/src/proxy_leader.rs`), the harness's `ProxyProcess` and `PROXY_GROUP`
 (`paros-sim/src/process/`, `roles.rs`), the audit's
 `observe_proxy_decision` (`paros-sim/src/audit/state.rs`). Paper: Whittaker et
 al., *Compartmentalized Paxos* §3.1. No level yet.
@@ -320,7 +320,7 @@ Phase 1 reads.
 `Config::replica_count`, `Config::reply_owner` (`contract/config.rs`);
 `ReplicaId` (`membership/ids.rs`); `WriteOp::Learned` (`write.rs`); the example
 `paros-core/examples/replica_tier.rs`; the driver `paros::run_replica`
-(`paros/src/replica_tier/mod.rs`), the harness's `ReplicaProcess` and
+(`crates/lib/paros-roles/src/replica.rs`), the harness's `ReplicaProcess` and
 `REPLICA_GROUP` (`paros-sim/src/process/`, `roles.rs`); the replica's quorum
 read `ReplicaNode::quorum_read_in` and its journal read `ReplicaNode::read_log`;
 the jump below the floor `ReplicaNode::trim_to`. Paper: Whittaker et al., *Compartmentalized
@@ -586,11 +586,11 @@ The scrubber writes its progress as an entry in the tenant's control journal.
 A newly elected scrubber reads that entry and continues the pass from there.
 A rate limit and a full-pass bound pace the reads, each with a floor.
 
-**In the code.** `LogStorage::scrub` (`storage/mod.rs`) reads and checks one
+**In the code.** `LogStorage::scrub` (`crates/lib/paros-storage/src/lib.rs`) reads and checks one
 page; `ColocatedNode::repair_record` (`node.rs`) and `Acceptor::rewrite`
 (`acceptor.rs`) write a damaged record again; `machine/scrub.rs` is the scrubber;
 `ScrubProgress` (`tenant/scrub.rs`) is its progress entry. In the simulation, a
-cold-rot scenario (`paros-sim`'s `world/cold_rot.rs`) damages a record on one disk
+cold-rot scenario (`paros-sim`'s `world/scenarios/cold_rot.rs`) damages a record on one disk
 while its machine runs, and a gate requires that the scrubber repairs a record no
 client read.
 
@@ -650,12 +650,12 @@ as the old one. A formation interrupted between its formats and its commit
 resumes by reading the disk, the rule the simulation's operator follows too.
 
 **In the code.** `LogStorage::formatted_config`, `LogStorage::format`
-(`crates/lib/paros/src/storage/mod.rs`); `BootKind::FirstBoot`,
+(`crates/lib/paros-storage/src/lib.rs`); `BootKind::FirstBoot`,
 `BootKind::ExistingMember`, `BootRefusal::Amnesia`,
-`BootRefusal::ConfigMismatch` (`crates/lib/paros/src/driver/config.rs`);
-`Audit::boot_refused`; `provision_store` (`crates/lib/paros/src/provision.rs`),
-`paros::machine::run_machine` and `MachineRecord` (`crates/lib/paros/src/machine/`)
-and `parosd`'s `Record` (`crates/bin/parosd/src/record.rs`). Play it:
+`BootRefusal::ConfigMismatch` (`crates/lib/paros-tunables/src/lib.rs`);
+`Audit::boot_refused`; `provision_store` (`crates/lib/paros-storage/src/provision.rs`),
+`paros::machine::run_machine` and `MachineRecord` (`crates/lib/paros-machine/src/`)
+and the machine's `MachineRecord` (`crates/lib/paros-model/src/machine/record.rs`). Play it:
 [`act4/the-wiped-node`](../../play/#act4/the-wiped-node).
 
 ## Many journals on one process
@@ -694,7 +694,7 @@ board carries what no single journal can see:
   window;
 - a node keeps serving its other journals while one is quarantined.
 
-**In the code.** `run_journals`, `JournalStores` (`crates/lib/paros/src/driver/`,
-`journals.rs`); `PeerMailbox` (`crates/lib/paros/src/driver/transport.rs`);
-`paros::scenario::HOLD_JOURNAL`, `Audit::journal_held`, `Audit::journal_quarantined`;
+**In the code.** `run_journals`, `JournalStores` (`crates/lib/paros-roles/src/node/`,
+`journals.rs`); `PeerMailbox` (`crates/lib/paros-roles/src/node/transport.rs`);
+`paros::observe::scenario::HOLD_JOURNAL`, `Audit::journal_held`, `Audit::journal_quarantined`;
 `crates/sim/paros-sim/src/audit/journals.rs`; `paros_sim::shape::journals`.
