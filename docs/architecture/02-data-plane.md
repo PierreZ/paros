@@ -275,7 +275,7 @@ after the create. There are two modes:
 
 Both modes are safe. A faulty entry was never acknowledged, so no decided value is lost. A
 `batched` journal repairs a lost batch only while each slot keeps a Phase-1 quorum of clean
-copies. A `batched` journal with `failures-per-partition 0` (one acceptor per partition) can
+copies. A `batched` journal with `machines=0` (one acceptor per partition) can
 stop for good after a power loss inside a commit. Choose `batched` only with `F >= 1`.
 
 How it is built. The mode is a field of the journal's `CreateJournal` entry in the tenant

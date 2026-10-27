@@ -76,5 +76,20 @@
   quorums with the intent durable before Phase 1.
 - **WPaxos's joint reconfiguration** (rejected on 2026-10-07): matchmakers reconfigure
   (section 4.1).
+- **Per-tenant pools of proxy leaders and batchers** (2026-10-04 to 2026-10-28, #193; per
+  `(tenant, region)` from 2026-10-07, #253; sized by the tenant counts `proxy_leaders=` and
+  `batchers=` of #604 (role counts)). Replaced by per-journal counts (#753 (per-journal
+  proxies), section 3.4): the core already holds `proxy_count` per journal, a journal's proxy
+  demand comes from its own fan-out, and a weightless stateless booking keeps idle journals
+  from filling the cell, the reason the pools existed.
+- **`failures-per-partition` and `partitions` inside `Durability`** (2026-10-14 to 2026-10-28,
+  #523 (durability names)). Replaced by `--survive machines=,zones=,regions=` (#748 (survive))
+  and a separate scale count `partitions` (#755 (partitions leave durability)), section 3.4. The
+  user typed a protocol number, not the failure to survive, and zone survival was dropped
+  without a word over one or two zones.
+- **A throughput target** (for example `--writes 50k/s`), rejected on 2026-10-28: it needs a
+  cost model paros does not have, and the simulation cannot prove it.
+- **A per-journal broadcast mode** (`--broadcast leader|pool`), rejected on 2026-10-28: a count
+  of 0 already means colocated (section 3.4).
 - **Hierarchical `Zoned` quorums** (deferred on 2026-10-07, #253): a later `QuorumSystem` variant once the
   simulation runs nine acceptors (section 5).

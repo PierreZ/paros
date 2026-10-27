@@ -10,7 +10,13 @@ role slots, journals born with their matchmaker set, tenant modes, the data-plan
 chaos in simulation and the deferral of recovery decided on 2026-10-04; the resolver and the
 frontend, zones inside a cell and multi-region cells decided on 2026-10-07; bootstrap by admin
 calls, `cell init` as a single-decree Paxos, the election journal on the founding members and the
-tenant control journal's fields decided on 2026-10-09. The milestones at the end carry the issue
+tenant control journal's fields decided on 2026-10-09; the journal's configuration redesign
+decided on 2026-10-28: `--survive` in place of `failures-per-partition` (#748 (survive)),
+per-journal proxy leaders and batchers (#753 (per-journal proxies)), `configure --plan` with its
+three outcomes (#749 (configure plan), #750 (plan oracle), #751 (cell capabilities)), status
+wants against has (#752 (wants against has)), `partitions` out of `Durability` (#755 (partitions
+leave durability)), the counts out of the format marker (#754 (counts off the format marker))
+and grids against failure domains (section 5). The milestones at the end carry the issue
 numbers.
 
 This folder holds one file per chapter; section 3 has one file per subsection. Read the files in

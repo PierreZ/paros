@@ -212,9 +212,13 @@ partitions the rule applies per partition (#532 (acceptor partitions)), because 
 predicates do. The tenant coordinator's create (`machine/tenants.rs`) labels the planned members
 from the registry and owns the configuration with its cell; a move (`machine/moves.rs`) does the
 same for the machines that stay. **Where the rule binds** (the open question of #215, default
-taken on 2026-10-16): a durability with `failures-per-partition` 1 or more, over storage machines
-that span three zones or more (`paros::model::placement::zone_rule_binds`). Over one or two zones no
-configuration can meet it, so the create is placed as before, without zone survival. Where it
+taken on 2026-10-16; amended on 2026-10-28, #748 (survive)): a durability with
+`failures-per-partition` 1 or more, over storage machines that span three zones or more
+(`paros::model::placement::zone_rule_binds`). Over one or two zones no configuration can meet it,
+so the create is placed as before, without zone survival. Since 2026-10-28 the journal's
+`survive` says whether the rule binds (`zones=1` or `regions=1`), never the cell's shape: a
+journal that asks for zone survival where the cell cannot give it is placeable degraded (with
+`--allow-degraded`) or unplaceable, and the plan says so (section 3.4). Where it
 binds, a plan that breaks it is planned again under another tie-break draw, up to
 `placement::ZONE_DRAWS` (8), and the create is recorded `Unplaceable` when none holds (a
 four-member majority over three zones, 2/1/1, is one). Not yet built: the rule on a move's
@@ -223,25 +227,41 @@ zone-pair latency model.
 
 **The shape of a regional cell.** A regional cell spans at least three zones (section 3.7). Its
 minimum production shape is two `storage` machines and one `stateless` machine per zone, nine
-machines: `failures-per-partition=2` needs five acceptors on five distinct machines and survives
+machines: `machines=2` needs five acceptors on five distinct machines and survives
 a zone only when spread 2/2/1.
 
-- **Acceptors**: `failures-per-partition=2` 2/2/1, the lone acceptor preferably in the zone that
-  writes least (a later reconfiguration adjusts it); `failures-per-partition=1` 1/1/1;
-  `failures-per-partition=0` none (section 3.4); with `partitions` above 1 the rule applies to
-  each partition (amended on 2026-10-14, #532 (acceptor partitions)).
+- **Acceptors**: `machines=2` 2/2/1, the lone acceptor preferably in the zone that
+  writes least (a later reconfiguration adjusts it); `machines=1` 1/1/1;
+  `machines=0` none (section 3.4); with `partitions` above 1 the rule applies to
+  each partition (amended on 2026-10-14, #532 (acceptor partitions); see grids below).
 - **Matchmakers**: 1/1/1 or 2/2/1, majorities only; a tenant's matchmaker preferably never
   shares a machine with its acceptors, while capacity permits.
-- **Stateless roles**: once a tenant's pool has three instances, at least one frontend and one
-  proxy leader per zone. Coordinators run on `stateless` machines and are re-elected in a
+- **Stateless roles**: at least one frontend per zone. A journal with three proxy leaders or
+  more has at least one per zone; proxy leaders and batchers are per-journal counts, spread zone
+  by zone (amended on 2026-10-28, #753 (per-journal proxies)). Coordinators run on `stateless` machines and are re-elected in a
   surviving zone after a zone loss.
 - **Replicas** spread over the zones, and a `Read` goes to the replica in the reader's zone.
 
-**The degraded trap.** After the loss of a zone that held two of a `failures-per-partition=2` journal's acceptors,
+**The degraded trap.** After the loss of a zone that held two of a `machines=2` journal's acceptors,
 three of five remain with zero slack, and the zone rule cannot be met again over two zones. The
 coordinator waits out the re-placement bound (section 3.2), the journal shows `Degraded`
 (section 3.6), and it is never re-placed into two zones; it is re-placed into a fourth zone only
-where the region has one.
+where the region has one. Its status line says so (section 3.6): `wants 2 machines,1 zone · has
+2 machines,0 zones · zone b lost, waiting for a 4th zone`.
+
+**Grids and failure domains** (decided on 2026-10-28, #748 (survive), #749 (configure plan),
+#755 (partitions leave durability)).
+
+- **The zone rule applies per acceptor partition** (per column). Each column spreads over the
+  zones like one majority. A column inside one zone is refused by the rule's second predicate
+  (no domain commits alone). Such a column would also block every later reconfiguration,
+  because Phase 1 needs a majority of every old column.
+- **A zone loss strikes every column at the same time.** After it, each column has spent its
+  margin, and one more failure in any of the `P` columns stops elections. The plan states it,
+  for example `after a zone loss: 0 spare per column, 3 columns at risk`.
+- **Regions are the same.** With regions as the failure domain the same holds. Region survival
+  and AZ survival stay separate guarantees (below). For a multi-region journal with partitions,
+  the plan recommends 3/3/3 per column.
 
 **A zone loss, a region loss.** A regional cell serves through the loss of one zone. The loss of
 its region takes it down by design: cells are not failover domains (section 3.7), resolvers
@@ -264,7 +284,7 @@ new capacity and moves wait.
 
 **Multi-region cells** (M12, decided on 2026-10-07, #253; M13 folded into M12 on 2026-10-09). Failure domains are two-level,
 `(region, az)`: in a regional cell every member shares one region and the rule runs over AZs; in a
-multi-region cell it runs at both levels. A `failures-per-partition=2` journal is placed 2/2/1 over the
+multi-region cell it runs at both levels. A `machines=2` journal is placed 2/2/1 over the
 three regions, its lone acceptor in the witness region, and each region's acceptors of one
 journal sit in distinct AZs. The rule: for every region `r`, both quorums hold on `M` minus `r`;
 for every AZ `a`, both hold on `M` minus `a`; and no region alone holds a Phase-2 quorum.
