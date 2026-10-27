@@ -1025,6 +1025,20 @@ where
                     );
                     rt.node.campaign_above(ballot);
                 }
+                // A campaign that adopted a reconfiguration naming its node
+                // campaigns again at once under it, not one election timeout
+                // later: the adoption is a fact, and no other candidate may
+                // lead the configuration it left (replay-recipe
+                // 10657547324818908675 658028:11647765738364291514 on 92aec82:
+                // a journal shrunk to one acceptor adopted its own
+                // reconfiguration from a new matchmaker generation, waited
+                // 12 s, lost a duel to a non-member, and missed the settle).
+                if matches!(step, MatchStep::StaleConfiguration { .. }) && rt.node.is_acceptor() {
+                    moonpool_assertions::reachable!(
+                        "matchmaking: a campaign that adopted a reconfiguration campaigns again at once"
+                    );
+                    rt.node.campaign_above(ballot);
+                }
                 shared.settle(rt).await;
             }
             Some((tenant, ack)) = gc_acks.recv() => {
