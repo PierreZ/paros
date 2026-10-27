@@ -244,6 +244,9 @@ pub struct Hosted {
     /// Whether the cell coordinator's task ended (#560 (clean Ctrl-C
     /// shutdown)).
     pub coordinator_ended: Option<watch::Receiver<bool>>,
+    /// Whether the machine's frontend ended (#723 (frontend as a parosd
+    /// role)).
+    pub frontend_ended: Option<watch::Receiver<bool>>,
 }
 
 /// The machine a node loop serves journals for (#474): a founding member

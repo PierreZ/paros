@@ -70,6 +70,14 @@ pub const RARE: &[Rare] = &[
         reason: "a tenant default configured with fewer batchers than its booked slots: a configure of the default after the booking names a lower count; 5 of 600 single-seed hunts with the batchers scenario, which books on 30 (#702 (batcher rare paths))",
     },
     Rare {
+        msg: "coordinator: a frontend slot is released to its count",
+        reason: "a tenant default configured with fewer frontends than its booked slots, as for the batchers: 0 of 300 single-seed hunts on PR #736 (#723 (frontend as a parosd role)); its batcher twin fires 5 of 600 (#702 (batcher rare paths))",
+    },
+    Rare {
+        msg: "stop: a frontend's stop ran out of time",
+        reason: "a machine's frontend that still forwards a call when the machine's shutdown_within runs out: the bound is the machine's knob (1.5 s by default, 0 to 4 s), mostly above a forwarded call's 600 ms; 0 of 300 single-seed hunts on PR #736 (#723 (frontend as a parosd role))",
+    },
+    Rare {
         msg: "placement: a placement changed between the oracle's reads",
         reason: "a mode change or a move that records its placement and releases a slot between the oracle's two reads, in the tail: one witness, seed 4897247819957563398 on PR #683 (disk full) (#360 (disk full), #486)",
     },

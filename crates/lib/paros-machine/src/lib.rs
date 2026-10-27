@@ -205,13 +205,15 @@ impl CellHost for CellMachine {
                 self.facts().names.clone(),
                 *tunables,
             );
-            paros_roles::frontend::spawn(
+            // It begins its stop with the machine's (`stopping`), and the
+            // node loop waits for it to end.
+            hosted.frontend_ended = Some(paros_roles::frontend::spawn(
                 providers,
                 rpc_handle,
                 settings,
                 (role.authz.clone(), frontend_audit),
-                incarnation_shutdown.clone(),
-            )?;
+                (incarnation_shutdown.clone(), stopping.clone()),
+            )?);
         }
         match self {
             CellMachine::Admitted { machine, cache } => {

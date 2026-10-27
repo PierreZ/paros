@@ -59,6 +59,7 @@ use moonpool_core::{
 use moonpool_rpc::RpcHandle;
 use paros_core::journal::JournalIdentifier;
 use paros_net::runtime::ParosProviders;
+use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use crate::node::edge::{Plain, RpcEdge};
@@ -289,9 +290,11 @@ where
     }
 }
 
-/// Serve the frontend contract on the machine edge `rpc` until `shutdown`,
-/// in a task of its own (#723 (frontend as a parosd role)): the frontend
-/// role a machine serves beside its journals, at its own address.
+/// Serve the frontend contract on the machine edge `rpc` in a task of its
+/// own (#723 (frontend as a parosd role)): the frontend role a machine
+/// serves beside its journals, at its own address. `stopping` begins its
+/// clean stop, with the machine's; `incarnation` ends it at once. The
+/// answer turns `true` once the task ended.
 ///
 /// # Errors
 ///
@@ -306,8 +309,8 @@ pub fn spawn<P, A>(
     rpc: &RpcHandle<P>,
     settings: FrontendSettings,
     (authz, audit): (Arc<dyn Authz>, A),
-    shutdown: CancellationToken,
-) -> SimulationResult<()>
+    (incarnation, stopping): (CancellationToken, CancellationToken),
+) -> SimulationResult<watch::Receiver<bool>>
 where
     P: ParosProviders,
     A: Audit + Clone + Send + Sync + 'static,
@@ -320,18 +323,27 @@ where
         inbox,
         settings,
         (authz, audit),
-        shutdown,
+        stopping,
     );
+    let (ended_tx, ended) = watch::channel(false);
     providers
         .local_task()
         .spawn_local_task("paros-frontend", async move {
-            if let Err(error) = task.await {
-                tracing::warn!(%error, "frontend_ended");
+            moonpool_core::select! {
+                biased;
+                () = incarnation.cancelled() => {}
+                served = task => {
+                    if let Err(error) = served {
+                        tracing::warn!(%error, "frontend_ended");
+                    }
+                }
             }
+            ended_tx.send_replace(true);
         })
         .detach();
+    assert!(!*ended.borrow(), "a frontend spawned has not ended");
     moonpool_assertions::reachable!("frontend: a machine serves the frontend role");
-    Ok(())
+    Ok(ended)
 }
 
 /// A frontend's settings, checked before it serves.

@@ -18,6 +18,10 @@
 //!    within an election timeout is left to an election.
 //! 4. **Flush.** Every batch in flight lands.
 //!
+//! A machine's frontend (#723 (frontend as a parosd role)) begins its own
+//! stop at step 1, and the loop waits for it to end as it waits for the
+//! cell coordinator's task.
+//!
 //! [`DriverTunables::shutdown_within`] bounds it all: when it runs out the
 //! loop returns anyway, and the log names the step that did not complete. A
 //! stop at any point is a crash, which recovery already handles, so no
@@ -75,6 +79,9 @@ pub(crate) enum Open {
     Leaderships,
     /// The cell coordinator's task did not end yet.
     Coordinator,
+    /// The machine's frontend still answers the calls it took (#723
+    /// (frontend as a parosd role)).
+    Frontend,
     /// A batch's flush still flies.
     Flush,
 }
@@ -86,9 +93,20 @@ impl Open {
             Open::InFlight => "in_flight",
             Open::Leaderships => "leaderships",
             Open::Coordinator => "coordinator",
+            Open::Frontend => "frontend",
             Open::Flush => "flush",
         }
     }
+}
+
+/// Whether the tasks a clean stop waits for ended: `true` for a task the
+/// node does not run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Ended {
+    /// The cell coordinator's task.
+    pub(crate) coordinator: bool,
+    /// The machine's frontend (#723 (frontend as a parosd role)).
+    pub(crate) frontend: bool,
 }
 
 /// A leadership handed on: whom to, under which ballot, and whether a beat
@@ -188,12 +206,9 @@ impl Stop {
     }
 
     /// The first step still open, or `None` when the stop is done.
-    /// `coordinator_ended` says whether the cell coordinator's task ended.
-    pub(crate) fn open<S, A>(
-        &self,
-        journals: &Journals<S, A>,
-        coordinator_ended: bool,
-    ) -> Option<Open> {
+    /// `ended` says whether the cell coordinator's task and the machine's
+    /// frontend ended.
+    pub(crate) fn open<S, A>(&self, journals: &Journals<S, A>, ended: Ended) -> Option<Open> {
         let in_flight = journals
             .live
             .values()
@@ -221,8 +236,11 @@ impl Stop {
         if leading || self.handed.values().any(|handed| !handed.taken) {
             return Some(Open::Leaderships);
         }
-        if !coordinator_ended {
+        if !ended.coordinator {
             return Some(Open::Coordinator);
+        }
+        if !ended.frontend {
+            return Some(Open::Frontend);
         }
         if journals.flying() {
             return Some(Open::Flush);

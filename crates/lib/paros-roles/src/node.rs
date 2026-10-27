@@ -567,6 +567,9 @@ where
     // shutdown)): a clean stop waits for it to hand its term on. `None` on
     // a node that runs none.
     let coordinator_ended: Option<watch::Receiver<bool>>;
+    // Whether the machine's frontend ended (#723 (frontend as a parosd
+    // role)): a clean stop waits for it to answer the calls it took.
+    let frontend_ended: Option<watch::Receiver<bool>>;
     // The instant since which the registry's pool is owed to the live journals
     // (#189), and whether this incarnation holds it a while (#387,
     // `paros_observe::scenario::ADMIT_LATE`; drawn only where a registry is followed).
@@ -579,6 +582,7 @@ where
         offered_books,
         unregistered: hosted_unregistered,
         coordinator_ended: hosted_coordinator,
+        frontend_ended: hosted_frontend,
     } = match machine {
         Some(machine) => machine.serve(
             &providers,
@@ -592,6 +596,7 @@ where
     let mut offered_books = offered_books;
     unregistered = hosted_unregistered;
     coordinator_ended = hosted_coordinator;
+    frontend_ended = hosted_frontend;
 
     // The replicas (#144) get a node's lane, as any peer. One lane per peer,
     // carrying every journal (#188: one `Deliver` per peer, a fair lane per
@@ -1511,8 +1516,11 @@ where
                         }
                         shared.settle(rt).await;
                     }
-                    let coordinator = coordinator_ended.as_ref().is_none_or(|ended| *ended.borrow());
-                    let open = halt.open(&journals, coordinator);
+                    let ended = stop::Ended {
+                        coordinator: coordinator_ended.as_ref().is_none_or(|ended| *ended.borrow()),
+                        frontend: frontend_ended.as_ref().is_none_or(|ended| *ended.borrow()),
+                    };
+                    let open = halt.open(&journals, ended);
                     let now = time.now();
                     if open.is_none() || halt.expired(now) {
                         let (handed, taken) = halt.handoffs();
