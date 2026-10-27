@@ -200,7 +200,7 @@ impl CellHost for CellMachine {
         if let Some(role) = &self.facts().frontend {
             let cell = self.founder_addrs();
             let settings = role.settings(
-                self.facts().listen,
+                (self.facts().listen, self.facts().addr.clone()),
                 cell,
                 self.facts().names.clone(),
                 *tunables,

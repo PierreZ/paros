@@ -85,6 +85,7 @@ mod election;
 mod healthy;
 mod journals;
 mod keys;
+mod leads;
 mod live;
 mod load;
 mod other_cell;
@@ -1280,6 +1281,15 @@ impl FleetOps {
             // Every journal the cell can hold heals (#475 (re-place after
             // the Down bound)).
             self.journals_heal(ctx, cell, ctx.time().now() + FLEET_SETTLE)
+                .await;
+            if crate::shape::admitted_slot(ctx.state()) {
+                self.create_in_tail(ctx, ctx.random().random_range(0..u64::MAX))
+                    .await;
+            }
+            // Every created journal elects a leader and takes a write (#700
+            // (a journal with a slot on an admitted machine never elects a
+            // leader)).
+            self.journals_lead(ctx, cell, ctx.time().now() + FLEET_SETTLE)
                 .await;
             // The failure detector holds every live machine up (#654 (live
             // machine marked down)).

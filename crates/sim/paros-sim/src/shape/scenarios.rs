@@ -409,6 +409,37 @@ pub(crate) fn changed_mode(state: &StateHandle) -> bool {
         .get_or_insert_with(|| !other && moonpool_sim::buggify_with_prob!(1.0))
 }
 
+/// Whether the run draws the **admitted-slot scenario** (#700 (a journal
+/// with a slot on an admitted machine never elects a leader)): drawn once
+/// per seed, its own BUGGIFY location, never with a scenario that founds
+/// the cell on one member or keeps a machine out of `init`. The bug needs a
+/// journal of three members or more with a slot on an admitted storage
+/// machine, created after its tenant's matchmaker set moved onto that
+/// machine. Each is a coin on its own: a cell of three founders and a
+/// fourth storage machine admitted is rare, and a journal of three members
+/// placed on it is rarer. In 200 hunt seeds without the scenario, no
+/// journal of three members had a slot on an admitted machine. On a
+/// scenario seed with four machines, the layout lists three founders and
+/// no other machine at `init`, all `storage` ([`machine_layout`]), so the
+/// cell places each set on the founders first and moves it onto the fourth
+/// machine once `ADMIT` admits it: the Compose run's generation 2. Client
+/// 0 runs `init` first, every client runs `ADMIT`, `TENANT` and
+/// `CREATE_JOURNAL` as often as the weight family allows at the steps
+/// knob's top (`crate::workload`), and the last client creates journals
+/// once the sets settled after chaos (`FleetOps::create_in_tail`). Each ingredient keeps its own
+/// coin on the other seeds. Rare-but-valid: an operator may add a machine
+/// at any time.
+#[tracing::instrument(level = "debug", skip_all)]
+pub(crate) fn admitted_slot(state: &StateHandle) -> bool {
+    // Drawn before the lock: the scenarios take the registry's lock too.
+    let other = drained_machine(state) || batchers(state) || second_cell(state);
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    *guard
+        .admitted_slot
+        .get_or_insert_with(|| !other && moonpool_sim::buggify_with_prob!(1.0))
+}
+
 /// Whether the run draws the **cold-rot scenario** (#362 (background
 /// scrubbing)): drawn once per seed, its own BUGGIFY location, never with a
 /// scenario that wipes, renames, drains or reconfigures a machine's

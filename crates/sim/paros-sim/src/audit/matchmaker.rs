@@ -1022,12 +1022,26 @@ impl MatchmakerAudit {
         ) else {
             return;
         };
-        let newer_request = self
-            .reconfigurations
-            .range((Bound::Excluded(*newest), Bound::Excluded(ballot)))
-            .any(|(_, (requested, _))| requested == config);
+        let between = (Bound::Excluded(*newest), Bound::Excluded(ballot));
+        let newer_request = *newest < ballot
+            && self
+                .reconfigurations
+                .range(between)
+                .any(|(_, (requested, _))| requested == config);
+        // The probe floor (#278), as `completed` judges it: a leadership
+        // that won above the reconfiguration under another configuration
+        // never ran it, so a campaign that keeps that leadership's
+        // configuration rolls nothing back (seed 1809677773762108752 on
+        // PR #744: a reconfiguration of round 3 that a quorum held only
+        // after leaderships of rounds 3 to 10 won under the configuration
+        // before it).
+        let below_a_leadership = *newest < ballot
+            && self
+                .won
+                .range(between)
+                .any(|(_, ran)| ran != effective && ran == config);
         assert_always!(
-            config == effective || newer_request,
+            config == effective || newer_request || below_a_leadership,
             "matchmaking: a completed campaign runs the effective configuration",
             {
                 "node" => node.0,

@@ -422,6 +422,12 @@ where
     // the redirects the tunables allow.
     let budget = count + usize::try_from(tunables.redirect_limit).unwrap_or(usize::MAX);
     let mut last = None;
+    // Whether a server named a leader the frontend does not know, or no
+    // server knew the journal: a machine admitted since the frontend
+    // learned the cell may serve it (#700 (a journal with a slot on an
+    // admitted machine never elects a leader)).
+    let mut unknown_leader = false;
+    let mut known = false;
     let time = shared.providers.time();
     for _ in 0..budget {
         let observer = client.observer();
@@ -458,6 +464,8 @@ where
                     return C::strip(ack);
                 }
                 Route::Redirect(hint) => {
+                    known = true;
+                    unknown_leader |= hint.is_some_and(|id| client.index_of(id).is_none());
                     client.observe_leader(hint);
                     target = client.leader().filter(|l| *l != target).unwrap_or(next);
                     last = Some(ack);
@@ -480,6 +488,13 @@ where
                 return C::unanswered();
             }
         }
+    }
+    if unknown_leader || (last.is_some() && !known) {
+        // The next call learns the cell, and its admitted machines, again.
+        moonpool_assertions::reachable!(
+            "frontend: a journal out of the frontend's reach sends it back to its cell"
+        );
+        super::lock(&shared.routes).stale_cell();
     }
     last.map_or_else(C::unavailable, C::strip)
 }

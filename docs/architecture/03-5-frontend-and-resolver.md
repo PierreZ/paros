@@ -123,6 +123,16 @@ token, the tenant name and the journal name). The frontend does these steps for 
    no answer, the answer is `UNANSWERED`, which the client reads as `Ambiguous`. A read moves on
    to the next server after any failure.
 
+The machines are every `storage` machine of the cell (decided on 2026-10-27, #700 (a journal with
+a slot on an admitted machine never elects a leader)): the founding members that answered, then
+every other `storage` machine the cell registry holds, at the address it registered last. A
+journal placed on an admitted machine, or led from one, is reached there, and so is a founding
+member that moved or was renamed. The frontend learns the cell from a majority of the founding
+members. When they name no cell (a founding member moved, and its first address is dark), it
+learns the cell from its own machine, which is a member of that cell. When no machine knows the
+journal, or a hint names a machine the frontend does not know, the frontend learns the cell
+again at the next call.
+
 An entry with an empty tenant name names an internal journal by the call's ids, and only an
 `admin` token reaches it.
 

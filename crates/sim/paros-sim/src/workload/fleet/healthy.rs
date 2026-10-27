@@ -184,7 +184,7 @@ pub(super) async fn set_lost(
 /// serve hold no quorum (a wipe or an outage took it), a maintenance window
 /// covers a member, or fewer machines can take a slot than members fail to
 /// serve.
-fn excused(
+pub(super) fn excused(
     reply: &ViewReply,
     registry: &Registry,
     journal: &JournalView,

@@ -43,13 +43,13 @@ pub(crate) use quorum::{
     wide_grid,
 };
 pub(crate) use scenarios::{
-    bare_quorum, batched_journals, batched_journals_among, batched_journals_drawn, batchers,
-    batchers_among, changed_mode, cold_rot, departed_straggler, disk_full, downed_founder,
-    drained_machine, early_handover, entry_capacity, gone_machine, handoff_storm, lagging_acceptor,
-    lagging_fold, lagging_replica, lost_verdict, matchmaker_registry_page, moved_founder,
-    paged_handover, racing_floor, replaced_founder, replica_apply_page, reused_name, run_end,
-    second_cell, silent_machine, slow_link, slow_machine, split_floor, stalled_proxy, unmetered,
-    untagged, wiped_founder, withhold_gc, zone_outage,
+    admitted_slot, bare_quorum, batched_journals, batched_journals_among, batched_journals_drawn,
+    batchers, batchers_among, changed_mode, cold_rot, departed_straggler, disk_full,
+    downed_founder, drained_machine, early_handover, entry_capacity, gone_machine, handoff_storm,
+    lagging_acceptor, lagging_fold, lagging_replica, lost_verdict, matchmaker_registry_page,
+    moved_founder, paged_handover, racing_floor, replaced_founder, replica_apply_page, reused_name,
+    run_end, second_cell, silent_machine, slow_link, slow_machine, split_floor, stalled_proxy,
+    unmetered, untagged, wiped_founder, withhold_gc, zone_outage,
 };
 pub(crate) use timing::{
     CONNECT_FLOOR_MS, ELECTION_RENEW_FLOOR, RESOLVE_ROUND_TRIP, longest_down_after,
@@ -169,6 +169,9 @@ struct Registry {
     /// Run-level: whether the run draws the changed-mode scenario (see
     /// [`changed_mode`]), fixed by the first caller.
     changed_mode: Option<bool>,
+    /// Run-level: whether the run draws the admitted-slot scenario (see
+    /// [`admitted_slot`]), fixed by the first caller.
+    admitted_slot: Option<bool>,
     /// Run-level: whether the run draws the cold-rot scenario (see
     /// [`cold_rot`]), fixed by the first caller.
     cold_rot: Option<bool>,

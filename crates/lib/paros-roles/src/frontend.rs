@@ -88,6 +88,11 @@ pub struct FrontendSettings {
     pub listen: SocketAddr,
     /// The cell it fronts: its founding members' advertised addresses.
     pub cell: Vec<Address>,
+    /// The address its own machine advertises. The frontend learns the
+    /// cell there when a majority of `cell` names none: a founding member
+    /// that moved leaves its first address dark (#700 (a journal with a
+    /// slot on an admitted machine never elects a leader)).
+    pub host: Address,
     /// The name table every address it dials resolves through.
     pub names: Names,
     /// The wall clock at its provider's zero, since the Unix epoch: a
@@ -117,8 +122,8 @@ pub struct FrontendRole {
 
 impl FrontendRole {
     /// The settings of the frontend a machine serves on its own edge: it
-    /// listens where the machine does and fronts `cell`, the founding
-    /// members' addresses.
+    /// listens where the machine does (`listen`, advertised as `host`) and
+    /// fronts `cell`, the founding members' addresses.
     ///
     /// # Panics
     ///
@@ -126,7 +131,7 @@ impl FrontendRole {
     #[must_use]
     pub fn settings(
         &self,
-        listen: SocketAddr,
+        (listen, host): (SocketAddr, Address),
         cell: Vec<Address>,
         names: Names,
         tunables: DriverTunables,
@@ -138,6 +143,7 @@ impl FrontendRole {
         FrontendSettings {
             listen,
             cell,
+            host,
             names,
             epoch: self.epoch,
             tunables,
