@@ -58,6 +58,10 @@ pub const RARE: &[Rare] = &[
         reason: "a reconfiguration registered at one matchmaker only, whose holder answers a member's campaign after a later leadership won under another configuration: one witness, replay-main 9491883622406273044 on PR #718 (one matchmaker host); 0 of 300 hunt seeds (#486)",
     },
     Rare {
+        msg: "matchmaking: a campaign adopts a reconfiguration its won leadership ran",
+        reason: "a reconfiguration registered at one matchmaker only, a leadership that ran it, then a campaign under the older belief whose Prepare reaches that leader: one witness in the sweep, replay-recipe 15215472214835945028 214785:9323787021693807484 on f75260d (PR #737 (fix-main))",
+    },
+    Rare {
         msg: "batcher: a merged write over the leader's limits is split",
         reason: "a batcher above the leader's limits whose merged write passes a small max_batch_records or max_batch_bytes knob: fired on PR #698's first sweep, missed by its later ones; 0 of 600 single-seed hunts with the batchers scenario (#702 (batcher rare paths))",
     },

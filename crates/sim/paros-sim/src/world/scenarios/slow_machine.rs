@@ -8,14 +8,19 @@
 //! its slow time (`crate::workload::fleet`).
 //!
 //! The injector strikes once, when the cell formed, then makes the machine
-//! healthy again. Half the strikes inside the chaos window last 10–16 s, cut
-//! at `LATE_WINDOW` into the tail (#361 (slow machines)): the cell
-//! coordinator judges the machine slow and moves its journals off it.
-//! `init` mostly runs in the recovery tail, so like the
-//! silent machine (`super::silent_machine`) it may strike up to
-//! `LATE_WINDOW` into the tail. A slow machine is not a dead one: the cell
-//! keeps every member, and the slowness ends long before the tail's
-//! liveness claims are judged.
+//! healthy again. Half the strikes last 10–16 s (#361 (slow machines)): the
+//! cell coordinator judges the machine slow and moves its journals off it.
+//! The scenario is a fault, so it lives in the chaos window only: it never
+//! strikes once chaos ended, and a strike still running then ends at the
+//! cutoff. A slow machine is not a dead one: the cell keeps every member,
+//! and the recovery tail is quiet for its liveness claims.
+//!
+//! It struck up to 4 s into the tail until main's sweep found a strike on a
+//! cell formed there (seed 8061199375031111920 on e5cdfff, red on "fleet: an
+//! operation an operator stopped in ends in the recovery tail"): the cell
+//! formed 0.5 s into the tail, a founder's disk stayed slow to 6.3 s, and
+//! `init` waited on it, its coordinator and the fleet steps past
+//! `FLEET_SETTLE`.
 
 use std::time::Duration;
 
@@ -24,7 +29,6 @@ use moonpool_sim::{
     FaultContext, FaultInjector, SimulationResult, Slowness, TimeProvider, assert_reachable,
 };
 
-use super::late_outage::LATE_WINDOW;
 use crate::world::outage::POLL;
 
 /// How long the machine stays slow, in milliseconds: several `Load`
@@ -63,7 +67,7 @@ impl FaultInjector for SlowMachine {
         }
         let time = ctx.time();
         let target = loop {
-            if crate::past_cutoff(time.now(), LATE_WINDOW) {
+            if !crate::in_chaos() {
                 return Ok(());
             }
             if let Some(target) = crate::machine::slow_target(ctx.state(), |ip| ctx.is_dead(ip)) {
@@ -92,17 +96,16 @@ impl FaultInjector for SlowMachine {
         assert_reachable!("load: the scenario slows a machine of the cell");
         tracing::info!(%target, cpu = slowness.cpu, disk = slowness.disk, "slow_machine_strikes");
         ctx.set_slowness(&target, slowness)?;
-        // Half the strikes inside the chaos window are long (#361 (slow
-        // machines)): the machine is judged slow and its journals move off
-        // it. A long strike still ends at most `LATE_WINDOW` into the tail.
-        let long = crate::in_chaos() && moonpool_sim::sim_random_range(0..2_u64) == 0;
+        // Half the strikes are long (#361 (slow machines)): the machine is
+        // judged slow and its journals move off it.
+        let long = moonpool_sim::sim_random_range(0..2_u64) == 0;
         if long {
             assert_reachable!("slow: the scenario slows a machine long enough to move");
         }
         let range = if long { LONG_SLOW_MS } else { SLOW_MS };
         let until = time.now() + Duration::from_millis(moonpool_sim::sim_random_range(range));
         crate::machine::note_slowed(ctx.state(), until);
-        while time.now() < until && !(long && crate::past_cutoff(time.now(), LATE_WINDOW)) {
+        while time.now() < until && crate::in_chaos() {
             // A sleep cut short ends the run: the machine is healthy either
             // way once nobody runs.
             if time

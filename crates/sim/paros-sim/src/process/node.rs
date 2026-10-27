@@ -336,13 +336,29 @@ pub(super) async fn run_acceptor(
                 // store (#147). On a journal seed a transient fault (a failed
                 // sync of the boot's own writes) can reach it first, and it
                 // restarts like any other (#176).
-                let parked = seats.iter().all(|seat| {
-                    seat.world
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .park_reason(my_ip)
-                        .is_some_and(|reason| reason != ParkReason::Wiped)
-                });
+                let reasons: Vec<Option<ParkReason>> = seats
+                    .iter()
+                    .map(|seat| {
+                        seat.world
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .park_reason(my_ip)
+                    })
+                    .collect();
+                let parked = reasons
+                    .iter()
+                    .all(|reason| reason.is_some_and(|reason| reason != ParkReason::Wiped));
+                // A retired node whose last journal met a storage fault
+                // stays down as retired, never as a corruption park it never
+                // had (recipe 9074079314762316809 29018:11864808903221653795
+                // on eee5ccd: a lost batch on a retired node was told to the
+                // audit as a corruption park).
+                if parked && reasons.contains(&Some(ParkReason::Retired)) {
+                    for seat in &seats {
+                        stay_down(&seat.checker, Down::Retired(self_rank.0));
+                    }
+                    return Ok(());
+                }
                 if parked {
                     assert_reachable!("storage: a corruption-crashed node stays down");
                     for seat in &seats {
