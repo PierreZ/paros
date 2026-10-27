@@ -1,0 +1,2195 @@
+//! The journal linearizability checker (#205): every attempt a client made at
+//! the four calls of its journal — `Write`, `Read`, `SetLeader`, `Truncate`,
+//! answered or never answered — checked against the **sequential model of a
+//! journal** (a leader uuid, a dense log, a floor) by a Wing & Gong
+//! search with Lowe's memoization (the Porcupine algorithm).
+//!
+//! The model is this file's own: it restates the rules of
+//! `docs/architecture/02-data-plane.md` §2 and never calls `paros_core`'s
+//! `JournalView::apply`, so a rule the core loses is a history the model
+//! refuses. Removing the fencing check from the core (a write accepted from
+//! any leader uuid) is red here on the first seed whose superseded
+//! writer is acked written — the PR that landed this file records the
+//! witness.
+//!
+//! **What is an operation.** One *attempt* is one RPC: its invocation is when
+//! the client built the request, its response when the answer arrived. A
+//! retry is a second attempt carrying the same write; the model accepts a
+//! write at most once, so a retry linearized after the acceptance folds to
+//! the `Duplicate` it must be answered with. An attempt with no verdict — a
+//! timeout, an abandoned observation, a transport error, a redirect, a
+//! truncation re-ask that was never decided — is **unknown**: it may have
+//! taken effect at any point after its invocation, or never.
+//!
+//! **Unknown attempts are linearized only where they change the state.** An
+//! unknown attempt constrains nothing about its own answer, so wherever a
+//! linearization places it as a no-op, deleting it from that point and
+//! appending it after every answered attempt is another linearization —
+//! where whatever it does is observed by nobody. The search therefore only
+//! tries an unknown attempt where it is effectful (a write accepted, a claim
+//! that wins, a truncation that raises the floor) and succeeds once every
+//! *answered* attempt is linearized. An unanswered read changes nothing and
+//! is dropped; of two identical unknown attempts the later-invoked one is
+//! dropped too, since the earlier one can stand wherever it could.
+//!
+//! **Unknown attempts past their deadline leave the search** (#392). The
+//! scalars only grow along a linearization: an unknown write lands at no
+//! `next_seq` above its last possible position, and an unknown truncation
+//! raises no floor at or above its `up_to`. Once the state passed that
+//! deadline, the attempt is taken out of the list until the search backs
+//! out of that state, so the steps grow with the history, not with its
+//! length times its unknown attempts.
+//!
+//! **The writer mode** (#241) is the model's too. A multi-writer journal
+//! has no leader: a write with records is accepted at the next position
+//! whatever position it names, with no deduplication, so every attempt can
+//! land once and identical attempts are never one step; anyone truncates;
+//! a fenced call and a `SetLeader` are refused as of the wrong mode. Of
+//! the unknown multi-writer writes that are interchangeable (the same call,
+//! or the same record count with bytes no page shows), the search only
+//! lands one after every earlier-invoked one landed: any linearization can
+//! be reordered so, since an earlier invocation stands wherever a later one
+//! could.
+//!
+//! **Unknown writes land only where the pages allow** (#512 (search
+//! budget)). Records never move, so a write that puts another record where
+//! a page shows one is refuted by that page in every linearization
+//! ([`Landings::shows`]); on a multi-writer journal, so is one that lands
+//! on a range an answered write took ([`Landings::fits`]). Without this,
+//! every unknown write was tried at every position of a gap between two
+//! answers, and only the page after the gap refuted the wrong orders: on a
+//! multi-writer journal, every one of them at every position (hunt seed
+//! 2216307595147519586 on PR #516 (internal clients): the election
+//! journal's 332 judged attempts, undecided past 50M steps, decided in
+//! 651); on a single-writer one, every choice among an owner's re-sent
+//! writes at one position (hunt seed 8108577621986896023 on PR #527
+//! (search budget), 304 judged attempts past 5M steps).
+//!
+//! **A write resolved not written** (#444) is held to it. When the
+//! client's `resolve` settles an ambiguous write as `NotWritten`, the
+//! history records a marker ([`Seen::NotWritten`]) whose invocation is when
+//! the settlement started. It is no attempt: the search judges none. It
+//! says the write was not in the journal at some point after that instant,
+//! and its uuid did not lead there or its position was taken. So the write
+//! lands, in any linearization, only under a leadership installed by a
+//! claim that may linearize after that instant (one answered later, or
+//! never answered): a uuid that leads again. A `resolve` that wrongly
+//! tells the application a rewrite is safe makes a late landing of the
+//! first write a refutation, not a lost update nobody sees. Proved on a
+//! mutant whose read-back drops the leader test: red on 18 of 1,000 hunt
+//! seeds with the marker, green on main (witness 17954477492009207736).
+//!
+//! **Time** is simulated nanoseconds. Two attempts whose spans share an
+//! instant are concurrent: a call event sorts before a return event at the
+//! same time, which can only drop a precedence edge, never invent one.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::ops::Range;
+
+use paros::core::journal::{JournalView, LeaderUuid, WriterMode};
+
+use crate::workload::chain::splitmix;
+
+/// The records a page carries at most, whatever the limit asked: the
+/// largest `max_read_records` a node draws (`paros::roles::node::MAX_READ_RECORDS`,
+/// #241). A node with a smaller maximum serves a shorter page, which the
+/// model accepts like any page cut by the tail.
+const PAGE_RECORDS: u64 = paros::roles::node::MAX_READ_RECORDS;
+
+/// One call a client made of its journal: what it asked.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Call {
+    /// `Write(leader, seq, batch)`; the batch as one hash per record.
+    Write {
+        leader: LeaderUuid,
+        seq: u64,
+        records: Vec<u64>,
+    },
+    /// `Read(from_seq, limit)`.
+    Read { from: u64, limit: u64 },
+    /// `SetLeader(new, old)` (#241).
+    SetLeader {
+        new: LeaderUuid,
+        old: Option<LeaderUuid>,
+    },
+    /// `Truncate(leader, up_to_seq)` (#228).
+    Truncate { leader: LeaderUuid, up_to: u64 },
+}
+
+/// What the client was told: a verdict, never a redirect or a timeout (those
+/// leave the attempt unknown).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Seen {
+    /// The write is in the journal at `[seq, seq + count)`: accepted by this
+    /// attempt, or (`duplicate`) answered from the log.
+    Written {
+        seq: u64,
+        count: u64,
+        duplicate: bool,
+    },
+    /// The write was refused against `state`.
+    Refused(JournalView),
+    /// The write's position is below `state.first_seq`.
+    WriteTruncated(JournalView),
+    /// A read page: the records from the read's `from`, one hash each, served
+    /// at `state`.
+    Page {
+        records: Vec<u64>,
+        state: JournalView,
+    },
+    /// The read started below `state.first_seq`.
+    ReadTruncated(JournalView),
+    /// The claim won: `state` is the one after it.
+    Won(JournalView),
+    /// The claim lost against `state`.
+    Lost(JournalView),
+    /// The truncation applied: `state` is the one after it.
+    Trimmed(JournalView),
+    /// The truncation was refused against `state` (#228): its fence is not
+    /// the writer in force.
+    TruncateRefused(JournalView),
+    /// The call is shaped for the other writer mode (#241), refused against
+    /// `state`.
+    WrongMode(JournalView),
+    /// Not an answer: the client resolved the write not written (#444). An
+    /// attempt with this verdict is a marker, never judged; its `inv` is
+    /// when the settlement started.
+    NotWritten,
+}
+
+/// One attempt: who made it, when, what it asked and — when it was
+/// answered — when and what it was told.
+#[derive(Clone, Debug)]
+pub(crate) struct Attempt {
+    pub(crate) client: u64,
+    pub(crate) inv: u64,
+    pub(crate) call: Call,
+    pub(crate) seen: Option<(u64, Seen)>,
+}
+
+impl Attempt {
+    /// Whether this is a resolution's marker (#444), not an attempt.
+    fn is_marker(&self) -> bool {
+        matches!(self.seen, Some((_, Seen::NotWritten)))
+    }
+
+    /// When the answer came; `u64::MAX` for an unknown attempt.
+    fn resp(&self) -> u64 {
+        self.seen.as_ref().map_or(u64::MAX, |(resp, _)| *resp)
+    }
+}
+
+/// The model's journal state: who may write, and where the dense positions
+/// stand. Plain scalars, compared field by field with what a node answered.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Scalars {
+    leader: Option<LeaderUuid>,
+    next_seq: u64,
+    first_seq: u64,
+    /// The claim that installed `leader` (#444): a write resolved not
+    /// written lands only under a claim that may follow its settlement.
+    /// No node reports it, so [`Scalars::is`] leaves it out.
+    installed_by: Option<usize>,
+}
+
+impl Scalars {
+    /// Whether a node's answered state is exactly this one.
+    fn is(self, state: &JournalView) -> bool {
+        self.leader == state.leader
+            && self.next_seq == state.next_seq.0
+            && self.first_seq == state.first_seq.0
+    }
+}
+
+/// What one step changed, to be undone on backtrack: the log only ever
+/// grows, so its lengths are the whole undo.
+#[derive(Clone, Copy)]
+struct Undo {
+    scalars: Scalars,
+    writes: usize,
+    records: usize,
+}
+
+/// The sequential journal the search walks.
+struct Model<'a> {
+    attempts: &'a [Attempt],
+    /// The journal's writer mode (#241).
+    mode: WriterMode,
+    /// Per attempt, the earlier-invoked unknown multi-writer write it is
+    /// interchangeable with: it lands only once that one landed.
+    after: Vec<Option<usize>>,
+    /// Per attempt, whether it is an accepted write in `writes`.
+    landed: Vec<bool>,
+    /// Per unknown attempt, the state past which it can never take effect.
+    deadline: Vec<Deadline>,
+    /// Where an unknown write may land: only where the pages show its
+    /// records (#512 (search budget)).
+    landings: Landings,
+    /// The writes a resolution proved not written (#444), each with the
+    /// latest instant a settlement of it started.
+    never: BTreeMap<&'a Call, u64>,
+    scalars: Scalars,
+    /// The accepted writes, as attempt indices, in position order (each
+    /// accepted at its own `seq`, so their starts are strictly increasing).
+    writes: Vec<usize>,
+    /// The record hash at every position below `next_seq`.
+    records: Vec<u64>,
+    /// `chain[k]`: a hash of the first `k` accepted writes, in order.
+    chain: Vec<u128>,
+}
+
+impl<'a> Model<'a> {
+    fn new(
+        attempts: &'a [Attempt],
+        mode: WriterMode,
+        after: Vec<Option<usize>>,
+        deadline: Vec<Deadline>,
+    ) -> Self {
+        Self {
+            attempts,
+            mode,
+            after,
+            landed: vec![false; attempts.len()],
+            deadline,
+            landings: Landings::new(attempts),
+            never: resolved_not_written(attempts, mode),
+            scalars: Scalars::default(),
+            writes: Vec::new(),
+            records: Vec::new(),
+            chain: vec![0],
+        }
+    }
+
+    /// Whether attempt `i` is past its deadline: the scalars only grow
+    /// along a linearization, so it takes effect nowhere from here on.
+    fn dead(&self, i: usize) -> bool {
+        match self.deadline[i] {
+            Deadline::Never => false,
+            Deadline::Tail(last) => self.scalars.next_seq > last,
+            Deadline::Floor(up_to) => self.scalars.first_seq >= up_to,
+        }
+    }
+
+    /// The undo back to the current state.
+    fn mark(&self) -> Undo {
+        Undo {
+            scalars: self.scalars,
+            writes: self.writes.len(),
+            records: self.records.len(),
+        }
+    }
+
+    /// Whether the step `undo` was taken for moved nothing.
+    fn unchanged(&self, undo: Undo) -> bool {
+        self.scalars == undo.scalars && self.writes.len() == undo.writes
+    }
+
+    fn undo(&mut self, undo: Undo) {
+        self.scalars = undo.scalars;
+        for &w in &self.writes[undo.writes.min(self.writes.len())..] {
+            self.landed[w] = false;
+        }
+        self.writes.truncate(undo.writes);
+        self.chain.truncate(undo.writes + 1);
+        self.records.truncate(undo.records);
+    }
+
+    /// A hash of the whole state: the scalars and the accepted-write order.
+    fn hash(&self) -> u128 {
+        let s = self.scalars;
+        let mut h = *self.chain.last().unwrap_or(&0);
+        h = mix128(h ^ s.leader.map_or(0, |leader| leader.0));
+        for word in [s.next_seq, s.first_seq] {
+            h = mix128(h ^ u128::from(word));
+        }
+        // Which claim installed the leader matters only to a write a
+        // resolution proved not written.
+        if !self.never.is_empty() {
+            h = mix128(h ^ s.installed_by.map_or(u128::MAX, |k| k as u128));
+        }
+        h
+    }
+
+    /// Whether `call` may land under the leader in force (#444): a write a
+    /// resolution proved not written lands only under a claim that may
+    /// linearize after that settlement started.
+    fn may_land(&self, call: &Call) -> bool {
+        let Some(&settled) = self.never.get(call) else {
+            return true;
+        };
+        self.scalars
+            .installed_by
+            .is_none_or(|claim| self.attempts[claim].resp() > settled)
+    }
+
+    /// The write accepted with its first record at `seq`, if any.
+    fn accepted_at(&self, seq: u64) -> Option<&Call> {
+        let index = self
+            .writes
+            .binary_search_by_key(&seq, |w| match &self.attempts[*w].call {
+                Call::Write { seq, .. } => *seq,
+                _ => u64::MAX,
+            })
+            .ok()?;
+        Some(&self.attempts[self.writes[index]].call)
+    }
+
+    /// Linearize attempt `i` at the current state, if the model's answer is
+    /// the one the client saw (or, for an unknown attempt, if it changes
+    /// anything). On success the state moved and the undo is returned; on
+    /// failure nothing moved.
+    fn step(&mut self, i: usize) -> Option<Undo> {
+        let undo = self.mark();
+        let attempt = &self.attempts[i];
+        let seen = attempt.seen.as_ref().map(|(_, seen)| seen);
+        let s = self.scalars;
+        if let Some(ok) = self.step_mode(i) {
+            return ok.then_some(undo);
+        }
+        let ok = match &attempt.call {
+            Call::Write {
+                leader,
+                seq,
+                records,
+            } => {
+                let count = records.len() as u64;
+                if *seq < s.first_seq {
+                    matches!(seen, Some(Seen::WriteTruncated(state)) if s.is(state))
+                } else if *seq < s.next_seq {
+                    // A retry is answered from the log: exactly the write
+                    // accepted at this position is a duplicate.
+                    let duplicate = self.accepted_at(*seq) == Some(&attempt.call);
+                    match seen {
+                        Some(Seen::Written {
+                            seq: at,
+                            count: n,
+                            duplicate: true,
+                        }) => duplicate && at == seq && *n == count,
+                        Some(Seen::Refused(state)) => !duplicate && s.is(state),
+                        _ => false,
+                    }
+                } else if s.leader == Some(*leader) && *seq == s.next_seq && count > 0 {
+                    let answered = self.may_land(&attempt.call)
+                        && match seen {
+                            None => self.landings.shows(*seq, records),
+                            Some(Seen::Written {
+                                seq: at,
+                                count: n,
+                                duplicate: false,
+                            }) => at == seq && *n == count,
+                            Some(_) => false,
+                        };
+                    if answered {
+                        self.land(i, records);
+                    }
+                    answered
+                } else {
+                    matches!(seen, Some(Seen::Refused(state)) if s.is(state))
+                }
+            }
+            // The compare-and-set (§2.3): it wins against the leader it
+            // names, installing a set uuid that is not the current one. A
+            // uuid that led before may be reinstated: the journal trusts its
+            // clients to draw fresh ones.
+            Call::SetLeader { new, old } => {
+                if *old == s.leader && new.is_set() && s.leader != Some(*new) {
+                    let after = Scalars {
+                        leader: Some(*new),
+                        installed_by: Some(i),
+                        ..s
+                    };
+                    let answered = match seen {
+                        None => true,
+                        Some(Seen::Won(state)) => after.is(state),
+                        Some(_) => false,
+                    };
+                    if answered {
+                        self.scalars = after;
+                    }
+                    answered
+                } else {
+                    matches!(seen, Some(Seen::Lost(state)) if s.is(state))
+                }
+            }
+            Call::Truncate { leader, up_to } => {
+                let (leader, up_to) = (*leader, *up_to);
+                let seen = seen.cloned();
+                self.step_truncate(leader, up_to, seen.as_ref())
+            }
+            Call::Read { from, limit } => match seen {
+                Some(Seen::ReadTruncated(state)) => s.is(state) && *from < s.first_seq,
+                Some(Seen::Page { records, state }) => {
+                    s.is(state) && *from >= s.first_seq && self.page_matches(*from, *limit, records)
+                }
+                _ => false,
+            },
+        };
+        ok.then_some(undo)
+    }
+
+    /// Accept write `i` of `records` at the next position.
+    fn land(&mut self, i: usize, records: &[u64]) {
+        let link = mix128(self.chain.last().copied().unwrap_or(0) ^ i as u128);
+        self.writes.push(i);
+        self.landed[i] = true;
+        self.chain.push(link);
+        self.records.extend_from_slice(records);
+        self.scalars.next_seq += records.len() as u64;
+    }
+
+    /// The writer mode's own rules (#241): `Some(ok)` when attempt `i` is
+    /// a call of the wrong mode, or any call on a multi-writer journal but
+    /// a read; `None` for the single-writer rules below.
+    fn step_mode(&mut self, i: usize) -> Option<bool> {
+        let attempt = &self.attempts[i];
+        let seen = attempt.seen.as_ref().map(|(_, seen)| seen);
+        let s = self.scalars;
+        let wrong = || matches!(seen, Some(Seen::WrongMode(state)) if s.is(state));
+        let fence = match &attempt.call {
+            Call::Read { .. } => return None,
+            Call::Write { leader, .. } | Call::Truncate { leader, .. } => Some(*leader),
+            Call::SetLeader { .. } => None,
+        };
+        match self.mode {
+            WriterMode::Single => fence.is_some_and(|f| !f.is_set()).then(wrong),
+            WriterMode::Multi => Some(match (&attempt.call, fence) {
+                (_, None) => wrong(),
+                (_, Some(fence)) if fence.is_set() => wrong(),
+                (Call::Truncate { up_to, .. }, _) => {
+                    let up_to = *up_to;
+                    let seen = seen.cloned();
+                    self.trim(up_to, seen.as_ref())
+                }
+                (Call::Write { records, .. }, _) => {
+                    if records.is_empty() {
+                        return Some(matches!(seen, Some(Seen::Refused(state)) if s.is(state)));
+                    }
+                    // Interchangeable unknown writes land in invocation
+                    // order.
+                    if self.after[i].is_some_and(|before| !self.landed[before]) {
+                        return Some(false);
+                    }
+                    let count = records.len() as u64;
+                    let answered = match seen {
+                        None => self.landings.fits(s.next_seq, records),
+                        Some(Seen::Written {
+                            seq,
+                            count: n,
+                            duplicate: false,
+                        }) => *seq == s.next_seq && *n == count,
+                        Some(_) => false,
+                    };
+                    if answered {
+                        let records = records.clone();
+                        self.land(i, &records);
+                    }
+                    answered
+                }
+                (Call::Read { .. } | Call::SetLeader { .. }, _) => unreachable!("handled above"),
+            }),
+        }
+    }
+
+    /// Linearize a `Truncate`: fenced like a write (#228) — only the writer
+    /// in force truncates, anyone else is refused against the state.
+    fn step_truncate(&mut self, leader: LeaderUuid, up_to: u64, seen: Option<&Seen>) -> bool {
+        let s = self.scalars;
+        if s.leader != Some(leader) {
+            return matches!(seen, Some(Seen::TruncateRefused(state)) if s.is(state));
+        }
+        self.trim(up_to, seen)
+    }
+
+    /// An accepted `Truncate` of either mode: raise the floor to `up_to`,
+    /// clamped to the tail, never lowered.
+    fn trim(&mut self, up_to: u64, seen: Option<&Seen>) -> bool {
+        let s = self.scalars;
+        let after = Scalars {
+            first_seq: s.first_seq.max(up_to.min(s.next_seq)),
+            ..s
+        };
+        let answered = match seen {
+            None => after != s,
+            Some(Seen::Trimmed(state)) => after.is(state),
+            Some(_) => false,
+        };
+        if answered {
+            self.scalars = after;
+        }
+        answered
+    }
+
+    /// Whether `page` is a page the journal could serve from `from` at the
+    /// current state: empty at or past the tail; otherwise at least one
+    /// record, at most the limit and the tail allow, each the one at its
+    /// position.
+    fn page_matches(&self, from: u64, limit: u64, page: &[u64]) -> bool {
+        let next = self.scalars.next_seq;
+        if from >= next {
+            return page.is_empty();
+        }
+        let cap = if limit == 0 {
+            PAGE_RECORDS
+        } else {
+            limit.min(PAGE_RECORDS)
+        };
+        let len = page.len() as u64;
+        let (Ok(start), Ok(end)) = (usize::try_from(from), usize::try_from(from + len)) else {
+            return false;
+        };
+        len >= 1 && len <= cap.min(next - from) && self.records.get(start..end) == Some(page)
+    }
+}
+
+/// The search's answer.
+pub(crate) struct Verdict {
+    /// Whether a linearization of every answered attempt exists.
+    pub(crate) linearizable: bool,
+    /// The search ran out of its step budget before deciding (then
+    /// `linearizable` is `true`: nothing was refuted).
+    pub(crate) exhausted: bool,
+    /// Steps taken.
+    pub(crate) steps: u64,
+    /// Attempts judged (after dropping the ones that can only be no-ops).
+    pub(crate) judged: usize,
+    /// On a refutation, the attempt whose response the deepest prefix could
+    /// not reach, and how many attempts that prefix linearized.
+    pub(crate) stuck: Option<(usize, usize)>,
+}
+
+/// An event of the history, in time order.
+#[derive(Clone, Copy)]
+struct Event {
+    attempt: usize,
+    is_return: bool,
+}
+
+/// The history's events in time order, Porcupine's list as an ordered set
+/// of the live events: linearizing an attempt lifts its call and return out
+/// of the set, and backtracking puts them back. An unknown attempt that
+/// waits for the copy before it ([`check`]'s chains) is out of the set
+/// until that copy is linearized, so the scan never meets it before.
+struct Timeline {
+    nodes: Vec<Event>,
+    live: BTreeSet<usize>,
+    call_node: Vec<usize>,
+    /// `usize::MAX` for an unknown attempt: it has no return event.
+    return_node: Vec<usize>,
+    /// Per attempt, the copy that waits for it ([`chains`]).
+    woken_by: Vec<Option<usize>>,
+}
+
+impl Timeline {
+    fn new(
+        attempts: &[Attempt],
+        keep: &[usize],
+        (waits, woken_by): (Vec<Option<usize>>, Vec<Option<usize>>),
+    ) -> Self {
+        let mut events: Vec<(u64, bool, usize)> = Vec::with_capacity(keep.len() * 2);
+        for &i in keep {
+            events.push((attempts[i].inv, false, i));
+            if let Some((resp, _)) = &attempts[i].seen {
+                events.push((*resp, true, i));
+            }
+        }
+        events.sort_unstable();
+        let nodes: Vec<Event> = events
+            .iter()
+            .map(|&(_, is_return, attempt)| Event { attempt, is_return })
+            .collect();
+        let mut call_node = vec![usize::MAX; attempts.len()];
+        let mut return_node = vec![usize::MAX; attempts.len()];
+        for (n, event) in nodes.iter().enumerate() {
+            if event.is_return {
+                return_node[event.attempt] = n;
+            } else {
+                call_node[event.attempt] = n;
+            }
+        }
+        let live = (0..nodes.len())
+            .filter(|&n| nodes[n].is_return || waits[nodes[n].attempt].is_none())
+            .collect();
+        Self {
+            nodes,
+            live,
+            call_node,
+            return_node,
+            woken_by,
+        }
+    }
+
+    /// The first live event, or `nodes.len()` when none is.
+    fn first(&self) -> usize {
+        self.live.first().copied().unwrap_or(self.nodes.len())
+    }
+
+    /// The first live event after `n` (live or not), or `nodes.len()`.
+    fn next(&self, n: usize) -> usize {
+        self.live
+            .range(n + 1..)
+            .next()
+            .copied()
+            .unwrap_or(self.nodes.len())
+    }
+
+    /// Take attempt `i` out of the set, and let in the copy that waited for
+    /// it; whether it was answered.
+    fn lift(&mut self, i: usize) -> bool {
+        self.live.remove(&self.call_node[i]);
+        if let Some(j) = self.woken_by[i] {
+            self.live.insert(self.call_node[j]);
+        }
+        let answered = self.return_node[i] != usize::MAX;
+        if answered {
+            self.live.remove(&self.return_node[i]);
+        }
+        answered
+    }
+
+    /// Put attempt `i` back, and take out the copy that waits for it;
+    /// whether it was answered.
+    fn unlift(&mut self, i: usize) -> bool {
+        if let Some(j) = self.woken_by[i] {
+            self.live.remove(&self.call_node[j]);
+        }
+        let answered = self.return_node[i] != usize::MAX;
+        if answered {
+            self.live.insert(self.return_node[i]);
+        }
+        self.live.insert(self.call_node[i]);
+        answered
+    }
+}
+
+/// Decide whether `attempts` (the merged history of every client of one
+/// journal) is linearizable, within `budget` steps.
+pub(crate) fn check(attempts: &[Attempt], mode: WriterMode, budget: u64) -> Verdict {
+    let keep = judged(attempts, mode);
+    let after = interchangeable(attempts, &keep, mode);
+    let mut timeline = Timeline::new(attempts, &keep, chains(attempts, &keep, &after));
+    let mut model = Model::new(attempts, mode, after, deadlines(attempts, &keep, mode));
+    let mut remaining = keep.iter().filter(|i| attempts[**i].seen.is_some()).count();
+    let mut linearized: u128 = 0;
+    let mut cache: BTreeSet<u128> = BTreeSet::new();
+    let mut pending = Pending::default();
+    for &i in &keep {
+        pending.add(attempts, i);
+    }
+    // Each frame: the attempt, its undo, and whether it was **forced** — an
+    // answered attempt that moved nothing (a read, a refusal, a lost claim,
+    // a duplicate, a truncation below the floor). Such a step legal now is
+    // never delayed: any linearization placing it later can place it here
+    // instead (nobody observes it, and as a candidate it already follows
+    // every attempt real time puts before it). So a dead end above a forced
+    // frame pops it without trying the orders that delay it. Without this,
+    // every subset of a long window of such answers was a separate state
+    // (hunt seed 2160548334956635398: 524k memo entries for 160 attempts).
+    //
+    // A frame is also **retired**: an unknown attempt past its deadline
+    // ([`Model::dead`]) leaves the list with no step, like a forced one. The
+    // scalars only grow along a path, so it can take effect nowhere below
+    // that frame. Without this, every unknown write left behind by the tail
+    // was tried again after every step, so the steps grew with the product
+    // of the history's length and its unknown attempts (#392, hunt seed
+    // 248236966498734736: 9,160 attempts past a 5M-step budget).
+    let mut stack: Vec<(usize, Undo, bool, bool)> = Vec::new();
+    let mut deepest: Option<(usize, usize)> = None;
+    // The retired frames on the stack: the linearized prefix is the rest.
+    let mut retired_frames = 0;
+    let mut steps = 0_u64;
+    let mut node = timeline.first();
+    let verdict = |linearizable, exhausted, steps, stuck| Verdict {
+        linearizable,
+        exhausted,
+        steps,
+        judged: keep.len(),
+        stuck,
+    };
+    loop {
+        if remaining == 0 {
+            return verdict(true, false, steps, None);
+        }
+        steps += 1;
+        if steps > budget {
+            return verdict(true, true, steps, None);
+        }
+        // While an answered attempt is unlinearized its return event is in
+        // the list, and the scan stops there at the latest.
+        let event = timeline.nodes[node];
+        let i = event.attempt;
+        if event.is_return {
+            let depth = stack.len() - retired_frames;
+            if deepest.is_none_or(|(deepest, _)| depth >= deepest) {
+                deepest = Some((depth, i));
+            }
+        } else if attempts[i].seen.is_none() && model.dead(i) {
+            timeline.lift(i);
+            stack.push((i, model.mark(), true, true));
+            retired_frames += 1;
+            // A copy just woken stands after `i`: the scan meets it next.
+            node = timeline.next(node);
+            continue;
+        } else if let Some(undo) = model.step(i) {
+            let forced = attempts[i].seen.is_some() && model.unchanged(undo);
+            pending.remove(attempts, i);
+            if pending
+                .lowest()
+                .is_some_and(|lowest| lowest < model.scalars.next_seq)
+            {
+                // `next_seq` only grows: an answered attempt still to place
+                // saw it lower, so no order from here places it.
+                pending.add(attempts, i);
+                model.undo(undo);
+                node = timeline.next(node);
+                continue;
+            }
+            let key = linearized ^ zobrist(i) ^ model.hash();
+            if cache.insert(key) {
+                stack.push((i, undo, forced, false));
+                linearized ^= zobrist(i);
+                if timeline.lift(i) {
+                    remaining -= 1;
+                }
+                node = timeline.first();
+                continue;
+            }
+            pending.add(attempts, i);
+            model.undo(undo);
+            // A forced step into a configuration already explored: that
+            // configuration failed, and so does this one.
+            if !forced {
+                node = timeline.next(node);
+                continue;
+            }
+        } else {
+            node = timeline.next(node);
+            continue;
+        }
+        // A dead end: undo back to the last step that had alternatives.
+        loop {
+            let Some((j, undo, forced, retired)) = stack.pop() else {
+                return verdict(false, false, steps, deepest.map(|(d, a)| (a, d)));
+            };
+            model.undo(undo);
+            pending.add(attempts, j);
+            if retired {
+                retired_frames -= 1;
+            } else {
+                linearized ^= zobrist(j);
+            }
+            if timeline.unlift(j) {
+                remaining += 1;
+            }
+            if !forced {
+                node = timeline.next(timeline.call_node[j]);
+                break;
+            }
+        }
+    }
+}
+
+/// The `next_seq` each answered attempt not yet linearized saw, as a
+/// multiset: the search places none of them past a state whose `next_seq`
+/// is higher. Without it, a multi-writer client's long run of unknown
+/// writes (#241) was tried in every combination before the first answer
+/// that refutes them all (hunt seed 13713880158750275224: 36 unknown
+/// writes ahead of a `Written { seq: 0 }`, past a 5M-step budget).
+#[derive(Default)]
+struct Pending(BTreeMap<u64, usize>);
+
+impl Pending {
+    /// The `next_seq` attempt `i`'s answer fixes: where a fresh write
+    /// landed, or the state any other answer carries. `None` for an
+    /// unknown attempt and a duplicate (answered from the log, any time
+    /// after its position).
+    fn bound(attempt: &Attempt) -> Option<u64> {
+        match &attempt.seen.as_ref()?.1 {
+            Seen::Written {
+                seq,
+                duplicate: false,
+                ..
+            } => Some(*seq),
+            Seen::Written {
+                duplicate: true, ..
+            }
+            | Seen::NotWritten => None,
+            Seen::Refused(state)
+            | Seen::WriteTruncated(state)
+            | Seen::Page { state, .. }
+            | Seen::ReadTruncated(state)
+            | Seen::Won(state)
+            | Seen::Lost(state)
+            | Seen::Trimmed(state)
+            | Seen::TruncateRefused(state)
+            | Seen::WrongMode(state) => Some(state.next_seq.0),
+        }
+    }
+
+    fn add(&mut self, attempts: &[Attempt], i: usize) {
+        if let Some(bound) = Self::bound(&attempts[i]) {
+            *self.0.entry(bound).or_insert(0) += 1;
+        }
+    }
+
+    fn remove(&mut self, attempts: &[Attempt], i: usize) {
+        let Some(bound) = Self::bound(&attempts[i]) else {
+            return;
+        };
+        if let Some(count) = self.0.get_mut(&bound) {
+            *count -= 1;
+            if *count == 0 {
+                self.0.remove(&bound);
+            }
+        }
+    }
+
+    fn lowest(&self) -> Option<u64> {
+        self.0.keys().next().copied()
+    }
+}
+
+/// The chains of interchangeable unknown attempts, as `(waits, woken_by)`:
+/// per attempt, the copy it waits for, and the copy that waits for it.
+///
+/// Identical unknown attempts are interchangeable: they have no response
+/// and make the same step, and the earlier-invoked one can stand wherever
+/// a later one could. So the search takes them in invocation order: a copy
+/// enters the list only once the copy before it ([`twins`]) is linearized
+/// or retired; a multi-writer journal's interchangeable writes (`after`,
+/// [`interchangeable`]) chain the same way. Without this, every subset of
+/// two families of retried claims was a separate state (hunt seed
+/// 4349432526857375247: 36 kept copies of `B <- A` and `A <- B` around a
+/// reinstatement ran past the budget on a linearizable history); and a copy
+/// that waited in the list was met again after every step (#392).
+fn chains(
+    attempts: &[Attempt],
+    keep: &[usize],
+    after: &[Option<usize>],
+) -> (Vec<Option<usize>>, Vec<Option<usize>>) {
+    let twin = twins(attempts, keep);
+    let waits: Vec<Option<usize>> = after.iter().zip(&twin).map(|(a, t)| a.or(*t)).collect();
+    let mut woken_by = vec![None; attempts.len()];
+    for (j, wait) in waits.iter().enumerate() {
+        if let Some(t) = wait {
+            woken_by[*t] = Some(j);
+        }
+    }
+    (waits, woken_by)
+}
+
+/// For each kept unknown attempt, the kept unknown attempt with the
+/// identical call invoked just before it, if any ([`check`]'s invocation
+/// order over interchangeable copies).
+fn twins(attempts: &[Attempt], keep: &[usize]) -> Vec<Option<usize>> {
+    let mut order: Vec<usize> = keep
+        .iter()
+        .copied()
+        .filter(|&i| attempts[i].seen.is_none())
+        .collect();
+    order.sort_by_key(|&i| (attempts[i].inv, i));
+    let mut twin = vec![None; attempts.len()];
+    let mut last: BTreeMap<&Call, usize> = BTreeMap::new();
+    for i in order {
+        twin[i] = last.insert(&attempts[i].call, i);
+    }
+    twin
+}
+
+/// The attempts the search judges, by index: every answered one, and every
+/// unknown write, claim and truncation not dominated by another unknown
+/// attempt. An unanswered read changes nothing and is dropped.
+///
+/// Two domination rules, both keeping the earlier-invoked attempt (it can
+/// stand wherever the later one could):
+///
+/// - **Identical calls.** Two unknown attempts asking the same thing are the
+///   same step, when the call can take effect at most once. A write can:
+///   its position is taken once and `next_seq` only grows. A
+///   `SetLeader(new, old)` cannot, because a reinstated uuid wins again
+///   (§2.3, decided on 2026-10-09): the swap wins once, and once more each
+///   time some attempt reinstalls `old`. So identical unknown claims keep
+///   their earliest `1 + installs(old)` copies, and one copy when `old` is
+///   `None` (witness 16550793748011305905: a claim retried 17 times, its
+///   one kept copy spent on the first swap, refuted a history whose read
+///   saw the second).
+/// - **Unobserved bytes.** Two unknown writes with the same
+///   `(leader, seq, count)` change the scalars identically, and
+///   differ only in bytes. When no answered attempt can tell those bytes
+///   apart — no page shows one of their records, and no answered write is
+///   the same call (whose verdict, duplicate or refused, would depend on
+///   them), nor a resolution's marker (#444: where the write may land
+///   depends on them) — accepting one or the other is observed by nobody, so one
+///   representative per group stands for all. Without this, an owner's
+///   recovery loop (a fresh write per try at one position, hundreds over a
+///   long tail) made every unknown write a branch at the one state where
+///   they could all land (hunt seed 651057785248754081: 382 at one
+///   position, past a 5M-step budget).
+///
+/// And two exclusion rules:
+///
+/// - **Unobserved claims.** An unknown `SetLeader` whose `new` uuid no
+///   answer can tell apart is not judged ([`relevant_leaders`]). Without
+///   this, a run whose claims all timed out while reads saw no leader made
+///   every claim a branch before every read (1.2M steps for 317 attempts,
+///   #392).
+/// - **Taken positions.** A write answered `Written { seq, count }` holds
+///   `[seq, seq + count)` in every linearization: a position is taken once
+///   and `next_seq` only grows. An unknown write of another call that
+///   overlaps such a range can never have taken effect, so it is not
+///   judged. Without this, a pipelined batch left unknown and later
+///   rewritten, position by position, with fresh bytes the journal answered
+///   made both writes steppable at every position, doubling the search per
+///   position into the same dead end (hunt seed 6883584563191284886: 16
+///   positions, past a 5M-step budget).
+fn judged(attempts: &[Attempt], mode: WriterMode) -> Vec<usize> {
+    if mode == WriterMode::Multi {
+        return judged_multi(attempts);
+    }
+    let mut seen_records: BTreeSet<u64> = BTreeSet::new();
+    let mut answered_writes: BTreeSet<&Call> = BTreeSet::new();
+    let mut taken: Vec<(Range<u64>, &Call)> = Vec::new();
+    for attempt in attempts {
+        match (&attempt.call, &attempt.seen) {
+            (_, Some((_, Seen::Page { records, .. }))) => seen_records.extend(records),
+            (call @ Call::Write { .. }, Some((_, seen))) => {
+                answered_writes.insert(call);
+                if let Seen::Written { seq, count, .. } = seen {
+                    taken.push((*seq..*seq + *count, call));
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut order: Vec<usize> = (0..attempts.len()).collect();
+    order.sort_by_key(|&i| (attempts[i].inv, i));
+    let mut unknown: BTreeSet<&Call> = BTreeSet::new();
+    // How many attempts install each uuid: the most times an identical
+    // claim swapping it out can win.
+    let mut installs: BTreeMap<LeaderUuid, usize> = BTreeMap::new();
+    for attempt in attempts {
+        if let Call::SetLeader { new, .. } = &attempt.call {
+            *installs.entry(*new).or_insert(0) += 1;
+        }
+    }
+    let relevant = relevant_leaders(attempts);
+    let mut claim_copies: BTreeMap<&Call, usize> = BTreeMap::new();
+    let mut unobserved: BTreeSet<(LeaderUuid, u64, usize)> = BTreeSet::new();
+    let mut keep: Vec<usize> = order
+        .into_iter()
+        .filter(|&i| {
+            let attempt = &attempts[i];
+            if attempt.seen.is_some() {
+                return !attempt.is_marker();
+            }
+            match &attempt.call {
+                Call::Read { .. } => false,
+                // An unfenced call on a single-writer journal is refused as of
+                // the wrong mode (#241): it moves nothing.
+                Call::Write { leader, .. } | Call::Truncate { leader, .. } if !leader.is_set() => {
+                    false
+                }
+                call @ Call::Write {
+                    leader,
+                    seq,
+                    records,
+                } => {
+                    let range = *seq..*seq + records.len() as u64;
+                    let lost = taken.iter().any(|(held, by)| {
+                        *by != call && held.start < range.end && range.start < held.end
+                    });
+                    if lost {
+                        return false;
+                    }
+                    let observed = answered_writes.contains(call)
+                        || records.iter().any(|r| seen_records.contains(r));
+                    unknown.insert(call)
+                        && (observed || unobserved.insert((*leader, *seq, records.len())))
+                }
+                Call::SetLeader { new, .. } if !relevant.contains(new) => false,
+                call @ Call::SetLeader { old, .. } => {
+                    let copies = claim_copies.entry(call).or_insert(0);
+                    *copies += 1;
+                    let wins = 1 + old.map_or(0, |old| installs.get(&old).copied().unwrap_or(0));
+                    *copies <= wins
+                }
+                call => unknown.insert(call),
+            }
+        })
+        .collect();
+    keep.sort_unstable();
+    keep
+}
+
+/// The leader uuids an answer can tell apart, for [`judged`]: every uuid an
+/// answered attempt names (as a state's leader, a fence, or either side of a
+/// claim) or an unknown write or truncation is fenced by, closed under the
+/// unknown claims (the `old` of a claim whose `new` is relevant is
+/// relevant).
+///
+/// An unknown claim installing any other uuid `X` can be dropped from any
+/// linearization. While `X` leads, no answered attempt but a duplicate
+/// (answered from the log, whatever the leader) is linearized: every other
+/// answer names the leader in its state, or needs its own fence or `old` to
+/// lead. No unknown write or truncation takes effect under `X` either, and
+/// a claim swapping `X` out installs another such uuid, by the closure. So
+/// what follows the claim is unknown attempts and duplicates, and the
+/// linearization without the claim and those unknown attempts holds.
+fn relevant_leaders(attempts: &[Attempt]) -> BTreeSet<LeaderUuid> {
+    let mut relevant = BTreeSet::new();
+    for attempt in attempts {
+        match (&attempt.call, &attempt.seen) {
+            (Call::Write { leader, .. } | Call::Truncate { leader, .. }, _) => {
+                relevant.insert(*leader);
+            }
+            (Call::SetLeader { new, old }, Some(_)) => {
+                relevant.insert(*new);
+                relevant.extend(*old);
+            }
+            (Call::SetLeader { .. } | Call::Read { .. }, None) | (Call::Read { .. }, Some(_)) => {}
+        }
+        if let Some((_, seen)) = &attempt.seen
+            && let Some(leader) = view(seen).and_then(|state| state.leader)
+        {
+            relevant.insert(leader);
+        }
+    }
+    loop {
+        let before = relevant.len();
+        for attempt in attempts {
+            if let (
+                Call::SetLeader {
+                    new,
+                    old: Some(old),
+                },
+                None,
+            ) = (&attempt.call, &attempt.seen)
+                && relevant.contains(new)
+            {
+                relevant.insert(*old);
+            }
+        }
+        if relevant.len() == before {
+            return relevant;
+        }
+    }
+}
+
+/// The state an answer carries, if any (a write's acceptance carries none).
+fn view(seen: &Seen) -> Option<&JournalView> {
+    match seen {
+        Seen::Written { .. } | Seen::NotWritten => None,
+        Seen::Page { state, .. }
+        | Seen::Refused(state)
+        | Seen::WriteTruncated(state)
+        | Seen::ReadTruncated(state)
+        | Seen::Won(state)
+        | Seen::Lost(state)
+        | Seen::Trimmed(state)
+        | Seen::TruncateRefused(state)
+        | Seen::WrongMode(state) => Some(state),
+    }
+}
+
+/// The attempts the search judges on a multi-writer journal (#241): every
+/// answered one, every unknown unfenced write with records (each can land
+/// once, wherever it lands, so none dominates another), and the unknown
+/// unfenced truncations, one per identical call. An unknown read, claim or
+/// fenced call moves nothing and is dropped, and so is an unknown write
+/// [`Landings`] leaves no position (an empty one among them).
+fn judged_multi(attempts: &[Attempt]) -> Vec<usize> {
+    let landings = Landings::new(attempts);
+    let mut order: Vec<usize> = (0..attempts.len()).collect();
+    order.sort_by_key(|&i| (attempts[i].inv, i));
+    let mut unknown: BTreeSet<&Call> = BTreeSet::new();
+    let mut keep: Vec<usize> = order
+        .into_iter()
+        .filter(|&i| {
+            let attempt = &attempts[i];
+            if attempt.seen.is_some() {
+                return !attempt.is_marker();
+            }
+            match &attempt.call {
+                Call::Write {
+                    leader, records, ..
+                } => !leader.is_set() && landings.last(records).is_some(),
+                call @ Call::Truncate { leader, .. } => !leader.is_set() && unknown.insert(call),
+                Call::Read { .. } | Call::SetLeader { .. } => false,
+            }
+        })
+        .collect();
+    keep.sort_unstable();
+    keep
+}
+
+/// Per attempt, the earlier-invoked kept unknown multi-writer write it is
+/// interchangeable with (#241): the same call, or, when no page shows any of
+/// their records, the same record count. Such writes change the state alike
+/// and nobody can tell their bytes apart, so the search lands them in
+/// invocation order. `None` everywhere on a single-writer journal.
+fn interchangeable(attempts: &[Attempt], keep: &[usize], mode: WriterMode) -> Vec<Option<usize>> {
+    #[derive(PartialEq, Eq, PartialOrd, Ord)]
+    enum Key<'c> {
+        Call(&'c Call),
+        Count(usize),
+    }
+    let mut after = vec![None; attempts.len()];
+    if mode == WriterMode::Single {
+        return after;
+    }
+    let seen_records: BTreeSet<u64> = attempts
+        .iter()
+        .filter_map(|attempt| match &attempt.seen {
+            Some((_, Seen::Page { records, .. })) => Some(records.iter().copied()),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    let mut order: Vec<usize> = keep
+        .iter()
+        .copied()
+        .filter(|&i| attempts[i].seen.is_none())
+        .filter(|&i| matches!(attempts[i].call, Call::Write { .. }))
+        .collect();
+    order.sort_by_key(|&i| (attempts[i].inv, i));
+    let mut last: BTreeMap<Key<'_>, usize> = BTreeMap::new();
+    for i in order {
+        let Call::Write { records, .. } = &attempts[i].call else {
+            continue;
+        };
+        let key = if records.iter().any(|r| seen_records.contains(r)) {
+            Key::Call(&attempts[i].call)
+        } else {
+            Key::Count(records.len())
+        };
+        after[i] = last.insert(key, i);
+    }
+    after
+}
+
+/// The writes a resolution proved not written (#444), from the history's
+/// markers ([`Seen::NotWritten`]): each call with the latest instant a
+/// settlement of it started. None on a multi-writer journal, whose
+/// unfenced writes are never settled.
+fn resolved_not_written(attempts: &[Attempt], mode: WriterMode) -> BTreeMap<&Call, u64> {
+    let mut never: BTreeMap<&Call, u64> = BTreeMap::new();
+    if mode == WriterMode::Multi {
+        return never;
+    }
+    for attempt in attempts.iter().filter(|a| a.is_marker()) {
+        let settled = never.entry(&attempt.call).or_insert(attempt.inv);
+        *settled = (*settled).max(attempt.inv);
+    }
+    never
+}
+
+/// When an unknown attempt can no longer take effect, in terms of the
+/// scalars that only grow along a linearization.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Deadline {
+    /// It may take effect at any state (a claim: the leader moves both ways).
+    Never,
+    /// A write: it lands at no `next_seq` above this one.
+    Tail(u64),
+    /// A truncation: it raises no floor at or above this one.
+    Floor(u64),
+}
+
+/// Per kept unknown attempt, its [`Deadline`]: a single-writer write lands
+/// only at its own `seq`; a multi-writer write only at a position
+/// [`Landings`] allows; a truncation only below its `up_to`.
+fn deadlines(attempts: &[Attempt], keep: &[usize], mode: WriterMode) -> Vec<Deadline> {
+    let mut deadline = vec![Deadline::Never; attempts.len()];
+    let landings = (mode == WriterMode::Multi).then(|| Landings::new(attempts));
+    for &i in keep {
+        if attempts[i].seen.is_some() {
+            continue;
+        }
+        deadline[i] = match (&attempts[i].call, &landings) {
+            (Call::Write { records, .. }, Some(landings)) => landings
+                .last(records)
+                .map_or(Deadline::Tail(0), Deadline::Tail),
+            (Call::Write { seq, .. }, None) => Deadline::Tail(*seq),
+            (Call::Truncate { up_to, .. }, _) => Deadline::Floor(*up_to),
+            (Call::Read { .. } | Call::SetLeader { .. }, _) => Deadline::Never,
+        };
+    }
+    deadline
+}
+
+/// Where an unknown multi-writer write (#241) may land: the positions the
+/// answers leave it. Records never move, so a position a page shows holds
+/// that record in every linearization, and a range an answered write took
+/// holds that write. A write lands at `p` only where no page shows another
+/// record at its positions and no answered write took one. It also lands
+/// below `end`, the highest position any answer shows: a landing past it
+/// raises `next_seq` above what every answered attempt saw, so no answered
+/// attempt follows it, and the search never needs it.
+struct Landings {
+    end: u64,
+    /// The record a page shows at each position.
+    shown: BTreeMap<u64, u64>,
+    /// Each record hash, at every position a page shows it.
+    shown_at: BTreeMap<u64, Vec<u64>>,
+    /// The positions an answered write took.
+    taken: BTreeSet<u64>,
+    /// Below `end`, the positions neither shown nor taken.
+    free: Vec<u64>,
+}
+
+impl Landings {
+    fn new(attempts: &[Attempt]) -> Self {
+        let mut end = 0;
+        let mut shown = BTreeMap::new();
+        let mut taken = BTreeSet::new();
+        for attempt in attempts {
+            let Some((_, seen)) = &attempt.seen else {
+                continue;
+            };
+            match seen {
+                Seen::Written { seq, count, .. } => {
+                    end = end.max(seq + count);
+                    taken.extend(*seq..seq + count);
+                }
+                Seen::Page { records, state } => {
+                    end = end.max(state.next_seq.0);
+                    if let Call::Read { from, .. } = attempt.call {
+                        for (position, record) in (from..).zip(records) {
+                            shown.entry(position).or_insert(*record);
+                        }
+                    }
+                }
+                Seen::Refused(state)
+                | Seen::WriteTruncated(state)
+                | Seen::ReadTruncated(state)
+                | Seen::Won(state)
+                | Seen::Lost(state)
+                | Seen::Trimmed(state)
+                | Seen::TruncateRefused(state)
+                | Seen::WrongMode(state) => end = end.max(state.next_seq.0),
+                Seen::NotWritten => {}
+            }
+        }
+        let mut shown_at: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
+        for (&position, &record) in &shown {
+            shown_at.entry(record).or_default().push(position);
+        }
+        let free = (0..end)
+            .filter(|p| !shown.contains_key(p) && !taken.contains(p))
+            .collect();
+        Self {
+            end,
+            shown,
+            shown_at,
+            taken,
+            free,
+        }
+    }
+
+    /// Whether `records` may land at `p`.
+    fn fits(&self, p: u64, records: &[u64]) -> bool {
+        self.shows(p, records)
+            && (p..)
+                .take(records.len())
+                .all(|position| !self.taken.contains(&position))
+    }
+
+    /// Whether no page shows another record than `records` at their
+    /// positions from `p`. A single-writer write asks no more: an answered
+    /// write of the same call takes its range as a duplicate, and
+    /// [`judged`] drops the unknown writes another call's range excludes.
+    fn shows(&self, p: u64, records: &[u64]) -> bool {
+        (p..).zip(records).all(|(position, record)| {
+            self.shown
+                .get(&position)
+                .is_none_or(|shown| shown == record)
+        })
+    }
+
+    /// The highest position `records` may land at, if any.
+    fn last(&self, records: &[u64]) -> Option<u64> {
+        let count = records.len() as u64;
+        let first = records.first()?;
+        let highest = self.end.checked_sub(count)?;
+        let shown = self.shown_at.get(first).map_or(&[][..], Vec::as_slice);
+        let below = |positions: &[u64]| {
+            positions
+                .iter()
+                .rev()
+                .copied()
+                .filter(move |&p| p <= highest)
+                .find(|&p| self.fits(p, records))
+        };
+        below(shown).max(below(&self.free))
+    }
+}
+
+/// The Zobrist key of attempt `i` in the linearized set.
+fn zobrist(i: usize) -> u128 {
+    mix128(
+        0x9e37_79b9_7f4a_7c15_f39c_c060_5ced_c834 ^ (i as u128).wrapping_mul(0x2545_f491_4f6c_dd1d),
+    )
+}
+
+/// A 128-bit finalizer (two `splitmix64` lanes).
+fn mix128(x: u128) -> u128 {
+    let low = u64::try_from(x & u128::from(u64::MAX)).unwrap_or(0);
+    let high = u64::try_from(x >> 64).unwrap_or(0);
+    let lo = splitmix(low);
+    let hi = splitmix(high ^ lo.rotate_left(29));
+    (u128::from(hi) << 64) | u128::from(lo)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Attempt, Call, Seen, check, judged};
+    use paros::core::journal::JournalView;
+    use paros::core::journal::LeaderUuid;
+    use paros::core::journal::Seq;
+    use paros::core::journal::WriterMode;
+
+    /// Client `k`'s leader uuid (the unset uuid is never one).
+    fn u(k: u64) -> LeaderUuid {
+        LeaderUuid(u128::from(k) + 1)
+    }
+
+    fn state(leader: Option<u64>, next: u64, first: u64) -> JournalView {
+        JournalView {
+            leader: leader.map(u),
+            next_seq: Seq(next),
+            first_seq: Seq(first),
+        }
+    }
+
+    fn claim(new: u64, old: Option<u64>) -> Call {
+        Call::SetLeader {
+            new: u(new),
+            old: old.map(u),
+        }
+    }
+
+    fn at(client: u64, inv: u64, call: Call, resp: Option<(u64, Seen)>) -> Attempt {
+        Attempt {
+            client,
+            inv,
+            call,
+            seen: resp,
+        }
+    }
+
+    fn write(leader: u64, seq: u64, records: &[u64]) -> Call {
+        Call::Write {
+            leader: u(leader),
+            seq,
+            records: records.to_vec(),
+        }
+    }
+
+    fn written(seq: u64, count: u64, duplicate: bool) -> Seen {
+        Seen::Written {
+            seq,
+            count,
+            duplicate,
+        }
+    }
+
+    fn linearizable(history: &[Attempt]) -> bool {
+        let verdict = check(history, WriterMode::Single, 1_000_000);
+        assert!(!verdict.exhausted);
+        verdict.linearizable
+    }
+
+    /// The mechanism: a claim, a write, a read that sees it.
+    #[test]
+    fn a_sequential_owner_is_linearizable() {
+        let history = [
+            at(
+                0,
+                0,
+                claim(0, None),
+                Some((1, Seen::Won(state(Some(0), 0, 0)))),
+            ),
+            at(0, 2, write(0, 0, &[7, 8]), Some((3, written(0, 2, false)))),
+            at(
+                0,
+                4,
+                Call::Read { from: 0, limit: 0 },
+                Some((
+                    5,
+                    Seen::Page {
+                        records: vec![7, 8],
+                        state: state(Some(0), 2, 0),
+                    },
+                )),
+            ),
+            at(
+                0,
+                6,
+                Call::Truncate {
+                    leader: u(0),
+                    up_to: 9,
+                },
+                Some((7, Seen::Trimmed(state(Some(0), 2, 2)))),
+            ),
+            at(
+                0,
+                8,
+                Call::Read { from: 1, limit: 0 },
+                Some((9, Seen::ReadTruncated(state(Some(0), 2, 2)))),
+            ),
+        ];
+        assert!(linearizable(&history));
+    }
+
+    /// The fencing rule: a superseded writer acked written after the claim
+    /// that fenced it completed has no linearization.
+    #[test]
+    fn a_superseded_writer_acked_written_is_refuted() {
+        let mut history = vec![
+            at(
+                0,
+                0,
+                claim(0, None),
+                Some((1, Seen::Won(state(Some(0), 0, 0)))),
+            ),
+            at(
+                1,
+                2,
+                claim(1, Some(0)),
+                Some((3, Seen::Won(state(Some(1), 0, 0)))),
+            ),
+            at(0, 4, write(0, 0, &[7]), Some((5, written(0, 1, false)))),
+        ];
+        assert!(!linearizable(&history));
+        // Concurrent with the claim, it is fine — when the claim's answer
+        // shows the write landed before it.
+        history[2].inv = 2;
+        history[1].seen = Some((3, Seen::Won(state(Some(1), 1, 0))));
+        assert!(linearizable(&history));
+    }
+
+    /// The truncation fence (#228): a superseded owner's `Truncate` is
+    /// refused against the writer in force, and one acked as applied after
+    /// the claim that fenced it has no linearization.
+    #[test]
+    fn a_superseded_owner_truncation_is_refused() {
+        let mut history = vec![
+            at(
+                0,
+                0,
+                claim(0, None),
+                Some((1, Seen::Won(state(Some(0), 0, 0)))),
+            ),
+            at(0, 2, write(0, 0, &[7]), Some((3, written(0, 1, false)))),
+            at(
+                1,
+                4,
+                claim(1, Some(0)),
+                Some((5, Seen::Won(state(Some(1), 1, 0)))),
+            ),
+            at(
+                0,
+                6,
+                Call::Truncate {
+                    leader: u(0),
+                    up_to: 1,
+                },
+                Some((7, Seen::TruncateRefused(state(Some(1), 1, 0)))),
+            ),
+        ];
+        assert!(linearizable(&history));
+        history[3].seen = Some((7, Seen::Trimmed(state(Some(1), 1, 1))));
+        assert!(!linearizable(&history));
+    }
+
+    /// An unknown write may have landed — a read that shows it is explained —
+    /// and a retry of it is answered from the log.
+    #[test]
+    fn an_unknown_write_may_land_and_a_retry_is_a_duplicate() {
+        let history = [
+            at(
+                0,
+                0,
+                claim(0, None),
+                Some((1, Seen::Won(state(Some(0), 0, 0)))),
+            ),
+            at(0, 2, write(0, 0, &[7]), None),
+            at(0, 4, write(0, 0, &[7]), Some((5, written(0, 1, true)))),
+            at(
+                1,
+                6,
+                Call::Read { from: 0, limit: 1 },
+                Some((
+                    7,
+                    Seen::Page {
+                        records: vec![7],
+                        state: state(Some(0), 1, 0),
+                    },
+                )),
+            ),
+        ];
+        assert!(linearizable(&history));
+        // Without the unknown attempt, the duplicate has nothing to repeat.
+        let without: Vec<Attempt> = history
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != 1)
+            .map(|(_, a)| a.clone())
+            .collect();
+        assert!(!linearizable(&without));
+    }
+
+    /// A compare-and-set wins at most once against one leader.
+    #[test]
+    fn two_claims_cannot_both_win_against_one_leader() {
+        let history = [
+            at(
+                0,
+                0,
+                claim(0, None),
+                Some((5, Seen::Won(state(Some(0), 0, 0)))),
+            ),
+            at(
+                1,
+                0,
+                claim(1, None),
+                Some((5, Seen::Won(state(Some(1), 0, 0)))),
+            ),
+        ];
+        assert!(!linearizable(&history));
+    }
+
+    /// A read never moves backwards across real time.
+    #[test]
+    fn a_stale_read_after_a_completed_write_is_refuted() {
+        let history = [
+            at(
+                0,
+                0,
+                claim(0, None),
+                Some((1, Seen::Won(state(Some(0), 0, 0)))),
+            ),
+            at(0, 2, write(0, 0, &[7]), Some((3, written(0, 1, false)))),
+            at(
+                1,
+                4,
+                Call::Read { from: 0, limit: 0 },
+                Some((
+                    5,
+                    Seen::Page {
+                        records: vec![],
+                        state: state(Some(0), 0, 0),
+                    },
+                )),
+            ),
+        ];
+        assert!(!linearizable(&history));
+    }
+
+    /// Unknown writes at one position with unobserved bytes collapse to one
+    /// representative; one whose record a page shows stays its own branch.
+    #[test]
+    fn unobserved_unknown_writes_at_one_position_collapse() {
+        let mut history = vec![at(
+            0,
+            0,
+            claim(0, None),
+            Some((1, Seen::Won(state(Some(0), 0, 0)))),
+        )];
+        for k in 0..50 {
+            history.push(at(0, 2 + k, write(0, 0, &[100 + k]), None));
+        }
+        history.push(at(
+            1,
+            90,
+            Call::Read { from: 0, limit: 0 },
+            Some((
+                91,
+                Seen::Page {
+                    records: vec![130],
+                    state: state(Some(0), 1, 0),
+                },
+            )),
+        ));
+        let kept = judged(&history, WriterMode::Single);
+        // The claim, the read, the observed write (bytes 130) and one
+        // representative of the 49 others.
+        assert_eq!(kept.len(), 4);
+        assert!(linearizable(&history));
+    }
+
+    /// An unknown pipelined batch whose positions a later, answered rewrite
+    /// took is never judged: it can have landed nowhere, and judging it made
+    /// the search double per position.
+    #[test]
+    fn unknown_writes_at_positions_an_answered_write_took_are_not_judged() {
+        let mut history = vec![at(
+            0,
+            0,
+            claim(0, None),
+            Some((1, Seen::Won(state(Some(0), 0, 0)))),
+        )];
+        for k in 0..16 {
+            history.push(at(0, 2 + k, write(0, k, &[100 + k]), None));
+        }
+        for k in 0..16 {
+            history.push(at(
+                0,
+                40 + k,
+                write(0, k, &[200 + k]),
+                Some((900, written(k, 1, false))),
+            ));
+        }
+        let kept = judged(&history, WriterMode::Single);
+        // The claim and the sixteen answered rewrites.
+        assert_eq!(kept.len(), 17);
+        assert!(linearizable(&history));
+    }
+
+    /// Answers that move nothing are never delayed: a window of many
+    /// concurrent reads around one write is decided in a handful of steps,
+    /// not one state per subset of the reads.
+    #[test]
+    fn a_window_of_unchanging_answers_is_not_a_subset_explosion() {
+        let mut history = vec![
+            at(
+                0,
+                0,
+                claim(0, None),
+                Some((1, Seen::Won(state(Some(0), 0, 0)))),
+            ),
+            at(0, 2, write(0, 0, &[7]), Some((1_000, written(0, 1, false)))),
+        ];
+        for k in 0..40 {
+            let page = if k % 2 == 0 { vec![] } else { vec![7] };
+            let next = page.len() as u64;
+            history.push(at(
+                1 + k % 3,
+                3 + k,
+                Call::Read { from: 0, limit: 0 },
+                Some((
+                    900 + k,
+                    Seen::Page {
+                        records: page,
+                        state: state(Some(0), next, 0),
+                    },
+                )),
+            ));
+        }
+        let verdict = check(&history, WriterMode::Single, 1_000_000);
+        assert!(verdict.linearizable);
+        assert!(verdict.steps < 20_000, "steps: {}", verdict.steps);
+    }
+
+    /// The journal trusts its clients to draw fresh uuids (§2.3, decided on
+    /// 2026-10-09): a misbehaving client that reinstates a former leader's
+    /// uuid wins, and that uuid's writes are accepted again.
+    #[test]
+    fn a_reinstated_uuid_leads_again() {
+        let history = [
+            at(
+                0,
+                0,
+                claim(0, None),
+                Some((1, Seen::Won(state(Some(0), 0, 0)))),
+            ),
+            at(
+                1,
+                2,
+                claim(1, Some(0)),
+                Some((3, Seen::Won(state(Some(1), 0, 0)))),
+            ),
+            at(
+                1,
+                4,
+                claim(0, Some(1)),
+                Some((5, Seen::Won(state(Some(0), 0, 0)))),
+            ),
+            at(0, 6, write(0, 0, &[7]), Some((7, written(0, 1, false)))),
+        ];
+        assert!(linearizable(&history));
+    }
+
+    /// An unknown claim retried with the identical call may win twice when
+    /// its `old` uuid is reinstated in between: two reads see the swap twice.
+    #[test]
+    fn a_retried_claim_wins_again_after_a_reinstatement() {
+        let led_by = |leader| Seen::Page {
+            records: vec![],
+            state: state(Some(leader), 0, 0),
+        };
+        let history = [
+            at(
+                0,
+                0,
+                claim(0, None),
+                Some((1, Seen::Won(state(Some(0), 0, 0)))),
+            ),
+            at(1, 2, claim(1, Some(0)), None),
+            at(0, 3, Call::Read { from: 0, limit: 0 }, Some((4, led_by(1)))),
+            at(
+                0,
+                5,
+                claim(0, Some(1)),
+                Some((6, Seen::Won(state(Some(0), 0, 0)))),
+            ),
+            at(1, 7, claim(1, Some(0)), None),
+            at(0, 8, Call::Read { from: 0, limit: 0 }, Some((9, led_by(1)))),
+        ];
+        assert!(linearizable(&history));
+    }
+
+    /// A multi-writer write (#241): unfenced, no position.
+    fn append(records: &[u64]) -> Call {
+        Call::Write {
+            leader: LeaderUuid(0),
+            seq: 0,
+            records: records.to_vec(),
+        }
+    }
+
+    fn multi_state(next: u64, first: u64) -> JournalView {
+        JournalView {
+            leader: None,
+            next_seq: Seq(next),
+            first_seq: Seq(first),
+        }
+    }
+
+    #[test]
+    fn a_multi_writer_retry_may_land_twice_and_a_claim_is_refused() {
+        let history = vec![
+            at(0, 1, append(&[7]), Some((2, written(0, 1, false)))),
+            // The same bytes again: a second position, never a duplicate.
+            at(0, 3, append(&[7]), Some((4, written(1, 1, false)))),
+            at(
+                1,
+                5,
+                claim(1, None),
+                Some((6, Seen::WrongMode(multi_state(2, 0)))),
+            ),
+            at(
+                1,
+                7,
+                Call::Read { from: 0, limit: 0 },
+                Some((
+                    8,
+                    Seen::Page {
+                        records: vec![7, 7],
+                        state: multi_state(2, 0),
+                    },
+                )),
+            ),
+        ];
+        let verdict = check(&history, WriterMode::Multi, 1_000_000);
+        assert!(verdict.linearizable);
+        // The same history is not a single-writer one.
+        assert!(!check(&history, WriterMode::Single, 1_000_000).linearizable);
+    }
+
+    /// An unknown single-writer write lands only where the pages show its
+    /// records (#512 (search budget)): an owner's writes re-sent with
+    /// fresh bytes at each position, under one page, are decided in a few
+    /// steps.
+    #[test]
+    fn unknown_single_writer_writes_land_only_where_the_pages_show_them() {
+        const GAP: u64 = 16;
+        let mut history = vec![at(
+            0,
+            0,
+            claim(0, None),
+            Some((1, Seen::Won(state(Some(0), 0, 0)))),
+        )];
+        // Three tries at each position; the page shows the last.
+        for k in 0..GAP {
+            for t in 1..=3 {
+                history.push(at(0, 2 + 3 * k + t, write(0, k, &[1000 * k + t]), None));
+            }
+        }
+        history.push(at(
+            1,
+            4 * GAP + 4,
+            Call::Read { from: 0, limit: 0 },
+            Some((
+                4 * GAP + 5,
+                Seen::Page {
+                    records: (0..GAP).map(|k| 1000 * k + 3).collect(),
+                    state: state(Some(0), GAP, 0),
+                },
+            )),
+        ));
+        let verdict = check(&history, WriterMode::Single, 10_000);
+        assert!(!verdict.exhausted, "{} steps", verdict.steps);
+        assert!(verdict.linearizable);
+    }
+
+    /// An unknown multi-writer write lands only where it fits what the
+    /// pages show (#512 (search budget)): a long gap of unknown writes
+    /// under one page is decided in a few steps, whatever their
+    /// invocation order.
+    #[test]
+    fn unknown_multi_writer_writes_land_only_where_they_fit() {
+        const GAP: u64 = 24;
+        // Invoked in the reverse of the order the page shows them.
+        let mut history: Vec<Attempt> = (0..GAP)
+            .map(|k| at(0, GAP - k, append(&[100 + k]), None))
+            .collect();
+        history.push(at(
+            1,
+            2 * GAP,
+            Call::Read { from: 0, limit: 0 },
+            Some((
+                2 * GAP + 1,
+                Seen::Page {
+                    records: (0..GAP).map(|k| 100 + k).collect(),
+                    state: multi_state(GAP, 0),
+                },
+            )),
+        ));
+        let verdict = check(&history, WriterMode::Multi, 10_000);
+        assert!(!verdict.exhausted, "{} steps", verdict.steps);
+        assert!(verdict.linearizable);
+    }
+
+    #[test]
+    fn unknown_multi_writer_writes_each_land_at_most_once() {
+        // Two unknown writes of one record and a read that sees three: no
+        // linearization lands a third.
+        let history = vec![
+            at(0, 1, append(&[1]), None),
+            at(0, 2, append(&[2]), None),
+            at(
+                1,
+                3,
+                Call::Read { from: 0, limit: 0 },
+                Some((
+                    4,
+                    Seen::Page {
+                        records: vec![1, 2],
+                        state: multi_state(2, 0),
+                    },
+                )),
+            ),
+        ];
+        assert!(check(&history, WriterMode::Multi, 1_000_000).linearizable);
+        let mut three = history.clone();
+        three[2].seen = Some((
+            4,
+            Seen::Page {
+                records: vec![1, 2, 2],
+                state: multi_state(3, 0),
+            },
+        ));
+        assert!(!check(&three, WriterMode::Multi, 1_000_000).linearizable);
+    }
+
+    #[test]
+    fn anyone_truncates_a_multi_writer_journal_but_a_fenced_call_is_refused() {
+        let history = vec![
+            at(0, 1, append(&[1, 2]), Some((2, written(0, 2, false)))),
+            at(
+                1,
+                3,
+                Call::Truncate {
+                    leader: LeaderUuid(0),
+                    up_to: 1,
+                },
+                Some((4, Seen::Trimmed(multi_state(2, 1)))),
+            ),
+            at(
+                1,
+                5,
+                Call::Write {
+                    leader: u(1),
+                    seq: 2,
+                    records: vec![3],
+                },
+                Some((6, Seen::WrongMode(multi_state(2, 1)))),
+            ),
+        ];
+        assert!(check(&history, WriterMode::Multi, 1_000_000).linearizable);
+    }
+
+    /// Two families of identical unknown claims, `1 <- 0` and `0 <- 1`
+    /// (a retried claim and a reinstatement retried), around reads that
+    /// pin the leader: the copies are taken in invocation order, not as
+    /// every subset of each family.
+    fn claim_families(seen_by_last: u64) -> Vec<Attempt> {
+        let led_by = |leader| Seen::Page {
+            records: vec![],
+            state: state(Some(leader), 0, 0),
+        };
+        let mut history = vec![at(
+            0,
+            0,
+            claim(0, None),
+            Some((1, Seen::Won(state(Some(0), 0, 0)))),
+        )];
+        for k in 0..20 {
+            history.push(at(1, 2 + k, claim(1, Some(0)), None));
+            history.push(at(0, 2 + k, claim(0, Some(1)), None));
+        }
+        history.push(at(
+            2,
+            30,
+            Call::Read { from: 0, limit: 0 },
+            Some((31, led_by(1))),
+        ));
+        history.push(at(
+            2,
+            32,
+            Call::Read { from: 0, limit: 0 },
+            Some((33, led_by(0))),
+        ));
+        history.push(at(
+            2,
+            34,
+            Call::Read { from: 0, limit: 0 },
+            Some((35, led_by(seen_by_last))),
+        ));
+        history
+    }
+
+    /// A claim storm nobody observes (#392): every claim times out while
+    /// every read sees no leader. No unknown claim is judged, so the
+    /// search is one step per read; a read that sees one of the claimed
+    /// uuids makes that claim judged again, and explains it.
+    #[test]
+    fn unknown_claims_no_answer_observes_are_not_judged() {
+        let none = || Seen::Page {
+            records: vec![],
+            state: state(None, 0, 0),
+        };
+        let mut history = Vec::new();
+        for k in 0..150 {
+            history.push(at(k % 3, 10 * k, claim(k, None), None));
+            history.push(at(
+                3,
+                10 * k + 1,
+                Call::Read { from: 0, limit: 1 },
+                Some((10 * k + 2, none())),
+            ));
+        }
+        let kept = judged(&history, WriterMode::Single);
+        assert_eq!(kept.len(), 150);
+        let verdict = check(&history, WriterMode::Single, 1_000_000);
+        assert!(verdict.linearizable);
+        assert!(verdict.steps <= 300, "steps: {}", verdict.steps);
+        history.push(at(
+            3,
+            5_000,
+            Call::Read { from: 0, limit: 1 },
+            Some((
+                5_001,
+                Seen::Page {
+                    records: vec![],
+                    state: state(Some(77), 0, 0),
+                },
+            )),
+        ));
+        assert_eq!(judged(&history, WriterMode::Single).len(), 152);
+        assert!(linearizable(&history));
+        // A leader no claim installs is still refuted.
+        history.last_mut().expect("pushed").seen = Some((
+            5_001,
+            Seen::Page {
+                records: vec![],
+                state: state(Some(500), 0, 0),
+            },
+        ));
+        assert!(!linearizable(&history));
+    }
+
+    /// A multi-writer client's retries (#392): each append first times out,
+    /// then its retry is answered, and a read shows the one copy. The
+    /// timed-out copy can land nowhere (its record is shown only where the
+    /// retry landed), so it is not judged; were it judged, the search
+    /// would try it again after every later step.
+    #[test]
+    fn unknown_writes_the_tail_left_behind_cost_no_steps() {
+        let mut history = Vec::new();
+        let rounds = 3_000;
+        for k in 0..rounds {
+            let t = 10 * k;
+            history.push(at(0, t, append(&[100 + k]), None));
+            history.push(at(
+                0,
+                t + 1,
+                append(&[100 + k]),
+                Some((t + 2, written(k, 1, false))),
+            ));
+            history.push(at(
+                1,
+                t + 3,
+                Call::Read { from: k, limit: 1 },
+                Some((
+                    t + 4,
+                    Seen::Page {
+                        records: vec![100 + k],
+                        state: multi_state(k + 1, 0),
+                    },
+                )),
+            ));
+        }
+        assert_eq!(judged(&history, WriterMode::Multi).len(), 2 * 3_000);
+        let verdict = check(&history, WriterMode::Multi, 1_000_000);
+        assert!(verdict.linearizable);
+        assert!(verdict.steps < 3 * 3_000, "steps: {}", verdict.steps);
+        // A read that shows the record twice explains the timed-out copy
+        // landing as well.
+        let last = history.len() - 1;
+        history[last].call = Call::Read {
+            from: rounds - 1,
+            limit: 2,
+        };
+        history[last].seen = Some((
+            10 * rounds,
+            Seen::Page {
+                records: vec![99 + rounds; 2],
+                state: multi_state(rounds + 1, 0),
+            },
+        ));
+        assert!(check(&history, WriterMode::Multi, 1_000_000).linearizable);
+    }
+
+    /// Unknown single-writer writes the tail passed are retired, not tried
+    /// after every step: a long run of writes, each timed out once and
+    /// answered on its retry.
+    #[test]
+    fn unknown_single_writer_writes_behind_the_tail_are_retired() {
+        let mut history = vec![at(
+            0,
+            0,
+            claim(0, None),
+            Some((1, Seen::Won(state(Some(0), 0, 0)))),
+        )];
+        let rounds = 3_000;
+        for k in 0..rounds {
+            let t = 10 + 10 * k;
+            // A timed-out write and its answered retry: the copy may land
+            // only at its own position, and is retired once the tail passed.
+            history.push(at(0, t, write(0, k, &[k]), None));
+            history.push(at(
+                0,
+                t + 1,
+                write(0, k, &[k]),
+                Some((t + 2, written(k, 1, false))),
+            ));
+        }
+        let verdict = check(&history, WriterMode::Single, 1_000_000);
+        assert!(verdict.linearizable);
+        assert!(verdict.steps < 4 * 3_000, "steps: {}", verdict.steps);
+    }
+
+    #[test]
+    fn families_of_identical_unknown_claims_are_not_a_subset_explosion() {
+        let verdict = check(&claim_families(1), WriterMode::Single, 50_000);
+        assert!(!verdict.exhausted, "steps: {}", verdict.steps);
+        assert!(verdict.linearizable);
+    }
+
+    /// A refutation explores every order, so it pins the mechanism: taking
+    /// each family's copies as distinct runs past a million steps here, in
+    /// invocation order it ends well inside.
+    #[test]
+    fn a_leader_no_claim_installs_is_still_refuted_among_copies() {
+        let verdict = check(&claim_families(2), WriterMode::Single, 1_000_000);
+        assert!(!verdict.exhausted, "steps: {}", verdict.steps);
+        assert!(!verdict.linearizable);
+    }
+
+    /// A page that shows `records` at `next`, under `leader`.
+    fn page(records: &[u64], leader: u64, next: u64) -> Seen {
+        Seen::Page {
+            records: records.to_vec(),
+            state: state(Some(leader), next, 0),
+        }
+    }
+
+    /// #444: a write the client resolved not written while its uuid still
+    /// led (a `resolve` that compares wrongly) is refuted once a read shows
+    /// it landed; without the resolution's marker the late landing is an
+    /// unknown write, linearizable.
+    #[test]
+    fn a_write_resolved_not_written_never_lands_under_its_leadership() {
+        let mut history = vec![
+            at(
+                0,
+                0,
+                claim(0, None),
+                Some((1, Seen::Won(state(Some(0), 0, 0)))),
+            ),
+            at(0, 2, write(0, 0, &[7]), None),
+            at(
+                1,
+                10,
+                Call::Read { from: 0, limit: 0 },
+                Some((11, page(&[7], 0, 1))),
+            ),
+        ];
+        assert!(linearizable(&history));
+        history.push(at(0, 3, write(0, 0, &[7]), Some((4, Seen::NotWritten))));
+        assert!(!linearizable(&history));
+    }
+
+    /// #444: a uuid that leads again after the settlement lets the write
+    /// land (§2.3: a reinstated uuid is the caller's misbehaviour), and so
+    /// does a claim of it still unanswered when the settlement started.
+    #[test]
+    fn a_write_resolved_not_written_lands_when_its_uuid_leads_again() {
+        let history = [
+            at(
+                0,
+                0,
+                claim(0, None),
+                Some((1, Seen::Won(state(Some(0), 0, 0)))),
+            ),
+            at(0, 2, write(0, 0, &[7]), None),
+            at(
+                1,
+                3,
+                claim(1, Some(0)),
+                Some((4, Seen::Won(state(Some(1), 0, 0)))),
+            ),
+            at(0, 5, write(0, 0, &[7]), Some((6, Seen::NotWritten))),
+            at(
+                1,
+                7,
+                claim(0, Some(1)),
+                Some((8, Seen::Won(state(Some(0), 0, 0)))),
+            ),
+            at(
+                1,
+                10,
+                Call::Read { from: 0, limit: 0 },
+                Some((11, page(&[7], 0, 1))),
+            ),
+        ];
+        assert!(linearizable(&history));
+        // The reinstating claim answered before the settlement started:
+        // the write was proved out of that leadership too.
+        let mut early = history.to_vec();
+        early[3].inv = 9;
+        early[3].seen = Some((9, Seen::NotWritten));
+        assert!(!linearizable(&early));
+    }
+
+    /// #444: a resolution's marker is never judged as an attempt, and it
+    /// keeps its write out of the unobserved-bytes collapse: the marked
+    /// write and an unmarked one at the same position both stay.
+    #[test]
+    fn a_resolution_marker_is_not_an_attempt() {
+        let history = [
+            at(
+                0,
+                0,
+                claim(0, None),
+                Some((1, Seen::Won(state(Some(0), 0, 0)))),
+            ),
+            at(0, 2, write(0, 0, &[7]), None),
+            at(0, 3, write(0, 0, &[8]), None),
+            at(0, 4, write(0, 0, &[7]), Some((5, Seen::NotWritten))),
+        ];
+        assert_eq!(judged(&history, WriterMode::Single), vec![0, 1, 2]);
+        assert!(linearizable(&history));
+    }
+}

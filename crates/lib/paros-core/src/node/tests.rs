@@ -1,0 +1,326 @@
+//! Unit tests for the Multi-Paxos state machine. Tests are a child module of
+//! `node`, so they may read `ColocatedNode`'s private fields directly.
+
+use std::collections::BTreeMap;
+
+use super::{
+    BeliefSource, ColocatedNode, Delegation, HANDOFF_BATCH, HANDOFF_FENCE_ELECTIONS,
+    LeadershipOrigin, MatchStep, NodeRole, ProposeResult, READ_TTL_TICKS, ReadState,
+    ReconfigureRefusal, ReconfigureResult,
+};
+use crate::contract::hard_state::HardState;
+use crate::contract::limits::{Limits, PROMISE_BATCH, RECOVERY_BATCH};
+use crate::contract::mem_storage::MemStorage;
+use crate::contract::message::{Message, Party};
+use crate::matchmaker::{
+    MatchOutcome, MatchRefusal, MatchReply, MatchRequest, Matchmaker, MatchmakerConfig,
+    Registration,
+};
+use crate::membership::{AcceptorConfig, MatchmakerGeneration, MatchmakerId};
+use crate::node::ready::Ready;
+
+/// The journal every test node serves.
+const J: crate::journal::JournalId = crate::journal::JournalId::UNSET;
+use crate::journal::{Command, Control, Entry, LeaderUuid, Seq, command_fingerprint};
+use crate::types::{Ballot, NodeId, Slot, Value};
+
+fn node(id: u64, members: &[u64]) -> ColocatedNode {
+    limited_node(id, members, Limits::DEFAULT)
+}
+
+/// [`node`] under `limits`.
+fn limited_node(id: u64, members: &[u64], limits: Limits) -> ColocatedNode {
+    ColocatedNode::new(&MemStorage::for_node(id, members), limits)
+}
+
+/// A fresh `N`-node cluster `node(0..N)` over the membership `0..N`.
+fn cluster<const N: usize>() -> [ColocatedNode; N] {
+    let members: Vec<u64> = (0..N as u64).collect();
+    std::array::from_fn(|i| node(i as u64, &members))
+}
+
+/// A node of a **matchmaker deployment**: bootstrap membership `members`,
+/// addressable pool `pool` (a superset holding the spares), and `matchmakers`
+/// matchmakers.
+fn deployed_node(id: u64, members: &[u64], pool: &[u64], matchmakers: u64) -> ColocatedNode {
+    let mut storage = MemStorage::for_node(id, members);
+    storage.config.nodes = pool.iter().copied().map(NodeId).collect();
+    storage.config.matchmakers = (0..matchmakers).map(MatchmakerId).collect();
+    ColocatedNode::new(&storage, Limits::DEFAULT)
+}
+
+/// Fire the election clock on `n` once: a node on its bootstrap belief
+/// opens a membership probe (#173), any other a campaign.
+fn fire_election(n: &mut ColocatedNode) {
+    n.set_election_timeout(1);
+    n.tick();
+}
+
+/// Fire the election clock on `n` so a campaign opens: a probe the clock
+/// opened first is answered by every matchmaker of the believed set with
+/// no reconfiguration, which confirms the bootstrap as heard — and a node
+/// the bootstrap names campaigns from that answer.
+fn campaign(n: &mut ColocatedNode) {
+    fire_election(n);
+    let Some(tag) = n
+        .membership_probe()
+        .map(crate::matchmaking::MembershipProbe::ballot)
+    else {
+        return;
+    };
+    let set = n
+        .matchmaker_set()
+        .cloned()
+        .expect("a probe runs on a matchmaker deployment");
+    let _ = drain_match_requests(n);
+    for matchmaker in set.members() {
+        n.on_match_reply(MatchReply {
+            journal: J,
+            matchmaker: *matchmaker,
+            to: n.config().id,
+            ballot: tag,
+            generation: set.generation,
+            outcome: MatchOutcome::Probed { effective: None },
+        });
+    }
+}
+
+/// Drain a node's pending matchmaking requests and clear the batch.
+fn drain_match_requests(n: &mut ColocatedNode) -> Vec<(MatchmakerId, MatchRequest)> {
+    drain_with(n, |ready| ready.match_requests().to_vec()).1
+}
+
+/// Answer `requests` from the given registries, returning every reply.
+fn matchmake(
+    matchmakers: &mut [Matchmaker],
+    requests: Vec<(MatchmakerId, MatchRequest)>,
+) -> Vec<MatchReply> {
+    let mut replies = Vec::new();
+    for (id, request) in requests {
+        let mm = &mut matchmakers[usize::try_from(id.0).expect("matchmaker index")];
+        mm.step(request);
+        let ready = mm.ready();
+        replies.extend(ready.replies().to_vec());
+        ready.advance();
+    }
+    replies
+}
+
+/// Fresh in-memory registries, `MatchmakerId(0..n)`.
+fn registries(n: u64) -> Vec<Matchmaker> {
+    (0..n)
+        .map(|i| {
+            Matchmaker::new(
+                &MatchmakerConfig {
+                    id: MatchmakerId(i),
+                    bootstrap: (0..n).map(MatchmakerId).collect(),
+                },
+                &crate::matchmaker::MemRegistry::default(),
+                Limits::DEFAULT,
+            )
+        })
+        .collect()
+}
+
+/// `AcceptorConfig` over `members` under the majority system.
+fn cfg(members: &[u64]) -> AcceptorConfig {
+    AcceptorConfig::new(
+        members.iter().copied().map(NodeId).collect(),
+        crate::membership::QuorumSystem::Majority,
+    )
+}
+
+fn val(b: u8) -> Value {
+    Value(vec![b])
+}
+
+/// A one-record `Write` by `client` at position `seq` under generation zero:
+/// the per-slot value most consensus tests carry. Nobody owns a journal at
+/// generation zero, so the journal state machine refuses it at apply — which
+/// is all a test of the consensus layer needs.
+fn entry(client: u64, seq: u64, b: u8) -> Entry {
+    Entry {
+        leader: LeaderUuid(u128::from(client)),
+        seq: Seq(seq),
+        records: vec![val(b)],
+    }
+}
+
+/// A client [`Command`] wrapping [`entry`], the common per-slot value in tests.
+fn ucmd(client: u64, seq: u64, b: u8) -> Command {
+    Command::Write(entry(client, seq, b))
+}
+
+fn ballot(round: u64, node: u64) -> Ballot {
+    Ballot {
+        round,
+        node: NodeId(node),
+    }
+}
+
+/// A one-page `Promise` from `from` at `ballot` covering the whole suffix
+/// from slot 0: `accepted` reported, nothing faulty.
+fn terminal_promise(
+    from: NodeId,
+    ballot: Ballot,
+    accepted: BTreeMap<Slot, (Ballot, Command)>,
+) -> Message {
+    Message::Promise {
+        from,
+        ballot,
+        from_slot: Slot(0),
+        accepted,
+        faulty: BTreeMap::new(),
+        next_from_slot: None,
+    }
+}
+
+/// Drain a node's pending messages and clear the batch, resolving each
+/// audience against this node's own pool exactly as the driver does.
+fn drain(n: &mut ColocatedNode) -> Vec<(NodeId, Message)> {
+    drain_with(n, |_| ()).0
+}
+
+/// [`drain`], also reading `extra` off the batch before it is cleared.
+fn drain_with<'n, T>(
+    n: &'n mut ColocatedNode,
+    extra: impl FnOnce(&Ready<'n>) -> T,
+) -> (Vec<(NodeId, Message)>, T) {
+    let pool: Vec<NodeId> = n.config().pool().to_vec();
+    let me = n.config().id;
+    let ready = n.ready();
+    let msgs: Vec<(NodeId, Message)> = ready
+        .messages()
+        .iter()
+        .flat_map(|(audience, msg)| {
+            audience
+                .resolve(&pool, me)
+                .into_iter()
+                .map(move |to| (to, msg.clone()))
+        })
+        .collect();
+    let extra = extra(&ready);
+    ready.advance();
+    (msgs, extra)
+}
+
+/// The chosen client value at `slot` on this node, if any (a control command has
+/// no client value and reads back as `None`).
+fn chosen_at(n: &ColocatedNode, slot: u64) -> Option<Value> {
+    n.replica
+        .chosen()
+        .get(&Slot(slot))
+        .and_then(Command::write)
+        .map(|e| e.records[0].clone())
+}
+
+/// Deliver `queue` to addressed recipients, dropping any `(to, msg)` for which
+/// `keep` is false, enqueueing each delivery's resulting messages. Runs to
+/// quiescence (a reliable network with a caller-controlled partition).
+fn deliver_filtered(
+    nodes: &mut [ColocatedNode],
+    mut queue: Vec<(NodeId, Message)>,
+    keep: impl Fn(NodeId, &Message) -> bool,
+) {
+    while let Some((to, msg)) = queue.pop() {
+        if !keep(to, &msg) {
+            continue;
+        }
+        let n = node_at(nodes, to);
+        n.step(msg);
+        queue.extend(drain(n));
+    }
+}
+
+fn deliver_all(nodes: &mut [ColocatedNode], queue: Vec<(NodeId, Message)>) {
+    deliver_filtered(nodes, queue, |_, _| true);
+}
+
+/// A `CheckQuorum` window far past any unit test's tick horizon. Unit tests
+/// step messages by hand rather than pumping ack traffic every tick, so a
+/// realistic short timeout would demote their leaders mid-test; tests that
+/// *target* `CheckQuorum` set a short window explicitly instead.
+const NO_CHECK_QUORUM: u64 = 1_000_000;
+
+/// Drive `nodes[idx]` to leadership in a healthy cluster, then beat once so the
+/// followers learn who the leader is (a follower only adopts a leader on
+/// `Accept`/`Heartbeat`, never on Phase 1). Leaves the leader with an
+/// effectively infinite `CheckQuorum` window (see [`NO_CHECK_QUORUM`]).
+fn make_leader(nodes: &mut [ColocatedNode], idx: usize) {
+    campaign(&mut nodes[idx]); // election timeout -> Candidate, broadcasts Prepare
+    let q = drain(&mut nodes[idx]);
+    deliver_all(nodes, q);
+    assert!(
+        nodes[idx].is_leader(),
+        "node {idx} should have won the election"
+    );
+    nodes[idx].set_election_timeout(NO_CHECK_QUORUM);
+    nodes[idx].tick(); // fires Heartbeat -> followers adopt the leader
+    let q = drain(&mut nodes[idx]);
+    deliver_all(nodes, q);
+}
+
+/// Drive a fresh 3-node cluster with node 0 as leader and get slots 0..=2 chosen
+/// everywhere, then return the cluster (`chosen_index` is `Some(Slot(2))`).
+fn cluster_with_three_chosen() -> [ColocatedNode; 3] {
+    let mut nodes = cluster::<3>();
+    make_leader(&mut nodes, 0);
+    for (seq, b) in [(1u64, 10u8), (2, 20), (3, 30)] {
+        let _ = nodes[0].propose(entry(1, seq, b));
+        let q = drain(&mut nodes[0]);
+        deliver_all(&mut nodes, q);
+    }
+    nodes
+}
+
+// ---- addressing one node of a cluster ---------------------------------------
+
+/// The node of `nodes` whose id is `to`. Panics if `to` is not a cluster
+/// member.
+fn node_at(nodes: &mut [ColocatedNode], to: NodeId) -> &mut ColocatedNode {
+    nodes
+        .iter_mut()
+        .find(|n| n.config().id == to)
+        .expect("message addressed to a cluster member")
+}
+
+/// Step `msg` into whichever node it is addressed to, without draining it (so
+/// its pending buckets stay observable), returning nothing. Panics if `to` is
+/// not a cluster member.
+fn step_at(nodes: &mut [ColocatedNode], to: NodeId, msg: Message) {
+    node_at(nodes, to).step(msg);
+}
+
+// ---- #67/#88: the stale-ballot election --------------------------------------
+//
+// Two **guard** tests (plus the acceptor-side containment below). #67 asked
+// whether a Candidate that learns a higher ballot mid-campaign can go on to win
+// at its now-stale ballot; the answer used to be yes, through the two
+// promise-raising paths that left the campaign open: `mark_chosen` (a learned
+// `Commit`/`CatchUpResponse`) and the snapshot install #186 deleted (a snapshot
+// whose serving peer minted its promise with no quorum behind it — the #88
+// route, uncontained by quorum intersection at n >= 5; a trim-point jump moves
+// no promise, so the route is gone for good). `try_become_leader` then refused
+// the stale win; now `mark_chosen` closes the campaign where the promise rises
+// (a live campaign's promise sits at its ballot, `assert_invariants`; witness
+// 13099780746496209636, a matchmaking phase that reached Phase 1 past its
+// promise), restoring "a leader's ballot >= its own promise". These tests pin
+// the close, the self-heal (the next campaign ratchets past the learned
+// promise), and the healthy re-propose the stale win used to break.
+
+mod acceptor;
+mod bounds;
+mod catch_up;
+mod decide_apply;
+mod election;
+mod handoff;
+mod invariants;
+mod matchmaking;
+mod membership_probe;
+mod phase2;
+mod pool;
+mod quorum_reads;
+mod reconfigure;
+mod recovery;
+mod replication;
+mod wire_hygiene;

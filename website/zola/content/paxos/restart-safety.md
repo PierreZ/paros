@@ -72,7 +72,7 @@ that broke paros (commit `608bb58`): a node persists `X` for slot 5 at a low bal
 never reaches a quorum, then learns by `Commit` that the cluster chose a **different**
 value `Y` there. Its volatile chosen map holds `Y`, but its **durable** accepted record
 still holds `X` — and on boot the volatile state is rebuilt from those durable records
-(`crates/paros-core/src/node/boot.rs`), so the node comes back believing slot 5 is `X`
+(`crates/lib/paros-core/src/node/boot.rs`), so the node comes back believing slot 5 is `X`
 while every other node holds `Y`. That is exactly what
 [Why one value is safe](@/paxos/safety.md) promised could never happen, and nothing in the run
 was out of order: every write was flushed before its reply, which is why
@@ -112,7 +112,7 @@ sweep injects `Chaos::Attrition` (a node crashes and recovers, with `prob_wipe =
 durable state survives — a clean restart). Under that chaos the assertion went red on
 real seeds; the one-word fix turned it green and the sweep ran clean across thousands.
 A core test, `chosen_value_survives_restart_over_a_stale_accept`
-(`crates/paros-core/src/node/tests/acceptor.rs`), pins the mechanism.
+(`crates/lib/paros-core/src/node/tests/acceptor.rs`), pins the mechanism.
 
 That is the loop the project lives by: make the violation reproducible, watch it fail,
 fix the core, watch it pass — and a safety bug the simulation cannot reproduce is
@@ -147,13 +147,13 @@ prefix. A crash after the commit index was durable but *before* the node emitted
 applied-slot reports lost those reports, and the boot did not replay them, so the prefix
 looked like it skipped, failing **"a node's applied prefix advances one slot at a time
 (a forward jump only at the compaction floor or a snapshot install)"**
-(`crates/paros-sim/src/audit/`). The durable prefix was gap-free the whole time; the
+(`crates/sim/paros-sim/src/audit/`). The durable prefix was gap-free the whole time; the
 *report* had simply not been re-driven. The fix was to re-drive it on boot, idempotent
 because the commit index *is* the applied index, and the sweep saturated with seam
 crashes on, a stronger guard than replaying the one seed that surfaced it. Since paros
 stopped running an application (#186) there is nothing left to replay at all: the
 recovered chosen index is the node's whole walked prefix, and the boot report
-(`report_boot_state`, `crates/paros/src/driver/boot.rs`) hands it to the audit as one
+(`report_boot_state`, `crates/lib/paros-roles/src/node/boot.rs`) hands it to the audit as one
 transition. The application is a client that reads the log, and it keeps its own
 place in it.
 
@@ -163,5 +163,5 @@ anyway, so in steady state it once stayed where the last election left it. After
 restart of a cell, each new leader then re-proposed its whole log, and the cell answered
 nothing for 30 to 90 s (#602). Now a sync writes the metainfo for the chosen index alone
 once it runs `CHOSEN_INDEX_LAG` (64) slots ahead of the durable one
-(`crates/paros/src/journal/node.rs`). The audit checks **"a reboot rewinds the chosen
+(`crates/lib/paros-storage/src/journal/node.rs`). The audit checks **"a reboot rewinds the chosen
 index by less than a page"** at every boot.

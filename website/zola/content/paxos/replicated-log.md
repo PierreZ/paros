@@ -92,12 +92,12 @@ flowchart TD
 
 Slots 5 and 6 may apply; slot 8 **must not**, because applying it before slot 7 would
 execute commands in an order no other node will reproduce. In paros the walk is the
-`Replica` role (`crates/paros-core/src/replica.rs`): `advance_chosen_index` steps it
+`Replica` role (`crates/lib/paros-core/src/replica.rs`): `advance_chosen_index` steps it
 forward one slot at a time, surfacing each newly applied `(slot, command)` in order,
 and a hole stops the walk until it is filled. A hole that *never* fills is a permanent
 cluster-wide wedge — see [The stable leader](@/paxos/stable-leader.md). The audit pins the walk:
 **"a node's applied prefix advances one slot at a time (a forward jump only at the
-compaction floor or a snapshot install)"** (`crates/paros-sim/src/audit/`), and each
+compaction floor or a snapshot install)"** (`crates/sim/paros-sim/src/audit/`), and each
 journal client's fold of what it reads must visit LSNs in increasing order (the message
 **"chain: applies are contiguous per node"**, kept from when the fold was the node's own
 application). Both keep their old wording because an assertion's identity is the hash of

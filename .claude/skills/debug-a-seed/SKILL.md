@@ -20,7 +20,7 @@ cargo run -p paros-sim-runner --bin sim-paros-hunt replay-canary <seed>    # run
 
 There is one campaign (the corpus folded into it, #263). The binary prints `GREEN`/`RED`
 and the `assertion_violations` list. The nextest smoke
-(`crates/paros-sim/tests/sim.rs`) drives the same entry points
+(`crates/sim/paros-sim/tests/sim.rs`) drives the same entry points
 (`run_chain_seed`, `chain_seed_canary`, `chain_smoke`) if you want it inside a
 test run.
 
@@ -29,7 +29,7 @@ test run.
 Every oracle message is a stable string and its detail map carries the ids
 (node, slot, ballot, client, seq). Locate the message in `paros-sim`:
 
-- `crates/paros-sim/src/audit/state.rs` — protocol safety folded per
+- `crates/sim/paros-sim/src/audit/state.rs` — protocol safety folded per
   transition (promise monotonicity across restarts, one value per slot, the
   chosen prefix, the storage gates);
 - `audit/client.rs` and `audit/linearizability.rs` — `ClientHistory` and the
@@ -40,11 +40,11 @@ Every oracle message is a stable string and its detail map carries the ids
 - `audit/world.rs` — `AuditWorld`, `check_run` (the end-of-run convergence and
   chosen-gap claims) and `fold_applied`, the application check over the
   clients' folds of the journal (#186: the client is the application;
-  `ChainState` in `chain.rs`, the fold in `chain_workload/fold.rs`);
-- `audit/mod.rs` — the `Audit` port's implementation, `reach_once!`.
+  `ChainState` in `workload/chain.rs`, the fold in `workload/fold.rs`);
+- `audit.rs` — the `Audit` port's implementation, `reach_once!`.
 
 The message tells you which invariant; the check's code tells you which
-`Audit` callback fed it (`crates/paros/src/audit.rs`), and that callback sits
+`Audit` callback fed it (`crates/lib/paros-observe/src/audit.rs`), and that callback sits
 next to the driver `tracing` event that reports the transition.
 
 ## 3. Walk back through the protocol
@@ -61,11 +61,11 @@ stale. The usual shapes:
   reconfiguration superseded;
 - a client retry that changed the write — leader uuid, position or
   bytes — and was treated as new (`CallLog`'s retry-identity check in
-  `chain_workload/rpc.rs` names it).
+  `workload/rpc.rs` names it).
 
 Use `tracing` for reading only; never add a check that scans it. Note what a
 replay actually shows: `sim-paros-hunt` installs no subscriber of its own
-(`crates/paros-sim-runner/src/` has no tracing setup), and each moonpool run
+(`crates/sim/paros-sim-runner/src/` has no tracing setup), and each moonpool run
 installs a **capture-only** `SimulationLayer` as the thread's default,
 floored at `SimulationBuilder::trace_level` (`INFO` unless the builder lowers
 it). It feeds the timeline and prints nothing, so the flake's `RUST_LOG=debug`
@@ -73,7 +73,7 @@ changes nothing and there is no verbosity flag. The replay's output is
 `GREEN`/`RED` plus the `assertion_violations` list with each detail map:
 when you need more context, put it in a detail map (or a throwaway local
 print on the replay path you do not commit). Lowering `.trace_level(..)` on
-the `run_chain_seed` builder in `crates/paros-sim/src/lib.rs` only enlarges
+the `run_chain_seed` builder in `crates/sim/paros-sim/src/lib.rs` only enlarges
 the capture; a level never changes scheduling or randomness, so the seed still
 replays identically.
 

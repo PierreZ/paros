@@ -1,6 +1,6 @@
 # paros play: the interactive Paxos game
 
-> Since #540 (one wasm crate), the engine is the `paxos` feature of `crates/paros-wasm`
+> Since #540 (one wasm crate), the engine is the `paxos` feature of `crates/support/paros-wasm`
 > (`src/paxos.rs`, `src/paxos/`), built by `scripts/build-wasm.sh`. The paths below are the
 > original plan's (`crates/paros-play`, `scripts/build-play.sh`).
 
@@ -118,10 +118,10 @@ ReconfigureReply)` — plus `clock: u64`, the client registry (next seq per clie
 pending client operations (a proposed `(client, seq)` waiting for its slot, a read waiting for
 its `ReadState`).
 
-**The drain contract** is `crates/paros-core/examples/quorum_read.rs:164-198`, generalised:
+**The drain contract** is `crates/lib/paros-core/examples/quorum_read.rs:164-198`, generalised:
 after any call into a node, `ready()` → copy `writes`, `messages`, `committed`,
 `snapshot_offers`, `read_states`, `recovery_batch` out → `advance()` → apply the writes to the
-disk in order (`Truncate` behind the app apply, as `crates/paros/src/driver/ready.rs:239-247`
+disk in order (`Truncate` behind the app apply, as `crates/lib/paros/src/driver/ready.rs:239-247`
 does) → push one `InFlight` per `audience.resolve(&pool, id)` → apply `committed` to the disk's
 app log → record served reads → `advance_recovery()`. `Ready` is never held across a player
 action.
@@ -139,7 +139,7 @@ traffic on each tick when the heartbeat automation is on, and otherwise sets the
 timeout to the no-check-quorum sentinel exactly as `examples/quorum_read.rs:116` does.
 
 **Crash and restart.** `Crash { node }` drops the `ColocatedNode` and keeps the disk;
-`Restart { node }` is `ColocatedNode::new(&disk)`. `CrashAt { node, seam }` is the Act II seam
+`Restart { node }` is `ColocatedNode::new(&disk, limits)`. `CrashAt { node, seam }` is the Act II seam
 level: the pending `Ready` batch is cut before sync (nothing durable, nothing sent) or after
 sync before send (writes durable, messages lost). `Wipe { node }` (Act IV) clears the disk; the
 format-marker refusal is then the core's.

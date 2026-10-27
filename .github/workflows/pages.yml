@@ -7,7 +7,7 @@ on:
   pull_request:
     paths:
       - "website/**"
-      - "crates/paros-wasm/**"
+      - "crates/support/paros-wasm/**"
       - "website/zola/build.sh"
       - "scripts/build-wasm.sh"
       - "flake.nix"

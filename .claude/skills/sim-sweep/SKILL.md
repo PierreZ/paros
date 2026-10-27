@@ -31,13 +31,13 @@ or it runs uninstrumented and its code coverage never guides the seeds:
 nix develop --command cargo xtask sim run paros-chain
 ```
 
-## Hunt axes and replay commands (`crates/paros-sim-runner/src/hunt.rs`)
+## Hunt axes and replay commands (`crates/sim/paros-sim-runner/src/hunt.rs`)
 
 Axes: `main` (default; the one swarm campaign), `canary`. Iterations default
 to **2000**. Replays: `replay-main`, `replay-canary`, `explore-main`. (The
 corpus axes went when the corpus folded into the campaign, #263.) Neither
 binary reads environment variables; `SMOKE_ITERATIONS` and
-`COVERAGE_ITERATIONS` are `pub const`s in `crates/paros-sim/src/lib.rs`, and the flake exports `RUST_LOG=debug`
+`COVERAGE_ITERATIONS` are `pub const`s in `crates/sim/paros-sim/src/lib.rs`, and the flake exports `RUST_LOG=debug`
 while moonpool's sim subscriber stays floored at INFO.
 
 ## Budgets

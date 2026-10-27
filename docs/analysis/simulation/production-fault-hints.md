@@ -50,7 +50,7 @@ the ledger.
 This is right for *what* is at stake and wrong for *when*. The disk knows the batch is
 dirty. It does not know the batch is about to be synced, or that the sync just returned
 and the `Accepted` replies are about to leave. Attrition lands "wherever a task happens
-to yield" (`crates/paros/src/hooks.rs:3`). The persist-then-send edge is one await
+to yield" (`crates/lib/paros/src/hooks.rs:3`). The persist-then-send edge is one await
 wide. Volume alone does not hit it. The code must name the moment.
 
 ### The recommendation: a labelled point, no taxonomy
@@ -80,7 +80,7 @@ guard drops".
 
 Points are necessary. The seams are points. The cell-init promise is a point. The step
 between the promise commit and the entries commit in `JournalStorage::sync`
-(`crates/paros/src/journal/node.rs:481-557`) is a point.
+(`crates/lib/paros/src/journal/node.rs:481-557`) is a point.
 
 Windows are not necessary in the first version, for two reasons:
 
@@ -94,7 +94,7 @@ Windows are not necessary in the first version, for two reasons:
    names the instants inside the span itself (entries written, records written, metainfo
    stale), so a plain point at each covers it. `PowerCut` and its timer race are deleted.
    The copy budget stays the harness's, through moonpool's `HintVeto`
-   (`crates/paros-sim/src/world/cut.rs`).
+   (`crates/sim/paros-sim/src/world/cut.rs`).
 
 How each injector consumes a point, without breaking determinism:
 
@@ -274,7 +274,7 @@ scheduler tick through `Event::ProcessForceKill`, the `SelfCrash::crash` path
 
 Four, from the shipped paths. Each replaces a `DriverHooks` method and its sim arm.
 
-**The persist-then-send edge** (`crates/paros/src/driver/ready.rs:220-241`), two
+**The persist-then-send edge** (`crates/lib/paros/src/driver/ready.rs:220-241`), two
 seams today:
 
 ```rust
@@ -298,7 +298,7 @@ send_messages(out, audit, journal, messages);
 sink records. `Seam` survives as the audit's label enum only where a boot can tell the
 seams apart; otherwise it goes too.
 
-**The matchmaker's registration** (`crates/paros/src/matchmaker/mod.rs:207-221`):
+**The matchmaker's registration** (`crates/lib/paros/src/matchmaker/mod.rs:207-221`):
 
 ```rust
 hint!("registration staged, not synced").await;
@@ -307,7 +307,7 @@ hint!("registration durable, reply not sent").await;
 reply(..);
 ```
 
-**The cell init promise** (`crates/paros/src/machine/wait.rs:267-271`):
+**The cell init promise** (`crates/lib/paros/src/machine/wait.rs:267-271`):
 
 ```rust
 ledger.promise(ballot).await?;
@@ -317,7 +317,7 @@ hint!("cell promise durable, ack not sent").await;   // was crash_at(Seam::CellP
 `RunError::SeamCrash` goes: a killed process never returns. `paros-sim/src/machine.rs::
 seam_crash` and `restart_delay!` go with it.
 
-**The three commits of one sync** (`crates/paros/src/journal/node.rs:481-557`), the
+**The three commits of one sync** (`crates/lib/paros/src/journal/node.rs:481-557`), the
 #264 shape made likely:
 
 ```rust
@@ -334,7 +334,7 @@ that `hint!` itself: it depends on `moonpool-core` only, and `moonpool-buggify` 
 zero-dep. Then every user of the journal gets mid-commit cuts, and `PowerCut`'s timer
 race is deleted from paros rather than moved.
 
-**A hook that is not a hint** (`crates/paros/src/driver/mod.rs:516`,
+**A hook that is not a hint** (`crates/lib/paros/src/driver/mod.rs:516`,
 `skip_accept_resend`): the driver's own rare-but-valid decision needs no simulator
 action, so it is a plain inline site:
 
@@ -350,7 +350,7 @@ if pending_accepts && !moonpool_buggify::buggify_with_prob!(0.95) {
 |---|---|---|
 | `Seam::BeforeSync`, `AfterSyncBeforeSend` (`ready.rs`) | two `hint!` points, section 9 | hint |
 | `Seam::AfterPrepareSent` (#260) | `hint!("reconfiguring prepare sent")` after the send | hint |
-| `Seam::MatchBeforeSync`, `MatchAfterSyncBeforeReply` | two points in `matchmaker/mod.rs` | hint |
+| `Seam::MatchBeforeSync`, `MatchAfterSyncBeforeReply` | two points in `crates/lib/paros-roles/src/matchmaker.rs` | hint |
 | `Seam::CellPromised`, `CellFormatted` (`wait.rs`) | two points; `seam_crash` deleted | hint |
 | `world/power.rs` `PowerCut::around` | points between the sync's commits (paros) and inside `commit` (moonpool-journal); the copy budget a `HintVeto` (landed, #294 step 6) | hint |
 | `seam_crash_bias` ×10 | a higher rate literal on the write-side points (`hint!(.., 0.2)`) | rate |
@@ -360,7 +360,7 @@ if pending_accepts && !moonpool_buggify::buggify_with_prob!(0.95) {
 | `skip_*_resend`, `resign_leadership`, `stretch_tick_interval`, `expire_parked_read_early`, `skip_delegation`, mailbox hooks (`overtake`, `hold`, `reverse`, `evict`), election-timeout extremes, `abandon_reconfigurer` per phase | `buggify_with_prob!(p)` inline, same rates as `BuggifyHooks` | inline |
 | `drop_outgoing`, `duplicate_outgoing`, `drop_client_reply`, `duplicate_client_reply` | `buggify_with_prob!` at the send and the reply, one site per message kind that has its own gate | inline |
 | `handoff_target`, `phase2_column`, `read_row`, `proxy_for`, `initiate_handoff` | `buggify_pick!(p, n)` inline; `HandoffContext` stays as the tilt's input | inline |
-| `withhold_gc_requests`, `hold_journal`, `lose_verdicts` (per-seed latched) | `buggify_named!(label, p)` at the site; the scenario draw decides it with `set_activation` (done, #318 E: `paros::scenario`) | inline, scenario |
+| `withhold_gc_requests`, `hold_journal`, `lose_verdicts` (per-seed latched) | `buggify_named!(label, p)` at the site; the scenario draw decides it with `set_activation` (done, #318 E: `paros::observe::scenario`) | inline, scenario |
 | `DriverTunables` draws (`NodeShape`) | stay knobs, drawn by the harness: configuration, not a decision | unchanged |
 | `world/injector.rs` boot damage | stays: storage chaos aimed by `FaultFocus`; `upstream-to-moonpool` candidate | environment |
 | `ScriptedLifecycle`, `fleet.rs` target kill, late and bare outages | stay harness injectors over audit facts (FDB's `MachineAttrition`) | environment |

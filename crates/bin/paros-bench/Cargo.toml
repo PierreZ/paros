@@ -1,0 +1,31 @@
+[package]
+name = "paros-bench"
+description = "The paros load generator: clients writing and reading the journals of a tenant, against a deployment or a local cell"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+paros = { workspace = true, features = ["tls"] }
+# The options, the connection and the fleet helpers `parosctl` has.
+parosctl = { path = "../parosctl" }
+# The production providers, as `parosd` (its Cargo.toml says why).
+moonpool-core = { workspace = true, features = ["compio-providers", "select"] }
+
+clap = { version = "4", features = ["derive", "env"] }
+compio = { version = "0.19", default-features = false, features = ["runtime", "time", "signal", "io-uring", "polling"] }
+tokio-util = "0.7"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "registry"] }
+serde_json = "1"
+# Latency histograms, and their raw export (#517).
+hdrhistogram = "7"
+base64 = "0.22"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

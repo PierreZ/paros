@@ -145,7 +145,7 @@ judges it at apply like any other slot (`JournalState::apply`): it is a
 `Duplicate` exactly when the log already holds that write at that position.
 The judgement at apply is the safety rule (a leader may refuse early from its
 own fold as an optimisation, never instead of it), and the driver answers a call
-only with the verdict its slot folded to (`paros::driver::calls`), so an acknowledged write
+only with the verdict its slot folded to (`paros::roles::node::calls`), so an acknowledged write
 is always one a read through this node can already see.
 
 ## Where this lives in paros
@@ -157,20 +157,20 @@ is always one a read through this node can already see.
 | The evidence | `PreRead{reply_to, ctx}`, `PreReadAck{watermark}`, `Acceptor::vote_watermark` |
 | Settle and serve | `QuorumReads::fold`, `QuorumReads::serve`, `Replica::covers` |
 | The driver seam | `Ready::read_states`, `ReadState{ctx, index}` |
-| The verdict at apply | `JournalState::apply`, `Outcome` (`journal_state.rs`) |
-| A retry's answer | `Outcome::Duplicate`, answered from the fold (`paros::driver::calls`) |
+| The verdict at apply | `JournalState::apply`, `Outcome` (`journal/state.rs`) |
+| A retry's answer | `Outcome::Duplicate`, answered from the fold (`paros::roles::node::calls`) |
 
 ## Proven, not asserted
 
 The client is the only party that knows its own program order, so this check lives
-in the workload. `ClientHistory` (`crates/paros-sim/src/audit/client.rs`) records
+in the workload. `ClientHistory` (`crates/sim/paros-sim/src/audit/client.rs`) records
 every operation the client issues. This stage asserted three conditions over that
 history: a committed read observes every write completed before it began,
 committed-read watermarks never move backwards, and a write issued after a
 committed read lands above its watermark. Since the journal API (#205) the history
 is judged whole instead: every attempt at `Write`, `Read`, `SetLeader` and
 `Truncate`, answered or not, is searched for a linearization against the
-sequential model of a journal (`crates/paros-sim/src/audit/linearizability.rs`),
+sequential model of a journal (`crates/sim/paros-sim/src/audit/linearizability.rs`),
 and the three conditions are special cases of what that search refuses. Nothing
 reads a trace back. Every later stage — storage faults, reconfiguration —
 inherits this client's-eye definition of "nothing was lost".

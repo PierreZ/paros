@@ -41,7 +41,7 @@ parosd
 ```
 
 To pass the key without a file, put the text of the `.public` file in
-`PAROS_ROOT_PUBLIC_KEY_JSON` (`PAROS_FRONTEND_ROOT_PUBLIC_KEY_JSON` for a frontend). `parosctl
+`PAROS_ROOT_PUBLIC_KEY_JSON`. `parosctl
 init` takes the universe's first key the same way, in `PAROSCTL_ROOT_PUBLIC_KEY_JSON` or
 `--root-public-key-json`.
 
@@ -71,7 +71,7 @@ the keys that a frontend uses.
 A frontend reads the keys with the universe directory. When a token is refused as
 `invalid_token`, the frontend reads the keys again and checks the token once more. Thus a new
 key is trusted at its first use. A removed key stops being trusted at the next read. Before the
-first read, the frontend uses the files of `PAROS_FRONTEND_ROOT_PUBLIC_KEY`, if there are any.
+first read, the frontend uses the keys of `PAROS_ROOT_PUBLIC_KEY`, if there are any.
 
 A rotation has three steps:
 

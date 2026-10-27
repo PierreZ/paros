@@ -1,0 +1,34 @@
+[package]
+name = "paros-storage"
+description = "paros's storage layer: the log storage port, its contract suites, and the moonpool-journal stores"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+documentation = "https://docs.rs/paros-storage"
+
+[dependencies]
+paros-core = { workspace = true, features = ["tracing", "assertions", "serde"] }
+paros-model = { workspace = true }
+paros-wire = { workspace = true }
+futures = { workspace = true }
+moonpool-assertions = { workspace = true }
+moonpool-buggify = { workspace = true }
+moonpool-core = { workspace = true, features = ["select"] }
+moonpool-journal = { workspace = true }
+postcard = { workspace = true }
+serde = { workspace = true }
+crc32c = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+futures = { workspace = true, features = ["executor"] }
+moonpool-sim = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros"] }
+
+[lints]
+workspace = true

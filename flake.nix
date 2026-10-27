@@ -67,11 +67,11 @@
             # The site (website/zola/, Zola + Goyo, #254): website/zola/build.sh.
             zola
 
-            # The site's wasm tools (crates/paros-wasm, #540: the game at
+            # The site's wasm tools (crates/support/paros-wasm, #540: the game at
             # website/play, the playground at website/sandbox) and the paros-sim
-            # wasm check (crates/paros-sim-wasm-check, #307).
+            # wasm check (crates/sim/paros-sim-wasm-check, #307).
             # wasm-bindgen-cli's version MUST equal the `wasm-bindgen` crate pin
-            # in crates/paros-wasm/Cargo.toml and crates/paros-sim-wasm-check/Cargo.toml
+            # in crates/support/paros-wasm/Cargo.toml and crates/sim/paros-sim-wasm-check/Cargo.toml
             # (a mismatch fails bindgen with an opaque schema-version error);
             # bump all three together.
             wasm-bindgen-cli

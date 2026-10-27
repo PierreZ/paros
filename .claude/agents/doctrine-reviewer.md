@@ -16,7 +16,7 @@ finding, and cite file:line for every one.
 
 Check, in this order:
 
-1. **The core stays pure.** In `crates/paros-core`: no new dependency, feature,
+1. **The core stays pure.** In `crates/lib/paros-core`: no new dependency, feature,
    `cfg`, RNG, clock, `std::time`, or simulation-only path; the two features
    remain observation-only; a rare decision is exposed as a method with an
    honest contract, not a flag; `HashMap`/`HashSet` never appear anywhere in
@@ -55,7 +55,7 @@ Check, in this order:
 8. **Files and docs.** A module that now holds two concerns and was not
    split; a superseded axis, flag or gate not deleted; a doctrine change not
    reflected in the crate's `AGENTS.md`, the book, or a design note under
-   `docs/analysis/`; the moonpool pin changed in fewer than all of its lines (eight, across `crates/paros`, `crates/paros-sim` and `crates/parosd`'s manifests).
+   `docs/analysis/`; the moonpool pin changed in fewer than all of its lines (eight, across `crates/lib/paros`, `crates/sim/paros-sim` and `crates/bin/parosd`'s manifests).
 9. **Evidence.** A protocol fix whose commit message lacks the invariant and
    the red→green result; a claim the simulation was not made to reproduce.
 

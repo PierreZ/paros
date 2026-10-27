@@ -7,11 +7,11 @@ Reconfigurable Consensus Protocol" (Whittaker et al., 2021), §3.4–§3.5, §4.
 Appendices A, B and D. It sits beside `dpaxos-leader-handoff.md` and follows its shape:
 what the paper says, what paros actually has, and the rule that survives the translation.
 
-Code: `crates/paros-core/src/node/gc.rs` (the leader's GC decision),
-`crates/paros-core/src/matchmaker.rs` (generations, fencing, the durable decree
-acceptor), `crates/paros-core/src/matchmaker/reconfigurer.rs` (the handover state
-machine), `crates/paros-core/src/decree.rs` (the decree it decides with, generic since #277), and the
-harness's wipe / retire model in `crates/paros-sim/src/world/mod.rs`.
+Code: `crates/lib/paros-core/src/node/gc.rs` (the leader's GC decision),
+`crates/lib/paros-core/src/matchmaker.rs` (generations, fencing, the durable decree
+acceptor), `crates/lib/paros-core/src/matchmaker/reconfigurer.rs` (the handover state
+machine), `crates/lib/paros-core/src/decree.rs` (the decree it decides with, generic since #277), and the
+harness's wipe / retire model in `crates/sim/paros-sim/src/world.rs`.
 
 ## 1. Garbage collection: when may a configuration be forgotten?
 

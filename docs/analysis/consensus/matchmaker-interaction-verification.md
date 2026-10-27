@@ -13,7 +13,7 @@ evidence.
 Method. Each concern is read against the code with citations (a citation is a file and the
 line it held when this note was written; the symbol beside it outlives the line). Where a
 claim can be judged by the sans-IO handover model checker
-(`crates/paros-core/src/matchmaker/handover_model.rs`) it is written there as an assertion
+(`crates/lib/paros-core/src/models/handover.rs`) it is written there as an assertion
 judged after every step, and then shown to *bite*: a mutation of the rule it names must go
 red on the default seeds, and the line that goes red is recorded here. A concern the model
 cannot reach (it has no acceptors and no reboot of the *node's* volatile state) is verified
@@ -34,15 +34,15 @@ it only above `last_member_ballot`, the highest ballot a configuration naming it
 to. That scalar is volatile. Does a reboot open a window in which a node that is still a
 member accepts its own retirement?
 
-**What enforces it.** `ColocatedNode::may_retire` (`crates/paros-core/src/node/gc.rs:254`)
+**What enforces it.** `ColocatedNode::may_retire` (`crates/lib/paros-core/src/node/gc.rs:254`)
 requires four things: matchmakers, not an acceptor of the configuration the node believes
 in force, not the leader, and `watermark > last_member_ballot`. `last_member_ballot` is
-raised by `record_membership` (`crates/paros-core/src/node/helpers.rs:69`) from every
+raised by `record_membership` (`crates/lib/paros-core/src/node/helpers.rs:69`) from every
 assignment to `acceptors_since` — `learn_config`, `try_become_leader`, a handoff install
 (`node/handoff.rs:558`) and the adoption of an effective configuration
 (`node/matchmaking.rs:417`) — and the invariant checker pins that a member's fence is at
 least the ballot its configuration is bound to (`node/invariants.rs:114`). It boots at
-`Ballot::zero()` (`crates/paros-core/src/node/boot.rs:102`), beside the volatile `acceptors`
+`Ballot::zero()` (`crates/lib/paros-core/src/node/boot.rs:102`), beside the volatile `acceptors`
 that regresses to the bootstrap configuration.
 
 **Reading.** The window exists in the code and is exactly this: a node pulled in by a
@@ -58,9 +58,9 @@ became effective.
 
 **Verification.** By reading and by the harness's oracle, not by a model claim: the model
 has no node reboot of `ColocatedNode` state. The harness aims one retirement in ten at a
-*member* rather than at a retirable acceptor (`chain_workload/reconfigure.rs`, the `aim_at_member`
+*member* rather than at a retirable acceptor (`workload/reconfigure.rs`, the `aim_at_member`
 coin, with the watermark it just read), and the audit's "gc: a node retires only after an
-effective floor named it retirable" (`crates/paros-sim/src/audit/matchmaker.rs`) is an
+effective floor named it retirable" (`crates/sim/paros-sim/src/audit/matchmaker.rs`) is an
 always-assertion on the retired node against the set the effective floor released.
 
 **The red witness (#165).** CI's coverage-guided sweep on #160 produced the recipe
@@ -82,7 +82,7 @@ at `Ballot::zero()`, the deaf node's below `w`. The leg is an equality because a
 *above* `w` fails the other way: a node of `C_w` that missed `w` and then heard a later
 configuration dropping it would pass every other leg for the old watermark, while `C_w`,
 which the floor did not collect, still names it (a review finding on the first draft, which
-used `>=`). The refusal leg is `"stale"` (`paros::driver::operator::retire`, reported only
+used `>=`). The refusal leg is `"stale"` (`paros::roles::node::operator::retire`, reported only
 when the fence leg passed, so `not_collected` keeps its meaning; the audit's reachable "gc: a
 retirement is refused on a belief older than the floor"). It ends when a beat at the
 leader's ballot reaches the node — beats go to the whole pool, removed members included —
@@ -105,7 +105,7 @@ the explorer is still the runner most likely to land in the state again.
 ## 2. Registry paging as protocol
 
 **The concern.** A matchmaker's history answer is paged (`REGISTRY_PAGE = 64`,
-`crates/paros-core/src/matchmaker.rs:158`) and the candidate re-asks from a cursor. Paging
+`crates/lib/paros-core/src/matchmaker.rs:158`) and the candidate re-asks from a cursor. Paging
 is protocol, not transport: a page lost, duplicated, reordered, or answered from a registry
 that moved between two pages must never let a campaign close with a hole in `H_b`, and must
 never wedge it.
@@ -113,7 +113,7 @@ never wedge it.
 **What enforces it.** `Matchmaker::page` (`matchmaker.rs:562`) answers at most
 `REGISTRY_PAGE` records from `max(cursor, watermark)` and names the next cursor only when
 the page was full (`matchmaker.rs:439–443`). The candidate's `Matchmaking::accepts`
-(`crates/paros-core/src/matchmaking.rs:238`) folds a page only from a matchmaker it asked,
+(`crates/lib/paros-core/src/matchmaking.rs:238`) folds a page only from a matchmaker it asked,
 at the cursor it owes (`page_next`, `matchmaking.rs:150`), and the fold maxes every reply's
 watermark into the closing one, above which the union is filtered at closure.
 
@@ -154,16 +154,16 @@ test `a_page_leaves_out_a_belief_a_later_registration_repeats` pins the mechanis
 **Verification.** Model claim 4, two halves. Completeness: at closure `H_b` holds every
 registration below `b`, at or above the maximum reported watermark, that a majority of
 *any* generation up to the addressed one durably holds — pages, cursors, GC raises and
-handovers included (`handover_model.rs:1331`, "a completed matchmaking is complete"). Every
+handovers included (`models/handover.rs:1331`, "a completed matchmaking is complete"). Every
 node in the model runs the real `Matchmaking` tally against the set it believes
 authoritative, re-asked on the beat and never abandoned by the clock, as `ColocatedNode`
 does; the tail raises GC floors between pages, drawn from the upper half of the round space
 so a floor actually rises over one in force. Liveness: after quiescence every campaign
-closed (`settle_campaigns`, `handover_model.rs:1849`), and a page that jumps the cursor at
-the sender's raised watermark must fold (`handover_model.rs:1271`).
+closed (`settle_campaigns`, `models/handover.rs:1849`), and a page that jumps the cursor at
+the sender's raised watermark must fold (`models/handover.rs:1271`).
 
 **Witness.** Reverting the fix (refuse the jumped page again) is red at
-`handover_model.rs:1271` on the default seeds. The `campaign_paged` and
+`models/handover.rs:1271` on the default seeds. The `campaign_paged` and
 `campaign_page_jumped` reach counters are asserted non-zero, so the claim is not vacuous.
 
 ## 3. The effective configuration against GC and against a handover
@@ -175,7 +175,7 @@ one. #134's P1 found that GC pruned its record. Two things must now hold: GC nev
 it, and a handover carries it into the successor generation.
 
 **What enforces it.** `MatchmakerHardState::effective` is a durable monotone scalar
-(`crates/paros-core/src/matchmaker/state.rs:112–121`), folded as a max on every
+(`crates/lib/paros-core/src/matchmaker/state.rs:112–121`), folded as a max on every
 registration and carried in every `Registered` reply; `advance_gc_watermark`
 (`matchmaker.rs:530`) moves the window's floor and leaves the scalar alone; the freeze reply
 carries it (`ReconfigureReply::Stopped { effective }`, `matchmaker/message.rs:316`) and the
@@ -185,13 +185,13 @@ reconstruction takes the maximum over the frozen quorum into the pending bootstr
 **Verification.** Model claim 5, two halves. At every campaign's closure the tally's
 effective configuration is at least the highest reconfiguration a majority durably
 registered below `b`, whether or not its record was collected or the generation that took
-it was replaced (`handover_model.rs:1352`, "a completed matchmaking learns the effective
+it was replaced (`models/handover.rs:1352`, "a completed matchmaking learns the effective
 configuration"); and on every disk the scalar is monotone across every write, the GC
-watermark's included (`handover_model.rs:1003`, judged at every persist). The
+watermark's included (`models/handover.rs:1003`, judged at every persist). The
 `effective_outlived_its_record` counter proves the collected case is reached.
 
 **Witness.** Making `advance_gc_watermark` clear the scalar (the DPaxos-shaped mistake of
-P1, re-introduced) is red at `handover_model.rs:1352` and at `:1003` on the default seeds.
+P1, re-introduced) is red at `models/handover.rs:1352` and at `:1003` on the default seeds.
 
 ## 4. Phase-specific quorum semantics
 
@@ -255,12 +255,12 @@ still raises the floor the reopen clears (`Decree::on_nack`, `decree.rs:280`, ke
 the floor.
 
 **Verification.** Model claim 6, judged on every reply against a `PhaseShape` snapshot of
-the running phase taken before and after the fold (`handover_model.rs:1071`): an `Ignored`
+the running phase taken before and after the fold (`models/handover.rs:1071`): an `Ignored`
 reply left the shape unchanged and the stall clock untouched; a counted reply moved the
 shape and restarted the clock (`:1083–1100`). The `reply_ignored` counter is asserted
 non-zero.
 
-**Witness.** Reverting the fix is red at `handover_model.rs:1095` on the first default seed
+**Witness.** Reverting the fix is red at `models/handover.rs:1095` on the first default seed
 and in the directed `two_finishers_with_different_stop_quorums_choose_one_successor` case.
 
 ## 6. Freeze closure with two finishers
@@ -280,12 +280,12 @@ the winner's vote (claim 2).
 
 **Verification.** Model claim 7: a `Stopped` ack leaves the freeze open (`:1111`), a close
 happens only once the quorum answered, and the closed proposal is exactly the target or the
-answerers (`handover_model.rs:1576`); plus the directed cases
+answerers (`models/handover.rs:1576`); plus the directed cases
 `a_straggler_that_answers_before_the_close_widens_the_finish` (`:2126`) and
 `two_finishers_with_different_stop_quorums_choose_one_successor`.
 
 **Witness.** Proposing only a quorum-sized subset of the answerers (the pre-#134 ratchet)
-is red at `handover_model.rs:1576` on the default seeds and at `:2126` in the straggler
+is red at `models/handover.rs:1576` on the default seeds and at `:2126` in the straggler
 case.
 
 ## 7. Learned generation and publication
@@ -303,18 +303,18 @@ it already activated (`:290–306`), writing nothing; the reconfigurer counts a 
 that contradicts the recorded successor.
 
 **Verification.** Model claim 8: a publication is `Done` only when a majority of the
-successor's disks are durably at `g + 1` (`handover_model.rs:1128`), and a `Chosen` re-sent
+successor's disks are durably at `g + 1` (`models/handover.rs:1128`), and a `Chosen` re-sent
 to a member that already activated it is answered `Learned { activated: false, at: g + 1 }`
 and writes nothing (`:848`). The `chosen_resent_to_activated` counter is asserted non-zero.
 
 **Witness.** Answering the re-sent `Chosen` with a refusal (the pre-#137 behaviour) is red
-at `handover_model.rs:848` on the default seeds and in the two-finisher case.
+at `models/handover.rs:848` on the default seeds and in the two-finisher case.
 
 ## 8. The new failure seams
 
 **The concern.** #134 and #133 added durability seams on the matchmaker plane
 (`Seam::MatchBeforeSync`, `Seam::MatchAfterSyncBeforeReply` at the time; since #294 the
-two `hint!`s in `crates/paros/src/matchmaker/mod.rs`'s `drain`)
+two `hint!`s in `crates/lib/paros-roles/src/matchmaker.rs`'s `drain`)
 and a torn-batch crash. Every reply a matchmaker sends is a promise about its disk: the
 freeze, the pending bootstrap, the decree promise and vote, the activation, the
 registration. Is each one durable at the seam the reply leaves through?
@@ -322,15 +322,15 @@ registration. Is each one durable at the seam the reply leaves through?
 **What enforces it.** The matchmaker driver's drain is persist → fsync → reply, structural
 (`run_matchmaker`), and `Matchmaker::on_stop` freezes durably before the `Stopped` leaves
 (`generation.rs:78–100`, the `freeze()` at `:92`). The model reproduces the three seams (before persist, after
-persist before reply, after reply) and the torn prefix (`handover_model.rs:311–316`, `:918–925`).
+persist before reply, after reply) and the torn prefix (`models/handover.rs:311–316`, `:918–925`).
 
-**Verification.** Model claim 9, `assert_reply_backed` (`handover_model.rs:973`): every
+**Verification.** Model claim 9, `assert_reply_backed` (`models/handover.rs:973`): every
 reply the model delivers is checked against the disk of the matchmaker that sent it — a
 `Stopped` leaves a durably frozen generation (`:1020`), a `Bootstrapped` a durable pending
 set, a `Promised`/`Voted` the decree scalars, a `Learned` the activation, a `Registered` the
 record — at the instant it leaves, under every crash seam.
 
-**Witness.** Answering `Stopped` without freezing first is red at `handover_model.rs:1020`
+**Witness.** Answering `Stopped` without freezing first is red at `models/handover.rs:1020`
 in four of the directed cases on the first seed.
 
 ## The mutation table
@@ -341,7 +341,7 @@ reverted; none is kept, per the doctrine that a witness is evidence, not an arti
 
 | concern | claim | mutation | red at |
 | --- | --- | --- | --- |
-| 2 paging | 4 | refuse a page that starts above the cursor at the sender's raised watermark (`matchmaking.rs:257`) | `handover_model.rs:1271` |
+| 2 paging | 4 | refuse a page that starts above the cursor at the sender's raised watermark (`matchmaking.rs:257`) | `models/handover.rs:1271` |
 | 3 effective | 5 | `advance_gc_watermark` clears `effective` (`matchmaker.rs:530`) | `:1352`, `:1003` |
 | 5 duplicates | 6 | a second `Nacked` on a preempted decree answers `Preempted` (`reconfigurer.rs:on_reply`) | `:1095`, `two_finishers…` |
 | 6 freeze | 7 | a finish proposes only a quorum-sized subset of the answerers (`reconfigurer.rs:511`) | `:1576`, `:2126` |

@@ -1,0 +1,1014 @@
+use super::*;
+#[allow(clippy::wildcard_imports)]
+use crate::contract::limits::Limits;
+
+#[test]
+fn election_fires_after_timeout_and_becomes_candidate() {
+    let mut n = node(0, &[0, 1, 2]);
+    n.set_election_timeout(3);
+    n.tick();
+    n.tick();
+    assert_eq!(n.role(), NodeRole::Follower, "not yet timed out");
+    n.tick();
+    assert_eq!(
+        n.role(),
+        NodeRole::Candidate,
+        "election fired on the 3rd tick"
+    );
+    assert!(n.needs_election_timeout(), "driver must reseed the timeout");
+    let out = drain(&mut n);
+    // On the election timeout the candidate broadcasts a Prepare *and* a proactive
+    // catch-up probe to each of the two peers (the probe heals a silently-behind
+    // node that is not hearing a fresh leader commit): 4 messages total.
+    let prepares: Vec<_> = out
+        .iter()
+        .filter(|(_, m)| matches!(m, Message::Prepare { from_slot, .. } if *from_slot == Slot(0)))
+        .collect();
+    let probes: Vec<_> = out
+        .iter()
+        .filter(|(_, m)| matches!(m, Message::CatchUpRequest { from_slot, .. } if *from_slot == Slot(0)))
+        .collect();
+    assert_eq!(prepares.len(), 2, "Prepare broadcast to the two peers");
+    assert_eq!(probes.len(), 2, "catch-up probe broadcast to the two peers");
+    assert_eq!(out.len(), 4, "only Prepare + catch-up probe are broadcast");
+}
+
+#[test]
+fn promise_quorum_makes_leader() {
+    let mut nodes = cluster::<3>();
+    make_leader(&mut nodes, 0);
+    assert_eq!(nodes[0].role(), NodeRole::Leader);
+    assert_eq!(nodes[0].leader(), Some(NodeId(0)));
+}
+
+/// Build the #54 wedge: slot 1 reaches the leader alone, slot 2 reaches a
+/// follower and is chosen, then the leader dies and the survivors elect. Returns
+/// the three nodes with node 1 freshly elected. The hole at slot 1 is what the
+/// promise quorum {1,2} never saw — and what `next_slot` (3, from the recovered
+/// slot 2) jumped clean over.
+fn wedge_after_election() -> [ColocatedNode; 3] {
+    let mut nodes = cluster::<3>();
+    make_leader(&mut nodes, 0);
+
+    // Slot 0: healthy, so every node's chosen prefix starts at slot 0.
+    nodes[0].propose(entry(1, 1, 10));
+    let q = drain(&mut nodes[0]);
+    deliver_all(&mut nodes, q);
+
+    // Slot 1: every `Accept` is lost, so only the leader holds it. Undecided.
+    nodes[0].propose(entry(1, 2, 20));
+    let q = drain(&mut nodes[0]);
+    deliver_filtered(&mut nodes, q, |_, msg| {
+        !matches!(msg, Message::Accept { .. })
+    });
+    assert!(
+        nodes[0].has_pending_accepts(),
+        "the driver can see that a re-send would do useful work"
+    );
+
+    // Slot 2: the `Accept` reaches node 1 only — enough for the {0,1} quorum, so
+    // slot 2 *is* chosen and both followers learn it from the `Commit`.
+    nodes[0].propose(entry(1, 3, 30));
+    let q = drain(&mut nodes[0]);
+    deliver_filtered(&mut nodes, q, |to, msg| {
+        !(matches!(msg, Message::Accept { .. }) && to == NodeId(2))
+    });
+    assert_eq!(
+        chosen_at(&nodes[1], 2),
+        Some(val(30)),
+        "slot 2 is chosen even though slot 1 never left the leader"
+    );
+
+    // Node 0 dies. Node 1 campaigns; the promise quorum is {1,2}, neither of which
+    // ever saw slot 1, so `Election::recovered` holds only slot 2.
+    campaign(&mut nodes[1]);
+    let q = drain(&mut nodes[1]);
+    deliver_filtered(&mut nodes, q, |to, _| to != NodeId(0));
+    assert!(nodes[1].is_leader(), "the survivors elected node 1");
+    nodes
+}
+
+#[test]
+fn election_fills_a_hole_the_promise_quorum_never_reported() {
+    // Pins the #54 bug: `try_become_leader` used to re-propose only the slots in
+    // `Election::recovered`, so a slot that reached the old leader alone — below a
+    // later slot that *did* reach the promise quorum — was neither recovered nor
+    // re-allocated (`next_slot` jumped over it). Nothing would ever propose it
+    // again, freezing the contiguous chosen prefix one below it forever. The new
+    // leader now fills it with a `Control::Noop`. `paros_sim::audit` catches this
+    // in simulation (its chosen-gap check); this is the deterministic unit pin.
+    let mut nodes = wedge_after_election();
+
+    assert_eq!(
+        nodes[1].election_gap_fills(),
+        1,
+        "the election found exactly one hole (slot 1) and filled it"
+    );
+    assert!(
+        matches!(
+            nodes[1].acceptor().records().get(&Slot(1)),
+            Some((_, Command::Control(Control::Noop)))
+        ),
+        "the hole was filled with a no-op, not a client value"
+    );
+
+    // The fill is an ordinary Phase-2 round: node 2 accepts it, the quorum decides,
+    // and the frozen prefix finally walks past the hole.
+    let q = drain(&mut nodes[1]);
+    deliver_filtered(&mut nodes, q, |to, _| to != NodeId(0));
+    assert_eq!(
+        nodes[1].hard_state().chosen_index,
+        Some(Slot(2)),
+        "the chosen prefix advances over the filled hole to the recovered suffix"
+    );
+    assert_eq!(
+        nodes[1].replica().chosen_gap(),
+        None,
+        "no chosen slot is stranded above the applied prefix any more"
+    );
+
+    // And the leader can serve fresh proposals past it, which is what the wedge
+    // used to make impossible.
+    nodes[1].propose(entry(1, 4, 40));
+    let q = drain(&mut nodes[1]);
+    deliver_filtered(&mut nodes, q, |to, _| to != NodeId(0));
+    assert_eq!(
+        nodes[1].hard_state().chosen_index,
+        Some(Slot(3)),
+        "the log keeps growing after the fill"
+    );
+}
+
+#[test]
+fn new_leader_recovers_inflight_entry_under_its_ballot() {
+    // 3-node cluster. Node 1 has accepted slot 0 at an old ballot but it was
+    // never chosen. Node 2 wins a new election; its recovery must re-propose that
+    // entry under node 2's higher ballot (gap fill / takeover).
+    let mut nodes = cluster::<3>();
+    let old = ballot(1, 0);
+    let recovered = ucmd(5, 1, 99);
+    nodes[1].step(Message::Accept {
+        reply_to: Party::Node(NodeId(0)),
+        leader: NodeId(0),
+        ballot: old,
+        slot: Slot(0),
+        command: recovered.clone(),
+        config: None,
+    });
+    let _ = drain(&mut nodes[1]); // Accepted reply, dropped (node 0 is gone)
+    assert!(nodes[1].acceptor().records().contains_key(&Slot(0)));
+
+    // Node 2 campaigns. Deliver only to node 1 (node 0 is partitioned).
+    campaign(&mut nodes[2]);
+    let q = drain(&mut nodes[2]);
+    deliver_filtered(&mut nodes, q, |to, _| to != NodeId(0));
+
+    assert!(nodes[2].is_leader(), "node 2 won with node 1's promise");
+    // Node 2 re-proposed the recovered entry for slot 0 under its own ballot.
+    let (b, e) = nodes[2]
+        .acceptor()
+        .records()
+        .get(&Slot(0))
+        .expect("slot 0 re-accepted");
+    assert_eq!(
+        e, &recovered,
+        "recovered value re-proposed, not overwritten"
+    );
+    assert!(*b > old, "re-proposed under the new, higher ballot");
+    assert_eq!(
+        nodes[2].proposer().next_slot(),
+        Slot(1),
+        "next_slot is past the recovered slot"
+    );
+}
+
+#[test]
+fn recovery_picks_highest_ballot_value_per_slot() {
+    // 5-node cluster (quorum 3): node 4 self + 2 promises. Two promises report
+    // different values for slot 0 at different ballots; the higher-ballot value
+    // must win the recovery merge.
+    let mut n = node(4, &[0, 1, 2, 3, 4]);
+    campaign(&mut n); // Candidate at ballot {1,4}, Prepare from_slot 0
+    let _ = drain(&mut n);
+    let camp = n.ballot();
+
+    let low = (ballot(1, 0), ucmd(1, 1, 1));
+    let high = (ballot(1, 3), ucmd(1, 1, 2));
+    let mut acc_low = BTreeMap::new();
+    acc_low.insert(Slot(0), low);
+    let mut acc_high = BTreeMap::new();
+    acc_high.insert(Slot(0), high.clone());
+    n.step(terminal_promise(NodeId(0), camp, acc_low));
+    assert!(!n.is_leader(), "one promise short of quorum");
+    n.step(terminal_promise(NodeId(3), camp, acc_high));
+    assert!(n.is_leader(), "quorum reached");
+    let (_, e) = n
+        .acceptor()
+        .records()
+        .get(&Slot(0))
+        .expect("slot 0 re-accepted");
+    assert_eq!(
+        e, &high.1,
+        "the highest-ballot accepted value is re-proposed"
+    );
+}
+
+#[test]
+fn nack_steps_a_candidate_down_instead_of_stalling() {
+    let mut n = node(0, &[0, 1, 2]);
+    campaign(&mut n); // Candidate
+    let _ = drain(&mut n);
+    assert_eq!(n.role(), NodeRole::Candidate);
+    let camp = n.ballot();
+    n.step(Message::Nack {
+        from: NodeId(1),
+        ballot: camp,
+        slot: Slot(0),
+    });
+    assert_eq!(
+        n.role(),
+        NodeRole::Follower,
+        "a Nack of our campaign steps us down (livelock fix)"
+    );
+    assert!(
+        n.needs_election_timeout(),
+        "and asks for a fresh randomized timeout"
+    );
+}
+
+#[test]
+fn a_non_member_nack_cannot_depose_a_campaign() {
+    let mut n = node(0, &[0, 1, 2]);
+    campaign(&mut n);
+    let _ = drain(&mut n);
+    let camp = n.ballot();
+
+    n.step(Message::Nack {
+        from: NodeId(99),
+        ballot: camp,
+        slot: Slot(0),
+    });
+
+    assert_eq!(n.role(), NodeRole::Candidate);
+    assert_eq!(n.ballot(), camp);
+}
+
+#[test]
+fn promise_suffix_is_served_in_bounded_pages() {
+    let mut storage = MemStorage::for_node(0, &[0, 1, 2]);
+    for slot in 0..130 {
+        storage.accepted.insert(
+            Slot(slot),
+            (
+                ballot(0, 0),
+                ucmd(7, slot, u8::try_from(slot).expect("test slot fits u8")),
+            ),
+        );
+    }
+    let mut n = ColocatedNode::new(&storage, Limits::DEFAULT);
+    let prepared = ballot(1, 1);
+    let mut cursor = Slot(0);
+    let mut pages = Vec::new();
+
+    loop {
+        n.step(Message::Prepare {
+            reply_to: NodeId(1),
+            ballot: prepared,
+            from_slot: cursor,
+            config: None,
+        });
+        let out = drain(&mut n);
+        let [
+            (
+                NodeId(1),
+                Message::Promise {
+                    accepted,
+                    next_from_slot,
+                    ..
+                },
+            ),
+        ] = out.as_slice()
+        else {
+            panic!("expected one Promise page, got {out:?}");
+        };
+        assert!(accepted.len() <= PROMISE_BATCH);
+        pages.push(accepted.len());
+        let Some(next) = next_from_slot else {
+            break;
+        };
+        cursor = *next;
+    }
+
+    assert_eq!(pages, vec![PROMISE_BATCH, PROMISE_BATCH, 2]);
+}
+
+#[test]
+fn a_partial_promise_page_does_not_count_toward_the_quorum() {
+    let mut n = node(0, &[0, 1, 2]);
+    campaign(&mut n);
+    let _ = drain(&mut n);
+    let camp = n.ballot();
+    let accepted = (0..PROMISE_BATCH as u64)
+        .map(|slot| {
+            (
+                Slot(slot),
+                (
+                    ballot(0, 1),
+                    ucmd(8, slot, u8::try_from(slot).expect("test slot fits u8")),
+                ),
+            )
+        })
+        .collect();
+
+    n.step(Message::Promise {
+        faulty: BTreeMap::new(),
+        from: NodeId(1),
+        ballot: camp,
+        from_slot: Slot(0),
+        accepted,
+        next_from_slot: Some(Slot(PROMISE_BATCH as u64)),
+    });
+    assert_eq!(n.role(), NodeRole::Candidate);
+    let _ = drain(&mut n);
+
+    n.step(Message::Promise {
+        faulty: BTreeMap::new(),
+        from: NodeId(1),
+        ballot: camp,
+        from_slot: Slot(PROMISE_BATCH as u64),
+        accepted: BTreeMap::new(),
+        next_from_slot: None,
+    });
+    assert_eq!(n.role(), NodeRole::Leader);
+}
+
+#[test]
+fn a_same_ballot_continuation_closes_a_different_stale_leadership() {
+    let mut nodes = cluster::<3>();
+    make_leader(&mut nodes, 0);
+    let [mut n, _, _] = nodes;
+    let stale = n.ballot();
+    let _ = drain(&mut n);
+    // A leader that learns a higher-ballot commit stays a leader until a
+    // deposing message arrives (a campaign would close here instead,
+    // `mark_chosen`): the promise rises, the role does not move.
+    let learned = ballot(stale.round + 1, 1);
+    n.step(Message::Commit {
+        from: Party::Node(NodeId(1)),
+        ballot: learned,
+        slot: Slot(0),
+        command: ucmd(5, 1, 9),
+    });
+    let _ = drain(&mut n);
+    assert_eq!(n.role(), NodeRole::Leader);
+    assert_eq!(n.hard_state().max_promised_ballot, learned);
+
+    n.step(Message::Prepare {
+        reply_to: NodeId(1),
+        ballot: learned,
+        from_slot: Slot(1),
+        config: None,
+    });
+
+    assert_eq!(n.role(), NodeRole::Follower);
+    assert!(n.proposer.election().is_none());
+    let out = drain(&mut n);
+    assert!(matches!(out.as_slice(), [(_, Message::Promise { .. })]));
+}
+
+/// A leader that won over a promise quorum reporting `2 * PROMISE_BATCH + 2`
+/// accepted slots, with `page` as its recovery page size (#330).
+fn recovering_leader(page: usize) -> ColocatedNode {
+    let mut n = limited_node(
+        0,
+        &[0, 1, 2],
+        Limits {
+            recovery_page: page,
+            ..Limits::DEFAULT
+        },
+    );
+    campaign(&mut n);
+    let _ = drain(&mut n);
+    let camp = n.ballot();
+
+    for (from, len, next) in [
+        (0_u64, PROMISE_BATCH, Some(PROMISE_BATCH as u64)),
+        (
+            PROMISE_BATCH as u64,
+            PROMISE_BATCH,
+            Some((2 * PROMISE_BATCH) as u64),
+        ),
+        ((2 * PROMISE_BATCH) as u64, 2, None),
+    ] {
+        let accepted = (from..from + len as u64)
+            .map(|slot| {
+                (
+                    Slot(slot),
+                    (
+                        ballot(0, 1),
+                        ucmd(9, slot, u8::try_from(slot).expect("test slot fits u8")),
+                    ),
+                )
+            })
+            .collect();
+        n.step(Message::Promise {
+            faulty: BTreeMap::new(),
+            from: NodeId(1),
+            ballot: camp,
+            from_slot: Slot(from),
+            accepted,
+            next_from_slot: next.map(Slot),
+        });
+        if next.is_some() {
+            let _ = drain(&mut n);
+        }
+    }
+
+    assert_eq!(n.role(), NodeRole::Leader);
+    n
+}
+
+#[test]
+fn leader_recovery_is_split_across_ready_batches() {
+    let mut n = recovering_leader(RECOVERY_BATCH);
+    let ready = n.ready();
+    assert_eq!(ready.recovery_batch(), Some((RECOVERY_BATCH, 0, 66)));
+    ready.advance();
+    n.advance_recovery();
+    let ready = n.ready();
+    assert_eq!(ready.recovery_batch(), Some((RECOVERY_BATCH, 0, 2)));
+    ready.advance();
+    n.advance_recovery();
+    let ready = n.ready();
+    assert_eq!(ready.recovery_batch(), Some((2, 0, 0)));
+    ready.advance();
+    assert!(n.proposer.recovery().is_none());
+}
+
+#[test]
+fn a_small_recovery_page_spans_more_pages() {
+    // 130 recovered slots at seven per page: eighteen full pages and a
+    // last page of four, every one bounded by the node's own page size.
+    let mut n = recovering_leader(7);
+    assert_eq!(n.limits().recovery_page, 7);
+    let mut pages = 0_usize;
+    let mut total = 0_usize;
+    loop {
+        let ready = n.ready();
+        let (started, gap_fills, remaining) = ready
+            .recovery_batch()
+            .expect("a recovering leader reports a page");
+        ready.advance();
+        assert!(started <= 7);
+        assert_eq!(gap_fills, 0);
+        pages += 1;
+        total += started;
+        if remaining == 0 {
+            break;
+        }
+        n.advance_recovery();
+    }
+    assert_eq!(total, 130);
+    assert_eq!(pages, 19);
+    assert!(n.proposer.recovery().is_none());
+}
+
+#[test]
+#[should_panic(expected = "a recovery page visits at least one slot")]
+fn a_zero_recovery_page_is_refused() {
+    let _ = limited_node(
+        0,
+        &[0, 1, 2],
+        Limits {
+            recovery_page: 0,
+            ..Limits::DEFAULT
+        },
+    );
+}
+
+#[test]
+#[should_panic(expected = "a recovery page never exceeds its ceiling")]
+fn a_recovery_page_above_its_ceiling_is_refused() {
+    let _ = limited_node(
+        0,
+        &[0, 1, 2],
+        Limits {
+            recovery_page: RECOVERY_BATCH + 1,
+            ..Limits::DEFAULT
+        },
+    );
+}
+
+#[test]
+fn leader_never_lowers_its_promise_on_self_accept() {
+    // A leader streams, but a competing higher Prepare raises its promise; the
+    // next self-accept must not pull the promise back down.
+    let mut nodes = cluster::<3>();
+    make_leader(&mut nodes, 0);
+    let higher = ballot(99, 2);
+    nodes[0].step(Message::Prepare {
+        reply_to: NodeId(2),
+        ballot: higher,
+        from_slot: Slot(0),
+        config: None,
+    });
+    let _ = drain(&mut nodes[0]);
+    assert_eq!(nodes[0].hard_state().max_promised_ballot, higher);
+    // The leader (now superseded) tries to stream; self-accept must be skipped.
+    let _ = nodes[0].propose(entry(1, 1, 1));
+    assert_eq!(
+        nodes[0].hard_state().max_promised_ballot,
+        higher,
+        "self-accept never lowers the promise"
+    );
+}
+
+#[test]
+fn single_node_cluster_elects_and_chooses_immediately() {
+    let mut n = node(0, &[0]);
+    campaign(&mut n);
+    assert!(n.is_leader(), "a single node wins its own election");
+    let r = n.propose(entry(1, 1, 42));
+    assert_eq!(r, ProposeResult::Accepted(Slot(0)));
+    assert_eq!(
+        chosen_at(&n, 0),
+        Some(val(42)),
+        "chosen immediately (quorum of one)"
+    );
+}
+
+/// The safety crux of Stage 5, as a directed core reproduction: a quorum that
+/// truncated a chosen slot refuses a candidate blind to that slot. Without the
+/// floor guard this candidate would win with an empty-looking Promise and
+/// re-propose a different value into the already-chosen slot (two values chosen
+/// for one slot, the DST-found `18153519926117387038` violation).
+#[test]
+fn truncated_quorum_refuses_a_blind_candidate() {
+    let mut nodes = cluster::<3>();
+    make_leader(&mut nodes, 0);
+
+    // Slots 0 and 1 chosen everywhere.
+    for (seq, b) in [(1u64, 10u8), (2, 20)] {
+        let _ = nodes[0].propose(entry(1, seq, b));
+        let q = drain(&mut nodes[0]);
+        deliver_all(&mut nodes, q);
+    }
+    // Slot 2 chosen on the quorum {0, 1} only: drop everything addressed to node 2.
+    let _ = nodes[0].propose(entry(1, 3, 30));
+    let q = drain(&mut nodes[0]);
+    deliver_filtered(&mut nodes, q, |to, _| to != NodeId(2));
+    assert_eq!(nodes[0].hard_state().chosen_index, Some(Slot(2)));
+    assert_eq!(nodes[1].hard_state().chosen_index, Some(Slot(2)));
+    assert_eq!(
+        nodes[2].hard_state().chosen_index,
+        Some(Slot(1)),
+        "node 2 missed slot 2"
+    );
+
+    // The caught-up quorum {0, 1} compacts past slot 2, dropping the record.
+    nodes[0].compact(Slot(2));
+    nodes[1].compact(Slot(2));
+    let _ = drain(&mut nodes[0]);
+    let _ = drain(&mut nodes[1]);
+    assert_eq!(nodes[0].acceptor().first_slot(), Slot(3));
+    assert_eq!(nodes[1].acceptor().first_slot(), Slot(3));
+
+    // Node 2, blind to slot 2, campaigns: its Prepare's from_slot is 2, below the
+    // quorum's floor (3).
+    campaign(&mut nodes[2]);
+    assert_eq!(nodes[2].role(), NodeRole::Candidate);
+    let q = drain(&mut nodes[2]);
+    assert!(
+        q.iter().any(|(_, m)| matches!(
+            m,
+            Message::Prepare { from_slot, .. } if *from_slot == Slot(2)
+        )),
+        "node 2 prepares from its hole at slot 2"
+    );
+    deliver_all(&mut nodes, q);
+
+    // The quorum Nacked (below floor), so the blind candidate is deposed, never
+    // becomes leader, and never learns a (possibly different) value for slot 2.
+    assert_eq!(
+        nodes[2].role(),
+        NodeRole::Follower,
+        "a blind candidate is deposed by the below-floor Nacks, never leads"
+    );
+    assert!(
+        chosen_at(&nodes[2], 2).is_none(),
+        "slot 2 is not re-chosen with a new value on the blind node"
+    );
+}
+
+/// #67/#88, route 1 (`mark_chosen`, via `on_commit` / `on_catchup_response`):
+/// a candidate that learns a higher-ballot commit mid-campaign closes its
+/// campaign, so a late promise wins nothing, and the next campaign recovers
+/// the reported slot properly.
+///
+/// Before any guard, the win went through and the damage was downstream:
+/// `start_accept_round`'s "never lower our promise" guard skipped the
+/// self-accept for every recovered slot, so those never entered `accepted`;
+/// `next_slot` — derived from `accepted` — landed *below* an in-flight slot,
+/// and the next `propose` re-broadcast a second command for one
+/// `(ballot, slot)` (`paros_sim::audit`'s "one ballot proposes at most one
+/// command for a slot" catches it).
+#[test]
+fn a_candidate_that_learns_a_higher_ballot_commit_closes_its_campaign() {
+    let mut x = node(0, &[0, 1, 2]);
+    let b = ballot(1, 0);
+    let b_prime = ballot(1, 2);
+    assert!(b_prime > b, "same round, higher node id");
+
+    // X campaigns at `b` and promises it to itself.
+    x.on_check_leader();
+    assert_eq!(x.role, NodeRole::Candidate);
+    assert_eq!(x.ballot, b);
+    let _ = drain(&mut x);
+
+    // A `Commit` at `b'` arrives: some other proposer won `b'` with a quorum X
+    // was not part of, and decided slot 0. X learns it as a *learner*: the
+    // promise rises to `b'`, so the campaign at `b` is over.
+    x.step(Message::Commit {
+        from: Party::Node(NodeId(2)),
+        ballot: b_prime,
+        slot: Slot(0),
+        command: Command::Control(Control::Noop),
+    });
+    let _ = drain(&mut x);
+    assert_eq!(
+        x.hard_state().max_promised_ballot,
+        b_prime,
+        "`mark_chosen` raised the promise to the choosing ballot"
+    );
+    assert_eq!(x.role, NodeRole::Follower, "the campaign is closed");
+    assert!(x.proposer.election().is_none());
+
+    // The delayed `Promise(b)` lands: a perfectly well-formed promise for a
+    // ballot X has since promised away. The quorum is there — the win is not.
+    let mut reported = BTreeMap::new();
+    reported.insert(Slot(3), (ballot(0, 1), ucmd(9, 9, 0xA0)));
+    x.step(terminal_promise(NodeId(1), b, reported));
+    assert_eq!(x.role, NodeRole::Follower, "a late promise wins nothing");
+    assert!(
+        x.proposer.rounds().is_empty(),
+        "nothing is proposed at the stale ballot"
+    );
+    let _ = drain(&mut x);
+
+    // Self-heal: the next campaign ratchets past the learned promise, and the
+    // same reported slot is recovered *properly* this time.
+    x.on_check_leader();
+    let b2 = x.ballot;
+    assert!(
+        b2 > b_prime,
+        "the fresh campaign sits above the learned promise"
+    );
+    let _ = drain(&mut x);
+    let mut reported = BTreeMap::new();
+    reported.insert(Slot(3), (ballot(0, 1), ucmd(9, 9, 0xA0)));
+    x.step(Message::Promise {
+        faulty: BTreeMap::new(),
+        from: NodeId(1),
+        ballot: b2,
+        // The fresh campaign solicits from `first_unchosen()` — slot 0 was
+        // chosen by the learned commit, so the probe starts at slot 1.
+        from_slot: Slot(1),
+        accepted: reported,
+        next_from_slot: None,
+    });
+    assert_eq!(x.role, NodeRole::Leader, "the healthy win goes through");
+    assert!(
+        x.ballot >= x.hard_state().max_promised_ballot,
+        "a leader's ballot covers its own promise"
+    );
+    assert!(
+        x.proposer.rounds().contains_key(&Slot(3)),
+        "slot 3 is re-proposed (P2c)"
+    );
+    assert!(
+        x.acceptor().records().contains_key(&Slot(3)),
+        "and its self-accept was recorded"
+    );
+    assert_eq!(
+        x.proposer().next_slot(),
+        Slot(4),
+        "the allocator sits above the recovered slot"
+    );
+}
+
+/// #67, route 1: the containment — why the anomaly above is not a safety
+/// violation.
+///
+/// The stale leader's promise was raised by a value **chosen** at `b'`. Chosen
+/// means a Phase-1 quorum promised `b'` and a Phase-2 quorum accepted at `b'`,
+/// both strictly *before* the commit reached the candidate, which is before it
+/// won. Promises never decrease, so every member of that Phase-1 quorum is
+/// pinned at `b'` from then on, and both gates that could give the stale leader a
+/// quorum reject it: [`ColocatedNode::on_accept`] and [`ColocatedNode::on_heartbeat`] each
+/// require `ballot >= max_promised_ballot`. The stale leader cannot even count
+/// itself towards an accept quorum — `start_accept_round` skips its own
+/// self-accept for the same reason.
+///
+/// So the acceptors available to ballot `b` are at most the complement of a
+/// Phase-1 quorum, `n - q1`, and `n - q1 < q2` holds for every quorum system
+/// Paxos admits (Phase-1 and Phase-2 quorums must intersect). Nothing is decided
+/// at `b`, no read confirms at `b`, and the first `Nack` sends the stale leader
+/// back to Follower. The duplicate `Accept`s die on the wire.
+#[test]
+fn an_acceptor_pinned_at_the_higher_ballot_gives_the_stale_leader_nothing() {
+    let b = ballot(1, 0);
+    let b_prime = ballot(1, 2);
+
+    // A peer that promised `b'` — i.e. a member of the Phase-1 quorum that any
+    // decision at `b'` had to have.
+    let mut p = node(1, &[0, 1, 2]);
+    p.step(Message::Prepare {
+        reply_to: NodeId(2),
+        ballot: b_prime,
+        from_slot: Slot(0),
+        config: None,
+    });
+    let _ = drain(&mut p);
+    assert_eq!(p.hard_state().max_promised_ballot, b_prime);
+
+    // It rejects the stale leader's `Accept` …
+    p.step(Message::Accept {
+        reply_to: Party::Node(NodeId(0)),
+        leader: NodeId(0),
+        ballot: b,
+        slot: Slot(3),
+        command: ucmd(1, 2, 3),
+        config: None,
+    });
+    let out = drain(&mut p);
+    assert!(
+        out.iter().all(|(_, m)| matches!(m, Message::Nack { .. })),
+        "a Nack, never an Accepted: {out:?}"
+    );
+
+    // … and stays silent on its beat, so no read round of the stale leader's can
+    // reach a confirmation quorum either.
+    p.step(Message::Heartbeat {
+        from: NodeId(0),
+        ballot: b,
+        commit: None,
+        config: None,
+        fence: None,
+    });
+    let out = drain(&mut p);
+    assert!(
+        !out.iter()
+            .any(|(_, m)| matches!(m, Message::HeartbeatAck { .. })),
+        "a below-promise beat is not acked: {out:?}"
+    );
+}
+
+#[test]
+fn campaign_above_opens_a_campaign_without_waiting_for_the_clock() {
+    let mut n = node(0, &[0, 1, 2]);
+    n.set_election_timeout(10);
+    let promised = n.acceptor().promised();
+    n.campaign_above(ballot(7, 2));
+    assert_eq!(n.role(), NodeRole::Candidate, "the campaign opened at once");
+    assert!(
+        n.acceptor().promised() > promised,
+        "the campaign raised the promise"
+    );
+    assert!(
+        n.acceptor().promised() > ballot(7, 2),
+        "the campaign opened above the ballot seen"
+    );
+    assert!(n.needs_election_timeout(), "driver must reseed the timeout");
+    let out = drain(&mut n);
+    assert_eq!(
+        out.iter()
+            .filter(|(_, m)| matches!(m, Message::Prepare { .. }))
+            .count(),
+        2,
+        "Prepare broadcast to the two peers"
+    );
+}
+
+#[test]
+fn campaign_above_is_a_no_op_on_the_leader() {
+    let mut nodes = cluster::<3>();
+    make_leader(&mut nodes, 0);
+    let promised = nodes[0].acceptor().promised();
+    nodes[0].campaign_above(ballot(9, 1));
+    assert_eq!(
+        nodes[0].role(),
+        NodeRole::Leader,
+        "the leader keeps leading"
+    );
+    assert_eq!(
+        nodes[0].acceptor().promised(),
+        promised,
+        "the leader's promise does not move"
+    );
+}
+
+/// #376: an acceptor holding a value the next leadership never saw campaigns
+/// before that leadership's `Accept` overwrites it. The `Accept` is refused,
+/// and the campaign's Phase 1 reads both values for the slot: P2c keeps the
+/// higher ballot's.
+#[test]
+fn campaign_above_an_overwrite_reads_both_values() {
+    let mut nodes = cluster::<3>();
+    make_leader(&mut nodes, 0);
+    // Slot 0 reaches the leader alone: every `Accept` is lost.
+    nodes[0].propose(entry(1, 1, 10));
+    let q = drain(&mut nodes[0]);
+    deliver_filtered(&mut nodes, q, |_, msg| {
+        !matches!(msg, Message::Accept { .. })
+    });
+    // Node 1 campaigns with node 2; node 0 never answers, so the new
+    // leadership does not see slot 0 and puts another value there.
+    campaign(&mut nodes[1]);
+    let q = drain(&mut nodes[1]);
+    deliver_filtered(&mut nodes, q, |to, _| to != NodeId(0));
+    assert_eq!(
+        nodes[1].role(),
+        NodeRole::Leader,
+        "node 1 won without node 0"
+    );
+    nodes[1].propose(entry(2, 1, 20));
+    let q = drain(&mut nodes[1]);
+    let overwrite = q
+        .iter()
+        .find(|(to, m)| {
+            *to == NodeId(0) && matches!(m, Message::Accept { slot, .. } if *slot == Slot(0))
+        })
+        .cloned()
+        .expect("the new leader sends node 0 an Accept for slot 0");
+    deliver_filtered(&mut nodes, q, |to, _| to != NodeId(0));
+    assert_eq!(
+        chosen_at(&nodes[1], 0),
+        Some(val(20)),
+        "slot 0 is chosen with the new value"
+    );
+    // Node 0, deposed without knowing it, contests before the overwrite
+    // reaches it.
+    nodes[0].step_down();
+    let Message::Accept { ballot: seen, .. } = overwrite.1 else {
+        unreachable!("found as an Accept")
+    };
+    nodes[0].campaign_above(seen);
+    step_at(&mut nodes, overwrite.0, overwrite.1);
+    let held = nodes[0].acceptor().record(Slot(0)).cloned();
+    assert!(
+        held.is_some_and(|(b, _)| b.node == NodeId(0)),
+        "the raised promise refused the overwrite"
+    );
+    // Its Phase 1 meets node 2, which holds the chosen value.
+    let q = drain(&mut nodes[0]);
+    deliver_filtered(&mut nodes, q, |to, _| to != NodeId(1));
+    assert_eq!(nodes[0].role(), NodeRole::Leader, "node 0 won with node 2");
+    let q = drain(&mut nodes[0]);
+    deliver_all(&mut nodes, q);
+    assert_eq!(
+        chosen_at(&nodes[0], 0),
+        Some(val(20)),
+        "P2c kept the higher ballot's value"
+    );
+}
+
+/// #428 (paging livelock): while a campaign pages one peer's long suffix,
+/// every tick re-sends the campaign's `Prepare` to the peers that already
+/// answered completely, so their election clocks stay quiet; the repeated
+/// `Promise` folds as nothing. No paging, no keep-alive. The keep-alive
+/// asks from one past the highest slot the tally merged, so an answered
+/// peer re-affirms with an empty page, never its whole suffix again.
+#[test]
+fn a_paging_campaign_keeps_its_promisers_quiet() {
+    let mut nodes = cluster::<5>();
+    campaign(&mut nodes[0]);
+    nodes[0].set_election_timeout(1_000);
+    let _ = drain(&mut nodes[0]);
+    let camp = nodes[0].ballot();
+
+    // Node 1 answers at once, completely: no paging yet, so a tick sends
+    // no Prepare.
+    nodes[0].step(terminal_promise(NodeId(1), camp, BTreeMap::new()));
+    assert_eq!(nodes[0].role(), NodeRole::Candidate);
+    let _ = drain(&mut nodes[0]);
+    nodes[0].tick();
+    let quiet = drain(&mut nodes[0]);
+    assert!(
+        !quiet
+            .iter()
+            .any(|(_, m)| matches!(m, Message::Prepare { .. })),
+        "a campaign that does not page sends no keep-alive: {quiet:?}"
+    );
+
+    // Node 2 answers one page of a longer suffix: the campaign pages it.
+    let page = BTreeMap::from([(Slot(0), (ballot(0, 2), ucmd(9, 0, 1)))]);
+    nodes[0].step(Message::Promise {
+        from: NodeId(2),
+        ballot: camp,
+        from_slot: Slot(0),
+        accepted: page,
+        faulty: BTreeMap::new(),
+        next_from_slot: Some(Slot(1)),
+    });
+    let continuation = drain(&mut nodes[0]);
+    assert!(matches!(
+        continuation.as_slice(),
+        [(
+            NodeId(2),
+            Message::Prepare {
+                from_slot: Slot(1),
+                ..
+            }
+        )]
+    ));
+
+    // A tick re-sends the campaign's Prepare to node 1 alone: the same
+    // ballot, from one past the highest slot the tally merged (slot 0).
+    nodes[0].tick();
+    let keep_alive: Vec<_> = drain(&mut nodes[0])
+        .into_iter()
+        .filter(|(_, m)| matches!(m, Message::Prepare { .. }))
+        .collect();
+    assert_eq!(
+        keep_alive.len(),
+        1,
+        "one keep-alive, to node 1: {keep_alive:?}"
+    );
+    let (to, prepare) = keep_alive[0].clone();
+    assert_eq!(to, NodeId(1));
+    assert!(matches!(
+        prepare,
+        Message::Prepare { ballot, from_slot: Slot(1), .. } if ballot == camp
+    ));
+
+    // Node 1 already promised the ballot: the keep-alive resets its clock,
+    // writes nothing, and its repeated Promise counts for nothing.
+    nodes[1].step(Message::Prepare {
+        reply_to: NodeId(0),
+        ballot: camp,
+        from_slot: Slot(1),
+        config: None,
+    });
+    let _ = drain(&mut nodes[1]);
+    nodes[1].tick();
+    nodes[1].tick();
+    assert_eq!(nodes[1].election_elapsed, 2);
+    nodes[1].step(Message::Prepare {
+        reply_to: NodeId(0),
+        ballot: camp,
+        from_slot: Slot(1),
+        config: None,
+    });
+    assert_eq!(
+        nodes[1].election_elapsed, 0,
+        "a keep-alive resets the clock"
+    );
+    let (reply, writes) = drain_with(&mut nodes[1], |r| r.writes().len());
+    assert_eq!(writes, 0, "a re-affirmed promise writes nothing");
+    let [(NodeId(0), promise)] = reply.as_slice() else {
+        panic!("expected one Promise, got {reply:?}");
+    };
+    assert!(
+        matches!(
+            promise,
+            Message::Promise { from_slot: Slot(1), accepted, faulty, next_from_slot: None, .. }
+                if accepted.is_empty() && faulty.is_empty()
+        ),
+        "a keep-alive is answered with an empty page: {promise:?}"
+    );
+    nodes[0].step(promise.clone());
+    assert_eq!(
+        nodes[0].role(),
+        NodeRole::Candidate,
+        "a repeat is no quorum"
+    );
+    assert_eq!(
+        nodes[0].proposer.election().map(|e| e.promised().len()),
+        Some(2),
+        "a repeated Promise counts once"
+    );
+}
+
+/// A live campaign's promise sits at its ballot (`assert_invariants`), on
+/// the plain path too: a candidate in Phase 1 that learns, by a catch-up
+/// replay, a slot chosen above its ballot closes its campaign, so a late
+/// promise at the old ballot makes no leadership its own promise refuses.
+#[test]
+fn a_replayed_slot_chosen_above_a_phase_one_campaign_closes_it() {
+    let mut n = node(1, &[0, 1, 2]);
+    n.set_election_timeout(1);
+    n.tick();
+    assert_eq!(n.role(), NodeRole::Candidate);
+    let b = n.ballot();
+    let _ = drain(&mut n);
+    let above = ballot(b.round + 1, 2);
+    n.step(Message::CatchUpResponse {
+        from: NodeId(2),
+        entries: BTreeMap::from([(Slot(0), (above, ucmd(7, 7, 2)))]),
+    });
+    assert_eq!(chosen_at(&n, 0), Some(val(2)), "the slot is learned chosen");
+    assert_eq!(n.hard_state().max_promised_ballot, above);
+    assert_eq!(n.role(), NodeRole::Follower, "the campaign is closed");
+    n.step(terminal_promise(NodeId(2), b, BTreeMap::new()));
+    assert_eq!(n.role(), NodeRole::Follower, "a late promise elects nobody");
+}

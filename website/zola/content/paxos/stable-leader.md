@@ -57,7 +57,7 @@ The matching `Promise` reports **all** entries the acceptor accepted in that suf
 so one exchange tells the new leader everything in flight across the whole log. A node
 that times out waiting for a leader becomes a `Candidate` and sends that Prepare
 (`on_check_leader`); a promise quorum makes it `Leader` (`try_become_leader`,
-`crates/paros-core/src/node/election.rs`). Afterwards a client command costs exactly
+`crates/lib/paros-core/src/node/election.rs`). Afterwards a client command costs exactly
 one round trip — the leader assigns the next free slot and goes straight to Accept —
 which Lamport notes is not merely fast but **optimal**: "Phase 2 of Paxos has been
 shown to have the minimum possible cost of any fault-tolerant agreement algorithm."
@@ -111,7 +111,7 @@ heals fails the end-of-run claim that **"every node converges to the cluster's c
 prefix at the end of the settle tail"**, with the recorded gap saying where the node
 was stuck. The fill itself has to happen, so the sweep gates on **"a new leader
 gap-fills a hole its promise quorum never reported"** and asserts **"a recovery batch
-reports only gap fills it actually started"** (`crates/paros-sim/src/audit/`).
+reports only gap fills it actually started"** (`crates/sim/paros-sim/src/audit/`).
 
 ## Holding the lead, and surviving its loss
 
@@ -156,7 +156,7 @@ steps the node down to `Follower` and waits (`on_nack` / `become_follower`), and
 in-code comment says plainly that "we do not immediately re-prepare: that, with the
 randomized timeout, is the dueling-proposer livelock fix." Second, the election timeout
 is **randomized** — the driver draws a fresh jittered value (`draw_election_timeout`,
-`crates/paros/src/driver/`) so two followers rarely time out together. (Classic
+`crates/lib/paros-roles/src/node/`) so two followers rarely time out together. (Classic
 single-decree Paxos cures the same duel with exponential backoff; the randomized
 timeout is the Multi-Paxos equivalent.)
 
@@ -169,7 +169,7 @@ streams several slots"** and **"leadership turns over and the cluster recovers"*
 while the always-checks (**"at most one value is ever chosen for a slot"**, **"a node's
 promised ballot never decreases"**) hold throughout. A leader that loses its quorum
 must also notice: **"a leader deposed by a promise-majority stops beating within an
-election timeout (CheckQuorum)"** (`crates/paros-sim/src/audit/`).
+election timeout (CheckQuorum)"** (`crates/sim/paros-sim/src/audit/`).
 
 ## Optimizations at a glance
 

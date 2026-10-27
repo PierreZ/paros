@@ -1,4 +1,4 @@
-// Briefings are markdown, authored in `crates/paros-wasm/src/paxos/level/`.
+// Briefings are markdown, authored in `crates/support/paros-wasm/src/paxos/level/`.
 //
 // The source is the game's own binary — not user input and not the network —
 // so rendering it into `innerHTML` is rendering our own text. `marked` is

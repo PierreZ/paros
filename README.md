@@ -16,7 +16,7 @@ on. Two islands, one parliament.
 
 ## What it is
 
-The design is **sans-IO**: [`paros-core`](crates/paros-core) is a pure synchronous state machine
+The design is **sans-IO**: [`paros-core`](crates/lib/paros-core) is a pure synchronous state machine
 (`step` / `tick` in, one `Ready` out, an `advance()` handshake) with no I/O, no clock, and no
 randomness. An async driver built on [moonpool](https://github.com/PierreZ/moonpool) wraps it
 and performs all side effects, honoring the persist-before-send rule at the heart of Paxos
@@ -30,12 +30,14 @@ acceptors ever choose different values.
 
 ## At a glance
 
-| Crate | Role |
-|-------|------|
-| [`paros-core`](crates/paros-core) | sans-IO Multi-Paxos state machine: std-only, wasm-safe, zero deps with `default-features = false` (only `tracing` spans on by default) |
-| [`paros`](crates/paros) | the provider-generic node driver, default storage, and RPC contract |
-| [`paros-sim`](crates/paros-sim) | the deterministic-simulation harness: the workload, the fault world, the audit |
-| [`parosd`](crates/parosd) | the `parosd` daemon, one uniform binary per machine, and `parosctl`, the CLI |
+The workspace holds three products, each in its own directory of `crates/` (#722 (three
+products)):
+
+| Product | Crates |
+|---------|--------|
+| The library, `crates/lib/` | [`paros-core`](crates/lib/paros-core), the sans-IO Multi-Paxos state machine (std-only, wasm-safe, zero deps with `default-features = false`); one crate per layer above it (wire, model, tunables, storage, net, client, observe, roles, coordinator, machine); and [`paros`](crates/lib/paros), the facade a program depends on |
+| The binaries, `crates/bin/` | [`parosd`](crates/bin/parosd), one uniform daemon per machine; [`parosctl`](crates/bin/parosctl), the CLI; [`paros-bench`](crates/bin/paros-bench), the load generator |
+| The harness, `crates/sim/` | [`paros-sim`](crates/sim/paros-sim), the deterministic-simulation harness (the workload, the fault world, the audit), and its runners |
 
 ## Run it
 
@@ -62,6 +64,11 @@ A multi-writer journal can put many writers' writes in one slot through batchers
 `stateless` machines, `parosctl resolve acme` names them, and each writer gets its own positions
 back.
 
+Every `parosd` is also a frontend (#723 (frontend as a parosd role)): it checks a Biscuit token,
+resolves `paros://<tenant>/<journal>` and forwards the call. `parosctl configure --tenant acme
+--frontends 2` books two on the cell's `stateless` machines, and `parosctl resolve acme` names
+them.
+
 A universe can hold more than one cell: `parosctl init --idle` forms a cell with no universe,
 `parosctl universe add-cell` joins it, and `parosctl tenant create --cell` puts a tenant in it.
 Any machine resolves a tenant to its cell. `parosctl universe remove-cell` removes an empty
@@ -82,13 +89,13 @@ Each machine serves Prometheus metrics and two probes (`/metrics`, `/healthz`, `
 start first:
 
 ```sh
-parosctl bench --local 3 --duration 30s
+paros-bench --local 3 --duration 30s
 ```
 
 The copy-paste demo, with Docker Compose or three local processes, is
 [`DEMO.md`](DEMO.md). The walkthrough — init, write and read, kill and restart a
 machine, supersede a writer, lose a disk — is
-[`crates/parosd/README.md`](crates/parosd/README.md).
+[`crates/bin/parosd/README.md`](crates/bin/parosd/README.md).
 
 Roadmap (filed as GitHub issues): **M1** safety kernel, **M2** Multi-Paxos, **M3**
 storage-fault tolerance, **M4** online reconfiguration, **M5** scale-out and hardening.
@@ -96,34 +103,34 @@ storage-fault tolerance, **M4** online reconfiguration, **M5** scale-out and har
 ## Learning Paxos with paros-core
 
 Eight small, deterministic, runnable examples drive the composable roles of
-[`paros-core`](crates/paros-core) (`Proposer`, `Acceptor`, `Replica`, `Matchmaker`) by hand —
+[`paros-core`](crates/lib/paros-core) (`Proposer`, `Acceptor`, `Replica`, `Matchmaker`) by hand —
 direct calls for the network, a `Vec` for the disk, a printed trace and assertions for the
 property each one teaches. Read them in order:
 
-1. [`single_decree.rs`](crates/paros-core/examples/single_decree.rs) — Phase 1, P2c, Phase 2:
+1. [`single_decree.rs`](crates/lib/paros-core/examples/single_decree.rs) — Phase 1, P2c, Phase 2:
    one value, and why a higher ballot must adopt a value it finds accepted.
-2. [`multi_paxos.rs`](crates/paros-core/examples/multi_paxos.rs) — slots versus ballots, one
+2. [`multi_paxos.rs`](crates/lib/paros-core/examples/multi_paxos.rs) — slots versus ballots, one
    Phase 1 amortized over many slots, and leader recovery as P2c applied slot by slot.
-3. [`matchmaker.rs`](crates/paros-core/examples/matchmaker.rs) — configuration discovery
+3. [`matchmaker.rs`](crates/lib/paros-core/examples/matchmaker.rs) — configuration discovery
    through the matchmakers, a reconfiguration as a round change, and the matchmaker set
    itself chosen by the same single-decree Paxos over `Vec<MatchmakerId>`.
-4. [`flexible_quorums.rs`](crates/paros-core/examples/flexible_quorums.rs) — Flexible Paxos:
+4. [`flexible_quorums.rs`](crates/lib/paros-core/examples/flexible_quorums.rs) — Flexible Paxos:
    four nodes under `Flexible { q1: 3, q2: 2 }` decide on two accepts, and the next election
    needs three promises so that one of them reports what the deciding pair chose.
-5. [`acceptor_grid.rs`](crates/paros-core/examples/acceptor_grid.rs) — the acceptor grid of
+5. [`acceptor_grid.rs`](crates/lib/paros-core/examples/acceptor_grid.rs) — the acceptor grid of
    Compartmentalized Paxos: six nodes under `QuorumSystem::grid(2, 3)`, every slot's Phase 2
    addressed to one column so each acceptor sees a third of the commands, a majority of
    promises that still misses a column, and the next election needing one acceptor of every
    column (a full row is one) because each promise in it reports exactly its own column's value.
-6. [`quorum_read.rs`](crates/paros-core/examples/quorum_read.rs) — Paxos Quorum Reads: a
+6. [`quorum_read.rs`](crates/lib/paros-core/examples/quorum_read.rs) — Paxos Quorum Reads: a
    row of the same grid answers with its vote watermarks while a column is mid-decision, the
    reader settles on the maximum and waits for its replica to apply it, and the leader sends
    no beat and opens no round — a linearizable read with no leader and no clock.
-7. [`proxy_leader.rs`](crates/paros-core/examples/proxy_leader.rs) — proxy leaders: the leader
+7. [`proxy_leader.rs`](crates/lib/paros-core/examples/proxy_leader.rs) — proxy leaders: the leader
    sequences and a `ProxyLeader` on another process fans each slot's `Accept` out, folds the
    votes and announces the `Commit`; a dead proxy's round is taken back, and a handoff
    successor re-delegates what it inherited.
-8. [`replica_tier.rs`](crates/paros-core/examples/replica_tier.rs) — the replica tier: three
+8. [`replica_tier.rs`](crates/lib/paros-core/examples/replica_tier.rs) — the replica tier: three
    acceptors vote and keep the chosen prefix, two `ReplicaNode`s learn it and never vote, a replica that lost a `Commit` catches up from the
    leader's beat, and each slot's reply is owned by one replica (`slot % replica_count`).
 

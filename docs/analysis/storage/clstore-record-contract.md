@@ -5,10 +5,10 @@ assumes about every durable record, the spec the future production storage engin
 implement, and the semantics the simulation's `StorageWorld` models — as first-class *read
 outcomes* at the `LogStorage` seam, never as serialized bytes.
 
-> **Status (2026-10-08, #261).** The production store is now `paros::journal` on
+> **Status (2026-10-08, #261).** The production store is now `paros::storage::journal` on
 > moonpool-journal (CLSTORE), which implements this contract itself: the journal classifies at
-> open, and `paros::journal` maps its states onto `CorruptionVerdict`. The simulation's world
-> stores, `paros::corruption::decide` and `classify_log` named below are gone; the faults are
+> open, and `paros::storage::journal` maps its states onto `CorruptionVerdict`. The simulation's world
+> stores, `paros::model::corruption::decide` and `classify_log` named below are gone; the faults are
 > injected as bytes on the simulated disk by `paros_sim::world::injector` and judged against the
 > journal's verdict. The contract below stands; the names of the deleted code are history.
 
@@ -105,7 +105,7 @@ corruption).
   on any witnessed/valid record *inside* the window (it might be a misdirected read).
 
 The classifier is a **total, named, exhaustively-tested decision function**:
-`paros::corruption::decide` over the evidence cube (2 entry states × 3 identifier states ×
+`paros::model::corruption::decide` over the evidence cube (2 entry states × 3 identifier states ×
 2 successor states — the unit test enumerates all 12 points), each `RecoveryCase` mapping
 to its `CorruptionVerdict`, with the case label on the tracing event. `classify_log`
 applies the batching rule + hardening over a whole retained log.

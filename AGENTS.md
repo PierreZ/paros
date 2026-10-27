@@ -88,7 +88,7 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
 - **A reusable moonpool gap** (simulator infrastructure, not a paros bug) becomes a focused issue
   in `PierreZ/moonpool`; keep paros-side defense in depth meanwhile (`upstream-to-moonpool`).
   When paros needs the fix, improve moonpool autonomously (decided on 2026-10-09): open the
-  moonpool PR, merge it once its CI is green, then advance paros's pin (all thirteen lines).
+  moonpool PR, merge it once its CI is green, then advance paros's pin (the six `moonpool-*` lines of the root `[workspace.dependencies]` and `paros-core`'s own `moonpool-assertions` line).
 - **Name every issue and PR number** (decided on 2026-10-10): write a short name next to it,
   e.g. "#216 (finish bootstrap)", in chats, comments, PR descriptions and commit messages.
 - **Never edit a `CHANGELOG.md` by hand**: release-plz generates it; the commit message is where
@@ -112,6 +112,17 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
 - **Organize as you grow**: a module holds one concern; split a file the moment it holds a
   second. Deleting is part of every change: a superseded axis, type, flag or gate goes in the
   PR that supersedes it.
+- **Layers point down only** (decided on 2026-10-24, #722 (three products)): each layer of the
+  library is its own crate, and a crate depends only on the layers below it (see *Layout*). Put
+  new code in the lowest layer that can hold it. A type that two layers share moves down; a call
+  up goes through a port (a trait the upper layer implements, as `CellHost`).
+- **One module style** (#722 (three products)): a module with children is `foo.rs` beside
+  `foo/`, never `foo/mod.rs`, and no file is included with `#[path]`. CI runs
+  `scripts/check-module-style.sh`.
+- **Paper names are the vocabulary** (#722 (three products)): a role keeps the name of
+  Compartmentalized Paxos (proxy leader, acceptor grid, replica, leaderless read, batcher,
+  unbatcher) or Matchmaker Paxos (matchmaker, matchmaking) in `paros-core`, `paros-roles`,
+  `paros-sim` and the docs.
 
 ## Simulation rules
 
@@ -178,7 +189,7 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   faster); replays and focused explorations stay in-process (`workers: 0`). Every workload
   and process is factory-created.
 
-Depth: the `sim-sweep` and `debug-a-seed` skills, `crates/paros-sim-runner/AGENTS.md`.
+Depth: the `sim-sweep` and `debug-a-seed` skills, `crates/sim/paros-sim-runner/AGENTS.md`.
 
 ## The harness in one paragraph
 
@@ -195,10 +206,10 @@ writes, duplicates, dual submits) are explicit calls, never the library's defaul
 judged by the client's own history (`ClientHistory`, searched for a linearization against the
 journal's model) and the shared `AuditWorld`. Roles come from moonpool process groups
 (`paros-node`, `paros-matchmaker`, `paros-proxy`, `paros-replica`, `paros-joiner`,
-`paros-machine`, `paros-frontend`) through the deployment/role map `paros_sim::roles`. The machines are `parosd`s
+`paros-machine`; the machines serve the frontend, #723 (frontend as a parosd role)) through the deployment/role map `paros_sim::roles`. The machines are `parosd`s
 running the shipped `run_machine` from an empty disk, formed into a cell by the workload's
 `init` (`paros::client::initialize`) over a per-seed layout (#246). No third workload, no per-scenario process type, no
-check that reads a trace. Depth: `crates/paros-sim/AGENTS.md` (the op-id table, the role map,
+check that reads a trace. Depth: `crates/sim/paros-sim/AGENTS.md` (the op-id table, the role map,
 the quorum-system and grid draws, the journal and storage coins).
 
 ## Architecture
@@ -216,7 +227,7 @@ batch) and holds **no protocol tally of its own**:
 - `acceptor.rs` (+ `acceptor/retention.rs`, the floor-moving ops) — promise, records, floor, CTRL
 - `proposer.rs` (+ `proposer/rounds.rs` the standalone Phase-2 tally, `proposer/authority.rs`
   the standing authority) — election, repair probe, recovery
-- `replica.rs` — chosen prefix, apply walk, journal fold · `journal_state.rs` — the one
+- `replica.rs` — chosen prefix, apply walk, journal fold · `journal/state.rs` — the one
   journal-control state machine, judged at apply
 - `quorum_read.rs` — leaderless reads · `collector.rs` — the leader-side GC tally
 - `membership/` — `AcceptorConfig`, `MatchmakerSet`, `QuorumSystem`
@@ -225,7 +236,15 @@ batch) and holds **no protocol tally of its own**:
   Paxos (`Decree<Id, V>`): the handover's successor and `cell init`'s plan (#277)
 - `proxy_leader.rs`, `replica_node.rs` — the second and third deployments
 
-The map is `crates/paros-core/AGENTS.md`. **A component must not acquire knowledge merely because
+Beside the roles, the **foundations**: `types.rs` (the Paxos scalars), `journal/` (what the log
+carries), `contract/` (what a driver honors: `Message`, `WriteOp`, `Storage`, `MemStorage`,
+`HardState`, `Config`, `Limits`) and `retained.rs`. The three layers point down only
+(foundations ← roles ← deployments, #730 (paros-core rework)): a role never uses a deployment,
+and a deployment never uses another (`scripts/check-core-layers.sh`). Every module is `pub`;
+the root re-exports only what a driver loop needs. A deployment takes its `Limits` at
+construction and reports its counters in one snapshot (`ColocatedNode::counters`).
+
+The map is `crates/lib/paros-core/AGENTS.md`. **A component must not acquire knowledge merely because
 the current deployment colocates it**: the proposer builds no message, the acceptor never reads
 the chosen prefix, the replica never sees a ballot tally; the caller hands each the data it
 needs. **Every quorum question crosses `membership/`**: predicates are phase-split
@@ -304,7 +323,7 @@ configuration, not a transitional state. Before touching `on_check_leader`, `Ele
 
 Depth: module docs of `matchmaking.rs`, `node/matchmaking.rs`, `node/reconfigure.rs`,
 `node/gc.rs` (`may_retire`), `matchmaker.rs`, `matchmaker/reconfigurer.rs`,
-`matchmaker/handover_model.rs`; `docs/analysis/consensus/matchmaker-gc-and-generations.md` and
+`models/handover.rs`; `docs/analysis/consensus/matchmaker-gc-and-generations.md` and
 `matchmaker-interaction-verification.md`.
 
 ## Journals, system journals, storage, boot safety
@@ -326,12 +345,12 @@ Depth: module docs of `matchmaking.rs`, `node/matchmaking.rs`, `node/reconfigure
   A full disk (`StorageError::Full`, #360 (disk full)) is never a crash: the journal re-opens
   read-only (Phase 1 and reads, no Phase-2 vote) until `read_only_ticks` after the fault, and never ends the node.
 - **Control journals** (#189, #210): the node registry is the cell tenant's control journal
-  (`paros::system::Registry`), and every hosted tenant has its own control journal
-  (`paros::tenant::TenantControl`): its description and every journal it created, each create or
+  (`paros::model::registry::Registry`), and every hosted tenant has its own control journal
+  (`paros::model::tenant::TenantControl`): its description and every journal it created, each create or
   delete a request with an idempotency id judged at apply, its outcome recorded under that id. A
   node follows them through a `ControlPlan` (`None` is the static deployment). The tenant
   coordinator (the elected cell coordinator until #476, #225) draws a created journal's id, books
-  one acceptor slot per member in the registry with `paros::placement` before the create, and
+  one acceptor slot per member in the registry with `paros::model::placement` before the create, and
   records a create it has no slot for as `Unplaceable` (#212 (placement)); the
   fold refuses a used id (`IdTaken`: the coordinator redraws), and an id is never reused.
   Clients send requests with `paros::client::journals`. The core's pool grows, never shrinks
@@ -339,9 +358,9 @@ Depth: module docs of `matchmaking.rs`, `node/matchmaking.rs`, `node/reconfigure
   machine's class and capacity, judges capacity bookings at apply (#211), and is checkpointed
   and truncated with `paros::client::checkpoint` (#230); a `stateless` machine never serves a
   journal.
-- **The fleet tenant** (`paros::fleet`, #229; named *meta* until #244) holds the fleet directory
+- **The fleet tenant** (`paros::model::fleet`, #229; named *meta* until #244) holds the fleet directory
   (`FleetDirectory`): tenant → cell plus the cell entries, hosted by the fleet's one cell. Every
-  tenant has a set of groups (`paros::fleet::Groups`), fixed at registration: the fleet tenant
+  tenant has a set of groups (`paros::model::fleet::Groups`), fixed at registration: the fleet tenant
   `{internal, fleet}`, a cell tenant `{internal, cell}` (both created only by
   `init`/adding a cell), a served tenant `{users}` (the tenant API's); only `cell` forbids a move,
   and there is no per-tenant placement. Fleet operations (`init`'s fleet half, tenant create
@@ -353,7 +372,7 @@ Depth: module docs of `matchmaking.rs`, `node/matchmaking.rs`, `node/reconfigure
 - **The storage seam is async** (`LogStorage` / `MatchmakerStorage`: every device-touching method
   returns a `Send` future, awaited in persist-before-send order); the core's recovery ports
   stay synchronous, served from memory after `boot_scan`. Production stores are
-  `paros::journal` on `moonpool-journal`, a CLSTORE journal: the state itself (slot = position,
+  `paros::storage::journal` on `moonpool-journal`, a CLSTORE journal: the state itself (slot = position,
   ballot in the entry's identity, scalars in its two-copy metainfo), no fold, no checkpoint.
   `JournalStores::open` is async: an opener resolves an interrupted format from the disk at every
   open, a quarantined journal's re-open included.
@@ -364,8 +383,9 @@ Depth: module docs of `matchmaking.rs`, `node/matchmaking.rs`, `node/reconfigure
   rejoins**: a trim jump restores the floor, not the promise. The acceptor set heals around it by
   reconfiguration; a wiped matchmaker is replaced by a handover.
 
-Depth: `crates/paros/AGENTS.md`; module docs of `driver/journals.rs`, `driver/system.rs`,
-`driver/boot.rs`, `storage/mod.rs`, `journal/mod.rs`, `matchmaker/mod.rs`.
+Depth: `crates/lib/paros-roles/AGENTS.md` and `crates/lib/paros-storage/AGENTS.md`; module docs of
+`paros-roles`'s `node/journals.rs`, `node/system.rs`, `node/boot.rs`, `matchmaker.rs`, and of
+`paros-storage`'s `lib.rs` and `journal.rs`.
 
 ## Turbulence layers
 
@@ -402,7 +422,7 @@ Three layers, and nothing crosses them:
   `LATE_WINDOW` into the tail and lasts 13–18 s, past every `machine_replace_after`
   (`paros_sim::world::gone_machine`, #475 (re-place after the Down bound)). Likewise on a seed that draws
   the lagging-fold scenario, half the nodes admit the registry's pool 2 s late
-  (`paros::scenario::ADMIT_LATE`, #387 (unpooled joiner)), in the tail too: the hold is a bound,
+  (`paros::observe::scenario::ADMIT_LATE`, #387 (unpooled joiner)), in the tail too: the hold is a bound,
   not a window, because most joiners register in the tail.
 - **`paros-core` is never buggified**: no RNG, knob or conditional compilation. A rare-but-valid
   decision is exposed as a method with an honest contract (`resend_pending`, `step_down`) and
@@ -410,7 +430,7 @@ Three layers, and nothing crosses them:
 - **Prong 1, the driver's choices are inline sites** (#294, #318): every per-call rare-but-valid
   choice is a `buggify_fault_with_prob!` at the line that makes it (silent in the recovery tail),
   with a `reachable!` beside it or a fired gate in the audit. A site that is one ingredient of a
-  per-seed scenario is a named location (`buggify_named!`, `paros::scenario`, #318 E): the
+  per-seed scenario is a named location (`buggify_named!`, `paros::observe::scenario`, #318 E): the
   harness turns it on with the scenario's other ingredients (`set_activation`). Draw a site only
   where its answer has an observable effect. A driver site draws **only on the node loop**,
   never in a spawned task; a decision a spawned task needs is carried to it.
@@ -427,7 +447,7 @@ Three layers, and nothing crosses them:
   `PLATEAU_SEEDS`, `CHAOS_CAP`, `SETTLE`, `WAIT_SETTLE`) and schedule ceilings
   (`*_ITERATIONS`). Constants a correctness argument depends on (`MAX_TORN_TAIL`) are not tunables.
 
-Depth: the `adding-a-buggify-site` skill, `crates/paros/src/scenario.rs`.
+Depth: the `adding-a-buggify-site` skill, `crates/lib/paros-observe/src/scenario.rs`.
 
 ## Audit, correctness, assertions, spans
 
@@ -515,45 +535,72 @@ Procedure: the `simulation-driven-fix` skill.
 
 ## Layout
 
-Cargo workspace, every package under `crates/`. Dependency stack: `paros-core` ← `paros` ←
-`paros-sim` ← `paros-sim-runner`, and `paros` ← `parosd`; `paros` ← `paros-authz-biscuit` ←
-`parosd`, `paros-sim`. Each crate's `AGENTS.md` is its map.
+Cargo workspace, every package under `crates/`, grouped by product (#722 (three products)).
+Each crate's `AGENTS.md` is its map.
+
+`crates/lib/`, the library, one crate per layer. Each layer depends only on the ones above it
+in this list:
 
 - `paros-core` — the sans-IO roles and `ColocatedNode`; dependency-free with
   `default-features = false`, wasm-safe; sancov crate-under-test. Its optional, default-on
   `assertions` feature (#317) adds `moonpool-assertions` for coverage probes only.
-- `paros` — the library: provider-generic drivers, RPC contract (`proto/`, built by
-  `prost-build`), stores, `paros::client`; wasm-safe and provider-free. Its `tls` feature
-  (`paros::tls`, on in `parosd` and `paros-sim`) adds TLS and mutual TLS (PR #509 (mutual TLS)).
-- `parosd` — the uniform `parosd` daemon on one compio thread (one binary per machine: `PAROS_*` config,
-  `node_id` minted at format, waits for `parosctl init`, #196), `paros-frontend` (#192 (the
-  frontend)) and `parosctl`
-  (`src/bin/parosctl/`), the CLI over `paros::client` (`publish = false`). The image and the
-  Compose toy are `Dockerfile` and `docker-compose.yml` at the root; `DEMO.md` is how to run it.
-- `paros-authz-biscuit` — Biscuit tokens (#245, #400): root keys, offline mint, derive and
-  seal, the verifier and its one policy, and `BiscuitAuthz`, the frontend's `Authz` (#192 (the
-  frontend)). It depends on `paros` for that trait; Biscuit never enters `paros` or
-  `paros-core`. `biscuit-auth` is pinned by git rev, so the crate is `publish = false`.
+- `paros-wire` — the RPC contract (`proto/`, built by `prost-build`) and its codecs.
+- `paros-model` — the pure folds and data types: the registry, tenants, the fleet directory,
+  tags, placement, footprints, status, views, load, checkpoints, the machine's data types.
+- `paros-tunables` — the driver's and the client's tunables and their floors.
+- `paros-storage` — the `LogStorage` seam, the moonpool-journal stores, provisioning, boot.
+- `paros-net` — addresses and name resolution, the transport, the RPC edge and its clients,
+  TLS (`tls` feature, PR #509 (mutual TLS)).
+- `paros-client` — `paros::client`, the library client of a cell.
+- `paros-observe` — the `Audit` port, metrics, named BUGGIFY locations, the reply seam.
+- `paros-roles` — one module per paper role, each with its `run_*` loop: `node`,
+  `proxy_leader`, `replica`, `batcher`, `matchmaker`, `frontend`.
+- `paros-coordinator` — the cell, tenant and universe coordinators.
+- `paros-machine` — one machine's lifecycle, `run_machine`, and `inspect`.
+- `paros` — the facade: each layer as a module (`paros::core`, `paros::model`, …) and the
+  `run_*` entry points. A program depends on `paros` alone. Wasm-safe and provider-free.
+
+`crates/bin/`, the binaries (`publish = false`):
+
+- `parosd` — the uniform daemon on one compio thread (one binary per machine: `PAROS_*` config,
+  `node_id` minted at format, waits for `parosctl init`, #196). The image and the Compose toy
+  are `Dockerfile` and `docker-compose.yml` at the root; `DEMO.md` is how to run it. Every
+  `parosd` serves the frontend role with `BiscuitAuthz` (#723 (frontend as a parosd role)).
+- `parosctl` — the CLI over `paros::client`: `main.rs` is the command tree, `cmd/` holds one
+  module per noun, `support/` what the commands share.
+- `paros-bench` — the load generator (#517, #194 (throughput benchmark)), against a cell or a
+  local one (`--local N`).
+
+`crates/sim/`, the harness:
+
 - `paros-sim` — the DST harness: processes, role map, storage ledger and injector, workload, audit.
 - `paros-sim-runner` — `sim-paros-chain` and `sim-paros-hunt` (`publish = false`).
+- `paros-sim-wasm-check` — the proof that a seed of `paros-sim` is the same run on wasm32 as
+  natively (#307): one fingerprint line per seed from the native binary and from the wasm
+  bundle under node (`scripts/check-sim-wasm.sh`).
+
+`crates/support/`:
+
+- `paros-authz-biscuit` — Biscuit tokens (#245, #400): root keys, offline mint, derive and
+  seal, the verifier and its one policy, and `BiscuitAuthz`, the frontend's `Authz` (#192 (the
+  frontend)). It depends on `paros` for that trait; Biscuit never enters the library.
+  `biscuit-auth` is pinned by git rev, so the crate is `publish = false`.
 - `paros-wasm` — the site's wasm tools, one crate with one feature per tool (#540, decided on
   2026-10-15), each built alone into its own bundle: `paxos`, the interactive Paxos game on
   `paros-core` only (the app is `website/play/`), and `playground`, the paros playground (#518):
   a paros universe on moonpool's simulated providers, the shipped `run_machine` and
   `paros::client`, replayed from a seed, a config and an action log (the page is
   `website/sandbox/`). Never depends on `paros-sim` or `parosd`.
-- `paros-sim-wasm-check` — the proof that a seed of `paros-sim` is the same run on wasm32 as
-  natively (#307): one fingerprint line per seed from the native binary and from the wasm
-  bundle under node (`scripts/check-sim-wasm.sh`).
 - `xtask` — `cargo xtask sim` (the sancov runner) and `cargo xtask mutants` (the mutation hunt, #269).
 
 Elsewhere: `website/` holds everything a browser loads (decided on 2026-10-13): `website/zola/` (the website, Zola + Goyo, #254; `website/zola/AGENTS.md`, the `update-the-site` skill; built by `website/zola/build.sh`), `website/play/` (the game's app), `website/sandbox/` (the sandbox page); `scripts/build-wasm.sh` builds and stages both; the Rust behind them stays in `crates/`,
 `docs/architecture/`, `docs/analysis/` (design notes), `docs/references/` (papers and source
-references), `scripts/` (`sancov-rustc.sh`, `build-wasm.sh`, `check-sim-wasm.sh`, `check-dockerfile-toolchain.sh`, `mutants-report.sh`), `.claude/skills/` and
+references), `scripts/` (`sancov-rustc.sh`, `build-wasm.sh`, `check-sim-wasm.sh`, `check-dockerfile-toolchain.sh`, `check-module-style.sh`, `check-core-layers.sh`, `mutants-report.sh`), `.claude/skills/` and
 `.claude/agents/`.
 
 Publishing mirrors moonpool: library crates share a release-plz `version_group` with per-crate
-`CHANGELOG.md`; binaries and xtask are `publish = false`. `paros`, `paros-sim` and `parosd` pin
-moonpool by **git** rev (thirteen lines across their `Cargo.toml`s, `paros-wasm` included, advanced together), so only
+`CHANGELOG.md`; binaries and xtask are `publish = false`. The workspace pins moonpool by
+**git** rev (the `moonpool-*` lines of the root `[workspace.dependencies]`, which every crate
+uses, advanced together with `paros-core`'s own line), so only
 `paros-core` is truly publishable: its one moonpool line (`moonpool-assertions`, optional) also
 carries a crates.io `version`, which a publish resolves instead of the git rev.

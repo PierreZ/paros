@@ -145,7 +145,8 @@ FoundationDB:
   names no durability takes the default.
 - `parosctl configure --tenant acme --batchers 3` sets the tenant's role counts. The command
   also takes `--frontends` and `--proxy-leaders`. A count that the command does not name keeps
-  its value. The cell places batchers today. It records the other two counts for a later
+  its value. The cell places batchers and frontends on its `stateless` machines, and
+  `parosctl resolve acme` names them. It records the count of proxy leaders for a later
   change.
 
 The answer `configured` means that the tenant's control journal holds the new durability. The

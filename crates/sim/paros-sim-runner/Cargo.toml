@@ -1,0 +1,36 @@
+[package]
+name = "paros-sim-runner"
+description = "Native runner for paros deterministic simulations (full features, incl. fork explorer)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+autobins = false
+
+[[bin]]
+name = "sim-paros-chain"
+path = "src/main.rs"
+
+[[bin]]
+name = "sim-paros-hunt"
+path = "src/hunt.rs"
+
+# The mutation hunt (#269): `cargo xtask mutants` runs this target as
+# cargo-mutants' test (`.cargo/mutants.toml`). Behind a feature so the plain
+# `cargo nextest run` never builds or runs a 300-seed hunt.
+[[test]]
+name = "mutants"
+path = "tests/mutants.rs"
+harness = false
+required-features = ["mutants"]
+
+[features]
+mutants = []
+
+[dependencies]
+paros-sim = { workspace = true }
+
+[lints]
+workspace = true

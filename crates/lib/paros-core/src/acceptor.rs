@@ -1,0 +1,714 @@
+//! The **acceptor**: one node's Paxos voting state, and nothing else.
+//!
+//! An acceptor knows its durable promise, the per-slot records it accepted,
+//! the compaction floor below which those records are gone, and the CTRL
+//! tri-state's third answer — the slots whose record it *had* but can no
+//! longer read (`faulty`: identity known, value lost). It answers two
+//! questions, both pure Paxos:
+//!
+//! - `Prepare(from_slot, ballot)`: promise, or refuse with the promise held
+//!   ([`Acceptor::prepare`]), and page out the accepted suffix a promise
+//!   reports ([`Acceptor::promise_page`]).
+//! - `Accept(slot, ballot, value)`: admissible at this promise, or refused
+//!   ([`Acceptor::admit`]); the record itself lands through
+//!   [`Acceptor::record_accepted`].
+//!
+//! It is generic over the value its log carries — to an acceptor a value has
+//! identity and nothing else — so the one-slot decree of the matchmaker-set
+//! handover and the unbounded Multi-Paxos log are the same role over
+//! different `V`. Its two durable ops are named by [`AcceptorWrite`]; the
+//! caller's batch type only has to say where they sit (`W: From<_>`). The
+//! two *retention* ops, [`crate::WriteOp::Truncate`] and [`crate::WriteOp::TrimmedTo`],
+//! live in their own module (`acceptor/retention.rs`) and still speak the
+//! node batch's own language: a log that compacts is the multi-slot
+//! deployment's concern, and they stay methods of this role because the
+//! role that moves the floor emits the write that makes it durable (see
+//! that module's doc for why a separate retention *type* was not the
+//! answer).
+//!
+//! It knows nothing about leadership, elections, replicas, matchmakers, the
+//! network, timers, randomness, or *why* a `Prepare` arrived — the
+//! [`crate::ColocatedNode`] wiring owns those couplings (a `Prepare` that deposes a
+//! leader, a heartbeat that adopts a sender) and builds the wire messages.
+//! Every durable change it makes is emitted as a [`crate::WriteOp`] into the batch
+//! the caller hands it, so the persist-before-send ordering stays the
+//! caller's structural contract — and every op in a batch that needs an
+//! fsync comes from here ([`crate::WriteOp::needs_sync`]): a second
+//! deployment reusing this role gets the whole durable surface with it, and
+//! cannot silently lose a write by forgetting to push one beside the call.
+//!
+//! Hard `assert!`s throughout: a broken voting invariant is a programmer
+//! error, never an operating condition (AGENTS.md, *Assertion doctrine*).
+
+mod retention;
+
+use std::collections::BTreeMap;
+
+use crate::contract::write::AcceptorWrite;
+use crate::retained::RetainedWindow;
+use crate::types::{Ballot, Slot};
+
+use crate::contract::limits::PROMISE_BATCH;
+
+/// What a `Prepare` did at this acceptor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PrepareOutcome {
+    /// The requested range starts below the compaction floor: those slots are
+    /// chosen and truncated, so no promise could report them — refused
+    /// *without* moving the promise (a blind laggard never ratchets it).
+    BelowFloor,
+    /// The promise held already dominates the ballot: refused, promise
+    /// untouched.
+    Refused,
+    /// Promised. `raised` says whether the promise moved (a same-ballot
+    /// continuation page re-affirms it without a write).
+    Promised {
+        /// Whether this prepare raised the durable promise.
+        raised: bool,
+    },
+}
+
+/// Whether an `Accept` may land at this acceptor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AcceptOutcome {
+    /// The slot is below the compaction floor: already chosen, ignore.
+    BelowFloor,
+    /// The promise held dominates the ballot: refused.
+    Refused,
+    /// Admissible: the caller raises the promise and records the value.
+    Admitted,
+}
+
+/// One page of a `Promise`: the readable records and the faulty entries at
+/// or after the requested slot, bounded, disjoint, and the continuation
+/// cursor when the suffix did not fit.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PromisePage<V> {
+    /// Readable records, by slot.
+    pub accepted: BTreeMap<Slot, (Ballot, V)>,
+    /// Faulty entries (identity known, value lost), by slot.
+    pub faulty: BTreeMap<Slot, Ballot>,
+    /// Where the next page starts, when this one was full.
+    pub next_from_slot: Option<Slot>,
+}
+
+/// The acceptor: promise, records, floor, tri-state, over the value `V` its
+/// log carries. See the module doc.
+#[derive(Clone, Debug)]
+pub struct Acceptor<V> {
+    /// The highest ballot promised. Monotone for the node's whole lifetime —
+    /// the durable safety hinge.
+    promised: Ballot,
+    /// The working per-slot accepted log (rebuilt from durable storage on
+    /// boot): the highest-ballot record per slot, or the chosen value once
+    /// learned — retained above the compaction floor.
+    records: RetainedWindow<Slot, (Ballot, V)>,
+    /// Slots this acceptor accepted but can no longer read, at the ballot
+    /// the lost record carried — the tri-state's `faulty` answer. Retained
+    /// above the same floor, which the two windows keep in step (asserted).
+    faulty: RetainedWindow<Slot, Ballot>,
+    /// Faulty entries healed in place by a fresh record, this incarnation.
+    faulty_repaired: u64,
+    /// An upper bound on the ballot of every record and every faulty entry
+    /// held: raised at each record, never lowered (a floor raise only drops
+    /// entries). `ceiling <= promised` then proves "the promise dominates
+    /// every record" in O(1), where a scan of the log grew with it (#619
+    /// (O(n) invariants)).
+    ceiling: Ballot,
+}
+
+impl<V: Clone + PartialEq> Acceptor<V> {
+    /// An acceptor over the durable state a boot scan read back.
+    ///
+    /// # Panics
+    ///
+    /// If the state breaks the acceptor's invariants: a record or faulty
+    /// entry below the floor, a slot both readable and faulty, or a record
+    /// above the promise (the write side always flushes the promise ahead of
+    /// the record it covers).
+    #[must_use]
+    pub fn new(
+        promised: Ballot,
+        records: BTreeMap<Slot, (Ballot, V)>,
+        first_slot: Slot,
+        faulty: BTreeMap<Slot, Ballot>,
+    ) -> Self {
+        // The windows enforce their own floor, so these say the same thing
+        // in the *acceptor's* words, at the boot seam where a corrupt store
+        // is what breaks it.
+        assert!(
+            records.keys().next().is_none_or(|s| *s >= first_slot),
+            "no accepted record survives below the compaction floor"
+        );
+        assert!(
+            faulty.keys().next().is_none_or(|s| *s >= first_slot),
+            "no faulty entry survives below the compaction floor"
+        );
+        // The boot seam scans once; every later check reads the bound.
+        let ceiling = records
+            .values()
+            .map(|(ballot, _)| *ballot)
+            .chain(faulty.values().copied())
+            .max()
+            .unwrap_or_else(Ballot::zero);
+        let acceptor = Self {
+            promised,
+            records: RetainedWindow::new(records, first_slot),
+            faulty: RetainedWindow::new(faulty, first_slot),
+            faulty_repaired: 0,
+            ceiling,
+        };
+        acceptor.assert_invariants();
+        acceptor
+    }
+
+    /// The acceptor's own cross-field invariants: min-key probes against the
+    /// floor, a scan of the faulty set (small: only damage fills it), and the
+    /// promise against the ballot ceiling. Nothing here walks the retained
+    /// log, so the check costs the same however long the log grows (#619
+    /// (O(n) invariants)).
+    ///
+    /// # Panics
+    ///
+    /// If a record or faulty entry sits below the floor, a slot is both
+    /// readable and faulty, or a record or faulty entry stands above the
+    /// promise.
+    pub fn assert_invariants(&self) {
+        assert!(
+            self.records
+                .first_key()
+                .is_none_or(|s| s >= self.first_slot()),
+            "no accepted record survives below the compaction floor"
+        );
+        assert!(
+            self.faulty
+                .first_key()
+                .is_none_or(|s| s >= self.first_slot()),
+            "no faulty entry survives below the compaction floor"
+        );
+        assert!(
+            self.records.floor() == self.faulty.floor(),
+            "the tri-state's two windows share one compaction floor"
+        );
+        // The tri-state is a partition: a slot is readable, faulty, or absent —
+        // never two at once.
+        assert!(
+            self.faulty
+                .entries()
+                .keys()
+                .all(|s| !self.records.contains_key(*s)),
+            "the faulty set stays disjoint from the accepted log"
+        );
+        // The write-side ordering, read back: a record is admitted only at or
+        // below the promise, and the promise is flushed ahead of the record it
+        // covers — so nothing this acceptor holds may stand above it. The
+        // faulty half says the same about a record whose value was lost: its
+        // identity survived, and so did the promise that covered it.
+        // `ceiling` bounds every record and faulty ballot (raised at each
+        // record, scanned once at boot), so these hold for all of them in
+        // O(1). The first and last records are checked against the bound
+        // itself, its read-back pair.
+        assert!(
+            self.ceiling <= self.promised,
+            "the promise dominates every accepted record"
+        );
+        assert!(
+            [self.records.first_key(), self.records.last_key()]
+                .into_iter()
+                .flatten()
+                .filter_map(|slot| self.records.get(slot))
+                .all(|(ballot, _)| *ballot <= self.ceiling),
+            "the ballot ceiling bounds every accepted record"
+        );
+        assert!(
+            [self.faulty.first_key(), self.faulty.last_key()]
+                .into_iter()
+                .flatten()
+                .filter_map(|slot| self.faulty.get(slot))
+                .all(|ballot| *ballot <= self.ceiling),
+            "the ballot ceiling bounds every faulty record"
+        );
+    }
+
+    // ---- reads --------------------------------------------------------------
+
+    /// The highest ballot promised.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
+    #[must_use]
+    pub fn promised(&self) -> Ballot {
+        // The read side of the write ordering: the last record never stands
+        // above the promise that covered it.
+        assert!(
+            self.records
+                .last_key()
+                .and_then(|s| self.records.get(s))
+                .is_none_or(|(b, _)| *b <= self.promised),
+            "the promise dominates the last record"
+        );
+        self.promised
+    }
+
+    /// The working accepted log.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
+    #[must_use]
+    pub fn records(&self) -> &BTreeMap<Slot, (Ballot, V)> {
+        let records = self.records.entries();
+        assert!(
+            records
+                .keys()
+                .next()
+                .is_none_or(|s| *s >= self.first_slot()),
+            "no accepted record survives below the compaction floor"
+        );
+        records
+    }
+
+    /// The record at `slot`, if readable.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
+    #[must_use]
+    pub fn record(&self, slot: Slot) -> Option<&(Ballot, V)> {
+        let record = self.records.get(slot);
+        if let Some((ballot, _)) = record {
+            // Read-back of `record_accepted`'s preconditions: a readable
+            // record sits at or above the floor and under the promise.
+            assert!(
+                !self.records.below_floor(slot),
+                "a readable record sits above the floor"
+            );
+            assert!(
+                *ballot <= self.promised,
+                "the promise dominates a readable record"
+            );
+            assert!(
+                !self.faulty.contains_key(slot),
+                "a readable slot is never faulty"
+            );
+        }
+        record
+    }
+
+    /// The compaction floor: the first slot still retained.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
+    #[must_use]
+    pub fn first_slot(&self) -> Slot {
+        let floor = self.records.floor();
+        assert!(
+            floor == self.faulty.floor(),
+            "the tri-state's two windows share one floor"
+        );
+        floor
+    }
+
+    /// The faulty entries: identity known, value lost.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
+    #[must_use]
+    pub fn faulty(&self) -> &BTreeMap<Slot, Ballot> {
+        let faulty = self.faulty.entries();
+        assert!(
+            faulty.keys().next().is_none_or(|s| *s >= self.first_slot()),
+            "no faulty entry survives below the compaction floor"
+        );
+        faulty
+    }
+
+    /// The **vote watermark** (#143, Compartmentalized Paxos §3.4): the
+    /// highest slot this acceptor has voted in — the last retained record,
+    /// the last faulty entry (identity known, value lost: it *was* voted),
+    /// or `first_slot - 1` when the retained log is empty above a compaction
+    /// floor (every truncated slot was chosen, hence voted). `None` only on a
+    /// log that never voted anything.
+    ///
+    /// paros records a *chosen* value as the authoritative accepted record
+    /// (`mark_chosen` → [`Acceptor::record_accepted`]), so a learner-only
+    /// record raises the watermark too. That is **conservative, never
+    /// unsafe**: a quorum read waits until the replica has applied the
+    /// watermark, so a watermark that is too high costs latency, and one
+    /// that is too low would be the bug — it cannot be, because every vote
+    /// this acceptor cast is either retained, faulty, or below the floor.
+    /// Monotone across [`Acceptor::record_accepted`] and
+    /// [`Acceptor::truncate`] (asserted at both).
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
+    #[must_use]
+    pub fn vote_watermark(&self) -> Option<Slot> {
+        let truncated = self.first_slot().0.checked_sub(1).map(Slot);
+        let watermark = [self.records.last_key(), self.faulty.last_key(), truncated]
+            .into_iter()
+            .flatten()
+            .max();
+        // Postconditions: the watermark covers every vote this acceptor still
+        // holds, and every vote the floor stands in for.
+        assert!(
+            watermark >= self.records.last_key(),
+            "the vote watermark covers every retained record"
+        );
+        assert!(
+            watermark >= self.faulty.last_key(),
+            "the vote watermark covers every faulty entry"
+        );
+        assert!(
+            watermark >= truncated,
+            "the vote watermark covers every truncated slot"
+        );
+        watermark
+    }
+
+    /// Faulty entries repaired in place this incarnation — half of the CTRL
+    /// §5.2 metric. The other half, the payload bytes those repairs shipped,
+    /// is the caller's to tally: it needs the *meaning* of a value, which an
+    /// acceptor deliberately does not have (see the module doc's opacity
+    /// rule), and [`Acceptor::record_accepted`] reports each repair as it
+    /// happens.
+    #[must_use]
+    pub fn faulty_repaired(&self) -> u64 {
+        self.faulty_repaired
+    }
+
+    // ---- Phase 1 ------------------------------------------------------------
+
+    /// A candidate prepares `ballot` for every slot at or after `from_slot`.
+    /// Promotes the promise when `ballot` is strictly higher (emitting the
+    /// [`AcceptorWrite::SetPromise`]), re-affirms it for a same-ballot page
+    /// continuation, and refuses below it — or below the floor, without
+    /// touching the promise.
+    ///
+    /// # Panics
+    ///
+    /// If the promise does not land exactly on the prepared ballot (a
+    /// programmer error).
+    pub fn prepare<W: From<AcceptorWrite<V>>>(
+        &mut self,
+        ballot: Ballot,
+        from_slot: Slot,
+        writes: &mut Vec<W>,
+    ) -> PrepareOutcome {
+        let writes_before = writes.len();
+        if self.records.below_floor(from_slot) {
+            return PrepareOutcome::BelowFloor;
+        }
+        if ballot < self.promised {
+            return PrepareOutcome::Refused;
+        }
+        let raised = ballot > self.promised;
+        if raised {
+            self.set_promise(ballot, writes);
+        }
+        // Postcondition: the promise sits exactly at the prepared ballot.
+        assert!(
+            self.promised == ballot,
+            "a promise reply carries the exact promised ballot"
+        );
+        // Negative space: a raise emits exactly the one durable promise, a
+        // same-ballot continuation emits nothing.
+        if raised {
+            assert!(
+                writes.len() == writes_before + 1,
+                "a raised promise emits one write"
+            );
+        } else {
+            assert!(
+                writes.len() == writes_before,
+                "a re-affirmed promise emits no write"
+            );
+        }
+        PrepareOutcome::Promised { raised }
+    }
+
+    /// One bounded page over the slot-ordered union of readable records
+    /// (`have`) and faulty entries (the tri-state's third answer): a rotted
+    /// copy is reported as `faulty(ballot)` — silence toward the none-tally,
+    /// never "nothing accepted here". The page carries at most `limit`
+    /// entries (#338: a small limit makes a suffix span several pages).
+    ///
+    /// # Panics
+    ///
+    /// If `limit` is zero or above [`PROMISE_BATCH`]. Never otherwise: the
+    /// peeked cursors are advanced only after a successful peek.
+    #[must_use]
+    pub fn promise_page(&self, from_slot: Slot, limit: usize) -> PromisePage<V> {
+        assert!(limit > 0, "a promise page carries at least one entry");
+        assert!(
+            limit <= PROMISE_BATCH,
+            "a promise page stays under PROMISE_BATCH"
+        );
+        let mut readable = self.records.range(from_slot..).peekable();
+        let mut rotted = self.faulty.range(from_slot..).peekable();
+        let mut page = PromisePage {
+            accepted: BTreeMap::new(),
+            faulty: BTreeMap::new(),
+            next_from_slot: None,
+        };
+        while page.accepted.len() + page.faulty.len() < limit {
+            let take_readable = match (readable.peek(), rotted.peek()) {
+                (None, None) => break,
+                (Some(_), None) => true,
+                (None, Some(_)) => false,
+                (Some((ra, _)), Some((rf, _))) => ra < rf,
+            };
+            if take_readable {
+                let (slot, record) = readable.next().expect("peeked");
+                page.accepted.insert(*slot, record.clone());
+            } else {
+                let (slot, fb) = rotted.next().expect("peeked");
+                page.faulty.insert(*slot, *fb);
+            }
+        }
+        page.next_from_slot = match (readable.peek(), rotted.peek()) {
+            (None, None) => None,
+            (Some((slot, _)), None) | (None, Some((slot, _))) => Some(**slot),
+            (Some((ra, _)), Some((rf, _))) => Some(*std::cmp::min(*ra, *rf)),
+        };
+        // Postconditions: bounded, disjoint, at or after the requested slot,
+        // and the cursor strictly past everything this page carried.
+        assert!(
+            page.accepted.len() + page.faulty.len() <= limit,
+            "a promise page is bounded by PROMISE_BATCH"
+        );
+        assert!(
+            page.faulty.keys().all(|s| !page.accepted.contains_key(s)),
+            "a promise page reports a slot as readable or faulty, never both"
+        );
+        assert!(
+            page.accepted
+                .keys()
+                .chain(page.faulty.keys())
+                .all(|s| *s >= from_slot),
+            "a promise page starts at the requested slot"
+        );
+        if let Some(next) = page.next_from_slot {
+            assert!(
+                page.accepted
+                    .keys()
+                    .chain(page.faulty.keys())
+                    .all(|s| *s < next),
+                "the continuation cursor lies past every slot the page carried"
+            );
+            assert!(
+                page.accepted.len() + page.faulty.len() == limit,
+                "only a full page carries a continuation cursor"
+            );
+        }
+        page
+    }
+
+    // ---- Phase 2 ------------------------------------------------------------
+
+    /// Whether an `Accept` at `ballot` for `slot` may land here: not below the
+    /// floor (already chosen — ignore, never refuse), and at or above the
+    /// promise.
+    #[must_use]
+    pub fn admit(&self, ballot: Ballot, slot: Slot) -> AcceptOutcome {
+        if self.records.below_floor(slot) {
+            return AcceptOutcome::BelowFloor;
+        }
+        if ballot < self.promised {
+            return AcceptOutcome::Refused;
+        }
+        AcceptOutcome::Admitted
+    }
+
+    // ---- durable writes -----------------------------------------------------
+
+    /// Raise (or re-affirm) the promised ballot to `ballot`, emitting a
+    /// [`AcceptorWrite::SetPromise`] only when it actually changes.
+    ///
+    /// # Panics
+    ///
+    /// If `ballot` is below the promise held: a promise is never lowered,
+    /// across the node's whole lifetime.
+    pub fn set_promise<W: From<AcceptorWrite<V>>>(&mut self, ballot: Ballot, writes: &mut Vec<W>) {
+        assert!(
+            ballot >= self.promised,
+            "a node's promised ballot never decreases"
+        );
+        let writes_before = writes.len();
+        if self.promised != ballot {
+            self.promised = ballot;
+            writes.push(AcceptorWrite::SetPromise(ballot).into());
+        }
+        assert!(
+            self.promised == ballot,
+            "the promise lands on the requested ballot"
+        );
+        assert!(
+            writes.len() <= writes_before + 1,
+            "a promise change emits at most one write"
+        );
+    }
+
+    /// Record `(ballot, command)` as accepted for `slot` and emit the matching
+    /// [`AcceptorWrite::AppendAccepted`]. An upsert-by-slot: a higher-ballot
+    /// re-accept, or a chosen value overwriting a stale accept. A fresh record
+    /// over a faulty entry is the in-place repair (fill or
+    /// replace-with-proven-identical, never delete).
+    ///
+    /// Returns whether this record *was* such an in-place repair, so a caller
+    /// that understands what a value is can attribute the repair's cost to it
+    /// (the acceptor cannot: to it a value is opaque).
+    ///
+    /// # Panics
+    ///
+    /// If `slot` is below the floor, `ballot` is above the promise (the write
+    /// side always raises the promise first), or an accept at or below the
+    /// recorded ballot carries a different command — the acceptor-side
+    /// agreement rule: a record is replaced either by a *higher* ballot, or
+    /// at-or-below the recorded ballot only by the *chosen* value, which P2c
+    /// makes identical to whatever was accepted here at any ballot at or
+    /// above the choosing one; and one ballot has one proposer (P2b).
+    pub fn record_accepted<W: From<AcceptorWrite<V>>>(
+        &mut self,
+        slot: Slot,
+        ballot: Ballot,
+        command: V,
+        writes: &mut Vec<W>,
+    ) -> bool {
+        assert!(
+            !self.records.below_floor(slot),
+            "never record an accept below the compaction floor"
+        );
+        assert!(
+            ballot <= self.promised,
+            "a record is never accepted above the promise"
+        );
+        let watermark_before = self.vote_watermark();
+        let writes_before = writes.len();
+        let repaired = self.faulty.remove(slot).is_some();
+        let repaired_before = self.faulty_repaired;
+        if repaired {
+            self.faulty_repaired += 1;
+        }
+        assert!(
+            self.faulty_repaired == repaired_before + u64::from(repaired),
+            "a repair is counted once"
+        );
+        if let Some((recorded_ballot, recorded)) = self.records.get(slot)
+            && ballot <= *recorded_ballot
+        {
+            assert!(
+                *recorded == command,
+                "an accept at or below the recorded ballot carries the recorded command"
+            );
+        }
+        assert!(
+            self.records
+                .get(slot)
+                .is_none_or(|(held, _)| ballot >= *held),
+            "an accepted record's ballot never falls"
+        );
+        self.records.insert(slot, (ballot, command.clone()));
+        self.ceiling = self.ceiling.max(ballot);
+        writes.push(
+            AcceptorWrite::AppendAccepted {
+                slot,
+                ballot,
+                value: command,
+            }
+            .into(),
+        );
+        // Postcondition: a vote only ever raises the watermark (a quorum read
+        // that captured the old one stays sound).
+        assert!(
+            self.vote_watermark() >= watermark_before,
+            "the vote watermark never decreases across a record"
+        );
+        // The record and its durable op are one: exactly one write, the slot
+        // readable at the ballot just recorded, and no longer faulty.
+        assert!(
+            writes.len() == writes_before + 1,
+            "a record emits exactly one write"
+        );
+        assert!(
+            self.records.get(slot).is_some_and(|(b, _)| *b == ballot),
+            "the record lands at the recorded ballot"
+        );
+        assert!(
+            !self.faulty.contains_key(slot),
+            "a recorded slot is never faulty"
+        );
+        repaired
+    }
+
+    /// The scrub's in-place repair (#362 (background scrubbing)): write the
+    /// record this acceptor holds at `slot` again, at the same ballot and
+    /// value, because its durable copy failed its checksum when a scrub read
+    /// it back. The value is the one this acceptor voted for (loaded and
+    /// checked at boot, or recorded in this incarnation), so the write
+    /// changes no vote and no watermark: it is CTRL's repair of a faulty
+    /// entry, served from this node's own copy. Counted with the other
+    /// in-place repairs ([`Acceptor::faulty_repaired`]).
+    ///
+    /// `None`, and no write, when the acceptor holds no readable record at
+    /// `slot`: below the floor, never voted, or already faulty (the boot
+    /// found it, and CTRL's catch-up or election repairs it from a peer).
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
+    pub fn rewrite<W: From<AcceptorWrite<V>>>(
+        &mut self,
+        slot: Slot,
+        writes: &mut Vec<W>,
+    ) -> Option<Ballot> {
+        let (ballot, value) = self.record(slot).cloned()?;
+        let watermark_before = self.vote_watermark();
+        let promised_before = self.promised;
+        let writes_before = writes.len();
+        self.faulty_repaired += 1;
+        writes.push(
+            AcceptorWrite::AppendAccepted {
+                slot,
+                ballot,
+                value: value.clone(),
+            }
+            .into(),
+        );
+        // The rewrite is one write of the record held, and moves nothing
+        // else: the same record, the same promise, the same watermark.
+        assert!(
+            writes.len() == writes_before + 1,
+            "a rewrite emits exactly one write"
+        );
+        assert!(
+            self.records
+                .get(slot)
+                .is_some_and(|(b, v)| *b == ballot && *v == value),
+            "a rewrite keeps the record it writes"
+        );
+        assert!(
+            self.promised == promised_before,
+            "a rewrite never moves the promise"
+        );
+        assert!(
+            self.vote_watermark() == watermark_before,
+            "a rewrite never moves the vote watermark"
+        );
+        Some(ballot)
+    }
+}
+
+#[cfg(test)]
+mod tests;

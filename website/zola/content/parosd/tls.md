@@ -10,11 +10,10 @@ for a certificate: this is mutual TLS. A universe has one certificate authority,
 
 ## Make the certificates
 
-One command writes the authority and a certificate for each machine, frontend and operator:
+One command writes the authority and a certificate for each machine and operator:
 
 ```sh
-parosctl tls init --out tls --machines parosd-1,parosd-2,parosd-3 \
-  --frontends paros-frontend --universe prod
+parosctl tls init --out tls --machines parosd-1,parosd-2,parosd-3 --universe prod
 ```
 
 The command prints a table of the files and the variables each process reads. It never
@@ -34,7 +33,8 @@ Each certificate names its holder with an identity:
 `spiffe://<universe>/<role>/<name>`. There are four roles:
 
 - A `machine` (a `parosd`) serves and dials.
-- A `frontend` (a `paros-frontend`) serves and dials.
+- A `frontend` (a program that embeds `run_frontend`) serves and dials. Every `parosd` also
+  serves the frontend, with its `machine` certificate.
 - An `admin` (an operator's `parosctl`) only dials.
 - A `client` (an application) only dials.
 
@@ -47,11 +47,10 @@ authority and the name `paros`, never the address.
 | process | variables |
 |---|---|
 | `parosd` | `PAROS_TLS_CERT`, `PAROS_TLS_KEY`, `PAROS_TLS_CA`, `PAROS_TLS_CLIENT_AUTH` |
-| `paros-frontend` | `PAROS_FRONTEND_TLS_CERT`, `PAROS_FRONTEND_TLS_KEY`, `PAROS_FRONTEND_TLS_CA`, `PAROS_FRONTEND_TLS_CLIENT_AUTH` |
 | `parosctl` | `PAROSCTL_TLS_CA`, `PAROSCTL_TLS_CERT`, `PAROSCTL_TLS_KEY` (or `--tls-ca`, `--tls-cert`, `--tls-key`) |
 
 Each variable names a file. Its `_PEM` twin holds the PEM text itself instead, for a deployment
-that passes secrets as variables (`PAROS_TLS_CERT_PEM`, `PAROS_FRONTEND_TLS_KEY_PEM`,
+that passes secrets as variables (`PAROS_TLS_CERT_PEM`, `PAROS_TLS_KEY_PEM`,
 `PAROSCTL_TLS_CA_PEM`, or `--tls-cert-pem`). Give one of the two for each item. A flag wins over
 its variable.
 

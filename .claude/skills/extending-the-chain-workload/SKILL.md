@@ -5,13 +5,13 @@ description: Add or change an operation in paros's ChainWorkload (the one main-c
 
 # Extending the chain workload
 
-`ChainWorkload` (`crates/paros-sim/src/chain_workload.rs`; the op ids and
-`ChainConfig` in `chain_workload/config.rs`) is the only
+`ChainWorkload` (`crates/sim/paros-sim/src/workload.rs`; the op ids and
+`ChainConfig` in `workload/config.rs`) is the only
 main-campaign workload: one to three factory-created clients driving a
 chaotic pool through the journal API of #204 (`Write`, `Read`, `Truncate`,
 `SetLeader`). paros runs no application (#186): each client *is* the
 Chain-of-Blocks application, reading the journal and folding every record
-into its own `ChainState` (`chain_workload/fold.rs`), which the audit compares
+into its own `ChainState` (`workload/fold.rs`), which the audit compares
 across clients (`AuditWorld::fold_applied`). A fold needs every record from
 the start, so every truncation a client asks for is clamped below the shared
 trim fence (the lowest cursor of the clients still folding). Every client is
@@ -27,8 +27,8 @@ round-robin over the seed's one to three journals): every call names
 operations (`RECONFIGURE`, `RECONFIGURE_MATCHMAKERS`, `RETIRE`) run only on
 the run's main journal (`shape::Identifiers::main`), and the run ends only once every journal a client writes
 to has converged (the `converged` set on the shared `Tail`). The
-system-journal operations (#189) live in `chain_workload/system.rs`; the
-three races of `docs/architecture/06-verification.md` §6 (#205) in `chain_workload/races.rs`
+system-journal operations (#189) live in `workload/system.rs`; the
+three races of `docs/architecture/06-verification.md` §6 (#205) in `workload/races.rs`
 and the `READ` step.
 
 ## The alphabet is a wire format
@@ -56,8 +56,8 @@ the same rule.
 ## Calls go through the library client (#221)
 
 The workload drives every call through `paros::client`
-(`crates/paros/src/client/`, see `/working-on-the-client`), as
-`ChainClient = paros::client::Client<SimProviders>` (`crates/paros-sim/src/client.rs`):
+(`crates/lib/paros-client/src/`, see `/working-on-the-client`), as
+`ChainClient = paros::client::Client<SimProviders>` (`crates/sim/paros-sim/src/client.rs`):
 the client the sweep judges is the client `parosctl` ships. Do not
 re-implement a policy loop in the workload.
 
@@ -69,7 +69,7 @@ re-implement a policy loop in the workload.
   `Client::reconfigure_matchmakers`, `Client::inspect` and `Client::retire`.
   Race 3 folds its answer with the library's `Reader` (`Reader::new(journal,
   from)`), which resumes a truncated read at the floor it names.
-- **`CallLog`** (`chain_workload/rpc.rs`) is the history: it implements
+- **`CallLog`** (`workload/rpc.rs`) is the history: it implements
   `paros::client::CallObserver`, so every attempt the library builds and
   every answer it judges is logged at the RPC seam for the linearizability
   search (#205) — no call site can forget one. An attempt whose future is

@@ -39,10 +39,10 @@ generic BUGGIFY sites combined per seed (the correlated outage in
 ## 3. Put the check where the fact arrives
 
 - a driver-observable transition → `paros_sim::audit` (add the `Audit`
-  callback in `crates/paros/src/audit.rs` if the driver does not report it);
+  callback in `crates/lib/paros-observe/src/audit.rs` if the driver does not report it);
 - a client-observable one → the workload's own history and `check()`;
 - a storage fact → the storage layer's audit callbacks; an application fact
-  → the client's fold (`chain_workload/fold.rs`, `AuditWorld::fold_applied`),
+  → the client's fold (`workload/fold.rs`, `AuditWorld::fold_applied`),
   since paros runs no application (#186).
 
 Never a scan over the trace (`/adding-an-audit-check`). Preserve existing

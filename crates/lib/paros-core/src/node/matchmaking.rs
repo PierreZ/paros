@@ -1,0 +1,1127 @@
+//! The leader-side **matchmaking phase** (Matchmaker Paxos §3.1–§3.2, §4.2):
+//! the round trip a campaign runs *before* Phase 1 on a deployment that names
+//! matchmakers.
+//!
+//! A candidate's round no longer begins with `Prepare`. It picks the acceptor
+//! configuration it intends to run its ballot with (`C_b`), registers
+//! `(b, C_b)` with a **quorum of matchmakers**, and collects the histories they
+//! return — every configuration each of them holds at a ballot below `b`. The
+//! **union** of those histories, filtered by the **maximum** reported GC
+//! watermark, is `H_b`: the set of prior configurations whose Phase-1 quorums
+//! the candidate must each obtain before it may propose anything
+//! ([`super::election`]). That is the whole safety argument of §3.3: the set
+//! came from an intersecting matchmaker quorum, so no configuration that could
+//! still hold a chosen-but-unlearned value is missing from it.
+//!
+//! The phase is its own **role** ([`crate::matchmaking::Matchmaking`] — the
+//! tally, the union, `H_b` and the stale-belief signal), held beside
+//! [`crate::proposer::Election`] and never folded into it: a reader must be
+//! able to point at the matchmaking state, the Phase-1 state, and the
+//! boundary between them (`ColocatedNode::start_phase1`). A candidate holds
+//! exactly one of the two, and `ColocatedNode::assert_invariants` says so.
+//! This module is the wiring: it builds the requests, guards the replies,
+//! and turns the role's answers into role transitions.
+//!
+//! # Plain Multi-Paxos never comes here
+//!
+//! A deployment with no matchmakers ([`crate::Config::matchmakers`] empty)
+//! skips this module entirely: `on_check_leader` goes straight from the ballot
+//! bump to `Prepare` against its one static configuration, `H_b` is
+//! implicitly `{C}`, and no matchmaker message or extra round trip exists
+//! (AGENTS.md, *Plain Multi-Paxos is first-class*). Only a configuration that
+//! names matchmakers ever constructs a [`Matchmaking`].
+//!
+//! # The effective configuration is a registration fact, not a chosen value
+//!
+//! This is the one place the protocol's notion of "the configuration in
+//! force" is decided, and it is **not** a value chosen by Paxos. A
+//! configuration becomes authoritative the moment a leader's
+//! *reconfiguration* registration ([`crate::matchmaker::Registration::reconfiguration`])
+//! has landed at a **matchmaker quorum** — before, and independently of,
+//! any Phase 1 or Phase 2 the new acceptor set ever completes. From then on,
+//! quorum intersection puts that record in every later campaign's histories,
+//! and the effective configuration every ordinary campaign must register is
+//! the **highest-ballot reconfiguration registration** those histories name
+//! (`Matchmaking::effective`, `Matchmaking::stale_belief`). Three
+//! consequences a reader must not miss:
+//!
+//! - **Durability is the matchmaker quorum's**, not the acceptors'. A
+//!   `Reconfigure` acked `accepted: true` has *started*; it is guaranteed to
+//!   be honored once its matchmaking completed at a quorum, and may be lost
+//!   before that like any proposal short of a quorum.
+//! - **Two reconfigurations may overlap.** With `R1 -> C1` and `R2 -> C2`
+//!   both registered, `R1` may still finish its Phase 1 and lead briefly
+//!   under `C1` while `C2` is already the highest registration; `R2`'s
+//!   Phase 1 covers `C1` (it is in `H_b`), so nothing chosen under `C1` is
+//!   lost, and every later ordinary campaign registers `C2`. Paxos safety is
+//!   the acceptors' quorums; configuration monotonicity is the matchmakers'.
+//! - **Beliefs never count.** An ordinary campaign's registration is what
+//!   the candidate believed, possibly stale, possibly abandoned; only the
+//!   flagged records decide, which is what keeps two stale candidates from
+//!   re-adopting each other's beliefs forever.
+//!
+//! GC (#123) collects the flagged *record* like any other: the floor is a
+//! leader's own ballot and rises over it as soon as an ordinary leader
+//! campaigns above it. What it must never forget is the **fact**, which is
+//! why every matchmaker also holds the effective configuration as a durable
+//! monotone scalar the watermark does not touch
+//! ([`crate::matchmaker::MatchmakerHardState::effective`]) and reports it beside every
+//! history. `Matchmaking::fold` takes the maximum of the two, so a campaign
+//! whose replies show an empty history still learns the configuration in
+//! force (review finding P1: without the scalar, an ordinary leader's GC
+//! erased it and a rebooted candidate was elected under the superseded
+//! configuration).
+//!
+//! # Where the promise sits
+//!
+//! The candidate promises its own ballot **before** matchmaking, exactly where
+//! the plain path promises it. Promising first is always safe — a promise only
+//! refuses lower ballots — and it keeps the durable-write shape of a campaign
+//! identical in both deployments; a refused registration then simply leaves a
+//! follower with a slightly higher promise, which is the same state a lost
+//! election leaves.
+//!
+//! # Refusals, staleness, and re-sends
+//!
+//! - A **refusal** from any matchmaker (`Stale`, or `BelowWatermark`) aborts
+//!   the campaign: the candidate becomes a follower and re-campaigns, at a
+//!   strictly higher round, when its randomized election timeout next fires —
+//!   the same shape as a `Nack` on a `Prepare`, and the same dueling-proposer
+//!   livelock fix. The refusal's payload (`highest`, the watermark) is a
+//!   diagnostic, never adopted as a campaign hint, exactly like
+//!   [`crate::Message::Nack`]'s `promised`.
+//! - A **stale configuration**: an ordinary campaign registers the
+//!   configuration this node believes is in force, and a node that was down
+//!   or partitioned through a reconfiguration believes an old one. The ledger
+//!   distinguishes a **reconfiguration** registration (a leader's explicit
+//!   change, [`crate::matchmaker::Registration::reconfiguration`]) from a candidate's
+//!   belief, and the highest-ballot reconfiguration the quorum's histories
+//!   name is the **effective configuration**. When it differs from the one an
+//!   ordinary campaign just registered, the candidate abandons the campaign,
+//!   adopts it, and re-campaigns — so a leader change can never quietly
+//!   reinstate a superseded configuration. Beliefs never trigger this:
+//!   "adopt the newest *registration*" made two candidates re-adopt each
+//!   other's abandoned beliefs and flip-flop forever, while reconfiguration
+//!   requests are monotone by ballot and never manufactured by a campaign.
+//!   Its abandoned registration stays in the registry and is honored by every
+//!   later leader's Phase 1 (nothing was ever accepted at it, but the registry
+//!   cannot know that); GC retires it later (#123), the flagged one
+//!   included — the effective configuration outlives its record as the
+//!   durable scalar every `Registered` reply reports
+//!   ([`crate::matchmaker::MatchmakerHardState::effective`]).
+//! - **A membership probe** (#173) is the one matchmaker round trip that is
+//!   not a campaign: a node whose belief is only the bootstrap default asks
+//!   a quorum for the effective configuration and registers nothing
+//!   ([`crate::matchmaking::MembershipProbe`], `probe_membership`). Its
+//!   requests and answers share this wire, tagged by a round every later
+//!   campaign opens above; its refusals fold like a campaign's.
+//! - **Lost replies** are the driver's business: [`super::ColocatedNode::resend_matchmaking`]
+//!   re-queues the request for every matchmaker that has not answered, and
+//!   skipping the call is always safe — the matchmaker answers a repeated
+//!   request idempotently from its retained history, and a campaign that never
+//!   completes is simply abandoned at the next election timeout.
+
+use super::{Ballot, BeliefSource, ColocatedNode, NodeId, NodeRole};
+use crate::journal::JournalId;
+use crate::matchmaker::{MatchOutcome, MatchRefusal, MatchReply, MatchRequest, RegistrationKind};
+use crate::matchmaking::{MatchFold, Matchmaking, MembershipProbe, RegisteredPage};
+use crate::membership::{AcceptorConfig, MatchmakerGeneration, MatchmakerId, MatchmakerSet};
+
+/// What one matchmaker reply did to an open campaign, returned by
+/// [`super::ColocatedNode::on_match_reply`] so the driver can report the transition
+/// it caused.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MatchStep {
+    /// Not for this campaign (no campaign open, a different ballot, a
+    /// duplicate answer, or addressed to another node): nothing changed.
+    Ignored,
+    /// One more matchmaker registered the ballot; `remaining` more are needed
+    /// for the matchmaker quorum.
+    Registered {
+        /// Registrations still missing before the quorum holds.
+        remaining: usize,
+    },
+    /// A matchmaker's answer is paged and this was not its last page: the
+    /// registration does not count yet, and the candidate has queued the
+    /// request for the page starting at `next`.
+    Paged {
+        /// The cursor the next page starts at.
+        next: Ballot,
+    },
+    /// The matchmaker quorum holds and Phase 1 has started: `prior` is `H_b`
+    /// (the distinct prior configurations, in ballot order) and `watermark`
+    /// the maximum GC watermark it was filtered by.
+    Completed {
+        /// `H_b` — every distinct prior configuration Phase 1 must cover.
+        prior: Vec<AcceptorConfig>,
+        /// The maximum watermark any replying matchmaker reported.
+        watermark: Ballot,
+        /// How many matchmakers answered before the quorum closed.
+        registered_by: usize,
+        /// Ballots two matchmakers reported with different configurations
+        /// (the union keeps both). Carried here because the phase is closed
+        /// by the time the driver reports it (#269).
+        disagreements: u64,
+    },
+    /// A matchmaker refused the registration: the campaign is abandoned and
+    /// this node is a follower again.
+    Refused(MatchRefusal),
+    /// The matchmaker set this campaign addressed has a chosen successor
+    /// (#125): the campaign is abandoned, the successor adopted as this
+    /// node's matchmaker set, and the next campaign asks it.
+    Superseded {
+        /// The adopted set.
+        set: MatchmakerSet,
+    },
+    /// The quorum's histories named a reconfiguration to a configuration
+    /// other than the one this ordinary campaign registered: the belief was
+    /// stale. The campaign is abandoned, the effective configuration adopted
+    /// as this node's belief, and the next campaign registers it.
+    StaleConfiguration {
+        /// The ballot the effective configuration was registered under.
+        newest: Ballot,
+    },
+    /// One more matchmaker answered the open membership probe (#173), and
+    /// the probe still waits for a quorum.
+    ProbeAnswered,
+    /// The quorum's answers name a configuration with a node outside this
+    /// node's pool (#189: a node the deployment's registry admitted that this
+    /// node has not heard of yet): the campaign (or the membership probe) is
+    /// abandoned and this node is a follower again. The next one, once the
+    /// pool has caught up, completes — a liveness cost, never a safety one.
+    UnknownMember,
+    /// A matchmaker quorum answered the membership probe and it closed: the
+    /// node's belief is now heard — the effective configuration they named,
+    /// or the bootstrap confirmed when they named none — and a node the
+    /// belief names opened a campaign in the same call.
+    ProbeClosed {
+        /// The ballot the node's belief is bound to once the probe closed:
+        /// the effective configuration adopted, or the newer one it already
+        /// held (#270); `None` while the belief is the bootstrap.
+        effective: Option<Ballot>,
+        /// Whether the belief now names this node (and a campaign opened).
+        member: bool,
+        /// How many distinct matchmakers answered the probe: a quorum of
+        /// its set, which an observer judges apart from the probe's own
+        /// predicate (#343).
+        answered_by: usize,
+    },
+    /// A matchmaker answered a probe that had already closed with this node
+    /// outside, naming a reconfiguration newer than the one the belief
+    /// matches (#278): the node adopted it, and a node it names opened a
+    /// campaign in the same call.
+    ProbeLate {
+        /// The ballot the node's belief is bound to after the answer.
+        effective: Option<Ballot>,
+        /// Whether the belief now names this node (and a campaign opened).
+        member: bool,
+    },
+}
+
+/// What one reply answers: a registration's page, a probe's effective
+/// configuration, or a refusal of either.
+enum Answer {
+    Page(RegisteredPage),
+    Probed(Option<(Ballot, AcceptorConfig)>),
+    Refused(MatchRefusal),
+}
+
+/// Decode one reply into the answer the campaign or the probe folds.
+fn split_reply(reply: MatchReply) -> (MatchmakerId, NodeId, Ballot, Answer) {
+    let to = reply.to;
+    let ballot = reply.ballot;
+    let answer = match reply.outcome {
+        MatchOutcome::Probed { effective } => Answer::Probed(effective),
+        outcome => match RegisteredPage::from_outcome(outcome) {
+            Some(Ok(page)) => Answer::Page(page),
+            Some(Err(refusal)) => Answer::Refused(refusal),
+            None => unreachable!("only a probe's answer decodes to no page"),
+        },
+    };
+    (reply.matchmaker, to, ballot, answer)
+}
+
+/// The open phase's `MatchRequest` from `me`: its kind, ballot and
+/// configuration, fenced by `generation`, asked from the start of the
+/// history (a paged answer continues it with `MatchRequest::from_page`).
+fn phase_request(
+    journal: JournalId,
+    me: NodeId,
+    m: &Matchmaking,
+    generation: MatchmakerGeneration,
+) -> MatchRequest {
+    MatchRequest::for_kind(
+        m.kind(),
+        journal,
+        me,
+        m.ballot(),
+        m.config().clone(),
+        generation,
+    )
+}
+
+impl ColocatedNode {
+    /// Re-queue the open matchmaking request toward every matchmaker that has
+    /// not answered yet. A no-op on a node with no open matchmaking phase.
+    ///
+    /// **The driver is expected to call this on a steady cadence** while
+    /// [`ColocatedNode::matchmaking_pending`] reports an open phase, so a request
+    /// or reply the transport lost does not stall the campaign until the
+    /// election timeout abandons it.
+    ///
+    /// **Skipping a call is always safe.** Re-sending is pure optimization,
+    /// exactly like [`ColocatedNode::resend_pending`]: the matchmaker answers a
+    /// repeated request idempotently from its retained history (it registers
+    /// nothing twice), and a campaign that never completes its matchmaking is
+    /// simply abandoned at the next election timeout and retried at a higher
+    /// round. The deterministic simulation skips calls to reach exactly those
+    /// abandoned campaigns; production never skips.
+    ///
+    /// # Panics
+    ///
+    /// If an internal invariant is broken (a programmer error, never an
+    /// operating condition).
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0)))]
+    pub fn resend_matchmaking(&mut self) {
+        let marks = self.durable_marks();
+        let ballot = self.ballot;
+        self.queue_match_requests();
+        self.queue_probe_requests();
+        // A re-ask moves nothing but the queue: same ballot, nothing durable.
+        assert!(
+            self.ballot == ballot,
+            "a matchmaking re-send never moves the ballot"
+        );
+        self.assert_marks_monotone(marks);
+        self.assert_invariants();
+    }
+
+    /// Queue the open phase's request toward every matchmaker that has not
+    /// answered completely, each from the page cursor it owes next. A no-op
+    /// with no open phase. A freshly opened phase has answers from nobody,
+    /// so this addresses every member from the start — how a campaign sends
+    /// its first round.
+    pub(super) fn queue_match_requests(&mut self) {
+        let Some(m) = self.matchmaking.as_ref() else {
+            return;
+        };
+        let matchmakers = self.deployment_matchmakers();
+        assert!(
+            m.ballot() == self.ballot,
+            "a registration runs at the operating ballot"
+        );
+        let queued = self.pending_match_requests.len();
+        let request = phase_request(
+            self.config.journal.journal,
+            self.config.id,
+            m,
+            matchmakers.generation,
+        );
+        let unanswered = m.unanswered(matchmakers);
+        for (matchmaker, cursor) in unanswered {
+            // A matchmaker mid-answer is re-asked from where its last page
+            // stopped, never from the start: the pages already folded stay
+            // folded, and an answer restarted at the watermark would be
+            // refused by `Matchmaking::accepts` anyway.
+            let request = match cursor {
+                Some(from) => request.clone().from_page(from),
+                None => request.clone(),
+            };
+            self.pending_match_requests.push((matchmaker, request));
+        }
+        let matchmakers = self.deployment_matchmakers();
+        assert!(
+            self.pending_match_requests[queued..]
+                .iter()
+                .all(|(m, _)| matchmakers.contains(*m)),
+            "a registration addresses only the believed generation's matchmakers"
+        );
+    }
+
+    /// Queue the open membership probe's request toward every matchmaker
+    /// that has not answered it. A no-op with no probe open.
+    fn queue_probe_requests(&mut self) {
+        let Some(probe) = self.probe.as_ref() else {
+            return;
+        };
+        let matchmakers = self.deployment_matchmakers();
+        assert!(
+            self.role == NodeRole::Follower,
+            "only a follower probes its membership"
+        );
+        let queued = self.pending_match_requests.len();
+        let request = MatchRequest::probe(
+            self.config.journal.journal,
+            self.config.id,
+            probe.ballot(),
+            probe.believed().clone(),
+            matchmakers.generation,
+        );
+        for matchmaker in probe.unanswered(matchmakers) {
+            self.pending_match_requests
+                .push((matchmaker, request.clone()));
+        }
+        let matchmakers = self.deployment_matchmakers();
+        assert!(
+            self.pending_match_requests[queued..]
+                .iter()
+                .all(|(m, _)| matchmakers.contains(*m)),
+            "a probe addresses only the believed generation's matchmakers"
+        );
+    }
+
+    /// Open a membership probe (#173), or re-ask an open one: the election
+    /// clock of a node whose belief is only the bootstrap default, or a
+    /// heard belief that leaves it outside (#270; see `on_check_leader`). The probe's tag is a round this node never
+    /// campaigns at: it sits at the next campaign round and raises the round
+    /// floor over it, so a late answer can never be mistaken for a later
+    /// campaign's. Nothing is promised and nothing registered.
+    pub(super) fn probe_membership(&mut self) {
+        let me = self.config.id;
+        // Preconditions: a follower on a matchmaker deployment, on a
+        // belief it never heard or one that leaves it outside, with no
+        // campaign open.
+        assert!(
+            self.config.has_matchmakers(),
+            "only a matchmaker deployment probes its membership"
+        );
+        if self.belief_source == BeliefSource::Heard {
+            assert!(
+                !self.acceptors.contains(me),
+                "a node re-probes a heard belief only from outside it"
+            );
+        }
+        assert!(
+            self.role != NodeRole::Leader,
+            "a probe never overlaps a leadership"
+        );
+        assert!(
+            self.matchmaking.is_none(),
+            "a probe never overlaps a campaign"
+        );
+        assert!(
+            self.role == NodeRole::Follower,
+            "a probe opens only on a follower"
+        );
+        if self.probe.is_some() {
+            // The clock is the probe's retry cadence, as it is a
+            // matchmaking's: re-ask whoever has not answered.
+            self.queue_probe_requests();
+            return;
+        }
+        let Some(round) = self.next_campaign_round() else {
+            return;
+        };
+        self.round_floor = self.round_floor.max(round);
+        // A fresh probe supersedes the closed one's late answers (#278).
+        self.closed_probe = None;
+        self.probe = Some(Box::new(MembershipProbe::new(
+            Ballot { round, node: me },
+            self.acceptors.clone(),
+        )));
+        // The tag that fences the probe's answers is its own fresh round
+        // (#269): an earlier probe's late answers never count toward it.
+        assert!(
+            self.probe
+                .as_ref()
+                .is_some_and(|p| p.ballot() == Ballot { round, node: me }),
+            "a probe is tagged by its own fresh round"
+        );
+        self.queue_probe_requests();
+        // Every later campaign opens strictly above the probe's tag.
+        assert!(
+            self.round_floor >= round,
+            "the round floor covers the probe's tag"
+        );
+        assert!(
+            self.next_campaign_round().is_none_or(|next| next > round),
+            "the next campaign opens above the probe's tag"
+        );
+    }
+
+    /// Whether a matchmaking phase or a membership probe is open — the
+    /// driver's cue to pace [`ColocatedNode::resend_matchmaking`], consulted
+    /// only where a re-send can have an effect.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
+    #[must_use]
+    pub fn matchmaking_pending(&self) -> bool {
+        let pending = self.matchmaking.is_some() || self.probe.is_some();
+        // The matchmaker plane is the opt-in: plain Multi-Paxos never waits on it.
+        if pending {
+            assert!(
+                self.config.has_matchmakers(),
+                "only a matchmaker deployment matchmakes"
+            );
+        }
+        pending
+    }
+
+    /// The open matchmaking phase, if any — the node's own [`Matchmaking`]
+    /// role, read-only: its ballot, the configuration it registers and what
+    /// kind of registration that is, and the tally so far (how many
+    /// matchmakers registered, how many more a quorum needs, the union of
+    /// histories above the maximum watermark). A caller that wants to ask it
+    /// a question — what would one more reply do? — clones it; the node's
+    /// own copy moves only through [`ColocatedNode::on_match_reply`].
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
+    #[must_use]
+    pub fn matchmaking_role(&self) -> Option<&Matchmaking> {
+        if let Some(m) = &self.matchmaking {
+            assert!(
+                self.role == NodeRole::Candidate,
+                "only a candidate matchmakes"
+            );
+            assert!(
+                m.ballot() == self.ballot,
+                "a matchmaking runs at the operating ballot"
+            );
+        }
+        self.matchmaking.as_ref()
+    }
+
+    /// Fold one matchmaker's answer into the open matchmaking phase — the
+    /// leader-side half of the matchmaker contract (#120). A reply for another
+    /// ballot, another node, another generation, or a matchmaker that already
+    /// answered (or is outside the believed set) is ignored whole (wire
+    /// input, never asserted). Returns what the reply did, so the driver can
+    /// report the transition it caused.
+    ///
+    /// - `Registered`: the history is unioned and the watermark maxed; once a
+    ///   **quorum of matchmakers** has registered the ballot, `H_b` is
+    ///   computed (the union, filtered by the maximum watermark) and handed to
+    ///   Phase 1 through `ColocatedNode::start_phase1` — no `Prepare` ever leaves
+    ///   before that instant (invariant 1). An ordinary campaign whose
+    ///   histories name a **reconfiguration** to a configuration other than
+    ///   the one it registered abandons the campaign and adopts that
+    ///   configuration instead — `StaleConfiguration`, the rule that keeps a
+    ///   superseded configuration from being reinstated by a candidate that
+    ///   missed the change (see [`crate::matchmaker::Registration`]).
+    /// - `Refused`: the campaign is abandoned and this node steps back to
+    ///   follower; a refusal's ballot is diagnostic only (a `Stale` or
+    ///   `BelowWatermark` refusal raises the round floor the next campaign
+    ///   opens above). A refusal naming a **chosen successor set** (#125:
+    ///   `Stopped { successor }`, or `Generation` from a later generation) is
+    ///   adopted through [`ColocatedNode::learn_matchmakers`] and reported as
+    ///   `Superseded`; the next campaign asks the new set. A refused
+    ///   registration never becomes a leadership (invariant 4).
+    /// - A membership probe's answer (#173) is folded into the open probe
+    ///   (`ProbeAnswered`, `ProbeClosed`); one that arrives after the probe
+    ///   closed with this node outside is folded on its own (`ProbeLate`,
+    ///   #278).
+    ///
+    /// # Panics
+    ///
+    /// If an internal invariant is broken (a programmer error, never an
+    /// operating condition).
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, matchmaker = reply.matchmaker.0, round = reply.ballot.round)))]
+    pub fn on_match_reply(&mut self, reply: MatchReply) -> MatchStep {
+        let generation = reply.generation;
+        // #190: a set answers for every journal of its tenant; only this
+        // journal's registry answers this campaign.
+        if reply.journal != self.config.journal.journal {
+            return MatchStep::Ignored;
+        }
+        let (matchmaker, to, ballot, answer) = split_reply(reply);
+        let Some(matchmakers) = self.matchmakers.as_ref() else {
+            return MatchStep::Ignored;
+        };
+        if to != self.config.id || !matchmakers.contains(matchmaker) {
+            return MatchStep::Ignored;
+        }
+        if generation != matchmakers.generation {
+            return MatchStep::Ignored;
+        }
+        if self.probe.is_none() && self.closed_probe == Some(ballot) {
+            // A closed probe's late answer (#278); anything else at its tag
+            // answers nothing this node still asks.
+            let step = match answer {
+                Answer::Probed(effective) => self.fold_late_probe_answer(effective),
+                Answer::Refused(_) | Answer::Page(_) => MatchStep::Ignored,
+            };
+            self.assert_invariants();
+            return step;
+        }
+        if self.probe.as_ref().is_some_and(|p| p.ballot() == ballot) {
+            let step = match answer {
+                Answer::Probed(effective) => self.fold_probe_answer(matchmaker, effective),
+                Answer::Refused(refusal) => {
+                    self.probe = None;
+                    self.fold_refusal(refusal)
+                }
+                // A registration's page at a probe's tag: not an answer to
+                // anything this node asked.
+                Answer::Page(_) => MatchStep::Ignored,
+            };
+            self.assert_invariants();
+            return step;
+        }
+        if self
+            .matchmaking
+            .as_ref()
+            .is_none_or(|m| m.ballot() != ballot)
+        {
+            return MatchStep::Ignored;
+        }
+        let step = match answer {
+            Answer::Page(page) => self.fold_registration(matchmaker, page),
+            Answer::Refused(refusal) => self.fold_refusal(refusal),
+            // A probe's answer at a campaign's ballot: never asked for.
+            Answer::Probed(_) => MatchStep::Ignored,
+        };
+        // Post-step restatements of invariants 1 and 4: a refused campaign
+        // left nothing Phase-1-shaped behind, and a completed one
+        // closed the matchmaking phase before opening Phase 1.
+        match &step {
+            MatchStep::Refused(_)
+            | MatchStep::StaleConfiguration { .. }
+            | MatchStep::Superseded { .. } => {
+                assert!(
+                    self.role == NodeRole::Follower,
+                    "a refused registration never becomes a leadership"
+                );
+                assert!(
+                    self.proposer.election().is_none(),
+                    "an abandoned campaign leaves no Phase 1 open"
+                );
+                assert!(
+                    self.matchmaking.is_none(),
+                    "an abandoned campaign leaves no matchmaking open"
+                );
+            }
+            MatchStep::Completed { .. } => {
+                assert!(
+                    self.matchmaking.is_none(),
+                    "a completed matchmaking phase is closed"
+                );
+            }
+            MatchStep::UnknownMember => {
+                assert!(
+                    self.matchmaking.is_none(),
+                    "a campaign that met an unknown member is closed"
+                );
+                assert!(
+                    self.probe.is_none(),
+                    "a probe that met an unknown member is closed"
+                );
+            }
+            MatchStep::Registered { .. }
+            | MatchStep::Paged { .. }
+            | MatchStep::Ignored
+            | MatchStep::ProbeAnswered
+            | MatchStep::ProbeClosed { .. } => {}
+            MatchStep::ProbeLate { .. } => {
+                unreachable!("a late probe answer is folded before any campaign");
+            }
+        }
+        self.assert_invariants();
+        step
+    }
+
+    /// The `Registered` half of [`ColocatedNode::on_match_reply`]: union this
+    /// matchmaker's history, and once a quorum has registered the ballot,
+    /// either adopt an effective configuration this campaign is stale against
+    /// or hand `H_b` to Phase 1.
+    ///
+    /// # Panics
+    ///
+    /// If Phase 1 would open without the quorum, or on a prior configuration
+    /// naming a node outside the pool.
+    fn fold_registration(&mut self, matchmaker: MatchmakerId, page: RegisteredPage) -> MatchStep {
+        let Some(matchmakers) = self.matchmakers.as_ref() else {
+            return MatchStep::Ignored;
+        };
+        let Some(m) = self.matchmaking.as_mut() else {
+            return MatchStep::Ignored;
+        };
+        let next = match m.fold(matchmaker, page) {
+            MatchFold::Ignored => return MatchStep::Ignored,
+            MatchFold::Paged(next) => Some(next),
+            MatchFold::Registered => None,
+        };
+        if let Some(next) = next {
+            // The answer is still paged: ask this matchmaker for the rest.
+            // Nothing counts toward the quorum until its last page lands.
+            let request = phase_request(
+                self.config.journal.journal,
+                self.config.id,
+                m,
+                matchmakers.generation,
+            );
+            self.pending_match_requests
+                .push((matchmaker, request.from_page(next)));
+            return MatchStep::Paged { next };
+        }
+        let m = self.matchmaking.as_mut().expect("the phase is still open");
+        let registered = m.registered();
+        // Wire hygiene at the matchmaking → Phase 1 boundary (#189): a
+        // configuration the histories name — the effective one or any prior
+        // one — must be one this node can run. One naming a node outside the
+        // pool (admitted by the registry, not yet by this node) abandons the
+        // campaign rather than acting on it.
+        let unknown = |c: &AcceptorConfig, pool: &[NodeId]| !c.is_drawn_from(pool);
+        if m.quorum_held(matchmakers)
+            && (m
+                .stale_belief()
+                .is_some_and(|(_, c)| unknown(&c, &self.pool))
+                || m.prior().iter().any(|c| unknown(c, &self.pool)))
+        {
+            probe!(
+                reachable,
+                "matchmaking: a campaign meets a configuration outside the pool"
+            );
+            self.matchmaking = None;
+            self.become_follower(None);
+            return MatchStep::UnknownMember;
+        }
+        // The campaign's twin of the probe floor (#278): a reconfiguration
+        // at or below a leadership this node knows won is one that
+        // leadership's matchmaking quorum missed (a registration refused as
+        // stale by every matchmaker that registered the leadership, so held
+        // by a minority), never in effect. Adopting it bound the members of
+        // the configuration in force to a dead rotation that left them
+        // outside, probing forever, while the rotation's members knew
+        // better and did not lead: no leader for a 190 s tail (replay-main
+        // 9491883622406273044 on 832b116, red on "cluster converged after
+        // chaos"). Phase 1 still covers it: it stays in `prior`.
+        let floor = self.probe_floor();
+        let m = self.matchmaking.as_mut().expect("the phase is still open");
+        if !m.quorum_held(matchmakers) {
+            MatchStep::Registered {
+                remaining: m.remaining(matchmakers),
+            }
+        } else if let Some((newest, config)) =
+            m.stale_belief().filter(|(newest, _)| *newest > floor)
+        {
+            // Stale belief: the quorum's histories name a
+            // reconfiguration to a configuration other than the
+            // one this ordinary campaign registered. Adopt the
+            // effective configuration and abandon the campaign;
+            // the next one registers it. Only *reconfiguration*
+            // registrations count as facts here: the ledger also
+            // records every candidate's belief, and "adopt the
+            // newest registration" made two candidates re-adopt
+            // each other's abandoned beliefs and flip-flop one
+            // round per election timeout (seed
+            // 7519660681720567139: 182 aborts, no leader for a
+            // 50 s tail). A reconfiguration request is monotone
+            // by ballot and never manufactured by a campaign, so
+            // adopting the highest one cannot flip-flop — and
+            // without it a candidate that missed a completed
+            // reconfiguration could be elected under the
+            // superseded configuration, rolling the cluster back
+            // without anyone asking (review of #132).
+            // The adoption binds this node to the reconfiguration's own
+            // ballot, which may be *older* than the one it holds: a
+            // reconfiguration campaign at 8 can complete its registration
+            // after an ordinary leader at 10 was elected, and it is honored
+            // by every later campaign regardless (intersection hands its
+            // record to them). `acceptors_since` is therefore not monotone
+            // here, unlike `learn_config`, and the membership fence keeps
+            // the higher ballot it already recorded.
+            self.adopt_configuration(config, newest);
+            self.bind_fact(newest);
+            self.become_follower(None);
+            MatchStep::StaleConfiguration { newest }
+        } else {
+            // The history is `H_b`, the prior set Phase 1 must
+            // cover. A belief that matches the effective
+            // configuration (or predates any reconfiguration)
+            // runs the leadership under what it registered.
+            if m.stale_belief().is_some() {
+                probe!(
+                    reachable,
+                    "matchmaking: a campaign keeps its belief over a reconfiguration below a won leadership"
+                );
+            }
+            let prior = m.prior();
+            let watermark = m.watermark();
+            let disagreements = m.disagreements();
+            let config = m.config().clone();
+            // The matchmaking → Phase 1 boundary. The registered
+            // quorum is restated here, at the one place Phase 1
+            // can open on a matchmaker deployment.
+            assert!(
+                m.quorum_held(matchmakers),
+                "Phase 1 opens only once a matchmaker quorum registered the ballot"
+            );
+            assert!(
+                prior.iter().all(|c| self.pooled_all(c)),
+                "every prior configuration is drawn from the node pool"
+            );
+            self.matchmaking = None;
+            self.start_phase1(config, prior.clone());
+            // The boundary crossed: Phase 1 is open, or already won.
+            assert!(
+                self.role != NodeRole::Follower,
+                "a completed matchmaking campaigns on"
+            );
+            MatchStep::Completed {
+                prior,
+                watermark,
+                registered_by: registered,
+                disagreements,
+            }
+        }
+    }
+
+    /// The probe half of [`ColocatedNode::on_match_reply`] (#173): fold one
+    /// matchmaker's effective configuration, and once a quorum answered,
+    /// close the probe — adopt what they named when it is newer than the
+    /// belief (or keep the belief, now confirmed) as a belief this node
+    /// **heard**, and campaign at once if that belief names it.
+    ///
+    /// # Panics
+    ///
+    /// If the probe closes on a belief this node heard since it opened (a
+    /// heard belief closes the probe itself).
+    fn fold_probe_answer(
+        &mut self,
+        matchmaker: MatchmakerId,
+        effective: Option<(Ballot, AcceptorConfig)>,
+    ) -> MatchStep {
+        let me = self.config.id;
+        let matchmakers = self.deployment_matchmakers().clone();
+        let Some(probe) = self.probe.as_mut() else {
+            return MatchStep::Ignored;
+        };
+        if !probe.fold(matchmaker, effective) {
+            return MatchStep::Ignored;
+        }
+        if !probe.quorum_held(&matchmakers) {
+            return MatchStep::ProbeAnswered;
+        }
+        let effective = probe.effective().cloned();
+        let tag = probe.ballot();
+        let answered_by = probe.answered_by();
+        assert!(answered_by > 0, "a closed probe was answered by someone");
+        self.probe = None;
+        // The probe's twin of the campaign's guard (#189): an effective
+        // configuration naming a node outside the pool is not adopted; the
+        // belief stays the bootstrap default and the next election timeout
+        // probes again, once the pool has caught up.
+        if effective
+            .as_ref()
+            .is_some_and(|(_, c)| !c.is_drawn_from(&self.pool))
+        {
+            probe!(
+                reachable,
+                "matchmaking: a membership probe meets a configuration outside the pool"
+            );
+            return MatchStep::UnknownMember;
+        }
+        // A belief heard since the probe opened would have closed it
+        // (`adopt_configuration`): what closes here is the belief it opened
+        // on, the bootstrap default or a heard one leaving this node outside.
+        if self.belief_source == BeliefSource::Heard {
+            assert!(
+                !self.acceptors.contains(me),
+                "a probe closes on a heard belief only from outside it"
+            );
+        } else {
+            assert!(
+                self.acceptors_since == Ballot::zero(),
+                "a probe closes on a bootstrap belief bound to no ballot"
+            );
+        }
+        let (adopted, member) = self.adopt_probed(effective);
+        // Postconditions: the probe is spent, the belief is heard, and a
+        // campaign opened exactly when the belief names this node; one that
+        // closed outside keeps its tag for the late answers (#278).
+        assert!(self.probe.is_none(), "a closed probe leaves nothing open");
+        assert!(
+            self.belief_source == BeliefSource::Heard,
+            "a closed probe's belief is heard"
+        );
+        if !member {
+            self.closed_probe = Some(tag);
+        }
+        assert!(
+            self.closed_probe.is_some() != member,
+            "a probe keeps its tag exactly when it closed outside"
+        );
+        MatchStep::ProbeClosed {
+            effective: adopted,
+            member,
+            answered_by,
+        }
+    }
+
+    /// A matchmaker's answer to a probe that already **closed with this node
+    /// outside** (#278): fold it as the probe would have, had it arrived
+    /// before the quorum. A quorum is a minimum, not a maximum, and with
+    /// fixed per-pair latencies the one matchmaker that holds a
+    /// reconfiguration registered at a minority may answer last on every
+    /// re-probe: a leader that died with its rotation at one matchmaker
+    /// left the old members adopting it and the new members' quorums
+    /// missing it, everyone outside, and nobody campaigned again. The hunt
+    /// went red on "every node converges to the cluster's chosen prefix" and
+    /// "cluster converged after chaos" without this fold.
+    ///
+    /// # Panics
+    ///
+    /// If the fold moves the belief backwards or leaves a member without a
+    /// campaign (a programmer error, never an operating condition).
+    fn fold_late_probe_answer(&mut self, effective: Option<(Ballot, AcceptorConfig)>) -> MatchStep {
+        let me = self.config.id;
+        // Wire input: an answer that cannot move the belief, or one that
+        // lands after the node moved on, is ignored whole.
+        let outside = self.belief_source == BeliefSource::Heard && !self.acceptors.contains(me);
+        let idle =
+            self.role == NodeRole::Follower && self.matchmaking.is_none() && self.probe.is_none();
+        let floor = self.probe_floor();
+        let newer = effective
+            .as_ref()
+            .is_some_and(|(ballot, _)| *ballot > floor);
+        // The closing probe's #189 guard: a configuration naming a node this
+        // pool has not admitted yet is not adopted.
+        let drawn = effective
+            .as_ref()
+            .is_some_and(|(_, config)| config.is_drawn_from(&self.pool));
+        if !outside || !idle || !newer || !drawn {
+            return MatchStep::Ignored;
+        }
+        let since = self.acceptors_since;
+        let (adopted, member) = self.adopt_probed(effective);
+        assert!(
+            self.acceptors_since >= since,
+            "a late probe answer never moves a belief backwards"
+        );
+        if !member {
+            assert!(
+                self.role == NodeRole::Follower,
+                "a late probe answer that leaves its node outside opens nothing"
+            );
+        }
+        MatchStep::ProbeLate {
+            effective: adopted,
+            member,
+        }
+    }
+
+    /// Adopt what a probe heard (#173, #278) and campaign when it names this
+    /// node: the shared tail of a closing probe and a late answer. Only a
+    /// reconfiguration above the [probe floor](ColocatedNode::probe_floor)
+    /// moves the belief — never a comparison against `acceptors_since`,
+    /// which may be the ballot of a campaign that never won and left this
+    /// node outside (#278) — and the belief stays bound at least as high as
+    /// it was, so no `Prepare` at or below the campaign it heard can flip it
+    /// back. A re-probe whose quorum misses the one holder of the fact this
+    /// node already matches moves nothing (#270). Returns the ballot the
+    /// belief is bound to (`None`: the bootstrap) and whether it names this
+    /// node.
+    ///
+    /// The belief is then `C_fact` bound to `max(fact, since)`, a pair no
+    /// campaign ever registered when `since` was higher. What depends on the
+    /// binding still holds: a probe runs only from outside the belief it
+    /// replaces, so this node was outside `C_since` too (`may_retire`'s
+    /// legs 2 and 5), the membership fence only rises, and the read basis is
+    /// judged against `since`, which never falls.
+    fn adopt_probed(
+        &mut self,
+        effective: Option<(Ballot, AcceptorConfig)>,
+    ) -> (Option<Ballot>, bool) {
+        let me = self.config.id;
+        let since = self.acceptors_since;
+        let fact = self.belief_fact;
+        let floor = self.probe_floor();
+        assert!(floor >= fact, "the probe floor covers the matched fact");
+        if let Some((ballot, config)) = effective.filter(|(ballot, _)| *ballot > floor) {
+            assert!(
+                config.is_drawn_from(&self.pool),
+                "a probe adopts only a configuration drawn from the pool"
+            );
+            self.adopt_configuration(config, ballot.max(since));
+            self.bind_fact(ballot);
+        }
+        // No newer fact: the belief stands — the bootstrap is the
+        // configuration in force as far as any campaign could learn — and
+        // this node heard so.
+        self.belief_source = BeliefSource::Heard;
+        assert!(
+            self.acceptors_since >= since,
+            "a probe never moves a belief backwards"
+        );
+        assert!(
+            self.belief_fact >= fact,
+            "a probe never moves the matched fact backwards"
+        );
+        let adopted = (self.acceptors_since != Ballot::zero()).then_some(self.acceptors_since);
+        let member = self.acceptors.contains(me);
+        if member {
+            self.campaign(RegistrationKind::Belief, self.acceptors.clone());
+        }
+        if self.next_campaign_round().is_some() {
+            assert!(
+                member == (self.role != NodeRole::Follower),
+                "a probe that finds its node inside campaigns, and only then"
+            );
+        }
+        (adopted, member)
+    }
+
+    /// The ballot a probe's reconfiguration must exceed to move this node's
+    /// belief (#278): the fact the belief already matches, or the ballot of
+    /// a leadership this node knows **won** (its read basis), whichever is
+    /// higher. A won leadership's configuration is in force at its ballot,
+    /// so a reconfiguration below it is either honored by it or one its
+    /// matchmaking quorum missed, never in effect, and reviving it would
+    /// finish a rotation nobody was told of. A campaign this node only
+    /// promised counts for nothing here: it may never have won.
+    pub(super) fn probe_floor(&self) -> Ballot {
+        let won = self.read_basis.as_ref().map_or(Ballot::zero(), |b| b.since);
+        let floor = self.belief_fact.max(won);
+        assert!(
+            floor >= self.belief_fact,
+            "the probe floor covers the matched fact"
+        );
+        assert!(floor >= won, "the probe floor covers a won leadership");
+        floor
+    }
+
+    /// The refusal half of [`ColocatedNode::on_match_reply`]: raise the round floor
+    /// the next campaign opens above, adopt a chosen successor set when the
+    /// refusal names one, and abandon the campaign either way.
+    fn fold_refusal(&mut self, refusal: MatchRefusal) -> MatchStep {
+        match &refusal {
+            MatchRefusal::Stale { highest } => {
+                // The next campaign opens above the round that
+                // refused this one (see `round_floor`).
+                self.round_floor = self.round_floor.max(highest.round);
+            }
+            MatchRefusal::BelowWatermark { watermark } => {
+                // A collected round is never campaigned again: the
+                // next one opens above the floor (#123 — a
+                // partitioned leader that outlived a GC recovers by
+                // campaigning higher).
+                self.round_floor = self.round_floor.max(watermark.round);
+            }
+            MatchRefusal::Stopped { .. }
+            | MatchRefusal::Generation { .. }
+            | MatchRefusal::Inactive => {}
+        }
+        let believed = self.matchmakers.as_ref().map(|set| set.generation);
+        let successor = match &refusal {
+            MatchRefusal::Stopped {
+                successor: Some(set),
+            } => Some(set.clone()),
+            MatchRefusal::Generation { current }
+                if believed.is_some_and(|believed| current.generation > believed) =>
+            {
+                Some(current.clone())
+            }
+            _ => None,
+        };
+        self.become_follower(None);
+        // A refusal abandons the campaign whole.
+        assert!(
+            self.matchmaking.is_none(),
+            "a refused campaign leaves no matchmaking"
+        );
+        assert!(
+            self.role == NodeRole::Follower,
+            "a refused campaign steps down"
+        );
+        match successor {
+            Some(set) if self.learn_matchmakers(&set) => MatchStep::Superseded { set },
+            _ => MatchStep::Refused(refusal),
+        }
+    }
+    /// The matchmaker set this node believes authoritative (#125): the
+    /// bootstrap set at generation 0 until a later one is learned. `None` on
+    /// plain Multi-Paxos, which names no matchmakers at all.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
+    #[must_use]
+    pub fn matchmaker_set(&self) -> Option<&MatchmakerSet> {
+        // The `None` arm: exactly the plain deployment names no set.
+        assert!(
+            self.matchmakers.is_some() == self.config.has_matchmakers(),
+            "a matchmaker set is believed exactly on a matchmaker deployment"
+        );
+        self.matchmakers.as_ref()
+    }
+
+    /// The matchmaker set of a matchmaker deployment, for the matchmaker-plane
+    /// paths — a campaign's registration, a GC campaign, a match reply — that
+    /// only ever open where [`Config::has_matchmakers`] holds
+    /// (`assert_deployment_invariants` couples the two).
+    ///
+    /// # Panics
+    ///
+    /// On a plain deployment: reaching a matchmaker-plane path there is a
+    /// programmer error.
+    pub(super) fn deployment_matchmakers(&self) -> &MatchmakerSet {
+        assert!(
+            self.config.has_matchmakers(),
+            "the matchmaker plane runs only on a matchmaker deployment"
+        );
+        self.matchmakers
+            .as_ref()
+            .expect("the matchmaker plane runs only on a matchmaker deployment")
+    }
+
+    /// Adopt `set` as the authoritative matchmaker set if it is a strictly
+    /// later generation than the one believed (#125): a refusal naming a
+    /// successor, a reconfiguration this node's driver completed, or a reply
+    /// from a later generation. An open matchmaking against the superseded
+    /// set is abandoned (the next election timeout re-campaigns against the
+    /// new one), a pending GC tally starts over, and a plain deployment never
+    /// moves (it has no generation to move). Returns whether the belief
+    /// moved.
+    ///
+    /// # Panics
+    ///
+    /// If an internal invariant is broken.
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, generation = set.generation.0)))]
+    pub fn learn_matchmakers(&mut self, set: &MatchmakerSet) -> bool {
+        let Some(believed) = self.matchmakers.as_ref() else {
+            return false;
+        };
+        if set.generation <= believed.generation {
+            return false;
+        }
+        // Wire hygiene: a set naming a matchmaker outside the pool is not one
+        // this deployment can reach; ignore it whole.
+        if !set
+            .members()
+            .iter()
+            .all(|m| self.matchmaker_pool.binary_search(m).is_ok())
+        {
+            return false;
+        }
+        self.matchmakers = Some(set.clone());
+        // A membership probe tallies one generation's answers: the next
+        // election timeout asks the new set afresh.
+        self.probe = None;
+        if self.matchmaking.is_some() {
+            // The registrations collected so far were for a replaced
+            // generation; a stopped quorum will never complete them.
+            self.become_follower(None);
+        }
+        self.reset_gc_for_generation();
+        // The belief moved forward to exactly the set handed in.
+        assert!(
+            self.matchmakers
+                .as_ref()
+                .is_some_and(|m| m.generation == set.generation),
+            "a learned set is the believed generation"
+        );
+        assert!(
+            self.matchmaking.is_none(),
+            "no registration survives a generation change"
+        );
+        self.assert_invariants();
+        true
+    }
+}

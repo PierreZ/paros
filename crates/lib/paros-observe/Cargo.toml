@@ -1,0 +1,31 @@
+[package]
+name = "paros-observe"
+description = "paros's observe layer: the audit port, the metrics, the trace helpers and the named BUGGIFY locations"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+documentation = "https://docs.rs/paros-observe"
+
+[dependencies]
+paros-core = { workspace = true, features = ["tracing", "assertions", "serde"] }
+paros-model = { workspace = true }
+paros-wire = { workspace = true }
+paros-storage = { workspace = true }
+paros-net = { workspace = true }
+paros-client = { workspace = true }
+moonpool-assertions = { workspace = true }
+moonpool-buggify = { workspace = true }
+prometheus = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+futures = { workspace = true, features = ["executor"] }
+moonpool-sim = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros"] }
+
+[lints]
+workspace = true

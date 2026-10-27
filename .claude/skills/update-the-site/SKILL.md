@@ -17,7 +17,7 @@ sub-issues (#306 to #316) list the pages still to come.
 | Changed | Page (`website/zola/content/`) |
 |---|---|
 | what paros is, the two parts | `_index.md`, `paxos/_index.md`, `parosd/_index.md` |
-| the game's levels, level ids, the level-to-chapter map (`crates/paros-wasm/src/paxos/level/`) | `paxos/play.md` (the single source of the level/chapter mapping; every chapter's "Play it" callout must agree with it) |
+| the game's levels, level ids, the level-to-chapter map (`crates/support/paros-wasm/src/paxos/level/`) | `paxos/play.md` (the single source of the level/chapter mapping; every chapter's "Play it" callout must agree with it) |
 | single-decree kernel, Prepare/Promise/Accept, the P2c rule, the invariant ladder | `paxos/choose-one-value.md`, `paxos/safety.md` |
 | slots, the log, `next_slot`, catch-up, the hole picture | `paxos/replicated-log.md` |
 | leader election, heartbeats, election gap fill, the optimizations table | `paxos/stable-leader.md` |

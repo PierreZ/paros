@@ -160,7 +160,7 @@ whole founding list forms at most one.
 **Naming** (decided on 2026-10-09). The top level is the **universe** (formerly the fleet; the
 name Spanner and YugabyteDB use). "Seed" now only ever means a simulation seed, and the word
 "cluster" is not used: a set of machines is a cell. Some code names still say `fleet` and `seeds`
-(for example `paros::fleet` and `SystemPlan::seeds`); they go when the rename lands (#246's
+(for example `paros::model::fleet` and `SystemPlan::seeds`); they go when the rename lands (#246's
 follow-up).
 
 **Every journal is born with its matchmaker set** (decided on 2026-10-04). The cell control

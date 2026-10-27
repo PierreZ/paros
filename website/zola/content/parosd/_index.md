@@ -46,7 +46,7 @@ the limits. [Admin views](@/parosd/admin-views.md) shows the machines, tenants a
 cell with `parosctl`. [TLS](@/parosd/tls.md) encrypts every session and proves every caller with
 mutual TLS. [Tokens and root keys](@/parosd/tokens.md) signs tokens offline, pins the machines
 and rotates the root keys. [Bench](@/parosd/bench.md) measures throughput and latency per call
-with `parosctl bench`. [Metrics and probes](@/parosd/metrics.md) reads the counts, the probes and
+with `paros-bench`. [Metrics and probes](@/parosd/metrics.md) reads the counts, the probes and
 the usage per journal of each machine. `parosd` is a work in progress. Later pages of this part will describe the control
 hierarchy, the bootstrap, multi-tenancy, the cell design and how to run the Compose demo
 (`DEMO.md` in the repository).

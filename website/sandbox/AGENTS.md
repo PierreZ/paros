@@ -1,7 +1,7 @@
 # website/sandbox
 
 The page of the Paxos sandbox (#518); the engine is the `playground` feature of
-`crates/paros-wasm` (#540), compiled to wasm by `scripts/build-wasm.sh` into `wasm/` (bundle
+`crates/support/paros-wasm` (#540), compiled to wasm by `scripts/build-wasm.sh` into `wasm/` (bundle
 `paros_playground`, gitignored) and staged at `/sandbox/app/`. Plain
 HTML, CSS and ES modules, no build step: `main.js` (editor, replay link, playback, the three
 acts and their captions), `stage.js` (the cluster view: machines by zone, each journal a chip,

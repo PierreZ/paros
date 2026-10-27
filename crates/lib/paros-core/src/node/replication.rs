@@ -1,0 +1,230 @@
+use super::{Ballot, ColocatedNode, Message, NodeId, NodeRole, PULL_FALLBACK_BEATS, Slot};
+use crate::contract::message::Audience;
+use crate::membership::AcceptorConfig;
+
+/// The leader's heartbeat cadence, in ticks: a leader beats on **every**
+/// tick ([`ColocatedNode::tick`] broadcasts unconditionally), so this is
+/// `1` by definition — a statement of the cadence, not a tunable. The driver
+/// always supplies an election timeout far larger than this
+/// (`>= 2 * HEARTBEAT_TICKS`), so a live leader always beats before any
+/// follower's election clock fires.
+///
+/// Public because an observer that judges "this leader is still beating" has
+/// to know the period a beat is expected in: the sim audit's deposed-leader
+/// oracle counts beatless ticks against this constant rather than a
+/// hard-coded 1, so a cadence change here would move the oracle with it.
+pub const HEARTBEAT_TICKS: u64 = 1;
+
+// `tick` beats unconditionally, so the cadence is one tick by definition.
+const _: () = assert!(HEARTBEAT_TICKS == 1);
+
+impl ColocatedNode {
+    /// Broadcast one leader beat ([`ColocatedNode::tick`] beats through
+    /// here, once per tick).
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0)))]
+    pub(super) fn broadcast_heartbeat(&mut self) {
+        // The caller (`tick`) is leader-gated.
+        assert!(
+            self.role == NodeRole::Leader,
+            "only a leader broadcasts beats"
+        );
+        // Beats reach the whole pool, not only the active configuration: a
+        // spare or a removed member is still a replica that learns the chosen
+        // prefix through the commit watermark and catch-up. Only members' acks
+        // count (`on_heartbeat_ack`).
+        let config = self.wire_config();
+        // A beat carries the leader's own ballot, which its promise covers.
+        assert!(
+            self.ballot <= self.acceptor.promised(),
+            "a beat's ballot is one this node promised"
+        );
+        // The leadership's fence rides beside its configuration (#260), on a
+        // matchmaker deployment only: the follower's read basis is both.
+        let fence = config.as_ref().and(self.proposer.fence());
+        self.broadcast(Message::Heartbeat {
+            from: self.config.id,
+            ballot: self.ballot,
+            commit: self.replica.chosen_index(),
+            config,
+            fence,
+        });
+    }
+
+    /// A follower receiving a leader's beat.
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0)))]
+    pub(super) fn on_heartbeat(
+        &mut self,
+        from: NodeId,
+        ballot: Ballot,
+        commit: Option<Slot>,
+        config: Option<AcceptorConfig>,
+        fence: Option<Slot>,
+    ) {
+        let me = self.config.id;
+        // Wire hygiene: a beat adopts its sender as leader (and triggers
+        // catch-up toward it), so an id outside the pool must never be
+        // followed — the same refusal every quorum-counting handler already
+        // applies.
+        if !self.in_pool(from) {
+            return;
+        }
+        // Follower receiving the leader's beat: adopt its ballot / leadership only
+        // if it is at or above our promise.
+        if ballot >= self.acceptor.promised() {
+            if self.role == NodeRole::Follower {
+                self.leader = Some(from);
+                self.election_elapsed = 0;
+            } else {
+                self.become_follower(Some(from));
+            }
+            // The leader's configuration rides on its beats, so a follower
+            // that missed the `Prepare` still learns the latest one.
+            // A beat is a won leadership's (#260): what it carries is a read
+            // basis, unlike the `Prepare` of a campaign that may never finish.
+            if let Some(basis) = config.clone() {
+                self.learn_read_basis(basis, ballot, fence);
+            }
+            self.follow_ballot(ballot, config);
+            // Ack the beat, echoing its ballot: the leader counts these toward
+            // its `CheckQuorum` window. Below-promise beats fall through
+            // unacked, so a deposed leader's window starves instead of
+            // refilling. No durable write precedes the ack — it claims only
+            // "my promise is at or below `ballot` right now", which is exactly
+            // what this restates (and promise monotonicity preserves).
+            assert!(
+                self.acceptor.promised() <= ballot,
+                "a beat ack never claims a promise above the acked ballot"
+            );
+            // The chosen index rides the ack on a matchmaker deployment only
+            // (#123's GC counts it); a plain deployment's ack is unchanged.
+            let chosen = self
+                .config
+                .has_matchmakers()
+                .then_some(self.replica.chosen_index())
+                .flatten();
+            self.send(
+                from,
+                Message::HeartbeatAck {
+                    from: me,
+                    ballot,
+                    chosen,
+                },
+            );
+        }
+        // Commit-replay catch-up reconciles the sender's advertised contiguous
+        // chosen prefix (`commit`) against ours, in **both** directions. It is
+        // deliberately **not** gated on `ballot >= promise`: catch-up learns
+        // *immutable chosen history*, not leadership, and a value either side has
+        // decided is quorum-committed and safe to learn. The per-beat cadence
+        // rate-limits (and self-heals a lost message); it stops once the prefixes
+        // agree.
+        //
+        // Both sides are `Option<Slot>` and compare directly: `None` (nothing
+        // chosen) orders below `Some(Slot(0))` (slot 0 chosen), which is the whole
+        // point — those two states are genuinely different, and a wire encoding
+        // that folded them together left a follower missing exactly slot 0 with no
+        // way to notice (#56).
+        let ci = self.replica.chosen_index();
+        if commit > ci {
+            // We are behind: a `Commit` (and its `Accept`) for a decided slot never
+            // reached us — the leader only re-sends `Accept`s for still-*pending*
+            // slots, so that hole would be permanent. Pull the decided range from
+            // our first unchosen slot.
+            self.pull_gap(from, ci);
+        } else if commit < ci {
+            probe!(
+                reachable,
+                "catch-up: a follower replays the decided prefix to a leader that advertises a lower commit"
+            );
+            // We are ahead of the sender: push what it is missing. This is what
+            // heals a leader that lost its (relaxed, non-fsync'd) chosen index to a
+            // crash — it beats a stale low `commit`, so no follower would ever pull;
+            // a follower that *does* know the slot is decided replays it to the
+            // leader, which then advertises the true prefix and the genuinely-behind
+            // nodes pull. A sender with nothing chosen needs the replay from the
+            // very first slot.
+            // Serve from one PAST the sender's contiguous chosen index: it
+            // already holds everything at and below `commit`. Serving from
+            // `commit` itself wasted one batch entry — and at the floor
+            // boundary it converted a one-slot-behind peer into a trim-point jump
+            // install (`commit == first_slot - 1` tripped the below-floor
+            // branch for a replay we can serve normally).
+            self.serve_catchup(from, commit.map_or(Slot(0), |c| Slot(c.0 + 1)));
+        }
+        if commit <= ci {
+            // No gap: the next pull starts fresh.
+            self.pull_beats = 0;
+        }
+        assert!(
+            commit > ci || self.pull_beats == 0,
+            "a beat with no gap leaves no pull counting"
+        );
+    }
+
+    /// Pull the decided-prefix gap above `ci` that a beat from `from`
+    /// revealed. The beat's sender serves it, unless the pulls at this chosen
+    /// index outlast one election timeout (at least `PULL_FALLBACK_BEATS`):
+    /// then the whole pool is asked, and any peer that holds the chosen range
+    /// serves it. A chosen entry is the same from any holder, so the fallback
+    /// changes only who answers.
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, from = from.0)))]
+    fn pull_gap(&mut self, from: NodeId, ci: Option<Slot>) {
+        if self.pull_beats == 0 || self.pull_index != ci {
+            self.pull_index = ci;
+            self.pull_beats = 0;
+        }
+        self.pull_beats += 1;
+        let fallback = self.election_timeout.max(PULL_FALLBACK_BEATS);
+        let request = self.catch_up_request(self.first_unchosen());
+        let queued = self.pending_messages.len();
+        if self.pull_beats > fallback {
+            probe!(reachable, "catch-up: a stalled pull asks the whole pool");
+            self.broadcast(request);
+            self.pull_beats = 0;
+            assert!(
+                matches!(self.pending_messages.last(), Some((Audience::Learners, _))),
+                "a stalled pull asks the whole pool"
+            );
+        } else {
+            self.send(from, request);
+            assert!(
+                matches!(self.pending_messages.last(), Some((Audience::Node(to), _)) if *to == from),
+                "a pull short of the fallback asks the beat's sender alone"
+            );
+        }
+        assert!(
+            self.pending_messages.len() == queued + 1,
+            "a pull queues one request"
+        );
+        assert!(
+            self.pull_beats <= fallback,
+            "a stalled pull falls back to the pool"
+        );
+    }
+
+    /// Leader: a peer answered a beat at `ballot`. An ack at our own ballot
+    /// credits the `CheckQuorum` window and the GC fence tally; stale or
+    /// cross-ballot acks are dropped whole.
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, from = from.0, round = ballot.round)))]
+    pub(super) fn on_heartbeat_ack(&mut self, from: NodeId, ballot: Ballot, chosen: Option<Slot>) {
+        // Quorum sets are keyed by NodeId, over the **active configuration**:
+        // a beat reaches the whole pool, but only a member's ack may count
+        // toward the `CheckQuorum` window (a joining acceptor
+        // never inflates a quorum it is not in, #122).
+        if !self.acceptors.contains(from) {
+            return;
+        }
+        if self.role != NodeRole::Leader || ballot != self.ballot {
+            return;
+        }
+        // CheckQuorum: an ack at our ballot is proof this peer can still reach
+        // us and has not promised past us — credit the current window.
+        assert!(
+            self.proposer.election().is_none(),
+            "a leader credits no campaign"
+        );
+        self.proposer.credit_authority(from);
+        // The GC fence tally (#123): a configured member's chosen index.
+        self.note_peer_chosen(from, chosen);
+    }
+}

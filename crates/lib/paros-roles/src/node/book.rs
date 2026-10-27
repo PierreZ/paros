@@ -1,0 +1,220 @@
+//! A formed machine's **peer book** (#349, `docs/architecture/03-2-machines.md` §3.2):
+//! where its lanes dial each founding member, folded from the registry, never
+//! from the plan.
+//!
+//! The registry is the cell tenant's control journal, which every founding
+//! member serves. After each tick the node folds its own chosen prefix of that
+//! journal (a local read, as a seed's system follower does, #189), and when
+//! the [`address_book`] moves a peer, the peer's lane dials the new address
+//! from its next batch on. A peer the registry never moved keeps the plan's
+//! address. The fold is volatile: every incarnation folds again from what its
+//! own log holds, starting from the machine's **cached registry fold**
+//! (#211): the lanes dial where the cache says until the fold passes the
+//! cache's position, and every later book is offered to the cache.
+//!
+//! The book also carries each peer's **machine interface** (#404 (static vs
+//! dynamic endpoints)): the registry's reference for the peer's current
+//! incarnation, which its lane dials `Deliver` through. A peer the registry
+//! holds no reference for is dialed at its well-known `Deliver`.
+
+use std::collections::BTreeMap;
+
+use paros_core::NodeId;
+use paros_core::journal::{JournalIdentifier, Seq};
+use paros_core::replica::LogRead;
+
+use super::journals::Journals;
+use super::transport::PeerTarget;
+use crate::node::host::FormedCell;
+use paros_model::address::Address;
+use paros_model::checkpoint::Folder;
+use paros_model::machine::{CachedRegistry, address_book, cell_book};
+use paros_model::registry::Registry;
+
+/// The records one local read of the registry takes.
+const BOOK_READ_RECORDS: usize = 256;
+
+/// The record bytes one local read of the registry takes.
+const BOOK_READ_BYTES: usize = 64 * 1024;
+
+// A read that takes nothing never moves the fold.
+const _: () = assert!(BOOK_READ_RECORDS > 0 && BOOK_READ_BYTES > 0);
+
+/// The ticks a book may hold a moved address back for (2 s at the 50 ms
+/// tick): the lane dials the peer's old address meanwhile, as a node whose
+/// fold lags the peer's re-registration does. Counted on every tick, so a
+/// hold ends on a quiet registry too.
+const MOVE_HOLD_TICKS: u32 = 40;
+
+// A hold of no tick holds nothing back.
+const _: () = assert!(MOVE_HOLD_TICKS > 0);
+
+/// A formed machine's fold of its cell's registry, and the address each
+/// peer's lane dials now.
+pub(crate) struct PeerBook {
+    /// This machine.
+    me: NodeId,
+    /// The cell control journal: the registry.
+    registry: JournalIdentifier,
+    /// The founding members with the plan's addresses.
+    founders: Vec<(NodeId, Address)>,
+    fold: Folder<Registry>,
+    /// The cached registry fold's position: below it, the cache's book is
+    /// newer than the fold's, so the fold moves no lane.
+    floor: u64,
+    /// The address each peer's lane dials now, and the machine interface it
+    /// dials there (empty: the well-known `Deliver`).
+    dialed: BTreeMap<NodeId, PeerTarget>,
+    /// The peers whose moved address the book holds back, and for how many
+    /// more ticks.
+    held: BTreeMap<NodeId, u32>,
+}
+
+impl PeerBook {
+    /// The book of the founding member `formed`: every peer where its
+    /// cached registry fold dials it, else at the plan's address, until the
+    /// registry moves it.
+    pub(crate) fn new(formed: &FormedCell) -> Self {
+        let me = formed.facts.node_id;
+        let founders = formed.plan.members.clone();
+        let dialed: BTreeMap<NodeId, PeerTarget> = formed
+            .founders()
+            .into_iter()
+            .filter(|(id, _)| *id != me)
+            .map(|(id, addr)| (id, (addr, Vec::new())))
+            .collect();
+        assert!(
+            founders.iter().any(|(id, _)| *id == me),
+            "a peer book is a founding member's"
+        );
+        assert!(!dialed.contains_key(&me), "a machine is not its own peer");
+        Self {
+            me,
+            registry: formed.plan.control,
+            founders: founders.clone(),
+            fold: Folder::new(Registry::new(founders.iter().map(|(id, _)| *id))),
+            floor: formed.cached.as_ref().map_or(0, |c| c.position),
+            dialed,
+            held: BTreeMap::new(),
+        }
+    }
+
+    /// Fold what this node's own registry log chose since the last call, and
+    /// return every peer the book moved, with its new address and machine
+    /// interface (#404), and the cell's book when the fold reached a new one
+    /// at or past the cache's position (#211).
+    ///
+    /// Draws one BUGGIFY decision per peer whose interface alone changed,
+    /// on the node loop: the book holds the fresh interface back for one
+    /// fold, so the lane meets its stale one (#404).
+    pub(crate) fn follow<S, A>(
+        &mut self,
+        journals: &Journals<S, A>,
+    ) -> (Vec<(NodeId, PeerTarget)>, Option<CachedRegistry>) {
+        // A flying registry's fold is not yet durable (`JournalRt::settled`):
+        // the book and its durable cache wait for its batch to land.
+        let Some(rt) = journals.live.get(&self.registry).filter(|rt| rt.settled()) else {
+            return (Vec::new(), None);
+        };
+        // A hold counts down on every tick; one that ends re-reads the book.
+        for ticks in self.held.values_mut() {
+            *ticks = ticks.saturating_sub(1);
+        }
+        let ended = self.held.values().any(|ticks| *ticks == 0);
+        let before = self.fold.next_seq();
+        loop {
+            let from = self.fold.next_seq();
+            match rt
+                .node
+                .read_log(Seq(from), BOOK_READ_RECORDS, BOOK_READ_BYTES)
+            {
+                LogRead::Page(page) if page.next().0 > from => {
+                    for (seq, record) in (page.from.0..).zip(&page.records) {
+                        self.fold.fold(seq, &record.0);
+                    }
+                }
+                LogRead::Truncated(state) if state.first_seq.0 > from => {
+                    self.fold.jump(state.first_seq.0);
+                }
+                _ => break,
+            }
+        }
+        assert!(self.fold.next_seq() >= before, "the fold never moves back");
+        // A fold that jumped a gap holds no registry until its checkpoint:
+        // the book stands until then.
+        if (self.fold.next_seq() == before && !ended) || !self.fold.is_whole() {
+            return (Vec::new(), None);
+        }
+        // Below the cache's position the cache is the newer book (#211): a
+        // restarted machine's fold re-reads history it already cached.
+        if self.fold.next_seq() < self.floor {
+            moonpool_assertions::reachable!(
+                "machine: a restarted fold stays behind its cached registry fold"
+            );
+            return (Vec::new(), None);
+        }
+        let mut moved = Vec::new();
+        for (id, addr) in address_book(&self.founders, self.fold.state()) {
+            if id == self.me {
+                continue;
+            }
+            let interface = self
+                .fold
+                .state()
+                .get(id)
+                .map(|node| node.machine_interface.clone())
+                .unwrap_or_default();
+            let dialed = self.dialed.get_mut(&id);
+            let Some(dialed) = dialed else { continue };
+            if dialed.0 == addr && dialed.1 == interface {
+                continue;
+            }
+            // A fresh interface at the same address, held back one fold
+            // (#404): the lane dials the stale one and falls back.
+            if dialed.0 == addr && moonpool_buggify::buggify_fault_with_prob!(0.2) {
+                moonpool_assertions::reachable!(
+                    "machine: a peer book holds a fresh machine interface back"
+                );
+                continue;
+            }
+            // A moved address, held back for a few ticks: the lane dials
+            // the peer's old address, where nothing may listen, as a lagging
+            // fold's does. A follower's pull toward a leader behind that
+            // lane fails, and the pull falls back to the pool (#349).
+            if dialed.0 != addr {
+                if let Some(ticks) = self.held.get(&id) {
+                    if *ticks > 0 {
+                        continue;
+                    }
+                } else if moonpool_buggify::buggify_fault_with_prob!(0.2) {
+                    moonpool_assertions::reachable!(
+                        "machine: a peer book holds a moved address back"
+                    );
+                    self.held.insert(id, MOVE_HOLD_TICKS);
+                    continue;
+                }
+            }
+            self.held.remove(&id);
+            *dialed = (addr.clone(), interface.clone());
+            moved.push((id, (addr, interface)));
+        }
+        assert!(
+            moved.iter().all(|(id, _)| *id != self.me),
+            "a machine never moves its own lane"
+        );
+        // A hold that ended has moved its lane or found it current.
+        self.held.retain(|_, ticks| *ticks > 0);
+        assert!(
+            moved.iter().all(|(id, _)| !self.held.contains_key(id)),
+            "a moved lane is held back no more"
+        );
+        let cache = CachedRegistry {
+            node: self.me,
+            position: self.fold.next_seq(),
+            machines: cell_book(&self.founders, self.fold.state()),
+        };
+        assert!(cache.position >= self.floor, "a cache is written forward");
+        assert_eq!(cache.check(), Ok(()), "a fold's book is a valid cache");
+        (moved, Some(cache))
+    }
+}

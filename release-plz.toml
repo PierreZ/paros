@@ -29,17 +29,67 @@ features_always_increment_minor = true
 # All publishable crates share a version group so they bump in lockstep.
 [[package]]
 name = "paros-core"
-changelog_path = "crates/paros-core/CHANGELOG.md"
+changelog_path = "crates/lib/paros-core/CHANGELOG.md"
+version_group = "paros"
+
+[[package]]
+name = "paros-wire"
+changelog_path = "crates/lib/paros-wire/CHANGELOG.md"
+version_group = "paros"
+
+[[package]]
+name = "paros-model"
+changelog_path = "crates/lib/paros-model/CHANGELOG.md"
+version_group = "paros"
+
+[[package]]
+name = "paros-tunables"
+changelog_path = "crates/lib/paros-tunables/CHANGELOG.md"
+version_group = "paros"
+
+[[package]]
+name = "paros-storage"
+changelog_path = "crates/lib/paros-storage/CHANGELOG.md"
+version_group = "paros"
+
+[[package]]
+name = "paros-net"
+changelog_path = "crates/lib/paros-net/CHANGELOG.md"
+version_group = "paros"
+
+[[package]]
+name = "paros-client"
+changelog_path = "crates/lib/paros-client/CHANGELOG.md"
+version_group = "paros"
+
+[[package]]
+name = "paros-observe"
+changelog_path = "crates/lib/paros-observe/CHANGELOG.md"
+version_group = "paros"
+
+[[package]]
+name = "paros-roles"
+changelog_path = "crates/lib/paros-roles/CHANGELOG.md"
+version_group = "paros"
+
+[[package]]
+name = "paros-coordinator"
+changelog_path = "crates/lib/paros-coordinator/CHANGELOG.md"
+version_group = "paros"
+
+[[package]]
+name = "paros-machine"
+changelog_path = "crates/lib/paros-machine/CHANGELOG.md"
 version_group = "paros"
 
 [[package]]
 name = "paros-sim"
-changelog_path = "crates/paros-sim/CHANGELOG.md"
+changelog_path = "crates/sim/paros-sim/CHANGELOG.md"
 version_group = "paros"
 
 [[package]]
 name = "paros"
-changelog_path = "crates/paros/CHANGELOG.md"
+changelog_path = "crates/lib/paros/CHANGELOG.md"
 version_group = "paros"
 
 # Binaries are not published or released.
@@ -55,6 +105,16 @@ publish = false
 
 [[package]]
 name = "parosd"
+release = false
+publish = false
+
+[[package]]
+name = "parosctl"
+release = false
+publish = false
+
+[[package]]
+name = "paros-bench"
 release = false
 publish = false
 

@@ -1,0 +1,39 @@
+[package]
+name = "paros-coordinator"
+description = "paros's coordinators: the cell, tenant and universe coordinators"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+documentation = "https://docs.rs/paros-coordinator"
+
+[dependencies]
+paros-core = { workspace = true, features = ["tracing", "assertions", "serde"] }
+paros-model = { workspace = true }
+paros-wire = { workspace = true }
+paros-tunables = { workspace = true }
+paros-storage = { workspace = true }
+paros-net = { workspace = true }
+paros-client = { workspace = true }
+paros-observe = { workspace = true }
+paros-roles = { workspace = true }
+futures = { workspace = true }
+moonpool-assertions = { workspace = true }
+moonpool-buggify = { workspace = true }
+moonpool-core = { workspace = true, features = ["select"] }
+moonpool-rpc = { workspace = true, features = ["prost"] }
+prost = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+futures = { workspace = true, features = ["executor"] }
+moonpool-sim = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros"] }
+
+[lints]
+workspace = true

@@ -1,0 +1,43 @@
+[package]
+name = "parosctl"
+description = "The paros CLI: journal calls and operator calls against a paros deployment"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "parosctl"
+path = "src/main.rs"
+
+[dependencies]
+paros = { workspace = true, features = ["tls"] }
+# `parosctl key` and `parosctl token` (#400): Biscuit keys and tokens, offline.
+paros-authz-biscuit = { workspace = true }
+# The production providers, as `parosd` (its Cargo.toml says why).
+moonpool-core = { workspace = true, features = ["compio-providers", "select"] }
+# The client-only RPC runtime, under `paros::client`.
+moonpool-rpc = { workspace = true, features = ["prost"] }
+
+clap = { version = "4", features = ["derive", "env"] }
+compio = { version = "0.19", default-features = false, features = ["runtime", "time", "signal", "io-uring", "polling"] }
+futures = "0.3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "registry"] }
+# `parosctl --json`.
+serde_json = "1"
+# `parosctl tls show`: a certificate's names, use and validity. The same
+# version moonpool-rpc's certificate authority reads authorities with.
+x509-parser = "0.18"
+base64 = "0.22"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

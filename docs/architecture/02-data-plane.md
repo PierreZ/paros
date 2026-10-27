@@ -140,7 +140,7 @@ position, and the journal judges it. An empty write also goes alone.
 Every machine serves the batcher endpoint over the cell's address book. The tenant coordinator
 books a tenant's batchers, by its `batchers=` count, on the cell's `stateless` machines (section
 3.4), and `Resolve` names them (section 3.5). A client of a multi-writer journal sends its writes
-to a batcher it was given (`Resolved::batcher_servers`). `paros::batcher::run_batcher` runs a
+to a batcher it was given (`Resolved::batcher_servers`). `paros::roles::batcher::run_batcher` runs a
 batcher on its own address, in front of a fixed list of nodes.
 
 How it is built (#241, part 3). The mode is a field of the journal's `Config`, so the format
@@ -250,7 +250,7 @@ The read limits are `DriverTunables::max_read_records` (256 by default, floor 1:
 or above it is cut to it), `max_read_bytes` (64 KiB, floor 1: a page always holds one record,
 whatever its size), `max_wait_ms` (400 ms in the simulation's baseline, 1 s in `parosd`, floor 0)
 and `min_wait_ms` (0, floor 0). They are `PAROS_*` overrides in `parosd`. The node applies them
-when it parks the read (`paros::driver::log_reads::ReadLimits`); a page shorter than the
+when it parks the read (`paros::roles::node::log_reads::ReadLimits`); a page shorter than the
 client's `limit` is the server's limit, and the client reads on from the page's end.
 
 ### 2.8 Underneath
@@ -279,12 +279,12 @@ copies. A `batched` journal with `failures-per-partition 0` (one acceptor per pa
 stop for good after a power loss inside a commit. Choose `batched` only with `F >= 1`.
 
 How it is built. The mode is a field of the journal's `CreateJournal` entry in the tenant
-control journal (`paros::tenant::StoreDurability`, `store_durability` on the wire, `ordered`
+control journal (`paros::model::tenant::StoreDurability`, `store_durability` on the wire, `ordered`
 is the zero value). `Configure` never changes it. Each machine that serves the journal opens
 its store with that mode (`JournalStores::create`). The control journals, the plan journals
 and the matchmaker sets stay `ordered`. The store records the protocol per batch, so a store
 opens under either mode. `parosctl journal create --store-durability ordered|batched` sets
-the mode, `parosctl bench --store-durability` creates its journals with it, and `journal
+the mode, `paros-bench --store-durability` creates its journals with it, and `journal
 list` and `tenant show` print it. The simulation draws `batched` for three creates in four on
 some seeds (`shape::batched_journals`). A machine's power loss inside a `batched` commit
 spends the journal's cut budget: at most as many machines as copies of one slot its

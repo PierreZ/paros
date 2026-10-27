@@ -11,7 +11,7 @@ Every `parosd` is uniform. **Identity** has three parts (decided on 2026-10-02, 
   (`PAROS_ADVERTISE`, below).
 - `incarnation`: moonpool-rpc's per-start `Incarnation`, carried in the `InterfaceRef`.
 
-**One thread** (decided on 2026-10-22): every `parosd`, `paros-frontend` and `parosctl` runs on
+**One thread** (decided on 2026-10-22): every `parosd` and `parosctl` runs on
 one compio runtime thread (io_uring on Linux, polling where a seccomp profile refuses it).
 The library is written against moonpool's local provider traits (`paros::ParosProviders`), so
 its futures need not be `Send`. The simulation runs the same code on `SimProviders`. The only
@@ -198,7 +198,7 @@ counts again from its start.
 
 **Clean stop** (#560 (clean Ctrl-C shutdown), landed on 2026-10-18). `SIGINT` (Ctrl-C) and
 `SIGTERM` give the same clean stop. `parosd` only turns the signal into the machine's shutdown
-token; the stop is the library's (`driver/stop.rs` in the node loop, `machine/coordinator.rs`),
+token; the stop is the library's (`crates/lib/paros-roles/src/node/stop.rs` in the node loop, `machine/coordinator.rs`),
 so the simulation runs the same code. moonpool's graceful reboot cancels the same token, then
 kills the process after a grace period. The node loop serves on while it stops:
 
@@ -225,9 +225,9 @@ profile, floor 0): when it runs out, the loop returns anyway and logs `stop_time
 step that did not complete. A second signal exits at once with code 130, and so does a stop that
 is still running 5 s past its bound. Each of these is a crash, which recovery already handles, so
 no bound is a safety rule. Each step logs with the machine's name (`stop_started`,
-`stop_handoff_sent`, `stop_handoff_taken`, `stop_completed`). `paros-frontend` stops the same way
-with no leadership and no store: it refuses new calls (`stopping`), waits for the ones it took
-and returns. In the simulation, a stopping frontend sometimes waits out its whole bound,
+`stop_handoff_sent`, `stop_handoff_taken`, `stop_completed`). A machine's frontend (#723
+(frontend as a parosd role)) stops with it and holds no leadership and no store: it refuses new
+calls (`stopping`), waits for the ones it took and returns. In the simulation, a stopping frontend sometimes waits out its whole bound,
 as a frontend behind a slow load balancer does. It refuses the calls that still arrive.
 
 The simulation draws a graceful reboot for about a third of the machine and frontend groups'
@@ -256,7 +256,7 @@ as a down machine, and the mode changes leave its journals to the moves. An open
 window (#359) suspends this, as it suspends a down machine's re-placement: the mark stays
 written, but no slot moves off a machine the window covers. A grid leader sends a
 round's Phase 2 to a column with no slow acceptor when its own column holds one, and a quorum read
-asks such a row (`fast_column`, `fast_row` in `driver/mod.rs`); a majority already decides on the
+asks such a row (`fast_column`, `fast_row` in `crates/lib/paros-roles/src/node.rs`); a majority already decides on the
 fastest replies. `parosctl` shows the machine `slow` (`MachineView.slow`). The simulation's
 slow-machine scenario holds a founding member slow for 10–16 s on half its strikes in the chaos
 window; its oracles: a slow mark never takes a quorum, and after chaos no journal with a machine
@@ -302,7 +302,7 @@ Landed in #211 (2026-10-10): the **durable cached registry fold**
 and atomically, as the record is:
 
 - **Who writes it.** A founding member offers each book its own registry fold reaches
-  (`driver/book.rs`). An admitted machine serves no journal, so it folds the registry through
+  (`crates/lib/paros-roles/src/node/book.rs`). An admitted machine serves no journal, so it folds the registry through
   the machines it knows, each renewal period (`machine/follow.rs`). It learns the genesis pool
   from the control journal's membership. A writer task beside the machine writes a book only
   at a later position and only when the book changed. The node loop never waits on the disk.
@@ -327,7 +327,7 @@ new address hears none of its peers: they send to the address the registry knows
 clocks still fired, and each campaign raised its peers' promises above the sitting leader's. The
 cell control journal then stalled, so the registration that would move the peers' lanes never
 landed. Now such a member holds its journals' clocks until its registration ends
-(`driver/mod.rs`). It still answers every message that reaches it. A lone founding member is its
+(`crates/lib/paros-roles/src/node.rs`). It still answers every message that reaches it. A lone founding member is its
 own quorum, so it never holds.
 
 Landed in #505 (stranded admitted machine, 2026-10-15). An admitted machine reads the registry

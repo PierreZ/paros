@@ -2,7 +2,7 @@
 
 A cell of `parosd` machines you start by hand, write to and read from. This is a demo, not a
 test: nothing in CI runs it (CI only builds the image). The walkthrough that explains what each
-step does is [`crates/parosd/README.md`](crates/parosd/README.md).
+step does is [`crates/bin/parosd/README.md`](crates/bin/parosd/README.md).
 
 No id is fixed: `init` draws the cell's control journals at random, and the tenant coordinator
 draws a journal's id when it creates the journal. A journal is named by its name,
@@ -114,8 +114,8 @@ docker compose run --rm parosctl cell remove-machine storage4
 # second, then the totals. Ctrl-C stops it and still prints the totals. Add
 # `--mix write=80,read-tail=20` for reads that check every byte, `--rate 200` for an open
 # loop, `--histograms /tmp/h.json` for the raw histograms. Numbers compare runs on the same
-# machine. `parosctl bench --local 3` runs without Compose, on a cell in its own process.
-docker compose run --rm parosctl bench --tenant bench --journals 4 --clients 8 --duration 60s --ramp 10s
+# machine. `paros-bench --local 3` runs without Compose, on a cell in its own process.
+docker compose run --rm paros-bench --tenant bench --journals 4 --clients 8 --duration 60s --ramp 10s
 
 # Logs, and tear everything down (volumes included).
 docker compose logs node1
@@ -230,8 +230,23 @@ parosctl universe key add /tmp/paros-demo/demo-2.public
 parosctl universe key remove demo-1
 ```
 
-`init` without a token is refused `forbidden` or `invalid_token` (exit 3). A frontend reads the
-keys in the universe, so `PAROS_FRONTEND_ROOT_PUBLIC_KEY` is optional.
+`init` without a token is refused `forbidden` or `invalid_token` (exit 3).
+
+## Through a frontend
+
+Every machine serves the frontend once it is in a cell (#723 (frontend as a parosd role)). A
+frontend checks each call's token against the keys in the universe, and resolves the journal by
+its name. The tenant coordinator books a tenant's frontends on the `stateless` machines, and
+`parosctl resolve` names them:
+
+```sh
+parosctl configure --tenant acme --frontends 1
+parosctl resolve acme      # frontends=…
+parosctl token mint --key /tmp/paros-demo/demo-1.private --role tenant --tenant acme --ttl 1h \
+  --subject acme --out /tmp/paros-demo/acme.token
+parosctl --frontends "$PAROSCTL_SERVERS" --token-file /tmp/paros-demo/acme.token \
+  write paros://acme/orders hello --leader 7
+```
 
 ## If something goes wrong
 
@@ -240,7 +255,7 @@ keys in the universe, so `PAROS_FRONTEND_ROOT_PUBLIC_KEY` is optional.
 - `parosctl` exit codes: `0` success, `3` refused, `4` ambiguous (run it again), `5` no server
   answered.
 - A machine that exits with `78` refuses to start on purpose (amnesia, a changed class, a lost
-  identity): do not restart it blindly; see `crates/parosd/README.md`.
+  identity): do not restart it blindly; see `crates/bin/parosd/README.md`.
 - A restarted container can get a new IP. Its peers find it again at its name: each machine
   advertises its service name (`PAROS_ADVERTISE`, #257), and a peer resolves the name when it
   dials.

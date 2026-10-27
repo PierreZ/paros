@@ -1,10 +1,10 @@
 +++
 title = "Bench"
-description = "Measure throughput and latency per call with parosctl bench"
+description = "Measure throughput and latency per call with paros-bench"
 weight = 4
 +++
 
-`parosctl bench` is the load generator of `parosd`. It runs clients against a cell and prints
+`paros-bench` is the load generator of `parosd`. It runs clients against a cell and prints
 the throughput and the latency of each call, every second, then the totals. Use it to compare
 two commits on the same machine. The baseline is on issue #194 (throughput benchmark).
 
@@ -14,7 +14,7 @@ On one machine, with no cell to start first, `--local 3` starts a cell of three 
 the `parosctl` process, on loopback:
 
 ```sh
-parosctl bench --local 3 --duration 60s --record-size 1024 --records-per-call 16
+paros-bench --local 3 --duration 60s --record-size 1024 --records-per-call 16
 ```
 
 Each machine is the shipped `parosd` code. Its stores go in a new directory under
@@ -25,7 +25,7 @@ temporary directory is often in memory (`tmpfs`).
 Against a running cell, such as the Compose cell (`DEMO.md` in the repository):
 
 ```sh
-docker compose run --rm parosctl bench --tenant bench --journals 4 --clients 8 --duration 60s --ramp 10s
+docker compose run --rm paros-bench --tenant bench --journals 4 --clients 8 --duration 60s --ramp 10s
 ```
 
 The bench creates the tenant and the journals `bench-3x1-0` to `bench-3x1-3` if they are
@@ -39,7 +39,7 @@ the plain majority of three, and it is the default. `3x3` is a grid of nine acce
 acceptors of one column decide each slot. Give several topologies to compare them:
 
 ```sh
-parosctl bench --local 9 --topology 3x1,3x2,3x3 --clients 8 --journals 8 --duration 30s
+paros-bench --local 9 --topology 3x1,3x2,3x3 --clients 8 --journals 8 --duration 30s
 ```
 
 The bench runs each topology in turn, with the same seed and the same load, on journals of
@@ -57,8 +57,8 @@ CPU. A local cell shares one host, so there the plain majority is faster.
 A `--local` cell is new for each run. On a running cell, give each mode its own tenant:
 
 ```sh
-parosctl bench --local 3 --store-durability batched
-docker compose run --rm parosctl bench --tenant bench-batched --store-durability batched
+paros-bench --local 3 --store-durability batched
+docker compose run --rm paros-bench --tenant bench-batched --store-durability batched
 ```
 
 ## What it does

@@ -25,9 +25,9 @@ Work in this order and report where you stopped if you cannot finish:
 1. Replay the seed alone with the matching `sim-paros-hunt replay-*` command
    (or `explore-main` for nearby timelines). Confirm it is RED on this build.
 2. Take the **first** `assertion_violations` entry and its detail map. Find
-   the oracle in `crates/paros-sim/src/audit/` (or `chain.rs`, or the
+   the oracle in `crates/sim/paros-sim/src/audit/` (or `workload/chain.rs`, or the
    workload's `ClientHistory` and the linearizability search, `audit/linearizability.rs`), then the `Audit` callback that fed it in
-   `crates/paros/src/audit.rs`, then the driver site that reports it.
+   `crates/lib/paros-observe/src/audit.rs`, then the driver site that reports it.
 3. Walk back through the roles in `paros-core`: which of `Acceptor`,
    `Proposer`, `Replica`, `Matchmaking`, `Matchmaker` decided, what
    `ColocatedNode` handed it, and which fault (a crash at a driver `hint!`, a dropped or

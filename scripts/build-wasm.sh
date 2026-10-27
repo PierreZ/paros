@@ -15,7 +15,7 @@
 #
 # Run inside `nix develop` (wasm-bindgen-cli, wasm-opt, node and npm come from
 # the flake). The wasm-bindgen CLI version must equal the `wasm-bindgen` crate
-# pin in crates/paros-wasm/Cargo.toml; the flake and the pin are bumped
+# pin in crates/support/paros-wasm/Cargo.toml; the flake and the pin are bumped
 # together. `website/zola/build.sh` must have run first when staging
 # (website/zola/public/ is its output).
 set -euo pipefail

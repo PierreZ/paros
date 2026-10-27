@@ -1,0 +1,749 @@
+//! The wire contracts' round-trip tests: every domain value crosses its
+//! typed protobuf losslessly, and malformed wire input is refused.
+
+use std::collections::BTreeMap;
+
+use paros_core::contract::Party;
+use paros_core::journal::{Command, Control, Entry, JournalState, LeaderUuid, Seq};
+use paros_core::membership::ProxyId;
+use paros_core::{Ballot, Message, NodeId, Slot, Value};
+use prost::Message as ProstMessage;
+
+use super::consensus::message_from_proto;
+use super::{common, internal};
+
+#[test]
+fn protobuf_rejects_a_missing_message_kind() {
+    let result = message_from_proto(internal::ConsensusMessage {
+        kind: None,
+        journal: 0,
+        tenant: 0,
+    });
+    assert!(matches!(result, Err("missing Paxos message kind")));
+}
+
+#[test]
+fn protobuf_rejects_duplicate_slots_in_a_suffix() {
+    let entry = internal::SlotCommand {
+        slot: 4,
+        ballot: Some(common::Ballot { round: 2, node: 1 }),
+        command: Some(internal::Command {
+            kind: Some(internal::command::Kind::Control(internal::ControlCommand {
+                kind: Some(internal::control_command::Kind::Noop(internal::Noop {})),
+            })),
+        }),
+    };
+    let wire = internal::ConsensusMessage {
+        kind: Some(internal::consensus_message::Kind::CatchUpResponse(
+            internal::CatchUpResponse {
+                from: 1,
+                entries: vec![entry.clone(), entry],
+            },
+        )),
+        journal: 0,
+        tenant: 0,
+    };
+
+    assert!(matches!(
+        message_from_proto(wire),
+        Err("duplicate slot in message")
+    ));
+}
+
+/// One representative of every `Message` variant.
+#[allow(clippy::too_many_lines)] // Exhaustive wire fixture: one literal per variant.
+fn every_variant() -> Vec<Message> {
+    let ballot = Ballot {
+        round: 7,
+        node: NodeId(3),
+    };
+    let entry = Entry {
+        leader: LeaderUuid(1),
+        seq: Seq(2),
+        records: vec![Value(vec![1, 2, 3]), Value(Vec::new())],
+    };
+    let command = Command::Write(entry.clone());
+    // Control commands in the accepted suffix exercise every protobuf
+    // control variant alongside the client-write case.
+    let control = Command::Control(Control::Truncate {
+        leader: LeaderUuid(9),
+        up_to: Seq(3),
+    });
+    let claim = Command::Control(Control::SetLeader {
+        new: LeaderUuid(9),
+        old: Some(LeaderUuid(3)),
+    });
+    let mut accepted = BTreeMap::new();
+    accepted.insert(Slot(5), (ballot, command.clone()));
+    accepted.insert(Slot(6), (ballot, control));
+    accepted.insert(Slot(8), (ballot, claim));
+    accepted.insert(Slot(7), (ballot, Command::Control(Control::Noop)));
+    let mut catchup = BTreeMap::new();
+    catchup.insert(Slot(4), (ballot, command.clone()));
+    vec![
+        Message::Prepare {
+            reply_to: NodeId(1),
+            ballot,
+            from_slot: Slot(5),
+            config: None,
+        },
+        // A matchmaker deployment's `Prepare` carries the registered
+        // configuration; the plain one above carries none.
+        Message::Prepare {
+            reply_to: NodeId(1),
+            ballot,
+            from_slot: Slot(5),
+            config: Some(paros_core::membership::AcceptorConfig::new(
+                vec![NodeId(3), NodeId(1), NodeId(4)],
+                paros_core::membership::QuorumSystem::Majority,
+            )),
+        },
+        Message::Promise {
+            from: NodeId(1),
+            ballot,
+            from_slot: Slot(5),
+            accepted,
+            faulty: BTreeMap::from([(Slot(6), ballot)]),
+            next_from_slot: None,
+        },
+        Message::Accept {
+            reply_to: Party::Node(NodeId(2)),
+            leader: NodeId(2),
+            ballot,
+            slot: Slot(6),
+            command: command.clone(),
+            config: None,
+        },
+        // A reply address that is not the leader: the shape a handoff
+        // successor's re-send puts on the wire, and a case that encodes
+        // the optional `leader` field.
+        Message::Accept {
+            reply_to: Party::Node(NodeId(5)),
+            leader: NodeId(2),
+            ballot,
+            slot: Slot(6),
+            command: command.clone(),
+            config: None,
+        },
+        // A delegated round (#142): the reply party is a proxy, and on a
+        // matchmaker deployment the delegation carries the configuration.
+        Message::Accept {
+            reply_to: Party::Proxy(ProxyId(1)),
+            leader: NodeId(2),
+            ballot,
+            slot: Slot(6),
+            command: command.clone(),
+            config: Some(paros_core::membership::AcceptorConfig::new(
+                vec![NodeId(1), NodeId(2), NodeId(3)],
+                paros_core::membership::QuorumSystem::Majority,
+            )),
+        },
+        Message::Accepted {
+            from: NodeId(2),
+            ballot,
+            slot: Slot(6),
+            vhash: 17,
+        },
+        Message::Nack {
+            from: NodeId(2),
+            ballot,
+            slot: Slot(6),
+        },
+        Message::Commit {
+            from: Party::Node(NodeId(0)),
+            ballot,
+            slot: Slot(6),
+            command: command.clone(),
+        },
+        // A proxy leader's decision (#142).
+        Message::Commit {
+            from: Party::Proxy(ProxyId(0)),
+            ballot,
+            slot: Slot(6),
+            command,
+        },
+        Message::CatchUpRequest {
+            from: NodeId(1),
+            from_slot: Slot(4),
+        },
+        Message::CatchUpResponse {
+            from: NodeId(0),
+            entries: catchup,
+        },
+        Message::TrimmedTo {
+            from: NodeId(0),
+            point: Slot(6),
+            // The journal state rides with the trim point (#204) and must
+            // survive the wire round trip scalar for scalar.
+            state: JournalState {
+                leader: Some(LeaderUuid(4)),
+                term: 2,
+                next_seq: Seq(7),
+                first_seq: Seq(3),
+            },
+        },
+        Message::Heartbeat {
+            from: NodeId(0),
+            ballot,
+            commit: Some(Slot(2)),
+            config: None,
+            fence: None,
+        },
+        Message::Heartbeat {
+            from: NodeId(0),
+            ballot,
+            commit: Some(Slot(2)),
+            config: Some(paros_core::membership::AcceptorConfig::new(
+                vec![NodeId(0), NodeId(2)],
+                paros_core::membership::QuorumSystem::Majority,
+            )),
+            fence: Some(Slot(1)),
+        },
+        // The empty watermark is its own variant of the beat, and the one the
+        // wire encoding used to be unable to say (#56): a leader that has
+        // chosen nothing is not a leader that has chosen slot 0.
+        Message::Heartbeat {
+            from: NodeId(0),
+            ballot,
+            commit: None,
+            config: None,
+            fence: None,
+        },
+        Message::HeartbeatAck {
+            from: NodeId(1),
+            ballot,
+            chosen: Some(Slot(4)),
+        },
+        // Cooperative leader handoff: the intended successor, the
+        // transferred allocator frontier, and both halves of the tail —
+        // `pending` deliberately carries no per-slot ballot on the wire
+        // (it is the transferred ballot by construction), so the round
+        // trip is what pins that re-derivation.
+        Message::Relinquish {
+            from: NodeId(3),
+            to: NodeId(1),
+            ballot,
+            from_slot: Slot(4),
+            next_slot: Slot(7),
+            decided: BTreeMap::from([(
+                Slot(4),
+                (
+                    Ballot {
+                        round: 6,
+                        node: NodeId(2),
+                    },
+                    Command::Control(Control::Truncate {
+                        leader: LeaderUuid(9),
+                        up_to: Seq(2),
+                    }),
+                ),
+            )]),
+            pending: BTreeMap::from([
+                (
+                    Slot(5),
+                    Command::Write(Entry {
+                        leader: LeaderUuid(8),
+                        seq: Seq(3),
+                        records: vec![Value(vec![4, 5])],
+                    }),
+                ),
+                (Slot(6), Command::Control(Control::Noop)),
+            ]),
+            config: Some(paros_core::membership::AcceptorConfig::new(
+                vec![NodeId(1), NodeId(2), NodeId(3)],
+                paros_core::membership::QuorumSystem::Majority,
+            )),
+        },
+        // The empty tail: a fully settled leader hands over the frontier
+        // and nothing else.
+        Message::Relinquish {
+            from: NodeId(3),
+            to: NodeId(2),
+            ballot,
+            from_slot: Slot(9),
+            next_slot: Slot(9),
+            decided: BTreeMap::new(),
+            pending: BTreeMap::new(),
+            config: None,
+        },
+    ]
+}
+
+/// The matchmaker contract: every outcome and refusal round-trips through
+/// its typed protobuf losslessly.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn matchmaker_contract_round_trips() {
+    use paros_core::journal::{JournalId, TenantId};
+    use paros_core::matchmaker::{
+        BootstrapPage, GcAck, GcRequest, JournalRegistry, MatchOutcome, MatchRefusal, MatchReply,
+        MatchRequest, MatchmakerPhase, ReconfigureReply, ReconfigureRequest, Registration,
+    };
+    use paros_core::membership::{
+        AcceptorConfig, MatchmakerGeneration, MatchmakerId, MatchmakerSet, QuorumSystem,
+    };
+    // #190: every request names its tenant and journal, and both survive.
+    let tenant = TenantId(0xA1);
+    // The matchmaker addressed (#190).
+    let to = MatchmakerId(0xC3);
+    // A cell id rides every request (#539 (matchmaker cell fence)).
+    let addressed = super::Addressed {
+        cell_id: 0xD4,
+        tenant,
+        to,
+    };
+    let j = JournalId(0xB2);
+    let ballot = |round: u64, node: u64| Ballot {
+        round,
+        node: NodeId(node),
+    };
+    let config = |members: &[u64]| {
+        AcceptorConfig::new(
+            members.iter().map(|n| NodeId(*n)).collect(),
+            QuorumSystem::Majority,
+        )
+    };
+    let g = MatchmakerGeneration;
+    let set = |generation: u64, members: &[u64]| {
+        MatchmakerSet::new(
+            g(generation),
+            members.iter().copied().map(MatchmakerId).collect(),
+        )
+    };
+    for request in [
+        MatchRequest::new(j, NodeId(4), ballot(7, 4), config(&[0, 1, 2]), g(0)),
+        MatchRequest::reconfigure(j, NodeId(4), ballot(8, 4), config(&[1, 2, 3]), g(3)),
+        MatchRequest::probe(j, NodeId(5), ballot(9, 5), config(&[0, 1, 2]), g(1)),
+    ] {
+        let wire = super::matchmaker_codec::wire_match_request(addressed, &request);
+        let bytes = wire.encode_to_vec();
+        let decoded = super::WireMatchRequest::decode(bytes.as_slice()).expect("decode");
+        assert_eq!(
+            super::matchmaker_codec::match_request_from_wire(decoded).expect("request"),
+            (addressed, request)
+        );
+    }
+
+    let reply = |matchmaker: u64, ballot: Ballot, outcome: MatchOutcome| MatchReply {
+        matchmaker: MatchmakerId(matchmaker),
+        journal: j,
+        to: NodeId(4),
+        ballot,
+        generation: g(2),
+        outcome,
+    };
+    let replies = vec![
+        reply(
+            1,
+            ballot(7, 4),
+            MatchOutcome::Registered {
+                history: BTreeMap::from([
+                    (ballot(2, 1), Registration::belief(config(&[0, 1, 2]))),
+                    (
+                        ballot(5, 3),
+                        Registration::reconfiguration(config(&[1, 2, 3, 4])),
+                    ),
+                ]),
+                gc_watermark: ballot(2, 1),
+                effective: Some((ballot(5, 3), config(&[1, 2, 3, 4]))),
+                from_ballot: ballot(2, 1),
+                next_from_ballot: Some(ballot(6, 1)),
+            },
+        ),
+        reply(
+            2,
+            ballot(7, 4),
+            MatchOutcome::Registered {
+                history: BTreeMap::new(),
+                gc_watermark: Ballot::zero(),
+                effective: None,
+                from_ballot: Ballot::zero(),
+                next_from_ballot: None,
+            },
+        ),
+        reply(
+            3,
+            ballot(8, 5),
+            MatchOutcome::Probed {
+                effective: Some((ballot(5, 3), config(&[3, 4, 5]))),
+            },
+        ),
+        reply(3, ballot(8, 5), MatchOutcome::Probed { effective: None }),
+        reply(
+            0,
+            ballot(7, 4),
+            MatchOutcome::Refused(MatchRefusal::Stale {
+                highest: ballot(9, 2),
+            }),
+        ),
+        reply(
+            0,
+            ballot(1, 4),
+            MatchOutcome::Refused(MatchRefusal::BelowWatermark {
+                watermark: ballot(3, 1),
+            }),
+        ),
+        reply(
+            0,
+            ballot(1, 4),
+            MatchOutcome::Refused(MatchRefusal::Stopped { successor: None }),
+        ),
+        reply(
+            0,
+            ballot(1, 4),
+            MatchOutcome::Refused(MatchRefusal::Stopped {
+                successor: Some(set(3, &[0, 4, 5])),
+            }),
+        ),
+        reply(
+            0,
+            ballot(1, 4),
+            MatchOutcome::Refused(MatchRefusal::Generation {
+                current: set(5, &[1, 2]),
+            }),
+        ),
+        reply(
+            0,
+            ballot(1, 4),
+            MatchOutcome::Refused(MatchRefusal::Inactive),
+        ),
+    ];
+    for reply in replies {
+        let wire = super::matchmaker_codec::wire_match_reply(&reply);
+        let bytes = wire.encode_to_vec();
+        let decoded = super::WireMatchReply::decode(bytes.as_slice()).expect("decode");
+        assert_eq!(
+            super::matchmaker_codec::match_reply_from_wire(decoded).expect("reply"),
+            reply,
+            "matchmaker reply round-trip must be lossless for {reply:?}"
+        );
+    }
+
+    let ack = GcAck {
+        matchmaker: MatchmakerId(2),
+        journal: j,
+        generation: g(1),
+        applied: true,
+        watermark: ballot(3, 1),
+        newer: None,
+    };
+    let wire = super::matchmaker_codec::wire_garbage_collect_ack(&ack);
+    let decoded =
+        super::WireGarbageCollectAck::decode(wire.encode_to_vec().as_slice()).expect("decode");
+    assert_eq!(
+        super::matchmaker_codec::garbage_collect_ack_from_wire(decoded).expect("ack"),
+        ack
+    );
+    let gc = GcRequest {
+        from: NodeId(4),
+        journal: j,
+        generation: g(1),
+        watermark: ballot(3, 1),
+    };
+    let wire = super::matchmaker_codec::wire_garbage_collect(addressed, &gc);
+    let decoded =
+        super::WireGarbageCollect::decode(wire.encode_to_vec().as_slice()).expect("decode");
+    assert_eq!(
+        super::matchmaker_codec::garbage_collect_from_wire(decoded).expect("gc"),
+        (addressed, gc)
+    );
+
+    // The handover contract (#125): every request and reply kind.
+    // Two journals' registries, one of them blank but for its watermark.
+    let registries = BTreeMap::from([
+        (
+            j,
+            JournalRegistry {
+                gc_watermark: ballot(2, 1),
+                history: BTreeMap::from([(ballot(5, 3), Registration::belief(config(&[1, 2])))]),
+                effective: Some((ballot(4, 2), config(&[0, 1, 2]))),
+            },
+        ),
+        (
+            JournalId(0xB3),
+            JournalRegistry {
+                gc_watermark: ballot(6, 2),
+                history: BTreeMap::new(),
+                effective: None,
+            },
+        ),
+    ]);
+    let bootstrap = BootstrapPage {
+        set: set(1, &[0, 1, 3]),
+        after: None,
+        registries: registries.clone(),
+        last: true,
+    };
+    // A later page of a bootstrap cut short (#439).
+    let later = BootstrapPage {
+        set: set(1, &[0, 1, 3]),
+        after: Some(JournalId(0xA1)),
+        registries: registries.clone(),
+        last: false,
+    };
+    for request in [
+        ReconfigureRequest::Stop {
+            from: NodeId(4),
+            generation: g(0),
+            after: None,
+        },
+        ReconfigureRequest::Stop {
+            from: NodeId(4),
+            generation: g(0),
+            after: Some(JournalId(0xB3)),
+        },
+        ReconfigureRequest::Bootstrap {
+            from: NodeId(4),
+            bootstrap: bootstrap.clone(),
+        },
+        ReconfigureRequest::Bootstrap {
+            from: NodeId(4),
+            bootstrap: later,
+        },
+        ReconfigureRequest::DecreePrepare {
+            from: NodeId(4),
+            generation: g(0),
+            ballot: ballot(1, 4),
+        },
+        ReconfigureRequest::DecreeAccept {
+            from: NodeId(4),
+            generation: g(0),
+            ballot: ballot(1, 4),
+            members: vec![MatchmakerId(0), MatchmakerId(1), MatchmakerId(3)],
+        },
+        ReconfigureRequest::Chosen {
+            from: NodeId(4),
+            generation: g(0),
+            successor: set(1, &[0, 1, 3]),
+        },
+    ] {
+        let wire = super::matchmaker_codec::wire_reconfigure_request(addressed, &request);
+        let decoded =
+            super::WireReconfigureRequest::decode(wire.encode_to_vec().as_slice()).expect("decode");
+        assert_eq!(
+            super::matchmaker_codec::reconfigure_request_from_wire(decoded).expect("request"),
+            (addressed, request)
+        );
+    }
+    for reply in [
+        ReconfigureReply::Stopped {
+            matchmaker: MatchmakerId(1),
+            generation: g(0),
+            after: None,
+            next: None,
+            registries: registries.clone(),
+            successor: Some(set(1, &[0, 1, 3])),
+            decree_promised: ballot(3, 2),
+        },
+        ReconfigureReply::Stopped {
+            matchmaker: MatchmakerId(1),
+            generation: g(0),
+            after: Some(JournalId(0xA1)),
+            next: Some(JournalId(0xB3)),
+            registries,
+            successor: None,
+            decree_promised: ballot(3, 2),
+        },
+        ReconfigureReply::Bootstrapped {
+            matchmaker: MatchmakerId(3),
+            set: set(1, &[0, 1, 3]),
+            held: Some(JournalId(0xB3)),
+            complete: true,
+        },
+        ReconfigureReply::Bootstrapped {
+            matchmaker: MatchmakerId(3),
+            set: set(1, &[0, 1, 3]),
+            held: None,
+            complete: false,
+        },
+        ReconfigureReply::Promised {
+            matchmaker: MatchmakerId(1),
+            generation: g(0),
+            ballot: ballot(1, 4),
+            vote: Some((ballot(1, 2), vec![MatchmakerId(1), MatchmakerId(2)])),
+        },
+        ReconfigureReply::Promised {
+            matchmaker: MatchmakerId(1),
+            generation: g(0),
+            ballot: ballot(1, 4),
+            vote: None,
+        },
+        ReconfigureReply::Accepted {
+            matchmaker: MatchmakerId(1),
+            generation: g(0),
+            ballot: ballot(1, 4),
+        },
+        ReconfigureReply::Nacked {
+            matchmaker: MatchmakerId(1),
+            generation: g(0),
+            ballot: ballot(1, 4),
+            promised: ballot(2, 5),
+        },
+        ReconfigureReply::Learned {
+            matchmaker: MatchmakerId(1),
+            generation: g(0),
+            activated: true,
+            at: g(1),
+        },
+        ReconfigureReply::Refused {
+            matchmaker: MatchmakerId(1),
+            current: set(2, &[1, 5]),
+            phase: MatchmakerPhase::Stopped,
+            successor: Some(set(3, &[5, 6])),
+        },
+    ] {
+        let wire = super::matchmaker_codec::wire_reconfigure_reply(&reply);
+        let decoded =
+            super::WireReconfigureReply::decode(wire.encode_to_vec().as_slice()).expect("decode");
+        assert_eq!(
+            super::matchmaker_codec::reconfigure_reply_from_wire(decoded).expect("reply"),
+            reply
+        );
+    }
+}
+
+/// A page cursor names a journal (#439): journal `0` is unset, so a cursor
+/// that names it is malformed, never the first page.
+#[test]
+fn a_page_cursor_of_journal_zero_is_refused() {
+    use super::matchmaker::reconfigure_reply::Kind as ReplyKind;
+    use super::matchmaker::reconfigure_request::Kind as RequestKind;
+    use paros_core::journal::{JournalId, TenantId};
+    use paros_core::matchmaker::{ReconfigureReply, ReconfigureRequest};
+    use paros_core::membership::{MatchmakerGeneration as g, MatchmakerId, MatchmakerSet};
+    let set = |generation: u64, members: &[u64]| {
+        MatchmakerSet::new(
+            g(generation),
+            members.iter().copied().map(MatchmakerId).collect(),
+        )
+    };
+    let addressed = super::Addressed {
+        cell_id: 0xD4,
+        tenant: TenantId(0xA1),
+        to: MatchmakerId(1),
+    };
+    let stop = ReconfigureRequest::Stop {
+        from: NodeId(4),
+        generation: g(0),
+        after: Some(JournalId(9)),
+    };
+    let mut wire = super::matchmaker_codec::wire_reconfigure_request(addressed, &stop);
+    assert!(super::matchmaker_codec::reconfigure_request_from_wire(wire.clone()).is_ok());
+    let Some(RequestKind::Stop(inner)) = wire.kind.as_mut() else {
+        unreachable!("a Stop encodes as a Stop")
+    };
+    inner.after = Some(0);
+    assert!(super::matchmaker_codec::reconfigure_request_from_wire(wire).is_err());
+    let ack = ReconfigureReply::Bootstrapped {
+        matchmaker: MatchmakerId(3),
+        set: set(1, &[0, 1, 3]),
+        held: Some(JournalId(9)),
+        complete: false,
+    };
+    let mut wire = super::matchmaker_codec::wire_reconfigure_reply(&ack);
+    assert!(super::matchmaker_codec::reconfigure_reply_from_wire(wire.clone()).is_ok());
+    let Some(ReplyKind::Bootstrapped(inner)) = wire.kind.as_mut() else {
+        unreachable!("a Bootstrapped encodes as a Bootstrapped")
+    };
+    inner.held = Some(0);
+    assert!(super::matchmaker_codec::reconfigure_reply_from_wire(wire).is_err());
+}
+
+/// The `leader` field of an `Accept` is absent from the wire whenever it
+/// would merely repeat the reply address — which is every message paros
+/// sends today, on a plain deployment and on a matchmaker one alike. This
+/// pins the encoding against the day a proxied Phase 2 starts populating
+/// it. (A `Prepare` has no such field: Phase 1 is never proxied.)
+#[test]
+fn a_leader_that_is_the_reply_address_stays_off_the_wire() {
+    use super::internal::consensus_message::Kind;
+
+    for msg in every_variant() {
+        let wire = super::message_to_proto(&msg).expect("encode protobuf DTO");
+        if let (
+            Message::Accept {
+                reply_to, leader, ..
+            },
+            Some(Kind::Accept(wire)),
+        ) = (msg, wire.kind)
+        {
+            assert_eq!(wire.leader.is_none(), reply_to == Party::Node(leader));
+        }
+    }
+}
+
+/// Every domain variant must round-trip through the typed protobuf contract
+/// losslessly before the driver is allowed to put it on the wire.
+#[test]
+fn message_protobuf_round_trips() {
+    for msg in every_variant() {
+        let wire = super::message_to_proto(&msg).expect("encode protobuf DTO");
+        let bytes = wire.encode_to_vec();
+        let decoded = super::internal::ConsensusMessage::decode(bytes.as_slice())
+            .expect("decode protobuf bytes");
+        let back = message_from_proto(decoded).expect("decode protobuf DTO");
+        assert_eq!(
+            msg, back,
+            "protobuf round-trip must be lossless for {msg:?}"
+        );
+    }
+}
+
+/// A labeled configuration owned by a cell (#215 (zones)) crosses the wire
+/// unchanged, and labels that are not one per member are refused, never a
+/// panic.
+#[test]
+fn a_labeled_configuration_round_trips_and_bad_labels_are_refused() {
+    use paros_core::membership::{AcceptorConfig, FailureDomain, QuorumSystem};
+
+    use super::codec::{config_from_proto, config_to_proto};
+
+    let zone = |az: &str| FailureDomain::new("eu-west-1", az);
+    let config = AcceptorConfig::zoned(
+        vec![
+            (NodeId(9), zone("c")),
+            (NodeId(3), zone("a")),
+            (NodeId(5), zone("b")),
+        ],
+        QuorumSystem::Majority,
+    )
+    .with_cell(42);
+    let wire = config_to_proto(&config);
+    assert_eq!(wire.members, vec![3, 5, 9], "members go sorted");
+    assert_eq!(wire.domains.len(), 3, "one label per member");
+    assert_eq!(wire.cell_id, 42);
+    let back = config_from_proto(Some(wire.clone()))
+        .expect("decodes")
+        .expect("present");
+    assert_eq!(back, config);
+    assert!(back.zone_rule().holds());
+
+    // An unlabeled configuration stays byte-identical to before.
+    let plain = AcceptorConfig::new(
+        vec![NodeId(1), NodeId(2), NodeId(3)],
+        QuorumSystem::Majority,
+    );
+    let plain_wire = config_to_proto(&plain);
+    assert!(plain_wire.domains.is_empty() && plain_wire.cell_id == 0);
+    assert_eq!(
+        plain_wire.encode_to_vec(),
+        common::AcceptorConfig {
+            members: vec![1, 2, 3],
+            ..Default::default()
+        }
+        .encode_to_vec()
+    );
+
+    let mut short = wire.clone();
+    short.domains.pop();
+    assert!(config_from_proto(Some(short)).is_err(), "a missing label");
+    let mut twice = wire.clone();
+    twice.members = vec![3, 3, 9];
+    assert!(
+        config_from_proto(Some(twice)).is_err(),
+        "one member, two labels"
+    );
+    let mut long = wire;
+    long.domains[0].az = "z".repeat(paros_core::membership::MAX_FAILURE_DOMAIN_BYTES + 1);
+    assert!(config_from_proto(Some(long)).is_err(), "a name too long");
+}

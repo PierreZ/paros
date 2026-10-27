@@ -1,0 +1,555 @@
+//! **Quorum reads** (#143, Compartmentalized Paxos §3.4, *Paxos Quorum
+//! Reads*): a linearizable read that never touches the leader and never
+//! reads a clock.
+//!
+//! A reader asks a **Phase-1** quorum of acceptors — one row of a grid, the
+//! whole membership under a majority or a flexible split — for their *vote
+//! watermarks* ([`crate::acceptor::Acceptor::vote_watermark`]: the highest
+//! slot each has voted in), takes the **maximum**, and has any one replica
+//! serve the read once that replica has applied that index
+//! ([`crate::replica::Replica::covers`]). This module is the tally: a
+//! [`QuorumRead`] folds the answers of one row and completes on
+//! [`AcceptorConfig::has_phase1_quorum_in`]; [`QuorumReads`] holds every
+//! read a node has open, bounded by a TTL. It reads no wire and knows no role — the node's
+//! `node/quorum_reads.rs` is the wiring that feeds it and acts on its
+//! answers, on **any** node: leader, follower, spare.
+//!
+//! # Safety, written down
+//!
+//! A write acked before the read began was chosen by a full Phase-2 quorum
+//! `Q2` of the configuration in force at some slot `s`. The read's Phase-1
+//! quorum `Q1` intersects `Q2` ([`crate::membership::QuorumSystem::cross_intersects`] —
+//! under a grid, a row meets every column in one cell), so some acceptor in
+//! `Q1` voted `s` and its watermark is at least `s`; the maximum over `Q1`
+//! is therefore at least `s`, and the replica serves only after applying
+//! `s`. Every write acked before the read is thus visible to it, which is
+//! the read half of linearizability (§3.5's case analysis); the write half
+//! is the leader's, unchanged. **No clock anywhere**: the paper's read
+//! leases (§9) assume clock synchrony, and this rung refuses exactly that.
+//!
+//! The liveness trade is the mirror image: a watermark raised by an accept
+//! that never decided (a slot the leader started and abandoned) makes the
+//! replica wait for the next leader's gap fill, and the read expires
+//! [`Ambiguous`](crate::ColocatedNode::quorum_read) at the client. A
+//! learner-only record raises the watermark too (paros records a chosen
+//! value as the authoritative accepted record), which is conservative in the
+//! same direction — a longer wait, never a stale answer.
+//!
+//! # One configuration at a time, and which one (#260)
+//!
+//! The argument above is made within **one configuration**: the row asked
+//! and the column that chose the write are of the same grid. A read is
+//! therefore bound to the configuration it was opened against (the tally
+//! snapshots it, as a round records its column), and a node **abandons**
+//! every open read the moment it learns a newer configuration — the row it
+//! asked need not intersect the successor's columns. A `PreReadAck` also
+//! carries the answering node's configuration ballot on a matchmaker
+//! deployment, so a read whose row already knows of a successor abandons on
+//! the first such answer rather than completing over a superseded belief.
+//! That catch needs the read's row to meet the successor's Phase-1 quorum
+//! in the old configuration: true under a majority and under the flexible
+//! splits the simulation draws (`q1 > n / 2`), not under every flexible
+//! split the library admits (Flexible Paxos never asks two Phase-1 quorums
+//! to meet), and not for a grid row *wholly* unaware of a completed
+//! successor — those reads are judged by the client-history linearizability
+//! oracle and the audit's read floor, the sweep's finding, not this
+//! module's claim. A rebooted acceptor answers no `PreRead` until it has
+//! heard what is in force, or its answer would name a ballot it forgot.
+//!
+//! *Which* configuration is the [`ReadBasis`]: never a node's belief as a
+//! `Prepare` moved it, because a campaign may never finish and every
+//! configuration in its `H_b` may still hold slots its own quorums never
+//! voted. The #260 witness: a leader under `{0, 1, 3}` with `q2 = 1` chose
+//! a slot with its own vote, campaigned at the next ballot with
+//! `{0, 2, 3}` and died; an acceptor that promised that `Prepare` served
+//! reads over a majority `{2, 3}` of the new configuration and missed the
+//! slot for a second. The basis is learned only from a leadership that won
+//! its ballot (its election, its handoff install, its beat), with that
+//! leadership's fence — everything an earlier configuration chose sits at
+//! or below it (the Phase 1 that won covered every configuration in
+//! `H_b`) — and a read is served at `max(watermark, fence)`. A node whose
+//! belief moved above its basis opens no read until the new leadership's
+//! beat arrives: reads are unavailable during a campaign, never stale.
+//!
+//! # What is deliberately not here (§3.6)
+//!
+//! Sequentially and eventually consistent reads are client-side watermark
+//! bookkeeping over the same `Read` — a client that remembers the highest
+//! index it has written or read and asks a replica for at least that — and
+//! involve no acceptor at all. They are workload-only, judged by the client
+//! history's linearizability search (#205), and are not built in the core.
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use crate::membership::AcceptorConfig;
+use crate::types::{Ballot, Slot};
+
+/// The **read basis** (#260): the configuration a node's quorum reads are
+/// judged over, the ballot it is bound to, and the fence of the leadership
+/// that put it in force — everything a Phase 1 of that ballot could have
+/// found chosen under an earlier configuration sits at or below the fence.
+///
+/// On a matchmaker deployment a node's *belief* moves on a `Prepare`, a
+/// campaign that may never finish, while an older configuration in `H_b`
+/// still holds slots the new one's quorums never voted. A read judged over
+/// such a belief misses them (the #260 witness: a slot chosen by `{0}` under
+/// `q2 = 1`, a read served by `{2, 3}` of the campaign's majority). A basis
+/// is therefore learned only from a leadership that **won** its ballot — its
+/// own election or handoff install, or its beat — and a read served under
+/// it covers `max(watermark, fence)`: the fence for what earlier
+/// configurations chose, the row's watermark for what this ballot chose. On
+/// plain Multi-Paxos the basis is the static configuration with no fence.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReadBasis<Id> {
+    /// The configuration reads are judged over.
+    pub config: AcceptorConfig<Id>,
+    /// The ballot `config` is bound to: an answer naming a higher one
+    /// supersedes the read.
+    pub since: Ballot,
+    /// The winning leadership's fence (`None`: nothing below it).
+    pub fence: Option<Slot>,
+}
+
+/// What folding a [`crate::Message::PreReadAck`] did to a read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PreReadFold {
+    /// No read open at that token, or the sender already answered.
+    Ignored,
+    /// The answer was counted toward the read's row.
+    Counted,
+    /// The answer named a configuration newer than the one the read was
+    /// opened against: the read is abandoned, whole.
+    Superseded,
+}
+
+/// Where one quorum read stands.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Stage {
+    /// Collecting watermarks from the row.
+    Tallying,
+    /// The row answered: the read index is the maximum watermark, and the
+    /// read waits for the replica to cover it.
+    Confirmed {
+        /// The maximum watermark over the row (`None`: nobody voted yet).
+        index: Option<Slot>,
+    },
+}
+
+/// One in-flight quorum read: the row it was addressed to, the
+/// configuration it is judged over, and the watermarks folded so far.
+#[derive(Clone, Debug)]
+pub struct QuorumRead<Id> {
+    /// The reader's correlation token.
+    ctx: u64,
+    /// The row this read was addressed to ([`AcceptorConfig::row_of`]);
+    /// `None` when the quorum system names no row.
+    row: Option<usize>,
+    /// The configuration the read was opened against and is judged over —
+    /// snapshotted, as a round records its column, so a belief that moves
+    /// underneath the read cannot change what quorum it needs.
+    config: AcceptorConfig<Id>,
+    /// The ballot `config` was bound to at the reader; an answer naming a
+    /// higher one supersedes the read.
+    config_since: Ballot,
+    /// The basis's fence ([`ReadBasis::fence`]): the read is served only
+    /// once the replica covers it as well as the row's maximum.
+    fence: Option<Slot>,
+    /// The watermark each answering acceptor reported.
+    watermarks: BTreeMap<Id, Option<Slot>>,
+    /// Tick the read was opened on, for TTL garbage collection.
+    created_tick: u64,
+    stage: Stage,
+}
+
+impl<Id: Copy + Ord> QuorumRead<Id> {
+    /// The reader's correlation token.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
+    #[must_use]
+    pub fn ctx(&self) -> u64 {
+        // A read's row is one its configuration has.
+        assert!(
+            self.config.admits_read_row(self.row),
+            "a read asks a row of its configuration"
+        );
+        self.ctx
+    }
+
+    /// The row this read was addressed to (`None`: no row).
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
+    #[must_use]
+    pub fn row(&self) -> Option<usize> {
+        assert!(
+            self.config.admits_read_row(self.row),
+            "a read asks a row of its configuration"
+        );
+        self.row
+    }
+
+    /// The configuration the read is judged over.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
+    #[must_use]
+    pub fn config(&self) -> &AcceptorConfig<Id> {
+        assert!(
+            self.config.is_well_formed(),
+            "a read is judged over a well-formed configuration"
+        );
+        &self.config
+    }
+
+    /// The acceptors that have answered, with the watermark each reported.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
+    #[must_use]
+    pub fn watermarks(&self) -> &BTreeMap<Id, Option<Slot>> {
+        // The row guard's read-back: every counted watermark is the row's.
+        assert!(
+            self.watermarks
+                .keys()
+                .all(|id| self.config.is_phase1_addressee(*id, self.row)),
+            "every counted watermark comes from the read's row"
+        );
+        &self.watermarks
+    }
+
+    /// The read index, once the row answered: the maximum watermark over
+    /// the quorum. `None` while still tallying.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
+    #[must_use]
+    pub fn confirmed_index(&self) -> Option<Option<Slot>> {
+        let confirmed = match self.stage {
+            Stage::Tallying => None,
+            Stage::Confirmed { index } => Some(index),
+        };
+        // A confirmed read's tally is frozen: its index is still the maximum
+        // of the watermarks that confirmed it.
+        if let Some(index) = confirmed {
+            assert!(
+                index == self.max_watermark(),
+                "a confirmed index is the row's maximum"
+            );
+        }
+        confirmed
+    }
+
+    /// The maximum watermark over the answers so far — what the read index
+    /// becomes the moment the row is whole.
+    fn max_watermark(&self) -> Option<Slot> {
+        let max = self.watermarks.values().copied().flatten().max();
+        assert!(
+            self.watermarks.values().all(|w| *w <= max),
+            "the read index covers every watermark the row reported"
+        );
+        max
+    }
+}
+
+/// Every quorum read a node has open, in creation order (see the module
+/// doc). Generic over the acceptor identity like every tally in the crate.
+#[derive(Clone, Debug)]
+pub struct QuorumReads<Id> {
+    reads: Vec<QuorumRead<Id>>,
+}
+
+impl<Id> Default for QuorumReads<Id> {
+    fn default() -> Self {
+        Self { reads: Vec::new() }
+    }
+}
+
+impl<Id: Copy + Ord> QuorumReads<Id> {
+    /// No read open.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The open reads, in creation order.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
+    #[must_use]
+    pub fn pending(&self) -> &[QuorumRead<Id>] {
+        // Every token is opened at most once.
+        assert!(
+            self.reads
+                .iter()
+                .enumerate()
+                .all(|(i, r)| self.reads[..i].iter().all(|o| o.ctx != r.ctx)),
+            "a read token is open at most once"
+        );
+        &self.reads
+    }
+
+    /// Whether no read is open.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.reads.is_empty()
+    }
+
+    /// Open a read at `ctx` against `row` of `config` (bound to the reader
+    /// at `config_since`) — the row [`AcceptorConfig::row_of`] derives for
+    /// `ctx`, or one the caller chose ([`AcceptorConfig::read_row`]) — seeded
+    /// with the reader's own watermark when it is itself an addressee of
+    /// that row (`own: Some((me, watermark))`). Returns the addressees the
+    /// caller sends `PreRead` to — the row minus the reader itself.
+    ///
+    /// # Panics
+    ///
+    /// If a read is already open at `ctx` (the driver's token is unique per
+    /// read, so a second open at one token is a programmer error), or if
+    /// `row` is not a row of `config`'s quorum system (a row under a
+    /// majority or a flexible split, or one past a grid's last).
+    pub fn open(
+        &mut self,
+        ctx: u64,
+        row: Option<usize>,
+        basis: ReadBasis<Id>,
+        created_tick: u64,
+        own: Option<(Id, Option<Slot>)>,
+    ) -> Vec<Id> {
+        let ReadBasis {
+            config,
+            since: config_since,
+            fence,
+        } = basis;
+        assert!(
+            self.reads.iter().all(|r| r.ctx != ctx),
+            "a quorum read token is opened at most once"
+        );
+        assert!(
+            config.admits_read_row(row),
+            "a quorum read is opened against a row of its configuration"
+        );
+        let mut watermarks = BTreeMap::new();
+        let mut addressees = config.phase1_addressees(row);
+        if let Some((me, watermark)) = own {
+            assert!(
+                config.is_phase1_addressee(me, row),
+                "a reader seeds its own watermark only as an addressee of the row"
+            );
+            watermarks.insert(me, watermark);
+            addressees.retain(|id| *id != me);
+        }
+        let open = self.reads.len();
+        self.reads.push(QuorumRead {
+            ctx,
+            row,
+            config,
+            config_since,
+            fence,
+            watermarks,
+            created_tick,
+            stage: Stage::Tallying,
+        });
+        // The reader never addresses itself, and the read is tallying.
+        if let Some((me, _)) = own {
+            assert!(!addressees.contains(&me), "a reader never pre-reads itself");
+        }
+        assert!(
+            self.reads.len() == open + 1,
+            "opening adds exactly one read"
+        );
+        addressees
+    }
+
+    /// Fold `from`'s watermark into the read at `ctx`. The row guard is the
+    /// tally's own, as the Phase-2 column guard is
+    /// ([`crate::proposer::Proposer::fold_accepted_in`]): an answer from
+    /// outside the read's row, over the configuration the read was opened
+    /// against ([`AcceptorConfig::is_phase1_addressee`]), is ignored before
+    /// anything else, so it can neither be counted nor abandon the read. A
+    /// sender already counted is ignored. `config_since` is the
+    /// configuration ballot the answer named (`None` on a plain
+    /// deployment): one above the read's abandons it — the row asked need
+    /// not intersect the successor's columns.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
+    pub fn fold(
+        &mut self,
+        ctx: u64,
+        from: Id,
+        watermark: Option<Slot>,
+        config_since: Option<Ballot>,
+    ) -> PreReadFold {
+        let Some(position) = self.reads.iter().position(|r| r.ctx == ctx) else {
+            return PreReadFold::Ignored;
+        };
+        if !self.reads[position]
+            .config
+            .is_phase1_addressee(from, self.reads[position].row)
+        {
+            return PreReadFold::Ignored;
+        }
+        if config_since.is_some_and(|since| since > self.reads[position].config_since) {
+            self.reads.remove(position);
+            probe!(
+                reachable,
+                "quorum read: a pre-read ack from a newer configuration abandons the read"
+            );
+            return PreReadFold::Superseded;
+        }
+        let read = &mut self.reads[position];
+        if read.stage != Stage::Tallying || read.watermarks.contains_key(&from) {
+            return PreReadFold::Ignored;
+        }
+        read.watermarks.insert(from, watermark);
+        assert!(
+            read.watermarks.get(&from) == Some(&watermark),
+            "a counted watermark is the one reported"
+        );
+        assert!(read.stage == Stage::Tallying, "only a tallying read counts");
+        PreReadFold::Counted
+    }
+
+    /// Abandon every read opened against a configuration bound below
+    /// `config_since`: the reader learned a newer configuration, and a read
+    /// over the superseded one may never complete.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
+    pub fn abandon_superseded(&mut self, config_since: Ballot) {
+        self.reads.retain(|r| r.config_since >= config_since);
+        assert!(
+            self.reads.iter().all(|r| r.config_since >= config_since),
+            "no read opened under a superseded configuration survives"
+        );
+    }
+
+    /// Advance every read: a tallying read whose row is whole (a Phase-1
+    /// quorum of its configuration **in its row**) confirms at the maximum
+    /// watermark, and a confirmed read whose index — that maximum, raised to
+    /// its basis's fence — `covered` (the replica's answer, "applied at or
+    /// past this index") is served. Returns the served `(ctx, index)` pairs
+    /// in creation order and drops them.
+    ///
+    /// # Panics
+    ///
+    /// If a vote behind a confirmation came from outside the read's row:
+    /// [`QuorumReads::fold`]'s row guard refuses any other sender, restated
+    /// here so the quorum predicate is never fed an id that is not one of
+    /// the row's.
+    pub fn serve(&mut self, covered: impl Fn(Option<Slot>) -> bool) -> Vec<(u64, Option<Slot>)> {
+        let mut served = Vec::new();
+        self.reads.retain_mut(|read| {
+            if read.stage == Stage::Tallying {
+                let answered: BTreeSet<Id> = read.watermarks.keys().copied().collect();
+                if !read.config.has_phase1_quorum_in(&answered, read.row) {
+                    return true;
+                }
+                assert!(
+                    answered
+                        .iter()
+                        .all(|id| read.config.is_phase1_addressee(*id, read.row)),
+                    "every watermark behind a quorum read comes from the read's row"
+                );
+                read.stage = Stage::Confirmed {
+                    index: read.max_watermark(),
+                };
+            }
+            let Stage::Confirmed { index } = read.stage else {
+                unreachable!("a read past the tally is confirmed");
+            };
+            // The basis's fence stands for every earlier configuration the
+            // row cannot speak for (#260): the read waits on both. A cause,
+            // not an outcome, and marginal (`gates::RARE`): a reachable, so a
+            // sweep that misses it is excused rather than failed at 0 %.
+            if read.fence > index {
+                probe!(
+                    reachable,
+                    "quorum read: a read waits on its basis fence above the row's watermark"
+                );
+            }
+            let index = index.max(read.fence);
+            assert!(
+                index >= read.fence,
+                "a served read covers its basis's fence"
+            );
+            if !covered(index) {
+                return true;
+            }
+            served.push((read.ctx, index));
+            false
+        });
+        // A served read leaves the tally: it surfaces exactly once.
+        assert!(
+            served
+                .iter()
+                .all(|(ctx, _)| self.reads.iter().all(|r| r.ctx != *ctx)),
+            "a served read is no longer pending"
+        );
+        served
+    }
+
+    /// Drop every read older than `ttl` ticks at `now` (a row that never
+    /// answered whole, a watermark the replica never reached). Dropped
+    /// silently: the read carries no
+    /// durable obligation, and the driver owns the client reply.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
+    pub fn expire(&mut self, now: u64, ttl: u64) {
+        let before = self.reads.len();
+        self.reads
+            .retain(|r| now.saturating_sub(r.created_tick) <= ttl);
+        probe!(
+            sometimes,
+            self.reads.len() < before,
+            "quorum read: the core drops a read that outlived its window"
+        );
+        assert!(
+            self.reads
+                .iter()
+                .all(|r| now.saturating_sub(r.created_tick) <= ttl),
+            "no read outlives its window"
+        );
+        assert!(
+            self.reads.iter().all(|r| r.created_tick <= now),
+            "no read was opened in the future"
+        );
+    }
+}
+
+/// A served quorum read, surfaced via [`crate::Ready::read_states`]: a whole row
+/// answered the read's `PreRead` with vote watermarks whose maximum is
+/// `index`, and this node's chosen prefix covered `index` by the time it
+/// surfaced — the linearization point a read at `ctx` observes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReadState {
+    /// The driver-supplied correlation token from [`crate::ColocatedNode::quorum_read`].
+    pub ctx: u64,
+    /// The read index: the maximum vote watermark the read's row reported
+    /// (`None` = empty prefix). The node's chosen index is at or past it
+    /// when it surfaces.
+    pub index: Option<Slot>,
+}
+
+#[cfg(test)]
+mod tests;

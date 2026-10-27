@@ -13,7 +13,7 @@ agents; fall back to the source, never to memory.
    end-to-end agent guide and names the API anchors (`SimulationBuilder`,
    `Process`, `Workload`, `SimContext`, `Invariant`, the assertion and
    Buggify macros). If the fetch is blocked, locate the pinned checkout:
-   read the `rev` from `crates/paros/Cargo.toml`, then look under
+   read the `rev` from `crates/lib/paros/Cargo.toml`, then look under
    `~/.cargo/git/checkouts/moonpool-*/<rev-prefix>/` for `book/src/llms.md`,
    `AGENTS.md`, and the crate sources (`crates/moonpool-sim/src/runner/builder.rs`
    for the builder, `runner/process.rs`, `runner/workload.rs`,

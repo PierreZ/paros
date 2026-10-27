@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 #
-# The paros image (#196): `parosd` and `parosctl` in a slim runtime. A plain
+# The paros image (#196): `parosd`, `parosctl` and `paros-bench` in a slim runtime. A plain
 # multi-stage Rust build, not Nix `dockerTools`, so a fresh clone runs with
 # `docker compose` alone — the one documented exception to the repository's
 # Nix-only tooling (AGENTS.md). The builder's Rust version must equal the
@@ -10,7 +10,7 @@ ARG RUST_VERSION=1.99.1
 
 FROM rust:${RUST_VERSION}-slim-bookworm AS builder
 ARG RUST_VERSION
-# `crates/paros/build.rs` compiles the wire contract with prost-build.
+# `crates/lib/paros-wire/build.rs` compiles the wire contract with prost-build.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends protobuf-compiler \
  && rm -rf /var/lib/apt/lists/*
@@ -24,14 +24,14 @@ COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/src/target \
-    cargo build --release -p parosd \
- && cp target/release/parosd target/release/parosctl target/release/paros-frontend /usr/local/bin/
+    cargo build --release -p parosd -p parosctl -p paros-bench \
+ && cp target/release/parosd target/release/parosctl target/release/paros-bench /usr/local/bin/
 
 FROM debian:bookworm-slim
 RUN useradd --system --uid 10001 --home-dir /var/lib/paros paros \
  && mkdir -p /var/lib/paros \
  && chown paros:paros /var/lib/paros
-COPY --from=builder /usr/local/bin/parosd /usr/local/bin/parosctl /usr/local/bin/paros-frontend /usr/local/bin/
+COPY --from=builder /usr/local/bin/parosd /usr/local/bin/parosctl /usr/local/bin/paros-bench /usr/local/bin/
 USER paros
 # A named volume mounted here takes the directory's ownership on first use.
 VOLUME ["/var/lib/paros"]
