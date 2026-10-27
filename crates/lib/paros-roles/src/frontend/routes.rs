@@ -30,7 +30,9 @@ use paros_client::names::{
     JournalNames, JournalResolution, TenantResolution, Unreadable, resolve_journal, tenant_in,
 };
 use paros_client::{Client, Server};
+use paros_model::address::Address;
 use paros_model::fleet::{FleetDirectory, RootKeyEntry};
+use paros_model::machine::Class;
 use paros_model::name::JournalName;
 use paros_model::registry::Registry;
 use paros_net::NodeClient;
@@ -194,23 +196,44 @@ where
         })
         .collect();
     assert_eq!(servers.len(), count, "every server that answered is called");
-    let mut client = Client::new(&shared.providers, servers, settings.client).rotating_over(count);
+    let mut client =
+        Client::new(&shared.providers, servers.clone(), settings.client).rotating_over(count);
     // A harness observes the calls the frontend forwards, as it observes
     // its own clients' (`Audit::call_observer`); production observes none.
     if let Some(observer) = shared.audit.call_observer() {
         client = client.with_observer(observer);
+    }
+    // The cell's registry: every machine it admitted, and the universe its
+    // join points at (#232 (multiple cells)).
+    let genesis = servers_ids(&client);
+    let mut registry = Folder::new(Registry::new(genesis));
+    let loaded = load(&mut registry, journals.cell, &client, 0, 0).await;
+    let registry = matches!(loaded, LoadOutcome::Loaded { .. }).then(|| registry.state().clone());
+    // Every other storage machine of the cell, at the address it
+    // registered (#700 (a journal with a slot on an admitted machine never
+    // elects a leader)): a journal placed on admitted machines, or led from
+    // one, is reached there, and so is a founding member that did not
+    // answer at the address the frontend was given. The rotation starts on
+    // the founding members that answered.
+    if let Some(registry) = &registry {
+        let registered = registered_servers(&rpc, settings, &client, registry);
+        if !registered.is_empty() {
+            moonpool_assertions::reachable!(
+                "frontend: the frontend learns a machine from the registry"
+            );
+            let mut all = servers;
+            all.extend(registered);
+            client = client.with_servers(all).rotating_over(count);
+        }
     }
     // The cell's own universe directory, else the one its join points at
     // (#232 (multiple cells)): read from the cell control journal.
     let (universe, reader) = if let Some(universe) = journals.fleet {
         (universe, client.clone())
     } else {
-        let genesis = servers_ids(&client);
-        let mut registry = Folder::new(Registry::new(genesis));
-        let loaded = load(&mut registry, journals.cell, &client, 0, 0).await;
-        let pointer = registry.state().universe().cloned();
+        let pointer = registry.as_ref().and_then(|r| r.universe().cloned());
         // An idle cell that joined no universe yet fronts nothing.
-        let (LoadOutcome::Loaded { .. }, Some(pointer)) = (loaded, pointer) else {
+        let Some(pointer) = pointer else {
             moonpool_assertions::reachable!("frontend: the cell hosts no universe tenant yet");
             return None;
         };
@@ -230,6 +253,34 @@ where
         reader,
     });
     Some(cell.clone())
+}
+
+/// A server for every `storage` machine `registry` holds that is not one of
+/// `client`'s, at the address it registered last: an admitted machine, or
+/// a founding member that did not answer at its first address (a moved or
+/// renamed one). A retired machine has no address.
+fn registered_servers<P: ParosProviders>(
+    rpc: &RpcHandle<P>,
+    settings: &super::FrontendSettings,
+    client: &Client<P>,
+    registry: &Registry,
+) -> Vec<Server<P>> {
+    let servers: Vec<Server<P>> = registry
+        .nodes()
+        .filter(|(id, node)| node.class == Class::Storage && client.index_of(id.0).is_none())
+        .filter_map(|(id, _)| {
+            let address = Address::parse(registry.address(id)?).ok()?;
+            Some(Server {
+                id: id.0,
+                node: NodeClient::named(rpc, settings.names.clone(), address),
+            })
+        })
+        .collect();
+    assert!(
+        servers.iter().all(|s| client.index_of(s.id).is_none()),
+        "a registered server is not one the frontend knows"
+    );
+    servers
 }
 
 /// The ids of `client`'s servers: the genesis pool a fold of the cell

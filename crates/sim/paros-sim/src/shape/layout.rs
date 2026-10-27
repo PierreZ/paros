@@ -8,9 +8,9 @@ use paros::storage::journal::JournalStoreConfig;
 
 use crate::shape::registry;
 use crate::shape::scenarios::{
-    batched_journals, batched_journals_among, batchers, changed_mode, cold_rot, downed_founder,
-    drained_machine, lagging_fold, moved_founder, paged_handover, replaced_founder, second_cell,
-    slow_link, zone_outage,
+    admitted_slot, batched_journals, batched_journals_among, batchers, changed_mode, cold_rot,
+    downed_founder, drained_machine, lagging_fold, moved_founder, paged_handover, replaced_founder,
+    second_cell, slow_link, zone_outage,
 };
 
 /// What a joiner registers as (#211): its class and its capacity.
@@ -453,6 +453,9 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
     let rotted = cold_rot(state);
     let second = second_cell(state);
     let batchers = batchers(state) && count >= 3;
+    // The admitted-slot scenario (#700): three founders, and a fourth
+    // storage machine admitted after `init`.
+    let admitted = admitted_slot(state) && count >= 4;
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     guard
@@ -485,7 +488,7 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
             let reserve = second && count > if drained || batchers { 3 } else { least };
             let founders = if count == 0 {
                 0
-            } else if zoned {
+            } else if zoned || admitted {
                 3
             } else if drained || batchers {
                 // The drained-machine scenario: one founding member, and
@@ -505,7 +508,7 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
             // may list, so the `stateless` ones serve before `ADMIT` runs.
             let listed = if batchers && moonpool_sim::sim_random_bool(0.5) {
                 room
-            } else if founders % 2 == 1 && founders < room && !drained {
+            } else if founders % 2 == 1 && founders < room && !drained && !admitted {
                 if moonpool_sim::sim_random_bool(0.5) {
                     moonpool_sim::sim_random_range(founders + 1..room + 1)
                 } else {
@@ -537,7 +540,7 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
             let machines = (0..count)
                 .map(|rank| {
                     // The founders, and the second cell's machine, store.
-                    let stores = rank < founders || rank >= room || drained;
+                    let stores = rank < founders || rank >= room || drained || admitted;
                     // The batchers scenario: the two machines past the
                     // founder are `stateless`.
                     let stateless = batchers && rank < founders + 2;

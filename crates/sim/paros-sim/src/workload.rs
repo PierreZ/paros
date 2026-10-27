@@ -698,6 +698,18 @@ impl ChainWorkload {
             }
             config.steps = config.steps.max(64);
         }
+        if crate::shape::admitted_slot(ctx.state()) {
+            // The admitted-slot scenario (#700 (a journal with a slot on an
+            // admitted machine never elects a leader)): the bug needs a
+            // machine admitted after `init`, and journals created after a
+            // tenant's set moved onto it, so every client admits machines,
+            // creates tenants and journals as often as the weight family
+            // allows, at the steps knob's top.
+            for op in [ADMIT, TENANT, CREATE_JOURNAL] {
+                config.weights[usize::from(op)] = OP_WEIGHT_CEILING;
+            }
+            config.steps = config.steps.max(64);
+        }
         if crate::shape::changed_mode(ctx.state()) {
             // The changed-mode scenario (#214 (tenant modes)): a mode change
             // needs tenants and their journals, and time to finish, so every
@@ -876,8 +888,10 @@ impl ChainWorkload {
         }
         // Likewise the drained-machine scenario's ops (#474 (journals on
         // admitted machines)), the slow-machine scenario's (#361 (slow
-        // machines)) and the batchers scenario's (#145 (batchers)).
+        // machines)), the batchers scenario's (#145 (batchers)) and the
+        // admitted-slot scenario's (#700).
         if crate::shape::drained_machine(ctx.state())
+            || crate::shape::admitted_slot(ctx.state())
             || crate::shape::slow_machine(ctx.state())
             || crate::shape::batchers(ctx.state())
         {
@@ -943,6 +957,7 @@ impl ChainWorkload {
         // The wiped-founder (#246), replaced-founder (#423), slow-machine
         // (#424), downed-founder (#213 (three founding members)),
         // drained-machine (#474), changed-mode (#214 (tenant modes)),
+        // admitted-slot (#700),
         // batched-journals (#599 (durability mode per journal)), batchers
         // (#145 (batchers)) and second-cell (#232 (multiple cells))
         // scenarios: client 0 runs
@@ -954,6 +969,7 @@ impl ChainWorkload {
                 || crate::shape::downed_founder(ctx.state())
                 || crate::shape::drained_machine(ctx.state())
                 || crate::shape::changed_mode(ctx.state())
+                || crate::shape::admitted_slot(ctx.state())
                 || crate::shape::zone_outage(ctx.state())
                 || crate::shape::cold_rot(ctx.state())
                 || crate::shape::batched_journals(ctx.state())

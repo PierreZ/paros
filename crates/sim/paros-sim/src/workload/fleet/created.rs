@@ -55,7 +55,7 @@ const PAGES: usize = 64;
 pub(super) const LONG_LOG: u64 = 64;
 
 /// The hash of each record of `records`, as the audit keeps them.
-fn hashes(records: &[Value]) -> Vec<u64> {
+pub(super) fn hashes(records: &[Value]) -> Vec<u64> {
     records
         .iter()
         .map(|record| user_command_hash(&record.0))
@@ -63,7 +63,7 @@ fn hashes(records: &[Value]) -> Vec<u64> {
 }
 
 /// Tell `audit` a write of `sent` is written at `[seq, seq + count)`.
-fn acked(audit: Option<&AuditWorld>, seq: u64, count: u64, sent: Vec<u64>) {
+pub(super) fn acked(audit: Option<&AuditWorld>, seq: u64, count: u64, sent: Vec<u64>) {
     if let Some(audit) = audit {
         audit.note_acked(AckedWrite {
             seq,
@@ -158,7 +158,7 @@ impl FleetOps {
 
     /// The records of one batch, drawn as the genesis journals' are
     /// (#658), registered with `audit` when there is one.
-    fn records(&self, audit: Option<&AuditWorld>) -> Vec<Value> {
+    pub(super) fn records(&self, audit: Option<&AuditWorld>) -> Vec<Value> {
         records_of(&self.config, audit)
     }
 
