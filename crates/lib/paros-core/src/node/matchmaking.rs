@@ -691,15 +691,30 @@ impl ColocatedNode {
         // better and did not lead: no leader for a 190 s tail (replay-main
         // 9491883622406273044 on 832b116, red on "cluster converged after
         // chaos"). Phase 1 still covers it: it stays in `prior`.
+        // A reconfiguration the won leadership itself ran is no missed one:
+        // that leadership honored it, so a belief other than its
+        // configuration is the stale one, and keeping it would roll the
+        // configuration back (replay-recipe 15215472214835945028
+        // 214785:9323787021693807484 on f75260d: node 3 led round 44 under
+        // the reconfiguration of round 37, then heard a round-45 campaign's
+        // older belief and ran round 46 under it).
         let floor = self.probe_floor();
+        let honored = self.read_basis.as_ref().map(|basis| basis.config.clone());
         let m = self.matchmaking.as_mut().expect("the phase is still open");
         if !m.quorum_held(matchmakers) {
             MatchStep::Registered {
                 remaining: m.remaining(matchmakers),
             }
-        } else if let Some((newest, config)) =
-            m.stale_belief().filter(|(newest, _)| *newest > floor)
+        } else if let Some((newest, config)) = m
+            .stale_belief()
+            .filter(|(newest, config)| *newest > floor || honored.as_ref() == Some(config))
         {
+            if newest <= floor {
+                probe!(
+                    reachable,
+                    "matchmaking: a campaign adopts a reconfiguration its won leadership ran"
+                );
+            }
             // Stale belief: the quorum's histories name a
             // reconfiguration to a configuration other than the
             // one this ordinary campaign registered. Adopt the
