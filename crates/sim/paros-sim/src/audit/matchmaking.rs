@@ -1,6 +1,6 @@
 //! The candidate's matchmaking phase (#120), garbage collection (#123) and the reconfigurer of the matchmaker set (#125): the node's side.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound;
 
 use moonpool_sim::{TimeProvider, assert_always, assert_reachable, assert_sometimes};
@@ -476,6 +476,34 @@ impl MatchmakerAudit {
         );
     }
 
+    /// Whether a leadership won between the effective reconfiguration
+    /// `newest` and the campaign's `ballot` under another configuration
+    /// than `config`, and whether a reconfiguration in between registered
+    /// `mine`. A reconfiguration registered above `ballot` (a later
+    /// candidate's, folded from a reply sent after it) has nothing between
+    /// the two (recipe 2440116414355831033 128549:16402484848252166245 on
+    /// 408c9d8: the range panicked on round 26 of node 2 over round 26 of
+    /// node 1).
+    fn exemptions(
+        won: &BTreeMap<Ballot, AcceptorConfig>,
+        reconfigurations: &BTreeMap<Ballot, (AcceptorConfig, BTreeSet<u64>)>,
+        (newest, ballot): (Ballot, Ballot),
+        config: &AcceptorConfig,
+        mine: Option<&AcceptorConfig>,
+    ) -> (bool, bool) {
+        if newest >= ballot {
+            return (false, false);
+        }
+        let between = (Bound::Excluded(newest), Bound::Excluded(ballot));
+        let below_a_leadership = won.range(between).any(|(_, ran)| ran != config);
+        let newer_fact = mine.is_some_and(|mine| {
+            reconfigurations
+                .range(between)
+                .any(|(_, (registered, _))| registered == mine)
+        });
+        (below_a_leadership, newer_fact)
+    }
+
     /// The candidate's matchmaking closed with a quorum: Phase 1 opens.
     pub(super) fn completed(
         &mut self,
@@ -557,15 +585,13 @@ impl MatchmakerAudit {
         if !campaign.kind.is_reconfiguration()
             && let Some((newest, config)) = effective
         {
-            let below_a_leadership = self
-                .won
-                .range((Bound::Excluded(newest), Bound::Excluded(ballot)))
-                .any(|(_, ran)| *ran != config);
-            let newer_fact = campaign.config.as_ref().is_some_and(|mine| {
-                self.reconfigurations
-                    .range((Bound::Excluded(newest), Bound::Excluded(ballot)))
-                    .any(|(_, (registered, _))| registered == mine)
-            });
+            let (below_a_leadership, newer_fact) = Self::exemptions(
+                &self.won,
+                &self.reconfigurations,
+                (newest, ballot),
+                &config,
+                campaign.config.as_ref(),
+            );
             assert_always!(
                 campaign.config.as_ref() == Some(&config) || below_a_leadership || newer_fact,
                 "matchmaking: a completed ordinary campaign registered the effective configuration",
