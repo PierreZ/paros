@@ -338,13 +338,21 @@ impl Writer {
     }
 
     /// Learn from a view a verdict named. A view naming this writer's uuid
-    /// the leader (a claim whose answer was lost, a position it had wrong)
-    /// is adopted whole; any other leader supersedes it, and its next claim
-    /// asks under a fresh uuid.
+    /// the leader (a claim whose answer was lost) is adopted, but its
+    /// position never moves back: every position below `next_seq` is a
+    /// write the journal acked, so a view behind it is an older one (a
+    /// lagging server's). Any other leader supersedes it, and its next
+    /// claim asks under a fresh uuid.
+    ///
+    /// Adopted whole, a stale view took a writer back from 8 to 6 while
+    /// positions 6 and 7 held its own writes: its next write went to 6 and
+    /// was refused, and a write it meant past the tail landed at 8, the
+    /// tail (main's sweep, seed 130138408517690301 on e5cdfff, red on
+    /// "chain: a write ahead of the journal is never accepted").
     pub fn learn(&mut self, state: &JournalView) -> Learned {
         if state.leader == Some(self.mine) {
             self.owned = true;
-            self.next_seq = state.next_seq.0;
+            self.next_seq = self.next_seq.max(state.next_seq.0);
             self.saw_leading(state.next_seq.0);
             Learned::Owner
         } else if self.owned {
