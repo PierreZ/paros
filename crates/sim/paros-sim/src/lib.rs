@@ -421,6 +421,18 @@ fn chain_builder(digest: Option<DigestSink>) -> SimulationBuilder {
     SimulationBuilder::new()
         .network_fault_mask(NetworkFaultMask::all().without(NetworkFault::BitFlip))
         .storage_fault_mask(storage_fault_mask())
+        // Moonpool owns fault placement (#760): the journals' leaders
+        // declare their replication with `shard!` and the stores publish
+        // their layouts, so no destructive fault costs a journal the copies
+        // it needs. The gate judges durability only: an outage of every
+        // acceptor is a fault paros must recover from, lost data is not.
+        .shard_faults(moonpool_sim::ShardFaults::default().durable_only())
+        // The acceptors' bytes outside every shard take damage in a pattern
+        // that keeps one domain clean (TigerBeetle's fault atlas).
+        .replicated_storage_faults(
+            moonpool_sim::ReplicatedFaults::new(moonpool_sim::DomainLevel::Machine)
+                .group(ACCEPTOR_GROUP),
+        )
         .cluster(LocalityConfig::new(PROCESS_POOL_RANGE, 1, 1, 1), || {
             Box::new(NodeProcess::chaotic())
         })

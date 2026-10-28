@@ -69,6 +69,7 @@ pub(crate) mod ready;
 pub(crate) mod reply;
 mod report;
 pub mod scrub;
+mod shards;
 mod shared;
 mod stop;
 mod system;
@@ -665,6 +666,7 @@ where
         out: &out,
         edge: &edge,
         self_id,
+        own_addr: &local_addr,
         tunables,
         metrics: &metrics,
     };
@@ -1230,7 +1232,11 @@ where
                     journals.fold(journal, Err(fault), ticks, self_id)?;
                     continue;
                 }
+                let old = rt.node.acceptors().clone();
                 let ack = operator::reconfigure(&mut rt.node, &rt.audit, self_id, &req);
+                if ack.accepted {
+                    shards::declare_move(&rt.node, &old, &mut rt.last.shard, &|id| shared.with(&rt.audit).replica(id));
+                }
                 shared.settle(rt).await;
                 // A lost reconfiguration ack is ambiguous to the client, which
                 // re-asks; a started reconfiguration stands (a retry is refused

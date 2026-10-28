@@ -525,6 +525,9 @@ impl Workload for ChainWorkload {
             // The cell coordinator's terms install in order (#653 (election
             // term to installed leader)).
             crate::audit::installs::check_installs(ctx.state());
+            // Every `shard!` a journal declared is a configuration the
+            // audit knows (#760 (moonpool owns fault placement)).
+            crate::audit::check_shard_declarations(ctx);
         }
         // The histories `Announce` logged (#247): every client's library
         // calls at the registry, at the control journals of the cell the

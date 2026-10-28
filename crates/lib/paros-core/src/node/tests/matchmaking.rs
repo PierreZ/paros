@@ -1336,3 +1336,13 @@ fn a_slot_chosen_above_a_matchmaking_campaign_closes_it() {
     assert!(n.ballot() > above);
     assert_eq!(n.hard_state().max_promised_ballot, n.ballot());
 }
+
+/// Only a leader names the configurations in force (#760 (moonpool owns
+/// fault placement)): a follower and a candidate do not know them.
+#[test]
+fn only_a_leader_names_its_configurations_in_force() {
+    let mut n = deployed_node(2, &[0, 1, 2], &[0, 1, 2, 3, 4], 1);
+    assert!(n.configs_in_force().is_none());
+    campaign(&mut n);
+    assert!(n.configs_in_force().is_none());
+}

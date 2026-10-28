@@ -368,6 +368,41 @@ impl ColocatedNode {
         effective
     }
 
+    /// The configurations a leader's chosen values may still need (#760
+    /// (moonpool owns fault placement)): the configuration in force, and
+    /// every other configuration of `H_b` until the GC floor is effective.
+    /// Read-only, for a driver that declares the journal's replication.
+    /// `None` off a leader. A plain deployment, or a matchmaker leader
+    /// whose campaign holds no other configuration, has no prior one.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants fails: a programmer error.
+    #[must_use]
+    pub fn configs_in_force(&self) -> Option<(Vec<&AcceptorConfig>, &AcceptorConfig)> {
+        if self.role != NodeRole::Leader {
+            return None;
+        }
+        let current = &self.acceptors;
+        let prior: Vec<&AcceptorConfig> = match self.gc.as_ref() {
+            Some(gc) if gc.effective().is_none() => {
+                gc.prior().iter().filter(|c| *c != current).collect()
+            }
+            _ => Vec::new(),
+        };
+        assert!(
+            prior.iter().all(|c| *c != current),
+            "the configuration in force is never its own prior"
+        );
+        if !self.config.has_matchmakers() {
+            assert!(
+                prior.is_empty(),
+                "a plain deployment has no prior configuration"
+            );
+        }
+        Some((prior, current))
+    }
+
     /// Fold one matchmaker's GC ack. A refusal that names a later set
     /// teaches it first (`learn_matchmakers`: the tally starts over and asks
     /// the new set). An ack for another generation, another watermark, or a

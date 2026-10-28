@@ -101,6 +101,10 @@ pub(crate) struct PeerMailbox {
     /// (#349) or named another machine interface for it (#404): the
     /// delivery task dials it there from its next batch on.
     readdress: Arc<Mutex<Option<PeerTarget>>>,
+    /// The address the node loop last pointed this lane at: the one it was
+    /// opened with, or the last [`PeerMailbox::readdress`]. Read by the
+    /// shard declarations (#760 (moonpool owns fault placement)).
+    dialed: Arc<Mutex<Option<Address>>>,
 }
 
 /// Where a lane dials its peer (#349, #404): the address, and the encoded
@@ -234,13 +238,27 @@ impl PeerMailbox {
             hold_next: Arc::new(AtomicBool::new(false)),
             reverse_next: Arc::new(AtomicBool::new(false)),
             readdress: Arc::new(Mutex::new(None)),
+            dialed: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// The address the node loop last pointed this lane at, if any.
+    pub(crate) fn dialed(&self) -> Option<Address> {
+        self.dialed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    fn set_dialed(&self, addr: &Address) {
+        *self.dialed.lock().unwrap_or_else(PoisonError::into_inner) = Some(addr.clone());
     }
 
     /// Dial this lane's peer at `addr`, through the machine `interface`
     /// (#404; empty: the well-known `Deliver`), from the next batch on
     /// (#349): the queued messages stay, and go there.
     pub(crate) fn readdress(&self, addr: Address, interface: Vec<u8>) {
+        self.set_dialed(&addr);
         *self
             .readdress
             .lock()
@@ -486,6 +504,12 @@ impl Outbound {
             }
             None => false,
         }
+    }
+
+    /// The address the lane to `node` dials now (#760 (moonpool owns fault
+    /// placement)), if a lane to it exists.
+    pub(crate) fn dialed(&self, node: NodeId) -> Option<Address> {
+        self.peers().get(&node).and_then(PeerMailbox::dialed)
     }
 
     /// Add a lane to `node` (#189: a node the registry admitted at runtime).
@@ -922,8 +946,9 @@ impl<P: ParosProviders, A: Audit + Clone + Send + Sync + 'static> LaneOpener<'_,
         addr: Address,
         to: Party,
     ) -> PeerMailbox {
-        let dialer = Dialer::new(rpc, self.names.clone(), addr);
         let mailbox = PeerMailbox::new(self.tunables.peer_queue_capacity);
+        mailbox.set_dialed(&addr);
+        let dialer = Dialer::new(rpc, self.names.clone(), addr);
         self.providers
             .local_task()
             .spawn_local_task(

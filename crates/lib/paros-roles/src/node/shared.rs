@@ -44,10 +44,25 @@ pub(crate) struct NodeLoop<'a, P: ParosProviders, A: Audit> {
     pub(crate) out: &'a Outbound,
     pub(crate) audit: &'a A,
     pub(crate) self_id: u64,
+    /// This node's own address, as its shard declarations name it.
+    pub(crate) own_addr: &'a str,
     pub(crate) tunables: DriverTunables,
 }
 
 impl<P: ParosProviders, A: Audit> NodeLoop<'_, P, A> {
+    /// How a shard declaration names the acceptor `id` (#760 (moonpool
+    /// owns fault placement)): by the address its lane dials, this node by
+    /// its own. A member with no lane here is named by its id, an address
+    /// the simulator does not know.
+    pub(crate) fn replica(&self, id: NodeId) -> moonpool_buggify::shard::Replica {
+        let address = if id.0 == self.self_id {
+            Some(self.own_addr.to_string())
+        } else {
+            self.out.dialed(id).map(|addr| addr.as_str().to_string())
+        };
+        moonpool_buggify::shard::Replica::new(address.unwrap_or_else(|| format!("node-{}", id.0)))
+    }
+
     /// The **settle tail**'s second half, once the batch [`take_ready`] took
     /// is durable: finish the batch (send → apply), surface a matchmaking
     /// phase it opened *before* the requests leave, put the batch's
@@ -97,6 +112,7 @@ impl<P: ParosProviders, A: Audit> NodeLoop<'_, P, A> {
             ),
             self.audit,
         );
+        super::shards::declare(node, &mut last.shard, &|id| self.replica(id));
         // The journal fold only grows inside a batch: a journal read
         // long-polling at the tail is re-served here (#204).
         // Nothing between the drain and here walks the prefix: the reads
@@ -524,6 +540,8 @@ pub(crate) struct Shared<'a, P: ParosProviders> {
     pub(crate) out: &'a Outbound,
     pub(crate) edge: &'a RpcEdge<P>,
     pub(crate) self_id: u64,
+    /// This node's own address, as its shard declarations name it.
+    pub(crate) own_addr: &'a str,
     pub(crate) tunables: DriverTunables,
     /// The machine's metrics (#366 (metrics)); off outside a machine.
     pub(crate) metrics: &'a Metrics,
@@ -538,6 +556,7 @@ impl<P: ParosProviders> Shared<'_, P> {
             out: self.out,
             audit,
             self_id: self.self_id,
+            own_addr: self.own_addr,
             tunables: self.tunables,
         }
     }
