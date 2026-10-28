@@ -274,7 +274,7 @@ impl FleetOps {
         // The listed machines past the founders, which `init` admits: the
         // founders are `2F+1` with `F = founders / 2`, so `init` forms the
         // cell on them alone (#523 (redundancy naming)).
-        let failures_per_partition = u32::try_from(founders / 2).unwrap_or(u32::MAX);
+        let survive_machines = u32::try_from(founders / 2).unwrap_or(u32::MAX);
         let listed: Vec<Address> = members
             .iter()
             .chain(&self.machines[founders..self.layout.listed])
@@ -306,7 +306,7 @@ impl FleetOps {
                 names: self.init_names.clone(),
                 token: token.clone(),
                 root_key: Some(crate::frontend::signing_entry(ctx.state())),
-                failures_per_partition,
+                survive_machines,
                 idle: false,
             },
         );

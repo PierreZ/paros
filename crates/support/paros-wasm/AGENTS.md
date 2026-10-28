@@ -104,7 +104,7 @@ sim-only path, no buggify or hint here. The timeline is an `Invariant` that only
   shipped BUGGIFY sites and crash hints are inert, as in production. A log starts with `init`
   at 0 ms (over the first `machines`) and holds no other `init`.
 - `src/playground/model.rs` → `Config`, `Action`, `Op` (`init`, `create_tenant`, `create_journal` with
-  its `mode`: `failures-per-partition=F,partitions=P` (#523), either part optional, `write`, `read`), `StepResult`,
+  its `mode`: `machines=F,partitions=P` (#523), either part optional, `write`, `read`), `StepResult`,
   `Topology` (each machine's short and full node id and its zone), `TenantPlace`,
   `JournalPlace` (its `key`, acceptors in membership order, `Quorum`), `Event`, `RunView` →
   the JSON contract.

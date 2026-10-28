@@ -1,14 +1,14 @@
 //! The bench's journal topologies: `--topology 3x1,3x2,3x3` compares
 //! the plain majority with acceptor grids under the same load. A topology
 //! `RxC` is `C` acceptor partitions of `R` acceptors each: `R = 2F+1`, so
-//! it is the durability `F` per partition over `C` partitions
+//! it is `survive machines=F` over `C` acceptor partitions
 //! (`paros::model::tenant::Durability`). `3x1` is the plain majority of three;
 //! `3x3` is nine acceptors, each slot decided by two of one column.
 
 use std::fmt;
 use std::str::FromStr;
 
-use paros::model::tenant::{Desired, Durability, MAX_FAILURES_PER_PARTITION};
+use paros::model::tenant::{Desired, Durability, MAX_SURVIVE_MACHINES};
 
 /// One journal topology: `rows` acceptors in each of `columns` partitions.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -40,7 +40,7 @@ impl Topology {
         }
     }
 
-    /// Its durability's label: `1 per partition · 3 partitions (…) · 9 acceptors`.
+    /// Its durability's label: `survive 1 machine · 3 partitions (…) · 9 acceptors`.
     pub fn label(self) -> String {
         self.durability.label()
     }
@@ -59,7 +59,7 @@ impl FromStr for Topology {
         let shape = || {
             format!(
                 "{text:?}: a topology is ROWSxCOLUMNS, ROWS odd from 1 to {}, COLUMNS at least 1 (3x1, 3x3)",
-                2 * MAX_FAILURES_PER_PARTITION + 1
+                2 * MAX_SURVIVE_MACHINES + 1
             )
         };
         let (rows, columns) = text.trim().split_once(['x', 'X']).ok_or_else(shape)?;
@@ -118,7 +118,7 @@ mod tests {
         let majority: Topology = "3x1".parse().expect("3x1");
         assert_eq!(majority.acceptors(), 3);
         assert_eq!(majority.to_string(), "3x1");
-        assert_eq!(majority.desired().durability.failures_per_partition, 1);
+        assert_eq!(majority.desired().durability.survive_machines, 1);
         let grid: Topology = "5X3".parse().expect("5x3");
         assert_eq!(grid.acceptors(), 15);
         assert_eq!(grid.to_string(), "5x3");

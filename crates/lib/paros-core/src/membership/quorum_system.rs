@@ -210,17 +210,17 @@ impl QuorumSystem {
         }
     }
 
-    /// `partitions` acceptor partitions of `2F+1` acceptors each, `F` the
-    /// `failures_per_partition` (#532 (acceptor partitions)): a grid of
-    /// `2F+1` rows and one column per partition, where a majority (`F+1`) of
-    /// one partition chooses a slot and a majority of every partition
-    /// elects.
+    /// `partitions` acceptor partitions of `2F+1` acceptors each, `F` being
+    /// `f`, Compartmentalized Paxos's `f` and the `machines` of a journal's
+    /// `survive` (#532 (acceptor partitions)): a grid of `2F+1` rows and one
+    /// column per partition, where a majority (`F+1`) of one partition
+    /// chooses a slot and a majority of every partition elects.
     #[must_use]
-    pub const fn partitions(failures_per_partition: usize, partitions: usize) -> Self {
+    pub const fn partitions(f: usize, partitions: usize) -> Self {
         QuorumSystem::Grid {
-            rows: 2 * failures_per_partition + 1,
+            rows: 2 * f + 1,
             cols: partitions,
-            acks: failures_per_partition + 1,
+            acks: f + 1,
         }
     }
 

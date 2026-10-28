@@ -1098,7 +1098,7 @@ fn zone_plan(
 ) -> Result<Vec<Step>, ZonePlan> {
     let first = placement::plan(want, machines, current, seed).map_err(ZonePlan::Short)?;
     if !placement::zone_rule_binds(
-        desired.durability.failures_per_partition,
+        desired.durability.survive_machines,
         paros_model::machine::Class::Storage,
         machines,
     ) {

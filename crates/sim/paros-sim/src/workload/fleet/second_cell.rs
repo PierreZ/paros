@@ -202,7 +202,7 @@ impl FleetOps {
                 names: (String::new(), CELL_NAME.into()),
                 token,
                 root_key: None,
-                failures_per_partition: 0,
+                survive_machines: 0,
                 idle: true,
             },
         )

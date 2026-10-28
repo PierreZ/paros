@@ -431,7 +431,7 @@ fn unmoved(
             // in force's, the placement the coordinator last recorded
             // (`placed`, #214 (tenant modes)), never the create's
             // bootstrap `config`: a mode change may have left the journal
-            // one acceptor per partition (`failures_per_partition` 0),
+            // one acceptor per partition (`survive_machines` 0),
             // whose Phase 1 needs every member. Recipe 409137802379467466
             // 472027:15658202577153942549 on 936348a: a leader under a
             // `1×3` grid lost a member to a wipe, kept leading, and the

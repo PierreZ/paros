@@ -21,9 +21,10 @@ the `failures-per-partition` names of 2026-10-14, #523 (durability names), secti
 - Zone or region survival is never downgraded without a word. Until now, a cell with one or two
   zones placed a journal without zone survival (`zone_rule_binds`, section 5). That becomes an
   explicit outcome of the plan (placeable degraded, below).
-- The code still says `failures-per-partition` and `Durability { failures_per_partition,
-  partitions }` until #748 (survive) and #755 (partitions leave durability) land. In this
-  folder, `machines=N` is the old `failures-per-partition=N`.
+- The rename landed on 2026-10-28: the CLI takes `--survive machines=N` (`zones` and
+  `regions` take only 0 until #748 (survive) lands), a mode string is `machines=N,partitions=P`,
+  and the field is `Durability::survive_machines`. `partitions` stays inside `Durability` until
+  #755 (partitions leave durability) lands.
 
 | 2026-10-04 | 2026-10-14 (#523) | 2026-10-28 (#748) |
 |---|---|---|
@@ -145,7 +146,7 @@ proves it before it lands.
 *Landed* (#214 (tenant modes), 2026-10-15): `configure` for a journal's durability and the
 tenant's default.
 
-- **The request.** `parosctl configure --tenant t [--journal j] [--failures-per-partition F]
+- **The request.** `parosctl configure --tenant t [--journal j] [--survive machines=F]
   [--partitions P] [--replicas R]` sends a `JournalRequest` with a `ConfigureOp`
   (`paros::client::journals::JournalOp::Configure`) and an idempotency id. The tenant
   coordinator judges whether the cell can place the mode now (as many storage machines as a

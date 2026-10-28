@@ -1379,18 +1379,16 @@ fn drawn_store(state: &moonpool_sim::StateHandle) -> StoreDurability {
 /// in one acceptor partition); sometimes no failure, two or three failures,
 /// or four acceptor partitions no cell of three founders can place.
 fn drawn_desired(draw: u64) -> Desired {
-    let (failures_per_partition, partitions) = match (draw >> 16) % 8 {
+    let (survive_machines, partitions) = match (draw >> 16) % 8 {
         0 => (0, 1),
         1 => (2, 1),
         2 => (0, 4),
         3 => (3, 1),
         _ => (1, 1),
     };
-    Durability::new(failures_per_partition, partitions).map_or(Desired::DEFAULT, |durability| {
-        Desired {
-            durability,
-            replicas: 0,
-        }
+    Durability::new(survive_machines, partitions).map_or(Desired::DEFAULT, |durability| Desired {
+        durability,
+        replicas: 0,
     })
 }
 
@@ -1404,7 +1402,7 @@ fn drawn_configure(draw: u64) -> Desired {
     // On three storage machines most modes place the same three slots, so
     // the draw leans to the ones that change them: one acceptor (a shrink)
     // and acceptor partitions (another quorum system on the same machines).
-    let (failures_per_partition, partitions) = match (draw >> 24) % 10 {
+    let (survive_machines, partitions) = match (draw >> 24) % 10 {
         0 => (1, 1),
         1 | 2 => (0, 1),
         3 => (2, 1),
@@ -1416,11 +1414,9 @@ fn drawn_configure(draw: u64) -> Desired {
         // storage machine: on a full cell it is refused for want of slots.
         _ => (3, 1),
     };
-    Durability::new(failures_per_partition, partitions).map_or(Desired::DEFAULT, |durability| {
-        Desired {
-            durability,
-            replicas: 0,
-        }
+    Durability::new(survive_machines, partitions).map_or(Desired::DEFAULT, |durability| Desired {
+        durability,
+        replicas: 0,
     })
 }
 

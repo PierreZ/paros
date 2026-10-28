@@ -2,8 +2,8 @@
 //! tenant's birth books against its cell's capacity, so a cell hosts only a
 //! tenant it can run. A footprint is one coordinator slot, the tenant's
 //! matchmaker set, one acceptor quorum of its durability for data, and one
-//! `failures-per-partition=1` quorum for its control journal (a
-//! `failures-per-partition=0` tenant's control journal still needs one).
+//! `machines=1` quorum for its control journal (a
+//! `machines=0` tenant's control journal still needs one).
 //! The cell tenant and the universe tenant have one too: `init` books them.
 //!
 //! The footprint is a reservation of slots (`BookingTarget::Tenant`), not
@@ -42,13 +42,13 @@ pub const BIRTH: Durability = Durability::DEFAULT;
 pub struct Footprint {
     /// One acceptor quorum of the tenant's durability: `F+1`.
     pub acceptors: u64,
-    /// One `failures-per-partition=1` quorum for its control journal: 2.
+    /// One `machines=1` quorum for its control journal: 2.
     pub control: u64,
     /// Its matchmaker set: `2F+1`.
     pub matchmakers: u64,
 }
 
-/// The quorum of a `failures-per-partition=1` partition: 2 of 3.
+/// The quorum of a `machines=1` partition: 2 of 3.
 const CONTROL_QUORUM: u64 = 2;
 
 impl Footprint {
@@ -59,7 +59,7 @@ impl Footprint {
     /// Never: a footprint always books its two quorums and its set.
     #[must_use]
     pub fn of(durability: Durability) -> Self {
-        let f = u64::from(durability.failures_per_partition);
+        let f = u64::from(durability.survive_machines);
         let footprint = Footprint {
             acceptors: f + 1,
             control: CONTROL_QUORUM,

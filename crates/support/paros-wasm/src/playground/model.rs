@@ -59,7 +59,7 @@ pub enum Op {
         tenant: String,
         /// The journal's name, inside the tenant.
         journal: String,
-        /// Its durability (#523): `failures-per-partition=F,partitions=P`,
+        /// Its durability (#523): `machines=F,partitions=P`,
         /// either part optional (`F=1`, `P=1` by default).
         #[serde(default = "default_durability")]
         mode: String,
@@ -86,7 +86,7 @@ pub enum Op {
 }
 
 fn default_durability() -> String {
-    "failures-per-partition=1".into()
+    "machines=1".into()
 }
 
 /// What a step came to.

@@ -46,14 +46,14 @@ message Describe {
   Desired desired = 6;
 }
 
-// A desired mode (§3.4, #523): the durability, `failures_per_partition`
+// A desired mode (§3.4, #523): the durability, `survive_machines`
 // (0 to 3) over `partitions` acceptor partitions (at least 1, 0 is refused),
 // and the replica count. Tags 1 to 3 held the retired redundancy and grid.
 message Desired {
   reserved 1, 2, 3;
   reserved "redundancy", "rows", "cols";
   uint32 replicas = 4;
-  uint32 failures_per_partition = 5;
+  uint32 survive_machines = 5;
   uint32 partitions = 6;
 }
 

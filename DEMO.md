@@ -30,7 +30,7 @@ docker compose up -d --build
 docker compose run --rm init
 
 # A tenant, then a journal in it (#210). The tenant coordinator draws the journal's id and
-# picks its members from its durability (`--failures-per-partition 1 --partitions 1` by
+# picks its members from its durability (`--survive machines=1 --partitions 1` by
 # default: three acceptors in one acceptor partition). Prints:
 #   created journal=id:T/J members=…
 docker compose run --rm parosctl tenant create acme
@@ -72,8 +72,8 @@ docker compose run --rm parosctl journal list acme
 # The tenant coordinator books the new slots, reconfigures the journal and releases the old
 # ones; `parosctl tenant show acme` shows the new acceptors once it is done. Without
 # `--journal`, it changes the tenant's default, which a create with no durability takes.
-docker compose run --rm parosctl configure --tenant acme --journal orders --partitions 3 --failures-per-partition 0
-docker compose run --rm parosctl configure --tenant acme --failures-per-partition 1
+docker compose run --rm parosctl configure --tenant acme --journal orders --partitions 3 --survive machines=0
+docker compose run --rm parosctl configure --tenant acme --survive machines=1
 
 # Admit the two idle machines into the cell (#216): each is registered in the cell
 # control journal, then records its cell. A re-run prints `unchanged`.
@@ -149,7 +149,7 @@ done
 export PAROSCTL_SERVERS=127.0.0.1:4501,127.0.0.1:4502,127.0.0.1:4503
 
 # `cell init` over the three, every one of them needed (the servers, by default). The first
-# 2F+1 listed machines found the cell (`--failures-per-partition`, default 1): `init` admits
+# 2F+1 listed machines found the cell (`--survive machines=F`, default 1): `init` admits
 # any others, and the control journals keep three acceptors.
 parosctl init --members "$PAROSCTL_SERVERS"
 parosctl tenant create acme

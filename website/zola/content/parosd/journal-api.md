@@ -132,14 +132,14 @@ the same leader again after a short pause, until its deadline.
 
 ## Durability and configure
 
-A journal's durability is `--failures-per-partition F` and `--partitions P`. Each acceptor
+A journal's durability is `--survive machines=F` and `--partitions P`. Each acceptor
 partition has `2F+1` acceptors. The default is `F=1` and `P=1`: three acceptors and a plain
 majority. The tenant coordinator picks the machines; a caller never names them.
 
 `parosctl configure` changes a durability after the create. It is the `configure` command of
 FoundationDB:
 
-- `parosctl configure --tenant acme --journal orders --failures-per-partition 2` asks for five
+- `parosctl configure --tenant acme --journal orders --survive machines=2` asks for five
   acceptors for `acme/orders`.
 - `parosctl configure --tenant acme --partitions 3` changes the tenant's default. A create that
   names no durability takes the default.
@@ -155,7 +155,7 @@ reconfigure, and releases the slots that the journal does not use any more. The 
 all its records during the change, and writes continue. A durability that the cell cannot place
 is refused with `unplaceable`, and nothing changes. The writer mode never changes.
 
-A tenant's matchmaker set has `2F+1` matchmakers, with `F` the largest `failures-per-partition`
+A tenant's matchmaker set has `2F+1` matchmakers, with `F` the largest `machines` of `survive`
 of the tenant: its default and each of its journals. The coordinator grows or shrinks the set
 when that number changes.
 
@@ -172,8 +172,8 @@ journal)):
   store then reports those entries faulty, and the journal repairs them from its peers.
 
 Both modes are safe: a lost entry was never acknowledged. A `batched` journal needs peers to
-repair a lost batch, so use it only with `--failures-per-partition 1` or more. With
-`--failures-per-partition 0`, a power loss inside a commit can stop the journal for good.
+repair a lost batch, so use it only with `--survive machines=1` or more. With
+`--survive machines=0`, a power loss inside a commit can stop the journal for good.
 
 ```sh
 parosctl journal create acme orders --store-durability batched
