@@ -976,12 +976,10 @@ pub(crate) fn check_every_world(
 /// Check every journal's `shard!` declarations against the audit's own
 /// model of its configurations (#760 (moonpool owns fault placement)): the
 /// gate trusts what the code declares, so a declaration the audit does not
-/// recognize fails the seed instead of silently weakening the gate. Each
-/// declared replica on an acceptor of the deployment is a member of a
-/// configuration the audit saw, and each configuration a declaration names
-/// alone (a stable `current`, or a move's `next`) is one the audit saw. A
-/// declaration that names a machine is left out: a machine's id is the one
-/// it minted, not its rank.
+/// recognize fails the seed instead of silently weakening the gate. A
+/// stable declaration names a configuration the audit saw, and a move names
+/// one on at least one side. A declaration that names a machine is left
+/// out: a machine's id is the one it minted, not its rank.
 #[tracing::instrument(level = "debug", skip_all)]
 pub(crate) fn check_shard_declarations(ctx: &moonpool_sim::SimContext) {
     let deployment = crate::roles::deployment(ctx.topology());
@@ -994,33 +992,30 @@ pub(crate) fn check_shard_declarations(ctx: &moonpool_sim::SimContext) {
         let name = format!("journal/{journal}");
         let world = published_world(ctx.state(), journal);
         let known = world.lock().known_member_sets();
-        let members: BTreeSet<u64> = known.iter().flatten().copied().collect();
         for event in events.iter().filter(|event| event.name == name) {
             let Some(current) = &event.current else {
                 continue;
             };
-            let alone = if event.next.is_some() {
-                event.next.as_ref()
-            } else {
-                Some(current)
-            };
+            let mut sides = Vec::new();
             for replication in std::iter::once(current).chain(event.next.as_ref()) {
                 let Some(ids) = acceptor_ids(&deployment, replication) else {
                     continue;
                 };
                 assert_reachable!("shard: a journal's declaration is checked against the audit");
+                sides.push(known.contains(&ids));
+            }
+            // A stable declaration names a configuration in force. A move
+            // names one on at least one side: an operator's move goes to a
+            // requested configuration that no matchmaker may have bound yet
+            // (its leader can die first) and may name a joiner no configuration
+            // holds yet, and a GC move comes from the union
+            // of `H_b`'s prior configurations.
+            if sides.len() == 1 + usize::from(event.next.is_some()) {
                 assert_always!(
-                    ids.is_subset(&members),
-                    "shard: a declared replica is a member of a configuration the audit knows",
+                    sides.iter().any(|known| *known),
+                    "shard: a declared shard matches a configuration the audit knows",
                     { "journal" => journal.to_string(), "site" => event.site }
                 );
-                if alone == Some(replication) {
-                    assert_always!(
-                        known.contains(&ids),
-                        "shard: a declared shard matches a configuration the audit knows",
-                        { "journal" => journal.to_string(), "site" => event.site }
-                    );
-                }
             }
         }
     }
