@@ -54,6 +54,8 @@ pub struct Collector {
     fence: Option<Slot>,
     /// The members of every configuration in `H_b`.
     prior_members: BTreeSet<NodeId>,
+    /// The configurations of `H_b`, each once, in the order given.
+    prior: Vec<AcceptorConfig>,
     /// Per configured peer: the chosen index it last acked at this ballot.
     peer_chosen: BTreeMap<NodeId, Slot>,
     /// Whether the requests have been queued (the preconditions held).
@@ -87,6 +89,12 @@ impl Collector {
                 .iter()
                 .flat_map(|c| c.members().iter().copied())
                 .collect(),
+            prior: prior.iter().fold(Vec::new(), |mut kept, config| {
+                if !kept.contains(config) {
+                    kept.push(config.clone());
+                }
+                kept
+            }),
             peer_chosen: BTreeMap::new(),
             requested: false,
             acked_by: BTreeSet::new(),
@@ -136,6 +144,24 @@ impl Collector {
     #[must_use]
     pub fn fence(&self) -> Option<Slot> {
         self.fence
+    }
+
+    /// The configurations of `H_b` this campaign collects, each once: the
+    /// ones a value chosen below the ballot may live in until the floor is
+    /// effective (#760 (moonpool owns fault placement)).
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants fails: a programmer error.
+    #[must_use]
+    pub fn prior(&self) -> &[AcceptorConfig] {
+        assert!(
+            self.prior
+                .iter()
+                .all(|c| c.members().iter().all(|m| self.prior_members.contains(m))),
+            "every prior configuration's members are in the retirement pool"
+        );
+        &self.prior
     }
 
     /// Whether the requests have been queued.

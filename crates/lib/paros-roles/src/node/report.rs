@@ -171,6 +171,9 @@ pub(crate) struct Deltas {
     /// them: the election backoff's streak
     /// ([`DriverTunables::election_backoff_doublings`](super::DriverTunables)).
     pub(crate) failed_campaigns: u32,
+    /// The replication this journal declared last (#760 (moonpool owns
+    /// fault placement)).
+    pub(crate) shard: super::shards::Declared,
 }
 
 impl Deltas {
@@ -186,6 +189,7 @@ impl Deltas {
             matchmaking_timeouts: node.counters().matchmaking_timeouts,
             matchmaker_generation: node.matchmaker_set().map_or(0, |set| set.generation.0),
             failed_campaigns: 0,
+            shard: None,
         }
     }
 }
@@ -255,6 +259,7 @@ pub(crate) fn maintain<P: ParosProviders, A: Audit>(
         matchmaking_timeouts: last_matchmaking_timeouts,
         matchmaker_generation: last_generation,
         failed_campaigns,
+        shard: _,
     } = last;
     // The election backoff's streak ends when this node hears another node
     // lead: a cluster with a leader other nodes follow has settled. Being

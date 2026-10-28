@@ -66,6 +66,10 @@ impl FaultInjector for WipedFounder {
             assert_reachable!("machine: the scenario wipes a promised founder before any vote");
         }
         tracing::info!(%target, after_vote, "wiped_founder_strikes");
+        // The scenario wipes a founder past what its journals declare they
+        // keep, on purpose: the shard gate would turn the wipe into a crash
+        // (#760 (moonpool owns fault placement)).
+        ctx.shards().switch_off_all();
         ctx.reboot_with_delays(&target, RebootKind::CrashAndWipe, &(250..1_501), &(0..1))
     }
 }

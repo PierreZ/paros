@@ -612,6 +612,19 @@ impl AuditState {
             .or(self.bootstrap.as_ref())
     }
 
+    /// The member sets of every configuration this journal's audit saw:
+    /// the bootstrap, each ballot's, and each prior configuration a
+    /// matchmaking closed with (#760 (moonpool owns fault placement)).
+    pub(crate) fn known_member_sets(&self) -> BTreeSet<BTreeSet<u64>> {
+        let ids = |c: &AcceptorConfig| c.members().iter().map(|m| m.0).collect::<BTreeSet<u64>>();
+        self.bootstrap
+            .iter()
+            .chain(self.configs.values())
+            .chain(self.prior.values().flatten())
+            .map(ids)
+            .collect()
+    }
+
     /// Record the prior configurations `node`'s matchmaking for `ballot`
     /// closed with.
     pub(super) fn note_prior(&mut self, node: u64, ballot: Ballot, prior: &[AcceptorConfig]) {

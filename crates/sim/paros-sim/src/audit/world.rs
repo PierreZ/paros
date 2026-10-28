@@ -973,6 +973,77 @@ pub(crate) fn check_every_world(
     digest
 }
 
+/// Check every journal's `shard!` declarations against the audit's own
+/// model of its configurations (#760 (moonpool owns fault placement)): the
+/// gate trusts what the code declares, so a declaration the audit does not
+/// recognize fails the seed instead of silently weakening the gate. A
+/// stable declaration names a configuration the audit saw, and a move names
+/// one on at least one side. A declaration that names a machine is left
+/// out: a machine's id is the one it minted, not its rank.
+#[tracing::instrument(level = "debug", skip_all)]
+pub(crate) fn check_shard_declarations(ctx: &moonpool_sim::SimContext) {
+    let deployment = crate::roles::deployment(ctx.topology());
+    let events = ctx.shards().events();
+    let worlds = audit_worlds(ctx.state())
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone();
+    for journal in worlds {
+        let name = format!("journal/{journal}");
+        let world = published_world(ctx.state(), journal);
+        let known = world.lock().known_member_sets();
+        for event in events.iter().filter(|event| event.name == name) {
+            let Some(current) = &event.current else {
+                continue;
+            };
+            let mut sides = Vec::new();
+            for replication in std::iter::once(current).chain(event.next.as_ref()) {
+                let Some(ids) = acceptor_ids(&deployment, replication) else {
+                    continue;
+                };
+                assert_reachable!("shard: a journal's declaration is checked against the audit");
+                sides.push(known.contains(&ids));
+            }
+            // A stable declaration names a configuration in force. A move
+            // names one on at least one side: an operator's move goes to a
+            // requested configuration that no matchmaker may have bound yet
+            // (its leader can die first) and may name a joiner no configuration
+            // holds yet, and a GC move comes from the union
+            // of `H_b`'s prior configurations.
+            if sides.len() == 1 + usize::from(event.next.is_some()) {
+                assert_always!(
+                    sides.iter().any(|known| *known),
+                    "shard: a declared shard matches a configuration the audit knows",
+                    { "journal" => journal.to_string(), "site" => event.site }
+                );
+            }
+        }
+    }
+}
+
+/// The acceptor ids of every replica `replication` names, by the
+/// deployment's rank; `None` when one is not an acceptor or a joiner of
+/// the deployment (a machine, or a name).
+fn acceptor_ids(
+    deployment: &crate::roles::Deployment,
+    replication: &moonpool_sim::shard::Replication,
+) -> Option<BTreeSet<u64>> {
+    replication
+        .replicas
+        .iter()
+        .map(|replica| {
+            let address = replica.address();
+            let ip = address
+                .parse::<std::net::SocketAddr>()
+                .map_or_else(|_| address.to_string(), |addr| addr.ip().to_string());
+            match deployment.role_of(&ip)? {
+                crate::roles::Role::Acceptor(id) | crate::roles::Role::Joiner(id) => Some(id.0),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
 /// Whether `node` is excused from the per-node convergence leg: down for
 /// good from a storage fault, wiped, retired, or a joiner that left the
 /// pool. One predicate for the oracle and the settle tail (#466 (late

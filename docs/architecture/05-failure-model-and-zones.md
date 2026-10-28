@@ -105,6 +105,22 @@ implementation deferral of 2026-10-08, #176, not a change of direction). moonpoo
 closed as not planned), so the ground truth stays the ledgered injector's and the journal's
 own verdicts.
 
+**Moonpool owns fault placement** (decided on 2026-10-28, #760). The code says how each journal
+is replicated, and moonpool keeps every destructive fault inside that, as FoundationDB's
+`canKillProcesses` and TigerBeetle's fault atlas do. A journal's leader declares its
+configurations in force with `shard!` (paros-roles `node/shards.rs`): the one it runs, and the
+prior ones of `H_b` as a move until its GC floor is effective. An operator reconfiguration starts
+a move before its campaign. A configuration keeps its slots while a Phase-1 quorum of intact
+copies remains. The journal stores publish their regions in the journal's shard. moonpool then
+turns a wipe that would cost a journal its data into a crash, a crash whose dirty sectors could
+cost a slot into a kill that keeps the page cache, and places no damage on a copy the journal
+needs. The gate judges durability only: an outage of every acceptor stays whole, because paros
+must recover from it. A scenario that goes past the tolerance on purpose switches the gate off
+for its run. The audit checks every declaration against its own model of the configurations.
+The harness ledger (`world/cut.rs`, the injector's planning, the budgets) is deleted step by
+step as moonpool takes its place, each deletion after a mutant (#742) proves the sweep still
+catches what it guarded.
+
 **The journal is CLSTORE, and paros uses it directly** (decided on 2026-10-07, moonpool#308). The
 first moonpool-journal was a dense Raft-shaped log; paros journaled operations into it and folded
 them at boot, with checkpoint brackets. It is rewritten as a protocol-free CLSTORE journal: an entry
