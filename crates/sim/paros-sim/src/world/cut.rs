@@ -47,6 +47,13 @@
 //! A kill can still tear it into an ambiguous last batch. So a store whose
 //! sync failed parks its commit ([`InFlight::park`]) until the store opens
 //! or syncs again ([`release_parked`]), and the veto keeps judging it.
+//! A failed writeback (fsyncgate, #720) can tear it with no kill at all:
+//! its sectors stay volatile, and the next open drops the cache, which
+//! resolves them as a crash would. So a store that parked a commit may
+//! come back with an ambiguous last batch ([`is_parked`]) beside the
+//! budgeted cuts (witness recipe 6367796333744769963
+//! 26230:17833651999620246342 on 31d4aed: a matchmaker's registry sync
+//! failed, and its next open found the batch torn).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
@@ -363,6 +370,20 @@ impl InFlight {
         assert_reachable!("journal store: a failed registry sync keeps its commit in flight");
         self.id = PARKED;
     }
+}
+
+/// Whether the store `key` parked a commit whose sync failed and that no
+/// later open or sync ended (see the module doc).
+pub(crate) fn is_parked(state: &StateHandle, key: &str) -> bool {
+    state
+        .get::<Arc<Mutex<Commits>>>(COMMITS_KEY)
+        .is_some_and(|commits| {
+            commits
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .parked
+                .contains_key(key)
+        })
 }
 
 /// End the commit the store `key` parked, if any: the store opened or

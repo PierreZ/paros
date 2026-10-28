@@ -227,14 +227,22 @@ pub(super) async fn run_matchmaker_role(
                 // down for the run and replaced by a handover, like a wiped
                 // one.
                 if matches!(failure, paros::storage::StorageError::Corruption { .. }) {
-                    // Only the budgeted cut may leave a registry this way;
-                    // any other is a fault beyond the budget.
+                    // Only the budgeted cut, or a failed writeback the
+                    // open then resolved torn (`world::cut`'s module doc),
+                    // may leave a registry this way; any other is a fault
+                    // beyond the budget.
                     let cut = world
                         .lock()
                         .unwrap_or_else(PoisonError::into_inner)
                         .is_cut_matchmaker(my_ip);
+                    let stranded = tenants.keys().any(|tenant| {
+                        crate::world::cut::is_parked(
+                            ctx.state(),
+                            &crate::world::registry_store::set_key(my_ip, *tenant),
+                        )
+                    });
                     assert_always!(
-                        cut,
+                        cut || stranded,
                         "matchmaker: only the budgeted cut loses a registry for good",
                         { "matchmaker" => id.0 }
                     );
