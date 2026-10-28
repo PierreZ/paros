@@ -225,6 +225,21 @@ async fn leave(
 /// oracle threshold.
 const RENEWALS_SEEN: u32 = 3;
 
+/// The cell coordinator's current term, and whether it is served (its
+/// record names the published interface, so the term installed); `None`
+/// without a read or a leader.
+pub(in crate::workload) async fn coordinator_term(
+    ctx: &SimContext,
+    cell: &Cell,
+    attempt: usize,
+) -> Option<(u64, bool)> {
+    let journal = cell.journals.election?;
+    let fold = read_election(&cell.client, journal, attempt).await?;
+    note_terms(ctx, journal, &fold);
+    let leader = fold.leader()?;
+    Some((leader.term, !leader.candidate.interface.is_empty()))
+}
+
 /// Liveness (#240): once the chaos window closed, the cell's election
 /// settles on one leader that keeps renewing. Reads of the election journal
 /// by `deadline` see one term's anchor move [`RENEWALS_SEEN`] times, from

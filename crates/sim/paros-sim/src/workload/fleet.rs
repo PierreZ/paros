@@ -1110,6 +1110,11 @@ impl FleetOps {
 /// control plane that cannot finish one operation in this long is stuck.
 const FLEET_SETTLE: Duration = Duration::from_secs(20);
 
+/// The most a pending operation waits in the recovery tail while the cell
+/// coordinator hands over (see [`FleetOps::settle`]). An oracle threshold,
+/// **never buggified**.
+const HANDOVER_CEILING: Duration = Duration::from_secs(60);
+
 /// The pause before an operator's next resumption in the recovery tail:
 /// `beat` times a factor drawn uniformly from `1..=2^min(attempt, 4)`. Two
 /// operators resuming one interrupted operation each claim its journals, so
@@ -1159,6 +1164,8 @@ impl FleetOps {
             { "client" => self.client_id }
         );
         let mut deadline = ctx.time().now() + FLEET_SETTLE;
+        let ceiling = ctx.time().now() + HANDOVER_CEILING;
+        let mut served: Option<u64> = None;
         let mut draw = self.client_id;
         let mut attempt = 0_u32;
         while !self.resume(ctx, policy, draw).await {
@@ -1175,7 +1182,26 @@ impl FleetOps {
                 attempt = 0;
                 continue;
             }
-            if ctx.time().now() >= deadline
+            // A tenant operation ends only through a served coordinator
+            // term (#225): the coordinator writes its footprint and
+            // `HostTenant`. A handover in the tail stalls it until the next
+            // term installs, so the deadline holds while the term is not
+            // served, and restarts when a new term serves, up to
+            // [`HANDOVER_CEILING`] (witness 1843748513009448967: term 10
+            // won 4 s after a create and served 24 s after it).
+            let mut handover = false;
+            if let Some(cell) = self.learn(ctx).await
+                && let Some((term, is_served)) =
+                    election::coordinator_term(ctx, &cell, attempt as usize).await
+            {
+                handover = !is_served;
+                if is_served && served.replace(term) != Some(term) {
+                    deadline = deadline.max(ctx.time().now() + FLEET_SETTLE);
+                }
+            }
+            let expired = (ctx.time().now() >= deadline && !handover)
+                || ctx.time().now() >= ceiling.max(deadline);
+            if expired
                 || ctx.shutdown().is_cancelled()
                 || ctx
                     .time()
