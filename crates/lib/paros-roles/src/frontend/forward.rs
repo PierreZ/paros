@@ -428,6 +428,11 @@ where
     // admitted machine never elects a leader)).
     let mut unknown_leader = false;
     let mut known = false;
+    // The server a redirect named, and whether it refused the connection
+    // at the address the frontend learned: a renamed machine (#349) keeps
+    // its id and moves, and the registry names where it went.
+    let mut named: Option<usize> = None;
+    let mut dark_leader = false;
     let time = shared.providers.time();
     for _ in 0..budget {
         let observer = client.observer();
@@ -468,6 +473,7 @@ where
                     unknown_leader |= hint.is_some_and(|id| client.index_of(id).is_none());
                     client.observe_leader(hint);
                     target = client.leader().filter(|l| *l != target).unwrap_or(next);
+                    named = hint.and_then(|id| client.index_of(id));
                     last = Some(ack);
                 }
                 Route::Unknown => {
@@ -478,6 +484,7 @@ where
             Ok(Err(error))
                 if !C::OPERATION.writes() || error.execution() == Execution::NotAdmitted =>
             {
+                dark_leader |= named == Some(target) && error.execution() == Execution::NotAdmitted;
                 target = next;
             }
             Ok(Err(_)) | Err(_) if !C::OPERATION.writes() => target = next,
@@ -489,8 +496,9 @@ where
             }
         }
     }
-    if unknown_leader || (last.is_some() && !known) {
-        // The next call learns the cell, and its admitted machines, again.
+    if unknown_leader || dark_leader || (last.is_some() && !known) {
+        // The next call learns the cell, and its admitted machines, again,
+        // each at the address it registered last.
         moonpool_assertions::reachable!(
             "frontend: a journal out of the frontend's reach sends it back to its cell"
         );

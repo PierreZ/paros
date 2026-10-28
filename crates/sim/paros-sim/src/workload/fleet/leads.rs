@@ -28,6 +28,7 @@ use std::time::Duration;
 use moonpool_sim::{SimContext, TimeProvider, assert_always, assert_reachable};
 use paros::client::views::{ViewOutcome, ask, request};
 use paros::client::{ClaimOutcome, WriteOptions, WriteOutcome, Writer, WriterOutcome, multi};
+use paros::core::Value;
 use paros::core::journal::{JournalId, JournalIdentifier, TenantId};
 use paros::model::view::Scope;
 use paros::net::Pass;
@@ -196,11 +197,29 @@ impl FleetOps {
         let sent = hashes(&records);
         match claim {
             ClaimOutcome::Won { .. } => {
-                if let WriterOutcome::Written { seq, count, .. } =
-                    writer.write(client, records, first).await
-                {
-                    acked(Some(&audit), seq, count, sent);
-                    return true;
+                // A node whose batch limits the seed drew small refuses a
+                // batch over them, proposes nothing and names them: the
+                // batch is cut to fit and sent once more (witness recipe
+                // 12665019189975174713 232008:10773240230173250979 on
+                // bc60ebc: every write to a journal led by a node that
+                // takes one record per write was refused).
+                let mut records = records;
+                let mut sent = sent;
+                for _ in 0..2 {
+                    match writer.write(client, records.clone(), first).await {
+                        WriterOutcome::Written { seq, count, .. } => {
+                            acked(Some(&audit), seq, count, sent);
+                            return true;
+                        }
+                        WriterOutcome::TooLarge {
+                            max_records,
+                            max_bytes,
+                        } => {
+                            records = fit(records, max_records, max_bytes);
+                            sent = hashes(&records);
+                        }
+                        _ => return false,
+                    }
                 }
                 false
             }
@@ -222,4 +241,21 @@ impl FleetOps {
             _ => false,
         }
     }
+}
+
+/// The longest prefix of `records` within `max_records` records and
+/// `max_bytes` bytes, and at least its first record: a node's limits always
+/// admit one record (`paros::roles::node::calls::batch_too_large`).
+fn fit(records: Vec<Value>, max_records: u64, max_bytes: u64) -> Vec<Value> {
+    let mut bytes = 0_u64;
+    let mut kept = Vec::new();
+    for record in records {
+        bytes = bytes.saturating_add(u64::try_from(record.0.len()).unwrap_or(u64::MAX));
+        let count = u64::try_from(kept.len()).unwrap_or(u64::MAX);
+        if !kept.is_empty() && (count >= max_records || bytes > max_bytes) {
+            break;
+        }
+        kept.push(record);
+    }
+    kept
 }
