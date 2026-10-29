@@ -113,7 +113,7 @@ pub(crate) struct TenantBoard {
     name_reused: bool,
     /// `(machine, journal)`: the machine stopped serving the journal for
     /// good, a delete or its tenant's drop (#447 (model checks for every
-    /// journal world)).
+    /// journal world)), until it starts the journal again.
     stopped: BTreeSet<(u64, JournalIdentifier)>,
     /// Tenants a machine folded the cell's drop of: every machine that folds
     /// it stops each journal of the tenant, a lagging one included, so none
@@ -572,7 +572,20 @@ impl TenantBoard {
     /// or a journal its tenant created, which the node folded before it
     /// started it. A journal of a tenant whose control journal no machine
     /// folded yet is not judged: the board does not know the tenant.
-    pub(crate) fn started(&self, node: NodeId, journal: JournalIdentifier) {
+    ///
+    /// A start after a stop takes the stop back: the node serves the
+    /// journal again, answers its Phase 1 and reports its faulty copies, so
+    /// convergence must not count it gone. Kept, the stop made the audit
+    /// drop that node's faulty report of a decided slot: the leader's
+    /// repair probe waited on the third member, wiped, for good, and
+    /// nothing excused the frozen journal (witness: PR #770 (batcher
+    /// follow-ups)'s sweep, recipe `266950:9674206228777083985` on seed
+    /// 3588815606738864349: slot 0 of a created journal decided at
+    /// `(12, B)`, `B` stopped then started the journal and reported slot 0
+    /// faulty at `(13, B)`; red on "every quorum-decided slot is applied by
+    /// the end of the tail", green with the stop taken back).
+    pub(crate) fn started(&mut self, node: NodeId, journal: JournalIdentifier) {
+        self.stopped.remove(&(node.0, journal));
         let controls = self.controls();
         let Some(control) = controls.iter().find(|c| c.tenant == journal.tenant) else {
             return;
