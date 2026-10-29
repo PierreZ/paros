@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 # The rolling survivors issue's body (#269), from the `mutants.out` directories
-# of a cargo-mutants run's shards: `scripts/mutants-report.sh <dir>`, where each
-# subdirectory of <dir> is one shard's `mutants.out`. Prints Markdown.
+# of a cargo-mutants run's shards: `scripts/mutants-report.sh <dir> [<negative>]`,
+# where each subdirectory of <dir> is one shard's `mutants.out`, and each of
+# <negative> one shard's `negative.out` (#742 (mutant per excuse)). Prints
+# Markdown.
 #
 # Reads RUN_URL, SEEDS and GITHUB_SHA from the environment when set.
 set -euo pipefail
 
-dir=${1:?usage: mutants-report.sh <shards-dir>}
+dir=${1:?usage: mutants-report.sh <shards-dir> [<negative-dir>]}
+negative=${2:-}
 shards=$(find "$dir" -mindepth 1 -maxdepth 1 -type d | sort)
 
 # Every line of one outcome file across the shards, sorted.
@@ -73,4 +76,25 @@ if [ "$timeout" -gt 0 ]; then
   lines timeout | sed 's/^/- `/; s/$/`/'
   echo
   echo "</details>"
+fi
+
+if [ -n "$negative" ] && [ -d "$negative" ]; then
+  verdicts=$(find "$negative" -name verdicts.txt -exec cat {} + | sed '/^$/d' | sort)
+  echo
+  echo "## Negative hunt"
+  echo
+  cat <<'MD'
+Hand-written mutants that each oracle excuse must catch (#742 (mutant per
+excuse), `crates/sim/paros-sim-runner/negative`). A row marked UNEXPECTED is a
+verdict that differs from the mutant's `expect`: an excuse wider than the rule
+it copies, or a mutant the code moved away from (stale).
+
+| mutant | excuse | verdict | expect | |
+|---|---|---|---|---|
+MD
+  if [ -z "$verdicts" ]; then
+    echo "| (no verdicts: every shard failed or was cancelled) | | | | |"
+  else
+    echo "$verdicts" | awk -F'\t' '{ printf "| `%s` | %s | %s | %s | %s |\n", $1, $2, $3, $4, $5 }'
+  fi
 fi

@@ -1,0 +1,11 @@
+# Placement sees one free slot less on every machine than it has: a
+# machine with exactly one free slot never takes a re-placed member. The
+# heal oracle's "cell cannot hold shape" excuse counts free slots from the
+# audit's own registry fold, so it must not excuse the journal.
+excuse: heal: cell cannot hold shape
+file: crates/lib/paros-model/src/placement.rs
+--- find
+        self.capacity.saturating_sub(self.booked)
+--- replace
+        self.capacity.saturating_sub(self.booked + 1)
+--- end

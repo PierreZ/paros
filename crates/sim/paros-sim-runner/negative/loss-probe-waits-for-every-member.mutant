@@ -1,0 +1,11 @@
+# The repair probe waits for every member of each asked configuration
+# instead of a Phase-1 quorum of qualifying answers: one member down for
+# good blocks a lost slot that a quorum could decide. The audit's
+# `blocked_in_asked` asks for a quorum, so it must not excuse the journal.
+excuse: loss: blocked in asked
+file: crates/lib/paros-core/src/proposer.rs
+--- find
+        .all(|config| config.has_phase1_quorum(&qualifying))
+--- replace
+        .all(|config| config.members().iter().all(|m| qualifying.contains(m)))
+--- end

@@ -6,6 +6,11 @@
 # unreachable state, or an equivalent mutant to exclude with a reason. Weekly
 # and on demand, never a PR gate (decided on 2026-10-09). The survivors land in
 # one rolling issue, labelled `mutation-survivors`, rewritten by every run.
+#
+# The negative hunt (#742 (mutant per excuse), `cargo xtask negative`) runs
+# beside it: the hand-written mutants of `crates/sim/paros-sim-runner/negative`,
+# each of which must turn the sim red where its oracle excuse fires. It also
+# runs on a pull request that changes them, and there it is a gate.
 name: Mutants
 
 on:
@@ -17,10 +22,17 @@ on:
       seeds:
         description: "Hunt seeds per mutant"
         default: "300"
+  pull_request:
+    branches: [main]
+    paths:
+      - "crates/sim/paros-sim-runner/negative/**"
+      - "crates/sim/paros-sim-runner/tests/mutants.rs"
+      - "crates/support/xtask/src/negative.rs"
+      - ".github/workflows/mutants.yml"
 
 concurrency:
-  group: ${{ github.workflow }}
-  cancel-in-progress: false
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || 'weekly' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -33,6 +45,7 @@ env:
 
 jobs:
   mutants:
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 340
     strategy:
@@ -61,9 +74,29 @@ jobs:
           path: mutants.out
           if-no-files-found: warn
 
+  negative:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - name: Run negative shard ${{ matrix.shard }}
+        run: nix develop --command cargo xtask negative --shard "${{ matrix.shard }}/4"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: negative-shard-${{ matrix.shard }}
+          path: negative.out
+          if-no-files-found: warn
+
   report:
-    needs: mutants
-    if: always()
+    needs: [mutants, negative]
+    if: always() && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -74,13 +107,17 @@ jobs:
         with:
           pattern: mutants-shard-*
           path: shards
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: negative-shard-*
+          path: negative
       - name: Rewrite the rolling survivors issue
         env:
           GH_TOKEN: ${{ github.token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           SEEDS: ${{ inputs.seeds || '300' }}
         run: |
-          scripts/mutants-report.sh shards > report.md
+          scripts/mutants-report.sh shards negative > report.md
           cat report.md
           gh label create mutation-survivors --force \
             --color B60205 --description "cargo-mutants survivors (#269)"

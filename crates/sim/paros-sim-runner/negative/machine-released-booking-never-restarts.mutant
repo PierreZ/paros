@@ -1,0 +1,14 @@
+# A machine never starts again a journal whose booking it released once,
+# also when the coordinator books it there again. The machine reported the
+# stop, so the "left pool" excuse holds for it, but the registry books it:
+# the journal runs a member short while the cell believes it serves.
+excuse: node: left pool
+file: crates/lib/paros-roles/src/node/control.rs
+--- find
+        for journal in booked {
+--- replace
+        for journal in booked {
+            if self.journals.released(journal) {
+                continue;
+            }
+--- end

@@ -1,0 +1,14 @@
+# The core waits on a faulty slot that CTRL says it can decide: a faulty
+# copy at or below the best clean copy never qualifies, so a Phase-1 quorum
+# that holds one such copy never decides the slot. The audit's own copy of
+# the rule (`audit/losses.rs`, `loss_recoverable`) calls the slot
+# recoverable, so it must not excuse the journal: the convergence oracle
+# goes red. If the audit's rule were wider than the core's, the slot would
+# read as unrecoverable and the run would stay green.
+excuse: loss: unrecoverable slot
+file: crates/lib/paros-core/src/proposer.rs
+--- find
+                .is_none_or(|ballot| Some(*ballot) <= threshold)
+--- replace
+                .is_none()
+--- end

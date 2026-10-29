@@ -1,0 +1,21 @@
+# The library formats an existing member's empty store and boots it, in
+# place of the amnesia refusal (#147): a wiped acceptor comes back with no
+# promise and votes again. The "wiped" excuse assumes that a wiped identity
+# never boots again, so the oracles must see the amnesiac votes.
+excuse: node: wiped
+file: crates/lib/paros-roles/src/node/boot.rs
+--- find
+        (BootKind::ExistingMember, None) => BootRefusal::Amnesia,
+--- replace
+        (BootKind::ExistingMember, None) => {
+            storage
+                .format(&operator)
+                .await
+                .map_err(|e| storage_fault_crash(audit, self_id, e))?;
+            storage
+                .sync(paros_core::contract::MustSync::Sync)
+                .await
+                .map_err(|e| storage_fault_crash(audit, self_id, e))?;
+            return Ok(());
+        }
+--- end

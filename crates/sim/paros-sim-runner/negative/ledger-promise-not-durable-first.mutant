@@ -1,0 +1,13 @@
+# A flush that raises the promise and stages entries no longer makes the
+# promise durable first: the entries can land on disk above the durable
+# promise (#264). The harness's cut ledger (`world/cut.rs`: the commit
+# registry, `HintVeto`, `permit_power_cut`) places power cuts inside
+# commits; this mutant must stay red once moonpool's gate replaces it
+# (#760 (moonpool owns fault placement)).
+excuse: none
+file: crates/lib/paros-storage/src/journal/node.rs
+--- find
+        if meta.is_some() && self.promise_raised && !entries.is_empty() {
+--- replace
+        if false && meta.is_some() && self.promise_raised && !entries.is_empty() {
+--- end

@@ -1,0 +1,10 @@
+# `cell init` refuses every fresh plan as another cell's: no cell ever
+# forms. The convergence oracle skips a run where no cell formed, so the
+# `cell init` oracles must catch it.
+excuse: skip converge: no cell
+file: crates/lib/paros-machine/src/cell_init.rs
+--- find
+    } else if foreign > 0 {
+--- replace
+    } else {
+--- end

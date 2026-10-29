@@ -1,0 +1,15 @@
+# A damaged record reads back as nothing accepted, not as a faulty entry:
+# the acceptor forgets a vote it gave (CTRL's unsafe class). The harness
+# ledger plans rot so that enough clean copies stay (the custody ledger,
+# `may_corrupt_record`, `may_park_for_copies`); this mutant must stay red
+# once moonpool's fault atlas replaces that ledger (#760 (moonpool owns
+# fault placement)).
+excuse: none
+file: crates/lib/paros-storage/src/journal/node.rs
+--- find
+                Err(ReadError::Damaged { id, .. }) => {
+                    self.faulty.insert(slot, id_ballot(&id).0);
+                }
+--- replace
+                Err(ReadError::Damaged { .. }) => {}
+--- end
