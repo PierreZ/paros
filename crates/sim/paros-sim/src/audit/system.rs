@@ -128,6 +128,9 @@ struct RegistryModel {
     next: Option<u64>,
     /// The live bookings the model knows, to their node.
     bookings: BTreeMap<u64, u64>,
+    /// The live bookings that take no slot (#753 (per-journal proxies)):
+    /// a journal's proxy leaders and batchers.
+    light: BTreeSet<u64>,
     /// Every booking id the model saw booked (#211): never booked again.
     spent: BTreeSet<u64>,
     /// Each node's fold: the position after the last one it reported (its
@@ -154,6 +157,7 @@ impl Default for RegistryModel {
         Self {
             next: Some(0),
             bookings: BTreeMap::new(),
+            light: BTreeSet::new(),
             spent: BTreeSet::new(),
             at: BTreeMap::new(),
             checkpoints: BTreeMap::new(),
@@ -379,18 +383,28 @@ impl SystemBoard {
                 booking,
                 node,
                 role,
-            } => self.model_booking(model, lsn, *booking, *node, *role),
+                target,
+            } => self.model_booking(model, lsn, *booking, *node, (*role, *target)),
             // A grant books its slots in order (#476), each judged alike.
             RegistryEvent::Granted { slots, .. } => {
                 for slot in slots {
-                    self.model_booking(model, lsn, slot.booking, slot.node, slot.role);
+                    self.model_booking(
+                        model,
+                        lsn,
+                        slot.booking,
+                        slot.node,
+                        (slot.role, slot.target),
+                    );
                 }
             }
             RegistryEvent::Released { booking, .. } => {
                 model.bookings.remove(booking);
+                model.light.remove(booking);
             }
             RegistryEvent::Retired { id } => {
                 model.bookings.retain(|_, node| *node != id.0);
+                let bookings = &model.bookings;
+                model.light.retain(|booking| bookings.contains_key(booking));
                 model.readdress(id.0, lsn, None);
             }
             RegistryEvent::Refused(RegistryRefusal::NoCapacity { .. }) => {
@@ -419,15 +433,20 @@ impl SystemBoard {
     }
 
     /// The model's half of one booking (#211): `booking` of `node` for
-    /// `role`, first folded at `lsn`.
+    /// `role` and its target, first folded at `lsn`. A booking that takes no
+    /// slot (#753 (per-journal proxies)) is judged against no capacity.
     fn model_booking(
         &self,
         model: &mut RegistryModel,
         lsn: u64,
         booking: u64,
         node: NodeId,
-        role: paros::model::registry::Role,
+        (role, target): (
+            paros::model::registry::Role,
+            paros::model::registry::BookingTarget,
+        ),
     ) {
+        let weighs = paros::model::registry::Booking::weighs_for(role, target);
         let machine = self.machines.get(&node.0).copied();
         assert_always!(
             machine.is_none_or(|(drawn, _)| drawn == role.class()),
@@ -439,13 +458,20 @@ impl SystemBoard {
             "registry: a booking id is booked at most once across checkpoints",
             { "node" => node.0, "lsn" => lsn }
         );
-        let held = model.bookings.values().filter(|n| **n == node.0).count() as u64;
+        let held = model
+            .bookings
+            .iter()
+            .filter(|(id, n)| **n == node.0 && !model.light.contains(id))
+            .count() as u64;
         assert_always!(
-            machine.is_none_or(|(_, capacity)| held < capacity),
+            !weighs || machine.is_none_or(|(_, capacity)| held < capacity),
             "registry: a node is never booked past its capacity",
             { "node" => node.0, "lsn" => lsn, "held" => held }
         );
         let before = model.bookings.insert(booking, node.0);
+        if !weighs {
+            model.light.insert(booking);
+        }
         assert_always!(
             before.is_none(),
             "registry: a live booking id is never booked again",
@@ -506,6 +532,11 @@ impl SystemBoard {
                 }
                 self.resumed_at_checkpoint = true;
                 model.bookings = held;
+                model.light = state
+                    .bookings()
+                    .filter(|(_, b)| !b.weighs())
+                    .map(|(id, _)| id)
+                    .collect();
                 model.spent = spent;
                 model.checkpoints.retain(|at, _| *at > seq);
                 model.next = Some(seq + 1);

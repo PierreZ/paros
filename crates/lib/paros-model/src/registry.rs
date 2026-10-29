@@ -574,6 +574,7 @@ impl Registry {
             booking,
             node: id,
             role,
+            target,
         }
     }
 

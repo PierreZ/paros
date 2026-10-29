@@ -6,7 +6,7 @@ use paros_core::journal::{JournalId, TenantId};
 use crate::checkpoint::Folded;
 use crate::machine::Class;
 use crate::registry::command::{GrantKey, Slot};
-use crate::registry::records::{MaintenanceScope, Role};
+use crate::registry::records::{BookingTarget, MaintenanceScope, Role};
 
 // The cell control journal has no fixed identifier (§3.8): a deployment draws
 // it and hands it to whoever folds it (`paros_roles::node::ControlPlan`).
@@ -53,6 +53,9 @@ pub enum RegistryEvent {
         node: NodeId,
         /// The slot's role.
         role: Role,
+        /// What the slot is for: with the role, whether it weighs
+        /// (`Booking::weighs`, #753 (per-journal proxies)).
+        target: BookingTarget,
     },
     /// The cell coordinator recorded machine `id`'s admission (#511).
     MachineAdmitted {
