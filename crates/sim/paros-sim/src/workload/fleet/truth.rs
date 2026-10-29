@@ -6,8 +6,9 @@
 //! The facts are the run's own: the machine board (each machine's process
 //! starts and stops, its disk's minted id, the wipes, the drains, removals
 //! and maintenance windows an operator sent, each machine's zone), the
-//! audit's acceptor configuration in force on each journal, the audit's
-//! matchmaker generations, the layout's class and capacity of each machine
+//! audit's acceptor configuration in force on each journal, the desired
+//! mode its tenant's create or configure recorded, the audit's matchmaker
+//! generations, the layout's class and capacity of each machine
 //! and the audit's booking model, folded from the registry's decided events
 //! in position order.
 //!
@@ -108,10 +109,15 @@ pub(super) fn excuse(
     journal: JournalIdentifier,
     now: Duration,
 ) -> Option<Excuse> {
-    let desired = crate::audit::tenants::lock(&crate::audit::tenants::tenant_board(state))
-        .live_config(journal)
-        .cloned();
-    let config = crate::audit::config_in_force(state, journal).or_else(|| desired.clone())?;
+    let (created, desired) = {
+        let board = crate::audit::tenants::tenant_board(state);
+        let board = crate::audit::tenants::lock(&board);
+        (
+            board.live_config(journal).cloned(),
+            board.desired_acceptors(journal),
+        )
+    };
+    let config = crate::audit::config_in_force(state, journal).or(created)?;
     let members: BTreeSet<u64> = config.members().iter().map(|m| m.0).collect();
     let (failing, candidates) = {
         let board = machine_board(state);
@@ -155,9 +161,7 @@ pub(super) fn excuse(
             .collect();
         (failing, candidates)
     };
-    let short = desired
-        .map_or(0, |d| d.members().len())
-        .saturating_sub(members.len());
+    let short = desired.unwrap_or(0).saturating_sub(members.len());
     if failing + short == 0 {
         return None;
     }
