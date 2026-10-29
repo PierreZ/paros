@@ -16,7 +16,12 @@
 //! 2026-10-19, #145).
 //!
 //! A write shaped for a single-writer journal (it carries a leader uuid) is
-//! never merged: it goes to the leader alone, and the journal judges it. A
+//! never merged: it goes to the leader alone, and the journal judges it.
+//! The log deduplicates a re-send only when it is the identical write, and
+//! a caller re-sends its own write, alone or merged again with others: a
+//! fenced merge here would make the journal refuse a write it holds. A
+//! single-writer journal merges in its client's `Pipeline` instead (#709
+//! (merge fenced writes)). A
 //! merged write the leader refuses as too large teaches the batcher the
 //! leader's limits, and each of its writes is sent again alone. Any other
 //! answer is every write's answer: within the limits a multi-writer write

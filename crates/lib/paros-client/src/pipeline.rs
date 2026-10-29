@@ -27,13 +27,32 @@
 //!   in flight settle; then the next one opens at the tail the writer
 //!   knows. A claim that wins a new term opens at the tail its view names at
 //!   once: the old term's writes in flight are fenced or already counted.
+//! - **Writes sent together merge into one write** (#709 (merge fenced
+//!   writes)). A send waits one turn of the executor, so the sends beside
+//!   it get ready too. Then the first ready write takes the ready writes at
+//!   the positions after it, under the same uuid, into one write at its own
+//!   position: one slot, not one slot per write. The journal judges the
+//!   merged write as one write, and each write gets its own range back. A
+//!   verdict that is not a write (a refusal, a fence, an ambiguity) is the
+//!   verdict of every write it holds. A merged write over a leader's limits
+//!   (`TooLarge`) comes apart: each write is sent alone, and never merged
+//!   again. The merge is here, not in a batcher: the log deduplicates a
+//!   re-send only when it is the identical write, and only the pipeline
+//!   re-sends the merged write unchanged (an early re-send, or
+//!   [`Client::resolve`] of an ambiguous one). A batcher that merged
+//!   again a write a caller re-sent alone would make the journal refuse a
+//!   write it holds.
 //!
 //! The library draws no randomness and sends nothing on its own: each write
 //! is the caller's [`Pipeline::send`], and the first server is the
 //! caller's choice, as for [`Writer::write`]. [`Lanes`] is the pure state;
 //! the unit tests pin it.
 
+use std::collections::BTreeMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::task::{Context, Poll};
 
 use paros_core::Value;
 use paros_core::journal::{Entry, JournalIdentifier, JournalView, LeaderUuid, Seq};
@@ -77,6 +96,37 @@ pub struct Pipelined {
     /// The write arrived before the write in front of it, waited, and was
     /// sent again unchanged.
     pub resent: bool,
+    /// The write went out merged with the writes beside it, in one write
+    /// (#709 (merge fenced writes)).
+    pub merged: bool,
+}
+
+/// The most records one merged write carries (#709 (merge fenced
+/// writes)): a quarter of a leader's default `max_batch_records`. A leader
+/// with lower limits answers `TooLarge`, and the writes go apart.
+pub const MERGE_RECORDS: usize = 256;
+
+/// The most record bytes one merged write carries: a quarter of a leader's
+/// default `max_batch_bytes`.
+pub const MERGE_BYTES: usize = 256 * 1024;
+
+const _: () = assert!(MERGE_RECORDS >= 2 && MERGE_BYTES >= 1);
+
+/// One turn of the executor: pending once, woken at once. The sends
+/// polled in the same turn get ready before the first one leads.
+struct YieldOnce(bool);
+
+impl Future for YieldOnce {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        if self.0 {
+            return Poll::Ready(());
+        }
+        self.0 = true;
+        cx.waker().wake_by_ref();
+        Poll::Pending
+    }
 }
 
 impl Pipeline {
@@ -173,15 +223,62 @@ impl Pipeline {
             self.lanes().holds(ticket.id),
             "a ticket is sent while it is in flight"
         );
+        self.lanes().ready(ticket.id);
+        // The sends beside it get ready in this turn (#709 (merge fenced
+        // writes)).
+        YieldOnce(false).await;
         let mut resent = false;
+        // Lead a write, or wait for the merged write that carries it.
+        let mut entry = loop {
+            let mut settled = self.settled.subscribe();
+            let lead = self.lanes().lead(ticket.id);
+            match lead {
+                Lead::Send(entry) => break entry,
+                Lead::Done(outcome) => {
+                    guard.id = None;
+                    return Pipelined {
+                        outcome,
+                        resent,
+                        merged: true,
+                    };
+                }
+                Lead::Wait => {
+                    if settled.changed().await.is_err() {
+                        return Pipelined {
+                            outcome: WriterOutcome::Ambiguous,
+                            resent,
+                            merged: true,
+                        };
+                    }
+                }
+            }
+        };
+        let merged = entry != ticket.entry;
+        if merged {
+            moonpool_assertions::reachable!(
+                "client: a pipeline merges consecutive writes into one write"
+            );
+        }
         loop {
             let mut writer = self.writer();
-            let outcome = writer.write_entry(client, &ticket.entry, first).await;
+            let outcome = writer.write_entry(client, &entry, first).await;
             let folded = self.lanes().fold(ticket.id, outcome);
             self.wake();
-            if let Folded::Done(outcome) = folded {
-                guard.id = None;
-                return Pipelined { outcome, resent };
+            match folded {
+                Folded::Done(outcome) => {
+                    guard.id = None;
+                    return Pipelined {
+                        outcome,
+                        resent,
+                        merged,
+                    };
+                }
+                Folded::Apart => {
+                    // Over a leader's limits: its own write, alone.
+                    entry = ticket.entry.clone();
+                    continue;
+                }
+                Folded::Early => {}
             }
             loop {
                 let mut settled = self.settled.subscribe();
@@ -190,10 +287,7 @@ impl Pipeline {
                     Resumed::Send(again) => {
                         // Paired with `open`: a re-send is the identical
                         // write.
-                        assert!(
-                            again == ticket.entry,
-                            "a pipelined write is sent again unchanged"
-                        );
+                        assert!(again == entry, "a pipelined write is sent again unchanged");
                         moonpool_assertions::reachable!(
                             "client: a pipelined write that arrived early is sent again"
                         );
@@ -203,7 +297,11 @@ impl Pipeline {
                     Resumed::Done(outcome) => {
                         self.wake();
                         guard.id = None;
-                        return Pipelined { outcome, resent };
+                        return Pipelined {
+                            outcome,
+                            resent,
+                            merged,
+                        };
                     }
                     Resumed::Wait => {
                         if settled.changed().await.is_err() {
@@ -307,6 +405,33 @@ pub(crate) enum Folded {
     Done(WriterOutcome),
     /// Arrived before the write in front of it: it waits.
     Early,
+    /// A merged write over a leader's limits came apart (#709 (merge
+    /// fenced writes)): each write it held is sent alone.
+    Apart,
+}
+
+/// What a ready write does (#709 (merge fenced writes)).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Lead {
+    /// Send this write: its own, or merged with the ready writes after it.
+    Send(Entry),
+    /// A merged write of another ticket carries it.
+    Wait,
+    /// The merged write that carried it settled with this outcome.
+    Done(WriterOutcome),
+}
+
+/// Where a write's send stands (#709 (merge fenced writes)).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Stage {
+    /// Opened; its send has not started.
+    Opened,
+    /// Its send started, and no write took it yet.
+    Ready,
+    /// Its own send leads it, alone or merged.
+    Sending,
+    /// The merged write of this ticket carries it.
+    Carried(u64),
 }
 
 /// What a waiting write does next.
@@ -327,6 +452,16 @@ struct InFlight {
     entry: Entry,
     /// The refusal of a write that arrived early, while it waits.
     early: Option<JournalView>,
+    /// Where its send stands.
+    stage: Stage,
+    /// Sent alone from now on: a merged write that held it was over a
+    /// leader's limits.
+    alone: bool,
+    /// The tickets its merged write carries after its own, in position
+    /// order; empty when it goes alone.
+    carries: Vec<u64>,
+    /// Its send was dropped while a merged write carried it.
+    dropped: bool,
 }
 
 /// The pipeline's pure state: the shared writer, the next position it
@@ -341,6 +476,8 @@ pub(crate) struct Lanes {
     broken: bool,
     next_id: u64,
     flight: Vec<InFlight>,
+    /// The verdicts of carried writes, until their own send takes them.
+    done: BTreeMap<u64, WriterOutcome>,
 }
 
 /// The view an outcome names, when it names one.
@@ -355,6 +492,33 @@ fn view_of(outcome: &WriterOutcome) -> Option<&JournalView> {
     }
 }
 
+/// `entry`'s share of a merged write's `outcome`: its own range of a
+/// written one, the same verdict otherwise.
+fn part_of(outcome: &WriterOutcome, entry: &Entry) -> WriterOutcome {
+    match outcome {
+        WriterOutcome::Written {
+            duplicate,
+            resolved,
+            ..
+        } => WriterOutcome::Written {
+            seq: entry.seq.0,
+            count: entry.count(),
+            duplicate: *duplicate,
+            resolved: *resolved,
+        },
+        other => other.clone(),
+    }
+}
+
+/// `entry`'s record bytes.
+fn bytes_of(entry: &Entry) -> usize {
+    entry
+        .records
+        .iter()
+        .map(|record| record.0.len())
+        .fold(0, usize::saturating_add)
+}
+
 impl Lanes {
     pub(crate) fn new(writer: Writer) -> Self {
         let lanes = Self {
@@ -363,6 +527,7 @@ impl Lanes {
             broken: false,
             next_id: 0,
             flight: Vec::new(),
+            done: BTreeMap::new(),
         };
         lanes.assert_invariants();
         lanes
@@ -387,10 +552,32 @@ impl Lanes {
                 );
             }
         }
+        for write in &self.flight {
+            if let Stage::Carried(by) = write.stage {
+                assert!(
+                    self.flight
+                        .iter()
+                        .any(|other| other.id == by && other.stage == Stage::Sending),
+                    "a carried write rides a merged write in flight"
+                );
+            }
+            assert!(
+                write.carries.is_empty() || write.stage == Stage::Sending,
+                "only a write being sent carries others"
+            );
+        }
         assert!(
             !self.broken || !self.flight.is_empty(),
             "a failure stops the pipeline only while writes are in flight"
         );
+    }
+
+    /// The tickets in flight, in ticket order.
+    #[cfg(test)]
+    pub(crate) fn in_flight_ids(&self) -> Vec<u64> {
+        let mut ids: Vec<u64> = self.flight.iter().map(|write| write.id).collect();
+        ids.sort_unstable();
+        ids
     }
 
     pub(crate) fn holds(&self, id: u64) -> bool {
@@ -442,6 +629,10 @@ impl Lanes {
             id,
             entry: entry.clone(),
             early: None,
+            stage: Stage::Opened,
+            alone: false,
+            carries: Vec::new(),
+            dropped: false,
         });
         self.assert_invariants();
         Ticket { id, entry }
@@ -499,16 +690,26 @@ impl Lanes {
 
     /// Fold `id`'s outcome.
     pub(crate) fn fold(&mut self, id: u64, outcome: WriterOutcome) -> Folded {
-        let entry = self.at(id).entry.clone();
+        let entry = self.sent_entry(id);
+        let merged = !self.get(id).carries.is_empty();
         let current = self.writer.owned() == Some(entry.leader);
         if let Some(state) = view_of(&outcome) {
             self.observe(entry.leader, state);
         }
         match outcome {
+            // A merged write over a leader's limits proposed nothing: its
+            // writes go apart, each alone.
+            WriterOutcome::TooLarge { .. } if merged => {
+                self.apart(id);
+                Folded::Apart
+            }
             WriterOutcome::Written { seq, count, .. } => {
+                assert!(
+                    !merged || (seq == entry.seq.0 && count == entry.count()),
+                    "a merged write is written whole, at its own position"
+                );
                 self.forward(seq + count);
-                self.remove(id);
-                Folded::Done(outcome)
+                Folded::Done(self.settle(id, &outcome))
             }
             // Refused under its own uuid at a tail below its position: the
             // write in front of it was not applied yet.
@@ -526,8 +727,7 @@ impl Lanes {
                 if current {
                     self.broken = true;
                 }
-                self.remove(id);
-                Folded::Done(outcome)
+                Folded::Done(self.settle(id, &outcome))
             }
         }
     }
@@ -538,7 +738,7 @@ impl Lanes {
     ///
     /// If `id` did not arrive early (a programmer error).
     pub(crate) fn resume(&mut self, id: u64) -> Resumed {
-        let write = self.at(id).clone();
+        let write = self.get(id).clone();
         let Some(early) = write.early else {
             panic!("only a write that arrived early waits");
         };
@@ -553,15 +753,15 @@ impl Lanes {
         let current = self.writer.owned() == Some(leader);
         if current && self.writer.next_seq() >= write.entry.seq.0 {
             self.at(id).early = None;
-            return Resumed::Send(write.entry);
+            return Resumed::Send(self.sent_entry(id));
         }
         // The writes in front of it settled and the tail stops short of it
-        // (or its term ended): its one verdict is the refusal.
+        // (or its term ended): its one verdict is the refusal, and the
+        // verdict of every write it carries.
         if current {
             self.broken = true;
         }
-        self.remove(id);
-        Resumed::Done(WriterOutcome::Refused { state: early })
+        Resumed::Done(self.settle(id, &WriterOutcome::Refused { state: early }))
     }
 
     /// Settle `id`, whose send was dropped: it may still land.
@@ -569,10 +769,148 @@ impl Lanes {
         if !self.holds(id) {
             return;
         }
-        if self.writer.owned() == Some(self.at(id).entry.leader) {
+        if matches!(self.get(id).stage, Stage::Carried(_)) {
+            // The merged write that carries it goes on; its verdict has no
+            // one to take it.
+            self.at(id).dropped = true;
+            self.assert_invariants();
+            return;
+        }
+        if self.writer.owned() == Some(self.get(id).entry.leader) {
             self.broken = true;
         }
+        // The writes it carries may land with it.
+        self.settle(id, &WriterOutcome::Ambiguous);
+    }
+
+    /// Start `id`'s send: it is ready to lead, or to be carried (#709
+    /// (merge fenced writes)).
+    ///
+    /// # Panics
+    ///
+    /// If its send already started (a programmer error).
+    pub(crate) fn ready(&mut self, id: u64) {
+        let write = self.at(id);
+        assert!(write.stage == Stage::Opened, "a write's send starts once");
+        write.stage = Stage::Ready;
+        self.assert_invariants();
+    }
+
+    /// What the ready write `id` sends (#709 (merge fenced writes)): the
+    /// verdict of the merged write that carried it, a wait while one
+    /// carries it, or its write, merged with the ready writes at the
+    /// positions after it under the same uuid, within [`MERGE_RECORDS`] and
+    /// [`MERGE_BYTES`]. An empty write is never merged: it holds no
+    /// position of its own.
+    ///
+    /// # Panics
+    ///
+    /// If `id` is not ready (a programmer error).
+    pub(crate) fn lead(&mut self, id: u64) -> Lead {
+        if let Some(outcome) = self.done.remove(&id) {
+            return Lead::Done(outcome);
+        }
+        let write = self.at(id);
+        match write.stage {
+            Stage::Carried(_) => return Lead::Wait,
+            Stage::Ready => write.stage = Stage::Sending,
+            Stage::Opened | Stage::Sending => panic!("only a ready write leads"),
+        }
+        let leader = write.entry.leader;
+        let alone = write.alone || write.entry.records.is_empty();
+        let mut end = write.entry.seq.0 + write.entry.count();
+        let mut records = write.entry.records.len();
+        let mut bytes = bytes_of(&write.entry);
+        loop {
+            if alone {
+                break;
+            }
+            let next = self.flight.iter_mut().find(|other| {
+                other.stage == Stage::Ready
+                    && !other.alone
+                    && !other.entry.records.is_empty()
+                    && other.entry.leader == leader
+                    && other.entry.seq.0 == end
+                    && records + other.entry.records.len() <= MERGE_RECORDS
+                    && bytes.saturating_add(bytes_of(&other.entry)) <= MERGE_BYTES
+            });
+            let Some(other) = next else {
+                break;
+            };
+            other.stage = Stage::Carried(id);
+            end += other.entry.count();
+            records += other.entry.records.len();
+            bytes = bytes.saturating_add(bytes_of(&other.entry));
+            let member = other.id;
+            self.at(id).carries.push(member);
+        }
+        self.assert_invariants();
+        Lead::Send(self.sent_entry(id))
+    }
+
+    fn get(&self, id: u64) -> &InFlight {
+        self.flight
+            .iter()
+            .find(|write| write.id == id)
+            .expect("a write is in flight")
+    }
+
+    /// The write `id`'s send carries: its own entry, then the records of
+    /// each write it carries, in turn.
+    pub(crate) fn sent_entry(&self, id: u64) -> Entry {
+        let write = self.get(id);
+        let mut entry = write.entry.clone();
+        for member in &write.carries {
+            entry
+                .records
+                .extend(self.get(*member).entry.records.iter().cloned());
+        }
+        entry
+    }
+
+    /// Settle `id` and every write it carries with `outcome`: a write's
+    /// range is its own part of a written one. Returns `id`'s own verdict;
+    /// the others wait in `done` for their sends.
+    fn settle(&mut self, id: u64, outcome: &WriterOutcome) -> WriterOutcome {
+        let carries = std::mem::take(&mut self.at(id).carries);
+        let own = self.get(id).entry.clone();
+        let mut at = own.seq.0 + own.count();
+        for member in carries {
+            let write = self.remove(member);
+            assert!(
+                write.stage == Stage::Carried(id) && write.entry.seq.0 == at,
+                "a merged write carries the writes at the positions after its own"
+            );
+            at += write.entry.count();
+            if !write.dropped {
+                self.done.insert(member, part_of(outcome, &write.entry));
+            }
+        }
         self.remove(id);
+        part_of(outcome, &own)
+    }
+
+    /// Take `id`'s merged write apart: each write it carried sends itself
+    /// alone, and none merges again. A write whose send was dropped is
+    /// never sent: the merged write proposed nothing, so it is not
+    /// written, and the pipeline drains as after a failure.
+    fn apart(&mut self, id: u64) {
+        let carries = std::mem::take(&mut self.at(id).carries);
+        self.at(id).alone = true;
+        let leader = self.get(id).entry.leader;
+        for member in carries {
+            if self.get(member).dropped {
+                if self.writer.owned() == Some(leader) {
+                    self.broken = true;
+                }
+                self.remove(member);
+            } else {
+                let write = self.at(member);
+                write.stage = Stage::Ready;
+                write.alone = true;
+            }
+        }
+        self.assert_invariants();
     }
 
     /// Start a claim: `fresh` spends the uuid the writer leads with. The

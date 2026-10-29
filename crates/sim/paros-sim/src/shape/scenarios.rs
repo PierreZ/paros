@@ -554,6 +554,34 @@ pub(crate) fn batchers_among(state: &StateHandle, machines: usize) -> bool {
     })
 }
 
+/// Whether the run draws the **batcher-limits scenario** (#702 (batcher
+/// rare paths)): drawn once per seed, its own BUGGIFY location, and only on
+/// a batchers seed ([`batchers`]). Read before that draw, it is off: it
+/// never draws the batchers scenario itself. Two batcher gates fired on
+/// almost no seed. A merged write is split only when a batcher's limits
+/// are above its journal's leader's, and the merged write passes the
+/// leader's: a small `max_batch_records` on the leader, a large one on the
+/// batcher. A write goes alone only at a batcher whose limits are below
+/// the write. Each ingredient was a coin of its own (the knob's extreme,
+/// a batcher's start decision, wide writes). On a scenario seed, half the
+/// machines boot with a record limit of two or three (`boot`), every
+/// batched burst carries wide writes, and a created multi-writer journal
+/// takes every burst, so a batcher that learned a leader's limits from a
+/// split sends the next wide write alone (`crate::workload`).
+/// Rare-but-valid: an operator may give machines different limits.
+pub(crate) fn batcher_limits(state: &StateHandle) -> bool {
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    let batchers = guard.batchers.unwrap_or(false);
+    *guard.batcher_limits.get_or_insert_with(|| {
+        let drawn = batchers && moonpool_sim::buggify_with_prob!(1.0);
+        if drawn {
+            assert_reachable!("batchers: a run draws the batcher-limits scenario");
+        }
+        drawn
+    })
+}
+
 /// Whether the run draws the **silent-machine scenario** (#211): drawn once
 /// per seed, its own BUGGIFY location. The cell coordinator marks a machine
 /// down only when it is silent past `machine_down_after`, while a
