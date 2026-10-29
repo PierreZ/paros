@@ -877,6 +877,9 @@ pub async fn read_election<P: ParosProviders>(
     // records the last page the server served held: its page stride.
     let mut ahead: VecDeque<(u64, ReadReport)> = VecDeque::new();
     let mut stride = 0_u64;
+    // The journal's tail as the last answer reported it: how far the tail
+    // grows in one round trip.
+    let mut last_tail: Option<u64> = None;
     loop {
         let from = fold.next();
         let request = Read {
@@ -889,6 +892,7 @@ pub async fn read_election<P: ParosProviders>(
         wait = 0;
         let report = next_page(client, request, first, (stride, target), &mut ahead).await;
         first = report.server;
+        let grown = tail_growth(&mut last_tail, &report.outcome);
         match report.outcome {
             ReadOutcome::Page {
                 from: at,
@@ -947,15 +951,33 @@ pub async fn read_election<P: ParosProviders>(
                 // only): recipe 8266528131635722183 `[(7084,
                 // 2178426596142505780)]` on 5b8f8b8 (PR #764), a floor two
                 // records ahead each 200 ms round trip, 70 waits in one read
-                // and the settle oracle's 20 s gone in three reads.
+                // and the settle oracle's 20 s gone in three reads. The
+                // lead is at most what the tail grew in the last round
+                // trip: a floor that jumps `compact_after` records at a
+                // time moves that far in one truncation, not in one round
+                // trip, and a wait that far ahead skips the record the next
+                // floor lands on. Witness (cite only): replay-main
+                // 14084384682467174515 on dd5cb31 (PR #770 (batcher
+                // follow-ups)), a floor 25 records ahead every 2.5 s, a
+                // wait 31 records ahead of a tail that grew 4 per round
+                // trip, and every read gave up past the next floor.
                 if chased {
                     cycles += 1;
                     waits = 0;
                     moonpool_assertions::reachable!(
                         "election: a reader waits at the tail past a moving floor"
                     );
-                    let lead = state.first_seq.0.saturating_sub(from);
-                    assert!(lead > 0, "a floor that outran a read leads it");
+                    let jump = state.first_seq.0.saturating_sub(from);
+                    assert!(jump > 0, "a floor that outran a read leads it");
+                    let lead = grown.map_or(jump, |grown| jump.min(grown.max(1)));
+                    assert!(
+                        lead > 0,
+                        "a reader past a moving floor waits ahead of the tail"
+                    );
+                    assert!(
+                        lead <= jump,
+                        "a reader waits no further ahead than the floor moved"
+                    );
                     fold.resume_at_tail(state.first_seq.0, state.next_seq.0.saturating_add(lead));
                     wait = FLOOR_RACE_WAIT_MS;
                 } else {
@@ -970,6 +992,22 @@ pub async fn read_election<P: ParosProviders>(
             _ => return None,
         }
     }
+}
+
+/// How far the journal's tail grew since `last_tail`, the tail the last
+/// answer reported, by `outcome`'s report; `last_tail` moves to it. `None`
+/// for the first answer, or one that reports no tail.
+fn tail_growth(last_tail: &mut Option<u64>, outcome: &ReadOutcome) -> Option<u64> {
+    let (ReadOutcome::Page { state, .. } | ReadOutcome::Truncated { state }) = outcome else {
+        return None;
+    };
+    let grown = last_tail.map(|tail| state.next_seq.0.saturating_sub(tail));
+    *last_tail = Some(state.next_seq.0);
+    assert!(
+        *last_tail == Some(state.next_seq.0),
+        "the last tail is the one just reported"
+    );
+    grown
 }
 
 /// The page `request` asks for, from server `first` on: the next page of
