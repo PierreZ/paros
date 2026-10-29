@@ -1,0 +1,13 @@
+cargo::rerun-if-changed=src/scan.rs
+cargo::rerun-if-changed=/home/user/paros-5b8/crates/sim/paros-sim-runner/../../lib/paros-core/src
+cargo::rerun-if-changed=/home/user/paros-5b8/crates/sim/paros-sim-runner/../../lib/paros-wire/src
+cargo::rerun-if-changed=/home/user/paros-5b8/crates/sim/paros-sim-runner/../../lib/paros-model/src
+cargo::rerun-if-changed=/home/user/paros-5b8/crates/sim/paros-sim-runner/../../lib/paros-tunables/src
+cargo::rerun-if-changed=/home/user/paros-5b8/crates/sim/paros-sim-runner/../../lib/paros-storage/src
+cargo::rerun-if-changed=/home/user/paros-5b8/crates/sim/paros-sim-runner/../../lib/paros-net/src
+cargo::rerun-if-changed=/home/user/paros-5b8/crates/sim/paros-sim-runner/../../lib/paros-client/src
+cargo::rerun-if-changed=/home/user/paros-5b8/crates/sim/paros-sim-runner/../../lib/paros-observe/src
+cargo::rerun-if-changed=/home/user/paros-5b8/crates/sim/paros-sim-runner/../../lib/paros-roles/src
+cargo::rerun-if-changed=/home/user/paros-5b8/crates/sim/paros-sim-runner/../../lib/paros-coordinator/src
+cargo::rerun-if-changed=/home/user/paros-5b8/crates/sim/paros-sim-runner/../../lib/paros-machine/src
+cargo::rerun-if-changed=/home/user/paros-5b8/crates/sim/paros-sim-runner/../../sim/paros-sim/src
