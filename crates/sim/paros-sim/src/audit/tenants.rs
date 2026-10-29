@@ -78,6 +78,10 @@ pub(crate) struct TenantBoard {
     /// Every created journal's store durability (#599 (durability mode per
     /// journal)).
     stores: BTreeMap<JournalIdentifier, StoreDurability>,
+    /// Every created journal's desired mode, its create's or its latest
+    /// configure's, with the position that set it (#739 (heal from ground
+    /// truth)): a lagging fold of an older position never undoes a newer one.
+    desired: BTreeMap<JournalIdentifier, (u64, paros::model::tenant::Desired)>,
     /// Per created journal: the fewest copies of a slot its configurations
     /// may lose and still repair it, over its create and every configure
     /// (#599): the machines' cut budget.
@@ -248,11 +252,13 @@ impl TenantBoard {
                 writer,
                 config,
                 store,
+                desired,
                 ..
             } => {
                 zone_spread(config, lsn);
                 self.armed = true;
                 let journal = JournalIdentifier::new(control.tenant, *id);
+                self.set_desired(journal, lsn, *desired);
                 self.modes.entry(journal).or_insert(*writer);
                 self.configs
                     .entry(journal)
@@ -404,6 +410,7 @@ impl TenantBoard {
         // before (#214 (tenant modes)).
         if let Some(id) = id {
             let journal = JournalIdentifier::new(control.tenant, id);
+            self.set_desired(journal, lsn, *desired);
             // Its new placement survives `machines` failures per acceptor partition (#599:
             // the cut budget takes the smallest of its life).
             let failures = desired.durability.survive_machines;
@@ -442,6 +449,28 @@ impl TenantBoard {
     fn tolerate(&mut self, journal: JournalIdentifier, loss: usize) {
         let held = self.tolerated.entry(journal).or_insert(loss);
         *held = (*held).min(loss);
+    }
+
+    /// The acceptors `journal` asks for (#739 (heal from ground truth)):
+    /// its create's desired mode, or the latest configure of it folded.
+    pub(crate) fn desired_acceptors(&self, journal: JournalIdentifier) -> Option<usize> {
+        self.desired
+            .get(&journal)
+            .map(|(_, desired)| desired.acceptors())
+    }
+
+    /// `journal` asks for `desired` from position `lsn` of its control
+    /// journal on, unless a later position set it.
+    fn set_desired(
+        &mut self,
+        journal: JournalIdentifier,
+        lsn: u64,
+        desired: paros::model::tenant::Desired,
+    ) {
+        let held = self.desired.entry(journal).or_insert((lsn, desired));
+        if lsn >= held.0 {
+            *held = (lsn, desired);
+        }
     }
 
     /// The store durability `journal` was created with, when a tenant

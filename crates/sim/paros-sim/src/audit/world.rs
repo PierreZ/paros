@@ -71,6 +71,54 @@ pub(crate) fn audit_world_named(
     world
 }
 
+/// The acceptor configuration in force on `journal` as its audit folded
+/// it (#739 (heal from ground truth)): the one bound to the highest
+/// registered ballot, else the bootstrap. `None` when no node reported the
+/// journal yet: no world is made for it here.
+pub(crate) fn config_in_force(
+    state: &StateHandle,
+    journal: paros::core::journal::JournalIdentifier,
+) -> Option<paros::core::membership::AcceptorConfig> {
+    let known = audit_worlds(state)
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .contains(&journal);
+    if !known {
+        return None;
+    }
+    let world = published_world(state, journal);
+    let audit = world.lock();
+    audit
+        .configs
+        .values()
+        .next_back()
+        .or(audit.bootstrap.as_ref())
+        .cloned()
+}
+
+/// The members of `tenant`'s matchmaker set in force as the audit bound
+/// it (#739 (heal from ground truth)): the highest generation a chosen
+/// handover, an activation or the deployment bound. `None` on plain
+/// Multi-Paxos, or before any generation is bound.
+pub(crate) fn set_in_force(
+    state: &StateHandle,
+    tenant: paros::core::journal::TenantId,
+) -> Option<Vec<u64>> {
+    let sets = crate::state::published_arc(
+        state,
+        &crate::state::journal_key(
+            TENANT_SETS_KEY,
+            paros::core::journal::JournalIdentifier::new(
+                tenant,
+                paros::core::journal::JournalId::UNSET,
+            ),
+        ),
+        super::matchmaker::TenantSets::default,
+    );
+    let generation = sets.generations().into_iter().max()?;
+    sets.get(generation).filter(|members| !members.is_empty())
+}
+
 /// The published [`AuditWorld`] of `journal`, its mode not settled.
 fn published_world(
     state: &StateHandle,

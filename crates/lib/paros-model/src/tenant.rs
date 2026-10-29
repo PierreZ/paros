@@ -841,6 +841,9 @@ pub enum TenantEvent {
         writer: WriterMode,
         /// How its stores commit a batch (#599).
         store: StoreDurability,
+        /// The mode it asks for (#739 (heal from ground truth)): what its
+        /// placement must grow to.
+        desired: Desired,
     },
     /// A journal was tombstoned.
     Deleted {
@@ -1188,6 +1191,7 @@ impl TenantControl {
             config,
             writer,
             store,
+            desired,
         }
     }
 

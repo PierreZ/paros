@@ -113,6 +113,14 @@ pub(crate) struct MachineBoard {
     /// The machines an operator asked to remove (#359), by minted id: a
     /// removal whose answer was lost may still have landed.
     pub(crate) remove_asked: BTreeSet<u64>,
+    /// The machines an operator asked to drain (#474), by minted id: a
+    /// drain whose answer was lost may still have landed (#739 (heal from
+    /// ground truth)).
+    pub(crate) drain_asked: BTreeSet<u64>,
+    /// Every maintenance window or end an operator sent, in send order
+    /// (#739 (heal from ground truth)), whether it landed or not: what the
+    /// heal oracle bounds a window's hold by.
+    pub(crate) windows: Vec<WindowSent>,
     /// The audit's fold of the calls every machine metered (#366
     /// (metrics)): what the machines' counters must add up to.
     pub(crate) metered: paros::observe::metrics::Totals,
@@ -150,6 +158,31 @@ pub(crate) struct MaintenanceNote {
     /// The bookings held on the machine when the operator sent it: each id
     /// and its journal or set.
     pub(crate) slots: Vec<(u64, paros::model::registry::BookingTarget)>,
+}
+
+/// A maintenance window, or the end of one, an operator sent (#739 (heal
+/// from ground truth)).
+#[derive(Clone, Debug)]
+pub(crate) struct WindowSent {
+    /// The window's scope.
+    pub(crate) scope: paros::model::registry::MaintenanceScope,
+    /// When the operator sent it, in simulated time.
+    pub(crate) sent: Duration,
+    /// The window's length: zero ends the window over `scope`.
+    pub(crate) length: Duration,
+    /// What the answer said.
+    pub(crate) landed: Landed,
+}
+
+/// Whether a sent window entry landed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Landed {
+    /// No answer, or a lost one: it may land at any later time.
+    Unknown,
+    /// The registry took it before this instant.
+    By(Duration),
+    /// The registry refused it: it changed nothing.
+    Refused,
 }
 
 impl MachineBoard {
@@ -402,6 +435,39 @@ pub(crate) fn gone_down(state: &StateHandle) -> Option<u64> {
         .get(addr)
         .is_some_and(|ended| ended >= started)
         .then_some(node)
+}
+
+/// An operator sends a window entry over `scope` of `length` (zero ends
+/// it) at `sent` (#739 (heal from ground truth)): its index on the board,
+/// for [`note_window_answered`].
+pub(crate) fn note_window_sent(
+    state: &StateHandle,
+    scope: paros::model::registry::MaintenanceScope,
+    sent: Duration,
+    length: Duration,
+) -> usize {
+    let board = machine_board(state);
+    let mut board = lock(&board);
+    board.windows.push(WindowSent {
+        scope,
+        sent,
+        length,
+        landed: Landed::Unknown,
+    });
+    board.windows.len() - 1
+}
+
+/// The answer to the window entry at `index` came back.
+pub(crate) fn note_window_answered(state: &StateHandle, index: usize, landed: Landed) {
+    if let Some(window) = lock(&machine_board(state)).windows.get_mut(index) {
+        window.landed = landed;
+    }
+}
+
+/// An operator asks to drain machine `node` (#474, #739 (heal from ground
+/// truth)).
+pub(crate) fn note_drain_asked(state: &StateHandle, node: u64) {
+    lock(&machine_board(state)).drain_asked.insert(node);
 }
 
 /// An operator removed machine `node` from the cell (#359).

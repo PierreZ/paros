@@ -289,6 +289,26 @@ impl SystemBoard {
         );
     }
 
+    /// The free slots of storage machine `node` in the registry `journal`
+    /// (#739 (heal from ground truth)): the capacity its layout drew, less
+    /// the live bookings that take a slot in the model this board folds
+    /// from the registry's events in position order. `None` for a machine
+    /// that never booted or is not a storage machine.
+    pub(crate) fn free_slots(&self, journal: JournalIdentifier, node: u64) -> Option<u64> {
+        let (class, capacity) = self.machines.get(&node)?;
+        if *class != Class::Storage {
+            return None;
+        }
+        let booked = self.models.get(&journal).map_or(0, |model| {
+            model
+                .bookings
+                .iter()
+                .filter(|(id, on)| **on == node && !model.light.contains(id))
+                .count()
+        });
+        Some(capacity.saturating_sub(u64::try_from(booked).unwrap_or(u64::MAX)))
+    }
+
     /// `node` folded LSN `lsn` of the registry `journal` to `event`.
     #[tracing::instrument(level = "trace", skip(self, event), fields(node = node.0, journal = %journal, lsn))]
     pub(crate) fn folded(

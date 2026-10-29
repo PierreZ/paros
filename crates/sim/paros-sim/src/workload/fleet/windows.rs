@@ -158,7 +158,22 @@ impl FleetOps {
                     .collect::<Vec<(u64, BookingTarget)>>(),
             })
             .collect();
-        if let Ok(true) = session.maintenance(client, first, scope, for_ms).await {
+        // The heal oracle bounds a window by what the answer says, not by
+        // the registry (#739 (heal from ground truth)).
+        let index = crate::machine::note_window_sent(
+            ctx.state(),
+            scope.clone(),
+            sent,
+            Duration::from_millis(for_ms),
+        );
+        let answer = session.maintenance(client, first, scope, for_ms).await;
+        let landed = match answer {
+            Ok(true) => crate::machine::Landed::By(ctx.time().now()),
+            Ok(false) => crate::machine::Landed::Refused,
+            Err(_) => crate::machine::Landed::Unknown,
+        };
+        crate::machine::note_window_answered(ctx.state(), index, landed);
+        if let Ok(true) = answer {
             if for_ms == 0 {
                 tracing::info!("maintenance_ended");
                 return;

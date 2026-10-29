@@ -5,47 +5,37 @@
 //! down past `machine_replace_after`, has its slot re-placed; one that
 //! answers again rejoins in place.
 //!
-//! A journal is excused when the cell cannot hold its shape: a member is
-//! not serving (down, draining, unknown) and the cell has fewer storage
-//! machines to go to than such members (registered, serving the cell, up,
-//! with a free slot, outside any maintenance window and holding no slot of
-//! the journal). It is excused when the members that serve hold no quorum:
-//! no leader can reconfigure it (a wipe of a quorum loses it for good,
-//! witness 17795399505419045907 on a0c4aa6). It is excused when its
-//! tenant's matchmaker set in force holds no majority outside the wiped
-//! machines: a re-placement is a round change, every campaign registers at
-//! a matchmaker quorum first, and a wiped matchmaker never rejoins, so no
-//! leader can ever reconfigure a journal of that tenant (`sets.rs` excuses
-//! the set the same way; recipe 12277531871500182271
-//! 91348:13584114706456816475 on 448be19: two of a set's three wiped, a
-//! journal of its tenant left at its bootstrap ballot, no leader to move
-//! it off the dead id). It is excused too while a
-//! maintenance window covers one
-//! of its members (#359), and on a seed whose coordinators wait longer than
-//! the settle tail before they re-place (the shipped profile's bound).
+//! A journal is excused when the cell cannot hold its shape, as the sim's
+//! own ground truth says (#739 (heal from ground truth), `truth.rs`), never
+//! as the registry or the view the cell answers says: its members that
+//! serve hold no quorum (no leader can reconfigure it; a wipe of a quorum
+//! loses it for good, witness 17795399505419045907 on a0c4aa6), a
+//! maintenance window may cover one of its members (#359), or the cell has
+//! fewer storage machines to go to than members that fail to serve. It is
+//! excused when its tenant's matchmaker set in force holds no majority
+//! outside the wiped machines: a re-placement is a round change, every
+//! campaign registers at a matchmaker quorum first, and a wiped matchmaker
+//! never rejoins, so no leader can ever reconfigure a journal of that
+//! tenant (recipe 12277531871500182271 91348:13584114706456816475 on
+//! 448be19: two of a set's three wiped, a journal of its tenant left at its
+//! bootstrap ballot, no leader to move it off the dead id). It is skipped
+//! on a seed whose coordinators wait longer than the settle tail before
+//! they re-place (the shipped profile's bound).
 
-use std::collections::BTreeSet;
 use std::time::Duration;
 
-use moonpool_sim::{SimContext, TimeProvider, assert_always, assert_reachable};
-use paros::client::checkpoint::LoadOutcome;
+use moonpool_sim::{SimContext, StateHandle, TimeProvider, assert_always, assert_reachable};
 use paros::client::views::{ViewOutcome, ask, request};
-use paros::core::NodeId;
 use paros::core::journal::JournalId;
 use paros::core::journal::JournalIdentifier;
 use paros::core::journal::TenantId;
-use paros::core::membership::MatchmakerGeneration;
-use paros::core::membership::MatchmakerId;
-use paros::core::membership::MatchmakerSet;
-use paros::machine::Class;
-use paros::model::registry::{NodeStanding, Registry};
-use paros::model::status::{Member, Word, judge, member, observe, placed};
+use paros::model::status::{Word, observe};
 use paros::model::view::Scope;
-use paros::wire::view::{CellQuery, JournalView, ViewReply, view_request::Query};
+use paros::wire::view::{CellQuery, ViewReply, view_request::Query};
 
+use super::FleetOps;
 use super::cell::Cell;
-use super::sets::in_force;
-use super::{FleetOps, judged_cell};
+use super::truth;
 use crate::excuses::{self, Excuse};
 
 impl FleetOps {
@@ -75,17 +65,15 @@ impl FleetOps {
                 self.patience,
             )
             .await;
-            if let ViewOutcome::Answered(reply) = outcome
-                && let Some(registry) = read(cell, attempt).await
-            {
+            if let ViewOutcome::Answered(reply) = outcome {
                 let wiped = crate::machine::wiped_ids(ctx.state());
                 let mut found = None;
-                let (unhealthy, excused) = unhealthy(&reply, &registry, &wiped);
+                let (unhealthy, excused) = unhealthy(ctx.state(), cell, &reply, ctx.time().now());
                 for (journal, excuse) in excused {
                     excuses::note(ctx.state(), excuse, Some(journal));
                 }
                 for (tenant, journal, word) in unhealthy {
-                    if set_lost(cell, &registry, TenantId(tenant), &wiped).await {
+                    if truth::set_lost(ctx.state(), TenantId(tenant), &wiped) {
                         assert_reachable!("status: a lost matchmaker set excuses a journal");
                         excuses::note(
                             ctx.state(),
@@ -122,30 +110,19 @@ impl FleetOps {
     }
 }
 
-/// The cell's registry, folded to its tail.
-pub(super) async fn read(cell: &Cell, attempt: u64) -> Option<Registry> {
-    let mut fold = judged_cell(&cell.members);
-    let loaded = paros::client::checkpoint::load(
-        &mut fold,
-        cell.journals.cell,
-        &cell.client,
-        cell.first(attempt),
-        0,
-    )
-    .await;
-    matches!(loaded, LoadOutcome::Loaded { .. }).then(|| fold.state().registry().clone())
-}
-
 /// A journal that does not show healthy, with the excuse that holds.
 type Excused = (JournalIdentifier, Excuse);
 
 /// Every data journal of `reply` that does not show healthy and is not
 /// excused, as `(tenant, journal, word)`, in the reply's order; and every
-/// one that does not show healthy and is excused, with its excuse.
+/// one that does not show healthy and is excused, with its excuse. The
+/// reply names the journals and their words; the excuses are the sim's
+/// own (`truth.rs`).
 fn unhealthy(
+    state: &StateHandle,
+    cell: &Cell,
     reply: &ViewReply,
-    registry: &Registry,
-    wiped: &BTreeSet<u64>,
+    now: Duration,
 ) -> (Vec<(u64, u64, String)>, Vec<Excused>) {
     let mut found = Vec::new();
     let mut excused = Vec::new();
@@ -155,9 +132,8 @@ fn unhealthy(
             if word == Some(Word::Healthy) {
                 continue;
             }
-            if let Some(excuse) = excuse(reply, registry, journal, wiped) {
-                let id =
-                    JournalIdentifier::new(TenantId(tenant.tenant), JournalId(journal.journal));
+            let id = JournalIdentifier::new(TenantId(tenant.tenant), JournalId(journal.journal));
+            if let Some(excuse) = truth::excuse(state, cell, id, now) {
                 excused.push((id, excuse));
                 continue;
             }
@@ -166,126 +142,4 @@ fn unhealthy(
         }
     }
     (found, excused)
-}
-
-/// Whether `tenant`'s matchmaker set in force, as the founding members
-/// believe it for the tenant's control journal (one set per tenant, #190),
-/// holds no majority outside `wiped`. Every campaign registers at a
-/// matchmaker quorum before its first `Prepare`, and a wiped matchmaker
-/// never rejoins (the library refuses an amnesiac boot), so no journal of
-/// the tenant can elect the leader a re-placement needs. `false` when the
-/// set cannot be read, or on plain Multi-Paxos (no set): the journal is
-/// judged.
-pub(super) async fn set_lost(
-    cell: &Cell,
-    registry: &Registry,
-    tenant: TenantId,
-    wiped: &BTreeSet<u64>,
-) -> bool {
-    let Some(control) = registry.hosted_tenant(tenant).map(|h| h.control) else {
-        return false;
-    };
-    let journal = JournalIdentifier::new(tenant, control);
-    let Some(members) = in_force(&cell.client, cell.client.server_count(), journal).await else {
-        return false;
-    };
-    if members.is_empty() {
-        return false;
-    }
-    // Every quorum question crosses `membership/`: the set judges its own
-    // majority. The generation is not what is judged here.
-    let set = MatchmakerSet::new(
-        MatchmakerGeneration(0),
-        members.iter().copied().map(MatchmakerId).collect(),
-    );
-    let live: BTreeSet<MatchmakerId> = members
-        .iter()
-        .filter(|m| !wiped.contains(m))
-        .copied()
-        .map(MatchmakerId)
-        .collect();
-    !set.has_quorum(&live)
-}
-
-/// Whether the cell cannot hold `journal`'s shape now: the members that
-/// serve hold no quorum (a wipe or an outage took it), a maintenance window
-/// covers a member, or fewer machines can take a slot than members fail to
-/// serve.
-pub(super) fn excused(
-    reply: &ViewReply,
-    registry: &Registry,
-    journal: &JournalView,
-    wiped: &BTreeSet<u64>,
-) -> bool {
-    excuse(reply, registry, journal, wiped).is_some()
-}
-
-/// [`excused`], with the excuse that holds (#738 (count excuses, the
-/// baseline)): a maintenance window, or any other reason the cell cannot
-/// hold the shape.
-fn excuse(
-    reply: &ViewReply,
-    registry: &Registry,
-    journal: &JournalView,
-    wiped: &BTreeSet<u64>,
-) -> Option<Excuse> {
-    let machine = |id: u64| reply.machines.iter().find(|m| m.node_id == id);
-    // A re-placement is a reconfiguration by the journal's leader: while the
-    // members that serve hold no Phase-1 or no Phase-2 quorum, no leader can
-    // run it. A wiped member never serves again: the journal is lost. A down
-    // one may answer again later than the tail.
-    if let Some(placed) = placed(journal) {
-        let serving = |id: NodeId| {
-            if wiped.contains(&id.0) {
-                Member::Gone
-            } else {
-                member(machine(id.0))
-            }
-        };
-        let size = placed.members().len();
-        if judge(&placed, size, placed.quorum_system(), serving) == Word::Unavailable {
-            return Some(Excuse::HealCannotHold);
-        }
-    }
-    if journal
-        .acceptors
-        .iter()
-        .any(|id| machine(*id).is_some_and(|m| m.maintenance_ms > 0))
-    {
-        assert_reachable!("status: a maintenance window excuses a journal");
-        return Some(Excuse::HealMaintenance);
-    }
-    let failing = journal
-        .acceptors
-        .iter()
-        .filter(|id| member(machine(**id)) != Member::Serving)
-        .count();
-    let short = usize::try_from(journal.desired_acceptors)
-        .unwrap_or(usize::MAX)
-        .saturating_sub(journal.acceptors.len());
-    let held: BTreeSet<u64> = journal.acceptors.iter().copied().collect();
-    let free = registry
-        .nodes()
-        .filter(|(id, n)| {
-            n.standing == NodeStanding::Registered
-                && n.class == Class::Storage
-                && registry.serves(*id)
-                && registry.liveness(*id).up
-                && registry.available(*id) > 0
-                && registry.maintenance_of(*id).next().is_none()
-                && !held.contains(&id.0)
-        })
-        .count();
-    // A founding member the registry does not list stores too.
-    let founders = reply
-        .machines
-        .iter()
-        .filter(|m| {
-            m.founder
-                && registry.get(NodeId(m.node_id)).is_none()
-                && m.up
-                && !held.contains(&m.node_id)
-        })
-        .count();
-    (free + founders < failing + short).then_some(Excuse::HealCannotHold)
 }
