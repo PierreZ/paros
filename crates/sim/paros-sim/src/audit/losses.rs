@@ -165,6 +165,19 @@ impl AuditState {
     /// slot on the leader alone, then the other member's machine was wiped
     /// (PR #678's sweep, recipe `246:12551097816637968050` on seed
     /// 17950225408756416880). Safety is never excused, nor an acked slot.
+    ///
+    /// So is a journal whose latest won leadership ran under a
+    /// configuration with no Phase-1 quorum of members never wiped, whatever
+    /// the older ones keep. That leader registered its configuration at a
+    /// matchmaker quorum before its Phase 1, and only a later leader's GC
+    /// floor removes it, so every later campaign must also win a Phase-1
+    /// quorum of it. Seen on a `1×3` grid journal (Phase 1 needs all three)
+    /// first placed under a majority: its leader at round 4 chose slot 0
+    /// alone, crashed, and a member's machine was wiped; no campaign of the
+    /// 20 that followed could win (sim seed 14085890836155138235 on PR #768
+    /// (zoned resolve), #735 (quorum-decided slot not applied)). The older
+    /// majority configuration kept two live members, so the rule above did
+    /// not hold.
     pub(super) fn wipes_excuse_liveness(&self) -> bool {
         if self.wiped.is_empty() {
             return false;
@@ -177,7 +190,7 @@ impl AuditState {
         if configs.peek().is_none() {
             return false;
         }
-        let excused = configs.all(|config| {
+        let stuck = |config: &AcceptorConfig| {
             let alive: BTreeSet<NodeId> = config
                 .members()
                 .iter()
@@ -185,7 +198,16 @@ impl AuditState {
                 .filter(|member| !self.wiped.contains(&member.0))
                 .collect();
             !config.has_phase1_quorum(&alive)
-        });
+        };
+        // The latest won leadership's ballot, and the configuration bound to
+        // it (the bootstrap one when it has none of its own, as `config_of`).
+        let latest_won = self
+            .leader_round
+            .iter()
+            .map(|(&node, &round)| (round, node))
+            .max()
+            .and_then(|ballot| self.configs.get(&ballot).or(self.bootstrap.as_ref()));
+        let excused = configs.all(&stuck) || latest_won.is_some_and(stuck);
         if excused {
             assert_reachable!(
                 "convergence: a journal its wipes left without a Phase-1 quorum is excused"
