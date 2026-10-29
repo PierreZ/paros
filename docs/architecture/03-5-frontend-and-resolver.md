@@ -59,6 +59,13 @@ keeps them between requests:
   books a `batcher` slot of the tenant on, at the address the book holds for it
   (`ResolveAck.batchers`). A client of a multi-writer journal sends its writes there
   (`Resolved::batcher_servers`, section 2.4). A tenant with no batcher gets an empty list.
+- Each machine's zone (#673 (zoned resolve), landed on 2026-10-29): every `Member` of the answer
+  carries the `paros/zone` tag the registry holds for it (`Member.zone`, empty when it has none).
+  The client takes its own zone from its configuration, never from a draw, and ranks the
+  machines, batchers and frontends of its zone first (`Resolved::prefer_zone`).
+  `parosctl resolve <tenant> --zone <zone>` lists them in that order. In the simulation each
+  client stands in a zone of the cell's; its oracles: an answered zone is the one the machine's
+  layout placed it in, and a client asks a machine of its own zone first when the answer names one.
 
 `paros::client::resolve` asks the entry endpoint's addresses in turn and passes over a machine
 that does not answer or answers `unavailable`. `parosctl resolve <tenant>` prints the answer. An

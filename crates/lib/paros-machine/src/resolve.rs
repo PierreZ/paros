@@ -270,7 +270,8 @@ impl Folds {
                     });
                     // Each machine's interface as the registry holds it
                     // (#404 (static vs dynamic endpoints)): the client
-                    // sends its data plane through it.
+                    // sends its data plane through it. And its zone (#673
+                    // (zoned resolve)): the client prefers its own zone's.
                     let registry = self.registry.as_ref().map(|(_, folder)| folder.state());
                     ack.machines = self
                         .book
@@ -306,6 +307,7 @@ impl Folds {
                             node_id: *id,
                             addr: addr.to_string(),
                             machine_interface: Vec::new(),
+                            zone: String::new(),
                         })
                         .collect();
                 }
@@ -380,15 +382,19 @@ impl Folds {
     }
 }
 
-/// Machine `id` at `addr`, with the machine interface `registry` holds
-/// for it (#404 (static vs dynamic endpoints)).
+/// Machine `id` at `addr`, with the machine interface (#404 (static vs
+/// dynamic endpoints)) and the zone (#673 (zoned resolve)) `registry` holds
+/// for it.
 fn member(registry: Option<&Registry>, id: NodeId, addr: &Address) -> wire::Member {
+    let node = registry.and_then(|registry| registry.get(id));
     wire::Member {
         node_id: id.0,
         addr: addr.to_string(),
-        machine_interface: registry
-            .and_then(|registry| registry.get(id))
+        machine_interface: node
             .map(|node| node.machine_interface.clone())
+            .unwrap_or_default(),
+        zone: node
+            .map(|node| node.locality.zone.clone())
             .unwrap_or_default(),
     }
 }

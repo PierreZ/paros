@@ -340,6 +340,21 @@ pub(crate) fn wiped_ids(state: &StateHandle) -> BTreeSet<u64> {
         .collect()
 }
 
+/// The zone machine `node` stands in, as its layout draw placed it (#673
+/// (zoned resolve)): the ground truth a `Resolve` answer's zone is judged
+/// by. `None` when the board holds no address for the node, or no zone for
+/// the address.
+pub(crate) fn zone_of(state: &StateHandle, node: u64) -> Option<String> {
+    let board = machine_board(state);
+    let board = lock(&board);
+    board
+        .nodes
+        .iter()
+        .find(|(_, id)| **id == node)
+        .and_then(|(addr, _)| board.zones.get(addr))
+        .cloned()
+}
+
 /// The machines `cell add-machine` admitted into their cell (#216): with the
 /// founding members, the only ones that ever serve its journals.
 pub(crate) fn admitted_ids(state: &StateHandle) -> BTreeSet<u64> {

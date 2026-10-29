@@ -150,7 +150,9 @@ FoundationDB:
   not name keeps its value. A count of 0 runs the job in the leader's process. The cell places
   proxy leaders and batchers on its `stateless` machines, replicas on `storage` machines, and
   the journal's leader runs the counts by a round change. `parosctl resolve acme` names the
-  batchers and the frontends.
+  batchers and the frontends, each with its machine's zone. With `--zone eu-1`, the machines
+  and frontends in zone `eu-1` come first: a client in that zone calls them first and saves a
+  cross-zone hop.
 
 The answer `configured` means that the tenant's control journal holds the new durability. The
 tenant coordinator then applies it. It books slots on new machines, asks the journal's leader to

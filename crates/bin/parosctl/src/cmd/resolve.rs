@@ -20,6 +20,10 @@ use crate::support::output::{Printer, note, record_text, short};
 pub struct ResolveArgs {
     /// The tenant's name.
     tenant: String,
+    /// The zone the client stands in (#673 (zoned resolve)): the machines
+    /// and frontends of this zone are listed first.
+    #[arg(long, default_value = "")]
+    zone: String,
 }
 
 /// `parosctl resolve <tenant>` through the entry endpoint `entry`.
@@ -35,6 +39,9 @@ pub async fn run(
     let tenant = args.tenant;
     match resolve(providers, rpc, names, entry, tenant.as_bytes(), timeout).await {
         Resolution::Resolved(resolved) => {
+            let resolved = resolved.prefer_zone(&args.zone);
+            let zone =
+                |id: &paros::core::NodeId| resolved.zones.get(id).cloned().unwrap_or_default();
             let machines: Vec<String> = resolved
                 .machines
                 .iter()
@@ -69,12 +76,16 @@ pub async fn run(
                         "machines": resolved
                             .machines
                             .iter()
-                            .map(|(id, addr)| json!({"node": id.0, "addr": addr.to_string()}))
+                            .map(|(id, addr)| {
+                                json!({"node": id.0, "addr": addr.to_string(), "zone": zone(id)})
+                            })
                             .collect::<Vec<_>>(),
                         "frontends": resolved
                             .frontends
                             .iter()
-                            .map(|(id, addr)| json!({"node": id.0, "addr": addr.to_string()}))
+                            .map(|(id, addr)| {
+                                json!({"node": id.0, "addr": addr.to_string(), "zone": zone(id)})
+                            })
                             .collect::<Vec<_>>(),
                         "at": resolved.at,
                     })

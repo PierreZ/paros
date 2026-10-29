@@ -1122,28 +1122,34 @@ fn judged_multi(attempts: &[Attempt]) -> Vec<usize> {
 }
 
 /// Per attempt, the earlier-invoked kept unknown multi-writer write it is
-/// interchangeable with (#241): the same call, or, when no page shows any of
-/// their records, the same record count. Such writes change the state alike
-/// and nobody can tell their bytes apart, so the search lands them in
-/// invocation order. `None` everywhere on a single-writer journal.
+/// interchangeable with (#241): the same record count, with the same record
+/// at each index where either holds a record a page shows at a position it
+/// can reach. Record `k` of a write lands at `p + k`, so it meets a page
+/// showing its value at `q` only when `q >= k`; anywhere else it matches no
+/// shown position, as a record no page shows. So a page tells two such
+/// writes apart only by those records. They change the state alike, so the
+/// search lands them in invocation order. `None` everywhere on a
+/// single-writer journal.
+///
+/// Before, one shown record in a write made it interchangeable only with
+/// its own call: a run whose writes drew one alphabet value often had
+/// dozens of distinct unknown writes, and the search ran past its budget
+/// (sim seed 5139942365875627589 on PR #768 (zoned resolve): 76 attempts,
+/// a page showing the common record at position 0, undecided past 5M steps).
 fn interchangeable(attempts: &[Attempt], keep: &[usize], mode: WriterMode) -> Vec<Option<usize>> {
-    #[derive(PartialEq, Eq, PartialOrd, Ord)]
-    enum Key<'c> {
-        Call(&'c Call),
-        Count(usize),
-    }
     let mut after = vec![None; attempts.len()];
     if mode == WriterMode::Single {
         return after;
     }
-    let seen_records: BTreeSet<u64> = attempts
-        .iter()
-        .filter_map(|attempt| match &attempt.seen {
-            Some((_, Seen::Page { records, .. })) => Some(records.iter().copied()),
-            _ => None,
-        })
-        .flatten()
-        .collect();
+    let landings = Landings::new(attempts);
+    // Whether record `record`, at index `k` of a write, can meet a page
+    // that shows it.
+    let reaches = |k: usize, record: u64| {
+        landings
+            .shown_at
+            .get(&record)
+            .is_some_and(|positions| positions.iter().any(|&q| q >= k as u64))
+    };
     let mut order: Vec<usize> = keep
         .iter()
         .copied()
@@ -1151,16 +1157,16 @@ fn interchangeable(attempts: &[Attempt], keep: &[usize], mode: WriterMode) -> Ve
         .filter(|&i| matches!(attempts[i].call, Call::Write { .. }))
         .collect();
     order.sort_by_key(|&i| (attempts[i].inv, i));
-    let mut last: BTreeMap<Key<'_>, usize> = BTreeMap::new();
+    let mut last: BTreeMap<Vec<Option<u64>>, usize> = BTreeMap::new();
     for i in order {
         let Call::Write { records, .. } = &attempts[i].call else {
             continue;
         };
-        let key = if records.iter().any(|r| seen_records.contains(r)) {
-            Key::Call(&attempts[i].call)
-        } else {
-            Key::Count(records.len())
-        };
+        let key: Vec<Option<u64>> = records
+            .iter()
+            .enumerate()
+            .map(|(k, &r)| reaches(k, r).then_some(r))
+            .collect();
         after[i] = last.insert(key, i);
     }
     after
