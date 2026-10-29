@@ -15,6 +15,11 @@
 //! Once a window ends, a machine down past `machine_replace_after` is
 //! re-placed: the final check `healthy::journals_heal` excuses a journal
 //! only while a window covers a member.
+//!
+//! Windows stay long during chaos, but none outlasts it (#741 (end
+//! windows)): in the settle tail the last operator ends every window
+//! ([`FleetOps::end_windows`]) before the final checks, so the heal oracle
+//! judges every journal after chaos.
 
 use std::time::Duration;
 
@@ -26,8 +31,12 @@ use paros::model::registry::{BookingTarget, MaintenanceScope, NodeStanding};
 
 use super::FleetOps;
 
-/// A maintenance window that outlasts every run (#359).
+/// A maintenance window that outlasts every run (#359), until the settle
+/// tail ends it (#741 (end windows)).
 pub(super) const LONG_WINDOW: Duration = Duration::from_secs(3_600);
+
+/// How long the last operator has to end every window in the settle tail.
+const END_WINDOWS: Duration = Duration::from_secs(20);
 
 impl FleetOps {
     /// Open, open again or end a maintenance window over a registered
@@ -114,6 +123,77 @@ impl FleetOps {
         self.send_window(ctx, &mut session, (&cell.client, first), scope, for_ms)
             .await;
         true
+    }
+
+    /// End every maintenance window in the settle tail (#741 (end
+    /// windows)): each scope the registry holds a window over, and each a
+    /// window may hold over as the operators' entries say
+    /// (`truth::held_scopes`), until the registry holds none. Then no
+    /// window sent before excuses a journal from the heal oracle. Run by
+    /// the last operator to settle: no operator sends a window after it.
+    #[tracing::instrument(level = "debug", skip_all, fields(client = self.client_id))]
+    pub(in crate::workload) async fn end_windows(
+        &mut self,
+        ctx: &SimContext,
+        policy: CheckpointPolicy,
+    ) {
+        if crate::machine::formed_cell(ctx.state()).is_none() {
+            return;
+        }
+        let deadline = ctx.time().now() + END_WINDOWS;
+        let mut ended = false;
+        let mut attempt = 0_u64;
+        while ctx.time().now() < deadline
+            && !ctx.shutdown().is_cancelled()
+            && !crate::machine::cell_lost(ctx.state())
+        {
+            attempt += 1;
+            if let Some(cell) = self.learn(ctx).await {
+                let members: Vec<NodeId> = cell.members.iter().copied().map(NodeId).collect();
+                let founders: Vec<(NodeId, paros::model::address::Address)> = cell
+                    .servers
+                    .iter()
+                    .map(|(id, addr)| (NodeId(*id), addr.clone()))
+                    .collect();
+                let mut session = CellSession::new(
+                    cell.journals,
+                    &members,
+                    founders,
+                    self.leader_seeds.next(),
+                    policy,
+                );
+                let first = cell.first(attempt);
+                if session.open(&cell.client, first).await.is_ok() {
+                    let mut scopes: Vec<MaintenanceScope> = session
+                        .registry()
+                        .maintenance()
+                        .map(|(scope, _)| scope.clone())
+                        .collect();
+                    for scope in super::truth::held_scopes(ctx.state(), ctx.time().now()) {
+                        if !scopes.contains(&scope) {
+                            scopes.push(scope);
+                        }
+                    }
+                    if scopes.is_empty() {
+                        if ended {
+                            assert_reachable!(
+                                "maintenance: the settle tail ends every window before the heal check"
+                            );
+                        }
+                        crate::machine::note_windows_ended(ctx.state(), ctx.time().now());
+                        return;
+                    }
+                    for scope in scopes {
+                        self.send_window(ctx, &mut session, (&cell.client, first), scope, 0)
+                            .await;
+                    }
+                    ended = true;
+                }
+            }
+            if ctx.time().sleep(Duration::from_millis(200)).await.is_err() {
+                return;
+            }
+        }
     }
 
     /// Send a window of `for_ms` over `scope` (`0` ends it) through

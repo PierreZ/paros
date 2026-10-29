@@ -121,6 +121,10 @@ pub(crate) struct MachineBoard {
     /// (#739 (heal from ground truth)), whether it landed or not: what the
     /// heal oracle bounds a window's hold by.
     pub(crate) windows: Vec<WindowSent>,
+    /// When the last operator saw the registry hold no window after it
+    /// ended every one, in the settle tail (#741 (end windows)): no window
+    /// sent before it holds from then on.
+    pub(crate) windows_ended: Option<Duration>,
     /// The audit's fold of the calls every machine metered (#366
     /// (metrics)): what the machines' counters must add up to.
     pub(crate) metered: paros::observe::metrics::Totals,
@@ -470,6 +474,12 @@ pub(crate) fn note_window_sent(
         landed: Landed::Unknown,
     });
     board.windows.len() - 1
+}
+
+/// The last operator ended every maintenance window at `at`, in the
+/// settle tail, and the registry holds none (#741 (end windows)).
+pub(crate) fn note_windows_ended(state: &StateHandle, at: Duration) {
+    lock(&machine_board(state)).windows_ended = Some(at);
 }
 
 /// The answer to the window entry at `index` came back.

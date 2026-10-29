@@ -187,7 +187,7 @@ pub const RARE: &[Rare] = &[
     },
     Rare {
         msg: "placement: a maintenance window is judged after chaos",
-        reason: "a gone-machine seed with a long window: 2 hits in 1,000 hunt seeds (#498 (moves in the sweep), #475 (re-place after the Down bound))",
+        reason: "the settle tail ends every window before the heal check (#741 (end windows)): it fires only when the tail could not end a window in time, which a sound cell never does (#498 (moves in the sweep), #475 (re-place after the Down bound))",
     },
     Rare {
         msg: "status: a maintenance window excuses a journal",
