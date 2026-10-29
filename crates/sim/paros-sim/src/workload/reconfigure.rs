@@ -980,11 +980,13 @@ impl ChainWorkload {
 /// verdicts reach the wire); on any other seed, or for a shape no
 /// configuration admits, the members alone.
 ///
-/// On a coin the configuration also names new proxy and replica counts
-/// (#754 (counts off the format marker)): a count change is a round
-/// change on the same members. The proxy count may pass the deployment's
-/// proxy leaders by one, so a leader meets a rank it has no lane for and
-/// runs the round colocated.
+/// On a coin the configuration also names a new proxy count (#754
+/// (counts off the format marker)): a count change is a round change on
+/// the same members. The proxy count may pass the deployment's proxy
+/// leaders by one, so a leader meets a rank it has no lane for and runs
+/// the round colocated. The replica count stays the deployment's: a
+/// replica outside the count learns nothing, and every replica of the run
+/// must converge in the tail.
 async fn compose(
     reconfigurer: &crate::client::ChainClient,
     ctx: &moonpool_sim::SimContext,
@@ -1007,8 +1009,7 @@ async fn compose(
         let replicas = deployment.replica_count();
         let draw = ctx.random().random::<u64>();
         let proxies = usize::try_from(draw % (proxies as u64 + 2)).unwrap_or(0);
-        let replicas = usize::try_from((draw >> 8) % (replicas as u64 + 1)).unwrap_or(0);
-        assert_reachable!("reconfiguration: the composer changes the proxy and replica counts");
+        assert_reachable!("reconfiguration: the composer changes the proxy count");
         (proxies, replicas)
     });
     if crate::shape::acceptor_zones(state) == 0 || !admitted {

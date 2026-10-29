@@ -45,8 +45,7 @@ pub(crate) const REQUEST_FLOOR_MS: u64 = 1_000;
 /// leader must take back is answered after that budget plus two round
 /// trips (the client's call and the colocated Phase 2), and that answer
 /// must come inside the shortest deadline a client draws. Above it, a
-/// proxy whose `Accept` a needed acceptor drops (a node that counts fewer
-/// proxies, `NodeShape::proxy_count_lag`) makes every write and every
+/// proxy whose `Accept` a needed acceptor drops makes every write and every
 /// retry of it outlast its deadline, so no write is acknowledged for the
 /// whole tail although the cluster keeps deciding the retries. Witness
 /// (cite only): sweep recipe 4157026387069203832 `[(9989,
@@ -103,27 +102,9 @@ pub(crate) struct NodeShape {
     /// ordinary restart, so even an operator who edits on every restart
     /// costs the cluster one restart delay per edit.
     pub(crate) config_edit_pct: u32,
-    /// How many of the deployment's proxy leaders this node does not count
-    /// (#193): a node configured with `proxy_count - lag` (never below
-    /// zero), as one is in the middle of a rolling change of the count
-    /// until the tenant coordinator applies counts (#214). A slot's proxy is
-    /// its leader's choice alone, and an acceptor that counts fewer proxies
-    /// drops an `Accept` whose reply goes to one it does not count, so mixed
-    /// counts change which proxy runs a round, or whether it runs at all
-    /// before the leader takes it back, never what is chosen. Floor 0: no
-    /// lag, every node agrees on the count. Extreme 1..=2.
-    pub(crate) proxy_count_lag: usize,
 }
 
 impl NodeShape {
-    /// `count` as this node counts it: the deployment's proxy count less
-    /// its lag, never below zero.
-    pub(crate) fn lagged_proxy_count(&self, count: usize) -> usize {
-        let lagged = count.saturating_sub(self.proxy_count_lag);
-        assert!(lagged <= count, "a lag never adds a proxy");
-        lagged
-    }
-
     /// Draw one node's shape — born workload-buggified (AGENTS.md
     /// prong 2): every default is production's constant, and an activated
     /// seed draws an extreme. One `buggify_knob!` location per knob, so a
@@ -520,7 +501,6 @@ impl NodeShape {
             wipe_pct: buggify_knob!(DEFAULT_LOSS_PCT, MIN_LOSS_PCT..MAX_LOSS_PCT + 1),
             matchmaker_loss_pct: buggify_knob!(DEFAULT_LOSS_PCT, MIN_LOSS_PCT..MAX_LOSS_PCT + 1),
             config_edit_pct: buggify_knob!(DEFAULT_CONFIG_EDIT_PCT, 25..MAX_LOSS_PCT + 1),
-            proxy_count_lag: buggify_knob!(0_usize, 1_usize..3_usize),
         }
     }
 }
