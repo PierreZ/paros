@@ -85,20 +85,8 @@ impl FleetOps {
                 assert_reachable!("resolve: an entry machine resolves a tenant");
                 judge_batchers(resolved);
                 judge_frontends(resolved);
-                // The answer's references serve the data plane (#404
-                // (static vs dynamic endpoints)): the tenant's control
-                // journal, read through the machines it names.
-                if self
-                    .connector
-                    .resolved(resolved)
-                    .journal_state(resolved.control, first)
-                    .await
-                    .is_some()
-                {
-                    assert_reachable!(
-                        "resolve: a client reads its tenant through the answered machines"
-                    );
-                }
+                self.judge_zones(resolved);
+                self.read_ranked(resolved, first).await;
             }
             Resolution::Refused {
                 refusal,
@@ -131,6 +119,63 @@ impl FleetOps {
                 matches!(&resolution, Resolution::Resolved(r) if r.tenant == created),
                 "resolve: an entry machine resolves the tenant its creation made"
             );
+        }
+    }
+
+    /// Read the tenant's control journal through the machines `resolved`
+    /// names, ranked for this client's zone (#673 (zoned resolve)): from
+    /// a machine of its zone when the answer names one, else from machine
+    /// `first` on.
+    async fn read_ranked(&self, resolved: &paros::client::resolve::Resolved, first: usize) {
+        // A machine of its own zone first saves a cross-zone hop.
+        let ranked = resolved.clone().prefer_zone(&self.zone);
+        let home = ranked
+            .machines
+            .first()
+            .is_some_and(|(id, _)| ranked.in_zone(*id, &self.zone));
+        assert_always!(
+            home == ranked
+                .machines
+                .iter()
+                .any(|(id, _)| ranked.in_zone(*id, &self.zone)),
+            "resolve: a client asks a machine of its zone first when one is named"
+        );
+        // The answer's references serve the data plane (#404
+        // (static vs dynamic endpoints)): the tenant's control
+        // journal, read through the machines it names.
+        let start = if home { 0 } else { first };
+        if self
+            .connector
+            .resolved(&ranked)
+            .journal_state(ranked.control, start)
+            .await
+            .is_some()
+        {
+            assert_reachable!("resolve: a client reads its tenant through the answered machines");
+            if home {
+                assert_reachable!("resolve: a client reads its tenant from its own zone first");
+            }
+        }
+    }
+
+    /// Judge the zones a resolution gave its machines (#673 (zoned
+    /// resolve)): each is the zone the machine's layout placed it in, as
+    /// the machine registered it, whenever the board knows the machine.
+    /// Every machine of the layout stands in a zone, so the registry holds
+    /// one for every machine that registered.
+    fn judge_zones(&self, resolved: &paros::client::resolve::Resolved) {
+        for (id, zone) in &resolved.zones {
+            let Some(truth) = crate::machine::zone_of(&self.state, id.0) else {
+                continue;
+            };
+            assert_always!(
+                *zone == truth,
+                "resolve: a machine's zone is the one it stands in",
+                { "node" => id.0, "answered" => zone.clone(), "truth" => truth }
+            );
+        }
+        if !resolved.zones.is_empty() {
+            assert_reachable!("resolve: a resolution names its machines' zones");
         }
     }
 

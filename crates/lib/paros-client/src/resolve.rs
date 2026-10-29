@@ -8,6 +8,11 @@
 //! passed over. A client caches the answer and resolves again when a call is
 //! refused (§3.5): an answer is a hint read from a fold, never a fact.
 //!
+//! Each reference carries its machine's zone (#673 (zoned resolve)). A
+//! client takes its own zone from its configuration, never from a draw, and
+//! ranks the references of its zone first ([`Resolved::prefer_zone`]): a
+//! call to one of them saves a cross-zone hop.
+//!
 //! Draws no randomness and decides no retry beyond one pass over the entry
 //! endpoint: every other choice is the caller's.
 
@@ -44,6 +49,9 @@ pub struct Resolved {
     /// dynamic endpoints)): the encoded reference its data plane is served
     /// in. A machine with none is absent.
     pub interfaces: BTreeMap<NodeId, Vec<u8>>,
+    /// Each machine's zone as the registry holds it (#673 (zoned resolve)):
+    /// its `paros/zone` tag. A machine with none is absent.
+    pub zones: BTreeMap<NodeId, String>,
     /// The universe directory's position the answer was read at.
     pub at: u64,
     /// The universe's name, for people (#239 (names at the edge)); empty
@@ -149,6 +157,40 @@ async fn ask<P: ParosProviders>(
 }
 
 impl Resolved {
+    /// The references ranked for a client in zone `zone` (#673 (zoned
+    /// resolve)): the machines, batchers and frontends of `zone` first,
+    /// then the rest, each group in the answer's order. A client in no
+    /// zone (`""`) keeps the answer's order.
+    ///
+    /// # Panics
+    ///
+    /// Never: the assertions check that ranking keeps every reference.
+    #[must_use]
+    pub fn prefer_zone(mut self, zone: &str) -> Self {
+        if zone.is_empty() {
+            return self;
+        }
+        let zones = &self.zones;
+        let home = |id: &NodeId| zones.get(id).is_some_and(|held| held == zone);
+        for list in [&mut self.machines, &mut self.batchers, &mut self.frontends] {
+            let count = list.len();
+            // A stable sort: the references of `zone` first, in order.
+            list.sort_by_key(|(id, _)| !home(id));
+            assert_eq!(list.len(), count, "ranking keeps every reference");
+        }
+        if self.machines.first().is_some_and(|(id, _)| home(id)) {
+            moonpool_assertions::reachable!("resolve: a client ranks a machine of its zone first");
+        }
+        self
+    }
+
+    /// Whether machine `id` stands in zone `zone`, as the answer names it
+    /// (#673 (zoned resolve)). A machine with no zone stands in none.
+    #[must_use]
+    pub fn in_zone(&self, id: NodeId, zone: &str) -> bool {
+        !zone.is_empty() && self.zones.get(&id).is_some_and(|held| held == zone)
+    }
+
     /// A client's servers for the cell's machines, through `rpc` and
     /// `names`: each machine's data plane through the interface the answer
     /// holds for it, else through its well-known endpoints.
@@ -248,6 +290,14 @@ pub fn from_wire(ack: &wire::ResolveAck) -> Resolution {
                 .iter()
                 .filter(|m| !m.machine_interface.is_empty())
                 .map(|m| (NodeId(m.node_id), m.machine_interface.clone()))
+                .collect(),
+            zones: ack
+                .machines
+                .iter()
+                .chain(&ack.batchers)
+                .chain(&ack.frontends)
+                .filter(|m| !m.zone.is_empty())
+                .map(|m| (NodeId(m.node_id), m.zone.clone()))
                 .collect(),
             at: ack.at,
             universe_name: ack.universe_name.clone(),

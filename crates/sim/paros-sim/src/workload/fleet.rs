@@ -202,6 +202,10 @@ pub(super) struct FleetOps {
     /// reaches its tail after chaos.
     registry: Option<(JournalIdentifier, usize)>,
     client_id: u64,
+    /// The zone this client stands in (#673 (zoned resolve)): a
+    /// configuration value, as a production client's is, never a draw of
+    /// the library. It ranks a `Resolve` answer's references.
+    zone: String,
     /// The universe's and the cell's names this operator's `init` writes,
     /// whole or its fleet half alone: `parosctl init` always names both
     /// (#239 (names at the edge)).
@@ -293,6 +297,10 @@ impl FleetOps {
             patience,
             registry,
             client_id,
+            // The machines stand in `zone-0` to `zone-2`
+            // (`crate::shape::machine_locality`): every client has a zone of
+            // the cell's.
+            zone: format!("zone-{}", client_id % 3),
             init_names: ("universe".into(), format!("cell-{}", client_id % 4)),
             leader_seeds,
             initialized: false,

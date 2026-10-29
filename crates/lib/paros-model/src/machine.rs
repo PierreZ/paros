@@ -293,6 +293,7 @@ impl Admission {
                     node_id: id.0,
                     addr: addr.to_string(),
                     machine_interface: Vec::new(),
+                    zone: String::new(),
                 })
                 .collect(),
             founders: self.founders.iter().map(|id| id.0).collect(),
@@ -408,6 +409,7 @@ impl CellPlan {
                 node_id: id.0,
                 addr: addr.to_string(),
                 machine_interface: Vec::new(),
+                zone: String::new(),
             })
             .collect()
     }

@@ -121,6 +121,7 @@ impl JoinRequest {
                     node_id: *node_id,
                     addr: addr.to_string(),
                     machine_interface: Vec::new(),
+                    zone: String::new(),
                 })
                 .collect(),
         }

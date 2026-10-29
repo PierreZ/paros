@@ -116,6 +116,10 @@ message Member {
   // `InterfaceRef` of the group that serves its data plane. Empty when the
   // registry holds none; the client then calls the well-known endpoints.
   bytes machine_interface = 3;
+  // The machine's zone as the registry holds it (#673 (zoned resolve)), in a
+  // `Resolve` answer: its `paros/zone` tag. Empty when it has none. A client
+  // prefers the references in its own zone.
+  string zone = 4;
 }
 
 // A journal's identifier: its tenant and the journal inside it (#235).
