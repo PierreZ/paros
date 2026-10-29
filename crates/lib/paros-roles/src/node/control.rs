@@ -631,7 +631,8 @@ pub(crate) fn admit_owed<P: ParosProviders, S, A>(
 /// Every live journal admits the registry's pool (#189): a registered node
 /// becomes one it follows, counts and answers. Refused by the core on a
 /// journal that cannot reconfigure; retired nodes stay in (the pool is
-/// grow-only) and are kept out at the edge instead.
+/// grow-only) and are kept out at the edge instead. Every machine the
+/// registry holds, a retired one too, is admitted to the matchmaker pool.
 pub(crate) fn admit_pool<P: ParosProviders, S, A>(
     journals: &mut Journals<S, A>,
     follower: &ControlFollower<P>,
@@ -639,8 +640,28 @@ pub(crate) fn admit_pool<P: ParosProviders, S, A>(
     let pool = follower.pool();
     // In a cell, a machine's matchmaker is named by its node id: every
     // registered machine may host a set of a later generation (#501
-    // (matchmaker sets off the founders)).
-    let matchmakers: Vec<MatchmakerId> = pool.iter().map(|n| MatchmakerId(n.0)).collect();
+    // (matchmaker sets off the founders)). A retired machine stays a
+    // matchmaker of the pool: a journal re-opened from its boot pool walks
+    // its set's generations from the bootstrap one, and a generation in
+    // between may name a machine retired since. Sweep recipe
+    // 140393:9830954766615262418 on 10491397258943519739: a founder's
+    // control journal re-opened at generation 0 and never learned
+    // generation 1, on a retired machine, so its set stayed off its booked
+    // machine for good.
+    let registered = follower.registry().nodes().map(|(node, _)| node);
+    let mut matchmakers: Vec<MatchmakerId> = pool
+        .iter()
+        .copied()
+        .chain(registered)
+        .map(|n| MatchmakerId(n.0))
+        .collect();
+    matchmakers.sort_unstable();
+    matchmakers.dedup();
+    assert!(
+        pool.iter()
+            .all(|n| matchmakers.binary_search(&MatchmakerId(n.0)).is_ok()),
+        "every pool member is a matchmaker of the pool"
+    );
     for rt in journals.live.values_mut() {
         rt.node.extend_pool(&pool);
         rt.node.extend_matchmaker_pool(&matchmakers);

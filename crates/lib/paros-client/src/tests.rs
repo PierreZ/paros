@@ -607,6 +607,79 @@ fn a_pipeline_gives_consecutive_positions_and_waits_out_an_early_write() {
 }
 
 #[test]
+fn ready_writes_at_consecutive_positions_merge_into_one_write() {
+    use super::WriterOutcome;
+    use super::pipeline::{Admit, Folded, Lead};
+
+    let (mut lanes, uuid) = leading_lanes(10);
+    let a = lanes.open(one(1));
+    let b = lanes.open(vec![Value(vec![2]), Value(vec![3])]);
+    let c = lanes.open(one(4));
+    // `d` is opened but not sent: no merged write takes it.
+    let _d = lanes.open(one(5));
+    for id in 0..3 {
+        lanes.ready(id);
+    }
+    let Lead::Send(merged) = lanes.lead(0) else {
+        panic!("the first ready write leads");
+    };
+    assert_eq!(merged.seq.0, 10);
+    assert_eq!(merged.leader, uuid);
+    let records: Vec<Value> = [a.entry(), b.entry(), c.entry()]
+        .iter()
+        .flat_map(|e| e.records.clone())
+        .collect();
+    assert_eq!(merged.records, records);
+    assert_eq!(lanes.lead(1), Lead::Wait);
+    assert_eq!(lanes.lead(2), Lead::Wait);
+    let written = |seq, count| WriterOutcome::Written {
+        seq,
+        count,
+        duplicate: false,
+        resolved: false,
+    };
+    // Written whole: each write gets its own range.
+    assert_eq!(lanes.fold(0, written(10, 4)), Folded::Done(written(10, 1)));
+    assert_eq!(lanes.lead(1), Lead::Done(written(11, 2)));
+    assert_eq!(lanes.lead(2), Lead::Done(written(13, 1)));
+    assert_eq!(lanes.in_flight_ids(), vec![3]);
+    assert_eq!(lanes.admit(), Admit::At(15));
+}
+
+#[test]
+fn a_merged_write_over_the_limits_comes_apart() {
+    use super::WriterOutcome;
+    use super::pipeline::{Folded, Lead};
+
+    let (mut lanes, _) = leading_lanes(0);
+    let a = lanes.open(one(1));
+    let b = lanes.open(one(2));
+    lanes.ready(0);
+    lanes.ready(1);
+    assert!(matches!(lanes.lead(0), Lead::Send(entry) if entry.count() == 2));
+    let too_large = WriterOutcome::TooLarge {
+        max_records: 1,
+        max_bytes: 1024,
+    };
+    assert_eq!(lanes.fold(0, too_large), Folded::Apart);
+    // Each write goes alone, and never merges again.
+    assert_eq!(lanes.sent_entry(0), a.entry().clone());
+    assert_eq!(lanes.lead(1), Lead::Send(b.entry().clone()));
+    // A refusal of a merged write is every write's refusal.
+    let (mut lanes, _) = leading_lanes(0);
+    let _a = lanes.open(one(1));
+    let _b = lanes.open(one(2));
+    lanes.ready(0);
+    lanes.ready(1);
+    let _ = lanes.lead(0);
+    let fenced = WriterOutcome::Superseded {
+        state: state(Some(leader_uuid(99, 0)), 0, 0),
+    };
+    assert_eq!(lanes.fold(0, fenced.clone()), Folded::Done(fenced.clone()));
+    assert_eq!(lanes.lead(1), Lead::Done(fenced));
+}
+
+#[test]
 fn a_failed_write_strands_the_writes_behind_it_until_the_pipeline_drains() {
     use super::WriterOutcome;
     use super::pipeline::{Admit, Folded, Resumed};

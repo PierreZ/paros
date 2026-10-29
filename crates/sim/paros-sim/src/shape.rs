@@ -44,12 +44,12 @@ pub(crate) use quorum::{
 };
 pub(crate) use scenarios::{
     admitted_slot, bare_quorum, batched_journals, batched_journals_among, batched_journals_drawn,
-    batchers, batchers_among, changed_mode, cold_rot, departed_straggler, disk_full,
-    downed_founder, drained_machine, early_handover, entry_capacity, gone_machine, handoff_storm,
-    lagging_acceptor, lagging_fold, lagging_replica, lost_verdict, matchmaker_registry_page,
-    moved_founder, paged_handover, racing_floor, replaced_founder, replica_apply_page, reused_name,
-    run_end, second_cell, silent_machine, slow_link, slow_machine, split_floor, stalled_proxy,
-    unmetered, untagged, wiped_founder, withhold_gc, zone_outage,
+    batcher_limits, batchers, batchers_among, changed_mode, cold_rot, departed_straggler,
+    disk_full, downed_founder, drained_machine, early_handover, entry_capacity, gone_machine,
+    handoff_storm, lagging_acceptor, lagging_fold, lagging_replica, lost_verdict,
+    matchmaker_registry_page, moved_founder, paged_handover, racing_floor, replaced_founder,
+    replica_apply_page, reused_name, run_end, second_cell, silent_machine, slow_link, slow_machine,
+    split_floor, stalled_proxy, unmetered, untagged, wiped_founder, withhold_gc, zone_outage,
 };
 pub(crate) use timing::{
     CONNECT_FLOOR_MS, ELECTION_RENEW_FLOOR, RESOLVE_ROUND_TRIP, longest_down_after,
@@ -178,6 +178,9 @@ struct Registry {
     /// Run-level: whether the run draws the batchers scenario (see
     /// [`batchers`]), fixed by the first caller.
     batchers: Option<bool>,
+    /// Run-level: whether the run draws the batcher-limits scenario (see
+    /// [`batcher_limits`]), fixed by the first caller.
+    batcher_limits: Option<bool>,
     /// Run-level: whether the run draws the second-cell scenario (see
     /// [`second_cell`]), fixed by the first caller.
     second_cell: Option<bool>,
@@ -234,6 +237,7 @@ pub(crate) fn boot(state: &StateHandle, ip: &str) -> Incarnation {
     let wide_grid = wide_grid(state);
     let racing_floor = racing_floor(state);
     let entry_bytes = entry_capacity(state);
+    let batcher_limits = batcher_limits(state);
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     let entry = guard.nodes.entry(ip.to_string()).or_insert_with(|| {
@@ -268,6 +272,14 @@ pub(crate) fn boot(state: &StateHandle, ip: &str) -> Incarnation {
             // A tail wait as long as a renewal period (see `NodeShape::draw`).
             let renew_ms = u64::try_from(ELECTION_RENEW_FLOOR.as_millis()).unwrap_or(u64::MAX);
             shape.tunables.max_wait_ms = shape.tunables.max_wait_ms.max(renew_ms);
+        }
+        if batcher_limits && moonpool_sim::sim_random_bool(0.5) {
+            // The batcher-limits scenario (#702 (batcher rare paths)): half
+            // the machines take two or three records a write, so a batcher
+            // on a machine with the default limits merges past its
+            // journal's leader, and a wide write goes alone at a batcher
+            // with the low ones.
+            shape.tunables.max_batch_records = moonpool_sim::sim_random_range(2_u64..4);
         }
         if wide_grid {
             // The wide-grid scenario: a stuck round moves after 1 to 3

@@ -62,14 +62,6 @@ pub const RARE: &[Rare] = &[
         reason: "a reconfiguration registered at one matchmaker only, a leadership that ran it, then a campaign under the older belief whose Prepare reaches that leader: one witness in the sweep, replay-recipe 15215472214835945028 214785:9323787021693807484 on f75260d (PR #737 (fix-main))",
     },
     Rare {
-        msg: "batcher: a merged write over the leader's limits is split",
-        reason: "a batcher above the leader's limits whose merged write passes a small max_batch_records or max_batch_bytes knob: fired on PR #698's first sweep, missed by its later ones; 0 of 600 single-seed hunts with the batchers scenario (#702 (batcher rare paths))",
-    },
-    Rare {
-        msg: "batcher: a write goes alone",
-        reason: "a wide batched burst on a multi-writer created journal, sent to a batcher that started below the leader's limits: missed by PR #698's sweeps; 1 of 600 single-seed hunts with the batchers scenario (#702 (batcher rare paths))",
-    },
-    Rare {
         msg: "coordinator: a journal's role slot is released to its count",
         reason: "a journal configured with fewer proxy leaders, batchers or replicas than its booked slots: a configure after the booking names a lower count; its tenant-batcher twin fired on 5 of 600 single-seed hunts with the batchers scenario (#702 (batcher rare paths), #753 (per-journal proxies))",
     },

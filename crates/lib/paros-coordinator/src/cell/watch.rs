@@ -63,6 +63,16 @@ pub struct Watch {
     /// red on "registry: the cell coordinator never marks a live machine
     /// down in the tail").
     pub(crate) asked: BTreeMap<NodeId, Duration>,
+    /// How many asks in a row each machine left unanswered since it last
+    /// answered. One missed probe never marks a machine down (#211): a
+    /// round lasts longer than `every`, so the time since the last answer
+    /// alone passes `down_after` at the first miss when `down_after` is
+    /// near `every` (replay-main 17838952018056042006 on 7863404, PR #770
+    /// (batcher follow-ups): a machine's connection dropped once as it
+    /// joined the cell, 1.4 s after its last answer, past a `down_after` of
+    /// 1.1 s, red on "registry: the cell coordinator never marks a live
+    /// machine down in the tail").
+    pub(crate) missed: BTreeMap<NodeId, u32>,
     /// Whether the last call ran a round.
     pub(crate) ran: bool,
     /// The `Identify` checks a `Register` left running, by machine (#454
@@ -129,6 +139,7 @@ impl Watch {
             seen: now,
             heard: BTreeMap::new(),
             asked: BTreeMap::new(),
+            missed: BTreeMap::new(),
             ran: false,
             probes: BTreeMap::new(),
             positions: BTreeMap::new(),
@@ -343,6 +354,11 @@ impl Watch {
     /// Run one round if one is due at `now`, writing each change through
     /// `session`: how many entries it wrote.
     ///
+    /// # Panics
+    ///
+    /// If its own bookkeeping is broken: a machine that answered still
+    /// counts a missed ask, or one was heard after the round's end.
+    ///
     /// # Errors
     ///
     /// A write did not land: the term writes nothing more.
@@ -403,13 +419,18 @@ impl Watch {
             }
             // Asked now, answered or not: a moment this watch watched.
             self.seen = client.now();
-            let command = match &answer {
-                Some(ack) => {
-                    self.heard.insert(id, client.now());
-                    Self::answered(session, id, &addr, ack)
-                }
-                None => self.silent(session, id, client.now()),
+            let command = if let Some(ack) = &answer {
+                self.heard.insert(id, client.now());
+                self.missed.remove(&id);
+                Self::answered(session, id, &addr, ack)
+            } else {
+                *self.missed.entry(id).or_insert(0) += 1;
+                self.silent(session, id, client.now())
             };
+            assert!(
+                answer.is_none() || !self.missed.contains_key(&id),
+                "a machine that answered missed no ask"
+            );
             if let Some(command) = command {
                 session.record(client, 0, &command).await?;
                 wrote += 1;
@@ -655,11 +676,17 @@ impl Watch {
     }
 
     /// The change machine `id`'s silence at `now` makes, if any: `Down`
-    /// once it was silent for `down_after`, unless it is held down.
+    /// once it was silent for `down_after` and left more than one ask in a
+    /// row unanswered, unless it is held down.
     fn silent(&self, session: &CellSession, id: NodeId, now: Duration) -> Option<SystemCommand> {
         let held = session.registry().liveness(id);
         let since = self.silent_since(id);
+        let missed = self.missed.get(&id).copied().unwrap_or(0);
+        assert!(missed > 0, "a silent machine missed this ask");
         if !held.up || now.saturating_sub(since) < self.down_after {
+            return None;
+        }
+        if missed < 2 {
             return None;
         }
         assert!(

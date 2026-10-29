@@ -67,6 +67,19 @@ once, because the old term's writes in flight are fenced or already counted. The
 owner writes through it on its own BUGGIFY location, on a coin last position first and on
 another with a claim racing the writes.
 
+Writes sent together merge into one write (decided on 2026-10-29, #709 (merge fenced writes)).
+A send waits one turn of the executor, so the sends beside it get ready too. The first ready
+write then takes the ready writes at the positions after it, under the same uuid, into one write
+at its own position, up to 256 records and 256 KiB (`MERGE_RECORDS`, `MERGE_BYTES`). The journal
+judges the merged write as one write in one slot, and each caller gets its own `seq` range. A
+verdict that is not a write (a refusal, a fence, an ambiguity) is every caller's verdict, and the
+rules above then apply. A merged write that a leader refuses as too large comes apart: each write
+is sent alone, and never merged again. The merge is in the pipeline, not in a batcher. The log
+deduplicates a re-send only when it is the identical write (same uuid, position and records). A
+pipeline re-sends its merged write unchanged: an early write, or a resolve of an ambiguous one.
+A batcher cannot keep that promise: a caller re-sends its own write alone, or the batcher merges
+it again with other writes, and the journal then refuses a write that it holds.
+
 ### 2.3 Leadership
 
 Leadership is a pure compare-and-set, no lease and no clock. `SetLeader(new_uuid, old_uuid)`
@@ -135,7 +148,8 @@ each write of it again alone. A merged write that may have run with no answer is
 unanswered (ambiguous), the same as a frontend's, and the batcher never sends it again: the
 writers own an ambiguous write (at-least-once). A write that carries a leader uuid (a
 single-writer journal's) is never merged: it goes to the leader alone, with its fence and its
-position, and the journal judges it. An empty write also goes alone.
+position, and the journal judges it (a single-writer journal merges in its `Pipeline`, §2.2,
+#709 (merge fenced writes)). An empty write also goes alone.
 
 Every machine serves the batcher endpoint over the cell's address book. The tenant coordinator
 books a tenant's batchers, by its `batchers=` count, on the cell's `stateless` machines (section

@@ -142,11 +142,16 @@ impl FleetOps {
         assert_reachable!("created: a batchers seed bursts on a journal it created");
         let batched = self.connect_batched(servers);
         let audit = audit_world_named(&self.state, journal);
+        // The batcher-limits scenario (#702 (batcher rare paths)): every
+        // burst, so a batcher that learned a leader's limits from a split
+        // takes the next wide writes.
+        let every = crate::shape::batcher_limits(&self.state);
         for _ in 0..BURSTS {
             if self
                 .batched_burst(&batched, journal, first, Some(&audit))
                 .await
                 > 0
+                && !every
             {
                 return;
             }
@@ -392,8 +397,9 @@ impl FleetOps {
     ) -> usize {
         // On a coin, each write carries more records than a batcher below
         // the leader's limits takes (`paros::roles::batcher::TIGHT_RECORDS`): it
-        // goes alone, and a merged write passes the limits sooner.
-        let wide = buggify_with_prob!(0.3);
+        // goes alone, and a merged write passes the limits sooner. Every
+        // time on the batcher-limits scenario (#702 (batcher rare paths)).
+        let wide = crate::shape::batcher_limits(&self.state) || buggify_with_prob!(0.3);
         let writes: Vec<(Vec<u64>, paros::wire::Write)> = (0..self.config.pipeline_depth)
             .map(|_| {
                 // Never more than the workload's largest write
