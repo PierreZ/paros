@@ -515,6 +515,7 @@ impl Workload for ChainWorkload {
         // Every other journal world (#447 (model checks for every journal
         // world)): the system, control and created journals' models.
         if self.client_id == 0 {
+            crate::excuses::note_run();
             let judged: BTreeSet<_> = self
                 .plan
                 .iter()
@@ -2795,6 +2796,21 @@ impl ChainWorkload {
         // of reach (#263), is waited on for good: the run's liveness is
         // excused, never its safety.
         let unrecoverable = audit.loss_excuses_liveness();
+        // Count what excuses an unavailable run (#738 (count excuses, the
+        // baseline)); the loss excuses are counted by the audit's check.
+        if ended_by_sibling {
+            crate::excuses::note(
+                ctx.state(),
+                crate::excuses::Excuse::ChainEndedBySibling,
+                Some(journal),
+            );
+        } else if !converged && !unrecoverable && !storage.clean_quorum_everywhere {
+            crate::excuses::note(
+                ctx.state(),
+                crate::excuses::Excuse::ChainStorageFaults,
+                Some(journal),
+            );
+        }
         assert_always!(
             converged || ended_by_sibling || unrecoverable || !storage.clean_quorum_everywhere,
             "chain: an unavailable run is explained by injected storage faults"

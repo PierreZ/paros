@@ -20,7 +20,9 @@ mod gates;
 #[cfg(test)]
 mod scan;
 
-use common::{arg, is_clean, print_failed_runs, print_never_fired, print_seed_counts};
+use common::{
+    arg, is_clean, print_excuses, print_failed_runs, print_never_fired, print_seed_counts,
+};
 use paros_sim::{
     EXPLORATION_TIMELINES_PER_SEED, SimulationReport, chain_canary_hunt, chain_seed_canary,
     chain_smoke, explore_chain_seed, replay_chain_timeline, run_chain_seed,
@@ -115,6 +117,7 @@ fn main() {
     // gate that never fires cannot fail the sweep)).
     gates::print(&gates::judge(&report.assertion_results), "");
     gates::print_rarest(&report.assertion_results, RAREST);
+    print_excuses(&report.assertion_results);
     if let Some(filter) = arg::<String>(3) {
         print_gates(&report, &filter);
     }

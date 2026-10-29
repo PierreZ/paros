@@ -7,7 +7,9 @@ mod gates;
 #[cfg(test)]
 mod scan;
 
-use common::{arg, is_clean, print_failed_runs, print_never_fired, print_seed_counts};
+use common::{
+    arg, is_clean, print_excuses, print_failed_runs, print_never_fired, print_seed_counts,
+};
 use std::collections::BTreeMap;
 
 use paros_sim::{
@@ -62,6 +64,7 @@ fn main() {
     let declared = gates::judge(&slots);
     gates::print(&declared, "  ");
     gates::print_rarest(&slots, RAREST);
+    print_excuses(&slots);
     // A CI shard hands its gate defects (a declared gate that never ran, a
     // gate that never fired) to the job that judges every shard's together
     // (`.github/workflows/rust.yml`): such a defect fails CI only when every

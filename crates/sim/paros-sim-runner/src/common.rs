@@ -1,6 +1,9 @@
 //! Argument parsing and report printing shared by both runner binaries.
 
-use paros_sim::SimulationReport;
+use std::collections::BTreeMap;
+
+use paros_sim::excuses::{Excuse, RUNS_SLOT};
+use paros_sim::{AssertionStats, SimulationReport};
 
 /// The `n`th command-line argument, parsed; `None` when absent or malformed.
 pub fn arg<T: std::str::FromStr>(n: usize) -> Option<T> {
@@ -40,5 +43,36 @@ pub fn print_never_fired(report: &SimulationReport, indent: &str) {
     println!("{indent}coverage gates that never fired:");
     for gate in &report.coverage_violations {
         println!("{indent}  - {gate}");
+    }
+}
+
+/// The excuse table (#738 (count excuses, the baseline)): for each oracle
+/// excuse and silent skip, the runs where it fired and the journals it
+/// excused, read from `slots` (`paros_sim::excuses`). A run is a seed or an
+/// explored timeline. A skip judges no journal: its journal column is `-`.
+pub fn print_excuses(slots: &BTreeMap<String, AssertionStats>) {
+    let count = |slot: &str| slots.get(slot).map_or(0, |stats| stats.successes);
+    let runs = count(RUNS_SLOT);
+    println!("excuses and skips over {runs} judged runs:");
+    println!(
+        "  {:<34} {:>8} {:>7} {:>9}",
+        "excuse", "runs", "share", "journals"
+    );
+    for excuse in Excuse::ALL {
+        let fired = count(excuse.runs_slot());
+        let share = if runs == 0 {
+            0.0
+        } else {
+            #[expect(clippy::cast_precision_loss, reason = "a share for a report")]
+            let share = fired as f64 * 100.0 / runs as f64;
+            share
+        };
+        let journals = excuse
+            .journals_slot()
+            .map_or_else(|| "-".to_string(), |slot| count(slot).to_string());
+        println!(
+            "  {:<34} {fired:>8} {share:>6.1}% {journals:>9}",
+            excuse.name()
+        );
     }
 }

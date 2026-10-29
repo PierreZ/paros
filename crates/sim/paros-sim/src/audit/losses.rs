@@ -59,6 +59,7 @@ use paros::core::membership::AcceptorConfig;
 use paros::core::{Ballot, NodeId};
 
 use super::state::AuditState;
+use crate::excuses::Excuse;
 
 /// The CTRL threshold of a lost slot's clean copies.
 enum Threshold {
@@ -133,6 +134,24 @@ impl AuditState {
                 .keys()
                 .any(|slot| self.blocked_in_asked(*slot))
             || self.frozen_by_faulty()
+    }
+
+    /// The loss excuses [`Self::loss_excuses_liveness`] holds now, by name
+    /// (#738 (count excuses, the baseline)).
+    pub(super) fn loss_excuses(&self) -> Vec<Excuse> {
+        let planned = || self.losses.planned.keys().copied();
+        [
+            (Excuse::Unrecoverable, self.losses.has_unrecoverable()),
+            (Excuse::Stranded, planned().any(|slot| self.stranded(slot))),
+            (
+                Excuse::BlockedInAsked,
+                planned().any(|slot| self.blocked_in_asked(slot)),
+            ),
+            (Excuse::FrozenByFaulty, self.frozen_by_faulty()),
+        ]
+        .into_iter()
+        .filter_map(|(excuse, holds)| holds.then_some(excuse))
+        .collect()
     }
 
     /// Whether the run's wipes excuse the journal's liveness: no
