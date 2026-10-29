@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 #[cfg(doc)]
 use super::MatchmakerSet;
 use super::quorum_system::counted;
-use super::{FailureDomain, QuorumSystem};
+use super::{FailureDomain, MAX_ROLE_COUNT, QuorumSystem, ReplicaId};
 use crate::types::{NodeId, Slot};
 
 /// An acceptor configuration as registered with a matchmaker: a membership
@@ -55,6 +55,18 @@ pub struct AcceptorConfig<Id = NodeId> {
     /// the ballot like the rest, so the effective configuration names the
     /// owning cell.
     cell: u64,
+    /// How many **proxy leaders** this configuration's leader delegates
+    /// Phase 2 to (#142, Compartmentalized Paxos §3.1): `ProxyId(0..proxies)`.
+    /// Zero runs every Phase 2 on the leader, the plain arm. Bound to the
+    /// ballot like the membership (#754 (counts off the format marker)), so
+    /// a change of the count is a round change. An acceptor reads it only
+    /// for wire checks: what is chosen never depends on it.
+    proxies: usize,
+    /// How many **replicas** learn this configuration's log beside its
+    /// acceptors (#144, Compartmentalized Paxos §3.3):
+    /// `ReplicaId(0..replicas)`. Zero is the plain arm. Bound to the ballot
+    /// like `proxies` (#754).
+    replicas: usize,
 }
 
 /// The wire shape [`AcceptorConfig`] deserialises through, so a serialized
@@ -69,6 +81,10 @@ struct SerdeAcceptorConfig<Id> {
     domains: Vec<FailureDomain>,
     #[serde(default)]
     cell: u64,
+    #[serde(default)]
+    proxies: usize,
+    #[serde(default)]
+    replicas: usize,
 }
 
 #[cfg(feature = "serde")]
@@ -82,7 +98,9 @@ impl<Id: Copy + Ord> From<SerdeAcceptorConfig<Id>> for AcceptorConfig<Id> {
                 wire.quorum_system,
             )
         };
-        config.with_cell(wire.cell)
+        config
+            .with_cell(wire.cell)
+            .with_counts(wire.proxies, wire.replicas)
     }
 }
 
@@ -152,6 +170,8 @@ impl<Id: Copy + Ord> AcceptorConfig<Id> {
             quorum_system,
             domains,
             cell: 0,
+            proxies: 0,
+            replicas: 0,
         };
         assert!(
             config.is_well_formed(),
@@ -482,6 +502,73 @@ impl<Id: Copy + Ord> AcceptorConfig<Id> {
     #[must_use]
     pub fn cell(&self) -> u64 {
         self.cell
+    }
+
+    /// This configuration with `proxies` proxy leaders and `replicas`
+    /// replicas, every other field unchanged (#754 (counts off the format
+    /// marker)). Two configurations that differ only in a count are two
+    /// configurations, so a count change is a round change.
+    ///
+    /// # Panics
+    ///
+    /// If a count is above [`MAX_ROLE_COUNT`].
+    #[must_use]
+    pub fn with_counts(mut self, proxies: usize, replicas: usize) -> Self {
+        assert!(
+            proxies <= MAX_ROLE_COUNT && replicas <= MAX_ROLE_COUNT,
+            "a configuration's role counts are at most the cap"
+        );
+        self.proxies = proxies;
+        self.replicas = replicas;
+        assert!(
+            self.is_well_formed(),
+            "naming the counts keeps a configuration well formed"
+        );
+        self
+    }
+
+    /// How many proxy leaders this configuration's leader delegates to
+    /// (`ProxyId(0..proxy_count)`); zero runs Phase 2 colocated.
+    #[must_use]
+    pub fn proxy_count(&self) -> usize {
+        self.proxies
+    }
+
+    /// How many replicas learn this configuration's log
+    /// (`ReplicaId(0..replica_count)`); zero is none.
+    #[must_use]
+    pub fn replica_count(&self) -> usize {
+        self.replicas
+    }
+
+    /// Whether this configuration delegates Phase 2 to proxy leaders.
+    #[must_use]
+    pub fn has_proxies(&self) -> bool {
+        self.proxies > 0
+    }
+
+    /// Whether this configuration runs a replica tier.
+    #[must_use]
+    pub fn has_replicas(&self) -> bool {
+        self.replicas > 0
+    }
+
+    /// The replica that owns `slot`'s client reply under this configuration
+    /// (Compartmentalized Paxos §3.3): `ReplicaId(slot % replica_count)`,
+    /// [`ReplicaId::of`]. `None` without a replica tier.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
+    #[must_use]
+    pub fn reply_owner(&self, slot: Slot) -> Option<ReplicaId> {
+        let owner = ReplicaId::of(slot, self.replicas);
+        assert!(
+            owner.is_some() == self.has_replicas(),
+            "a slot has a reply owner iff replicas run"
+        );
+        owner
     }
 
     /// Whether this configuration carries failure domains.

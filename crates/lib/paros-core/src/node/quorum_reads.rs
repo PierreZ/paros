@@ -149,7 +149,7 @@ impl ColocatedNode {
         // pool, or, on a deployment with a replica tier, a replica (its id is
         // outside the pool by construction; the driver routes it through the
         // deployment map and drops an address it does not know).
-        if !self.in_pool(reply_to) && !self.config.has_replicas() {
+        if !self.in_pool(reply_to) && !self.acceptors.has_replicas() {
             return;
         }
         // An answer carries this node's configuration ballot, which a reader

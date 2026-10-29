@@ -484,7 +484,8 @@ impl<P: LocalStorageProvider> LogStorage for JournalStorage<P> {
         // The marker is set once, never edited (the driver refuses a
         // formatted store before it gets here).
         assert!(self.meta.formatted.is_none(), "a store is formatted once");
-        self.meta.formatted = Some(config.clone());
+        // The marker records no count (#754 (counts off the format marker)).
+        self.meta.formatted = Some(config.recorded());
         self.meta_dirty = true;
         Ok(())
     }

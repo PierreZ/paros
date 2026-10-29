@@ -140,18 +140,19 @@ use transport::{LaneOpener, Outbound, peer_target};
 /// driver speaks the matchmaker contract only when it is non-empty.
 ///
 /// `proxies` is the deployment map's proxy leaders (`ProxyId` → address,
-/// #142), empty on a deployment without proxies; its length must agree with
-/// the `Config`'s `proxy_count`. A leader delegates a settled round's Phase 2
-/// to the proxy the core names (or the one the driver's proxy override names),
-/// and takes it back after `tunables.proxy_take_back_resends` re-delegations
-/// without a `Commit`.
+/// #142), empty on a deployment without proxies. The proxy count in force
+/// is the configuration's, bound to its ballot (#754 (counts off the format
+/// marker)). A leader delegates a settled round's Phase 2 to the proxy the
+/// core names (or the one the driver's proxy override names) when this map
+/// holds it, runs it colocated when it does not, and takes it back after
+/// `tunables.proxy_take_back_resends` re-delegations without a `Commit`.
 ///
 /// `replicas` is the deployment map's replica tier (#144, `NodeId` →
 /// address, empty without one): learners outside the pool that are not
 /// acceptors. Every message the core addresses to the learners — a
 /// `Commit`, a beat — reaches them beside the pool, and a catch-up answer or
 /// a trim point addressed to one reaches its lane. Its length is the
-/// `Config`'s `replica_count`.
+/// bootstrap configuration's `replica_count`.
 ///
 /// `boot` is the operator's claim about `storage` ([`BootKind`], #147): a
 /// first boot formats the store (the marker, durably) before the core reads

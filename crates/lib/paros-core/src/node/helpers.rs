@@ -2,7 +2,7 @@ use super::{
     Audience, Ballot, BeliefSource, ColocatedNode, Command, LeadershipOrigin, Message, NodeId,
     NodeRole, Party, Slot,
 };
-use crate::membership::AcceptorConfig;
+use crate::membership::{AcceptorConfig, MAX_ROLE_COUNT};
 use crate::quorum_read::ReadBasis;
 
 impl ColocatedNode {
@@ -359,13 +359,16 @@ impl ColocatedNode {
     }
 
     /// Whether `party` is one this deployment can answer: a node of the
-    /// pool ([`ColocatedNode::in_pool`]) or a proxy of the deployment
-    /// (`ProxyId(0..proxy_count)`) — the wire-hygiene boundary an `Accept`'s
-    /// reply address is checked against (#142).
+    /// pool ([`ColocatedNode::in_pool`]) or a proxy rank under the cap
+    /// (`ProxyId(0..MAX_ROLE_COUNT)`) — the wire-hygiene boundary an
+    /// `Accept`'s reply address is checked against (#142). The cap, not the
+    /// count: the count is the configuration's, bound to the ballot (#754
+    /// (counts off the format marker)), and an acceptor may not know the
+    /// configuration of the ballot it votes in yet.
     pub(super) fn is_party_addressable(&self, party: Party) -> bool {
         match party {
             Party::Node(node) => self.in_pool(node),
-            Party::Proxy(proxy) => proxy.is_in(self.config.proxy_count),
+            Party::Proxy(proxy) => proxy.is_in(MAX_ROLE_COUNT),
         }
     }
 

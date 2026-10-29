@@ -506,7 +506,7 @@ impl ChainWorkload {
                 assert_reachable!("reconfiguration: an operator names no journal");
                 let outcome = compose(
                     reconfigurer,
-                    ctx.state(),
+                    ctx,
                     JournalIdentifier::UNSET,
                     &next,
                     system,
@@ -525,15 +525,7 @@ impl ChainWorkload {
                     assert_reachable!("reconfiguration: a node refuses a request with no journal");
                 }
             }
-            let outcome = compose(
-                reconfigurer,
-                ctx.state(),
-                journal,
-                &next,
-                system,
-                probe_target,
-            )
-            .await;
+            let outcome = compose(reconfigurer, ctx, journal, &next, system, probe_target).await;
             tracing::info!(shape = name, outcome = ?outcome, "chain_reconfigure_outcome");
             ledger_answer(ctx.state(), ledger_id, &outcome);
             // On a lagging-fold seed a reconfiguration onto a joiner just
@@ -894,15 +886,8 @@ impl ChainWorkload {
                 assert_reachable!("gc: an operator asks to re-add a node just before retiring it");
                 let ledger_id = ledger_request(ctx.state(), &readd);
                 let system = policy.system(readd.len());
-                let outcome = compose(
-                    reconfigurer,
-                    ctx.state(),
-                    journal,
-                    &readd,
-                    system,
-                    probe_target,
-                )
-                .await;
+                let outcome =
+                    compose(reconfigurer, ctx, journal, &readd, system, probe_target).await;
                 ledger_answer(ctx.state(), ledger_id, &outcome);
             }
             // Park the identity first, under the dead-node budget
@@ -994,26 +979,52 @@ impl ChainWorkload {
 /// shared with the tenant coordinator's placement (the gates show both
 /// verdicts reach the wire); on any other seed, or for a shape no
 /// configuration admits, the members alone.
+///
+/// On a coin the configuration also names new proxy and replica counts
+/// (#754 (counts off the format marker)): a count change is a round
+/// change on the same members. The proxy count may pass the deployment's
+/// proxy leaders by one, so a leader meets a rank it has no lane for and
+/// runs the round colocated.
 async fn compose(
     reconfigurer: &crate::client::ChainClient,
-    state: &moonpool_sim::StateHandle,
+    ctx: &moonpool_sim::SimContext,
     journal: JournalIdentifier,
     members: &[u64],
     system: paros::core::membership::QuorumSystem,
     target: usize,
 ) -> ReconfigureOutcome {
+    let state = ctx.state();
     let nodes: Vec<paros::core::NodeId> =
         members.iter().copied().map(paros::core::NodeId).collect();
     let distinct = nodes
         .iter()
         .collect::<std::collections::BTreeSet<_>>()
         .len();
-    if crate::shape::acceptor_zones(state) == 0 || distinct == 0 || !system.admits(distinct) {
-        return reconfigurer
-            .reconfigure(journal, members, system, target)
-            .await;
+    let admitted = distinct > 0 && system.admits(distinct);
+    let counts = (admitted && buggify_with_prob!(0.2)).then(|| {
+        let deployment = crate::roles::deployment(ctx.topology());
+        let proxies = deployment.proxies().len();
+        let replicas = deployment.replica_count();
+        let draw = ctx.random().random::<u64>();
+        let proxies = usize::try_from(draw % (proxies as u64 + 2)).unwrap_or(0);
+        let replicas = usize::try_from((draw >> 8) % (replicas as u64 + 1)).unwrap_or(0);
+        assert_reachable!("reconfiguration: the composer changes the proxy and replica counts");
+        (proxies, replicas)
+    });
+    if crate::shape::acceptor_zones(state) == 0 || !admitted {
+        let Some((proxies, replicas)) = counts else {
+            return reconfigurer
+                .reconfigure(journal, members, system, target)
+                .await;
+        };
+        let config = paros::core::membership::AcceptorConfig::new(nodes, system)
+            .with_counts(proxies, replicas);
+        return reconfigurer.reconfigure_to(journal, &config, target).await;
     }
-    let config = crate::shape::acceptor_config(state, nodes, system);
+    let mut config = crate::shape::acceptor_config(state, nodes, system);
+    if let Some((proxies, replicas)) = counts {
+        config = config.with_counts(proxies, replicas);
+    }
     if config.zone_rule().holds() {
         assert_reachable!("zones: the composer proposes a configuration that holds the zone rule");
     } else {

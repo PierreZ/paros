@@ -7,7 +7,9 @@ use paros_core::contract::Party;
 use paros_core::journal::{
     Command, Control, Entry, JournalState, JournalView, LeaderUuid, Seq, WriterMode,
 };
-use paros_core::membership::{AcceptorConfig, FailureDomain, ProxyId, QuorumSystem};
+use paros_core::membership::{
+    AcceptorConfig, FailureDomain, MAX_ROLE_COUNT, ProxyId, QuorumSystem,
+};
 use paros_core::{Ballot, NodeId, Value};
 
 use super::{InspectReply, Reconfigure, common, internal};
@@ -179,6 +181,8 @@ pub fn config_to_proto(config: &AcceptorConfig) -> common::AcceptorConfig {
         cols,
         domains: config.domains().iter().map(domain_to_proto).collect(),
         cell_id: config.cell(),
+        proxies: config.proxy_count() as u64,
+        replicas: config.replica_count() as u64,
     }
 }
 
@@ -258,6 +262,7 @@ pub fn config_from_proto(
     }
     let zoned = zoned_members(&config.members, config.domains)?;
     let cell = config.cell_id;
+    let (proxies, replicas) = counts_from_proto(config.proxies, config.replicas)?;
     let members: BTreeSet<NodeId> = config.members.into_iter().map(NodeId).collect();
     if !quorum_system.admits(members.len()) {
         return Err("acceptor configuration does not admit its quorum system");
@@ -267,8 +272,25 @@ pub fn config_from_proto(
             Some(zoned) => AcceptorConfig::zoned(zoned, quorum_system),
             None => AcceptorConfig::new(members.into_iter().collect(), quorum_system),
         }
-        .with_cell(cell),
+        .with_cell(cell)
+        .with_counts(proxies, replicas),
     ))
+}
+
+/// A configuration's proxy and replica counts from the wire (#754 (counts
+/// off the format marker)), refused past [`MAX_ROLE_COUNT`].
+///
+/// # Errors
+///
+/// A count above the cap.
+pub fn counts_from_proto(proxies: u64, replicas: u64) -> Result<(usize, usize), &'static str> {
+    let cap = |n: u64| {
+        usize::try_from(n)
+            .ok()
+            .filter(|n| *n <= MAX_ROLE_COUNT)
+            .ok_or("a role count is at most 64")
+    };
+    Ok((cap(proxies)?, cap(replicas)?))
 }
 
 pub(super) fn command_to_proto(command: &Command) -> internal::Command {

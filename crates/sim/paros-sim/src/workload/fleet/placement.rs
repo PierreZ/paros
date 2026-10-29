@@ -35,6 +35,7 @@ use paros::client::journals;
 use paros::core::NodeId;
 use paros::core::journal::JournalIdentifier;
 use paros::core::journal::TenantId;
+use paros::core::journal::state::WriterMode;
 use paros::machine::Class;
 use paros::model::registry::{BookingTarget, NodeStanding, Registry, Role};
 use paros::model::tenant::TenantControl;
@@ -63,7 +64,7 @@ pub(super) async fn placements_booked(
         if let Some((tenants, registry, slow_before)) = read(known, first, &learn).await {
             if !judged {
                 judge(ctx.state(), &tenants, &registry, &slow_before);
-                batchers(&tenants, registry.registry());
+                journal_roles(&tenants, registry.registry());
                 maintained(ctx, &tenants, registry.registry());
                 removed(ctx, registry.registry());
                 judged = true;
@@ -338,34 +339,81 @@ fn footprints(registry: &Registry) {
     }
 }
 
-/// A tenant's batchers (#145 (batchers), #604 (role counts)): every
-/// batcher slot of a tenant is on a `stateless` machine, one per machine;
-/// gate: a tenant holds batchers, no more than its count, after chaos.
-fn batchers(tenants: &[TenantControl], registry: &Registry) {
+/// A journal's scale counts (#753 (per-journal proxies)): every proxy
+/// leader, batcher and replica slot of a live journal is on a machine of
+/// its class, one per machine; a replica shares no machine with the
+/// journal's acceptors; a single-writer journal holds no batcher, and a
+/// stateless slot of a journal weighs nothing, so it never fills a machine.
+/// Gates: a journal holds each role, no more than its count, after chaos.
+fn journal_roles(tenants: &[TenantControl], registry: &Registry) {
     for control in tenants {
         let tenant = control.tenant();
-        let target = BookingTarget::Tenant { tenant };
-        let nodes: Vec<NodeId> = registry
-            .bookings()
-            .filter(|(_, b)| b.role == Role::Batcher && b.target == target)
-            .map(|(_, b)| b.node)
-            .collect();
-        let distinct: BTreeSet<NodeId> = nodes.iter().copied().collect();
-        assert_always!(
-            distinct.len() == nodes.len(),
-            "placement: a tenant holds one batcher slot per machine at most",
-            { "tenant" => tenant.0, "slots" => nodes.len() }
-        );
-        assert_always!(
-            nodes
-                .iter()
-                .all(|node| registry.get(*node).is_some_and(|n| n.class == Class::Stateless)),
-            "placement: a batcher is booked on a stateless machine",
-            { "tenant" => tenant.0 }
-        );
-        let wanted = usize::try_from(control.roles().batchers).unwrap_or(usize::MAX);
-        if !nodes.is_empty() && nodes.len() <= wanted {
-            assert_reachable!("placement: a tenant holds its batchers after chaos");
+        for (id, journal) in control.live() {
+            let target = BookingTarget::Journal(JournalIdentifier::new(tenant, id));
+            let of = |role: Role| -> Vec<NodeId> {
+                registry
+                    .bookings()
+                    .filter(|(_, b)| b.role == role && b.target == target)
+                    .map(|(_, b)| b.node)
+                    .collect()
+            };
+            let acceptors: BTreeSet<NodeId> = of(Role::Acceptor).into_iter().collect();
+            for role in [Role::ProxyLeader, Role::Batcher, Role::Replica] {
+                let nodes = of(role);
+                let distinct: BTreeSet<NodeId> = nodes.iter().copied().collect();
+                assert_always!(
+                    distinct.len() == nodes.len(),
+                    "placement: a journal holds one slot of a role per machine at most",
+                    { "tenant" => tenant.0, "journal" => id.0, "slots" => nodes.len() }
+                );
+                assert_always!(
+                    nodes
+                        .iter()
+                        .all(|node| registry.get(*node).is_some_and(|n| n.class == role.class())),
+                    "placement: a journal's role is booked on a machine of its class",
+                    { "tenant" => tenant.0, "journal" => id.0 }
+                );
+                let wanted = match role {
+                    Role::ProxyLeader => journal.desired.proxies,
+                    Role::Batcher if journal.writer == WriterMode::Multi => {
+                        journal.desired.batchers
+                    }
+                    Role::Batcher => {
+                        assert_always!(
+                            nodes.is_empty(),
+                            "placement: a single-writer journal holds no batcher",
+                            { "tenant" => tenant.0, "journal" => id.0 }
+                        );
+                        0
+                    }
+                    _ => {
+                        assert_always!(
+                            distinct.is_disjoint(&acceptors),
+                            "placement: a replica shares no machine with its acceptors",
+                            { "tenant" => tenant.0, "journal" => id.0 }
+                        );
+                        journal.desired.replicas
+                    }
+                };
+                let wanted = usize::try_from(wanted).unwrap_or(usize::MAX);
+                if !nodes.is_empty() && nodes.len() <= wanted {
+                    match role {
+                        Role::ProxyLeader => assert_reachable!(
+                            "placement: a journal holds its proxy leaders after chaos"
+                        ),
+                        Role::Batcher => {
+                            assert_reachable!(
+                                "placement: a journal holds its batchers after chaos"
+                            );
+                        }
+                        _ => {
+                            assert_reachable!(
+                                "placement: a journal holds its replicas after chaos"
+                            );
+                        }
+                    }
+                }
+            }
         }
     }
 }

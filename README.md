@@ -60,9 +60,10 @@ orders --survive machines=2` asks for five acceptors, and the tenant coordinator
 the journal there by reconfiguration, without losing a write (#214 (tenant modes)).
 
 A multi-writer journal can put many writers' writes in one slot through batchers (#145
-(batchers)): `parosctl configure --tenant acme --batchers 3` books three on the cell's
-`stateless` machines, `parosctl resolve acme` names them, and each writer gets its own positions
-back.
+(batchers)): `parosctl configure --tenant acme --journal orders --batchers 3` books three on the
+cell's `stateless` machines, `parosctl resolve acme` names them, and each writer gets its own
+positions back. `--proxies N` and `--replicas N` are the journal's other scale counts (#753
+(per-journal proxies)): 0 runs the job in the leader's process.
 
 Every `parosd` is also a frontend (#723 (frontend as a parosd role)): it checks a Biscuit token,
 resolves `paros://<tenant>/<journal>` and forwards the call. `parosctl configure --tenant acme

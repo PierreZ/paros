@@ -31,7 +31,7 @@ impl ColocatedNode {
                 "only a leader holds delegated rounds"
             );
             assert!(
-                self.config.proxy_count > 0,
+                self.acceptors.proxy_count() > 0,
                 "only a proxy deployment delegates"
             );
         }

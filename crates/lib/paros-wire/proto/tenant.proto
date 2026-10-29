@@ -55,6 +55,10 @@ message Desired {
   uint32 replicas = 4;
   uint32 survive_machines = 5;
   uint32 partitions = 6;
+  // The journal's proxy leaders and batchers (#753 (per-journal proxies)):
+  // 0 runs the job in the leader's process. Each is at most 64.
+  uint32 proxies = 7;
+  uint32 batchers = 8;
 }
 
 // Request `request`: create journal `id` (drawn by the coordinator) named
@@ -126,8 +130,10 @@ message Configure {
 // pools of stateless roles the tenant coordinator places.
 message TenantRoles {
   uint32 frontends = 1;
-  uint32 proxy_leaders = 2;
-  uint32 batchers = 3;
+  // 2 and 3 were the tenant counts of proxy leaders and batchers: they are
+  // the journal's since 2026-10-28 (`Desired`, #753 (per-journal proxies)).
+  reserved 2, 3;
+  reserved "proxy_leaders", "batchers";
 }
 
 // The configuration in force of journal `id` once the coordinator applied

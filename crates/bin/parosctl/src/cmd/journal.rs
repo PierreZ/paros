@@ -274,7 +274,7 @@ impl DurabilityArgs {
         .expect("clap bounds the durability");
         Some(Desired {
             durability,
-            replicas: 0,
+            ..Desired::DEFAULT
         })
     }
 }
@@ -292,11 +292,18 @@ pub struct ConfigureArgs {
     /// The new durability: a field not named takes its default.
     #[command(flatten)]
     durability: DurabilityArgs,
-    /// The replicas per journal (recorded).
+    /// The journal's replicas (#753 (per-journal proxies)): the coordinator
+    /// books that many on `storage` machines. 0 is none.
     #[arg(long)]
     replicas: Option<u32>,
-    /// The tenant's batchers (#145 (batchers)): the coordinator books that
-    /// many on the cell's `stateless` machines. Only without `--journal`.
+    /// The journal's proxy leaders (#753 (per-journal proxies)): the
+    /// coordinator books that many on `stateless` machines. 0 runs every
+    /// Phase 2 on the leader.
+    #[arg(long)]
+    proxies: Option<u32>,
+    /// The journal's batchers (#145 (batchers), #753): the coordinator books
+    /// that many on `stateless` machines for a multi-writer journal. 0 is
+    /// none.
     #[arg(long)]
     batchers: Option<u32>,
     /// The tenant's frontends (#723 (frontend as a parosd role)): the
@@ -304,10 +311,6 @@ pub struct ConfigureArgs {
     /// without `--journal`.
     #[arg(long)]
     frontends: Option<u32>,
-    /// The tenant's proxy leaders (recorded, #604 (role counts)). Only
-    /// without `--journal`.
-    #[arg(long)]
-    proxy_leaders: Option<u32>,
     /// How long the request is sent again while no coordinator decides it,
     /// in milliseconds.
     #[arg(long, default_value = "30000")]
@@ -449,15 +452,45 @@ async fn ready_tenant(
 /// The role counts `args` names (#604 (role counts)), each count it does
 /// not name kept from `held`, or a refusal printed.
 fn role_counts(args: &ConfigureArgs, held: TenantRoles) -> Result<TenantRoles, Ending> {
-    TenantRoles::new(
-        args.frontends.unwrap_or(held.frontends),
-        args.proxy_leaders.unwrap_or(held.proxy_leaders),
+    TenantRoles::new(args.frontends.unwrap_or(held.frontends)).map_err(|error| {
+        note(&format!("refused: {error}"));
+        Ending::Refused
+    })
+}
+
+/// The scale counts `args` names (#753 (per-journal proxies)), each count
+/// it does not name kept from `held`, or a refusal printed.
+fn scale_counts(args: &ConfigureArgs, held: Desired) -> Result<Desired, Ending> {
+    held.with_counts(
+        args.replicas.unwrap_or(held.replicas),
+        args.proxies.unwrap_or(held.proxies),
         args.batchers.unwrap_or(held.batchers),
     )
     .map_err(|error| {
         note(&format!("refused: {error}"));
         Ending::Refused
     })
+}
+
+/// The mode `journal` (the tenant default when `None`) holds now, and the
+/// tenant's role counts, read from the tenant's control journal.
+async fn held_mode(
+    client: &ParosClient,
+    (tenant, control): (TenantId, paros::core::journal::JournalId),
+    journal: Option<&str>,
+) -> Result<(Desired, TenantRoles), Ending> {
+    let Some(fold) = journals::list(client, tenant, control).await else {
+        note("the tenant's control journal could not be read to its tail");
+        return Err(Ending::Unreachable);
+    };
+    let desired = match journal {
+        None => fold.default_desired(),
+        Some(name) => fold
+            .named(name.as_bytes())
+            .and_then(|id| fold.get(id))
+            .map_or(Desired::DEFAULT, |journal| journal.desired),
+    };
+    Ok((desired, fold.roles()))
 }
 
 /// `parosctl configure` (#214 (tenant modes)): record a new desired mode
@@ -472,29 +505,30 @@ pub async fn configure(
     out: &Printer,
     args: ConfigureArgs,
 ) -> Ending {
-    let named_roles =
-        args.batchers.is_some() || args.frontends.is_some() || args.proxy_leaders.is_some();
+    let named_roles = args.frontends.is_some();
     if named_roles && args.journal.is_some() {
-        note("role counts are the tenant default's: drop --journal");
+        note("--frontends is the tenant default's: drop --journal");
         return Ending::Refused;
     }
+    let named_counts = args.replicas.is_some() || args.proxies.is_some() || args.batchers.is_some();
     let named_mode = args.durability.desired();
-    if named_mode.is_none() && args.replicas.is_none() && !named_roles {
-        note("name a mode: --survive, --partitions, --replicas or a role count");
+    if named_mode.is_none() && !named_counts && !named_roles {
+        note(
+            "name a mode: --survive, --partitions, --replicas, --proxies, --batchers or --frontends",
+        );
         return Ending::Refused;
     }
     let (tenant, control, election, _) = match ready_tenant(client, out, &args.tenant).await {
         Ok(found) => found,
         Err(ending) => return ending,
     };
-    // A count or a mode not named keeps the tenant's: read its fold when
+    // A count or a mode not named keeps the target's: read the fold when
     // the command names only part of them.
-    let current = if args.journal.is_none() && (named_roles || named_mode.is_none()) {
-        let Some(fold) = journals::list(client, tenant, control).await else {
-            note("the tenant's control journal could not be read to its tail");
-            return Ending::Unreachable;
-        };
-        Some((fold.default_desired(), fold.roles()))
+    let current = if named_roles || named_mode.is_none() || named_counts {
+        match held_mode(client, (tenant, control), args.journal.as_deref()).await {
+            Ok(held) => Some(held),
+            Err(ending) => return ending,
+        }
     } else {
         None
     };
@@ -507,14 +541,17 @@ pub async fn configure(
     } else {
         None
     };
-    let mut desired = named_mode
-        .or_else(|| current.map(|(desired, _)| desired))
-        .unwrap_or(Desired::DEFAULT);
-    if let Some(replicas) = args.replicas {
-        desired.replicas = replicas;
-    } else if named_mode.is_some() {
-        desired.replicas = 0;
-    }
+    let held = current.map_or(Desired::DEFAULT, |(desired, _)| desired);
+    // A named durability keeps the counts held; a count not named keeps its
+    // own.
+    let mode = named_mode.map_or(held, |mode| Desired {
+        durability: mode.durability,
+        ..held
+    });
+    let desired = match scale_counts(&args, mode) {
+        Ok(desired) => desired,
+        Err(ending) => return ending,
+    };
     let request = JournalRequest {
         request: nonzero(providers),
         tenant,

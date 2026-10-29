@@ -282,9 +282,10 @@ impl Folds {
                         self.book.len(),
                         "every machine of the book is answered"
                     );
-                    // The tenant's batchers (#145, #604): each machine the
-                    // registry books a `batcher` slot of the tenant on, at
-                    // the address the book holds for it.
+                    // The tenant's batchers (#145, #753 (per-journal
+                    // proxies)): each machine the registry books a `batcher`
+                    // slot of one of the tenant's journals on, at the
+                    // address the book holds for it.
                     ack.batchers = registry
                         .map(|registry| booked_on(registry, tenant, Role::Batcher, &self.book))
                         .unwrap_or_default();
@@ -393,9 +394,9 @@ fn member(registry: Option<&Registry>, id: NodeId, addr: &Address) -> wire::Memb
 }
 
 /// The machines `registry` books a `role` slot of `tenant` on (a batcher
-/// or a frontend), each once, at the address `book` holds for it (a
-/// machine the book does not place is left out), with its machine
-/// interface.
+/// of one of its journals, or a frontend of the tenant), each once, at the
+/// address `book` holds for it (a machine the book does not place is left
+/// out), with its machine interface.
 fn booked_on(
     registry: &Registry,
     tenant: paros_core::journal::TenantId,
@@ -408,9 +409,7 @@ fn booked_on(
     );
     let nodes: std::collections::BTreeSet<NodeId> = registry
         .bookings()
-        .filter(|(_, b)| {
-            b.role == role && b.target == paros_model::registry::BookingTarget::Tenant { tenant }
-        })
+        .filter(|(_, b)| b.role == role && b.target.tenant() == tenant)
         .map(|(_, b)| b.node)
         .collect();
     let members: Vec<wire::Member> = nodes

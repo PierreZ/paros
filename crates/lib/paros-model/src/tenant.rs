@@ -278,22 +278,57 @@ impl Durability {
     }
 }
 
-/// A desired mode (§3.4): a [`Durability`] plus the replica count. A caller
-/// names this, never members or an `AcceptorConfig`.
+/// A desired mode (§3.4): a [`Durability`] plus the journal's scale counts
+/// (#753 (per-journal proxies)). A caller names this, never members or an
+/// `AcceptorConfig`. A count of 0 runs the job in the acceptor or leader
+/// process; N books N instances, each at most [`MAX_ROLE_COUNT`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Desired {
     /// The acceptors' durability.
     pub durability: Durability,
-    /// Replicas per journal (recorded; placed by #212).
+    /// Replicas of the journal, on `storage` machines; in its configuration
+    /// (#754 (counts off the format marker)).
     pub replicas: u32,
+    /// Proxy leaders of the journal, on `stateless` machines; in its
+    /// configuration (#754).
+    pub proxies: u32,
+    /// Batchers of the journal, on `stateless` machines; booked for a
+    /// multi-writer journal only.
+    pub batchers: u32,
 }
 
 impl Desired {
-    /// The default: one failure in one partition, three acceptors.
+    /// The default: one failure in one partition, three acceptors, every
+    /// job colocated.
     pub const DEFAULT: Desired = Desired {
         durability: Durability::DEFAULT,
         replicas: 0,
+        proxies: 0,
+        batchers: 0,
     };
+
+    /// The same mode with the scale counts `replicas`, `proxies` and
+    /// `batchers`.
+    ///
+    /// # Errors
+    ///
+    /// A count above [`MAX_ROLE_COUNT`].
+    pub fn with_counts(
+        self,
+        replicas: u32,
+        proxies: u32,
+        batchers: u32,
+    ) -> Result<Self, &'static str> {
+        if replicas > MAX_ROLE_COUNT || proxies > MAX_ROLE_COUNT || batchers > MAX_ROLE_COUNT {
+            return Err("a role count is at most 64");
+        }
+        Ok(Self {
+            replicas,
+            proxies,
+            batchers,
+            ..self
+        })
+    }
 
     /// The acceptors it asks for.
     #[must_use]
@@ -307,10 +342,22 @@ impl Desired {
         self.durability.quorum_system()
     }
 
-    /// Its label ([`Durability::label`]).
+    /// Its label: [`Durability::label`], then each scale count that is
+    /// not 0, e.g. `… · 3 acceptors · 2 proxies · 1 replica`.
     #[must_use]
     pub fn label(&self) -> String {
-        self.durability.label()
+        let mut parts = vec![self.durability.label()];
+        for (count, one, many) in [
+            (self.proxies, "proxy", "proxies"),
+            (self.batchers, "batcher", "batchers"),
+            (self.replicas, "replica", "replicas"),
+        ] {
+            if count > 0 {
+                let noun = if count == 1 { one } else { many };
+                parts.push(format!("{count} {noun}"));
+            }
+        }
+        parts.join(" · ")
     }
 
     /// The wire form.
@@ -320,6 +367,8 @@ impl Desired {
             survive_machines: self.durability.survive_machines,
             partitions: self.durability.partitions,
             replicas: self.replicas,
+            proxies: self.proxies,
+            batchers: self.batchers,
         }
     }
 
@@ -327,24 +376,28 @@ impl Desired {
     ///
     /// # Errors
     ///
-    /// No mode, `survive_machines` above 3 or no partition.
+    /// No mode, `survive_machines` above 3, no partition, or a count
+    /// above [`MAX_ROLE_COUNT`].
     pub fn from_wire(desired: Option<wire::Desired>) -> Result<Self, &'static str> {
         let desired = desired.ok_or("no desired mode")?;
-        Ok(Desired {
+        Desired {
             durability: Durability::new(desired.survive_machines, desired.partitions)?,
-            replicas: desired.replicas,
-        })
+            ..Desired::DEFAULT
+        }
+        .with_counts(desired.replicas, desired.proxies, desired.batchers)
     }
 }
 
 impl std::str::FromStr for Desired {
     type Err = &'static str;
 
-    /// `machines=F,partitions=P`, either part optional (the
-    /// default is `F=1`, `P=1`), in any order.
+    /// `machines=F,partitions=P,replicas=R,proxies=X,batchers=B`, every
+    /// part optional (the default is `F=1`, `P=1` and no count), in any
+    /// order.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let mut f = Durability::DEFAULT.survive_machines;
         let mut p = Durability::DEFAULT.partitions;
+        let (mut replicas, mut proxies, mut batchers) = (0, 0, 0);
         for part in s.split(',').map(str::trim).filter(|part| !part.is_empty()) {
             let (key, value) = part
                 .split_once('=')
@@ -356,13 +409,21 @@ impl std::str::FromStr for Desired {
             match key.trim() {
                 "machines" => f = value,
                 "partitions" => p = value,
-                _ => return Err("a mode names machines and partitions"),
+                "replicas" => replicas = value,
+                "proxies" => proxies = value,
+                "batchers" => batchers = value,
+                _ => {
+                    return Err(
+                        "a mode names machines, partitions, replicas, proxies and batchers",
+                    );
+                }
             }
         }
-        Ok(Desired {
+        Desired {
             durability: Durability::new(f, p)?,
-            replicas: 0,
-        })
+            ..Desired::DEFAULT
+        }
+        .with_counts(replicas, proxies, batchers)
     }
 }
 
@@ -371,18 +432,16 @@ impl std::str::FromStr for Desired {
 /// take an instance.
 pub const MAX_ROLE_COUNT: u32 = 64;
 
-/// A tenant's role counts (§3.4, #604): how many instances of each of its
-/// pools of stateless roles the tenant coordinator places on the cell's
-/// `stateless` machines. Zero is none: the tenant's calls go to the
-/// machines, as before.
+/// A tenant's role counts (§3.4, #604): how many frontends the tenant
+/// coordinator places on the cell's `stateless` machines for the tenant.
+/// Zero is none: the tenant's calls go to the machines, as before. Proxy
+/// leaders and batchers are the journal's counts since 2026-10-28
+/// ([`Desired`], #753 (per-journal proxies)).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TenantRoles {
-    /// Frontends (recorded; placed by a later change, #604).
+    /// Frontends (#723 (frontend as a parosd role)): placed, and named by
+    /// `Resolve`.
     pub frontends: u32,
-    /// Proxy leaders (recorded; placed by a later change, #604).
-    pub proxy_leaders: u32,
-    /// Batchers (#145): placed, and named by `Resolve`.
-    pub batchers: u32,
 }
 
 impl TenantRoles {
@@ -391,16 +450,11 @@ impl TenantRoles {
     /// # Errors
     ///
     /// A count above [`MAX_ROLE_COUNT`].
-    pub fn new(frontends: u32, proxy_leaders: u32, batchers: u32) -> Result<Self, &'static str> {
-        if frontends > MAX_ROLE_COUNT || proxy_leaders > MAX_ROLE_COUNT || batchers > MAX_ROLE_COUNT
-        {
+    pub fn new(frontends: u32) -> Result<Self, &'static str> {
+        if frontends > MAX_ROLE_COUNT {
             return Err("a role count is at most 64");
         }
-        Ok(Self {
-            frontends,
-            proxy_leaders,
-            batchers,
-        })
+        Ok(Self { frontends })
     }
 
     /// The wire form.
@@ -408,8 +462,6 @@ impl TenantRoles {
     pub fn to_wire(&self) -> wire::TenantRoles {
         wire::TenantRoles {
             frontends: self.frontends,
-            proxy_leaders: self.proxy_leaders,
-            batchers: self.batchers,
         }
     }
 
@@ -419,16 +471,13 @@ impl TenantRoles {
     ///
     /// A count above [`MAX_ROLE_COUNT`].
     pub fn from_wire(roles: &wire::TenantRoles) -> Result<Self, &'static str> {
-        Self::new(roles.frontends, roles.proxy_leaders, roles.batchers)
+        Self::new(roles.frontends)
     }
 
-    /// Its label: `2 frontends · 0 proxy leaders · 3 batchers`.
+    /// Its label: `2 frontends`.
     #[must_use]
     pub fn label(&self) -> String {
-        format!(
-            "{} frontends · {} proxy leaders · {} batchers",
-            self.frontends, self.proxy_leaders, self.batchers
-        )
+        format!("{} frontends", self.frontends)
     }
 }
 
@@ -1473,6 +1522,8 @@ mod tests {
                         partitions: 3,
                     },
                     replicas: 2,
+                    proxies: 3,
+                    batchers: 1,
                 },
             }),
             TenantCommand::CreateJournal {
@@ -1501,14 +1552,16 @@ mod tests {
             TenantCommand::Configure {
                 request: 12,
                 target: ConfigureTarget::Journal(JournalId(0x9e37)),
-                desired: "machines=0,partitions=3".parse().expect("a mode"),
+                desired: "machines=0,partitions=3,proxies=2,batchers=1,replicas=3"
+                    .parse()
+                    .expect("a mode"),
                 roles: None,
             },
             TenantCommand::Configure {
                 request: 13,
                 target: ConfigureTarget::TenantDefault,
                 desired: Desired::DEFAULT,
-                roles: Some(TenantRoles::new(1, 2, 3).expect("counts")),
+                roles: Some(TenantRoles::new(1).expect("counts")),
             },
             TenantCommand::Placed {
                 id: JournalId(0x9e37),
@@ -1678,7 +1731,7 @@ mod tests {
     #[test]
     fn role_counts_are_the_tenant_defaults_and_survive_a_checkpoint() {
         let mut t = fold();
-        let roles = TenantRoles::new(0, 0, 3).expect("counts");
+        let roles = TenantRoles::new(3).expect("counts");
         let set = TenantCommand::Configure {
             request: 40,
             target: ConfigureTarget::TenantDefault,
@@ -1715,7 +1768,12 @@ mod tests {
             .restore(t.next_seq() - 1, &t.checkpoint())
             .expect("a checkpoint restores");
         assert_eq!(restored.roles(), roles);
-        assert!(TenantRoles::new(65, 0, 0).is_err(), "a count is at most 64");
+        assert!(TenantRoles::new(65).is_err(), "a count is at most 64");
+        assert!(
+            Desired::DEFAULT.with_counts(0, 65, 0).is_err(),
+            "a journal count is at most 64"
+        );
+        assert!("proxies=65".parse::<Desired>().is_err());
     }
 
     #[test]
@@ -2046,6 +2104,8 @@ mod tests {
                 let desired = Desired {
                     durability: Durability::new(f, p).expect("a durability"),
                     replicas: p,
+                    proxies: f,
+                    batchers: p + f,
                 };
                 assert_eq!(Desired::from_wire(Some(desired.to_wire())), Ok(desired));
             }

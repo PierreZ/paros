@@ -417,7 +417,11 @@ fn the_reply_owner_is_the_slot_modulo_the_replica_count() {
     assert!(ReplicaId(1).is_in(2));
     assert!(!ReplicaId(2).is_in(2));
     assert_eq!(
-        Config::new(NodeId(0), crate::journal::JournalIdentifier::UNSET).reply_owner(Slot(5)),
+        crate::membership::AcceptorConfig::new(
+            vec![NodeId(0)],
+            crate::membership::QuorumSystem::Majority
+        )
+        .reply_owner(Slot(5)),
         None
     );
 }

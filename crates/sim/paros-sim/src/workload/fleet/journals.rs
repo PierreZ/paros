@@ -181,25 +181,21 @@ impl FleetOps {
                     drawn_configure(payload)
                 };
                 let name = (!(payload >> 12).is_multiple_of(4)).then_some(name);
-                // The tenant default's configure names the tenant's role
-                // counts on a coin (#604): up to three batchers and three
-                // frontends (#723 (frontend as a parosd role)), and the
-                // recorded count of proxy leaders. Always on a batchers
-                // seed, so a lower count releases a slot; there at least one
-                // frontend, so the batcher's machine the scenario drains
-                // holds one too.
+                // The tenant default's configure names the tenant's
+                // frontends on a coin (#604, #723 (frontend as a parosd
+                // role)): up to three. Always on a batchers seed, so a lower
+                // count releases a slot; there at least one, so the
+                // batcher's machine the scenario drains holds one too.
                 let roles = (name.is_none()
                     && (crate::shape::batchers(ctx.state()) || buggify_with_prob!(0.6)))
                 .then(|| {
                     assert_reachable!("journals: a configure names the tenant's role counts");
-                    let batchers = u32::try_from((payload >> 40) % 4).unwrap_or(0);
-                    let proxies = u32::try_from((payload >> 44) % 3).unwrap_or(0);
                     let frontends = if crate::shape::batchers(ctx.state()) {
                         1 + u32::try_from((payload >> 48) % 3).unwrap_or(0)
                     } else {
                         u32::try_from((payload >> 48) % 4).unwrap_or(0)
                     };
-                    paros::model::tenant::TenantRoles::new(frontends, proxies, batchers)
+                    paros::model::tenant::TenantRoles::new(frontends)
                         .expect("the counts are within the cap")
                 });
                 JournalOp::Configure {
@@ -221,7 +217,12 @@ impl FleetOps {
                     // (durability mode per journal)): over 300 hunt seeds,
                     // 66 of the 71 kills asked inside a batched commit met
                     // a journal with no loss to spare.
-                    desired: if store == StoreDurability::Batched
+                    desired: if crate::shape::batchers(ctx.state()) {
+                        // A batchers seed's create takes the tenant default,
+                        // which names its batchers (#753 (per-journal
+                        // proxies)).
+                        None
+                    } else if store == StoreDurability::Batched
                         && !(payload >> 20).is_multiple_of(8)
                     {
                         Some(Desired::DEFAULT)
@@ -1326,23 +1327,42 @@ fn expected_denial(presented: Presented, internal: bool, kind: Kind) -> Option<D
     }
 }
 
-/// The batchers scenario's configure (#145 (batchers), #604 (role counts)):
-/// the tenant default with two or three batchers, so the tenant holds one
-/// on each `stateless` machine, and the default mode of one partition,
-/// which fits the scenario's one or two storage machines, so the cell
-/// never refuses it.
+/// The batchers scenario's configure (#145 (batchers), #753 (per-journal
+/// proxies)): the tenant default with two or three batchers and proxy
+/// leaders, so each multi-writer journal it creates next holds one on each
+/// `stateless` machine, and the default mode of one partition, which fits
+/// the scenario's one or two storage machines, so the cell never refuses
+/// it.
 fn batchers_configure(payload: u64) -> JournalOp {
     assert_reachable!("journals: a configure names batchers on a batchers seed");
     let batchers = 2 + u32::try_from((payload >> 40) % 2).unwrap_or(0);
     let others = u32::try_from((payload >> 44) % 3).unwrap_or(0);
     JournalOp::Configure {
         name: None,
-        desired: Desired::DEFAULT,
+        desired: Desired::DEFAULT
+            .with_counts(0, others, batchers)
+            .expect("the counts are within the cap"),
         roles: Some(
-            paros::model::tenant::TenantRoles::new(others, others, batchers)
-                .expect("the counts are within the cap"),
+            paros::model::tenant::TenantRoles::new(others).expect("the counts are within the cap"),
         ),
     }
+}
+
+/// The scale counts a create or a configure draws (#753 (per-journal
+/// proxies)): 0 on most draws, so most journals stay colocated, else up to
+/// three replicas, proxy leaders and batchers, each its own draw. A count
+/// above the cell's machines is capped by the coordinator.
+fn drawn_counts(desired: Desired, draw: u64) -> Desired {
+    // Its own bits: the payload's high bits already choose the step.
+    let draw = draw.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 32;
+    if !draw.is_multiple_of(3) {
+        return desired;
+    }
+    assert_reachable!("journals: a mode names a journal's scale counts");
+    let count = |shift: u32| u32::try_from((draw >> shift) % 4).unwrap_or(0);
+    desired
+        .with_counts(count(2), count(4), count(6))
+        .expect("the counts are within the cap")
 }
 
 /// The writer mode a create draws (#241): fixed for the journal's life.
@@ -1386,10 +1406,14 @@ fn drawn_desired(draw: u64) -> Desired {
         3 => (3, 1),
         _ => (1, 1),
     };
-    Durability::new(survive_machines, partitions).map_or(Desired::DEFAULT, |durability| Desired {
-        durability,
-        replicas: 0,
-    })
+    let desired =
+        Durability::new(survive_machines, partitions).map_or(Desired::DEFAULT, |durability| {
+            Desired {
+                durability,
+                ..Desired::DEFAULT
+            }
+        });
+    drawn_counts(desired, draw)
 }
 
 /// The desired mode a configure draws (#214 (tenant modes)): the default,
@@ -1414,10 +1438,14 @@ fn drawn_configure(draw: u64) -> Desired {
         // storage machine: on a full cell it is refused for want of slots.
         _ => (3, 1),
     };
-    Durability::new(survive_machines, partitions).map_or(Desired::DEFAULT, |durability| Desired {
-        durability,
-        replicas: 0,
-    })
+    let desired =
+        Durability::new(survive_machines, partitions).map_or(Desired::DEFAULT, |durability| {
+            Desired {
+                durability,
+                ..Desired::DEFAULT
+            }
+        });
+    drawn_counts(desired, draw)
 }
 
 /// The widest mode of one acceptor partition, `F = 3`: one partition takes
@@ -1425,7 +1453,7 @@ fn drawn_configure(draw: u64) -> Desired {
 fn widest_configure() -> Desired {
     Durability::new(3, 1).map_or(Desired::DEFAULT, |durability| Desired {
         durability,
-        replicas: 0,
+        ..Desired::DEFAULT
     })
 }
 

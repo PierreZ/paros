@@ -15,8 +15,8 @@ use paros_model::machine::ControlJournals;
 use paros_observe::audit::Audit;
 use paros_wire::{
     InspectReply, MatchmakersRefusal, Reconfigure, ReconfigureAck, RetireAck, RetireRefusal,
-    RetireRequest, WireQuorumSystem, common, journal_state_to_proto, quorum_system_from_proto,
-    quorum_system_to_proto, zoned_members,
+    RetireRequest, WireQuorumSystem, common, counts_from_proto, journal_state_to_proto,
+    quorum_system_from_proto, quorum_system_to_proto, zoned_members,
 };
 
 use super::handover::HandoverDriver;
@@ -44,14 +44,24 @@ pub(crate) fn reconfigure<A: Audit>(
     // member, else the request is malformed.
     let zoned = zoned_members(&req.members, req.domains.clone());
     let distinct = members.iter().collect::<BTreeSet<_>>().len();
-    let result = match (quorum_system, zoned) {
+    // The counts ride beside the members (#754 (counts off the format
+    // marker)): an absent one keeps the count in force.
+    let counts = counts_from_proto(
+        req.proxies.unwrap_or(node.acceptors().proxy_count() as u64),
+        req.replicas
+            .unwrap_or(node.acceptors().replica_count() as u64),
+    );
+    let result = match (quorum_system, zoned, counts) {
         _ if members.is_empty() => ReconfigureResult::Refused(ReconfigureRefusal::UnknownMember),
-        (Ok(quorum_system), Ok(zoned)) if quorum_system.admits(distinct) => {
+        (Ok(quorum_system), Ok(zoned), Ok((proxies, replicas)))
+            if quorum_system.admits(distinct) =>
+        {
             let config = match zoned {
                 Some(zoned) => AcceptorConfig::zoned(zoned, quorum_system),
                 None => AcceptorConfig::new(members.clone(), quorum_system),
             }
-            .with_cell(req.cell_id);
+            .with_cell(req.cell_id)
+            .with_counts(proxies, replicas);
             node.reconfigure(&config)
         }
         _ => ReconfigureResult::Refused(ReconfigureRefusal::Malformed),
@@ -287,6 +297,8 @@ pub(crate) fn inspect(node: &ColocatedNode, cell: Option<&ControlJournals>) -> I
         gc_watermark,
         folded: node.replica().folded().0,
         journal: Some(journal_state_to_proto(node.replica().journal())),
+        proxies: node.acceptors().proxy_count() as u64,
+        replicas: node.acceptors().replica_count() as u64,
         ..facts
     }
 }

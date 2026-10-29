@@ -518,7 +518,7 @@ impl ColocatedNode {
                 .rounds()
                 .values()
                 .filter_map(Round::proxy)
-                .all(|proxy| proxy.is_in(self.config.proxy_count)),
+                .all(|proxy| proxy.is_in(self.acceptors.proxy_count())),
             "a delegated round names a proxy of the deployment"
         );
     }

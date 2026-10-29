@@ -54,7 +54,8 @@ pub async fn provision_store<S: LogStorage>(storage: &mut S) -> Result<Provision
     storage.boot_scan().await.map_err(RunError::Storage)?;
     let (_, config) = storage.initial_state();
     match storage.formatted_config() {
-        Some(formatted) if formatted == config => Ok(Provisioned::Resumed),
+        // The marker records no count (#754 (counts off the format marker)).
+        Some(formatted) if formatted == config.recorded() => Ok(Provisioned::Resumed),
         Some(formatted) => {
             tracing::error!(formatted = ?formatted, operator = ?config, "provision_config_mismatch");
             Err(RunError::Refused(BootRefusal::ConfigMismatch))

@@ -1278,8 +1278,14 @@ impl<P: ParosProviders> Client<P> {
         quorum_system: QuorumSystem,
         target: usize,
     ) -> ReconfigureOutcome {
-        self.reconfigure_wire(journal, members, (Vec::new(), 0), quorum_system, target)
-            .await
+        self.reconfigure_wire(
+            journal,
+            members,
+            (Vec::new(), 0, None),
+            quorum_system,
+            target,
+        )
+        .await
     }
 
     /// [`Client::reconfigure`] onto a composed `config`, its failure
@@ -1300,7 +1306,11 @@ impl<P: ParosProviders> Client<P> {
         self.reconfigure_wire(
             journal,
             &members,
-            (domains, config.cell()),
+            (
+                domains,
+                config.cell(),
+                Some((config.proxy_count(), config.replica_count())),
+            ),
             config.quorum_system(),
             target,
         )
@@ -1308,13 +1318,18 @@ impl<P: ParosProviders> Client<P> {
     }
 
     /// The reconfiguration as the wire carries it: `members` with their
-    /// labels (empty, or one per member) and the configuration's cell (`0`:
-    /// none).
+    /// labels (empty, or one per member), the configuration's cell (`0`:
+    /// none) and its proxy and replica counts (`None` keeps the counts in
+    /// force, #754 (counts off the format marker)).
     async fn reconfigure_wire(
         &self,
         journal: JournalIdentifier,
         members: &[u64],
-        (domains, cell_id): (Vec<paros_wire::common::FailureDomain>, u64),
+        (domains, cell_id, counts): (
+            Vec<paros_wire::common::FailureDomain>,
+            u64,
+            Option<(usize, usize)>,
+        ),
         quorum_system: QuorumSystem,
         target: usize,
     ) -> ReconfigureOutcome {
@@ -1336,6 +1351,8 @@ impl<P: ParosProviders> Client<P> {
                 journal: journal.journal.0,
                 domains: domains.clone(),
                 cell_id,
+                proxies: counts.map(|(p, _)| p as u64),
+                replicas: counts.map(|(_, r)| r as u64),
             };
             let node = self.node(server).clone();
             let attempt =

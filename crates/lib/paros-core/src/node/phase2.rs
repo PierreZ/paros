@@ -76,7 +76,7 @@ impl ColocatedNode {
     ///
     /// If an explicit proxy is not one of the deployment's `proxy_count`.
     fn proxy_for(&self, slot: Slot, delegation: Delegation) -> Option<ProxyId> {
-        let count = self.config.proxy_count;
+        let count = self.acceptors.proxy_count();
         match delegation {
             Delegation::Colocated => None,
             Delegation::Auto => {
@@ -330,7 +330,7 @@ impl ColocatedNode {
         );
         if let Some(proxy) = proxy {
             assert!(
-                proxy.is_in(self.config.proxy_count),
+                proxy.is_in(self.acceptors.proxy_count()),
                 "a delegated Accept names a deployed proxy"
             );
         }

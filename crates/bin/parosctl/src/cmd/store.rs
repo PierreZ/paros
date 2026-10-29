@@ -386,8 +386,6 @@ fn config_json(config: &Config, labels: &Labels) -> Json {
         "quorum": quorum_text(config.quorum_system),
         "writers": writers_text(config.writer_mode),
         "matchmakers": config.matchmakers.iter().map(|m| m.0).collect::<Vec<_>>(),
-        "proxies": config.proxy_count,
-        "replicas": config.replica_count,
     })
 }
 

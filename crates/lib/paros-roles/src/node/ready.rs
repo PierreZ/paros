@@ -257,7 +257,7 @@ pub(crate) async fn take_ready<A: Audit>(
     let promised_before = node.hard_state().max_promised_ballot;
     // The replica tier serves one journal (#188): a journal with no replica
     // in its configuration never addresses one.
-    let with_learners = node.config().replica_count > 0;
+    let with_learners = node.acceptors().has_replicas();
     // The deployment map an `Audience` is resolved against, read before the
     // batch takes the node's borrow.
     let pool: Vec<NodeId> = node.pool().to_vec();

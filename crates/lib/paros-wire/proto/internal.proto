@@ -410,6 +410,10 @@ message InspectReply {
   // that is not a formed machine. A frontend learns its servers' references
   // here.
   bytes machine_interface = 27;
+  // The proxy leaders and replicas of the configuration this node believes
+  // is the latest (#754 (counts off the format marker)), beside `members`.
+  uint64 proxies = 28;
+  uint64 replicas = 29;
 }
 
 // A scrub of one journal's durable records on the node that answers (#362

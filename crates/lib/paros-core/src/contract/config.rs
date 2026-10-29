@@ -2,15 +2,16 @@
 
 use crate::journal::JournalIdentifier;
 use crate::journal::state::WriterMode;
-use crate::membership::{AcceptorConfig, FailureDomain, MatchmakerId, QuorumSystem, ReplicaId};
-use crate::types::{NodeId, Slot};
+use crate::membership::{AcceptorConfig, FailureDomain, MatchmakerId, QuorumSystem};
+use crate::types::NodeId;
 
 /// Static, immutable-for-this-instance configuration: who *I* am, the
 /// **bootstrap** acceptor configuration, the pool of nodes that may ever be an
 /// acceptor, and the matchmaker set (empty for plain Multi-Paxos).
 ///
 /// Two deployments live in this one struct, told apart by `matchmakers`
-/// (and, orthogonally, `proxy_count` says whether Phase 2 is delegated):
+/// (and, orthogonally, the configuration's proxy count says whether Phase 2
+/// is delegated):
 ///
 /// - **Plain Multi-Paxos** (`matchmakers` empty — the default, and permanent:
 ///   see AGENTS.md, *Plain Multi-Paxos is first-class*): `peers` is the fixed
@@ -54,26 +55,27 @@ pub struct Config {
     /// matchmaker-set reconfiguration draws from, a superset of
     /// `matchmakers`. Empty means "exactly `matchmakers`".
     pub matchmaker_pool: Vec<MatchmakerId>,
-    /// How many **proxy leaders** the deployment runs (#142, Compartmentalized
-    /// Paxos §3.1): `ProxyId(0..proxy_count)`. **Zero is the plain
-    /// deployment** — every Phase 2 stays colocated on the leader and the
-    /// wire carries exactly today's messages; the `None` arm, like an empty
-    /// `matchmakers`. With a count, a leader delegates the Phase 2 of every
-    /// slot it allocates on a settled leadership to `ProxyId(slot %
-    /// proxy_count)` ([`crate::membership::ProxyId::of`]), and only the count is
-    /// protocol data: which process answers to a `ProxyId` is the driver's
-    /// deployment map, so a dead proxy is replaced without editing this.
+    /// How many **proxy leaders** the bootstrap configuration names (#142,
+    /// Compartmentalized Paxos §3.1): `ProxyId(0..proxy_count)`. **Zero is
+    /// the plain deployment**: every Phase 2 stays colocated on the leader,
+    /// the `None` arm like an empty `matchmakers`. The count in force is the
+    /// one of the configuration bound to the ballot
+    /// ([`AcceptorConfig::proxy_count`], #754 (counts off the format
+    /// marker)): a reconfiguration changes it, as a round change. It is
+    /// **not recorded in the format marker** ([`Config::recorded`]), so a
+    /// restart may name another bootstrap count; acceptors read counts only
+    /// for wire checks, so safety never depends on them. Which process
+    /// answers to a `ProxyId` is the driver's deployment map.
+    #[cfg_attr(feature = "serde", serde(skip))]
     pub proxy_count: usize,
-    /// How many **replicas** the deployment runs beside its acceptors (#144,
+    /// How many **replicas** the bootstrap configuration names (#144,
     /// Compartmentalized Paxos §3.3): `ReplicaId(0..replica_count)`, each a
     /// [`crate::ReplicaNode`] that learns and applies but never votes.
     /// **Zero is the plain deployment**, the `None` arm like a zero
-    /// `proxy_count`: every node is its own replica and nothing else
-    /// learns. With a count, [`Config::reply_owner`] names the one replica
-    /// that owns a slot's client reply (§3.3: each replies for `1/n` of the
-    /// slots). A replica votes on nothing and adopts no ballot, so the count
-    /// carries no quorum obligation, and which process answers to a
-    /// `ReplicaId` is the driver's deployment map.
+    /// `proxy_count`. As `proxy_count`: the count in force is the
+    /// configuration's ([`AcceptorConfig::reply_owner`] names a slot's reply
+    /// owner), and the format marker does not record it (#754).
+    #[cfg_attr(feature = "serde", serde(skip))]
     pub replica_count: usize,
     /// The journal this node serves, named with its tenant (#184, #235):
     /// carried for assertions and tracing, never read by a protocol decision
@@ -157,7 +159,8 @@ impl Config {
     pub fn bootstrap(&self) -> AcceptorConfig {
         if self.peer_domains.is_empty() {
             return AcceptorConfig::new(self.peers.clone(), self.quorum_system)
-                .with_cell(self.cell_id);
+                .with_cell(self.cell_id)
+                .with_counts(self.proxy_count, self.replica_count);
         }
         assert_eq!(
             self.peer_domains.len(),
@@ -173,7 +176,33 @@ impl Config {
             self.quorum_system,
         );
         assert!(config.is_zoned(), "a labeled bootstrap stays labeled");
-        config.with_cell(self.cell_id)
+        config
+            .with_cell(self.cell_id)
+            .with_counts(self.proxy_count, self.replica_count)
+    }
+
+    /// This configuration as the format marker records it (#754 (counts off
+    /// the format marker)): the counts cleared, every other field unchanged.
+    /// A store is formatted with it, and a boot compares the marker with the
+    /// operator's configuration through it, so a count change never refuses
+    /// a restart.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
+    #[must_use]
+    pub fn recorded(&self) -> Self {
+        let recorded = Self {
+            proxy_count: 0,
+            replica_count: 0,
+            ..self.clone()
+        };
+        assert!(
+            !recorded.has_proxies() && !recorded.has_replicas(),
+            "the format marker records no count"
+        );
+        recorded
     }
 
     /// The addressable pool: `nodes`, or `peers` when `nodes` is empty.
@@ -193,42 +222,17 @@ impl Config {
         !self.matchmakers.is_empty()
     }
 
-    /// Whether this deployment runs proxy leaders (the opt-in that delegates
-    /// Phase 2, #142).
+    /// Whether the bootstrap configuration runs proxy leaders (the opt-in
+    /// that delegates Phase 2, #142).
     #[must_use]
     pub fn has_proxies(&self) -> bool {
         self.proxy_count > 0
     }
 
-    /// Whether this deployment runs a replica tier (#144).
+    /// Whether the bootstrap configuration runs a replica tier (#144).
     #[must_use]
     pub fn has_replicas(&self) -> bool {
         self.replica_count > 0
-    }
-
-    /// The replica that owns `slot`'s client reply (Compartmentalized Paxos
-    /// §3.3): `ReplicaId(slot % replica_count)`, [`ReplicaId::of`]. `None`
-    /// on a deployment without a replica tier, where the node the client
-    /// asked replies.
-    ///
-    /// The contract is only that every party derives the same owner from
-    /// the slot without coordination. Nothing routes on it yet: the node a
-    /// client asked still acks the proposal it serves, and the owner is
-    /// what a future client library that connects to replicas will act on.
-    ///
-    /// # Panics
-    ///
-    /// If an assertion on its own invariants, preconditions or postconditions
-    /// fails: a programmer error, never an operating condition.
-    #[must_use]
-    pub fn reply_owner(&self, slot: Slot) -> Option<ReplicaId> {
-        let owner = ReplicaId::of(slot, self.replica_count);
-        // The `None` arm: only a replica tier owns client replies.
-        assert!(
-            owner.is_some() == self.has_replicas(),
-            "a slot has a reply owner iff replicas run"
-        );
-        owner
     }
 
     /// The matchmaker pool: `matchmaker_pool`, or `matchmakers` when empty.
