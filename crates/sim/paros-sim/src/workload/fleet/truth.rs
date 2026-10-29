@@ -16,7 +16,9 @@
 //! as landed: a drain, a removal, and a window, which then holds for the
 //! rest of the run. A window the registry took holds no longer than its
 //! length from the answer, or than the next entry over its scope the
-//! registry took.
+//! registry took. In the settle tail the last operator ends every window
+//! (#741 (end windows)): once the registry holds none, no window sent
+//! before holds.
 
 use std::collections::BTreeSet;
 use std::time::Duration;
@@ -79,6 +81,12 @@ fn under_window(board: &MachineBoard, node: u64, now: Duration) -> bool {
         if window.length.is_zero() || window.sent > now || !covers(board, &window.scope, node) {
             return false;
         }
+        if board
+            .windows_ended
+            .is_some_and(|ended| window.sent < ended && now >= ended)
+        {
+            return false;
+        }
         match window.landed {
             Landed::Refused => false,
             Landed::Unknown => true,
@@ -95,6 +103,37 @@ fn under_window(board: &MachineBoard, node: u64, now: Duration) -> bool {
             }
         }
     })
+}
+
+/// Every scope a window may still hold over at `now`, as the operators'
+/// entries say (#741 (end windows)): the last entry over the scope the
+/// registry did not refuse opens a window that has not run out, or is an
+/// end whose answer was lost. An end the registry refused names a machine
+/// out of the pool, which holds no window.
+pub(super) fn held_scopes(state: &StateHandle, now: Duration) -> Vec<MaintenanceScope> {
+    let board = machine_board(state);
+    let board = lock(&board);
+    let mut held: Vec<MaintenanceScope> = Vec::new();
+    for window in board.windows.iter().filter(|w| w.sent <= now) {
+        if held.contains(&window.scope) {
+            continue;
+        }
+        let last = board
+            .windows
+            .iter()
+            .rev()
+            .filter(|w| w.sent <= now && w.scope == window.scope)
+            .find(|w| w.length.is_zero() || w.landed != Landed::Refused);
+        let holds = last.is_some_and(|last| match last.landed {
+            Landed::Unknown => true,
+            Landed::By(at) => !last.length.is_zero() && now < at.saturating_add(last.length),
+            Landed::Refused => false,
+        });
+        if holds {
+            held.push(window.scope.clone());
+        }
+    }
+    held
 }
 
 /// Whether the cell cannot hold `journal`'s shape at `now`, with the excuse

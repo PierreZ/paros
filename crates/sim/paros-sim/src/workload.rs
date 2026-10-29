@@ -2136,6 +2136,11 @@ impl ChainWorkload {
             guard.fleet_settled == guard.registered
         };
         if last_to_settle {
+            // No maintenance window outlasts chaos (#741 (end windows)):
+            // the heal oracle judges every journal in the tail.
+            fleet_ops
+                .end_windows(ctx, config.tunables().checkpoint_policy())
+                .await;
             let journals = self
                 .plan
                 .as_ref()
