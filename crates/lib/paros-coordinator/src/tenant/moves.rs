@@ -260,6 +260,12 @@ pub(crate) fn bookable(
         .collect()
 }
 
+/// The proxy and replica counts in force of the leader's answer `reply`
+/// (#754 (counts off the format marker)), or `None` past the cap.
+fn counts_in_force(reply: &InspectReply) -> Option<(usize, usize)> {
+    paros_wire::counts_from_proto(reply.proxies, reply.replicas).ok()
+}
+
 /// Record the configuration in force of the leader's answer `reply` as
 /// `journal`'s placement (`Placed`, what views show) when its tenant
 /// control journal holds another. `Some(true)` once it is recorded,
@@ -283,7 +289,10 @@ async fn record_in_force<P: ParosProviders>(
     if members.is_empty() || !system.admits(members.len()) {
         return Some(false);
     }
-    let in_force = AcceptorConfig::new(members, system);
+    let Some((proxies, replicas)) = counts_in_force(reply) else {
+        return Some(false);
+    };
+    let in_force = AcceptorConfig::new(members, system).with_counts(proxies, replicas);
     let placed = match desk.tenant(client, journal.tenant, control).await {
         Ok(state) => state.get(journal.journal).map(|j| j.placed.clone()),
         Err(JournalAnswer::NotCoordinator) => return None,
@@ -492,8 +501,14 @@ impl Moves {
         // a new configuration like a create.
         let staying_nodes: Vec<NodeId> = target.iter().copied().map(NodeId).collect();
         let machines = placement::machines(cell.registry(), staying_nodes.iter().copied());
-        let composed =
-            placement::zoned(&staying_nodes, &machines, system).with_cell(cell.journals().cell_id);
+        // A move keeps the proxy and replica counts in force (#754 (counts
+        // off the format marker)): only a mode change moves them.
+        let Some((proxies, replicas)) = counts_in_force(&reply) else {
+            return Some(MoveStep::Waiting);
+        };
+        let composed = placement::zoned(&staying_nodes, &machines, system)
+            .with_cell(cell.journals().cell_id)
+            .with_counts(proxies, replicas);
         if members != target {
             return Some(match nodes.reconfigure_to(journal, &composed, at).await {
                 ReconfigureOutcome::Started { .. } => {

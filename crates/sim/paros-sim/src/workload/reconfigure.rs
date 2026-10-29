@@ -1003,14 +1003,13 @@ async fn compose(
         .collect::<std::collections::BTreeSet<_>>()
         .len();
     let admitted = distinct > 0 && system.admits(distinct);
+    let deployment = crate::roles::deployment(ctx.topology());
+    let deployed = (deployment.proxies().len(), deployment.replica_count());
     let counts = (admitted && buggify_with_prob!(0.2)).then(|| {
-        let deployment = crate::roles::deployment(ctx.topology());
-        let proxies = deployment.proxies().len();
-        let replicas = deployment.replica_count();
         let draw = ctx.random().random::<u64>();
-        let proxies = usize::try_from(draw % (proxies as u64 + 2)).unwrap_or(0);
+        let proxies = usize::try_from(draw % (deployed.0 as u64 + 2)).unwrap_or(0);
         assert_reachable!("reconfiguration: the composer changes the proxy count");
-        (proxies, replicas)
+        (proxies, deployed.1)
     });
     if crate::shape::acceptor_zones(state) == 0 || !admitted {
         let Some((proxies, replicas)) = counts else {
@@ -1022,10 +1021,10 @@ async fn compose(
             .with_counts(proxies, replicas);
         return reconfigurer.reconfigure_to(journal, &config, target).await;
     }
-    let mut config = crate::shape::acceptor_config(state, nodes, system);
-    if let Some((proxies, replicas)) = counts {
-        config = config.with_counts(proxies, replicas);
-    }
+    // A whole configuration names its counts: without the coin, the
+    // deployment's, so the replica tier keeps learning.
+    let (proxies, replicas) = counts.unwrap_or(deployed);
+    let config = crate::shape::acceptor_config(state, nodes, system).with_counts(proxies, replicas);
     if config.zone_rule().holds() {
         assert_reachable!("zones: the composer proposes a configuration that holds the zone rule");
     } else {
