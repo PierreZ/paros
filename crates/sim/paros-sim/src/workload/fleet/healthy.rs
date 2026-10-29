@@ -31,6 +31,7 @@ use moonpool_sim::{SimContext, TimeProvider, assert_always, assert_reachable};
 use paros::client::checkpoint::LoadOutcome;
 use paros::client::views::{ViewOutcome, ask, request};
 use paros::core::NodeId;
+use paros::core::journal::JournalId;
 use paros::core::journal::JournalIdentifier;
 use paros::core::journal::TenantId;
 use paros::core::membership::MatchmakerGeneration;
@@ -45,15 +46,18 @@ use paros::wire::view::{CellQuery, JournalView, ViewReply, view_request::Query};
 use super::cell::Cell;
 use super::sets::in_force;
 use super::{FleetOps, judged_cell};
+use crate::excuses::{self, Excuse};
 
 impl FleetOps {
     /// Ask the cell for an admin view until every journal it can place
     /// shows healthy, or `deadline`.
     pub(super) async fn journals_heal(&self, ctx: &SimContext, cell: &Cell, deadline: Duration) {
-        // A coordinator that waits past the tail never re-places in it.
+        // A coordinator that waits past the tail never re-places in it: a
+        // counted skip (#738 (count excuses, the baseline)).
         if crate::shape::longest_replace_after(ctx.state()) * 2
             > deadline.saturating_sub(ctx.time().now())
         {
+            excuses::note(ctx.state(), Excuse::SkipHealReplacePastTail, None);
             return;
         }
         let servers: Vec<_> = cell.servers.iter().map(|(_, addr)| addr.clone()).collect();
@@ -76,9 +80,18 @@ impl FleetOps {
             {
                 let wiped = crate::machine::wiped_ids(ctx.state());
                 let mut found = None;
-                for (tenant, journal, word) in unhealthy(&reply, &registry, &wiped) {
+                let (unhealthy, excused) = unhealthy(&reply, &registry, &wiped);
+                for (journal, excuse) in excused {
+                    excuses::note(ctx.state(), excuse, Some(journal));
+                }
+                for (tenant, journal, word) in unhealthy {
                     if set_lost(cell, &registry, TenantId(tenant), &wiped).await {
                         assert_reachable!("status: a lost matchmaker set excuses a journal");
+                        excuses::note(
+                            ctx.state(),
+                            Excuse::HealSetLost,
+                            Some(JournalIdentifier::new(TenantId(tenant), JournalId(journal))),
+                        );
                         continue;
                     }
                     found = Some((tenant, journal, word));
@@ -97,6 +110,9 @@ impl FleetOps {
             }
         }
         if let Some((tenant, journal, word)) = last {
+            if crate::machine::cell_lost(ctx.state()) {
+                excuses::note(ctx.state(), Excuse::SkipHealCellLost, None);
+            }
             assert_always!(
                 crate::machine::cell_lost(ctx.state()),
                 "status: a journal the cell can hold shows healthy after chaos",
@@ -120,25 +136,36 @@ pub(super) async fn read(cell: &Cell, attempt: u64) -> Option<Registry> {
     matches!(loaded, LoadOutcome::Loaded { .. }).then(|| fold.state().registry().clone())
 }
 
+/// A journal that does not show healthy, with the excuse that holds.
+type Excused = (JournalIdentifier, Excuse);
+
 /// Every data journal of `reply` that does not show healthy and is not
-/// excused, as `(tenant, journal, word)`, in the reply's order.
+/// excused, as `(tenant, journal, word)`, in the reply's order; and every
+/// one that does not show healthy and is excused, with its excuse.
 fn unhealthy(
     reply: &ViewReply,
     registry: &Registry,
     wiped: &BTreeSet<u64>,
-) -> Vec<(u64, u64, String)> {
+) -> (Vec<(u64, u64, String)>, Vec<Excused>) {
     let mut found = Vec::new();
+    let mut excused = Vec::new();
     for tenant in &reply.tenants {
         for journal in tenant.journals.iter().filter(|j| j.kind == "data") {
             let word = observe(journal, &reply.machines);
-            if word == Some(Word::Healthy) || excused(reply, registry, journal, wiped) {
+            if word == Some(Word::Healthy) {
+                continue;
+            }
+            if let Some(excuse) = excuse(reply, registry, journal, wiped) {
+                let id =
+                    JournalIdentifier::new(TenantId(tenant.tenant), JournalId(journal.journal));
+                excused.push((id, excuse));
                 continue;
             }
             let word = word.map_or("none", Word::as_str).to_string();
             found.push((tenant.tenant, journal.journal, word));
         }
     }
-    found
+    (found, excused)
 }
 
 /// Whether `tenant`'s matchmaker set in force, as the founding members
@@ -190,6 +217,18 @@ pub(super) fn excused(
     journal: &JournalView,
     wiped: &BTreeSet<u64>,
 ) -> bool {
+    excuse(reply, registry, journal, wiped).is_some()
+}
+
+/// [`excused`], with the excuse that holds (#738 (count excuses, the
+/// baseline)): a maintenance window, or any other reason the cell cannot
+/// hold the shape.
+fn excuse(
+    reply: &ViewReply,
+    registry: &Registry,
+    journal: &JournalView,
+    wiped: &BTreeSet<u64>,
+) -> Option<Excuse> {
     let machine = |id: u64| reply.machines.iter().find(|m| m.node_id == id);
     // A re-placement is a reconfiguration by the journal's leader: while the
     // members that serve hold no Phase-1 or no Phase-2 quorum, no leader can
@@ -205,7 +244,7 @@ pub(super) fn excused(
         };
         let size = placed.members().len();
         if judge(&placed, size, placed.quorum_system(), serving) == Word::Unavailable {
-            return true;
+            return Some(Excuse::HealCannotHold);
         }
     }
     if journal
@@ -214,7 +253,7 @@ pub(super) fn excused(
         .any(|id| machine(*id).is_some_and(|m| m.maintenance_ms > 0))
     {
         assert_reachable!("status: a maintenance window excuses a journal");
-        return true;
+        return Some(Excuse::HealMaintenance);
     }
     let failing = journal
         .acceptors
@@ -248,5 +287,5 @@ pub(super) fn excused(
                 && !held.contains(&m.node_id)
         })
         .count();
-    free + founders < failing + short
+    (free + founders < failing + short).then_some(Excuse::HealCannotHold)
 }

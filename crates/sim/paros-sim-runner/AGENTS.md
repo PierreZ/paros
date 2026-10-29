@@ -22,14 +22,14 @@ binaries take no flags beyond the positional arguments below and read one enviro
   have a slot, and a gate gets its slot the first time it runs, so this check names every
   declared gate that never ran. Slots are named by their first 63 bytes (`slot_name`); no two
   gates may share them (a unit test).
-- `src/common.rs` → `arg`, `is_clean`, `print_seed_counts`, `print_failed_runs` (a panicked process is a failed run with no violation), `print_never_fired` → shared parsing and printing.
+- `src/common.rs` → `arg`, `is_clean`, `print_seed_counts`, `print_failed_runs` (a panicked process is a failed run with no violation), `print_never_fired`, `print_excuses` (#738 (count excuses, the baseline): per excuse and silent skip, the runs where it fired, their share, and the journals it excused) → shared parsing and printing.
 
 ## Entry points
 
 - `sim-paros-chain [iterations]` (default `COVERAGE_ITERATIONS`): runs `explore`, prints
   saturated-vs-cap, saturation signal, exploration stats and bug recipes, guidance watermarks
-  and the gates that never fired, the declared gates that never ran, and the ten rarest
-  declared gates that fired. Exits 1 on any assertion violation, failed run, coverage violation,
+  and the gates that never fired, the declared gates that never ran, the ten rarest
+  declared gates that fired, and the excuse table. Exits 1 on any assertion violation, failed run, coverage violation,
   declared gate that never ran (unless listed in `gates::RARE`) or convergence timeout. With
   `PAROS_SIM_MISSING_GATES=<path>` the run is a CI shard: it writes its gate defects (a declared
   gate it never ran, a gate it never fired) to `<path>` and does not fail on them; CI's
@@ -37,7 +37,7 @@ binaries take no flags beyond the positional arguments below and read one enviro
   convergence timeout with every gate fired still fails the shard.
 - `sim-paros-hunt [main|canary] [iterations] [gate-filter]` (default 2000, the normal evidence
   budget; root *Simulation rules*): prints seed counts, assertion slots used and dropped, gates
-  that never fired, the declared gates that never ran, the 25 rarest declared gates, and with a filter every gate whose name contains it, with its successes and
+  that never fired, the declared gates that never ran, the 25 rarest declared gates, the excuse table, and with a filter every gate whose name contains it, with its successes and
   checks (a gate's rate before and after a change); exits 1 on a violation, 2 on an unknown
   axis. Coverage never decides it.
 - `sim-paros-hunt <replay> <seed>` with `replay-main`, `replay-canary`, `explore-main`

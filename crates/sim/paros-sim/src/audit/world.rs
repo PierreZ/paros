@@ -9,6 +9,7 @@ use moonpool_sim::{StateHandle, assert_always, assert_reachable, assert_sometime
 
 use super::ClientHistory;
 use super::state::AuditState;
+use crate::excuses::Excuse;
 
 /// The published key of a tenant's matchmaker generations (#190).
 const TENANT_SETS_KEY: &str = "paros-audit-tenant-sets";
@@ -646,6 +647,35 @@ impl AuditWorld {
         self.lock().loss_excuses_liveness()
     }
 
+    /// The excuses that switch this journal's convergence checks off now,
+    /// by name (#738 (count excuses, the baseline)): the loss and wipe
+    /// excuses of [`Self::check_final_convergence`], and each reason a
+    /// node it judges is excused from the per-node leg.
+    pub(crate) fn excuses(&self) -> Vec<Excuse> {
+        let st = self.lock();
+        let mut excuses = st.loss_excuses();
+        if st.wipes_excuse_liveness() {
+            excuses.push(Excuse::WipesNoQuorum);
+        }
+        let nodes: BTreeSet<u64> = st
+            .booted
+            .iter()
+            .chain(st.applied_max.keys())
+            .copied()
+            .collect();
+        for (excuse, set) in [
+            (Excuse::NodeStorageDead, &st.storage_dead),
+            (Excuse::NodeWiped, &st.wiped),
+            (Excuse::NodeRetired, &st.retired),
+            (Excuse::NodeLeftPool, &st.left_pool),
+        ] {
+            if nodes.iter().any(|node| set.contains(node)) {
+                excuses.push(excuse);
+            }
+        }
+        excuses
+    }
+
     /// Ground truth from a journal store (#264): the accepts of the commit
     /// it is about to start, `(slot, vhash)`. A store cannot know what a
     /// crash inside the commit lands, so it names what may land, and
@@ -937,6 +967,7 @@ pub(crate) fn check_run(
     // walked by the end (#204: answers name positions to the client, slots
     // to the audit).
     let acked_max = audit.answered_max();
+    crate::excuses::note_all(state, &audit.excuses(), journal);
     audit.check_final_convergence(acked_max);
     audit.digest()
 }

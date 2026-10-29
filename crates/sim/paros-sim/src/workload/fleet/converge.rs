@@ -37,6 +37,7 @@ use paros::core::journal::TenantId;
 use super::cell::Cell;
 use crate::audit::AuditWorld;
 use crate::audit::tenants::TenantBoard;
+use crate::excuses::{self, Excuse};
 
 /// The journals no writer touches once every operator settled: the formed
 /// cell's universe journal, every tenant control journal a machine folded, and
@@ -105,8 +106,13 @@ fn note_stops(board: &Mutex<TenantBoard>, journal: JournalIdentifier, world: &Au
 /// nothing, a tenant whose set is lost owes nothing (see the module doc),
 /// and a run shut down by a sibling is not judged.
 pub(super) async fn worlds_converge(ctx: &SimContext, cell: Option<&Cell>, deadline: Duration) {
-    if crate::machine::formed_cell(ctx.state()).is_none() || crate::machine::cell_lost(ctx.state())
-    {
+    // Both skips are counted (#738 (count excuses, the baseline)).
+    if crate::machine::formed_cell(ctx.state()).is_none() {
+        excuses::note(ctx.state(), Excuse::SkipConvergeNoCell, None);
+        return;
+    }
+    if crate::machine::cell_lost(ctx.state()) {
+        excuses::note(ctx.state(), Excuse::SkipConvergeCellLost, None);
         return;
     }
     let wiped = crate::machine::wiped_ids(ctx.state());
@@ -115,6 +121,12 @@ pub(super) async fn worlds_converge(ctx: &SimContext, cell: Option<&Cell>, deadl
     let lost = lost_tenants(cell, &quiet, &wiped).await;
     if !lost.is_empty() {
         assert_reachable!("convergence: a lost matchmaker set excuses a quiet journal");
+        for journal in quiet
+            .iter()
+            .filter(|journal| lost.contains(&journal.tenant))
+        {
+            excuses::note(ctx.state(), Excuse::ConvergeSetLost, Some(*journal));
+        }
         quiet.retain(|journal| !lost.contains(&journal.tenant));
     }
     let mut worlds = Vec::new();
@@ -156,7 +168,8 @@ pub(super) async fn worlds_converge(ctx: &SimContext, cell: Option<&Cell>, deadl
         return;
     }
     refresh(&worlds);
-    for (_, world) in &worlds {
+    for (journal, world) in &worlds {
+        excuses::note_all(ctx.state(), &world.excuses(), *journal);
         world.check_final_convergence(world.answered_max());
     }
     // #599 (durability mode per journal): a `Batched` journal a machine

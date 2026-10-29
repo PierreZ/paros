@@ -21,6 +21,7 @@
 
 mod audit;
 mod client;
+pub mod excuses;
 mod frontend;
 mod lifecycle;
 mod machine;
