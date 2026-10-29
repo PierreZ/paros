@@ -20,6 +20,12 @@
 //!    journal on it again, and a retired identity never comes back to its
 //!    journal. The release stops the journal there, its store kept.
 //!
+//! The configuration a change composes carries the journal's booked proxy
+//! leaders and replicas (`crate::tenant::roles`) as its counts, so a count
+//! change is the same round change on the same members (#754 (counts off
+//! the format marker)): the journal is settled only once its configuration
+//! in force names as many of each as the registry books.
+//!
 //! A journal with a slot on a draining machine, on one held slow (#361
 //! (slow machines)), or on one gone (down past the re-placement bound, #475 (re-place after the Down bound)), is the
 //! move's, never a mode change's: it waits until the move is done. Else the
@@ -99,6 +105,23 @@ struct Change {
     placed: AcceptorConfig,
     /// Its acceptor slots.
     slots: Vec<(u64, Booking)>,
+    /// The counts its configuration must carry: its booked proxy leaders
+    /// and replicas ([`counts`]).
+    counts: (usize, usize),
+}
+
+/// The proxy leaders and the replicas the registry books for `journal`
+/// (#754 (counts off the format marker)): the counts its configuration
+/// carries.
+fn counts(registry: &Registry, journal: JournalIdentifier) -> (usize, usize) {
+    let booked = |role: Role| {
+        registry
+            .bookings()
+            .filter(|(_, b)| b.role == role && b.target == BookingTarget::Journal(journal))
+            .count()
+            .min(paros_core::membership::MAX_ROLE_COUNT)
+    };
+    (booked(Role::ProxyLeader), booked(Role::Replica))
 }
 
 /// The acceptor slots of `journal`.
@@ -118,11 +141,18 @@ fn nodes_of(slots: &[(u64, Booking)]) -> Vec<NodeId> {
 }
 
 /// Whether `placed` is the shape `desired` asks for, `count` members under
-/// its quorum system, on exactly the journal's slots.
-fn settled(placed: &AcceptorConfig, desired: &Desired, count: usize, slots: &[NodeId]) -> bool {
+/// its quorum system, on exactly the journal's slots, with its booked
+/// `(proxies, replicas)` counts.
+fn settled(
+    placed: &AcceptorConfig,
+    desired: &Desired,
+    (count, counts): (usize, (usize, usize)),
+    slots: &[NodeId],
+) -> bool {
     placed.members().len() == count
         && placed.quorum_system() == desired.quorum_system()
         && placed.members() == slots
+        && (placed.proxy_count(), placed.replica_count()) == counts
 }
 
 impl Modes {
@@ -200,7 +230,8 @@ impl Modes {
         let wanted = change.desired.quorum_system();
         let in_force = members.len() == count
             && system == wanted
-            && members.iter().all(|m| slot_nodes.contains(m));
+            && members.iter().all(|m| slot_nodes.contains(m))
+            && (reply.proxies, reply.replicas) == (change.counts.0 as u64, change.counts.1 as u64);
         if !in_force {
             return Some(
                 self.reconfigure(cell, desk, (&nodes, at), &want, &change, wanted)
@@ -212,9 +243,12 @@ impl Modes {
             cell,
             desk,
             &change,
-            // Labeled and owned like a create's (#215 (zones)).
+            // Labeled and owned like a create's (#215 (zones)), with its
+            // counts (#754).
             (
-                placement::zoned(&members, &machines, system).with_cell(cell.journals().cell_id),
+                placement::zoned(&members, &machines, system)
+                    .with_cell(cell.journals().cell_id)
+                    .with_counts(change.counts.0, change.counts.1),
                 &reply,
             ),
         )
@@ -258,7 +292,13 @@ impl Modes {
                     continue;
                 }
                 let count = placed_count(&journal.desired, storage);
-                if settled(&journal.placed, &journal.desired, count, &nodes_of(&slots)) {
+                let counts = counts(registry, identifier);
+                if settled(
+                    &journal.placed,
+                    &journal.desired,
+                    (count, counts),
+                    &nodes_of(&slots),
+                ) {
                     continue;
                 }
                 changes.insert(
@@ -268,6 +308,7 @@ impl Modes {
                         desired: journal.desired,
                         placed: journal.placed.clone(),
                         slots,
+                        counts,
                     },
                 );
             }
@@ -370,13 +411,19 @@ impl Modes {
         // The new configuration is labeled with its members' zones and
         // owned by this cell, like a create's (#215 (zones)).
         let machines = placement::machines(cell.registry(), target.iter().copied());
-        let composed =
-            placement::zoned(&target, &machines, system).with_cell(cell.journals().cell_id);
+        let composed = placement::zoned(&target, &machines, system)
+            .with_cell(cell.journals().cell_id)
+            .with_counts(change.counts.0, change.counts.1);
         match nodes.reconfigure_to(change.journal, &composed, at).await {
             ReconfigureOutcome::Started { .. } => {
                 moonpool_assertions::reachable!(
                     "coordinator: a mode change reconfigures its journal"
                 );
+                if (change.placed.proxy_count(), change.placed.replica_count()) != change.counts {
+                    moonpool_assertions::reachable!(
+                        "coordinator: a count change reconfigures its journal"
+                    );
+                }
                 if change.placed.quorum_system() != system {
                     moonpool_assertions::reachable!(
                         "coordinator: a mode change moves its journal to another quorum system"
@@ -460,7 +507,7 @@ mod tests {
     fn desired(survive_machines: u32, partitions: u32) -> Desired {
         Desired {
             durability: Durability::new(survive_machines, partitions).expect("a durability"),
-            replicas: 0,
+            ..Desired::DEFAULT
         }
     }
 
@@ -469,16 +516,40 @@ mod tests {
         let nodes = |ids: &[u64]| ids.iter().copied().map(NodeId).collect::<Vec<_>>();
         let three = AcceptorConfig::new(nodes(&[1, 2, 3]), QuorumSystem::Majority);
         let majority = desired(1, 1);
-        assert!(settled(&three, &majority, 3, &nodes(&[1, 2, 3])));
+        assert!(settled(&three, &majority, (3, (0, 0)), &nodes(&[1, 2, 3])));
         // Another slot, or a missing one: not settled.
-        assert!(!settled(&three, &majority, 3, &nodes(&[1, 2, 4])));
-        assert!(!settled(&three, &majority, 3, &nodes(&[1, 2, 3, 4])));
+        assert!(!settled(&three, &majority, (3, (0, 0)), &nodes(&[1, 2, 4])));
+        assert!(!settled(
+            &three,
+            &majority,
+            (3, (0, 0)),
+            &nodes(&[1, 2, 3, 4])
+        ));
         // The same members under another quorum system: not settled.
         let partitions = desired(0, 3);
-        assert!(!settled(&three, &partitions, 3, &nodes(&[1, 2, 3])));
+        assert!(!settled(
+            &three,
+            &partitions,
+            (3, (0, 0)),
+            &nodes(&[1, 2, 3])
+        ));
         let grid = AcceptorConfig::new(nodes(&[1, 2, 3]), partitions.quorum_system());
-        assert!(settled(&grid, &partitions, 3, &nodes(&[1, 2, 3])));
+        assert!(settled(&grid, &partitions, (3, (0, 0)), &nodes(&[1, 2, 3])));
+        // The same shape with another count: not settled (#754).
+        assert!(!settled(&three, &majority, (3, (1, 0)), &nodes(&[1, 2, 3])));
+        let proxied = three.clone().with_counts(1, 0);
+        assert!(settled(
+            &proxied,
+            &majority,
+            (3, (1, 0)),
+            &nodes(&[1, 2, 3])
+        ));
         // A larger mode on the same slots: not settled.
-        assert!(!settled(&three, &desired(2, 1), 5, &nodes(&[1, 2, 3])));
+        assert!(!settled(
+            &three,
+            &desired(2, 1),
+            (5, (0, 0)),
+            &nodes(&[1, 2, 3])
+        ));
     }
 }

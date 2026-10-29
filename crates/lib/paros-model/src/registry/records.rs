@@ -341,4 +341,21 @@ impl Booking {
     pub fn class(&self) -> Class {
         self.role.class()
     }
+
+    /// Whether the booking reserves a slot of the machine's capacity. A
+    /// journal's proxy leader or batcher does not (decided on 2026-10-28,
+    /// #753 (per-journal proxies)): it counts for the spread, and idle
+    /// journals never fill a cell's `stateless` machines.
+    #[must_use]
+    pub fn weighs(&self) -> bool {
+        Self::weighs_for(self.role, self.target)
+    }
+
+    /// Whether a booking of `role` for `target` reserves a slot
+    /// ([`Booking::weighs`]).
+    #[must_use]
+    pub fn weighs_for(role: Role, target: BookingTarget) -> bool {
+        !(matches!(target, BookingTarget::Journal(_))
+            && matches!(role, Role::ProxyLeader | Role::Batcher))
+    }
 }

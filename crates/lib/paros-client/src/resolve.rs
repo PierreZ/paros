@@ -51,8 +51,9 @@ pub struct Resolved {
     pub universe_name: Vec<u8>,
     /// The cell's name, for people; empty when the directory names none.
     pub cell_name: Vec<u8>,
-    /// The tenant's batchers (#145, #604): the machines the registry books
-    /// a `batcher` slot of the tenant on. Empty when it has none.
+    /// The tenant's batchers (#145, #753 (per-journal proxies)): the
+    /// machines the registry books a `batcher` slot of one of the tenant's
+    /// journals on. Empty when it has none.
     pub batchers: Vec<(NodeId, Address)>,
     /// The tenant's frontends (#723 (frontend as a parosd role)): the
     /// machines the registry books a `frontend` slot of the tenant on. Empty

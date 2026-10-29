@@ -86,7 +86,7 @@ pub async fn storage_contract_suite<S, Fresh, Reopened>(
     let mut s = fresh().await;
     let (_, operator) = s.initial_state();
     let provisioned = paros_core::Config {
-        replica_count: operator.replica_count + 1,
+        cell_id: operator.cell_id + 1,
         ..operator.clone()
     };
     s.format(&provisioned).await.expect("format");

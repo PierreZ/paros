@@ -304,6 +304,11 @@ message CreateJournalOp {
   // How its stores commit a batch (#599 (durability mode per journal)),
   // fixed for its life. Ordered, the zero value, is the default.
   paros.common.v1.StoreDurability store_durability = 10;
+  // Its proxy leaders and batchers (#753 (per-journal proxies)), beside
+  // `replicas`: 0 runs the job in the leader's process; above 64 is
+  // `malformed`.
+  uint32 proxies = 11;
+  uint32 batchers = 12;
 }
 
 // Delete the live journal named `name`: a tombstone, never a reuse.
@@ -320,12 +325,19 @@ message ConfigureOp {
   uint32 replicas = 2;
   uint32 survive_machines = 3;
   uint32 partitions = 4;
-  // The tenant's role counts (#604), on a tenant default only (no `name`):
-  // set when `roles` is true, kept otherwise.
+  // The tenant's frontends (#604, #723), on a tenant default only (no
+  // `name`): set when `roles` is true, kept otherwise. 7 and 8 were the
+  // tenant counts of proxy leaders and batchers, the journal's since
+  // 2026-10-28 (#753 (per-journal proxies)).
   bool roles = 5;
   uint32 frontends = 6;
-  uint32 proxy_leaders = 7;
-  uint32 batchers = 8;
+  reserved 7, 8;
+  reserved "proxy_leaders";
+  // The journal's (or the default's) proxy leaders and batchers (#753),
+  // beside `replicas`: 0 runs the job in the leader's process; above 64 is
+  // `malformed`.
+  uint32 proxies = 9;
+  uint32 batchers = 10;
 }
 
 // The live journal named `name`'s user tags become `tags`, all of them at
@@ -391,8 +403,9 @@ message ResolveAck {
   // universe directory records for `tenant_cell`, where the client asks
   // again. Empty when the directory records none.
   repeated Member tenant_cell_endpoint = 12;
-  // On "": the tenant's batchers (#145, #604), the machines its registry
-  // books a `batcher` slot of the tenant on, each at its address and with
+  // On "": the tenant's batchers (#145, #753 (per-journal proxies)), the
+  // machines its registry books a `batcher` slot of one of the tenant's
+  // journals on, each at its address and with
   // its machine interface. A client sends its multi-writer writes there
   // (`BatchWrite`). Empty when the tenant has none.
   repeated Member batchers = 13;

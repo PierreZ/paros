@@ -36,7 +36,7 @@
 //! stopped, and an acceptor answers `TrimmedTo` (#186): it jumps its floor
 //! and chosen index to the point and catches up from there.
 //!
-//! A deployment whose `Config::replica_count` is zero runs no replica; the
+//! A configuration whose replica count is zero runs no replica; the
 //! node driver then sends its learner traffic to the pool alone, exactly the
 //! plain deployment's messages.
 

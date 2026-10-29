@@ -25,7 +25,7 @@
 //! next re-delegation rebuilds every round it still needs. The only typed
 //! exit is [`RunError::Infra`].
 //!
-//! A deployment whose `Config::proxy_count` is zero never runs this loop;
+//! A configuration whose proxy count is zero never delegates to this loop;
 //! the node driver then delegates nothing and the wire carries exactly the
 //! plain deployment's messages.
 

@@ -212,10 +212,23 @@ pub(crate) fn initiate_handoff(ctx: &HandoffContext) -> bool {
 /// with proxies), on the node loop. First "run it colocated?", then "which
 /// proxy?", each its own location; [`Delegation::Auto`] otherwise, which is
 /// the core's own rule.
-pub(crate) fn delegation_choice(node: &ColocatedNode) -> Delegation {
-    let count = node.config().proxy_count;
+///
+/// The count is the configuration's in force (#754 (counts off the format
+/// marker)), and the driver resolves a proxy rank only to a lane it holds
+/// (`reachable`): a round whose proxy has no lane here runs colocated, so a
+/// count in force before its proxy leaders are served never stalls a write.
+pub(crate) fn delegation_choice(
+    node: &ColocatedNode,
+    reachable: impl Fn(ProxyId) -> bool,
+) -> Delegation {
+    let count = node.acceptors().proxy_count();
     if count == 0 || !node.is_leader() {
         return Delegation::Auto;
+    }
+    let next = ProxyId::of(node.proposer().next_slot(), count).expect("a count names a proxy");
+    if !reachable(next) {
+        moonpool_assertions::reachable!("proxy: a round whose proxy has no lane runs colocated");
+        return Delegation::Colocated;
     }
     // The round runs colocated instead, so a proxied deployment's log mixes
     // proxied and colocated slots and the two Phase-2 paths interleave in
@@ -231,15 +244,15 @@ pub(crate) fn delegation_choice(node: &ColocatedNode) -> Delegation {
     // re-delegation (which derives `slot % count` afresh) lands on another
     // proxy. Two proxies then fan out the same round: the P2b idempotency
     // the delegation rests on.
-    let choice = if count >= 2 && moonpool_buggify::buggify_fault_with_prob!(0.10) {
-        moonpool_assertions::reachable!("proxy: the driver overrides a round's proxy");
-        let modulus = u64::try_from(count).unwrap_or(u64::MAX);
-        Delegation::To(ProxyId(
-            node.proposer().next_slot().0.wrapping_add(1) % modulus,
-        ))
-    } else {
-        Delegation::Auto
-    };
+    let modulus = u64::try_from(count).unwrap_or(u64::MAX);
+    let other = ProxyId(node.proposer().next_slot().0.wrapping_add(1) % modulus);
+    let choice =
+        if count >= 2 && reachable(other) && moonpool_buggify::buggify_fault_with_prob!(0.10) {
+            moonpool_assertions::reachable!("proxy: the driver overrides a round's proxy");
+            Delegation::To(other)
+        } else {
+            Delegation::Auto
+        };
     // A named proxy is one the deployment has, chosen by its leader.
     if let Delegation::To(proxy) = choice {
         assert!(proxy.is_in(count), "a delegation names a deployed proxy");

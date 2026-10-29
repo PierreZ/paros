@@ -63,8 +63,11 @@ pub struct Machine {
     pub zone: String,
     /// The slots of its capacity.
     pub capacity: u64,
-    /// The slots booked on it now.
+    /// The slots of its capacity booked on it now ([`Registry::weight`]).
     pub booked: u64,
+    /// Its weightless bookings ([`Booking::weighs`], #753 (per-journal
+    /// proxies)): they take no slot, and break ties of load inside a zone.
+    pub light: u64,
     /// Whether the cell coordinator holds it up and not slow (#361 (slow
     /// machines)): placement books a slow machine last, as a down one, and
     /// moves its roles off it.
@@ -114,7 +117,8 @@ pub fn machines(registry: &Registry, nodes: impl IntoIterator<Item = NodeId>) ->
                 class: held.class,
                 zone: held.locality.zone.clone(),
                 capacity: held.capacity,
-                booked: registry.booked(node),
+                booked: registry.weight(node),
+                light: registry.booked(node) - registry.weight(node),
                 up: registry.liveness(node).up && !registry.liveness(node).slow,
                 low_space: registry.liveness(node).low_space,
             })
@@ -341,7 +345,13 @@ fn add(
         .iter()
         .filter(|m| m.class == want.role.class() && !excluded.contains(&m.node))
         .collect();
-    let eligible: Vec<&Machine> = fitting.iter().copied().filter(|m| m.free() > 0).collect();
+    // A weightless booking takes no slot (#753 (per-journal proxies)).
+    let weighs = Booking::weighs_for(want.role, want.target);
+    let eligible: Vec<&Machine> = fitting
+        .iter()
+        .copied()
+        .filter(|m| !weighs || m.free() > 0)
+        .collect();
     if eligible.len() < missing {
         let short = missing - eligible.len();
         return Err(if fitting.len() >= missing {
@@ -395,7 +405,7 @@ fn add(
                 .iter()
                 .enumerate()
                 .filter(|(_, m)| first(m) == up && m.zone == zone)
-                .min_by_key(|(_, m)| (m.booked, rank(seed, m.node.0)))
+                .min_by_key(|(_, m)| (m.booked, m.light, rank(seed, m.node.0)))
                 .map(|(i, m)| (i, *m))
                 .expect("a zone picked holds a machine");
             *per_zone.entry(zone).or_default() += 1;
@@ -446,6 +456,7 @@ mod tests {
             zone: zone.to_string(),
             capacity,
             booked: 0,
+            light: 0,
             up: true,
             low_space: false,
         }
@@ -587,6 +598,40 @@ mod tests {
         assert_eq!(
             plan(&want(journal(1), 4), &machines, &[], 1),
             Err(Shortfall::Machines { short: 2 })
+        );
+    }
+
+    #[test]
+    fn a_journal_proxy_takes_no_slot_and_spreads_by_zone() {
+        // Full stateless machines still take a journal's proxy leaders:
+        // the booking weighs nothing (#753 (per-journal proxies)).
+        let mut machines = vec![machine(1, "a", 1), machine(2, "b", 1), machine(3, "a", 1)];
+        for m in &mut machines {
+            m.class = Class::Stateless;
+            m.booked = 1;
+        }
+        machines[0].light = 5;
+        let proxies = Want {
+            role: Role::ProxyLeader,
+            target: journal(1),
+            count: 2,
+        };
+        let steps = plan(&proxies, &machines, &[], 1).expect("fits");
+        let mut nodes = booked(&steps);
+        nodes.sort_unstable();
+        // One per zone, and the lighter machine of zone a.
+        assert_eq!(nodes, vec![NodeId(2), NodeId(3)]);
+        // A tenant's slot still weighs.
+        let frontends = Want {
+            role: Role::Frontend,
+            target: BookingTarget::Tenant {
+                tenant: TenantId(1),
+            },
+            count: 1,
+        };
+        assert_eq!(
+            plan(&frontends, &machines, &[], 1),
+            Err(Shortfall::Capacity { short: 1 })
         );
     }
 

@@ -67,7 +67,7 @@ mod zone_rule;
 
 pub use acceptor_config::AcceptorConfig;
 pub use failure_domain::{FailureDomain, MAX_FAILURE_DOMAIN_BYTES};
-pub use ids::{MatchmakerId, ProxyId, ReplicaId};
+pub use ids::{MAX_ROLE_COUNT, MatchmakerId, ProxyId, ReplicaId};
 pub use matchmaker_set::{MatchmakerGeneration, MatchmakerSet};
 pub use quorum_system::QuorumSystem;
 pub use zone_rule::ZoneRule;

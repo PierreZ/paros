@@ -42,7 +42,7 @@
 //!    (`CatchUpResponse`) lets it learn the rest in order. A journal read
 //!    on replica 11 then returns the whole log.
 //! 4. Each slot has one **reply owner**, `slot % replica_count`
-//!    ([`Config::reply_owner`]): the replica that answers the client for
+//!    ([`paros_core::membership::AcceptorConfig::reply_owner`]): the replica that answers the client for
 //!    that slot, so each replica sends half of the replies.
 //!
 //! Further reading: Whittaker et al., *Scaling Replicated State Machines

@@ -116,7 +116,8 @@ pub use codec::{
     quorum_system_from_proto, quorum_system_to_proto, writer_mode_from_proto, writer_mode_to_proto,
 };
 pub use codec::{
-    ballot_to_proto, config_from_proto, config_to_proto, domain_to_proto, zoned_members,
+    ballot_to_proto, config_from_proto, config_to_proto, counts_from_proto, domain_to_proto,
+    zoned_members,
 };
 pub use consensus::{message_from_proto, message_to_proto};
 pub use matchmaker_codec::{

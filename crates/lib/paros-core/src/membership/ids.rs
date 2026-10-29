@@ -9,15 +9,22 @@ use crate::types::{FNV_OFFSET, Fingerprint, Slot, fnv1a};
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct MatchmakerId(pub u64);
 
+/// The most proxy leaders, or replicas, one configuration may name (#754
+/// (counts off the format marker)): the cap an acceptor checks a proxy's
+/// rank against, since it may not know the count of the configuration the
+/// proxy serves yet.
+pub const MAX_ROLE_COUNT: usize = 64;
+
 /// Stable identity of a **proxy leader** within the deployment's proxy set
 /// (#142, Compartmentalized Paxos §3.1). A distinct namespace from
 /// [`NodeId`], exactly as [`MatchmakerId`] is and for the same reason: a
 /// proxy is not an acceptor. It is never in `Config::nodes`, never drawn by a
 /// reconfiguration, never counted by retirement, GC, the pool guards or a
-/// dead-node budget; an operator scales proxies by starting processes, never
-/// by reconfiguring the acceptor set.
+/// dead-node budget; an operator scales proxies by starting processes and
+/// changing the count, never by changing the acceptor set.
 ///
-/// The core holds only the proxy **count** (`Config::proxy_count`) and
+/// The core holds only the proxy **count** of the configuration bound to
+/// the ballot (`AcceptorConfig::proxy_count`, #754) and
 /// derives a slot's proxy as `ProxyId(slot % proxy_count)`
 /// ([`ProxyId::of`]): a pure function of the slot, so a handoff successor
 /// re-delegating an inherited round and a restarted leader's re-send name
@@ -78,7 +85,8 @@ impl ProxyId {
 /// map gave it, because the learner messages it sends and receives
 /// (`CatchUpRequest`, `CatchUpResponse`, `TrimmedTo`) address nodes.
 ///
-/// The core holds only the count (`Config::replica_count`) and derives a
+/// The core holds only the count of the configuration bound to the ballot
+/// (`AcceptorConfig::replica_count`, #754) and derives a
 /// slot's owner as `ReplicaId(slot % replica_count)` ([`ReplicaId::of`]):
 /// a pure function of the slot, so every replica, every node and a future
 /// client library agree on the owner without carrying it.

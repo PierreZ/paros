@@ -46,7 +46,7 @@
 //! - **The walk:** [`ReplicaReady::committed`] in contiguous slot order, the
 //!   slots the prefix just moved over — reported by the driver, handed to no
 //!   application (#186: the client folds what it reads).
-//! - **The reply:** [`Config::reply_owner`] names the one replica that owns
+//! - **The reply:** [`AcceptorConfig::reply_owner`] names the one replica that owns
 //!   a slot's client reply (§3.3, `slot % replica_count`). Nothing routes on
 //!   it yet: the node a client asked keeps acking what it serves, until a
 //!   client library that connects to replicas exists.
@@ -940,7 +940,8 @@ impl ReplicaNode {
     }
 
     /// The replica that owns `slot`'s client reply
-    /// ([`Config::reply_owner`]).
+    /// under the configuration it follows ([`AcceptorConfig::reply_owner`],
+    /// #754 (counts off the format marker)).
     ///
     /// # Panics
     ///
@@ -948,10 +949,10 @@ impl ReplicaNode {
     /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn reply_owner(&self, slot: Slot) -> Option<ReplicaId> {
-        let owner = self.config.reply_owner(slot);
+        let owner = self.acceptors.reply_owner(slot);
         if let Some(owner) = owner {
             assert!(
-                owner.is_in(self.config.replica_count),
+                owner.is_in(self.acceptors.replica_count()),
                 "a reply owner is a deployed replica"
             );
         }

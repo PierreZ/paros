@@ -40,7 +40,10 @@ AGENTS.md.
   applies the durability only. Decided on 2026-10-28: the counts leave the format marker for the
   configuration bound to the ballot (#754 (counts off the format marker)), and proxy leaders and
   batchers become per-journal counts (#753 (per-journal proxies)) instead of the per-tenant
-  pools of #193.
+  pools of #193. Landed with R1 on 2026-10-29: the counts are part of every `AcceptorConfig`,
+  the tenant coordinator books each journal's proxy leaders, batchers and replicas and puts the
+  booked counts in force by a round change (section 3.4). Still to do: a `parosd` machine that
+  runs the booked proxy leaders and replicas of its journals.
 - `--survive` replaces `--failures-per-partition`, `partitions` leaves `Durability`, and
   `configure --plan`, `cell capabilities` and the status line of wants against has come with
   them (decided on 2026-10-28: #748 (survive), #755 (partitions leave durability), #749

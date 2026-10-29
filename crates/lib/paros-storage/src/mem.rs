@@ -97,7 +97,7 @@ impl LogStorage for MemStorage {
 
     #[tracing::instrument(level = "trace", skip_all)]
     async fn format(&mut self, config: &Config) -> Result<(), StorageError> {
-        self.formatted = Some(config.clone());
+        self.formatted = Some(config.recorded());
         Ok(())
     }
 

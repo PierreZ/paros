@@ -23,8 +23,8 @@ use paros_storage::boot::{BootKind, BootRefusal, RunError};
 ///
 /// #207: the marker records the [`Config`](paros_core::Config) it was written
 /// under, and an existing member is refused when the operator now hands it
-/// another one ([`BootRefusal::ConfigMismatch`]). The bootstrap membership,
-/// the quorum system and the counts are safety inputs the core reads once,
+/// another one ([`BootRefusal::ConfigMismatch`]). The bootstrap membership
+/// and the quorum system are safety inputs the core reads once,
 /// at construction: an edited configuration file must never change them
 /// across a restart — a node that silently switched from a majority to a
 /// flexible split, or to a membership missing a peer, would count quorums
@@ -48,7 +48,11 @@ pub(crate) async fn check_format_marker<S: LogStorage, A: Audit>(
         "a store is checked for the node that owns it"
     );
     let refusal = match (boot, storage.formatted_config()) {
-        (BootKind::ExistingMember, Some(formatted)) if formatted == operator => return Ok(()),
+        // The marker records no count (#754 (counts off the format marker)):
+        // a restart may name other bootstrap counts.
+        (BootKind::ExistingMember, Some(formatted)) if formatted == operator.recorded() => {
+            return Ok(());
+        }
         (BootKind::ExistingMember, Some(formatted)) => {
             tracing::error!(
                 node = self_id,

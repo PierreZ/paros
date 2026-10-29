@@ -36,7 +36,7 @@ impl Topology {
     pub fn desired(self) -> Desired {
         Desired {
             durability: self.durability,
-            replicas: 0,
+            ..Desired::DEFAULT
         }
     }
 

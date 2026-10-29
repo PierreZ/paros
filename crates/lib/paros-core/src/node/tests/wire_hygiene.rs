@@ -19,7 +19,7 @@ use crate::contract::limits::Limits;
 use crate::contract::limits::REGISTRY_PAGE;
 use crate::matchmaker::RegistrationKind;
 use crate::matchmaking::{MatchFold, Matchmaking, RegisteredPage};
-use crate::membership::ProxyId;
+use crate::membership::{MAX_ROLE_COUNT, ProxyId};
 use crate::node::ColocatedNode;
 
 // ---------------------------------------------------------------------------
@@ -204,25 +204,31 @@ fn accepted(msgs: &[(NodeId, Message)]) -> bool {
         .any(|(_, m)| matches!(m, Message::Accepted { .. }))
 }
 
-/// An `Accept` whose reply address names a proxy the deployment does not
-/// have is refused whole: no promise, no vote. The deployed proxy's twin is
-/// answered.
+/// An `Accept` whose reply address names a proxy rank past the cap is
+/// refused whole: no promise, no vote. A rank under the cap is answered,
+/// past the count this node knows too: the count is the configuration's,
+/// bound to a ballot this acceptor may not know yet (#754 (counts off the
+/// format marker)).
 #[test]
-fn an_accept_replying_to_an_undeployed_proxy_is_ignored() {
+fn an_accept_replying_to_a_proxy_past_the_cap_is_ignored() {
     let mut n = proxied_follower();
-    n.step(accept(Party::Proxy(ProxyId(1))));
+    n.step(accept(Party::Proxy(ProxyId(MAX_ROLE_COUNT as u64))));
     assert!(
         !accepted(&drain(&mut n)),
-        "an undeployed proxy gets no vote"
+        "a proxy past the cap gets no vote"
     );
     assert_eq!(n.acceptor.promised(), Ballot::zero());
     n.step(accept(Party::Proxy(ProxyId(u64::MAX))));
     assert!(!accepted(&drain(&mut n)));
     assert_eq!(n.acceptor.promised(), Ballot::zero());
 
-    n.step(accept(Party::Proxy(ProxyId(0))));
+    n.step(accept(Party::Proxy(ProxyId(1))));
     let _ = drain(&mut n);
-    assert_eq!(n.acceptor.promised(), ballot(1, 0), "the deployed proxy is");
+    assert_eq!(
+        n.acceptor.promised(),
+        ballot(1, 0),
+        "a proxy past the count but under the cap is"
+    );
 }
 
 /// The rank arithmetic itself, at its boundaries: a rank names one of

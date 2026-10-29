@@ -78,8 +78,9 @@ the limits, or after a short tick. The journal gives that write a range of posit
 batcher cuts the range in order, so each writer gets the positions of its own records. A merged
 write is accepted or refused whole. When the batcher gets no answer, each writer gets
 `ambiguous`, and the batcher never sends the write again. Every machine serves the batcher
-endpoint. `parosctl configure --tenant acme --batchers 3` asks the tenant coordinator to book
-three batchers on the cell's `stateless` machines, and `parosctl resolve acme` names them.
+endpoint. `parosctl configure --tenant acme --journal orders --batchers 3` asks the tenant
+coordinator to book three batchers for `acme/orders` on the cell's `stateless` machines, and
+`parosctl resolve acme` names them.
 
 ## Reads
 
@@ -143,11 +144,13 @@ FoundationDB:
   acceptors for `acme/orders`.
 - `parosctl configure --tenant acme --partitions 3` changes the tenant's default. A create that
   names no durability takes the default.
-- `parosctl configure --tenant acme --batchers 3` sets the tenant's role counts. The command
-  also takes `--frontends` and `--proxy-leaders`. A count that the command does not name keeps
-  its value. The cell places batchers and frontends on its `stateless` machines, and
-  `parosctl resolve acme` names them. It records the count of proxy leaders for a later
-  change.
+- `parosctl configure --tenant acme --journal orders --proxies 2 --replicas 1` sets the
+  journal's scale counts. The command also takes `--batchers`; without `--journal` it sets the
+  tenant's default, and `--frontends` sets the tenant's frontends. A count that the command does
+  not name keeps its value. A count of 0 runs the job in the leader's process. The cell places
+  proxy leaders and batchers on its `stateless` machines, replicas on `storage` machines, and
+  the journal's leader runs the counts by a round change. `parosctl resolve acme` names the
+  batchers and the frontends.
 
 The answer `configured` means that the tenant's control journal holds the new durability. The
 tenant coordinator then applies it. It books slots on new machines, asks the journal's leader to

@@ -174,26 +174,57 @@ tenant's default.
   and no new mode, a configured journal is one its tenant created before, a placement is recorded
   only for a journal created before, and the placed members hold their slots after chaos.
 - **Role counts** (#604 (role counts), decided on 2026-10-19; for proxy leaders and batchers
-  replaced on 2026-10-28 by per-journal counts, #753 (per-journal proxies), above: the tenant
-  counts `proxy_leaders=` and `batchers=` and the tenant step for `Role::Batcher` go, and
-  `frontends=` stays a cell matter, #723). A `Configure` of the tenant
-  default may carry `frontends=`, `proxy_leaders=` and `batchers=` (`TenantRoles`, each at most
-  64; refused on a journal target). The tenant control journal records them, and its checkpoint
-  keeps them. `parosctl configure --tenant T --batchers 3` sends them; a count that the command
-  does not name keeps the tenant's. The tenant coordinator applies `batchers=` and, since #723
-  (frontend as a parosd role, decided on 2026-10-27), `frontends=`: one step per watch round,
-  after the footprint step, in turn over the hosted tenants and for each over the two roles
-  (`paros-coordinator`'s `tenant/roles.rs`). It first releases a slot of the role on a machine
-  that leaves. Then it books or releases slots with `paros::model::placement` (`Role::Batcher` or
-  `Role::Frontend`, `BookingTarget::Tenant`) until the tenant holds
-  `min(count, stateless machines that can take one)`. A cell with no `stateless` machine
-  places none. A cell that grows places the rest later. A slot is placement only: every machine
-  serves both endpoints, and `Resolve` names the booked machines.
-- **Still to do.** The count of proxy leaders and the `replicas=` mode field are recorded but
-  not placed. `proxy_count` and `replica_count` sit in the core's `Config`
-  under the format marker. The design change this needed is decided (2026-10-28, #754
-  (counts off the format marker), above): the counts move into the configuration bound to the
-  ballot, and #753 (per-journal proxies) places them per journal.
+  replaced on 2026-10-28 by per-journal counts, #753 (per-journal proxies), above). A
+  `Configure` of the tenant default may carry `frontends=` (`TenantRoles`, at most 64; refused
+  on a journal target). The tenant control journal records it, and its checkpoint keeps it.
+  The tenant counts `proxy_leaders=` and `batchers=` and their wire fields are gone (landed
+  with R1, 2026-10-29).
+- **Scale counts per journal** (#753 (per-journal proxies), #754 (counts off the format
+  marker), landed with R1 on 2026-10-29). A journal's `Desired` carries `replicas`, `proxies`
+  and `batchers`, each at most 64, beside its durability; the tenant default carries them too,
+  and a create that names no mode takes them.
+  - **The request.** `parosctl configure --tenant T [--journal J] [--replicas R] [--proxies X]
+    [--batchers B] [--frontends N]`. A count or a durability that the command does not name
+    keeps the target's. A mode string is `machines=F,partitions=P,replicas=R,proxies=X,batchers=B`.
+  - **The bookings** (`paros-coordinator`'s `tenant/roles.rs`). One step per watch round,
+    after the footprint step, in turn over the hosted tenants: first the tenant's
+    `Role::Frontend` slots (`BookingTarget::Tenant`), then for each live journal its
+    `Role::ProxyLeader` and `Role::Batcher` slots on `stateless` machines and its `Role::Replica`
+    slots on `storage` machines (`BookingTarget::Journal`). A single-writer journal books no
+    batcher. A replica never shares a machine with the journal's acceptors (placement's rule
+    2). The step first releases a slot on a machine that leaves, then books or releases until
+    the journal holds `min(count, machines of the class that can take one)`.
+  - **Weightless slots.** A journal's proxy leader or batcher booking reserves no capacity
+    (`Booking::weighs`, `Registry::weight`): the registry never refuses it as `NoCapacity`, and
+    placement breaks ties inside a zone on these bookings after the weighed ones. A tenant's
+    frontend slot and a replica still weigh one slot.
+  - **The counts in force.** `proxy_count` and `replica_count` are part of every
+    `AcceptorConfig`, bound to its ballot, and on the wire (`AcceptorConfig` fields 9 and 10;
+    `Reconfigure` takes them as optional fields, absent keeps the counts in force). The mode
+    step (`tenant/modes.rs`) composes the journal's configuration with the booked proxy leader
+    and replica counts. A journal whose configuration in force names other counts is not
+    settled, and the step reconfigures it onto the same members: a round change. The
+    configuration a node runs decides delegation (`ProxyId::of(slot, proxy_count)`) and reply
+    ownership (`AcceptorConfig::reply_owner`). An acceptor checks a proxy's rank against the cap
+    of 64, never the count: it may not know the configuration of the ballot it votes in yet.
+  - **Bootstrap counts.** `Config::proxy_count` and `Config::replica_count` stay as the counts of
+    the bootstrap configuration (`Config::bootstrap`), so a plain deployment without matchmakers
+    still names its proxy leaders and replicas. The format marker no longer records them
+    (`Config::recorded`, store format version 6): a restart may name other counts, and a boot is
+    never refused for a count.
+  - **Serving.** Every machine serves the batcher endpoint, and `Resolve` names the machines
+    that hold a batcher slot of any of the tenant's journals. A leader resolves proxy rank `r`
+    only to a lane its driver holds, and runs the round colocated when it holds none
+    (`delegation_choice`). A `parosd` machine does not yet run a proxy leader or a replica for
+    the journals it hosts, so on a cell a booked proxy leader or replica is placement only: to
+    build in a later change, with the leader's lanes to the booked machines.
+  - **The simulation.** A create or a configure draws the counts on one draw in three, 0 to 3
+    each. The plane's reconfiguration composer changes the counts on a coin, the proxy count up
+    to one past the deployed proxy leaders, so a leader meets a rank it has no lane for; nodes
+    with a lagged bootstrap count run beside the others. Oracles: a journal holds at most one
+    slot of a role per machine, each on a machine of the role's class, a replica on no machine of
+    the journal's acceptors, and a single-writer journal no batcher; gates fire when a journal
+    holds its proxy leaders, batchers and replicas after chaos.
 
 **`machines=0` survives no zone** (decided on 2026-10-07, #215): a majority over one
 acceptor cannot meet the zone rule of section 5. It stays a mode without zone survival, for

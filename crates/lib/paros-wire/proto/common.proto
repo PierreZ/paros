@@ -52,6 +52,12 @@ message AcceptorConfig {
   // The cell that owns the journal (#215 (zones), `docs/architecture/03-7-universe.md`
   // §3.7). Zero is none, byte-identical to before the field existed.
   uint64 cell_id = 8;
+  // The proxy leaders and the replicas of this configuration, bound to its
+  // ballot (#754 (counts off the format marker)). Zero is none, the plain
+  // arm, byte-identical to before the fields existed. Each is at most 64,
+  // or the configuration is refused.
+  uint64 proxies = 9;
+  uint64 replicas = 10;
 }
 
 // A failure domain (#215 (zones)): the region and the availability zone a

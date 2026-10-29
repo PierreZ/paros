@@ -118,15 +118,6 @@ pub(super) async fn run_acceptor(
     crate::shape::lagging_fold(ctx.state());
     crate::shape::handoff_storm(ctx.state());
     let shape = incarnation.shape;
-    // A node in the middle of a rolling change of the proxy count (#193):
-    // it counts fewer proxies than the deployment has, in every journal.
-    let config = Config {
-        proxy_count: shape.lagged_proxy_count(config.proxy_count),
-        ..config
-    };
-    if config.proxy_count < proxies.len() {
-        assert_reachable!("proxy: a node counts fewer proxies than the deployment");
-    }
     // The copy budget is sized by the run's configuration floor
     // (`crate::shape::config_floor`): the whole pool on a plain seed, the
     // smallest set a reconfiguration may shrink to on a matchmaker seed —

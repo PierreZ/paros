@@ -70,8 +70,20 @@ pub const RARE: &[Rare] = &[
         reason: "a wide batched burst on a multi-writer created journal, sent to a batcher that started below the leader's limits: missed by PR #698's sweeps; 1 of 600 single-seed hunts with the batchers scenario (#702 (batcher rare paths))",
     },
     Rare {
-        msg: "coordinator: a batcher slot is released to its count",
-        reason: "a tenant default configured with fewer batchers than its booked slots: a configure of the default after the booking names a lower count; 5 of 600 single-seed hunts with the batchers scenario, which books on 30 (#702 (batcher rare paths))",
+        msg: "coordinator: a journal's role slot is released to its count",
+        reason: "a journal configured with fewer proxy leaders, batchers or replicas than its booked slots: a configure after the booking names a lower count; its tenant-batcher twin fired on 5 of 600 single-seed hunts with the batchers scenario (#702 (batcher rare paths), #753 (per-journal proxies))",
+    },
+    Rare {
+        msg: "coordinator: a replica leaves a machine that leaves",
+        reason: "a journal whose scale counts book a replica on a machine that then drains or goes down past its bound: a one-in-three count draw, then a drain of that machine; it ran on no seed of PR #764's first shard (#753 (per-journal proxies))",
+    },
+    Rare {
+        msg: "coordinator: a journal's stateless role leaves a machine that leaves",
+        reason: "a journal whose scale counts book a proxy leader or a batcher on a machine that then drains or goes down past its bound, as for the replicas: it ran on no seed of PR #764's fourth shard (#753 (per-journal proxies))",
+    },
+    Rare {
+        msg: "coordinator: a replica leaves a machine another storage slot of its journal takes",
+        reason: "a move or a mode change places an acceptor on the machine of one of its journal's replicas: 1 of some 1,900 seeds of PR #764's second shard (#753 (per-journal proxies))",
     },
     Rare {
         msg: "coordinator: a frontend slot is released to its count",

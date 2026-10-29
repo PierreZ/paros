@@ -939,14 +939,24 @@ pub async fn read_election<P: ParosProviders>(
                     continue;
                 }
                 // The second time, the floor outran this read: wait at the
-                // tail for the next renewal ([`FLOOR_RACE_WAIT_MS`]).
+                // tail for the next renewal ([`FLOOR_RACE_WAIT_MS`]). The
+                // wait starts ahead of the tail by as far as the floor moved
+                // past this read: a read is confirmed a round trip after it
+                // arrives, and a floor that moves faster than that truncates
+                // the tail position before it is served. Witness (cite
+                // only): recipe 8266528131635722183 `[(7084,
+                // 2178426596142505780)]` on 5b8f8b8 (PR #764), a floor two
+                // records ahead each 200 ms round trip, 70 waits in one read
+                // and the settle oracle's 20 s gone in three reads.
                 if chased {
                     cycles += 1;
                     waits = 0;
                     moonpool_assertions::reachable!(
                         "election: a reader waits at the tail past a moving floor"
                     );
-                    fold.resume_at_tail(state.first_seq.0, state.next_seq.0);
+                    let lead = state.first_seq.0.saturating_sub(from);
+                    assert!(lead > 0, "a floor that outran a read leads it");
+                    fold.resume_at_tail(state.first_seq.0, state.next_seq.0.saturating_add(lead));
                     wait = FLOOR_RACE_WAIT_MS;
                 } else {
                     fold.gap(state.first_seq.0);

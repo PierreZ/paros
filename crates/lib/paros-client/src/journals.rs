@@ -109,6 +109,8 @@ impl JournalRequest {
                 name: name.clone(),
                 writer: writer_mode_to_proto(*writer).into(),
                 replicas: desired.map_or(0, |d| d.replicas),
+                proxies: desired.map_or(0, |d| d.proxies),
+                batchers: desired.map_or(0, |d| d.batchers),
                 survive_machines: desired.map_or(0, |d| d.durability.survive_machines),
                 // 0: the tenant's default.
                 partitions: desired.map_or(0, |d| d.durability.partitions),
@@ -131,8 +133,8 @@ impl JournalRequest {
                 partitions: desired.durability.partitions,
                 roles: roles.is_some(),
                 frontends: roles.map_or(0, |r| r.frontends),
-                proxy_leaders: roles.map_or(0, |r| r.proxy_leaders),
-                batchers: roles.map_or(0, |r| r.batchers),
+                proxies: desired.proxies,
+                batchers: desired.batchers,
             }),
         };
         wire::JournalRequest {
@@ -164,11 +166,15 @@ impl JournalRequest {
                 desired: if create.partitions == 0
                     && create.survive_machines == 0
                     && create.replicas == 0
+                    && create.proxies == 0
+                    && create.batchers == 0
                 {
                     None
                 } else {
                     Some(Desired::from_wire(Some(paros_wire::tenant::Desired {
                         replicas: create.replicas,
+                        proxies: create.proxies,
+                        batchers: create.batchers,
                         survive_machines: create.survive_machines,
                         partitions: create.partitions,
                     }))?)
@@ -187,17 +193,15 @@ impl JournalRequest {
                 name: (!configure.name.is_empty()).then(|| configure.name.clone()),
                 desired: Desired::from_wire(Some(paros_wire::tenant::Desired {
                     replicas: configure.replicas,
+                    proxies: configure.proxies,
+                    batchers: configure.batchers,
                     survive_machines: configure.survive_machines,
                     partitions: configure.partitions,
                 }))?,
                 roles: match (configure.roles, configure.name.is_empty()) {
                     (false, _) => None,
                     (true, false) => return Err("role counts are the tenant default's"),
-                    (true, true) => Some(TenantRoles::new(
-                        configure.frontends,
-                        configure.proxy_leaders,
-                        configure.batchers,
-                    )?),
+                    (true, true) => Some(TenantRoles::new(configure.frontends)?),
                 },
             },
         };

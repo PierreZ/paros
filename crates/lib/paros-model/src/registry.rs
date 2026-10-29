@@ -544,7 +544,8 @@ impl Registry {
         if node.class != class {
             return RegistryEvent::Refused(RegistryRefusal::WrongClass { id });
         }
-        if self.booked(id) >= node.capacity {
+        let weighs = Booking::weighs_for(role, target);
+        if weighs && self.weight(id) >= node.capacity {
             return RegistryEvent::Refused(RegistryRefusal::NoCapacity { id });
         }
         // A tenant's slots are not role instances: they may stack (#476).
@@ -566,13 +567,14 @@ impl Registry {
             },
         );
         assert!(
-            self.booked(id) <= self.nodes.get(&id).map_or(0, |n| n.capacity),
+            !weighs || self.weight(id) <= self.nodes.get(&id).map_or(0, |n| n.capacity),
             "a node is never booked past its capacity"
         );
         RegistryEvent::Booked {
             booking,
             node: id,
             role,
+            target,
         }
     }
 
@@ -906,10 +908,30 @@ impl Registry {
         self.nodes.iter().map(|(id, n)| (*id, n))
     }
 
-    /// The slots of `id` its live bookings hold.
+    /// The live bookings of `id`: the roles it holds, a weightless one
+    /// ([`Booking::weighs`]) included.
     #[must_use]
     pub fn booked(&self, id: NodeId) -> u64 {
         self.bookings.values().filter(|b| b.node == id).count() as u64
+    }
+
+    /// The slots of `id`'s capacity its live bookings hold: every booking
+    /// but a weightless one ([`Booking::weighs`], #753 (per-journal
+    /// proxies)).
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
+    #[must_use]
+    pub fn weight(&self, id: NodeId) -> u64 {
+        let weight = self
+            .bookings
+            .values()
+            .filter(|b| b.node == id && b.weighs())
+            .count() as u64;
+        assert!(weight <= self.booked(id), "a weight counts bookings");
+        weight
     }
 
     /// The slots `id` has left: its capacity less its live bookings (`0` for
@@ -920,7 +942,7 @@ impl Registry {
         self.nodes
             .get(&id)
             .filter(|n| n.standing == NodeStanding::Registered)
-            .map_or(0, |n| n.capacity.saturating_sub(self.booked(id)))
+            .map_or(0, |n| n.capacity.saturating_sub(self.weight(id)))
     }
 
     /// The live booking `booking`.

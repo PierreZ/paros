@@ -119,7 +119,7 @@ impl ColocatedNode {
         assert!(
             taken
                 .iter()
-                .all(|(_, proxy)| proxy.is_in(self.config.proxy_count)),
+                .all(|(_, proxy)| proxy.is_in(self.acceptors.proxy_count())),
             "a round was delegated only to a deployed proxy"
         );
         // Read from the rounds, apart from `stalled_delegations` (#269): no
