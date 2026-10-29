@@ -82,6 +82,10 @@ pub const RARE: &[Rare] = &[
         reason: "a journal whose scale counts book a proxy leader or a batcher on a machine that then drains or goes down past its bound, as for the replicas: it ran on no seed of PR #764's fourth shard (#753 (per-journal proxies))",
     },
     Rare {
+        msg: "coordinator: a replica leaves a machine another storage slot of its journal takes",
+        reason: "a move or a mode change places an acceptor on the machine of one of its journal's replicas: 1 of some 1,900 seeds of PR #764's second shard (#753 (per-journal proxies))",
+    },
+    Rare {
         msg: "coordinator: a frontend slot is released to its count",
         reason: "a tenant default configured with fewer frontends than its booked slots, as for the batchers: 0 of 300 single-seed hunts on PR #736 (#723 (frontend as a parosd role)); its batcher twin fires 5 of 600 (#702 (batcher rare paths))",
     },

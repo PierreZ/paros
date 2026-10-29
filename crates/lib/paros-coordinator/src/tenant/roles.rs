@@ -188,8 +188,11 @@ impl Roles {
     }
 }
 
-/// Release one of the `role` slots of `target` on a machine that leaves:
-/// `Some(None)` when the write did not land, `None` when no slot leaves.
+/// Release one of the `role` slots of `target` on a machine that leaves,
+/// or, for a storage role, on a machine that holds another storage slot of
+/// the journal (placement's rule 2: a move may place an acceptor on a
+/// replica's machine): `Some(None)` when the write did not land, `None`
+/// when no slot leaves.
 async fn release_leaving<P: ParosProviders>(
     client: &Client<P>,
     cell: &mut CellSession,
@@ -197,9 +200,23 @@ async fn release_leaving<P: ParosProviders>(
     (role, target): (Role, BookingTarget),
 ) -> Option<Option<RoleStep>> {
     let registry = cell.registry();
-    let (booking, _) = slots(registry, target, role)
+    let shared = |node: NodeId| {
+        role.class() == Class::Storage
+            && registry.bookings().any(|(_, b)| {
+                b.target == target
+                    && b.role != role
+                    && b.class() == Class::Storage
+                    && b.node == node
+            })
+    };
+    let (booking, slot) = slots(registry, target, role)
         .into_iter()
-        .find(|(_, b)| !stays(registry, leaving, b.node))?;
+        .find(|(_, b)| !stays(registry, leaving, b.node) || shared(b.node))?;
+    if stays(registry, leaving, slot.node) {
+        moonpool_assertions::reachable!(
+            "coordinator: a replica leaves a machine another storage slot of its journal takes"
+        );
+    }
     assert!(
         registry.booking(booking).is_some_and(|b| b.role == role),
         "a released slot is one of the role's"
