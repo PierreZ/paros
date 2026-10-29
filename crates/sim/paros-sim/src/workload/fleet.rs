@@ -95,6 +95,7 @@ mod resolve;
 mod second_cell;
 mod sets;
 mod tags;
+mod truth;
 mod view;
 mod windows;
 
@@ -1332,7 +1333,7 @@ impl FleetOps {
         }
         // Every quiet journal world converges (#447 (model checks for every
         // journal world)), on its own deadline.
-        converge::worlds_converge(ctx, cell.as_ref(), ctx.time().now() + FLEET_SETTLE).await;
+        converge::worlds_converge(ctx, ctx.time().now() + FLEET_SETTLE).await;
         // Its own deadline (#304): a fleet half that took all of its time
         // must not leave the registry half none.
         self.final_registry(ctx, nodes, expected, ctx.time().now() + FLEET_SETTLE)

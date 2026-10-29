@@ -158,6 +158,9 @@ impl FleetOps {
             }
             return true;
         }
+        // A drain whose answer is lost may still land (#739 (heal from
+        // ground truth)).
+        crate::machine::note_drain_asked(ctx.state(), node.0);
         if let Ok(true) = session.drain(&cell.client, first, node).await {
             assert_reachable!("drain: an operator drains an admitted machine");
             tracing::info!(node = node.0, "machine_drained");
@@ -248,6 +251,7 @@ impl FleetOps {
         let Some(node) = batcher_host(registry) else {
             return false;
         };
+        crate::machine::note_drain_asked(ctx.state(), node.0);
         if let Ok(true) = session.drain(&cell.client, first, node).await {
             assert_reachable!("drain: an operator drains a batcher's machine");
             tracing::info!(node = node.0, "machine_drained");

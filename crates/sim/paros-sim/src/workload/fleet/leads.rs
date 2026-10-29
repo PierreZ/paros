@@ -16,16 +16,17 @@
 //! (`healthy.rs`) do not see that: a journal with no write and no leader
 //! converges, and its word is judged from its members' standing alone.
 //!
-//! A journal is excused as the status check excuses it (`healthy::excused`,
-//! `healthy::set_lost`): its members that serve hold no quorum, a
-//! maintenance window covers a member, the cell has no machine to re-place
-//! a member onto, or its tenant's matchmaker set lost its majority.
+//! A journal is excused as the status check excuses it, from the sim's
+//! ground truth (`truth::excused`, `truth::set_lost`, #739 (heal from
+//! ground truth)): its members that serve hold no quorum, a maintenance
+//! window may cover a member, the cell has no machine to re-place a member
+//! onto, or its tenant's matchmaker set lost its majority.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 
-use moonpool_sim::{SimContext, TimeProvider, assert_always, assert_reachable};
+use moonpool_sim::{SimContext, StateHandle, TimeProvider, assert_always, assert_reachable};
 use paros::client::views::{ViewOutcome, ask, request};
 use paros::client::{ClaimOutcome, WriteOptions, WriteOutcome, Writer, WriterOutcome, multi};
 use paros::core::Value;
@@ -37,7 +38,7 @@ use paros::wire::view::{CellQuery, ViewReply, view_request::Query};
 use super::FleetOps;
 use super::cell::Cell;
 use super::created::{acked, hashes};
-use super::healthy::{excused, read, set_lost};
+use super::truth::{excused, set_lost};
 use crate::audit::audit_world_named;
 use crate::client::ChainClient;
 use crate::frontend::{self, Presented};
@@ -52,16 +53,13 @@ struct Owed {
     admitted: bool,
 }
 
-/// Every data journal of `reply` the cell can hold, not excused.
-fn owed(
-    reply: &ViewReply,
-    registry: &paros::model::registry::Registry,
-    wiped: &BTreeSet<u64>,
-) -> Vec<Owed> {
+/// Every data journal of `reply` the cell can hold at `now`, not excused.
+fn owed(state: &StateHandle, cell: &Cell, reply: &ViewReply, now: Duration) -> Vec<Owed> {
     let mut owed = Vec::new();
     for tenant in &reply.tenants {
         for journal in tenant.journals.iter().filter(|j| j.kind == "data") {
-            if excused(reply, registry, journal, wiped) {
+            let id = JournalIdentifier::new(TenantId(tenant.tenant), JournalId(journal.journal));
+            if excused(state, cell, id, now) {
                 continue;
             }
             let admitted = journal.acceptors.iter().any(|id| {
@@ -71,10 +69,7 @@ fn owed(
                     .any(|m| m.node_id == *id && !m.founder)
             });
             owed.push(Owed {
-                journal: JournalIdentifier::new(
-                    TenantId(tenant.tenant),
-                    JournalId(journal.journal),
-                ),
+                journal: id,
                 admitted,
             });
         }
@@ -110,9 +105,7 @@ impl FleetOps {
                 self.patience,
             )
             .await;
-            let (ViewOutcome::Answered(reply), Some(registry)) =
-                (outcome, read(cell, attempt).await)
-            else {
+            let ViewOutcome::Answered(reply) = outcome else {
                 if ctx.time().sleep(PASS_PAUSE).await.is_err() {
                     return;
                 }
@@ -131,11 +124,11 @@ impl FleetOps {
             let client = self.connector.through(&self.frontends, &pass);
             let frontends = self.frontends.len();
             left = None;
-            for owed in owed(&reply, &registry, &wiped) {
+            for owed in owed(ctx.state(), cell, &reply, ctx.time().now()) {
                 if written.contains(&owed.journal) {
                     continue;
                 }
-                if set_lost(cell, &registry, owed.journal.tenant, &wiped).await {
+                if set_lost(ctx.state(), owed.journal.tenant, &wiped) {
                     continue;
                 }
                 if self

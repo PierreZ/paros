@@ -49,7 +49,7 @@ pub enum Excuse {
     /// The chain oracle: an unavailable run that storage faults explain.
     ChainStorageFaults,
     /// The heal oracle: the cell cannot hold the journal's shape
-    /// (`healthy::excused`, from the system's own view).
+    /// (`truth::excuse`, from the sim's ground truth, #739).
     HealCannotHold,
     /// The heal oracle: a maintenance window covers a member.
     HealMaintenance,

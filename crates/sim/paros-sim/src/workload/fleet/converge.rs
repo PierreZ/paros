@@ -14,7 +14,8 @@
 //! rejoins, and the handover that would replace it needs a stop quorum of
 //! the same lost generation. No journal of the tenant elects a leader
 //! again, so a member that missed a decided slot never learns it. The
-//! status check excuses such a journal the same way (`healthy::set_lost`).
+//! status check excuses such a journal the same way (`truth::set_lost`), from
+//! the matchmaker generations the audit bound (#739 (heal from ground truth)).
 //!
 //! A machine that stopped a journal for good owes it nothing: it folded
 //! the journal's delete, its tenant's drop, or the release of its booking
@@ -30,11 +31,10 @@ use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use moonpool_sim::{SimContext, TimeProvider, assert_reachable, assert_sometimes};
+use moonpool_sim::{SimContext, StateHandle, TimeProvider, assert_reachable, assert_sometimes};
 use paros::core::journal::JournalIdentifier;
 use paros::core::journal::TenantId;
 
-use super::cell::Cell;
 use crate::audit::AuditWorld;
 use crate::audit::tenants::TenantBoard;
 use crate::excuses::{self, Excuse};
@@ -63,33 +63,22 @@ fn quiet_journals(ctx: &SimContext) -> BTreeSet<JournalIdentifier> {
 }
 
 /// The tenants of `quiet` whose matchmaker set in force lost its majority
-/// to `wiped`, read through `cell` (`None` when the operator never learned
-/// the cell: nothing is excused).
-async fn lost_tenants(
-    cell: Option<&Cell>,
+/// to `wiped`, as the audit bound the set (#739 (heal from ground truth)).
+fn lost_tenants(
+    state: &StateHandle,
     quiet: &BTreeSet<JournalIdentifier>,
     wiped: &BTreeSet<u64>,
 ) -> BTreeSet<TenantId> {
-    let mut lost = BTreeSet::new();
-    let Some(cell) = cell else {
-        return lost;
-    };
     if wiped.is_empty() {
-        return lost;
+        return BTreeSet::new();
     }
-    let Some(registry) = super::healthy::read(cell, 0).await else {
-        return lost;
-    };
-    for tenant in quiet
+    quiet
         .iter()
         .map(|journal| journal.tenant)
         .collect::<BTreeSet<_>>()
-    {
-        if super::healthy::set_lost(cell, &registry, tenant, wiped).await {
-            lost.insert(tenant);
-        }
-    }
-    lost
+        .into_iter()
+        .filter(|tenant| super::truth::set_lost(state, *tenant, wiped))
+        .collect()
 }
 
 /// Excuse from `world`'s convergence every machine the tenant board holds
@@ -105,7 +94,7 @@ fn note_stops(board: &Mutex<TenantBoard>, journal: JournalIdentifier, world: &Au
 /// then judge each with the final convergence claim. A lost cell owes
 /// nothing, a tenant whose set is lost owes nothing (see the module doc),
 /// and a run shut down by a sibling is not judged.
-pub(super) async fn worlds_converge(ctx: &SimContext, cell: Option<&Cell>, deadline: Duration) {
+pub(super) async fn worlds_converge(ctx: &SimContext, deadline: Duration) {
     // Both skips are counted (#738 (count excuses, the baseline)).
     if crate::machine::formed_cell(ctx.state()).is_none() {
         excuses::note(ctx.state(), Excuse::SkipConvergeNoCell, None);
@@ -118,7 +107,7 @@ pub(super) async fn worlds_converge(ctx: &SimContext, cell: Option<&Cell>, deadl
     let wiped = crate::machine::wiped_ids(ctx.state());
     let board = crate::audit::tenants::tenant_board(ctx.state());
     let mut quiet = quiet_journals(ctx);
-    let lost = lost_tenants(cell, &quiet, &wiped).await;
+    let lost = lost_tenants(ctx.state(), &quiet, &wiped);
     if !lost.is_empty() {
         assert_reachable!("convergence: a lost matchmaker set excuses a quiet journal");
         for journal in quiet
