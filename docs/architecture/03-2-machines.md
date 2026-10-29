@@ -176,7 +176,8 @@ never heartbeats into a journal.
 Landed in #211: the cell coordinator's `Watch` (`paros::machine::coordinator`) sends `Identify` to
 every founding member and every registered machine at each renewal period. The detector's timeout
 is `machine_down_after` (a driver tunable, floor above `election_renew`): a machine silent that
-long is written `MachineDown`, one held down or seen as another incarnation `MachineUp`, and a new
+long, and silent for two asks in a row or more, is written `MachineDown` (one missed ask never marks
+a machine down: a round lasts longer than one renewal period, PR #770 (batcher follow-ups)), one held down or seen as another incarnation `MachineUp`, and a new
 incarnation of a registered machine registers again. The registry refuses a liveness entry that
 changes nothing (`LivenessUnchanged`), and the simulation asserts that none is ever written. The
 watch writes only while its term's session holds the cell control journal; its first write that
