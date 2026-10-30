@@ -149,7 +149,10 @@ impl FleetOps {
         let Some(cell) = &self.cell else {
             return;
         };
+        // A tenant token names its tenant: an empty name (an internal
+        // tenant's) has none to mint one for, so an admin asks for it.
         let presented = match self.connector.providers().random().random_range(0..10u32) {
+            _ if name.is_empty() => Presented::Admin,
             0 => Presented::OtherTenant,
             1 => Presented::Garbage,
             2 => Presented::Expired,
