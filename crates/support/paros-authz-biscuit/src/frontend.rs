@@ -50,6 +50,7 @@ pub fn operation(operation: frontend::Operation) -> Operation {
         frontend::Operation::FormCell => Operation::CellForm,
         frontend::Operation::Admit => Operation::MachineAdmit,
         frontend::Operation::SetTags => Operation::JournalTag,
+        frontend::Operation::Resolve => Operation::TenantResolve,
     }
 }
 
@@ -59,6 +60,7 @@ impl Authz for BiscuitAuthz {
             Target::Users { tenant, journal } => {
                 (Some(tenant), Some(TargetKind::Users), Some(journal))
             }
+            Target::Tenant { tenant } => (Some(tenant), Some(TargetKind::Users), None),
             Target::Internal => (None, Some(TargetKind::Internal), None),
         };
         let checked = Request {

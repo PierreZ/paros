@@ -1,5 +1,6 @@
 # The paros toy (#196), a demo to run paros by hand (no test runs it): one cell of five machines over three failure
-# domains, every one the same `parosd` image configured by PAROS_* variables.
+# domains, and a second cell of three machines (#232 (multiple cells)), every one the same `parosd` image
+# configured by PAROS_* variables.
 #
 # Out of the box it runs with mutual TLS and a pinned root key (#245 (Biscuit tokens)): the
 # key material is the pre-generated demo set in `demo/keys/`, passed as the text itself
@@ -13,6 +14,10 @@
 #   docker compose run --rm parosctl write T/J hello world --leader 7
 #   docker compose run --rm parosctl read T/J
 #   docker compose run --rm paros-bench --tenant bench --journals 4 --clients 8 --duration 60s --ramp 10s
+#   docker compose run --rm init-cell2     # the second cell, idle
+#   docker compose run --rm add-cell2      # joins the universe as cell-2
+#   docker compose run --rm parosctl tenant create initech --cell cell-2
+#   docker compose run --rm parosctl --token "$(cat demo/keys/initech.token)" resolve initech
 #
 # The copy-paste demo is DEMO.md; the walkthrough is crates/bin/parosd/README.md.
 # A machine mints its node id on
@@ -174,6 +179,43 @@ services:
       PAROS_ZONE: zone-b
     volumes: [stateless1:/var/lib/paros]
 
+  # The second cell (#232 (multiple cells)): three machines, one per zone. They idle until
+  # `init-cell2` forms them into a cell of their own, and `add-cell2` joins it to the universe
+  # that cell-1 hosts. Every machine of both cells serves the resolver (#233 (resolver)).
+  cell2-a:
+    <<: *parosd
+    hostname: cell2-a
+    environment:
+      <<: *env
+      PAROS_LISTEN: 0.0.0.0:4500
+      PAROS_ADVERTISE: cell2-a:4500
+      PAROS_CLASS: storage
+      PAROS_ZONE: zone-a
+    volumes: [cell2-a:/var/lib/paros]
+    networks: { default: { aliases: [cell2] } }
+  cell2-b:
+    <<: *parosd
+    hostname: cell2-b
+    environment:
+      <<: *env
+      PAROS_LISTEN: 0.0.0.0:4500
+      PAROS_ADVERTISE: cell2-b:4500
+      PAROS_CLASS: storage
+      PAROS_ZONE: zone-b
+    volumes: [cell2-b:/var/lib/paros]
+    networks: { default: { aliases: [cell2] } }
+  cell2-c:
+    <<: *parosd
+    hostname: cell2-c
+    environment:
+      <<: *env
+      PAROS_LISTEN: 0.0.0.0:4500
+      PAROS_ADVERTISE: cell2-c:4500
+      PAROS_CLASS: storage
+      PAROS_ZONE: zone-c
+    volumes: [cell2-c:/var/lib/paros]
+    networks: { default: { aliases: [cell2] } }
+
   # `init`, once, after `up`: `cell init` over the three nodes, every one of
   # them needed, each named by its advertised address. It waits for them to listen;
   # re-running it resumes an interrupted init, and is refused on an
@@ -197,6 +239,37 @@ services:
       - "60000"
     depends_on: [node1, node2, node3]
 
+  # The second cell, once, after `init`: an idle cell over its three machines (no universe
+  # yet), then joined to the universe as `cell-2`. Each step resumes when run again.
+  init-cell2:
+    <<: *parosctl
+    entrypoint:
+      - parosctl
+      - --servers
+      - cell2:4500
+      - init
+      - --idle
+      - --members
+      - cell2-a:4500,cell2-b:4500,cell2-c:4500
+      - --patience-ms
+      - "60000"
+    depends_on: [cell2-a, cell2-b, cell2-c]
+
+  add-cell2:
+    <<: *parosctl
+    entrypoint:
+      - parosctl
+      - --servers
+      - members:4500
+      - --timeout-ms
+      - "10000"
+      - universe
+      - add-cell
+      - --members
+      - cell2-a:4500,cell2-b:4500,cell2-c:4500
+      - --name
+      - cell-2
+
   # Any parosctl command against the members: `docker compose run --rm parosctl …`.
   parosctl:
     <<: *parosctl
@@ -212,3 +285,6 @@ volumes:
   node3:
   storage4:
   stateless1:
+  cell2-a:
+  cell2-b:
+  cell2-c:

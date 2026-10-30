@@ -16,7 +16,7 @@ journal, decided on 2026-10-28, #753 (per-journal proxies)):
 | Unbatcher | stateless | `paros_core::Unbatcher`, in the batcher's process (section 2.4) |
 | Matchmaker | storage | `Matchmaker`, `run_matchmaker`; one logical set per tenant, processes shared |
 | Frontend (the entry role) | stateless | `paros::roles::frontend` (every `parosd` serves it, `run_frontend` stand-alone for an embedder; #723 (frontend as a parosd role), decided on 2026-10-27); booked per tenant by `frontends=` (#604) and named by `Resolve`; authorizes, resolves names and forwards each call to the role that serves it (section 3.5). To build: one pool per `(tenant, region)` in a multi-region cell (section 3.4) |
-| Resolver | stateless | to build in M12: universe level, one pool per region shared by every tenant; redirects a client to its tenant's cell, never carries data (section 3.5) |
+| Resolver | stateless | universe level, shared by every tenant; redirects a client to its tenant's cell, never carries data (section 3.5). Since #233 every `parosd` serves it beside its frontend (`ResolveEntry`); a pool per region is the machines a client lists |
 | Coordinator (universe, cell, tenant) | stateless, or a founding member at bootstrap | to build: the election library over a multi-writer journal (#240) |
 
 ### 4.1 How the pieces fit

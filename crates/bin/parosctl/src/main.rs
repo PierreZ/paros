@@ -233,9 +233,16 @@ async fn resolve_tenant(
     runtime: &Runtime,
     global: &Global,
     out: &Printer,
-    args: resolve::ResolveArgs,
+    mut args: resolve::ResolveArgs,
 ) -> ExitCode {
     let entry = global.addrs();
+    args.token = match global.token() {
+        Ok(token) => token,
+        Err(error) => {
+            eprintln!("parosctl: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
     resolve::run(
         &runtime.providers,
         &runtime.rpc,

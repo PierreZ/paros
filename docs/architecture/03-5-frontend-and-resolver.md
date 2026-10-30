@@ -42,9 +42,9 @@ refreshed on `StaleIncarnation` or a redirect. The resolver stops at the cell: i
 machines answer and the frontend forwards, so forward-not-redirect stands and nodes still do no
 authorization.
 
-**Where `Resolve` stands** (#216, landed on 2026-10-10). There is no resolver (M12) and no frontend
-(#192) yet, so every machine of a cell, founding or admitted, answers both hops in one answer
-(`paros::machine::resolve`). It reads two folds through the cell's machines, as a client does, and
+**Where `Resolve` stands** (#216, landed on 2026-10-10). Every machine of a cell, founding or
+admitted, answers both hops in one answer (`paros::machine::resolve`), with no token. Since #233
+(resolver) a client with a token asks a resolver first (below). It reads two folds through the cell's machines, as a client does, and
 keeps them between requests:
 
 - The universe directory, when the cell serves it. A `READY` `users` tenant resolves to its
@@ -74,6 +74,38 @@ The simulation resolves every created tenant at the entry endpoint (every machin
 one on) beside the library's own resolution. Its oracles: a removed, internal or never-created
 name never resolves, and a resolved tenant is served by the operator's cell. Machines do no
 authorization: the Biscuit check is the resolver's and the frontend's (#245).
+
+**Where the resolver stands** (#233 (resolver), landed on 2026-10-30). The resolver is a role of
+`parosd`, as the frontend is (#723 (frontend as a parosd role)): every machine given the
+frontend role also answers `ResolveEntry` on its own edge, with the same `Authz` and the same
+wall clock (`paros::machine::resolve`'s `entry` module). There is no separate binary and no
+booking: a region's pool is the machines a client lists as its entry endpoint, any machine of
+any cell of the universe. For each request the resolver:
+
+1. reads the universe directory to its tail, through the same fold the machine's `Resolve`
+   keeps, within `resolve_answer_within`. When the read fails or runs out of time, it answers
+   from the copy it last read to its tail (static stability, section 3.3). A machine that never
+   read the directory to its tail answers `unavailable`, and the client asks the next one;
+2. checks the token (`tenant.resolve`) against the root public keys of that copy, else against
+   the machine's pin. A `tenant` token resolves its own tenant only; a token derived to one
+   journal resolves with that journal's name in the request. A refusal is `invalid_token`,
+   `expired` or `forbidden`; a malformed name is `malformed`;
+3. answers a redirect: the tenant's id, its cell, the cell's name and the cell's entry endpoint
+   that the directory records (`no_endpoint` when it records none). Never the control journal,
+   the machines, the batchers or the frontends: those are the second hop's.
+
+`paros::client::resolve::resolve_through` asks the resolvers in turn, then the cell's endpoint
+`Resolve`, which follows at most one `other_cell` hop when the resolver's copy was stale: a
+redirect never loops. `parosctl resolve <tenant>` takes this path when it is given a token. The
+simulation resolves each created tenant through the machines' resolvers with a drawn token
+(the tenant's own, an `admin` one, another tenant's, an expired one, one an unknown key signed,
+bytes that are no token), and the second cell's tenant through a resolver of the run's cell. Its
+oracles: a token without the right is never redirected, a token with the right is never denied,
+a never-created name is never redirected, a tenant is sent to the cell it was created in, and
+the redirected cell resolves its own tenant. A per-incarnation BUGGIFY decision answers every
+request after the first read from the copy alone, as when the universe tenant is out of reach.
+Not yet: the second hop still reads the universe directory, so it answers `unavailable` while
+the universe tenant cannot be read; the Compose demo has a second cell and every role.
 
 ```
  client ──Resolve(T)──► resolver (its region: universe directory fold, Biscuit sig + scope)

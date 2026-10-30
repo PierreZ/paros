@@ -33,6 +33,13 @@
 //! (`paros_sim`'s `resolve_answers`) now exercise. The task draws no randomness: its one
 //! BUGGIFY decision (answer every request from fresh folds, the path a
 //! restarted machine takes) is drawn where the task is started.
+//!
+//! **The resolver** (#233 (resolver), [`entry`]): the same task answers
+//! `ResolveEntry`, the resolver's hop, when the machine serves the frontend
+//! role. It reads the same fold of the universe directory, and answers from
+//! the copy last read to its tail when the directory cannot be read now.
+
+mod entry;
 
 use std::time::Duration;
 
@@ -52,7 +59,7 @@ use paros_model::fleet::FleetDirectory;
 use paros_model::registry::{Registry, Role};
 use paros_net::{Inbound, NodeClient, serve_well_known};
 use paros_wire::machine as wire;
-use paros_wire::methods::ResolveRpc;
+use paros_wire::methods::{ResolveEntryRpc, ResolveRpc};
 
 /// What a machine answers `Resolve` from.
 pub(crate) struct Resolver {
@@ -98,6 +105,12 @@ pub(crate) fn spawn<P: ParosProviders>(
         "an answer has time to read"
     );
     let mut requests = Inbound::plain(serve_well_known::<P, ResolveRpc>(rpc)?);
+    let mut entries = Inbound::plain(serve_well_known::<P, ResolveEntryRpc>(rpc)?);
+    // This incarnation's resolver reads the universe directory once, then
+    // answers every later request from that copy: the universe tenant is
+    // out of its reach (static stability, §3.3, #233 (resolver)). Drawn
+    // here, on the machine's start path, and carried to the task.
+    let frozen = moonpool_buggify::buggify_with_prob!(0.15);
     // Fold both journals again from position 0 for every answer that follows
     // a completed one: the path a restarted machine takes, on every request of
     // this incarnation. An answer cut short still keeps its folds, so a fold
@@ -126,7 +139,11 @@ pub(crate) fn spawn<P: ParosProviders>(
                     () = shutdown.cancelled() => return,
                     Some((request, reply)) = requests.recv() => {
                         if fresh && completed {
+                            // The resolver's copy stays: it is this
+                            // incarnation's, read to its tail.
+                            let last = folds.last.take();
                             folds = Folds::new(&resolver);
+                            folds.last = last;
                         }
                         let answer = folds.answer(&providers, &rpc, &resolver, &request, &shutdown);
                         let within = if std::mem::take(&mut hasty) {
@@ -148,6 +165,12 @@ pub(crate) fn spawn<P: ParosProviders>(
                         });
                         reply.send(ack);
                     }
+                    Some((request, reply)) = entries.recv() => {
+                        let ack = folds
+                            .redirect(&providers, &rpc, &resolver, &request, frozen, &shutdown)
+                            .await;
+                        reply.send(ack);
+                    }
                     else => return,
                 }
             }
@@ -162,6 +185,9 @@ struct Folds {
     registry: Option<(Vec<NodeId>, Folder<Registry>)>,
     /// The universe directory.
     directory: Folder<FleetDirectory>,
+    /// The universe directory as last read to its tail: what the resolver
+    /// answers from while the directory cannot be read (#233 (resolver)).
+    last: Option<FleetDirectory>,
     /// The cell's machines, as the registry last placed them.
     book: Vec<(NodeId, Address)>,
     /// The server a read asks first, rotated per answer.
@@ -178,6 +204,7 @@ impl Folds {
                 )
             }),
             directory: Folder::new(FleetDirectory::default()),
+            last: None,
             book: resolver.book.clone(),
             first: 0,
         }
@@ -213,33 +240,9 @@ impl Folds {
         request: &wire::Resolve,
         shutdown: &CancellationToken,
     ) -> wire::ResolveAck {
-        let client = self.client(providers, rpc, resolver, shutdown);
-        if client.server_count() == 0 {
-            return refused(resolver, "unavailable");
+        if let Err(refusal) = self.refresh(providers, rpc, resolver, shutdown).await {
+            return refused(resolver, refusal);
         }
-        self.first = (self.first + 1) % client.server_count();
-        if !self.fold_registry(&client, resolver).await {
-            return refused(resolver, "unavailable");
-        }
-        // The cell's own universe directory, else the one its join points
-        // at (#232 (multiple cells)), read through that cell's machines.
-        let registry = self.registry.as_ref().map(|(_, folder)| folder.state());
-        let pointer = registry.and_then(Registry::universe).cloned();
-        let (universe, reader, first) = match (resolver.cell.fleet, pointer) {
-            (_, Some(pointer)) => (pointer.directory, client.elsewhere(&pointer.hosts), 0),
-            (Some(fleet), None) => (fleet, client.clone(), self.first),
-            (None, None) => return refused(resolver, "no_universe"),
-        };
-        let LoadOutcome::Loaded { .. } =
-            load(&mut self.directory, universe, &reader, first, 0).await
-        else {
-            // Kept (#457): a fold that stopped is a prefix the next answer
-            // goes on from; only a fold with a hole starts again.
-            if !self.directory.is_whole() {
-                self.directory = Folder::new(FleetDirectory::default());
-            }
-            return refused(resolver, "unavailable");
-        };
         let directory = self.directory.state();
         let Some(universe_id) = directory.fleet() else {
             return refused(resolver, "no_universe");
@@ -324,6 +327,95 @@ impl Folds {
             TenantResolution::Unreadable(_) => unreachable!("the directory was folded"),
         }
         ack
+    }
+
+    /// Bring both folds to their tails: the registry (and the book with
+    /// it), then the universe directory, kept as [`Folds::last`] once whole.
+    /// `Err` is the refusal an answer gives when they could not be read.
+    async fn refresh<P: ParosProviders>(
+        &mut self,
+        providers: &P,
+        rpc: &RpcHandle<P>,
+        resolver: &Resolver,
+        shutdown: &CancellationToken,
+    ) -> Result<(), &'static str> {
+        let client = self.client(providers, rpc, resolver, shutdown);
+        if client.server_count() == 0 {
+            return Err("unavailable");
+        }
+        self.first = (self.first + 1) % client.server_count();
+        if !self.fold_registry(&client, resolver).await {
+            return Err("unavailable");
+        }
+        // The cell's own universe directory, else the one its join points
+        // at (#232 (multiple cells)), read through that cell's machines.
+        let registry = self.registry.as_ref().map(|(_, folder)| folder.state());
+        let pointer = registry.and_then(Registry::universe).cloned();
+        let (universe, reader, first) = match (resolver.cell.fleet, pointer) {
+            (_, Some(pointer)) => (pointer.directory, client.elsewhere(&pointer.hosts), 0),
+            (Some(fleet), None) => (fleet, client.clone(), self.first),
+            (None, None) => return Err("no_universe"),
+        };
+        let LoadOutcome::Loaded { .. } =
+            load(&mut self.directory, universe, &reader, first, 0).await
+        else {
+            // Kept (#457): a fold that stopped is a prefix the next answer
+            // goes on from; only a fold with a hole starts again.
+            if !self.directory.is_whole() {
+                self.directory = Folder::new(FleetDirectory::default());
+            }
+            return Err("unavailable");
+        };
+        let directory = self.directory.state();
+        if self
+            .last
+            .as_ref()
+            .is_none_or(|last| last.next_seq() != directory.next_seq())
+        {
+            self.last = Some(directory.clone());
+        }
+        assert_eq!(
+            self.last.as_ref().map(FleetDirectory::next_seq),
+            Some(directory.next_seq()),
+            "the copy kept is the directory just read"
+        );
+        Ok(())
+    }
+
+    /// The resolver's answer to `request` (#233 (resolver)): a redirect read
+    /// from the universe directory brought to its tail within the answer's
+    /// bound, else from the copy last read (static stability). `frozen`
+    /// skips the read once a copy is held.
+    async fn redirect<P: ParosProviders>(
+        &mut self,
+        providers: &P,
+        rpc: &RpcHandle<P>,
+        resolver: &Resolver,
+        request: &wire::ResolveEntry,
+        frozen: bool,
+        shutdown: &CancellationToken,
+    ) -> wire::ResolveAck {
+        let Some(role) = resolver.facts.frontend.clone() else {
+            // No `Authz`: this machine serves no resolver, so ask another.
+            return refused(resolver, "unavailable");
+        };
+        let read = if frozen && self.last.is_some() {
+            false
+        } else {
+            let within = resolver.answer_within;
+            let refresh = self.refresh(providers, rpc, resolver, shutdown);
+            matches!(providers.time().timeout(within, refresh).await, Ok(Ok(())))
+        };
+        let Some(directory) = self.last.as_ref() else {
+            return refused(resolver, "unavailable");
+        };
+        if !read {
+            moonpool_assertions::reachable!(
+                "resolver: a tenant resolves from the directory last read while the universe directory is not read"
+            );
+        }
+        let now = role.epoch + providers.time().now();
+        entry::answer(directory, &role, now, resolver.cell.cell_id, request)
     }
 
     /// Bring the registry to its tail and the book with it; `false` when it
