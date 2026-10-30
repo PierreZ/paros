@@ -15,6 +15,14 @@
 //!
 //! Draws no randomness and decides no retry beyond one pass over the entry
 //! endpoint: every other choice is the caller's.
+//!
+//! A client handed the universe's resolvers and a token resolves in two
+//! hops instead ([`through`], #233 (resolver)): a resolver names the
+//! tenant's cell, and a machine of that cell names its references.
+
+mod through;
+
+pub use through::{Redirect, Redirection, redirect, redirect_from_wire, resolve_through};
 
 use std::collections::BTreeMap;
 use std::time::Duration;

@@ -347,6 +347,45 @@ impl FleetOps {
             );
             assert_reachable!("universe: a tenant of a second cell resolves from the run's cell");
         }
+        // Through a resolver of the run's cell (#233 (resolver)): it sends
+        // the client to the second cell, whose machine names the rest.
+        let now = self.connector.providers().time().now();
+        let own = crate::frontend::token(
+            ctx.state(),
+            &String::from_utf8_lossy(NAME),
+            "",
+            Presented::Own,
+            now,
+        );
+        let (redirection, resolution) = paros::client::resolve::resolve_through(
+            self.connector.providers(),
+            self.connector.rpc(),
+            self.connector.names(),
+            founders,
+            (NAME, b""),
+            &own,
+            self.patience,
+        )
+        .await;
+        if let paros::client::resolve::Redirection::Redirected(redirect) = &redirection
+            && with_second(ctx.state(), |second| second.tenant) == Some(redirect.tenant)
+        {
+            assert_always!(
+                redirect.cell_id == formed.journals.cell_id,
+                "resolver: a tenant is sent to the cell it was created in",
+                { "cell" => redirect.cell_id, "known" => formed.journals.cell_id }
+            );
+            if let Resolution::Resolved(resolved) = &resolution {
+                assert_always!(
+                    resolved.cell_id == formed.journals.cell_id,
+                    "resolve: a tenant resolves to the cell that serves it",
+                    { "cell" => resolved.cell_id, "known" => formed.journals.cell_id }
+                );
+                assert_reachable!(
+                    "resolver: a tenant of a second cell resolves through a resolver"
+                );
+            }
+        }
         if self.frontends.is_empty() {
             return;
         }

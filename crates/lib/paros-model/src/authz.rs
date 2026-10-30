@@ -35,13 +35,16 @@ pub enum Operation {
     Admit,
     /// A journal's user tags, set by its tenant (#575 (key:value tags)).
     SetTags,
+    /// A tenant's name resolved to its cell by a resolver (#233
+    /// (resolver)).
+    Resolve,
 }
 
 impl Operation {
     /// Whether the call changes the journal.
     #[must_use]
     pub fn writes(self) -> bool {
-        !matches!(self, Self::Read)
+        !matches!(self, Self::Read | Self::Resolve)
     }
 
     /// The operation's name, as a log reads it.
@@ -55,6 +58,7 @@ impl Operation {
             Self::FormCell => "form_cell",
             Self::Admit => "admit",
             Self::SetTags => "set_tags",
+            Self::Resolve => "resolve",
         }
     }
 }
@@ -68,6 +72,12 @@ pub enum Target<'a> {
         tenant: &'a str,
         /// The journal's name inside the tenant.
         journal: &'a str,
+    },
+    /// A `users` tenant by its name alone: a resolver's request (#233
+    /// (resolver)) that names no journal.
+    Tenant {
+        /// The tenant's name.
+        tenant: &'a str,
     },
     /// A journal named by its ids: an internal tenant's (the universe
     /// tenant's, a cell tenant's). It has no resolvable name, so only an

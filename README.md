@@ -72,8 +72,10 @@ them.
 
 A universe can hold more than one cell: `parosctl init --idle` forms a cell with no universe,
 `parosctl universe add-cell` joins it, and `parosctl tenant create --cell` puts a tenant in it.
-Any machine resolves a tenant to its cell. `parosctl universe remove-cell` removes an empty
-cell for good.
+Any machine resolves a tenant to its cell. Every `parosd` is also a resolver (#233 (resolver)):
+with a token, `parosctl --token … resolve acme` asks a resolver first, which checks the token and
+sends the client to the tenant's cell, from the universe directory it read last.
+`parosctl universe remove-cell` removes an empty cell for good.
 
 Each tenant scrubs its journals in the background: its coordinator reads every acceptor's copy
 of every record again, and an acceptor writes a damaged record again from its own copy

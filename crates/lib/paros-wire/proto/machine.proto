@@ -60,6 +60,12 @@ service Machine {
   // registry. Until the resolver (M12) and the frontend (#192) exist, a
   // machine answers both hops in one answer.
   rpc Resolve(.paros.machine.v1.Resolve) returns (.paros.machine.v1.ResolveAck);
+  // The resolver's hop of `Resolve` (#233 (resolver), §3.5): which cell
+  // serves tenant `tenant`, and that cell's entry endpoint. Answered by a
+  // machine that serves the resolver role, from its cached fold of the
+  // universe directory, once the token's signature and scope allow it. It
+  // redirects only: the client then asks a machine of that cell `Resolve`.
+  rpc ResolveEntry(.paros.machine.v1.ResolveEntry) returns (.paros.machine.v1.ResolveAck);
   // How busy this machine was over its last full window (#424): FDB's
   // busyness numbers, computed from two samples of the machine's own
   // counters. Answered by every machine, idle, admitted or founding, from
@@ -372,8 +378,28 @@ message Resolve {
   bytes tenant = 1;
 }
 
+message ResolveEntry {
+  // The caller's Biscuit token (#245): it must allow `tenant.resolve` on
+  // `tenant`.
+  bytes token = 1;
+  // The tenant's name, as a user types it.
+  bytes tenant = 2;
+  // The journal the caller means to reach, when it names one: a token
+  // derived to one journal resolves its tenant only with it. Empty when
+  // the caller names none.
+  bytes journal = 3;
+}
+
+// The answer to `Resolve` and to `ResolveEntry`. A resolver's answer to
+// `ResolveEntry` (#233 (resolver)) is a redirect: on "" it names the
+// tenant (`tenant`), its cell (`tenant_cell`, `tenant_cell_name`) and that
+// cell's entry endpoint (`tenant_cell_endpoint`), and never `control`,
+// `machines`, `batchers` or `frontends`, which only the cell's machines
+// answer. Its refusals are the ones below, and "invalid_token", "expired",
+// "forbidden" (the token does not allow the call) and "no_endpoint" (the
+// universe directory records no entry endpoint for the tenant's cell).
 message ResolveAck {
-  // "" when the tenant resolved. Else: "unknown_tenant" (no tenant holds the
+  // "" when the tenant resolved (or, from a resolver, was redirected). Else: "unknown_tenant" (no tenant holds the
   // name), "not_ready" (the tenant is being created or removed: `tenant` is
   // its id), "internal" (the name is not a user's tenant), "other_cell"
   // (another cell hosts the tenant: `tenant_cell` names it, M12),

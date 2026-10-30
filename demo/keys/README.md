@@ -10,6 +10,7 @@ use them for anything but the demo. Each file is also inline in `docker-compose.
 | `admin.crt`, `admin.key` | the operator's client certificate | `PAROSCTL_TLS_CERT_PEM`, `PAROSCTL_TLS_KEY_PEM` |
 | `demo.public`, `demo.private` | the root key pair | `PAROS_ROOT_PUBLIC_KEY_JSON`, `PAROSCTL_ROOT_PUBLIC_KEY_JSON` |
 | `admin.token` | an `admin` token the root key signed, valid ten years | `PAROS_TOKEN` |
+| `acme.token`, `initech.token` | a `tenant` token for `acme` and one for `initech`, valid ten years | by hand: `--token "$(cat demo/keys/initech.token)"` (`DEMO.md`) |
 
 To mint a tenant token for the frontends, sign it with the demo key:
 
@@ -23,4 +24,6 @@ To make a new set, run these commands, then copy each file into `docker-compose.
 parosctl tls init --out demo/keys --machines machine --admins admin --universe demo --days 3650 --ca-days 3660
 parosctl key generate --out demo/keys --label demo
 parosctl token mint --key demo/keys/demo.private --role admin --ttl 3650d --subject demo-operator --out demo/keys/admin.token
+parosctl token mint --key demo/keys/demo.private --role tenant --tenant acme --ttl 3650d --subject demo-acme --out demo/keys/acme.token
+parosctl token mint --key demo/keys/demo.private --role tenant --tenant initech --ttl 3650d --subject demo-initech --out demo/keys/initech.token
 ```

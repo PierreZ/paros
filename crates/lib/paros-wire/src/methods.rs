@@ -293,6 +293,13 @@ well_known_method!(
     LoadRpc, 0x5041_030B, machine::Load => machine::LoadAck,
     "paros.machine.Load"
 );
+well_known_method!(
+    /// The resolver's hop of `Resolve` (#233 (resolver)): a tenant's cell
+    /// and that cell's entry endpoint, for a token whose scope covers the
+    /// tenant. Answered by a machine that serves the resolver role.
+    ResolveEntryRpc, 0x5041_030E, machine::ResolveEntry => machine::ResolveAck,
+    "paros.machine.ResolveEntry"
+);
 // 0x5041_04xx: the frontend contract (#192 (the frontend)), served by a
 // frontend only: a public call with the caller's entry.
 well_known_method!(

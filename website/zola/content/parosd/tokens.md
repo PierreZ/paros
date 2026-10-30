@@ -73,6 +73,18 @@ A frontend reads the keys with the universe directory. When a token is refused a
 key is trusted at its first use. A removed key stops being trusted at the next read. Before the
 first read, the frontend uses the keys of `PAROS_ROOT_PUBLIC_KEY`, if there are any.
 
+A resolver checks a token the same way (#233 (resolver)). Every machine is a resolver: it
+tells a client which cell serves its tenant, and gives that cell's entry machines. A `tenant`
+token resolves only its own tenant, and an `admin` token resolves any tenant:
+
+```sh
+parosctl --servers parosd-1:4500 --token-file acme.token resolve acme
+```
+
+The resolver only redirects: a machine of the tenant's cell then names the tenant's frontends.
+The resolver answers from the universe directory it read last, so it keeps routing while the
+universe tenant cannot be read.
+
 A rotation has three steps:
 
 1. Add the next key: `parosctl universe key add keys/prod-2.public`.
@@ -85,6 +97,4 @@ to stop a token, remove its key.
 ## Limits
 
 - A machine pins its key at its start. To change the pin, restart it with the new
-  `PAROS_ROOT_PUBLIC_KEY`.
-- The cell coordinator finishes an admission that an operator left in flight. It has no token,
-  so a pinned machine refuses it. Run `cell add-machine` again with your token.
+  

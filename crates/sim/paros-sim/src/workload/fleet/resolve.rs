@@ -4,12 +4,24 @@
 //! (`paros::client::resolve`). The entry endpoint is every machine, from a
 //! drawn one on: idle machines do not serve `Resolve` and are passed over,
 //! founding and admitted machines answer from their own folds.
+//!
+//! The same name then resolves through the machines' resolver role (#233
+//! (resolver)), with a drawn token: a resolver names the tenant's cell and
+//! that cell's entry endpoint, and a machine there names the rest. Its
+//! oracles: a token without the right is never redirected, a token with the
+//! right is never denied, a never-created name is never redirected, and a
+//! tenant this operator created is sent to the cell it was created in.
 
 use std::collections::BTreeSet;
 
-use moonpool_sim::{assert_always, assert_reachable, assert_sometimes, buggify_with_prob};
-use paros::client::resolve::{Resolution, resolve};
+use moonpool_sim::{
+    Providers as _, RandomProvider as _, TimeProvider as _, assert_always, assert_reachable,
+    assert_sometimes, buggify_with_prob,
+};
+use paros::client::resolve::{Redirection, Resolution, resolve, resolve_through};
 use paros::core::journal::TenantId;
+
+use crate::frontend::Presented;
 
 use super::{FleetOps, removed_in, with_names};
 
@@ -118,6 +130,103 @@ impl FleetOps {
             assert_sometimes!(
                 matches!(&resolution, Resolution::Resolved(r) if r.tenant == created),
                 "resolve: an entry machine resolves the tenant its creation made"
+            );
+        }
+        if buggify_with_prob!(0.5) {
+            self.resolve_through_resolver(&entry, name, created).await;
+        }
+    }
+
+    /// Resolve `name` through the resolvers of `entry` (#233 (resolver))
+    /// with a drawn token, and judge both hops. `created` is the tenant
+    /// this operator's creation of `name` just made.
+    async fn resolve_through_resolver(
+        &self,
+        entry: &[paros::model::address::Address],
+        name: &[u8],
+        created: Option<TenantId>,
+    ) {
+        let Some(cell) = &self.cell else {
+            return;
+        };
+        let presented = match self.connector.providers().random().random_range(0..10u32) {
+            0 => Presented::OtherTenant,
+            1 => Presented::Garbage,
+            2 => Presented::Expired,
+            3 => Presented::UnknownKey,
+            4 => Presented::Admin,
+            _ => Presented::Own,
+        };
+        let allowed = matches!(presented, Presented::Own | Presented::Admin);
+        let now = self.connector.providers().time().now();
+        let tenant = String::from_utf8_lossy(name);
+        let token = crate::frontend::token(&self.state, &tenant, "", presented, now);
+        let (redirection, resolution) = resolve_through(
+            self.connector.providers(),
+            self.connector.rpc(),
+            self.connector.names(),
+            entry,
+            (name, b""),
+            &token,
+            self.patience,
+        )
+        .await;
+        assert_always!(
+            redirection != Redirection::Malformed,
+            "resolver: a resolver's answer decodes"
+        );
+        match &redirection {
+            Redirection::Redirected(redirect) => {
+                assert_always!(
+                    allowed,
+                    "resolver: a token without the right is never redirected"
+                );
+                assert_always!(
+                    !name.is_empty() && name != NEVER_CREATED,
+                    "resolver: only a created user's tenant name is redirected"
+                );
+                // A resolver may answer from the directory it last read
+                // (static stability): a redirect to a tenant removed since
+                // is a stale hint, so only the second hop is judged on it.
+                if created == Some(redirect.tenant) {
+                    assert_always!(
+                        redirect.cell_id == cell.journals.cell_id,
+                        "resolver: a tenant is sent to the cell it was created in",
+                        { "cell" => redirect.cell_id, "known" => cell.journals.cell_id }
+                    );
+                }
+                assert_reachable!("resolver: a client is redirected to its tenant's cell");
+                if let Resolution::Resolved(resolved) = &resolution
+                    && resolved.tenant == redirect.tenant
+                {
+                    assert_always!(
+                        resolved.cell_id == redirect.cell_id,
+                        "resolver: the redirected cell resolves its own tenant",
+                        { "cell" => resolved.cell_id, "redirect" => redirect.cell_id }
+                    );
+                    assert_reachable!("resolver: a client resolves its tenant in two hops");
+                }
+            }
+            Redirection::Refused { refusal, .. } => {
+                let denied = matches!(refusal.as_str(), "invalid_token" | "expired" | "forbidden");
+                assert_always!(
+                    !(allowed && denied),
+                    "resolver: a token with the right is never denied",
+                    { "refusal" => refusal.clone() }
+                );
+                if denied {
+                    assert_reachable!("resolver: a token without the right is denied");
+                }
+            }
+            Redirection::Unavailable | Redirection::Malformed => {}
+        }
+        if let Some(created) = created
+            && name != NEVER_CREATED
+            && presented == Presented::Own
+        {
+            assert_sometimes!(
+                matches!(&redirection, Redirection::Redirected(r) if r.tenant == created),
+                "resolver: a resolver redirects the tenant its creation made"
             );
         }
     }

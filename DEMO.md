@@ -54,7 +54,9 @@ docker compose run --rm parosctl set-leader "$J" --new 8
 docker compose run --rm parosctl write "$J" stale --leader 7 --no-claim
 docker compose run --rm parosctl write "$J" fresh --leader 8
 
-# Ask any machine which references serve a tenant (#216): the client's first call. Prints:
+# Ask which references serve a tenant (#216): the client's first call. With a token (the
+# admin token of the demo set here), a resolver checks it and names the tenant's cell first
+# (#233 (resolver)); a machine of that cell then answers. Prints:
 #   tenant=acme universe=… cell=… machines=node1:4500,node2:4500,node3:4500
 docker compose run --rm parosctl resolve acme
 
@@ -82,6 +84,14 @@ docker compose run --rm parosctl configure --tenant acme --survive machines=1
 # control journal, then records its cell. A re-run prints `unchanged`.
 docker compose run --rm parosctl cell add-machine storage4:4500
 docker compose run --rm parosctl cell add-machine stateless1:4500
+
+# Every role of a journal (#604 (role counts), #753 (per-journal proxies)): a multi-writer
+# journal with two replicas on the storage machines, and a proxy leader and a batcher on the
+# stateless machine; and the tenant's frontend there too. `cell show` and `roles` then list
+# acceptors, matchmakers, replicas, proxy leaders, batchers and frontends.
+docker compose run --rm parosctl journal create acme feed --writers multi
+docker compose run --rm parosctl configure --tenant acme --journal feed --replicas 2 --proxies 1 --batchers 1
+docker compose run --rm parosctl configure --tenant acme --frontends 1
 
 # The cell, as tables (#399): its machines, its tenants, who holds which role.
 docker compose run --rm parosctl machine list
@@ -119,6 +129,26 @@ docker compose run --rm parosctl cell remove-machine storage4
 # loop, `--histograms /tmp/h.json` for the raw histograms. Numbers compare runs on the same
 # machine. `paros-bench --local 3` runs without Compose, on a cell in its own process.
 docker compose run --rm paros-bench --tenant bench --journals 4 --clients 8 --duration 60s --ramp 10s
+
+# A second cell (#232 (multiple cells)): cell2-a..cell2-c form an idle cell, which then joins
+# the universe as cell-2. A tenant goes into it with `--cell`.
+docker compose run --rm init-cell2
+docker compose run --rm add-cell2
+docker compose run --rm parosctl tenant create initech --cell cell-2
+docker compose run --rm parosctl journal create initech orders
+
+# The resolver (#233 (resolver)): every machine of both cells serves it. Ask a machine of
+# cell-1 with the tenant's own token (`demo/keys/initech.token`): the resolver checks the
+# token, sends the client to cell-2, and a machine of cell-2 names the rest. Prints:
+#   a resolver of cell … sends tenant "initech" to cell cell-2
+#   tenant=initech universe=demo cell=cell-2 machines=cell2-a:4500,cell2-b:4500,cell2-c:4500 …
+INITECH=$(cat demo/keys/initech.token)
+docker compose run --rm parosctl --token "$INITECH" resolve initech
+# The same token for another tenant is refused (exit 3): its scope is initech only.
+docker compose run --rm parosctl --token "$INITECH" resolve acme
+# A resolver of cell-2 answers the same: any machine of the universe is an entry point.
+docker compose run --rm parosctl --servers cell2:4500 --token "$INITECH" resolve initech
+docker compose run --rm parosctl tenant list
 
 # Logs, and tear everything down (volumes included).
 docker compose logs node1
