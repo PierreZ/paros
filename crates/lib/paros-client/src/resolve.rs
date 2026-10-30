@@ -75,6 +75,10 @@ pub struct Resolved {
     /// machines the registry books a `frontend` slot of the tenant on. Empty
     /// when it has none.
     pub frontends: Vec<(NodeId, Address)>,
+    /// The tenant's replicas (#765 (booked proxies and replicas)): the
+    /// machines the registry books a `replica` slot of one of the tenant's
+    /// journals on. Empty when it has none.
+    pub replicas: Vec<(NodeId, Address)>,
 }
 
 /// What resolving a tenant through the entry endpoint came to.
@@ -180,7 +184,12 @@ impl Resolved {
         }
         let zones = &self.zones;
         let home = |id: &NodeId| zones.get(id).is_some_and(|held| held == zone);
-        for list in [&mut self.machines, &mut self.batchers, &mut self.frontends] {
+        for list in [
+            &mut self.machines,
+            &mut self.batchers,
+            &mut self.frontends,
+            &mut self.replicas,
+        ] {
             let count = list.len();
             // A stable sort: the references of `zone` first, in order.
             list.sort_by_key(|(id, _)| !home(id));
@@ -221,6 +230,36 @@ impl Resolved {
             })
             .collect();
         assert_eq!(servers.len(), self.machines.len(), "one server per machine");
+        servers
+    }
+
+    /// A client's servers for reads (#765 (booked proxies and replicas)):
+    /// the tenant's replicas first, then every other machine, each once, as
+    /// [`Resolved::servers`] dials them. A replica serves the leaderless
+    /// read of the journals it holds a slot of and refuses the others as
+    /// unknown, so the client moves on to the next machine.
+    ///
+    /// # Panics
+    ///
+    /// Never: the assertion checks that every machine is named once.
+    #[must_use]
+    pub fn read_servers<P: ParosProviders>(
+        &self,
+        rpc: &RpcHandle<P>,
+        names: &Names,
+    ) -> Vec<Server<P>> {
+        let replicas: std::collections::BTreeSet<NodeId> =
+            self.replicas.iter().map(|(id, _)| *id).collect();
+        let mut servers = self.servers(rpc, names);
+        // A stable sort: the replicas first, each group in its order.
+        servers.sort_by_key(|server| !replicas.contains(&NodeId(server.id)));
+        assert_eq!(servers.len(), self.machines.len(), "one server per machine");
+        if servers
+            .first()
+            .is_some_and(|server| replicas.contains(&NodeId(server.id)))
+        {
+            moonpool_assertions::reachable!("resolve: a client reads at a replica first");
+        }
         servers
     }
 
@@ -277,8 +316,11 @@ pub fn from_wire(ack: &wire::ResolveAck) -> Resolution {
             })
             .collect()
     };
-    let (Some(batchers), Some(frontends)) = (members(&ack.batchers), members(&ack.frontends))
-    else {
+    let (Some(batchers), Some(frontends), Some(replicas)) = (
+        members(&ack.batchers),
+        members(&ack.frontends),
+        members(&ack.replicas),
+    ) else {
         return Resolution::Malformed;
     };
     let well_formed = ack.cell_id != 0
@@ -304,6 +346,7 @@ pub fn from_wire(ack: &wire::ResolveAck) -> Resolution {
                 .iter()
                 .chain(&ack.batchers)
                 .chain(&ack.frontends)
+                .chain(&ack.replicas)
                 .filter(|m| !m.zone.is_empty())
                 .map(|m| (NodeId(m.node_id), m.zone.clone()))
                 .collect(),
@@ -312,6 +355,7 @@ pub fn from_wire(ack: &wire::ResolveAck) -> Resolution {
             cell_name: ack.cell_name.clone(),
             batchers,
             frontends,
+            replicas,
         }),
         _ => Resolution::Malformed,
     }

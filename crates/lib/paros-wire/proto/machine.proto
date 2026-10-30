@@ -444,6 +444,11 @@ message ResolveAck {
   // at its address and with its machine interface. A client sends its
   // calls there, with its token. Empty when the tenant has none.
   repeated Member frontends = 14;
+  // On "": the tenant's replicas (#765 (booked proxies and replicas)), the
+  // machines its registry books a `replica` slot of one of the tenant's
+  // journals on, each at its address and with its machine interface. A
+  // client sends its reads there first. Empty when the tenant has none.
+  repeated Member replicas = 15;
 }
 
 message Load {}

@@ -225,8 +225,20 @@ tenant's default.
     serve steps that journal's delegated `Accept`, `Accepted` and `Nack` into a proxy leader.
     The proxy leader is born at the first delegation, with the rank its `reply_to` names and
     the `C_b` it carries, and a delegation that names another rank replaces it. It stops when
-    the machine loses the slot. A `parosd` machine does not yet run a replica for a booked
-    replica slot, so a booked replica is placement only: to build in a later change.
+    the machine loses the slot.
+  - **Replicas on machines** (#765, landed 2026-10-30). A `storage` machine that holds a
+    `Role::Replica` slot of a journal runs the journal's replica in its node loop, with the
+    code of `run_replica`. The machine is no acceptor of the journal, and a journal's learners
+    on a machine are the registry's pool. So the leader's `Commit`s and beats already reach it,
+    and the node loop steps every message for a journal it does not serve into the replica. A
+    `Read` of that journal is a leaderless read of the replica's fold. The store is at
+    `replicas/<tenant>/<journal>/`, provisioned at its first open under the journal's bootstrap
+    acceptors with the machine as the replica, and no record line names it: a replica holds no
+    promise, so a lost store is a first boot that learns again. A storage fault parks the
+    replica for `quarantine_ticks`. A released slot stops it and keeps its store. `Resolve`
+    names the machines that hold a replica slot of the tenant's journals (`replicas`, field
+    15), and `Resolved::read_servers` puts them first. The replica settles in the node loop,
+    not off it (#613 (settle off the node loop) is for the acceptors).
   - **The simulation.** A create or a configure draws the counts on one draw in three, 0 to 3
     each. The plane's reconfiguration composer changes the counts on a coin, the proxy count up
     to one past the deployed proxy leaders, so a leader meets a rank it has no lane for; nodes

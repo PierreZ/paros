@@ -354,7 +354,37 @@ where
         (self.audits)(AuditScope::Journal(journal))
     }
 
-    fn proxy_audit(&self, journal: JournalIdentifier) -> A {
+    async fn open_replica(
+        &mut self,
+        journal: JournalIdentifier,
+        config: Config,
+    ) -> Option<Self::Store> {
+        assert!(
+            config.id == self.node,
+            "a replica store is opened as its machine"
+        );
+        let layout = JournalStoreConfig {
+            durability: Durability::Ordered,
+            ..self.disk.layout()
+        };
+        let mut store = JournalStorage::new(
+            self.disk.provider().clone(),
+            self.disk.replica_dir(journal),
+            config,
+            layout,
+        );
+        // No record line: a replica holds no promise, so a store lost
+        // between its format and its first boot is a first boot again.
+        match paros_storage::provision::provision_store(&mut store).await {
+            Ok(_) => Some(store),
+            Err(error) => {
+                tracing::warn!(journal = %journal, %error, "replica_store_unprovisioned");
+                None
+            }
+        }
+    }
+
+    fn role_audit(&self, journal: JournalIdentifier) -> A {
         (self.audits)(AuditScope::Journal(journal))
     }
 

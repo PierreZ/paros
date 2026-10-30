@@ -67,6 +67,7 @@ mod metered;
 pub(crate) mod operator;
 mod proxies;
 pub(crate) mod ready;
+mod replicas;
 pub(crate) mod reply;
 mod report;
 pub mod scrub;
@@ -665,6 +666,8 @@ where
     // The proxy leaders the registry books on this machine (#765): none
     // off a machine, where no registry is followed.
     let mut booked_proxies = proxies::BookedProxies::new(NodeId(self_id));
+    // The replicas the registry books on this machine (#765).
+    let mut booked_replicas = replicas::BookedReplicas::new(NodeId(self_id));
     let shared = Shared {
         providers: &providers,
         links: &links,
@@ -897,6 +900,16 @@ where
                         continue;
                     }
                     let journal = JournalIdentifier::new(TenantId(req.tenant), JournalId(req.journal));
+                    // A journal this machine holds a replica of (#765): a
+                    // leaderless read of the replica's fold.
+                    let (req, reply) = if journals.serves(journal) {
+                        (req, reply)
+                    } else {
+                        let Some(unserved) = booked_replicas.read(journal, (req, reply), &out, (ticks, &tunables)).await else {
+                            continue;
+                        };
+                        unserved
+                    };
                     let Some(rt) = journals.live.get_mut(&journal) else {
                         if refuse_unknown(&journals, follower.as_ref(), journal, "read", self_id, &node_audit) {
                             shared.with(&node_audit).answer(
@@ -968,11 +981,14 @@ where
                 }
                 let held = paros_observe::scenario::hold_journal(hold_candidate, journal);
                 // A journal this machine does not serve may be one it is a
-                // proxy leader of (#765).
+                // replica or a proxy leader of (#765).
                 let msg = if journals.serves(journal) {
                     msg
                 } else {
-                    let Some(msg) = booked_proxies.deliver(journal, msg, &out, || stores.proxy_audit(journal)) else {
+                    let Some(msg) = booked_replicas.deliver(journal, msg, &out, (ticks, &tunables)).await else {
+                        continue;
+                    };
+                    let Some(msg) = booked_proxies.deliver(journal, msg, &out, || stores.role_audit(journal)) else {
                         continue;
                     };
                     msg
@@ -1511,12 +1527,17 @@ where
                 // The system journals (#189): fold what this node's own
                 // the system journals chose, apply it, and keep a follow read
                 // open against a seed for the ones it does not run.
-                // The proxy leaders this machine serves (#765): the slots
-                // the registry books now, then each one's beat.
+                // The proxy leaders and replicas this machine serves
+                // (#765): the slots the registry books now, then each one's
+                // beat.
                 if let Some(f) = follower.as_ref() {
                     booked_proxies.follow(f.registry(), &out);
+                    booked_replicas
+                        .follow(f, |journal| journals.serves(journal), &mut stores, &providers, &out, (ticks, &tunables))
+                        .await;
                 }
                 booked_proxies.beat(&tunables);
+                booked_replicas.beat(&out, (ticks, &tunables)).await;
                 if let Some(f) = follower.as_mut() {
                     // Every fold this tick reports its events before any
                     // journal is placed (#474): a placement reads them all.
