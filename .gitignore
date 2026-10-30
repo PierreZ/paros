@@ -17,9 +17,6 @@ target
 /website/zola/public/
 /website/zola/themes/
 
-# Library crate: lockfile is not committed
-/Cargo.lock
-
 # Claude Code local settings
 .claude/settings.local.json
 

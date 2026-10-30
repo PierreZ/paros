@@ -46,8 +46,67 @@
           targets = rustTargets;
         };
 
+        # The rust toolchain of rust-toolchain.toml as the rustc/cargo of nixpkgs' Rust builders.
+        rustPlatform = pkgs.makeRustPlatform {
+          cargo = rust-toolchain;
+          rustc = rust-toolchain;
+        };
+
+        # The three binaries of the paros image (#196), built from the committed Cargo.lock.
+        # The git dependencies (moonpool, biscuit-auth) are fetched by rev.
+        paros = rustPlatform.buildRustPackage {
+          pname = "paros";
+          version = "0.0.0";
+          src = pkgs.lib.cleanSourceWith {
+            src = ./.;
+            # Keep the site, build output and VCS data out of the build.
+            filter = path: _type:
+              !(builtins.elem (baseNameOf path) [ "target" "website" ".git" ]);
+          };
+          cargoLock = {
+            lockFile = ./Cargo.lock;
+            allowBuiltinFetchGit = true;
+          };
+          # prost-build (paros-wire) runs protoc.
+          nativeBuildInputs = [ pkgs.protobuf pkgs.removeReferencesTo ];
+          # The binaries embed the toolchain's store path (panic locations): drop that
+          # reference so the image does not carry rustc, gcc and the docs.
+          postFixup = ''
+            remove-references-to -t ${rust-toolchain} $out/bin/*
+          '';
+          cargoBuildFlags = [ "-p" "parosd" "-p" "parosctl" "-p" "paros-bench" ];
+          # CI tests separately.
+          doCheck = false;
+        };
+
       in
       {
+        packages = {
+          inherit paros;
+          default = paros;
+
+          # The same image as the Dockerfile, without a Docker Hub pull:
+          # `nix build .#image && docker load < result` gives `paros:local`.
+          image = pkgs.dockerTools.buildLayeredImage {
+            name = "paros";
+            tag = "local";
+            # The binaries land in /bin, on the PATH of the image.
+            contents = [ paros ];
+            # A named volume mounted at /var/lib/paros takes this ownership on first use.
+            fakeRootCommands = ''
+              mkdir -p ./var/lib/paros
+              chown 10001:10001 ./var/lib/paros
+            '';
+            config = {
+              Entrypoint = [ "parosd" ];
+              User = "10001:10001";
+              Env = [ "PAROS_DATA_DIR=/var/lib/paros" ];
+              ExposedPorts."4500/tcp" = { };
+              Volumes."/var/lib/paros" = { };
+            };
+          };
+        };
+
         devShells.default = pkgs.mkShell {
           buildInputs = with pkgs; [
             # Rust toolchain from oxalica
@@ -77,6 +136,9 @@
             wasm-bindgen-cli
             binaryen
             nodejs_22
+
+            # Terminal recordings (`.cast` files) of demos.
+            asciinema
           ];
 
           shellHook = ''

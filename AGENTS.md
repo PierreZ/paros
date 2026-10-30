@@ -58,7 +58,9 @@ Any other value (`cli`, `vscode`) is local: Nix is already set up; use `nix deve
 
 **Use Nix-provided software for all tooling.** The one documented exception is the image
 (`Dockerfile`, `docker-compose.yml`, #196): a plain multi-stage Rust build so a fresh clone runs
-with Docker alone. It is the user's demo, never a test: no smoke script, no test that spawns
+with Docker alone. The flake also builds the same image (`nix build .#image`), which needs no
+Docker Hub pull; `Cargo.lock` is committed (decided on 2026-10-30) so the flake can build the image.
+It is the user's demo, never a test: no smoke script, no test that spawns
 `parosd` processes (behaviour is proved in simulation); CI only builds the image; its Rust version must equal `rust-toolchain.toml`'s channel (CI's `image` job,
 `scripts/check-dockerfile-toolchain.sh`). Never run the sandbox's preinstalled binaries
 (the `rustup`/`cargo`/`rustc` under `/root/.cargo`), never `apt-get`/`pip install`/`npm -g`/

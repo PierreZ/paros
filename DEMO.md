@@ -19,6 +19,9 @@ certificate (`PAROS_TLS_*_PEM`), the root public key (`PAROS_ROOT_PUBLIC_KEY_JSO
 admin certificate and token for `parosctl` (`PAROSCTL_TLS_*_PEM`, `PAROS_TOKEN`). No file is
 mounted. The demo keys are public: never use them for anything else.
 
+The image can also be built with Nix: `nix build .#image && docker load < result`. Then run
+`docker compose up -d` without `--build`; it uses the loaded `paros:local` and pulls nothing.
+
 ```sh
 # Five machines: node1..node3 (storage, zones a/b/c), storage4, stateless1 (stateless).
 # After an upgrade, start over with `docker compose down -v`: a volume an older version wrote

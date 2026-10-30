@@ -19,8 +19,8 @@ RUN apt-get update \
 ENV RUSTUP_TOOLCHAIN=${RUST_VERSION}
 WORKDIR /src
 COPY . .
-# No `--locked`: the workspace commits no `Cargo.lock` (a library crate,
-# `.gitignore`), so the build resolves its dependencies as every build does.
+# No `--locked`: the build resolves its dependencies as every build does
+# (`Cargo.lock` is committed, so the flake can build the same image).
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/src/target \
