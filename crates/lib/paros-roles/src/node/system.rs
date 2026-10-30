@@ -273,10 +273,16 @@ impl<P: ParosProviders> ControlFollower<P> {
 
     /// Adopt `book`, the cell's machines at registry position `position`,
     /// handed from outside the fold (#505 (stranded admitted machine)): an
-    /// admitted machine whose every seed moved learns where they are from
-    /// its cell coordinator. Each seed `book` names is dialed there from its
-    /// next read on, unless the node adopted a newer book already. The
-    /// seeds that moved, at their new addresses.
+    /// admitted machine whose every seed moved, or was never a seed, learns
+    /// where they are from its cell coordinator. A founding member `book`
+    /// names becomes a seed: a machine admitted while one founder alone had
+    /// registered starts with that one seed, and when it is wiped the fold
+    /// never reads past it (replay-main 1952391620211990956 on ec801f5: the
+    /// admitted machine never booked its tenant's matchmaker set, every
+    /// handover onto it froze the set, and a journal it held never elected
+    /// a leader). Each seed `book` names is dialed there from its next read
+    /// on, unless the node adopted a newer book already. The seeds that
+    /// moved, at their new addresses.
     pub(crate) fn adopt(
         &mut self,
         position: u64,
@@ -287,6 +293,26 @@ impl<P: ParosProviders> ControlFollower<P> {
         }
         self.adopted = position;
         let me = self.self_id;
+        let count = self.seeds.len();
+        for (id, addr) in book {
+            if *id != me
+                && self.founders.contains(id)
+                && !self.seeds.iter().any(|(seed, _)| seed == id)
+            {
+                self.seeds.push((
+                    *id,
+                    NodeClient::named(&self.rpc, self.names.clone(), addr.clone()),
+                ));
+            }
+        }
+        assert!(
+            self.seeds.len() >= count,
+            "an adopted book never drops a seed"
+        );
+        assert!(
+            self.seeds.iter().all(|(seed, _)| *seed != me),
+            "a node is never its own seed"
+        );
         let seeds: Vec<NodeId> = self.seeds.iter().map(|(id, _)| *id).collect();
         let moved: Vec<(NodeId, paros_model::address::Address)> = book
             .iter()
