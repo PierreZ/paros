@@ -306,7 +306,25 @@ impl<P: LocalStorageProvider> JournalStorage<P> {
             recovery,
         };
         self.journal = Some(journal);
+        self.publish_layout();
         Ok(())
+    }
+
+    /// Have the journal tell the provider where its records live, the
+    /// batch in flight included (#760 (moonpool owns fault placement)), in
+    /// the shard the journal's leader declares (`journal/<tenant>/<journal>`),
+    /// so a stripe is `(journal, slot)`. A simulator keeps a crash or
+    /// damage off a copy the journal cannot afford to lose; every other
+    /// provider ignores it. Every store publishes, a machine's as an acceptor
+    /// pool's: recipe
+    /// 9163977011002237483 141611:4883898652655768089 on c88d808 tore a
+    /// founder's last copy of slot 0 in a crash, since no machine store
+    /// had said where its slots were.
+    fn publish_layout(&mut self) {
+        let shard = format!("journal/{}", self.config.journal);
+        if let Some(journal) = self.journal.as_mut() {
+            journal.publish_layout(Some(shard));
+        }
     }
 
     /// Raise the floor in memory: the image keeps nothing below it.
@@ -382,12 +400,14 @@ impl<P: LocalStorageProvider> JournalStorage<P> {
             .await
             .map_err(|e| open_error(&e, StorageRecord::Promise))?;
             self.journal = Some(created);
+            self.publish_layout();
             self.durable_meta = early;
         }
         let journal = self.journal.as_mut().expect("created above");
         let before = journal.rolls();
         let committed = journal.commit(batch).await.map_err(|e| commit_error(&e));
         let after = journal.rolls();
+
         assert!(
             after.onto_spare >= before.onto_spare && after.created >= before.created,
             "a journal's rolls only grow"

@@ -1,7 +1,7 @@
 //! The machines' names (#257, #349): the name tables, the advertised addresses, the renames and where a machine binds.
 
 use moonpool_sim::{
-    ScriptedResolver, SimulationError, SimulationResult, StateHandle, assert_always,
+    ScriptedResolver, ShardBook, SimulationError, SimulationResult, StateHandle, assert_always,
     assert_reachable,
 };
 use paros::core::NodeId;
@@ -24,10 +24,23 @@ pub(crate) const OPERATOR_NAMES_KEY: &str = "paros-operator-names";
 /// machine that moves repoints. A name a renamed machine left keeps the IP
 /// it had, where nobody listens now (#349): its peers reach it only at the
 /// name the registry holds.
+///
+/// The run's shard book resolves the replicas the machines declare through
+/// it too: a journal names its members by the address its lanes dial, and
+/// moonpool counts a wipe or damage only against a replica it can map to a
+/// process. Recipe 9163977011002237483 141611:4883898652655768089 on
+/// c88d808: a member named `machine-1.paros:4500`, wiped, counted as a
+/// clean copy, and rot took the last one of slot 0.
 pub(crate) fn name_table(state: &StateHandle) -> ScriptedResolver {
-    crate::state::published_arc(state, NAMES_KEY, ScriptedResolver::new)
-        .as_ref()
-        .clone()
+    crate::state::published_arc(state, NAMES_KEY, || {
+        let table = ScriptedResolver::new();
+        if let Some(book) = ShardBook::of(state) {
+            book.resolve_names(table.clone());
+        }
+        table
+    })
+    .as_ref()
+    .clone()
 }
 
 /// The operators' name table (#349): the entry endpoints the workload's
