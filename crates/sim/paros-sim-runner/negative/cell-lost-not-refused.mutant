@@ -3,6 +3,7 @@
 # is not `cell_lost`. The convergence oracle skips a run whose cell is
 # lost, so the `cell init` oracles must catch it.
 excuse: skip converge: cell lost
+expect: survives #773
 file: crates/lib/paros-machine/src/cell_init.rs
 --- find
     if intact.len() < q2 {

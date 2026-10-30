@@ -2,7 +2,10 @@
 # instead of a Phase-1 quorum of qualifying answers: one member down for
 # good blocks a lost slot that a quorum could decide. The audit's
 # `blocked_in_asked` asks for a quorum, so it must not excuse the journal.
+# Red on 3 of 600 seeds, never where the excuse fired (#773 (six
+# excuse mutants survive)): convergence oracles catch it elsewhere.
 excuse: loss: blocked in asked
+expect: red elsewhere
 file: crates/lib/paros-core/src/proposer.rs
 --- find
         .all(|config| config.has_phase1_quorum(&qualifying))

@@ -3,6 +3,7 @@
 # heal oracle's "cell cannot hold shape" excuse counts free slots from the
 # audit's own registry fold, so it must not excuse the journal.
 excuse: heal: cell cannot hold shape
+expect: survives #773
 file: crates/lib/paros-model/src/placement.rs
 --- find
         self.capacity.saturating_sub(self.booked)

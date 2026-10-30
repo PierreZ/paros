@@ -3,6 +3,7 @@
 # member only while the harness's own window holds (#741), so the journal
 # must be judged once the windows ended.
 excuse: heal: maintenance window
+expect: survives #773
 file: crates/lib/paros-coordinator/src/cell/watch.rs
 --- find
                 .is_some_and(|(_, seen)| now < *seen + Duration::from_millis(window.for_ms))

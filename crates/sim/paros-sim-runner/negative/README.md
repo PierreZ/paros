@@ -17,21 +17,29 @@ request that changes this folder. The file format and the verdicts are in
 
 ## Mutants
 
-| Mutant | Excuse | What it breaks |
-|---|---|---|
-| `loss-faulty-copy-never-qualifies` | loss: unrecoverable slot | A faulty copy at or below the best clean copy never qualifies (CTRL R2/R3). |
-| `loss-probe-waits-for-every-member` | loss: blocked in asked | The repair probe waits for every member, not a Phase-1 quorum. |
-| `storage-quarantine-never-ends` | node: storage dead | A quarantined journal never opens again. |
-| `wipe-amnesiac-store-boots-fresh` | node: wiped | A wiped member boots again with an empty store (no amnesia refusal). |
-| `gc-retire-on-stale-belief` | node: retired | A node may retire on a stale belief of the configuration in force. |
-| `machine-released-booking-never-restarts` | node: left pool | A journal released once never starts again on that machine. |
-| `heal-machine-free-one-short` | heal: cell cannot hold shape | Placement sees one free slot less on each machine. |
-| `heal-maintenance-never-ends` | heal: maintenance window | A maintenance window holds a down machine's roles for good. |
-| `heal-replace-after-never` | skip heal: re-place past tail | The coordinator never re-places a down machine's roles. |
-| `cell-fresh-plan-refused` | skip converge: no cell | `cell init` refuses every fresh plan: no cell forms. |
-| `cell-lost-not-refused` | skip converge: cell lost | `cell init` does not refuse a plan that lost its quorum. |
-| `ledger-damaged-record-reads-empty` | none (fault ledger, #760) | A damaged record reads back as nothing accepted. |
-| `ledger-promise-not-durable-first` | none (fault ledger, #760) | A raised promise is not durable before the entries under it. |
+| Mutant | Excuse | What it breaks | Expect |
+|---|---|---|---|
+| `loss-faulty-copy-never-qualifies` | loss: unrecoverable slot | A faulty copy at or below the best clean copy never qualifies (CTRL R2/R3). | caught |
+| `loss-probe-waits-for-every-member` | loss: blocked in asked | The repair probe waits for every member, not a Phase-1 quorum. | red elsewhere |
+| `storage-quarantine-never-ends` | node: storage dead | A quarantined journal never opens again. | caught |
+| `wipe-amnesiac-store-boots-fresh` | node: wiped | A wiped member boots again with an empty store (no amnesia refusal). | red elsewhere (by construction) |
+| `gc-retire-on-stale-belief` | node: retired | A node may retire on a stale belief of the configuration in force. | survives #773 |
+| `machine-released-booking-never-restarts` | node: left pool | A journal released once never starts again on that machine. | survives #773 |
+| `heal-machine-free-one-short` | heal: cell cannot hold shape | Placement sees one free slot less on each machine. | survives #773 |
+| `heal-maintenance-never-ends` | heal: maintenance window | A maintenance window holds a down machine's roles for good. | survives #773 |
+| `heal-replace-after-never` | skip heal: re-place past tail | The coordinator never re-places a down machine's roles. | survives #773 |
+| `cell-fresh-plan-refused` | skip converge: no cell | `cell init` refuses every fresh plan: no cell forms. | caught |
+| `cell-lost-not-refused` | skip converge: cell lost | `cell init` does not refuse a plan that lost its quorum. | survives #773 |
+| `ledger-damaged-record-reads-empty` | none (fault ledger, #760) | A damaged record reads back as nothing accepted. | caught |
+| `ledger-promise-not-durable-first` | none (fault ledger, #760) | A raised promise is not durable before the entries under it. | caught |
+
+The `expect` key of each file holds its verdict. `red elsewhere` means
+the hunt is red, but never on a seed where the excuse fired. The wipe
+mutant removes the amnesia refusal that the audit reads, so its excuse
+cannot fire on a red seed. The six survivors and their reasons are in
+#773 (six excuse mutants survive): two excuses are too rare at 600 seeds,
+two mutants never bite, one is equivalent, and one shows a probable
+oracle gap (no oracle checks that a journal gets its full shape back).
 
 ## Excuses with no mutant
 

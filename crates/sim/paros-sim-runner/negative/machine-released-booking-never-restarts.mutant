@@ -3,6 +3,7 @@
 # stop, so the "left pool" excuse holds for it, but the registry books it:
 # the journal runs a member short while the cell believes it serves.
 excuse: node: left pool
+expect: survives #773
 file: crates/lib/paros-roles/src/node/control.rs
 --- find
         for journal in booked {

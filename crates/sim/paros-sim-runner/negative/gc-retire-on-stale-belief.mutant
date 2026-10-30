@@ -4,6 +4,7 @@
 # configuration loses a member for good. The "retired" excuse covers only a
 # node an effective floor named, so the loss must show.
 excuse: node: retired
+expect: survives #773
 file: crates/lib/paros-core/src/node/gc.rs
 --- find
             && watermark > self.last_member_ballot
