@@ -65,6 +65,7 @@ pub(crate) mod log_reads;
 mod matchmaking;
 mod metered;
 pub(crate) mod operator;
+mod proxies;
 pub(crate) mod ready;
 pub(crate) mod reply;
 mod report;
@@ -661,6 +662,9 @@ where
     let mut retiring: Option<JournalIdentifier> = None;
 
     let out = Outbound::new(peer_queues, proxy_queues, learners, me);
+    // The proxy leaders the registry books on this machine (#765): none
+    // off a machine, where no registry is followed.
+    let mut booked_proxies = proxies::BookedProxies::new(NodeId(self_id));
     let shared = Shared {
         providers: &providers,
         links: &links,
@@ -963,6 +967,16 @@ where
                     continue;
                 }
                 let held = paros_observe::scenario::hold_journal(hold_candidate, journal);
+                // A journal this machine does not serve may be one it is a
+                // proxy leader of (#765).
+                let msg = if journals.serves(journal) {
+                    msg
+                } else {
+                    let Some(msg) = booked_proxies.deliver(journal, msg, &out, || stores.proxy_audit(journal)) else {
+                        continue;
+                    };
+                    msg
+                };
                 let Some(rt) = journals.live.get_mut(&journal).filter(|_| !held) else {
                     tracing::info!(node = self_id, journal = %journal, held, "journal_message_dropped");
                     continue;
@@ -1497,6 +1511,12 @@ where
                 // The system journals (#189): fold what this node's own
                 // the system journals chose, apply it, and keep a follow read
                 // open against a seed for the ones it does not run.
+                // The proxy leaders this machine serves (#765): the slots
+                // the registry books now, then each one's beat.
+                if let Some(f) = follower.as_ref() {
+                    booked_proxies.follow(f.registry(), &out);
+                }
+                booked_proxies.beat(&tunables);
                 if let Some(f) = follower.as_mut() {
                     // Every fold this tick reports its events before any
                     // journal is placed (#474): a placement reads them all.

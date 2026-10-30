@@ -46,6 +46,10 @@ pub struct Rare {
 /// window seldom reaches, #485 the double fault, #486 the rest.
 pub const RARE: &[Rare] = &[
     Rare {
+        msg: "proxy: a machine's proxy leader takes another rank",
+        reason: "a journal's earlier proxy leader slot is released while a later one stays, so the later machine's rank moves down and the leader delegates to it under the new rank: it ran on no seed of a 120-seed hunt (#765 (booked proxies and replicas))",
+    },
+    Rare {
         msg: "gc: a refused ack meets a frozen generation",
         reason: "a handover abandoned after its freeze, with no campaign to meet the frozen set, while a stable leader's GC asks it: one witness, replay-recipe 13627598485075066090 53:11387013064857220442 on c868dac; the refused-campaign BUGGIFY leaves more frozen sets to GC (PR #771 (negative hunt))",
     },

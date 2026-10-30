@@ -458,9 +458,17 @@ pub(crate) struct Outbound {
     /// can be added while the loop holds the handle shared (#189: a node the
     /// registry admits at runtime); the loop is the only writer and never
     /// holds it across an await.
-    peer_queues: Mutex<BTreeMap<NodeId, PeerMailbox>>,
-    /// The proxy leaders' mailboxes: a node delegates through them.
-    pub(crate) proxy_queues: BTreeMap<ProxyId, PeerMailbox>,
+    /// Shared with the handles [`Outbound::sharing`] makes: a machine's
+    /// proxy leaders send through this node's lanes (#765).
+    peer_queues: Arc<Mutex<BTreeMap<NodeId, PeerMailbox>>>,
+    /// The deployment map's proxy leaders' mailboxes: a node delegates
+    /// through them on a journal the registry books no proxy leader of.
+    proxy_queues: BTreeMap<ProxyId, PeerMailbox>,
+    /// The registry's proxy leader slots, per journal (#765): rank `r` is
+    /// the machine of the journal's `r`-th booking in booking order, and a
+    /// send to `Party::Proxy(r)` of that journal goes into its peer lane.
+    /// Shared with the handles [`Outbound::sharing`] makes.
+    booked_proxies: Arc<Mutex<BTreeMap<JournalIdentifier, Vec<NodeId>>>>,
     /// The deployment's replicas (#144): learners that are not in the node
     /// pool, reached by every [`Audience::Learners`] message beside the pool
     /// and addressed by their own `NodeId` (a catch-up answer, a trim
@@ -481,11 +489,41 @@ impl Outbound {
         sender: Party,
     ) -> Self {
         Self {
-            peer_queues: Mutex::new(peer_queues),
+            peer_queues: Arc::new(Mutex::new(peer_queues)),
             proxy_queues,
+            booked_proxies: Arc::default(),
             learners,
             sender,
         }
+    }
+
+    /// A handle over the same peer lanes and proxy bookings that sends as
+    /// `sender` (#765): a proxy leader a machine serves inside its node
+    /// loop. It reaches no deployment-map proxy and no replica.
+    pub(crate) fn sharing(&self, sender: Party) -> Self {
+        Self {
+            peer_queues: Arc::clone(&self.peer_queues),
+            proxy_queues: BTreeMap::new(),
+            booked_proxies: Arc::clone(&self.booked_proxies),
+            learners: Vec::new(),
+            sender,
+        }
+    }
+
+    /// The registry's proxy leader slots now (#765): for each journal, the
+    /// machines of its slots in rank order.
+    pub(crate) fn book_proxies(&self, ranks: BTreeMap<JournalIdentifier, Vec<NodeId>>) {
+        *self
+            .booked_proxies
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = ranks;
+    }
+
+    /// Whether a send to `journal`'s proxy leader `proxy` has a lane: the
+    /// booked machine's peer lane when the registry books the journal's
+    /// proxy leaders, the deployment map's otherwise.
+    pub(crate) fn reaches_proxy(&self, journal: JournalIdentifier, proxy: ProxyId) -> bool {
+        self.mailbox_for(journal, Party::Proxy(proxy)).is_some()
     }
 
     /// Whether a lane to `node` exists.
@@ -585,10 +623,36 @@ impl Outbound {
 
     /// The mailbox `to`'s copy of `msg` goes into, if the deployment map
     /// names `to` at all.
-    fn mailbox_for(&self, to: Party) -> Option<PeerMailbox> {
+    fn mailbox_for(&self, journal: JournalIdentifier, to: Party) -> Option<PeerMailbox> {
         match to {
             Party::Node(node) => self.peers().get(&node).cloned(),
-            Party::Proxy(proxy) => self.proxy_queues.get(&proxy).cloned(),
+            Party::Proxy(proxy) => {
+                let booked = self
+                    .booked_proxies
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .get(&journal)
+                    .map(|ranks| {
+                        usize::try_from(proxy.0)
+                            .ok()
+                            .and_then(|r| ranks.get(r).copied())
+                    });
+                match booked {
+                    // The registry books this journal's proxy leaders: rank
+                    // `r` is a machine, reached through its peer lane (none
+                    // for this machine itself, or a rank past the slots).
+                    Some(machine) => {
+                        let lane = machine.and_then(|machine| self.peers().get(&machine).cloned());
+                        if lane.is_some() {
+                            moonpool_assertions::reachable!(
+                                "proxy: a send reaches a booked proxy leader's machine"
+                            );
+                        }
+                        lane
+                    }
+                    None => self.proxy_queues.get(&proxy).cloned(),
+                }
+            }
         }
     }
 
@@ -669,7 +733,7 @@ impl Outbound {
                 ),
             },
         }
-        if let Some(queue) = self.mailbox_for(to) {
+        if let Some(queue) = self.mailbox_for(journal, to) {
             let Ok(mut message) = message_to_proto(msg) else {
                 tracing::warn!(
                     from = %self.sender,

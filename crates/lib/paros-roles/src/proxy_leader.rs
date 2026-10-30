@@ -85,7 +85,7 @@ struct Served<A> {
 /// The coordinates of a delegated `Accept` the report needs once the core
 /// has consumed the message: its leader, ballot, slot and command hash.
 #[derive(Clone, Copy)]
-struct DelegatedAccept {
+pub(crate) struct DelegatedAccept {
     leader: NodeId,
     ballot: Ballot,
     slot: Slot,
@@ -95,7 +95,7 @@ struct DelegatedAccept {
 impl DelegatedAccept {
     /// Read the report's coordinates off `msg` before it is stepped; `None`
     /// for anything but an `Accept`.
-    fn of(msg: &Message) -> Option<Self> {
+    pub(crate) fn of(msg: &Message) -> Option<Self> {
         let Message::Accept {
             leader,
             ballot,
@@ -117,7 +117,7 @@ impl DelegatedAccept {
 
 /// Report what one delegated `Accept` did at the proxy, read off the core's
 /// own counters before and after the step.
-fn report_delegation<A: Audit>(
+pub(crate) fn report_delegation<A: Audit>(
     audit: &A,
     id: ProxyId,
     before: paros_core::proxy_leader::ProxyCounters,
@@ -173,7 +173,7 @@ fn report_delegation<A: Audit>(
 /// a `Commit` to the learners reaches the deployment's replicas too),
 /// and send. Nothing to persist: the batch is messages alone.
 #[tracing::instrument(level = "trace", skip_all, fields(proxy = proxy.id().0))]
-fn drain<A: Audit>(
+pub(crate) fn drain<A: Audit>(
     proxy: &mut ProxyLeader,
     journal: JournalIdentifier,
     pool: &[NodeId],
@@ -266,7 +266,7 @@ fn drain<A: Audit>(
 
 /// Note that `journal`'s proxy leader decided a slot: one proxy deciding
 /// for two journals is the shared process #193 makes of it.
-fn note_decided(decided: &mut BTreeSet<JournalIdentifier>, journal: JournalIdentifier) {
+pub(crate) fn note_decided(decided: &mut BTreeSet<JournalIdentifier>, journal: JournalIdentifier) {
     if decided.insert(journal) && decided.len() >= 2 {
         moonpool_assertions::reachable!("proxy: one proxy decides slots for two journals");
     }
@@ -274,6 +274,44 @@ fn note_decided(decided: &mut BTreeSet<JournalIdentifier>, journal: JournalIdent
         decided.contains(&journal),
         "a journal that decided is remembered"
     );
+}
+
+/// One journal's proxy beat: evict the rounds the retention budget ran
+/// out on, then re-fan-out every open round; `true` when the re-fan-out
+/// decided a slot.
+pub(crate) fn beat<A: Audit>(
+    proxy: &mut ProxyLeader,
+    journal: JournalIdentifier,
+    pool: &[NodeId],
+    out: &Outbound,
+    audit: &A,
+    tunables: &DriverTunables,
+) -> bool {
+    let id = proxy.id();
+    // Bounded retention first: a round re-fanned-out the budget's worth of
+    // beats without an answer is evicted (a compacted slot is never
+    // answered; an eviction decides nothing and the leader's re-delegation
+    // reopens a round it still needs). Driver policy
+    // (`proxy_round_resends`, born buggified); the core only counts.
+    for slot in proxy.expire_stale(tunables.proxy_round_resends) {
+        audit.proxy_round_expired(id, slot);
+        tracing::info!(proxy = id.0, journal = %journal, slot = slot.0, "proxy_round_expired");
+    }
+    // The beat: re-fan-out every open round. Consulted only with rounds
+    // open, so a skip always costs a beat; skipping is always safe (the
+    // leader's take-back is the liveness).
+    if !proxy.has_pending_accepts() {
+        return false;
+    }
+    // Generous: the state worth reaching is the leader taking the round
+    // back while the proxy still holds it. Silent in the recovery tail.
+    if moonpool_buggify::buggify_fault_with_prob!(0.5) {
+        moonpool_assertions::reachable!("proxy: a proxy skips a re-fan-out beat");
+        tracing::info!(proxy = id.0, journal = %journal, "proxy_resend_skipped");
+        return false;
+    }
+    proxy.resend_pending();
+    drain(proxy, journal, pool, out, audit)
 }
 
 /// Drive a paros proxy leader to completion over the given providers.
@@ -461,34 +499,8 @@ where
                 // Each journal's beat, in identifier order (iteration order
                 // is part of determinism).
                 for (journal, Served { proxy, audit }) in &mut served {
-                    // Bounded retention first: a round re-fanned-out the
-                    // budget's worth of beats without an answer is evicted
-                    // (a compacted slot is never answered; an eviction
-                    // decides nothing and the leader's re-delegation reopens
-                    // a round it still needs). Driver policy
-                    // (`proxy_round_resends`, born buggified); the core only
-                    // counts.
-                    for slot in proxy.expire_stale(tunables.proxy_round_resends) {
-                        audit.proxy_round_expired(id, slot);
-                        tracing::info!(proxy = id.0, journal = %journal, slot = slot.0, "proxy_round_expired");
-                    }
-                    // The beat: re-fan-out every open round. Consulted only
-                    // with rounds open, so a skip always costs a beat;
-                    // skipping is always safe (the leader's take-back is the
-                    // liveness).
-                    if proxy.has_pending_accepts() {
-                        // Generous: the state worth reaching is the leader
-                        // taking the round back while the proxy still holds
-                        // it. Silent in the recovery tail.
-                        if moonpool_buggify::buggify_fault_with_prob!(0.5) {
-                            moonpool_assertions::reachable!("proxy: a proxy skips a re-fan-out beat");
-                            tracing::info!(proxy = id.0, journal = %journal, "proxy_resend_skipped");
-                        } else {
-                            proxy.resend_pending();
-                            if drain(proxy, *journal, &pool, &out, &*audit) {
-                                note_decided(&mut decided, *journal);
-                            }
-                        }
+                    if beat(proxy, *journal, &pool, &out, &*audit, &tunables) {
+                        note_decided(&mut decided, *journal);
                     }
                 }
                 tracing::info!(proxy = id.0, "proxy_tick");
