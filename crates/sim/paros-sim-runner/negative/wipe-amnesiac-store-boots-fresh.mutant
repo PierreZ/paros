@@ -2,7 +2,10 @@
 # place of the amnesia refusal (#147): a wiped acceptor comes back with no
 # promise and votes again. The "wiped" excuse assumes that a wiped identity
 # never boots again, so the oracles must see the amnesiac votes.
+# The audit learns a wiped identity from the amnesia refusal, which this
+# mutant removes: the excuse cannot fire, so the hunt is red elsewhere.
 excuse: node: wiped
+expect: red elsewhere
 file: crates/lib/paros-roles/src/node/boot.rs
 --- find
         (BootKind::ExistingMember, None) => BootRefusal::Amnesia,

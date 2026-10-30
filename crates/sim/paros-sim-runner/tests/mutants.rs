@@ -19,7 +19,9 @@
 //! --features mutants --test mutants`. Built only with the `mutants` feature,
 //! so the plain nextest run never pays for it.
 
-use paros_sim::excuses::Excuse;
+use std::collections::BTreeMap;
+
+use paros_sim::excuses::{Excuse, RUNS_SLOT};
 use paros_sim::{MUTANT_BATCH, MUTANT_SEEDS, SimulationReport, chain_mutants};
 
 /// The last line of a negative hunt caught on a seed where its excuse fired.
@@ -55,11 +57,13 @@ fn main() {
     }
     let mut ok = 0;
     let mut red_elsewhere = Vec::new();
+    let mut tally = BTreeMap::new();
     let mut first = 1;
     while first <= seeds {
         let last = (first + MUTANT_BATCH - 1).min(seeds);
         let report = chain_mutants(first..=last);
         ok += report.successful_runs;
+        add_tally(&mut tally, &report);
         if !report.assertion_violations.is_empty() || report.failed_runs > 0 {
             print_red(&report);
             let Some(excuse) = excuse else {
@@ -81,6 +85,11 @@ fn main() {
         }
         first = last + 1;
     }
+    // How often each excuse fired over the whole hunt: a survivor whose
+    // excuse fired far more than on main hides behind it.
+    if excuse.is_some() {
+        println!("excuse tally over the hunt: {tally:?}");
+    }
     if !red_elsewhere.is_empty() {
         println!(
             "{seeds} seeds: red on {red_elsewhere:?}, never where {:?} fired",
@@ -90,6 +99,24 @@ fn main() {
         std::process::exit(1);
     }
     println!("{seeds} seeds: {ok} ok, no violations: the hunt came back clean");
+}
+
+/// Add the runs where each excuse fired in `report`, and the runs judged,
+/// to `tally`.
+fn add_tally(tally: &mut BTreeMap<&'static str, usize>, report: &SimulationReport) {
+    let count = |slot: &str| {
+        report
+            .assertion_results
+            .get(slot)
+            .map_or(0, |stats| stats.successes)
+    };
+    *tally.entry("runs judged").or_default() += count(RUNS_SLOT);
+    for excuse in Excuse::ALL {
+        let fired = count(excuse.runs_slot());
+        if fired > 0 {
+            *tally.entry(excuse.name()).or_default() += fired;
+        }
+    }
 }
 
 /// Name every failed run and every violation of a red batch.

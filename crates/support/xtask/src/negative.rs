@@ -56,6 +56,9 @@ const MUTANT_DIR: &str = "crates/sim/paros-sim-runner/negative";
 /// `verdicts.txt`, and each hunt's output in `<name>.log`.
 const OUT_DIR: &str = "negative.out";
 
+/// The lines of each hunt's log the command repeats on its own output.
+const TAIL_LINES: usize = 12;
+
 /// Seeds per mutant when no `--seeds` is given: more than the mutation
 /// hunt's, as an excuse fires on a share of the seeds only.
 const DEFAULT_SEEDS: u64 = 600;
@@ -392,6 +395,12 @@ fn run(mutant: &Mutant, seeds: u64, timeout: Duration) -> Verdict {
     };
     let verdict = wait(child, timeout, mutant.excuse.is_some(), &log);
     drop(applied);
+    // The hunt's last lines carry its evidence: the CI log shows them.
+    let text = fs::read_to_string(&log).unwrap_or_default();
+    let lines: Vec<&str> = text.lines().collect();
+    for line in &lines[lines.len().saturating_sub(TAIL_LINES)..] {
+        eprintln!("  | {line}");
+    }
     verdict
 }
 
