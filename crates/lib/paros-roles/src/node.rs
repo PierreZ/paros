@@ -1058,6 +1058,7 @@ where
                 maybe_duplicate(NodeId(self_id), Reply::GcAck, &links.gc_acks, &(tenant, ack.clone()));
                 let step = rt.node.on_gc_ack(&ack);
                 rt.audit.gc_step(NodeId(self_id), ack.matchmaker, &ack, &step);
+                let frozen = matches!(step, paros_core::collector::GcStep::Frozen { .. });
                 tracing::info!(
                     node = self_id,
                     matchmaker = ack.matchmaker.0,
@@ -1068,6 +1069,17 @@ where
                     "gc_ack_received"
                 );
                 shared.settle(rt).await;
+                // A frozen generation with no successor: this leader finishes
+                // the handover nobody finished, or its floor never becomes
+                // effective (`paros_core` `node/gc.rs`, `on_gc_ack`).
+                if frozen {
+                    moonpool_assertions::reachable!("generation: a leader's GC finishes a frozen set");
+                    let audits = tenant_audits(&journals, &stores, tenant);
+                    let handover = handovers.entry(tenant).or_insert_with(|| HandoverDriver::new(NodeId(self_id), registry_page));
+                    if let Some(rt) = journals.live.get(&journal) {
+                        shared.with(&audits).finish_frozen(&rt.node, handover);
+                    }
+                }
             }
             Some((tenant, reply)) = reconfigure_replies.recv() => {
                 // A matchmaker's answer to this node's handover step of

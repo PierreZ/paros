@@ -162,6 +162,10 @@ message GarbageCollectAck {
   // On a refusal, the later set to address instead: a stopped generation's
   // successor, or the generation in force (#475).
   optional MatchmakerSet newer = 6;
+  // On a refusal, whether the matchmaker froze exactly this generation and
+  // knows no successor: a handover nobody finished, which the leader then
+  // finishes.
+  bool stopped = 7;
 }
 
 // ---- matchmaker-set reconfiguration (#125) ----------------------------------

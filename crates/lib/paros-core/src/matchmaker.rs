@@ -761,6 +761,35 @@ impl Matchmaker {
         newer
     }
 
+    /// Whether this matchmaker froze exactly `generation` and knows no
+    /// successor: the refusal a handover nobody finished leaves
+    /// (`MatchRefusal::Stopped { successor: None }`). The GC ack carries it
+    /// to a stable leader, which campaigns for nothing and so meets the
+    /// frozen generation nowhere else.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants fails: a programmer error,
+    /// never an operating condition.
+    #[must_use]
+    pub fn frozen_without_successor(&self, generation: MatchmakerGeneration) -> bool {
+        let frozen = matches!(
+            self.judge_generation(generation),
+            Some(MatchRefusal::Stopped { successor: None })
+        );
+        if frozen {
+            assert!(
+                self.phase() == MatchmakerPhase::Stopped,
+                "a frozen generation is a stopped matchmaker's"
+            );
+            assert!(
+                self.newer_set(generation).is_none(),
+                "a frozen generation with no successor names no later set"
+            );
+        }
+        frozen
+    }
+
     /// The generation fence for a matchmaking or GC request: `None` when
     /// this matchmaker is active for exactly `generation`.
     fn generation_refusal(&self, generation: MatchmakerGeneration) -> Option<MatchRefusal> {

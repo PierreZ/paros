@@ -217,6 +217,34 @@ impl<P: ParosProviders, A: Audit> NodeLoop<'_, P, A> {
         self.send_reconfigure(tenant, handover.take_requests());
     }
 
+    /// Finish this node's believed matchmaker set, which a handover froze
+    /// and abandoned (`Stopped { successor: None }`): the reconfigurer's
+    /// decree adopts whatever was voted, or re-chooses the same members
+    /// under a fresh generation. A no-op while a handover runs here.
+    ///
+    /// Sound to finish *this* node's believed set: a matchmaker answers
+    /// `Stopped { successor: None }` only when the generation it froze is
+    /// the one the request named (`Matchmaker::generation_refusal` answers a
+    /// mismatch with `Generation { current }` or `Inactive` instead), so the
+    /// generation this node finishes is exactly the one it believes in
+    /// force.
+    pub(crate) fn finish_frozen(&self, node: &ColocatedNode, handover: &mut HandoverDriver) {
+        assert!(
+            node.config().has_matchmakers(),
+            "only a matchmaker deployment finishes a handover"
+        );
+        if handover.is_busy() {
+            return;
+        }
+        let tenant = node.config().journal.tenant;
+        if let Some(current) = node.matchmaker_set().cloned()
+            && handover.finish(&current).is_ok()
+        {
+            assert!(handover.is_busy(), "a finishing handover is busy");
+            self.start_reconfigurer((tenant, handover), &current, current.members(), true);
+        }
+    }
+
     /// The two straggler paths of a handover (#125), taken by whichever node
     /// meets them in a matchmaker's refusal: a registry frozen with no
     /// successor is finished by this node (the reconfigurer's decree adopts
@@ -232,21 +260,21 @@ impl<P: ParosProviders, A: Audit> NodeLoop<'_, P, A> {
     ) {
         let tenant = node.config().journal.tenant;
         match step {
-            // Sound to finish *this* node's believed set: a matchmaker
-            // answers `Stopped { successor: None }` only when the generation
-            // it froze is the one the request named
-            // (`Matchmaker::generation_refusal` answers a mismatch with
-            // `Generation { current }` or `Inactive` instead), so the
-            // generation this node is finishing is exactly the one it
-            // believes in force.
             MatchStep::Refused(MatchRefusal::Stopped { successor: None })
                 if !handover.is_busy() =>
             {
-                if let Some(current) = node.matchmaker_set().cloned()
-                    && handover.finish(&current).is_ok()
-                {
-                    self.start_reconfigurer((tenant, handover), &current, current.members(), true);
+                // BUGGIFY: leave the frozen generation to the next node that
+                // meets it. Valid (any node that meets it finishes it), and it
+                // leaves a frozen set to a stable leader's GC, which meets it
+                // only in a refused ack (`finish_frozen`). Silent in the
+                // recovery tail.
+                if moonpool_buggify::buggify_fault_with_prob!(0.5) {
+                    moonpool_assertions::reachable!(
+                        "generation: a refused campaign leaves a frozen set to the next node"
+                    );
+                    return;
                 }
+                self.finish_frozen(node, handover);
             }
             MatchStep::Refused(MatchRefusal::Inactive | MatchRefusal::Generation { .. }) => {
                 // A refusal is only ever folded on a matchmaker deployment (a

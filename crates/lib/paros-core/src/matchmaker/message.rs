@@ -373,6 +373,11 @@ pub struct GcAck {
     /// handover only from here: it re-campaigns for none (#475 (re-place
     /// after the Down bound)).
     pub newer: Option<MatchmakerSet>,
+    /// On a refusal, whether the matchmaker froze exactly the request's
+    /// generation and knows no successor (`MatchRefusal::Stopped { successor:
+    /// None }`). A stable leader meets an abandoned handover only here: it
+    /// finishes it, as a refused campaign does.
+    pub stopped: bool,
 }
 
 /// A reconfigurer's message to a matchmaker (#125): one step of the

@@ -502,7 +502,11 @@ model alone.
 Two liveness rules keep a frozen generation from wedging the cluster. Any node
 that meets a `Stopped` reply with no successor finishes the handover itself. And
 the driver abandons a phase that makes no progress, after a budget of election
-timeouts.
+timeouts. A stable leader does not campaign, so it meets a frozen generation
+only in a refused GC acknowledgement. That acknowledgement says that the
+generation is frozen with no successor, and the leader finishes the handover too.
+Without this, the leader's GC floor never became effective, and a reconfiguration
+that waited on it never ended.
 
 A sans-IO **model checker** proves the handover, in place of an argument.
 Concurrent reconfigurers run over the real types. Every message is dropped,

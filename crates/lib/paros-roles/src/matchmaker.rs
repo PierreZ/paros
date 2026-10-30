@@ -846,7 +846,13 @@ impl<'f, F> Host<'f, F> {
                         newer: (outcome == GcOutcome::Refused)
                             .then(|| seat.matchmaker.newer_set(generation))
                             .flatten(),
+                        stopped: outcome == GcOutcome::Refused
+                            && seat.matchmaker.frozen_without_successor(generation),
                     };
+                    assert!(
+                        !ack.stopped || ack.newer.is_none(),
+                        "a frozen generation names no successor"
+                    );
                     assert!(
                         ack.applied || ack.newer.as_ref().is_none_or(|s| s.generation > generation),
                         "a stopped matchmaker names a later generation"
