@@ -128,6 +128,10 @@ pub(crate) struct StorageWorld {
     /// to open ([`StorageWorld::judged`]). The next boot judges the same
     /// injection, never a second one.
     unjudged: BTreeMap<String, injector::Injection>,
+    /// Double faults planned and not yet landed, by identity: the plan
+    /// reserves the corruption park at once, so no other loss takes the
+    /// budget while the apply flushes ([`StorageWorld::reserve_park`]).
+    landing: BTreeSet<String>,
     /// The operator's provisioning ledger (#147): every identity whose
     /// store has ever been formatted, kept **outside** the disks so a wipe
     /// erases the marker but not the memory of having provisioned the node
@@ -205,7 +209,11 @@ impl StorageWorld {
     /// library, not the harness, refuses its empty store.
     pub(crate) fn park_reason(&self, ip: &str) -> Option<ParkReason> {
         match self.parked.get(ip).copied() {
-            Some(ParkReason::Corruption) if self.unjudged.contains_key(ip) => None,
+            Some(ParkReason::Corruption)
+                if self.unjudged.contains_key(ip) || self.landing.contains(ip) =>
+            {
+                None
+            }
             reason => reason,
         }
     }
@@ -216,12 +224,37 @@ impl StorageWorld {
         self.unjudged.get(ip).cloned()
     }
 
-    /// Park `key` for the double fault `injection` that landed on it
-    /// (#351): the dead-node budget counts it from now on, but the process
-    /// honors it only once the journal refuses to open.
-    pub(super) fn reserve_park(&mut self, key: &str, node: u64, injection: injector::Injection) {
+    /// Reserve a corruption park for the double fault a boot of `key` plans
+    /// (#351, node `node`): the dead-node budget counts it from the plan on,
+    /// because the apply awaits its flushes and another boot may plan a
+    /// loss meanwhile (witness 3435493108874258629 on #774 (moonpool places
+    /// the harness faults): reserved only once landed, two parks passed the
+    /// budget). The process honors it only once the journal refuses to open.
+    pub(super) fn reserve_park(&mut self, key: &str, node: u64) {
         self.park_as(key, node, ParkReason::Corruption);
+        self.landing.insert(key.to_owned());
+    }
+
+    /// `key`'s reserved double fault `injection` landed: its next open
+    /// judges it ([`StorageWorld::judged`]).
+    pub(super) fn park_landed(&mut self, key: &str, injection: injector::Injection) {
+        let reserved = self.landing.remove(key);
+        // Pair of `reserve_park`: a double fault lands only on its plan's
+        // reservation.
+        assert_always!(
+            reserved,
+            "storage: a landed double fault had its park reserved"
+        );
         self.unjudged.insert(key.to_owned(), injection);
+    }
+
+    /// `ip`'s reserved double fault never landed: its apply was refused or
+    /// failed, or a kill took the boot inside a flush (the bytes flip after
+    /// the last await, so nothing landed). The reservation goes.
+    pub(crate) fn release_landing(&mut self, ip: &str) {
+        if self.landing.remove(ip) && self.parked.get(ip) == Some(&ParkReason::Corruption) {
+            self.parked.remove(ip);
+        }
     }
 
     /// `ip`'s journal gave its verdict on the double fault that landed
@@ -776,8 +809,9 @@ pub(crate) fn storage_fault_stats(
             // Red-path diagnostic: name the slot and the copies left, so an
             // availability violation is attributable without a re-run.
             eprintln!(
-                "clean copies lost: slot={slot} clean={clean:?} marks={:?}",
-                guard.marks
+                "clean copies lost: slot={slot} clean={clean:?} marks={:?} needs={:?}",
+                guard.marks,
+                declared.replications()
             );
             stats.clean_quorum_everywhere = false;
         }

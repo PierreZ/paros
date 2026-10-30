@@ -70,11 +70,12 @@ impl LedgeredJournal {
     /// before the journal opens and judged against what it reports.
     async fn damage(&mut self) -> Option<super::injector::Injection> {
         // A double fault that landed and its journal never judged is
-        // judged now (#351): a second apply would flip its bytes back.
+        // judged now (#351): a second apply would flip its bytes back. One
+        // a kill stopped before it landed releases its park.
         let pending = self.world.upgrade().and_then(|w| {
-            w.lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .unjudged(&self.ip)
+            let mut w = w.lock().unwrap_or_else(PoisonError::into_inner);
+            w.release_landing(&self.ip);
+            w.unjudged(&self.ip)
         });
         if pending.is_some() {
             return pending;
@@ -93,9 +94,10 @@ impl LedgeredJournal {
                 .plan_boot_damage(&ip, node, in_chaos)
         })?;
         if !super::injector::apply(&self.provider, &injection).await {
+            self.with_world(|w| w.release_landing(&ip));
             return None;
         }
-        self.with_world(|w| w.note_landed(&ip, node, &injection));
+        self.with_world(|w| w.note_landed(&ip, &injection));
         Some(injection)
     }
 

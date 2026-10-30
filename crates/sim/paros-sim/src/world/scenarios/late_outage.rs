@@ -78,6 +78,7 @@ impl FaultInjector for LateOutage {
         // planned first so the straggler is the holder it left clean.
         let kept = plan_losses(
             ctx.state(),
+            &ctx.shards(),
             LossShape::DEPARTED_STRAGGLER.with_spares_kept(),
         );
         strike(ctx, &kept)

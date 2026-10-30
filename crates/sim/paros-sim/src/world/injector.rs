@@ -327,13 +327,16 @@ impl StorageWorld {
             custody.settled = false;
             custody.injected = true;
         }
+        if !injection.outage && injection.double_fault().is_some() {
+            self.reserve_park(key, node);
+        }
         Some(injection)
     }
 
-    /// `key`'s planned `injection` landed (node `node`): an entry rot is a
-    /// lost copy, a record rot a rotted record, and a double fault a park
-    /// the journal's verdict makes terminal (#351).
-    pub(crate) fn note_landed(&mut self, key: &str, node: u64, injection: &Injection) {
+    /// `key`'s planned `injection` landed: an entry rot is a lost copy, a
+    /// record rot a rotted record, and a double fault the park its plan
+    /// reserved, which the journal's verdict makes terminal (#351).
+    pub(crate) fn note_landed(&mut self, key: &str, injection: &Injection) {
         self.injections += 1;
         if injection.outage {
             return;
@@ -345,7 +348,7 @@ impl StorageWorld {
             Family::RecordRot(slot) => {
                 self.rotted.entry(key.to_string()).or_default().insert(slot);
             }
-            Family::DoubleFault(_) => self.reserve_park(key, node, injection.clone()),
+            Family::DoubleFault(_) => self.park_landed(key, injection.clone()),
             Family::MetaRot | Family::HeaderRot => {}
         }
     }
@@ -396,6 +399,7 @@ impl StorageWorld {
         &mut self,
         loss: LossShape,
         decided: &BTreeMap<u64, Vec<u64>>,
+        keeps: &dyn Fn(u64, &[String]) -> bool,
     ) -> Option<PlannedLoss> {
         if self.cluster_size == 0 {
             return None;
@@ -469,7 +473,7 @@ impl StorageWorld {
                 holders.len()
             }
             .saturating_sub(keep),
-            _ => self.clean_copies(slot).saturating_sub(self.quorum()),
+            _ => self.usual_loss(slot, &damageable, keeps),
         }
         .min(damageable.len());
         if count == 0 {
@@ -485,7 +489,7 @@ impl StorageWorld {
             self.marks.entry(key.clone()).or_default().insert(slot);
             self.pending.insert(key.clone(), slot);
         }
-        if self.clean_copies(slot) < self.quorum() {
+        if self.clean_copies(slot) < self.quorum() || !keeps(slot, &self.lost_with(slot, &[])) {
             self.lossy.insert(slot);
             assert_reachable!("storage: an outage spends the loss budget");
         }
@@ -502,6 +506,40 @@ impl StorageWorld {
             holders: holders.iter().map(|(_, node, _)| *node).collect(),
             damaged: damaged.iter().map(|(_, node)| *node).collect(),
         })
+    }
+
+    /// How many of `damageable`'s copies of `slot` an outage outside the
+    /// loss budget loses: down to a quorum of clean copies, and never below
+    /// the copies the journal's shard needs (`keeps`, #760 (moonpool owns
+    /// fault placement)). The damage lands past the gate, and the
+    /// configuration floor's quorum is less than a grown pool's: witness
+    /// 15555488400013153756 on #774 (moonpool places the harness faults),
+    /// where a fourth member made the need 3 and the plan left 2.
+    fn usual_loss(
+        &self,
+        slot: u64,
+        damageable: &[(String, u64)],
+        keeps: &dyn Fn(u64, &[String]) -> bool,
+    ) -> usize {
+        let mut count = self
+            .clean_copies(slot)
+            .saturating_sub(self.quorum())
+            .min(damageable.len());
+        while count > 0 && !keeps(slot, &self.lost_with(slot, &damageable[..count])) {
+            count -= 1;
+        }
+        count
+    }
+
+    /// The stores whose copy of `slot` is lost, with `more`: what a shard's
+    /// need is judged against.
+    fn lost_with(&self, slot: u64, more: &[(String, u64)]) -> Vec<String> {
+        self.marks
+            .iter()
+            .filter(|(_, marks)| marks.contains(&slot))
+            .map(|(key, _)| key.clone())
+            .chain(more.iter().map(|(key, _)| key.clone()))
+            .collect()
     }
 
     /// Whether the custody ledger holds a decided slot a loss could leave
@@ -781,6 +819,15 @@ impl StorageWorld {
     fn plan_one(&mut self, key: &str) -> Option<Injection> {
         let custody = self.custody.get(key)?.clone();
         if !custody.settled || self.parked.contains_key(key) {
+            return None;
+        }
+        // An outage's planned loss on another store has not landed yet, so
+        // the gate cannot see it (#760 (moonpool owns fault placement)): no
+        // family aims until it lands. Witness 15555488400013153756 on #774
+        // (moonpool places the harness faults): an entry rot took a copy the
+        // gate judged spare, then the planned loss took a second one.
+        if self.pending.keys().any(|other| other != key) {
+            assert_reachable!("journal store: an injection waits for an outage's planned loss");
             return None;
         }
         let pick = |slots: &[u64]| -> Option<u64> {
