@@ -918,18 +918,6 @@ pub const RARE: &[Rare] = &[
         reason: "the copy budget never plans a double fault: fired on none of 810 hunt seeds (#485)",
     },
     Rare {
-        msg: "journal store: a double fault's apply stops halfway",
-        reason: "the copy budget never plans a double fault: fired on none of 810 hunt seeds (#485)",
-    },
-    Rare {
-        msg: "journal store: a kill lands inside an injection",
-        reason: "the copy budget never plans a double fault: fired on none of 810 hunt seeds (#485)",
-    },
-    Rare {
-        msg: "journal store: a kill lands before an injection is synced",
-        reason: "marginal: fired on 10 of 810 hunt seeds (#486)",
-    },
-    Rare {
         msg: "storage: a peer's floor passes the lagging acceptor's prefix",
         reason: "marginal: fired on 5 of 810 hunt seeds (#486)",
     },
@@ -938,24 +926,12 @@ pub const RARE: &[Rare] = &[
         reason: "marginal: fired on 1 of 810 hunt seeds (#486)",
     },
     Rare {
-        msg: "storage: a double fault that never landed whole releases its park",
-        reason: "the copy budget never plans a double fault: fired on none of 810 hunt seeds (#485)",
-    },
-    Rare {
         msg: "gc: a retirement is withheld while a reconfiguration naming the node may be registered above its floor",
         reason: "marginal: fired on 7 of 810 hunt seeds (#486)",
     },
     Rare {
-        msg: "journal store: an unconfirmed double fault refuses the journal",
-        reason: "the copy budget never plans a double fault: fired on none of 810 hunt seeds (#485)",
-    },
-    Rare {
         msg: "journal store: a crash tears a batch the journal discards",
         reason: "marginal: fired on none of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "journal store: a machine loses power inside a batched commit",
-        reason: "marginal: 66 cuts in 1,000 hunt seeds, on about one seed in a hundred: a hint location inside moonpool-journal's commit is active on half the runs and no scenario can force it (moonpool#340 (hint! activation a harness can force per seed); #599 (durability mode per journal))",
     },
     Rare {
         msg: "journal store: a batched journal boots with its last batch lost",

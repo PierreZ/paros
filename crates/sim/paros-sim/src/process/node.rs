@@ -218,7 +218,15 @@ pub(super) async fn run_acceptor(
             && seats.len() == 1
             && crate::in_chaos()
             && moonpool_sim::buggify_with_prob!(f64::from(shape.wipe_pct) / 100.0);
+        // Moonpool's shard gate judges the loss too (#760 (moonpool owns
+        // fault placement)), and counts the node lost from then on.
         if wipe
+            && seats[0]
+                .world
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .may_wipe(my_ip)
+            && ctx.storage().lose_replica().unwrap_or(false)
             && seats[0]
                 .world
                 .lock()

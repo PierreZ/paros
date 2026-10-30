@@ -188,12 +188,9 @@ impl JournalStores for SimStores<'_> {
             journal,
             Arc::downgrade(&seat.world),
             self.ip.to_string(),
-            self.ctx.state().clone(),
             seat.checker.clone(),
             crate::world::node_store::DamagePolicy {
                 chaotic,
-                cut_budget: (layout.durability == paros::storage::journal::Durability::Batched)
-                    .then(|| seat.floor.saturating_sub(seat.clean_copies)),
                 inject: !seat.quiet,
             },
             provider.clone(),

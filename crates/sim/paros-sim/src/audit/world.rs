@@ -1000,6 +1000,7 @@ impl AuditWorld {
 #[tracing::instrument(level = "debug", skip_all)]
 pub(crate) fn check_run(
     state: &StateHandle,
+    shards: &moonpool_sim::Shards,
     journal: paros::core::journal::JournalIdentifier,
     history: &ClientHistory,
     clients: usize,
@@ -1007,7 +1008,7 @@ pub(crate) fn check_run(
     let audit = audit_world_for(state, journal);
     audit.check_client_history(history, clients);
     audit.check_gates();
-    crate::world::check_storage_gates(state, journal);
+    crate::world::check_storage_gates(state, shards, journal);
     super::journals::lock(&super::journals::journal_board(state)).check_gates();
     super::system::lock(&super::system::system_board(state)).check_gates();
     super::tenants::lock(&super::tenants::tenant_board(state)).check_gates();

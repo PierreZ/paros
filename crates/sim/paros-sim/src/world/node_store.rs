@@ -1,8 +1,9 @@
 //! An acceptor's store (#187, #261): the library's shipped
 //! [`JournalStorage`] over the simulated disk (`SimStorageProvider`), the
 //! store a real deployment runs, under moonpool's crash physics, the power
-//! cuts its own `hint!`s ask for (budgeted by [`super::cut`]) and the
-//! ledgered injector ([`super::injector`]).
+//! cuts its own `hint!`s ask for (placed by moonpool's shard gate, #760
+//! (moonpool owns fault placement)) and the ledgered injector
+//! ([`super::injector`]).
 //!
 //! What the world owns beside it is the operator's **provisioning ledger**
 //! (#147), which [`LedgeredJournal`] keeps: the journal's format
@@ -14,7 +15,7 @@
 
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 
-use moonpool_sim::{SimStorageProvider, StateHandle, assert_reachable};
+use moonpool_sim::{SimStorageProvider, assert_reachable};
 use paros::core::Ballot;
 use paros::core::Config;
 use paros::core::HardState;
@@ -28,7 +29,6 @@ use paros::storage::StorageError;
 use paros::storage::journal::JournalStorage;
 
 use super::StorageWorld;
-use super::cut::{Budget, InFlight, Owner};
 use crate::audit::AuditWorld;
 
 /// The journal store, keeping the world's provisioning ledger in step with
@@ -39,9 +39,6 @@ pub(crate) struct LedgeredJournal {
     ip: String,
     /// A format was staged and its sync has not returned yet.
     format_pending: bool,
-    /// The run's state: where a commit in flight registers for the cut's
-    /// budget ([`super::cut`]).
-    state: StateHandle,
     /// Whether the injector's damage may land on this store while the
     /// run's chaos lasts (a quiet store never takes it).
     chaotic: bool,
@@ -54,98 +51,58 @@ pub(crate) struct LedgeredJournal {
     inject: bool,
     /// The simulated disk the journal lives on: the injector damages it.
     provider: SimStorageProvider,
-    /// Lost copies a power cut may leave (a `Batched` commit's ambiguous
-    /// last batch) budgeted by the world ([`super::cut`]): `None` on an `Ordered` store,
-    /// whose cut commit is torn or whole, never ambiguous; else the
-    /// distinct acceptors the journal's quorum system tolerates losing.
-    cut_budget: Option<usize>,
 }
 
-/// How a boot's injection is judged against the journal's verdict.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Judging {
-    /// No injection, or one that never confirmed and holds no park.
-    Skip,
-    /// Every write and sync confirmed: the family's verdict is exact.
-    Landed,
-    /// A double fault that never confirmed (#351): it may have landed
-    /// whole, in part or not at all, so the verdict decides its park.
-    Uncertain,
-}
-
-/// What damage a [`LedgeredJournal`] takes: its power cuts' copy budget,
-/// whether the ledgered injector aims at it, and until when.
+/// What damage a [`LedgeredJournal`] takes: whether the ledgered injector
+/// aims at it, and until when.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct DamagePolicy {
     /// Whether the injector may damage the store while the run's chaos
     /// lasts: false for a quiet store.
     pub(crate) chaotic: bool,
-    /// See [`LedgeredJournal`]'s `cut_budget`.
-    pub(crate) cut_budget: Option<usize>,
     /// See [`LedgeredJournal`]'s `inject`.
     pub(crate) inject: bool,
 }
 
 impl LedgeredJournal {
     /// The ledgered injector (#261) at one boot: at most one family's
-    /// damage, aimed by the custody ledger, applied before the journal
-    /// opens and judged against what it reports. Returns the injection and
-    /// how its verdict is judged.
-    async fn damage(&mut self) -> (Option<super::injector::Injection>, Judging) {
-        // A double fault a boot planned and its journal never judged is
+    /// damage, aimed by the custody ledger, placed through moonpool's gate
+    /// before the journal opens and judged against what it reports.
+    async fn damage(&mut self) -> Option<super::injector::Injection> {
+        // A double fault that landed and its journal never judged is
         // judged now (#351): a second apply would flip its bytes back.
         let pending = self.world.upgrade().and_then(|w| {
             w.lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .unjudged(&self.ip)
         });
-        if let Some(reserved) = pending {
-            let judging = if reserved.landed {
-                Judging::Landed
-            } else {
-                Judging::Uncertain
-            };
-            return (Some(reserved.injection), judging);
+        if pending.is_some() {
+            return pending;
         }
-        let injection = if self.inject {
-            let (ip, node, in_chaos) = (
-                self.ip.clone(),
-                self.node,
-                self.chaotic && crate::in_chaos(),
-            );
-            self.world.upgrade().and_then(|w| {
-                w.lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .plan_boot_damage(&ip, node, in_chaos)
-            })
-        } else {
-            None
-        };
-        let Some(injection) = injection else {
-            return (None, Judging::Skip);
-        };
-        if super::injector::apply(&self.provider, &injection).await {
-            let ip = self.ip.clone();
-            self.with_world(|w| {
-                w.note_applied(&ip);
-                w.note_flip_synced(&ip);
-            });
-            (Some(injection), Judging::Landed)
-        } else if injection.double_fault().is_some() {
-            // The reserved park waits for the journal's verdict.
-            (Some(injection), Judging::Uncertain)
-        } else {
-            // Any other family that never confirmed may or may not have
-            // landed; the open may repair it either way. Not judged.
-            (Some(injection), Judging::Skip)
+        if !self.inject {
+            return None;
         }
+        let (ip, node, in_chaos) = (
+            self.ip.clone(),
+            self.node,
+            self.chaotic && crate::in_chaos(),
+        );
+        let injection = self.world.upgrade().and_then(|w| {
+            w.lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .plan_boot_damage(&ip, node, in_chaos)
+        })?;
+        if !super::injector::apply(&self.provider, &injection).await {
+            return None;
+        }
+        self.with_world(|w| w.note_landed(&ip, node, &injection));
+        Some(injection)
     }
 
     pub(crate) fn new(
         inner: JournalStorage<SimStorageProvider>,
         world: Weak<Mutex<StorageWorld>>,
         ip: String,
-        state: StateHandle,
         checker: Arc<AuditWorld>,
         damage: DamagePolicy,
         provider: SimStorageProvider,
@@ -161,9 +118,7 @@ impl LedgeredJournal {
         }
         Self {
             node,
-            state,
             chaotic: damage.chaotic,
-            cut_budget: damage.cut_budget,
             inject: damage.inject,
             provider,
             inner,
@@ -221,7 +176,7 @@ impl Storage for LedgeredJournal {
 impl LogStorage for LedgeredJournal {
     #[tracing::instrument(level = "debug", skip_all)]
     async fn boot_scan(&mut self) -> Result<(), StorageError> {
-        let (injection, judging) = self.damage().await;
+        let injection = self.damage().await;
         // An open writes too (moonpool-journal's `begin_generation` rewrites
         // both metainfo copies; a header or record repair rewrites its
         // region), so a kill inside it may tear a copy the last sync left
@@ -237,7 +192,7 @@ impl LogStorage for LedgeredJournal {
         // that carried an injection re-opens, as the driver's
         // quarantine would, until the journal gives its verdict.
         let mut retries = 0;
-        while judging != Judging::Skip
+        while injection.is_some()
             && retries < super::injector::REOPEN_ATTEMPTS
             && matches!(
                 scanned,
@@ -254,28 +209,7 @@ impl LogStorage for LedgeredJournal {
             .iter()
             .map(|(slot, _)| slot.0)
             .collect();
-        if let Some(slot) = injection
-            .as_ref()
-            .and_then(super::injector::Injection::double_fault)
-            && judging == Judging::Uncertain
-            && !matches!(
-                scanned,
-                Err(StorageError::Io { .. } | StorageError::FsyncFailed { .. })
-            )
-        {
-            // A double fault that may have landed in part (#351): a refusal
-            // is the damage landed whole, a crash decision like any other;
-            // an open is the reserved park released.
-            if refused {
-                self.with_world(StorageWorld::note_injected);
-                self.with_world(StorageWorld::note_injected_crash);
-                assert_reachable!("journal store: an unconfirmed double fault refuses the journal");
-            }
-            let (ip, lost) = (self.ip.clone(), faulty.contains(&slot));
-            self.with_world(|w| w.judged(&ip, refused, slot, lost));
-        }
-        if let Some(injection) = injection.as_ref().filter(|_| judging == Judging::Landed) {
-            self.with_world(StorageWorld::note_injected);
+        if let Some(injection) = injection.as_ref() {
             let crashed = super::injector::judge(
                 injection,
                 &scanned,
@@ -287,9 +221,9 @@ impl LogStorage for LedgeredJournal {
             if crashed {
                 self.with_world(StorageWorld::note_injected_crash);
             }
-            if let Some(slot) = injection.double_fault() {
-                let (ip, lost) = (self.ip.clone(), faulty.contains(&slot));
-                self.with_world(|w| w.judged(&ip, refused, slot, lost));
+            if injection.double_fault().is_some() {
+                let ip = self.ip.clone();
+                self.with_world(|w| w.judged(&ip, refused));
             }
             // An outage's planned loss landed: the journal's own verdict is
             // the audit's ground truth that this copy is gone (#263).
@@ -369,29 +303,10 @@ impl LogStorage for LedgeredJournal {
     }
 
     async fn sync(&mut self, must_sync: MustSync) -> Result<(), StorageError> {
-        let writes = self.inner.staged_entries() > 0;
         let slots: Vec<Slot> = self.inner.staged_slots().collect();
         let ip = self.ip.clone();
         self.with_world(|w| w.note_sync_started(&ip));
-        // A commit that writes entries is in flight until the sync returns:
-        // a hint that kills the process now spends its copy budget.
-        let in_flight = writes.then(|| {
-            let budget = self
-                .cut_budget
-                .map_or(Budget::Free, |tolerated| Budget::Node {
-                    tolerated,
-                    slots: slots.iter().map(|slot| slot.0).collect(),
-                });
-            InFlight::open(
-                &self.state,
-                &self.ip,
-                Owner::Node,
-                budget,
-                self.world.clone(),
-            )
-        });
         let synced = self.inner.sync(must_sync).await;
-        drop(in_flight);
         self.ledger(synced)?;
         // The custody ledger (#261): where what this sync wrote now
         // lives, the floor, the metainfo and header copies.

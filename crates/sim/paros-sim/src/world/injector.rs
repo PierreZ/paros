@@ -18,11 +18,19 @@
 //!
 //! | Family | Damage | Budget | The journal's verdict |
 //! |---|---|---|---|
-//! | entry rot | a slot's entry | a lost copy: [`StorageWorld::may_corrupt_record`] | the slot reported faulty (CTRL's recoverable class) |
-//! | record rot | a slot's persist record | none: repaired locally | the record rebuilt from its entry |
-//! | double fault | both, outside the last batch | a lost node: [`StorageWorld::may_park`] | the journal refuses to open (`DoubleFault`), the node parked |
-//! | metainfo rot | one metainfo copy | none: repaired from its twin | the copy repaired |
-//! | header rot | one segment header copy | none: repaired from its twin | the header repaired |
+//! | entry rot | a slot's entry | a lost copy: moonpool's shard gate | the slot reported faulty (CTRL's recoverable class) |
+//! | record rot | a slot's persist record | moonpool's shard gate | the record rebuilt from its entry |
+//! | double fault | both, outside the last batch | a lost node: [`StorageWorld::may_park`] and the gate | the journal refuses to open (`DoubleFault`), the node parked |
+//! | metainfo rot | one metainfo copy | moonpool's shard gate | the copy repaired |
+//! | header rot | one segment header copy | moonpool's shard gate | the header repaired |
+//!
+//! **Moonpool places the damage** (#760 (moonpool owns fault placement)):
+//! the flip goes through `SimStorageProvider::corrupt_bytes`, which the
+//! shard gate refuses when the journal's configurations in force would keep
+//! too few clean copies of the slot. The simulator then sees the damage, so
+//! its own crashes and rot never take the copies it leaves. A double fault
+//! gives the whole node up, so it asks `SimStorageProvider::lose_replica`
+//! first. A refused flip is no injection.
 //!
 //! **The ground truth** is the injection set against the journal's own
 //! verdicts at open ([`judge`]): every injected damage resolves to exactly the
@@ -31,17 +39,12 @@
 //! never touches the last batch, where the journal reads a doubly damaged
 //! slot as a torn, unacknowledged write and would drop an acknowledged vote.
 //! A planned injection unsettles its custody until the journal opens again
-//! (#441 (metainfo twin)): a boot that dies inside the apply leaves bytes the
-//! ledger can no longer vouch for, and a `hint!` between the flip's write
-//! and its sync makes that kill common.
+//! (#441 (metainfo twin)): an open that fails leaves the damage unread, and
+//! no family aims at that layout again until one succeeds.
 //!
-//! **A double fault's park is reserved, then judged** (#351). The plan
-//! reserves the park against the dead-node budget before any byte changes.
-//! An apply that fails, or a process that dies during it, may leave the
-//! damage whole, in part or absent, so the next verdict decides: a refused
-//! open makes the park terminal, any other releases it
-//! ([`StorageWorld::judged`]). A BUGGIFY location stops an apply halfway
-//! ([`apply`]) so that path is common, not a one-in-thousands seed.
+//! **A double fault's park waits for its verdict** (#351): the node boots
+//! again, and the journal's refusal makes the park terminal
+//! ([`StorageWorld::judged`]).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -70,74 +73,9 @@ const P_HEADER_ROT: f64 = 0.15;
 const FLIPPED: u64 = 8;
 const FLIPPED_AT: u64 = 8;
 
-/// The other slots whose bytes share a sector with a flip: moonpool's crash
-/// damage resolves a dirty sector whole (`SECTOR_SIZE`), so a process killed
-/// between a flip's write and its sync may damage every slot that sector
-/// holds, not only the flipped one. Records are 64 bytes and entries are
-/// packed, so a sector holds several of each.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct Exposure {
-    /// The slots whose persist record shares a flipped sector.
-    records: BTreeSet<u64>,
-    /// The slots whose entry shares a flipped sector.
-    entries: BTreeSet<u64>,
-    /// Whether a damaged copy the custody no longer holds shares a flipped
-    /// sector (see [`Custody::stale`]).
-    stale: bool,
-}
-
-impl Exposure {
-    /// The sector neighbours of a flip of `regions` in `custody`, `slot`
-    /// (the flipped slot, if any) aside.
-    fn of(custody: &Custody, slot: Option<u64>, regions: &[LayoutRegion]) -> Self {
-        let sector = moonpool_sim::SECTOR_SIZE as u64;
-        let spans: Vec<(&str, std::ops::Range<u64>)> = regions
-            .iter()
-            .map(|region| {
-                let at = region.bytes.start + FLIPPED_AT;
-                let span = (at / sector * sector)..(at + FLIPPED).div_ceil(sector) * sector;
-                (region.path.as_str(), span)
-            })
-            .collect();
-        let hit = |region: &LayoutRegion| {
-            spans.iter().any(|(path, span)| {
-                *path == region.path
-                    && region.bytes.start < span.end
-                    && span.start < region.bytes.end
-            })
-        };
-        let mut exposure = Exposure::default();
-        for (held, layout) in custody.records.iter().filter(|(s, _)| Some(**s) != slot) {
-            if hit(&layout.record) {
-                exposure.records.insert(*held);
-            }
-            if hit(&layout.entry) {
-                exposure.entries.insert(*held);
-            }
-        }
-        exposure.stale = custody
-            .stale
-            .iter()
-            .any(|layout| hit(&layout.record) || hit(&layout.entry));
-        // Every span covers its own flipped bytes.
-        assert_always!(
-            spans
-                .iter()
-                .all(|(_, span)| span.end - span.start >= FLIPPED),
-            "journal store: a flipped sector span covers its flip"
-        );
-        exposure
-    }
-
-    /// Every slot the flip may damage besides its own.
-    fn slots(&self) -> impl Iterator<Item = u64> + '_ {
-        self.records.union(&self.entries).copied()
-    }
-}
-
-/// How many times the damage's own write and sync are retried: moonpool's
-/// storage chaos fails a sync or shortens a transfer now and then, never for
-/// long. An injection that never confirms is uncertain and not judged.
+/// How many times a flush before the damage is retried: moonpool's storage
+/// chaos fails a sync now and then, never for long. A flush that never
+/// confirms leaves the store undamaged.
 const WRITE_ATTEMPTS: usize = 64;
 
 /// How many times a boot that carried an injection re-opens its journal
@@ -155,23 +93,13 @@ pub(crate) struct Custody {
     /// layout below what the disk holds.
     settled: bool,
     /// Whether an injection was planned since the journal last opened: a
-    /// boot that finds it still set follows one that died inside an apply,
-    /// or whose open failed (#441 (metainfo twin)).
+    /// boot that finds it still set follows one whose open failed (#441
+    /// (metainfo twin)).
     injected: bool,
     /// The journal's floor: nothing below it is targeted.
     first: u64,
     /// Where each held slot's persist record and entry live.
     records: BTreeMap<u64, Layout>,
-    /// The damaged copies (a lost entry or a rotted record) the custody no
-    /// longer holds, in a segment the journal still has: a floor passed
-    /// the slot, or a rewrite put it at a new place. The journal still
-    /// judges every persist record of a live segment at open, and it
-    /// rewrites none outside its last batch, so the damage stays. A flip
-    /// whose sector holds one of them may complete a double fault no
-    /// budget permitted, so none is planned. Witness 16919860385643220324
-    /// (recipe 41314:1687730448808971088) on dd9d1de: a node refused its
-    /// journal at 52 boots in a row, and the ledger had planned no fault.
-    stale: Vec<Layout>,
     /// The slots of the last batch that wrote entries.
     last_batch: BTreeSet<u64>,
     /// The two metainfo copies.
@@ -219,16 +147,6 @@ pub(crate) struct Injection {
 }
 
 impl Injection {
-    /// The slot the injection aims at, for a family that aims at one.
-    fn slot(&self) -> Option<u64> {
-        match self.family {
-            Family::EntryRot(slot) | Family::RecordRot(slot) | Family::DoubleFault(slot) => {
-                Some(slot)
-            }
-            Family::MetaRot | Family::HeaderRot => None,
-        }
-    }
-
     /// The slot a double fault damages, if this is one.
     pub(crate) fn double_fault(&self) -> Option<u64> {
         match self.family {
@@ -280,36 +198,15 @@ impl StorageWorld {
         regions: &[LayoutRegion],
         rewritten: bool,
     ) {
-        let (marks, rotted) = (self.marks.get(key), self.rotted.get(key));
-        let damaged = |slot: &u64| {
-            marks.is_some_and(|m| m.contains(slot)) || rotted.is_some_and(|r| r.contains(slot))
-        };
         let custody = self.custody.entry(key.to_string()).or_default();
         custody.node = node;
         if !written.is_empty() {
             custody.last_batch = written.iter().map(|(slot, _)| *slot).collect();
         }
         let slots: Vec<u64> = written.iter().map(|(slot, _)| *slot).collect();
-        for (slot, at) in &written {
-            if let Some(old) = custody.records.get(slot)
-                && old != at
-                && damaged(slot)
-            {
-                custody.stale.push(old.clone());
-            }
-        }
         custody.records.extend(written);
         custody.first = custody.first.max(first);
-        let held = custody.records.split_off(&custody.first);
-        for (slot, old) in std::mem::replace(&mut custody.records, held) {
-            if damaged(&slot) {
-                custody.stale.push(old);
-            }
-        }
-        let live: BTreeSet<&str> = regions.iter().map(|r| r.path.as_str()).collect();
-        custody
-            .stale
-            .retain(|layout| live.contains(layout.record.path.as_str()));
+        custody.records = custody.records.split_off(&custody.first);
         custody.meta = regions
             .iter()
             .filter(|r| r.kind == Layout::META)
@@ -348,12 +245,11 @@ impl StorageWorld {
     /// A journal store at `key` opened: its custody is what the journal now
     /// holds (`layouts`, every slot it reports), the floor `first` and its
     /// `regions`. A commit whose sync was cut may have landed, so a boot is
-    /// where the ledger learns it; nothing is a mark's business here, since
-    /// only a rewrite clears one. `faulty` are the slots the open reported
+    /// where the ledger learns it. `faulty` are the slots the open reported
     /// faulty: their entry is damaged on disk (a cut commit's ambiguous last
-    /// batch keeps its records and loses its entries), so until a rewrite
-    /// no family aims at them (see `rotted`): a record rot there is a
-    /// double fault no budget permitted.
+    /// batch keeps its records and loses its entries), a lost copy until a
+    /// rewrite, and no family aims at them (see `rotted`): a record rot
+    /// there is a double fault no budget permitted.
     pub(crate) fn note_opened(
         &mut self,
         key: &str,
@@ -377,43 +273,18 @@ impl StorageWorld {
                 .filter(|(slot, at)| custody.records.get(slot) != Some(at))
                 .map(|(slot, _)| *slot),
         );
-        let (marks, rotted) = (self.marks.get(key), self.rotted.get(key));
-        for (slot, old) in std::mem::take(&mut custody.records) {
-            let moved = !layouts.iter().any(|(s, at)| *s == slot && *at == old);
-            if moved
-                && (marks.is_some_and(|m| m.contains(&slot))
-                    || rotted.is_some_and(|r| r.contains(&slot)))
-            {
-                custody.stale.push(old);
-            }
-        }
+        custody.records.clear();
         self.ledger_custody(key, node, layouts, first, regions, false);
         if let Some(custody) = self.custody.get_mut(key) {
             custody.last_batch = last_batch;
         }
         let damaged: Vec<u64> = faulty.iter().copied().filter(|s| *s >= first).collect();
-        self.settle_cut_marks(key, faulty);
-        // A flip that never synced may have taken its whole sector: its
-        // neighbours' records may be damaged on disk (rebuilt in memory
-        // only, as a record rot's), and an entry the open reports faulty is
-        // a lost copy. Witness 13922779119779744936 (recipe
-        // 531950:9726856619194462578) on 47ce75b: an entry rot killed before
-        // its sync damaged the entry of a slot whose record a released
-        // double fault had left rotted, so the journal refused to open.
-        if let Some(exposure) = self.exposed.remove(key) {
-            assert_reachable!("journal store: a flip that never synced exposes its sector");
-            let lost: Vec<u64> = exposure
-                .entries
-                .iter()
-                .copied()
-                .filter(|slot| *slot >= first && faulty.contains(slot))
-                .collect();
-            self.marks.entry(key.to_string()).or_default().extend(lost);
-            self.rotted
-                .entry(key.to_string())
-                .or_default()
-                .extend(exposure.slots().filter(|slot| *slot >= first));
-        }
+        // A faulty entry is a lost copy (a crash tore the last batch, or
+        // rot took it), until a rewrite: the wipe budget counts it.
+        self.marks
+            .entry(key.to_string())
+            .or_default()
+            .extend(damaged.iter().copied());
         if !damaged.is_empty() {
             self.rotted
                 .entry(key.to_string())
@@ -424,16 +295,14 @@ impl StorageWorld {
 
     /// Plan this boot's injection for the journal store at `key` (node
     /// `node`): the copy an outage's plan lost, which every boot after it
-    /// applies, else — only `in_chaos` — a family that fires and whose
-    /// budget allows (see the module doc). A permitted entry rot marks the
-    /// copy lost; a permitted double fault parks the node, before the
-    /// journal ever opens.
+    /// applies, else — only `in_chaos` — a family that fires (see the
+    /// module doc). What it costs is recorded once it lands
+    /// ([`Self::note_landed`]).
     ///
     /// A planned injection unsettles the custody (#441 (metainfo twin)):
-    /// its apply changes bytes the ledger vouches for, and a process that
-    /// dies inside it leaves them flipped, in part or not at all. Until
-    /// the journal's next open reports what the disk holds
-    /// ([`Self::note_opened`]), no family aims at that layout again.
+    /// its apply changes bytes the ledger vouches for. Until the journal's
+    /// next open reports what the disk holds ([`Self::note_opened`]), no
+    /// family aims at that layout again.
     /// Witness: a boot died while it flipped one metainfo copy, and the
     /// next boot flipped the other, so the journal refused to open
     /// (seed 16594478988965922038 on #434 (matchmakers everywhere)). With a
@@ -457,44 +326,28 @@ impl StorageWorld {
         if let Some(custody) = custody {
             custody.settled = false;
             custody.injected = true;
-            let exposure = Exposure::of(custody, injection.slot(), &injection.regions);
-            self.exposed.insert(key.to_string(), exposure);
         }
         Some(injection)
     }
 
-    /// `key`'s planned flip synced: its sector neighbours are as they were.
-    pub(crate) fn note_flip_synced(&mut self, key: &str) {
-        self.exposed.remove(key);
-    }
-
-    /// Whether a flip of `regions` aimed at `slot` of `key` may damage its
-    /// sector neighbours too (see [`Exposure`]): none has a lost entry or a
-    /// rotted record already, so no neighbour becomes a double fault no
-    /// budget permitted, and the budget permits each entry it may lose.
-    fn sectors_permit(
-        &self,
-        key: &str,
-        custody: &Custody,
-        slot: u64,
-        regions: &[LayoutRegion],
-    ) -> bool {
-        let exposure = Exposure::of(custody, Some(slot), regions);
-        let marked = self.marks.get(key);
-        let rotted = self.rotted.get(key);
-        let permitted = !exposure.stale
-            && exposure.slots().all(|neighbour| {
-                !marked.is_some_and(|m| m.contains(&neighbour))
-                    && !rotted.is_some_and(|r| r.contains(&neighbour))
-            })
-            && exposure
-                .entries
-                .iter()
-                .all(|neighbour| self.may_corrupt_record(key, *neighbour));
-        if !permitted {
-            assert_reachable!("journal store: a flip's sector neighbour refuses it");
+    /// `key`'s planned `injection` landed (node `node`): an entry rot is a
+    /// lost copy, a record rot a rotted record, and a double fault a park
+    /// the journal's verdict makes terminal (#351).
+    pub(crate) fn note_landed(&mut self, key: &str, node: u64, injection: &Injection) {
+        self.injections += 1;
+        if injection.outage {
+            return;
         }
-        permitted
+        match injection.family {
+            Family::EntryRot(slot) => {
+                self.marks.entry(key.to_string()).or_default().insert(slot);
+            }
+            Family::RecordRot(slot) => {
+                self.rotted.entry(key.to_string()).or_default().insert(slot);
+            }
+            Family::DoubleFault(_) => self.reserve_park(key, node, injection.clone()),
+            Family::MetaRot | Family::HeaderRot => {}
+        }
     }
 
     /// [`Self::plan_boot_damage`]'s choice, before it unsettles the custody.
@@ -521,13 +374,13 @@ impl StorageWorld {
         }
         if self.custody.get(key).is_some_and(|c| c.injected) {
             // The boot the unsettled custody guards: the bytes an earlier
-            // apply flipped are unknown until the journal opens.
+            // apply flipped are unread until the journal opens.
             assert_reachable!(
                 "journal store: a boot after an interrupted injection aims at nothing"
             );
             return None;
         }
-        self.plan_one(key, node)
+        self.plan_one(key)
     }
 
     /// Plan a correlated outage's loss in this journal (#263, see
@@ -924,14 +777,8 @@ impl StorageWorld {
         self.lossy.contains(&slot) || self.lossy.len() < budget
     }
 
-    /// A planned injection landed: its writes and sync confirmed. Only
-    /// damage that landed counts toward the exercised-corruption gates.
-    pub(crate) fn note_injected(&mut self) {
-        self.injections += 1;
-    }
-
     /// [`Self::plan_boot_damage`]'s draw.
-    fn plan_one(&mut self, key: &str, node: u64) -> Option<Injection> {
+    fn plan_one(&mut self, key: &str) -> Option<Injection> {
         let custody = self.custody.get(key)?.clone();
         if !custody.settled || self.parked.contains_key(key) {
             return None;
@@ -981,24 +828,14 @@ impl StorageWorld {
         // last in the order, it fired on 1 of 2,000 hunt seeds, too rare
         // to reach a reserved park whose apply never landed whole.
         if buggify_with_prob!(0.5)
-            && let Some(injection) = self.plan_double_fault(key, node, &custody, &whole)
+            && let Some(injection) = self.plan_double_fault(key, &custody, &whole)
         {
             assert_reachable!("journal store: a boot rolls the double fault first");
             return Some(injection);
         }
         if buggify_with_prob!(P_ENTRY_ROT)
             && let Some(slot) = aim(&whole)
-            && self.may_corrupt_record(key, slot)
-            && self.sectors_permit(key, &custody, slot, &[custody.records[&slot].entry.clone()])
         {
-            self.marks.entry(key.to_string()).or_default().insert(slot);
-            // The budget's own claim, at injection: the copy left behind is
-            // within it.
-            assert_always!(
-                self.clean_copies(slot) >= self.quorum(),
-                "journal store: an injected entry rot keeps a clean quorum of copies",
-                { "node" => node, "slot" => slot }
-            );
             return Some(Injection {
                 family: Family::EntryRot(slot),
                 regions: vec![custody.records[&slot].entry.clone()],
@@ -1007,14 +844,7 @@ impl StorageWorld {
         }
         if buggify_with_prob!(P_RECORD_ROT)
             && let Some(slot) = pick(&whole)
-            && self.sectors_permit(
-                key,
-                &custody,
-                slot,
-                &[custody.records[&slot].record.clone()],
-            )
         {
-            self.rotted.entry(key.to_string()).or_default().insert(slot);
             return Some(Injection {
                 family: Family::RecordRot(slot),
                 regions: vec![custody.records[&slot].record.clone()],
@@ -1022,7 +852,7 @@ impl StorageWorld {
             });
         }
         if buggify_with_prob!(P_DOUBLE_FAULT)
-            && let Some(injection) = self.plan_double_fault(key, node, &custody, &whole)
+            && let Some(injection) = self.plan_double_fault(key, &custody, &whole)
         {
             return Some(injection);
         }
@@ -1049,29 +879,12 @@ impl StorageWorld {
 
 impl StorageWorld {
     /// A double fault on a `whole` slot of `custody` outside its last
-    /// batch, when the dead-node budget permits a park: the plan reserves
-    /// it (#351), since the damage may never land whole and only the
-    /// journal's refusal makes it terminal.
-    fn plan_double_fault(
-        &mut self,
-        key: &str,
-        node: u64,
-        custody: &Custody,
-        whole: &[u64],
-    ) -> Option<Injection> {
+    /// batch, when the dead-node budget permits a park.
+    fn plan_double_fault(&self, key: &str, custody: &Custody, whole: &[u64]) -> Option<Injection> {
         let settled: Vec<u64> = whole
             .iter()
             .copied()
             .filter(|slot| !custody.last_batch.contains(slot))
-            .filter(|slot| {
-                let layout = &custody.records[slot];
-                self.sectors_permit(
-                    key,
-                    custody,
-                    *slot,
-                    &[layout.record.clone(), layout.entry.clone()],
-                )
-            })
             .collect();
         if settled.is_empty() || !self.may_park(key) {
             return None;
@@ -1079,115 +892,93 @@ impl StorageWorld {
         let at = moonpool_sim::sim_random_range(0..settled.len() as u64);
         let slot = settled[usize::try_from(at).unwrap_or(0)];
         let layout = &custody.records[&slot];
-        let injection = Injection {
+        Some(Injection {
             family: Family::DoubleFault(slot),
             regions: vec![layout.record.clone(), layout.entry.clone()],
             outage: false,
-        };
-        self.reserve_park(key, node, injection.clone());
-        Some(injection)
+        })
     }
 }
 
-/// Flip [`FLIPPED`] bytes near the start of every region of `injection`,
-/// through the node's own provider, and sync them. Whether every write and
-/// sync confirmed: an unconfirmed injection may or may not have landed.
+/// Flip [`FLIPPED`] bytes near the start of every region of `injection`
+/// through moonpool's shard gate (see the module doc), after a flush of
+/// every file it touches, so no cached write covers the flip. Whether the
+/// whole injection landed: a refused or failed one changed nothing, and is
+/// no injection.
 #[tracing::instrument(level = "debug", skip_all, fields(family = ?injection.family))]
 pub(crate) async fn apply(provider: &SimStorageProvider, injection: &Injection) -> bool {
-    // A double fault's apply that stops halfway (#351): one region flipped,
-    // the other never, the apply unconfirmed. The reserved park then waits
-    // for a journal that opens, a lost copy or a rebuilt record, never a
-    // refusal. Its own BUGGIFY location makes the shape common.
-    if injection.regions.len() == 2 && buggify_with_prob!(0.25) {
-        let half = usize::from(moonpool_sim::sim_random_bool(0.5));
-        flip(provider, &injection.regions[half]).await;
-        assert_reachable!("journal store: a double fault's apply stops halfway");
+    let Some(spans) = injection
+        .regions
+        .iter()
+        .map(flipped)
+        .collect::<Option<Vec<_>>>()
+    else {
+        return false;
+    };
+    let paths: BTreeSet<&str> = injection.regions.iter().map(|r| r.path.as_str()).collect();
+    for path in paths {
+        if !flush(provider, path).await {
+            return false;
+        }
+    }
+    // A double fault gives the whole node up: the gate judges that first.
+    if injection.double_fault().is_some() && !provider.lose_replica().unwrap_or(false) {
+        assert_reachable!("journal store: the shard gate refuses a double fault");
         return false;
     }
-    for (at, region) in injection.regions.iter().enumerate() {
-        if at > 0 {
-            // Between two regions: a kill here leaves the first flipped and
-            // the second whole, judged at the next boot.
-            let hinted = moonpool_sim::hint!("injection half applied", 0.25);
-            if hinted.strike() == moonpool_sim::hint::Strike::Killed {
-                assert_reachable!("journal store: a kill lands inside an injection");
+    for (at, (region, span)) in injection.regions.iter().zip(spans).enumerate() {
+        let landed = if injection.outage {
+            // A planned loss may go past the journal's need on purpose
+            // (`super::outage::LossShape`): the gate sees it, never judges it.
+            provider.corrupt_bytes_past_gate(&region.path, span).is_ok()
+        } else {
+            let landed = provider.corrupt_bytes(&region.path, span).unwrap_or(false);
+            if !landed {
+                assert_always!(
+                    at == 0,
+                    "journal store: a double fault's gate takes both its regions"
+                );
+                assert_reachable!("journal store: the shard gate refuses an injection");
             }
-            hinted.await;
-        }
-        if !flip(provider, region).await {
+            landed
+        };
+        if !landed {
             return false;
         }
     }
     true
 }
 
-/// Flip the bytes of one region (see [`apply`]).
-pub(crate) async fn flip(provider: &SimStorageProvider, region: &LayoutRegion) -> bool {
+/// The bytes of `region` a flip changes: [`FLIPPED`] bytes near its start,
+/// where a header or metainfo copy's checksum covers its encoded fields.
+fn flipped(region: &LayoutRegion) -> Option<std::ops::Range<u64>> {
     let len = region.bytes.end.saturating_sub(region.bytes.start);
-    if len < FLIPPED_AT + FLIPPED {
-        return false;
-    }
-    // Near the region's start: a header or metainfo copy's checksum covers
-    // its encoded fields, not the rest of its block.
     let at = region.bytes.start + FLIPPED_AT;
-    let Ok(file) = provider.open(&region.path, OpenOptions::read_write()).await else {
+    (len >= FLIPPED_AT + FLIPPED).then_some(at..at + FLIPPED)
+}
+
+/// Flip one region (see [`apply`]) through the shard gate, after a flush:
+/// whether it landed.
+pub(crate) async fn flip(provider: &SimStorageProvider, region: &LayoutRegion) -> bool {
+    let Some(span) = flipped(region) else {
         return false;
     };
-    let mut bytes = vec![0_u8; usize::try_from(FLIPPED).unwrap_or(8)];
-    let mut read = 0;
+    flush(provider, &region.path).await
+        && provider.corrupt_bytes(&region.path, span).unwrap_or(false)
+}
+
+/// Make every write to `path` durable, so a flip of its durable bytes is
+/// what the next read finds.
+async fn flush(provider: &SimStorageProvider, path: &str) -> bool {
+    let Ok(file) = provider.open(path, OpenOptions::read_write()).await else {
+        return false;
+    };
     for _ in 0..WRITE_ATTEMPTS {
-        if read == bytes.len() {
-            break;
-        }
-        match file.read_at(at + read as u64, &mut bytes[read..]).await {
-            Ok(0) | Err(_) => return false,
-            Ok(n) => read += n,
-        }
-    }
-    if read != bytes.len() {
-        return false;
-    }
-    for byte in &mut bytes {
-        *byte ^= 0xA5;
-    }
-    if !write_all(&file, at, &bytes).await {
-        return false;
-    }
-    // Written, not synced (#441 (metainfo twin)): a kill here leaves the
-    // flip whole, torn or gone, and the custody unsettled until the next
-    // open reports what the disk holds.
-    let hinted = moonpool_sim::hint!("injection written, not synced", 1.0);
-    if hinted.strike() == moonpool_sim::hint::Strike::Killed {
-        assert_reachable!("journal store: a kill lands before an injection is synced");
-    }
-    hinted.await;
-    for attempt in 0..WRITE_ATTEMPTS {
-        // A failed writeback leaves the flip clean and not durable, and a
-        // retried sync then flushes nothing (#720 (fsyncgate)): each retry
-        // writes the flip again first.
-        if attempt > 0 && !write_all(&file, at, &bytes).await {
-            return false;
-        }
         if file.sync_all().await.is_ok() {
             return true;
         }
     }
     false
-}
-
-/// Write all of `bytes` at `at`, in at most [`WRITE_ATTEMPTS`] transfers.
-async fn write_all<F: StorageFile>(file: &F, at: u64, bytes: &[u8]) -> bool {
-    let mut written = 0;
-    for _ in 0..WRITE_ATTEMPTS {
-        if written == bytes.len() {
-            break;
-        }
-        match file.write_at(at + written as u64, &bytes[written..]).await {
-            Ok(0) | Err(_) => {}
-            Ok(n) => written += n,
-        }
-    }
-    written == bytes.len()
 }
 
 /// Judge what the journal reported at open against what was injected (see
