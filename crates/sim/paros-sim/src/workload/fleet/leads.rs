@@ -40,6 +40,7 @@ use super::cell::Cell;
 use super::created::{acked, hashes};
 use super::truth::{excused, set_lost};
 use crate::audit::audit_world_named;
+use crate::audit::tenants::tenant_board;
 use crate::client::ChainClient;
 use crate::frontend::{self, Presented};
 
@@ -129,6 +130,25 @@ impl FleetOps {
                     continue;
                 }
                 if set_lost(ctx.state(), owed.journal.tenant, &wiped) {
+                    continue;
+                }
+                // A slot an outage's losses or faulty copies left no leader
+                // able to decide again holds every claim of the journal
+                // (the leader's repair probe stays blocked and resigns, so
+                // no read is served): its liveness is excused, as the
+                // convergence check excuses it, and the write is owed to
+                // no one. A holder that stopped the journal (a spare whose
+                // booking was released) is out of reach of a catch-up, so
+                // its stops are noted first, as `worlds_converge` does
+                // (witness: sweep recipe `207858:9784360079472352245` on
+                // seed 16247384942910892624 on PR #778, a `1x2` grid
+                // `batched` journal whose one member's copy of slot 0 tore
+                // at `(4, B)` while the only clean copy sat on a spare's
+                // unbooked store).
+                let world = audit_world_named(&self.state, owed.journal);
+                super::converge::note_stops(&tenant_board(ctx.state()), owed.journal, &world);
+                if world.loss_excuses_liveness() {
+                    crate::excuses::note_all(ctx.state(), &world.excuses(), owed.journal);
                     continue;
                 }
                 if self
