@@ -83,7 +83,11 @@ fn lost_tenants(
 
 /// Excuse from `world`'s convergence every machine the tenant board holds
 /// as having stopped `journal` for good, as reported so far.
-fn note_stops(board: &Mutex<TenantBoard>, journal: JournalIdentifier, world: &AuditWorld) {
+pub(super) fn note_stops(
+    board: &Mutex<TenantBoard>,
+    journal: JournalIdentifier,
+    world: &AuditWorld,
+) {
     let stopped = crate::audit::tenants::lock(board).stopped_on(journal);
     for node in stopped {
         world.note_stopped(node);
