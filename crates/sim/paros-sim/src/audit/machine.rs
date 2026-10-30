@@ -176,5 +176,8 @@ impl<T: TimeProvider> NodeAudit<T> {
         if let Some((board, rank_addr)) = &self.machines {
             crate::machine::formatting(board, rank_addr, node, plan);
         }
+        if let Some(board) = &self.racked {
+            crate::machine::racked_formatting(board, plan);
+        }
     }
 }

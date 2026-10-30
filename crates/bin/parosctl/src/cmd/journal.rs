@@ -308,9 +308,10 @@ pub struct ConfigureArgs {
     batchers: Option<u32>,
     /// The tenant's frontends (#723 (frontend as a parosd role)): the
     /// coordinator books that many on the cell's `stateless` machines. Only
-    /// without `--journal`.
+    /// without `--journal`. Named `--frontend-count`: the global
+    /// `--frontends` names the frontends a call goes through.
     #[arg(long)]
-    frontends: Option<u32>,
+    frontend_count: Option<u32>,
     /// How long the request is sent again while no coordinator decides it,
     /// in milliseconds.
     #[arg(long, default_value = "30000")]
@@ -328,11 +329,12 @@ pub async fn run(
     args: JournalArgs,
 ) -> Ending {
     let (tenant_name, journal_name) = args.command.names();
-    let (tenant, control, election, tenant_tags) =
+    let (tenant, control, election, tenant_tags, cell) =
         match ready_tenant(client, out, &tenant_name).await {
             Ok(found) => found,
             Err(ending) => return ending,
         };
+    let client = &cell;
     let op = match args.command {
         JournalCommand::List { selector, .. } => {
             return list(
@@ -400,8 +402,11 @@ pub(crate) fn user_tags(texts: &[String]) -> Result<UserTags, Ending> {
 }
 
 /// The `READY` tenant named `tenant_name`, with its control journal, the
-/// cell's election journal, where the tenant coordinator publishes itself,
-/// and the tenant's tags (#575 (key:value tags)).
+/// election journal of its cell, where the tenant coordinator publishes
+/// itself, the tenant's tags (#575 (key:value tags)), and a client of its
+/// cell: `client` itself, or one over the entry endpoint the universe
+/// directory records for the tenant's cell when another cell hosts it
+/// (#232 (multiple cells)).
 async fn ready_tenant(
     client: &ParosClient,
     out: &Printer,
@@ -412,6 +417,7 @@ async fn ready_tenant(
         paros::core::journal::JournalId,
         JournalIdentifier,
         Tags,
+        ParosClient,
     ),
     Ending,
 > {
@@ -446,13 +452,49 @@ async fn ready_tenant(
         );
         return Err(Ending::Refused);
     }
-    Ok((tenant, entry.control, election, entry.all_tags()))
+    if entry.cell_id == cell.cell_id {
+        return Ok((
+            tenant,
+            entry.control,
+            election,
+            entry.all_tags(),
+            client.clone(),
+        ));
+    }
+    let endpoint = directory.endpoint(entry.cell_id);
+    if endpoint.is_empty() {
+        note(&format!(
+            "tenant {tenant_name} is in another cell, and the universe directory records no entry endpoint for it"
+        ));
+        return Err(Ending::Refused);
+    }
+    let other = client.elsewhere(endpoint);
+    let mut election = None;
+    for server in 0..other.server_count() {
+        election = other
+            .inspect_node(server)
+            .await
+            .as_ref()
+            .and_then(paros::client::bootstrap::control_journals_of)
+            .filter(|journals| journals.cell_id == entry.cell_id)
+            .and_then(|journals| journals.election);
+        if election.is_some() {
+            break;
+        }
+    }
+    let Some(election) = election else {
+        note(&format!(
+            "no machine of tenant {tenant_name}'s cell named its election journal"
+        ));
+        return Err(Ending::Unreachable);
+    };
+    Ok((tenant, entry.control, election, entry.all_tags(), other))
 }
 
 /// The role counts `args` names (#604 (role counts)), each count it does
 /// not name kept from `held`, or a refusal printed.
 fn role_counts(args: &ConfigureArgs, held: TenantRoles) -> Result<TenantRoles, Ending> {
-    TenantRoles::new(args.frontends.unwrap_or(held.frontends)).map_err(|error| {
+    TenantRoles::new(args.frontend_count.unwrap_or(held.frontends)).map_err(|error| {
         note(&format!("refused: {error}"));
         Ending::Refused
     })
@@ -505,23 +547,24 @@ pub async fn configure(
     out: &Printer,
     args: ConfigureArgs,
 ) -> Ending {
-    let named_roles = args.frontends.is_some();
+    let named_roles = args.frontend_count.is_some();
     if named_roles && args.journal.is_some() {
-        note("--frontends is the tenant default's: drop --journal");
+        note("--frontend-count is the tenant default's: drop --journal");
         return Ending::Refused;
     }
     let named_counts = args.replicas.is_some() || args.proxies.is_some() || args.batchers.is_some();
     let named_mode = args.durability.desired();
     if named_mode.is_none() && !named_counts && !named_roles {
         note(
-            "name a mode: --survive, --partitions, --replicas, --proxies, --batchers or --frontends",
+            "name a mode: --survive, --partitions, --replicas, --proxies, --batchers or --frontend-count",
         );
         return Ending::Refused;
     }
-    let (tenant, control, election, _) = match ready_tenant(client, out, &args.tenant).await {
+    let (tenant, control, election, _, cell) = match ready_tenant(client, out, &args.tenant).await {
         Ok(found) => found,
         Err(ending) => return ending,
     };
+    let client = &cell;
     // A count or a mode not named keeps the target's: read the fold when
     // the command names only part of them.
     let current = if named_roles || named_mode.is_none() || named_counts {

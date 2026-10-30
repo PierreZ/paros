@@ -67,7 +67,7 @@ positions back. `--proxies N` and `--replicas N` are the journal's other scale c
 
 Every `parosd` is also a frontend (#723 (frontend as a parosd role)): it checks a Biscuit token,
 resolves `paros://<tenant>/<journal>` and forwards the call. `parosctl configure --tenant acme
---frontends 2` books two on the cell's `stateless` machines, and `parosctl resolve acme` names
+--frontend-count 2` books two on the cell's `stateless` machines, and `parosctl resolve acme` names
 them.
 
 A universe can hold more than one cell: `parosctl init --idle` forms a cell with no universe,

@@ -113,6 +113,11 @@ pub(crate) struct NodeAudit<T> {
         Arc<Mutex<crate::machine::MachineBoard>>,
         paros::model::address::Address,
     )>,
+    /// The run's machine board, on the port of a machine racked in the
+    /// middle of a run (#490 (second cell mid-run)): it notes the election
+    /// journal its cell plan names, so the oracles judge that journal as an
+    /// election journal, and the calls its metrics count (#366 (metrics)).
+    racked: Option<Arc<Mutex<crate::machine::MachineBoard>>>,
     /// The run's state, on a machine's own port: where a wiped machine is
     /// signaled healed (moonpool #344 (rolling wipes), `crate::machine::heal`).
     wipes: Option<moonpool_sim::StateHandle>,
@@ -173,6 +178,7 @@ impl<T: TimeProvider> NodeAudit<T> {
             system: None,
             tenants: None,
             machines: None,
+            racked: None,
             wipes: None,
             calls: None,
             frontend: None,
@@ -218,6 +224,14 @@ impl<T: TimeProvider> NodeAudit<T> {
     ) -> Self {
         self.machines = Some((crate::machine::machine_board(state), addr));
         self.wipes = Some(state.clone());
+        self
+    }
+
+    /// This port reports a racked machine's cell plan to the machine board
+    /// of `state` (#490 (second cell mid-run)): its election journal and its
+    /// metered calls.
+    pub(crate) fn on_racked(mut self, state: &moonpool_sim::StateHandle) -> Self {
+        self.racked = Some(crate::machine::machine_board(state));
         self
     }
 

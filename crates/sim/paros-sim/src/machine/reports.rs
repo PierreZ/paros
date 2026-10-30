@@ -21,9 +21,13 @@ pub(crate) const MACHINE_CLIENT_BASE: u64 = 1 << 32;
 
 /// The audit port of machine `rank`, advertised at `audit_addr`: each
 /// scope's `NodeAudit` (#294).
+///
+/// A machine racked in the middle of a run ([`crate::machine::racked`],
+/// #490 (second cell mid-run)) passes `on_board: false`: the machine
+/// board's oracles model the layout's machines only.
 pub(crate) fn machine_audits(
     ctx: &SimContext,
-    (audit_addr, my_ip): (Address, &str),
+    (audit_addr, my_ip, on_board): (Address, &str, bool),
     (rank, draw): (usize, &crate::shape::MachineDraw),
 ) -> impl Fn(AuditScope) -> NodeAudit<SimTimeProvider> + Clone + Send + Sync + 'static {
     // The registry's fold oracles judge the machines' cell control journal
@@ -35,14 +39,26 @@ pub(crate) fn machine_audits(
     let my_ip = my_ip.to_string();
     move |scope: AuditScope| -> NodeAudit<SimTimeProvider> {
         match scope {
-            AuditScope::Machine => NodeAudit::new(time.clone(), crate::audit::audit_world(&state))
-                .on_machines(&state, audit_addr.clone())
-                .on_registry(registry.clone(), plane),
+            AuditScope::Machine => {
+                let audit = NodeAudit::new(time.clone(), crate::audit::audit_world(&state));
+                let audit = if on_board {
+                    audit.on_machines(&state, audit_addr.clone())
+                } else {
+                    audit.on_racked(&state)
+                };
+                audit.on_registry(registry.clone(), plane)
+            }
             // The coordinator's calls join the control journals' histories
             // (#240), as client `MACHINE_CLIENT_BASE + rank`.
             AuditScope::Node(home) => {
-                NodeAudit::new(time.clone(), crate::audit::audit_world_for(&state, home))
-                    .on_machines(&state, audit_addr.clone())
+                let audit =
+                    NodeAudit::new(time.clone(), crate::audit::audit_world_for(&state, home));
+                let audit = if on_board {
+                    audit.on_machines(&state, audit_addr.clone())
+                } else {
+                    audit.on_racked(&state)
+                };
+                audit
                     .with_tenants(crate::audit::tenants::tenant_board(&state))
                     .on_registry(registry.clone(), plane)
                     .with_calls(Arc::new(crate::workload::system::Announce::of_machine(
@@ -373,6 +389,15 @@ pub(crate) fn recorded(board: &Mutex<MachineBoard>, addr: &Address, record: &Mac
             assert_reachable!("machine: a later ballot finishes the plan an earlier one proposed");
         }
     }
+}
+
+/// A racked machine formats cell `plan` (#490 (second cell mid-run)): the
+/// board notes its election journal and the control journal it governs,
+/// and nothing else of the layout's oracles.
+pub(crate) fn racked_formatting(board: &Mutex<MachineBoard>, plan: &CellPlan) {
+    let mut board = lock(board);
+    board.elections.insert(plan.election);
+    board.governs.insert(plan.election, plan.control);
 }
 
 /// A machine is about to format `plan`'s stores

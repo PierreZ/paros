@@ -367,6 +367,9 @@ impl ChainWorkload {
                 nodes.id_of(report.server),
                 writer.journal(),
             );
+            if matches!(result, WriteOutcome::Written { .. }) {
+                super::fleet::operator::note_acknowledged(ctx.state());
+            }
             if report.redirects > 0 && matches!(result, WriteOutcome::Written { .. }) {
                 *redirected_written = true;
             }

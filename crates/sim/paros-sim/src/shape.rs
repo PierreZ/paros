@@ -47,9 +47,10 @@ pub(crate) use scenarios::{
     batcher_limits, batchers, batchers_among, changed_mode, cold_rot, departed_straggler,
     disk_full, downed_founder, drained_machine, early_handover, entry_capacity, gone_machine,
     handoff_storm, lagging_acceptor, lagging_fold, lagging_replica, lost_verdict,
-    matchmaker_registry_page, moved_founder, paged_handover, racing_floor, replaced_founder,
-    replica_apply_page, reused_name, run_end, second_cell, silent_machine, slow_link, slow_machine,
-    split_floor, stalled_proxy, unmetered, untagged, wiped_founder, withhold_gc, zone_outage,
+    matchmaker_registry_page, moved_founder, operator_lane, paged_handover, racing_floor,
+    replaced_founder, replica_apply_page, reused_name, run_end, second_cell, silent_machine,
+    slow_link, slow_machine, split_floor, stalled_proxy, unmetered, untagged, wiped_founder,
+    withhold_gc, zone_outage,
 };
 pub(crate) use timing::{
     CONNECT_FLOOR_MS, ELECTION_RENEW_FLOOR, RESOLVE_ROUND_TRIP, longest_down_after,
@@ -184,6 +185,9 @@ struct Registry {
     /// Run-level: whether the run draws the second-cell scenario (see
     /// [`second_cell`]), fixed by the first caller.
     second_cell: Option<bool>,
+    /// Run-level: whether the run has an operator lane (see
+    /// [`operator_lane`]), fixed by the first caller.
+    operator_lane: Option<bool>,
     /// Run-level: whether the run draws the slow-link scenario (see
     /// [`slow_link`]), fixed by the first caller.
     slow_link: Option<bool>,

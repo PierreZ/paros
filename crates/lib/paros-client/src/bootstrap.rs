@@ -368,20 +368,27 @@ pub fn control_journals_of(reply: &InspectReply) -> Option<ControlJournals> {
 
 /// Learn the fleet's control journals from the cell's servers (§3.2): a
 /// node-only `Inspect` of each in turn, the first that names the cell's and
-/// the fleet's. `None` when none does.
+/// the fleet's. A cell that does not host the universe directory (an idle
+/// cell, or one added with `universe add-cell`, #232 (multiple cells))
+/// names none: then the first server that names the cell's. `None` when
+/// none does.
 pub async fn control_journals<P: ParosProviders>(client: &Client<P>) -> Option<ControlJournals> {
+    let mut cell_only = None;
     for server in 0..client.server_count() {
-        if let Some(journals) = client
+        let Some(journals) = client
             .inspect_node(server)
             .await
             .as_ref()
             .and_then(control_journals_of)
-            .filter(|journals| journals.fleet.is_some())
-        {
+        else {
+            continue;
+        };
+        if journals.fleet.is_some() {
             return Some(journals);
         }
+        cell_only.get_or_insert(journals);
     }
-    None
+    cell_only
 }
 
 /// The cell control journal's members (#216): its acceptor set as the first

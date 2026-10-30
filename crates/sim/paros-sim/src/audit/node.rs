@@ -1296,6 +1296,9 @@ impl<T: TimeProvider> NodeAudit<T> {
         if let Some((board, _)) = &self.machines {
             crate::machine::metered_call(board, call);
         }
+        if let Some(board) = &self.racked {
+            crate::machine::metered_call(board, call);
+        }
     }
 
     pub(super) fn call_answered(
@@ -1310,6 +1313,9 @@ impl<T: TimeProvider> NodeAudit<T> {
         read: u64,
     ) {
         if let Some((board, _)) = &self.machines {
+            crate::machine::metered_answer(board, call, written, read);
+        }
+        if let Some(board) = &self.racked {
             crate::machine::metered_answer(board, call, written, read);
         }
     }

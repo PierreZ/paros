@@ -184,7 +184,7 @@ tenant's default.
   and `batchers`, each at most 64, beside its durability; the tenant default carries them too,
   and a create that names no mode takes them.
   - **The request.** `parosctl configure --tenant T [--journal J] [--replicas R] [--proxies X]
-    [--batchers B] [--frontends N]`. A count or a durability that the command does not name
+    [--batchers B] [--frontend-count N]`. A count or a durability that the command does not name
     keeps the target's. A mode string is `machines=F,partitions=P,replicas=R,proxies=X,batchers=B`.
   - **The bookings** (`paros-coordinator`'s `tenant/roles.rs`). One step per watch round,
     after the footprint step, in turn over the hosted tenants: first the tenant's

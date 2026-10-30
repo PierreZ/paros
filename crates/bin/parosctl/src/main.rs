@@ -408,4 +408,23 @@ mod tests {
     fn the_command_line_is_well_formed() {
         Cli::command().debug_assert();
     }
+
+    /// A subcommand flag named like a global one panics when the command
+    /// line is read, which `debug_assert` does not see: `configure
+    /// --frontends 1` did, beside the global `--frontends HOST:PORT`.
+    #[test]
+    fn a_tenant_frontend_count_reads_beside_the_global_frontends() {
+        use clap::Parser as _;
+        let cli = Cli::try_parse_from([
+            "parosctl",
+            "--frontends",
+            "a:4500",
+            "configure",
+            "--tenant",
+            "acme",
+            "--frontend-count",
+            "1",
+        ]);
+        assert!(cli.is_ok());
+    }
 }
