@@ -257,6 +257,18 @@ async fn desired_size<P: ParosProviders>(
                     "coordinator: a set's size passes over a full machine"
                 );
             }
+            // A set that holds no slot yet runs on the founding members. It
+            // is placed only once placement may book as many machines as it
+            // should keep of them: a cell whose founding members are not yet
+            // bookable would move it onto fewer, and then onto more one round
+            // at a time (seed 17573877990299474282 on c88d808: three founders
+            // not yet bookable, the set booked onto the one admitted machine,
+            // that machine drained, and the set left it past the settle
+            // bound).
+            let keep = set_size(largest, storage.len()).min(in_force);
+            if held.is_empty() && eligible < keep {
+                return Some(None);
+            }
             Some(Some(set_size(largest, eligible)))
         }
         Err(JournalAnswer::NotCoordinator) => None,
