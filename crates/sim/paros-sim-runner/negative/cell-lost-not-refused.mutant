@@ -1,0 +1,12 @@
+# `cell init` refuses a plan as lost only when every member is wiped, not
+# when it lost its quorum: an init of a lost cell goes on, and its reply
+# is not `cell_lost`. The convergence oracle skips a run whose cell is
+# lost, so the `cell init` oracles must catch it.
+excuse: skip converge: cell lost
+expect: survives #773
+file: crates/lib/paros-machine/src/cell_init.rs
+--- find
+    if intact.len() < q2 {
+--- replace
+    if intact.is_empty() {
+--- end

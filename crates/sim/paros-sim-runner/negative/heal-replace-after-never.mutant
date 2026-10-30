@@ -1,0 +1,13 @@
+# The coordinator waits a thousand times its Down bound before it re-places
+# a down machine's roles: in practice it never re-places them. The heal
+# oracle skips the whole check on a seed whose Down bound reaches past the
+# tail, so this mutant asks whether anything else catches a cell that never
+# heals on such a seed.
+excuse: skip heal: re-place past tail
+expect: survives #773
+file: crates/lib/paros-coordinator/src/cell/watch.rs
+--- find
+            if now.saturating_sub(since) < self.replace_after {
+--- replace
+            if now.saturating_sub(since) < self.replace_after * 1000 {
+--- end

@@ -46,6 +46,14 @@ pub struct Rare {
 /// window seldom reaches, #485 the double fault, #486 the rest.
 pub const RARE: &[Rare] = &[
     Rare {
+        msg: "gc: a refused ack meets a frozen generation",
+        reason: "a handover abandoned after its freeze, with no campaign to meet the frozen set, while a stable leader's GC asks it: one witness, replay-recipe 13627598485075066090 53:11387013064857220442 on c868dac; the refused-campaign BUGGIFY leaves more frozen sets to GC (PR #771 (negative hunt))",
+    },
+    Rare {
+        msg: "generation: a leader's GC finishes a frozen set",
+        reason: "the driver half of \"gc: a refused ack meets a frozen generation\": the same witness (PR #771 (negative hunt))",
+    },
+    Rare {
         msg: "registry: a slow mark is held over a machine still busy",
         reason: "a machine marked slow during chaos whose own work keeps its disk in the band between the slow bounds for the whole tail: the cell coordinator's renewals on a one-founder cell at the 100 ms renewal floor; one witness, replay-main 10435710832576718291 on 0fe713a (#486)",
     },

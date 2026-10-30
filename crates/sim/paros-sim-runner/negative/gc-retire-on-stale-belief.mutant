@@ -1,0 +1,14 @@
+# A node says it may retire on a stale belief: the configuration it
+# believes in force need not be bound to the operator's watermark. A node
+# that a later configuration names again may then be retired, and that
+# configuration loses a member for good. The "retired" excuse covers only a
+# node an effective floor named, so the loss must show.
+excuse: node: retired
+expect: survives #773
+file: crates/lib/paros-core/src/node/gc.rs
+--- find
+            && watermark > self.last_member_ballot
+            && self.acceptors_since == watermark;
+--- replace
+            && watermark > self.last_member_ballot;
+--- end

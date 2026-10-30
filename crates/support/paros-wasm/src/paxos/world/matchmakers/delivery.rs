@@ -446,6 +446,12 @@ impl World {
                  the floor is in force.",
                 who(id)
             ),
+            GcStep::Frozen { generation } => format!(
+                "{} meets a matchmaker set frozen at generation {} with no successor. The floor \
+                 waits until a node finishes the handover.",
+                who(id),
+                generation.0
+            ),
             GcStep::Effective { watermark, retired } => format!(
                 "The floor {} is in force: a matchmaker quorum wrote it down. Every later \
                  campaign asks a quorum that shares a matchmaker with this one, so no later \

@@ -426,6 +426,7 @@ fn matchmaker_contract_round_trips() {
         applied: true,
         watermark: ballot(3, 1),
         newer: None,
+        stopped: true,
     };
     let wire = super::matchmaker_codec::wire_garbage_collect_ack(&ack);
     let decoded =

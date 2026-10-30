@@ -445,6 +445,33 @@ impl ColocatedNode {
             self.assert_invariants();
             return GcStep::Ignored;
         }
+        // A frozen generation with no successor (a handover abandoned after
+        // its freeze) refuses every request for ever: the floor never
+        // becomes effective, and a move or a mode change waiting on it never
+        // ends. A stable leader campaigns for nothing, so it meets the frozen
+        // generation only here, and its driver finishes the handover, as a
+        // refused campaign's does. Recipe 13627598485075066090
+        // 53:11387013064857220442 on c868dac: generation 5 frozen with no
+        // successor, a journal's mode change waited on its GC watermark
+        // through the whole tail ("status: a journal the cell can hold shows
+        // healthy after chaos").
+        if !ack.applied && ack.stopped {
+            assert!(
+                ack.newer.is_none(),
+                "a frozen generation names no successor"
+            );
+            if self
+                .matchmakers
+                .as_ref()
+                .is_some_and(|set| set.generation == ack.generation)
+            {
+                probe!(reachable, "gc: a refused ack meets a frozen generation");
+                return GcStep::Frozen {
+                    generation: ack.generation,
+                };
+            }
+            return GcStep::Ignored;
+        }
         let Some(matchmakers) = self.matchmakers.as_ref() else {
             return GcStep::Ignored;
         };

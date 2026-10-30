@@ -1,12 +1,15 @@
 //! Build automation for paros: the sancov-instrumented simulation runner
-//! (mirrors moonpool's `xtask`) and the mutation hunt (`cargo xtask mutants`,
-//! #269).
+//! (mirrors moonpool's `xtask`), the mutation hunt (`cargo xtask mutants`,
+//! #269) and the negative hunt (`cargo xtask negative`, #742 (mutant per
+//! excuse)).
 //!
 //! The runner machinery (`run_binaries`) sets `SANCOV_CRATES` and a separate
 //! `--target-dir target/sancov` so cargo doesn't serve a cached
 //! non-instrumented build, and builds in release mode: a debug build runs the
 //! whole simulation many times slower. `SIM_BINARIES` lists the
 //! deterministic-simulation binaries to drive under coverage.
+
+mod negative;
 
 use std::collections::BTreeSet;
 use std::process::{self, Command};
@@ -41,6 +44,7 @@ fn main() {
     match args.first().map(std::string::String::as_str) {
         Some("sim") => sim_dispatch(&args[1..]),
         Some("mutants") => mutants(&args[1..]),
+        Some("negative") => negative::negative(&args[1..]),
         Some("help" | "--help" | "-h") | None => print_usage(),
         Some(cmd) => {
             eprintln!("unknown command: {cmd}");
@@ -56,6 +60,7 @@ fn print_usage() {
     eprintln!("Commands:");
     eprintln!("  sim       Simulation binary management");
     eprintln!("  mutants   Mutation-test paros-core with the simulation as the test");
+    eprintln!("  negative  Run the hand-written mutants each oracle excuse must catch");
     eprintln!();
     eprintln!("Run 'cargo xtask sim --help' for simulation subcommands.");
 }

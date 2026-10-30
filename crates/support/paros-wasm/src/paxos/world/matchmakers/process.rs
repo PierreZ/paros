@@ -206,6 +206,8 @@ impl MatchmakerProcess {
         let newer = (outcome == GcOutcome::Refused)
             .then(|| role.newer_set(request.generation))
             .flatten();
+        let stopped =
+            outcome == GcOutcome::Refused && role.frozen_without_successor(request.generation);
         role.ready().advance();
         Some(GcAck {
             matchmaker: self.config.id,
@@ -214,6 +216,7 @@ impl MatchmakerProcess {
             applied: outcome != GcOutcome::Refused,
             watermark,
             newer,
+            stopped,
         })
     }
 

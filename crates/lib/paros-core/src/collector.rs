@@ -33,6 +33,14 @@ pub enum GcStep {
         /// Acks still needed.
         remaining: usize,
     },
+    /// A matchmaker of the believed generation froze it and knows no
+    /// successor: a handover nobody finished. The floor waits for a
+    /// successor set, which the driver finishes (`generation`, the frozen
+    /// one).
+    Frozen {
+        /// The generation that was frozen.
+        generation: MatchmakerGeneration,
+    },
     /// A matchmaker quorum holds the floor: `watermark` is effective and the
     /// acceptors in `retired` are no longer needed by any future leader.
     Effective {

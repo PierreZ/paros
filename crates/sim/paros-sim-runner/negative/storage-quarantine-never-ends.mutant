@@ -1,0 +1,11 @@
+# A journal that a storage fault quarantined is never opened again, also
+# when the fault was transient and the world did not park the store. The
+# "storage dead" excuse covers only a store the world parked for a detected
+# corruption, so the node that stays down on its own must not be excused.
+excuse: node: storage dead
+file: crates/lib/paros-roles/src/node/journals.rs
+--- find
+            .filter(|(_, since)| now.saturating_sub(**since) >= quarantine_ticks.max(1))
+--- replace
+            .filter(|(_, since)| now.saturating_sub(**since) >= u64::MAX)
+--- end

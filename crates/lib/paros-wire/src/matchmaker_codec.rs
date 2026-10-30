@@ -314,6 +314,7 @@ pub fn wire_garbage_collect_ack(ack: &GcAck) -> WireGarbageCollectAck {
         applied: ack.applied,
         journal: ack.journal.0,
         newer: ack.newer.as_ref().map(mm_set_to_proto),
+        stopped: ack.stopped,
     }
 }
 
@@ -329,6 +330,7 @@ pub fn garbage_collect_ack_from_wire(ack: WireGarbageCollectAck) -> Result<GcAck
         applied: ack.applied,
         watermark: ballot_from_proto(ack.watermark)?,
         newer: ack.newer.map(mm_set_value).transpose()?,
+        stopped: ack.stopped,
     })
 }
 
