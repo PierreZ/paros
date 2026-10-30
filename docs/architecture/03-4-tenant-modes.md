@@ -215,9 +215,18 @@ tenant's default.
   - **Serving.** Every machine serves the batcher endpoint, and `Resolve` names the machines
     that hold a batcher slot of any of the tenant's journals. A leader resolves proxy rank `r`
     only to a lane its driver holds, and runs the round colocated when it holds none
-    (`delegation_choice`). A `parosd` machine does not yet run a proxy leader or a replica for
-    the journals it hosts, so on a cell a booked proxy leader or replica is placement only: to
-    build in a later change, with the leader's lanes to the booked machines.
+    (`delegation_choice`).
+  - **Proxy leaders on machines** (#765, landed 2026-10-30). Rank `r` of a journal is the
+    machine of its `r`-th `Role::ProxyLeader` booking, in booking order. Every machine reads
+    the ranks from its registry fold, and a leader or an acceptor sends to rank `r` through
+    the peer lane of that machine. The proxy leader has no endpoint of its own: a message
+    carries only its journal, and a `stateless` machine serves no journal it is a proxy
+    leader of. So the node loop of a machine that holds a slot of a journal it does not
+    serve steps that journal's delegated `Accept`, `Accepted` and `Nack` into a proxy leader.
+    The proxy leader is born at the first delegation, with the rank its `reply_to` names and
+    the `C_b` it carries, and a delegation that names another rank replaces it. It stops when
+    the machine loses the slot. A `parosd` machine does not yet run a replica for a booked
+    replica slot, so a booked replica is placement only: to build in a later change.
   - **The simulation.** A create or a configure draws the counts on one draw in three, 0 to 3
     each. The plane's reconfiguration composer changes the counts on a coin, the proxy count up
     to one past the deployed proxy leaders, so a leader meets a rank it has no lane for; nodes

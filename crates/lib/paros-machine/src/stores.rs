@@ -354,6 +354,10 @@ where
         (self.audits)(AuditScope::Journal(journal))
     }
 
+    fn proxy_audit(&self, journal: JournalIdentifier) -> A {
+        (self.audits)(AuditScope::Journal(journal))
+    }
+
     /// A journal a control journal created naming this machine (#210),
     /// under `config`, committing under `durability` (#599 (durability mode
     /// per journal)). Idempotent: a restart re-folds and asks again.

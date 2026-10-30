@@ -810,8 +810,9 @@ impl<P: ParosProviders> Shared<'_, P> {
         let self_id = self.self_id;
         match input {
             Input::Propose(call) => {
+                let journal = rt.node.config().journal;
                 let delegation =
-                    delegation_choice(&rt.node, |proxy| self.out.proxy_queues.contains_key(&proxy));
+                    delegation_choice(&rt.node, |proxy| self.out.reaches_proxy(journal, proxy));
                 let result = match &call {
                     Call::Write { entry, .. } => {
                         // The column override (#141): drawn only where it

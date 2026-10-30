@@ -109,6 +109,14 @@ pub trait JournalStores {
     /// §3.8, #243).
     fn node_audit(&self) -> Self::Audit;
 
+    /// The audit port the proxy leader of `journal` a machine serves
+    /// reports to (#765): a journal this node does not serve. The node's
+    /// own port by default.
+    fn proxy_audit(&self, journal: JournalIdentifier) -> Self::Audit {
+        let _ = journal;
+        self.node_audit()
+    }
+
     /// The audit port the frontend a machine serves reports to (#723
     /// (frontend as a parosd role)): its resolutions and the calls it
     /// forwards. The node's own port by default.
