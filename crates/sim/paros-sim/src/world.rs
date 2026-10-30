@@ -11,7 +11,6 @@
 
 pub(crate) mod cut;
 pub(crate) mod injector;
-pub(crate) mod layouts;
 pub(crate) mod node_store;
 pub(crate) mod outage;
 pub(crate) mod registry_store;

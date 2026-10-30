@@ -174,13 +174,6 @@ impl LedgeredJournal {
         }
     }
 
-    /// Publish the store's regions to moonpool (#760 (moonpool owns fault
-    /// placement)), in the shard its leader declares.
-    fn publish_layout(&self, regions: Vec<moonpool_sim::LayoutRegion>) {
-        let shard = format!("journal/{}", self.inner.initial_state().1.journal);
-        super::layouts::publish(&self.state, &self.provider, &self.ip, &shard, regions);
-    }
-
     fn with_world(&self, f: impl FnOnce(&mut StorageWorld)) {
         if let Some(world) = self.world.upgrade() {
             f(&mut world.lock().unwrap_or_else(PoisonError::into_inner));
@@ -316,7 +309,6 @@ impl LogStorage for LedgeredJournal {
             .filter_map(|region| region.stripe)
             .filter_map(|slot| self.inner.layout(Slot(slot)).map(|at| (slot, at)))
             .collect();
-        self.publish_layout(regions.clone());
         self.checker.note_faulty_copies(self.node, &faulty);
         let (ip, node, first) = (self.ip.clone(), self.node, self.inner.first_slot().0);
         self.with_world(|w| w.note_opened(&ip, node, layouts, first, &regions, &faulty));
@@ -409,7 +401,6 @@ impl LogStorage for LedgeredJournal {
             .collect();
         let first = self.inner.first_slot().0;
         let regions = self.inner.regions();
-        self.publish_layout(regions.clone());
         let ip = self.ip.clone();
         let node = self.node;
         self.with_world(|w| w.note_synced(&ip, node, written, first, &regions));
