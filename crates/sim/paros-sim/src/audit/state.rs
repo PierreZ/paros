@@ -427,6 +427,20 @@ pub(super) struct AuditState {
     /// (witness 4059871466191551614: an accept at round 3 reported, the
     /// boot finding the round-1 record faulty).
     pub(super) faulty_ballots: BTreeMap<(u64, u64), (u64, u64)>,
+    /// Per `(node, slot)`: the ballot of the durable accept the node
+    /// reported since its last boot reported the slot faulty, so the copy
+    /// is whole again at that identity. A repair rewrites the record at
+    /// the decided ballot, which may sit *below* a torn re-accept's ballot
+    /// an earlier boot reported faulty, so "an accept above the faulty
+    /// identity" is not the test; what makes a copy whole is a durable
+    /// accept that came after the report (witness 12796155111302085624 on
+    /// PR #786 (multi-cell demo): slot 0 re-accepted at `(20, 1)` by nodes
+    /// 0 and 1, torn on both, repaired at the decided `(7, 2)`, torn
+    /// again; with node 2 storage-dead the leader waited in CTRL's Case 3
+    /// for good, yet the `(20, 1)` tally made both look clean and the
+    /// frozen journal unexcused, red on "chain: an unavailable run is
+    /// explained by injected storage faults").
+    pub(super) rewritten: BTreeMap<(u64, u64), (u64, u64)>,
     /// Repair progress observed (from [`Audit::repair_progress`](paros::observe::audit::Audit::repair_progress)): in-place
     /// repairs, straggler Case-1 re-proposals, Case-2 no-op fills, and
     /// recovery-timeout resignations.

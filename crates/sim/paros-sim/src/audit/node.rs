@@ -67,6 +67,8 @@ impl<T: TimeProvider> NodeAudit<T> {
             "a node never persists an accept below its compaction floor"
         );
         st.persisted.insert((node.0, slot.0), vhash);
+        st.rewritten
+            .insert((node.0, slot.0), (ballot.round, ballot.node.0));
         // The commit that carried it is no longer in flight for this slot.
         st.dropped_in_flight.remove(&(node.0, slot.0));
         if st.in_flight.get(&(node.0, slot.0)) == Some(&vhash) {
@@ -1398,6 +1400,7 @@ impl<T: TimeProvider> NodeAudit<T> {
             staged.insert(slot.0);
             st.faulty_ballots
                 .insert((node.0, slot.0), (ballot.round, ballot.node.0));
+            st.rewritten.remove(&(node.0, slot.0));
         }
         // A machine's `Batched` journal booted with its last batch lost
         // (#599 (durability mode per journal)).

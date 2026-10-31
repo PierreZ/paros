@@ -478,12 +478,17 @@ impl MatchmakerAudit {
 
     /// Whether a leadership won between the effective reconfiguration
     /// `newest` and the campaign's `ballot` under another configuration
-    /// than `config`, and whether a reconfiguration in between registered
-    /// `mine`. A reconfiguration registered above `ballot` (a later
-    /// candidate's, folded from a reply sent after it) has nothing between
-    /// the two (recipe 2440116414355831033 128549:16402484848252166245 on
-    /// 408c9d8: the range panicked on round 26 of node 2 over round 26 of
-    /// node 1).
+    /// than `config`, and whether a reconfiguration above `newest`
+    /// registered `mine`. A reconfiguration registered above `ballot` (a
+    /// later candidate's, folded from a reply sent after it) has nothing
+    /// between the two (recipe 2440116414355831033
+    /// 128549:16402484848252166245 on 408c9d8: the range panicked on round
+    /// 26 of node 2 over round 26 of node 1). The reconfiguration that
+    /// registered `mine` may itself sit above `ballot`: a re-answer reports
+    /// the matchmaker's monotone effective scalar, so a candidate learns a
+    /// request registered after its own ballot and keeps the belief that
+    /// request names (replay-main 17187159566539186422 on bd55f09; see
+    /// [`MatchmakerAudit::check_effective_configuration`]).
     fn exemptions(
         won: &BTreeMap<Ballot, AcceptorConfig>,
         reconfigurations: &BTreeMap<Ballot, (AcceptorConfig, BTreeSet<u64>)>,
@@ -491,16 +496,16 @@ impl MatchmakerAudit {
         config: &AcceptorConfig,
         mine: Option<&AcceptorConfig>,
     ) -> (bool, bool) {
+        let newer_fact = mine.is_some_and(|mine| {
+            reconfigurations
+                .range((Bound::Excluded(newest), Bound::Unbounded))
+                .any(|(_, (registered, _))| registered == mine)
+        });
         if newest >= ballot {
-            return (false, false);
+            return (false, newer_fact);
         }
         let between = (Bound::Excluded(newest), Bound::Excluded(ballot));
         let below_a_leadership = won.range(between).any(|(_, ran)| ran != config);
-        let newer_fact = mine.is_some_and(|mine| {
-            reconfigurations
-                .range(between)
-                .any(|(_, (registered, _))| registered == mine)
-        });
         (below_a_leadership, newer_fact)
     }
 
