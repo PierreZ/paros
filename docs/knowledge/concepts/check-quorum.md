@@ -187,7 +187,7 @@ length) and of `Authority::holds` (why Phase 2).
   with a deadline to cover it.
 - [Flexible quorums](flexible-quorums.md) and [grid quorums](grid-quorums.md): why the window
   asks for a Phase-2 quorum.
-- Leaderless quorum reads (planned): why paros needs no lease.
+- [Leaderless quorum reads](leaderless-reads.md): why paros needs no lease.
 - Configuration GC (planned): it counts chosen indices past the fence.
 
 ## 12. Sources
