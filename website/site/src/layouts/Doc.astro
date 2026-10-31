@@ -5,7 +5,7 @@ import { url } from "../nav";
 
 interface Sibling { title: string; path: string }
 interface Props {
-  frontmatter?: { title: string; description?: string; kicker?: string; section?: string; siblings?: string };
+  frontmatter?: { title: string; description?: string; kicker?: string; section?: string; siblings?: string; trace?: string };
   title?: string;
   description?: string;
   kicker?: string;
@@ -31,6 +31,11 @@ const PAGES: Record<string, Sibling[]> = {
     { title: "The playground", path: "docs/playground/" },
   ],
 };
+// A Paxos page names its step-through trace (#811): src/traces/<name>.json,
+// recorded from paros-core by `cargo test -p paros-wasm --test paxos_traces`.
+const traces = import.meta.glob("../traces/*.json", { eager: true, import: "default" });
+const trace = fm.trace ? traces[`../traces/${fm.trace}.json`] : undefined;
+if (fm.trace && !trace) throw new Error(`no trace src/traces/${fm.trace}.json`);
 const siblings = Astro.props.siblings ?? PAGES[section] ?? [];
 const here = Astro.url.pathname;
 const i = siblings.findIndex((s) => here.endsWith("/" + s.path));
@@ -47,6 +52,8 @@ const next = i >= 0 && i < siblings.length - 1 ? siblings[i + 1] : undefined;
     <article class="prose">
       <slot />
     </article>
+    {trace && <script is:inline type="application/json" id="trace" data-wasm={url("paxos/wasm/paros_paxos.js")} set:html={JSON.stringify(trace).replace(/</g, "\\u003c")} />}
+    {trace && <script is:inline src={url("steps.js")} />}
     {(prev || next) && (
       <nav class="pager label" aria-label="Next and previous pages">
         {prev ? <a href={url(prev.path)}>← {prev.title}</a> : <span />}

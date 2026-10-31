@@ -13,7 +13,7 @@ engineering techniques. No long book pages and no "blabla": a page fits its job 
 | Path | Source | Job |
 |---|---|---|
 | `/` | `src/pages/index.astro` | sells parosd: what you get, a session, the path of a write, numbers, run it |
-| `/paxos/` | `src/pages/paxos/*.md` | one page per flavor: problem, messages, why safe, where in paros |
+| `/paxos/` | `src/pages/paxos/*.md` | one page per flavor: the problem, a step-through diagram, the rule, where in paros |
 | `/playground/` | `src/pages/playground/index.astro` + `website/sandbox/` | a paros universe in the browser |
 | `/docs/` | `src/pages/docs/*.md` | quickstart (from `DEMO.md`), reference, the playground |
 | `/engineering/` | (#812) | one page per technique, each with something to see |
@@ -42,3 +42,16 @@ Old URLs (the Zola book, the mdbook `.html` pages, `/play/`, `/sandbox/`) redire
 ASD-STE100 Simplified Technical English. "cell", never "cluster"; "universe" above cells. Name
 a symbol only if it exists in the code. Never name a person or an audience on the playground
 or the Paxos tools. The playground says that the network, the disk and the clock are simulated.
+
+## Step-through diagrams (#811 (Paxos flavor pages))
+
+A Paxos page names its trace in its front matter (`trace: single-decree`) and puts
+`<div data-steps>` where the diagram goes. `src/layouts/Doc.astro` inlines
+`src/traces/<name>.json`, and `public/steps.js` draws it: one lane per role, one row per
+message, play / step / back / restart, and one button per "what if" run. Then `steps.js`
+loads `paros-core` compiled to wasm (`public/paxos/wasm/`, staged by `scripts/build-wasm.sh`,
+gitignored), calls `paxos_trace(page)` and draws the live run at the same step. The JSON is
+the fallback when the wasm does not load (`npm run dev` without `scripts/build-wasm.sh`).
+`cargo test -p paros-wasm --test paxos_traces` writes the JSON from the same scripts
+(`crates/support/paros-wasm/src/paxos/trace/pages.rs`) and proves a page recorded alone is
+the same run; never edit the JSON by hand.

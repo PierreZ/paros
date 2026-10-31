@@ -3,3 +3,4 @@ dist/
 .astro/
 public/shared/
 public/playground/
+public/paxos/wasm/

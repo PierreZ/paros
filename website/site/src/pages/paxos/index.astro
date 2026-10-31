@@ -3,7 +3,7 @@ import Doc from "../../layouts/Doc.astro";
 import { url } from "../../nav";
 ---
 <Doc title="The Paxos flavors" kicker="Paxos" section="paxos/" siblings={[]}
-  description="paros is made of five Paxos flavors. Each page gives the problem, the messages, why it is safe and where it lives in the code.">
+  description="paros is made of five Paxos flavors. Each page gives the problem, a step-through diagram of a real run, the rule that keeps it safe and where it lives in the code.">
   <ol class="index-list">
     <li><a href={url("paxos/single-decree/")}>Single-decree Paxos</a><span class="desc">Choose one value. Forms the cell.</span></li>
     <li><a href={url("paxos/multi-paxos/")}>Multi-Paxos</a><span class="desc">A log of slots with a stable leader. Each journal.</span></li>
