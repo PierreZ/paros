@@ -1002,8 +1002,16 @@ impl MatchmakerAudit {
     /// request short of a quorum is still a real request, and a candidate
     /// whose folded quorum happens to include the one matchmaker holding it
     /// adopts it. So the configuration is accepted when it *is* the
-    /// quorum-held one, or when some flagged registration above it and below
-    /// this ballot named it. Nothing else is: a belief is not a request.
+    /// quorum-held one, or when some flagged registration above it named it.
+    /// Nothing else is: a belief is not a request. That request may sit
+    /// **above** this ballot: a matchmaker re-answers a re-sent request from
+    /// its current scalars, and its effective-configuration scalar is
+    /// monotone, so the re-answer reports a reconfiguration registered after
+    /// the request's own ballot (replay-main 17187159566539186422 on
+    /// bd55f09: node 1's round-10 campaign re-asked matchmaker 0 after node
+    /// 0, deposed, registered its round-11 reconfiguration back to the set
+    /// node 1 believed; the effective one below round 10 was round 8's).
+    /// Phase 1 still covers the quorum-held one: it stays in `H_b`.
     ///
     /// The reply-derived check in [`Self::completed`] asks the same question
     /// of what the candidate was *told*; this one asks it of what is *true*,
@@ -1023,11 +1031,10 @@ impl MatchmakerAudit {
             return;
         };
         let between = (Bound::Excluded(*newest), Bound::Excluded(ballot));
-        let newer_request = *newest < ballot
-            && self
-                .reconfigurations
-                .range(between)
-                .any(|(_, (requested, _))| requested == config);
+        let newer_request = self
+            .reconfigurations
+            .range((Bound::Excluded(*newest), Bound::Unbounded))
+            .any(|(_, (requested, _))| requested == config);
         // The probe floor (#278), as `completed` judges it: a leadership
         // that won above the reconfiguration under another configuration
         // never ran it, so a campaign that keeps that leadership's
