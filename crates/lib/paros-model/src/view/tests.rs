@@ -197,18 +197,31 @@ fn every_journal_carries_its_status_word() {
         &facts(&founders, &registry),
         words(&mut status),
     );
-    let journals: Vec<&wire::JournalView> =
-        reply.tenants.iter().flat_map(|t| &t.journals).collect();
+    let journals: Vec<(&str, &wire::JournalView)> = reply
+        .tenants
+        .iter()
+        .flat_map(|t| t.journals.iter().map(|j| (t.kind.as_str(), j)))
+        .collect();
     assert!(!journals.is_empty());
-    for journal in &journals {
-        assert_eq!(journal.desired_acceptors, 2);
-        assert_eq!(journal.observed, "healthy");
-        assert_eq!(journal.word, "healthy");
-        assert_eq!(
-            crate::status::observe(journal, &reply.machines),
-            Some(Word::Healthy)
-        );
+    for (tenant, journal) in &journals {
+        // A tenant control journal wants `2F + 1` of the three storage
+        // machines (#685 (special tenants are tenants)): on the two founders
+        // alone, before the coordinator books the third, it is degraded.
+        let (desired, word) = if *tenant == "users" && journal.kind == "control" {
+            (3, Word::Degraded)
+        } else {
+            (2, Word::Healthy)
+        };
+        assert_eq!(journal.desired_acceptors, desired);
+        assert_eq!(journal.observed, word.as_str());
+        assert_eq!(journal.word, word.as_str());
+        assert_eq!(crate::status::observe(journal, &reply.machines), Some(word));
     }
+    assert!(
+        journals
+            .iter()
+            .any(|(t, j)| *t == "users" && j.kind == "control")
+    );
     // A founder down: a majority of two is two, so no quorum is left.
     registry.fold(
         registry.next_seq(),
