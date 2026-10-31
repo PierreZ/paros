@@ -137,6 +137,10 @@ jobs:
         run: |
           nix develop --command cargo test -p paros-wasm --test paxos_bindings
           git diff --exit-code -- website/play/src/generated
+      - name: Re-record the Paxos pages' step-through traces and check they are committed (#811 (Paxos flavor pages))
+        run: |
+          nix develop --command cargo test -p paros-wasm --test paxos_traces
+          git diff --exit-code -- website/site/src/traces
       - name: Build every wasm tool (one bundle per feature)
         run: nix develop --command scripts/build-wasm.sh --wasm-only
       - name: Type-check, test and bundle the game's web app

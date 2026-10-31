@@ -39,6 +39,7 @@ pub mod auto;
 pub mod level;
 pub mod narration;
 pub mod prompt;
+pub mod trace;
 pub mod view;
 pub mod world;
 
@@ -169,6 +170,20 @@ impl Game {
                 ),
             ));
         }
+        let events = self.apply(&action)?;
+        self.log.push(action);
+        self.narration.push(events);
+        Ok(())
+    }
+
+    /// Play one move that the level does not have to offer: a site trace
+    /// (`trace`) runs a level's setup with its own script. The engine still
+    /// validates the move, and the core still answers it.
+    ///
+    /// # Errors
+    ///
+    /// See [`ActionErrorCode`].
+    pub fn act_freely(&mut self, action: Action) -> Result<(), ActionError> {
         let events = self.apply(&action)?;
         self.log.push(action);
         self.narration.push(events);

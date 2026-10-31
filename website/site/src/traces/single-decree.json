@@ -1,0 +1,1121 @@
+{
+  "page": "single-decree",
+  "lanes": [
+    {
+      "id": "n5",
+      "label": "proposer 5",
+      "role": "proposer"
+    },
+    {
+      "id": "n8",
+      "label": "proposer 8",
+      "role": "proposer"
+    },
+    {
+      "id": "n1",
+      "label": "a1",
+      "role": "acceptor"
+    },
+    {
+      "id": "n2",
+      "label": "a2",
+      "role": "acceptor"
+    },
+    {
+      "id": "n3",
+      "label": "a3",
+      "role": "acceptor"
+    }
+  ],
+  "scenarios": [
+    {
+      "id": "base",
+      "label": "No fault",
+      "fork": 0,
+      "steps": [
+        {
+          "kind": "event",
+          "from": null,
+          "to": null,
+          "label": "proposer 5 opens a ballot for alpha",
+          "phase": null,
+          "reply": false,
+          "notes": [
+            "Proposer 5 opens ballot 1.5 for \"alpha\" and sends Prepare to acceptors 1, 2 and 3. Phase 1 names no value. It claims the ballot, and it asks what the acceptors have already accepted."
+          ],
+          "state": [
+            "phase 1 at 1.5",
+            "idle",
+            "promised 0.0",
+            "promised 0.0",
+            "promised 0.0"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n5",
+          "to": "n1",
+          "label": "Prepare 1.5",
+          "phase": "prepare",
+          "reply": false,
+          "notes": [
+            "Acceptor 1 receives Prepare 1.5. Its promise was 0.0, so it promises 1.5 and reports what it accepted: nothing."
+          ],
+          "state": [
+            "phase 1 at 1.5",
+            "idle",
+            "promised 1.5",
+            "promised 0.0",
+            "promised 0.0"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n5",
+          "to": "n2",
+          "label": "Prepare 1.5",
+          "phase": "prepare",
+          "reply": false,
+          "notes": [
+            "Acceptor 2 receives Prepare 1.5. Its promise was 0.0, so it promises 1.5 and reports what it accepted: nothing."
+          ],
+          "state": [
+            "phase 1 at 1.5",
+            "idle",
+            "promised 1.5",
+            "promised 1.5",
+            "promised 0.0"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n5",
+          "to": "n3",
+          "label": "Prepare 1.5",
+          "phase": "prepare",
+          "reply": false,
+          "notes": [
+            "Acceptor 3 receives Prepare 1.5. Its promise was 0.0, so it promises 1.5 and reports what it accepted: nothing."
+          ],
+          "state": [
+            "phase 1 at 1.5",
+            "idle",
+            "promised 1.5",
+            "promised 1.5",
+            "promised 1.5"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n1",
+          "to": "n5",
+          "label": "Promise 1.5",
+          "phase": "promise",
+          "reply": true,
+          "notes": [
+            "Proposer 5 holds Promises from acceptor 1. That is 1 of 3. A Phase-1 quorum here is 2 of 3. That is not enough yet, so it may propose nothing."
+          ],
+          "state": [
+            "phase 1 at 1.5",
+            "idle",
+            "promised 1.5",
+            "promised 1.5",
+            "promised 1.5"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n2",
+          "to": "n5",
+          "label": "Promise 1.5",
+          "phase": "promise",
+          "reply": true,
+          "notes": [
+            "Proposer 5 holds Promises from acceptors 1 and 2. That is 2 of 3. A Phase-1 quorum here is 2 of 3. Phase 1 is complete.",
+            "No acceptor reported a value, so proposer 5 may propose its own. Quorum intersection says that a member of this quorum would have reported a value already chosen.",
+            "Phase 2 begins: Accept alpha at ballot 1.5 to acceptors 1, 2 and 3."
+          ],
+          "state": [
+            "phase 2 at 1.5",
+            "idle",
+            "promised 1.5",
+            "promised 1.5",
+            "promised 1.5"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n3",
+          "to": "n5",
+          "label": "Promise 1.5",
+          "phase": "promise",
+          "reply": true,
+          "notes": [],
+          "state": [
+            "phase 2 at 1.5",
+            "idle",
+            "promised 1.5",
+            "promised 1.5",
+            "promised 1.5"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n5",
+          "to": "n1",
+          "label": "Accept 1.5 · slot 0",
+          "phase": "accept",
+          "reply": false,
+          "notes": [
+            "Acceptor 1 votes for alpha at ballot 1.5. Its promise was 1.5, and it refuses nothing at or above that promise. It re-affirms the promise and writes the record down before the Accepted reports it."
+          ],
+          "state": [
+            "phase 2 at 1.5",
+            "idle",
+            "promised 1.5 · voted alpha at 1.5",
+            "promised 1.5",
+            "promised 1.5"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n5",
+          "to": "n2",
+          "label": "Accept 1.5 · slot 0",
+          "phase": "accept",
+          "reply": false,
+          "notes": [
+            "Acceptor 2 votes for alpha at ballot 1.5. Its promise was 1.5, and it refuses nothing at or above that promise. It re-affirms the promise and writes the record down before the Accepted reports it."
+          ],
+          "state": [
+            "phase 2 at 1.5",
+            "idle",
+            "promised 1.5 · voted alpha at 1.5",
+            "promised 1.5 · voted alpha at 1.5",
+            "promised 1.5"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n5",
+          "to": "n3",
+          "label": "Accept 1.5 · slot 0",
+          "phase": "accept",
+          "reply": false,
+          "notes": [
+            "Acceptor 3 votes for alpha at ballot 1.5. Its promise was 1.5, and it refuses nothing at or above that promise. It re-affirms the promise and writes the record down before the Accepted reports it."
+          ],
+          "state": [
+            "phase 2 at 1.5",
+            "idle",
+            "promised 1.5 · voted alpha at 1.5",
+            "promised 1.5 · voted alpha at 1.5",
+            "promised 1.5 · voted alpha at 1.5"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n1",
+          "to": "n5",
+          "label": "Accepted 1.5 · slot 0",
+          "phase": "accepted",
+          "reply": true,
+          "notes": [
+            "Proposer 5 has 1 of 3 votes at ballot 1.5. A Phase-2 quorum here is 2 of 3. Nothing is chosen yet."
+          ],
+          "state": [
+            "phase 2 at 1.5",
+            "idle",
+            "promised 1.5 · voted alpha at 1.5",
+            "promised 1.5 · voted alpha at 1.5",
+            "promised 1.5 · voted alpha at 1.5"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n2",
+          "to": "n5",
+          "label": "Accepted 1.5 · slot 0",
+          "phase": "accepted",
+          "reply": true,
+          "notes": [
+            "Slot 0 is chosen: acceptors 1 and 2 voted for alpha at ballot 1.5. That is 2 of 3 acceptors. A Phase-2 quorum here is 2 of 3. This decision is final. Every Phase-1 quorum of a higher ballot meets this set of voters, so every later proposer learns the value and must propose it again."
+          ],
+          "state": [
+            "chosen at 1.5",
+            "idle",
+            "promised 1.5 · voted alpha at 1.5",
+            "promised 1.5 · voted alpha at 1.5",
+            "promised 1.5 · voted alpha at 1.5"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n3",
+          "to": "n5",
+          "label": "Accepted 1.5 · slot 0",
+          "phase": "accepted",
+          "reply": true,
+          "notes": [
+            "Proposer 5 has 0 of 3 votes at ballot 1.5. A Phase-2 quorum here is 2 of 3. Nothing is chosen yet."
+          ],
+          "state": [
+            "chosen at 1.5",
+            "idle",
+            "promised 1.5 · voted alpha at 1.5",
+            "promised 1.5 · voted alpha at 1.5",
+            "promised 1.5 · voted alpha at 1.5"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n5",
+          "to": "n1",
+          "label": "Commit 1.5 · slot 0",
+          "phase": "commit",
+          "reply": false,
+          "notes": [
+            "Acceptor 1 learns the decision: it records alpha at ballot 1.5, whether or not it ever voted for it."
+          ],
+          "state": [
+            "chosen at 1.5",
+            "idle",
+            "promised 1.5 · voted alpha at 1.5",
+            "promised 1.5 · voted alpha at 1.5",
+            "promised 1.5 · voted alpha at 1.5"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n5",
+          "to": "n2",
+          "label": "Commit 1.5 · slot 0",
+          "phase": "commit",
+          "reply": false,
+          "notes": [
+            "Acceptor 2 learns the decision: it records alpha at ballot 1.5, whether or not it ever voted for it."
+          ],
+          "state": [
+            "chosen at 1.5",
+            "idle",
+            "promised 1.5 · voted alpha at 1.5",
+            "promised 1.5 · voted alpha at 1.5",
+            "promised 1.5 · voted alpha at 1.5"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n5",
+          "to": "n3",
+          "label": "Commit 1.5 · slot 0",
+          "phase": "commit",
+          "reply": false,
+          "notes": [
+            "Acceptor 3 learns the decision: it records alpha at ballot 1.5, whether or not it ever voted for it."
+          ],
+          "state": [
+            "chosen at 1.5",
+            "idle",
+            "promised 1.5 · voted alpha at 1.5",
+            "promised 1.5 · voted alpha at 1.5",
+            "promised 1.5 · voted alpha at 1.5"
+          ]
+        }
+      ],
+      "outcome": "alpha is chosen at ballot 1.5."
+    },
+    {
+      "id": "acceptor-down",
+      "label": "What if a3 is down?",
+      "fork": 3,
+      "steps": [
+        {
+          "kind": "event",
+          "from": null,
+          "to": null,
+          "label": "proposer 5 opens a ballot for alpha",
+          "phase": null,
+          "reply": false,
+          "notes": [
+            "Proposer 5 opens ballot 1.5 for \"alpha\" and sends Prepare to acceptors 1, 2 and 3. Phase 1 names no value. It claims the ballot, and it asks what the acceptors have already accepted."
+          ],
+          "state": [
+            "phase 1 at 1.5",
+            "idle",
+            "promised 0.0",
+            "promised 0.0",
+            "promised 0.0"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n5",
+          "to": "n1",
+          "label": "Prepare 1.5",
+          "phase": "prepare",
+          "reply": false,
+          "notes": [
+            "Acceptor 1 receives Prepare 1.5. Its promise was 0.0, so it promises 1.5 and reports what it accepted: nothing."
+          ],
+          "state": [
+            "phase 1 at 1.5",
+            "idle",
+            "promised 1.5",
+            "promised 0.0",
+            "promised 0.0"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n5",
+          "to": "n2",
+          "label": "Prepare 1.5",
+          "phase": "prepare",
+          "reply": false,
+          "notes": [
+            "Acceptor 2 receives Prepare 1.5. Its promise was 0.0, so it promises 1.5 and reports what it accepted: nothing."
+          ],
+          "state": [
+            "phase 1 at 1.5",
+            "idle",
+            "promised 1.5",
+            "promised 1.5",
+            "promised 0.0"
+          ]
+        },
+        {
+          "kind": "drop",
+          "from": "n5",
+          "to": "n3",
+          "label": "Prepare 1.5",
+          "phase": "prepare",
+          "reply": false,
+          "notes": [
+            "Prepare at 1.5 for slots from 0 is lost."
+          ],
+          "state": [
+            "phase 1 at 1.5",
+            "idle",
+            "promised 1.5",
+            "promised 1.5",
+            "promised 0.0"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n1",
+          "to": "n5",
+          "label": "Promise 1.5",
+          "phase": "promise",
+          "reply": true,
+          "notes": [
+            "Proposer 5 holds Promises from acceptor 1. That is 1 of 3. A Phase-1 quorum here is 2 of 3. That is not enough yet, so it may propose nothing."
+          ],
+          "state": [
+            "phase 1 at 1.5",
+            "idle",
+            "promised 1.5",
+            "promised 1.5",
+            "promised 0.0"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n2",
+          "to": "n5",
+          "label": "Promise 1.5",
+          "phase": "promise",
+          "reply": true,
+          "notes": [
+            "Proposer 5 holds Promises from acceptors 1 and 2. That is 2 of 3. A Phase-1 quorum here is 2 of 3. Phase 1 is complete.",
+            "No acceptor reported a value, so proposer 5 may propose its own. Quorum intersection says that a member of this quorum would have reported a value already chosen.",
+            "Phase 2 begins: Accept alpha at ballot 1.5 to acceptors 1, 2 and 3."
+          ],
+          "state": [
+            "phase 2 at 1.5",
+            "idle",
+            "promised 1.5",
+            "promised 1.5",
+            "promised 0.0"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n5",
+          "to": "n1",
+          "label": "Accept 1.5 · slot 0",
+          "phase": "accept",
+          "reply": false,
+          "notes": [
+            "Acceptor 1 votes for alpha at ballot 1.5. Its promise was 1.5, and it refuses nothing at or above that promise. It re-affirms the promise and writes the record down before the Accepted reports it."
+          ],
+          "state": [
+            "phase 2 at 1.5",
+            "idle",
+            "promised 1.5 · voted alpha at 1.5",
+            "promised 1.5",
+            "promised 0.0"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n5",
+          "to": "n2",
+          "label": "Accept 1.5 · slot 0",
+          "phase": "accept",
+          "reply": false,
+          "notes": [
+            "Acceptor 2 votes for alpha at ballot 1.5. Its promise was 1.5, and it refuses nothing at or above that promise. It re-affirms the promise and writes the record down before the Accepted reports it."
+          ],
+          "state": [
+            "phase 2 at 1.5",
+            "idle",
+            "promised 1.5 · voted alpha at 1.5",
+            "promised 1.5 · voted alpha at 1.5",
+            "promised 0.0"
+          ]
+        },
+        {
+          "kind": "drop",
+          "from": "n5",
+          "to": "n3",
+          "label": "Accept 1.5 · slot 0",
+          "phase": "accept",
+          "reply": false,
+          "notes": [
+            "Accept alpha at 1.5 for slot 0 is lost."
+          ],
+          "state": [
+            "phase 2 at 1.5",
+            "idle",
+            "promised 1.5 · voted alpha at 1.5",
+            "promised 1.5 · voted alpha at 1.5",
+            "promised 0.0"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n1",
+          "to": "n5",
+          "label": "Accepted 1.5 · slot 0",
+          "phase": "accepted",
+          "reply": true,
+          "notes": [
+            "Proposer 5 has 1 of 3 votes at ballot 1.5. A Phase-2 quorum here is 2 of 3. Nothing is chosen yet."
+          ],
+          "state": [
+            "phase 2 at 1.5",
+            "idle",
+            "promised 1.5 · voted alpha at 1.5",
+            "promised 1.5 · voted alpha at 1.5",
+            "promised 0.0"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n2",
+          "to": "n5",
+          "label": "Accepted 1.5 · slot 0",
+          "phase": "accepted",
+          "reply": true,
+          "notes": [
+            "Slot 0 is chosen: acceptors 1 and 2 voted for alpha at ballot 1.5. That is 2 of 3 acceptors. A Phase-2 quorum here is 2 of 3. This decision is final. Every Phase-1 quorum of a higher ballot meets this set of voters, so every later proposer learns the value and must propose it again."
+          ],
+          "state": [
+            "chosen at 1.5",
+            "idle",
+            "promised 1.5 · voted alpha at 1.5",
+            "promised 1.5 · voted alpha at 1.5",
+            "promised 0.0"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n5",
+          "to": "n1",
+          "label": "Commit 1.5 · slot 0",
+          "phase": "commit",
+          "reply": false,
+          "notes": [
+            "Acceptor 1 learns the decision: it records alpha at ballot 1.5, whether or not it ever voted for it."
+          ],
+          "state": [
+            "chosen at 1.5",
+            "idle",
+            "promised 1.5 · voted alpha at 1.5",
+            "promised 1.5 · voted alpha at 1.5",
+            "promised 0.0"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n5",
+          "to": "n2",
+          "label": "Commit 1.5 · slot 0",
+          "phase": "commit",
+          "reply": false,
+          "notes": [
+            "Acceptor 2 learns the decision: it records alpha at ballot 1.5, whether or not it ever voted for it."
+          ],
+          "state": [
+            "chosen at 1.5",
+            "idle",
+            "promised 1.5 · voted alpha at 1.5",
+            "promised 1.5 · voted alpha at 1.5",
+            "promised 0.0"
+          ]
+        },
+        {
+          "kind": "drop",
+          "from": "n5",
+          "to": "n3",
+          "label": "Commit 1.5 · slot 0",
+          "phase": "commit",
+          "reply": false,
+          "notes": [
+            "Commit slot 0 = alpha at 1.5 is lost."
+          ],
+          "state": [
+            "chosen at 1.5",
+            "idle",
+            "promised 1.5 · voted alpha at 1.5",
+            "promised 1.5 · voted alpha at 1.5",
+            "promised 0.0"
+          ]
+        }
+      ],
+      "outcome": "alpha is chosen at ballot 1.5."
+    },
+    {
+      "id": "second-proposer",
+      "label": "What if a second proposer starts?",
+      "fork": 8,
+      "steps": [
+        {
+          "kind": "event",
+          "from": null,
+          "to": null,
+          "label": "proposer 5 opens a ballot for alpha",
+          "phase": null,
+          "reply": false,
+          "notes": [
+            "Proposer 5 opens ballot 1.5 for \"alpha\" and sends Prepare to acceptors 1, 2 and 3. Phase 1 names no value. It claims the ballot, and it asks what the acceptors have already accepted."
+          ],
+          "state": [
+            "phase 1 at 1.5",
+            "idle",
+            "promised 0.0",
+            "promised 0.0",
+            "promised 0.0"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n5",
+          "to": "n1",
+          "label": "Prepare 1.5",
+          "phase": "prepare",
+          "reply": false,
+          "notes": [
+            "Acceptor 1 receives Prepare 1.5. Its promise was 0.0, so it promises 1.5 and reports what it accepted: nothing."
+          ],
+          "state": [
+            "phase 1 at 1.5",
+            "idle",
+            "promised 1.5",
+            "promised 0.0",
+            "promised 0.0"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n5",
+          "to": "n2",
+          "label": "Prepare 1.5",
+          "phase": "prepare",
+          "reply": false,
+          "notes": [
+            "Acceptor 2 receives Prepare 1.5. Its promise was 0.0, so it promises 1.5 and reports what it accepted: nothing."
+          ],
+          "state": [
+            "phase 1 at 1.5",
+            "idle",
+            "promised 1.5",
+            "promised 1.5",
+            "promised 0.0"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n5",
+          "to": "n3",
+          "label": "Prepare 1.5",
+          "phase": "prepare",
+          "reply": false,
+          "notes": [
+            "Acceptor 3 receives Prepare 1.5. Its promise was 0.0, so it promises 1.5 and reports what it accepted: nothing."
+          ],
+          "state": [
+            "phase 1 at 1.5",
+            "idle",
+            "promised 1.5",
+            "promised 1.5",
+            "promised 1.5"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n1",
+          "to": "n5",
+          "label": "Promise 1.5",
+          "phase": "promise",
+          "reply": true,
+          "notes": [
+            "Proposer 5 holds Promises from acceptor 1. That is 1 of 3. A Phase-1 quorum here is 2 of 3. That is not enough yet, so it may propose nothing."
+          ],
+          "state": [
+            "phase 1 at 1.5",
+            "idle",
+            "promised 1.5",
+            "promised 1.5",
+            "promised 1.5"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n2",
+          "to": "n5",
+          "label": "Promise 1.5",
+          "phase": "promise",
+          "reply": true,
+          "notes": [
+            "Proposer 5 holds Promises from acceptors 1 and 2. That is 2 of 3. A Phase-1 quorum here is 2 of 3. Phase 1 is complete.",
+            "No acceptor reported a value, so proposer 5 may propose its own. Quorum intersection says that a member of this quorum would have reported a value already chosen.",
+            "Phase 2 begins: Accept alpha at ballot 1.5 to acceptors 1, 2 and 3."
+          ],
+          "state": [
+            "phase 2 at 1.5",
+            "idle",
+            "promised 1.5",
+            "promised 1.5",
+            "promised 1.5"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n3",
+          "to": "n5",
+          "label": "Promise 1.5",
+          "phase": "promise",
+          "reply": true,
+          "notes": [],
+          "state": [
+            "phase 2 at 1.5",
+            "idle",
+            "promised 1.5",
+            "promised 1.5",
+            "promised 1.5"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n5",
+          "to": "n1",
+          "label": "Accept 1.5 · slot 0",
+          "phase": "accept",
+          "reply": false,
+          "notes": [
+            "Acceptor 1 votes for alpha at ballot 1.5. Its promise was 1.5, and it refuses nothing at or above that promise. It re-affirms the promise and writes the record down before the Accepted reports it."
+          ],
+          "state": [
+            "phase 2 at 1.5",
+            "idle",
+            "promised 1.5 · voted alpha at 1.5",
+            "promised 1.5",
+            "promised 1.5"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n1",
+          "to": "n5",
+          "label": "Accepted 1.5 · slot 0",
+          "phase": "accepted",
+          "reply": true,
+          "notes": [
+            "Proposer 5 has 1 of 3 votes at ballot 1.5. A Phase-2 quorum here is 2 of 3. Nothing is chosen yet."
+          ],
+          "state": [
+            "phase 2 at 1.5",
+            "idle",
+            "promised 1.5 · voted alpha at 1.5",
+            "promised 1.5",
+            "promised 1.5"
+          ]
+        },
+        {
+          "kind": "event",
+          "from": null,
+          "to": null,
+          "label": "proposer 8 opens a higher ballot for bravo",
+          "phase": null,
+          "reply": false,
+          "notes": [
+            "Proposer 8 opens ballot 1.8 for \"bravo\" and sends Prepare to acceptors 1, 2 and 3. Phase 1 names no value. It claims the ballot, and it asks what the acceptors have already accepted."
+          ],
+          "state": [
+            "phase 2 at 1.5",
+            "phase 1 at 1.8",
+            "promised 1.5 · voted alpha at 1.5",
+            "promised 1.5",
+            "promised 1.5"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n8",
+          "to": "n1",
+          "label": "Prepare 1.8",
+          "phase": "prepare",
+          "reply": false,
+          "notes": [
+            "Acceptor 1 receives Prepare 1.8. Its promise was 1.5, so it promises 1.8 and reports what it accepted: alpha at ballot 1.5."
+          ],
+          "state": [
+            "phase 2 at 1.5",
+            "phase 1 at 1.8",
+            "promised 1.8 · voted alpha at 1.5",
+            "promised 1.5",
+            "promised 1.5"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n8",
+          "to": "n2",
+          "label": "Prepare 1.8",
+          "phase": "prepare",
+          "reply": false,
+          "notes": [
+            "Acceptor 2 receives Prepare 1.8. Its promise was 1.5, so it promises 1.8 and reports what it accepted: nothing."
+          ],
+          "state": [
+            "phase 2 at 1.5",
+            "phase 1 at 1.8",
+            "promised 1.8 · voted alpha at 1.5",
+            "promised 1.8",
+            "promised 1.5"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n8",
+          "to": "n3",
+          "label": "Prepare 1.8",
+          "phase": "prepare",
+          "reply": false,
+          "notes": [
+            "Acceptor 3 receives Prepare 1.8. Its promise was 1.5, so it promises 1.8 and reports what it accepted: nothing."
+          ],
+          "state": [
+            "phase 2 at 1.5",
+            "phase 1 at 1.8",
+            "promised 1.8 · voted alpha at 1.5",
+            "promised 1.8",
+            "promised 1.8"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n1",
+          "to": "n8",
+          "label": "Promise 1.8",
+          "phase": "promise",
+          "reply": true,
+          "notes": [
+            "Proposer 8 holds Promises from acceptor 1. That is 1 of 3. A Phase-1 quorum here is 2 of 3. That is not enough yet, so it may propose nothing."
+          ],
+          "state": [
+            "phase 2 at 1.5",
+            "phase 1 at 1.8",
+            "promised 1.8 · voted alpha at 1.5",
+            "promised 1.8",
+            "promised 1.8"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n2",
+          "to": "n8",
+          "label": "Promise 1.8",
+          "phase": "promise",
+          "reply": true,
+          "notes": [
+            "Proposer 8 holds Promises from acceptors 1 and 2. That is 2 of 3. A Phase-1 quorum here is 2 of 3. Phase 1 is complete.",
+            "A promise reported alpha accepted at ballot 1.5. The value-selection rule (P2c) makes proposer 8 propose that value again, instead of its own. One report is exactly what an already-chosen value looks like from here.",
+            "Phase 2 begins: Accept alpha at ballot 1.8 to acceptors 1, 2 and 3."
+          ],
+          "state": [
+            "phase 2 at 1.5",
+            "phase 2 at 1.8",
+            "promised 1.8 · voted alpha at 1.5",
+            "promised 1.8",
+            "promised 1.8"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n3",
+          "to": "n8",
+          "label": "Promise 1.8",
+          "phase": "promise",
+          "reply": true,
+          "notes": [],
+          "state": [
+            "phase 2 at 1.5",
+            "phase 2 at 1.8",
+            "promised 1.8 · voted alpha at 1.5",
+            "promised 1.8",
+            "promised 1.8"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n5",
+          "to": "n2",
+          "label": "Accept 1.5 · slot 0",
+          "phase": "accept",
+          "reply": false,
+          "notes": [
+            "Acceptor 2 receives Accept 1.5 for alpha. It promised 1.8, which is higher, so it refuses the vote. The ballot it holds the fence for may already have chosen a value."
+          ],
+          "state": [
+            "phase 2 at 1.5",
+            "phase 2 at 1.8",
+            "promised 1.8 · voted alpha at 1.5",
+            "promised 1.8",
+            "promised 1.8"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n5",
+          "to": "n3",
+          "label": "Accept 1.5 · slot 0",
+          "phase": "accept",
+          "reply": false,
+          "notes": [
+            "Acceptor 3 receives Accept 1.5 for alpha. It promised 1.8, which is higher, so it refuses the vote. The ballot it holds the fence for may already have chosen a value."
+          ],
+          "state": [
+            "phase 2 at 1.5",
+            "phase 2 at 1.8",
+            "promised 1.8 · voted alpha at 1.5",
+            "promised 1.8",
+            "promised 1.8"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n8",
+          "to": "n1",
+          "label": "Accept 1.8 · slot 0",
+          "phase": "accept",
+          "reply": false,
+          "notes": [
+            "Acceptor 1 votes for alpha at ballot 1.8. Its promise was 1.8, and it refuses nothing at or above that promise. It re-affirms the promise and writes the record down before the Accepted reports it."
+          ],
+          "state": [
+            "phase 2 at 1.5",
+            "phase 2 at 1.8",
+            "promised 1.8 · voted alpha at 1.8",
+            "promised 1.8",
+            "promised 1.8"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n8",
+          "to": "n2",
+          "label": "Accept 1.8 · slot 0",
+          "phase": "accept",
+          "reply": false,
+          "notes": [
+            "Acceptor 2 votes for alpha at ballot 1.8. Its promise was 1.8, and it refuses nothing at or above that promise. It re-affirms the promise and writes the record down before the Accepted reports it."
+          ],
+          "state": [
+            "phase 2 at 1.5",
+            "phase 2 at 1.8",
+            "promised 1.8 · voted alpha at 1.8",
+            "promised 1.8 · voted alpha at 1.8",
+            "promised 1.8"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n8",
+          "to": "n3",
+          "label": "Accept 1.8 · slot 0",
+          "phase": "accept",
+          "reply": false,
+          "notes": [
+            "Acceptor 3 votes for alpha at ballot 1.8. Its promise was 1.8, and it refuses nothing at or above that promise. It re-affirms the promise and writes the record down before the Accepted reports it."
+          ],
+          "state": [
+            "phase 2 at 1.5",
+            "phase 2 at 1.8",
+            "promised 1.8 · voted alpha at 1.8",
+            "promised 1.8 · voted alpha at 1.8",
+            "promised 1.8 · voted alpha at 1.8"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n2",
+          "to": "n5",
+          "label": "Nack 1.5 · slot 0",
+          "phase": "nack",
+          "reply": true,
+          "notes": [
+            "Proposer 5's ballot 1.5 is preempted. Some acceptor has promised a higher ballot. Notice what the Nack does *not* carry: the promise that refused it. A proposer raises its ballot one round at a time, from what it knows."
+          ],
+          "state": [
+            "refused at 1.5",
+            "phase 2 at 1.8",
+            "promised 1.8 · voted alpha at 1.8",
+            "promised 1.8 · voted alpha at 1.8",
+            "promised 1.8 · voted alpha at 1.8"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n3",
+          "to": "n5",
+          "label": "Nack 1.5 · slot 0",
+          "phase": "nack",
+          "reply": true,
+          "notes": [
+            "Proposer 5's ballot 1.5 is preempted. Some acceptor has promised a higher ballot. Notice what the Nack does *not* carry: the promise that refused it. A proposer raises its ballot one round at a time, from what it knows."
+          ],
+          "state": [
+            "refused at 1.5",
+            "phase 2 at 1.8",
+            "promised 1.8 · voted alpha at 1.8",
+            "promised 1.8 · voted alpha at 1.8",
+            "promised 1.8 · voted alpha at 1.8"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n1",
+          "to": "n8",
+          "label": "Accepted 1.8 · slot 0",
+          "phase": "accepted",
+          "reply": true,
+          "notes": [
+            "Proposer 8 has 1 of 3 votes at ballot 1.8. A Phase-2 quorum here is 2 of 3. Nothing is chosen yet."
+          ],
+          "state": [
+            "refused at 1.5",
+            "phase 2 at 1.8",
+            "promised 1.8 · voted alpha at 1.8",
+            "promised 1.8 · voted alpha at 1.8",
+            "promised 1.8 · voted alpha at 1.8"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n2",
+          "to": "n8",
+          "label": "Accepted 1.8 · slot 0",
+          "phase": "accepted",
+          "reply": true,
+          "notes": [
+            "Slot 0 is chosen: acceptors 1 and 2 voted for alpha at ballot 1.8. That is 2 of 3 acceptors. A Phase-2 quorum here is 2 of 3. This decision is final. Every Phase-1 quorum of a higher ballot meets this set of voters, so every later proposer learns the value and must propose it again.",
+            "2 ballots completed Phase 1, and the cluster chose exactly one value: alpha. The duel cost extra rounds. It did not cost safety."
+          ],
+          "state": [
+            "refused at 1.5",
+            "chosen at 1.8",
+            "promised 1.8 · voted alpha at 1.8",
+            "promised 1.8 · voted alpha at 1.8",
+            "promised 1.8 · voted alpha at 1.8"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n3",
+          "to": "n8",
+          "label": "Accepted 1.8 · slot 0",
+          "phase": "accepted",
+          "reply": true,
+          "notes": [
+            "Proposer 8 has 0 of 3 votes at ballot 1.8. A Phase-2 quorum here is 2 of 3. Nothing is chosen yet."
+          ],
+          "state": [
+            "refused at 1.5",
+            "chosen at 1.8",
+            "promised 1.8 · voted alpha at 1.8",
+            "promised 1.8 · voted alpha at 1.8",
+            "promised 1.8 · voted alpha at 1.8"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n8",
+          "to": "n1",
+          "label": "Commit 1.8 · slot 0",
+          "phase": "commit",
+          "reply": false,
+          "notes": [
+            "Acceptor 1 learns the decision: it records alpha at ballot 1.8, whether or not it ever voted for it."
+          ],
+          "state": [
+            "refused at 1.5",
+            "chosen at 1.8",
+            "promised 1.8 · voted alpha at 1.8",
+            "promised 1.8 · voted alpha at 1.8",
+            "promised 1.8 · voted alpha at 1.8"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n8",
+          "to": "n2",
+          "label": "Commit 1.8 · slot 0",
+          "phase": "commit",
+          "reply": false,
+          "notes": [
+            "Acceptor 2 learns the decision: it records alpha at ballot 1.8, whether or not it ever voted for it."
+          ],
+          "state": [
+            "refused at 1.5",
+            "chosen at 1.8",
+            "promised 1.8 · voted alpha at 1.8",
+            "promised 1.8 · voted alpha at 1.8",
+            "promised 1.8 · voted alpha at 1.8"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n8",
+          "to": "n3",
+          "label": "Commit 1.8 · slot 0",
+          "phase": "commit",
+          "reply": false,
+          "notes": [
+            "Acceptor 3 learns the decision: it records alpha at ballot 1.8, whether or not it ever voted for it."
+          ],
+          "state": [
+            "refused at 1.5",
+            "chosen at 1.8",
+            "promised 1.8 · voted alpha at 1.8",
+            "promised 1.8 · voted alpha at 1.8",
+            "promised 1.8 · voted alpha at 1.8"
+          ]
+        }
+      ],
+      "outcome": "alpha is chosen at ballot 1.8."
+    }
+  ]
+}
