@@ -25,12 +25,22 @@
     return window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? DARK : LIGHT;
   }
 
+  // Always written, so a page can read the resolved theme from <html data-theme>
+  // (a frame on a book page reads it to match the page).
   function apply(t) {
-    if (t) root.setAttribute("data-theme", t);
-    else root.removeAttribute("data-theme");
+    root.setAttribute("data-theme", t);
   }
 
-  apply(stored());
+  apply(current());
+  if (window.matchMedia) {
+    var q = window.matchMedia("(prefers-color-scheme: dark)");
+    var follow = function () {
+      if (stored()) return;
+      apply(current());
+      window.dispatchEvent(new CustomEvent("paros-theme", { detail: current() }));
+    };
+    if (q.addEventListener) q.addEventListener("change", follow);
+  }
 
   window.parosTheme = {
     isDark: function () {

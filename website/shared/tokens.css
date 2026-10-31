@@ -4,9 +4,10 @@
  * (website/zola), paros play (website/play) and the sandbox (website/sandbox)
  * import it. Mermaid `classDef` colours in the book are the one exception.
  *
- * Theme: the reader's choice is in localStorage["theme"] ("goyo-light" or
- * "goyo-dark"), written on <html data-theme>. Without a choice, the page
- * follows prefers-color-scheme. The dark values are written twice (the media
+ * Theme: <html data-theme> is "goyo-light"/"light" or "goyo-dark"/"dark".
+ * shared/theme.js writes it from localStorage["theme"] or, without a choice,
+ * from prefers-color-scheme; the media query below covers a page without
+ * the script. The dark values are written twice (the media
  * query and the explicit choice) because CSS cannot share one block for both.
  */
 
@@ -128,7 +129,7 @@
 }
 
 @media (prefers-color-scheme: dark) {
-  :root:not([data-theme="goyo-light"]) {
+  :root:not([data-theme="goyo-light"]):not([data-theme="light"]) {
     color-scheme: dark;
     --bg: #0b0c0d;
     --panel: #16191a;
@@ -184,7 +185,8 @@
   }
 }
 
-:root[data-theme="goyo-dark"] {
+:root[data-theme="goyo-dark"],
+:root[data-theme="dark"] {
   color-scheme: dark;
   --bg: #0b0c0d;
   --panel: #16191a;
