@@ -414,6 +414,22 @@ message InspectReply {
   // is the latest (#754 (counts off the format marker)), beside `members`.
   uint64 proxies = 28;
   uint64 replicas = 29;
+  // The acceptor half of this node (#518 (paros playground)), read only:
+  // the highest ballot it promised, its vote watermark (the highest slot it
+  // holds or stands in for a vote at, unset before its first vote), how many
+  // accepted records it retains, and the last of them (at most
+  // `INSPECT_ACCEPTED_TAIL`), oldest first.
+  .paros.common.v1.Ballot promised = 30;
+  optional uint64 vote_watermark = 31;
+  uint64 accepted_count = 32;
+  repeated AcceptedVote accepted_tail = 33;
+}
+
+// One record of an acceptor's accepted log, as `Inspect` reports it: its
+// slot and the ballot it was accepted under. The value stays on the node.
+message AcceptedVote {
+  uint64 slot = 1;
+  .paros.common.v1.Ballot ballot = 2;
 }
 
 // A scrub of one journal's durable records on the node that answers (#362

@@ -2,7 +2,7 @@
 // then watch it play in the cluster view. The page draws only what the run
 // returns; the run is the shipped paros code on moonpool's simulator.
 
-import { BEATS, Stage, drawTimeline, el, explain, index, legend, lowerBound } from "./stage.js";
+import { BEATS, Stage, drawTimeline, el, explain, index, legend, lowerBound, role } from "./stage.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -19,6 +19,31 @@ const PRESETS = {
       { at_ms: 7000, op: { kind: "write", tenant: "acme", journal: "orders", count: 12 } },
       { at_ms: 8000, op: { kind: "write", tenant: "acme", journal: "audit", count: 4 } },
       { at_ms: 9000, op: { kind: "read", tenant: "acme", journal: "orders", count: 12 } },
+    ],
+  },
+  "Crash the leader, then restart it": {
+    config: { seed: 1, machines: 5, run_ms: 30000 },
+    actions: [
+      init(5),
+      { at_ms: 3000, op: { kind: "create_tenant", tenant: "acme" } },
+      { at_ms: 4000, op: { kind: "create_journal", tenant: "acme", journal: "orders", mode: "machines=1" } },
+      { at_ms: 6000, op: { kind: "write", tenant: "acme", journal: "orders", count: 4 } },
+      { at_ms: 9000, op: { kind: "crash", machine: 0 } },
+      { at_ms: 10000, op: { kind: "write", tenant: "acme", journal: "orders", count: 4 } },
+      { at_ms: 20000, op: { kind: "restart", machine: 0 } },
+      { at_ms: 24000, op: { kind: "read", tenant: "acme", journal: "orders", count: 8 } },
+    ],
+  },
+  "Cut a machine off, then heal it": {
+    config: { seed: 2, machines: 5, run_ms: 30000 },
+    actions: [
+      init(5),
+      { at_ms: 3000, op: { kind: "create_tenant", tenant: "acme" } },
+      { at_ms: 4000, op: { kind: "create_journal", tenant: "acme", journal: "orders", mode: "machines=1" } },
+      { at_ms: 6000, op: { kind: "isolate", machine: 1 } },
+      { at_ms: 7000, op: { kind: "write", tenant: "acme", journal: "orders", count: 6 } },
+      { at_ms: 15000, op: { kind: "heal", machine: 1 } },
+      { at_ms: 20000, op: { kind: "read", tenant: "acme", journal: "orders", count: 6 } },
     ],
   },
   "Two tenants": {
@@ -41,6 +66,8 @@ const CAPTIONS = [
   "Writes flow. A client outside the cell sends each write to the journal's leader. The leader asks a Phase-2 quorum to accept it; then the record is chosen.",
 ];
 
+// Replay mode: a run opened from a file or pasted is stepped, not edited.
+let replaying = false;
 let state = loadFromHash() || structuredClone(PRESETS["Three acts: cell, tenant, writes"]);
 let run = null;
 let ix = null;
@@ -74,7 +101,7 @@ worker.onmessage = ({ data }) => {
 };
 
 function setBusy(busy) {
-  for (const id of ["add", "undo", "clear", "load-preset"]) $(id).disabled = busy;
+  for (const id of ["add", "undo", "clear", "load-preset"]) $(id).disabled = busy || replaying;
   if (busy) $("status").textContent = "Running…";
 }
 
@@ -91,13 +118,16 @@ function saveToHash() {
   const bytes = new TextEncoder().encode(JSON.stringify(state));
   let text = "";
   bytes.forEach((b) => (text += String.fromCharCode(b)));
-  history.replaceState(null, "", "#" + btoa(text).replaceAll("+", "-").replaceAll("/", "_"));
+  history.replaceState(null, "", `#${replaying ? "replay:" : ""}` + btoa(text).replaceAll("+", "-").replaceAll("/", "_"));
 }
 
 function loadFromHash() {
   if (location.hash.length < 2) return null;
   try {
-    const text = atob(location.hash.slice(1).replaceAll("-", "+").replaceAll("_", "/"));
+    // `#replay:<run>` opens the run in replay mode.
+    let hash = location.hash.slice(1);
+    if (hash.startsWith("replay:")) { replaying = true; hash = hash.slice(7); }
+    const text = atob(hash.replaceAll("-", "+").replaceAll("_", "/"));
     const bytes = Uint8Array.from(text, (c) => c.charCodeAt(0));
     const loaded = JSON.parse(new TextDecoder().decode(bytes));
     if (!loaded.config || !Array.isArray(loaded.actions)) return null;
@@ -120,6 +150,10 @@ function describe(op) {
     case "create_journal": return `create journal ${op.tenant}/${op.journal} (${op.mode || "machines=1"})`;
     case "write": return `write ${op.count} records to ${op.tenant}/${op.journal}`;
     case "read": return `read ${op.count} records of ${op.tenant}/${op.journal}`;
+    case "crash": return `crash m${op.machine}`;
+    case "restart": return `restart m${op.machine}`;
+    case "isolate": return `cut m${op.machine} from the network`;
+    case "heal": return `join m${op.machine} to the network again`;
     default: return op.kind;
   }
 }
@@ -152,7 +186,7 @@ function renderActions() {
           textContent: ` → ${result.detail} (${result.start_ms}–${result.end_ms} ms)` });
         item.append(span);
       }
-      if (index > 0) {
+      if (index > 0 && !replaying) {
         const remove = el("button", { textContent: "×", title: "Remove this action" });
         remove.onclick = () => { state.actions.splice(index, 1); start(); };
         item.append(remove);
@@ -184,6 +218,7 @@ function renderPicks() {
   };
   fill($("tenant-pick"), tenants);
   fill($("journal-pick"), journals);
+  fill($("machine-pick"), Array.from({ length: state.config.machines }, (_, m) => String(m)));
   renderOpFields();
 }
 
@@ -195,7 +230,10 @@ function renderOpFields() {
   $("mode-field").hidden = kind !== "create_journal";
   $("journal-pick-field").hidden = !["write", "read"].includes(kind);
   $("count-field").hidden = !["write", "read"].includes(kind);
+  $("machine-pick-field").hidden = !FAULTS.has(kind);
 }
+
+const FAULTS = new Set(["crash", "restart", "isolate", "heal"]);
 
 function readConfig() {
   state.config = {
@@ -225,6 +263,8 @@ function addAction() {
     if (!text("tenant-pick")) { $("status").textContent = "Create a tenant first."; return; }
     if (!text("journal-name")) { $("status").textContent = "Name the journal."; return; }
     op = { kind, tenant: text("tenant-pick"), journal: text("journal-name"), mode: $("mode").value };
+  } else if (FAULTS.has(kind)) {
+    op = { kind, machine: clamp(Number($("machine-pick").value), 0, state.config.machines - 1) };
   } else {
     const pick = text("journal-pick");
     if (!pick) { $("status").textContent = "Create a journal first."; return; }
@@ -265,9 +305,10 @@ function caption() {
   for (const s of run.steps) {
     if (s.start_ms <= t) {
       const a = state.actions[s.index];
+      const flavour = a.op.kind === "init" ? " (single-decree Paxos chooses the cell plan)" : "";
       now = s.end_ms <= t
-        ? `Step ${s.index}, ${describe(a.op)}: ${s.detail}.`
-        : `Step ${s.index} is running: ${describe(a.op)}.`;
+        ? `Step ${s.index}, ${describe(a.op)}${flavour}: ${s.detail}.`
+        : `Step ${s.index} is running: ${describe(a.op)}${flavour}.`;
     }
   }
   return `${CAPTIONS[act]} ${now}`;
@@ -331,9 +372,60 @@ function renderLog(time) {
     if (e.time_ms > time || (!showMsgs && e.name === "msg_sent")) continue;
     const who = e.machine !== null ? `m${e.machine}` : e.name === "operator_step" || e.name.startsWith("client") ? "op" : "sim";
     const fields = e.fields.map(([k, v]) => `${k}=${/^\d{10,}$/.test(v) ? BigInt(v).toString(16).padStart(16, "0").slice(0, 6) : v}`).join(" ");
-    lines.push(`${String(e.time_ms).padStart(6)} ms  ${who.padEnd(4)} ${e.name}  ${fields}`);
+    const flavour = role(ix, e, e.time_ms);
+    lines.push(`${String(e.time_ms).padStart(6)} ms  ${who.padEnd(4)} ${flavour ? `[${flavour}] ` : ""}${e.name}  ${fields}`);
   }
   $("log").textContent = lines.join("\n");
+}
+
+// One step of the log at a time: jump to where the step starts, paused.
+function stepAction(direction) {
+  if (!ix || !run.steps.length) return;
+  playing = false;
+  stepped = null;
+  const starts = run.steps.map((s) => s.start_ms);
+  let i = direction > 0 ? starts.findIndex((x) => x > t + 1) : starts.findLastIndex((x) => x < t - 1);
+  if (i < 0) i = direction > 0 ? starts.length - 1 : 0;
+  t = starts[i];
+  renderReplaying(i);
+  render(true);
+}
+
+// ---- replay ----
+
+function renderReplaying(at) {
+  $("replaying").hidden = !replaying;
+  $("edit-run").hidden = !replaying;
+  for (const id of ["add", "undo", "clear", "load-preset", "seed", "machines", "run"]) $(id).disabled = replaying;
+  if (!replaying) return;
+  const steps = state.actions.length;
+  const where = at === undefined ? "" : ` Step ${at} of ${steps - 1}: ${describe(state.actions[at].op)}.`;
+  $("replaying").textContent =
+    `Replaying seed ${state.config.seed} over ${state.config.machines} machines, ${steps} steps. Use “◀ step” and “step ▶” to go through the log.${where}`;
+}
+
+// A saved or pasted run: `{config, actions}`, or a whole run view.
+function openRun(text) {
+  let loaded;
+  try { loaded = JSON.parse(text); } catch { $("status").textContent = "That is not JSON."; return; }
+  if (!loaded || !loaded.config || !Array.isArray(loaded.actions)) {
+    $("status").textContent = "A run holds a config and a list of actions.";
+    return;
+  }
+  state = { config: loaded.config, actions: loaded.actions };
+  replaying = true;
+  renderConfig();
+  renderReplaying();
+  start();
+}
+
+function saveRun() {
+  const blob = new Blob([JSON.stringify(state, null, 2)], { type: "application/json" });
+  const a = el("a", { href: URL.createObjectURL(blob), download: `paros-run-seed-${state.config.seed}.json` });
+  document.body.append(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(a.href);
 }
 
 // ---- wiring ----
@@ -346,6 +438,17 @@ $("load-preset").onclick = () => {
 };
 for (const name of ["seed", "machines", "run"]) $(name).onchange = readConfig;
 $("add").onclick = addAction;
+$("prev-step").onclick = () => stepAction(-1);
+$("next-step").onclick = () => stepAction(1);
+$("copy-link").onclick = async () => {
+  saveToHash();
+  try { await navigator.clipboard.writeText(location.href); $("status").textContent = "The link is copied."; }
+  catch { $("status").textContent = "Copy the address bar: it holds the run."; }
+};
+$("save-run").onclick = saveRun;
+$("open-run").onchange = async (e) => { const file = e.target.files[0]; if (file) openRun(await file.text()); e.target.value = ""; };
+$("replay-paste").onclick = () => openRun($("paste-run").value);
+$("edit-run").onclick = () => { replaying = false; renderReplaying(); renderActions(); };
 $("undo").onclick = () => { if (state.actions.length > 1) state.actions.pop(); start(); };
 $("clear").onclick = () => { state.actions = [state.actions[0]]; start(); };
 $("op").onchange = renderOpFields;
@@ -364,9 +467,12 @@ document.addEventListener("keydown", (e) => {
   if (e.key === " ") { e.preventDefault(); $("play").click(); }
   if (e.key === "[") stepMessage(-1);
   if (e.key === "]") stepMessage(1);
+  if (e.key === ",") stepAction(-1);
+  if (e.key === ".") stepAction(1);
 });
 window.addEventListener("resize", () => { if (ix) { stage.layout(); render(false); } });
 
 renderConfig();
 renderActions();
+renderReplaying();
 start();

@@ -95,7 +95,7 @@ mod tests;
 
 pub use inspect::{InspectRefusal, InspectTarget};
 pub use internal::{
-    InspectReply, InspectRequest, RetireAck, RetireRequest, ScrubReply, ScrubRequest,
+    AcceptedVote, InspectReply, InspectRequest, RetireAck, RetireRequest, ScrubReply, ScrubRequest,
 };
 pub(crate) use matchmaker::{
     GarbageCollect as WireGarbageCollect, GarbageCollectAck as WireGarbageCollectAck,

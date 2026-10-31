@@ -3,15 +3,16 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>paros sandbox</title>
+  <title>paros playground</title>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
 <header>
-  <h1>paros sandbox</h1>
-  <div>Watch a paros cell run in your browser. Every machine runs the same code as <code>parosd</code>,
-    and the operator uses the same calls as <code>parosctl</code>.
-    <a href="../">How the sandbox works</a> · <a href="../../">paros</a></div>
+  <h1>paros playground</h1>
+  <div>A tool to understand Paxos and paros: run a paros universe in your browser, drive it, break it
+    and watch it recover. Every machine runs the same code as <code>parosd</code>, and the operator uses
+    the same calls as <code>parosctl</code>.
+    <a href="../">How the playground works</a> · <a href="../../">paros</a></div>
   <div class="notice">The network, the disks and the clock are simulated. Times are simulated
     milliseconds, not production numbers. A run depends only on its seed, its configuration and its
     action log, so the link to this page replays it exactly.</div>
@@ -34,6 +35,8 @@
       <button id="play" title="Play or pause (space)">▶</button>
       <button id="prev-msg" title="Previous message ([)">◀ msg</button>
       <button id="next-msg" title="Next message (])">msg ▶</button>
+      <button id="prev-step" title="Previous step of the log (,)">◀ step</button>
+      <button id="next-step" title="Next step of the log (.)">step ▶</button>
       <label class="inline">Speed <select id="speed">
         <option value="0.02">0.02×</option>
         <option value="0.05" selected>0.05×</option>
@@ -56,7 +59,7 @@
           <label>Run length (s) <input id="run" type="number" min="1" max="300" /></label>
         </div>
         <p class="muted">One cell, <code>cell-1</code>, over three zones: machine <i>i</i> is in
-          zone <i>i</i> mod 3. A second cell in one universe comes with paros milestone M12.</p>
+          zone <i>i</i> mod 3.</p>
         <div class="row">
           <label>Example <select id="preset"></select></label>
           <button id="load-preset">Load</button>
@@ -72,7 +75,12 @@
             <option value="create_journal">create a journal</option>
             <option value="write">write N records</option>
             <option value="read">read N records</option>
+            <option value="crash">crash a machine</option>
+            <option value="restart">restart a machine</option>
+            <option value="isolate">cut a machine from the network</option>
+            <option value="heal">join a machine to the network again</option>
           </select></label>
+          <label id="machine-pick-field">Machine <select id="machine-pick"></select></label>
           <label id="tenant-name-field">Tenant <input id="tenant-name" value="acme" size="10" /></label>
           <label id="tenant-pick-field">Tenant <select id="tenant-pick"></select></label>
           <label id="journal-name-field">Journal <input id="journal-name" value="orders" size="10" /></label>
@@ -94,6 +102,21 @@
           <button id="clear">Clear</button>
         </div>
         <p class="muted" id="status">Loading…</p>
+      </section>
+      <section>
+        <h2>Replay</h2>
+        <p class="muted">A run is its seed, its configuration and its action log. Save them, or open a
+          saved run to replay it step by step.</p>
+        <p class="replaying" id="replaying" hidden></p>
+        <div class="row">
+          <button id="copy-link">Copy the link</button>
+          <button id="save-run">Save the run</button>
+          <label class="inline file">Open a run <input id="open-run" type="file" accept="application/json,.json" /></label>
+          <button id="edit-run" hidden>Edit this run</button>
+        </div>
+        <label class="wide">Or paste a run (JSON: config and actions)
+          <textarea id="paste-run" rows="3" spellcheck="false"></textarea></label>
+        <div class="row"><button id="replay-paste">Replay the pasted run</button></div>
       </section>
     </div>
     <section>

@@ -236,10 +236,16 @@ export class Stage {
   card(m, topo, had, animate) {
     const ix = this.ix;
     const node = topo ? topo.machines[m] : null;
-    const card = el("div", { className: `machine${node ? "" : " idle"}` });
+    const down = topo?.down?.includes(m);
+    const cut = topo?.isolated?.includes(m);
+    const card = el("div", { className: `machine${node ? "" : " idle"}${down ? " down" : ""}${cut ? " cut" : ""}` });
     card.dataset.machine = m;
     card.append(el("div", { className: "machine-head" }, el("b", { textContent: `m${m}` }),
       el("small", { textContent: node ?? (topo ? "idle" : "") })));
+    if (down || cut) {
+      card.append(el("div", { className: "fault", textContent: down ? "crashed" : "cut off",
+        title: down ? "Crashed: its process is down until a restart." : "Cut off: the network drops every message to or from it." }));
+    }
     if (!topo) return card;
     const sets = el("div", { className: "sets" });
     for (const tenant of topo.tenants) {
@@ -412,6 +418,7 @@ export class Stage {
       parts.push(el("p", { className: "round", textContent:
         `Slot ${round.slot}: Accept sent to ${[...round.addressed].map((m) => `m${m}`).join(", ")}; ${got} accepted.` }));
     }
+    if (place.acceptors?.length) parts.push(acceptorTable(place));
     const log = el("div", { className: "logbar" });
     const count = chosen === null ? 0 : chosen + 1;
     const shown = Math.min(count, 48);
@@ -428,6 +435,48 @@ export class Stage {
     if (round && round.accepted.has(m)) c.classList.add("yes");
     return c;
   }
+}
+
+/// Each machine's acceptor state for the followed journal, as its `Inspect`
+/// answered after the last step: a read only.
+function acceptorTable(place) {
+  const ballot = (b) => (b ? `${b.round}.${b.node}` : "–");
+  const num = (v) => (v === null || v === undefined ? "–" : String(v));
+  const table = el("table", { className: "acceptors" });
+  table.append(el("tr", {}, ...["", "promised", "accepted", "chosen", "floor"].map((h) => el("th", { textContent: h }))));
+  for (const a of place.acceptors) {
+    const last = a.tail.length ? a.tail[a.tail.length - 1] : null;
+    const accepted = a.accepted ? `${a.accepted}${last ? ` (s${last[0]} @${last[1].round})` : ""}` : "0";
+    const row = el("tr", { className: a.member ? "" : "out",
+      title: a.member
+        ? `m${a.machine}: promised ballot ${ballot(a.promised)}, holds ${a.accepted} accepted records, vote watermark ${num(a.watermark)}. Last accepted: ${a.tail.map(([s, b]) => `s${s}@${b.round}`).join(" ") || "none"}.`
+        : `m${a.machine} serves this journal but is not an acceptor of the configuration in force.` },
+      el("td", { textContent: `m${a.machine}${a.machine === place.leader ? " L" : ""}` }),
+      el("td", { textContent: ballot(a.promised) }),
+      el("td", { textContent: accepted }),
+      el("td", { textContent: num(a.chosen) }),
+      el("td", { textContent: String(a.floor) }));
+    table.append(row);
+  }
+  const wrap = el("div", {}, el("p", { className: "muted", textContent:
+    "Acceptor state after the last step, from each machine's Inspect: the ballot it promised (round.node), the records it accepted (the last slot @ its round), the highest slot it knows chosen, and its floor." }), table);
+  return wrap;
+}
+
+/// The Paxos flavour a message or an event belongs to.
+export function role(ix, m, t) {
+  if (m.name) {
+    if (m.name.startsWith("cell_init") || m.name === "cell_initialized") return "single-decree Paxos";
+    if (m.name.startsWith("matchmaking")) return "Matchmaker Paxos";
+    if (m.name === "msg_sent" || m.name === "leader_elected" || m.name === "value_chosen") return "Multi-Paxos";
+    return null;
+  }
+  const ti = topoAt(ix, t);
+  const place = ti >= 0 ? placeOf(ix.topos[ti], m.key) : null;
+  if (PHASE1.has(m.kind) && m.kind !== "catchup_request" && m.kind !== "catchup_response" && place?.matchmakers.length) {
+    return "Matchmaker Paxos, Phase 1";
+  }
+  return "Multi-Paxos";
 }
 
 // ---- drawing ----
@@ -538,9 +587,12 @@ export function explain(ix, m, t) {
   const q = place?.quorum;
   const n = place?.members.length ?? 0;
   const slot = m.slot;
-  const head = `${m.kind} from m${m.from} to m${m.to}, ${name}${slot !== null ? `, slot ${slot}` : ""}${m.round ? `, ballot ${m.round}` : ""}. `;
+  const flavour = role(ix, m, t);
+  const head = `[${flavour}] ${m.kind} from m${m.from} to m${m.to}, ${name}${slot !== null ? `, slot ${slot}` : ""}${m.round ? `, ballot ${m.round}` : ""}. `;
   const why = {
-    prepare: `Phase 1: a candidate asks the acceptors to promise ballot ${m.round} and to tell what they accepted.`,
+    prepare: flavour.startsWith("Matchmaker")
+      ? `Phase 1: the candidate registered ballot ${m.round} with a matchmaker quorum first. Now it asks the acceptors of every configuration still in force to promise it and to tell what they accepted.`
+      : `Phase 1: a candidate asks the acceptors to promise ballot ${m.round} and to tell what they accepted.`,
     promise: `Phase 1: m${m.from} promises ballot ${m.round}. With a Phase-1 quorum of promises, the candidate leads.`,
     accept: q?.system === "grid"
       ? `Phase 2: the leader asks column ${slot % q.cols} (slot ${slot} mod ${q.cols}) to accept the record. Only that column decides it.`

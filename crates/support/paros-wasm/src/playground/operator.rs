@@ -41,9 +41,11 @@ use paros::net::transport::Transport;
 use tokio_util::sync::CancellationToken;
 
 use crate::playground::calls::CallTrace;
+use crate::playground::faults::Faults;
 use crate::playground::machine::{machine_addr, zone_of};
 use crate::playground::model::{
-    Action, Config, JournalPlace, Op, Quorum, StepResult, TenantPlace, Topology,
+    AcceptorView, Action, BallotView, Config, JournalPlace, Op, Quorum, StepResult, TenantPlace,
+    Topology,
 };
 
 /// How long one operator step may take before it gives up.
@@ -56,6 +58,7 @@ pub(crate) struct Operator {
     actions: Vec<Action>,
     results: Arc<Mutex<Vec<StepResult>>>,
     topology: Arc<Mutex<Vec<Topology>>>,
+    faults: Faults,
 }
 
 impl Operator {
@@ -64,13 +67,24 @@ impl Operator {
         actions: Vec<Action>,
         results: Arc<Mutex<Vec<StepResult>>>,
         topology: Arc<Mutex<Vec<Topology>>>,
+        faults: Faults,
     ) -> Self {
         Self {
             config,
             actions,
             results,
             topology,
+            faults,
         }
+    }
+
+    /// The machines faults hold down and cut off now, by index.
+    fn faulted(&self) -> (Vec<usize>, Vec<usize>) {
+        let state = self.faults.lock().unwrap_or_else(PoisonError::into_inner);
+        (
+            state.down.iter().copied().collect(),
+            state.isolated.iter().copied().collect(),
+        )
     }
 }
 
@@ -112,6 +126,10 @@ impl Operator {
         // No fault injection: the shipped BUGGIFY sites are inert, as in
         // production (the machines turn them off too).
         moonpool_sim::buggify_reset();
+        self.faults
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .client_ip = Some(ctx.my_ip().to_owned());
         let (run, rpc) = Transport::Plaintext
             .client_only(ctx.providers().clone(), rpc_config())
             .map_err(|e| SimulationError::InvalidState(format!("client RPC runtime: {e}")))?;
@@ -138,7 +156,28 @@ impl Operator {
                 return Ok(());
             }
             let start_ms = now_ms(ctx);
-            let (ok, detail) = desk.step(&mut known, &action.op).await;
+            let (ok, detail) = if let Some(machine) = action.op.fault_target() {
+                // moonpool's fault injector plays the fault on its next
+                // beat: ask for it, wait, then report what the world is now.
+                self.faults
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .wanted = Some(index);
+                while self
+                    .faults
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .wanted
+                    .is_some()
+                {
+                    if ctx.time().sleep(Duration::from_millis(1)).await.is_err() {
+                        return Ok(());
+                    }
+                }
+                (true, fault_detail(&action.op, machine))
+            } else {
+                desk.step(&mut known, &action.op).await
+            };
             let end_ms = now_ms(ctx);
             tracing::info!(index, ok, %detail, "operator_step");
             self.results
@@ -151,13 +190,19 @@ impl Operator {
                     ok,
                     detail,
                 });
-            if let Some((machines, nodes, tenants)) = desk.survey(&self.config, &known).await {
+            let (down, isolated) = self.faulted();
+            let silent: Vec<usize> = down.iter().chain(&isolated).copied().collect();
+            if let Some((machines, nodes, tenants)) =
+                desk.survey(&self.config, &known, &silent).await
+            {
                 let topology = Topology {
                     step: index,
                     time_ms: now_ms(ctx),
                     machines,
                     nodes,
                     zones: (0..self.config.machines).map(zone_of).collect(),
+                    down,
+                    isolated,
                     tenants,
                 };
                 self.topology
@@ -168,6 +213,16 @@ impl Operator {
         }
         wait_until(ctx, self.config.run_ms).await;
         Ok(())
+    }
+}
+
+/// What a fault step did, for people.
+fn fault_detail(op: &Op, machine: usize) -> String {
+    match op {
+        Op::Crash { .. } => format!("machine-{machine} crashed: its unsynced writes are lost"),
+        Op::Restart { .. } => format!("machine-{machine} started again on its disk"),
+        Op::Isolate { .. } => format!("machine-{machine} is cut from the network"),
+        _ => format!("machine-{machine} is on the network again"),
     }
 }
 
@@ -257,6 +312,10 @@ impl Desk {
                 journal,
                 count,
             } => self.read(known, tenant, journal, *count).await,
+            // The fault injector plays faults; the operator only reports them.
+            Op::Crash { .. } | Op::Restart { .. } | Op::Isolate { .. } | Op::Heal { .. } => {
+                (true, String::new())
+            }
         }
     }
 
@@ -581,7 +640,10 @@ impl Desk {
     }
 
     /// Where every tenant and journal lives, through the admin API.
-    async fn survey(&self, config: &Config, known: &Known) -> Option<Survey> {
+    ///
+    /// The machines in `silent` (crashed or cut off) are not asked: they
+    /// would not answer.
+    async fn survey(&self, config: &Config, known: &Known, silent: &[usize]) -> Option<Survey> {
         let cell = known.cell.as_ref()?;
         // Server `i` of the client is machine `index[i]`.
         let index: Vec<usize> = cell
@@ -632,7 +694,10 @@ impl Desk {
             }
             let mut journals = Vec::new();
             for (name, id) in list {
-                journals.push(self.place(&client, &index, &by_node, name, id).await);
+                journals.push(
+                    self.place(&client, &index, &by_node, silent, name, id)
+                        .await,
+                );
             }
             let name = String::from_utf8_lossy(&entry.name).into_owned();
             tenants.push(TenantPlace {
@@ -656,6 +721,7 @@ impl Desk {
         client: &Client<SimProviders>,
         index: &[usize],
         by_node: &BTreeMap<u64, usize>,
+        silent: &[usize],
         name: String,
         journal: JournalIdentifier,
     ) -> JournalPlace {
@@ -676,12 +742,24 @@ impl Desk {
             matchmakers: Vec::new(),
             hosts: Vec::new(),
             chosen: None,
+            acceptors: Vec::new(),
         };
+        let ballot = |b: Option<&paros::wire::common::Ballot>| {
+            b.map(|b| BallotView {
+                round: b.round,
+                node: short(b.node),
+            })
+        };
+        let mut replies = Vec::new();
         for (server, machine) in index.iter().enumerate() {
+            if silent.contains(machine) {
+                continue;
+            }
             let Some(reply) = client.inspect(server, journal).await else {
                 continue;
             };
             place.hosts.push(*machine);
+            replies.push((*machine, reply.clone()));
             if reply.leader || place.members.is_empty() {
                 // Membership order, not machine order: a grid's rows are
                 // consecutive runs of it.
@@ -710,6 +788,24 @@ impl Desk {
             }
         }
         place.hosts.sort_unstable();
+        replies.sort_by_key(|(machine, _)| *machine);
+        place.acceptors = replies
+            .into_iter()
+            .map(|(machine, reply)| AcceptorView {
+                machine,
+                member: place.members.contains(&machine),
+                promised: ballot(reply.promised.as_ref()),
+                watermark: reply.vote_watermark,
+                chosen: reply.chosen_index,
+                floor: reply.first_slot,
+                accepted: reply.accepted_count,
+                tail: reply
+                    .accepted_tail
+                    .iter()
+                    .map(|vote| (vote.slot, ballot(vote.ballot.as_ref()).unwrap_or_default()))
+                    .collect(),
+            })
+            .collect();
         place
     }
 }

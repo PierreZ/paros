@@ -1,6 +1,6 @@
 # website/sandbox
 
-The page of the Paxos sandbox (#518); the engine is the `playground` feature of
+The page of the paros playground (#518 (paros playground)); the engine is the `playground` feature of
 `crates/support/paros-wasm` (#540), compiled to wasm by `scripts/build-wasm.sh` into `wasm/` (bundle
 `paros_playground`, gitignored) and staged at `/sandbox/app/`. Plain
 HTML, CSS and ES modules, no build step: `main.js` (editor, replay link, playback, the three
@@ -16,4 +16,9 @@ thread), `style.css` (light and dark).
 - The URL hash is the replay: base64url JSON of `{config, actions}`.
 - The log always starts with `init` at 0 ms, and the page never removes it; the engine refuses
   a log without it.
+- Faults (`crash`, `restart`, `isolate`, `heal`) are steps of the log too. moonpool's fault
+  injector plays them when the operator gets to the step; the page only draws the `down` and
+  `isolated` machines each topology reports.
+- Replay mode (`#replay:<run>`, "Open a run", a pasted run) shows a log without its editor and
+  steps it with `,` and `.`.
 - Preview: `scripts/build-wasm.sh --wasm-only`, then serve this directory with any static server.

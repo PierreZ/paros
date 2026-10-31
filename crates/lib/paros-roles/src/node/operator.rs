@@ -14,9 +14,9 @@ use paros_core::{Ballot, ColocatedNode, NodeId};
 use paros_model::machine::ControlJournals;
 use paros_observe::audit::Audit;
 use paros_wire::{
-    InspectReply, MatchmakersRefusal, Reconfigure, ReconfigureAck, RetireAck, RetireRefusal,
-    RetireRequest, WireQuorumSystem, common, counts_from_proto, journal_state_to_proto,
-    quorum_system_from_proto, quorum_system_to_proto, zoned_members,
+    AcceptedVote, InspectReply, MatchmakersRefusal, Reconfigure, ReconfigureAck, RetireAck,
+    RetireRefusal, RetireRequest, WireQuorumSystem, common, counts_from_proto,
+    journal_state_to_proto, quorum_system_from_proto, quorum_system_to_proto, zoned_members,
 };
 
 use super::handover::HandoverDriver;
@@ -252,6 +252,10 @@ pub(crate) fn node_facts(self_id: u64, cell: Option<&ControlJournals>) -> Inspec
     }
 }
 
+/// The most accepted records an `Inspect` reply lists: the last ones, so
+/// a reply stays small however long the log is.
+pub(crate) const INSPECT_ACCEPTED_TAIL: usize = 16;
+
 /// A pure read of the core: what an operator (or a client's composer) sees
 /// of this node and of the journal `node` runs.
 #[tracing::instrument(level = "debug", skip_all, fields(node = node.config().id.0))]
@@ -299,6 +303,27 @@ pub(crate) fn inspect(node: &ColocatedNode, cell: Option<&ControlJournals>) -> I
         journal: Some(journal_state_to_proto(node.replica().journal())),
         proxies: node.acceptors().proxy_count() as u64,
         replicas: node.acceptors().replica_count() as u64,
+        promised: Some(common::Ballot {
+            round: node.acceptor().promised().round,
+            node: node.acceptor().promised().node.0,
+        }),
+        vote_watermark: node.acceptor().vote_watermark().map(|slot| slot.0),
+        accepted_count: node.acceptor().records().len() as u64,
+        accepted_tail: node
+            .acceptor()
+            .records()
+            .iter()
+            .rev()
+            .take(INSPECT_ACCEPTED_TAIL)
+            .rev()
+            .map(|(slot, (ballot, _))| AcceptedVote {
+                slot: slot.0,
+                ballot: Some(common::Ballot {
+                    round: ballot.round,
+                    node: ballot.node.0,
+                }),
+            })
+            .collect(),
         ..facts
     }
 }
