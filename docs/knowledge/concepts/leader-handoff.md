@@ -55,7 +55,7 @@ The successor also records how it got the leadership: `LeadershipOrigin::Handoff
    `next_slot - first_unchosen` fits in `HANDOFF_BATCH`.
 2. `relinquish_to(target)` splits `[first_unchosen, next_slot)` into `decided` and `pending`,
    asserts that they tile the range exactly (`tail_shape_valid`), queues
-   `Relinquish { from, to, ballot, from_slot, next_slot, decided, pending, config }`, and calls
+   `Relinquish { from, to, ballot, from_slot, next_slot, decided, pending, config, prior }`, and calls
    `become_follower(Some(target))` **in the same call**.
 3. The successor's `on_relinquish` checks addressing (`to == me`, both ids in the pool), staleness
    (`ballot` not below its promise, not already held, frontier not rewound), shape
@@ -204,6 +204,8 @@ Unit tests: `paros-core/src/node/tests/handoff.rs`, for example
 - [DPaxos §4.4] ties the successor to the replication quorums the old leader declared in its
   intents (Expanding Quorums). paros has no intents; the payload carries the configuration
   (`config`) on a matchmaker deployment, and the plain path keeps its static configuration.
+  It also carries `prior`: the other configurations the minter still declares in force while
+  its GC floor is not effective. The successor opens its collector over them (#815).
 - etcd-raft's leader transfer ([etcd-raft §6], `raft.go:1628`, `raft.go:1750`) is a **forced
   election**: the old leader stops taking proposals, brings the target up to date, and sends
   `MsgTimeoutNow`; the target campaigns at a higher term. The old leader aborts after one
@@ -219,6 +221,12 @@ Unit tests: `paros-core/src/node/tests/handoff.rs`, for example
   at a time exercises a logical Paxos authority". A durable relinquish record would fix it at
   the cost of a new `HardState` field; the one-hop rule fixes it with none
   (`can_relinquish` doc).
+- **The forgotten prior configurations** (#815). The successor once opened its collector over
+  no prior configuration. While no GC floor was effective, it declared `C_b` alone in force,
+  and the simulator dropped the old configuration's copies of a slot too early. A later
+  election found the old configuration in `H_b` again and needed those copies. The sweep went
+  red on "storage: faults never cost a record the clean copies its shard needs" (witness
+  5431805690316111145, recipe `13122:14051179970700299360`). The payload now carries `prior`.
 - **A rewound frontier.** The proxy model checker (seed 756) found a delegated round that left no
   record at the leader. The successor crashed, rebooted with its frontier rewound, and a
   duplicated `Relinquish` re-installed the authority: one slot allocated twice at one ballot.

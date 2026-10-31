@@ -457,6 +457,23 @@ impl ColocatedNode {
         // The authority's Phase-2 membership travels with it (a matchmaker
         // deployment); the plain path carries nothing, as ever.
         let config = self.wire_config();
+        // The prior configurations this leadership still declares in force
+        // travel with it (#815): a successor that opened its collector over
+        // none would declare `C_b` alone while no GC floor is effective, and
+        // drop the old configurations' copies too early (witness
+        // 5431805690316111145, recipe 13122:14051179970700299360).
+        let prior: Vec<AcceptorConfig> = self
+            .configs_in_force()
+            .map(|(prior, _)| prior.into_iter().cloned().collect())
+            .unwrap_or_default();
+        assert!(
+            prior.is_empty() || self.config.has_matchmakers(),
+            "a plain handoff carries no prior configuration"
+        );
+        assert!(
+            config.as_ref().is_none_or(|c| prior.iter().all(|p| p != c)),
+            "a handoff's prior never repeats the configuration in force"
+        );
         self.send(
             target,
             Message::Relinquish {
@@ -468,6 +485,7 @@ impl ColocatedNode {
                 decided,
                 pending,
                 config,
+                prior,
             },
         );
         // THE abdication. Everything above only *described* the authority;
@@ -493,6 +511,29 @@ impl ColocatedNode {
         Some(receipt)
     }
 
+    /// The configuration a handoff transfers, or `None` when the payload is
+    /// malformed (wire input: refused, never asserted). A matchmaker
+    /// deployment transfers one drawn from the pool, and its prior
+    /// configurations (#815), each drawn from the pool and never the one in
+    /// force. The plain path carries neither, and keeps its static
+    /// membership.
+    #[allow(clippy::option_option)]
+    fn handoff_config(
+        &self,
+        config: Option<AcceptorConfig>,
+        prior: &[AcceptorConfig],
+    ) -> Option<Option<AcceptorConfig>> {
+        match (self.config.has_matchmakers(), config) {
+            (false, None) => prior.is_empty().then_some(None),
+            (true, Some(config)) => (config.is_drawn_from(&self.pool)
+                && prior
+                    .iter()
+                    .all(|p| *p != config && p.is_drawn_from(&self.pool)))
+            .then_some(Some(config)),
+            _ => None,
+        }
+    }
+
     /// Install a predecessor's transferred Phase-2 authority, or refuse it.
     ///
     /// Every rejection here is a wire-input guard (a stale peer, a replay, a
@@ -514,6 +555,7 @@ impl ColocatedNode {
         decided: BTreeMap<Slot, (Ballot, Command)>,
         pending: BTreeMap<Slot, Command>,
         config: Option<AcceptorConfig>,
+        prior: &[AcceptorConfig],
     ) {
         let me = self.config.id;
         // Addressing. The intended successor travels inside the payload, so a
@@ -549,17 +591,11 @@ impl ColocatedNode {
             self.handoff.rejected_shape = self.handoff.rejected_shape.saturating_add(1);
             return;
         }
-        // The authority's configuration: a matchmaker deployment transfers it
-        // verbatim (a payload without one, or naming a node outside the
-        // pool, is malformed); the plain path carries none and keeps its
-        // static membership.
-        let config = match (self.config.has_matchmakers(), config) {
-            (false, None) => None,
-            (true, Some(config)) if config.is_drawn_from(&self.pool) => Some(config),
-            _ => {
-                self.handoff.rejected_shape = self.handoff.rejected_shape.saturating_add(1);
-                return;
-            }
+        // The authority's configuration and its prior ones, or a malformed
+        // payload ([`ColocatedNode::handoff_config`]).
+        let Some(config) = self.handoff_config(config, prior) else {
+            self.handoff.rejected_shape = self.handoff.rejected_shape.saturating_add(1);
+            return;
         };
         // The successor must be able to *use* the leadership it is handed. A
         // node holding faulty records needs
@@ -674,13 +710,21 @@ impl ColocatedNode {
         // retirement) waits for as long as the successor leads (#529 (sets
         // oracles after PR #515): witness 10809718814318581208, recipe
         // 157:5903308118697919823, a drained machine's slot never released).
-        // The prior configurations stay the minter's: an empty list names
-        // no node retirable, the conservative answer.
+        // The prior configurations are the minter's, carried in the payload
+        // (#815): the successor declares in force every configuration the
+        // minter did, until its own floor is effective.
         if self.config.has_matchmakers() {
-            self.open_gc(&[]);
+            self.open_gc(prior);
             assert!(
                 self.gc.is_some(),
                 "a handed-on matchmaker leadership collects"
+            );
+            assert!(
+                self.gc
+                    .as_ref()
+                    .is_some_and(|gc| gc.effective().is_some()
+                        || prior.iter().all(|p| gc.prior().contains(p))),
+                "a handed-on leadership collects over every inherited prior configuration"
             );
         } else {
             assert!(self.gc.is_none(), "a plain leadership never collects");
