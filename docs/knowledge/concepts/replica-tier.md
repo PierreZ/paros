@@ -46,8 +46,8 @@ So every acceptor stays a learner, and the replica tier adds read capacity on to
    prefix, it sends `CatchUpRequest` to the beat's sender.
 4. A client `Read` runs the leaderless read (§3.4): the replica asks a row of acceptors for their
    vote watermarks (`PreRead`), takes the maximum, and serves the page from its own fold once its
-   prefix covers that index (`ReplicaNode::quorum_read_in`, `read_log`). See the reads card
-   (planned).
+   prefix covers that index (`ReplicaNode::quorum_read_in`, `read_log`). See
+   [leaderless reads](leaderless-reads.md).
 
 ```mermaid
 sequenceDiagram
@@ -140,7 +140,7 @@ replica waits until its prefix covers the maximum vote watermark of a row, and s
 
 - [Catch-up](catch-up.md): how a replica heals.
 - [Proxy leaders](proxy-leaders.md): a proxy sends its `Commit` to the replicas.
-- Leaderless quorum reads (planned): the read a replica serves.
+- [Leaderless quorum reads](leaderless-reads.md): the read a replica serves.
 - [Batchers and unbatchers](batchers.md): [SRSM]'s unbatchers sit after the replicas.
 
 ## 12. Sources

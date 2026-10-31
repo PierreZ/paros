@@ -77,7 +77,7 @@ A `3 × 2` grid of partitions (`F = 1`): six acceptors, two columns of three.
    needs `rows − acks + 1` promises in every column.
 4. On a full-column grid (`acks = rows`), a quorum read addressed to a row is answered by that
    row. On a partition grid a read needs `rows − acks + 1` of every column, so it goes to
-   everyone (`row_of`; reads card, planned).
+   everyone (`row_of`; [leaderless reads](leaderless-reads.md)).
 
 ## 5. Recovery flow
 
@@ -181,7 +181,7 @@ because a short row or column would let a predicate answer for a cell that does 
 - [Flexible quorums](flexible-quorums.md): the theory the grid instantiates.
 - [Zone rule](zone-rule.md): applied per partition.
 - [Proxy leaders](proxy-leaders.md): the other half of [SRSM §3]; a proxy fans a round out to its column.
-- Leaderless quorum reads (planned): a read addressed to one row.
+- [Leaderless quorum reads](leaderless-reads.md): a read addressed to one row.
 
 ## 12. Sources
 
