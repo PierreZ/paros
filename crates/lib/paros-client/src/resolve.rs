@@ -233,36 +233,6 @@ impl Resolved {
         servers
     }
 
-    /// A client's servers for reads (#765 (booked proxies and replicas)):
-    /// the tenant's replicas first, then every other machine, each once, as
-    /// [`Resolved::servers`] dials them. A replica serves the leaderless
-    /// read of the journals it holds a slot of and refuses the others as
-    /// unknown, so the client moves on to the next machine.
-    ///
-    /// # Panics
-    ///
-    /// Never: the assertion checks that every machine is named once.
-    #[must_use]
-    pub fn read_servers<P: ParosProviders>(
-        &self,
-        rpc: &RpcHandle<P>,
-        names: &Names,
-    ) -> Vec<Server<P>> {
-        let replicas: std::collections::BTreeSet<NodeId> =
-            self.replicas.iter().map(|(id, _)| *id).collect();
-        let mut servers = self.servers(rpc, names);
-        // A stable sort: the replicas first, each group in its order.
-        servers.sort_by_key(|server| !replicas.contains(&NodeId(server.id)));
-        assert_eq!(servers.len(), self.machines.len(), "one server per machine");
-        if servers
-            .first()
-            .is_some_and(|server| replicas.contains(&NodeId(server.id)))
-        {
-            moonpool_assertions::reachable!("resolve: a client reads at a replica first");
-        }
-        servers
-    }
-
     /// A client's servers for the tenant's batchers (#145): each sends
     /// `BatchWrite`, so a client over them sends multi-writer writes only.
     /// Empty when the tenant has no batcher.

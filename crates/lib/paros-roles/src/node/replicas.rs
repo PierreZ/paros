@@ -93,14 +93,22 @@ impl<S: LogStorage, A: Audit + Clone + Send + Sync + 'static> BookedReplicas<S, 
             self.read_at = Some(at);
             self.held = self.slots(follower);
         }
-        let before = self.live.len();
         let held = &self.held;
-        self.live
-            .retain(|journal, _| held.contains_key(journal) && !serves(*journal));
-        if self.live.len() < before {
+        let stopped: Vec<JournalIdentifier> = self
+            .live
+            .keys()
+            .filter(|journal| !held.contains_key(journal) || serves(**journal))
+            .copied()
+            .collect();
+        for journal in stopped {
             moonpool_assertions::reachable!(
                 "replica: a machine stops the replica of a released slot"
             );
+            self.live.remove(&journal);
+            // As a released journal: the replica's learning ends here, and
+            // the journal's convergence no longer waits for it.
+            stores.node_audit().journal_stopped(self.me, journal);
+            tracing::info!(node = self.me.0, journal = %journal, "machine_replica_stopped");
         }
         let due: Vec<(JournalIdentifier, paros_core::Config)> = self
             .held

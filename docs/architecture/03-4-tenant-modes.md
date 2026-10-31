@@ -237,7 +237,7 @@ tenant's default.
     promise, so a lost store is a first boot that learns again. A storage fault parks the
     replica for `quarantine_ticks`. A released slot stops it and keeps its store. `Resolve`
     names the machines that hold a replica slot of the tenant's journals (`replicas`, field
-    15), and `Resolved::read_servers` puts them first. The replica settles in the node loop,
+    15), so a client can send its reads there. The replica settles in the node loop,
     not off it (#613 (settle off the node loop) is for the acceptors).
   - **The simulation.** A create or a configure draws the counts on one draw in three, 0 to 3
     each. The plane's reconfiguration composer changes the counts on a coin, the proxy count up
