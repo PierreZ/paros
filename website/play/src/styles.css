@@ -49,47 +49,47 @@
   --column-5: #8a6b2f;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    color-scheme: dark;
+/* The dark palette. `main.ts` sets `data-theme` from the holding page or the
+   system setting, so a scenario framed on a site page follows that page. */
+:root[data-theme='dark'] {
+  color-scheme: dark;
 
-    --page: #1a1814;
-    --panel: #221f19;
-    --ink: #ece5d5;
-    --ink-soft: #a89e8a;
-    --rule: #3a352b;
-    --accent: #d9a066;
+  --page: #1a1814;
+  --panel: #221f19;
+  --ink: #ece5d5;
+  --ink-soft: #a89e8a;
+  --rule: #3a352b;
+  --accent: #d9a066;
 
-    --done: #5c9a70;
-    --done-dark: #8fc9a1;
-    --gap: #c05a5a;
-    --gap-dark: #e08a8a;
-    --open: #7d7d7d;
-    --open-dark: #b0b0b0;
-    --shared: #dfa05c;
-    --shared-dark: #f0c48c;
+  --done: #5c9a70;
+  --done-dark: #8fc9a1;
+  --gap: #c05a5a;
+  --gap-dark: #e08a8a;
+  --open: #7d7d7d;
+  --open-dark: #b0b0b0;
+  --shared: #dfa05c;
+  --shared-dark: #f0c48c;
 
-    --phase-prepare: #7aa8d8;
-    --phase-promise: #a3c9ec;
-    --phase-accept: #6fb388;
-    --phase-accepted: #a6d8bb;
-    --phase-nack: #d97a7a;
-    --phase-commit: #e2a463;
-    --phase-heartbeat: #bda986;
-    --phase-catchup: #a98ad0;
-    --phase-read: #d68fce;
-    --phase-handoff: #cfae6a;
-    --phase-match: #8fb2d6;
-    --phase-gc: #b3b37f;
-    --phase-reconfigure: #d68a63;
+  --phase-prepare: #7aa8d8;
+  --phase-promise: #a3c9ec;
+  --phase-accept: #6fb388;
+  --phase-accepted: #a6d8bb;
+  --phase-nack: #d97a7a;
+  --phase-commit: #e2a463;
+  --phase-heartbeat: #bda986;
+  --phase-catchup: #a98ad0;
+  --phase-read: #d68fce;
+  --phase-handoff: #cfae6a;
+  --phase-match: #8fb2d6;
+  --phase-gc: #b3b37f;
+  --phase-reconfigure: #d68a63;
 
-    --column-0: #7aa8d8;
-    --column-1: #e29a6b;
-    --column-2: #6fb388;
-    --column-3: #a98ad0;
-    --column-4: #63bdb9;
-    --column-5: #cfae6a;
-  }
+  --column-0: #7aa8d8;
+  --column-1: #e29a6b;
+  --column-2: #6fb388;
+  --column-3: #a98ad0;
+  --column-4: #63bdb9;
+  --column-5: #cfae6a;
 }
 
 * {
@@ -1471,4 +1471,14 @@ code,
   .wire-menu {
     max-width: calc(100vw - 1.5rem);
   }
+}
+
+/* ---- a scenario mounted alone on a site page (`?embed`) ---- */
+
+html.embed body {
+  background: var(--page);
+}
+
+html.embed .app.playing {
+  min-height: 0;
 }

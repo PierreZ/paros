@@ -73,8 +73,7 @@ config with `--no-sandbox`).
 
 The interactive half of the site is **paros play**, deployed on the same GitHub Pages site
 at `/play/` (`crates/support/paros-wasm`'s `paxos` feature + `website/play`, staged into `website/zola/public/play/`
-by `scripts/build-wasm.sh` in the Pages workflow). The one-widget rewrite (#308) replaces this
-section's rules when it lands. It drives the real `paros-core` compiled
+by `scripts/build-wasm.sh` in the Pages workflow). It drives the real `paros-core` compiled
 to wasm — the player is the network and the clock, and plays each role until the core judges
 the answer right — and it **never replays a trace**: the game has no seed, no recorded run and
 no simulation (the sandbox, below, is the one place that simulates). `website/zola/content/paxos/play.md` is the level map; the levels themselves are
@@ -113,8 +112,27 @@ chapter edit:
   is about. Do not list a level in a chapter it does not belong to; `play.md`'s
   table is the single source of the mapping, and the two must agree.
 
-Do not add demo iframes, `runSeed` references, or wasm build steps to a chapter: the game is
-a separate page, linked, never embedded.
+### Scenarios: one level, mounted on a page (#308)
+
+A page may mount one level of the game where it earns its place, with the `scenario`
+shortcode (`templates/shortcodes/scenario.html`):
+
+```
+{{ scenario(name="act2/the-permanent-gap") }}
+{{ scenario(name="act2/the-permanent-gap", caption="Drop slot 1's Accepts and watch the hole.") }}
+```
+
+- `name` is a level id, verbatim. The frame loads `/play/?embed#<id>`: the same build as
+  `/play/`, with the level map, the navigation and the progress store left out. There is
+  one engine, one view contract and one build; never add a second widget.
+- The frame follows the page's theme (the shortcode sends Goyo's `data-theme` to it) and
+  grows to the scenario's height.
+- A run is a function of the level and the action log. The game draws no randomness, so it
+  has no seed. `?log=` (base64url JSON of the actions, `website/play/src/replay.ts`) replays a
+  run, and the panel's "Link to this run" carries it.
+- The tricky-part pages (`content/paxos/tricky/`) mount scenarios. The field-guide chapters
+  keep the "Play it" callout and link to the game; do not put a scenario in a chapter as well.
+- No `runSeed` references and no wasm build steps in a page: the shortcode is the only way in.
 
 ## The sandbox is the second live surface (decided on 2026-10-13, #518)
 

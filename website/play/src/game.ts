@@ -61,6 +61,8 @@ export class Game {
   readonly #engine: Engine;
   #view: GameView;
   #lastError: ErrorView | null = null;
+  /** The moves the engine took, oldest first: the engine's own log, as actions. */
+  #actions: Action[] = [];
 
   constructor(engine: Engine) {
     this.#engine = engine;
@@ -84,19 +86,45 @@ export class Game {
     this.#lastError = null;
   }
 
+  /** The moves played so far, oldest first. With the level id, they are the whole run. */
+  get actions(): readonly Action[] {
+    return this.#actions;
+  }
+
   /** Play one move. Returns false when the engine refused it. */
   act(action: Action): boolean {
-    return this.#absorb(this.#engine.act(JSON.stringify(action)));
+    const ok = this.#absorb(this.#engine.act(JSON.stringify(action)));
+    if (ok) this.#actions.push(action);
+    return ok;
+  }
+
+  /**
+   * Play a whole log from where the level is now.
+   *
+   * It stops at the first move the engine refuses, and returns how many moves
+   * it played. The refusal stays in `lastError`.
+   */
+  replay(actions: readonly Action[]): number {
+    let played = 0;
+    for (const action of actions) {
+      if (!this.act(action)) break;
+      played += 1;
+    }
+    return played;
   }
 
   /** Undo the last move. */
   undo(): boolean {
-    return this.#absorb(this.#engine.undo());
+    const ok = this.#absorb(this.#engine.undo());
+    if (ok) this.#actions.pop();
+    return ok;
   }
 
   /** Start the level again. */
   reset(): boolean {
-    return this.#absorb(this.#engine.reset());
+    const ok = this.#absorb(this.#engine.reset());
+    if (ok) this.#actions = [];
+    return ok;
   }
 
   #absorb(json: string): boolean {

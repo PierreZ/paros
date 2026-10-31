@@ -26,6 +26,10 @@ export interface PanelDeps {
   narrow: boolean;
   /** Fold this level's briefing away, or open it again. */
   fold: (folded: boolean) => void;
+  /** Whether the level is a scenario mounted alone on a site page. */
+  embed: boolean;
+  /** The link that replays this run in the full game. */
+  runLink: string;
 }
 
 /**
@@ -191,6 +195,20 @@ function logBlock(deps: PanelDeps): HTMLElement {
     { class: 'log' },
     h('h2', {}, 'What you have played'),
     h('div', { class: 'log-buttons' }, undo, reset),
+    h(
+      'p',
+      { class: 'run-link small' },
+      h(
+        'a',
+        {
+          href: deps.runLink,
+          target: deps.embed ? '_blank' : null,
+          rel: deps.embed ? 'noopener' : null,
+          title: 'The level and your moves. The same level and the same moves always give the same run.',
+        },
+        deps.embed ? 'Open this run in the game' : 'Link to this run',
+      ),
+    ),
     entries.length === 0
       ? h('p', { class: 'empty' }, 'You did not play a move yet.')
       : h(
@@ -257,7 +275,11 @@ function footnote(view: GameView): HTMLElement {
             ...level.symbols.map((symbol) => h('li', {}, h('code', {}, symbol))),
           )
         : null,
-      h('p', {}, h('a', { href: `../${level.field_guide}` }, 'The field guide page for this level')),
+      h(
+        'p',
+        {},
+        h('a', { href: `../${level.field_guide}`, target: '_top' }, 'The field guide page for this level'),
+      ),
     ),
   );
 }
@@ -275,12 +297,12 @@ export function renderPanel(deps: PanelDeps): HTMLElement {
       h('p', { class: 'act-label' }, `Act ${view.level.act}${record?.passed ? ' · passed' : ''}`),
       h('h1', {}, view.level.title),
     ),
-    navBlock(deps),
+    deps.embed ? null : navBlock(deps),
     renderPrompt(view, deps.dispatch),
     goalBlock(view),
     quorumBlock(view),
     briefingBlock(deps),
-    unlocksBlock(view),
+    deps.embed ? null : unlocksBlock(view),
     view.level.hint ? h('section', { class: 'hint' }, h('h2', {}, 'A hint'), h('p', {}, view.level.hint)) : null,
     automationBlock(view, deps.dispatch),
     logBlock(deps),
