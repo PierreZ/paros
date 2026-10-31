@@ -170,6 +170,28 @@ docker compose run --rm parosctl --token "$INITECH" resolve acme
 docker compose run --rm parosctl --servers cell2:4500 --token "$INITECH" resolve initech
 docker compose run --rm parosctl tenant list
 
+# Bucket placement (#713 (bucket placement)). A tenant created without `--cell` goes to the
+# cell its bucket names: CRC16(name) mod 16384, as Redis Cluster does. cell-1 took every
+# bucket at `init`, and cell-2 has none, so acme, globex and bench are in cell-1 by bucket.
+# initech is in cell-2 by an override (`--cell`).
+docker compose run --rm parosctl universe status
+# Give cell-2 the buckets 4096-8191. No tenant placed by a bucket lives there yet.
+docker compose run --rm parosctl universe buckets assign 4096-8191 cell-2
+# hooli falls in bucket 4703, so it goes to cell-2; wayne (bucket 1931) stays in cell-1.
+# Each create prints its cell and its placement:
+#   created tenant=hooli cell=cell-2 bucket=4703 steps=…
+docker compose run --rm parosctl universe buckets show hooli
+docker compose run --rm parosctl tenant create hooli
+docker compose run --rm parosctl tenant create wayne
+# Pick a cell by its tags (#672 (cell tag selector)): the READY cell that matches and has the
+# fewest tenants. It writes an override, with a reason for people.
+docker compose run --rm parosctl cell tag cell-2 env:prod
+docker compose run --rm parosctl tenant create stark --cell-selector env:prod --reason dedicated
+# The buckets, and the tenants of each cell by bucket and by override.
+docker compose run --rm parosctl universe status
+# Tenants do not move between cells yet: the range that holds hooli does not go back (exit 3).
+docker compose run --rm parosctl universe buckets assign 0-8191 cell-1
+
 # Logs, and tear everything down (volumes included).
 docker compose logs node1
 docker compose down -v
