@@ -1,0 +1,93 @@
+{# The site chrome (#804 (flat engineering redesign)): logo, top bar, section tree,
+   breadcrumbs. Goyo's DaisyUI layout is replaced; see website/zola/AGENTS.md. #}
+
+{% macro mark() %}<svg viewBox="0 0 32 32" aria-hidden="true" focusable="false"><g stroke="currentColor" stroke-width="1.5" stroke-dasharray="1.5 3" stroke-linecap="round" fill="none" opacity="0.6"><path d="M8 15L24 13"/><path d="M8 15L16 25"/><path d="M24 13L16 25"/></g><path d="M8 8L15 18H1Z" fill="currentColor"/><path d="M24 6L31 16H17Z" class="leader"/><path d="M16 18L23 28H9Z" fill="currentColor"/></svg>{% endmacro mark %}
+
+{% macro topbar(current) %}
+<header class="topbar">
+  <button class="menu-btn" type="button" data-menu-toggle aria-controls="site-menu" aria-expanded="false" aria-label="Menu">
+    <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M1 3.5h14M1 8h14M1 12.5h14" stroke="currentColor" stroke-width="1.5"/></svg>
+  </button>
+  <a class="brand" href="{{ get_url(path='/') }}">{{ self::mark() }}<span>paros <span class="tilde">~</span></span></a>
+  <nav class="topnav" aria-label="Sections">
+    {% for item in config.extra.nav %}
+    <a href="{{ get_url(path=item.url, trailing_slash=true) }}"{% if current == item.url %} aria-current="true"{% endif %}>{{ item.name }}</a>
+    {% endfor %}
+  </nav>
+  <div class="tools">
+    {% if config.build_search_index %}
+    <button class="tool" type="button" data-search-open aria-label="Search">Search<kbd class="wide">/</kbd></button>
+    {% endif %}
+    <button class="tool" type="button" data-theme-toggle aria-label="Switch light or dark">
+      <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><circle cx="7" cy="7" r="6" fill="none" stroke="currentColor"/><path d="M7 1a6 6 0 0 1 0 12Z" fill="currentColor"/></svg>
+    </button>
+    <a class="tool" href="{{ config.extra.repo_url }}"><span class="wide">GitHub&nbsp;</span>→</a>
+  </div>
+</header>
+{% endmacro topbar %}
+
+{# One level of the section tree: the pages of a section, then its subsections. #}
+{% macro tree(section_path, current_path, depth) %}
+{% set s = get_section(path=section_path) %}
+<ul>
+  {% for p in s.pages %}
+  <li><a href="{{ p.permalink | safe }}"{% if p.path == current_path %} aria-current="page"{% endif %}>{{ p.title }}</a></li>
+  {% endfor %}
+  {% for sub in s.subsections %}
+  {% set ss = get_section(path=sub, metadata_only=true) %}
+  <li class="sub"><a href="{{ ss.permalink | safe }}"{% if ss.path == current_path %} aria-current="page"{% endif %}>{{ ss.title }}</a>
+    {% if depth < 2 %}{{ self::tree(section_path=sub, current_path=current_path, depth=depth + 1) }}{% endif %}
+  </li>
+  {% endfor %}
+</ul>
+{% endmacro tree %}
+
+{% macro sidebar(current_path) %}
+{% set root = get_section(path="_index.md") %}
+<nav class="sidebar" id="site-menu" aria-label="All pages">
+  <div class="sidebar-sections label">
+    {% for item in config.extra.nav %}
+    <a href="{{ get_url(path=item.url, trailing_slash=true) }}">{{ item.name }}</a>
+    {% endfor %}
+  </div>
+  {% for sub in root.subsections %}
+  {% set top = get_section(path=sub, metadata_only=true) %}
+  <div class="tree">
+    <a class="tree-head label" href="{{ top.permalink | safe }}"{% if top.path == current_path %} aria-current="page"{% endif %}>{{ top.title }}</a>
+    {{ self::tree(section_path=sub, current_path=current_path, depth=1) }}
+  </div>
+  {% endfor %}
+</nav>
+{% endmacro sidebar %}
+
+{# Breadcrumb chips: PAXOS / SAFETY. `ancestors` excludes the root. #}
+{% macro crumbs(ancestors, title, path) %}
+<nav class="crumbs" aria-label="Breadcrumb">
+  {% for a in ancestors %}{% if not loop.first %}
+  {% set s = get_section(path=a, metadata_only=true) %}
+  <a href="{{ s.permalink | safe }}">{{ s.title }}</a><span class="sep">/</span>
+  {% endif %}{% endfor %}
+  <span class="here" aria-current="page">{{ title }}</span>
+</nav>
+{% endmacro crumbs %}
+
+{# The title block: section label, title, description, metadata row. #}
+{% macro title_block(ancestors, title, description, relative_path) %}
+{% set updated = load_data(path="updated.toml", required=false) %}
+{% if ancestors | length > 1 %}
+{% set top = get_section(path=ancestors[1], metadata_only=true) %}
+{% set top_title = top.title %}
+{% else %}
+{% set top_title = title %}
+{% endif %}
+<div class="titleblock">
+  <div class="kicker label">{{ top_title }}</div>
+  <h1>{{ title }}</h1>
+  {% if description %}<p class="lede">{{ description }}</p>{% endif %}
+  <div class="meta label">
+    {% set day = "" %}{% if updated %}{% set day = updated | get(key=relative_path, default="") %}{% endif %}
+    {% if day %}<span>Updated {{ day }}</span>{% endif %}
+    <a href="{{ config.extra.source_url }}/{{ relative_path }}">Source</a>
+  </div>
+</div>
+{% endmacro title_block %}

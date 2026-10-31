@@ -1,0 +1,26 @@
+{# A page of the book (#804 (flat engineering redesign)). Overrides Goyo's page.html. #}
+{% extends "base.html" %}
+{% import "macros/site.html" as site %}
+{% block title %}<title>{{ page.title }} | {{ config.title }}</title>{% endblock title %}
+{% block description %}<meta name="description" content="{{ page.description | default(value=config.description) }}">{% endblock description %}
+{% block topbar %}{% set top = page.components | first %}{{ site::topbar(current="/" ~ top ~ "/") }}{% endblock topbar %}
+{% block sidebar %}{{ site::sidebar(current_path=page.path) }}{% endblock sidebar %}
+{% block content %}
+{{ site::crumbs(ancestors=page.ancestors, title=page.title, path=page.path) }}
+{{ site::title_block(ancestors=page.ancestors, title=page.title, description=page.description, relative_path=page.relative_path) }}
+<article class="prose{% if page.extra.sans %} prose-sans{% endif %}">
+{{ page.content | safe }}
+</article>
+<nav class="pager label" aria-label="Previous and next">
+  {% if page.lower %}<a class="prev" href="{{ page.lower.permalink | safe }}">← {{ page.lower.title }}</a>{% else %}<span></span>{% endif %}
+  {% if page.higher %}<a class="next" href="{{ page.higher.permalink | safe }}">{{ page.higher.title }} →</a>{% endif %}
+</nav>
+{% endblock content %}
+{% block toc %}{% if page.toc | length > 1 %}
+<aside class="toc" aria-label="On this page">
+  <div class="label">On this page</div>
+  <ul>
+    {% for h in page.toc %}<li><a href="#{{ h.id }}">{{ h.title }}</a></li>{% endfor %}
+  </ul>
+</aside>
+{% endif %}{% endblock toc %}

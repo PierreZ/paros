@@ -1,0 +1,80 @@
+{# The home page (#804 (flat engineering redesign)): what paros is, a parosctl
+   session, the four parts of the site, the shape of a cell and bench numbers.
+   The prose under these blocks is content/_index.md. #}
+{% extends "base.html" %}
+{% import "macros/site.html" as site %}
+{% block body_class %}doc landing{% endblock body_class %}
+{% block content %}
+<div class="titleblock">
+  <div class="kicker label">Paxos in Rust · multi-tenant journals</div>
+  <h1>paros</h1>
+  <p class="lede">paros implements the Paxos family of consensus algorithms in Rust. <code>parosd</code> is a
+    journal service built on it: a cell of machines keeps ordered logs for many tenants.</p>
+  <div class="meta label"><span class="chip-status shared">Learning project</span><span>Not for production</span></div>
+</div>
+
+<section class="home-block">
+  <h2 class="label">A session</h2>
+  <div class="term" aria-label="An example parosctl session">
+    <div class="term-head label"><span>shell</span><span>three parosd machines on this host</span></div>
+<pre><code><span class="c"># Form a cell from the listed machines.</span>
+<span class="p">$ </span>parosctl init --members "$PAROSCTL_SERVERS"
+<span class="c"># A tenant owns journals. A journal is an ordered log of records.</span>
+<span class="p">$ </span>parosctl tenant create acme
+<span class="p">$ </span>parosctl journal create acme orders
+<span class="c"># Paxos chooses each record on a majority of acceptors.</span>
+<span class="p">$ </span>parosctl write "$J" hello world --leader 7
+<span class="p">$ </span>parosctl read "$J"</code></pre>
+  </div>
+  <p class="aside"><a class="act-link" href="{{ get_url(path='@/parosd/_index.md') }}">Run it yourself</a>: <code>DEMO.md</code> in the repository starts the three machines.</p>
+</section>
+
+<section class="home-block">
+  <h2 class="label">The site</h2>
+  <table class="entries">
+    <tbody>
+      <tr><th scope="row"><a href="{{ get_url(path='@/parosd/_index.md') }}">parosd</a></th><td>The journal service: cells, tenants, journals, roles, tokens and metrics.</td></tr>
+      <tr><th scope="row"><a href="{{ get_url(path='@/paxos/_index.md') }}">Paxos</a></th><td>The Paxos implementation as a learning path, from one value to a replicated log.</td></tr>
+      <tr><th scope="row"><a href="{{ get_url(path='play/') }}">Play</a></th><td>A game on the real <code>paros-core</code>. You are the network, the clock and each role.</td></tr>
+      <tr><th scope="row"><a href="{{ get_url(path='@/sandbox/_index.md') }}">Playground</a></th><td>A paros universe in your browser, on a simulated network, disk and clock.</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section class="home-block">
+  <h2 class="label">The path of a write</h2>
+  <div class="arch" role="img" aria-label="A client calls a frontend in the cell. The frontend forwards the write to a proxy leader. The proxy leader sends Phase 2 to the acceptors of the journal, and each acceptor syncs the record to its disk.">
+    <div class="box">client <small>parosctl · paros::client</small></div>
+    <div class="arrow">▼ <small>Write · Read · Truncate · SetLeader</small></div>
+    <div class="cellframe">
+      <span class="cellname">cell-1</span>
+      <div class="row"><div class="box">frontend <small>checks the token, finds the journal</small></div><div class="box side">coordinator · matchmaker <small>places roles, keeps configurations</small></div></div>
+      <div class="arrow">▼</div>
+      <div class="row"><div class="box">proxy leader <small>runs Phase 2 for the leader</small></div></div>
+      <div class="arrow">▼ <small>Accept → Accepted from a majority</small></div>
+      <div class="row three"><div class="box">acceptor</div><div class="box">acceptor</div><div class="box">acceptor</div></div>
+      <div class="arrow">▼ <small>sync before the reply</small></div>
+      <div class="row three"><div class="box disk">disk</div><div class="box disk">disk</div><div class="box disk">disk</div></div>
+    </div>
+  </div>
+</section>
+
+<section class="home-block">
+  <h2 class="label">Numbers</h2>
+  <table class="numbers tnum">
+    <thead><tr><th>Clients × journals</th><th>Writes/s</th><th>p50</th><th>p99</th></tr></thead>
+    <tbody>
+      <tr><td><a href="{{ get_url(path='@/parosd/bench.md') }}#run-it">1 × 1</a></td><td>622</td><td>1.4 ms</td><td>3.6 ms</td></tr>
+      <tr><td><a href="{{ get_url(path='@/parosd/bench.md') }}#run-it">8 × 8</a></td><td>845</td><td>8.7 ms</td><td>28.5 ms</td></tr>
+    </tbody>
+  </table>
+  <pre class="cmdline"><code>paros-bench --local 3 --clients 8 --journals 8 --duration 20s --ramp 2s</code></pre>
+  <p class="aside">A cell of three machines in one process, on one 4-vCPU cloud host, ext4, 256-byte records,
+    one record per write, writes only. Measured on 2026-10-17. Use the numbers to compare commits on one
+    machine. They are not production numbers.</p>
+</section>
+
+<article class="prose">
+{{ section.content | safe }}
+</article>
+{% endblock content %}

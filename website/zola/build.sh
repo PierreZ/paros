@@ -20,6 +20,21 @@ cp -r "$PAROS_GOYO" website/zola/themes/goyo
 chmod -R u+w website/zola/themes/goyo
 
 cd website/zola
+
+# The "Updated" date of each page: the day of the last commit that touched it
+# (#804 (flat engineering redesign)). The templates read it with load_data. A
+# shallow clone gives one day for every page, so the Pages workflow fetches
+# the whole history.
+{
+  echo "# Written by website/zola/build.sh. Do not edit."
+  find content -name '*.md' | sort | while read -r f; do
+    day=$(git log -1 --format=%cs -- "$f" 2>/dev/null || true)
+    if [ -n "$day" ]; then
+      echo "\"${f#content/}\" = \"$day\""
+    fi
+  done
+} > updated.toml
+
 if [ "${1:-}" = "serve" ]; then
   exec zola serve
 fi

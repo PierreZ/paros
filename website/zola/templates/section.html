@@ -1,0 +1,36 @@
+{# A section index of the book (#804 (flat engineering redesign)). Overrides Goyo's
+   section.html: the section text, then its pages as a plain list. #}
+{% extends "base.html" %}
+{% import "macros/site.html" as site %}
+{% block title %}<title>{{ section.title }} | {{ config.title }}</title>{% endblock title %}
+{% block description %}<meta name="description" content="{{ section.description | default(value=config.description) }}">{% endblock description %}
+{% block topbar %}{% set top = section.components | first %}{{ site::topbar(current="/" ~ top ~ "/") }}{% endblock topbar %}
+{% block sidebar %}{{ site::sidebar(current_path=section.path) }}{% endblock sidebar %}
+{% block content %}
+{{ site::crumbs(ancestors=section.ancestors, title=section.title, path=section.path) }}
+{{ site::title_block(ancestors=section.ancestors, title=section.title, description=section.description, relative_path=section.relative_path) }}
+<article class="prose">
+{{ section.content | safe }}
+</article>
+{% if section.pages or section.subsections %}
+<section class="index">
+  <h2 class="label">In this section</h2>
+  <ol class="index-list">
+    {% for p in section.pages %}
+    <li><a href="{{ p.permalink | safe }}">{{ p.title }}</a>{% if p.description %}<span class="desc">{{ p.description }}</span>{% endif %}</li>
+    {% endfor %}
+    {% for sub in section.subsections %}{% set s = get_section(path=sub, metadata_only=true) %}
+    <li><a href="{{ s.permalink | safe }}">{{ s.title }}/</a>{% if s.description %}<span class="desc">{{ s.description }}</span>{% endif %}</li>
+    {% endfor %}
+  </ol>
+</section>
+{% endif %}
+{% endblock content %}
+{% block toc %}{% if section.toc | length > 1 %}
+<aside class="toc" aria-label="On this page">
+  <div class="label">On this page</div>
+  <ul>
+    {% for h in section.toc %}<li><a href="#{{ h.id }}">{{ h.title }}</a></li>{% endfor %}
+  </ul>
+</aside>
+{% endif %}{% endblock toc %}

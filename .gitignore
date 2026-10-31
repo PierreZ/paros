@@ -16,6 +16,9 @@ target
 # The site's build output and the theme copied in at build time (website/zola/build.sh)
 /website/zola/public/
 /website/zola/themes/
+/website/zola/updated.toml
+# Zola writes it in class highlighting mode; site.css colours the classes instead.
+/website/zola/static/giallo.css
 
 # Claude Code local settings
 .claude/settings.local.json

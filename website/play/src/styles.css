@@ -1,95 +1,18 @@
-/* paros play — the book's palette, on the book's cream page.
- *
- * `done` green, `gap` red, `open` grey and `shared` orange are the four
- * colours book/CLAUDE.md fixes for the diagrams, so a chosen slot here is the
- * same green as a chosen slot there. Everything else is a tint of the page.
+/* paros play. Colours, fonts, the top bar and the shared components come
+ * from website/shared/ (#804 (flat engineering redesign)); this file maps the
+ * game's names onto the tokens and holds the game's own layout. It defines no
+ * colour: `done` green, `gap` red, `open` grey and `shared` orange are the four
+ * diagram colours of website/zola/AGENTS.md, so a chosen slot here is the same
+ * green as a chosen slot in the book.
  */
 
+@import '../../shared/tokens.css';
+@import '../../shared/base.css';
+
 :root {
-  color-scheme: light;
-
-  --page: #f9f5e9;
-  --panel: #f3ecd9;
-  --ink: #241f18;
-  --ink-soft: #5c5344;
-  --rule: #d9cfb4;
-  --accent: #7a4718;
-
-  --done: #3b6e47;
-  --done-dark: #244730;
-  --gap: #7a2f2f;
-  --gap-dark: #4d1f1f;
-  --open: #5a5a5a;
-  --open-dark: #333333;
-  --shared: #c97a2b;
-  --shared-dark: #7a4718;
-
-  --phase-prepare: #2f5d8a;
-  --phase-promise: #4a86c5;
-  --phase-accept: #3b6e47;
-  --phase-accepted: #6aa77f;
-  --phase-nack: #7a2f2f;
-  --phase-commit: #c97a2b;
-  --phase-heartbeat: #8a7a5c;
-  --phase-catchup: #6b4f8a;
-  --phase-read: #a05a9c;
-  --phase-handoff: #8a6b2f;
-  --phase-match: #4a6b8a;
-  --phase-gc: #6b6b4a;
-  --phase-reconfigure: #a0522d;
-  --phase-other: #5a5a5a;
-
-  /* One colour per grid column. A column is a Phase-2 quorum, so a slot's
-     Accept and the Accepted that answers it wear the same edge. */
-  --column-0: #2f5d8a;
-  --column-1: #b0552b;
-  --column-2: #3b6e47;
-  --column-3: #6b4f8a;
-  --column-4: #2f7d7a;
-  --column-5: #8a6b2f;
-}
-
-/* The dark palette. `main.ts` sets `data-theme` from the holding page or the
-   system setting, so a scenario framed on a site page follows that page. */
-:root[data-theme='dark'] {
-  color-scheme: dark;
-
-  --page: #1a1814;
-  --panel: #221f19;
-  --ink: #ece5d5;
-  --ink-soft: #a89e8a;
-  --rule: #3a352b;
-  --accent: #d9a066;
-
-  --done: #5c9a70;
-  --done-dark: #8fc9a1;
-  --gap: #c05a5a;
-  --gap-dark: #e08a8a;
-  --open: #7d7d7d;
-  --open-dark: #b0b0b0;
-  --shared: #dfa05c;
-  --shared-dark: #f0c48c;
-
-  --phase-prepare: #7aa8d8;
-  --phase-promise: #a3c9ec;
-  --phase-accept: #6fb388;
-  --phase-accepted: #a6d8bb;
-  --phase-nack: #d97a7a;
-  --phase-commit: #e2a463;
-  --phase-heartbeat: #bda986;
-  --phase-catchup: #a98ad0;
-  --phase-read: #d68fce;
-  --phase-handoff: #cfae6a;
-  --phase-match: #8fb2d6;
-  --phase-gc: #b3b37f;
-  --phase-reconfigure: #d68a63;
-
-  --column-0: #7aa8d8;
-  --column-1: #e29a6b;
-  --column-2: #6fb388;
-  --column-3: #a98ad0;
-  --column-4: #63bdb9;
-  --column-5: #cfae6a;
+  --page: var(--bg);
+  --ink: var(--fg);
+  --ink-soft: var(--muted);
 }
 
 * {
@@ -100,7 +23,7 @@ body {
   margin: 0;
   background: var(--page);
   color: var(--ink);
-  font: 15px/1.5 "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+  font: 14px/1.55 var(--font-mono);
 }
 
 a {
@@ -130,7 +53,7 @@ code,
 .wire-summary,
 .log-entry,
 .slot-label {
-  font-family: "SF Mono", "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace;
+  font-family: var(--font-mono);
 }
 
 .boot {
@@ -144,7 +67,7 @@ code,
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(330px, 400px);
   gap: 0;
-  min-height: 100vh;
+  min-height: calc(100vh - var(--bar));
 }
 
 @media (max-width: 900px) {
@@ -174,7 +97,7 @@ code,
 .stage-host {
   background: color-mix(in srgb, var(--panel) 45%, transparent);
   border: 1px solid var(--rule);
-  border-radius: 8px;
+  border-radius: 0;
 }
 
 .stage {
@@ -280,7 +203,7 @@ code,
 
 .slot.applied .slot-label,
 .slot.hole .slot-label {
-  fill: #fff;
+  fill: var(--bg);
 }
 
 .slot-more,
@@ -426,7 +349,7 @@ code,
 .control-block {
   flex: 1 1 260px;
   border: 1px solid var(--rule);
-  border-radius: 6px;
+  border-radius: 0;
   padding: 0.6rem 0.7rem;
 }
 
@@ -456,7 +379,7 @@ code,
   font-size: 0.85rem;
   padding: 0.2rem 0.55rem;
   border: 1px solid var(--rule);
-  border-radius: 4px;
+  border-radius: 0;
   background: var(--page);
   color: var(--ink);
   cursor: pointer;
@@ -484,7 +407,7 @@ code,
   font-size: 0.85rem;
   padding: 0.2rem 0.4rem;
   border: 1px solid var(--rule);
-  border-radius: 4px;
+  border-radius: 0;
   background: var(--page);
   color: var(--ink);
   width: 9rem;
@@ -500,7 +423,7 @@ code,
   background: var(--page);
   color: var(--ink);
   border: 1px solid var(--rule);
-  border-radius: 4px;
+  border-radius: 0;
 }
 
 .reach-label {
@@ -565,8 +488,8 @@ code,
   flex-direction: column;
   background: var(--panel);
   border: 1px solid var(--rule);
-  border-radius: 5px;
-  box-shadow: 0 3px 12px rgb(0 0 0 / 0.18);
+  border-radius: 0;
+  box-shadow: 3px 3px 0 var(--shadow);
 }
 
 .menu-item {
@@ -632,7 +555,7 @@ code,
 
 .prompt-card {
   border: 2px solid var(--accent);
-  border-radius: 7px;
+  border-radius: 0;
   padding: 0.7rem 0.8rem;
   background: color-mix(in srgb, var(--shared) 12%, var(--panel));
 }
@@ -794,7 +717,7 @@ code,
 }
 
 .level-id {
-  font-family: ui-monospace, monospace;
+  font-family: var(--font-mono);
   font-size: 0.75rem;
   color: var(--ink-soft);
 }
@@ -849,7 +772,7 @@ code,
 
 .history {
   border: 1px solid var(--rule);
-  border-radius: 6px;
+  border-radius: 0;
   padding: 0.6rem 0.7rem;
 }
 
@@ -1143,7 +1066,7 @@ code,
    lives here: the player taps a node, and this card opens under the stage. */
 .inspector {
   border: 1px solid var(--accent);
-  border-radius: 6px;
+  border-radius: 0;
   padding: 0.5rem 0.7rem 0.7rem;
   margin: 0.6rem 0;
   background: color-mix(in srgb, var(--panel) 60%, var(--page));
@@ -1197,7 +1120,7 @@ code,
 }
 
 .inspector-slot-name {
-  font-family: "SF Mono", "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace;
+  font-family: var(--font-mono);
   overflow-wrap: anywhere;
 }
 
@@ -1481,4 +1404,10 @@ html.embed body {
 
 html.embed .app.playing {
   min-height: 0;
+}
+
+/* ---- the shared top bar; a scenario on a site page has none ---- */
+
+html.embed .topbar {
+  display: none;
 }

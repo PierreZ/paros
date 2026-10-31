@@ -1,5 +1,7 @@
-# The paros site (#254): Zola with the Goyo theme. Build with `website/zola/build.sh`
-# (through Nix); it installs the pinned Goyo into `website/zola/themes/goyo` first.
+# The paros site (#254): Zola. Build with `website/zola/build.sh` (through Nix).
+# The look is the site's own (templates/, static/css/site.css and website/shared/,
+# #804 (flat engineering redesign)). Goyo stays the theme only for its assets
+# (mermaid.min.js); build.sh installs the pinned Goyo into `website/zola/themes/goyo`.
 base_url = "https://pierrez.github.io/paros"
 title = "paros"
 description = "Paxos in Rust, and parosd, a multi-tenant journal service built on it"
@@ -13,51 +15,23 @@ generate_sitemap = true
 [markdown]
 bottom_footnotes = true
 
+# Class mode: static/css/site.css colours the z-* classes from the tokens.
 [markdown.highlighting]
+style = "class"
 theme = "github-dark"
 
 [link_checker]
 internal_level = "error"
 
 [extra]
-enable_custom_css = false
-footer_html = "paros is a learning project, not for production. Built with <a href='https://www.getzola.org'>Zola</a> and <a href='https://github.com/hahwul/goyo'>Goyo</a>."
-edit_url = "https://github.com/PierreZ/paros/edit/main/site"
-issue_url = "https://github.com/PierreZ/paros/issues"
+footer_html = "paros ~ a learning project, not for production · built with <a href='https://www.getzola.org'>Zola</a>"
+repo_url = "https://github.com/PierreZ/paros"
+source_url = "https://github.com/PierreZ/paros/blob/main/website/zola/content"
 
+# The top bar and the phone menu. `url` is a path under the site root.
 nav = [
-    { name = "parosd", url = "/parosd/", type = "url", icon = "code" },
-    { name = "Paxos", url = "/paxos/", type = "url", icon = "book" },
-    { name = "Play", url = "/play/", type = "url", icon = "palette" },
-    { name = "Playground", url = "/sandbox/", type = "url", icon = "magnifying-glass-chart" },
-    { name = "GitHub", url = "https://github.com/PierreZ/paros", type = "url", icon = "github" },
+    { name = "parosd", url = "/parosd/" },
+    { name = "Paxos", url = "/paxos/" },
+    { name = "Play", url = "/play/" },
+    { name = "Playground", url = "/sandbox/" },
 ]
-
-[extra.logo]
-text = "paros"
-image_path = "paros-logo.svg"
-image_padding = "4px"
-
-[extra.theme]
-colorset = "light"
-brightness = "normal"
-disable_toggle = false
-default_theme_dark = "goyo-dark"
-default_theme_light = "goyo-light"
-
-[extra.sidebar]
-expand_depth = 1
-disable_root_hide = true
-enable_desktop_menu = true
-
-[extra.share]
-copy_url = false
-x = false
-
-# The site is served under /paros/ on GitHub Pages, and Goyo writes these paths as is.
-[extra.favicon]
-favicon_svg = "/paros/paros-logo.svg"
-favicon_96x96 = "/paros/paros-logo.png"
-favicon_ico = "/paros/icons/favicon.ico"
-apple_touch_icon = "/paros/paros-logo.png"
-site_webmanifest = "/paros/icons/site.webmanifest"

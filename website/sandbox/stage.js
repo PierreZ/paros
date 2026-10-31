@@ -4,8 +4,25 @@
 // and stepping all set `t` and draw again. Everything drawn comes from the
 // run: the topology after each step and the events the machines logged.
 
-const SERVED = ["#2f7ed8", "#d9822b", "#2ca58d", "#b34fbf", "#c9a227"];
-const INTERNAL = ["#8a93a3", "#6f7787", "#a3abb9"];
+// Tenant colours are tokens (website/shared/tokens.css): CSS takes the var()
+// as is, and the canvas resolves it with paint(), again after a theme switch.
+const SERVED = [0, 1, 2, 3, 4, 5].map((i) => `var(--tenant-${i})`);
+const INTERNAL = ["var(--tenant-internal)", "var(--open)", "var(--muted)"];
+const NO_TENANT = "var(--open)";
+
+let painted = new Map();
+window.addEventListener("paros-theme", () => { painted = new Map(); });
+
+// A colour for the canvas: a var(--token) becomes its value on the page.
+export function paint(color) {
+  if (!color.startsWith("var(")) return color;
+  let v = painted.get(color);
+  if (v === undefined) {
+    v = getComputedStyle(document.documentElement).getPropertyValue(color.slice(4, -1)).trim();
+    painted.set(color, v);
+  }
+  return v;
+}
 const BEATS = new Set(["heartbeat", "heartbeat_ack"]);
 const READS = new Set(["pre_read", "pre_read_ack"]);
 const PHASE1 = new Set(["prepare", "promise", "catchup_request", "catchup_response", "nack"]);
@@ -317,7 +334,7 @@ export class Stage {
       if (!a || !b) continue;
       const j = ix.journals.get(m.key);
       const focus = !this.selected || m.key === this.selected;
-      dot(ctx, a, b, (t - m.t) / travel, m.kind, j ? j.tenant.color : "#888", focus);
+      dot(ctx, a, b, (t - m.t) / travel, m.kind, j ? j.tenant.color : NO_TENANT, focus);
       budget--;
     }
     // Client calls: from outside the cell to the journal's leader, and back.
@@ -331,7 +348,7 @@ export class Stage {
         ? this.chips.get(`${call.key}@${place.leader}`) ?? this.positions[place.leader] : null;
       if (call.answer === null || t < call.answer + travel) calling = true;
       if (!target) continue;
-      const color = ix.journals.get(call.key)?.tenant.color ?? "#888";
+      const color = ix.journals.get(call.key)?.tenant.color ?? NO_TENANT;
       if (t - call.t < travel) dot(ctx, this.clientPos, target, (t - call.t) / travel, "client", color, true);
       if (call.answer !== null && call.answer <= t && t - call.answer < travel) {
         dot(ctx, target, this.clientPos, (t - call.answer) / travel, "client", color, true);
@@ -343,13 +360,13 @@ export class Stage {
       const a = this.chips.get(`${m.key}@${m.from}`) ?? this.positions[m.from];
       const b = this.chips.get(`${m.key}@${m.to}`) ?? this.positions[m.to];
       if (a && b) {
-        const color = ix.journals.get(m.key)?.tenant.color ?? "#888";
-        ctx.strokeStyle = color; ctx.globalAlpha = 0.5; ctx.lineWidth = 1.5; ctx.setLineDash([4, 4]);
+        const color = ix.journals.get(m.key)?.tenant.color ?? NO_TENANT;
+        ctx.strokeStyle = paint(color); ctx.globalAlpha = 0.5; ctx.lineWidth = 1.5; ctx.setLineDash([4, 4]);
         ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke(); ctx.setLineDash([]);
         ctx.globalAlpha = 1;
         const x = a.x + (b.x - a.x) * 0.6, y = a.y + (b.y - a.y) * 0.6;
-        ctx.fillStyle = color; ctx.beginPath(); ctx.arc(x, y, 9, 0, Math.PI * 2); ctx.fill();
-        ctx.font = "600 12px system-ui, sans-serif";
+        ctx.fillStyle = paint(color); ctx.beginPath(); ctx.arc(x, y, 9, 0, Math.PI * 2); ctx.fill();
+        ctx.font = `600 12px ${paint("var(--font-mono)")}`;
         ctx.fillStyle = getComputedStyle(document.body).color;
         ctx.fillText(`${m.kind}${m.slot !== null ? ` s${m.slot}` : ""}`, x + 12, y - 8);
       }
@@ -482,6 +499,7 @@ export function role(ix, m, t) {
 // ---- drawing ----
 
 function dot(ctx, a, b, f, kind, color, focus) {
+  color = paint(color);
   f = Math.min(1, Math.max(0, f));
   const dx = b.x - a.x, dy = b.y - a.y;
   const len = Math.hypot(dx, dy) || 1;
@@ -541,7 +559,8 @@ export function drawTimeline(canvas, ix, t) {
   ix.acts.forEach((act, i) => {
     if (act.start === null) return;
     const next = ix.acts.slice(i + 1).find((a) => a.start !== null);
-    ctx.fillStyle = i % 2 ? "rgba(127,127,127,0.10)" : "rgba(127,127,127,0.04)";
+    if (!(i % 2)) return;
+    ctx.fillStyle = paint("var(--panel)");
     ctx.fillRect(x(act.start), 0, x(next ? next.start : ix.end) - x(act.start), h);
   });
   // Histogram.
@@ -560,14 +579,14 @@ export function drawTimeline(canvas, ix, t) {
       const arr = ix.hist.get(tenant.name);
       if (!arr || !arr[b]) continue;
       const bh = (arr[b] / max) * (h - 22);
-      ctx.fillStyle = tenant.color;
+      ctx.fillStyle = paint(tenant.color);
       ctx.fillRect(x(b * ix.bin), y - bh, bw, bh);
       y -= bh;
     }
   }
   // Steps.
   ctx.fillStyle = styles.getPropertyValue("--muted");
-  ctx.font = "10px system-ui, sans-serif";
+  ctx.font = `10px ${paint("var(--font-mono)")}`;
   for (const s of ix.run.steps) {
     ctx.fillRect(x(s.start_ms), h - 12, 1, 12);
     const a = ix.run.actions[s.index];
