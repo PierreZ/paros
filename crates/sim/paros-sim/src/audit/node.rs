@@ -1146,7 +1146,9 @@ impl<T: TimeProvider> NodeAudit<T> {
         }
         let known = st.pool.clone().unwrap_or_default();
         for (node, pool) in judged {
-            let same = if crate::roles::is_joiner(node) {
+            // A node outside the genesis pool joined at runtime: a joiner,
+            // or a machine the registry admitted.
+            let same = if crate::roles::is_joiner(node) || !known.contains(&node) {
                 known.is_subset(&pool) && pool.contains(&node)
             } else {
                 known == pool
