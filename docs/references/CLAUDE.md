@@ -85,6 +85,10 @@ The knowledge base in [`../knowledge/`](../knowledge/) organizes these sources b
   election timeout steps down), the follower-side **vote lease**, and **leader transfer**
   (`MsgTimeoutNow`, a forced election). The reference for paros's `tick_check_quorum` (#95) and
   the contrast for its handoff; backs the knowledge base's Leader cards (#745).
+  [`etcd-raft/replication.md`](etcd-raft/replication.md), same commit: **durable before send**
+  (`msgsAfterAppend`, the leader's parallel write), the follower **progress states** (probe,
+  replicate, snapshot), the **inflight window**, and the snapshot fallback. The contrast for
+  paros's slot-based tally and pull catch-up; backs the Kernel cards (#745).
 - [`foundationdb/`](foundationdb/): [`foundationdb/cluster-controller-election.md`](foundationdb/cluster-controller-election.md).
   FoundationDB's **Cluster Controller leader election**: a register-based quorum election (*not*
   Paxos) with randomized ids plus exponential backoff (anti-dueling), a heartbeat **lease** with

@@ -8,11 +8,11 @@ yet; the sources are known), **waits for a source** (no source outside paros yet
 
 | Group | Concept | Card | Status | paros code | Backing sources |
 |---|---|---|---|---|---|
-| Kernel | Single-decree Paxos | | planned | `decree.rs`, `acceptor.rs` | paxos-made-simple, generalised-distributed-consensus |
-| Kernel | Multi-Paxos log and stable leader | | planned | `proposer.rs`, `replica.rs` | paxos-made-moderately-complex, paxos-made-live |
-| Kernel | Persist before send (`Ready`, `HardState`, `WriteOp`) | | planned | `node/ready.rs`, `contract/hard_state.rs`, `contract/write.rs` | paxos-made-live; etcd-raft `Ready` (`../analysis/go-raft/etcd-raft-sans-io-patterns.md`) |
-| Kernel | Pipelining and resend (`resend_pending`) | | planned | `node/replication.rs`, `node/policy.rs` | paxos-made-moderately-complex; etcd-raft inflight window (analysis to write) |
-| Kernel | Catch-up of a lagging follower | | planned | `node/catch_up.rs`, `node/replication.rs` | etcd-raft progress probe and replicate states (analysis to write) |
+| Kernel | Single-decree Paxos | [single-decree-paxos](concepts/single-decree-paxos.md) | verified | `decree.rs`, `acceptor.rs` | paxos-made-simple §2.1–§2.5, generalised-distributed-consensus §3–§4.1, paxos-made-moderately-complex §4.1, frankenpaxos `02-single-decree-paxos.md` |
+| Kernel | Multi-Paxos log and stable leader | [multi-paxos-log](concepts/multi-paxos-log.md) | verified | `proposer.rs`, `replica.rs`, `node/phase2.rs`, `node/learn.rs` | paxos-made-simple §3, paxos-made-moderately-complex §2/§4.1/§4.3, paxos-made-live §4.2, frankenpaxos `03-multipaxos-core.md` |
+| Kernel | Persist before send (`Ready`, `HardState`, `WriteOp`) | [persist-before-send](concepts/persist-before-send.md) | verified | `node/ready.rs`, `contract/hard_state.rs`, `contract/write.rs`, `paros-roles` `node/ready.rs` | paxos-made-simple §2.5, paxos-made-live §4.2, etcd-raft durable before send (`../references/etcd-raft/replication.md` §1), `../analysis/go-raft/etcd-raft-sans-io-patterns.md` §2 |
+| Kernel | Pipelining and resend (`resend_pending`) | [pipelining-and-resend](concepts/pipelining-and-resend.md) | verified | `node/policy.rs`, `proposer/rounds.rs` | paxos-made-simple §3, paxos-made-moderately-complex §2, etcd-raft progress and inflight window (`../references/etcd-raft/replication.md` §2–§3) |
+| Kernel | Catch-up of a lagging follower | [catch-up](concepts/catch-up.md) | verified | `node/catch_up.rs`, `node/replication.rs` | paxos-made-live §4.2/§5.5, paxos-made-moderately-complex §4.2, etcd-raft progress states and snapshot fallback (`../references/etcd-raft/replication.md` §2, §4) |
 | Leader | Election, P2c merge and gap fill (`Noop`, `record_own_round`) | [election](concepts/election.md) | verified | `proposer/election.rs`, `proposer/recovery.rs`, `node/election.rs`, `node/phase2.rs` | paxos-made-moderately-complex §2–§4.1, paxos-made-live §4.1–§4.2, paxos-vs-raft §3.3–§5, frankenpaxos `03-multipaxos-core.md` §3 |
 | Leader | Paging a campaign (`keep_alive_from`) | | waits for a source | `proposer/election.rs`, `node/election.rs` | to find: etcd-raft message size limits, or frankenpaxos recovery |
 | Leader | Leadership fence and CheckQuorum | [check-quorum](concepts/check-quorum.md) | verified | `proposer/authority.rs`, `node/authority.rs` | etcd-raft CheckQuorum (`../references/etcd-raft/check-quorum.md`), flexible-paxos §3, paxos-made-live §5.2, foundationdb §6 |
@@ -40,6 +40,7 @@ another crate.
 
 - `../references/etcd-raft/check-quorum.md`: etcd-raft CheckQuorum, the vote lease and leader
   transfer, at commit `c51f010` (Leader group).
+- `../references/etcd-raft/replication.md`: etcd-raft durable before send, the progress states,
+  the inflight window and the snapshot fallback, at commit `c51f010` (Kernel group).
 - To add: the Paxos Quorum Reads transcript (Charapko, Ailijiang, Demirbas, HotStorage 2019),
-  and etcd-raft analyses of the inflight window, the progress states and the message size
-  limits.
+  and an etcd-raft analysis of the message size limits.
