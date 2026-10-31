@@ -6,7 +6,8 @@ use moonpool_sim::{assert_always, assert_reachable, buggify_knob};
 use paros::roles::node::DriverTunables;
 
 use crate::shape::timing::{
-    CONNECT_FLOOR_MS, INTERNAL_CALL_FLOOR_MS, cap_backoff, resolve_answer_within, scrub_pace,
+    CONNECT_FLOOR_MS, INTERNAL_CALL_FLOOR_MS, SLOWEST_ROUND_TRIP_MS, cap_backoff,
+    resolve_answer_within, scrub_pace,
 };
 
 /// The longest a drawn quarantine holds a journal down, in milliseconds:
@@ -171,7 +172,17 @@ impl NodeShape {
         // its acks arrive — no claim (#204: claims start with a read) for a
         // whole run (witness seed 3336991135298497961, #205's 10k hunt:
         // confirmations at ~9 ticks against a 5-tick window, 172 s without a
-        // write). Its floor is two round trips.
+        // write). Its floor is two round trips of the *slowest* link the run
+        // keeps into the recovery tail ([`SLOWEST_ROUND_TRIP_MS`]), not of
+        // the default link: a read's row must include that link whenever one
+        // acceptor is away. Witness (cite only): replay-recipe
+        // 11132861827014470837 1327731:15717124982357204208 on 5833bb3, a
+        // founder renamed at 20 s on a slow-link seed; a 366 ms pair stayed
+        // in every read quorum, each read expired at the old 510 ms floor
+        // (answers 2 of 4), every coordinator install lost its cold election
+        // read, and the election settled 50 s after the tail's term, past
+        // the settle oracle (red on "election: the election settles on one
+        // renewing leader after chaos" and three consequences).
         let ms = Duration::from_millis;
         let tick_ms = buggify_knob!(50_u64, 10_u64..SLOWEST_TICK_MS + 1);
         // A slow-link seed beats fast: 10 to 17 ms (#386's witness ran 17).
@@ -193,7 +204,8 @@ impl NodeShape {
             keep_alive_timeout: ms(buggify_knob!(1000_u64, ROUND_TRIP_FLOOR_MS..3001_u64)),
             connection_timeout: ms(buggify_knob!(1000_u64, CONNECT_FLOOR_MS..3001_u64)),
             delivery_timeout: ms(buggify_knob!(1000_u64, ROUND_TRIP_FLOOR_MS..3001_u64)),
-            read_retry_ticks: buggify_knob!(10_u64, 1_u64..41_u64).max(2 * floor_ticks),
+            read_retry_ticks: buggify_knob!(10_u64, 1_u64..41_u64)
+                .max(2 * SLOWEST_ROUND_TRIP_MS.div_ceil(tick_ms)),
             // Floor 0: a zero wait answers every journal read at the end at
             // once, empty, and the client re-asks; the ceiling crosses the
             // client's deadline, where a tail wait the client stops waiting
