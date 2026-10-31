@@ -34,6 +34,7 @@ is `nix develop --command scripts/build-wasm.sh`, after `website/zola/build.sh`.
 | `src/main.ts` | boot, routing, the render loop, the stage's click handling |
 | `src/game.ts` | the typed wrapper over `WasmGame`: JSON in, `GameView` or `ErrorView` out |
 | `src/route.ts` | the URL hash ⇄ level id (`#act1/choose-a-value`; no hash is the level map) |
+| `src/replay.ts` | the query string: `?embed` (one level alone, for the site's `scenario` shortcode), `?log=` (replay a run: the action log as base64url JSON) and `?theme=` |
 | `src/progress.ts` | `localStorage`: levels passed, mistakes, automation unlocked |
 | `src/narration.ts` | narration: the last move's lines (the caption) and the log's whole stream |
 | `src/types.ts` | re-exports of the generated contract |
