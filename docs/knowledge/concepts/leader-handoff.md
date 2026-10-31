@@ -245,7 +245,8 @@ Unit tests: `paros-core/src/node/tests/handoff.rs`, for example
   inherited fence.
 - [Proxy leaders](proxy-leaders.md): a successor re-delegates inherited rounds with `leader` naming
   itself.
-- Corrupted storage recovery (planned): why a faulty record refuses a handoff.
+- [Corrupted storage recovery](corrupted-storage-recovery.md): why a faulty record refuses a
+  handoff.
 - [Configuration GC and retirement](configuration-gc.md): why an installed leadership opens GC.
 
 ## 12. Sources

@@ -386,7 +386,7 @@ Depth: module docs of `matchmaking.rs`, `node/matchmaking.rs`, `node/reconfigure
 - **Boot safety is the library's job.** Every store carries a format marker; `run_node` /
   `run_matchmaker` take the operator's `BootKind` as data and refuse `Amnesia` (an existing member
   with no marker), `AlreadyFormatted` and `ConfigMismatch` (the marker records the `Config`; the
-  membership, quorum system and counts are never edited across a restart). **A wiped node never
+  membership and quorum system are never edited across a restart; the counts are not recorded, #754). **A wiped node never
   rejoins**: a trim jump restores the floor, not the promise. The acceptor set heals around it by
   reconfiguration; a wiped matchmaker is replaced by a handover.
 
@@ -420,7 +420,7 @@ Three layers, and nothing crosses them:
   tail, once every founder formed (`paros_sim::world::replaced_founder`, #423). Likewise on a
   seed that draws the split-floor scenario (decided on 2026-10-11, #409), the acceptors whose
   floor passed a slot the others hold go down at most `SPLIT_WINDOW` (16 s) into the tail, for
-  at most `HOLD`, then the outage strikes the others (`paros_sim::world::split_floor`): a split
+  at most `HOLD`, then the outage strikes the others (`paros_sim::world::scenarios::split_floor`): a split
   floor shows mostly 5 to 20 s into a run. Likewise on a
   seed that draws the slow-machine scenario, its slowing of a founder may strike at most
   `LATE_WINDOW` into the tail, once the cell formed, and lasts 4–6 s
