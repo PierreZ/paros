@@ -101,7 +101,7 @@ worker.onmessage = ({ data }) => {
 };
 
 function setBusy(busy) {
-  for (const id of ["add", "undo", "clear", "load-preset", "quick-tenant", "quick-journals", "quick-traffic", "quick-machine"]) {
+  for (const id of ["add", "undo", "clear", "load-preset", "quick-tenant", "quick-journals", "quick-traffic", "quick-machine", "quick-kill"]) {
     $(id).disabled = busy || replaying;
   }
   if (busy) $("status").textContent = "Running…";
@@ -338,6 +338,24 @@ function idleMachine() {
   return null;
 }
 
+// The machine to kill: the one in cell-1 and up that leads the most
+// journals after the last step; the first such machine when none leads.
+function machineToKill() {
+  const up = new Set(Array.from({ length: state.actions[0].op.machines }, (_, m) => m));
+  for (const a of state.actions) {
+    if (a.op.kind === "add_machine" || a.op.kind === "restart") up.add(a.op.machine);
+    if (a.op.kind === "crash") up.delete(a.op.machine);
+  }
+  const leads = new Map();
+  for (const tenant of run?.topology?.at(-1)?.tenants || []) {
+    for (const j of tenant.journals) {
+      if (j.leader !== null && up.has(j.leader)) leads.set(j.leader, (leads.get(j.leader) || 0) + 1);
+    }
+  }
+  const busiest = [...leads].sort((x, y) => y[1] - x[1] || x[0] - y[0])[0];
+  return busiest ? busiest[0] : ([...up].sort((x, y) => x - y)[0] ?? null);
+}
+
 $("quick-tenant").onclick = () => quick([newTenant()]);
 $("quick-journals").onclick = () => quick(newJournals());
 $("quick-traffic").onclick = () => {
@@ -359,6 +377,12 @@ $("quick-machine").onclick = () => {
     renderConfig();
   }
   quick([{ kind: "add_machine", machine }]);
+};
+
+$("quick-kill").onclick = () => {
+  const machine = machineToKill();
+  if (machine === null) { $("status").textContent = "Every machine in cell-1 is down already."; return; }
+  quick([{ kind: "crash", machine }]);
 };
 
 // ---- playback ----
