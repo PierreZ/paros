@@ -253,6 +253,10 @@ fn every_variant() -> Vec<Message> {
                 vec![NodeId(1), NodeId(2), NodeId(3)],
                 paros_core::membership::QuorumSystem::Majority,
             )),
+            prior: vec![paros_core::membership::AcceptorConfig::new(
+                vec![NodeId(1), NodeId(2), NodeId(4)],
+                paros_core::membership::QuorumSystem::Majority,
+            )],
         },
         // The empty tail: a fully settled leader hands over the frontier
         // and nothing else.
@@ -265,6 +269,7 @@ fn every_variant() -> Vec<Message> {
             decided: BTreeMap::new(),
             pending: BTreeMap::new(),
             config: None,
+            prior: Vec::new(),
         },
     ]
 }

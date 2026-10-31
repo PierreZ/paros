@@ -1,0 +1,898 @@
+{
+  "page": "compartmentalized",
+  "lanes": [
+    {
+      "id": "n0",
+      "label": "node 0",
+      "role": "node"
+    },
+    {
+      "id": "n1",
+      "label": "node 1",
+      "role": "node"
+    },
+    {
+      "id": "n2",
+      "label": "node 2",
+      "role": "node"
+    }
+  ],
+  "scenarios": [
+    {
+      "id": "base",
+      "label": "No fault",
+      "fork": 0,
+      "steps": [
+        {
+          "kind": "event",
+          "from": null,
+          "to": null,
+          "label": "node 0 starts an election",
+          "phase": null,
+          "reply": false,
+          "notes": [
+            "Node 0's election timeout fires. It waited long enough without hearing from a leader. A timeout is not a safety decision. A timeout costs one round and nothing more.",
+            "Node 0 becomes a candidate at ballot 1.0: it wants the whole log suffix.",
+            "Node 0 raises its durable promise from 0.0 to 1.0. The promise is durable before anything leaves.",
+            "Node 0 campaigns at ballot 1.0. It sends one Prepare to 2 peers, and it claims every slot from 0 at once. Phase 1 asks about no value. It asks what the acceptors have already accepted.",
+            "Node 0 asks 2 peers for any slot from 0 it may have missed. It does not claim to be behind. A decision reaches a follower only as a commit watermark. A watermark that it did not receive looks the same as a watermark that was never set."
+          ],
+          "state": [
+            "candidate 1.0",
+            "promised 0.0",
+            "promised 0.0"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n0",
+          "to": "n1",
+          "label": "Prepare 1.0",
+          "phase": "prepare",
+          "reply": false,
+          "notes": [
+            "Node 1 receives Prepare 1.0 for every slot from 0. Its promise was 0.0. It holds 0 accepted records to report.",
+            "Node 1 raises its durable promise from 0.0 to 1.0, and reports what it accepted: nothing. Every ballot below 1.0 is fenced out here from now on."
+          ],
+          "state": [
+            "candidate 1.0",
+            "promised 1.0",
+            "promised 0.0"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n0",
+          "to": "n2",
+          "label": "Prepare 1.0",
+          "phase": "prepare",
+          "reply": false,
+          "notes": [
+            "Node 2 receives Prepare 1.0 for every slot from 0. Its promise was 0.0. It holds 0 accepted records to report.",
+            "Node 2 raises its durable promise from 0.0 to 1.0, and reports what it accepted: nothing. Every ballot below 1.0 is fenced out here from now on."
+          ],
+          "state": [
+            "candidate 1.0",
+            "promised 1.0",
+            "promised 1.0"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n0",
+          "to": "n1",
+          "label": "CatchUpRequest",
+          "phase": "catchup",
+          "reply": false,
+          "notes": [
+            "Node 1 receives a catch-up request from node 0: it is missing everything from slot 0."
+          ],
+          "state": [
+            "candidate 1.0",
+            "promised 1.0",
+            "promised 1.0"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n0",
+          "to": "n2",
+          "label": "CatchUpRequest",
+          "phase": "catchup",
+          "reply": false,
+          "notes": [
+            "Node 2 receives a catch-up request from node 0: it is missing everything from slot 0."
+          ],
+          "state": [
+            "candidate 1.0",
+            "promised 1.0",
+            "promised 1.0"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n1",
+          "to": "n0",
+          "label": "Promise 1.0",
+          "phase": "promise",
+          "reply": true,
+          "notes": [
+            "Node 0 receives a Promise for ballot 1.0 from node 1. The Promise reports the 0 accepted values it holds at or above the slot the Prepare asked about.",
+            "Node 0 is the leader at ballot 1.0. A promise quorum answered its Prepare. No ballot below 1.0 can decide anything now, and node 0 may run Phase 2 alone."
+          ],
+          "state": [
+            "leader 1.0",
+            "promised 1.0",
+            "promised 1.0"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n2",
+          "to": "n0",
+          "label": "Promise 1.0",
+          "phase": "promise",
+          "reply": true,
+          "notes": [
+            "Node 0 receives a Promise for ballot 1.0 from node 2. The Promise reports the 0 accepted values it holds at or above the slot the Prepare asked about."
+          ],
+          "state": [
+            "leader 1.0",
+            "promised 1.0",
+            "promised 1.0"
+          ]
+        },
+        {
+          "kind": "event",
+          "from": null,
+          "to": null,
+          "label": "the client writes alpha",
+          "phase": null,
+          "reply": false,
+          "notes": [
+            "Client 7 asks node 0 to get alpha chosen. The leader gives it the next free slot, 0, and goes directly to Phase 2. That costs one round trip, because the ballot the leader holds already covers the whole log suffix.",
+            "Node 0 records slot 0 = alpha at ballot 1.0. The vote is durable before the Accepted that reports it leaves.",
+            "Node 0 proposes alpha for slot 0 at ballot 1.0, to 2 acceptors. No second Phase 1 is needed. The ballot it holds already covers the whole log suffix."
+          ],
+          "state": [
+            "leader 1.0 · 0:alpha?",
+            "promised 1.0",
+            "promised 1.0"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n0",
+          "to": "n1",
+          "label": "Accept 1.0 · slot 0",
+          "phase": "accept",
+          "reply": false,
+          "notes": [
+            "Node 1 receives Accept 1.0 for slot 0, carrying alpha. Its promise was 1.0. It holds nothing at slot 0.",
+            "Node 1 records slot 0 = alpha at ballot 1.0. The vote is durable before the Accepted that reports it leaves."
+          ],
+          "state": [
+            "leader 1.0 · 0:alpha?",
+            "promised 1.0 · 0:alpha?",
+            "promised 1.0"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n0",
+          "to": "n2",
+          "label": "Accept 1.0 · slot 0",
+          "phase": "accept",
+          "reply": false,
+          "notes": [
+            "Node 2 receives Accept 1.0 for slot 0, carrying alpha. Its promise was 1.0. It holds nothing at slot 0.",
+            "Node 2 records slot 0 = alpha at ballot 1.0. The vote is durable before the Accepted that reports it leaves."
+          ],
+          "state": [
+            "leader 1.0 · 0:alpha?",
+            "promised 1.0 · 0:alpha?",
+            "promised 1.0 · 0:alpha?"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n1",
+          "to": "n0",
+          "label": "Accepted 1.0 · slot 0",
+          "phase": "accepted",
+          "reply": true,
+          "notes": [
+            "Node 0 receives an Accepted for slot 0 at 1.0 from node 1. Its round for that slot held 1 vote before this one.",
+            "Slot 0 is chosen. 2 of the 3 acceptors voted for alpha at ballot 1.0. A Phase-2 quorum here is 2 of 3. This decision is final. No later ballot can decide this slot differently.",
+            "Node 0 applies slot 0 = alpha. Its contiguous prefix now ends at slot 0."
+          ],
+          "state": [
+            "leader 1.0 · 0:alpha✓",
+            "promised 1.0 · 0:alpha?",
+            "promised 1.0 · 0:alpha?"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n2",
+          "to": "n0",
+          "label": "Accepted 1.0 · slot 0",
+          "phase": "accepted",
+          "reply": true,
+          "notes": [
+            "Node 0 receives an Accepted for slot 0 at 1.0 from node 2. Slot 0 is already chosen here: one more vote changes nothing."
+          ],
+          "state": [
+            "leader 1.0 · 0:alpha✓",
+            "promised 1.0 · 0:alpha?",
+            "promised 1.0 · 0:alpha?"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n0",
+          "to": "n1",
+          "label": "Commit 1.0 · slot 0",
+          "phase": "commit",
+          "reply": false,
+          "notes": [
+            "Node 1 receives a Commit: slot 0 is chosen as alpha at ballot 1.0. It held alpha at 1.0 there.",
+            "Node 1 learns that slot 0 is chosen as alpha at ballot 1.0.",
+            "Node 1 applies slot 0 = alpha. Its contiguous prefix now ends at slot 0."
+          ],
+          "state": [
+            "leader 1.0 · 0:alpha✓",
+            "promised 1.0 · 0:alpha✓",
+            "promised 1.0 · 0:alpha?"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n0",
+          "to": "n2",
+          "label": "Commit 1.0 · slot 0",
+          "phase": "commit",
+          "reply": false,
+          "notes": [
+            "Node 2 receives a Commit: slot 0 is chosen as alpha at ballot 1.0. It held alpha at 1.0 there.",
+            "Node 2 learns that slot 0 is chosen as alpha at ballot 1.0.",
+            "Node 2 applies slot 0 = alpha. Its contiguous prefix now ends at slot 0."
+          ],
+          "state": [
+            "leader 1.0 · 0:alpha✓",
+            "promised 1.0 · 0:alpha✓",
+            "promised 1.0 · 0:alpha✓"
+          ]
+        },
+        {
+          "kind": "event",
+          "from": null,
+          "to": null,
+          "label": "node 0 hands the leadership to node 1",
+          "phase": null,
+          "reply": false,
+          "notes": [
+            "Node 0 hands ballot 1.0 to node 1, and it stops leading inside the same call, before the message exists. It sends the frontier: slot 1 is the next free slot. It also sends the tail below the frontier: 0 slots already chosen, 0 slots still in flight. The two parts cover the whole range. The successor can therefore skip Phase 1 and still know every slot below the frontier.",
+            "Node 0 becomes a follower again. Its rounds are volatile, so they go with the leadership. Nobody re-sends what it had in flight."
+          ],
+          "state": [
+            "promised 1.0 · 0:alpha✓",
+            "promised 1.0 · 0:alpha✓",
+            "promised 1.0 · 0:alpha✓"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n0",
+          "to": "n1",
+          "label": "Relinquish 1.0",
+          "phase": "handoff",
+          "reply": false,
+          "notes": [
+            "Node 1 receives a hand-off from node 0. It carries ballot 1.0, the frontier at slot 1, and the tail below the frontier: 0 slots already chosen and 0 slots still in flight. Its own promise was 1.0.",
+            "Node 1 takes ballot 1.0 over from node 0. It runs no Phase 1 of its own. Node 0 already holds the promises for 1.0, and it told node 1 where the frontier is and what sits below it. That is the gain: a leader change without a round trip."
+          ],
+          "state": [
+            "promised 1.0 · 0:alpha✓",
+            "leader 1.0 · 0:alpha✓",
+            "promised 1.0 · 0:alpha✓"
+          ]
+        },
+        {
+          "kind": "event",
+          "from": null,
+          "to": null,
+          "label": "the client writes bravo",
+          "phase": null,
+          "reply": false,
+          "notes": [
+            "Client 7 asks node 1 to get bravo chosen. The leader gives it the next free slot, 1, and goes directly to Phase 2. That costs one round trip, because the ballot the leader holds already covers the whole log suffix.",
+            "Node 1 records slot 1 = bravo at ballot 1.0. The vote is durable before the Accepted that reports it leaves.",
+            "Node 1 proposes bravo for slot 1 at ballot 1.0, to 2 acceptors. No second Phase 1 is needed. The ballot it holds already covers the whole log suffix."
+          ],
+          "state": [
+            "promised 1.0 · 0:alpha✓",
+            "leader 1.0 · 0:alpha✓ 1:bravo?",
+            "promised 1.0 · 0:alpha✓"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n1",
+          "to": "n0",
+          "label": "Accept 1.0 · slot 1",
+          "phase": "accept",
+          "reply": false,
+          "notes": [
+            "Node 0 receives Accept 1.0 for slot 1, carrying bravo. Its promise was 1.0. It holds nothing at slot 1.",
+            "Node 0 records slot 1 = bravo at ballot 1.0. The vote is durable before the Accepted that reports it leaves."
+          ],
+          "state": [
+            "promised 1.0 · 0:alpha✓ 1:bravo?",
+            "leader 1.0 · 0:alpha✓ 1:bravo?",
+            "promised 1.0 · 0:alpha✓"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n1",
+          "to": "n2",
+          "label": "Accept 1.0 · slot 1",
+          "phase": "accept",
+          "reply": false,
+          "notes": [
+            "Node 2 receives Accept 1.0 for slot 1, carrying bravo. Its promise was 1.0. It holds nothing at slot 1.",
+            "Node 2 records slot 1 = bravo at ballot 1.0. The vote is durable before the Accepted that reports it leaves."
+          ],
+          "state": [
+            "promised 1.0 · 0:alpha✓ 1:bravo?",
+            "leader 1.0 · 0:alpha✓ 1:bravo?",
+            "promised 1.0 · 0:alpha✓ 1:bravo?"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n0",
+          "to": "n1",
+          "label": "Accepted 1.0 · slot 1",
+          "phase": "accepted",
+          "reply": true,
+          "notes": [
+            "Node 1 receives an Accepted for slot 1 at 1.0 from node 0. Its round for that slot held 1 vote before this one.",
+            "Slot 1 is chosen. 2 of the 3 acceptors voted for bravo at ballot 1.0. A Phase-2 quorum here is 2 of 3. This decision is final. No later ballot can decide this slot differently.",
+            "Node 1 applies slot 1 = bravo. Its contiguous prefix now ends at slot 1.",
+            "Node 1 leads at ballot 1.0, which node 0 won. No election ran, and the cluster chose slot 1 under the inherited authority. Node 1 must not pass the authority on. An authority moves once, and a second hop needs a durable record that paros does not keep."
+          ],
+          "state": [
+            "promised 1.0 · 0:alpha✓ 1:bravo?",
+            "leader 1.0 · 0:alpha✓ 1:bravo✓",
+            "promised 1.0 · 0:alpha✓ 1:bravo?"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n2",
+          "to": "n1",
+          "label": "Accepted 1.0 · slot 1",
+          "phase": "accepted",
+          "reply": true,
+          "notes": [
+            "Node 1 receives an Accepted for slot 1 at 1.0 from node 2. Slot 1 is already chosen here: one more vote changes nothing."
+          ],
+          "state": [
+            "promised 1.0 · 0:alpha✓ 1:bravo?",
+            "leader 1.0 · 0:alpha✓ 1:bravo✓",
+            "promised 1.0 · 0:alpha✓ 1:bravo?"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n1",
+          "to": "n0",
+          "label": "Commit 1.0 · slot 1",
+          "phase": "commit",
+          "reply": false,
+          "notes": [
+            "Node 0 receives a Commit: slot 1 is chosen as bravo at ballot 1.0. It held bravo at 1.0 there.",
+            "Node 0 learns that slot 1 is chosen as bravo at ballot 1.0.",
+            "Node 0 applies slot 1 = bravo. Its contiguous prefix now ends at slot 1."
+          ],
+          "state": [
+            "promised 1.0 · 0:alpha✓ 1:bravo✓",
+            "leader 1.0 · 0:alpha✓ 1:bravo✓",
+            "promised 1.0 · 0:alpha✓ 1:bravo?"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n1",
+          "to": "n2",
+          "label": "Commit 1.0 · slot 1",
+          "phase": "commit",
+          "reply": false,
+          "notes": [
+            "Node 2 receives a Commit: slot 1 is chosen as bravo at ballot 1.0. It held bravo at 1.0 there.",
+            "Node 2 learns that slot 1 is chosen as bravo at ballot 1.0.",
+            "Node 2 applies slot 1 = bravo. Its contiguous prefix now ends at slot 1."
+          ],
+          "state": [
+            "promised 1.0 · 0:alpha✓ 1:bravo✓",
+            "leader 1.0 · 0:alpha✓ 1:bravo✓",
+            "promised 1.0 · 0:alpha✓ 1:bravo✓"
+          ]
+        }
+      ],
+      "outcome": "Nodes 0, 1, 2 know: slot 0 = alpha, slot 1 = bravo."
+    },
+    {
+      "id": "leader-crash",
+      "label": "What if the leader crashes instead?",
+      "fork": 14,
+      "steps": [
+        {
+          "kind": "event",
+          "from": null,
+          "to": null,
+          "label": "node 0 starts an election",
+          "phase": null,
+          "reply": false,
+          "notes": [
+            "Node 0's election timeout fires. It waited long enough without hearing from a leader. A timeout is not a safety decision. A timeout costs one round and nothing more.",
+            "Node 0 becomes a candidate at ballot 1.0: it wants the whole log suffix.",
+            "Node 0 raises its durable promise from 0.0 to 1.0. The promise is durable before anything leaves.",
+            "Node 0 campaigns at ballot 1.0. It sends one Prepare to 2 peers, and it claims every slot from 0 at once. Phase 1 asks about no value. It asks what the acceptors have already accepted.",
+            "Node 0 asks 2 peers for any slot from 0 it may have missed. It does not claim to be behind. A decision reaches a follower only as a commit watermark. A watermark that it did not receive looks the same as a watermark that was never set."
+          ],
+          "state": [
+            "candidate 1.0",
+            "promised 0.0",
+            "promised 0.0"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n0",
+          "to": "n1",
+          "label": "Prepare 1.0",
+          "phase": "prepare",
+          "reply": false,
+          "notes": [
+            "Node 1 receives Prepare 1.0 for every slot from 0. Its promise was 0.0. It holds 0 accepted records to report.",
+            "Node 1 raises its durable promise from 0.0 to 1.0, and reports what it accepted: nothing. Every ballot below 1.0 is fenced out here from now on."
+          ],
+          "state": [
+            "candidate 1.0",
+            "promised 1.0",
+            "promised 0.0"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n0",
+          "to": "n2",
+          "label": "Prepare 1.0",
+          "phase": "prepare",
+          "reply": false,
+          "notes": [
+            "Node 2 receives Prepare 1.0 for every slot from 0. Its promise was 0.0. It holds 0 accepted records to report.",
+            "Node 2 raises its durable promise from 0.0 to 1.0, and reports what it accepted: nothing. Every ballot below 1.0 is fenced out here from now on."
+          ],
+          "state": [
+            "candidate 1.0",
+            "promised 1.0",
+            "promised 1.0"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n0",
+          "to": "n1",
+          "label": "CatchUpRequest",
+          "phase": "catchup",
+          "reply": false,
+          "notes": [
+            "Node 1 receives a catch-up request from node 0: it is missing everything from slot 0."
+          ],
+          "state": [
+            "candidate 1.0",
+            "promised 1.0",
+            "promised 1.0"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n0",
+          "to": "n2",
+          "label": "CatchUpRequest",
+          "phase": "catchup",
+          "reply": false,
+          "notes": [
+            "Node 2 receives a catch-up request from node 0: it is missing everything from slot 0."
+          ],
+          "state": [
+            "candidate 1.0",
+            "promised 1.0",
+            "promised 1.0"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n1",
+          "to": "n0",
+          "label": "Promise 1.0",
+          "phase": "promise",
+          "reply": true,
+          "notes": [
+            "Node 0 receives a Promise for ballot 1.0 from node 1. The Promise reports the 0 accepted values it holds at or above the slot the Prepare asked about.",
+            "Node 0 is the leader at ballot 1.0. A promise quorum answered its Prepare. No ballot below 1.0 can decide anything now, and node 0 may run Phase 2 alone."
+          ],
+          "state": [
+            "leader 1.0",
+            "promised 1.0",
+            "promised 1.0"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n2",
+          "to": "n0",
+          "label": "Promise 1.0",
+          "phase": "promise",
+          "reply": true,
+          "notes": [
+            "Node 0 receives a Promise for ballot 1.0 from node 2. The Promise reports the 0 accepted values it holds at or above the slot the Prepare asked about."
+          ],
+          "state": [
+            "leader 1.0",
+            "promised 1.0",
+            "promised 1.0"
+          ]
+        },
+        {
+          "kind": "event",
+          "from": null,
+          "to": null,
+          "label": "the client writes alpha",
+          "phase": null,
+          "reply": false,
+          "notes": [
+            "Client 7 asks node 0 to get alpha chosen. The leader gives it the next free slot, 0, and goes directly to Phase 2. That costs one round trip, because the ballot the leader holds already covers the whole log suffix.",
+            "Node 0 records slot 0 = alpha at ballot 1.0. The vote is durable before the Accepted that reports it leaves.",
+            "Node 0 proposes alpha for slot 0 at ballot 1.0, to 2 acceptors. No second Phase 1 is needed. The ballot it holds already covers the whole log suffix."
+          ],
+          "state": [
+            "leader 1.0 · 0:alpha?",
+            "promised 1.0",
+            "promised 1.0"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n0",
+          "to": "n1",
+          "label": "Accept 1.0 · slot 0",
+          "phase": "accept",
+          "reply": false,
+          "notes": [
+            "Node 1 receives Accept 1.0 for slot 0, carrying alpha. Its promise was 1.0. It holds nothing at slot 0.",
+            "Node 1 records slot 0 = alpha at ballot 1.0. The vote is durable before the Accepted that reports it leaves."
+          ],
+          "state": [
+            "leader 1.0 · 0:alpha?",
+            "promised 1.0 · 0:alpha?",
+            "promised 1.0"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n0",
+          "to": "n2",
+          "label": "Accept 1.0 · slot 0",
+          "phase": "accept",
+          "reply": false,
+          "notes": [
+            "Node 2 receives Accept 1.0 for slot 0, carrying alpha. Its promise was 1.0. It holds nothing at slot 0.",
+            "Node 2 records slot 0 = alpha at ballot 1.0. The vote is durable before the Accepted that reports it leaves."
+          ],
+          "state": [
+            "leader 1.0 · 0:alpha?",
+            "promised 1.0 · 0:alpha?",
+            "promised 1.0 · 0:alpha?"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n1",
+          "to": "n0",
+          "label": "Accepted 1.0 · slot 0",
+          "phase": "accepted",
+          "reply": true,
+          "notes": [
+            "Node 0 receives an Accepted for slot 0 at 1.0 from node 1. Its round for that slot held 1 vote before this one.",
+            "Slot 0 is chosen. 2 of the 3 acceptors voted for alpha at ballot 1.0. A Phase-2 quorum here is 2 of 3. This decision is final. No later ballot can decide this slot differently.",
+            "Node 0 applies slot 0 = alpha. Its contiguous prefix now ends at slot 0."
+          ],
+          "state": [
+            "leader 1.0 · 0:alpha✓",
+            "promised 1.0 · 0:alpha?",
+            "promised 1.0 · 0:alpha?"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n2",
+          "to": "n0",
+          "label": "Accepted 1.0 · slot 0",
+          "phase": "accepted",
+          "reply": true,
+          "notes": [
+            "Node 0 receives an Accepted for slot 0 at 1.0 from node 2. Slot 0 is already chosen here: one more vote changes nothing."
+          ],
+          "state": [
+            "leader 1.0 · 0:alpha✓",
+            "promised 1.0 · 0:alpha?",
+            "promised 1.0 · 0:alpha?"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n0",
+          "to": "n1",
+          "label": "Commit 1.0 · slot 0",
+          "phase": "commit",
+          "reply": false,
+          "notes": [
+            "Node 1 receives a Commit: slot 0 is chosen as alpha at ballot 1.0. It held alpha at 1.0 there.",
+            "Node 1 learns that slot 0 is chosen as alpha at ballot 1.0.",
+            "Node 1 applies slot 0 = alpha. Its contiguous prefix now ends at slot 0."
+          ],
+          "state": [
+            "leader 1.0 · 0:alpha✓",
+            "promised 1.0 · 0:alpha✓",
+            "promised 1.0 · 0:alpha?"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n0",
+          "to": "n2",
+          "label": "Commit 1.0 · slot 0",
+          "phase": "commit",
+          "reply": false,
+          "notes": [
+            "Node 2 receives a Commit: slot 0 is chosen as alpha at ballot 1.0. It held alpha at 1.0 there.",
+            "Node 2 learns that slot 0 is chosen as alpha at ballot 1.0.",
+            "Node 2 applies slot 0 = alpha. Its contiguous prefix now ends at slot 0."
+          ],
+          "state": [
+            "leader 1.0 · 0:alpha✓",
+            "promised 1.0 · 0:alpha✓",
+            "promised 1.0 · 0:alpha✓"
+          ]
+        },
+        {
+          "kind": "event",
+          "from": null,
+          "to": null,
+          "label": "node 0 crashes",
+          "phase": null,
+          "reply": false,
+          "notes": [
+            "Node 0 crashes. Its disk keeps promise 1.0 and 1 accepted record. Its role, its open rounds, its read rounds and its election timer are gone. Leadership is entirely volatile here, so a crash *is* an abdication and needs no durable fence. Nobody re-sends the Phase-2 rounds that were lost with it."
+          ],
+          "state": [
+            "down",
+            "promised 1.0 · 0:alpha✓",
+            "promised 1.0 · 0:alpha✓"
+          ]
+        },
+        {
+          "kind": "event",
+          "from": null,
+          "to": null,
+          "label": "node 1 starts an election",
+          "phase": null,
+          "reply": false,
+          "notes": [
+            "Node 1's election timeout fires. It waited long enough without hearing from a leader. A timeout is not a safety decision. A timeout costs one round and nothing more.",
+            "Node 1 becomes a candidate at ballot 2.1: it wants the whole log suffix.",
+            "Node 1 raises its durable promise from 1.0 to 2.1. The promise is durable before anything leaves.",
+            "Node 1 campaigns at ballot 2.1. It sends one Prepare to 2 peers, and it claims every slot from 1 at once. Phase 1 asks about no value. It asks what the acceptors have already accepted.",
+            "Node 1 asks 2 peers for any slot from 1 it may have missed. It does not claim to be behind. A decision reaches a follower only as a commit watermark. A watermark that it did not receive looks the same as a watermark that was never set."
+          ],
+          "state": [
+            "down",
+            "candidate 2.1 · 0:alpha✓",
+            "promised 1.0 · 0:alpha✓"
+          ]
+        },
+        {
+          "kind": "drop",
+          "from": "n1",
+          "to": "n0",
+          "label": "Prepare 2.1",
+          "phase": "prepare",
+          "reply": false,
+          "notes": [
+            "Prepare at 2.1 for slots from 1 is lost. The protocol must treat a lost message and a partition the same way."
+          ],
+          "state": [
+            "down",
+            "candidate 2.1 · 0:alpha✓",
+            "promised 1.0 · 0:alpha✓"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n1",
+          "to": "n2",
+          "label": "Prepare 2.1",
+          "phase": "prepare",
+          "reply": false,
+          "notes": [
+            "Node 2 receives Prepare 2.1 for every slot from 1. Its promise was 1.0. It holds 1 accepted record to report.",
+            "Node 2 raises its durable promise from 1.0 to 2.1, and reports what it accepted: nothing. Every ballot below 2.1 is fenced out here from now on."
+          ],
+          "state": [
+            "down",
+            "candidate 2.1 · 0:alpha✓",
+            "promised 2.1 · 0:alpha✓"
+          ]
+        },
+        {
+          "kind": "drop",
+          "from": "n1",
+          "to": "n0",
+          "label": "CatchUpRequest",
+          "phase": "catchup",
+          "reply": false,
+          "notes": [
+            "Catch me up from slot 1 is lost. The protocol must treat a lost message and a partition the same way."
+          ],
+          "state": [
+            "down",
+            "candidate 2.1 · 0:alpha✓",
+            "promised 2.1 · 0:alpha✓"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n1",
+          "to": "n2",
+          "label": "CatchUpRequest",
+          "phase": "catchup",
+          "reply": false,
+          "notes": [
+            "Node 2 receives a catch-up request from node 1: it is missing everything from slot 1."
+          ],
+          "state": [
+            "down",
+            "candidate 2.1 · 0:alpha✓",
+            "promised 2.1 · 0:alpha✓"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n2",
+          "to": "n1",
+          "label": "Promise 2.1",
+          "phase": "promise",
+          "reply": true,
+          "notes": [
+            "Node 1 receives a Promise for ballot 2.1 from node 2. The Promise reports the 0 accepted values it holds at or above the slot the Prepare asked about.",
+            "Node 1 is the leader at ballot 2.1. A promise quorum answered its Prepare. No ballot below 2.1 can decide anything now, and node 1 may run Phase 2 alone."
+          ],
+          "state": [
+            "down",
+            "leader 2.1 · 0:alpha✓",
+            "promised 2.1 · 0:alpha✓"
+          ]
+        },
+        {
+          "kind": "event",
+          "from": null,
+          "to": null,
+          "label": "the client writes bravo",
+          "phase": null,
+          "reply": false,
+          "notes": [
+            "Client 7 asks node 1 to get bravo chosen. The leader gives it the next free slot, 1, and goes directly to Phase 2. That costs one round trip, because the ballot the leader holds already covers the whole log suffix.",
+            "Node 1 records slot 1 = bravo at ballot 2.1. The vote is durable before the Accepted that reports it leaves.",
+            "Node 1 proposes bravo for slot 1 at ballot 2.1, to 2 acceptors. No second Phase 1 is needed. The ballot it holds already covers the whole log suffix."
+          ],
+          "state": [
+            "down",
+            "leader 2.1 · 0:alpha✓ 1:bravo?",
+            "promised 2.1 · 0:alpha✓"
+          ]
+        },
+        {
+          "kind": "drop",
+          "from": "n1",
+          "to": "n0",
+          "label": "Accept 2.1 · slot 1",
+          "phase": "accept",
+          "reply": false,
+          "notes": [
+            "Accept bravo at 2.1 for slot 1 is lost. The protocol must treat a lost message and a partition the same way."
+          ],
+          "state": [
+            "down",
+            "leader 2.1 · 0:alpha✓ 1:bravo?",
+            "promised 2.1 · 0:alpha✓"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n1",
+          "to": "n2",
+          "label": "Accept 2.1 · slot 1",
+          "phase": "accept",
+          "reply": false,
+          "notes": [
+            "Node 2 receives Accept 2.1 for slot 1, carrying bravo. Its promise was 2.1. It holds nothing at slot 1.",
+            "Node 2 records slot 1 = bravo at ballot 2.1. The vote is durable before the Accepted that reports it leaves."
+          ],
+          "state": [
+            "down",
+            "leader 2.1 · 0:alpha✓ 1:bravo?",
+            "promised 2.1 · 0:alpha✓ 1:bravo?"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n2",
+          "to": "n1",
+          "label": "Accepted 2.1 · slot 1",
+          "phase": "accepted",
+          "reply": true,
+          "notes": [
+            "Node 1 receives an Accepted for slot 1 at 2.1 from node 2. Its round for that slot held 1 vote before this one.",
+            "Slot 1 is chosen. 2 of the 3 acceptors voted for bravo at ballot 2.1. A Phase-2 quorum here is 2 of 3. This decision is final. No later ballot can decide this slot differently.",
+            "Node 1 applies slot 1 = bravo. Its contiguous prefix now ends at slot 1."
+          ],
+          "state": [
+            "down",
+            "leader 2.1 · 0:alpha✓ 1:bravo✓",
+            "promised 2.1 · 0:alpha✓ 1:bravo?"
+          ]
+        },
+        {
+          "kind": "drop",
+          "from": "n1",
+          "to": "n0",
+          "label": "Commit 2.1 · slot 1",
+          "phase": "commit",
+          "reply": false,
+          "notes": [
+            "Commit slot 1 = bravo at 2.1 is lost. The protocol must treat a lost message and a partition the same way."
+          ],
+          "state": [
+            "down",
+            "leader 2.1 · 0:alpha✓ 1:bravo✓",
+            "promised 2.1 · 0:alpha✓ 1:bravo?"
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n1",
+          "to": "n2",
+          "label": "Commit 2.1 · slot 1",
+          "phase": "commit",
+          "reply": false,
+          "notes": [
+            "Node 2 receives a Commit: slot 1 is chosen as bravo at ballot 2.1. It held bravo at 2.1 there.",
+            "Node 2 learns that slot 1 is chosen as bravo at ballot 2.1.",
+            "Node 2 applies slot 1 = bravo. Its contiguous prefix now ends at slot 1."
+          ],
+          "state": [
+            "down",
+            "leader 2.1 · 0:alpha✓ 1:bravo✓",
+            "promised 2.1 · 0:alpha✓ 1:bravo✓"
+          ]
+        }
+      ],
+      "outcome": "Nodes 1, 2 know: slot 0 = alpha, slot 1 = bravo."
+    }
+  ]
+}

@@ -1,0 +1,91 @@
+---
+// The dogfooding page (#812 (website redo 3/4)): the tower of paros
+// primitives that paros runs on, and under it a live run of the playground
+// engine with an x-ray: each layer's traffic, read from the run's events and
+// from the topology the admin API reports (public/engineering.js).
+import Doc from "../../layouts/Doc.astro";
+import Panel from "../../components/Panel.astro";
+import { url } from "../../nav";
+
+const LAYERS = [
+  {
+    num: "01", title: "cell init", flavor: "single-decree Paxos",
+    what: "The founding machines choose the cell plan once: the members, the cell's ids and its first matchmaker set. Before it, nothing is elected, so the decree is the first election.",
+    code: ["paros-core/src/decree.rs", "paros-machine/src/wait.rs"],
+    paxos: "paxos/single-decree/",
+  },
+  {
+    num: "02", title: "cell/election · cell/control", flavor: "Multi-Paxos · leader election",
+    what: "Two journals of the cell tenant. The election journal elects the cell coordinator; the winner claims cell/control with SetLeader. cell/control holds the machine registry and the capacity bookings.",
+    code: ["paros-client/src/election.rs", "paros-coordinator/src/cell.rs"],
+    paxos: "paxos/multi-paxos/",
+  },
+  {
+    num: "03", title: "universe/control", flavor: "Multi-Paxos",
+    what: "The universe directory: which cell hosts which tenant. The universe coordinator writes it; every index under it can be built again from the tenant control journals.",
+    code: ["paros-coordinator/src/universe.rs", "paros-client/src/universe.rs"],
+    paxos: "paxos/multi-paxos/",
+  },
+  {
+    num: "04", title: "tenant control journals", flavor: "Multi-Paxos · Matchmaker Paxos",
+    what: "One per tenant: its name, its journals, their durability and placement, and its desired state. The tenant coordinator reads it and places the journals.",
+    code: ["paros-coordinator/src/tenant.rs", "paros-model/src/tenant.rs"],
+    paxos: "paxos/matchmaker/",
+  },
+  {
+    num: "05", title: "user journals", flavor: "Multi-Paxos · Compartmentalized · quorums",
+    what: "What the clients write and read, with the four calls. Each journal has its own acceptors, matchmakers and quorum system.",
+    code: ["paros-roles/src/node.rs", "paros-client/src/writer.rs"],
+    paxos: "paxos/compartmentalized/",
+  },
+];
+---
+<Doc title="paros on paros" kicker="Engineering" section="engineering/" widget
+  description="The control plane of paros is made of paros: journals, elections and Paxos flavors. There is no external coordination service. Pull the layers apart and see the traffic of each one.">
+    <h2>The tower</h2>
+    <p>A cell needs a membership, a coordinator, a directory of tenants and the description of each
+      tenant. paros keeps all of them in its own journals, on the same machines, with the same Paxos,
+      the same stores and the same <code>Write</code> call as a user's journal. There is no special path
+      and no external service such as ZooKeeper or etcd. Each layer stands on the layer under it.</p>
+
+  <div class="xray" data-widget="xray">
+    <div class="tower" role="list" aria-label="The layers of paros, from the base up">
+      {LAYERS.map((l) => (
+        <div class="layer" role="listitem" data-layer={Number(l.num)}>
+          <Panel num={l.num} title={l.title} meta={l.flavor}>
+            <p class="layer-what">{l.what}</p>
+            <p class="layer-code label">
+              {l.code.map((c) => <code>{c}</code>)}
+              <a href={url(l.paxos)}>the flavor →</a>
+            </p>
+            <div class="layer-traffic"><p class="aside">A live run draws this layer's traffic here. It needs JavaScript and the playground engine.</p></div>
+          </Panel>
+        </div>
+      ))}
+    </div>
+  </div>
+
+    <h2>Read the x-ray</h2>
+    <p>The run above is the <a href={url("playground/")}>playground</a> engine: five <code>parosd</code>
+      machines on a simulated network, disk and clock, in your browser. Each bar is the traffic of a
+      layer over the simulated time of the run. Press <b>x-ray</b> on a layer to show only its traffic
+      and its message kinds. The page reads the layers from the run's events and from the admin
+      <code>Inspect</code> of each journal: a read only, it changes nothing in the run.</p>
+    <ul>
+      <li>Layer 01 talks once, at the start, and then never again.</li>
+      <li>Layers 02 to 04 keep a leader with heartbeats and lease reads even when nothing changes.
+        Show the heartbeats to see them.</li>
+      <li>Layer 05 moves only when a client writes or reads.</li>
+      <li>Crash a machine: the layers that had a leader on it elect a new one, with the same code.</li>
+    </ul>
+
+    <h2>Why</h2>
+    <ul>
+      <li><strong>One thing to run.</strong> The control plane fails, recovers and scales like the data
+        plane, because it is the data plane.</li>
+      <li><strong>One thing to test.</strong> Every simulation run tests the control plane with the same
+        faults, the same audit and the same linearizability checker as user journals.</li>
+      <li><strong>The flavors earn their place.</strong> A control journal is a hard user of paros: few
+        writes, many readers, a leader that must never be two.</li>
+    </ul>
+</Doc>

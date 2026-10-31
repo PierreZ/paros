@@ -455,6 +455,14 @@ pub enum Message {
         /// deployment refuses a transfer that carries none.
         #[cfg_attr(feature = "serde", serde(default))]
         config: Option<AcceptorConfig>,
+        /// The other configurations the minter still declares in force: the
+        /// configurations of its `H_b` besides `config`, while its GC floor
+        /// is not effective ([`ColocatedNode::configs_in_force`](crate::ColocatedNode::configs_in_force)).
+        /// The successor opens its collector over them, so it keeps the old
+        /// configurations' copies needed until a floor is effective. **Empty
+        /// on plain Multi-Paxos**, and once the minter's floor is effective.
+        #[cfg_attr(feature = "serde", serde(default))]
+        prior: Vec<AcceptorConfig>,
     },
 
     // ---- Liveness ----

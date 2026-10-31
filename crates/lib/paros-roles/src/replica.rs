@@ -74,13 +74,46 @@ use paros_wire::{
 };
 
 /// Report a (re)boot: the chosen index this replica rebuilt from its log
-/// and its floor. Nothing is replayed — a replica runs no application
-/// (#186); its chosen prefix is its whole state.
+/// and its floor, then the folded prefix, re-reported as walked in slot
+/// order. A replica runs no application (#186); its chosen prefix is its
+/// whole state.
+///
+/// The re-report is the node's boot loop (`node/boot.rs`), restated for a
+/// replica. A walked page made durable just before a kill at the hint
+/// "replica batch durable, not sent" was never reported, and the walk
+/// resumes above it. If no acceptor walked those slots either, no report
+/// ever names their verdicts (witness 4937484344765024183: slots 19 to 25
+/// unreported, slot 26 revealed a position past the last one reported). A
+/// replay of a slot already reported is idempotent to every oracle.
 #[tracing::instrument(level = "debug", skip_all, fields(replica = self_id))]
 pub(crate) fn report_boot<A: Audit>(replica: &ReplicaNode, self_id: u64, audit: &A) {
     let chosen_index = replica.replica().chosen_index();
     let floor = replica.first_slot();
     audit.replica_booted(NodeId(self_id), chosen_index, floor);
+    let folded = replica.replica().folded();
+    let mut next = floor;
+    for (slot, command) in replica.replica().chosen().range(floor..folded) {
+        if *slot != next {
+            break;
+        }
+        report_applied(
+            audit,
+            self_id,
+            *slot,
+            command,
+            replica.replica().outcome_at(*slot),
+        );
+        next = Slot(slot.0 + 1);
+    }
+    // The re-reported prefix never passes the fold, nor the chosen index.
+    assert!(
+        next <= folded,
+        "a replica boot replays no slot past its fold"
+    );
+    assert!(
+        chosen_index.map_or(next == floor, |ci| next.0 <= ci.0 + 1),
+        "a replica boot replays no slot past the chosen index"
+    );
     tracing::info!(
         replica = self_id,
         chosen = chosen_index.map_or(-1, |s| i64::try_from(s.0).unwrap_or(i64::MAX)),

@@ -50,6 +50,10 @@ name = "paxos_narration"
 required-features = ["paxos"]
 
 [[test]]
+name = "paxos_traces"
+required-features = ["paxos"]
+
+[[test]]
 name = "paxos_world"
 required-features = ["paxos"]
 

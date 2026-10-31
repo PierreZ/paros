@@ -313,8 +313,9 @@ impl StorageWorld {
         key: &str,
         node: u64,
         in_chaos: bool,
+        gate_off: bool,
     ) -> Option<Injection> {
-        let injection = self.plan_injection(key, node, in_chaos)?;
+        let injection = self.plan_injection(key, node, in_chaos, gate_off)?;
         let custody = self.custody.get_mut(key);
         // Pair of `plan_one`'s and the outage plans' guard: every family
         // aims only at a settled custody.
@@ -354,7 +355,13 @@ impl StorageWorld {
     }
 
     /// [`Self::plan_boot_damage`]'s choice, before it unsettles the custody.
-    fn plan_injection(&mut self, key: &str, node: u64, in_chaos: bool) -> Option<Injection> {
+    fn plan_injection(
+        &mut self,
+        key: &str,
+        node: u64,
+        in_chaos: bool,
+        gate_off: bool,
+    ) -> Option<Injection> {
         if let Some(slot) = self.pending.remove(key) {
             // The plan's own claim: it was made on a settled custody, and
             // nothing since (the node was down) moved it.
@@ -383,7 +390,7 @@ impl StorageWorld {
             );
             return None;
         }
-        self.plan_one(key)
+        self.plan_one(key, gate_off)
     }
 
     /// Plan a correlated outage's loss in this journal (#263, see
@@ -815,8 +822,10 @@ impl StorageWorld {
         self.lossy.contains(&slot) || self.lossy.len() < budget
     }
 
-    /// [`Self::plan_boot_damage`]'s draw.
-    fn plan_one(&mut self, key: &str) -> Option<Injection> {
+    /// [`Self::plan_boot_damage`]'s draw. `gate_off`: moonpool's shard gate
+    /// is off for this journal, so it judges no injection, and this draw
+    /// keeps the copy budget itself (defense in depth).
+    fn plan_one(&mut self, key: &str, gate_off: bool) -> Option<Injection> {
         let custody = self.custody.get(key)?.clone();
         if !custody.settled || self.parked.contains_key(key) {
             return None;
@@ -853,6 +862,13 @@ impl StorageWorld {
             .copied()
             .filter(|slot| !marked.is_some_and(|marks| marks.contains(slot)))
             .filter(|slot| !rotted.is_some_and(|rotted| rotted.contains(slot)))
+            // With the gate off (a scenario's `switch_off_all`, or the
+            // run's shard faults), nothing judges the copy budget: a family
+            // aims only where the slot keeps a clean quorum without this
+            // copy. Witness 5284606952228265407: with the gate off, an entry
+            // rot took the last clean copy of slot 0, and no slot was ever
+            // chosen.
+            .filter(|slot| !gate_off || self.clean_copies(*slot) > self.quorum())
             .collect();
         // Aimed by what the ledger knows (#263): on some boots the most
         // recent slot this node holds, the one a lagging peer is likeliest
