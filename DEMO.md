@@ -133,8 +133,10 @@ docker compose run --rm paros-bench --tenant bench --journals 4 --clients 8 --du
 
 # A second cell (#232 (multiple cells)): cell2-a..cell2-c form an idle cell, which then joins
 # the universe as cell-2. A tenant goes into it with `--cell`. A command that names the
-# tenant (`journal create`, `configure`) asks cell-1's machines, finds the tenant in cell-2
-# through the universe directory, and sends the request to cell-2.
+# tenant (`journal create`, `configure`, `write`, `read`, `tenant show`, `status --tenant`,
+# `roles --tenant`) asks cell-1's machines, finds the tenant in cell-2 through the universe
+# directory, and sends the request to cell-2. Only the commands about the cell itself
+# (`cell show`, `cell add-machine`, `machine list`, `status`) take `--servers cell2:4500`.
 docker compose run --rm init-cell2
 docker compose run --rm add-cell2
 docker compose run --rm parosctl tenant create initech --cell cell-2
@@ -142,18 +144,23 @@ docker compose run --rm parosctl journal create initech orders
 
 # Every role in cell-2 too: admit its stateless machine (`--servers cell2:4500` asks cell-2),
 # then give initech a multi-writer journal with two replicas, a proxy leader and a batcher,
-# and a frontend. `cell show` and `roles` on cell-2 list them.
+# and a frontend. `cell show` on cell-2 and `roles` list them.
 docker compose run --rm parosctl --servers cell2:4500 cell add-machine cell2-stateless:4500
 docker compose run --rm parosctl journal create initech feed --writers multi
 docker compose run --rm parosctl configure --tenant initech --journal feed --replicas 2 --proxies 1 --batchers 1
 docker compose run --rm parosctl configure --tenant initech --frontend-count 1
 docker compose run --rm parosctl --servers cell2:4500 cell show
-docker compose run --rm parosctl --servers cell2:4500 roles --tenant initech
+docker compose run --rm parosctl roles --tenant initech
+docker compose run --rm parosctl tenant show initech
+
+# Data in cell-2, through cell-1's machines, by name.
+docker compose run --rm parosctl write initech/orders "first order"
+docker compose run --rm parosctl read initech/orders
 
 # The resolver (#233 (resolver)): every machine of both cells serves it. Ask a machine of
 # cell-1 with the tenant's own token (`demo/keys/initech.token`): the resolver checks the
 # token, sends the client to cell-2, and a machine of cell-2 names the rest. Prints:
-#   a resolver of cell … sends tenant "initech" to cell cell-2
+#   parosctl: tenant "initech" lives in cell cell-2: resolved through that cell's machines
 #   tenant=initech universe=demo cell=cell-2 machines=cell2-a:4500,cell2-b:4500,cell2-c:4500 …
 INITECH=$(cat demo/keys/initech.token)
 docker compose run --rm parosctl --token "$INITECH" resolve initech

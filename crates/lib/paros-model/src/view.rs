@@ -474,6 +474,11 @@ pub fn tenant_view(
                 refusal: "other_cell".to_string(),
                 cell_id: entry.cell_id,
                 cell_name: directory.cell_name(entry.cell_id).to_vec(),
+                endpoint: directory
+                    .endpoint(entry.cell_id)
+                    .iter()
+                    .map(|(_, addr)| addr.to_string())
+                    .collect(),
                 ..wire::ViewReply::default()
             };
         }

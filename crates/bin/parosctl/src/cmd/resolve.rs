@@ -60,8 +60,7 @@ async fn ask(
     .await;
     if let Redirection::Redirected(redirect) = &redirection {
         note(&format!(
-            "a resolver of cell {} sends tenant {tenant:?} to cell {}",
-            short(redirect.resolver_cell),
+            "tenant {tenant:?} lives in cell {}: resolved through that cell's machines",
             named(&redirect.cell_name, redirect.cell_id)
         ));
     }

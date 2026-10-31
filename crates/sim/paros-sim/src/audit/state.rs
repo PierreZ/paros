@@ -170,8 +170,12 @@ pub(super) struct AuditState {
     /// Multi-Paxos, and of the ballots below the first registration on a
     /// matchmaker deployment.
     pub(super) bootstrap: Option<AcceptorConfig>,
-    /// The addressable node pool, from the boot reports.
+    /// The addressable node pool, from the boot reports of the genesis
+    /// nodes.
     pub(super) pool: Option<BTreeSet<u64>>,
+    /// The pools joiners (#189) booted with before any genesis node
+    /// reported its own: judged once one does.
+    pub(super) early_joiner_pools: Vec<(u64, BTreeSet<u64>)>,
     /// Per registered ballot `(round, node)`: the acceptor configuration
     /// bound to it — what that ballot's Phase-2 quorums are counted over.
     /// Bound at the matchmaker's durable registration (before any leader can

@@ -80,6 +80,10 @@ message ViewReply {
   repeated CellView cells = 13;
   // The universe's id (0: this cell does not host its directory).
   uint64 universe_id = 14;
+  // On "other_cell": the tenant's cell's entry endpoint, as the universe
+  // directory records it (#232 (multiple cells)), one `HOST:PORT` each. A
+  // caller asks those machines again.
+  repeated string endpoint = 15;
 }
 
 // One machine. A tenant scope sees only the machines its journals use, and

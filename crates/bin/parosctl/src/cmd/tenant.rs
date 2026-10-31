@@ -59,9 +59,9 @@ pub struct TenantArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum TenantCommand {
-    /// Create a `users` tenant (`REGISTERING` in the fleet directory, hosted by the cell,
-    /// then `READY`). A tenant is created once: a name the fleet tenant holds, in any
-    /// state, is refused. The CLI never creates an `internal` tenant.
+    /// Create a `users` tenant (`REGISTERING` in the universe directory, hosted by the
+    /// cell, then `READY`). A tenant is created once: a name the universe directory
+    /// holds, in any state, is refused. The CLI never creates an `internal` tenant.
     Create {
         /// The tenant's name.
         name: String,
@@ -596,12 +596,16 @@ pub async fn tenant_show(asker: &Asker<'_>, out: &Printer, name: &str) -> Ending
     };
     let names = machine_names(&reply);
     let members = |ids: &[u64]| {
-        ids.iter()
+        let mut listed: Vec<String> = ids
+            .iter()
             .map(|id| names.get(id).cloned().unwrap_or_else(|| "-".to_string()))
-            .collect::<Vec<_>>()
-            .join(",")
+            .collect();
+        listed.sort();
+        listed.join(",")
     };
-    let journal_rows: Vec<[String; 6]> = tenant
+    // A journal's matchmakers are not in the view yet: every journal reads
+    // as plain Multi-Paxos, so the table has no column for them.
+    let journal_rows: Vec<[String; 5]> = tenant
         .journals
         .iter()
         .map(|j| {
@@ -611,11 +615,6 @@ pub async fn tenant_show(asker: &Asker<'_>, out: &Printer, name: &str) -> Ending
                 j.store_durability.clone(),
                 j.desired.clone(),
                 members(&j.acceptors),
-                if j.matchmakers.is_empty() {
-                    "-".to_string()
-                } else {
-                    members(&j.matchmakers)
-                },
             ]
         })
         .collect();
@@ -648,7 +647,7 @@ pub async fn tenant_show(asker: &Asker<'_>, out: &Printer, name: &str) -> Ending
                 tenant.survives,
                 coordinator_text(&reply, &names),
                 indent(&table(
-                    ["JOURNAL", "WRITER", "STORE", "DESIRED", "ACCEPTORS", "MATCHMAKERS"],
+                    ["JOURNAL", "WRITER", "STORE", "DESIRED", "ACCEPTORS"],
                     &journal_rows
                 )),
                 indent(&table(["MACHINE", "ZONE", "STATE", "ACCEPTOR SLOTS"], &machine_rows)),

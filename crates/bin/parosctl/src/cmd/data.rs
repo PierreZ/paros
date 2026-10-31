@@ -26,6 +26,7 @@ use crate::support::connect::Ending;
 use crate::support::labels::Labels;
 use crate::support::names::{JournalRef, NodeRef, Resolved};
 use crate::support::output::{Printer, note, record_text, state_json, state_text};
+use crate::support::view::Asker;
 
 type ParosClient = Client<CompioProviders>;
 
@@ -173,6 +174,8 @@ pub async fn write(
         Ok(journal) => journal,
         Err(ending) => return ending,
     };
+    let cell = journal.client.clone();
+    let client = &cell;
     if args.multi {
         return append(client, out, &journal, &args.records).await;
     }
@@ -370,6 +373,7 @@ pub async fn read(client: &ParosClient, out: &Printer, args: ReadArgs) -> Ending
         Ok(journal) => journal,
         Err(ending) => return ending,
     };
+    let client = &resolved.client;
     let journal = resolved.journal;
     let mut reader = paros::client::Reader::new(journal, args.from);
     let mut records: Vec<(u64, Vec<u8>)> = Vec::new();
@@ -461,6 +465,7 @@ pub async fn tail(client: &ParosClient, out: &Printer, args: TailArgs) -> Ending
         Ok(journal) => journal,
         Err(ending) => return ending,
     };
+    let client = &resolved.client;
     let journal = resolved.journal;
     let mut reader = paros::client::Reader::new(journal, args.from);
     let backoff = client.tunables().retry_backoff;
@@ -538,6 +543,7 @@ pub async fn truncate(
         Ok(journal) => journal,
         Err(ending) => return ending,
     };
+    let client = &resolved.client;
     let (outcome, superseded) = if args.multi {
         let request = paros::client::multi::open_truncate_request(resolved.journal, args.up_to);
         (client.truncate(&request, start(client)).await, false)
@@ -622,6 +628,7 @@ pub async fn set_leader(
         Ok(journal) => journal,
         Err(ending) => return ending,
     };
+    let client = &resolved.client;
     let journal = resolved.journal;
     let new = leader_or_drawn(providers, args.new);
     let outcome = match args.old {
@@ -711,7 +718,7 @@ fn quorum_text(reply: &InspectReply) -> String {
 /// `parosctl inspect`: every server's view, in server order — of the
 /// journal named, or of the node alone.
 pub async fn inspect(
-    client: &ParosClient,
+    (client, asker): (&ParosClient, &Asker<'_>),
     labels: &Labels,
     out: &Printer,
     args: InspectArgs,
@@ -719,10 +726,24 @@ pub async fn inspect(
     let Some(journal) = args.journal else {
         return inspect_nodes(client, labels, out).await;
     };
-    let journal = match crate::support::names::journal(client, &journal).await {
-        Ok(journal) => journal.journal,
+    let resolved = match crate::support::names::journal(client, &journal).await {
+        Ok(journal) => journal,
         Err(ending) => return ending,
     };
+    let (journal, client) = (resolved.journal, &resolved.client);
+    // The names of the journal's cell's machines, when another cell serves it.
+    let mut labels = labels.clone();
+    if !resolved.elsewhere.is_empty() {
+        labels.absorb(
+            Labels::fetch_from(
+                (asker.providers, asker.rpc, asker.names),
+                &resolved.elsewhere,
+                asker.timeout,
+            )
+            .await,
+        );
+    }
+    let labels = &labels;
     let mut replies = Vec::new();
     for server in 0..client.server_count() {
         replies.push((client.id_of(server), client.inspect(server, journal).await));
@@ -743,7 +764,7 @@ pub async fn inspect(
         out.emit(
             || {
                 format!(
-                    "machine {}: leader={} ballot={} members={} quorum={} chosen_index={} \
+                    "machine {}: paxos_leader={} ballot={} members={} quorum={} chosen_index={} \
                      first_slot={} folded={} gc_watermark={} retirable={} \
                      matchmakers={}@{}{}",
                     labels.machine(id),
@@ -799,6 +820,16 @@ async fn inspect_nodes(client: &ParosClient, labels: &Labels, out: &Printer) -> 
     for server in 0..client.server_count() {
         replies.push((client.id_of(server), client.inspect_node(server).await));
     }
+    // A cell that does not host the universe directory names it through its
+    // universe pointer (#232 (multiple cells)).
+    let pointed = match replies
+        .iter()
+        .filter_map(|(_, reply)| reply.as_ref().and_then(control_journals_of))
+        .find(|journals| journals.fleet.is_none())
+    {
+        Some(own) => crate::support::cells::universe_label(client, &own).await,
+        None => None,
+    };
     let mut answered = false;
     for (id, reply) in replies {
         let Some(reply) = reply else {
@@ -822,7 +853,10 @@ async fn inspect_nodes(client: &ParosClient, labels: &Labels, out: &Printer) -> 
                     labels.machine(reply.node),
                     labels.cell(reply.cell_id),
                     journal(journals.map(|j| j.cell)),
-                    journal(journals.and_then(|j| j.fleet)),
+                    match (journals.and_then(|j| j.fleet), &pointed) {
+                        (None, Some(pointed)) => pointed.clone(),
+                        (fleet, _) => journal(fleet),
+                    },
                 )
             },
             || {

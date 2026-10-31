@@ -21,11 +21,9 @@ use clap::{Args, Subcommand};
 use moonpool_core::CompioProviders;
 use moonpool_rpc::RpcHandle;
 use paros::client::Client;
-use paros::client::bootstrap::control_journals;
-use paros::client::fleet::read_directory;
 use paros::client::journals::{self, JournalAnswer, JournalOp, JournalRequest};
 use paros::core::journal::{JournalIdentifier, TenantId, WriterMode};
-use paros::model::address::Names;
+use paros::model::address::{Address, Names};
 use paros::model::fleet::TenantState;
 use paros::model::tags::{Tags, UserTags};
 use paros::model::tenant::{
@@ -34,6 +32,7 @@ use paros::model::tenant::{
 use serde_json::json;
 
 use crate::cmd::tenant::nonzero;
+use crate::support::cells;
 use crate::support::connect::Ending;
 use crate::support::labels::Labels;
 use crate::support::output::{Printer, note, record_text, table};
@@ -329,12 +328,25 @@ pub async fn run(
     args: JournalArgs,
 ) -> Ending {
     let (tenant_name, journal_name) = args.command.names();
-    let (tenant, control, election, tenant_tags, cell) =
-        match ready_tenant(client, out, &tenant_name).await {
-            Ok(found) => found,
-            Err(ending) => return ending,
-        };
+    let ReadyTenant {
+        tenant,
+        control,
+        election,
+        tags: tenant_tags,
+        client: cell,
+        elsewhere,
+    } = match ready_tenant(client, out, &tenant_name).await {
+        Ok(found) => found,
+        Err(ending) => return ending,
+    };
     let client = &cell;
+    // The names of the tenant's cell's machines, when another cell hosts it.
+    let mut labels = labels.clone();
+    if let Some(endpoint) = elsewhere {
+        let timeout = Duration::from_millis(args.patience_ms);
+        labels.absorb(Labels::fetch_from((providers, rpc, names), &endpoint, timeout).await);
+    }
+    let labels = &labels;
     let op = match args.command {
         JournalCommand::List { selector, .. } => {
             return list(
@@ -401,44 +413,33 @@ pub(crate) fn user_tags(texts: &[String]) -> Result<UserTags, Ending> {
     })
 }
 
-/// The `READY` tenant named `tenant_name`, with its control journal, the
-/// election journal of its cell, where the tenant coordinator publishes
-/// itself, the tenant's tags (#575 (key:value tags)), and a client of its
-/// cell: `client` itself, or one over the entry endpoint the universe
-/// directory records for the tenant's cell when another cell hosts it
-/// (#232 (multiple cells)).
+/// The `READY` tenant named `tenant_name`, as [`ready_tenant`] finds it.
+struct ReadyTenant {
+    tenant: TenantId,
+    control: paros::core::journal::JournalId,
+    /// The election journal of its cell, where the tenant coordinator
+    /// publishes itself.
+    election: JournalIdentifier,
+    /// Its tags (#575 (key:value tags)).
+    tags: Tags,
+    /// A client of its cell.
+    client: ParosClient,
+    /// Its cell's entry endpoint, when another cell than the servers' hosts
+    /// it: where the names of that cell's machines are read.
+    elsewhere: Option<Vec<Address>>,
+}
+
+/// The `READY` tenant named `tenant_name`, through the universe directory
+/// of the servers' cell or of the cell its universe pointer names. A tenant
+/// another cell hosts is reached through the entry endpoint the directory
+/// records for that cell (#232 (multiple cells)).
 async fn ready_tenant(
     client: &ParosClient,
     out: &Printer,
     tenant_name: &str,
-) -> Result<
-    (
-        TenantId,
-        paros::core::journal::JournalId,
-        JournalIdentifier,
-        Tags,
-        ParosClient,
-    ),
-    Ending,
-> {
-    let Some(cell) = control_journals(client).await else {
-        note("no server named its cell's control journals: is the cell initialized?");
-        return Err(Ending::Unreachable);
-    };
-    let (Some(fleet), Some(election)) = (cell.fleet, cell.election) else {
-        note("the cell names no fleet journal or no election journal");
-        return Err(Ending::Refused);
-    };
-    let directory = match read_directory(client, 0, fleet).await {
-        Ok(directory) => directory,
-        Err(outcome) => {
-            note(&format!(
-                "the fleet directory could not be read to its tail: {outcome:?}"
-            ));
-            return Err(Ending::Unreachable);
-        }
-    };
-    let Some((tenant, entry)) = directory.named(tenant_name.as_bytes()) else {
+) -> Result<ReadyTenant, Ending> {
+    let universe = cells::universe(client).await?;
+    let Some((tenant, entry)) = universe.state.named(tenant_name.as_bytes()) else {
         out.emit(
             || format!("no tenant named {tenant_name}"),
             || json!({ "outcome": "unknown_tenant", "tenant": tenant_name }),
@@ -452,43 +453,47 @@ async fn ready_tenant(
         );
         return Err(Ending::Refused);
     }
-    if entry.cell_id == cell.cell_id {
-        return Ok((
-            tenant,
-            entry.control,
-            election,
-            entry.all_tags(),
-            client.clone(),
-        ));
-    }
-    let endpoint = directory.endpoint(entry.cell_id);
-    if endpoint.is_empty() {
-        note(&format!(
-            "tenant {tenant_name} is in another cell, and the universe directory records no entry endpoint for it"
-        ));
-        return Err(Ending::Refused);
-    }
-    let other = client.elsewhere(endpoint);
-    let mut election = None;
-    for server in 0..other.server_count() {
-        election = other
-            .inspect_node(server)
-            .await
-            .as_ref()
-            .and_then(paros::client::bootstrap::control_journals_of)
-            .filter(|journals| journals.cell_id == entry.cell_id)
-            .and_then(|journals| journals.election);
-        if election.is_some() {
-            break;
+    let cell = cells::tenant_cell(client, &universe, entry.cell_id)?;
+    let own = entry.cell_id == universe.own.cell_id;
+    let election = if own {
+        universe.own.election
+    } else {
+        let mut election = None;
+        for server in 0..cell.server_count() {
+            election = cell
+                .inspect_node(server)
+                .await
+                .as_ref()
+                .and_then(paros::client::bootstrap::control_journals_of)
+                .filter(|journals| journals.cell_id == entry.cell_id)
+                .and_then(|journals| journals.election);
+            if election.is_some() {
+                break;
+            }
         }
-    }
+        election
+    };
     let Some(election) = election else {
         note(&format!(
             "no machine of tenant {tenant_name}'s cell named its election journal"
         ));
         return Err(Ending::Unreachable);
     };
-    Ok((tenant, entry.control, election, entry.all_tags(), other))
+    Ok(ReadyTenant {
+        tenant,
+        control: entry.control,
+        election,
+        tags: entry.all_tags(),
+        elsewhere: (!own).then(|| {
+            universe
+                .state
+                .endpoint(entry.cell_id)
+                .iter()
+                .map(|(_, addr)| addr.clone())
+                .collect()
+        }),
+        client: cell,
+    })
 }
 
 /// The role counts `args` names (#604 (role counts)), each count it does
@@ -560,11 +565,12 @@ pub async fn configure(
         );
         return Ending::Refused;
     }
-    let (tenant, control, election, _, cell) = match ready_tenant(client, out, &args.tenant).await {
+    let ready = match ready_tenant(client, out, &args.tenant).await {
         Ok(found) => found,
         Err(ending) => return ending,
     };
-    let client = &cell;
+    let (tenant, control, election, client) =
+        (ready.tenant, ready.control, ready.election, &ready.client);
     // A count or a mode not named keeps the target's: read the fold when
     // the command names only part of them.
     let current = if named_roles || named_mode.is_none() || named_counts {

@@ -19,7 +19,7 @@
 
 use std::process::ExitCode;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use paros::model::address::Address;
 use parosctl::cmd::{
     cell, data, init, journal, key, machine, resolve, roles, status, store, tenant, tls, token,
@@ -45,10 +45,10 @@ struct Cli {
 #[derive(Subcommand, Debug)]
 enum Command {
     /// Form the cell over its founding members with `cell init`'s decree
-    /// (#196, #216, #277); then the fleet steps register the cell in the fleet
-    /// directory (#229), and `init` reads the cell control journal and waits
-    /// for the cell coordinator to join the cell (#513). Refused on an
-    /// initialized fleet; a re-run resumes.
+    /// (#196, #216, #277); then the universe steps register the cell in the
+    /// universe directory (#229), and `init` reads the cell control journal
+    /// and waits for the cell coordinator to join the cell (#513). Refused
+    /// on an initialized universe; a re-run resumes.
     Init(init::InitArgs),
     /// Cells (#216, #399): `cell list`, `cell show [<cell>]`, and `cell
     /// add-machine <addr>`, which admits an idle machine into the cell of
@@ -79,7 +79,7 @@ enum Command {
     /// The cell's machines (#399): `machine list`, `machine show <name>`.
     Machine(machine::MachineArgs),
     /// Who holds which role now (#399): the coordinators, every journal's
-    /// acceptors and matchmakers, and the bookings; of the cell, a tenant
+    /// acceptors and matchmakers, and the slots each machine reserves; of the cell, a tenant
     /// or a machine.
     Roles(roles::RolesArgs),
     /// How the universe, the cell or a tenant stands (#191 (status)):
@@ -143,7 +143,9 @@ fn main() -> ExitCode {
         )
         .with_writer(std::io::stderr)
         .init();
-    let cli = Cli::parse();
+    // The help cites no issue (#399): people read it.
+    let matches = parosctl::support::help::for_people(Cli::command()).get_matches();
+    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
     // The key, token, TLS and store commands are offline: no server, no
     // client runtime.
     let out = Printer::new(cli.global.json);
@@ -362,7 +364,7 @@ async fn online(global: Global, command: Command) -> ExitCode {
         CellCommand::SetLeader(args) => {
             data::set_leader(&runtime.providers, &client, &out, args).await
         }
-        CellCommand::Inspect(args) => data::inspect(&client, &labels, &out, args).await,
+        CellCommand::Inspect(args) => data::inspect((&client, &asker), &labels, &out, args).await,
         CellCommand::Reconfigure(args) => data::reconfigure(&client, &labels, &out, args).await,
         CellCommand::Retire(args) => data::retire(&client, &labels, &out, args).await,
         CellCommand::Tenant(args) => {

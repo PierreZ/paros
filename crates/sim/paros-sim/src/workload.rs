@@ -1048,7 +1048,7 @@ impl ChainWorkload {
                 .spawn_task(
                     "operator-lane",
                     async move {
-                        let ops = fleet::operator::run(lane_ctx, ops, lane_config).await;
+                        let ops = Box::pin(fleet::operator::run(lane_ctx, ops, lane_config)).await;
                         // A receiver gone means the run is over.
                         let _ = ended.send(ops);
                     }
