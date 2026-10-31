@@ -102,6 +102,20 @@ pub trait JournalStores {
     /// The audit port `journal` reports to.
     fn audit(&self, journal: JournalIdentifier) -> Self::Audit;
 
+    /// The store of the replica of `journal` this machine holds a slot of
+    /// (#765), under `config`, provisioned at its first open: a replica
+    /// holds no promise, so a lost one boots empty and learns again. `None`
+    /// when this opener hosts no replica (the default: a static list) or
+    /// the store could not be opened now.
+    fn open_replica(
+        &mut self,
+        journal: JournalIdentifier,
+        config: paros_core::Config,
+    ) -> impl Future<Output = Option<Self::Store>> {
+        let _ = (journal, config);
+        std::future::ready(None)
+    }
+
     /// The audit port the node's own facts report to — what no single
     /// journal owns: the edge's rejections, a peer lane's delivery failures,
     /// a refused journal id, the system journals' folds. Named by the
@@ -109,10 +123,10 @@ pub trait JournalStores {
     /// §3.8, #243).
     fn node_audit(&self) -> Self::Audit;
 
-    /// The audit port the proxy leader of `journal` a machine serves
-    /// reports to (#765): a journal this node does not serve. The node's
-    /// own port by default.
-    fn proxy_audit(&self, journal: JournalIdentifier) -> Self::Audit {
+    /// The audit port the proxy leader or the replica of `journal` a
+    /// machine serves reports to (#765): a journal this node does not
+    /// serve. The node's own port by default.
+    fn role_audit(&self, journal: JournalIdentifier) -> Self::Audit {
         let _ = journal;
         self.node_audit()
     }

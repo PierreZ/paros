@@ -75,6 +75,10 @@ pub struct Resolved {
     /// machines the registry books a `frontend` slot of the tenant on. Empty
     /// when it has none.
     pub frontends: Vec<(NodeId, Address)>,
+    /// The tenant's replicas (#765 (booked proxies and replicas)): the
+    /// machines the registry books a `replica` slot of one of the tenant's
+    /// journals on. Empty when it has none.
+    pub replicas: Vec<(NodeId, Address)>,
 }
 
 /// What resolving a tenant through the entry endpoint came to.
@@ -180,7 +184,12 @@ impl Resolved {
         }
         let zones = &self.zones;
         let home = |id: &NodeId| zones.get(id).is_some_and(|held| held == zone);
-        for list in [&mut self.machines, &mut self.batchers, &mut self.frontends] {
+        for list in [
+            &mut self.machines,
+            &mut self.batchers,
+            &mut self.frontends,
+            &mut self.replicas,
+        ] {
             let count = list.len();
             // A stable sort: the references of `zone` first, in order.
             list.sort_by_key(|(id, _)| !home(id));
@@ -277,8 +286,11 @@ pub fn from_wire(ack: &wire::ResolveAck) -> Resolution {
             })
             .collect()
     };
-    let (Some(batchers), Some(frontends)) = (members(&ack.batchers), members(&ack.frontends))
-    else {
+    let (Some(batchers), Some(frontends), Some(replicas)) = (
+        members(&ack.batchers),
+        members(&ack.frontends),
+        members(&ack.replicas),
+    ) else {
         return Resolution::Malformed;
     };
     let well_formed = ack.cell_id != 0
@@ -304,6 +316,7 @@ pub fn from_wire(ack: &wire::ResolveAck) -> Resolution {
                 .iter()
                 .chain(&ack.batchers)
                 .chain(&ack.frontends)
+                .chain(&ack.replicas)
                 .filter(|m| !m.zone.is_empty())
                 .map(|m| (NodeId(m.node_id), m.zone.clone()))
                 .collect(),
@@ -312,6 +325,7 @@ pub fn from_wire(ack: &wire::ResolveAck) -> Resolution {
             cell_name: ack.cell_name.clone(),
             batchers,
             frontends,
+            replicas,
         }),
         _ => Resolution::Malformed,
     }

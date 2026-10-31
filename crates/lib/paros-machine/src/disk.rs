@@ -110,6 +110,25 @@ impl<S: LocalStorageProvider + Clone> ProviderDisk<S> {
         )
     }
 
+    /// The directory of the store of `journal`'s replica on this machine
+    /// (#765): beside the journals, so a machine that later serves the
+    /// journal as an acceptor never opens the replica's log.
+    ///
+    /// # Panics
+    ///
+    /// When `journal` is unset.
+    #[must_use]
+    pub fn replica_dir(&self, journal: JournalIdentifier) -> String {
+        assert!(
+            journal.is_set(),
+            "a replica store is named by a set identifier"
+        );
+        format!(
+            "{}/replicas/{}/{}",
+            self.root, journal.tenant.0, journal.journal.0
+        )
+    }
+
     /// The directory of `tenant`'s matchmaker set's store (#190): one store
     /// per set.
     ///

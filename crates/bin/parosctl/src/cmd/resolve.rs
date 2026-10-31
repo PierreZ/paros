@@ -86,26 +86,30 @@ pub async fn run(
             let resolved = resolved.prefer_zone(&args.zone);
             let zone =
                 |id: &paros::core::NodeId| resolved.zones.get(id).cloned().unwrap_or_default();
-            let machines: Vec<String> = resolved
-                .machines
-                .iter()
-                .map(|(_, addr)| addr.to_string())
-                .collect();
-            // The tenant's frontends (#723 (frontend as a parosd role)):
-            // where `--frontends` points a tenant's calls.
-            let frontends: Vec<String> = resolved
-                .frontends
-                .iter()
-                .map(|(_, addr)| addr.to_string())
-                .collect();
+            // The machines, the tenant's frontends (#723 (frontend as a
+            // parosd role): where `--frontends` points a tenant's calls) and
+            // its replicas (#765 (booked proxies and replicas): where its
+            // clients read first), as addresses and as JSON references.
+            let addrs = |list: &[(paros::core::NodeId, paros::model::address::Address)]| {
+                list.iter()
+                    .map(|(_, addr)| addr.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            };
+            let refs = |list: &[(paros::core::NodeId, paros::model::address::Address)]| {
+                list.iter()
+                    .map(|(id, addr)| json!({"node": id.0, "addr": addr.to_string(), "zone": zone(id)}))
+                    .collect::<Vec<_>>()
+            };
             out.emit(
                 || {
                     format!(
-                        "tenant={tenant} universe={} cell={} machines={} frontends={}",
+                        "tenant={tenant} universe={} cell={} machines={} frontends={} replicas={}",
                         named(&resolved.universe_name, resolved.universe_id),
                         named(&resolved.cell_name, resolved.cell_id),
-                        machines.join(","),
-                        frontends.join(",")
+                        addrs(&resolved.machines),
+                        addrs(&resolved.frontends),
+                        addrs(&resolved.replicas)
                     )
                 },
                 || {
@@ -117,20 +121,9 @@ pub async fn run(
                         "cell_name": record_text(&resolved.cell_name),
                         "universe": resolved.universe_id,
                         "universe_name": record_text(&resolved.universe_name),
-                        "machines": resolved
-                            .machines
-                            .iter()
-                            .map(|(id, addr)| {
-                                json!({"node": id.0, "addr": addr.to_string(), "zone": zone(id)})
-                            })
-                            .collect::<Vec<_>>(),
-                        "frontends": resolved
-                            .frontends
-                            .iter()
-                            .map(|(id, addr)| {
-                                json!({"node": id.0, "addr": addr.to_string(), "zone": zone(id)})
-                            })
-                            .collect::<Vec<_>>(),
+                        "machines": refs(&resolved.machines),
+                        "frontends": refs(&resolved.frontends),
+                        "replicas": refs(&resolved.replicas),
                         "at": resolved.at,
                     })
                 },

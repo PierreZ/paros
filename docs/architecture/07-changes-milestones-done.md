@@ -44,8 +44,8 @@ AGENTS.md.
   the tenant coordinator books each journal's proxy leaders, batchers and replicas and puts the
   booked counts in force by a round change (section 3.4). Landed on 2026-10-30 (#765): a
   `parosd` machine runs the booked proxy leaders of its journals, inside its node loop, and every
-  machine sends to a proxy rank through the booked machine's peer lane. Still to do: a `parosd`
-  machine that runs the booked replicas of its journals.
+  machine sends to a proxy rank through the booked machine's peer lane. A `storage` machine runs
+  the booked replicas of its journals the same way, and `Resolve` names them for reads.
 - `--survive` replaces `--failures-per-partition`, `partitions` leaves `Durability`, and
   `configure --plan`, `cell capabilities` and the status line of wants against has come with
   them (decided on 2026-10-28: #748 (survive), #755 (partitions leave durability), #749
