@@ -46,6 +46,14 @@ pub struct Rare {
 /// window seldom reaches, #485 the double fault, #486 the rest.
 pub const RARE: &[Rare] = &[
     Rare {
+        msg: "universe: a cell that holds a bucket is not removed",
+        reason: "the second cell's tenant is removed while its bucket stays on the cell only when the chaos cuts the phase between the tenant's removal and the bucket's return; the next phase then meets the bucket first (#713 (bucket placement))",
+    },
+    Rare {
+        msg: "universe: a bucket move loses a race at apply",
+        reason: "a tenant must be registered in the bucket between the operator's look and its write, and one operator at a time takes the second cell's phases (#713 (bucket placement))",
+    },
+    Rare {
         msg: "proxy: a machine's proxy leader takes another rank",
         reason: "a journal's earlier proxy leader slot is released while a later one stays, so the later machine's rank moves down and the leader delegates to it under the new rank: it ran on no seed of a 120-seed hunt (#765 (booked proxies and replicas))",
     },

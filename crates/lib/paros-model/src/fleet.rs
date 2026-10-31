@@ -51,6 +51,15 @@
 //!   is malformed. A live name is held by one tenant at a time
 //!   ([`FleetDirectoryRefusal::NameTaken`]).
 //! - **Only a `READY` cell receives new tenants.**
+//! - **Placement is an override map, then a bucket table** (#713 (bucket
+//!   placement), [`buckets`]): a tenant registered by its bucket must name
+//!   the bucket table's cell for its name
+//!   ([`FleetDirectoryRefusal::BucketElsewhere`]); one registered with an
+//!   override names any `READY` cell. The first cell added takes every
+//!   bucket; [`FleetCommand::AssignBuckets`] moves a range, refused while a
+//!   tenant placed by one of its buckets lives elsewhere
+//!   ([`FleetDirectoryRefusal::BucketNotEmpty`]), and a cell that holds a
+//!   bucket is not removed ([`FleetDirectoryRefusal::CellHoldsBuckets`]).
 //! - **The directory is a pointer, never the authority** (#225): a tenant's
 //!   control journal's generation wins over it, and the directory is
 //!   rebuilt from the cells' tenant lists when lost (the recovery issue,
@@ -71,8 +80,10 @@ use crate::tags::{Tag, TagError, Tags, UserTags, reserved};
 pub use crate::tenant::Survives;
 use paros_wire::fleet as wire;
 
+pub mod buckets;
 mod keys;
 
+use buckets::{BucketRange, BucketTable, Placement, bucket_of};
 pub use keys::RootKeyEntry;
 use keys::{KeyChange, RootKeys};
 
@@ -83,8 +94,10 @@ use keys::{KeyChange, RootKeys};
 /// tokens)); `4` since tenants and cells carry tags and the tenant
 /// entry's groups became reserved tags (#575 (key:value tags)); `5` since a
 /// cell entry carries its entry endpoint and a removed cell's id is
-/// tombstoned (#232 (multiple cells)).
-pub const METADATA_VERSION: u32 = 5;
+/// tombstoned (#232 (multiple cells)); `6` since tenants are placed by an
+/// override or by their bucket, and the directory holds the bucket table
+/// (#713 (bucket placement)).
+pub const METADATA_VERSION: u32 = 6;
 
 /// What a tenant is (§3.7, #575 (key:value tags)): its reserved tags
 /// `paros/kind` and `paros/role`, fixed when it is registered and never
@@ -277,6 +290,18 @@ impl CellKind {
         match held.into_keys().next() {
             Some(key) => Err(TagError::UnknownReserved(key)),
             None => Ok(kind),
+        }
+    }
+
+    /// Whether a tenant that survives `survives` may live in a cell of this
+    /// kind (#252, #672 (cell tag selector)): a regional cell carries a
+    /// tenant that survives a zone, a multi-region cell one that survives
+    /// a zone or a region.
+    #[must_use]
+    pub fn carries(&self, survives: Survives) -> bool {
+        match self {
+            CellKind::Regional { .. } => survives == Survives::Az,
+            CellKind::MultiRegion { .. } => true,
         }
     }
 
@@ -481,6 +506,16 @@ pub enum FleetCommand {
         survives: Survives,
         /// Its first user tags (#575).
         tags: UserTags,
+        /// How it was placed (#713): by its bucket, or by an override.
+        placement: Placement,
+    },
+    /// `universe buckets assign` (#713 (bucket placement)): the buckets of
+    /// `range` name the `READY` cell `cell_id`.
+    AssignBuckets {
+        /// The buckets.
+        range: BucketRange,
+        /// The cell they name.
+        cell_id: u64,
     },
     /// Move `tenant` to `state`.
     MarkTenant {
@@ -613,14 +648,27 @@ impl FleetEntry {
                 cell_id,
                 survives,
                 tags,
-            } => Kind::RegisterTenant(wire::RegisterTenant {
-                tenant: control.tenant.0,
-                name: name.clone(),
-                cell_id: *cell_id,
-                control_journal: control.journal.0,
-                survives: survives.to_wire(),
-                tags: tags.to_wire(),
-            }),
+                placement,
+            } => {
+                let (placement, reason) = placement.to_wire();
+                Kind::RegisterTenant(wire::RegisterTenant {
+                    tenant: control.tenant.0,
+                    name: name.clone(),
+                    cell_id: *cell_id,
+                    control_journal: control.journal.0,
+                    survives: survives.to_wire(),
+                    tags: tags.to_wire(),
+                    placement,
+                    reason,
+                })
+            }
+            FleetCommand::AssignBuckets { range, cell_id } => {
+                Kind::AssignBuckets(wire::AssignBuckets {
+                    first: u32::from(range.first()),
+                    last: u32::from(range.last()),
+                    cell_id: *cell_id,
+                })
+            }
             FleetCommand::MarkTenant { tenant, state } => Kind::MarkTenant(wire::MarkTenant {
                 tenant: tenant.0,
                 state: state.to_wire(),
@@ -706,7 +754,23 @@ impl FleetEntry {
                 cell_id: register.cell_id,
                 survives: Survives::from_wire(register.survives)?,
                 tags: user_tags(register.tags)?,
+                placement: if register.placement == 0 && entry.version >= 6 {
+                    return Err("a tenant names no placement");
+                } else {
+                    Placement::from_wire(register.placement, register.reason)?
+                },
             },
+            Kind::AssignBuckets(assign) => {
+                let range = u16::try_from(assign.first)
+                    .ok()
+                    .zip(u16::try_from(assign.last).ok())
+                    .and_then(|(first, last)| BucketRange::new(first, last))
+                    .ok_or("a bucket range is out of order or out of range")?;
+                FleetCommand::AssignBuckets {
+                    range,
+                    cell_id: assign.cell_id,
+                }
+            }
             Kind::MarkTenant(mark) => FleetCommand::MarkTenant {
                 tenant: TenantId(mark.tenant),
                 state: TenantState::from_wire(mark.state).ok_or("an unknown tenant state")?,
@@ -803,6 +867,9 @@ pub struct TenantEntry {
     pub survives: Survives,
     /// Its user tags (#575).
     pub tags: UserTags,
+    /// How it was placed (#713): by its bucket or by an override. An
+    /// internal tenant is placed by an override (its kind).
+    pub placement: Placement,
 }
 
 impl TenantEntry {
@@ -896,6 +963,13 @@ pub enum FleetEvent {
     },
     /// A cell's user tags changed (#575).
     CellTagged {
+        /// The cell.
+        cell_id: u64,
+    },
+    /// A range of buckets now names a cell (#713).
+    BucketsAssigned {
+        /// The buckets.
+        range: BucketRange,
         /// The cell.
         cell_id: u64,
     },
@@ -1023,6 +1097,30 @@ pub enum FleetDirectoryRefusal {
         /// The label named.
         label: String,
     },
+    /// A tenant registered by its bucket names another cell than the
+    /// bucket table (#713): the bucket moved, so the creator looks again.
+    BucketElsewhere {
+        /// The tenant's bucket.
+        bucket: u16,
+        /// The cell the bucket names.
+        cell_id: u64,
+    },
+    /// A tenant placed by one of the buckets lives in another cell than
+    /// the one asked for (#713): it would have to move, and tenant moves
+    /// are not built (#232).
+    BucketNotEmpty {
+        /// Its bucket.
+        bucket: u16,
+        /// The tenant.
+        tenant: TenantId,
+    },
+    /// The cell holds buckets (#713): assign them to another cell first.
+    CellHoldsBuckets {
+        /// The cell named.
+        cell_id: u64,
+        /// How many buckets it holds.
+        buckets: usize,
+    },
 }
 
 /// What a tag request names (#575).
@@ -1059,6 +1157,8 @@ pub struct FleetDirectory {
     keys: RootKeys,
     /// Every tag request applied (#575): a retry never applies one again.
     tagged: BTreeSet<u64>,
+    /// Which cell each bucket names (#713).
+    buckets: BucketTable,
     next_seq: u64,
 }
 
@@ -1167,6 +1267,30 @@ impl FleetDirectory {
             .find(|id| self.cell_name(*id) == name)
     }
 
+    /// The cell a tenant that survives `survives` goes to under `selector`
+    /// (#672 (cell tag selector)): of the `READY` cells whose tags match and
+    /// whose kind carries it, the one with the fewest `users` tenants, then
+    /// the first by name, then by id. A deterministic function of the
+    /// directory: no user tag decides an outcome the fold records (§3.7).
+    #[must_use]
+    pub fn select_cell(&self, selector: &crate::tags::Selector, survives: Survives) -> Option<u64> {
+        self.cells()
+            .filter(|(_, cell)| {
+                cell.state == CellState::Ready
+                    && cell.kind.carries(survives)
+                    && selector.matches(&cell.all_tags(), None)
+            })
+            .min_by_key(|(id, _)| {
+                let tenants = self
+                    .tenants
+                    .values()
+                    .filter(|t| t.cell_id == *id && t.kind == TenantKind::Users)
+                    .count();
+                (tenants, self.cell_name(*id), *id)
+            })
+            .map(|(id, _)| id)
+    }
+
     /// The universe entry's root public keys in force, in key id order
     /// (#245): what an entry role verifies a token against.
     pub fn root_keys(&self) -> impl Iterator<Item = &RootKeyEntry> {
@@ -1197,6 +1321,52 @@ impl FleetDirectory {
             .find(|(_, cell)| cell.control_tenant == tenant)
             .map_or(entry.cell_id, |(id, _)| *id);
         Some(TenantLabel::Cell(cell))
+    }
+
+    /// The cell that bucket `bucket` names (#713), once the first cell is
+    /// added.
+    #[must_use]
+    pub fn bucket_cell(&self, bucket: u16) -> Option<u64> {
+        self.buckets.cell(bucket)
+    }
+
+    /// The cell a tenant named `name` placed by its bucket goes to (#713).
+    #[must_use]
+    pub fn bucket_cell_of(&self, name: &[u8]) -> Option<u64> {
+        self.buckets.cell(bucket_of(name))
+    }
+
+    /// The bucket table (#713).
+    #[must_use]
+    pub fn buckets(&self) -> &BucketTable {
+        &self.buckets
+    }
+
+    /// The first `users` tenant placed by one of the buckets of `range`
+    /// that lives in another cell than `cell_id` (#713): what keeps the
+    /// range from moving there.
+    #[must_use]
+    pub fn bucket_blocker(&self, range: BucketRange, cell_id: u64) -> Option<(u16, TenantId)> {
+        self.tenants.iter().find_map(|(id, t)| {
+            let bucket = bucket_of(&t.name);
+            (t.kind == TenantKind::Users
+                && t.placement.is_bucket()
+                && t.cell_id != cell_id
+                && range.contains(bucket))
+            .then_some((bucket, *id))
+        })
+    }
+
+    /// A `users` tenant placed by its bucket that lives in another cell
+    /// than its bucket names (#713). The fold keeps this `None`: an oracle.
+    #[must_use]
+    pub fn misplaced(&self) -> Option<TenantId> {
+        self.tenants.iter().find_map(|(id, t)| {
+            (t.kind == TenantKind::Users
+                && t.placement.is_bucket()
+                && self.bucket_cell_of(&t.name) != Some(t.cell_id))
+            .then_some(*id)
+        })
     }
 
     /// Whether `tenant` is held by an entry or was ever removed.
@@ -1267,7 +1437,9 @@ impl FleetDirectory {
                 cell_id,
                 survives,
                 tags,
-            } => self.register_tenant(*control, name, *cell_id, *survives, tags),
+                placement,
+            } => self.register_tenant(*control, name, *cell_id, (*survives, placement), tags),
+            FleetCommand::AssignBuckets { range, cell_id } => self.assign_buckets(*range, *cell_id),
             FleetCommand::MarkTenant { tenant, state } => self.mark_tenant(*tenant, *state),
             FleetCommand::RemoveTenant { tenant } => self.remove_tenant(*tenant),
             FleetCommand::AddRootKey(key) => Ok(self.keys.add(key)?.into()),
@@ -1350,6 +1522,7 @@ impl FleetDirectory {
                         movable: Movable::Movable,
                         survives: Survives::Az,
                         tags: UserTags::none(),
+                        placement: Placement::override_for("universe"),
                     },
                 );
                 Ok(FleetEvent::FleetFormed { fleet_id })
@@ -1422,8 +1595,13 @@ impl FleetDirectory {
                 movable: Movable::Pinned,
                 survives: Survives::Az,
                 tags: UserTags::none(),
+                placement: Placement::override_for("cell"),
             },
         );
+        // The fleet's first cell takes every bucket (#713).
+        if self.buckets.is_empty() {
+            self.buckets.fill(cell_id);
+        }
         // The fleet's first cell hosts the fleet tenant (#226).
         if let Some(fleet_tenant) = self.fleet.map(|fleet| fleet.control.tenant)
             && let Some(entry) = self.tenants.get_mut(&fleet_tenant)
@@ -1458,6 +1636,10 @@ impl FleetDirectory {
                 cell_id,
                 tenant: *tenant,
             });
+        }
+        let buckets = self.buckets.count(cell_id);
+        if buckets > 0 {
+            return Err(FleetDirectoryRefusal::CellHoldsBuckets { cell_id, buckets });
         }
         self.cells.remove(&cell_id);
         self.endpoints.remove(&cell_id);
@@ -1494,7 +1676,7 @@ impl FleetDirectory {
         control: JournalIdentifier,
         name: &[u8],
         cell_id: u64,
-        survives: Survives,
+        (survives, placement): (Survives, &Placement),
         tags: &UserTags,
     ) -> Result<FleetEvent, FleetDirectoryRefusal> {
         let tenant = control.tenant;
@@ -1512,7 +1694,8 @@ impl FleetDirectory {
                 && existing.name == name
                 && existing.cell_id == cell_id
                 && existing.control == control.journal
-                && existing.survives == survives;
+                && existing.survives == survives
+                && existing.placement == *placement;
             return if same {
                 Ok(FleetEvent::Unchanged)
             } else {
@@ -1528,6 +1711,18 @@ impl FleetDirectory {
         if self.cells.get(&cell_id).map(|c| c.state) != Some(CellState::Ready) {
             return Err(FleetDirectoryRefusal::CellNotReady { cell_id });
         }
+        if placement.is_bucket() {
+            let bucket = bucket_of(name);
+            match self.buckets.cell(bucket) {
+                Some(owner) if owner == cell_id => {}
+                owner => {
+                    return Err(FleetDirectoryRefusal::BucketElsewhere {
+                        bucket,
+                        cell_id: owner.unwrap_or(0),
+                    });
+                }
+            }
+        }
         self.names.insert(name.to_vec(), tenant);
         self.tenants.insert(
             tenant,
@@ -1541,9 +1736,33 @@ impl FleetDirectory {
                 movable: Movable::Movable,
                 survives,
                 tags: tags.clone(),
+                placement: placement.clone(),
             },
         );
         Ok(FleetEvent::TenantRegistered { tenant, cell_id })
+    }
+
+    fn assign_buckets(
+        &mut self,
+        range: BucketRange,
+        cell_id: u64,
+    ) -> Result<FleetEvent, FleetDirectoryRefusal> {
+        let state = self
+            .cells
+            .get(&cell_id)
+            .map(|cell| cell.state)
+            .ok_or(FleetDirectoryRefusal::UnknownCell { cell_id })?;
+        if self.buckets.holds(range, cell_id) {
+            return Ok(FleetEvent::Unchanged);
+        }
+        if state != CellState::Ready {
+            return Err(FleetDirectoryRefusal::CellNotReady { cell_id });
+        }
+        if let Some((bucket, tenant)) = self.bucket_blocker(range, cell_id) {
+            return Err(FleetDirectoryRefusal::BucketNotEmpty { bucket, tenant });
+        }
+        self.buckets.assign(range, cell_id);
+        Ok(FleetEvent::BucketsAssigned { range, cell_id })
     }
 
     fn mark_tenant(
@@ -1625,6 +1844,8 @@ impl FleetDirectory {
                 .tenants
                 .iter()
                 .map(|(id, t)| wire::TenantEntry {
+                    placement: t.placement.to_wire().0,
+                    reason: t.placement.to_wire().1,
                     tenant: id.0,
                     name: t.name.clone(),
                     cell_id: t.cell_id,
@@ -1637,6 +1858,7 @@ impl FleetDirectory {
                 .collect(),
             removed: self.removed.iter().map(|id| id.0).collect(),
             tagged: self.tagged.iter().copied().collect(),
+            buckets: self.buckets.to_wire(),
         }
     }
 }
@@ -1716,6 +1938,10 @@ impl Checkpointable for FleetDirectory {
                     movable,
                     survives: Survives::from_wire(t.survives)?,
                     tags,
+                    placement: match kind {
+                        TenantKind::Users => Placement::from_wire(t.placement, t.reason)?,
+                        internal => Placement::override_for(internal.as_str()),
+                    },
                 },
             );
         }
@@ -1728,6 +1954,11 @@ impl Checkpointable for FleetDirectory {
         if removed_cells.iter().any(|id| cells.contains_key(id)) {
             return Err("a fleet directory state holds a removed cell");
         }
+        let universe_cell = fleet
+            .and_then(|f| tenants.get(&f.control.tenant))
+            .map_or(0, |t: &TenantEntry| t.cell_id);
+        let buckets =
+            BucketTable::restore(state.buckets, universe_cell, |id| cells.contains_key(&id))?;
         self.fleet = fleet;
         self.cells = cells;
         self.endpoints = endpoints;
@@ -1737,6 +1968,7 @@ impl Checkpointable for FleetDirectory {
         self.removed = removed;
         self.keys = keys;
         self.tagged = state.tagged.into_iter().collect();
+        self.buckets = buckets;
         self.next_seq = covers_up_to + 1;
         Ok(())
     }

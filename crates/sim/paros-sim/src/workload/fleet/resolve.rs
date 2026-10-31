@@ -26,7 +26,7 @@ use crate::frontend::Presented;
 use super::{FleetOps, removed_in, with_names};
 
 /// A name no operator ever creates (the operators draw from `NAMES`).
-const NEVER_CREATED: &[u8] = b"umbrella";
+pub(super) const NEVER_CREATED: &[u8] = b"umbrella";
 
 impl FleetOps {
     /// Resolve `name` at the entry endpoint, from machine `first` on, and

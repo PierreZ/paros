@@ -531,6 +531,7 @@ mod tests {
                 cell_id: journals.cell_id,
                 survives: paros_model::tenant::Survives::Az,
                 tags: paros_model::tags::UserTags::none(),
+                placement: paros_model::fleet::buckets::Placement::Bucket,
             },
         ];
         for (seq, command) in (0..).zip(commands) {
