@@ -10,7 +10,7 @@
 
 .main { min-width: 0; padding: 32px 24px 72px; }
 .page, .home { max-width: calc(var(--measure) + 8ch); margin: 0 auto; }
-body.wide .main { padding: 20px 16px 48px; }
+body.wide .main { padding: 0 0 48px; }
 
 /* ---- title block ---- */
 
