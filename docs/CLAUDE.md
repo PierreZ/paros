@@ -2,6 +2,9 @@
 
 Research and design notes backing the Paxos implementation. No code here.
 
+- `knowledge/` — the Paxos knowledge base: one card per concept paros uses, each backed by a
+  paper or a real implementation and mapped onto the code. Start here for a protocol
+  question; `knowledge/CLAUDE.md` is its map and `knowledge/concepts.md` its index.
 - `references/papers/<name>/` — source paper (`paper.pdf`) plus a markdown `transcript.md`.
   Read the transcript first; it's searchable and citable.
 - `references/<repo>/` — analysis of an external *code* implementation we study

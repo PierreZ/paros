@@ -111,6 +111,11 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   changes behaviour also updates the site (`website/zola/`, the `update-the-site` skill), the
   `README.md` and `docs/architecture/` where they describe it. A feature PR without its
   docs is not done.
+- **Keep the knowledge base in step with the protocol** (decided on 2026-10-27, #745): a PR
+  that adds or changes a Paxos concept paros uses updates its card in
+  `docs/knowledge/concepts/` (a new concept gets its card in the same PR), and the index
+  `docs/knowledge/concepts.md`. A card cites a source outside paros, never memory
+  (`docs/knowledge/CLAUDE.md`).
 - **Organize as you grow**: a module holds one concern; split a file the moment it holds a
   second. Deleting is part of every change: a superseded axis, type, flag or gate goes in the
   PR that supersedes it.
@@ -596,7 +601,8 @@ in this list:
 - `xtask` — `cargo xtask sim` (the sancov runner) and `cargo xtask mutants` (the mutation hunt, #269).
 
 Elsewhere: `website/` holds everything a browser loads (decided on 2026-10-13): `website/zola/` (the website, Zola + Goyo, #254; `website/zola/AGENTS.md`, the `update-the-site` skill; built by `website/zola/build.sh`), `website/play/` (the game's app), `website/sandbox/` (the sandbox page); `scripts/build-wasm.sh` builds and stages both; the Rust behind them stays in `crates/`,
-`docs/architecture/`, `docs/analysis/` (design notes), `docs/references/` (papers and source
+`docs/architecture/`, `docs/knowledge/` (the Paxos knowledge base: one card per concept paros
+uses, #745), `docs/analysis/` (design notes), `docs/references/` (papers and source
 references), `scripts/` (`sancov-rustc.sh`, `build-wasm.sh`, `check-sim-wasm.sh`, `check-dockerfile-toolchain.sh`, `check-module-style.sh`, `check-core-layers.sh`, `mutants-report.sh`), `.claude/skills/` and
 `.claude/agents/`.
 

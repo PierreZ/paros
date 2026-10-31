@@ -212,17 +212,21 @@ redirect clients to itself.
 Everything below lives in `paros-sim`; `paros-core` is never buggified (the perturbation
 is a caller that calls differently).
 
-**BUGGIFY locations** (inline in `crates/lib/paros-roles/src/node.rs`, #318):
+**BUGGIFY locations** (inline in `paros-roles`, #318):
 
-- `initiate_handoff`, split into three independent probabilities by the *shape* of the
-  transfer — a leader still healing a hole (0.30), one with a non-empty tail (0.20), a
-  fully settled one (0.02). Biased toward the interesting states, with the clean case
-  kept armed so it never disappears.
-- `handoff_target` — occasionally pins the successor instead of taking the driver's
-  uniform draw, so a seed can concentrate handoffs on one node.
-- `drop_outgoing(Relinquish)` at 0.25 — the whole handoff lost in one message, which
-  must cost availability only.
-- `duplicate_outgoing(Relinquish)` at 0.25 — the replay path the `to` field and the
+- `initiate_handoff` (`crates/lib/paros-roles/src/node/draws.rs`), split into three
+  independent probabilities by the *shape* of the transfer — a leader still healing a hole
+  (0.03), one with a non-empty tail (0.02), a fully settled one (0.002). Biased toward the
+  interesting states, with the clean case kept armed so it never disappears. The rates stay
+  near the resignation site's (0.004): at 0.30 a handoff moved leadership every few ticks and
+  starved every campaign that needs a settled cell. The handoff-storm scenario
+  (`paros_observe::scenario::hand_off`, #484) adds its own location.
+- The target (`offer_handoff`, `crates/lib/paros-roles/src/node/shared.rs`) — at 0.5 pins the
+  lowest-id candidate instead of the driver's uniform draw, so a seed can concentrate
+  handoffs on one node.
+- A dropped `Relinquish` at 0.25 (`crates/lib/paros-roles/src/node/transport.rs`) — the whole
+  handoff lost in one message, which must cost availability only.
+- A duplicated `Relinquish` at 0.25 (same file) — the replay path the `to` field and the
   stale/rewind guards exist for.
 
 Crash coverage comes for free: the existing `BeforeSync` / `AfterSyncBeforeSend` /
