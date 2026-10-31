@@ -20,7 +20,39 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Which jobs a pull request needs. `rust` is false when every changed path is
+  # browser side: website/**, scripts/build-wasm.sh, Markdown or docs/. Then
+  # only the `wasm` job runs (the bundles, the bindings, the game's checks).
+  # A push to main always runs everything.
+  scope:
+    runs-on: ubuntu-latest
+    outputs:
+      rust: ${{ steps.scope.outputs.rust }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - id: scope
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" != pull_request ]; then
+            echo "rust=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          other=$(git diff --name-only "$BASE"...HEAD \
+            | grep -vE '^(website/|docs/|scripts/build-wasm\.sh$)|\.md$' || true)
+          if [ -n "$other" ]; then
+            echo "rust=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "rust=false" >> "$GITHUB_OUTPUT"
+          fi
+
   clippy:
+    needs: scope
+    if: ${{ needs.scope.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -32,6 +64,8 @@ jobs:
         run: RUSTDOCFLAGS="-D warnings" nix develop --command cargo doc -p paros-core --no-deps
 
   fmt:
+    needs: scope
+    if: ${{ needs.scope.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -47,6 +81,8 @@ jobs:
         run: scripts/check-core-layers.sh
 
   test:
+    needs: scope
+    if: ${{ needs.scope.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -64,6 +100,8 @@ jobs:
   # the public API's shape as much as of the protocol. They are linted under the
   # same pedantic clippy as the crate by the root clippy job's `--all-targets`.
   examples:
+    needs: scope
+    if: ${{ needs.scope.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -91,6 +129,8 @@ jobs:
   # gate guards those two contracts, and paros-sim's (#307); the browser build
   # itself is the `wasm` job.
   portability:
+    needs: scope
+    if: ${{ needs.scope.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -113,6 +153,8 @@ jobs:
   # time, the event count, the violations) must be identical. A u64 draw narrowed
   # to usize before its modulo once split them on a 32-bit target.
   sim-wasm:
+    needs: scope
+    if: ${{ needs.scope.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -146,6 +188,8 @@ jobs:
   # clone with Docker alone (the one build outside Nix), and its Rust version is
   # the channel rust-toolchain.toml pins.
   image:
+    needs: scope
+    if: ${{ needs.scope.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -157,6 +201,8 @@ jobs:
   # The flake builds the same image without a Docker Hub pull (`nix build .#image`).
   # A smoke only: the image loads and its binaries run, no parosd process starts.
   nix-image:
+    needs: scope
+    if: ${{ needs.scope.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -191,6 +237,8 @@ jobs:
   # with all the shards together.
   sim:
     name: sim (shard ${{ matrix.shard }}/4)
+    needs: scope
+    if: ${{ needs.scope.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -222,8 +270,8 @@ jobs:
   # fail the sweep)): a gate fails CI only when every shard missed it.
   # A shard that wrote no file (it died before its verdict) fails this job.
   sim-gates:
-    needs: sim
-    if: ${{ !cancelled() }}
+    needs: [scope, sim]
+    if: ${{ !cancelled() && needs.scope.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
