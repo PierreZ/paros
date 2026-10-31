@@ -181,7 +181,7 @@ votes) and `decree.rs` (no separate kernel: a decree is the `Proposer` over one 
 - [Election, P2c merge and gap fill](election.md): P2c over a whole log suffix.
 - [Flexible quorums](flexible-quorums.md): why Phase-1 and Phase-2 quorums need only meet each
   other.
-- Matchmaker generations and handover (planned): the main user of `Decree`.
+- [Matchmaker generations and handover](matchmaker-generations.md): the main user of `Decree`.
 
 ## 12. Sources
 

@@ -43,8 +43,8 @@ is the **subject** of a card, never its only source.
 7. Storage: corrupted storage recovery, truncation and the trim point, boot safety.
 8. On the log: the writer fence.
 
-Only the Leader group is written today (the pilot of #745). `concepts.md` marks the rest as
-planned.
+`concepts.md` marks each card verified or planned, group by group. A card that waits for a source
+says so in its row.
 
 ## Card template
 

@@ -76,7 +76,7 @@ quorums, `{1, 4}` and `{2, 3}`, do not meet, and that is safe.
   acceptors return.
 - **A reconfiguration** may change the split. A successor configuration carries its own quorum
   system, and Phase 1 must hold a Phase-1 quorum of **every** configuration in the history
-  (reconfiguration cards, planned).
+  ([matchmaking](matchmaking.md)).
 
 ## 6. Why it is safe
 
@@ -142,7 +142,7 @@ against a threshold on its own.
 - [FPaxos §7] weakens Phase 1 further: it needs to meet only the Phase-2 quorums **used** at
   lower ballots. paros's matchmakers are that idea for configurations: Phase 1 covers every
   configuration in the history `H_b` above the GC watermark, not every possible one
-  (reconfiguration cards, planned).
+  ([matchmaking](matchmaking.md)).
 - Matchmaker quorums and the handover's decree are majorities only (root `AGENTS.md`).
 
 ## 10. Pitfalls
