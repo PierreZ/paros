@@ -2,6 +2,7 @@
 
 External source material for `paros` (a learning **sans-IO Multi-Paxos** library in Rust): papers
 we study, and analyses of external consensus codebases. This file is the map; read it first.
+The knowledge base in [`../knowledge/`](../knowledge/) organizes these sources by concept.
 
 ## Conventions
 
@@ -79,6 +80,11 @@ we study, and analyses of external consensus codebases. This file is the map; re
 - [`ceph/`](ceph/) — [`ceph/mon-paxos-patterns.md`](ceph/mon-paxos-patterns.md). Ceph's production
   monitor Paxos: the **durability/persistence boundary**, recovery of uncommitted values, and
   **lease-based reads**. Sequential single-decree + I/O-coupled — a deliberate contrast to paros.
+- [`etcd-raft/`](etcd-raft/): [`etcd-raft/check-quorum.md`](etcd-raft/check-quorum.md).
+  etcd-raft at commit `c51f010`: **CheckQuorum** (a leader without an active quorum for one
+  election timeout steps down), the follower-side **vote lease**, and **leader transfer**
+  (`MsgTimeoutNow`, a forced election). The reference for paros's `tick_check_quorum` (#95) and
+  the contrast for its handoff; backs the knowledge base's Leader cards (#745).
 - [`foundationdb/`](foundationdb/): [`foundationdb/cluster-controller-election.md`](foundationdb/cluster-controller-election.md).
   FoundationDB's **Cluster Controller leader election**: a register-based quorum election (*not*
   Paxos) with randomized ids plus exponential backoff (anti-dueling), a heartbeat **lease** with
