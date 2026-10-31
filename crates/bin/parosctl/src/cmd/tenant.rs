@@ -73,10 +73,22 @@ pub enum TenantCommand {
         /// `paros/` key is refused.
         #[arg(long = "tag")]
         tags: Vec<String>,
-        /// The cell it lives in, by name (#232 (multiple cells)): a `READY`
-        /// cell of the universe. The servers' own cell by default.
-        #[arg(long)]
+        /// The cell it lives in, by name: a `READY` cell of the universe.
+        /// It writes an override entry. By default the tenant goes to the
+        /// cell its bucket names (`universe status`).
+        #[arg(long, conflicts_with = "cell_selector")]
         cell: Option<String>,
+        /// Pick the cell by its tags, `key:value`, comma separated, all of
+        /// them: of the `READY` cells that match and carry what the tenant
+        /// survives, the one with the fewest tenants, then by name. It
+        /// writes an override entry.
+        #[arg(long)]
+        cell_selector: Option<String>,
+        /// Why the tenant has its own cell (`dedicated`, `canary`,
+        /// `quarantine`, ...): the override's reason, for people. Needs
+        /// `--cell` or `--cell-selector`.
+        #[arg(long)]
+        reason: Option<String>,
     },
     /// Set a `users` tenant's user tags, whole: the tags given replace the
     /// ones it has, and none clears them (#575).
@@ -203,6 +215,22 @@ pub fn refusal_text(refusal: &FleetRefusal, labels: &Labels) -> String {
             "no_footprint: the cell has too few free slots for tenant {}'s footprint \
              (it is marked ERROR: delete it to free its name)",
             labels.tenant(*tenant)
+        ),
+        FleetRefusal::NoCellMatches => "no_cell_matches: no READY cell matches the selector \
+             and carries what the tenant survives"
+            .into(),
+        FleetRefusal::NoBucketCell { bucket } => {
+            format!("no_bucket_cell: bucket {bucket} names no cell: add a cell first")
+        }
+        FleetRefusal::BucketNotEmpty { bucket, tenant } => format!(
+            "bucket_not_empty: tenant {} lives in bucket {bucket} on another cell, \
+             and tenants do not move between cells yet",
+            labels.tenant(*tenant)
+        ),
+        FleetRefusal::CellHoldsBuckets { cell_id, buckets } => format!(
+            "cell_holds_buckets: cell {} holds {buckets} buckets: \
+             assign them to another cell first (universe buckets assign)",
+            labels.cell(*cell_id)
         ),
         FleetRefusal::IdTaken => "id_taken".into(),
         FleetRefusal::NameTaken { tenant, state } => format!(
@@ -348,17 +376,17 @@ pub async fn run(
             survives,
             tags,
             cell,
+            cell_selector,
+            reason,
         } => {
             let tags = match crate::cmd::journal::user_tags(&tags) {
                 Ok(tags) => tags,
                 Err(ending) => return ending,
             };
-            if let Some(cell) = cell {
-                match cell_named(client, &fleet, &cell).await {
-                    Ok(cell_id) => fleet = fleet.with_cell(cell_id),
-                    Err(ending) => return ending,
-                }
-            }
+            fleet = match target(client, fleet, cell, cell_selector, reason).await {
+                Ok(fleet) => fleet,
+                Err(ending) => return ending,
+            };
             // Random identifiers, the tenant's and its control journal's; the
             // library moves past one the fleet tenant holds already.
             let draws: Vec<JournalIdentifier> = (0..DRAWS)
@@ -373,7 +401,11 @@ pub async fn run(
             let run = fleet
                 .create_tenant(client, 0, name.as_bytes(), draws, patience)
                 .await;
-            report(out, "created", &name, run, labels)
+            let placed = match &run.outcome {
+                Step::Done { result, .. } => placed(&fleet, *result),
+                _ => None,
+            };
+            report(out, "created", &name, run, labels, placed.as_ref())
         }
         TenantCommand::Delete { name } => {
             let run = fleet
@@ -402,6 +434,7 @@ pub async fn run(
                         steps: run.steps,
                     },
                     labels,
+                    None,
                 ),
                 Step::Refused(refusal) => refused(out, &refusal, labels),
                 Step::Interrupted(stop) => interrupted(&stop),
@@ -480,15 +513,40 @@ pub fn refused(out: &Printer, refusal: &FleetRefusal, labels: &Labels) -> Ending
     Ending::Refused
 }
 
-/// Print a create's or delete's run.
-fn report(out: &Printer, done: &str, name: &str, run: Run<TenantId>, labels: &Labels) -> Ending {
+/// Where the directory placed `tenant` (#713 (bucket placement)): its
+/// cell's name, and `bucket=N` or `override=REASON`.
+fn placed(fleet: &FleetSession, tenant: TenantId) -> Option<(String, String)> {
+    use paros::model::fleet::buckets::{Placement, bucket_of};
+    let directory = fleet.directory();
+    let entry = directory.tenant(tenant)?;
+    let cell = String::from_utf8_lossy(directory.cell_name(entry.cell_id)).into_owned();
+    let how = match &entry.placement {
+        Placement::Bucket => format!("bucket={}", bucket_of(&entry.name)),
+        Placement::Override { reason } => format!("override={reason:?}"),
+    };
+    Some((cell, how))
+}
+
+/// Print a create's or delete's run, with where a creation placed the
+/// tenant.
+fn report(
+    out: &Printer,
+    done: &str,
+    name: &str,
+    run: Run<TenantId>,
+    labels: &Labels,
+    placed: Option<&(String, String)>,
+) -> Ending {
     match run.outcome {
         Step::Done { result, .. } => {
             let already = run.steps.is_empty();
+            let at = placed
+                .map(|(cell, how)| format!(" cell={cell} {how}"))
+                .unwrap_or_default();
             out.emit(
                 || {
                     format!(
-                        "{} tenant={name}{}",
+                        "{} tenant={name}{at}{}",
                         if already { "unchanged" } else { done },
                         if already {
                             String::new()
@@ -502,6 +560,8 @@ fn report(out: &Printer, done: &str, name: &str, run: Run<TenantId>, labels: &La
                         "outcome": if already { "unchanged" } else { done },
                         "tenant": result.0,
                         "name": name,
+                        "cell": placed.map(|(cell, _)| cell),
+                        "placement": placed.map(|(_, how)| how),
                         "steps": steps(&run.steps),
                     })
                 },
@@ -511,6 +571,32 @@ fn report(out: &Printer, done: &str, name: &str, run: Run<TenantId>, labels: &La
         Step::Refused(refusal) => refused(out, &refusal, labels),
         Step::Interrupted(stop) => interrupted(&stop),
         Step::Advanced(_) => unreachable!("a run never ends advanced"),
+    }
+}
+
+/// `fleet` placing the tenant it creates (#713 (bucket placement), #672
+/// (cell tag selector)): in the cell named `cell`, or the one `selector`
+/// picks, by an override entry with `reason`; else by its bucket.
+async fn target(
+    client: &ParosClient,
+    fleet: FleetSession,
+    cell: Option<String>,
+    selector: Option<String>,
+    reason: Option<String>,
+) -> Result<FleetSession, Ending> {
+    if let Some(cell) = cell {
+        let cell_id = cell_named(client, &fleet, &cell).await?;
+        let reason = reason.unwrap_or_else(|| format!("cell {cell} named"));
+        Ok(fleet.with_cell_for(cell_id, &reason))
+    } else if let Some(text) = selector {
+        let chosen = crate::support::view::selector(Some(&text))?;
+        let reason = reason.unwrap_or_else(|| format!("selector {text}"));
+        Ok(fleet.with_selector(chosen, &reason))
+    } else if reason.is_some() {
+        note("--reason names why a tenant has its own cell: give --cell or --cell-selector");
+        Err(Ending::Refused)
+    } else {
+        Ok(fleet)
     }
 }
 

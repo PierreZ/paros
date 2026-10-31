@@ -257,10 +257,8 @@ every node knowing its own cell.
 **M12, "Multiple cells"** (#232, #233): adding a second cell, removing a cell (its id goes into a
 tombstone set so it cannot silently rejoin), moving tenants between cells, moving the universe
 tenant, the resolver (section 3.5), splitting the universe tenant by range, placement across cells
-(each cell entry with a configured capacity and an allocated count, an ordered index of cells
-with room, the fullest cell of the kind the tenant's `survives` asks for that still has room
-after a quick availability check (amended on 2026-10-07, #232), an optional preferred cell, a
-per-cell switch that stops new placements), and tenant locks (`UNLOCKED`, `READ_ONLY` or
+(an override map, then a bucket table: see *Placement across cells* below, decided on
+2026-10-21, #713, which replaces the fullest cell with room of 2026-10-07), and tenant locks (`UNLOCKED`, `READ_ONLY` or
 `LOCKED` with an owner id) to make a tenant read-only during a move.
 
 **Adding and removing cells, part 1** (decided on 2026-10-16, #232 (multiple cells)). These rules
@@ -288,8 +286,8 @@ are in force now:
   machines (`Client::elsewhere`). The coordinator, the resolver, the views and the frontend use
   it.
 - **Tenants in a second cell.** `tenant create --cell NAME` (`FleetSession::with_cell`) creates a
-  tenant in a `READY` cell. Without `--cell`, the operator's own cell takes it when it is
-  `READY`, else the first `READY` cell. Placement across cells is still open (below).
+  tenant in a `READY` cell with an override entry. Without `--cell`, the tenant goes to the cell
+  its bucket names (*Placement across cells*, below).
 - **Resolve across cells.** A machine answers `other_cell` for a tenant of another cell, with
   that cell's entry endpoint. The client asks that cell once more (one hop). A frontend serves
   only the tenants of its own cell; another cell's tenant is unknown there.
@@ -297,10 +295,60 @@ are in force now:
   refuses it while the cell hosts a tenant other than its cell tenant (`CellNotEmpty`). It
   removes the cell, its entry endpoint and its cell tenant, and puts the cell id in a tombstone
   set (`removed_cells`). `AddCell` refuses a tombstoned id (`CellTombstoned`). The cell that
-  hosts the universe tenant is not removed.
+  hosts the universe tenant is not removed. A cell that holds a bucket is not removed either
+  (`CellHoldsBuckets`): give its buckets to another cell first.
 
-Still open for M12: moving tenants and the universe tenant between cells, placement across
-cells, tenant locks, splitting the universe tenant, and multi-region cells. A move needs the
+**Placement across cells** (decided on 2026-10-21, #713 (bucket placement), and #672 (cell tag
+selector); exact names only, decided on 2026-10-30). Placement has two levels, like the hash
+slots of Redis Cluster:
+
+1. **The override map.** A tenant created with a named cell (`tenant create --cell NAME`) or
+   with a tag selector (`--cell-selector env:prod`) is registered with an **override entry**.
+   An override names one tenant exactly: there are no prefix or pattern rows. It has a reason
+   for people (`--reason`: e.g. `dedicated`, `canary`, `quarantine`; at most 64 bytes). An
+   override always wins over the bucket.
+2. **The bucket table.** A tenant created without a cell goes to a **bucket**:
+   `bucket = CRC16(name) mod 16384` (CRC16-XMODEM, the hash of Redis Cluster). The hash is a
+   fixed function of the tenant's name, so every reader that folds the same directory places a
+   name in the same cell. The bucket table (16384 rows, `bucket -> cell`) names the cell.
+
+These rules are in force:
+
+- **The registration records the placement.** `RegisterTenant` carries its placement (`1`
+  bucket, `2` override, with the reason). The fold refuses a bucket placement whose cell is not
+  the bucket table's cell for the name (`BucketElsewhere`): a bucket move landed between the
+  operator's look and its write, and the next step looks again. So a creation that races a
+  bucket move sees the old owner or the new one, never neither. A registration from metadata
+  version 5 or below has no placement and reads as an override.
+- **The directory still records each tenant's cell.** The table and the overrides decide only
+  where a new tenant goes, and what a bucket move must move.
+- **The first cell takes every bucket.** The first `AddCell` (by `init`) fills the table with
+  its cell. `universe add-cell` gives a new cell no bucket, so a new cell fills on purpose, never
+  by surprise.
+- **`universe buckets assign RANGE CELL`** (`AssignBuckets`, `FleetSession::assign_buckets`)
+  gives the buckets `FIRST-LAST` to a `READY` cell. Until tenant moves land (#232), it is
+  refused while a tenant placed by one of these buckets lives in another cell
+  (`BucketNotEmpty`). A tenant placed by an override never blocks a bucket move.
+- **A selector picks one cell.** Of the `READY` cells whose tags match the selector and whose
+  kind carries the tenant's `survives`, it picks the one with the fewest `users` tenants, then
+  the first by name. A selector that matches no cell is refused (`NoCellMatches`). The
+  directory records only the cell id: no user tag decides an outcome the fold records.
+- **One bucket table for every cell kind.** A bucket placement does not check the cell's kind
+  yet: every cell is regional until multi-region cells land (#253). A tenant that must live in a
+  multi-region cell names it with `--cell` or a selector.
+- **A dedicated cell** (replaces #358, 2026-10-21) is a cell that holds no bucket. Its tenants
+  are placed there by override entries (`--cell`), and it grows with `cell add-machine`.
+- **Internal tenants are placed by their kind.** The universe tenant and the cell tenants are
+  never placed by a bucket, so a bucket move never moves them.
+- **Status.** `parosctl universe status` shows each cell's bucket ranges and its tenants by
+  bucket and by override. `parosctl universe buckets show NAME` shows a name's bucket and its
+  cell. Names, never hex ids.
+
+Still open for placement: a bucket's state `Moving { from, to }` and the four move steps for each
+tenant of a moving bucket (once tenant moves land, #232, #782-#785), hot-tenant detection and
+automatic rebalancing (#687).
+
+Still open for M12: moving tenants and the universe tenant between cells, tenant locks, splitting the universe tenant, and multi-region cells. A move needs the
 cell fence of section 3.2 to let a reconfiguration cross cells, and the `cell_id` in
 `AcceptorConfig` (above), so it is a later part. `JoinUniverse` has no authorization check yet: it
 changes nothing unless the directory already holds the cell, which only an admin writes.

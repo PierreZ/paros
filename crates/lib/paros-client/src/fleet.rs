@@ -106,8 +106,12 @@ use paros_model::fleet::RootKeyEntry;
 use paros_model::fleet::{CellState, FleetCommand, FleetDirectory, FleetEntry, TenantState};
 use paros_model::machine::ControlJournals;
 use paros_model::registry::{FleetRegistration, Registry};
-use paros_model::tags::UserTags;
+use paros_model::tags::{Selector, UserTags};
 use paros_model::tenant::Survives;
+
+mod placement;
+
+use placement::Target;
 
 /// An idle cell that `universe add-cell` joins to the universe (#232
 /// (multiple cells)): learned from its machines' node-only `Inspect`.
@@ -157,6 +161,8 @@ pub enum Stage {
     RemoveRootKey,
     /// A tenant's or a cell's user tags changed (#575).
     SetTags,
+    /// A range of buckets now names a cell (#713 (bucket placement)).
+    AssignBuckets,
 }
 
 /// Why a fleet operation cannot go on: running it again changes nothing
@@ -214,6 +220,30 @@ pub enum FleetRefusal {
     NoEndpoint {
         /// The cell.
         cell_id: u64,
+    },
+    /// No `READY` cell matches the selector and carries the tenant (#672
+    /// (cell tag selector)).
+    NoCellMatches,
+    /// The bucket table names no cell for the tenant's bucket yet (#713
+    /// (bucket placement)): no cell was added.
+    NoBucketCell {
+        /// The tenant's bucket.
+        bucket: u16,
+    },
+    /// A tenant placed by one of the buckets lives in another cell (#713):
+    /// it would have to move, and tenant moves are not built (#232).
+    BucketNotEmpty {
+        /// Its bucket.
+        bucket: u16,
+        /// The tenant.
+        tenant: TenantId,
+    },
+    /// The cell holds buckets (#713): assign them to another cell first.
+    CellHoldsBuckets {
+        /// The cell.
+        cell_id: u64,
+        /// How many buckets it holds.
+        buckets: usize,
     },
     /// Every tenant identifier drawn is held by an entry or was removed: draw
     /// more.
@@ -423,9 +453,9 @@ pub struct FleetSession {
     /// This cell's entry endpoint, which `init` writes into its cell entry
     /// (#232 (multiple cells)): its founding members by id and address.
     endpoint: Vec<(u64, Address)>,
-    /// The cell a tenant this session creates is assigned to (#232); this
-    /// session's own cell, else the first `READY` one, by default.
-    target: Option<u64>,
+    /// How a tenant this session creates is placed (#713 (bucket
+    /// placement)): by its bucket by default, else by an override entry.
+    target: Target,
     /// The control journals of the other cells this session read, each
     /// folded as a reader (#232), by cell id.
     others: BTreeMap<u64, Folder<Registry>>,
@@ -459,7 +489,7 @@ impl FleetSession {
             names: (Vec::new(), Vec::new()),
             root_key: None,
             endpoint: Vec::new(),
-            target: None,
+            target: Target::Bucket,
             others: BTreeMap::new(),
         })
     }
@@ -475,10 +505,34 @@ impl FleetSession {
     }
 
     /// Assign every tenant this session creates to cell `cell_id` (#232
-    /// (multiple cells)): it must be `READY`.
+    /// (multiple cells)) with an override entry (#713 (bucket placement)):
+    /// it must be `READY`.
     #[must_use]
-    pub fn with_cell(mut self, cell_id: u64) -> Self {
-        self.target = Some(cell_id);
+    pub fn with_cell(self, cell_id: u64) -> Self {
+        self.with_cell_for(cell_id, "cell named")
+    }
+
+    /// [`FleetSession::with_cell`] with the override's `reason`, for people
+    /// (e.g. `dedicated`, `canary`, `quarantine`).
+    #[must_use]
+    pub fn with_cell_for(mut self, cell_id: u64, reason: &str) -> Self {
+        self.target = Target::Cell {
+            cell_id,
+            reason: reason.to_string(),
+        };
+        self
+    }
+
+    /// Assign every tenant this session creates to the cell `selector`
+    /// picks (#672 (cell tag selector),
+    /// [`FleetDirectory::select_cell`]), with an override entry whose
+    /// reason is `reason`.
+    #[must_use]
+    pub fn with_selector(mut self, selector: Selector, reason: &str) -> Self {
+        self.target = Target::Selector {
+            selector,
+            reason: reason.to_string(),
+        };
         self
     }
 
@@ -709,18 +763,9 @@ impl FleetSession {
             if directory.tenant(draw.tenant).is_some() || directory.is_removed(draw.tenant) {
                 return Step::Refused(FleetRefusal::IdTaken);
             }
-            let ready = |id: &u64| directory.cell(*id).map(|c| c.state) == Some(CellState::Ready);
-            let cell_id = if let Some(cell_id) = self.target {
-                if !ready(&cell_id) {
-                    return Step::Refused(FleetRefusal::CellNotReady { cell_id });
-                }
-                cell_id
-            } else {
-                let first = directory.cells().map(|(id, _)| id).find(|id| ready(id));
-                let Some(cell_id) = Some(self.journals.cell_id).filter(ready).or(first) else {
-                    return Step::Refused(FleetRefusal::NotInitialized);
-                };
-                cell_id
+            let (cell_id, placement) = match self.target.place(directory, name, self.survives) {
+                Ok(placed) => placed,
+                Err(refusal) => return Step::Refused(refusal),
             };
             let register = FleetCommand::RegisterTenant {
                 control: draw,
@@ -728,6 +773,7 @@ impl FleetSession {
                 cell_id,
                 survives: self.survives,
                 tags: self.tags.clone(),
+                placement,
             };
             return self
                 .write_directory(client, first, fleet, register, Stage::RegisterTenant)
@@ -1011,6 +1057,10 @@ impl FleetSession {
             .find(|(id, t)| t.cell_id == cell_id && *id != cell.control_tenant)
         {
             return Step::Refused(FleetRefusal::CellNotEmpty { cell_id, tenant });
+        }
+        let buckets = directory.buckets().count(cell_id);
+        if buckets > 0 {
+            return Step::Refused(FleetRefusal::CellHoldsBuckets { cell_id, buckets });
         }
         if cell.state != CellState::Removing {
             let removing = FleetCommand::MarkCell {

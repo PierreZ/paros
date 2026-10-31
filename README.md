@@ -72,6 +72,11 @@ them.
 
 A universe can hold more than one cell: `parosctl init --idle` forms a cell with no universe,
 `parosctl universe add-cell` joins it, and `parosctl tenant create --cell` puts a tenant in it.
+A tenant created without `--cell` goes to the cell its bucket names (#713 (bucket placement)):
+`CRC16(name) mod 16384`, as Redis Cluster does. The first cell holds every bucket, and
+`parosctl universe buckets assign 8192-16383 cell-2` gives a range to another cell.
+`--cell-selector env:prod` picks the cell by its tags (#672 (cell tag selector)), and
+`parosctl universe status` shows the buckets and tenants of each cell.
 Any machine resolves a tenant to its cell. Every `parosd` is also a resolver (#233 (resolver)):
 with a token, `parosctl --token … resolve acme` asks a resolver first, which checks the token and
 sends the client to the tenant's cell, from the universe directory it read last.
