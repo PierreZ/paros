@@ -14,6 +14,7 @@ pub mod act1;
 pub mod act2;
 pub mod act3;
 pub mod act4;
+pub mod act5;
 mod common;
 mod script;
 
@@ -262,6 +263,7 @@ pub fn levels() -> Vec<&'static Level> {
     all.extend(act2::levels());
     all.extend(act3::levels());
     all.extend(act4::levels());
+    all.extend(act5::levels());
     all
 }
 

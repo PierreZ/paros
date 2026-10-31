@@ -48,6 +48,7 @@ impl ClientId {
     }
 }
 
+pub mod compartments;
 pub mod decree;
 pub mod disk;
 mod drain;
@@ -65,7 +66,7 @@ use paros_core::journal::Command;
 use paros_core::matchmaker::{
     GcAck, GcRequest, MatchReply, MatchRequest, ReconfigureReply, ReconfigureRequest,
 };
-use paros_core::membership::{AcceptorConfig, MatchmakerId, QuorumSystem};
+use paros_core::membership::{AcceptorConfig, MatchmakerId, ProxyId, QuorumSystem};
 use paros_core::proposer::RecoveryStep;
 use paros_core::{
     Ballot, ColocatedNode, Config, Limits, MatchmakerReconfigurer, Message, NodeId, Slot,
@@ -80,6 +81,7 @@ use crate::paxos::world::drain::Paused;
 use crate::paxos::world::history::Client;
 use crate::paxos::world::matchmakers::plane_view;
 
+pub use compartments::{ProxyProcess, ReplicaProcess, TakeBack};
 pub use disk::Disk;
 pub use history::HistoryOp;
 pub use matchmakers::{MatchmakerProcess, RegistryDisk};
@@ -108,6 +110,13 @@ pub enum Party {
     Node(NodeId),
     /// A matchmaker of the registry tier.
     Matchmaker(MatchmakerId),
+    /// A proxy leader (Compartmentalized Paxos §3.1). Proxy ids are a third
+    /// identity space: proxy 0 is neither node 0 nor matchmaker 0.
+    Proxy(ProxyId),
+    /// A replica that learns the chosen log and never votes (Compartmentalized
+    /// Paxos §3.3). A replica's id is a node id outside the acceptor pool,
+    /// because the core addresses its catch-up answers with `Audience::Node`.
+    Replica(NodeId),
 }
 
 /// What one wire entry carries.
@@ -183,14 +192,19 @@ impl InFlight {
     #[must_use]
     pub fn view(&self, system: QuorumSystem) -> MessageView {
         match &self.envelope {
-            Envelope::Node(message) => message_view(
-                self.id,
-                self.from.number(),
-                self.to.number(),
-                self.sent_at,
-                message,
-                system,
-            ),
+            Envelope::Node(message) => {
+                let mut view = message_view(
+                    self.id,
+                    self.from.number(),
+                    self.to.number(),
+                    self.sent_at,
+                    message,
+                    system,
+                );
+                view.from_party = self.from.party_view();
+                view.to_party = self.to.party_view();
+                view
+            }
             // Every other envelope is the matchmaker plane's, and none of them
             // names a slot or a column.
             _ => plane_view(self).expect("a matchmaker-plane entry renders"),
@@ -308,6 +322,19 @@ pub struct World {
     /// must get more beats than one round trip needs, or a handover that is
     /// simply slow is abandoned every time. `0` disables it.
     reconfigure_timeout_ticks: u64,
+    /// The proxy leaders this level deployed, in id order. Empty on every
+    /// colocated deployment: a proxy count of zero is exactly the classic
+    /// leader.
+    proxies: Vec<ProxyProcess>,
+    /// The replicas this level deployed beside the acceptors, in id order.
+    /// Empty when every acceptor is also the only learner.
+    replicas: Vec<ReplicaProcess>,
+    /// How many re-delegations a proxy may swallow before the leader takes
+    /// the round back and runs it colocated. **Driver policy**, as in
+    /// `paros::roles::node`: the core only offers `take_back_delegated`.
+    take_back_after: u64,
+    /// Every round a leader took back from a proxy, in order.
+    taken_back: Vec<TakeBack>,
     /// The history's own clock: a monotone counter stamped on every client
     /// operation as it is issued and again as it completes. It is **not** the
     /// tick clock — a level may never tick at all — and it never goes
@@ -403,6 +430,10 @@ impl World {
             retirements: Vec::new(),
             abandoned_handovers: Vec::new(),
             reconfigure_timeout_ticks: 0,
+            proxies: Vec::new(),
+            replicas: Vec::new(),
+            take_back_after: compartments::TAKE_BACK_AFTER,
+            taken_back: Vec::new(),
             next_event: 1,
             narration: Vec::new(),
         };
@@ -588,10 +619,15 @@ impl World {
     /// matchmaker set, and nothing it sends names a column.
     #[must_use]
     pub fn render(&self, entry: &InFlight) -> MessageView {
-        let system = entry
-            .from
-            .node()
-            .map_or(QuorumSystem::Majority, |id| self.system(id));
+        let system = match entry.from {
+            Party::Node(id) => self.system(id),
+            // A proxy fans out under the configuration it holds, which is the
+            // one the delegating leader's round runs under.
+            Party::Proxy(id) => self.proxy(id).map_or(QuorumSystem::Majority, |proxy| {
+                proxy.acceptors().quorum_system()
+            }),
+            Party::Matchmaker(_) | Party::Replica(_) => QuorumSystem::Majority,
+        };
         entry.view(system)
     }
 
@@ -735,6 +771,8 @@ pub fn name(party: Party) -> String {
     match party {
         Party::Node(id) => who(id),
         Party::Matchmaker(id) => matchmakers::which(id),
+        Party::Proxy(id) => format!("proxy {}", id.0),
+        Party::Replica(id) => format!("replica {}", id.0),
     }
 }
 

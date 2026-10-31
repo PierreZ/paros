@@ -5,4 +5,4 @@
  * **different identity spaces**, so a renderer must be told which one a number
  * names before it can draw the link.
  */
-export type PartyView = "node" | "matchmaker";
+export type PartyView = "node" | "matchmaker" | "proxy" | "replica";

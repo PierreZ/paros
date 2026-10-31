@@ -253,6 +253,17 @@ pub enum Action {
         /// The matchmaker's id.
         matchmaker: u64,
     },
+    /// Crash a proxy leader. A proxy holds nothing durable, so every round it
+    /// held is gone. Proxy ids are their own space, so the verb is its own.
+    CrashProxy {
+        /// The proxy's id.
+        proxy: u64,
+    },
+    /// Restart a crashed proxy leader, empty.
+    RestartProxy {
+        /// The proxy's id.
+        proxy: u64,
+    },
     /// A client asks the leader at `node` to put a new acceptor set in force.
     Reconfigure {
         /// The node the client asks (must be the leader).
@@ -399,6 +410,10 @@ pub enum ActionKind {
     CrashMatchmaker,
     /// [`Action::RestartMatchmaker`].
     RestartMatchmaker,
+    /// [`Action::CrashProxy`].
+    CrashProxy,
+    /// [`Action::RestartProxy`].
+    RestartProxy,
     /// [`Action::Reconfigure`].
     Reconfigure,
     /// [`Action::Retire`].
@@ -451,6 +466,8 @@ impl Action {
             Action::Wipe { .. } => ActionKind::Wipe,
             Action::CrashMatchmaker { .. } => ActionKind::CrashMatchmaker,
             Action::RestartMatchmaker { .. } => ActionKind::RestartMatchmaker,
+            Action::CrashProxy { .. } => ActionKind::CrashProxy,
+            Action::RestartProxy { .. } => ActionKind::RestartProxy,
             Action::Reconfigure { .. } => ActionKind::Reconfigure,
             Action::Retire { .. } => ActionKind::Retire,
             Action::ReconfigureMatchmakers { .. } => ActionKind::ReconfigureMatchmakers,
@@ -515,6 +532,8 @@ impl Action {
             Action::Wipe { node } => format!("erase the disk of node {node}"),
             Action::CrashMatchmaker { matchmaker } => format!("crash matchmaker {matchmaker}"),
             Action::RestartMatchmaker { matchmaker } => format!("restart matchmaker {matchmaker}"),
+            Action::CrashProxy { proxy } => format!("crash proxy {proxy}"),
+            Action::RestartProxy { proxy } => format!("restart proxy {proxy}"),
             Action::Reconfigure { node, members, .. } => {
                 format!("ask node {node} to make {members:?} the acceptors")
             }

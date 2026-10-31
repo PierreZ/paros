@@ -119,7 +119,15 @@ matchmaker: number, } | { "kind": "restart_matchmaker",
 /**
  * The matchmaker's id.
  */
-matchmaker: number, } | { "kind": "reconfigure", 
+matchmaker: number, } | { "kind": "crash_proxy", 
+/**
+ * The proxy's id.
+ */
+proxy: number, } | { "kind": "restart_proxy", 
+/**
+ * The proxy's id.
+ */
+proxy: number, } | { "kind": "reconfigure", 
 /**
  * The node the client asks (must be the leader).
  */
