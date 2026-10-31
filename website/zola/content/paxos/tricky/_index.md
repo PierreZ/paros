@@ -41,3 +41,12 @@ this run in the game" holds the level and your moves.
 
 9. [Quorum reads and the watermark](@/paxos/tricky/quorum-reads.md)
 10. [Quorum systems are one boundary](@/paxos/tricky/quorum-systems.md)
+
+## D. Changing who votes
+
+Start with [Matchmaker Paxos in one page](@/paxos/tricky/matchmaker-paxos.md).
+
+11. [Matchmaking before Phase 1](@/paxos/tricky/matchmaking-before-phase-1.md)
+12. [Reconfiguration is a round change](@/paxos/tricky/reconfiguration-is-a-round-change.md)
+13. [GC and watermarks: when an old set may be forgotten](@/paxos/tricky/gc-and-watermarks.md)
+14. [Matchmaker generations and the handover decree](@/paxos/tricky/matchmaker-generations.md)
