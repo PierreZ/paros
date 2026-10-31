@@ -347,3 +347,177 @@ pub(crate) fn extra_members(registry: &Registry, founders: &[NodeId]) -> BTreeSe
         .filter(|node| !founders.contains(node))
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tenant::moves::is_control;
+    use paros_core::journal::{JournalId, TenantId};
+    use paros_model::registry::{Class, GrantKey, HostedTenant, Slot, SystemCommand};
+
+    const FLEET: u64 = 0xf1ee7;
+
+    fn fold(registry: &mut Registry, command: &SystemCommand) {
+        let seq = registry.next_seq();
+        registry.fold(seq, &command.encode());
+    }
+
+    fn control(tenant: u64) -> JournalIdentifier {
+        JournalIdentifier::new(TenantId(tenant), JournalId(tenant + 1))
+    }
+
+    /// A cell of two founders and two more storage machines, hosting two
+    /// tenants, 50 and 60, whose control journals are 51 and 61.
+    fn registry() -> Registry {
+        let mut registry = Registry::new([NodeId(1), NodeId(2)]);
+        for id in [1, 2, 3, 4] {
+            fold(
+                &mut registry,
+                &SystemCommand::RegisterNode {
+                    id: NodeId(id),
+                    addr: format!("m{id}.paros:1"),
+                    class: Class::Storage,
+                    capacity: 4,
+                    locality: paros_model::machine::Locality::default(),
+                    name: format!("m{id}"),
+                    incarnation: 1,
+                    machine_interface: Vec::new(),
+                },
+            );
+        }
+        fold(
+            &mut registry,
+            &SystemCommand::JoinFleet {
+                fleet_id: FLEET,
+                cell_id: 0xce11,
+                version: paros_model::fleet::METADATA_VERSION,
+                universe: None,
+            },
+        );
+        for (tenant, name) in [(50, &b"acme"[..]), (60, b"globex")] {
+            fold(
+                &mut registry,
+                &SystemCommand::GrantCapacity {
+                    key: GrantKey::Footprint(TenantId(tenant)),
+                    tenant: TenantId(tenant),
+                    slots: Some(vec![Slot {
+                        booking: tenant,
+                        node: NodeId(3),
+                        role: Role::Acceptor,
+                        target: BookingTarget::Tenant {
+                            tenant: TenantId(tenant),
+                        },
+                    }]),
+                },
+            );
+            fold(
+                &mut registry,
+                &SystemCommand::HostTenant {
+                    fleet_id: FLEET,
+                    tenant: TenantId(tenant),
+                    hosted: HostedTenant {
+                        control: JournalId(tenant + 1),
+                        name: name.to_vec(),
+                        survives: paros_model::tenant::Survives::Az,
+                    },
+                },
+            );
+        }
+        assert_eq!(controls(&registry).len(), 2, "both tenants are hosted");
+        registry
+    }
+
+    fn book(registry: &mut Registry, booking: u64, node: u64, journal: JournalIdentifier) {
+        fold(
+            registry,
+            &SystemCommand::BookCapacity {
+                booking,
+                node: NodeId(node),
+                role: Role::Acceptor,
+                target: BookingTarget::Journal(journal),
+            },
+        );
+    }
+
+    #[test]
+    fn a_control_journal_wants_two_f_plus_one_with_its_founders_and_the_room_it_has() {
+        assert_eq!(size(1, 2, 2), 3, "F = 1 grows two founders by one");
+        assert_eq!(size(2, 2, 2), 4, "capped by the machines it may run on");
+        assert_eq!(size(2, 2, 3), 5);
+        assert_eq!(size(0, 2, 3), 2, "never below the founders");
+        assert_eq!(size(1, 3, 0), 3, "three founders already give F = 1");
+        assert_eq!(size(3, 1, 0), 1, "a cell of one machine");
+    }
+
+    #[test]
+    fn the_control_journals_are_the_hosted_tenants_and_only_they() {
+        let registry = registry();
+        assert_eq!(
+            controls(&registry).into_iter().collect::<Vec<_>>(),
+            [control(50), control(60)]
+        );
+        assert!(is_control(&registry, control(50)));
+        let data = JournalIdentifier::new(TenantId(50), JournalId(99));
+        assert!(!is_control(&registry, data), "a data journal is not one");
+        let foreign = JournalIdentifier::new(TenantId(70), JournalId(71));
+        assert!(!is_control(&registry, foreign), "nor an unhosted tenant's");
+    }
+
+    #[test]
+    fn the_extra_members_are_the_booked_machines_outside_the_founders() {
+        let mut registry = registry();
+        let founders = [NodeId(1), NodeId(2)];
+        assert!(extra_members(&registry, &founders).is_empty());
+        book(&mut registry, 100, 3, control(50));
+        book(&mut registry, 101, 4, control(60));
+        // A founder's slot, and a data journal's slot, are not extras.
+        book(&mut registry, 102, 1, control(60));
+        book(
+            &mut registry,
+            103,
+            4,
+            JournalIdentifier::new(TenantId(50), JournalId(99)),
+        );
+        assert_eq!(
+            extra_members(&registry, &founders)
+                .into_iter()
+                .collect::<Vec<_>>(),
+            [NodeId(3), NodeId(4)]
+        );
+        assert_eq!(held_ids(&registry, control(60)), [101, 102]);
+        fold(
+            &mut registry,
+            &SystemCommand::ReleaseCapacity { booking: 100 },
+        );
+        assert_eq!(
+            extra_members(&registry, &founders)
+                .into_iter()
+                .collect::<Vec<_>>(),
+            [NodeId(4)]
+        );
+    }
+
+    #[test]
+    fn the_next_journal_is_one_whose_slots_moved_else_the_next_in_turn() {
+        let mut registry = registry();
+        let mut controls = Controls::default();
+        // Nothing settled: every journal is pending, in id order.
+        assert_eq!(controls.next(&registry), Some(control(50)));
+        controls.last = Some(control(50));
+        assert_eq!(controls.next(&registry), Some(control(60)));
+        controls.last = Some(control(60));
+        assert_eq!(controls.next(&registry), Some(control(50)), "it wraps");
+        // Both settled: the turn takes every journal again, in id order.
+        controls
+            .settled
+            .insert(control(50), (held_ids(&registry, control(50)), 2));
+        controls
+            .settled
+            .insert(control(60), (held_ids(&registry, control(60)), 2));
+        assert_eq!(controls.next(&registry), Some(control(50)));
+        // A slot of 60 moved since it settled: 60 goes first.
+        controls.last = Some(control(60));
+        book(&mut registry, 100, 3, control(60));
+        assert_eq!(controls.next(&registry), Some(control(60)));
+    }
+}

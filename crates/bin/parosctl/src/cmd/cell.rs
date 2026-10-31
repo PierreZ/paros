@@ -693,4 +693,23 @@ mod tests {
         assert_eq!(parse_window("30m"), Ok(Duration::from_mins(30)));
         assert!(parse_window("5").is_err());
     }
+
+    #[test]
+    fn a_control_plane_mode_is_auto_by_default_and_manual_needs_its_value() {
+        assert_eq!(
+            control_plane_mode("auto", None),
+            Some(ControlPlaneMode::Auto {
+                target: DEFAULT_TARGET
+            })
+        );
+        assert_eq!(
+            control_plane_mode("auto", Some(2)),
+            Some(ControlPlaneMode::Auto { target: 2 })
+        );
+        assert_eq!(
+            control_plane_mode("manual", Some(0)),
+            Some(ControlPlaneMode::Manual { failures: 0 })
+        );
+        assert_eq!(control_plane_mode("manual", None), None);
+    }
 }

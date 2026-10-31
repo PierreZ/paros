@@ -249,3 +249,53 @@ fn every_journal_carries_its_status_word() {
     );
     assert_eq!(reply.tenants[0].journals[0].word, "unavailable");
 }
+
+#[test]
+fn a_control_journal_with_its_third_acceptor_booked_is_healthy() {
+    let (founders, mut registry) = (founders(), registry());
+    // The coordinator booked acme's control journal a slot on gamma
+    // (#685 (special tenants are tenants)), and reconfigured onto it.
+    let seq = registry.next_seq();
+    registry.fold(
+        seq,
+        &SystemCommand::BookCapacity {
+            booking: 70,
+            node: NodeId(3),
+            role: Role::Acceptor,
+            target: BookingTarget::Journal(identifier(50, 51)),
+        }
+        .encode(),
+    );
+    let mut status = Hysteresis::new(Duration::ZERO);
+    let reply = cell_view(
+        &Scope::Admin,
+        &facts(&founders, &registry),
+        words(&mut status),
+    );
+    let acme = reply
+        .tenants
+        .iter()
+        .find(|t| t.name == b"acme")
+        .expect("acme is hosted");
+    let control = acme
+        .journals
+        .iter()
+        .find(|j| j.kind == "control")
+        .expect("acme has its control journal");
+    assert_eq!(control.acceptors, [1, 2, 3]);
+    assert_eq!(control.desired_acceptors, 3);
+    assert_eq!(control.word, "healthy");
+    // globex's control journal has no third slot: still degraded.
+    let globex = reply
+        .tenants
+        .iter()
+        .find(|t| t.name == b"globex")
+        .expect("globex is hosted");
+    let control = globex
+        .journals
+        .iter()
+        .find(|j| j.kind == "control")
+        .expect("globex has its control journal");
+    assert_eq!(control.acceptors, [1, 2]);
+    assert_eq!(control.word, "degraded");
+}
