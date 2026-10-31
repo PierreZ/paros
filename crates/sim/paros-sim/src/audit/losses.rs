@@ -273,8 +273,10 @@ impl AuditState {
                 .is_some_and(|slots| slots.contains(&slot))
         };
         // A copy some node may hold whole: a commit of the slot in flight
-        // (it may land unreported, #264), or a durable accept above the
-        // faulty identity its boot reported (a repair rewrote it).
+        // (it may land unreported, #264), or a durable accept reported
+        // since the boot that found it faulty (a repair rewrote it, at the
+        // decided ballot: not necessarily above the faulty identity, see
+        // `AuditState::rewritten`).
         if self
             .in_flight
             .keys()
@@ -291,11 +293,7 @@ impl AuditState {
             .filter(|(node, ballot)| {
                 !down.contains(node)
                     && !self.replicas.contains(node)
-                    && (!lost(*node)
-                        || self
-                            .faulty_ballots
-                            .get(&(*node, slot))
-                            .is_none_or(|faulty| ballot > faulty))
+                    && (!lost(*node) || self.rewritten.get(&(*node, slot)) == Some(ballot))
             })
             .collect();
         // A clean holder whose chosen index covers the slot serves it from
