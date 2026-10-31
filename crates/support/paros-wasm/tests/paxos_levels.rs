@@ -283,7 +283,7 @@ fn every_act_is_registered_in_play_order() {
         acts.windows(2).all(|pair| pair[0] <= pair[1]),
         "the level map is in act order: {acts:?}"
     );
-    for act in 1..=4u8 {
+    for act in 1..=5u8 {
         assert!(acts.contains(&act), "act {act} has levels registered");
     }
 }

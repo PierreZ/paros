@@ -1,6 +1,6 @@
 //! The Act I world: single-decree Paxos over the bare roles.
 //!
-//! This is `crates/lib/paros-core/examples/single_decree.rs` with the network
+//! This is the old `paros-core` single-decree lesson (removed with #313) with the network
 //! turned into player moves. There is no [`ColocatedNode`](paros_core::ColocatedNode)
 //! here, no [`Storage`](paros_core::Storage) and no clock: an acceptor is an
 //! [`Acceptor<Command>`] plus a `Vec<AcceptorWrite<Command>>` standing in for

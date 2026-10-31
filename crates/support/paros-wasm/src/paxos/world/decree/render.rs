@@ -36,6 +36,8 @@ impl DecreeWorld {
                 .collect(),
             clients: Vec::<ClientView>::new(),
             matchmakers: Vec::<MatchmakerView>::new(),
+            proxies: Vec::new(),
+            replicas: Vec::new(),
             chosen: self.chosen.as_ref().map(|(ballot, command)| ChosenView {
                 value: value_text(command),
                 control: control_kind(command),

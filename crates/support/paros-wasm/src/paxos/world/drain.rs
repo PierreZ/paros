@@ -1,7 +1,7 @@
 //! The drain contract: one `Ready` batch at a time, from the node to the disk
 //! and the wire.
 //!
-//! This is the loop `crates/lib/paros-core/examples/quorum_read.rs` writes in
+//! This is the loop the old `paros-core` quorum-read lesson wrote in
 //! fifteen lines, with the two things a game needs added: a **durability seam**
 //! that can cut a batch in half, and a **prompt** that can hold one back until
 //! the player has said what the core did with it.
@@ -20,6 +20,7 @@
 
 use std::collections::BTreeMap;
 
+use paros_core::contract::Audience;
 use paros_core::journal::{Command, Control};
 use paros_core::matchmaker::{GcRequest, MatchReply, MatchRequest};
 use paros_core::membership::MatchmakerId;
@@ -41,7 +42,7 @@ const DRAIN_BUDGET: usize = 512;
 #[derive(Clone, Debug, Default)]
 pub(super) struct Batch {
     writes: Vec<WriteOp>,
-    messages: Vec<(NodeId, Message)>,
+    messages: Vec<(Party, Message)>,
     committed: Vec<(Slot, Command)>,
     read_states: Vec<ReadState>,
     /// `(started, gap fills, remaining)` when this batch carried a
@@ -368,21 +369,35 @@ impl World {
     /// node is dropped and the caller stops).
     fn take_batch(&mut self, index: usize) -> Option<Batch> {
         let id = self.pool[index];
+        let replicas = self.replica_ids();
         let pool = &self.pool;
         let node = self.nodes[index].as_mut()?;
         let ready = node.ready();
+        let mut messages: Vec<(Party, Message)> = Vec::new();
+        // The deployment map: a proxy audience is a proxy, a node id that
+        // names a replica is that replica, and the learner fan-out reaches
+        // the replica tier as well as the pool.
+        for (audience, message) in ready.messages() {
+            if let Some(proxy) = audience.proxy() {
+                messages.push((Party::Proxy(proxy), message.clone()));
+            }
+            for to in audience.resolve(pool, id) {
+                let party = if replicas.contains(&to) {
+                    Party::Replica(to)
+                } else {
+                    Party::Node(to)
+                };
+                messages.push((party, message.clone()));
+            }
+            if *audience == Audience::Learners {
+                for to in &replicas {
+                    messages.push((Party::Replica(*to), message.clone()));
+                }
+            }
+        }
         let batch = Batch {
             writes: ready.writes().to_vec(),
-            messages: ready
-                .messages()
-                .iter()
-                .flat_map(|(audience, message)| {
-                    audience
-                        .resolve(pool, id)
-                        .into_iter()
-                        .map(move |to| (to, message.clone()))
-                })
-                .collect(),
+            messages,
             committed: ready
                 .committed()
                 .iter()
@@ -444,7 +459,7 @@ impl World {
             if matches!(message, Message::Heartbeat { .. }) {
                 self.beats_broadcast = self.beats_broadcast.saturating_add(1);
             }
-            self.send(Party::Node(id), Party::Node(to), Envelope::Node(message));
+            self.send(Party::Node(id), to, Envelope::Node(message));
         }
         for (to, request) in batch.match_requests {
             self.send(

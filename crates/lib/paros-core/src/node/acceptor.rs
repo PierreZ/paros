@@ -214,7 +214,15 @@ impl ColocatedNode {
                 // *is* `ballot.node` (the predecessor accepting under the
                 // authority it just gave away), made a Follower name itself as
                 // leader and redirect clients to itself.
-                if leader != me && self.role != NodeRole::Follower {
+                // A leader at this very ballot holds it by a handoff, and the
+                // `Accept` is its predecessor's, still in flight from before
+                // the authority moved (#313: a proxy's fan-out is the common
+                // case). One ballot has one proposer at a time, so the vote
+                // stands, but the hint is stale: the successor keeps leading.
+                let inherited = self.role == NodeRole::Leader && ballot == self.ballot;
+                if inherited {
+                    // Keep the role, the hint and the CheckQuorum clock.
+                } else if leader != me && self.role != NodeRole::Follower {
                     self.become_follower(Some(leader));
                 } else {
                     self.leader = Some(leader);

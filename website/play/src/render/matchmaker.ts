@@ -138,5 +138,7 @@ export function endpointOf(
 
 /** How a message's endpoint is named in a list: `m0` for a matchmaker, `0` for a node. */
 export function endpointName(id: number, party: PartyView | null | undefined): string {
+  if (party === 'proxy') return `p${id}`;
+  if (party === 'replica') return `r${id}`;
   return party === 'matchmaker' ? `m${id}` : String(id);
 }

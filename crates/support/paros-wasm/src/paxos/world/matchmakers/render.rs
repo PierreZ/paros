@@ -234,8 +234,9 @@ impl Party {
     #[must_use]
     pub fn number(self) -> u64 {
         match self {
-            Party::Node(id) => id.0,
+            Party::Node(id) | Party::Replica(id) => id.0,
             Party::Matchmaker(id) => id.0,
+            Party::Proxy(id) => id.0,
         }
     }
 
@@ -245,6 +246,8 @@ impl Party {
         match self {
             Party::Node(_) => PartyView::Node,
             Party::Matchmaker(_) => PartyView::Matchmaker,
+            Party::Proxy(_) => PartyView::Proxy,
+            Party::Replica(_) => PartyView::Replica,
         }
     }
 
@@ -253,7 +256,7 @@ impl Party {
     pub fn node(self) -> Option<NodeId> {
         match self {
             Party::Node(id) => Some(id),
-            Party::Matchmaker(_) => None,
+            Party::Matchmaker(_) | Party::Proxy(_) | Party::Replica(_) => None,
         }
     }
 }

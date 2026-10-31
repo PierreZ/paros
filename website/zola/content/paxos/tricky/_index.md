@@ -50,3 +50,13 @@ Start with [Matchmaker Paxos in one page](@/paxos/tricky/matchmaker-paxos.md).
 12. [Reconfiguration is a round change](@/paxos/tricky/reconfiguration-is-a-round-change.md)
 13. [GC and watermarks: when an old set may be forgotten](@/paxos/tricky/gc-and-watermarks.md)
 14. [Matchmaker generations and the handover decree](@/paxos/tricky/matchmaker-generations.md)
+
+## E. Moving and splitting the leader
+
+Start with [Compartmentalized Paxos in one page](@/paxos/tricky/compartmentalized-paxos.md).
+
+15. [Leader handoff without an election](@/paxos/tricky/leader-handoff.md)
+16. [Proxy leaders: the leader only sequences](@/paxos/tricky/proxy-leaders.md)
+17. [Batchers and unbatchers](@/paxos/tricky/batchers.md)
+18. [The replica tier](@/paxos/tricky/replica-tier.md)
+19. [The state machine on the log](@/paxos/tricky/state-machine-on-the-log.md)

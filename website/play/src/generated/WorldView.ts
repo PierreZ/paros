@@ -4,7 +4,9 @@ import type { ClientView } from "./ClientView";
 import type { MatchmakerView } from "./MatchmakerView";
 import type { MessageView } from "./MessageView";
 import type { NodeView } from "./NodeView";
+import type { ProxyView } from "./ProxyView";
 import type { ReachView } from "./ReachView";
+import type { ReplicaView } from "./ReplicaView";
 import type { WorldFlavour } from "./WorldFlavour";
 
 /**
@@ -35,6 +37,15 @@ clients: Array<ClientView>,
  * The matchmakers (Act IV; empty until then).
  */
 matchmakers: Array<MatchmakerView>, 
+/**
+ * The proxy leaders (Act V; empty on a colocated deployment).
+ */
+proxies: Array<ProxyView>, 
+/**
+ * The replicas of the replica tier (Act V; empty when the acceptors are
+ * the only learners).
+ */
+replicas: Array<ReplicaView>, 
 /**
  * The single-decree world's decision, if it has one.
  */

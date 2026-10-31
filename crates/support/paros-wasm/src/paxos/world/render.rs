@@ -31,6 +31,8 @@ impl World {
             wire: self.wire.iter().map(|entry| self.render(entry)).collect(),
             clients: self.clients.iter().map(client_view).collect(),
             matchmakers: self.matchmakers().iter().map(matchmaker_view).collect(),
+            proxies: self.proxy_views(),
+            replicas: self.replica_views(),
             chosen: None::<ChosenView>,
             // The log world has no reach: a partition here is the player not
             // delivering, message by message.

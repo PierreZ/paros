@@ -168,6 +168,11 @@ pub struct WorldView {
     pub clients: Vec<ClientView>,
     /// The matchmakers (Act IV; empty until then).
     pub matchmakers: Vec<MatchmakerView>,
+    /// The proxy leaders (Act V; empty on a colocated deployment).
+    pub proxies: Vec<ProxyView>,
+    /// The replicas of the replica tier (Act V; empty when the acceptors are
+    /// the only learners).
+    pub replicas: Vec<ReplicaView>,
     /// The single-decree world's decision, if it has one.
     pub chosen: Option<ChosenView>,
     /// The single-decree world's phase reach sets — which acceptors a
@@ -448,6 +453,54 @@ pub enum PartyView {
     Node,
     /// A matchmaker of the registry tier.
     Matchmaker,
+    /// A proxy leader: a Phase-2 tally on a process of its own.
+    Proxy,
+    /// A replica that learns the chosen log and never votes.
+    Replica,
+}
+
+/// One proxy leader: it votes on nothing, orders nothing and keeps nothing
+/// durable. It fans a delegated slot's `Accept` out to the slot's column,
+/// folds the `Accepted`s, and announces the `Commit`.
+#[derive(Clone, Debug, Serialize, Deserialize, TS)]
+pub struct ProxyView {
+    /// The proxy's id, in its own identity space.
+    pub id: u64,
+    /// False while it is crashed. A proxy has no disk, so a restart is empty.
+    pub alive: bool,
+    /// The ballot of the leadership it works for, as `round.node`.
+    pub ballot: Option<String>,
+    /// The rounds it holds open: the slot and the leader that delegated it.
+    pub open_rounds: Vec<ProxyRoundView>,
+    /// How many rounds it decided and committed in this incarnation.
+    pub decided: u64,
+    /// How many delegations re-fanned-out a round it already held.
+    pub refanned: u64,
+}
+
+/// One round a proxy holds open.
+#[derive(Clone, Debug, Serialize, Deserialize, TS)]
+pub struct ProxyRoundView {
+    /// The slot.
+    pub slot: u64,
+    /// The leader that delegated it (the leader hint its fan-out carries).
+    pub leader: u64,
+}
+
+/// One replica of the replica tier: it learns the chosen log and serves reads
+/// from it, and it never votes.
+#[derive(Clone, Debug, Serialize, Deserialize, TS)]
+pub struct ReplicaView {
+    /// The replica's id. It is a node id outside the acceptor pool.
+    pub id: u64,
+    /// The contiguous chosen prefix's last slot it has learned.
+    pub chosen_index: Option<u64>,
+    /// A chosen slot it knows of above a hole: `(hole, highest)`.
+    pub chosen_gap: Option<GapView>,
+    /// What it learned, in slot order.
+    pub learned: Vec<SlotView>,
+    /// How many slots it learned from a catch-up answer, not from a `Commit`.
+    pub caught_up: u64,
 }
 
 /// One message in flight.

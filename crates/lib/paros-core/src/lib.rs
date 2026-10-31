@@ -41,18 +41,12 @@
 //!
 //! [`ColocatedNode`] is one deployment of a few composable **roles** —
 //! [`proposer::Proposer`], [`acceptor::Acceptor`], [`replica::Replica`] — and
-//! the roles can be driven by hand. Three runnable examples in this crate's
-//! `examples/` directory do exactly that, in order, each with a printed trace
-//! and assertions on the property it teaches:
-//!
-//! 1. `single_decree.rs` — Phase 1, P2c, Phase 2: one value
-//!    (`cargo run -p paros-core --example single_decree`).
-//! 2. `multi_paxos.rs` — slots versus ballots, one Phase 1 amortized over many
-//!    slots, leader recovery as P2c per slot.
-//! 3. `matchmaker.rs` — configuration discovery through the [`Matchmaker`]
-//!    and the [`matchmaking::Matchmaking`] phase, reconfiguration, and the
-//!    matchmaker set itself chosen by the same single-decree Paxos over
-//!    `Vec<MatchmakerId>`, persisted through a [`matchmaker::MemRegistry`].
+//! the roles can be driven by hand. The interactive Paxos game on the paros
+//! site does exactly that: each of its levels drives these roles, compiled to
+//! WebAssembly, and teaches one property (single-decree Paxos, the log, the
+//! [`Matchmaker`] and the [`matchmaking::Matchmaking`] phase, flexible and
+//! grid quorums, quorum reads, proxy leaders and the replica tier). The game
+//! is the crate `paros-wasm`, feature `paxos`.
 //!
 //! Beside them, `flexible_quorums.rs`, `acceptor_grid.rs` and
 //! `quorum_read.rs` change the *data* the same roles run over, and

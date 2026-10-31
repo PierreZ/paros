@@ -118,7 +118,7 @@ ReconfigureReply)` — plus `clock: u64`, the client registry (next seq per clie
 pending client operations (a proposed `(client, seq)` waiting for its slot, a read waiting for
 its `ReadState`).
 
-**The drain contract** is `crates/lib/paros-core/examples/quorum_read.rs:164-198`, generalised:
+**The drain contract** is the loop of the old `examples/quorum_read.rs` (lines 164-198; the examples were removed with #313), generalised:
 after any call into a node, `ready()` → copy `writes`, `messages`, `committed`,
 `snapshot_offers`, `read_states`, `recovery_batch` out → `advance()` → apply the writes to the
 disk in order (`Truncate` behind the app apply, as `crates/lib/paros/src/driver/ready.rs:239-247`
@@ -300,6 +300,21 @@ the tests replay. Level ids are stable strings (`act1/choose-a-value`), never in
 29. `act4/the-wiped-node` — wipe a disk: the node cannot rejoin (its promise is gone); the
     cluster heals around it by reconfiguration. Goal: a new command chosen without the wiped
     identity, and the wiped node's refusal explained.
+
+### Act V — moving and splitting the leader (log world with proxies or replicas)
+
+The proxy-leader and replica-tier lessons of the removed `paros-core` examples (#313). The world
+deploys `ProxyLeader`s (`World::with_proxies`) or `ReplicaNode`s (`World::with_replicas`) beside
+the pool (`world/compartments.rs`), each a `Party` of its own identity space.
+
+30. `act5/proxy-leaders` — 6 nodes in a 2 × 3 grid, 2 proxies. Three commands chosen through
+    the proxies: the leader sends one `Accept` and learns one `Commit` per command.
+31. `act5/the-dead-proxy` — crash the next slot's proxy; the leader re-delegates, then takes the
+    round back (`take_back_delegated`, budget 2) and runs it colocated.
+32. `act5/handoff-through-a-proxy` — hand off while a proxy holds a round; the successor
+    re-delegates it to `slot % proxies` under the same ballot, and the proxy re-fans-out.
+33. `act5/the-replica-tier` — 3 acceptors, replicas 10 and 11; drop a `Commit` to replica 11;
+    the leader's beat shows the gap and the replica catches up from an acceptor.
 
 The Act III world adds snapshots and truncation to `Disk` and the driver-side snapshot offer;
 the Act IV world adds the matchmaker plane (`world/matchmakers/`), the grid column choice,

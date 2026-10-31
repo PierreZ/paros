@@ -329,6 +329,14 @@ impl Game {
                 self.log_world()?
                     .restart_matchmaker(paros_core::membership::MatchmakerId(*matchmaker))?;
             }
+            Action::CrashProxy { proxy } => {
+                self.log_world()?
+                    .crash_proxy(paros_core::membership::ProxyId(*proxy))?;
+            }
+            Action::RestartProxy { proxy } => {
+                self.log_world()?
+                    .restart_proxy(paros_core::membership::ProxyId(*proxy))?;
+            }
             Action::Reconfigure {
                 node,
                 members,

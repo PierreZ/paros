@@ -139,6 +139,8 @@ export function headingDegrees(from: Point, to: Point): number {
  * matchmakers arrived.
  */
 function tier(party: unknown): string {
+  if (party === 'proxy') return 'p';
+  if (party === 'replica') return 'r';
   return party === 'matchmaker' ? 'm' : '';
 }
 

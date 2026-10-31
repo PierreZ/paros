@@ -7,7 +7,7 @@
 //! `compact`, `handoffs()` and `handoff_refusal()` beside `relinquish`.
 
 use paros_core::journal::{Command, Control, Entry, Seq};
-use paros_core::membership::{MatchmakerId, QuorumSystem};
+use paros_core::membership::{MatchmakerId, ProxyId, QuorumSystem};
 use paros_core::node::{HANDOFF_BATCH, LeadershipOrigin, ProposeResult};
 use paros_core::{Ballot, ColocatedNode, Message, NodeId, Slot, Value};
 
@@ -118,6 +118,14 @@ impl World {
             self.deliver_to_matchmaker(entry);
             return Ok(());
         }
+        if matches!(entry.to, Party::Proxy(_)) {
+            self.deliver_to_proxy(entry);
+            return Ok(());
+        }
+        if matches!(entry.to, Party::Replica(_)) {
+            self.deliver_to_replica(entry);
+            return Ok(());
+        }
         if !matches!(entry.envelope, Envelope::Node(_)) {
             self.deliver_matchmaker_reply(entry);
             return Ok(());
@@ -211,6 +219,26 @@ impl World {
                     let to = MatchmakerId(to);
                     self.matchmaker_index(to)?;
                     Party::Matchmaker(to)
+                }
+                Party::Proxy(_) => {
+                    let to = ProxyId(to);
+                    if !self.proxies().iter().any(|proxy| proxy.id() == to) {
+                        return Err(ActionError::new(
+                            ActionErrorCode::UnknownParty,
+                            format!("there is no proxy {} in this level", to.0),
+                        ));
+                    }
+                    Party::Proxy(to)
+                }
+                Party::Replica(_) => {
+                    let to = NodeId(to);
+                    if self.replica(to).is_none() {
+                        return Err(ActionError::new(
+                            ActionErrorCode::UnknownParty,
+                            format!("there is no replica {} in this level", to.0),
+                        ));
+                    }
+                    Party::Replica(to)
                 }
             };
         }
@@ -310,6 +338,9 @@ impl World {
                 node.resend_pending();
             }
         });
+        // On a proxy deployment the beat also takes back what a proxy
+        // swallowed past the budget (driver policy, as in `paros`).
+        self.take_back_stalled(id, index);
         // A tick is the driver's beat, and the handover is driver policy: the
         // stall clock advances, a freeze whose quorum answered is closed, and
         // a phase that has stopped moving is given up.
