@@ -44,6 +44,7 @@ mod board;
 mod detector;
 mod heal;
 mod names;
+pub(crate) mod racked;
 mod reports;
 
 pub(crate) use board::{
@@ -67,7 +68,7 @@ pub(crate) use names::{
 };
 pub(crate) use reports::{
     Ended, booted, check_metrics, formatting, machine_audits, metered_answer, metered_call,
-    recorded, registry_cache_read, registry_cached,
+    racked_formatting, recorded, registry_cache_read, registry_cached,
 };
 
 use crate::process::{RoleRig, arm_role, dispatch};
@@ -220,7 +221,7 @@ async fn run_machine_role(
     let (listen, advertise) = boot_listen(ctx.state(), &layout, rank, my_ip, held)?;
     let RoleRig { incarnation, .. } = arm_role(ctx, my_ip);
     let tunables = incarnation.shape.tunables;
-    let audits = machine_audits(ctx, (addrs[rank].clone(), my_ip), (rank, &draw));
+    let audits = machine_audits(ctx, (addrs[rank].clone(), my_ip, true), (rank, &draw));
     operator_slip();
     let addresses =
         MachineAddresses::new(listen, Some(advertise)).map_err(SimulationError::InvalidState)?;

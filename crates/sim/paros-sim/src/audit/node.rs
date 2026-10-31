@@ -1112,20 +1112,36 @@ impl<T: TimeProvider> NodeAudit<T> {
             { "node" => node.0, "members" => deployment.bootstrap.members().len() }
         );
         let pool: BTreeSet<u64> = deployment.pool.iter().map(|n| n.0).collect();
-        let known = st.pool.get_or_insert_with(|| pool.clone());
         // A genesis node boots with the genesis pool; a joiner (#189) — a node
         // outside it, admitted by the registry at runtime — boots with the
-        // genesis pool plus itself and whoever the registry had admitted.
-        let same = if known.contains(&node.0) {
-            *known == pool
+        // genesis pool plus itself and whoever the registry had admitted. A
+        // joiner may boot before every genesis node: its pool is judged once
+        // a genesis node names the genesis pool.
+        let joiner = crate::roles::is_joiner(node.0);
+        let mut judged = Vec::new();
+        if joiner && st.pool.is_none() {
+            st.early_joiner_pools.push((node.0, pool.clone()));
+        } else if st.pool.is_none() {
+            st.pool = Some(pool.clone());
+            judged = std::mem::take(&mut st.early_joiner_pools);
         } else {
-            known.is_subset(&pool) && pool.contains(&node.0)
-        };
-        assert_always!(
-            same,
-            "every node derives the same node pool",
-            { "node" => node.0, "pool" => pool.len() }
-        );
+            judged.push((node.0, pool.clone()));
+        }
+        let known = st.pool.clone().unwrap_or_default();
+        for (node, pool) in judged {
+            // A node outside the genesis pool joined at runtime: a joiner,
+            // or a machine the registry admitted.
+            let same = if crate::roles::is_joiner(node) || !known.contains(&node) {
+                known.is_subset(&pool) && pool.contains(&node)
+            } else {
+                known == pool
+            };
+            assert_always!(
+                same,
+                "every node derives the same node pool",
+                { "node" => node, "pool" => pool.len() }
+            );
+        }
         st.replica_count = deployment.replica_count;
         st.matchmaker.note_deployment(&deployment.matchmakers);
         st.matchmaker.note_bootstrap(&deployment.bootstrap);
@@ -1279,6 +1295,9 @@ impl<T: TimeProvider> NodeAudit<T> {
         if let Some((board, _)) = &self.machines {
             crate::machine::metered_call(board, call);
         }
+        if let Some(board) = &self.racked {
+            crate::machine::metered_call(board, call);
+        }
     }
 
     pub(super) fn call_answered(
@@ -1293,6 +1312,9 @@ impl<T: TimeProvider> NodeAudit<T> {
         read: u64,
     ) {
         if let Some((board, _)) = &self.machines {
+            crate::machine::metered_answer(board, call, written, read);
+        }
+        if let Some(board) = &self.racked {
             crate::machine::metered_answer(board, call, written, read);
         }
     }

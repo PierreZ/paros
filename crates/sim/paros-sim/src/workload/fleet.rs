@@ -88,6 +88,7 @@ mod keys;
 mod leads;
 mod live;
 mod load;
+pub(super) mod operator;
 mod other_cell;
 mod placement;
 mod replaced;

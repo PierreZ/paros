@@ -6,7 +6,8 @@
 //! The request picks the cell: `--servers` names it (the cell of the
 //! servers asked), and `--cell` checks that the servers are that cell's.
 //! `tenant show` asks the servers' cell, and a tenant that lives in another
-//! cell is refused with that cell's name. `cell list` and `tenant list` ask
+//! cell is asked again at that cell's entry endpoint, which the refusal
+//! names (#232 (multiple cells)). `cell list` and `tenant list` ask
 //! the cell that hosts the universe tenant.
 //!
 //! The cell filters every answer by the caller's scope before it sends it;
@@ -46,25 +47,63 @@ pub struct Asker<'a> {
 }
 
 impl Asker<'_> {
-    /// Ask `query`; the answer, or how the command ends.
+    /// Ask `query`; the answer, or how the command ends. A tenant that
+    /// lives in another cell is asked again at that cell's entry endpoint,
+    /// which the refusal names (#232 (multiple cells)).
     pub(crate) async fn ask(&self, query: Query) -> Result<wire::ViewReply, Ending> {
+        self.ask_followed(query).await.map(|(reply, _)| reply)
+    }
+
+    /// Ask `query` as [`Asker::ask`] does; the answer, and the servers of
+    /// the cell that answered it.
+    pub(crate) async fn ask_followed(
+        &self,
+        query: Query,
+    ) -> Result<(wire::ViewReply, Vec<Address>), Ending> {
+        match self.ask_at(&self.servers, query.clone()).await? {
+            Ok(reply) => Ok((reply, self.servers.clone())),
+            Err(refused) if refused.refusal == "other_cell" && !refused.endpoint.is_empty() => {
+                let endpoint: Vec<Address> = refused
+                    .endpoint
+                    .iter()
+                    .filter_map(|addr| Address::parse(addr).ok())
+                    .collect();
+                match self.ask_at(&endpoint, query).await? {
+                    Ok(reply) => Ok((reply, endpoint)),
+                    Err(refused) => {
+                        note(&refusal_text(&refused));
+                        Err(Ending::Refused)
+                    }
+                }
+            }
+            Err(refused) => {
+                note(&refusal_text(&refused));
+                Err(Ending::Refused)
+            }
+        }
+    }
+
+    /// Ask `query` of `servers`: the answer, the refusal, or how the command
+    /// ends when none answers.
+    pub(crate) async fn ask_at(
+        &self,
+        servers: &[Address],
+        query: Query,
+    ) -> Result<Result<wire::ViewReply, wire::ViewReply>, Ending> {
         let request = request(&self.scope, query);
         match ask(
             self.providers,
             self.rpc,
             self.names,
-            &self.servers,
+            servers,
             0,
             &request,
             self.timeout,
         )
         .await
         {
-            ViewOutcome::Answered(reply) => Ok(reply),
-            ViewOutcome::Refused(reply) => {
-                note(&refusal_text(&reply));
-                Err(Ending::Refused)
-            }
+            ViewOutcome::Answered(reply) => Ok(Ok(sorted(reply))),
+            ViewOutcome::Refused(reply) => Ok(Err(reply)),
             ViewOutcome::Unreachable => {
                 note(
                     "no server answered the view: is the cell formed, and are these its founding members?",
@@ -105,6 +144,18 @@ impl Asker<'_> {
         }
         Ok(reply)
     }
+}
+
+/// `reply` with its machines, tenants and cells in name order, as people
+/// read a table; a machine with no name sorts by its address.
+fn sorted(mut reply: wire::ViewReply) -> wire::ViewReply {
+    reply.machines.sort_by(|a, b| {
+        let key = |m: &wire::MachineView| (m.name.is_empty(), m.name.clone(), m.addr.clone());
+        key(a).cmp(&key(b))
+    });
+    reply.tenants.sort_by(|a, b| a.name.cmp(&b.name));
+    reply.cells.sort_by(|a, b| a.name.cmp(&b.name));
+    reply
 }
 
 /// A refusal in words.

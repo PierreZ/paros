@@ -1,5 +1,5 @@
 # The paros toy (#196), a demo to run paros by hand (no test runs it): one cell of five machines over three failure
-# domains, and a second cell of three machines (#232 (multiple cells)), every one the same `parosd` image
+# domains, and a second cell of four machines (#232 (multiple cells)), every one the same `parosd` image
 # configured by PAROS_* variables.
 #
 # Out of the box it runs with mutual TLS and a pinned root key (#245 (Biscuit tokens)): the
@@ -87,10 +87,13 @@ x-parosd: &parosd
 
 x-parosctl: &parosctl
   image: paros:local
-  entrypoint: ["parosctl", "--servers", "members:4500", "--timeout-ms", "10000"]
+  entrypoint: ["parosctl", "--timeout-ms", "10000"]
   profiles: ["tools"]
   restart: "no"
   environment: &ctlenv
+    # The servers by default: cell-1's machines. A `--servers` on the command line replaces
+    # them (`--servers cell2:4500` asks cell-2), where an entrypoint flag would add to them.
+    PAROSCTL_SERVERS: members:4500
     # The admin certificate and the admin token of the demo set.
     PAROSCTL_TLS_CA_PEM: *ca
     PAROSCTL_TLS_CERT_PEM: |
@@ -215,6 +218,18 @@ services:
       PAROS_ZONE: zone-c
     volumes: [cell2-c:/var/lib/paros]
     networks: { default: { aliases: [cell2] } }
+  # cell-2's stateless machine: it idles until `parosctl --servers cell2:4500 cell add-machine
+  # cell2-stateless:4500` admits it, then takes cell-2's frontends, proxy leaders and batchers.
+  cell2-stateless:
+    <<: *parosd
+    hostname: cell2-stateless
+    environment:
+      <<: *env
+      PAROS_LISTEN: 0.0.0.0:4500
+      PAROS_ADVERTISE: cell2-stateless:4500
+      PAROS_CLASS: stateless
+      PAROS_ZONE: zone-a
+    volumes: [cell2-stateless:/var/lib/paros]
 
   # `init`, once, after `up`: `cell init` over the three nodes, every one of
   # them needed, each named by its advertised address. It waits for them to listen;
@@ -288,3 +303,4 @@ volumes:
   cell2-a:
   cell2-b:
   cell2-c:
+  cell2-stateless:

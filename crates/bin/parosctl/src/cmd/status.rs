@@ -274,7 +274,7 @@ async fn tenant_status(asker: &Asker<'_>, out: &Printer, name: &str) -> Ending {
                 words_text(&summary),
                 scrub_text(tenant.scrub.as_ref()),
                 indent(&table(JOURNAL_HEADERS, &rows)),
-                indent(&table(["MACHINE", "DOMAIN", "STATE", "ACCEPTOR SLOTS"], &machine_rows)),
+                indent(&table(["MACHINE", "ZONE", "STATE", "ACCEPTOR SLOTS"], &machine_rows)),
                 usage.text(tenant),
             )
         },

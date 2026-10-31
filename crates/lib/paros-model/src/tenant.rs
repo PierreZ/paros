@@ -474,10 +474,15 @@ impl TenantRoles {
         Self::new(roles.frontends)
     }
 
-    /// Its label: `2 frontends`.
+    /// Its label: `1 frontend`, `2 frontends`.
     #[must_use]
     pub fn label(&self) -> String {
-        format!("{} frontends", self.frontends)
+        let noun = if self.frontends == 1 {
+            "frontend"
+        } else {
+            "frontends"
+        };
+        format!("{} {noun}", self.frontends)
     }
 }
 

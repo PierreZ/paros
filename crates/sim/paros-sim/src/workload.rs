@@ -1036,6 +1036,41 @@ impl ChainWorkload {
             LeaderSeeds::new(ctx.random().random::<u128>()),
             &config,
         )?;
+        // The operator lane (#489 (operator workload)): on a run that draws
+        // it, client 0 runs an operator of its own beside its data steps,
+        // until the run's end.
+        let operator_lane = if client_id == 0 && crate::shape::operator_lane(ctx.state()) {
+            let ops = fleet::FleetOps::new(
+                ctx,
+                &deployment,
+                runtime.connector(ctx, config.tunables()),
+                Duration::from_millis(config.init_patience_ms),
+                fleet::operator::OPERATOR_CLIENT,
+                LeaderSeeds::new(ctx.random().random::<u128>()),
+                &config,
+            )?;
+            let lane_config = fleet::operator::LaneConfig {
+                policy: config.tunables().checkpoint_policy(),
+                election: config.election_tunables(),
+                run_end: crate::shape::run_end(ctx.state()),
+            };
+            let (ended, lane_done) = oneshot::channel();
+            let lane_ctx = ctx.clone();
+            ctx.task()
+                .spawn_task(
+                    "operator-lane",
+                    async move {
+                        let ops = Box::pin(fleet::operator::run(lane_ctx, ops, lane_config)).await;
+                        // A receiver gone means the run is over.
+                        let _ = ended.send(ops);
+                    }
+                    .in_current_span(),
+                )
+                .detach();
+            Some(lane_done)
+        } else {
+            None
+        };
         let mut system_ops = system::SystemOps::new(
             &deployment,
             crate::shape::identifiers(ctx.state()),
@@ -2123,6 +2158,12 @@ impl ChainWorkload {
         // replicas: election, `Accept` re-send, gap fill, catch-up, snapshot
         // transfer and chunk repair get real fault-free simulated time, and
         // convergence is judged only at its end.
+        // The lane ends at the run's end too: chaos ends only once every
+        // client handed off.
+        let lane_ops = match operator_lane {
+            Some(lane) => lane.await.ok(),
+            None => None,
+        };
         handoff.into_quiet().await;
         // The joiners whose spare already booted this journal as the faults
         // stop (#466 (late joiner spare)): a spare outside this set joined in
@@ -2134,6 +2175,17 @@ impl ChainWorkload {
         // operator finishes the operation it stopped in, and the last one to
         // do so — every fleet writer is quiet then — judges the final folds
         // of the fleet directory and the cell, and every live node's registry fold.
+        // The operator lane's operation first (#489 (operator workload)):
+        // the lane stopped at the run's end, maybe in one.
+        if let Some(mut lane_ops) = lane_ops {
+            lane_ops
+                .settle(
+                    ctx,
+                    config.tunables().checkpoint_policy(),
+                    Duration::from_millis(config.retry_backoff_ms.max(10)),
+                )
+                .await;
+        }
         fleet_ops
             .settle(
                 ctx,

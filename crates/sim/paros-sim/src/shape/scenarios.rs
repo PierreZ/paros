@@ -501,6 +501,21 @@ pub(crate) fn second_cell(state: &StateHandle) -> bool {
         .get_or_insert_with(|| !other && moonpool_sim::buggify_with_prob!(1.0))
 }
 
+/// Whether the run has an **operator lane** (#489 (operator workload)):
+/// client 0 runs the admin processes (admissions, drains, maintenance,
+/// tenants, the second cell, elections) in a task of their own, in
+/// parallel with its data operations and the other clients', for the
+/// whole chaos phase. A swarm draw on its own BUGGIFY location: about half
+/// the runs.
+#[tracing::instrument(level = "debug", skip_all)]
+pub(crate) fn operator_lane(state: &StateHandle) -> bool {
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    *guard
+        .operator_lane
+        .get_or_insert_with(|| moonpool_sim::buggify_with_prob!(1.0))
+}
+
 /// Whether the run draws the **batchers scenario** (#145 (batchers), #604
 /// (role counts)), without drawing it: the draw is
 /// [`batchers_among`], made where a caller knows the run's machines. A

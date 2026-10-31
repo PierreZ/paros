@@ -21,11 +21,9 @@ use clap::{Args, Subcommand};
 use moonpool_core::CompioProviders;
 use moonpool_rpc::RpcHandle;
 use paros::client::Client;
-use paros::client::bootstrap::control_journals;
-use paros::client::fleet::read_directory;
 use paros::client::journals::{self, JournalAnswer, JournalOp, JournalRequest};
 use paros::core::journal::{JournalIdentifier, TenantId, WriterMode};
-use paros::model::address::Names;
+use paros::model::address::{Address, Names};
 use paros::model::fleet::TenantState;
 use paros::model::tags::{Tags, UserTags};
 use paros::model::tenant::{
@@ -34,6 +32,7 @@ use paros::model::tenant::{
 use serde_json::json;
 
 use crate::cmd::tenant::nonzero;
+use crate::support::cells;
 use crate::support::connect::Ending;
 use crate::support::labels::Labels;
 use crate::support::output::{Printer, note, record_text, table};
@@ -308,9 +307,10 @@ pub struct ConfigureArgs {
     batchers: Option<u32>,
     /// The tenant's frontends (#723 (frontend as a parosd role)): the
     /// coordinator books that many on the cell's `stateless` machines. Only
-    /// without `--journal`.
+    /// without `--journal`. Named `--frontend-count`: the global
+    /// `--frontends` names the frontends a call goes through.
     #[arg(long)]
-    frontends: Option<u32>,
+    frontend_count: Option<u32>,
     /// How long the request is sent again while no coordinator decides it,
     /// in milliseconds.
     #[arg(long, default_value = "30000")]
@@ -328,11 +328,25 @@ pub async fn run(
     args: JournalArgs,
 ) -> Ending {
     let (tenant_name, journal_name) = args.command.names();
-    let (tenant, control, election, tenant_tags) =
-        match ready_tenant(client, out, &tenant_name).await {
-            Ok(found) => found,
-            Err(ending) => return ending,
-        };
+    let ReadyTenant {
+        tenant,
+        control,
+        election,
+        tags: tenant_tags,
+        client: cell,
+        elsewhere,
+    } = match ready_tenant(client, out, &tenant_name).await {
+        Ok(found) => found,
+        Err(ending) => return ending,
+    };
+    let client = &cell;
+    // The names of the tenant's cell's machines, when another cell hosts it.
+    let mut labels = labels.clone();
+    if let Some(endpoint) = elsewhere {
+        let timeout = Duration::from_millis(args.patience_ms);
+        labels.absorb(Labels::fetch_from((providers, rpc, names), &endpoint, timeout).await);
+    }
+    let labels = &labels;
     let op = match args.command {
         JournalCommand::List { selector, .. } => {
             return list(
@@ -399,40 +413,33 @@ pub(crate) fn user_tags(texts: &[String]) -> Result<UserTags, Ending> {
     })
 }
 
-/// The `READY` tenant named `tenant_name`, with its control journal, the
-/// cell's election journal, where the tenant coordinator publishes itself,
-/// and the tenant's tags (#575 (key:value tags)).
+/// The `READY` tenant named `tenant_name`, as [`ready_tenant`] finds it.
+struct ReadyTenant {
+    tenant: TenantId,
+    control: paros::core::journal::JournalId,
+    /// The election journal of its cell, where the tenant coordinator
+    /// publishes itself.
+    election: JournalIdentifier,
+    /// Its tags (#575 (key:value tags)).
+    tags: Tags,
+    /// A client of its cell.
+    client: ParosClient,
+    /// Its cell's entry endpoint, when another cell than the servers' hosts
+    /// it: where the names of that cell's machines are read.
+    elsewhere: Option<Vec<Address>>,
+}
+
+/// The `READY` tenant named `tenant_name`, through the universe directory
+/// of the servers' cell or of the cell its universe pointer names. A tenant
+/// another cell hosts is reached through the entry endpoint the directory
+/// records for that cell (#232 (multiple cells)).
 async fn ready_tenant(
     client: &ParosClient,
     out: &Printer,
     tenant_name: &str,
-) -> Result<
-    (
-        TenantId,
-        paros::core::journal::JournalId,
-        JournalIdentifier,
-        Tags,
-    ),
-    Ending,
-> {
-    let Some(cell) = control_journals(client).await else {
-        note("no server named its cell's control journals: is the cell initialized?");
-        return Err(Ending::Unreachable);
-    };
-    let (Some(fleet), Some(election)) = (cell.fleet, cell.election) else {
-        note("the cell names no fleet journal or no election journal");
-        return Err(Ending::Refused);
-    };
-    let directory = match read_directory(client, 0, fleet).await {
-        Ok(directory) => directory,
-        Err(outcome) => {
-            note(&format!(
-                "the fleet directory could not be read to its tail: {outcome:?}"
-            ));
-            return Err(Ending::Unreachable);
-        }
-    };
-    let Some((tenant, entry)) = directory.named(tenant_name.as_bytes()) else {
+) -> Result<ReadyTenant, Ending> {
+    let universe = cells::universe(client).await?;
+    let Some((tenant, entry)) = universe.state.named(tenant_name.as_bytes()) else {
         out.emit(
             || format!("no tenant named {tenant_name}"),
             || json!({ "outcome": "unknown_tenant", "tenant": tenant_name }),
@@ -446,13 +453,53 @@ async fn ready_tenant(
         );
         return Err(Ending::Refused);
     }
-    Ok((tenant, entry.control, election, entry.all_tags()))
+    let cell = cells::tenant_cell(client, &universe, entry.cell_id)?;
+    let own = entry.cell_id == universe.own.cell_id;
+    let election = if own {
+        universe.own.election
+    } else {
+        let mut election = None;
+        for server in 0..cell.server_count() {
+            election = cell
+                .inspect_node(server)
+                .await
+                .as_ref()
+                .and_then(paros::client::bootstrap::control_journals_of)
+                .filter(|journals| journals.cell_id == entry.cell_id)
+                .and_then(|journals| journals.election);
+            if election.is_some() {
+                break;
+            }
+        }
+        election
+    };
+    let Some(election) = election else {
+        note(&format!(
+            "no machine of tenant {tenant_name}'s cell named its election journal"
+        ));
+        return Err(Ending::Unreachable);
+    };
+    Ok(ReadyTenant {
+        tenant,
+        control: entry.control,
+        election,
+        tags: entry.all_tags(),
+        elsewhere: (!own).then(|| {
+            universe
+                .state
+                .endpoint(entry.cell_id)
+                .iter()
+                .map(|(_, addr)| addr.clone())
+                .collect()
+        }),
+        client: cell,
+    })
 }
 
 /// The role counts `args` names (#604 (role counts)), each count it does
 /// not name kept from `held`, or a refusal printed.
 fn role_counts(args: &ConfigureArgs, held: TenantRoles) -> Result<TenantRoles, Ending> {
-    TenantRoles::new(args.frontends.unwrap_or(held.frontends)).map_err(|error| {
+    TenantRoles::new(args.frontend_count.unwrap_or(held.frontends)).map_err(|error| {
         note(&format!("refused: {error}"));
         Ending::Refused
     })
@@ -505,23 +552,25 @@ pub async fn configure(
     out: &Printer,
     args: ConfigureArgs,
 ) -> Ending {
-    let named_roles = args.frontends.is_some();
+    let named_roles = args.frontend_count.is_some();
     if named_roles && args.journal.is_some() {
-        note("--frontends is the tenant default's: drop --journal");
+        note("--frontend-count is the tenant default's: drop --journal");
         return Ending::Refused;
     }
     let named_counts = args.replicas.is_some() || args.proxies.is_some() || args.batchers.is_some();
     let named_mode = args.durability.desired();
     if named_mode.is_none() && !named_counts && !named_roles {
         note(
-            "name a mode: --survive, --partitions, --replicas, --proxies, --batchers or --frontends",
+            "name a mode: --survive, --partitions, --replicas, --proxies, --batchers or --frontend-count",
         );
         return Ending::Refused;
     }
-    let (tenant, control, election, _) = match ready_tenant(client, out, &args.tenant).await {
+    let ready = match ready_tenant(client, out, &args.tenant).await {
         Ok(found) => found,
         Err(ending) => return ending,
     };
+    let (tenant, control, election, client) =
+        (ready.tenant, ready.control, ready.election, &ready.client);
     // A count or a mode not named keeps the target's: read the fold when
     // the command names only part of them.
     let current = if named_roles || named_mode.is_none() || named_counts {

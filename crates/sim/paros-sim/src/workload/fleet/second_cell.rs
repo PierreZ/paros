@@ -18,6 +18,7 @@
 //! After chaos, the directory equals the second cell's tenant list while
 //! its machine keeps its vote (`final_second`).
 
+use std::collections::BTreeSet;
 use std::sync::{Arc, PoisonError};
 
 use moonpool_sim::{
@@ -68,6 +69,19 @@ pub(super) struct SecondCell {
     bucket: Option<u64>,
     /// The cell was removed from the directory.
     removed: bool,
+    /// The machines racked for it in the middle of the run (#490 (second
+    /// cell mid-run)), once an operator racked them: the cell forms over
+    /// these, and never over a layout machine again.
+    racked: Option<Vec<paros::model::address::Address>>,
+}
+
+impl SecondCell {
+    /// Whether the cell's votes are still on its machines' disks: racked
+    /// machines are never wiped (their group has no wipe regime), a layout
+    /// machine may be.
+    fn alive(&self, state: &moonpool_sim::StateHandle) -> bool {
+        self.racked.is_some() || crate::machine::second_cell_alive(state)
+    }
 }
 
 const SECOND_CELL_KEY: &str = "paros-second-cell";
@@ -132,15 +146,22 @@ impl FleetOps {
         policy: CheckpointPolicy,
         draw: u64,
     ) -> bool {
-        let (formed, joined, tenant) = with_second(ctx.state(), |second| {
-            (second.formed.clone(), second.joined, second.tenant)
+        let (formed, joined, tenant, alive) = with_second(ctx.state(), |second| {
+            (
+                second.formed.clone(),
+                second.joined,
+                second.tenant,
+                second.alive(ctx.state()),
+            )
         });
-        let Some(formed) = formed.filter(|_| crate::machine::second_cell_alive(ctx.state())) else {
+        let Some(formed) = formed.filter(|_| alive) else {
             // Not formed yet, or its machine was wiped (a lost cell of one
-            // member): form one on an idle machine `init` does not list.
+            // member): form one on racked machines, or on an idle machine
+            // `init` does not list.
             with_second(ctx.state(), |second| {
                 *second = SecondCell {
                     busy: true,
+                    racked: second.racked.take(),
                     ..SecondCell::default()
                 }
             });
@@ -168,9 +189,13 @@ impl FleetOps {
         true
     }
 
-    /// Form an idle cell on an unlisted idle machine: `init` over that one
-    /// machine, with no universe.
+    /// Form an idle cell, with no universe: on machines racked for it in
+    /// the middle of the run (#490 (second cell mid-run)), or on an
+    /// unlisted idle machine of the layout, `init` over that one machine.
     async fn form_second(&mut self, ctx: &SimContext, draw: u64) -> bool {
+        if let Some(racked) = Self::rack_second(ctx) {
+            return self.form_racked(ctx, &racked, draw).await;
+        }
         // A `stateless` machine is never a founding member.
         let unlisted: Vec<_> = (self.layout.listed..self.machines.len())
             .filter(|rank| {
@@ -233,6 +258,135 @@ impl FleetOps {
         let formed = CellJoin {
             journals,
             endpoint: initialized.servers.clone(),
+            name: CELL_NAME.as_bytes().to_vec(),
+        };
+        with_second(ctx.state(), |second| second.formed = Some(formed));
+        true
+    }
+
+    /// The machines racked for the second cell: racked by an earlier step,
+    /// or now, on a coin, unless the cell already formed on a layout
+    /// machine. `None` when the cell forms on a layout machine.
+    fn rack_second(ctx: &SimContext) -> Option<Vec<paros::model::address::Address>> {
+        if let Some(racked) = with_second(ctx.state(), |second| second.racked.clone()) {
+            return Some(racked);
+        }
+        if crate::machine::second_cell_founded(ctx.state()) || !buggify_with_prob!(0.5) {
+            return None;
+        }
+        let count = moonpool_sim::sim_random_range(
+            *crate::machine::racked::CELL_TWO_RANGE.start()
+                ..*crate::machine::racked::CELL_TWO_RANGE.end() + 1,
+        );
+        let ips = ctx
+            .deployment()
+            .spawn_group(crate::machine::racked::CELL_TWO_GROUP, count, || {
+                Box::new(crate::machine::racked::RackedMachineProcess::racked())
+            })
+            .ok()?;
+        let racked: Vec<_> = ips
+            .iter()
+            .filter_map(|ip| crate::machine::racked::racked_address(ip).ok())
+            .collect();
+        assert_always!(
+            racked.len() == count,
+            "universe: every racked machine has an address",
+            { "count" => count }
+        );
+        assert_reachable!("universe: an operator racks machines for a second cell mid-run");
+        with_second(ctx.state(), |second| second.racked = Some(racked.clone()));
+        Some(racked)
+    }
+
+    /// `cell init --idle` over the racked machines, under chaos (#490
+    /// (second cell mid-run)): 2F+1 founders, `F` one over three machines
+    /// and zero below. On a coin the list also names a founding member of
+    /// the run's cell, which is in a cell already: the formation is then
+    /// refused, and a later step forms the cell over the racked machines
+    /// alone.
+    async fn form_racked(
+        &mut self,
+        ctx: &SimContext,
+        racked: &[paros::model::address::Address],
+        draw: u64,
+    ) -> bool {
+        let mut listed = racked.to_vec();
+        let foreign = buggify_with_prob!(0.1) && self.layout.founders > 0;
+        if foreign {
+            listed.push(self.machines[0].clone());
+        }
+        let survive_machines = u32::from(racked.len() >= 3);
+        let connector = self.connector.clone();
+        let observer: Arc<dyn paros::client::CallObserver> = Arc::new(Announce::every(ctx));
+        let token =
+            crate::frontend::operator_token(ctx.state(), connector.providers().time().now());
+        let run = paros::client::initialize::initialize(
+            connector.providers(),
+            connector.rpc(),
+            connector.names(),
+            &listed,
+            |servers| {
+                connector
+                    .client(servers)
+                    .with_observer(observer.clone())
+                    .rotating_over(servers.len())
+            },
+            InitParams {
+                patience: self.patience,
+                fleet_id: draw | 1,
+                leader_seed: self.leader_seeds.next(),
+                names: (String::new(), CELL_NAME.into()),
+                token,
+                root_key: None,
+                survive_machines,
+                idle: true,
+            },
+        )
+        .await;
+        let (InitRun::Initialized(initialized) | InitRun::AlreadyInitialized(initialized)) = run
+        else {
+            if foreign && matches!(run, InitRun::Refused(_)) {
+                assert_reachable!(
+                    "universe: a second cell's init that lists a machine of the run's cell is refused"
+                );
+            }
+            return true;
+        };
+        let members: BTreeSet<u64> = initialized
+            .servers
+            .iter()
+            .chain(&initialized.admitted)
+            .filter(|(_, addr)| !racked.contains(addr))
+            .map(|(id, _)| *id)
+            .collect();
+        assert_always!(
+            members.is_empty(),
+            "universe: a second cell never takes a machine of the run's cell",
+            { "foreign" => format!("{members:?}") }
+        );
+        assert_always!(
+            initialized.fleet_id == 0 && initialized.journals.fleet.is_none(),
+            "universe: an idle cell holds no universe tenant",
+            { "cell" => initialized.journals.cell_id }
+        );
+        if initialized.members.len() + initialized.admitted.len() >= 2 {
+            assert_reachable!("universe: a second cell of two or more machines forms during chaos");
+        }
+        let journals = initialized.journals;
+        self.note_journals(
+            [Some(journals.cell), journals.election]
+                .into_iter()
+                .flatten(),
+        );
+        let endpoint = initialized
+            .servers
+            .iter()
+            .filter(|(_, addr)| racked.contains(addr))
+            .cloned()
+            .collect();
+        let formed = CellJoin {
+            journals,
+            endpoint,
             name: CELL_NAME.as_bytes().to_vec(),
         };
         with_second(ctx.state(), |second| second.formed = Some(formed));
@@ -580,7 +734,9 @@ impl FleetOps {
             return;
         };
         let cell_id = formed.journals.cell_id;
-        if !crate::machine::second_cell_alive(ctx.state()) || directory.cell(cell_id).is_none() {
+        if !with_second(ctx.state(), |second| second.alive(ctx.state()))
+            || directory.cell(cell_id).is_none()
+        {
             return;
         }
         // This operator may have taken no phase: it learns the cell's

@@ -3,11 +3,17 @@
 //! and a journal by its name.
 //!
 //! [`Labels`] is one admin cell view (`crate::support::view`) of the servers' cell,
-//! read once per command: its machines, its tenants and their journals.
+//! read once per command: its machines, its tenants and their journals. A
+//! command that follows a tenant to another cell adds that cell's names.
 //! Anything the view does not name — no answer, an entity of another cell
 //! — prints as its short hex id, the debugging form.
 
 use std::collections::BTreeMap;
+use std::time::Duration;
+
+use moonpool_core::CompioProviders;
+use moonpool_rpc::RpcHandle;
+use paros::model::address::{Address, Names};
 
 use paros::client::views::{ViewOutcome, ask, request};
 use paros::core::journal::{JournalIdentifier, TenantId};
@@ -31,18 +37,24 @@ impl Labels {
     /// The names of the servers' cell, from one admin cell view; none when
     /// no server answered it.
     pub async fn fetch(asker: &Asker<'_>) -> Self {
-        let request = request(&Scope::Admin, Query::Cell(CellQuery {}));
-        match ask(
-            asker.providers,
-            asker.rpc,
-            asker.names,
+        Self::fetch_from(
+            (asker.providers, asker.rpc, asker.names),
             &asker.servers,
-            0,
-            &request,
             asker.timeout,
         )
         .await
-        {
+    }
+
+    /// The names of the cell of `servers` (another cell's entry endpoint,
+    /// #232 (multiple cells)), from one admin cell view; none when no server
+    /// answered it.
+    pub async fn fetch_from(
+        (providers, rpc, names): (&CompioProviders, &RpcHandle<CompioProviders>, &Names),
+        servers: &[Address],
+        timeout: Duration,
+    ) -> Self {
+        let request = request(&Scope::Admin, Query::Cell(CellQuery {}));
+        match ask(providers, rpc, names, servers, 0, &request, timeout).await {
             ViewOutcome::Answered(reply) => Self::of(&reply),
             ViewOutcome::Refused(_) | ViewOutcome::Unreachable => Self::default(),
         }
@@ -91,6 +103,25 @@ impl Labels {
         labels
     }
 
+    /// Take the names `other` gives that these do not.
+    pub fn absorb(&mut self, other: Self) {
+        for (id, name) in other.machines {
+            self.machines.entry(id).or_insert(name);
+        }
+        for (id, name) in other.tenants {
+            self.tenants.entry(id).or_insert(name);
+        }
+        for (id, name) in other.journals {
+            self.journals.entry(id).or_insert(name);
+        }
+        for (id, name) in other.cells {
+            self.cells.entry(id).or_insert(name);
+        }
+        if self.universe.is_none() {
+            self.universe = other.universe;
+        }
+    }
+
     /// The names of the universe's cells and tenants, from its directory
     /// (#713 (bucket placement)): what a universe command that read the
     /// directory prints a refusal with.
@@ -120,9 +151,10 @@ impl Labels {
         self.machines.get(&id).cloned().unwrap_or_else(|| short(id))
     }
 
-    /// Machines' names, comma-separated, in brackets.
+    /// Machines' names, in name order, comma-separated, in brackets.
     pub fn machines(&self, ids: &[u64]) -> String {
-        let names: Vec<String> = ids.iter().map(|id| self.machine(*id)).collect();
+        let mut names: Vec<String> = ids.iter().map(|id| self.machine(*id)).collect();
+        names.sort();
         format!("[{}]", names.join(","))
     }
 

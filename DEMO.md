@@ -23,7 +23,8 @@ The image can also be built with Nix: `nix build .#image && docker load < result
 `docker compose up -d` without `--build`; it uses the loaded `paros:local` and pulls nothing.
 
 ```sh
-# Five machines: node1..node3 (storage, zones a/b/c), storage4, stateless1 (stateless).
+# Nine machines: node1..node3 (storage, zones a/b/c), storage4, stateless1 (stateless) for
+# cell-1; cell2-a..cell2-c (storage) and cell2-stateless for cell-2.
 # After an upgrade, start over with `docker compose down -v`: a volume an older version wrote
 # can make a machine refuse to start (exit 78).
 docker compose up -d --build
@@ -91,7 +92,7 @@ docker compose run --rm parosctl cell add-machine stateless1:4500
 # acceptors, matchmakers, replicas, proxy leaders, batchers and frontends.
 docker compose run --rm parosctl journal create acme feed --writers multi
 docker compose run --rm parosctl configure --tenant acme --journal feed --replicas 2 --proxies 1 --batchers 1
-docker compose run --rm parosctl configure --tenant acme --frontends 1
+docker compose run --rm parosctl configure --tenant acme --frontend-count 1
 
 # The cell, as tables (#399): its machines, its tenants, who holds which role.
 docker compose run --rm parosctl machine list
@@ -131,16 +132,35 @@ docker compose run --rm parosctl cell remove-machine storage4
 docker compose run --rm paros-bench --tenant bench --journals 4 --clients 8 --duration 60s --ramp 10s
 
 # A second cell (#232 (multiple cells)): cell2-a..cell2-c form an idle cell, which then joins
-# the universe as cell-2. A tenant goes into it with `--cell`.
+# the universe as cell-2. A tenant goes into it with `--cell`. A command that names the
+# tenant (`journal create`, `configure`, `write`, `read`, `tenant show`, `status --tenant`,
+# `roles --tenant`) asks cell-1's machines, finds the tenant in cell-2 through the universe
+# directory, and sends the request to cell-2. Only the commands about the cell itself
+# (`cell show`, `cell add-machine`, `machine list`, `status`) take `--servers cell2:4500`.
 docker compose run --rm init-cell2
 docker compose run --rm add-cell2
 docker compose run --rm parosctl tenant create initech --cell cell-2
 docker compose run --rm parosctl journal create initech orders
 
+# Every role in cell-2 too: admit its stateless machine (`--servers cell2:4500` asks cell-2),
+# then give initech a multi-writer journal with two replicas, a proxy leader and a batcher,
+# and a frontend. `cell show` on cell-2 and `roles` list them.
+docker compose run --rm parosctl --servers cell2:4500 cell add-machine cell2-stateless:4500
+docker compose run --rm parosctl journal create initech feed --writers multi
+docker compose run --rm parosctl configure --tenant initech --journal feed --replicas 2 --proxies 1 --batchers 1
+docker compose run --rm parosctl configure --tenant initech --frontend-count 1
+docker compose run --rm parosctl --servers cell2:4500 cell show
+docker compose run --rm parosctl roles --tenant initech
+docker compose run --rm parosctl tenant show initech
+
+# Data in cell-2, through cell-1's machines, by name.
+docker compose run --rm parosctl write initech/orders "first order"
+docker compose run --rm parosctl read initech/orders
+
 # The resolver (#233 (resolver)): every machine of both cells serves it. Ask a machine of
 # cell-1 with the tenant's own token (`demo/keys/initech.token`): the resolver checks the
 # token, sends the client to cell-2, and a machine of cell-2 names the rest. Prints:
-#   a resolver of cell … sends tenant "initech" to cell cell-2
+#   parosctl: tenant "initech" lives in cell cell-2: resolved through that cell's machines
 #   tenant=initech universe=demo cell=cell-2 machines=cell2-a:4500,cell2-b:4500,cell2-c:4500 …
 INITECH=$(cat demo/keys/initech.token)
 docker compose run --rm parosctl --token "$INITECH" resolve initech
@@ -273,7 +293,7 @@ its name. The tenant coordinator books a tenant's frontends on the `stateless` m
 `parosctl resolve` names them:
 
 ```sh
-parosctl configure --tenant acme --frontends 1
+parosctl configure --tenant acme --frontend-count 1
 parosctl resolve acme      # frontends=…
 parosctl token mint --key /tmp/paros-demo/demo-1.private --role tenant --tenant acme --ttl 1h \
   --subject acme --out /tmp/paros-demo/acme.token

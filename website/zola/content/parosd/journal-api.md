@@ -146,7 +146,7 @@ FoundationDB:
   names no durability takes the default.
 - `parosctl configure --tenant acme --journal orders --proxies 2 --replicas 1` sets the
   journal's scale counts. The command also takes `--batchers`; without `--journal` it sets the
-  tenant's default, and `--frontends` sets the tenant's frontends. A count that the command does
+  tenant's default, and `--frontend-count` sets the tenant's frontends. A count that the command does
   not name keeps its value. A count of 0 runs the job in the leader's process. The cell places
   proxy leaders and batchers on its `stateless` machines, replicas on `storage` machines, and
   the journal's leader runs the counts by a round change. Each machine runs the proxy leaders

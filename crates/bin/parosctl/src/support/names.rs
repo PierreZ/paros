@@ -19,13 +19,16 @@ use paros::client::Client;
 use paros::client::bootstrap::control_journals;
 use paros::client::fleet::read_directory;
 use paros::client::names::{
-    JournalResolution, NameResolution, TenantResolution, Unreadable, read_tenant_control, resolve,
+    JournalResolution, TenantResolution, Unreadable, read_tenant_control, resolve_journal,
+    tenant_in,
 };
 use paros::core::journal::{JournalId, JournalIdentifier, TenantId};
+use paros::model::address::Address;
 use paros::model::name::{
     Abbreviations, JournalName, PrefixMatch, match_prefix, parse_full, parse_prefix,
 };
 
+use crate::support::cells;
 use crate::support::connect::Ending;
 use crate::support::labels::Labels;
 use crate::support::output::note;
@@ -75,19 +78,26 @@ impl fmt::Display for JournalRef {
     }
 }
 
-/// A journal resolved: its identifier, and how to print it.
-#[derive(Clone, Debug)]
+/// A journal resolved: its identifier, how to print it, and a client of
+/// the cell that serves it.
+#[derive(Clone)]
 pub struct Resolved {
     /// What the protocol carries.
     pub journal: JournalIdentifier,
     /// Its name, or its abbreviated ids.
     pub label: String,
+    /// A client of the journal's cell: the servers' own client, or one over
+    /// the entry endpoint of the tenant's cell (#232 (multiple cells)).
+    pub client: ParosClient,
+    /// That entry endpoint, when another cell than the servers' serves the
+    /// journal: where the names of its machines are read. Else empty.
+    pub elsewhere: Vec<Address>,
 }
 
 /// The journal `reference` names, or how the command ends.
 pub async fn journal(client: &ParosClient, reference: &JournalRef) -> Result<Resolved, Ending> {
     if let Some(pass) = client.node(0).pass() {
-        return through_frontend(pass, reference);
+        return through_frontend(client, pass, reference);
     }
     match reference {
         JournalRef::Name(name) => by_name(client, name).await,
@@ -99,7 +109,11 @@ pub async fn journal(client: &ParosClient, reference: &JournalRef) -> Result<Res
 /// frontend)): a name is sent as it is, bound to a local identifier the
 /// frontend never reads; ids name an internal journal (an `admin` token)
 /// and must be whole, since `parosctl` lists nothing through a frontend.
-fn through_frontend(pass: &paros::net::Pass, reference: &JournalRef) -> Result<Resolved, Ending> {
+fn through_frontend(
+    client: &ParosClient,
+    pass: &paros::net::Pass,
+    reference: &JournalRef,
+) -> Result<Resolved, Ending> {
     match reference {
         JournalRef::Name(name) => {
             let local = JournalIdentifier::new(TenantId(1), JournalId(1));
@@ -107,6 +121,8 @@ fn through_frontend(pass: &paros::net::Pass, reference: &JournalRef) -> Result<R
             Ok(Resolved {
                 journal: local,
                 label: name.short(),
+                client: client.clone(),
+                elsewhere: Vec::new(),
             })
         }
         JournalRef::Id { tenant, journal } => {
@@ -114,6 +130,8 @@ fn through_frontend(pass: &paros::net::Pass, reference: &JournalRef) -> Result<R
                 return Ok(Resolved {
                     journal: JournalIdentifier::new(TenantId(tenant), JournalId(journal)),
                     label: reference.to_string(),
+                    client: client.clone(),
+                    elsewhere: Vec::new(),
                 });
             }
             note("through a frontend, ids are whole: 16 hex digits each");
@@ -122,47 +140,59 @@ fn through_frontend(pass: &paros::net::Pass, reference: &JournalRef) -> Result<R
     }
 }
 
-/// Resolve `name`: its tenant through the universe directory, then its
-/// journal through the tenant's control journal.
+/// Resolve `name`: its tenant through the universe directory (of the
+/// servers' cell, or of the cell its universe pointer names), then its
+/// journal through the tenant's control journal, in the tenant's cell
+/// (#232 (multiple cells)).
 async fn by_name(client: &ParosClient, name: &JournalName) -> Result<Resolved, Ending> {
-    let Some(journals) = control_journals(client).await else {
-        note("no server named its cell's control journals: is the cell initialized?");
-        return Err(Ending::Unreachable);
-    };
-    let Some(universe) = journals.fleet else {
-        note("the cell hosts no universe directory: names resolve only there");
-        return Err(Ending::Refused);
-    };
-    let ending = match resolve(client, 0, universe, name).await {
-        NameResolution::Resolved(journal) => {
-            return Ok(Resolved {
-                journal,
-                label: name.short(),
-            });
-        }
-        NameResolution::Tenant(TenantResolution::Resolved { .. })
-        | NameResolution::Journal(JournalResolution::Resolved { .. }) => {
-            unreachable!("a resolved hop resolves the name")
-        }
-        NameResolution::Tenant(TenantResolution::Unknown) => {
+    let universe = cells::universe(client).await?;
+    let at = universe.state.next_seq();
+    let control = match tenant_in(&universe.state, name.tenant().as_bytes(), at) {
+        TenantResolution::Resolved { control, .. } => control,
+        TenantResolution::Unknown => {
             note(&format!("no tenant named {}", name.tenant()));
-            Ending::Refused
+            return Err(Ending::Refused);
         }
-        NameResolution::Tenant(TenantResolution::Internal) => {
+        TenantResolution::Internal => {
             note("an internal tenant has no name: name it by its ids (id:TENANT/JOURNAL)");
-            Ending::Refused
+            return Err(Ending::Refused);
         }
-        NameResolution::Tenant(TenantResolution::NotReady { state, .. }) => {
+        TenantResolution::NotReady { state, .. } => {
             note(&format!("tenant {} is {}", name.tenant(), state.as_str()));
-            Ending::Refused
+            return Err(Ending::Refused);
         }
-        NameResolution::Tenant(TenantResolution::Unreadable(outcome)) => {
+        TenantResolution::Unreadable(outcome) => {
             note(&format!(
                 "the universe directory could not be read: {outcome:?}"
             ));
-            Ending::Unreachable
+            return Err(Ending::Unreachable);
         }
-        NameResolution::Journal(JournalResolution::Unknown { .. }) => {
+    };
+    let cell_id = universe
+        .state
+        .tenant(control.tenant)
+        .map_or(universe.own.cell_id, |entry| entry.cell_id);
+    let cell = cells::tenant_cell(client, &universe, cell_id)?;
+    let elsewhere = if cell_id == universe.own.cell_id {
+        Vec::new()
+    } else {
+        universe
+            .state
+            .endpoint(cell_id)
+            .iter()
+            .map(|(_, addr)| addr.clone())
+            .collect()
+    };
+    let ending = match resolve_journal(&cell, 0, control, name.journal().as_bytes()).await {
+        JournalResolution::Resolved { journal, .. } => {
+            return Ok(Resolved {
+                journal,
+                label: name.short(),
+                client: cell,
+                elsewhere,
+            });
+        }
+        JournalResolution::Unknown { .. } => {
             note(&format!(
                 "tenant {} has no journal named {}",
                 name.tenant(),
@@ -170,14 +200,14 @@ async fn by_name(client: &ParosClient, name: &JournalName) -> Result<Resolved, E
             ));
             Ending::Refused
         }
-        NameResolution::Journal(JournalResolution::Unreadable(Unreadable::UnknownJournal)) => {
+        JournalResolution::Unreadable(Unreadable::UnknownJournal) => {
             note(&format!(
-                "no server serves tenant {}'s control journal yet (#210)",
+                "no server serves tenant {}'s control journal yet",
                 name.tenant()
             ));
             Ending::Refused
         }
-        NameResolution::Journal(JournalResolution::Unreadable(why)) => {
+        JournalResolution::Unreadable(why) => {
             note(&format!(
                 "tenant {}'s control journal could not be read: {why:?}",
                 name.tenant()
@@ -265,6 +295,8 @@ async fn by_ids(client: &ParosClient, tenant: &str, journal: &str) -> Result<Res
         journal,
         label: Abbreviations::new(known.iter().flat_map(|j| [j.tenant.0, j.journal.0]))
             .journal(journal),
+        client: client.clone(),
+        elsewhere: Vec::new(),
     })
 }
 
