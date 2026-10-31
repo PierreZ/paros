@@ -7,10 +7,11 @@
 use std::collections::BTreeSet;
 
 use super::{
-    ColocatedNode, Command, Control, HANDOFF_BATCH, HANDOFF_FENCE_ELECTIONS, LeadershipOrigin,
-    MemStorage, Message, NO_CHECK_QUORUM, NodeId, NodeRole, Party, ProposeResult, Slot, ballot,
-    campaign, chosen_at, cluster, cluster_with_three_chosen, deliver_all, deliver_filtered, drain,
-    entry, make_leader, node, ucmd, val,
+    AcceptorConfig, ColocatedNode, Command, Control, HANDOFF_BATCH, HANDOFF_FENCE_ELECTIONS,
+    LeadershipOrigin, MemStorage, Message, NO_CHECK_QUORUM, NodeId, NodeRole, Party, ProposeResult,
+    Slot, ballot, campaign, cfg, chosen_at, cluster, cluster_with_three_chosen, deliver_all,
+    deliver_filtered, deployed_node, drain, drain_match_requests, entry, make_leader, matchmake,
+    node, registries, ucmd, val,
 };
 use crate::contract::limits::Limits;
 use crate::proposer::RecoveryPolicy;
@@ -599,4 +600,197 @@ fn the_transferred_tail_names_every_slot_below_the_frontier() {
         pending.values().all(|c| matches!(c, Command::Write(_))),
         "the open round carries its client command verbatim"
     );
+}
+
+// ---- the configuration a handoff carries -------------------------------------
+
+/// The distinct nodes `queue` sends an `Accept` to, in order.
+fn accept_targets(queue: &[(NodeId, Message)]) -> Vec<NodeId> {
+    let targets: BTreeSet<NodeId> = queue
+        .iter()
+        .filter(|(_, m)| matches!(m, Message::Accept { .. }))
+        .map(|(to, _)| *to)
+        .collect();
+    targets.into_iter().collect()
+}
+
+/// A matchmaker deployment of `{0, 1, 2}` over the pool `{0, 1, 2, 3}`
+/// with one registry: node 0 leads after a real matchmaking round, and
+/// one slot is chosen everywhere.
+fn deployed_cluster() -> [ColocatedNode; 4] {
+    let pool = [0, 1, 2, 3];
+    let mut nodes = [0, 1, 2, 3].map(|id| deployed_node(id, &[0, 1, 2], &pool, 1));
+    let mut mms = registries(1);
+    campaign(&mut nodes[0]);
+    let requests = drain_match_requests(&mut nodes[0]);
+    for reply in matchmake(&mut mms, requests) {
+        nodes[0].on_match_reply(reply);
+    }
+    let q = drain(&mut nodes[0]);
+    deliver_all(&mut nodes, q);
+    assert!(nodes[0].is_leader());
+    nodes[0].set_election_timeout(NO_CHECK_QUORUM);
+    nodes[0].tick();
+    let q = drain(&mut nodes[0]);
+    deliver_all(&mut nodes, q);
+    let _ = nodes[0].propose(entry(1, 1, 1));
+    let q = drain(&mut nodes[0]);
+    deliver_all(&mut nodes, q);
+    nodes
+}
+
+/// The `Relinquish` that node 0 of `nodes` sends to node 1.
+fn relinquish_to_one(nodes: &mut [ColocatedNode]) -> Message {
+    nodes[0].relinquish_to(NodeId(1)).expect("handoff admitted");
+    let queue = drain(&mut nodes[0]);
+    take_relinquish(&queue).1
+}
+
+/// `msg` with its `config` and `prior` replaced.
+fn with_configs(
+    msg: &Message,
+    config: Option<AcceptorConfig>,
+    prior: Vec<AcceptorConfig>,
+) -> Message {
+    tamper(msg, |m| {
+        if let Message::Relinquish {
+            config: c,
+            prior: p,
+            ..
+        } = m
+        {
+            *c = config;
+            *p = prior;
+        }
+    })
+}
+
+/// On a matchmaker deployment the successor runs Phase 2 over the
+/// configuration the payload carries. It also holds the prior
+/// configurations of the payload in force until its own GC floor is
+/// effective.
+#[test]
+fn a_matchmaker_successor_leads_under_the_carried_configurations() {
+    let mut nodes = deployed_cluster();
+    let msg = relinquish_to_one(&mut nodes);
+    let Message::Relinquish { config, prior, .. } = &msg else {
+        panic!("a Relinquish")
+    };
+    assert_eq!(*config, Some(cfg(&[0, 1, 2])), "the minter's configuration");
+    assert!(prior.is_empty());
+
+    let moved = with_configs(&msg, Some(cfg(&[0, 1, 3])), vec![cfg(&[0, 1, 2])]);
+    nodes[1].step(moved);
+    assert!(nodes[1].is_leader());
+    assert_eq!(*nodes[1].acceptors(), cfg(&[0, 1, 3]));
+    let (in_force_prior, current) = nodes[1]
+        .configs_in_force()
+        .expect("a leader names its configurations");
+    assert_eq!(*current, cfg(&[0, 1, 3]));
+    assert_eq!(in_force_prior, vec![&cfg(&[0, 1, 2])]);
+
+    let _ = nodes[1].propose(entry(2, 1, 9));
+    let q = drain(&mut nodes[1]);
+    assert_eq!(
+        accept_targets(&q),
+        vec![NodeId(0), NodeId(3)],
+        "Phase 2 runs over the carried configuration"
+    );
+}
+
+/// On a matchmaker deployment a payload is malformed when it carries no
+/// configuration, a configuration outside the pool, a prior configuration
+/// that repeats the one in force, or a prior configuration outside the
+/// pool. The successor refuses it and does not lead.
+#[test]
+fn a_matchmaker_successor_refuses_a_malformed_configuration() {
+    let mut nodes = deployed_cluster();
+    let good = relinquish_to_one(&mut nodes);
+    let malformed = [
+        with_configs(&good, None, Vec::new()),
+        with_configs(&good, Some(cfg(&[0, 1, 9])), Vec::new()),
+        with_configs(&good, Some(cfg(&[0, 1, 2])), vec![cfg(&[0, 1, 2])]),
+        with_configs(&good, Some(cfg(&[0, 1, 2])), vec![cfg(&[0, 1, 9])]),
+    ];
+    for (refused, msg) in (1u64..).zip(malformed) {
+        nodes[1].step(msg);
+        assert!(!nodes[1].is_leader());
+        assert_eq!(nodes[1].handoff_counters().rejected_shape, refused);
+    }
+    assert_eq!(*nodes[1].acceptors(), cfg(&[0, 1, 2]), "nothing adopted");
+    nodes[1].step(good);
+    assert!(nodes[1].is_leader(), "the guards refused only the damage");
+}
+
+/// On plain Multi-Paxos a payload with a configuration or with prior
+/// configurations is malformed. The successor refuses it and does not
+/// lead.
+#[test]
+fn a_plain_successor_refuses_a_payload_with_configurations() {
+    let mut nodes = cluster_with_three_chosen();
+    let good = relinquish_to_one(&mut nodes);
+    let malformed = [
+        with_configs(&good, Some(cfg(&[0, 1, 2])), Vec::new()),
+        with_configs(&good, None, vec![cfg(&[0, 1, 2])]),
+    ];
+    for (refused, msg) in (1u64..).zip(malformed) {
+        nodes[1].step(msg);
+        assert!(!nodes[1].is_leader());
+        assert_eq!(nodes[1].handoff_counters().rejected_shape, refused);
+    }
+    nodes[1].step(good);
+    assert!(nodes[1].is_leader(), "the guards refused only the damage");
+}
+
+/// A candidate whose own campaign is below the handed authority drops its
+/// campaign and leads under the handed ballot. It sends no `Prepare` of
+/// its own after the install.
+#[test]
+fn a_candidate_drops_its_campaign_to_install_a_higher_authority() {
+    let mut nodes = cluster::<3>();
+    // Node 1 campaigns, but its `Prepare`s are lost.
+    nodes[1].set_election_timeout(1);
+    nodes[1].tick();
+    let _ = drain(&mut nodes[1]);
+    assert_eq!(nodes[1].role(), NodeRole::Candidate);
+    let stale_campaign = nodes[1].ballot();
+    // Node 0 campaigns above it and wins with node 2 alone.
+    nodes[0].set_election_timeout(1);
+    while nodes[0].ballot() <= stale_campaign {
+        nodes[0].tick();
+        let _ = drain(&mut nodes[0]);
+    }
+    nodes[0].tick();
+    let q = drain(&mut nodes[0]);
+    let away_from_one = |to: NodeId, _: &Message| to != NodeId(1);
+    deliver_filtered(&mut nodes, q, away_from_one);
+    assert!(nodes[0].is_leader());
+    assert!(nodes[0].ballot() > stale_campaign);
+    nodes[0].set_election_timeout(NO_CHECK_QUORUM);
+    assert_eq!(nodes[1].role(), NodeRole::Candidate, "node 1 heard nothing");
+
+    let authority = nodes[0].ballot();
+    let msg = relinquish_to_one(&mut nodes);
+    nodes[1].step(msg);
+    assert!(nodes[1].is_leader());
+    assert_eq!(nodes[1].ballot(), authority);
+    assert_eq!(
+        nodes[1].leadership_origin(),
+        LeadershipOrigin::Handoff { from: NodeId(0) }
+    );
+    let q = drain(&mut nodes[1]);
+    assert!(
+        !q.iter().any(|(_, m)| matches!(m, Message::Prepare { .. })),
+        "the stale campaign is gone"
+    );
+    let ProposeResult::Accepted(slot) = nodes[1].propose(entry(5, 1, 50)) else {
+        panic!("the installed leader admits proposals");
+    };
+    let q = drain(&mut nodes[1]);
+    assert!(
+        q.iter()
+            .any(|(_, m)| matches!(m, Message::Accept { ballot: b, .. } if *b == authority))
+    );
+    deliver_all(&mut nodes, q);
+    assert_eq!(chosen_at(&nodes[1], slot.0), Some(val(50)));
 }
