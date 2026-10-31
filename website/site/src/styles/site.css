@@ -130,7 +130,6 @@ pre {
 .caps li { display: grid; grid-template-columns: 18ch 1fr; gap: 0 16px; padding: 9px 0; border-bottom: 1px solid var(--rule); }
 .caps b { font-weight: 600; }
 .caps span { color: var(--muted); }
-.cmdline { margin: 10px 0 0; padding: 8px 12px; background: var(--panel); border: 1px solid var(--rule); font-size: 12px; }
 
 /* Box drawings: single lines for a box, a double line for the cell, a dot
    pattern as the only shadow. Used by the home page and the Paxos pages. */

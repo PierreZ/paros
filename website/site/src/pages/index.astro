@@ -1,6 +1,6 @@
 ---
 // The home page sells parosd (#810 (website redo 1/4)): what it is, what you
-// get, a session, the path of a write, measured numbers, how to run it, and
+// get, a session, the path of a write, how to run it, and
 // the Paxos flavors it is made of.
 import Base from "../layouts/Base.astro";
 import Panel from "../components/Panel.astro";
@@ -23,8 +23,6 @@ import { url } from "../nav";
 
     <div class="strip" aria-label="parosd in figures">
       <div><span class="k">Data plane</span><span class="v">4 calls</span></div>
-      <div><span class="k">Writes/s · 8×8</span><span class="v">845</span></div>
-      <div><span class="k">p99 · 1×1</span><span class="v">3.6 ms</span></div>
       <div><span class="k">Paxos flavors</span><span class="v">5</span></div>
       <div><span class="k">Coordination service</span><span class="v">none</span></div>
     </div>
@@ -74,21 +72,7 @@ import { url } from "../nav";
       </div>
     </Panel>
 
-    <Panel num="04" title="Numbers" meta="2026-10-17">
-      <table class="tnum">
-        <thead><tr><th>Clients × journals</th><th>Writes/s</th><th>p50</th><th>p99</th></tr></thead>
-        <tbody>
-          <tr><td>1 × 1</td><td>622</td><td>1.4 ms</td><td>3.6 ms</td></tr>
-          <tr><td>8 × 8</td><td>845</td><td>8.7 ms</td><td>28.5 ms</td></tr>
-        </tbody>
-      </table>
-      <pre class="cmdline"><code>paros-bench --local 3 --clients 8 --journals 8 --duration 20s --ramp 2s</code></pre>
-      <p class="aside">A cell of three machines in one process, on one 4-vCPU cloud host, ext4, 256-byte
-        records, one record per write, every write synced to disk on a majority. Measured on 2026-10-17. The
-        numbers compare commits on one host; they are not production numbers.</p>
-    </Panel>
-
-    <Panel num="05" title="Run it">
+    <Panel num="04" title="Run it">
       <div class="term">
         <div class="term-head label"><span>shell</span><span>Docker with Compose, nothing else</span></div>
 <pre><code><span class="p">$ </span>git clone https://github.com/PierreZ/paros && cd paros
@@ -99,7 +83,7 @@ import { url } from "../nav";
       <p class="aside"><a class="act-link" href={url("docs/quickstart/")}>Quickstart</a>: write, read, kill a machine, add a cell.</p>
     </Panel>
 
-    <Panel num="06" title="Made of Paxos flavors">
+    <Panel num="05" title="Made of Paxos flavors">
       <ol class="index-list">
         <li><a href={url("paxos/single-decree/")}>Single-decree Paxos</a><span class="desc">Forms the cell: <code>cell init</code> chooses the cell plan once.</span></li>
         <li><a href={url("paxos/multi-paxos/")}>Multi-Paxos</a><span class="desc">Each journal is a log of slots with a stable leader.</span></li>

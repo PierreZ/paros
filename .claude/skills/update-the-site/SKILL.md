@@ -11,7 +11,7 @@ explains the Paxos flavors paros uses, and it shows the engineering techniques. 
 
 | Changed | Page (`website/site/src/pages/`) |
 |---|---|
-| what parosd offers, the bench numbers | `index.astro` |
+| what parosd offers | `index.astro` |
 | single decree, `cell init` | `paxos/single-decree.md` |
 | slots, the leader, persist-before-send, reads | `paxos/multi-paxos.md` |
 | matchmakers, reconfiguration, GC | `paxos/matchmaker.md` |

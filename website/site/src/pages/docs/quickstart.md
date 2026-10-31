@@ -94,11 +94,4 @@ docker compose run --rm parosctl write initech/orders "first order"
 `init-cell2` forms an idle cell and `add-cell2` joins it to the universe. A command that names a tenant finds its cell through the universe directory. Only commands
 about a cell itself take `--servers`.
 
-## Bench
-
-```sh
-docker compose run --rm paros-bench --tenant bench --journals 4 --clients 8 --duration 60s --ramp 10s
-```
-
-Closed-loop clients print throughput and latency each second. Compare runs on the same host
-only. The full walkthrough is `DEMO.md` in the repository.
+The full walkthrough is `DEMO.md` in the repository.
