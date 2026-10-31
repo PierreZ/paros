@@ -22,12 +22,12 @@ paros-machine = { path = "crates/lib/paros-machine", version = "0.2.0" }
 paros-sim = { path = "crates/sim/paros-sim", version = "0.2.0" }
 paros-authz-biscuit = { path = "crates/support/paros-authz-biscuit" }
 
-moonpool-core = { git = "https://github.com/PierreZ/moonpool", rev = "56e9e9dc21a99ac42614b5aca96f081cb8b4acac", default-features = false }
-moonpool-rpc = { git = "https://github.com/PierreZ/moonpool", rev = "56e9e9dc21a99ac42614b5aca96f081cb8b4acac", default-features = false }
-moonpool-journal = { git = "https://github.com/PierreZ/moonpool", rev = "56e9e9dc21a99ac42614b5aca96f081cb8b4acac" }
-moonpool-buggify = { git = "https://github.com/PierreZ/moonpool", rev = "56e9e9dc21a99ac42614b5aca96f081cb8b4acac" }
-moonpool-assertions = { git = "https://github.com/PierreZ/moonpool", rev = "56e9e9dc21a99ac42614b5aca96f081cb8b4acac" }
-moonpool-sim = { git = "https://github.com/PierreZ/moonpool", rev = "56e9e9dc21a99ac42614b5aca96f081cb8b4acac", default-features = false }
+moonpool-core = { git = "https://github.com/PierreZ/moonpool", rev = "01be4084293968956d2001afd1d029d78d6728db", default-features = false }
+moonpool-rpc = { git = "https://github.com/PierreZ/moonpool", rev = "01be4084293968956d2001afd1d029d78d6728db", default-features = false }
+moonpool-journal = { git = "https://github.com/PierreZ/moonpool", rev = "01be4084293968956d2001afd1d029d78d6728db" }
+moonpool-buggify = { git = "https://github.com/PierreZ/moonpool", rev = "01be4084293968956d2001afd1d029d78d6728db" }
+moonpool-assertions = { git = "https://github.com/PierreZ/moonpool", rev = "01be4084293968956d2001afd1d029d78d6728db" }
+moonpool-sim = { git = "https://github.com/PierreZ/moonpool", rev = "01be4084293968956d2001afd1d029d78d6728db", default-features = false }
 
 prometheus = { version = "0.14", default-features = false }
 prost = "0.14"

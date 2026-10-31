@@ -36,7 +36,7 @@ use moonpool_sim::{
     FaultContext, FaultInjector, SimulationResult, TimeProvider, assert_reachable, sim_random_range,
 };
 
-use crate::world::outage::{STRAGGLER, may_strike, strike};
+use crate::world::outage::{STRAGGLER, strike};
 
 /// How far into the recovery tail the split may still be held: a split
 /// floor shows mostly 5 to 20 s into a run (600 hunt seeds), past the
@@ -100,12 +100,8 @@ impl FaultInjector for SplitFloor {
             if let Some((nodes, _)) = split {
                 let ips: Option<Vec<String>> = nodes.iter().map(|node| ip_of(*node)).collect();
                 if let Some(ips) = ips.filter(|ips| {
-                    ips.len() < acceptors.len()
-                        && ips.iter().all(|ip| !ctx.is_dead(ip))
-                        && crate::world::cut::outage_permitted(ctx.state(), ips)
+                    ips.len() < acceptors.len() && ips.iter().all(|ip| !ctx.is_dead(ip))
                 }) {
-                    // Checked and struck with no await between them (#332).
-                    crate::world::cut::assert_outage_permitted(ctx.state(), &ips);
                     for ip in &ips {
                         ctx.crash(ip)?;
                     }
@@ -124,26 +120,22 @@ impl FaultInjector for SplitFloor {
             if time.now() >= release {
                 break false;
             }
-            if may_strike(ctx) {
-                let audit = crate::audit::audit_world_for(ctx.state(), main);
-                let decided = audit.decided_slots();
-                // Planned at the instant of the strike, with no await
-                // between them, so no holder repairs its copy first.
-                let planned = crate::world::storage_world_for(ctx.state(), main)
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .plan_split_floor_loss(&decided);
-                if let Some(planned) = planned {
-                    audit.note_outage_loss(planned.slot, &planned.holders, &planned.damaged);
-                    if !crate::in_chaos() {
-                        assert_reachable!(
-                            "outage: a split-floor outage strikes in the recovery tail"
-                        );
-                    }
-                    tracing::info!(slot = planned.slot, "split_floor_outage");
-                    strike(ctx, &[])?;
-                    break true;
+            let audit = crate::audit::audit_world_for(ctx.state(), main);
+            let decided = audit.decided_slots();
+            // Planned at the instant of the strike, with no await
+            // between them, so no holder repairs its copy first.
+            let planned = crate::world::storage_world_for(ctx.state(), main)
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .plan_split_floor_loss(&decided);
+            if let Some(planned) = planned {
+                audit.note_outage_loss(planned.slot, &planned.holders, &planned.damaged);
+                if !crate::in_chaos() {
+                    assert_reachable!("outage: a split-floor outage strikes in the recovery tail");
                 }
+                tracing::info!(slot = planned.slot, "split_floor_outage");
+                strike(ctx, &[])?;
+                break true;
             }
             if time.sleep(POLL).await.is_err() {
                 break false;

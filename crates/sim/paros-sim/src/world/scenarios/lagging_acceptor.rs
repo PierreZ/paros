@@ -16,8 +16,8 @@
 //! draws already meets under attrition, and the tail after the restart is
 //! still the recovery the oracles judge.
 //!
-//! The crash is a power loss, so it waits for a moment no budgeted commit
-//! is in flight on the node (#332, [`crate::world::cut`]).
+//! The crash is a power loss: moonpool's crash gate keeps it inside the
+//! journals' needs (#760 (moonpool owns fault placement)).
 
 use std::time::Duration;
 
@@ -74,17 +74,13 @@ impl FaultInjector for LaggingAcceptor {
             if crate::past_cutoff(time.now(), LATE_WINDOW) || ctx.chaos_shutdown().is_cancelled() {
                 return Ok(());
             }
-            if !ctx.is_dead(&target)
-                && crate::world::cut::outage_permitted(ctx.state(), std::slice::from_ref(&target))
-            {
+            if !ctx.is_dead(&target) {
                 break;
             }
             if time.sleep(POLL).await.is_err() {
                 return Ok(());
             }
         }
-        // Checked and struck with no await between them (#332).
-        crate::world::cut::assert_outage_permitted(ctx.state(), std::slice::from_ref(&target));
         ctx.crash(&target)?;
         assert_reachable!("storage: the lagging-acceptor scenario holds an acceptor down");
         tracing::info!(%target, rank, "lagging_acceptor_down");

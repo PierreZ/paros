@@ -854,20 +854,8 @@ pub const RARE: &[Rare] = &[
         reason: "marginal: fired on 10 of 810 hunt seeds (#486)",
     },
     Rare {
-        msg: "outage: a bare-quorum outage waits for a commit in flight",
-        reason: "marginal: fired on none of 810 hunt seeds (#486)",
-    },
-    Rare {
         msg: "outage: the bare-quorum outage strikes on a slot short of a member",
         reason: "marginal: fired on 12 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "outage: a commit in flight holds an outage back",
-        reason: "marginal: fired on 5 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "journal store: the copy budget refuses a cut mid-commit",
-        reason: "marginal: fired on 9 of 810 hunt seeds (#486)",
     },
     Rare {
         msg: "machine: the scenario holds a founder of a formed cell down",
@@ -928,10 +916,6 @@ pub const RARE: &[Rare] = &[
     Rare {
         msg: "storage: a peer's floor passes the lagging acceptor's prefix",
         reason: "marginal: fired on 5 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "outage: a late outage waits for a commit in flight",
-        reason: "marginal: fired on 1 of 810 hunt seeds (#486)",
     },
     Rare {
         msg: "gc: a retirement is withheld while a reconfiguration naming the node may be registered above its floor",

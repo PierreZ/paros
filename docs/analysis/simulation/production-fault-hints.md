@@ -93,8 +93,8 @@ Windows are not necessary in the first version, for two reasons:
    this shape. Landed (#294 step 6, moonpool#317) without a delayed strike: the journal
    names the instants inside the span itself (entries written, records written, metainfo
    stale), so a plain point at each covers it. `PowerCut` and its timer race are deleted.
-   The copy budget stays the harness's, through moonpool's `HintVeto`
-   (`crates/sim/paros-sim/src/world/cut.rs`).
+   The copy budget was the harness's, through moonpool's `HintVeto`; moonpool's shard
+   gate replaced it (#760 (moonpool owns fault placement)).
 
 How each injector consumes a point, without breaking determinism:
 

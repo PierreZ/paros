@@ -32,6 +32,7 @@ request that changes this folder. The file format and the verdicts are in
 | `cell-lost-not-refused` | skip converge: cell lost | `cell init` does not refuse a plan that lost its quorum. | survives #773 |
 | `ledger-damaged-record-reads-empty` | none (fault ledger, #760) | A damaged record reads back as nothing accepted. | caught |
 | `ledger-promise-not-durable-first` | none (fault ledger, #760) | A raised promise is not durable before the entries under it. | caught |
+| `registry-clears-before-registrations` | none (fault ledger, #760) | A matchmaker registry commits its clears before its registrations and metainfo. | caught |
 
 The `expect` key of each file holds its verdict. `red elsewhere` means
 the hunt is red, but never on a seed where the excuse fired. The wipe
@@ -66,5 +67,6 @@ Each piece gets a mutant before it goes; the mutant must stay red after.
 | Ledger piece | Mutant |
 |---|---|
 | Custody ledger, `may_corrupt_record`, `may_park_for_copies` | `ledger-damaged-record-reads-empty` |
-| Commit registry and `HintVeto` (`world/cut.rs`), `permit_power_cut` | `ledger-promise-not-durable-first` |
-| `OutageVeto`, `may_park`, `may_cut_node`, quiet seats | none yet |
+| Commit registry and `HintVeto` (`world/cut.rs`), `permit_power_cut` | `ledger-promise-not-durable-first` (deleted) |
+| Matchmaker cut budget, `HintVeto`, `OutageVeto` (`world/cut.rs`) | `registry-clears-before-registrations` (deleted) |
+| `may_park`, `may_cut_node`, quiet seats | none yet |
