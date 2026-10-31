@@ -192,6 +192,7 @@ impl JournalStores for SimStores<'_> {
             crate::world::node_store::DamagePolicy {
                 chaotic,
                 inject: !seat.quiet,
+                gate: Some((self.ctx.shards(), format!("journal/{}", seat.journal))),
             },
             provider.clone(),
         );
