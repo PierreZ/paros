@@ -150,7 +150,7 @@ journal refuse a write it already holds. A single-writer journal merges in its c
 
 - [Proxy leaders](proxy-leaders.md): the other half of the leader's load.
 - [Replica tier](replica-tier.md): the unbatcher's place in the paper.
-- Writer fence (planned): why a fenced write is never merged by a batcher.
+- [Writer fence](writer-fence.md): why a fenced write is never merged by a batcher.
 
 ## 12. Sources
 
