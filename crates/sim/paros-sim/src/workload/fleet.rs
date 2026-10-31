@@ -78,6 +78,7 @@ use crate::shape::MachineLayout;
 mod admit;
 mod capacity;
 mod cell;
+mod control_plane;
 mod converge;
 mod created;
 mod drain;

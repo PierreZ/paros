@@ -17,6 +17,7 @@ fn one(command: &SystemCommand) -> Vec<u8> {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // one entry per command
 fn every_command_round_trips() {
     let commands = [
         SystemCommand::RegisterNode {
@@ -31,6 +32,14 @@ fn every_command_round_trips() {
         },
         SystemCommand::DrainNode { id: NodeId(100) },
         SystemCommand::RetireNode { id: NodeId(100) },
+        SystemCommand::SetControlPlane {
+            request: 5,
+            mode: control_plane::ControlPlaneMode::Auto { target: 2 },
+        },
+        SystemCommand::SetControlPlane {
+            request: 6,
+            mode: control_plane::ControlPlaneMode::Manual { failures: 0 },
+        },
         SystemCommand::MachineAdmitted { id: NodeId(100) },
         SystemCommand::BookCapacity {
             booking: 7,
@@ -861,4 +870,89 @@ fn a_grant_books_every_slot_or_none_and_a_host_needs_its_footprint() {
         .restore(7, &registry.checkpoint())
         .expect("restores");
     assert_eq!(restored, registry);
+}
+
+#[test]
+fn the_control_plane_mode_is_set_once_per_request_and_refused_when_too_wide() {
+    use control_plane::ControlPlaneMode::{Auto, Manual};
+    let mut reg = Registry::new([NodeId(0)]);
+    // A cell that recorded no mode follows auto, target 1, and one founder
+    // places machines=0.
+    assert_eq!(reg.control_plane_mode(), Auto { target: 1 });
+    assert_eq!(reg.control_plane(1).desired, 0);
+    let set = |request: u64, mode| one(&SystemCommand::SetControlPlane { request, mode });
+    // Manual machines=1 needs three storage machines: one founder refuses it.
+    assert_eq!(
+        reg.fold(0, &set(1, Manual { failures: 1 })),
+        RegistryEvent::Refused(RegistryRefusal::ControlPlaneTooWide {
+            failures: 1,
+            storage: 1
+        })
+    );
+    assert!(!reg.control_plane_applied(1));
+    let storage = |seq: u64, id: u64, class: Class| {
+        one(&SystemCommand::RegisterNode {
+            id: NodeId(id),
+            addr: format!("n{id}"),
+            class,
+            capacity: 2,
+            locality: crate::machine::Locality::default(),
+            name: format!("m{id}"),
+            incarnation: u128::from(seq) + 1,
+            machine_interface: Vec::new(),
+        })
+    };
+    reg.fold(1, &storage(1, 100, Class::Storage));
+    reg.fold(2, &storage(2, 200, Class::Stateless));
+    // A stateless machine never counts: two storage machines still refuse.
+    assert_eq!(reg.storage_machines(), 2);
+    assert!(matches!(
+        reg.fold(3, &set(2, Manual { failures: 1 })),
+        RegistryEvent::Refused(RegistryRefusal::ControlPlaneTooWide { .. })
+    ));
+    reg.fold(4, &storage(4, 101, Class::Storage));
+    assert_eq!(reg.control_plane(1).desired, 1, "auto grows to its target");
+    assert_eq!(
+        reg.fold(5, &set(3, Manual { failures: 1 })),
+        RegistryEvent::ControlPlaneSet {
+            mode: Manual { failures: 1 }
+        }
+    );
+    assert_eq!(
+        reg.fold(6, &set(4, Auto { target: 3 })),
+        RegistryEvent::ControlPlaneSet {
+            mode: Auto { target: 3 }
+        }
+    );
+    // A retry of the first applied request never undoes the second.
+    assert_eq!(
+        reg.fold(7, &set(3, Manual { failures: 1 })),
+        RegistryEvent::ControlPlaneRepeated { request: 3 }
+    );
+    assert_eq!(reg.control_plane_mode(), Auto { target: 3 });
+    assert_eq!(
+        reg.control_plane(1).desired,
+        1,
+        "three machines place machines=1"
+    );
+    // A request with no id, or past machines=3, is malformed.
+    assert_eq!(
+        reg.fold(8, &set(0, Auto { target: 1 })),
+        RegistryEvent::Refused(RegistryRefusal::Malformed)
+    );
+    let mut forged = wire::SystemEntry::decode(set(9, Auto { target: 1 }).as_slice()).unwrap();
+    if let Some(wire::system_entry::Kind::SetControlPlane(plane)) = &mut forged.kind {
+        plane.failures = 4;
+    }
+    assert_eq!(
+        reg.fold(9, &forged.encode_to_vec()),
+        RegistryEvent::Refused(RegistryRefusal::Malformed)
+    );
+    // The mode and the applied requests cross a checkpoint.
+    let mut restored = Registry::new([NodeId(0)]);
+    restored.restore(9, &reg.checkpoint()).unwrap();
+    assert_eq!(restored.control_plane_mode(), Auto { target: 3 });
+    assert!(restored.control_plane_applied(3) && restored.control_plane_applied(4));
+    assert!(!restored.control_plane_applied(1));
+    assert_eq!(restored, reg);
 }

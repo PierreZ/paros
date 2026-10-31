@@ -561,6 +561,46 @@ impl CellSession {
         Ok(self.registry().tagged(request))
     }
 
+    /// `cell configure --control-plane` (#685 (special tenants are
+    /// tenants)): the control plane's durability mode becomes `mode`, under
+    /// the idempotency id `request`, unless the registry applied that
+    /// request already. Whether the registry holds the request applied: a
+    /// manual `F` the cell's storage machines cannot place is refused.
+    ///
+    /// # Panics
+    ///
+    /// `request` is `0`, or the registry applied the request and holds
+    /// another mode: a fold bug.
+    ///
+    /// # Errors
+    ///
+    /// The session did not open, or the write did not land (see
+    /// [`Interrupted`]).
+    pub async fn configure_control_plane<P: ParosProviders>(
+        &mut self,
+        client: &Client<P>,
+        first: usize,
+        request: u64,
+        mode: paros_model::registry::control_plane::ControlPlaneMode,
+    ) -> Result<bool, Interrupted> {
+        assert_ne!(request, 0, "a control plane request has an id");
+        self.open(client, first).await?;
+        if self.registry().control_plane_applied(request) {
+            return Ok(true);
+        }
+        let command = SystemCommand::SetControlPlane { request, mode };
+        self.record(client, first, &command).await?;
+        let applied = self.registry().control_plane_applied(request);
+        if applied {
+            assert_eq!(
+                self.registry().control_plane_mode(),
+                mode,
+                "the mode just applied is the mode in force"
+            );
+        }
+        Ok(applied)
+    }
+
     /// `cell remove-machine` (#359): retire the drained machine `node` from
     /// the cell for good. The registry tombstones its `node_id`: a machine
     /// with that id never registers again. Only a machine that is draining

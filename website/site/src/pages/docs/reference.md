@@ -67,6 +67,7 @@ parosctl token derive --token-file acme.token --read-only --journal orders
 |---|---|
 | `init --members A,B,C` | form the cell and the universe |
 | `cell show`, `cell add-machine`, `cell drain-machine`, `cell remove-machine`, `cell maintenance` | the cell and its machines |
+| `cell configure --control-plane auto\|manual [--survive machines=F]` | how the cell's own journals grow (auto by default) |
 | `tenant create`, `tenant list`, `tenant show` | tenants |
 | `journal create`, `journal delete`, `journal list` | journals of a tenant |
 | `configure --tenant T [--journal J]` | durability and role counts |

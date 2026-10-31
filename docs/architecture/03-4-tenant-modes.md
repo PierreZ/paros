@@ -333,3 +333,22 @@ durability for data and one `machines=1` quorum for its control journal (amended
 tenant count too. A cell refuses a tenant whose footprint it cannot book (landed with #476
 (tenant footprint), section 3.3: the footprint's durability is `machines=1`
 until a creation names one).
+
+**The control plane is a tenant's mode too** (decided on 2026-10-18, #685 (special tenants
+are tenants); the mode record landed on 2026-10-31). The special tenants (the cell tenant and
+the universe tenant) are tenants like any other, except that the platform manages them. Their
+journals are the cell control journal, the election journal, every tenant control journal and
+the universe directory. An `admin` call sets how their `F` is chosen:
+
+- `parosctl cell configure --control-plane auto [--survive machines=T]`: the cell coordinator
+  wants `F = min(T, (storage machines - 1) / 2)`. `T` is 1 by default. A cell that recorded no
+  mode follows auto with `T = 1`, so `init` needs no extra step.
+- `parosctl cell configure --control-plane manual --survive machines=F`: `F` stays as it is. The
+  registry refuses it at apply when the cell has fewer than `2F+1` storage machines
+  (`ControlPlaneTooWide`).
+- The mode is a `SetControlPlane` record in the cell control journal, applied once per request
+  id (`paros::model::registry::control_plane`). `status` shows it as the special tenants'
+  `survives`, and each of their journals as `<mode> · machines=<wanted> wanted ·
+  machines=<in force> in force`.
+- Until the moves of #685 land, the journals stay on the founding members, so the `F` in force
+  is the founders'. The next steps move them, then make the founders a boot hint only.

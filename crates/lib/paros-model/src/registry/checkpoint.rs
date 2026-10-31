@@ -114,6 +114,12 @@ impl Checkpointable for Registry {
         }
         let maintenance = maintenance_from_wire(state.maintenance, covers_up_to)?;
         let grants = grants_from_wire(state.grants, &spent)?;
+        let control_plane = state
+            .control_plane
+            .map(|plane| {
+                crate::registry::command::control_plane_from_wire(plane.auto, plane.failures)
+            })
+            .transpose()?;
         self.nodes = nodes;
         self.bookings = bookings;
         self.grants = grants;
@@ -125,6 +131,8 @@ impl Checkpointable for Registry {
         self.hosted = hosted;
         self.dropped = dropped;
         self.tagged = state.tagged.into_iter().collect();
+        self.control_plane = control_plane;
+        self.control_plane_requests = state.control_plane_requests.into_iter().collect();
         self.next_seq = covers_up_to + 1;
         Ok(())
     }
