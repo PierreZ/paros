@@ -30,18 +30,6 @@ from a ballot to the acceptor set that ballot uses. A matchmaker holds no log an
 slot. No write and no read on the command path asks it anything. It speaks only when a node
 campaigns, when a leader collects old sets, and when the matchmakers themselves are replaced.
 
-{% mermaid() %}
-flowchart LR
-    C["Candidate at ballot b<br/>with set C_b"]
-    M["Matchmaker quorum<br/>(ballot → set)"]
-    P1["Phase 1 over a quorum<br/>of every set in H_b"]
-    P2["Phase 2 over C_b"]
-    C -- "1. register (b, C_b)" --> M
-    M -- "2. history H_b" --> C
-    C -- "3. Prepare" --> P1
-    P1 -- "4. lead" --> P2
-{% end %}
-
 The four rules, in the order of the next pages:
 
 1. **[Matchmaking before Phase 1](@/paxos/tricky/matchmaking-before-phase-1.md).** A candidate
