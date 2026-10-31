@@ -258,3 +258,174 @@ fn a_hole_below_the_prefix_stops_the_fold_until_it_heals() {
     assert_eq!(r.fold_hole(), None);
     assert_eq!(r.journal().next_seq, Seq(2));
 }
+
+fn truncate_to(up_to: u64, leader: u128) -> Command {
+    Command::Control(Control::Truncate {
+        leader: LeaderUuid(leader),
+        up_to: Seq(up_to),
+    })
+}
+
+/// A multi-writer `Write`: no leader, and the journal picks its position.
+fn append(records: &[&[u8]]) -> Command {
+    Command::Write(Entry {
+        leader: LeaderUuid(0),
+        seq: Seq(0),
+        records: records.iter().map(|r| Value(r.to_vec())).collect(),
+    })
+}
+
+/// An empty replica under `mode` that learns `commands` from slot 0 and
+/// walks them, as a live node does. Returns the replica and the walk's
+/// compaction target.
+fn walked(mode: WriterMode, commands: &[Command]) -> (Replica, Option<Slot>) {
+    let mut r = Replica::from_boot(
+        mode,
+        None,
+        Slot(0),
+        JournalState::default(),
+        &BTreeMap::new(),
+    );
+    for (i, c) in commands.iter().enumerate() {
+        r.learn(Slot(i as u64), c);
+    }
+    let target = r.advance(|_, _| Some(Ballot::zero()), &mut Vec::new());
+    assert_eq!(r.committed().len(), commands.len(), "the walk applied all");
+    (r, target)
+}
+
+/// A retained retry above the floor keeps the record it read. Slot 3
+/// retries position 0, so slot 1 (which holds position 0) stays. A caller
+/// that compacts to the walk's target passes the check.
+#[test]
+fn a_compaction_to_the_walk_target_passes_the_check() {
+    let commands = [
+        claim(),
+        write(0, &[b"a"]),
+        write(1, &[b"b"]),
+        write(0, &[b"a"]),
+        truncate_to(1, 1),
+    ];
+    let (mut r, target) = walked(WriterMode::Single, &commands);
+    assert!(matches!(
+        r.outcome_at(Slot(3)),
+        Some(Outcome::Duplicate { .. })
+    ));
+    assert_eq!(target, Some(Slot(0)), "only the claim at slot 0 may go");
+    r.truncate(Slot(1));
+    r.assert_compacted();
+    // The check judges one walk once: a second call has nothing to judge.
+    r.assert_compacted();
+    assert_eq!(bytes(&page(r.read(Seq(1), 8, 64))), vec![b"b".to_vec()]);
+}
+
+/// A caller that does not compact after a walk that folded a `Truncate`
+/// fails the check: the floor slot holds no record anyone needs.
+#[test]
+#[should_panic(expected = "a compaction leaves a needed slot at the floor")]
+fn a_skipped_compaction_fails_the_check() {
+    let commands = [
+        claim(),
+        write(0, &[b"a"]),
+        write(1, &[b"b"]),
+        write(0, &[b"a"]),
+        truncate_to(1, 1),
+    ];
+    let (mut r, target) = walked(WriterMode::Single, &commands);
+    assert_eq!(target, Some(Slot(0)));
+    r.assert_compacted();
+}
+
+/// A walk that folded no `Truncate` is not judged, whatever the floor.
+#[test]
+fn a_walk_without_a_truncate_is_not_judged() {
+    let (mut r, target) = walked(
+        WriterMode::Single,
+        &[claim(), write(0, &[b"a"]), write(1, &[b"b"])],
+    );
+    assert_eq!(target, None, "no truncation: nothing to compact");
+    assert_eq!(r.compaction_target(), Some(Slot(0)));
+    r.assert_compacted();
+}
+
+/// A multi-writer journal has no retry. A write that names a position
+/// already in the journal never holds the floor down. The floor goes up to
+/// the write that holds the first record. A write is found by the position
+/// the journal gave it, not by the position it names.
+#[test]
+fn a_multi_writer_floor_follows_the_first_record_only() {
+    let commands = [
+        append(&[b"a"]),
+        append(&[b"b"]),
+        append(&[b"c"]),
+        truncate_to(2, 0),
+    ];
+    let (mut r, target) = walked(WriterMode::Multi, &commands);
+    assert_eq!(
+        r.accepted_at(Seq(1)).map(|e| e.records.clone()),
+        Some(vec![Value(b"b".to_vec())])
+    );
+    assert_eq!(target, Some(Slot(1)), "slots 0 and 1 hold dropped records");
+    r.truncate(Slot(2));
+    r.assert_compacted();
+    assert_eq!(bytes(&page(r.read(Seq(2), 8, 64))), vec![b"c".to_vec()]);
+    assert!(matches!(r.read(Seq(1), 8, 64), LogRead::Truncated(s) if s.first_seq == Seq(2)));
+}
+
+/// A trim-point jump below a fold that already passed the point keeps the
+/// node's own journal state. The peer's sealed state is not used. The new
+/// base is the node's own state at the point, and only the prefix below
+/// the point goes.
+#[test]
+fn a_trim_point_below_the_fold_keeps_the_own_state() {
+    let commands = [
+        claim(),
+        write(0, &[b"a"]),
+        write(1, &[b"b"]),
+        write(2, &[b"c"]),
+    ];
+    let mut r = replica(&commands);
+    let head = r.journal();
+    let peer = JournalState {
+        leader: Some(LeaderUuid(9)),
+        term: 7,
+        next_seq: Seq(50),
+        first_seq: Seq(40),
+    };
+    let base = r.trim_to(Slot(2), peer);
+    assert_eq!(
+        base,
+        replica(&commands[..2]).journal(),
+        "the own state at 2"
+    );
+    assert_eq!(r.journal_base(), base);
+    assert_eq!(r.journal(), head, "the fold's head does not move");
+    assert_eq!(r.folded(), Slot(4));
+    assert_eq!(r.chosen_index(), Some(Slot(3)));
+    assert_eq!(r.chosen().keys().next(), Some(&Slot(2)));
+    assert_eq!(r.read(Seq(0), 8, 64), LogRead::NotHeld);
+    assert_eq!(
+        bytes(&page(r.read(Seq(1), 8, 64))),
+        vec![b"b".to_vec(), b"c".to_vec()]
+    );
+}
+
+/// The byte budget of a read counts across writes. The page stops before
+/// the record that goes over the budget. The record limit stops a page at
+/// a write boundary too.
+#[test]
+fn a_read_budget_spans_several_writes() {
+    let r = replica(&[
+        claim(),
+        write(0, &[b"aa"]),
+        write(1, &[b"bb"]),
+        write(2, &[b"cc"]),
+    ]);
+    let p = page(r.read(Seq(0), 64, 4));
+    assert_eq!(bytes(&p), vec![b"aa".to_vec(), b"bb".to_vec()]);
+    assert_eq!(p.next(), Seq(2));
+    let p = page(r.read(Seq(0), 64, 5));
+    assert_eq!(p.records.len(), 2, "a third record would need 6 bytes");
+    let p = page(r.read(Seq(1), 1, 64));
+    assert_eq!(bytes(&p), vec![b"bb".to_vec()]);
+}
