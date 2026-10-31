@@ -1,7 +1,7 @@
 +++
 title = "Bench"
 description = "Measure throughput and latency per call with paros-bench"
-weight = 4
+weight = 7
 +++
 
 `paros-bench` is the load generator of `parosd`. It runs clients against a cell and prints

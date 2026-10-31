@@ -1,7 +1,7 @@
 +++
 title = "TLS"
 description = "Encrypt every session and prove every caller with mutual TLS"
-weight = 3
+weight = 5
 +++
 
 Every `parosd` session can run over TLS 1.3. By default the servers also ask every caller

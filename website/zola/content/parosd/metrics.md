@@ -1,7 +1,7 @@
 +++
 title = "Metrics and probes"
 description = "Read the metrics, the probes and the usage per journal of a parosd machine"
-weight = 6
+weight = 8
 +++
 
 Each `parosd` machine counts the calls that it serves. It shows the counts in the Prometheus

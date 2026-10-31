@@ -1,7 +1,7 @@
 +++
 title = "Tokens and root keys"
 description = "Sign tokens offline, pin the machines, and rotate the root keys of a universe"
-weight = 5
+weight = 6
 +++
 
 paros checks a caller with a Biscuit token. paros is its own issuer: a universe has one or more

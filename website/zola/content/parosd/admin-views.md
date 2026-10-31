@@ -1,7 +1,7 @@
 +++
 title = "Admin views"
 description = "See the machines, cells, tenants and roles of a cell with parosctl"
-weight = 2
+weight = 4
 +++
 
 `parosctl` shows what a cell holds: its machines, its tenants, its journals and which machine
@@ -21,7 +21,6 @@ reads the cell's own journals and answers. A view changes nothing.
 | `parosctl universe status` | the cells of the universe, the buckets each holds, and its tenants by bucket and by override | admin |
 | `parosctl universe buckets show <name>` | the bucket of a tenant name, the cell that bucket names, and where the tenant lives | admin |
 | `parosctl roles [--cell \| --tenant <name> \| --machine <name>]` | who holds each role: the cell coordinator, the acceptors and matchmakers of each journal, the capacity bookings | admin |
-
 | `parosctl journal list <tenant> [-l <selector>]` | the journals of a tenant and their tags | admin |
 
 The output is a table. Add `--json` after `parosctl` to get one JSON document for a script.
@@ -35,21 +34,9 @@ name is known. Hex ids are for local debugging only.
 
 ## Placement across cells
 
-A universe places each new tenant in one cell (#713 (bucket placement)):
-
-1. `parosctl tenant create acme --cell cell-2` names the cell. This writes an **override**
-   for the tenant. `--reason dedicated` records why, for people.
-2. `parosctl tenant create acme --cell-selector env:prod` picks the cell by its tags: of the
-   `READY` cells that match, the one with the fewest tenants (#672 (cell tag selector)). This
-   also writes an override.
-3. Without a cell, the tenant goes to its **bucket**: `CRC16(name) mod 16384`, as Redis
-   Cluster does. Each of the 16384 buckets names one cell.
-
-The first cell holds every bucket. A new cell holds no bucket, so it fills only when you give it
-some: `parosctl universe buckets assign 8192-16383 cell-2`. Tenants do not move between cells
-yet, so a range moves only while no tenant placed by its buckets lives in it. A cell that holds
-a bucket is not removed. A dedicated cell is a cell with no bucket: only overrides put tenants
-there.
+A universe places each new tenant in one cell: by an override (`--cell`, `--cell-selector`)
+or by the bucket of its name. [Cells and the universe](@/parosd/cells.md#placement) describes
+the rules and the `universe buckets` commands.
 
 ## Tags
 
