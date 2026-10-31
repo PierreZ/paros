@@ -1,0 +1,18 @@
+---
+// The Engineering section (#812 (website redo 3/4)): one short page per
+// technique, and each page shows the technique at work.
+import Doc from "../../layouts/Doc.astro";
+import { url } from "../../nav";
+---
+<Doc title="Engineering" kicker="Engineering" section="engineering/" siblings={[]}
+  description="How paros is built and tested. One short page per technique, and each page shows the technique at work: a live run in your browser or the real code.">
+  <ol class="index-list">
+    <li><a href={url("engineering/simulation/")}>Deterministic simulation</a><span class="desc">A seed is a run. Run one here, twice, and compare.</span></li>
+    <li><a href={url("engineering/same-code/")}>Same code in production and simulation</a><span class="desc">One <code>run_machine</code>, two sets of providers. Faults live in the shipped code.</span></li>
+    <li><a href={url("engineering/sans-io/")}>The sans-IO core</a><span class="desc">Paxos as a pure state machine: inputs in, one <code>Ready</code> out.</span></li>
+    <li><a href={url("engineering/durable-writes/")}>Fast durable writes</a><span class="desc">Every vote is synced. The work goes around the sync, not through it.</span></li>
+    <li><a href={url("engineering/fsync/")}>When fsync fails</a><span class="desc">A failed sync can lie. The stores read the device again.</span></li>
+    <li><a href={url("engineering/grid-quorums/")}>Grid quorums</a><span class="desc">Partitions of acceptors: a write touches one, an election touches all.</span></li>
+    <li><a href={url("engineering/dogfooding/")}>paros on paros</a><span class="desc">The control plane is made of paros. Pull the layers apart and see their traffic.</span></li>
+  </ol>
+</Doc>

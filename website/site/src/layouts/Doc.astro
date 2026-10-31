@@ -5,7 +5,9 @@ import { url } from "../nav";
 
 interface Sibling { title: string; path: string }
 interface Props {
-  frontmatter?: { title: string; description?: string; kicker?: string; section?: string; siblings?: string; trace?: string };
+  frontmatter?: { title: string; description?: string; kicker?: string; section?: string; siblings?: string; trace?: string; widget?: string };
+  /** A live widget of public/engineering.js on this page (#812). */
+  widget?: boolean;
   title?: string;
   description?: string;
   kicker?: string;
@@ -25,6 +27,15 @@ const PAGES: Record<string, Sibling[]> = {
     { title: "Compartmentalized Paxos", path: "paxos/compartmentalized/" },
     { title: "Quorums", path: "paxos/quorums/" },
   ],
+  "engineering/": [
+    { title: "Deterministic simulation", path: "engineering/simulation/" },
+    { title: "Same code in production and simulation", path: "engineering/same-code/" },
+    { title: "The sans-IO core", path: "engineering/sans-io/" },
+    { title: "Fast durable writes", path: "engineering/durable-writes/" },
+    { title: "When fsync fails", path: "engineering/fsync/" },
+    { title: "Grid quorums", path: "engineering/grid-quorums/" },
+    { title: "paros on paros", path: "engineering/dogfooding/" },
+  ],
   "docs/": [
     { title: "Quickstart", path: "docs/quickstart/" },
     { title: "Reference", path: "docs/reference/" },
@@ -36,6 +47,7 @@ const PAGES: Record<string, Sibling[]> = {
 const traces = import.meta.glob("../traces/*.json", { eager: true, import: "default" });
 const trace = fm.trace ? traces[`../traces/${fm.trace}.json`] : undefined;
 if (fm.trace && !trace) throw new Error(`no trace src/traces/${fm.trace}.json`);
+const widget = Astro.props.widget ?? Boolean(fm.widget);
 const siblings = Astro.props.siblings ?? PAGES[section] ?? [];
 const here = Astro.url.pathname;
 const i = siblings.findIndex((s) => here.endsWith("/" + s.path));
@@ -54,6 +66,7 @@ const next = i >= 0 && i < siblings.length - 1 ? siblings[i + 1] : undefined;
     </article>
     {trace && <script is:inline type="application/json" id="trace" data-wasm={url("paxos/wasm/paros_paxos.js")} set:html={JSON.stringify(trace).replace(/</g, "\\u003c")} />}
     {trace && <script is:inline src={url("steps.js")} />}
+    {widget && <script is:inline type="module" src={url("engineering.js")} />}
     {(prev || next) && (
       <nav class="pager label" aria-label="Next and previous pages">
         {prev ? <a href={url(prev.path)}>← {prev.title}</a> : <span />}

@@ -228,3 +228,76 @@ pre {
   border: 1px solid var(--rule); background: var(--bg); color: var(--muted); cursor: pointer; font-size: 11px;
 }
 .codewrap .copy:hover { color: var(--fg); border-color: var(--accent); }
+
+/* ---- the Engineering pages (#812 (website redo 3/4)) ----
+   public/engineering.js draws the live parts: a seed run twice
+   (determinism) and the x-ray of the dogfooding tower. */
+
+.eng-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 12px; margin: 0 0 14px; }
+.eng-controls label { display: inline-flex; align-items: center; gap: 6px; }
+.eng-controls input[type="number"] { width: 9ch; }
+.eng-controls input, .eng-controls select {
+  height: 30px; padding: 0 6px; border: 1px solid var(--rule-strong); border-radius: 0;
+  background: var(--bg); color: var(--fg); font: inherit; font-size: 13px;
+}
+.eng-controls input[type="checkbox"] { height: auto; }
+.eng-controls .btn[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+.eng-run { margin: 0 0 16px; }
+.eng-run .strip { margin: 0; border-bottom: 0; }
+.eng-run .strip .v { overflow-wrap: anywhere; }
+.eng-lane { position: relative; padding: 8px 10px 22px; border: 1px solid var(--rule); }
+.eng-marks { position: absolute; left: 10px; right: 10px; bottom: 2px; height: 16px; font-size: 10px; }
+.eng-mark { position: absolute; white-space: nowrap; padding: 2px 0 0 2px; border-left: 1px solid var(--rule-strong); }
+.eng-verdict { margin: 0; }
+.eng-top .strip { margin-bottom: 14px; }
+.eng-detail { margin-top: 8px; }
+
+.hist { display: block; width: 100%; height: 36px; }
+.hist rect { fill: var(--rule-strong); }
+.hist.on rect { fill: var(--accent); }
+.hist-base { stroke: var(--rule); stroke-width: 1; vector-effect: non-scaling-stroke; }
+
+/* The tower: layer 01 at the base. Pulled apart, the layers move away from
+   each other and a dashed rule joins them (the exploded view). */
+.tower { display: flex; flex-direction: column-reverse; gap: 0; }
+.tower .layer { transition: margin 0.25s ease, opacity 0.2s ease; }
+.tower .layer .panel { margin: 0; }
+.tower .layer + .layer .panel { border-bottom-width: 0; }
+.tower.exploded { gap: 22px; }
+.tower.exploded .layer + .layer .panel { border-bottom-width: 1px; }
+.tower.exploded .layer:not(:first-child) { position: relative; }
+.tower.exploded .layer:not(:first-child)::after {
+  content: ""; position: absolute; left: 24px; bottom: -22px; height: 22px;
+  border-left: 1px dashed var(--rule-strong);
+}
+.tower.exploded .layer:nth-child(2) { margin-left: 12px; margin-right: -12px; }
+.tower.exploded .layer:nth-child(3) { margin-left: 0; }
+.tower.exploded .layer:nth-child(4) { margin-left: 12px; margin-right: -12px; }
+.layer .panel-head { flex-wrap: wrap; padding-top: 4px; padding-bottom: 4px; }
+.layer .xray-btn { height: 24px; padding: 0 8px; font-size: 11px; }
+.layer .xray-btn[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+.layer.focus .panel { border-color: var(--accent); }
+.layer.dim { opacity: 0.35; }
+.layer-what { margin: 0 0 6px; font-size: 14px; }
+.layer-code { display: flex; flex-wrap: wrap; gap: 4px 10px; margin: 0 0 8px; text-transform: none; }
+.layer-traffic .layer-info { display: flex; flex-wrap: wrap; gap: 4px 10px; margin-top: 4px; text-transform: none; }
+
+/* Bar meters: a label, a thin bar, a count. */
+.meters { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; margin: 0 0 12px; font-size: 12px; }
+.meters dt { color: var(--muted); }
+.meters dd { display: flex; align-items: center; gap: 8px; margin: 0; }
+.meter { flex: 1 1 auto; height: 8px; background: var(--panel); border: 1px solid var(--rule); }
+.meter::before { content: ""; display: block; width: var(--fill); height: 100%; background: var(--accent); }
+.eng-log { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--rule); font-size: 12px; }
+.eng-log li { display: grid; grid-template-columns: 9ch 1fr; gap: 8px; padding: 3px 0; border-bottom: 1px solid var(--rule); }
+.eng-log .t { color: var(--muted); }
+
+@media (max-width: 600px) {
+  .eng-controls .btn { flex: 1 1 100%; justify-content: center; }
+  .eng-controls select { flex: 1 1 100%; }
+  .tower.exploded .layer { margin-left: 0 !important; margin-right: 0 !important; }
+  .eng-mark { font-size: 9px; }
+}
+.eng-legend { display: flex; flex-wrap: wrap; gap: 2px 14px; list-style: none; margin: 0 0 12px; padding: 0; font-size: 10px; text-transform: none; }
+.eng-timeline { margin-top: 10px; padding-bottom: 24px; border-top-width: 0; }
+.eng-axis .eng-legend { margin-top: 6px; }
