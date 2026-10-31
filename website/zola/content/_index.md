@@ -27,6 +27,6 @@ This site has two parts:
 **[paros play](play/)** is an interactive game. It runs the real `paros-core` in your browser.
 You control the network, the clock and each role.
 
-**[The sandbox](@/sandbox/_index.md)** runs a paros universe in your browser: the same code as
-`parosd` on a simulated network, disk and clock. You form a cell, write values, add machines and
-crash them, then replay the run from its seed and its action log.
+**[The playground](@/sandbox/_index.md)** runs a paros universe in your browser: the same code as
+`parosd` on a simulated network, disk and clock. You form a cell, write records, crash machines and
+cut them off, then replay the run from its seed and its action log.

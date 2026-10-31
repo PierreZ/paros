@@ -83,6 +83,43 @@ pub enum Op {
         /// How many records.
         count: u32,
     },
+    /// Crash machine `machine`: moonpool kills its process and drops the
+    /// writes its disk did not sync. It stays down until `restart`.
+    Crash {
+        /// The machine's index.
+        machine: usize,
+    },
+    /// Start machine `machine` again on the disk it had. A machine that
+    /// runs is killed and started again in place.
+    Restart {
+        /// The machine's index.
+        machine: usize,
+    },
+    /// Cut machine `machine` from every other machine and from the client:
+    /// moonpool drops each message to or from it until `heal`.
+    Isolate {
+        /// The machine's index.
+        machine: usize,
+    },
+    /// Join machine `machine` to the network again.
+    Heal {
+        /// The machine's index.
+        machine: usize,
+    },
+}
+
+impl Op {
+    /// The machine a fault names, when the step is a fault.
+    #[must_use]
+    pub fn fault_target(&self) -> Option<usize> {
+        match self {
+            Self::Crash { machine }
+            | Self::Restart { machine }
+            | Self::Isolate { machine }
+            | Self::Heal { machine } => Some(*machine),
+            _ => None,
+        }
+    }
 }
 
 fn default_durability() -> String {
@@ -121,6 +158,12 @@ pub struct Topology {
     pub nodes: Vec<Option<String>>,
     /// Each machine's zone (its failure domain), by index.
     pub zones: Vec<String>,
+    /// The machines a `crash` holds down, by index.
+    #[serde(default)]
+    pub down: Vec<usize>,
+    /// The machines an `isolate` cuts from the network, by index.
+    #[serde(default)]
+    pub isolated: Vec<usize>,
     /// The tenants, the internal ones first.
     pub tenants: Vec<TenantPlace>,
 }
@@ -160,6 +203,42 @@ pub struct JournalPlace {
     pub hosts: Vec<usize>,
     /// The highest position its leader knows chosen.
     pub chosen: Option<u64>,
+    /// The acceptor state of each machine that answered `Inspect` for it,
+    /// in machine order.
+    #[serde(default)]
+    pub acceptors: Vec<AcceptorView>,
+}
+
+/// A ballot: a round and the node that owns it (its first six hex digits).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BallotView {
+    /// The round.
+    pub round: u64,
+    /// The node, as people read it.
+    pub node: String,
+}
+
+/// One machine's acceptor and learner state for one journal, as its
+/// `Inspect` reports it. A read only: the page shows it, and nothing acts on
+/// it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AcceptorView {
+    /// The machine, by index.
+    pub machine: usize,
+    /// Whether the machine is an acceptor of the configuration in force.
+    pub member: bool,
+    /// The highest ballot it promised (Phase 1).
+    pub promised: Option<BallotView>,
+    /// The highest slot it holds a vote at, or stands in for one.
+    pub watermark: Option<u64>,
+    /// The highest slot it knows chosen.
+    pub chosen: Option<u64>,
+    /// Its compaction floor: the first slot it still holds.
+    pub floor: u64,
+    /// How many accepted records it holds.
+    pub accepted: u64,
+    /// The last accepted records (Phase 2), oldest first: slot and ballot.
+    pub tail: Vec<(u64, BallotView)>,
 }
 
 /// The quorum system of a journal's configuration, as `Inspect` reports it.

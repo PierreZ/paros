@@ -29,7 +29,7 @@ nav = [
     { name = "parosd", url = "/parosd/", type = "url", icon = "code" },
     { name = "Paxos", url = "/paxos/", type = "url", icon = "book" },
     { name = "Play", url = "/play/", type = "url", icon = "palette" },
-    { name = "Sandbox", url = "/sandbox/", type = "url", icon = "magnifying-glass-chart" },
+    { name = "Playground", url = "/sandbox/", type = "url", icon = "magnifying-glass-chart" },
     { name = "GitHub", url = "https://github.com/PierreZ/paros", type = "url", icon = "github" },
 ]
 

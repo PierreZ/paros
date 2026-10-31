@@ -131,3 +131,107 @@ fn tenants_write_read_and_show_their_topology() {
     // Replay: the same config and log give the same run.
     assert_eq!(run(&config, &actions), second);
 }
+
+#[test]
+fn a_crashed_leader_is_replaced_and_acceptors_show_their_state() {
+    let config = Config::default();
+    let base = vec![
+        at(0, Op::Init { machines: 5 }),
+        tenant(100, "acme"),
+        journal(200, "acme", "orders", "machines=1"),
+        write(300, "acme", "orders", 3),
+    ];
+    let first = run(&config, &base);
+    assert_eq!(first.error, None, "{first:#?}");
+    assert!(first.steps.iter().all(|s| s.ok), "{:#?}", first.steps);
+    let place = |view: &paros_wasm::playground::RunView, step: usize| {
+        view.topology
+            .iter()
+            .rfind(|t| t.step == step)
+            .and_then(|t| t.tenants.iter().find(|t| t.name == "acme"))
+            .and_then(|t| t.journals.iter().find(|j| j.name == "orders"))
+            .cloned()
+            .expect("acme/orders after the step")
+    };
+    let orders = place(&first, 3);
+    let leader = orders.leader.expect("a leader");
+    // Each acceptor reports what it promised and accepted: read only.
+    let members: Vec<_> = orders.acceptors.iter().filter(|a| a.member).collect();
+    assert_eq!(members.len(), 3, "{orders:#?}");
+    for acceptor in &members {
+        assert!(acceptor.promised.is_some(), "{acceptor:#?}");
+        assert!(acceptor.accepted >= 3, "{acceptor:#?}");
+        assert!(!acceptor.tail.is_empty(), "{acceptor:#?}");
+    }
+
+    // Crash the leader: the journal elects another and takes writes again.
+    let mut actions = base.clone();
+    actions.push(at(400, Op::Crash { machine: leader }));
+    actions.push(write(500, "acme", "orders", 2));
+    actions.push(at(20_000, Op::Restart { machine: leader }));
+    let second = run(&config, &actions);
+    assert_eq!(second.error, None, "{second:#?}");
+    for step in &second.steps {
+        assert!(step.ok, "step failed: {step:#?}");
+    }
+    let after = second
+        .topology
+        .iter()
+        .find(|t| t.step == 4)
+        .expect("a topology after the crash");
+    assert_eq!(after.down, vec![leader]);
+    let moved = place(&second, 5);
+    assert!(
+        moved.leader.is_some_and(|l| l != leader),
+        "another machine leads: {moved:#?}"
+    );
+    let last = second.topology.last().expect("a topology");
+    assert!(last.down.is_empty(), "{last:#?}");
+    assert_eq!(second.steps[..4], first.steps[..]);
+    assert_eq!(run(&config, &actions), second);
+}
+
+#[test]
+fn an_isolated_machine_is_cut_then_healed() {
+    let config = Config::default();
+    let actions = vec![
+        at(0, Op::Init { machines: 5 }),
+        tenant(100, "acme"),
+        journal(200, "acme", "orders", "machines=1"),
+        at(300, Op::Isolate { machine: 0 }),
+        write(400, "acme", "orders", 2),
+        at(10_000, Op::Heal { machine: 0 }),
+        read(11_000, "acme", "orders", 2),
+    ];
+    let view = run(&config, &actions);
+    assert_eq!(view.error, None, "{view:#?}");
+    for step in &view.steps {
+        assert!(step.ok, "step failed: {step:#?}");
+    }
+    let cut = view
+        .topology
+        .iter()
+        .find(|t| t.step == 3)
+        .expect("a topology after the isolate");
+    assert_eq!(cut.isolated, vec![0]);
+    assert!(
+        view.topology
+            .last()
+            .expect("a topology")
+            .isolated
+            .is_empty()
+    );
+}
+
+#[test]
+fn a_fault_on_a_machine_outside_the_universe_is_refused() {
+    let config = Config::default();
+    let view = run(
+        &config,
+        &[
+            at(0, Op::Init { machines: 3 }),
+            at(100, Op::Crash { machine: 9 }),
+        ],
+    );
+    assert!(view.error.is_some_and(|e| e.contains("machine")));
+}

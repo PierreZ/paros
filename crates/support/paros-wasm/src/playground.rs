@@ -8,8 +8,10 @@
 //! `journal create`, `write`, `read`), and after each step reads where
 //! every tenant and journal lives ([`Topology`]). Nothing here wraps or
 //! changes the shipped code; the timeline only observes the events the
-//! machines log. There is no fault injection: the shipped BUGGIFY sites and
-//! crash hints are turned off, as in production.
+//! machines log. The shipped BUGGIFY sites and crash hints are turned off,
+//! as in production. The only faults are the steps of the log (`crash`,
+//! `restart`, `isolate`, `heal`), which moonpool's fault injector plays on
+//! the simulated world, never on the code.
 //!
 //! A run is a pure function of its [`Config`] and its action log: the same
 //! seed and actions give the same [`RunView`], byte for byte. The browser
@@ -20,6 +22,7 @@
 //! not a production number.
 
 mod calls;
+mod faults;
 pub mod machine;
 pub mod model;
 mod operator;
@@ -32,7 +35,8 @@ use moonpool_sim::SimulationBuilder;
 use moonpool_sim::runner::builder::ProcessCount;
 
 pub use model::{
-    Action, Config, Event, JournalPlace, Op, Quorum, RunView, StepResult, TenantPlace, Topology,
+    AcceptorView, Action, BallotView, Config, Event, JournalPlace, Op, Quorum, RunView, StepResult,
+    TenantPlace, Topology,
 };
 
 /// The most machines a universe holds.
@@ -68,6 +72,8 @@ pub fn run(config: &Config, actions: &[Action]) -> RunView {
     let results = Arc::new(Mutex::new(Vec::new()));
     let topology = Arc::new(Mutex::new(Vec::new()));
     let recorded: timeline::Recorded = Arc::new(Mutex::new(Vec::new()));
+    let faults: faults::Faults = Arc::default();
+    let (machines, log, injected) = (config.machines, actions.to_vec(), faults.clone());
     let report = SimulationBuilder::new()
         .processes(ProcessCount::Fixed(config.machines), || {
             Box::new(machine::MachineProcess)
@@ -77,7 +83,15 @@ pub fn run(config: &Config, actions: &[Action]) -> RunView {
             actions.to_vec(),
             results.clone(),
             topology.clone(),
+            faults,
         ))
+        .fault_factory(move || {
+            Box::new(faults::Injector::new(
+                machines,
+                log.clone(),
+                injected.clone(),
+            ))
+        })
         .invariant(timeline::Timeline::new(recorded.clone()))
         .chaos_duration(Duration::from_millis(config.run_ms + 1))
         .chaos_until_run_ends()
@@ -117,14 +131,21 @@ fn check(config: &Config, actions: &[Action]) -> Result<(), String> {
             Op::CreateJournal { mode, .. }
                 if mode.parse::<paros::model::tenant::Desired>().is_err() =>
             {
-                return Err(format!(
-                    "no mode {mode}: single, double, triple or grid:RxC"
-                ));
+                return Err(format!("no durability {mode}: machines=F,partitions=P"));
             }
             Op::Write { count, .. } | Op::Read { count, .. }
                 if *count == 0 || *count > MAX_COUNT =>
             {
                 return Err(format!("a step writes or reads 1 to {MAX_COUNT} records"));
+            }
+            op if op
+                .fault_target()
+                .is_some_and(|machine| machine >= config.machines) =>
+            {
+                return Err(format!(
+                    "a fault names machine 0 to {}",
+                    config.machines - 1
+                ));
             }
             _ => {}
         }
