@@ -12,7 +12,7 @@ engineering techniques. No long book pages and no "blabla": a page fits its job 
 
 | Path | Source | Job |
 |---|---|---|
-| `/` | `src/pages/index.astro` | sells parosd: what you get, a session, the path of a write, numbers, run it |
+| `/` | `src/pages/index.astro` | sells parosd: what you get, a session, the path of a write, run it |
 | `/paxos/` | `src/pages/paxos/*.md` | one page per flavor: the problem, a step-through diagram, the rule, where in paros |
 | `/playground/` | `src/pages/playground/index.astro` + `website/sandbox/` | a paros universe in the browser |
 | `/docs/` | `src/pages/docs/*.md` | quickstart (from `DEMO.md`), reference, the playground |
