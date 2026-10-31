@@ -1,6 +1,7 @@
 // The sections of the site, in the order of the top bar.
 export const NAV = [
   { name: "Paxos", path: "paxos/" },
+  { name: "Engineering", path: "engineering/" },
   { name: "Playground", path: "playground/" },
   { name: "Docs", path: "docs/" },
 ] as const;

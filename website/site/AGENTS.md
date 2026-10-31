@@ -16,7 +16,7 @@ engineering techniques. No long book pages and no "blabla": a page fits its job 
 | `/paxos/` | `src/pages/paxos/*.md` | one page per flavor: the problem, a step-through diagram, the rule, where in paros |
 | `/playground/` | `src/pages/playground/index.astro` + `website/sandbox/` | a paros universe in the browser |
 | `/docs/` | `src/pages/docs/*.md` | quickstart (from `DEMO.md`), reference, the playground |
-| `/engineering/` | (#812) | one page per technique, each with something to see |
+| `/engineering/` | `src/pages/engineering/*` + `public/engineering.js` | one short page per technique, each with something to see; `dogfooding` is the paros-on-paros tower with its x-ray |
 
 Old URLs (the Zola book, the mdbook `.html` pages, `/play/`, `/sandbox/`) redirect in
 `astro.config.mjs`. Add a redirect when a page moves.
@@ -55,3 +55,14 @@ the fallback when the wasm does not load (`npm run dev` without `scripts/build-w
 `cargo test -p paros-wasm --test paxos_traces` writes the JSON from the same scripts
 (`crates/support/paros-wasm/src/paxos/trace/pages.rs`) and proves a page recorded alone is
 the same run; never edit the JSON by hand.
+
+## Live widgets of the Engineering pages (#812 (website redo 3/4))
+
+A page sets `widget: true` in its front matter (or `widget` on `<Doc>`) and puts
+`<div data-widget="determinism">` or `<div data-widget="xray">` where the widget goes.
+`public/engineering.js` runs the playground engine (`/playground/app/worker.js`, staged by
+`scripts/build-wasm.sh`) and draws what the run returns: a seed run twice with its event
+fingerprint, and the dogfooding tower's traffic per layer. A layer is read from the run's
+topology (tenant kind `cell`, `universe`, `users`; a tenant's first journal is its control
+journal), never from protocol logic in the page. No bench figures and no performance numbers
+on the site (Pierre, 2026-10-31).
