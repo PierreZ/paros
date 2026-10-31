@@ -235,3 +235,64 @@ fn a_fault_on_a_machine_outside_the_universe_is_refused() {
     );
     assert!(view.error.is_some_and(|e| e.contains("machine")));
 }
+
+#[test]
+fn traffic_writes_every_journal_and_an_added_machine_joins_the_cell() {
+    // #808 (one-click buttons): init over four of five machines, admit the
+    // fifth, then write to two journals at the same time.
+    let config = Config::default();
+    let actions = vec![
+        at(0, Op::Init { machines: 4 }),
+        at(100, Op::AddMachine { machine: 4 }),
+        tenant(200, "acme"),
+        journal(300, "acme", "orders", "machines=1"),
+        journal(400, "acme", "audit", "machines=1"),
+        at(500, Op::Traffic { count: 3 }),
+        read(600, "acme", "audit", 3),
+    ];
+    let view = run(&config, &actions);
+    assert_eq!(view.error, None, "{view:#?}");
+    for step in &view.steps {
+        assert!(step.ok, "step failed: {step:#?}");
+    }
+    assert!(
+        view.steps[5].detail.contains("each of 2 journals"),
+        "{:?}",
+        view.steps[5]
+    );
+    assert!(
+        view.steps[6].detail.starts_with("3 records"),
+        "{:?}",
+        view.steps[6]
+    );
+    let last = view
+        .topology
+        .last()
+        .expect("a topology after the last step");
+    assert!(
+        last.machines[4].is_some(),
+        "machine 4 is in the cell: {last:#?}"
+    );
+}
+
+#[test]
+fn adding_a_machine_already_in_the_cell_fails_and_outside_the_universe_is_refused() {
+    let config = Config::default();
+    let view = run(
+        &config,
+        &[
+            at(0, Op::Init { machines: 3 }),
+            at(100, Op::AddMachine { machine: 1 }),
+        ],
+    );
+    assert_eq!(view.error, None, "{view:#?}");
+    assert!(!view.steps[1].ok, "{:?}", view.steps[1]);
+    let refused = run(
+        &config,
+        &[
+            at(0, Op::Init { machines: 3 }),
+            at(100, Op::AddMachine { machine: 5 }),
+        ],
+    );
+    assert!(refused.error.is_some(), "{refused:#?}");
+}

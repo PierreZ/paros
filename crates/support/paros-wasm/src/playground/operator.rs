@@ -1,6 +1,7 @@
 //! The operator: the one workload, which runs the action log in order
 //! through the library client, the calls `parosctl` makes (`init`,
-//! `tenant create`, `journal create`, `write`, `read`). It holds no policy
+//! `tenant create`, `journal create`, `cell add-machine`, `write`, `read`),
+//! and traffic: writes to every journal at the same time. It holds no policy
 //! of its own: retries, redirects and claims are `paros::client`'s.
 //!
 //! After each step it reads where every tenant and journal lives through
@@ -19,6 +20,7 @@ use moonpool_sim::{
 };
 use std::collections::BTreeMap;
 
+use paros::client::cell::CellSession;
 use paros::client::fleet::{FleetSession, Step, read_directory};
 use paros::client::initialize::{InitParams, InitRun, Initialized, initialize};
 use paros::client::journals::{self, JournalAnswer, JournalOp, JournalRequest};
@@ -93,6 +95,9 @@ impl Operator {
 struct Known {
     cell: Option<Initialized>,
     fleet: Option<FleetSession>,
+    /// The session `cell add-machine` writes the cell control journal
+    /// through, opened at the first admission.
+    admin: Option<CellSession>,
     tenants: BTreeMap<String, TenantId>,
     journals: BTreeMap<(String, String), Opened>,
 }
@@ -312,6 +317,8 @@ impl Desk {
                 journal,
                 count,
             } => self.read(known, tenant, journal, *count).await,
+            Op::Traffic { count } => self.traffic(known, *count).await,
+            Op::AddMachine { machine } => self.add_machine(known, *machine).await,
             // The fault injector plays faults; the operator only reports them.
             Op::Crash { .. } | Op::Restart { .. } | Op::Isolate { .. } | Op::Heal { .. } => {
                 (true, String::new())
@@ -506,6 +513,104 @@ impl Desk {
                 format!("no journal {tenant}/{journal}: create it first"),
             );
         };
+        self.write_to(cell, opened, journal, count).await
+    }
+
+    /// Traffic: `count` records to every journal the log created, all the
+    /// journals at the same time.
+    async fn traffic(&self, known: &mut Known, count: u32) -> (bool, String) {
+        let Some(cell) = known.cell.as_ref() else {
+            return (false, "no cell: init failed".into());
+        };
+        if known.journals.is_empty() {
+            return (false, "no journal: create one first".into());
+        }
+        let writes = known
+            .journals
+            .iter_mut()
+            .map(|((tenant, journal), opened)| async move {
+                let (ok, detail) = self.write_to(cell, opened, journal, count).await;
+                (ok, format!("{tenant}/{journal}: {detail}"))
+            });
+        let answers = futures::future::join_all(writes).await;
+        let done = answers.iter().filter(|(ok, _)| *ok).count();
+        let failed: Vec<&str> = answers
+            .iter()
+            .filter(|(ok, _)| !ok)
+            .map(|(_, detail)| detail.as_str())
+            .collect();
+        let mut detail = format!(
+            "{count} records to each of {} journals at the same time, {done} done",
+            answers.len()
+        );
+        if !failed.is_empty() {
+            detail.push_str("; ");
+            detail.push_str(&failed.join("; "));
+        }
+        (failed.is_empty(), detail)
+    }
+
+    /// `parosctl cell add-machine`: admit idle machine `machine` into the
+    /// cell. The client then reaches it as it reaches the other members.
+    async fn add_machine(&self, known: &mut Known, machine: usize) -> (bool, String) {
+        let Some(cell) = known.cell.as_mut() else {
+            return (false, "no cell: init failed".into());
+        };
+        let target = machine_addr(machine);
+        if cell.servers.iter().any(|(_, addr)| *addr == target) {
+            return (false, format!("machine-{machine} is in cell-1 already"));
+        }
+        let client = self.client(&cell.servers);
+        let session = known.admin.get_or_insert_with(|| {
+            let members: Vec<NodeId> = cell.members.iter().copied().map(NodeId).collect();
+            let founders: Vec<(NodeId, Address)> = cell
+                .servers
+                .iter()
+                .filter(|(id, _)| cell.members.contains(id))
+                .map(|(id, addr)| (NodeId(*id), addr.clone()))
+                .collect();
+            CellSession::new(
+                cell.journals,
+                &members,
+                founders,
+                u128::from(self.nonzero()),
+                client.tunables().checkpoint_policy(),
+            )
+        });
+        let run = session
+            .add_machine(
+                &self.providers,
+                &self.rpc,
+                &client,
+                &self.names,
+                0,
+                &target,
+                PATIENCE,
+            )
+            .await;
+        match run.outcome {
+            Step::Done { result, .. } => {
+                cell.servers.push((result.0, target));
+                (
+                    true,
+                    format!(
+                        "machine-{machine} admitted into cell-1 as node {}",
+                        short(result.0)
+                    ),
+                )
+            }
+            other => (false, format!("add machine: {other:?}")),
+        }
+    }
+
+    /// Append `count` records to one journal, as its one writer.
+    async fn write_to(
+        &self,
+        cell: &Initialized,
+        opened: &mut Opened,
+        journal: &str,
+        count: u32,
+    ) -> (bool, String) {
         let client = self.journal_client(cell, &opened.members);
         // A journal just created opens on its members a moment later: until
         // then a claim reads nothing, and the operator asks again.

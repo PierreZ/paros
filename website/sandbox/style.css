@@ -633,3 +633,6 @@ ol.actions input {
     width: 100%;
   }
 }
+
+/* The one-click buttons (#808). */
+.quick { margin: 8px 0 4px; gap: 6px; }

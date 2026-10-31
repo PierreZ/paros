@@ -69,6 +69,14 @@ import { url } from "../../nav";
         <section>
           <h2>Action log</h2>
           <ol class="actions" id="actions" start="0"></ol>
+          <div class="row quick" id="quick">
+            <button id="quick-tenant" title="Add a step: create a tenant with the next free name">Create a tenant</button>
+            <button id="quick-journals" title="Add steps: create three journals in the last tenant">Create journals</button>
+            <button id="quick-traffic" title="Add a step: write N records to every journal at the same time">Generate traffic</button>
+            <button id="quick-machine" title="Add a step: admit the next idle machine into cell-1">Add a machine</button>
+          </div>
+          <p class="muted">Each button adds steps to the log, one second after the last step, and runs
+            the log again. Or build a step yourself:</p>
           <div class="row">
             <label>At (ms) <input id="at" type="number" min="1" step="100" /></label>
             <label>Action <select id="op">
@@ -76,6 +84,8 @@ import { url } from "../../nav";
               <option value="create_journal">create a journal</option>
               <option value="write">write N records</option>
               <option value="read">read N records</option>
+              <option value="traffic">write N records to every journal (traffic)</option>
+              <option value="add_machine">add a machine to cell-1</option>
               <option value="crash">crash a machine</option>
               <option value="restart">restart a machine</option>
               <option value="isolate">cut a machine from the network</option>

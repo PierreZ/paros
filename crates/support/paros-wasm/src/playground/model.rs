@@ -83,6 +83,19 @@ pub enum Op {
         /// How many records.
         count: u32,
     },
+    /// Traffic: append `count` records to every journal the log created,
+    /// all the journals at the same time, each through its one writer.
+    Traffic {
+        /// How many records each journal gets.
+        count: u32,
+    },
+    /// `parosctl cell add-machine`: admit idle machine `machine` into
+    /// `cell-1`. The cell registers it in its control journal, then tells
+    /// it its cell with `Admit`.
+    AddMachine {
+        /// The machine's index.
+        machine: usize,
+    },
     /// Crash machine `machine`: moonpool kills its process and drops the
     /// writes its disk did not sync. It stays down until `restart`.
     Crash {

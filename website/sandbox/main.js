@@ -101,7 +101,9 @@ worker.onmessage = ({ data }) => {
 };
 
 function setBusy(busy) {
-  for (const id of ["add", "undo", "clear", "load-preset"]) $(id).disabled = busy || replaying;
+  for (const id of ["add", "undo", "clear", "load-preset", "quick-tenant", "quick-journals", "quick-traffic", "quick-machine"]) {
+    $(id).disabled = busy || replaying;
+  }
   if (busy) $("status").textContent = "Running…";
 }
 
@@ -150,6 +152,8 @@ function describe(op) {
     case "create_journal": return `create journal ${op.tenant}/${op.journal} (${op.mode || "machines=1"})`;
     case "write": return `write ${op.count} records to ${op.tenant}/${op.journal}`;
     case "read": return `read ${op.count} records of ${op.tenant}/${op.journal}`;
+    case "traffic": return `traffic: write ${op.count} records to every journal at the same time`;
+    case "add_machine": return `add m${op.machine} to cell-1 (cell add-machine)`;
     case "crash": return `crash m${op.machine}`;
     case "restart": return `restart m${op.machine}`;
     case "isolate": return `cut m${op.machine} from the network`;
@@ -229,8 +233,8 @@ function renderOpFields() {
   $("journal-name-field").hidden = kind !== "create_journal";
   $("mode-field").hidden = kind !== "create_journal";
   $("journal-pick-field").hidden = !["write", "read"].includes(kind);
-  $("count-field").hidden = !["write", "read"].includes(kind);
-  $("machine-pick-field").hidden = !FAULTS.has(kind);
+  $("count-field").hidden = !["write", "read", "traffic"].includes(kind);
+  $("machine-pick-field").hidden = !FAULTS.has(kind) && kind !== "add_machine";
 }
 
 const FAULTS = new Set(["crash", "restart", "isolate", "heal"]);
@@ -263,7 +267,10 @@ function addAction() {
     if (!text("tenant-pick")) { $("status").textContent = "Create a tenant first."; return; }
     if (!text("journal-name")) { $("status").textContent = "Name the journal."; return; }
     op = { kind, tenant: text("tenant-pick"), journal: text("journal-name"), mode: $("mode").value };
-  } else if (FAULTS.has(kind)) {
+  } else if (kind === "traffic") {
+    if (!created().journals.length) { $("status").textContent = "Create a journal first."; return; }
+    op = { kind, count: clamp(Number($("count").value), 1, 100) };
+  } else if (FAULTS.has(kind) || kind === "add_machine") {
     op = { kind, machine: clamp(Number($("machine-pick").value), 0, state.config.machines - 1) };
   } else {
     const pick = text("journal-pick");
@@ -276,6 +283,83 @@ function addAction() {
   state.actions.sort((x, y) => x.at_ms - y.at_ms);
   start();
 }
+
+// ---- the one-click steps ----
+// Each button adds steps after the last one, as the form would, so the run
+// stays a pure function of its seed, its configuration and its log.
+
+const TENANT_NAMES = ["acme", "globex", "initech"];
+const JOURNAL_NAMES = ["orders", "audit", "events", "payments", "invoices", "metrics"];
+
+// The first name of `names` not in `taken`, then `<prefix>-2`, `<prefix>-3`, …
+function freeName(names, taken, prefix) {
+  const free = names.find((n) => !taken.includes(n));
+  if (free) return free;
+  for (let i = 2; ; i++) if (!taken.includes(`${prefix}-${i}`)) return `${prefix}-${i}`;
+}
+
+// Add `ops` one second apart after the last step, then run the log again.
+function quick(ops) {
+  let at = state.actions.at(-1).at_ms;
+  for (const op of ops) {
+    at += 1000;
+    if (at > state.config.run_ms) {
+      $("status").textContent = "The run ends before these steps: make the run longer.";
+      return;
+    }
+    state.actions.push({ at_ms: at, op });
+  }
+  start();
+}
+
+function newTenant() {
+  return { kind: "create_tenant", tenant: freeName(TENANT_NAMES, created().tenants, "tenant") };
+}
+
+// Three journals in the last tenant; a tenant first when there is none.
+function newJournals(how = 3) {
+  const ops = [];
+  let tenant = created().tenants.at(-1);
+  if (!tenant) { const op = newTenant(); ops.push(op); tenant = op.tenant; }
+  const taken = created().journals.filter((j) => j.startsWith(`${tenant}/`)).map((j) => j.split("/")[1]);
+  for (let i = 0; i < how; i++) {
+    const journal = freeName(JOURNAL_NAMES, taken, "journal");
+    taken.push(journal);
+    ops.push({ kind: "create_journal", tenant, journal, mode: $("mode").value });
+  }
+  return ops;
+}
+
+// The next machine outside cell-1: neither in init nor added by the log.
+function idleMachine() {
+  const inCell = new Set(Array.from({ length: state.actions[0].op.machines }, (_, m) => m));
+  for (const a of state.actions) if (a.op.kind === "add_machine") inCell.add(a.op.machine);
+  for (let m = 0; m < state.config.machines; m++) if (!inCell.has(m)) return m;
+  return null;
+}
+
+$("quick-tenant").onclick = () => quick([newTenant()]);
+$("quick-journals").onclick = () => quick(newJournals());
+$("quick-traffic").onclick = () => {
+  const ops = created().journals.length ? [] : newJournals(2);
+  ops.push({ kind: "traffic", count: clamp(Number($("count").value), 1, 100) });
+  quick(ops);
+};
+$("quick-machine").onclick = () => {
+  let machine = idleMachine();
+  if (machine === null) {
+    if (state.config.machines >= 7) {
+      $("status").textContent = "Every machine is in cell-1: a universe holds 7 machines at most.";
+      return;
+    }
+    // One more machine in the universe: it starts idle. The simulated
+    // draws change with it, so the run before this step can change too.
+    machine = state.config.machines;
+    state.config.machines += 1;
+    renderConfig();
+  }
+  quick([{ kind: "add_machine", machine }]);
+};
 
 // ---- playback ----
 
@@ -397,6 +481,7 @@ function renderReplaying(at) {
   $("replaying").hidden = !replaying;
   $("edit-run").hidden = !replaying;
   for (const id of ["add", "undo", "clear", "load-preset", "seed", "machines", "run"]) $(id).disabled = replaying;
+  $("quick").hidden = replaying;
   if (!replaying) return;
   const steps = state.actions.length;
   const where = at === undefined ? "" : ` Step ${at} of ${steps - 1}: ${describe(state.actions[at].op)}.`;

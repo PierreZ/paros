@@ -118,7 +118,7 @@ export function index(run) {
   const acts = [
     { title: "The cell runs itself", start: 0 },
     { title: "A tenant arrives", start: stepStart("create_tenant") },
-    { title: "Writes flow", start: [stepStart("write"), stepStart("read")].filter((x) => x !== null).sort((a, b) => a - b)[0] ?? null },
+    { title: "Writes flow", start: [stepStart("write"), stepStart("read"), stepStart("traffic")].filter((x) => x !== null).sort((a, b) => a - b)[0] ?? null },
   ];
   // Messages per 100 ms, by tenant, for the timeline.
   const bin = 100;

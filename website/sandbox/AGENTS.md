@@ -23,6 +23,10 @@ thread), `style.css` (the page's own layout).
 - The URL hash is the replay: base64url JSON of `{config, actions}`.
 - The log always starts with `init` at 0 ms, and the page never removes it; the engine refuses
   a log without it.
+- The one-click buttons ("Create a tenant", "Create journals", "Generate traffic", "Add a
+  machine", #808) only add steps to the log, as the form does: `create_tenant`, `create_journal`,
+  `traffic` (writes to every journal at the same time) and `add_machine` (`cell add-machine`).
+  "Add a machine" raises the config's machine count when no idle machine is left.
 - Faults (`crash`, `restart`, `isolate`, `heal`) are steps of the log too. moonpool's fault
   injector plays them when the operator gets to the step; the page only draws the `down` and
   `isolated` machines each topology reports.

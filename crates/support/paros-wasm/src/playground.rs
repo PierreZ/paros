@@ -5,7 +5,8 @@
 //! Every machine is a `parosd`: the shipped
 //! [`paros::machine::run_machine`] from an empty disk. The operator calls
 //! the same client and admin API as `parosctl` (`init`, `tenant create`,
-//! `journal create`, `write`, `read`), and after each step reads where
+//! `journal create`, `cell add-machine`, `write`, `read`, and traffic: writes
+//! to every journal at once), and after each step reads where
 //! every tenant and journal lives ([`Topology`]). Nothing here wraps or
 //! changes the shipped code; the timeline only observes the events the
 //! machines log. The shipped BUGGIFY sites and crash hints are turned off,
@@ -133,10 +134,13 @@ fn check(config: &Config, actions: &[Action]) -> Result<(), String> {
             {
                 return Err(format!("no durability {mode}: machines=F,partitions=P"));
             }
-            Op::Write { count, .. } | Op::Read { count, .. }
+            Op::Write { count, .. } | Op::Read { count, .. } | Op::Traffic { count }
                 if *count == 0 || *count > MAX_COUNT =>
             {
                 return Err(format!("a step writes or reads 1 to {MAX_COUNT} records"));
+            }
+            Op::AddMachine { machine } if *machine >= config.machines => {
+                return Err(format!("add a machine 0 to {}", config.machines - 1));
             }
             op if op
                 .fault_target()
