@@ -332,9 +332,15 @@ impl StorageWorld {
         self.parked_matchmakers.contains(ip)
     }
 
-    /// Whether [`StorageWorld::wipe`] would fire for `key` now.
+    /// Whether [`StorageWorld::wipe`] would fire for `key` now. Only a
+    /// provisioned identity can be wiped: an unprovisioned disk holds
+    /// nothing to lose, and its next boot is a first boot the library
+    /// accepts, so a park there would count a live node as down for good
+    /// (witness 13715138403037125052: a wipe before `init` parked node 2,
+    /// the settle tail stopped waiting for it, and the audit, which saw it
+    /// boot, still judged it).
     pub(crate) fn may_wipe(&self, key: &str) -> bool {
-        !self.parked.contains_key(key) && self.may_park(key)
+        self.provisioned(key) && !self.parked.contains_key(key) && self.may_park(key)
     }
 
     /// Wipe `ip`'s disk at a restart (#124): every record gone, the format
@@ -347,7 +353,7 @@ impl StorageWorld {
     /// (#147, [`StorageWorld::park_reason`]). Returns whether it fired.
     #[tracing::instrument(level = "debug", skip(self), fields(key = %key, node))]
     pub(crate) fn wipe(&mut self, key: &str, node: u64) -> bool {
-        if self.parked.contains_key(key) || !self.may_park(key) {
+        if !self.may_wipe(key) {
             return false;
         }
         self.marks.remove(key);

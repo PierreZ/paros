@@ -117,6 +117,7 @@ impl JournalStores for ReplicaStores<'_> {
             crate::world::node_store::DamagePolicy {
                 chaotic: false,
                 inject: false,
+                gate: None,
             },
             self.ctx.storage().clone(),
         );

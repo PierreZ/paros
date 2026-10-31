@@ -308,6 +308,9 @@ message Relinquish {
   // The authority's registered configuration, transferred verbatim (absent on
   // plain Multi-Paxos).
   optional .paros.common.v1.AcceptorConfig config = 9;
+  // The other configurations the minter still declares in force, while its
+  // GC floor is not effective (empty on plain Multi-Paxos).
+  repeated .paros.common.v1.AcceptorConfig prior = 10;
 }
 
 // Leaderless reads (Paxos Quorum Reads, #143): a reader asks a Phase-1

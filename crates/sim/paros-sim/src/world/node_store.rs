@@ -51,17 +51,23 @@ pub(crate) struct LedgeredJournal {
     inject: bool,
     /// The simulated disk the journal lives on: the injector damages it.
     provider: SimStorageProvider,
+    /// Moonpool's shard gate and this journal's shard name: whether the
+    /// gate judges the injector's damage. `None` for a store that takes
+    /// none.
+    gate: Option<(moonpool_sim::Shards, String)>,
 }
 
 /// What damage a [`LedgeredJournal`] takes: whether the ledgered injector
 /// aims at it, and until when.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct DamagePolicy {
     /// Whether the injector may damage the store while the run's chaos
     /// lasts: false for a quiet store.
     pub(crate) chaotic: bool,
     /// See [`LedgeredJournal`]'s `inject`.
     pub(crate) inject: bool,
+    /// See [`LedgeredJournal`]'s `gate`.
+    pub(crate) gate: Option<(moonpool_sim::Shards, String)>,
 }
 
 impl LedgeredJournal {
@@ -88,10 +94,14 @@ impl LedgeredJournal {
             self.node,
             self.chaotic && crate::in_chaos(),
         );
+        let gate_off = self
+            .gate
+            .as_ref()
+            .is_none_or(|(shards, name)| shards.is_off(name));
         let injection = self.world.upgrade().and_then(|w| {
             w.lock()
                 .unwrap_or_else(PoisonError::into_inner)
-                .plan_boot_damage(&ip, node, in_chaos)
+                .plan_boot_damage(&ip, node, in_chaos, gate_off)
         })?;
         if !super::injector::apply(&self.provider, &injection).await {
             self.with_world(|w| w.release_landing(&ip));
@@ -122,6 +132,7 @@ impl LedgeredJournal {
             node,
             chaotic: damage.chaotic,
             inject: damage.inject,
+            gate: damage.gate,
             provider,
             inner,
             world,

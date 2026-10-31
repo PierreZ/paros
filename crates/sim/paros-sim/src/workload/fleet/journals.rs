@@ -356,6 +356,12 @@ impl FleetOps {
     /// The user tags a create of `name` in `tenant` is born with (#575
     /// (key:value tags)), recorded on the run's tag board.
     fn birth_tags(&self, tenant: TenantId, name: &[u8]) -> paros::model::tags::UserTags {
+        // Pair of `through_frontend`'s guard: the board never keys a set on
+        // the placeholder tenant.
+        assert_always!(
+            tenant != LOCAL.tenant,
+            "frontend: a tag call names its tenant's id"
+        );
         let tags = super::tags::drawn(&self.state);
         super::tags::note(
             &self.state,
@@ -917,7 +923,17 @@ impl FleetOps {
         };
         let writes = !internal && (draw >> 52).is_multiple_of(2);
         let kind =
-            if writes && (draw >> 56).is_multiple_of(3) && !crate::shape::untagged(&self.state) {
+            // A tag call notes the asked set under its tenant's id, so the
+            // call before the fleet is ready, bound to the placeholder
+            // `LOCAL`, never tags: the frontend resolves the name to the
+            // real tenant, and the board would judge the set under the
+            // wrong id (witness 310871232490575205, recipe
+            // 636635:16162489060849312905).
+            if writes
+                && control != LOCAL
+                && (draw >> 56).is_multiple_of(3)
+                && !crate::shape::untagged(&self.state)
+            {
                 Kind::Tag
             } else if writes {
                 Kind::Write

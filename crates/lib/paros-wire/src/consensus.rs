@@ -225,6 +225,7 @@ pub fn message_to_proto(message: &Message) -> Result<internal::ConsensusMessage,
             decided,
             pending,
             config,
+            prior,
         } => Kind::Relinquish(internal::Relinquish {
             from: from.0,
             to: to.0,
@@ -234,6 +235,7 @@ pub fn message_to_proto(message: &Message) -> Result<internal::ConsensusMessage,
             decided: slot_commands_to_proto(decided),
             pending: pending_commands_to_proto(pending),
             config: config.as_ref().map(config_to_proto),
+            prior: prior.iter().map(config_to_proto).collect(),
         }),
         Message::PreRead { reply_to, ctx } => Kind::PreRead(internal::PreRead {
             reply_to: reply_to.0,
@@ -345,6 +347,11 @@ pub fn message_from_proto(message: internal::ConsensusMessage) -> Result<Message
             decided: slot_commands_from_proto(message.decided)?,
             pending: pending_commands_from_proto(message.pending)?,
             config: config_from_proto(message.config)?,
+            prior: message
+                .prior
+                .into_iter()
+                .map(|c| config_from_proto(Some(c))?.ok_or("a prior configuration is empty"))
+                .collect::<Result<_, _>>()?,
         }),
         Kind::PreRead(message) => Ok(Message::PreRead {
             reply_to: NodeId(message.reply_to),

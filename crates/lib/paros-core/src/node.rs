@@ -464,10 +464,10 @@ impl ColocatedNode {
                 decided,
                 pending,
                 config,
-                ..
+                prior,
             } => {
                 self.on_relinquish(
-                    from, to, ballot, from_slot, next_slot, decided, pending, config,
+                    from, to, ballot, from_slot, next_slot, decided, pending, config, &prior,
                 );
             }
             Message::Heartbeat {
