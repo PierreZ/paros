@@ -26,7 +26,7 @@ two queues, and nothing in a plain API orders them.
 - The single-decree model ([PMS §2.1]) with crash and restart.
 - An fsync makes a write durable. A write that was not synced can be lost by a crash.
 - paros adds storage faults beyond the papers: a failed writeback (fsyncgate, #720) and a full
-  disk (#360). See the storage cards (planned).
+  disk (#360). See [corrupted storage recovery](corrupted-storage-recovery.md).
 
 ## 3. Roles and state
 
@@ -180,7 +180,9 @@ etcd-raft's.
 - [Single-decree Paxos](single-decree-paxos.md): the two durable facts.
 - [Multi-Paxos log](multi-paxos-log.md): one durable write per acceptor per command.
 - [Catch-up](catch-up.md): how a lost relaxed chosen index heals.
-- Storage cards (planned): the store's own durability, torn tails and quarantine.
+- [Corrupted storage recovery](corrupted-storage-recovery.md): torn tails, faulty records and
+  quarantine.
+- [Boot safety](boot-safety.md): the format marker lands before the first promise.
 
 ## 12. Sources
 

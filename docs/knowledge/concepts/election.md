@@ -229,7 +229,8 @@ lists two of them under "Protocol invariants to remember".
   [persist before send](persist-before-send.md), [pipelining and resend](pipelining-and-resend.md),
   [catch-up](catch-up.md): the Kernel cards.
 - [Matchmaking and Phase 1 over every configuration](matchmaking.md): `H_b` and `C_b`.
-- Storage cards (planned): the CTRL repair probe that takes the slots Phase 1 cannot decide.
+- [Corrupted storage recovery](corrupted-storage-recovery.md): the CTRL repair probe that takes
+  the slots Phase 1 cannot decide.
 
 ## 12. Sources
 

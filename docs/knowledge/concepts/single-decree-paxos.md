@@ -23,7 +23,8 @@ second proposal, and the second one must not choose a different value ([PMS §2.
 
 - Asynchronous and non-Byzantine ([PMS §2.1]). Processes run at any speed, stop, and restart.
 - Messages can be lost, delayed and duplicated, but not corrupted. (paros's storage faults
-  break the "stable storage" half of this model; the corrupted-storage card (planned) covers them.)
+  break the "stable storage" half of this model;
+  [corrupted storage recovery](corrupted-storage-recovery.md) covers them.)
 - Each acceptor has **stable storage** that survives a restart.
 - No clock is needed for safety. Progress needs a single proposer for long enough
   ([PMS §2.4]).

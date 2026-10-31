@@ -166,7 +166,7 @@ and in the comments of `on_heartbeat`.
 - [Pipelining and resend](pipelining-and-resend.md): the repair for open rounds; catch-up is the
   repair for closed ones.
 - [Persist before send](persist-before-send.md): why the chosen index can be relaxed.
-- Truncation and the trim-point jump (planned, Storage group): how a floor moves.
+- [Truncation and the trim-point jump](truncation.md): how a floor moves.
 
 ## 12. Sources
 
