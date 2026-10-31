@@ -243,7 +243,7 @@ Unit tests: `paros-core/src/node/tests/handoff.rs`, for example
   `RecoveryPolicy` split, and `record_own_round`.
 - [Leadership fence and CheckQuorum](check-quorum.md): the install opens a fresh window and an
   inherited fence.
-- Proxy leaders (planned): a successor re-delegates inherited rounds with `leader` naming
+- [Proxy leaders](proxy-leaders.md): a successor re-delegates inherited rounds with `leader` naming
   itself.
 - Corrupted storage recovery (planned): why a faulty record refuses a handoff.
 - Configuration GC (planned): why an installed leadership opens GC.

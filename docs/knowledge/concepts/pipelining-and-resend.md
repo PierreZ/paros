@@ -156,7 +156,7 @@ not something `tick` does, because skipping it is what makes the #54 hole reacha
 - [Multi-Paxos log](multi-paxos-log.md): the rounds that pipelining keeps open.
 - [Election, P2c merge and gap fill](election.md): the repair for a pipeline a crash left open.
 - [Catch-up](catch-up.md): the repair for a `Commit` lost after a round closed.
-- Proxy leaders (planned): delegated rounds and the take-back.
+- [Proxy leaders](proxy-leaders.md): delegated rounds and the take-back.
 
 ## 12. Sources
 

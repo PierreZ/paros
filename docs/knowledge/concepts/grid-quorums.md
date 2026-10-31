@@ -180,7 +180,7 @@ because a short row or column would let a predicate answer for a cell that does 
 
 - [Flexible quorums](flexible-quorums.md): the theory the grid instantiates.
 - [Zone rule](zone-rule.md): applied per partition.
-- Proxy leaders (planned): the other half of [SRSM §3]; a proxy fans a round out to its column.
+- [Proxy leaders](proxy-leaders.md): the other half of [SRSM §3]; a proxy fans a round out to its column.
 - Leaderless quorum reads (planned): a read addressed to one row.
 
 ## 12. Sources
