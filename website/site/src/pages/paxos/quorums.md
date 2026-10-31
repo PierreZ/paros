@@ -38,6 +38,3 @@ every column, so the grid is safe. A column with a dead node cannot choose its s
   quorum system, so a reconfiguration can change the shape.
 - `parosctl journal create --survive machines=F --partitions P`: each partition has `2F+1`
   acceptors.
-- On one machine, a 3 × 3 grid was about 2 times slower than a majority, because all
-  acceptors shared one disk. A grid helps when each column has its own disks. Measure it with
-  `paros-bench --topology 3x1,3x2,3x3`.
