@@ -31,7 +31,7 @@ yet; the sources are known), **waits for a source** (no source outside paros yet
 | Storage | Corrupted storage recovery (CTRL faulty set, repair probe) | [corrupted-storage-recovery](concepts/corrupted-storage-recovery.md) | verified | `acceptor.rs`, `proposer.rs`, `proposer/probe.rs`, `paros-storage` `journal.rs` | protocol-aware-recovery §2–§5, paxos-made-live §5.1, `docs/analysis/storage/ctrl-multipaxos-restatement.md` |
 | Storage | Truncation, compaction floor and trim-point jump | [truncation](concepts/truncation.md) | verified | `journal/state.rs`, `acceptor/retention.rs`, `node/learn.rs`, `node/catch_up.rs` | paxos-made-live §5.5, protocol-aware-recovery §3.5.1, ceph `mon-paxos-patterns.md` §6 |
 | Storage | Boot safety (format marker, a wiped node never rejoins) | [boot-safety](concepts/boot-safety.md) | verified | `paros-storage` `boot.rs`, `paros-roles` `node/boot.rs`, `matchmaker.rs` | paxos-made-live §5.1, protocol-aware-recovery §2.3 |
-| On the log | Writer fence (leader uuid compare-and-set, judged at apply) | | planned | `journal/state.rs` | amazon-memorydb §4.1 |
+| On the log | Writer fence (leader uuid compare-and-set, judged at apply) | [writer-fence](concepts/writer-fence.md) | verified | `journal/state.rs`, `replica.rs`, `paros-client` `writer.rs`, `pipeline.rs` | amazon-memorydb §4.1, paxos-made-live §5.3 |
 
 Paths in the "paros code" column are relative to `crates/lib/paros-core/src/` unless they name
 another crate.

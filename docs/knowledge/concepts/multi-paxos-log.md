@@ -169,7 +169,7 @@ never covers Phase-1-shaped work).
 - [Persist before send](persist-before-send.md), [pipelining and resend](pipelining-and-resend.md),
   [catch-up](catch-up.md): the rest of the Kernel group.
 - [Proxy leaders](proxy-leaders.md), [batchers](batchers.md), [replica tier](replica-tier.md): the same log with the leader's work split.
-- Writer fence (planned): what the journal fold judges at apply.
+- [Writer fence](writer-fence.md): what the journal fold judges at apply.
 
 ## 12. Sources
 
