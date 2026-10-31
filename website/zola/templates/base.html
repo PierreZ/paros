@@ -1,0 +1,52 @@
+{# The page skeleton of the site (#804 (flat engineering redesign)). Every
+   template of the site extends it. It replaces Goyo's index.html layout; the
+   theme still provides mermaid.min.js. #}
+{% import "macros/site.html" as site %}
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  {% block title %}<title>{{ config.title }}</title>{% endblock title %}
+  {% block description %}<meta name="description" content="{{ config.description }}">{% endblock description %}
+  <meta property="og:site_name" content="paros">
+  <meta property="og:image" content="{{ get_url(path='social-card.png') }}">
+  <meta name="twitter:card" content="summary_large_image">
+  <script src="{{ get_url(path='shared/theme.js') }}"></script>
+  <link rel="stylesheet" href="{{ get_url(path='shared/tokens.css') }}">
+  <link rel="stylesheet" href="{{ get_url(path='shared/base.css') }}">
+  <link rel="stylesheet" href="{{ get_url(path='css/site.css') }}">
+  <link rel="preload" href="{{ get_url(path='shared/fonts/jetbrains-mono-latin-400-normal.woff2') }}" as="font" type="font/woff2" crossorigin>
+  <link rel="icon" type="image/svg+xml" href="{{ get_url(path='favicon.svg') }}">
+  <link rel="icon" type="image/png" sizes="96x96" href="{{ get_url(path='favicon-96.png') }}">
+  <link rel="shortcut icon" href="{{ get_url(path='favicon.ico') }}">
+  <link rel="apple-touch-icon" href="{{ get_url(path='apple-touch-icon.png') }}">
+  <script>window.PAROS = { base: {{ get_url(path='/') | json_encode | safe }}, mermaid: {{ get_url(path='js/mermaid.min.js') | json_encode | safe }}, search: {{ get_url(path='search_index.en.js') | json_encode | safe }} };</script>
+  <script defer src="{{ get_url(path='js/site.js') }}"></script>
+</head>
+<body class="{% block body_class %}doc{% endblock body_class %}">
+  <a class="skip" href="#content">Skip to the content</a>
+  {% if config.extra.announce %}
+  <div class="announce"><span class="tag">{{ config.extra.announce.tag }}</span><span>{{ config.extra.announce.text }}</span><a href="{{ get_url(path=config.extra.announce.url) }}">{{ config.extra.announce.link }}</a></div>
+  {% endif %}
+  {% block topbar %}{{ site::topbar(current="") }}{% endblock topbar %}
+  <div class="layout">
+    {% block sidebar %}{{ site::sidebar(current_path="") }}{% endblock sidebar %}
+    <main id="content" class="main">
+      {% block content %}{% endblock content %}
+    </main>
+    {% block toc %}{% endblock toc %}
+  </div>
+  <footer class="footer label">{{ config.extra.footer_html | safe }}</footer>
+  {% if config.build_search_index %}
+  <dialog class="search" id="search">
+    <form method="dialog" class="search-bar">
+      <span class="prompt" aria-hidden="true">/</span>
+      <input id="search-input" type="search" placeholder="search the site" autocomplete="off" aria-label="Search the site">
+      <button class="tool label" value="close">Esc</button>
+    </form>
+    <ol class="search-results" id="search-results"></ol>
+  </dialog>
+  {% endif %}
+</body>
+</html>

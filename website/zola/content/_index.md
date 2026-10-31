@@ -1,32 +1,19 @@
 +++
 title = "paros"
 sort_by = "weight"
-template = "section.html"
+template = "landing.html"
 +++
 
-<div style="text-align: center;">
-  <img src="paros-logo.svg" alt="paros logo" style="width: 180px; margin: 0 auto;" />
-</div>
-
-**paros** is a learning project. It implements the Paxos family of consensus algorithms in
-Rust, and it is built and validated with
-[deterministic simulation testing](https://pierrez.github.io/moonpool/) (DST). It is a work in
-progress and not for production.
+## The name
 
 The name refers to two Greek islands: [Paros](https://en.wikipedia.org/wiki/Paros) and
 [Paxos](https://en.wikipedia.org/wiki/Paxos), the island where Leslie Lamport set the consensus
-algorithm.
+algorithm. The logo is an archipelago: the islands are the machines, the dotted routes are the
+messages, and the island in the accent colour is the leader.
 
-This site has two parts:
+## How it is tested
 
-- **[parosd](@/parosd/_index.md)**, the system: a multi-tenant journal service with four calls
-  (`Write`, `Read`, `Truncate`, `SetLeader`).
-- **[The Paxos implementation](@/paxos/_index.md)**: what `paros-core` and `paros` do, told as
-  a learning path, from the classic two phases to the difficult parts around them.
-
-**[paros play](play/)** is an interactive game. It runs the real `paros-core` in your browser.
-You control the network, the clock and each role.
-
-**[The playground](@/sandbox/_index.md)** runs a paros universe in your browser: the same code as
-`parosd` on a simulated network, disk and clock. You form a cell, write records, crash machines and
-cut them off, then replay the run from its seed and its action log.
+paros is built and validated with
+[deterministic simulation testing](https://pierrez.github.io/moonpool/) (DST). The simulator runs
+the same code as production on a simulated network, disk and clock, and it injects faults for the
+whole run. A failing run replays exactly from its seed.

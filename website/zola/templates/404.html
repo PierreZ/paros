@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block title %}<title>Not found | {{ config.title }}</title>{% endblock title %}
+{% block body_class %}doc bare{% endblock body_class %}
+{% block content %}
+<div class="titleblock">
+  <div class="kicker label">Error 404</div>
+  <h1>Page not found</h1>
+  <p class="lede">The page is not at this address. It can have moved.</p>
+</div>
+<p><a class="act" href="{{ get_url(path='/') }}">Go to the home page</a></p>
+{% endblock content %}
