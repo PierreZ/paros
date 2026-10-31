@@ -270,8 +270,13 @@ function messageIdFrom(target: EventTarget | null, selector = '[data-msg]'): num
  * number are two processes, and they are two different squares on the stage.
  */
 function partyCentre(id: number, party: string | null | undefined): { x: number; y: number } | null {
-  const attribute = party === 'matchmaker' ? 'data-matchmaker' : 'data-node';
-  const group = document.querySelector(`[${attribute}="${id}"]`);
+  const selector =
+    party === 'proxy'
+      ? `[data-band-key="p${id}"]`
+      : party === 'replica'
+        ? `[data-band-key="r${id}"]`
+        : `[${party === 'matchmaker' ? 'data-matchmaker' : 'data-node'}="${id}"]`;
+  const group = document.querySelector(selector);
   const transform = group?.getAttribute('transform');
   const match = transform?.match(/translate\(([-\d.]+),\s*([-\d.]+)\)/);
   if (!match?.[1] || !match[2]) return null;

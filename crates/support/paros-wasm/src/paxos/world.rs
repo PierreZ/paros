@@ -1,7 +1,8 @@
 //! The log world: `ColocatedNode`s, their disks, the wire, and the clock the
 //! player owns.
 //!
-//! This is `crates/lib/paros-core/examples/quorum_read.rs` generalised. That example
+//! This is the hand-driven loop of the old `paros-core` quorum-read lesson
+//! (the crate's `examples/`, removed with #313) generalised. That lesson
 //! is 45 lines of `drain` / `deliver` around a `Vec<ColocatedNode>`; this module
 //! is the same two functions with the parts the example hard-codes turned into
 //! player choices: which message lands next, which node ticks, who crashes, and
@@ -93,7 +94,7 @@ pub use verbs::{CompactOutcome, HandoffOutcome, RetryAnswer, RetryOutcome};
 /// without hearing an ack quorum — correct in production, and fatal to a game
 /// where minutes pass between the player's moves. So while heartbeat delivery
 /// is manual, the world parks a leader's timeout at this sentinel, exactly as
-/// `paros-core`'s own `examples/quorum_read.rs` does; the moment
+/// the old `paros-core` quorum-read lesson did; the moment
 /// [`crate::paxos::auto::AutomationFlag::DeliverHeartbeats`] is on, the ack traffic
 /// flows on every tick and the level's real timeout is restored.
 pub const NO_CHECK_QUORUM: u64 = 1_000_000;

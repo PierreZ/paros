@@ -96,7 +96,7 @@ cargo check --target wasm32-unknown-unknown -p paros-core
 cargo check --target wasm32-unknown-unknown -p paros-core --no-default-features
 cargo check -p paros-core --features serde
 RUSTDOCFLAGS="-D warnings" cargo doc -p paros-core --no-deps
-cargo run -p paros-core --example single_decree   # also multi_paxos, matchmaker, flexible_quorums, acceptor_grid, quorum_read, proxy_leader, replica_tier
+cargo nextest run -p paros-wasm                   # the Paxos game drives the roles by hand
 cargo nextest run -p paros-core                   # incl. the handover and proxy model checkers
 ```
 

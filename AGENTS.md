@@ -29,7 +29,7 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
   the seeds. A red in any shard blocks the merge. Gates are judged over all the shards: CI's `sim-gates` job fails only on a gate no shard ran
   or fired (`PAROS_SIM_MISSING_GATES`).
 
-CI also runs the `paros-core` examples and the `wasm` job (the `paros-wasm` bundles and the game's web build). Rust 2024 edition,
+CI also runs the `wasm` job (the `paros-wasm` bundles and the game's web build). Rust 2024 edition,
 toolchain pinned in `rust-toolchain.toml` (incl. `wasm32-unknown-unknown`), clippy pedantic on
 (`[workspace.lints]`). The full local gate is the `validate` skill.
 

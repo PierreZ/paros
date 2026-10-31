@@ -1,12 +1,12 @@
 ---
 name: validate
-description: Run paros's full local gate the way CI's jobs do - cargo fmt, clippy --all-targets -D warnings, rustdoc -D warnings on paros-core, nextest, the eight paros-core examples, the wasm32 and no-default-features portability checks (paros-core, paros and paros-sim), the sim-wasm job (a seed of paros-sim is the same run on wasm32 as natively), the wasm job (ts-rs bindings diff, scripts/build-wasm.sh, npm check/test/build), and cargo xtask sim run-all when the protocol or harness changed - through Nix (nix develop, locally and on Claude Code on the web). Use before declaring any change done, before committing, when asked "will CI pass", and after any Cargo.toml or feature change.
+description: Run paros's full local gate the way CI's jobs do - cargo fmt, clippy --all-targets -D warnings, rustdoc -D warnings on paros-core, nextest, the wasm32 and no-default-features portability checks (paros-core, paros and paros-sim), the sim-wasm job (a seed of paros-sim is the same run on wasm32 as natively), the wasm job (ts-rs bindings diff, scripts/build-wasm.sh, npm check/test/build), and cargo xtask sim run-all when the protocol or harness changed - through Nix (nix develop, locally and on Claude Code on the web). Use before declaring any change done, before committing, when asked "will CI pass", and after any Cargo.toml or feature change.
 ---
 
 # Validate
 
 `.github/workflows/rust.yml` has these jobs (`clippy`, `fmt`, `test`,
-`examples`, `portability`, `sim-wasm`, `wasm`, `image`, `sim`, `sim-gates`) and every one runs through
+`portability`, `sim-wasm`, `wasm`, `image`, `sim`, `sim-gates`) and every one runs through
 `nix develop --command`. The sandbox's `/root/.cargo` toolchain is off-limits
 in this project: the pinned toolchain is `rust-toolchain.toml` (its channel, with
 `wasm32-unknown-unknown`), and results from anything else do not predict CI.
@@ -31,10 +31,6 @@ RUN cargo fmt --all -- --check              # job: fmt   (run `cargo fmt` to fix
 RUN cargo clippy --all-targets -- --deny warnings                       # job: clippy
 RUSTDOCFLAGS="-D warnings" RUN cargo doc -p paros-core --no-deps        # job: clippy (doc lints)
 RUN cargo nextest run                        # job: test  (fallback: cargo test)
-for ex in single_decree multi_paxos matchmaker flexible_quorums \
-          acceptor_grid quorum_read proxy_leader replica_tier; do        # job: examples
-  RUN cargo run -p paros-core --example "$ex"
-done
 RUN cargo check --target wasm32-unknown-unknown -p paros-core           # job: portability
 RUN cargo check --target wasm32-unknown-unknown -p paros-core --no-default-features
 RUN cargo check -p paros-core --features serde

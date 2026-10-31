@@ -80,8 +80,7 @@ tally changed when it landed.
 
 **In the code.** `QuorumSystem::Flexible`, `QuorumSystem::cross_intersects`,
 `AcceptorConfig::has_phase1_quorum`, `AcceptorConfig::has_phase2_quorum`
-(`crates/lib/paros-core/src/membership/`); the example
-`paros-core/examples/flexible_quorums.rs`. Paper: Howard, Malkhi and Spiegelman,
+(`crates/lib/paros-core/src/membership/`). Paper: Howard, Malkhi and Spiegelman,
 *Flexible Paxos* (`docs/references/papers/flexible-paxos/`). Play it:
 [`act4/flexible-quorums`](../../play/#act4/flexible-quorums).
 
@@ -104,8 +103,7 @@ stray copy, honestly and safely, and its vote still counts for nothing.
 
 **In the code.** `QuorumSystem::Grid { rows, cols }`, `QuorumSystem::column_of`,
 `QuorumSystem::row_of`, `AcceptorConfig::has_phase2_quorum_in`
-(`membership/`); `ColocatedNode::propose_in` (`node.rs`); the example
-`paros-core/examples/acceptor_grid.rs`. Paper: Whittaker et al.,
+(`membership/`); `ColocatedNode::propose_in` (`node.rs`). Paper: Whittaker et al.,
 *Scaling Replicated State Machines with Compartmentalization* §3.2
 (`docs/references/papers/scaling-rsm-compartmentalization/`). Play it:
 [`act4/the-grid`](../../play/#act4/the-grid).
@@ -219,8 +217,7 @@ hole. The rule that closes both is in the next section.
 `Rounds::stalled` (`proposer/rounds.rs`);
 `Delegation`, `ColocatedNode::propose_in`, `ColocatedNode::take_back_delegated`
 (`node.rs`, `node/phase2.rs`); `Party`, `Audience::Proxy` (`message.rs`);
-`Config::proxy_count` (`contract/config.rs`); `ProxyConfig`, `ProxyJournal`; the model checker `models/proxy.rs`; the
-example `paros-core/examples/proxy_leader.rs`; the driver `paros::run_proxy`
+`Config::proxy_count` (`contract/config.rs`); `ProxyConfig`, `ProxyJournal`; the model checker `models/proxy.rs`; the driver `paros::run_proxy`
 (`crates/lib/paros-roles/src/proxy_leader.rs`), the harness's `ProxyProcess` and `PROXY_GROUP`
 (`paros-sim/src/process/`, `roles.rs`), the audit's
 `observe_proxy_decision` (`paros-sim/src/audit/state.rs`). Paper: Whittaker et
@@ -318,8 +315,7 @@ Phase 1 reads.
 **In the code.** `ReplicaNode`, `ReplicaReady`, `ReplicaCounters`
 (`replica_node.rs`, whose module doc holds the coupling analysis);
 `Config::replica_count`, `Config::reply_owner` (`contract/config.rs`);
-`ReplicaId` (`membership/ids.rs`); `WriteOp::Learned` (`write.rs`); the example
-`paros-core/examples/replica_tier.rs`; the driver `paros::run_replica`
+`ReplicaId` (`membership/ids.rs`); `WriteOp::Learned` (`write.rs`); the driver `paros::run_replica`
 (`crates/lib/paros-roles/src/replica.rs`), the harness's `ReplicaProcess` and
 `REPLICA_GROUP` (`paros-sim/src/process/`, `roles.rs`); the replica's quorum
 read `ReplicaNode::quorum_read_in` and its journal read `ReplicaNode::read_log`;

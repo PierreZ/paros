@@ -1,7 +1,7 @@
 //! The **matchmaker plane**: the registry tier, the candidate's matchmaking
 //! phase, the garbage-collection floor, and the generation handover.
 //!
-//! This is `crates/lib/paros-core/examples/matchmaker.rs` with the parts the
+//! This is the old `paros-core` matchmaker lesson (removed with #313) with the parts the
 //! example hard-codes turned into player choices. The example's
 //! `MatchmakerNode` — a [`Matchmaker`](paros_core::Matchmaker) role, the
 //! static [`MatchmakerConfig`](paros_core::matchmaker::MatchmakerConfig) it boots with, and

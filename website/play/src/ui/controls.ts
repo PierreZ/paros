@@ -23,6 +23,7 @@ import {
   type MatchmakerControlState,
 } from './matchmakers';
 import { memberCount, phaseSize, quorumOf } from './quorum';
+import { renderProxyControls } from './proxies';
 
 type Dispatch = (action: Action) => void;
 
@@ -787,6 +788,7 @@ export function renderControls(
     reachPicker(view, dispatch),
     clientControls(view, state, dispatch),
     renderMatchmakerControls(view, state, dispatch, rerender),
+    renderProxyControls(view, dispatch),
     nodeControls(view, state, dispatch),
   ].filter((block): block is HTMLElement => block !== null);
   return h('section', { class: 'controls' }, ...blocks);

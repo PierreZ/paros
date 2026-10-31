@@ -48,13 +48,14 @@ calls the core (a core `assert!` in wasm is an abort): every player-reachable re
 - `src/paxos/world/drain.rs` → **the drain contract** (module doc) — the only place a `Ready` is held; `plan_recovery`.
 - `src/paxos/world/prompts.rs` → which delivery raises which prompt, and the clone it is judged on.
 - `src/paxos/world/render.rs` → the log world's view; a crashed node renders from its disk.
+- `src/paxos/world/compartments.rs` → `ProxyProcess`, `ReplicaProcess` → Act V's proxy leaders and replica tier: their own `Party`, delivery, drain, crash/restart, and the leader's take-back on a tick.
 - `src/paxos/world/matchmakers/{mod,process,verbs,delivery,prompts,render}.rs` → the matchmaker plane: `MatchmakerProcess`, operator verbs (`retire` needs `reports_gc_floor`), beat-driven freeze/abandon.
 - `src/paxos/prompt/{mod,acceptor,proposer,replica,reads,storage,matchmaker}.rs` → `PromptKind`, `Choice`, `Prompt`, `Verdict`, `ALL_PROMPTS`; constructors by role.
 - `src/paxos/auto.rs` → `AutomationFlag`, `ALL_FLAGS` → automation as reward, and the delivery pump.
 - `src/paxos/narration.rs` → narration derived from the transition.
 - `src/paxos/level.rs` → `Level`, `levels()`, `level(id)` · `src/paxos/level/common.rs` → shared worlds and shorthands.
 - `src/paxos/level/script.rs` → `Script` → records a reference solution by driving a real `Game`.
-- `src/paxos/level/act{1,2,3,4}.rs` → 6 + 7 + 5 + 10 = 28 levels.
+- `src/paxos/level/act{1,2,3,4,5}.rs` → 6 + 7 + 5 + 10 + 4 = 32 levels.
 - `src/paxos/view.rs` → `GameView` and friends → the one contract the browser reads.
 - `tests/paxos_bindings.rs` → writes `website/play/src/generated/` from the `ts_rs::TS` derives.
 - `tests/paxos_levels.rs` → every reference reaches its goal; wrong answers refused and inert; undo/replay bit-exact; ids unique; act order; field-guide links bare; unlocks pinned manual.

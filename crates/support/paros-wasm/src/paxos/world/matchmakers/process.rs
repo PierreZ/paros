@@ -1,7 +1,7 @@
 //! One matchmaker process: the role, the registry disk it reboots from, and
 //! the **step, persist, reply, advance** order every delivery follows.
 //!
-//! This is `crates/lib/paros-core/examples/matchmaker.rs`'s `MatchmakerNode`: a
+//! This is the old `paros-core` matchmaker lesson's `MatchmakerNode`: a
 //! [`Matchmaker`] role, the static [`MatchmakerConfig`] it boots with, and a
 //! [`MemRegistry`] disk it writes to and reboots from. A reply never leaves
 //! ahead of an unsynced write, and every batch is acknowledged with

@@ -1,7 +1,7 @@
 //! The drain contract: one `Ready` batch at a time, from the node to the disk
 //! and the wire.
 //!
-//! This is the loop `crates/lib/paros-core/examples/quorum_read.rs` writes in
+//! This is the loop the old `paros-core` quorum-read lesson wrote in
 //! fifteen lines, with the two things a game needs added: a **durability seam**
 //! that can cut a batch in half, and a **prompt** that can hold one back until
 //! the player has said what the core did with it.

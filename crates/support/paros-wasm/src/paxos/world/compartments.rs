@@ -1,8 +1,8 @@
 //! The compartments: proxy leaders and the replica tier (Compartmentalized
 //! Paxos §3.1 and §3.3).
 //!
-//! This is `crates/lib/paros-core/examples/proxy_leader.rs` and
-//! `replica_tier.rs` folded into the log world. A proxy leader and a replica
+//! This is the old `paros-core` proxy-leader and replica-tier lessons (the
+//! crate's `examples/`, removed with #313) folded into the log world. A proxy leader and a replica
 //! are **two more processes** beside the acceptor pool, each with its own
 //! identity space, and each driven through the same `step` → `ready` →
 //! `advance` shape as a node. Nothing here decides anything: the proxy is the

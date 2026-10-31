@@ -39,6 +39,7 @@ import {
   registrationLine,
   registryLines,
 } from './matchmaker';
+import { bandKey, bandTitle, helpersOf, type Helper } from './compartments';
 import {
   NARROW_DOT_RADIUS,
   NARROW_HIT_RADIUS,
@@ -112,6 +113,8 @@ interface Geometry {
   readonly gridGap: Gap;
   readonly at: Map<number, Point>;
   readonly bandAt: Map<number, Point>;
+  /** Where each proxy and replica sits, by its band key (`p0`, `r10`). */
+  readonly helperAt: Map<string, Point>;
   readonly band: { readonly size: number; readonly title: number } | null;
   readonly shape: GridShape | null;
   readonly cells: Map<number, Cell> | null;
@@ -564,7 +567,46 @@ function nodeLabelClass(kind: NarrowLabel['kind']): string {
  * are two different processes, and a reader must be told which one moved.
  */
 export function partyName(id: number, party: string | null | undefined): string {
-  return party === 'matchmaker' ? `matchmaker ${id}` : `node ${id}`;
+  if (party === 'matchmaker') return `matchmaker ${id}`;
+  if (party === 'proxy') return `proxy ${id}`;
+  if (party === 'replica') return `replica ${id}`;
+  return `node ${id}`;
+}
+
+/**
+ * One proxy leader or replica: a rounded square in the band, like a
+ * matchmaker, because neither one votes on a slot.
+ */
+function helperGroup(helper: Helper, at: Point, geo: Geometry): SVGGElement {
+  const size = geo.band?.size ?? MATCHMAKER_SIZE;
+  const half = size / 2;
+  return svg(
+    'g',
+    {
+      class: `matchmaker helper ${helper.party}${helper.alive ? '' : ' crashed'}`,
+      transform: `translate(${at.x.toFixed(1)}, ${at.y.toFixed(1)})`,
+      'data-band-key': helper.key,
+    },
+    svg('rect', {
+      class: 'matchmaker-box',
+      x: -half,
+      y: -half,
+      width: size,
+      height: size,
+      rx: geo.narrow ? 7 : 9,
+    }),
+    svg('text', { class: 'matchmaker-id', x: 0, y: 5 }, helper.label),
+    ...helper.lines.map((line, index) =>
+      geo.narrow
+        ? svg(
+            'text',
+            { class: 'matchmaker-meta', x: 0, y: half + 14 + index * NARROW_LINE },
+            clipLabel(line, geo.bandLabelHalf),
+          )
+        : svg('text', { class: 'registry-line', x: half + 10, y: -8 + index * 12 }, line),
+    ),
+    svg('title', {}, helper.title),
+  );
 }
 
 /**
@@ -764,20 +806,26 @@ export function narrowRegistry(
  */
 function matchmakerBand(
   matchmakers: readonly MatchmakerView[],
+  helpers: readonly Helper[],
   centre: Point,
   geo: Geometry,
 ): SVGGElement | null {
-  if (matchmakers.length === 0) return null;
+  if (matchmakers.length === 0 && helpers.length === 0) return null;
+  const heading = bandTitle(matchmakers.length, helpers);
+  const helperSquares = helpers.map((helper, index) =>
+    helperGroup(helper, geo.helperAt.get(helper.key) ?? { x: index, y: centre.y }, geo),
+  );
   if (geo.narrow) {
     const title = geo.band?.title ?? 0;
     return svg(
       'g',
       { class: 'matchmaker-band narrow' },
       svg('line', { class: 'band-rule', x1: 0, y1: title - 14, x2: geo.width, y2: title - 14 }),
-      svg('text', { class: 'gutter-title', x: 6, y: title }, 'matchmakers'),
+      svg('text', { class: 'gutter-title', x: 6, y: title }, heading),
       ...matchmakers.map((matchmaker, index) =>
         matchmakerGroup(matchmaker, geo.bandAt.get(matchmaker.id) ?? { x: index, y: title }, geo),
       ),
+      ...helperSquares,
     );
   }
   const positions = matchmakerPositions(matchmakers.length, centre);
@@ -791,10 +839,11 @@ function matchmakerBand(
       x2: centre.x - MATCHMAKER_SIZE,
       y2: centre.y * 2 - 30,
     }),
-    svg('text', { class: 'gutter-title', x: centre.x - MATCHMAKER_SIZE + 12, y: 30 }, 'matchmakers'),
+    svg('text', { class: 'gutter-title', x: centre.x - MATCHMAKER_SIZE + 12, y: 30 }, heading),
     ...matchmakers.map((matchmaker, index) =>
-      matchmakerGroup(matchmaker, positions[index] ?? centre, geo),
+      matchmakerGroup(matchmaker, geo.bandAt.get(matchmaker.id) ?? positions[index] ?? centre, geo),
     ),
+    ...helperSquares,
   );
 }
 
@@ -863,6 +912,8 @@ function geometryOf(view: GameView, viewport: Viewport): Geometry {
   const cells = shape ? gridCells(world, shape) : null;
   const wiped = wipedNodes(view);
   const matchmade = matchmakers.length > 0;
+  const helpers = helpersOf(world);
+  const banded = matchmakers.length + helpers.length;
 
   if (viewport.narrow) {
     const nodes: NarrowNode[] = world.nodes.map((node) => ({
@@ -872,17 +923,22 @@ function geometryOf(view: GameView, viewport: Viewport): Geometry {
     }));
     const matchmakerLines = matchmakers.reduce(
       (most, matchmaker) => Math.max(most, 2 + (matchmaker.successor ? 1 : 0) + narrowRegistry(matchmaker).length),
-      3,
+      helpers.reduce((most, helper) => Math.max(most, helper.lines.length), 3),
     );
     const stage = narrowLayout(viewport.width, nodes, {
       grid: shape,
-      matchmakers: matchmakers.length,
+      matchmakers: banded,
       matchmakerLines,
     });
     const bandAt = new Map<number, Point>();
     matchmakers.forEach((matchmaker, index) => {
       const point = stage.band[index];
       if (point) bandAt.set(matchmaker.id, point);
+    });
+    const helperAt = new Map<string, Point>();
+    helpers.forEach((helper, index) => {
+      const point = stage.band[matchmakers.length + index];
+      if (point) helperAt.set(helper.key, point);
     });
     return {
       narrow: true,
@@ -895,6 +951,7 @@ function geometryOf(view: GameView, viewport: Viewport): Geometry {
       gridGap: stage.gap ?? GRID_GAP,
       at: stage.points,
       bandAt,
+      helperAt,
       band: { size: stage.matchmakerSize, title: stage.bandTitle ?? 0 },
       shape,
       cells,
@@ -905,7 +962,7 @@ function geometryOf(view: GameView, viewport: Viewport): Geometry {
   // and a taller stage for the badges the tier adds. Every other position is
   // exactly where it was, so the acceptor ring never moves under the player.
   const hasClients = world.clients.length > 0;
-  const width = WIDTH + (matchmade ? BAND_WIDTH : 0);
+  const width = WIDTH + (banded > 0 ? BAND_WIDTH : 0);
   const height = matchmade ? TALL : HEIGHT;
   // A grid sits further right than a ring: it spends its left margin on the
   // row labels and on the leftmost logs.
@@ -926,9 +983,12 @@ function geometryOf(view: GameView, viewport: Viewport): Geometry {
   }
   const bandCentre: Point = { x: WIDTH + MATCHMAKER_SIZE + 20, y: height / 2 };
   const bandAt = new Map<number, Point>();
-  matchmakerPositions(matchmakers.length, bandCentre).forEach((point, index) => {
+  const helperAt = new Map<string, Point>();
+  matchmakerPositions(banded, bandCentre).forEach((point, index) => {
     const matchmaker = matchmakers[index];
     if (matchmaker) bandAt.set(matchmaker.id, point);
+    const helper = helpers[index - matchmakers.length];
+    if (helper) helperAt.set(helper.key, point);
   });
 
   return {
@@ -942,10 +1002,21 @@ function geometryOf(view: GameView, viewport: Viewport): Geometry {
     gridGap: GRID_GAP,
     at,
     bandAt,
+    helperAt,
     band: null,
     shape,
     cells,
   };
+}
+
+/**
+ * Where one end of a message sits: a node, a matchmaker, or a proxy or
+ * replica of the band. The tier is the engine's answer, never a guess.
+ */
+function endpointAt(id: number, party: string | null | undefined, geo: Geometry): Point | null {
+  const key = bandKey(id, party);
+  if (key !== null && party !== 'matchmaker') return geo.helperAt.get(key) ?? null;
+  return endpointOf(id, party === 'matchmaker' ? 'matchmaker' : 'node', geo.at, geo.bandAt);
 }
 
 /**
@@ -970,8 +1041,8 @@ export function renderStage(view: GameView, viewport: Viewport = WIDE): SVGSVGEl
     // The tier an endpoint belongs to is the engine's answer: matchmaker 0 and
     // node 0 are two processes, and only `from_party`/`to_party` tell them
     // apart.
-    const from = endpointOf(first.from, first.from_party, geo.at, geo.bandAt);
-    const to = endpointOf(first.to, first.to_party, geo.at, geo.bandAt);
+    const from = endpointAt(first.from, first.from_party, geo);
+    const to = endpointAt(first.to, first.to_party, geo);
     if (!from || !to) continue;
     // A narrow node keeps its labels under its disc, so a link is pulled in
     // further there: a dot that lands on a label hides a word.
@@ -1021,7 +1092,7 @@ export function renderStage(view: GameView, viewport: Viewport = WIDE): SVGSVGEl
     // room for it, and the panel's client history says the same thing.
     geo.narrow ? null : clientColumn(world),
     geo.shape ? gridLabels(geo.shape, geo) : null,
-    matchmakerBand(matchmakers, bandCentre, geo),
+    matchmakerBand(matchmakers, helpersOf(world), bandCentre, geo),
     svg('g', { class: 'links' }, ...links),
     svg('g', { class: 'nodes' }, ...nodes),
     svg('g', { class: 'wire' }, ...dots),

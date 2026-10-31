@@ -9,6 +9,7 @@ const ACT_TITLES: Record<number, string> = {
   2: 'Act II — a replicated log',
   3: 'Act III — truncation, the trim point and reads',
   4: 'Act IV — everything the book never wrote',
+  5: 'Act V — moving and splitting the leader',
 };
 
 /** The whole map page. */
