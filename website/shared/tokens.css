@@ -96,7 +96,11 @@
   --syn-constant: #6b4f8a;
   --syn-name: #1b1d1e;
 
-  /* paros play: Paxos message phases and grid columns. */
+  /* paros play: strokes of the four status colours, message phases, grid columns. */
+  --done-dark: #244730;
+  --gap-dark: #4d1f1f;
+  --open-dark: #333333;
+  --shared-dark: #7a4718;
   --phase-prepare: #2f5d8a;
   --phase-promise: #3f78b3;
   --phase-accept: #3b6e47;
@@ -155,6 +159,10 @@
     --syn-comment: #858b86;
     --syn-constant: #b49ad6;
     --syn-name: #d9ddd6;
+    --done-dark: #8fc9a1;
+    --gap-dark: #e08a8a;
+    --open-dark: #b0b0b0;
+    --shared-dark: #f0c48c;
     --phase-prepare: #7aa8d8;
     --phase-promise: #a3c9ec;
     --phase-accept: #6fb388;
@@ -212,6 +220,10 @@
   --syn-comment: #858b86;
   --syn-constant: #b49ad6;
   --syn-name: #d9ddd6;
+  --done-dark: #8fc9a1;
+  --gap-dark: #e08a8a;
+  --open-dark: #b0b0b0;
+  --shared-dark: #f0c48c;
   --phase-prepare: #7aa8d8;
   --phase-promise: #a3c9ec;
   --phase-accept: #6fb388;

@@ -5,6 +5,10 @@ import { defineConfig } from 'vitest/config';
 // dev server.
 export default defineConfig({
   base: './',
+  // The shared tokens, components and fonts live in website/shared/.
+  server: {
+    fs: { allow: ['..'] },
+  },
   build: {
     target: 'es2022',
     outDir: 'dist',

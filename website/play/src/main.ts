@@ -5,6 +5,9 @@
 // component state — the two things a frame needs to keep (what the player has
 // typed into a box, and where the focus was) are carried explicitly.
 
+// The shared theme switch and phone menu (#804 (flat engineering redesign)):
+// it sets <html data-theme> from the reader's choice or the system setting.
+import '../../shared/theme.js';
 import './styles.css';
 import init, { WasmGame } from './wasm/paros_paxos.js';
 import { Game, decodeLevels } from './game';
@@ -51,15 +54,14 @@ const options = parseOptions(window.location.search);
 let pendingLog = options.log;
 if (options.embed) document.documentElement.classList.add('embed');
 
-const darkQuery = window.matchMedia('(prefers-color-scheme: dark)');
 let theme: Theme | null = options.theme;
 
+// A theme from the URL or the holding page wins; without one, shared/theme.js
+// keeps the reader's choice (shared with the book) or the system setting.
 function applyTheme(): void {
-  const resolved: Theme = theme ?? (darkQuery.matches ? 'dark' : 'light');
-  document.documentElement.dataset['theme'] = resolved;
+  if (theme) document.documentElement.dataset['theme'] = theme;
 }
 applyTheme();
-darkQuery.addEventListener('change', applyTheme);
 
 // The holding page tells the frame when its reader flips the theme.
 window.addEventListener('message', (event) => {

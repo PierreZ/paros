@@ -837,3 +837,23 @@ dialog.search::backdrop {
     min-width: 0;
   }
 }
+
+/* ---- a Paxos scenario: one level of the game in a frame (#308) ---- */
+
+.paros-scenario {
+  margin: 1.6em 0;
+}
+
+.paros-scenario iframe {
+  display: block;
+  width: 100%;
+  height: 760px;
+  border: 1px solid var(--rule-strong);
+  background: var(--bg);
+}
+
+.paros-scenario figcaption {
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
