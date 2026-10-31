@@ -52,6 +52,10 @@ pub enum Op {
     CreateTenant {
         /// The tenant's name.
         tenant: String,
+        /// The cell it goes to, by name (`cell-1`, `cell-2`); `None` lets
+        /// the universe place it by its bucket.
+        #[serde(default)]
+        cell: Option<String>,
     },
     /// `parosctl journal create`: the tenant coordinator places it.
     CreateJournal {
@@ -63,6 +67,40 @@ pub enum Op {
         /// either part optional (`F=1`, `P=1` by default).
         #[serde(default = "default_durability")]
         mode: String,
+        /// A multi-writer journal (#241): anyone appends, no leader uuid,
+        /// no deduplication. A single-writer journal otherwise.
+        #[serde(default)]
+        multi: bool,
+    },
+    /// `parosctl configure`: record a new desired mode for a journal
+    /// (durability and role counts). The tenant coordinator then applies it
+    /// by reconfiguration.
+    Configure {
+        /// The tenant's name.
+        tenant: String,
+        /// The journal's name, inside the tenant.
+        journal: String,
+        /// `machines=F,partitions=P,replicas=R,proxies=X,batchers=B`.
+        mode: String,
+    },
+    /// `parosctl set-leader`: a new writer claims the journal with a fresh
+    /// leader uuid (`SetLeader(new, old)`), then the old writer tries one
+    /// write, which the journal refuses.
+    SetLeader {
+        /// The tenant's name.
+        tenant: String,
+        /// The journal's name, inside the tenant.
+        journal: String,
+    },
+    /// Start or stop a writer that appends one record to `journal` about
+    /// five times a second, between the other steps.
+    Stream {
+        /// The tenant's name.
+        tenant: String,
+        /// The journal's name, inside the tenant.
+        journal: String,
+        /// Start (`true`) or stop (`false`).
+        on: bool,
     },
     /// Append `count` records to `journal` of `tenant`, as its one writer.
     Write {
@@ -73,8 +111,7 @@ pub enum Op {
         /// How many records.
         count: u32,
     },
-    /// Read `count` records of `journal` of `tenant` from its first
-    /// position.
+    /// Read the last `count` records of `journal` of `tenant` (its tail).
     Read {
         /// The tenant's name.
         tenant: String,
@@ -82,6 +119,49 @@ pub enum Op {
         journal: String,
         /// How many records.
         count: u32,
+    },
+    /// Traffic: append `count` records to every journal the log created,
+    /// all the journals at the same time, each through its one writer.
+    Traffic {
+        /// How many records each journal gets.
+        count: u32,
+    },
+    /// `parosctl cell add-machine`: admit idle machine `machine` into
+    /// `cell-1`. The cell registers it in its control journal, then tells
+    /// it its cell with `Admit`.
+    AddMachine {
+        /// The machine's index.
+        machine: usize,
+    },
+    /// `parosctl cell drain-machine`: the cell coordinator moves every slot
+    /// off the machine.
+    Drain {
+        /// The machine's index.
+        machine: usize,
+    },
+    /// `parosctl cell remove-machine`: retire a drained machine.
+    Remove {
+        /// The machine's index.
+        machine: usize,
+    },
+    /// `parosctl cell maintenance`: the cell does not re-place the
+    /// machine's slots while it is down, for `for_ms` (0 ends it).
+    Maintenance {
+        /// The machine's index.
+        machine: usize,
+        /// How long, in simulated milliseconds.
+        for_ms: u64,
+    },
+    /// `parosctl init --idle` over `machines`, then `parosctl universe
+    /// add-cell`: a second cell, `cell-2`, joins the universe.
+    AddCell {
+        /// The machines that found it, by index.
+        machines: Vec<usize>,
+    },
+    /// `parosctl resolve`: where the universe sends a tenant's clients.
+    Resolve {
+        /// The tenant's name.
+        tenant: String,
     },
     /// Crash machine `machine`: moonpool kills its process and drops the
     /// writes its disk did not sync. It stays down until `restart`.
@@ -164,8 +244,20 @@ pub struct Topology {
     /// The machines an `isolate` cuts from the network, by index.
     #[serde(default)]
     pub isolated: Vec<usize>,
+    /// The cells, `cell-1` first, each with its machines by index.
+    #[serde(default)]
+    pub cells: Vec<CellView>,
     /// The tenants, the internal ones first.
     pub tenants: Vec<TenantPlace>,
+}
+
+/// One cell and its machines.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CellView {
+    /// Its name.
+    pub name: String,
+    /// Its machines, by index.
+    pub machines: Vec<usize>,
 }
 
 /// One tenant and its journals.

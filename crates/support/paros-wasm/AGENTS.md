@@ -11,8 +11,8 @@ tests cover both tools; each wasm bundle is built alone with `--no-default-featu
   page `website/play/` (off the site since #810 (website redo 1/4)). Spec: `docs/analysis/play/game-plan.md`; read it before adding a level
   or a verb.
 - `playground` → `src/playground.rs` + `src/playground/` → the paros playground (#518 (Paxos
-  visualization sandbox)): a paros universe on moonpool's simulated network, disk and clock, run
-  from a `Config` and an action log. Depends on `paros` (no `tls`) and `moonpool-sim` with
+  visualization sandbox), #813 (live playground)): one live paros universe on moonpool's simulated
+  network, disk and clock (`moonpool_sim::LiveSimulation`), driven one step at a time. Depends on `paros` (no `tls`) and `moonpool-sim` with
   default features off (no exploration). Bundle `paros_playground`, page `website/sandbox/`, served at
   `/playground/`; the site rules are in `website/site/AGENTS.md`.
 
@@ -106,23 +106,33 @@ sim-only path, no buggify or hint here. The timeline is an `Invariant` that only
 
 ### Map
 
-- `src/playground.rs` → `run`, `run_json`, `runSandbox` (wasm), `check` → one seed of
-  `SimulationBuilder`: the machine group, the operator workload, the timeline; no fault
-  injection: every machine and the operator call `moonpool_sim::buggify_reset` first, so the
-  shipped BUGGIFY sites and crash hints are inert, as in production. A log starts with `init`
-  at 0 ms (over the first `machines`) and holds no other `init`.
-- `src/playground/model.rs` → `Config`, `Action`, `Op` (`init`, `create_tenant`, `create_journal` with
-  its `mode`: `machines=F,partitions=P` (#523), either part optional, `write`, `read`), `StepResult`,
-  `Topology` (each machine's short and full node id and its zone), `TenantPlace`,
-  `JournalPlace` (its `key`, acceptors in membership order, `Quorum`), `Event`, `RunView` →
-  the JSON contract.
+- `src/playground.rs` → `Live` (`start`, `act`, `advance`, `finish`), `Frame`, `Universe` (wasm:
+  `new`, `act`, `advance`, `nowMs`), `run` and `run_json` (a whole action log on the same engine,
+  for the tests and the native binary), `check_config`/`check_op` → one seed of
+  `SimulationBuilder::live()`: the machine group, the operator workload, the fault injector, the
+  timeline. Every machine and the operator call `moonpool_sim::buggify_reset` first, so the shipped
+  BUGGIFY sites and crash hints are inert, as in production. A fault step goes to the injector
+  and strikes at once; any other step queues for the operator.
+- `src/playground/model.rs` → `Config`, `Action`, `Op` (`init`, `create_tenant` with its cell,
+  `create_journal` with its `mode` (`machines=F,partitions=P`, #523) and `multi`, `configure`,
+  `set_leader`, `stream`, `write`, `read` (the tail), `traffic`, `add_machine`, `drain`, `remove`,
+  `maintenance`, `add_cell`, `resolve`, and the faults `crash`, `restart`, `isolate`, `heal`),
+  `StepResult`, `Topology` (each machine's short and full node id and its zone, the `cells`),
+  `TenantPlace`, `JournalPlace` (its `key`, acceptors in membership order, `Quorum`), `Event`,
+  `RunView` → the JSON contract.
 - `src/playground/machine.rs` → `MachineProcess`, `MACHINE_GROUP`, `machine_ip`, `machine_addr`, `zone_of`
   → machine `i` is `10.0.1.{i+1}:4500` in `zone-{i mod 3}`, literal addresses, plaintext.
-- `src/playground/operator.rs` → `Operator` → `init` over the first machines (`paros::client::initialize`);
-  `FleetSession::create_tenant`; `journals::request` (create); a write claims and writes as the
-  journal's one `Writer`, one entry per record, the identical entry again after an unsettled
-  answer; a read walks a `Reader` from position 0. After each step, `survey` reads the topology through the admin API
-  only: `read_directory`, `journals::list` and `Client::inspect` on every machine.
+- `src/playground/operator.rs` → `Operator` → pops its steps from an inbox; `init` over the first
+  machines and `add_cell` over idle ones (`paros::client::initialize`, `FleetSession::add_cell`);
+  `FleetSession::create_tenant` (`with_cell`); `journals::request` (create, configure);
+  `CellSession` (add, drain, remove, maintenance), fresh for each command as `parosctl` opens one;
+  a single-writer write claims and writes as the journal's `Writer`, one entry per record, the
+  identical entry again after an unsettled answer; a multi-writer write is `multi::append_request`;
+  `set_leader` claims with a fresh `Writer` and tries one write with the old one. Idle, it appends
+  for the started writers and reads the topology every second. `survey` reads it through the admin
+  API only: `read_directory`, `journals::list` and `Client::inspect` on every machine.
+- `src/playground/faults.rs` → `Injector` → plays the fault steps on moonpool's simulated world
+  and records their results.
 - `src/playground/calls.rs` → `CallTrace` → a read-only `CallObserver` on the operator's journal clients:
   each attempt a `client_call` event, each answer a `client_answer` event.
 - `src/playground/timeline.rs` → `Timeline`, `NAMES` → the events the page draws and lists (`msg_sent`
@@ -130,7 +140,9 @@ sim-only path, no buggify or hint here. The timeline is an `Invariant` that only
 - `src/bin/paros-playground.rs` → the same JSON on stdin and stdout, natively.
 - `tests/playground_probe.rs` → `init` over four of five machines; two tenants create, write and read; the topology names each journal's acceptors
   and leader, and the quorum shape of a journal over four acceptor partitions; replay is identical, and a longer log
-  keeps the shorter one's steps.
+  keeps the shorter one's steps; a crashed leader is replaced; the DEMO's cell steps (a second
+  cell, a tenant in it, a multi-writer journal, set-leader, a started writer, configure, resolve,
+  maintenance, drain) in one run.
 
 ## Tests & gates
 

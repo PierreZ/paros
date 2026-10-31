@@ -4,9 +4,9 @@
 //! - [`paxos`] (feature `paxos`): the interactive Paxos game. It drives
 //!   `paros-core` by hand and depends on nothing else. The page is
 //!   `website/play/`.
-//! - [`playground`] (feature `playground`): the paros playground, a paros
-//!   universe on moonpool's simulated network, disk and clock, replayed from a
-//!   seed, a config and an action log. It depends on `paros` and
+//! - [`playground`] (feature `playground`): the paros playground, one live
+//!   paros universe on moonpool's simulated network, disk and clock, driven
+//!   one step at a time. It depends on `paros` and
 //!   `moonpool-sim`, default features off. The page is `website/sandbox/`.
 //!
 //! Each tool is built alone into its own `.wasm` bundle

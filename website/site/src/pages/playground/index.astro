@@ -1,130 +1,123 @@
 ---
-// The playground (#518, #810 (website redo 1/4)): a paros universe in the
-// browser on moonpool-sim. Same layout as every page; the app is
-// website/sandbox/ (main.js, stage.js, worker.js, style.css), staged at
-// /playground/app/ with its wasm by scripts/build-wasm.sh.
+// The playground (#518, #813 (live playground)): one live paros universe in
+// the browser on moonpool-sim. The app is website/sandbox/ (main.js,
+// stage.js, worker.js, style.css), staged at /playground/app/ with its wasm
+// by scripts/build-wasm.sh.
 import Base from "../../layouts/Base.astro";
 import { url } from "../../nav";
 ---
-<Base title="Playground" section="playground/" wide description="Run a paros universe in your browser: a cell of machines on a simulated network, disk and clock. Drive it, break it, watch it recover.">
+<Base title="Playground" section="playground/" wide description="A live paros universe in your browser: cells of machines on a simulated network, disk and clock. Click to operate it, break it, and watch it recover.">
   <link slot="head" rel="stylesheet" href={url("playground/app/style.css")} />
   <div class="intro">
     <div class="kicker label">Playground</div>
-    <h1>paros playground</h1>
-    <p class="lede">A tool to understand Paxos and paros: run a paros universe in your browser, drive it, break it
-      and watch it recover. Every machine runs the same code as <code>parosd</code>, and the operator uses
-      the same calls as <code>parosctl</code>. <a href={url("docs/playground/")}>How the playground works</a></p>
-    <div class="callout" data-tag="NOTE">The network, the disks and the clock are simulated. Times are simulated
-      milliseconds, not production numbers. A run depends only on its seed, its configuration and its
-      action log, so the link to this page replays it exactly.</div>
+    <h1>paros, live</h1>
+    <p class="lede">Eight machines run <code>parosd</code>, the shipped code. Every button runs the same call as
+      <code>parosctl</code> and prints its line. <a href={url("docs/playground/")}>How the playground works</a></p>
+    <div class="callout" data-tag="NOTE">The network, the disks and the clock are simulated (moonpool). Nothing
+      here measures paros: times are simulated time.</div>
   </div>
   <div class="app">
-    <section class="stage-section">
-      <div class="acts" id="acts"></div>
-      <div class="stage-wrap">
-        <div class="stage" id="stage">
-          <canvas id="wires"></canvas>
-          <div class="cell" id="cell"></div>
-          <div class="outside" id="outside">
-            <div class="client" id="client" hidden>client</div>
+    <div class="strip">
+      <div><span class="k">Seed</span><span class="v" id="seed">1</span></div>
+      <div><span class="k">Simulated time</span><span class="v" id="time">0.0 s</span></div>
+      <div><span class="k">Status</span><span class="v" id="status"></span></div>
+      <div><span class="k">Cells</span><span class="v" id="cells-count">0</span></div>
+      <div><span class="k">Machines up</span><span class="v" id="machines-up">0</span></div>
+      <div><span class="k">Journals</span><span class="v" id="journals-count">0</span></div>
+    </div>
+
+    <section class="panel ops">
+      <div class="panel-head label"><span class="num">00</span><span class="title">Operator</span><span class="meta">each click runs one parosctl call</span></div>
+      <div class="panel-body">
+        <div class="groups">
+          <div class="group">
+            <div class="label">Bootstrap</div>
+            <button class="btn primary" data-act="init" title="Form cell-1 over machines 0 to 2 and the universe on it">Init cell-1</button>
+            <button class="btn" data-act="add-machine" title="Admit the next idle machine into cell-1">Add a machine</button>
+            <button class="btn" data-act="add-cell" title="Form an idle cell over the last three idle machines, then join it to the universe">Add cell-2</button>
+          </div>
+          <div class="group">
+            <div class="label">Resources</div>
+            <button class="btn" data-act="tenant" title="Create a tenant in the cell picked below">Create a tenant</button>
+            <button class="btn" data-act="journal" title="Create one journal in the newest tenant">Create a journal</button>
+            <button class="btn" data-act="journals" title="Create three journals in the newest tenant">Add 3 journals</button>
+            <button class="btn" data-act="configure" title="Record a new durability and replica count for the journal picked below">Configure</button>
+          </div>
+          <div class="group">
+            <div class="label">Workloads</div>
+            <button class="btn" data-act="traffic" title="Write ten records to every journal at the same time">Generate traffic</button>
+            <button class="btn" data-act="stream" id="stream-btn" title="A writer appends to the journal picked below five times a second">Start a writer</button>
+            <button class="btn" data-act="write" title="Write five records to the journal picked below">Write</button>
+            <button class="btn" data-act="read" title="Read the last five records of the journal picked below">Read the tail</button>
+            <button class="btn" data-act="set-leader" title="A new writer takes the journal; the old writer's next write is refused">Set a new leader</button>
+            <button class="btn" data-act="resolve" title="Ask where the universe sends the tenant's clients">Resolve</button>
+          </div>
+          <div class="group">
+            <div class="label">Machines</div>
+            <button class="btn" data-act="maintenance" title="The cell does not re-place the machine's slots for 30 s">Maintenance</button>
+            <button class="btn" data-act="drain" title="The cell moves every slot off an added machine">Drain</button>
+            <button class="btn" data-act="remove" title="Retire a drained machine">Remove</button>
+          </div>
+          <div class="group">
+            <div class="label">Faults</div>
+            <button class="btn" data-act="kill" title="Crash the machine that leads the most journals, or the one picked">Kill a machine</button>
+            <button class="btn" data-act="restart" title="Start a crashed machine again on its disk">Restart</button>
+            <button class="btn" data-act="isolate" title="Drop every message to or from a machine">Cut off</button>
+            <button class="btn" data-act="heal" title="Join a cut machine to the network again">Heal</button>
           </div>
         </div>
-        <aside class="rail" id="rail"></aside>
+        <div class="picks">
+          <label>Machine <select id="machine-pick"><option value="auto">auto</option></select></label>
+          <label>Journal <select id="journal-pick"></select></label>
+          <label>Cell <select id="cell-pick"><option>cell-1</option><option disabled>cell-2</option></select></label>
+          <label>Durability <select id="mode">
+            <option value="machines=0">survive 0 machines (1 acceptor)</option>
+            <option value="machines=1" selected>survive 1 machine (3 acceptors)</option>
+            <option value="machines=2">survive 2 machines (5 acceptors)</option>
+            <option value="machines=0,partitions=2">2 partitions of 1 acceptor</option>
+            <option value="machines=1,partitions=2">2 partitions of 3 acceptors</option>
+          </select></label>
+          <label>Writers <select id="writers"><option value="single">single</option><option value="multi">multi</option></select></label>
+          <label>Replicas <select id="replicas"><option>0</option><option>1</option><option>2</option></select></label>
+        </div>
       </div>
-      <p class="caption" id="caption"></p>
-      <div class="controls">
-        <button id="play" title="Play or pause (space)">▶</button>
-        <button id="prev-msg" title="Previous message ([)">◀ msg</button>
-        <button id="next-msg" title="Next message (])">msg ▶</button>
-        <button id="prev-step" title="Previous step of the log (,)">◀ step</button>
-        <button id="next-step" title="Next step of the log (.)">step ▶</button>
-        <label class="inline">Speed <select id="speed">
-          <option value="0.02">0.02×</option>
-          <option value="0.05" selected>0.05×</option>
-          <option value="0.2">0.2×</option>
-          <option value="1">1×</option>
-        </select></label>
-        <label class="inline"><input id="show-beats" type="checkbox" checked /> heartbeats</label>
-        <span class="time" id="time"></span>
-        <span class="legend" id="legend"></span>
-      </div>
-      <canvas id="timeline" class="timeline" title="Drag to move in time"></canvas>
     </section>
-    <div class="lower">
-      <div>
-        <section>
-          <h2>Universe</h2>
-          <div class="row">
-            <label>Seed <input id="seed" type="number" min="0" /></label>
-            <label>Machines <input id="machines" type="number" min="1" max="7" /></label>
-            <label>Run length (s) <input id="run" type="number" min="1" max="300" /></label>
-          </div>
-          <p class="muted">One cell, <code>cell-1</code>, over three zones: machine <i>i</i> is in
-            zone <i>i</i> mod 3.</p>
-          <div class="row">
-            <label>Example <select id="preset"></select></label>
-            <button id="load-preset">Load</button>
-          </div>
-        </section>
-        <section>
-          <h2>Action log</h2>
-          <ol class="actions" id="actions" start="0"></ol>
-          <div class="row">
-            <label>At (ms) <input id="at" type="number" min="1" step="100" /></label>
-            <label>Action <select id="op">
-              <option value="create_tenant">create a tenant</option>
-              <option value="create_journal">create a journal</option>
-              <option value="write">write N records</option>
-              <option value="read">read N records</option>
-              <option value="crash">crash a machine</option>
-              <option value="restart">restart a machine</option>
-              <option value="isolate">cut a machine from the network</option>
-              <option value="heal">join a machine to the network again</option>
-            </select></label>
-            <label id="machine-pick-field">Machine <select id="machine-pick"></select></label>
-            <label id="tenant-name-field">Tenant <input id="tenant-name" value="acme" size="10" /></label>
-            <label id="tenant-pick-field">Tenant <select id="tenant-pick"></select></label>
-            <label id="journal-name-field">Journal <input id="journal-name" value="orders" size="10" /></label>
-            <label id="mode-field">Mode <select id="mode">
-              <option value="machines=0">survive 0 machines · 1 partition (1 acceptor)</option>
-              <option value="machines=1" selected>survive 1 machine · 1 partition (3 acceptors)</option>
-              <option value="machines=2">survive 2 machines · 1 partition (5 acceptors)</option>
-              <option value="machines=3">survive 3 machines · 1 partition (7 acceptors)</option>
-              <option value="machines=0,partitions=2">survive 0 machines · 2 partitions (2 acceptors)</option>
-              <option value="machines=0,partitions=4">survive 0 machines · 4 partitions (4 acceptors)</option>
-              <option value="machines=1,partitions=2">survive 1 machine · 2 partitions (6 acceptors)</option>
-            </select></label>
-            <label id="journal-pick-field">Journal <select id="journal-pick"></select></label>
-            <label id="count-field">N <input id="count" type="number" min="1" max="100" value="5" /></label>
-          </div>
-          <div class="row">
-            <button id="add" class="primary">Add and run</button>
-            <button id="undo">Undo</button>
-            <button id="clear">Clear</button>
-          </div>
-          <p class="muted" id="status">Loading…</p>
-        </section>
-        <section>
-          <h2>Replay</h2>
-          <p class="muted">A run is its seed, its configuration and its action log. Save them, or open a
-            saved run to replay it step by step.</p>
-          <p class="replaying" id="replaying" hidden></p>
-          <div class="row">
-            <button id="copy-link">Copy the link</button>
-            <button id="save-run">Save the run</button>
-            <label class="inline file">Open a run <input id="open-run" type="file" accept="application/json,.json" /></label>
-            <button id="edit-run" hidden>Edit this run</button>
-          </div>
-          <label class="wide">Or paste a run (JSON: config and actions)
-            <textarea id="paste-run" rows="3" spellcheck="false"></textarea></label>
-          <div class="row"><button id="replay-paste">Replay the pasted run</button></div>
-        </section>
-      </div>
-      <section>
-        <h2>Events up to now</h2>
-        <label class="inline"><input id="show-msgs" type="checkbox" /> show every message sent</label>
-        <div class="log" id="log"></div>
+
+    <div class="stage-wrap">
+      <section class="panel">
+        <div class="panel-head label"><span class="num">01</span><span class="title">Cells</span><span class="meta" id="legend"></span></div>
+        <div class="stage" id="stage">
+          <canvas id="wires"></canvas>
+          <div class="cells" id="cells"></div>
+          <div class="outside"><div class="client" id="client">client</div></div>
+        </div>
       </section>
+      <section class="panel">
+        <div class="panel-head label"><span class="num">02</span><span class="title">Journal</span><span class="meta" id="followed"></span></div>
+        <div class="panel-body rail" id="rail"></div>
+      </section>
+    </div>
+
+    <div class="lower">
+      <section class="panel">
+        <div class="panel-head label"><span class="num">03</span><span class="title">Roles</span><span class="meta">from the admin API, every second</span></div>
+        <div class="panel-body table-wrap" id="roles"></div>
+      </section>
+      <section class="panel">
+        <div class="panel-head label"><span class="num">04</span><span class="title">Operator log</span><span class="meta">parosctl lines and what they did</span></div>
+        <div class="panel-body log" id="log"></div>
+      </section>
+    </div>
+
+    <div class="dock">
+      <div class="controls">
+        <button class="btn" id="play">❚❚ Pause</button>
+        <label class="inline">Speed <select id="speed"></select></label>
+        <label class="inline"><input id="show-beats" type="checkbox" /> heartbeats</label>
+        <label class="inline">Seed <input id="seed-input" type="number" min="1" /></label>
+        <button class="btn" id="reset" title="Start a fresh universe with this seed">Reset</button>
+      </div>
+      <canvas id="timeline" class="timeline" title="The last 30 simulated seconds: messages by tenant, and the operator's steps"></canvas>
     </div>
   </div>
   <script is:inline type="module" src={url("playground/app/main.js")}></script>
