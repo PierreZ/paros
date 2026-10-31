@@ -924,6 +924,46 @@ impl Matchmaker {
         GcOutcome::Raised
     }
 
+    /// The answer to `request` (the paper's `GarbageB`), once
+    /// [`Matchmaker::advance_gc_watermark`] returned `outcome` for it and the
+    /// raise is durable. The ack names the floor in force; a refusal also
+    /// names the later set to ask instead ([`Matchmaker::newer_set`]), or
+    /// says the generation froze with no successor
+    /// ([`Matchmaker::frozen_without_successor`]). Every driver sends this
+    /// ack, so the rule lives here, once.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants fails: a programmer error,
+    /// never an operating condition.
+    #[must_use]
+    pub fn gc_ack(&self, request: &GcRequest, outcome: GcOutcome) -> GcAck {
+        let refused = outcome == GcOutcome::Refused;
+        let generation = request.generation;
+        let ack = GcAck {
+            matchmaker: self.config.id,
+            journal: request.journal,
+            generation,
+            applied: !refused,
+            watermark: self.hard_state.gc_watermark(request.journal),
+            newer: refused.then(|| self.newer_set(generation)).flatten(),
+            stopped: refused && self.frozen_without_successor(generation),
+        };
+        assert!(
+            ack.applied || self.generation_refusal(generation).is_some(),
+            "only a matchmaker not active for the generation refuses"
+        );
+        assert!(
+            !ack.stopped || ack.newer.is_none(),
+            "a frozen generation names no successor"
+        );
+        assert!(
+            !ack.applied || ack.watermark >= request.watermark,
+            "an applied raise acks a floor at or above the request"
+        );
+        ack
+    }
+
     /// Drain the pending batch. Holds the unique borrow until
     /// [`MatchmakerReady::advance`], so a second `ready()` before `advance()`
     /// is a compile error.

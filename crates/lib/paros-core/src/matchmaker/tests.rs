@@ -886,3 +886,87 @@ fn a_departed_matchmaker_answers_with_its_successor() {
     assert!(writes.is_empty());
     assert_eq!(mm.successor(), Some(&successor));
 }
+
+/// A GC request for `watermark` at generation `generation`, from node 1.
+fn gc_request(generation: MatchmakerGeneration, watermark: Ballot) -> GcRequest {
+    GcRequest {
+        from: NodeId(1),
+        journal: J,
+        generation,
+        watermark,
+    }
+}
+
+/// Raise the floor as a driver does, and answer with the ack the core builds.
+fn answer_gc(mm: &mut Matchmaker, request: &GcRequest) -> GcAck {
+    let outcome = mm.advance_gc_watermark(request.journal, request.generation, request.watermark);
+    mm.ready().advance();
+    mm.gc_ack(request, outcome)
+}
+
+/// The GC ack of an active matchmaker is applied and names the floor in
+/// force: the raised one, or the higher one it already held.
+#[test]
+fn a_gc_ack_names_the_floor_in_force() {
+    let mut mm = fresh(0);
+    let raised = answer_gc(&mut mm, &gc_request(G0, ballot(5, 1)));
+    assert_eq!(
+        raised,
+        GcAck {
+            matchmaker: MatchmakerId(0),
+            journal: J,
+            generation: G0,
+            applied: true,
+            watermark: ballot(5, 1),
+            newer: None,
+            stopped: false,
+        }
+    );
+    let lower = answer_gc(&mut mm, &gc_request(G0, ballot(3, 1)));
+    assert!(
+        lower.applied,
+        "a request below the floor is applied as a no-op"
+    );
+    assert_eq!(
+        lower.watermark,
+        ballot(5, 1),
+        "the ack names the higher floor"
+    );
+}
+
+/// A matchmaker that stopped the addressed generation and knows its
+/// successor refuses, and names the successor so the leader asks it next.
+#[test]
+fn a_gc_ack_from_a_stopped_generation_names_the_successor() {
+    let mut mm = fresh(0);
+    mm.step_reconfigure(ReconfigureRequest::Stop {
+        from: NodeId(5),
+        generation: G0,
+        after: None,
+    });
+    drain_reconfigure(&mut mm);
+    let successor = set(1, &[0, 3, 4]);
+    chosen(&mut mm, 5, &successor);
+    let ack = answer_gc(&mut mm, &gc_request(G0, ballot(5, 1)));
+    assert!(!ack.applied);
+    assert_eq!(ack.newer, Some(successor));
+    assert!(!ack.stopped, "a generation with a successor is not frozen");
+    assert_eq!(ack.watermark, Ballot::zero(), "a refusal raises nothing");
+}
+
+/// A matchmaker that froze the addressed generation and knows no successor
+/// (a handover nobody finished) refuses, names no set, and says so.
+#[test]
+fn a_gc_ack_from_a_frozen_generation_says_it_is_stopped() {
+    let mut mm = fresh(0);
+    mm.step_reconfigure(ReconfigureRequest::Stop {
+        from: NodeId(5),
+        generation: G0,
+        after: None,
+    });
+    drain_reconfigure(&mut mm);
+    let ack = answer_gc(&mut mm, &gc_request(G0, ballot(5, 1)));
+    assert!(!ack.applied);
+    assert_eq!(ack.newer, None);
+    assert!(ack.stopped);
+}
