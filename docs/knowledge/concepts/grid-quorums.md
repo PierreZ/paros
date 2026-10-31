@@ -91,7 +91,7 @@ A `3 × 2` grid of partitions (`F = 1`): six acceptors, two columns of three.
   quorum of every column at every lower ballot. The P2c merge works unchanged.
 - **A reconfiguration between grids, or between a grid and a majority.** Phase 1 needs a
   Phase-1 quorum of every configuration in the history, so a row of the old grid too
-  (reconfiguration cards, planned).
+  ([matchmaking](matchmaking.md)).
 
 ## 6. Why it is safe
 

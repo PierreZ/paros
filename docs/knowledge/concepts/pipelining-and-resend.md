@@ -134,9 +134,9 @@ not something `tick` does, because skipping it is what makes the #54 hole reacha
 **Divergences from the sources:**
 
 - [PMS §3] bounds the pipeline by `α`, because the server set of instance `i+α` is fixed by
-  command `i`. paros has no `α`: a reconfiguration is a round change (reconfiguration cards,
-  planned), so the core does not bound how many rounds are open. The client's pipeline and the
-  batcher bound it.
+  command `i`. paros has no `α`: a reconfiguration is a round change
+  ([reconfiguration](reconfiguration.md)), so the core does not bound how many rounds are
+  open. The client's pipeline and the batcher bound it.
 - etcd-raft bounds a per-follower window by count and bytes ([etcd-raft replication §3]). paros
   bounds each page, not each follower.
 

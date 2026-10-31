@@ -161,7 +161,7 @@ is "every `q2` spans at least two zones", WPaxos's `fz = 1`.
   the rule asks.
 - [Leader handoff](leader-handoff.md): the leader that follows its writer's zone (#581, not yet
   built).
-- Reconfiguration cards (planned): how a lost zone's acceptors are replaced.
+- [Reconfiguration as a round change](reconfiguration.md): how a lost zone's acceptors are replaced.
 
 ## 12. Sources
 
