@@ -251,7 +251,7 @@ impl CellFacts<'_> {
         let hosted = self.registry.hosted_tenant(tenant)?;
         let entry = self.directory.and_then(|d| d.tenant(tenant));
         let mut journals =
-            vec![self.founders_journal(hosted.control, "control", WriterMode::Single)];
+            vec![self.control_journal(JournalIdentifier::new(tenant, hosted.control))];
         let control = self.tenants.iter().find(|c| c.tenant() == tenant);
         let scrub = control.and_then(|c| c.scrub()).map(scrub_view);
         if let Some(control) = control {
@@ -359,6 +359,39 @@ impl CellFacts<'_> {
             placed: Some(config_to_proto(&placed)),
             // A journal the cell made stores ordered (#599 (durability mode
             // per journal)).
+            store_durability: crate::tenant::StoreDurability::Ordered.as_str().to_string(),
+            ..wire::JournalView::default()
+        }
+    }
+
+    /// A hosted tenant's control journal (#685 (special tenants are
+    /// tenants)): placed on the founding members and every machine that
+    /// holds one of its slots, desired at the tenant's own `2F+1` (its
+    /// largest `survive_machines`), never below the founders.
+    fn control_journal(&self, journal: JournalIdentifier) -> wire::JournalView {
+        let founders: Vec<NodeId> = self.founders.iter().map(|(id, _)| *id).collect();
+        let members = crate::machine::control_members(&founders, self.registry, journal);
+        let failures = self
+            .tenants
+            .iter()
+            .find(|c| c.tenant() == journal.tenant)
+            .map_or(crate::tenant::Durability::DEFAULT.survive_machines, |c| {
+                c.largest_failures()
+            });
+        let desired = crate::registry::control_plane::acceptors(failures)
+            .min(self.registry.storage_machines())
+            .max(founders.len());
+        let placed = AcceptorConfig::new(members.clone(), QuorumSystem::Majority);
+        wire::JournalView {
+            journal: journal.journal.0,
+            name: Vec::new(),
+            kind: "control".to_string(),
+            writer: writer_label(WriterMode::Single).to_string(),
+            desired: format!("machines={failures} · {desired} acceptors"),
+            desired_acceptors: desired as u64,
+            acceptors: members.iter().map(|id| id.0).collect(),
+            matchmakers: Vec::new(),
+            placed: Some(config_to_proto(&placed)),
             store_durability: crate::tenant::StoreDurability::Ordered.as_str().to_string(),
             ..wire::JournalView::default()
         }

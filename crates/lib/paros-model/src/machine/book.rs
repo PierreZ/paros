@@ -59,6 +59,38 @@ pub fn cell_book(founders: &[(NodeId, Address)], registry: &Registry) -> Vec<(No
     book
 }
 
+/// The machines that serve a tenant's control journal `journal` (#685
+/// (special tenants are tenants)), sorted: the founding members, which
+/// serve every tenant control journal from its birth and stay members,
+/// and every machine that holds one of its acceptor slots: the coordinator
+/// grows the journal onto them to the control plane's `2F+1`
+/// (`paros_coordinator::tenant::controls`).
+///
+/// # Panics
+///
+/// Never: the assertion checks that every founder is kept.
+#[must_use]
+pub fn control_members(
+    founders: &[NodeId],
+    registry: &Registry,
+    journal: paros_core::journal::JournalIdentifier,
+) -> Vec<NodeId> {
+    let target = crate::registry::BookingTarget::Journal(journal);
+    let mut members: Vec<NodeId> = registry
+        .bookings()
+        .filter(|(_, b)| b.role == crate::registry::Role::Acceptor && b.target == target)
+        .map(|(_, b)| b.node)
+        .chain(founders.iter().copied())
+        .collect();
+    members.sort_unstable();
+    members.dedup();
+    assert!(
+        founders.iter().all(|f| members.contains(f)),
+        "a control journal's members hold every founding member"
+    );
+    members
+}
+
 /// `members` as machine `me` dials them: its own entry at the address it
 /// advertises now (`own`), which the plan or the registry may not hold yet
 /// (#349: a machine that moved reaches itself there).

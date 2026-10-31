@@ -2,9 +2,10 @@
 //! how many machine failures the cell's own journals survive, and how that
 //! number is chosen.
 //!
-//! The control plane is the special tenants' journals: the cell control
-//! journal, the election journal, every tenant control journal and, on the
-//! cell that hosts it, the universe directory. They are tenants like any
+//! The control plane is the special tenants' journals, the tenants the
+//! system uses: the cell control journal, the election journal and, on the
+//! cell that hosts it, the universe directory. A user tenant's control
+//! journal follows the user tenant's own mode (Pierre, 2026-10-31). They are tenants like any
 //! other, managed by the platform (Pierre, 2026-10-18). An `admin` call
 //! (`parosctl cell configure --control-plane`) records the mode in the cell
 //! control journal ([`ControlPlaneMode`]):

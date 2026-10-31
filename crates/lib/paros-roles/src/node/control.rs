@@ -152,23 +152,10 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
                 // serves its control journal (the placement until #212).
                 SystemEvent::Registry(RegistryEvent::TenantHosted { tenant, control }) => {
                     let id = JournalIdentifier::new(tenant, control);
-                    let founders = follower.founders().to_vec();
-                    if self
-                        .start(
-                            follower,
-                            id,
-                            (&founders, &[], 0),
-                            (
-                                paros_core::membership::QuorumSystem::Majority,
-                                paros_core::journal::WriterMode::Single,
-                                paros_model::tenant::StoreDurability::Ordered,
-                            ),
-                            Seat::Member,
-                        )
-                        .await
-                    {
+                    if self.start_control(follower, id, Seat::Member).await {
                         admit = true;
                     }
+                    place = true;
                 }
                 // The cell dropped a tenant: every journal of it stops here.
                 SystemEvent::Registry(RegistryEvent::TenantDropped { tenant }) => {
@@ -215,24 +202,12 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
                 // a fold restored from it never saw the entries below it.
                 SystemEvent::Registry(RegistryEvent::Checkpoint { .. }) => {
                     let registry = follower.registry().clone();
-                    let founders = follower.founders().to_vec();
                     for tenant in registry.hosted() {
                         let Some(hosted) = registry.hosted_tenant(tenant) else {
                             continue;
                         };
                         let id = JournalIdentifier::new(tenant, hosted.control);
-                        self.start(
-                            follower,
-                            id,
-                            (&founders, &[], 0),
-                            (
-                                paros_core::membership::QuorumSystem::Majority,
-                                paros_core::journal::WriterMode::Single,
-                                paros_model::tenant::StoreDurability::Ordered,
-                            ),
-                            Seat::Member,
-                        )
-                        .await;
+                        self.start_control(follower, id, Seat::Member).await;
                     }
                     let served: Vec<TenantId> =
                         self.journals.live.keys().map(|j| j.tenant).collect();
@@ -262,6 +237,33 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
 }
 
 impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
+    /// Start the tenant control journal `id` on this node: bootstrapped
+    /// over the founding members, a majority, single-writer, ordered. A
+    /// founding member serves it as a member from the tenant's birth; any
+    /// other machine joins it as a spare once the coordinator books it a
+    /// slot (#685 (special tenants are tenants)). Whether it started.
+    async fn start_control(
+        &mut self,
+        follower: &ControlFollower<P>,
+        id: JournalIdentifier,
+        seat: Seat,
+    ) -> bool {
+        let founders = follower.founders().to_vec();
+        assert!(!founders.is_empty(), "a cell has founding members");
+        self.start(
+            follower,
+            id,
+            (&founders, &[], 0),
+            (
+                paros_core::membership::QuorumSystem::Majority,
+                paros_core::journal::WriterMode::Single,
+                paros_model::tenant::StoreDurability::Ordered,
+            ),
+            seat,
+        )
+        .await
+    }
+
     /// Start journal `id` on this node, bootstrapped over `members` under
     /// `quorum_system`, written in `writer` mode, its store committing under
     /// `store` (#599 (durability mode per journal)) — unless the journal is
@@ -402,6 +404,23 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
         }
         let mut started = false;
         for journal in booked {
+            // A tenant's control journal booked here (#685 (special tenants
+            // are tenants)): the coordinator grows it past the founding
+            // members. It starts as a spare over the founders, the
+            // bootstrap every member of it shares.
+            if follower
+                .registry()
+                .hosted_tenant(journal.tenant)
+                .is_some_and(|hosted| hosted.control == journal.journal)
+            {
+                if self.start_control(follower, journal, Seat::Spare).await {
+                    moonpool_assertions::reachable!(
+                        "machine: a booked tenant control journal starts as a spare"
+                    );
+                    started = true;
+                }
+                continue;
+            }
             let Some(created) = follower
                 .tenant(journal.tenant)
                 .and_then(|t| t.get(journal.journal))

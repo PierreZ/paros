@@ -117,8 +117,8 @@ pub enum CellAdminCommand {
         /// The tags, `key:value` each.
         tags: Vec<String>,
     },
-    /// Set the control plane's durability (#685): the cell control journal,
-    /// the election journal, every tenant control journal and the universe
+    /// Set the control plane's durability (#685): the system's own journals,
+    /// the cell control journal, the election journal and the universe
     /// directory. `auto` grows it with the storage machines up to the
     /// `--survive` given (default `machines=1`); `manual` keeps it, and is
     /// refused when the cell has fewer than `2M+1` storage machines.

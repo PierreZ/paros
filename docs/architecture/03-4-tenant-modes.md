@@ -336,9 +336,9 @@ until a creation names one).
 
 **The control plane is a tenant's mode too** (decided on 2026-10-18, #685 (special tenants
 are tenants); the mode record landed on 2026-10-31). The special tenants (the cell tenant and
-the universe tenant) are tenants like any other, except that the platform manages them. Their
-journals are the cell control journal, the election journal, every tenant control journal and
-the universe directory. An `admin` call sets how their `F` is chosen:
+the universe tenant) are the tenants the system uses. They are tenants like any other, except
+that the platform manages them. Their journals are the cell control journal, the election
+journal and the universe directory. An `admin` call sets how their `F` is chosen:
 
 - `parosctl cell configure --control-plane auto [--survive machines=T]`: the cell coordinator
   wants `F = min(T, (storage machines - 1) / 2)`. `T` is 1 by default. A cell that recorded no
@@ -350,5 +350,12 @@ the universe directory. An `admin` call sets how their `F` is chosen:
   id (`paros::model::registry::control_plane`). `status` shows it as the special tenants'
   `survives`, and each of their journals as `<mode> · machines=<wanted> wanted ·
   machines=<in force> in force`.
-- Until the moves of #685 land, the journals stay on the founding members, so the `F` in force
-  is the founders'. The next steps move them, then make the founders a boot hint only.
+- **A user tenant's control journal follows the tenant's own mode** (decided on 2026-10-31,
+  #685): `2F+1` acceptors, `F` the tenant's largest `survive_machines` (its default and every
+  live journal's, as its matchmaker set). The coordinator grows it from the founding members
+  onto booked storage machines (`paros_coordinator::tenant::controls`), and moves it off a
+  machine that leaves. The founders stay members, so every reader still dials them. Only the
+  special tenants (the cell tenant and the universe tenant) follow the control plane mode.
+- Until the next moves of #685 land, the special tenants' journals stay on the founding members,
+  so their `F` in force is the founders'. The next steps move them, then make the founders a
+  boot hint only.
