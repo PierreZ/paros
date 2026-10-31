@@ -501,7 +501,13 @@ impl Workload for ChainWorkload {
                 .filter(|client| plan.for_client(*client) == self.journal)
                 .count()
         });
-        let mut digest = check_run(ctx.state(), self.journal, &self.history, clients);
+        let mut digest = check_run(
+            ctx.state(),
+            &ctx.shards(),
+            self.journal,
+            &self.history,
+            clients,
+        );
         // A journal no client appends to (#188: more journals than clients)
         // is judged by client 0, on an empty history: its audit's safety
         // oracles ran all along, and its final claim holds too.
@@ -509,7 +515,13 @@ impl Workload for ChainWorkload {
             && let Some(plan) = &self.plan
         {
             for idle in plan.ids.iter().skip(ctx.client_count()) {
-                digest ^= check_run(ctx.state(), *idle, &ClientHistory::default(), 0);
+                digest ^= check_run(
+                    ctx.state(),
+                    &ctx.shards(),
+                    *idle,
+                    &ClientHistory::default(),
+                    0,
+                );
             }
         }
         // Every other journal world (#447 (model checks for every journal
@@ -2848,7 +2860,7 @@ impl ChainWorkload {
         // client was quiet) cuts this client's own observation short; the
         // audit's final-convergence claim is the arbiter for that run.
         let ended_by_sibling = !converged && shutdown.is_cancelled();
-        let storage = crate::world::storage_fault_stats(ctx.state(), journal);
+        let storage = crate::world::storage_fault_stats(ctx.state(), &ctx.shards(), journal);
         // A slot an outage left unrecoverable, or with every clean copy out
         // of reach (#263), is waited on for good: the run's liveness is
         // excused, never its safety.

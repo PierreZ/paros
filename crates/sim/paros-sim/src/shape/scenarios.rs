@@ -726,15 +726,6 @@ pub(crate) fn batched_journals_among(state: &StateHandle, machines: usize) -> bo
         .get_or_insert_with(|| !batchers && machines >= 3 && moonpool_sim::buggify_with_prob!(1.0))
 }
 
-/// Whether the run drew the batched-journals scenario
-/// ([`batched_journals`]), without drawing it: `false` until a caller drew
-/// it. For a veto, which must not draw.
-pub(crate) fn batched_journals_drawn(state: &StateHandle) -> bool {
-    let registry = registry(state);
-    let guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
-    guard.batched_journals == Some(true)
-}
-
 /// Whether the run draws the **racing-floor scenario**: drawn once per seed,
 /// its own BUGGIFY location. Every coordinator renews at the floor and
 /// truncates the election journal at every renewal, so the floor moves

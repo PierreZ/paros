@@ -38,7 +38,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use moonpool_sim::{StateHandle, assert_always, assert_reachable, assert_sometimes};
 use paros::core::NodeId;
 use paros::core::journal::{JournalId, JournalIdentifier, TenantId, WriterMode};
-use paros::core::membership::{AcceptorConfig, QuorumSystem};
+use paros::core::membership::AcceptorConfig;
 use paros::model::tenant::{RequestOutcome, StoreDurability, TenantEvent, TenantRefusal};
 
 const TENANT_BOARD_KEY: &str = "paros-tenant-board";
@@ -82,10 +82,6 @@ pub(crate) struct TenantBoard {
     /// configure's, with the position that set it (#739 (heal from ground
     /// truth)): a lagging fold of an older position never undoes a newer one.
     desired: BTreeMap<JournalIdentifier, (u64, paros::model::tenant::Desired)>,
-    /// Per created journal: the fewest copies of a slot its configurations
-    /// may lose and still repair it, over its create and every configure
-    /// (#599): the machines' cut budget.
-    tolerated: BTreeMap<JournalIdentifier, usize>,
     /// Batched journals a machine booted with faulty entries: a lost last
     /// batch (#599).
     batch_lost: BTreeSet<JournalIdentifier>,
@@ -156,22 +152,6 @@ fn zone_spread(config: &paros::core::membership::AcceptorConfig, lsn: u64) {
     );
     if binds {
         assert_reachable!("zones: a journal is placed over three zones");
-    }
-}
-
-/// The copies of one slot `config` may lose and still repair it (#599
-/// (durability mode per journal)): a lost copy is a faulty vote, and CTRL
-/// decides the slot only while every Phase-1 quorum keeps a clean copy and
-/// a Phase-1 quorum still answers. A majority of `n` loses `⌊(n-1)/2⌋`; a
-/// column of `rows` deciding on `acks` loses `min(acks - 1, rows - acks)`.
-fn tolerated_loss(config: &AcceptorConfig) -> usize {
-    let n = config.members().len();
-    match config.quorum_system() {
-        QuorumSystem::Majority => n.saturating_sub(1) / 2,
-        QuorumSystem::Flexible { q1, q2 } => n.saturating_sub(q1).min(q2.saturating_sub(1)),
-        QuorumSystem::Grid { rows, acks, .. } => {
-            acks.saturating_sub(1).min(rows.saturating_sub(acks))
-        }
     }
 }
 
@@ -311,9 +291,8 @@ impl TenantBoard {
                 id,
                 desired,
             } => self.configured(control, (*request, *id, desired), lsn),
-            TenantEvent::Placed { id, config } => {
+            TenantEvent::Placed { id, .. } => {
                 let journal = JournalIdentifier::new(control.tenant, *id);
-                self.tolerate(journal, tolerated_loss(config));
                 assert_always!(
                     self.created.get(&journal).is_some_and(|at| *at < lsn),
                     "tenant: a placement is recorded only for a journal created before",
@@ -411,10 +390,6 @@ impl TenantBoard {
         if let Some(id) = id {
             let journal = JournalIdentifier::new(control.tenant, id);
             self.set_desired(journal, lsn, *desired);
-            // Its new placement survives `machines` failures per acceptor partition (#599:
-            // the cut budget takes the smallest of its life).
-            let failures = desired.durability.survive_machines;
-            self.tolerate(journal, usize::try_from(failures).unwrap_or(0));
             assert_always!(
                 self.created.get(&journal).is_some_and(|at| *at < lsn),
                 "tenant: a configured journal is one the tenant created before",
@@ -433,7 +408,7 @@ impl TenantBoard {
     fn created_store(
         &mut self,
         journal: JournalIdentifier,
-        (store, config): (StoreDurability, &AcceptorConfig),
+        (store, _config): (StoreDurability, &AcceptorConfig),
         lsn: u64,
     ) {
         let held = *self.stores.entry(journal).or_insert(store);
@@ -442,13 +417,6 @@ impl TenantBoard {
             "tenant: a created journal keeps the store durability of its create",
             { "lsn" => lsn }
         );
-        self.tolerate(journal, tolerated_loss(config));
-    }
-
-    /// `journal`'s cut budget falls to `loss` when that is smaller (#599).
-    fn tolerate(&mut self, journal: JournalIdentifier, loss: usize) {
-        let held = self.tolerated.entry(journal).or_insert(loss);
-        *held = (*held).min(loss);
     }
 
     /// The acceptors `journal` asks for (#739 (heal from ground truth)):
@@ -477,15 +445,6 @@ impl TenantBoard {
     /// created it (#599 (durability mode per journal)).
     pub(crate) fn store(&self, journal: JournalIdentifier) -> Option<StoreDurability> {
         self.stores.get(&journal).copied()
-    }
-
-    /// The distinct machines a power loss may cut inside a commit of
-    /// `journal`, a `Batched` journal a tenant created: the fewest copies
-    /// of a slot its configurations may lose (#599). `None` for a journal
-    /// that stores ordered or that no tenant created: its cut costs no copy.
-    pub(crate) fn cut_budget(&self, journal: JournalIdentifier) -> Option<usize> {
-        (self.store(journal)? == StoreDurability::Batched)
-            .then(|| self.tolerated.get(&journal).copied().unwrap_or(0))
     }
 
     /// A machine booted `journal` with faulty entries: on a `Batched`

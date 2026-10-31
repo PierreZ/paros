@@ -113,11 +113,9 @@ impl JournalStores for ReplicaStores<'_> {
             ),
             Arc::downgrade(&seat.world),
             self.ip.to_string(),
-            self.ctx.state().clone(),
             seat.checker.clone(),
             crate::world::node_store::DamagePolicy {
                 chaotic: false,
-                cut_budget: None,
                 inject: false,
             },
             self.ctx.storage().clone(),

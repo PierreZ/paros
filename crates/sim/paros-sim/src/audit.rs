@@ -125,10 +125,6 @@ pub(crate) struct NodeAudit<T> {
     /// coordinator's, #240), handed to `paros` through
     /// [`Audit::call_observer`].
     calls: Option<Arc<dyn paros::client::CallObserver>>,
-    /// The run's state and the machine's process IP, on a machine's journal
-    /// port: a commit of a `Batched` journal registers there for the cut
-    /// budget (#599 (durability mode per journal), `crate::world::cut`).
-    cut: Option<(moonpool_sim::StateHandle, String)>,
     /// The run's state, on a machine's frontend port (#723 (frontend as a
     /// parosd role)): where its resolutions are judged
     /// (`crate::frontend::judge_resolved`).
@@ -182,16 +178,7 @@ impl<T: TimeProvider> NodeAudit<T> {
             wipes: None,
             calls: None,
             frontend: None,
-            cut: None,
         }
-    }
-
-    /// This port registers each commit of a `Batched` journal its machine
-    /// at `ip` runs in `state`'s cut budget (#599 (durability mode per
-    /// journal)).
-    pub(crate) fn with_cut_budget(mut self, state: moonpool_sim::StateHandle, ip: String) -> Self {
-        self.cut = Some((state, ip));
-        self
     }
 
     /// This port also reports the tenant control journals' folds and the
@@ -510,10 +497,6 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
 
     fn commit_started(&self, node: NodeId, writes: &[paros::core::WriteOp]) {
         NodeAudit::commit_started(self, node, writes);
-    }
-
-    fn commit_ended(&self, node: NodeId) {
-        NodeAudit::commit_ended(self, node);
     }
 
     fn truncated(&self, node: NodeId, first: Slot) {

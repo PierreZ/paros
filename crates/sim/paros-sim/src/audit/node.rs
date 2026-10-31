@@ -132,23 +132,6 @@ impl<T: TimeProvider> NodeAudit<T> {
         if !accepted.is_empty() {
             self.world.note_in_flight(node.0, &accepted);
         }
-        // A machine's commit of a `Batched` journal that writes entries:
-        // a power loss inside it may leave them faulty (#599).
-        let writes_entries = !accepted.is_empty() || !dropped.is_empty();
-        if let (Some((state, ip)), Some((journal, _)), Some(tenants), true) =
-            (&self.cut, &self.journal, &self.tenants, writes_entries)
-        {
-            let budget = tenants::lock(tenants).cut_budget(*journal);
-            if let Some(tolerated) = budget {
-                crate::world::cut::open_machine_commit(state, ip, *journal, tolerated);
-            }
-        }
-    }
-
-    pub(super) fn commit_ended(&self, _node: NodeId) {
-        if let (Some((state, ip)), Some((journal, _))) = (&self.cut, &self.journal) {
-            crate::world::cut::close_machine_commit(state, ip, *journal);
-        }
     }
 
     #[tracing::instrument(level = "trace", skip_all, fields(node = node.0, first = first.0))]

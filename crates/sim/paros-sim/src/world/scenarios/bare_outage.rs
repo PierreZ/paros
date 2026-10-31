@@ -56,7 +56,7 @@ impl FaultInjector for BareOutage {
         assert_reachable!("outage: the bare-quorum outage strikes on a slot short of a member");
         // Planned at the instant of the strike, with no await between them,
         // so the lagging member has not accepted the slot yet.
-        let _ = plan_losses(ctx.state(), LossShape::BARE_QUORUM);
+        let _ = plan_losses(ctx.state(), &ctx.shards(), LossShape::BARE_QUORUM);
         strike(ctx, &[])
     }
 }

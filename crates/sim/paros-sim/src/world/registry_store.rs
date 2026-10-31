@@ -29,7 +29,7 @@ use paros::storage::StorageError;
 use paros::storage::journal::JournalMatchmakerStorage;
 
 use super::StorageWorld;
-use super::cut::{Budget, InFlight, Owner, release_parked};
+use super::cut::{Budget, InFlight, release_parked};
 
 /// The directory a matchmaker's registries live in on its simulated disk.
 pub(crate) const REGISTRY_DIR: &str = "paros/matchmaker";
@@ -243,13 +243,7 @@ impl MatchmakerStorage for LedgeredRegistry {
                 held,
                 thin: self.thin.clone(),
             };
-            InFlight::open(
-                &self.state,
-                &self.ip,
-                Owner::Matchmaker,
-                budget,
-                self.world.clone(),
-            )
+            InFlight::open(&self.state, &self.ip, budget, self.world.clone())
         });
         let synced = self.inner.sync().await;
         match (&synced, in_flight) {
