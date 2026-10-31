@@ -1,588 +1,465 @@
-// The sandbox page: edit a universe and its action log, run it in a worker,
-// then watch it play in the cluster view. The page draws only what the run
-// returns; the run is the shipped paros code on moonpool's simulator.
+// The playground page: one live paros universe in a worker, driven by the
+// operator's buttons. Each click sends one step (or a few) to the universe
+// and prints the `parosctl` line it runs; a fault prints the simulator's
+// line. The page draws only what the universe sends back: the topology the
+// operator reads through the admin API, and the events the machines log.
 
-import { BEATS, Stage, drawTimeline, el, explain, index, legend, lowerBound, role } from "./stage.js";
+import { Stage, Universe, chip, drawTimeline, el, legend, roles } from "./stage.js";
 
 const $ = (id) => document.getElementById(id);
 
-const init = (machines) => ({ at_ms: 0, op: { kind: "init", machines } });
+// Eight machines over three zones: init forms cell-1 over three, two wait
+// for `cell add-machine`, and three found cell-2.
+const MACHINES = 8;
+const FOUNDERS = [0, 1, 2];
+const TENANT_NAMES = ["acme", "globex", "initech", "umbrella", "hooli", "stark", "wayne", "tyrell"];
+const JOURNAL_NAMES = ["orders", "events", "audit", "payments", "invoices", "sessions", "clicks", "feed"];
+// The simulated ms a tick runs, per real ms, by speed name.
+const SPEEDS = { "0.05×": 0.05, "0.2×": 0.2, "1×": 1, "5×": 5 };
+const TICK_MS = 100;
 
-const PRESETS = {
-  "Three acts: cell, tenant, writes": {
-    config: { seed: 1, machines: 7, run_ms: 12000 },
-    actions: [
-      init(7),
-      { at_ms: 3000, op: { kind: "create_tenant", tenant: "acme" } },
-      { at_ms: 4000, op: { kind: "create_journal", tenant: "acme", journal: "orders", mode: "machines=0,partitions=3" } },
-      { at_ms: 5000, op: { kind: "create_journal", tenant: "acme", journal: "audit", mode: "machines=1" } },
-      { at_ms: 7000, op: { kind: "write", tenant: "acme", journal: "orders", count: 12 } },
-      { at_ms: 8000, op: { kind: "write", tenant: "acme", journal: "audit", count: 4 } },
-      { at_ms: 9000, op: { kind: "read", tenant: "acme", journal: "orders", count: 12 } },
-    ],
-  },
-  "Crash the leader, then restart it": {
-    config: { seed: 1, machines: 5, run_ms: 30000 },
-    actions: [
-      init(5),
-      { at_ms: 3000, op: { kind: "create_tenant", tenant: "acme" } },
-      { at_ms: 4000, op: { kind: "create_journal", tenant: "acme", journal: "orders", mode: "machines=1" } },
-      { at_ms: 6000, op: { kind: "write", tenant: "acme", journal: "orders", count: 4 } },
-      { at_ms: 9000, op: { kind: "crash", machine: 0 } },
-      { at_ms: 10000, op: { kind: "write", tenant: "acme", journal: "orders", count: 4 } },
-      { at_ms: 20000, op: { kind: "restart", machine: 0 } },
-      { at_ms: 24000, op: { kind: "read", tenant: "acme", journal: "orders", count: 8 } },
-    ],
-  },
-  "Cut a machine off, then heal it": {
-    config: { seed: 2, machines: 5, run_ms: 30000 },
-    actions: [
-      init(5),
-      { at_ms: 3000, op: { kind: "create_tenant", tenant: "acme" } },
-      { at_ms: 4000, op: { kind: "create_journal", tenant: "acme", journal: "orders", mode: "machines=1" } },
-      { at_ms: 6000, op: { kind: "isolate", machine: 1 } },
-      { at_ms: 7000, op: { kind: "write", tenant: "acme", journal: "orders", count: 6 } },
-      { at_ms: 15000, op: { kind: "heal", machine: 1 } },
-      { at_ms: 20000, op: { kind: "read", tenant: "acme", journal: "orders", count: 6 } },
-    ],
-  },
-  "Two tenants": {
-    config: { seed: 1, machines: 6, run_ms: 12000 },
-    actions: [
-      init(6),
-      { at_ms: 3000, op: { kind: "create_tenant", tenant: "acme" } },
-      { at_ms: 3500, op: { kind: "create_journal", tenant: "acme", journal: "orders", mode: "machines=1" } },
-      { at_ms: 4000, op: { kind: "create_tenant", tenant: "globex" } },
-      { at_ms: 4500, op: { kind: "create_journal", tenant: "globex", journal: "events", mode: "machines=2" } },
-      { at_ms: 7000, op: { kind: "write", tenant: "acme", journal: "orders", count: 5 } },
-      { at_ms: 8000, op: { kind: "write", tenant: "globex", journal: "events", count: 5 } },
-    ],
-  },
-};
+const addr = (m) => `machine-${m}:4500`;
 
-const CAPTIONS = [
-  "The cell runs itself. paros keeps its own records in journals: the universe directory, the machine registry and the election journal. Grey dots are that internal traffic.",
-  "A tenant arrives. Its control journal and its journals land on machines, one zone at a time. Each journal is its own Paxos instance and elects its own leader.",
-  "Writes flow. A client outside the cell sends each write to the journal's leader. The leader asks a Phase-2 quorum to accept it; then the record is chosen.",
-];
+// ---- the universe ----
 
-// Replay mode: a run opened from a file or pasted is stepped, not edited.
-let replaying = false;
-let state = loadFromHash() || structuredClone(PRESETS["Three acts: cell, tenant, writes"]);
-let run = null;
-let ix = null;
-let t = 0;
-let playing = false;
-let stepped = null;
-let lastFrame = 0;
-let lastLog = 0;
+let seed = Number(new URLSearchParams(location.search).get("seed")) || 1;
+let u = null;
+let speed = 0.2;
+let paused = false;
+let last = { sim: 0, wall: performance.now() };
+let shownT = 0;
+// What the operator asked for, in click order, for the log: each entry is
+// one step with its parosctl lines, its index once the universe took it,
+// and its result once it ended.
+let entries = [];
+let waiting = [];
+// What the page believes exists, from the steps asked for: undone when a
+// step fails.
+let plan = null;
+
+function freshPlan() {
+  return { init: false, cell2: false, tenants: new Map(), journals: new Map(), added: [], draining: new Set(), streams: new Set() };
+}
 
 const stage = new Stage({
-  stage: $("stage"), wires: $("wires"), cell: $("cell"), client: $("client"), rail: $("rail"),
-}, () => render(true));
+  stage: $("stage"), wires: $("wires"), cells: $("cells"), client: $("client"), rail: $("rail"),
+}, () => { syncJournalPick(); });
 
 const worker = new Worker(new URL("./worker.js", import.meta.url), { type: "module" });
 worker.onmessage = ({ data }) => {
-  run = JSON.parse(data.json);
-  $("status").textContent = run.error
-    ? `The run stopped: ${run.error}`
-    : `Ran ${state.config.run_ms / 1000} simulated seconds in ${data.wallMs} ms of your time.`;
-  setBusy(false);
-  renderActions();
-  if (!run.topology) return;
-  ix = index(run);
-  stage.load(ix);
-  $("legend").replaceChildren(...legend(ix));
-  renderActs();
-  t = 0;
-  stepped = null;
-  playing = true;
-  render(true);
+  if (data.type === "frame") {
+    const frame = data.frame;
+    u.add(frame);
+    last = { sim: frame.now_ms, wall: performance.now() };
+    for (const step of frame.steps) settle(step);
+    if (frame.topology.length) { refreshPicks(); renderRoles(); $("legend").replaceChildren(...legend(u)); }
+    if (frame.error) setStatus("stopped", "gap", frame.error);
+  } else if (data.type === "acted") {
+    const entry = waiting.shift();
+    if (entry) { entry.index = data.index; entry.at = u.now; }
+  } else if (data.type === "error") {
+    const entry = waiting.shift();
+    if (entry) { entry.done = { ok: false, detail: data.message }; undo(entry); renderLog(); }
+    else setStatus("stopped", "gap", data.message);
+  }
 };
 
-function setBusy(busy) {
-  for (const id of ["add", "undo", "clear", "load-preset", "quick-tenant", "quick-journals", "quick-traffic", "quick-machine", "quick-kill"]) {
-    $(id).disabled = busy || replaying;
-  }
-  if (busy) $("status").textContent = "Running…";
-}
-
 function start() {
-  saveToHash();
-  setBusy(true);
-  playing = false;
-  worker.postMessage(state);
+  u = new Universe({ seed, machines: MACHINES });
+  stage.load(u);
+  plan = freshPlan();
+  entries = [];
+  waiting = [];
+  last = { sim: 0, wall: performance.now() };
+  shownT = 0;
+  worker.postMessage({ type: "start", config: { seed, machines: MACHINES, run_ms: 300000 } });
+  worker.postMessage({ type: "speed", value: speed });
+  worker.postMessage({ type: "pause", value: paused });
+  $("seed").textContent = String(seed);
+  setStatus(paused ? "paused" : "running", paused ? "" : "done");
+  renderLog();
+  renderRoles();
+  refreshPicks();
 }
 
-// ---- the URL is the replay ----
-
-function saveToHash() {
-  const bytes = new TextEncoder().encode(JSON.stringify(state));
-  let text = "";
-  bytes.forEach((b) => (text += String.fromCharCode(b)));
-  history.replaceState(null, "", `#${replaying ? "replay:" : ""}` + btoa(text).replaceAll("+", "-").replaceAll("/", "_"));
+function setStatus(text, kind, why) {
+  $("status").replaceChildren(chip(text, kind));
+  $("status").title = why || "";
 }
 
-function loadFromHash() {
-  if (location.hash.length < 2) return null;
-  try {
-    // `#replay:<run>` opens the run in replay mode.
-    let hash = location.hash.slice(1);
-    if (hash.startsWith("replay:")) { replaying = true; hash = hash.slice(7); }
-    const text = atob(hash.replaceAll("-", "+").replaceAll("_", "/"));
-    const bytes = Uint8Array.from(text, (c) => c.charCodeAt(0));
-    const loaded = JSON.parse(new TextDecoder().decode(bytes));
-    if (!loaded.config || !Array.isArray(loaded.actions)) return null;
-    // The log always starts with init at 0 ms, and holds no other init.
-    const first = loaded.actions.find((a) => a.op.kind === "init");
-    const machines = Number(first?.op.machines) || loaded.config.machines || 3;
-    loaded.actions = [init(machines), ...loaded.actions.filter((a) => a.op.kind !== "init")];
-    return loaded;
-  } catch {
-    return null;
+// ---- steps and the log ----
+
+// Send `ops`, each with its lines, as one click.
+function send(steps) {
+  for (const step of steps) {
+    const entry = { op: step.op, lines: step.lines, fault: Boolean(step.fault), index: null, done: null, apply: step.apply };
+    step.apply?.(true);
+    entries.push(entry);
+    waiting.push(entry);
+    worker.postMessage({ type: "act", op: step.op });
   }
+  renderLog();
 }
 
-// ---- the editor ----
+function settle(step) {
+  const entry = entries.find((e) => e.index === step.index);
+  if (!entry) return;
+  entry.done = step;
+  if (!step.ok) undo(entry);
+  renderLog();
+}
 
-function describe(op) {
-  switch (op.kind) {
-    case "init": return `init: cell init (cell-1 over m0–m${op.machines - 1}), then universe init`;
-    case "create_tenant": return `create tenant ${op.tenant}`;
-    case "create_journal": return `create journal ${op.tenant}/${op.journal} (${op.mode || "machines=1"})`;
-    case "write": return `write ${op.count} records to ${op.tenant}/${op.journal}`;
-    case "read": return `read ${op.count} records of ${op.tenant}/${op.journal}`;
-    case "traffic": return `traffic: write ${op.count} records to every journal at the same time`;
-    case "add_machine": return `add m${op.machine} to cell-1 (cell add-machine)`;
-    case "crash": return `crash m${op.machine}`;
-    case "restart": return `restart m${op.machine}`;
-    case "isolate": return `cut m${op.machine} from the network`;
-    case "heal": return `join m${op.machine} to the network again`;
-    default: return op.kind;
+function undo(entry) {
+  entry.apply?.(false);
+  refreshPicks();
+}
+
+function note(text) {
+  entries.push({ op: null, lines: [], note: text, done: null });
+  renderLog();
+}
+
+function renderLog() {
+  const log = $("log");
+  const rows = [];
+  for (const e of entries.slice(-40)) {
+    if (e.note) { rows.push(el("div", { className: "line note", textContent: `# ${e.note}` })); continue; }
+    const block = el("div", { className: `entry${e.done ? (e.done.ok ? " ok" : " failed") : " queued"}` });
+    for (const line of e.lines) block.append(el("div", { className: `line${e.fault ? " struck" : ""}`, textContent: line }));
+    const state = e.done
+      ? `${e.done.ok ? "ok" : "failed"} · ${fmt(e.done.start_ms ?? u.now)}${e.done.end_ms !== undefined ? `–${fmt(e.done.end_ms)}` : ""} · ${e.done.detail}`
+      : e.index === null ? "sending…" : "queued: it starts when the steps before it end";
+    block.append(el("div", { className: "result", textContent: `→ ${state}` }));
+    rows.push(block);
   }
+  log.replaceChildren(...rows);
+  log.scrollTop = log.scrollHeight;
 }
 
-function renderConfig() {
-  $("seed").value = state.config.seed;
-  $("machines").value = state.config.machines;
-  $("run").value = state.config.run_ms / 1000;
+const fmt = (ms) => `${(ms / 1000).toFixed(1)} s`;
+
+// ---- what to act on ----
+
+function cellOf() { return u.cellOf(); }
+
+function inCell(m) {
+  return cellOf()[m] !== null || (plan.init && FOUNDERS.includes(m)) || plan.added.includes(m)
+    || (plan.cell2 && plan.cell2.includes?.(m));
 }
 
-function renderActions() {
-  const results = new Map((run?.steps || []).map((s) => [s.index, s]));
-  $("actions").replaceChildren(
-    ...state.actions.map((action, index) => {
-      const item = document.createElement("li");
-      const result = results.get(index);
-      if (index === 0) {
-        const count = el("input", { type: "number", min: 1, max: state.config.machines,
-          value: action.op.machines, title: "How many machines init lists" });
-        count.onchange = () => {
-          action.op.machines = clamp(Number(count.value), 1, state.config.machines);
-          start();
-        };
-        item.append("0 ms: init over ", count, " machines: cell init, then universe init");
-      } else {
-        item.textContent = `${action.at_ms} ms: ${describe(action.op)}`;
-      }
-      if (result) {
-        const span = el("span", { className: result.ok ? "ok" : "bad",
-          textContent: ` → ${result.detail} (${result.start_ms}–${result.end_ms} ms)` });
-        item.append(span);
-      }
-      if (index > 0 && !replaying) {
-        const remove = el("button", { textContent: "×", title: "Remove this action" });
-        remove.onclick = () => { state.actions.splice(index, 1); start(); };
-        item.append(remove);
-      }
-      return item;
-    }),
-  );
-  const last = state.actions.at(-1);
-  $("at").value = Math.min(last.at_ms + 1000, state.config.run_ms);
-  renderPicks();
+function idleMachines() {
+  const out = [];
+  for (let m = 0; m < MACHINES; m++) if (!inCell(m)) out.push(m);
+  return out;
 }
 
-// The tenants and journals the log creates: what writes and reads can name.
-function created() {
-  const tenants = [], journals = [];
-  for (const a of state.actions) {
-    if (a.op.kind === "create_tenant") tenants.push(a.op.tenant);
-    if (a.op.kind === "create_journal") journals.push(`${a.op.tenant}/${a.op.journal}`);
+function down() { return new Set(u.topo?.down ?? []); }
+function cut() { return new Set(u.topo?.isolated ?? []); }
+
+// The machine to strike: the one picked, else the one that leads the most
+// journals and is up.
+function target(filter, fallback = "leader") {
+  const picked = $("machine-pick").value;
+  if (picked !== "auto") return Number(picked);
+  const ok = [];
+  for (let m = 0; m < MACHINES; m++) if (filter(m)) ok.push(m);
+  if (!ok.length) return null;
+  if (fallback === "leader") {
+    const leads = new Map();
+    for (const tenant of u.topo?.tenants ?? []) for (const j of tenant.journals) {
+      if (j.leader !== null && ok.includes(j.leader)) leads.set(j.leader, (leads.get(j.leader) || 0) + 1);
+    }
+    const busiest = [...leads].sort((x, y) => y[1] - x[1] || x[0] - y[0])[0];
+    if (busiest) return busiest[0];
   }
-  return { tenants, journals };
+  return fallback === "last" ? ok[ok.length - 1] : ok[0];
 }
 
-function renderPicks() {
-  const { tenants, journals } = created();
-  const fill = (select, items) => {
-    const old = select.value;
-    select.replaceChildren(...items.map((x) => new Option(x, x)));
-    if (items.includes(old)) select.value = old;
-  };
-  fill($("tenant-pick"), tenants);
-  fill($("journal-pick"), journals);
-  fill($("machine-pick"), Array.from({ length: state.config.machines }, (_, m) => String(m)));
-  renderOpFields();
-}
-
-function renderOpFields() {
-  const kind = $("op").value;
-  $("tenant-name-field").hidden = kind !== "create_tenant";
-  $("tenant-pick-field").hidden = kind !== "create_journal";
-  $("journal-name-field").hidden = kind !== "create_journal";
-  $("mode-field").hidden = kind !== "create_journal";
-  $("journal-pick-field").hidden = !["write", "read"].includes(kind);
-  $("count-field").hidden = !["write", "read", "traffic"].includes(kind);
-  $("machine-pick-field").hidden = !FAULTS.has(kind) && kind !== "add_machine";
-}
-
-const FAULTS = new Set(["crash", "restart", "isolate", "heal"]);
-
-function readConfig() {
-  state.config = {
-    seed: Math.max(0, Math.floor(Number($("seed").value) || 0)),
-    machines: clamp(Number($("machines").value), 1, 7),
-    run_ms: clamp(Math.round(Number($("run").value) * 1000), 1000, 300000),
-  };
-  state.actions = state.actions.filter((a) => a.at_ms <= state.config.run_ms);
-  const first = state.actions[0].op;
-  first.machines = Math.min(first.machines, state.config.machines);
-  renderConfig();
-  start();
-}
-
-function clamp(value, low, high) {
-  return Math.min(high, Math.max(low, Number.isFinite(value) ? Math.round(value) : low));
-}
-
-function addAction() {
-  const kind = $("op").value;
-  const text = (id) => $(id).value.trim();
-  let op;
-  if (kind === "create_tenant") {
-    if (!text("tenant-name")) { $("status").textContent = "Name the tenant."; return; }
-    op = { kind, tenant: text("tenant-name") };
-  } else if (kind === "create_journal") {
-    if (!text("tenant-pick")) { $("status").textContent = "Create a tenant first."; return; }
-    if (!text("journal-name")) { $("status").textContent = "Name the journal."; return; }
-    op = { kind, tenant: text("tenant-pick"), journal: text("journal-name"), mode: $("mode").value };
-  } else if (kind === "traffic") {
-    if (!created().journals.length) { $("status").textContent = "Create a journal first."; return; }
-    op = { kind, count: clamp(Number($("count").value), 1, 100) };
-  } else if (FAULTS.has(kind) || kind === "add_machine") {
-    op = { kind, machine: clamp(Number($("machine-pick").value), 0, state.config.machines - 1) };
-  } else {
-    const pick = text("journal-pick");
-    if (!pick) { $("status").textContent = "Create a journal first."; return; }
-    const [tenant, journal] = pick.split("/");
-    op = { kind, tenant, journal, count: clamp(Number($("count").value), 1, 100) };
-  }
-  const at_ms = clamp(Number($("at").value), 1, state.config.run_ms);
-  state.actions.push({ at_ms, op });
-  state.actions.sort((x, y) => x.at_ms - y.at_ms);
-  start();
-}
-
-// ---- the one-click steps ----
-// Each button adds steps after the last one, as the form would, so the run
-// stays a pure function of its seed, its configuration and its log.
-
-const TENANT_NAMES = ["acme", "globex", "initech"];
-const JOURNAL_NAMES = ["orders", "audit", "events", "payments", "invoices", "metrics"];
-
-// The first name of `names` not in `taken`, then `<prefix>-2`, `<prefix>-3`, …
 function freeName(names, taken, prefix) {
   const free = names.find((n) => !taken.includes(n));
   if (free) return free;
   for (let i = 2; ; i++) if (!taken.includes(`${prefix}-${i}`)) return `${prefix}-${i}`;
 }
 
-// Add `ops` one second apart after the last step, then run the log again.
-function quick(ops) {
-  let at = state.actions.at(-1).at_ms;
-  for (const op of ops) {
-    at += 1000;
-    if (at > state.config.run_ms) {
-      $("status").textContent = "The run ends before these steps: make the run longer.";
-      return;
-    }
-    state.actions.push({ at_ms: at, op });
+// The journal picked, else the newest.
+function journal() {
+  const picked = $("journal-pick").value;
+  if (picked && plan.journals.has(picked)) return picked;
+  const all = [...plan.journals.keys()];
+  return all[all.length - 1] ?? null;
+}
+
+function modeFlags(mode) {
+  const parts = Object.fromEntries(mode.split(",").map((p) => p.split("=")));
+  const flags = [];
+  if (parts.machines !== undefined) flags.push(`--survive machines=${parts.machines}`);
+  if (parts.partitions !== undefined) flags.push(`--partitions ${parts.partitions}`);
+  if (parts.replicas !== undefined && parts.replicas !== "0") flags.push(`--replicas ${parts.replicas}`);
+  return flags.join(" ");
+}
+
+// ---- the buttons ----
+
+function needCell() {
+  if (plan.init) return true;
+  note("Init cell-1 first.");
+  return false;
+}
+
+function tenantStep(name, cell) {
+  return {
+    op: { kind: "create_tenant", tenant: name, cell },
+    lines: [`$ parosctl tenant create ${name} --cell ${cell}`],
+    apply: (on) => on ? plan.tenants.set(name, cell) : plan.tenants.delete(name),
+  };
+}
+
+function journalSteps(how) {
+  const steps = [];
+  let tenant = [...plan.tenants.keys()].at(-1);
+  if (!tenant) {
+    tenant = freeName(TENANT_NAMES, [], "tenant");
+    steps.push(tenantStep(tenant, "cell-1"));
   }
-  start();
-}
-
-function newTenant() {
-  return { kind: "create_tenant", tenant: freeName(TENANT_NAMES, created().tenants, "tenant") };
-}
-
-// Three journals in the last tenant; a tenant first when there is none.
-function newJournals(how = 3) {
-  const ops = [];
-  let tenant = created().tenants.at(-1);
-  if (!tenant) { const op = newTenant(); ops.push(op); tenant = op.tenant; }
-  const taken = created().journals.filter((j) => j.startsWith(`${tenant}/`)).map((j) => j.split("/")[1]);
+  const taken = [...plan.journals.keys()].filter((k) => k.startsWith(`${tenant}/`)).map((k) => k.split("/")[1]);
+  const mode = $("mode").value;
+  const multi = $("writers").value === "multi";
   for (let i = 0; i < how; i++) {
-    const journal = freeName(JOURNAL_NAMES, taken, "journal");
-    taken.push(journal);
-    ops.push({ kind: "create_journal", tenant, journal, mode: $("mode").value });
+    const name = freeName(JOURNAL_NAMES, taken, "journal");
+    taken.push(name);
+    const key = `${tenant}/${name}`;
+    steps.push({
+      op: { kind: "create_journal", tenant, journal: name, mode, multi },
+      lines: [`$ parosctl journal create ${tenant} ${name} ${modeFlags(mode)}${multi ? " --writers multi" : ""}`],
+      apply: (on) => on ? plan.journals.set(key, { multi }) : plan.journals.delete(key),
+    });
   }
-  return ops;
+  return steps;
 }
 
-// The next machine outside cell-1: neither in init nor added by the log.
-function idleMachine() {
-  const inCell = new Set(Array.from({ length: state.actions[0].op.machines }, (_, m) => m));
-  for (const a of state.actions) if (a.op.kind === "add_machine") inCell.add(a.op.machine);
-  for (let m = 0; m < state.config.machines; m++) if (!inCell.has(m)) return m;
-  return null;
+function journalOp(kind, extra = {}) {
+  const key = journal();
+  if (!key) { note("Create a journal first."); return null; }
+  const [tenant, name] = key.split("/");
+  return { key, tenant, name, op: { kind, tenant, journal: name, ...extra } };
 }
 
-// The machine to kill: the one in cell-1 and up that leads the most
-// journals after the last step; the first such machine when none leads.
-function machineToKill() {
-  const up = new Set(Array.from({ length: state.actions[0].op.machines }, (_, m) => m));
-  for (const a of state.actions) {
-    if (a.op.kind === "add_machine" || a.op.kind === "restart") up.add(a.op.machine);
-    if (a.op.kind === "crash") up.delete(a.op.machine);
-  }
-  const leads = new Map();
-  for (const tenant of run?.topology?.at(-1)?.tenants || []) {
-    for (const j of tenant.journals) {
-      if (j.leader !== null && up.has(j.leader)) leads.set(j.leader, (leads.get(j.leader) || 0) + 1);
-    }
-  }
-  const busiest = [...leads].sort((x, y) => y[1] - x[1] || x[0] - y[0])[0];
-  return busiest ? busiest[0] : ([...up].sort((x, y) => x - y)[0] ?? null);
-}
-
-$("quick-tenant").onclick = () => quick([newTenant()]);
-$("quick-journals").onclick = () => quick(newJournals());
-$("quick-traffic").onclick = () => {
-  const ops = created().journals.length ? [] : newJournals(2);
-  ops.push({ kind: "traffic", count: clamp(Number($("count").value), 1, 100) });
-  quick(ops);
+const ACTIONS = {
+  // Bootstrap
+  init: () => {
+    if (plan.init) return note("cell-1 exists already: Reset to start again.");
+    send([{
+      op: { kind: "init", machines: FOUNDERS.length },
+      lines: [`$ parosctl init --members ${FOUNDERS.map(addr).join(",")}`],
+      apply: (on) => { plan.init = on; },
+    }]);
+  },
+  "add-machine": () => {
+    if (!needCell()) return;
+    // Keep three idle machines for cell-2 while it does not exist.
+    const idle = idleMachines();
+    const spare = plan.cell2 ? idle : idle.slice(0, Math.max(0, idle.length - 3));
+    const m = spare[0] ?? (plan.cell2 ? null : idle[0]);
+    if (m === undefined || m === null) return note("No idle machine is left.");
+    send([{
+      op: { kind: "add_machine", machine: m },
+      lines: [`$ parosctl cell add-machine ${addr(m)}`],
+      apply: (on) => { if (on) plan.added.push(m); else plan.added = plan.added.filter((x) => x !== m); },
+    }]);
+  },
+  "add-cell": () => {
+    if (!needCell()) return;
+    if (plan.cell2) return note("cell-2 exists already.");
+    const members = idleMachines().slice(-3);
+    if (!members.length) return note("No idle machine is left to found cell-2.");
+    const list = members.map(addr).join(",");
+    send([{
+      op: { kind: "add_cell", machines: members },
+      lines: [`$ parosctl --servers ${addr(members[0])} init --idle --members ${list}`,
+        `$ parosctl universe add-cell --members ${list} --name cell-2`],
+      apply: (on) => { plan.cell2 = on ? members : false; refreshPicks(); },
+    }]);
+  },
+  // Resources
+  tenant: () => {
+    if (!needCell()) return;
+    const cell = $("cell-pick").value;
+    if (cell === "cell-2" && !plan.cell2) return note("Add cell-2 first.");
+    send([tenantStep(freeName(TENANT_NAMES, [...plan.tenants.keys()], "tenant"), cell)]);
+  },
+  journal: () => { if (needCell()) send(journalSteps(1)); },
+  journals: () => { if (needCell()) send(journalSteps(3)); },
+  configure: () => {
+    const j = journalOp("configure");
+    if (!j) return;
+    const mode = `${$("mode").value},replicas=${$("replicas").value}`;
+    j.op.mode = mode;
+    send([{ op: j.op, lines: [`$ parosctl configure --tenant ${j.tenant} --journal ${j.name} ${modeFlags(mode)}`] }]);
+  },
+  // Workloads
+  traffic: () => {
+    if (!needCell()) return;
+    const steps = plan.journals.size ? [] : journalSteps(2);
+    steps.push({ op: { kind: "traffic", count: 10 },
+      lines: ["$ parosctl write <each journal> r1 … r10   # every journal at the same time"] });
+    send(steps);
+  },
+  stream: () => {
+    const j = journalOp("stream");
+    if (!j) return;
+    const on = !plan.streams.has(j.key);
+    j.op.on = on;
+    send([{ op: j.op,
+      lines: [on ? `$ while true; do parosctl write ${j.key} record; sleep 0.2; done &` : `$ kill %${j.key}`],
+      apply: (yes) => { if (yes === on) plan.streams.add(j.key); else plan.streams.delete(j.key); refreshStreamLabel(); } }]);
+  },
+  write: () => {
+    const j = journalOp("write", { count: 5 });
+    if (j) send([{ op: j.op, lines: [`$ parosctl write ${j.key} r1 r2 r3 r4 r5`] }]);
+  },
+  read: () => {
+    const j = journalOp("read", { count: 5 });
+    if (j) send([{ op: j.op, lines: [`$ parosctl read ${j.key} --from <tail − 5> --limit 5`] }]);
+  },
+  "set-leader": () => {
+    const j = journalOp("set_leader");
+    if (!j) return;
+    if (plan.journals.get(j.key)?.multi) return note(`${j.key} is a multi-writer journal: it has no leader to replace.`);
+    send([{ op: j.op, lines: [`$ parosctl set-leader ${j.key} --new <fresh uuid>`, `$ parosctl write ${j.key} stale --leader <old uuid> --no-claim`] }]);
+  },
+  resolve: () => {
+    const tenant = journal()?.split("/")[0] ?? [...plan.tenants.keys()].at(-1);
+    if (!tenant) return note("Create a tenant first.");
+    send([{ op: { kind: "resolve", tenant }, lines: [`$ parosctl resolve ${tenant}`] }]);
+  },
+  // Machines
+  maintenance: () => {
+    const m = target((x) => cellOf()[x] === "cell-1" && !FOUNDERS.includes(x), "last") ?? target((x) => cellOf()[x] === "cell-1", "last");
+    if (m === null) return note("No machine of cell-1 to put in maintenance.");
+    send([{ op: { kind: "maintenance", machine: m, for_ms: 30000 }, lines: [`$ parosctl cell maintenance machine-${m} --for 30s`] }]);
+  },
+  drain: () => {
+    const m = target((x) => cellOf()[x] === "cell-1" && !FOUNDERS.includes(x), "last");
+    if (m === null) return note("Add a machine to cell-1 first: drain one that is not a founder.");
+    send([{ op: { kind: "drain", machine: m }, lines: [`$ parosctl cell drain-machine machine-${m}`],
+      apply: (on) => on ? plan.draining.add(m) : plan.draining.delete(m) }]);
+  },
+  remove: () => {
+    const picked = $("machine-pick").value;
+    const m = picked !== "auto" ? Number(picked) : [...plan.draining][0];
+    if (m === undefined) return note("Drain a machine first.");
+    send([{ op: { kind: "remove", machine: m }, lines: [`$ parosctl cell remove-machine machine-${m}`] }]);
+  },
+  // Faults
+  kill: () => {
+    const m = target((x) => cellOf()[x] !== null && !down().has(x));
+    if (m === null) return note("No machine is up.");
+    send([{ op: { kind: "crash", machine: m }, fault: true, lines: [`# sim: crash machine-${m} (its unsynced writes are lost)`] }]);
+  },
+  restart: () => {
+    const m = target((x) => down().has(x), "first");
+    if (m === null) return note("No machine is down.");
+    send([{ op: { kind: "restart", machine: m }, fault: true, lines: [`# sim: restart machine-${m} on its disk`] }]);
+  },
+  isolate: () => {
+    const m = target((x) => cellOf()[x] !== null && !cut().has(x) && !down().has(x));
+    if (m === null) return note("No machine to cut off.");
+    send([{ op: { kind: "isolate", machine: m }, fault: true, lines: [`# sim: cut machine-${m} from the network`] }]);
+  },
+  heal: () => {
+    const m = target((x) => cut().has(x), "first");
+    if (m === null) return note("No machine is cut off.");
+    send([{ op: { kind: "heal", machine: m }, fault: true, lines: [`# sim: join machine-${m} to the network again`] }]);
+  },
 };
-$("quick-machine").onclick = () => {
-  let machine = idleMachine();
-  if (machine === null) {
-    if (state.config.machines >= 7) {
-      $("status").textContent = "Every machine is in cell-1: a universe holds 7 machines at most.";
-      return;
-    }
-    // One more machine in the universe: it starts idle. The simulated
-    // draws change with it, so the run before this step can change too.
-    machine = state.config.machines;
-    state.config.machines += 1;
-    renderConfig();
-  }
-  quick([{ kind: "add_machine", machine }]);
+
+for (const button of document.querySelectorAll("[data-act]")) {
+  button.onclick = () => ACTIONS[button.dataset.act]();
+}
+
+// ---- the pickers ----
+
+function refreshPicks() {
+  if (!u) return;
+  const mp = $("machine-pick");
+  const keep = mp.value;
+  const cells = cellOf();
+  mp.replaceChildren(el("option", { value: "auto", textContent: "auto" }),
+    ...Array.from({ length: MACHINES }, (_, m) => el("option", { value: String(m), textContent: `m${m}${cells[m] ? ` · ${cells[m]}` : " · idle"}` })));
+  mp.value = [...mp.options].some((o) => o.value === keep) ? keep : "auto";
+  const cp = $("cell-pick");
+  cp.options[1].disabled = !plan.cell2;
+  syncJournalPick();
+  refreshStreamLabel();
+}
+
+function syncJournalPick() {
+  const jp = $("journal-pick");
+  const keys = [...plan.journals.keys()];
+  const followed = stage.selected && u.journals.get(stage.selected);
+  const want = followed && !followed.tenant.internal ? `${followed.tenant.name}/${followed.name}` : jp.value;
+  jp.replaceChildren(...(keys.length ? keys : ["(none yet)"]).map((k) => el("option", { value: keys.length ? k : "", textContent: k })));
+  if (keys.includes(want)) jp.value = want; else if (keys.length) jp.value = keys[keys.length - 1];
+  refreshStreamLabel();
+}
+
+function refreshStreamLabel() {
+  const key = journal();
+  $("stream-btn").textContent = key && plan.streams.has(key) ? "Stop the writer" : "Start a writer";
+}
+
+$("journal-pick").onchange = () => {
+  const key = $("journal-pick").value;
+  for (const j of u.journals.values()) if (`${j.tenant.name}/${j.name}` === key) stage.select(j.key);
+  refreshStreamLabel();
 };
 
-$("quick-kill").onclick = () => {
-  const machine = machineToKill();
-  if (machine === null) { $("status").textContent = "Every machine in cell-1 is down already."; return; }
-  quick([{ kind: "crash", machine }]);
+function renderRoles() {
+  $("roles").replaceChildren(roles(u));
+  const cells = u.topo?.cells?.length ?? 0;
+  const up = cellOf().filter((c, m) => c !== null && !down().has(m)).length;
+  $("cells-count").textContent = String(cells);
+  $("machines-up").textContent = `${up} of ${MACHINES}`;
+  $("journals-count").textContent = String(plan.journals.size);
+}
+
+// ---- the clock ----
+
+$("play").onclick = () => {
+  paused = !paused;
+  worker.postMessage({ type: "pause", value: paused });
+  $("play").textContent = paused ? "▶ Play" : "❚❚ Pause";
+  setStatus(paused ? "paused" : "running", paused ? "" : "done");
 };
+$("speed").onchange = () => {
+  speed = SPEEDS[$("speed").value];
+  worker.postMessage({ type: "speed", value: speed });
+};
+$("reset").onclick = () => {
+  seed = Number($("seed-input").value) || seed;
+  start();
+};
+$("seed-input").value = String(seed);
+for (const name of Object.keys(SPEEDS)) $("speed").append(el("option", { value: name, textContent: name, selected: name === "0.2×" }));
 
-// ---- playback ----
-
-function speed() { return Number($("speed").value); }
-
-// A dot crosses the stage in about half a second of your time.
-function travel() { return Math.min(150, Math.max(3, 500 * speed())); }
-
-function actAt(time) {
-  let current = 0;
-  ix.acts.forEach((a, i) => { if (a.start !== null && time >= a.start) current = i; });
-  return current;
-}
-
-function renderActs() {
-  $("acts").replaceChildren(...ix.acts.map((act, i) => {
-    const b = el("button", { className: "act", textContent: `${"①②③"[i]} ${act.title}`, disabled: act.start === null });
-    b.onclick = () => { t = act.start; stepped = null; playing = true; render(true); };
-    return b;
-  }), el("span", { className: "time", id: "act-time" }));
-}
-
-function caption() {
-  if (stepped !== null) return explain(ix, ix.msgs[stepped], t);
-  const act = actAt(t);
-  let now = "";
-  for (const s of run.steps) {
-    if (s.start_ms <= t) {
-      const a = state.actions[s.index];
-      const flavour = a.op.kind === "init" ? " (single-decree Paxos chooses the cell plan)" : "";
-      now = s.end_ms <= t
-        ? `Step ${s.index}, ${describe(a.op)}${flavour}: ${s.detail}.`
-        : `Step ${s.index} is running: ${describe(a.op)}${flavour}.`;
-    }
-  }
-  return `${CAPTIONS[act]} ${now}`;
-}
-
-function render(full) {
-  if (!ix) return;
-  stage.cards(t);
-  stage.draw(t, travel(), $("show-beats").checked, stepped);
-  stage.rail(t);
-  $("caption").textContent = caption();
-  const act = actAt(t);
-  document.querySelectorAll(".act").forEach((b, i) => b.classList.toggle("on", i === act));
-  $("time").textContent = `t = ${(t / 1000).toFixed(3)} s of ${(ix.end / 1000).toFixed(1)} s`;
-  $("play").textContent = playing ? "⏸" : "▶";
-  drawTimeline($("timeline"), ix, t);
-  if (full || performance.now() - lastLog > 400) {
-    renderLog(t);
-    lastLog = performance.now();
-  }
-}
-
-function frame(now) {
-  const dt = lastFrame ? now - lastFrame : 0;
-  lastFrame = now;
-  if (playing && ix) {
-    t = Math.min(ix.end, t + dt * speed());
-    if (t >= ix.end) playing = false;
-    render(false);
+function frame() {
+  if (u) {
+    const lag = TICK_MS * speed;
+    const now = performance.now();
+    const t = paused ? shownT : Math.min(last.sim, Math.max(shownT, last.sim - lag + (now - last.wall) * speed));
+    shownT = t;
+    stage.cards();
+    stage.draw(t, Math.max(8, 300 * speed), $("show-beats").checked);
+    const { label } = stage.rail(t);
+    $("followed").textContent = label ?? "";
+    $("time").textContent = fmt(t);
+    const marks = entries.filter((e) => e.done && e.op).map((e) => ({
+      t: e.done.start_ms, fault: e.fault, label: e.op.kind.replace("create_", "").replace("_", " "),
+    }));
+    drawTimeline($("timeline"), u, t, marks);
   }
   requestAnimationFrame(frame);
 }
-requestAnimationFrame(frame);
 
-// One message at a time: the selected journal's, heartbeats left out.
-function stepMessage(direction) {
-  if (!ix) return;
-  playing = false;
-  const keep = (m) => !BEATS.has(m.kind) && (!stage.selected || m.key === stage.selected);
-  let i = stepped ?? lowerBound(ix.msgs, t, (m) => m.t) - (direction > 0 ? 1 : 0);
-  do { i += direction; } while (i >= 0 && i < ix.msgs.length && !keep(ix.msgs[i]));
-  if (i < 0 || i >= ix.msgs.length) return;
-  stepped = i;
-  t = ix.msgs[i].t + travel() * 0.6;
-  render(true);
-}
-
-function scrub(event) {
-  if (!ix) return;
-  const r = $("timeline").getBoundingClientRect();
-  t = Math.max(0, Math.min(ix.end, ((event.clientX - r.left) / r.width) * ix.end));
-  stepped = null;
-  render(true);
-}
-
-function renderLog(time) {
-  const showMsgs = $("show-msgs").checked;
-  const lines = [];
-  for (let i = run.events.length - 1; i >= 0 && lines.length < 150; i--) {
-    const e = run.events[i];
-    if (e.time_ms > time || (!showMsgs && e.name === "msg_sent")) continue;
-    const who = e.machine !== null ? `m${e.machine}` : e.name === "operator_step" || e.name.startsWith("client") ? "op" : "sim";
-    const fields = e.fields.map(([k, v]) => `${k}=${/^\d{10,}$/.test(v) ? BigInt(v).toString(16).padStart(16, "0").slice(0, 6) : v}`).join(" ");
-    const flavour = role(ix, e, e.time_ms);
-    lines.push(`${String(e.time_ms).padStart(6)} ms  ${who.padEnd(4)} ${flavour ? `[${flavour}] ` : ""}${e.name}  ${fields}`);
-  }
-  $("log").textContent = lines.join("\n");
-}
-
-// One step of the log at a time: jump to where the step starts, paused.
-function stepAction(direction) {
-  if (!ix || !run.steps.length) return;
-  playing = false;
-  stepped = null;
-  const starts = run.steps.map((s) => s.start_ms);
-  let i = direction > 0 ? starts.findIndex((x) => x > t + 1) : starts.findLastIndex((x) => x < t - 1);
-  if (i < 0) i = direction > 0 ? starts.length - 1 : 0;
-  t = starts[i];
-  renderReplaying(i);
-  render(true);
-}
-
-// ---- replay ----
-
-function renderReplaying(at) {
-  $("replaying").hidden = !replaying;
-  $("edit-run").hidden = !replaying;
-  for (const id of ["add", "undo", "clear", "load-preset", "seed", "machines", "run"]) $(id).disabled = replaying;
-  $("quick").hidden = replaying;
-  if (!replaying) return;
-  const steps = state.actions.length;
-  const where = at === undefined ? "" : ` Step ${at} of ${steps - 1}: ${describe(state.actions[at].op)}.`;
-  $("replaying").textContent =
-    `Replaying seed ${state.config.seed} over ${state.config.machines} machines, ${steps} steps. Use “◀ step” and “step ▶” to go through the log.${where}`;
-}
-
-// A saved or pasted run: `{config, actions}`, or a whole run view.
-function openRun(text) {
-  let loaded;
-  try { loaded = JSON.parse(text); } catch { $("status").textContent = "That is not JSON."; return; }
-  if (!loaded || !loaded.config || !Array.isArray(loaded.actions)) {
-    $("status").textContent = "A run holds a config and a list of actions.";
-    return;
-  }
-  state = { config: loaded.config, actions: loaded.actions };
-  replaying = true;
-  renderConfig();
-  renderReplaying();
-  start();
-}
-
-function saveRun() {
-  const blob = new Blob([JSON.stringify(state, null, 2)], { type: "application/json" });
-  const a = el("a", { href: URL.createObjectURL(blob), download: `paros-run-seed-${state.config.seed}.json` });
-  document.body.append(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL(a.href);
-}
-
-// ---- wiring ----
-
-$("preset").replaceChildren(...Object.keys(PRESETS).map((name) => new Option(name, name)));
-$("load-preset").onclick = () => {
-  state = structuredClone(PRESETS[$("preset").value]);
-  renderConfig();
-  start();
-};
-for (const name of ["seed", "machines", "run"]) $(name).onchange = readConfig;
-$("add").onclick = addAction;
-$("prev-step").onclick = () => stepAction(-1);
-$("next-step").onclick = () => stepAction(1);
-$("copy-link").onclick = async () => {
-  saveToHash();
-  try { await navigator.clipboard.writeText(location.href); $("status").textContent = "The link is copied."; }
-  catch { $("status").textContent = "Copy the address bar: it holds the run."; }
-};
-$("save-run").onclick = saveRun;
-$("open-run").onchange = async (e) => { const file = e.target.files[0]; if (file) openRun(await file.text()); e.target.value = ""; };
-$("replay-paste").onclick = () => openRun($("paste-run").value);
-$("edit-run").onclick = () => { replaying = false; renderReplaying(); renderActions(); };
-$("undo").onclick = () => { if (state.actions.length > 1) state.actions.pop(); start(); };
-$("clear").onclick = () => { state.actions = [state.actions[0]]; start(); };
-$("op").onchange = renderOpFields;
-$("play").onclick = () => { if (ix && t >= ix.end) t = 0; playing = !playing; stepped = null; render(true); };
-$("prev-msg").onclick = () => stepMessage(-1);
-$("next-msg").onclick = () => stepMessage(1);
-$("show-msgs").onchange = () => renderLog(t);
-$("show-beats").onchange = () => render(false);
-$("speed").onchange = () => render(false);
-let dragging = false;
-$("timeline").onpointerdown = (e) => { dragging = true; playing = false; $("timeline").setPointerCapture(e.pointerId); scrub(e); };
-$("timeline").onpointermove = (e) => { if (dragging) scrub(e); };
-$("timeline").onpointerup = () => { dragging = false; };
-document.addEventListener("keydown", (e) => {
-  if (e.target.closest("input, select, textarea")) return;
-  if (e.key === " ") { e.preventDefault(); $("play").click(); }
-  if (e.key === "[") stepMessage(-1);
-  if (e.key === "]") stepMessage(1);
-  if (e.key === ",") stepAction(-1);
-  if (e.key === ".") stepAction(1);
-});
-window.addEventListener("resize", () => { if (ix) { stage.layout(); render(false); } });
-window.addEventListener("paros-theme", () => { if (ix) render(true); });
-
-renderConfig();
-renderActions();
-renderReplaying();
 start();
+requestAnimationFrame(frame);

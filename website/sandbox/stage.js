@@ -1,13 +1,13 @@
-// The cluster view: one cell, its zones and machines, the journals each
-// machine hosts, and every message and client call as a dot in flight. The
-// stage is a pure function of the simulated time `t`: scrubbing, playing
-// and stepping all set `t` and draw again. Everything drawn comes from the
-// run: the topology after each step and the events the machines logged.
+// The live view of a universe: its cells, their zones and machines, the
+// journals each machine hosts, and every message and client call as a dot in
+// flight. The page feeds it the frames the worker sends (`Universe.add`);
+// the stage draws the universe at a simulated time `t` a little behind the
+// newest frame, so the dots of each frame play out smoothly.
 
 // Tenant colours are tokens (website/shared/tokens.css): CSS takes the var()
 // as is, and the canvas resolves it with paint(), again after a theme switch.
 const SERVED = [0, 1, 2, 3, 4, 5].map((i) => `var(--tenant-${i})`);
-const INTERNAL = ["var(--tenant-internal)", "var(--open)", "var(--muted)"];
+const INTERNAL = "var(--tenant-internal)";
 const NO_TENANT = "var(--open)";
 
 let painted = new Map();
@@ -23,19 +23,24 @@ export function paint(color) {
   }
   return v;
 }
-const BEATS = new Set(["heartbeat", "heartbeat_ack"]);
+
+export const BEATS = new Set(["heartbeat", "heartbeat_ack"]);
 const READS = new Set(["pre_read", "pre_read_ack"]);
 const PHASE1 = new Set(["prepare", "promise", "catchup_request", "catchup_response", "nack"]);
 const PHASE2 = new Set(["accept", "accepted"]);
 
-// ---- the run, indexed once ----
+// How much simulated time the universe keeps: the stage, the rail and the
+// timeline look back no further.
+export const WINDOW_MS = 30_000;
+// The timeline's bins.
+const BIN_MS = 250;
 
 function field(e, k) {
   for (const [key, v] of e.fields) if (key === k) return v;
   return undefined;
 }
 
-function lowerBound(arr, t, get = (x) => x) {
+export function lowerBound(arr, t, get = (x) => x) {
   let lo = 0, hi = arr.length;
   while (lo < hi) {
     const mid = (lo + hi) >> 1;
@@ -44,128 +49,136 @@ function lowerBound(arr, t, get = (x) => x) {
   return lo;
 }
 
-export function index(run) {
-  const topos = run.topology;
-  const machines = run.config.machines;
-  const nodeToMachine = new Map();
-  for (const topo of topos) {
-    topo.nodes.forEach((n, i) => { if (n) nodeToMachine.set(n, i); });
+// ---- the universe as the page knows it ----
+
+export class Universe {
+  constructor(config) {
+    this.config = config;
+    this.now = 0;
+    this.topo = null;
+    this.msgs = [];
+    this.calls = [];
+    this.byToken = new Map();
+    this.nodeToMachine = new Map();
+    this.tenants = new Map();
+    this.journals = new Map();
+    this.served = 0;
+    // Messages per bin, by tenant name: a Map of bin index to counts.
+    this.bins = new Map();
+    // The operator's steps, by their index in the log.
+    this.steps = new Map();
   }
-  // Journals and tenants, in the order they first appear.
-  const journals = new Map();
-  const tenants = new Map();
-  let served = 0, internal = 0;
-  for (const topo of topos) {
+
+  // Take one frame from the worker.
+  add(frame) {
+    this.now = Math.max(this.now, frame.now_ms);
+    for (const topo of frame.topology) this.learn(topo);
+    for (const e of frame.events) this.event(e);
+    for (const s of frame.steps) this.steps.set(s.index, s);
+    this.trim();
+  }
+
+  learn(topo) {
+    if (this.topo && topo.time_ms < this.topo.time_ms) return;
+    this.topo = topo;
+    topo.nodes.forEach((n, i) => { if (n) this.nodeToMachine.set(n, i); });
     for (const tenant of topo.tenants) {
-      if (!tenants.has(tenant.name)) {
-        const isInternal = tenant.kind !== "users";
-        const label = isInternal ? tenant.kind : tenant.name;
-        tenants.set(tenant.name, {
-          name: tenant.name, label, internal: isInternal,
-          color: isInternal ? INTERNAL[internal++ % INTERNAL.length] : SERVED[served++ % SERVED.length],
+      if (!this.tenants.has(tenant.name)) {
+        const internal = tenant.kind !== "users";
+        this.tenants.set(tenant.name, {
+          name: tenant.name, internal,
+          label: internal ? `${tenant.kind}@${tenant.cell}` : tenant.name,
+          color: internal ? INTERNAL : SERVED[this.served++ % SERVED.length],
         });
       }
-      const t = tenants.get(tenant.name);
+      const t = this.tenants.get(tenant.name);
       for (const j of tenant.journals) {
-        if (!journals.has(j.key)) journals.set(j.key, { key: j.key, name: j.name, tenant: t, label: `${t.label}/${j.name}` });
+        if (!this.journals.has(j.key)) {
+          this.journals.set(j.key, { key: j.key, name: j.name, tenant: t, label: `${t.label}/${j.name}` });
+        }
       }
     }
   }
-  const msgs = [];
-  const calls = [];
-  const byToken = new Map();
-  for (const e of run.events) {
+
+  event(e) {
     if (e.name === "msg_sent") {
-      const to = nodeToMachine.get((field(e, "to") || "").replace("node:", ""));
-      if (e.machine === null || to === undefined || to === e.machine) continue;
+      const to = this.nodeToMachine.get((field(e, "to") || "").replace("node:", ""));
+      if (e.machine === null || to === undefined || to === e.machine) return;
       const key = `${field(e, "tenant")}:${field(e, "journal")}`;
       const slot = field(e, "slot");
-      msgs.push({
+      this.msgs.push({
         t: e.time_ms, from: e.machine, to, kind: field(e, "kind"), key,
         slot: slot === undefined ? null : Number(slot),
         round: field(e, "bround") ?? null,
       });
+      const tenant = this.journals.get(key)?.tenant.name ?? "?";
+      const bin = Math.floor(e.time_ms / BIN_MS);
+      if (!this.bins.has(bin)) this.bins.set(bin, new Map());
+      const counts = this.bins.get(bin);
+      counts.set(tenant, (counts.get(tenant) || 0) + 1);
     } else if (e.name === "client_call") {
       const call = {
         t: e.time_ms, kind: field(e, "kind"),
         key: `${field(e, "tenant")}:${field(e, "journal")}`, answer: null, outcome: null,
       };
-      byToken.set(field(e, "token"), call);
-      calls.push(call);
+      this.byToken.set(field(e, "token"), call);
+      this.calls.push(call);
     } else if (e.name === "client_answer") {
-      const call = byToken.get(field(e, "token"));
-      if (call) { call.answer = e.time_ms; call.outcome = field(e, "outcome"); }
+      const token = field(e, "token");
+      const call = this.byToken.get(token);
+      if (call) { call.answer = e.time_ms; call.outcome = field(e, "outcome"); this.byToken.delete(token); }
     }
   }
-  // Per journal: the Phase-2 and commit messages, for the quorum rail.
-  const perKey = new Map();
-  msgs.forEach((m, i) => {
-    if (!perKey.has(m.key)) perKey.set(m.key, { accept: [], accepted: [], commit: [], beat: [] });
-    const p = perKey.get(m.key);
-    if (m.kind === "accept") p.accept.push(i);
-    else if (m.kind === "accepted") p.accepted.push(i);
-    else if (m.kind === "commit") p.commit.push(i);
-    else if (m.kind === "heartbeat") p.beat.push(i);
-  });
-  const lastEvent = run.events.length ? run.events[run.events.length - 1].time_ms : 0;
-  const end = Math.max(run.config.run_ms, lastEvent);
-  // The three acts, from the action log.
-  const stepStart = (kind) => {
-    const i = run.actions.findIndex((a) => a.op.kind === kind);
-    const s = run.steps.find((x) => x.index === i);
-    return i < 0 ? null : (s ? s.start_ms : run.actions[i].at_ms);
-  };
-  const acts = [
-    { title: "The cell runs itself", start: 0 },
-    { title: "A tenant arrives", start: stepStart("create_tenant") },
-    { title: "Writes flow", start: [stepStart("write"), stepStart("read"), stepStart("traffic")].filter((x) => x !== null).sort((a, b) => a - b)[0] ?? null },
-  ];
-  // Messages per 100 ms, by tenant, for the timeline.
-  const bin = 100;
-  const bins = Math.ceil(end / bin) + 1;
-  const hist = new Map();
-  for (const m of msgs) {
-    const j = journals.get(m.key);
-    const name = j ? j.tenant.name : "?";
-    if (!hist.has(name)) hist.set(name, new Uint32Array(bins));
-    hist.get(name)[Math.floor(m.t / bin)] += 1;
+
+  // Forget what is older than the window.
+  trim() {
+    const floor = this.now - WINDOW_MS;
+    const m = lowerBound(this.msgs, floor, (x) => x.t);
+    if (m > 2048) this.msgs = this.msgs.slice(m);
+    const c = lowerBound(this.calls, floor, (x) => x.t);
+    if (c > 256) this.calls = this.calls.slice(c);
+    const oldest = Math.floor(floor / BIN_MS);
+    for (const bin of this.bins.keys()) if (bin < oldest) this.bins.delete(bin);
+    if (this.byToken.size > 4096) this.byToken.clear();
   }
-  return { run, topos, machines, journals, tenants, msgs, calls, perKey, end, acts, hist, bin };
-}
 
-// ---- what is true at time t ----
+  place(key) {
+    if (!this.topo) return null;
+    for (const tenant of this.topo.tenants) for (const j of tenant.journals) if (j.key === key) return j;
+    return null;
+  }
 
-export function topoAt(ix, t) {
-  let found = -1;
-  ix.topos.forEach((topo, i) => { if (topo.time_ms <= t) found = i; });
-  return found;
-}
+  // The served journals, in the order they appeared, as `tenant/journal`.
+  served_journals() {
+    return [...this.journals.values()].filter((j) => !j.tenant.internal && j.name !== "control");
+  }
 
-function placeOf(topo, key) {
-  for (const tenant of topo.tenants) for (const j of tenant.journals) if (j.key === key) return j;
-  return null;
+  // The cell each machine is in, by index: a cell name or null (idle).
+  cellOf() {
+    const cells = new Array(this.config.machines).fill(null);
+    for (const cell of this.topo?.cells ?? []) for (const m of cell.machines) cells[m] = cell.name;
+    return cells;
+  }
 }
 
 /// The latest Accept of `key` sent by `t`, the machines it addressed, and
 /// the ones that answered Accepted by `t`.
-function roundAt(ix, key, t, place, pinned) {
-  const p = ix.perKey.get(key);
-  if (!p) return null;
-  let a = lowerBound(p.accept, t + 1e-9, (i) => ix.msgs[i].t) - 1;
-  // A message stepped to pins the round to its slot.
-  if (pinned && pinned.key === key && pinned.slot !== null) {
-    while (a >= 0 && ix.msgs[p.accept[a]].slot !== pinned.slot) a--;
+function roundAt(u, key, t, place) {
+  let last = -1;
+  for (let i = lowerBound(u.msgs, t + 1e-9, (m) => m.t) - 1; i >= 0 && t - u.msgs[i].t < 5000; i--) {
+    const m = u.msgs[i];
+    if (m.key === key && m.kind === "accept") { last = i; break; }
   }
-  if (a < 0) return null;
-  const first = ix.msgs[p.accept[a]];
+  if (last < 0) return null;
+  const first = u.msgs[last];
   const slot = first.slot;
   const addressed = new Set();
-  for (let k = a; k >= 0 && ix.msgs[p.accept[k]].slot === slot; k--) addressed.add(ix.msgs[p.accept[k]].to);
   const accepted = new Set();
-  const from = lowerBound(p.accepted, first.t - 50, (i) => ix.msgs[i].t);
-  for (let k = from; k < p.accepted.length && ix.msgs[p.accepted[k]].t <= t; k++) {
-    const m = ix.msgs[p.accepted[k]];
-    if (m.slot === slot) accepted.add(m.from);
+  for (let i = lowerBound(u.msgs, first.t - 50, (m) => m.t); i < u.msgs.length && u.msgs[i].t <= t; i++) {
+    const m = u.msgs[i];
+    if (m.key !== key || m.slot !== slot) continue;
+    if (m.kind === "accept") addressed.add(m.to);
+    if (m.kind === "accepted") accepted.add(m.from);
   }
   // The leader accepts its own proposal without a message, when it is an
   // acceptor the slot goes to.
@@ -179,102 +192,109 @@ function roundAt(ix, key, t, place, pinned) {
   return { slot, addressed, accepted, leader };
 }
 
-function chosenAt(ix, key, t) {
-  const p = ix.perKey.get(key);
-  if (!p) return null;
-  let best = null;
-  const hi = lowerBound(p.commit, t + 1e-9, (i) => ix.msgs[i].t);
-  for (let k = Math.max(0, hi - 64); k < hi; k++) {
-    const s = ix.msgs[p.commit[k]].slot;
-    if (s !== null && (best === null || s > best)) best = s;
-  }
-  return best;
-}
-
 // ---- the stage ----
 
 export class Stage {
   constructor(els, onSelect) {
     this.els = els;
     this.onSelect = onSelect;
-    this.ix = null;
-    this.topoIndex = null;
+    this.u = null;
+    this.drawn = null;
     this.selected = null;
     this.positions = [];
+    this.chips = new Map();
     this.ctx = els.wires.getContext("2d");
     new ResizeObserver(() => this.layout()).observe(els.stage);
   }
 
-  load(ix) {
-    this.ix = ix;
-    this.topoIndex = null;
-    if (!this.selected || !ix.journals.has(this.selected)) {
-      const served = [...ix.journals.values()].filter((j) => !j.tenant.internal && j.name !== "control");
-      const any = served[0] || [...ix.journals.values()].find((j) => !j.tenant.internal) || [...ix.journals.values()][0];
-      this.selected = any ? any.key : null;
-    }
+  load(u) {
+    this.u = u;
+    this.drawn = null;
+    this.selected = null;
   }
 
   select(key) {
     this.selected = key;
-    this.topoIndex = null;
+    this.drawn = null;
     this.onSelect?.(key);
   }
 
-  // The machine cards, grouped by zone; drawn again only when the topology
+  // The selected journal, or the newest served one.
+  followed() {
+    const u = this.u;
+    if (this.selected && u.place(this.selected)) return this.selected;
+    const served = u.served_journals().filter((j) => u.place(j.key));
+    return served.length ? served[served.length - 1].key : null;
+  }
+
+  // The cells and their machine cards; drawn again only when the topology
   // in force or the selection changes.
-  cards(t) {
-    const ix = this.ix;
-    const ti = topoAt(ix, t);
-    if (ti === this.topoIndex) return;
-    const previous = this.topoIndex === null || ti < this.topoIndex ? null : ix.topos[this.topoIndex];
-    this.topoIndex = ti;
-    const topo = ti >= 0 ? ix.topos[ti] : null;
+  cards() {
+    const u = this.u;
+    const topo = u.topo;
+    const stamp = `${topo?.time_ms}|${this.followed()}`;
+    if (stamp === this.drawn) return;
+    this.drawn = stamp;
+    const cellOf = u.cellOf();
+    const boxes = [];
+    const cells = topo?.cells?.length ? topo.cells.map((c) => c.name) : [];
+    for (const name of cells) {
+      const members = [];
+      for (let m = 0; m < u.config.machines; m++) if (cellOf[m] === name) members.push(m);
+      boxes.push(this.box(name, members, topo, false));
+    }
+    const idle = [];
+    for (let m = 0; m < u.config.machines; m++) if (cellOf[m] === null) idle.push(m);
+    if (idle.length) boxes.push(this.box(cells.length ? "idle machines" : "idle machines: init forms cell-1", idle, topo, true));
+    this.els.cells.replaceChildren(...boxes);
+    this.layout();
+  }
+
+  box(name, members, topo, idle) {
     const zones = new Map();
-    for (let m = 0; m < ix.machines; m++) {
+    for (const m of members) {
       const zone = topo ? topo.zones[m] : `zone-${m % 3}`;
       if (!zones.has(zone)) zones.set(zone, []);
       zones.get(zone).push(m);
     }
-    const had = new Set();
-    if (previous) for (const tenant of previous.tenants) for (const j of tenant.journals) for (const m of j.members) had.add(`${j.key}@${m}`);
-    const cell = this.els.cell;
-    cell.replaceChildren(el("div", { className: "cell-name", textContent: topo ? "cell-1" : "forming the cell…" }));
+    const box = el("div", { className: idle ? "cell idle-pool" : "cell" },
+      el("div", { className: "cell-name", textContent: name }));
     const row = el("div", { className: "zones" });
-    for (const [zone, members] of zones) {
+    for (const [zone, ms] of [...zones].sort()) {
       const column = el("div", { className: "zone" }, el("div", { className: "zone-name", textContent: zone }));
-      for (const m of members) column.append(this.card(m, topo, had, previous !== null));
+      for (const m of ms) column.append(this.card(m, topo, idle));
       row.append(column);
     }
-    cell.append(row);
-    this.layout();
+    box.append(row);
+    return box;
   }
 
-  card(m, topo, had, animate) {
-    const ix = this.ix;
+  card(m, topo, idle) {
+    const u = this.u;
     const node = topo ? topo.machines[m] : null;
     const down = topo?.down?.includes(m);
     const cut = topo?.isolated?.includes(m);
-    const card = el("div", { className: `machine${node ? "" : " idle"}${down ? " down" : ""}${cut ? " cut" : ""}` });
+    const card = el("div", { className: `machine${idle ? " idle" : ""}${down ? " down" : ""}${cut ? " cut" : ""}` });
     card.dataset.machine = m;
     card.append(el("div", { className: "machine-head" }, el("b", { textContent: `m${m}` }),
-      el("small", { textContent: node ?? (topo ? "idle" : "") })));
+      el("small", { textContent: node ?? "idle" })));
     if (down || cut) {
       card.append(el("div", { className: "fault", textContent: down ? "crashed" : "cut off",
         title: down ? "Crashed: its process is down until a restart." : "Cut off: the network drops every message to or from it." }));
     }
     if (!topo) return card;
+    const followed = this.followed();
     const sets = el("div", { className: "sets" });
     for (const tenant of topo.tenants) {
-      const t = ix.tenants.get(tenant.name);
+      const t = u.tenants.get(tenant.name);
       for (const j of tenant.journals) {
         if (!j.members.includes(m)) continue;
-        const info = ix.journals.get(j.key);
+        const info = u.journals.get(j.key);
         const lead = j.leader === m;
         const chip = el("button", {
-          className: `chip${lead ? " lead" : ""}${j.key === this.selected ? " selected" : ""}${t.internal ? " internal" : ""}${animate && !had.has(`${j.key}@${m}`) ? " new" : ""}`,
+          className: `chip${lead ? " lead" : ""}${j.key === followed ? " selected" : ""}${t.internal ? " internal" : ""}`,
           title: `${info.label}: ${lead ? "leader and acceptor" : "acceptor"}. Click to follow it.`,
-        }, el("span", { className: "swatch" }), `${info.label}`, el("i", { textContent: lead ? "L" : "A" }));
+        }, el("span", { className: "swatch" }), info.label, el("i", { textContent: lead ? "L" : "A" }));
         chip.style.setProperty("--tenant", t.color);
         chip.dataset.at = `${j.key}@${m}`;
         chip.onclick = () => this.select(j.key);
@@ -287,7 +307,7 @@ export class Stage {
         sets.append(badge);
       }
     }
-    if (sets.childElementCount) card.append(el("div", { className: "sets-row" }, el("small", { textContent: "matchmaker for " }), sets));
+    if (sets.childElementCount) card.append(el("div", { className: "sets-row" }, el("small", { textContent: "matchmaker " }), sets));
     return card;
   }
 
@@ -313,96 +333,74 @@ export class Stage {
     }
     const c = client.getBoundingClientRect();
     this.clientPos = { x: c.left - box.left + c.width / 2, y: c.top - box.top + c.height / 2 };
-    this.box = box;
+    this.bounds = box;
   }
 
   // Dots in flight: every message sent in the last `travel` simulated ms.
-  draw(t, travel, showBeats, stepped) {
-    const ix = this.ix;
+  draw(t, travel, showBeats) {
+    const u = this.u;
     const ctx = this.ctx;
-    ctx.clearRect(0, 0, this.box.width, this.box.height);
-    this.pinned = stepped === null ? null : ix.msgs[stepped];
-    const lo = lowerBound(ix.msgs, t - travel, (m) => m.t);
-    const hi = lowerBound(ix.msgs, t + 1e-9, (m) => m.t);
+    if (!this.bounds) return;
+    ctx.clearRect(0, 0, this.bounds.width, this.bounds.height);
+    const followed = this.followed();
+    const lo = lowerBound(u.msgs, t - travel, (m) => m.t);
+    const hi = lowerBound(u.msgs, t + 1e-9, (m) => m.t);
     let budget = 400;
     const busy = hi - lo > budget;
     for (let i = hi - 1; i >= lo && budget > 0; i--) {
-      const m = ix.msgs[i];
+      const m = u.msgs[i];
       if (BEATS.has(m.kind) && (!showBeats || busy)) continue;
       const a = this.chips.get(`${m.key}@${m.from}`) ?? this.positions[m.from];
       const b = this.chips.get(`${m.key}@${m.to}`) ?? this.positions[m.to];
       if (!a || !b) continue;
-      const j = ix.journals.get(m.key);
-      const focus = !this.selected || m.key === this.selected;
-      dot(ctx, a, b, (t - m.t) / travel, m.kind, j ? j.tenant.color : NO_TENANT, focus);
+      const j = u.journals.get(m.key);
+      dot(ctx, a, b, (t - m.t) / travel, m.kind, j ? j.tenant.color : NO_TENANT, !followed || m.key === followed);
       budget--;
     }
-    // Client calls: from outside the cell to the journal's leader, and back.
-    const ti = topoAt(ix, t);
-    const topo = ti >= 0 ? ix.topos[ti] : null;
+    // Client calls: from outside the cells to the journal's leader, and back.
     let calling = false;
-    for (const call of ix.calls) {
+    const from = lowerBound(u.calls, t - 5000, (c) => c.t);
+    for (let i = from; i < u.calls.length; i++) {
+      const call = u.calls[i];
       if (call.t > t) break;
-      const place = topo && placeOf(topo, call.key);
+      const place = u.place(call.key);
       const target = place && place.leader !== null
         ? this.chips.get(`${call.key}@${place.leader}`) ?? this.positions[place.leader] : null;
       if (call.answer === null || t < call.answer + travel) calling = true;
       if (!target) continue;
-      const color = ix.journals.get(call.key)?.tenant.color ?? NO_TENANT;
+      const color = u.journals.get(call.key)?.tenant.color ?? NO_TENANT;
       if (t - call.t < travel) dot(ctx, this.clientPos, target, (t - call.t) / travel, "client", color, true);
       if (call.answer !== null && call.answer <= t && t - call.answer < travel) {
         dot(ctx, target, this.clientPos, (t - call.answer) / travel, "client", color, true);
       }
     }
-    // The message stepped to: drawn large, on its way, with its name.
-    if (this.pinned) {
-      const m = this.pinned;
-      const a = this.chips.get(`${m.key}@${m.from}`) ?? this.positions[m.from];
-      const b = this.chips.get(`${m.key}@${m.to}`) ?? this.positions[m.to];
-      if (a && b) {
-        const color = ix.journals.get(m.key)?.tenant.color ?? NO_TENANT;
-        ctx.strokeStyle = paint(color); ctx.globalAlpha = 0.5; ctx.lineWidth = 1.5; ctx.setLineDash([4, 4]);
-        ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke(); ctx.setLineDash([]);
-        ctx.globalAlpha = 1;
-        const x = a.x + (b.x - a.x) * 0.6, y = a.y + (b.y - a.y) * 0.6;
-        ctx.fillStyle = paint(color); ctx.beginPath(); ctx.arc(x, y, 9, 0, Math.PI * 2); ctx.fill();
-        ctx.font = `600 12px ${paint("var(--font-mono)")}`;
-        ctx.fillStyle = getComputedStyle(document.body).color;
-        ctx.fillText(`${m.kind}${m.slot !== null ? ` s${m.slot}` : ""}`, x + 12, y - 8);
-      }
-    }
-    const firstCall = ix.calls[0];
-    this.els.client.hidden = !(firstCall && t >= firstCall.t);
     this.els.client.classList.toggle("busy", calling);
   }
 
-  // The selected journal's quorum and log.
+  // The followed journal's quorum and acceptors.
   rail(t) {
-    const ix = this.ix;
+    const u = this.u;
     const rail = this.els.rail;
-    const ti = topoAt(ix, t);
-    const topo = ti >= 0 ? ix.topos[ti] : null;
-    // The followed journal, or the newest one while it does not exist yet.
-    let key = this.selected;
-    if (topo && !placeOf(topo, key)) {
-      const all = topo.tenants.flatMap((tenant) => tenant.journals);
-      key = all.length ? all[all.length - 1].key : null;
-    }
-    const info = key && ix.journals.get(key);
-    const place = info && topo ? placeOf(topo, key) : null;
+    const key = this.followed();
+    const info = key && u.journals.get(key);
+    const place = info ? u.place(key) : null;
     if (!info || !place) {
-      rail.replaceChildren(el("h3", { textContent: "Click a journal" }),
-        el("p", { className: "muted", textContent: "Its quorum shape and its log show here." }));
-      return;
+      rail.replaceChildren(el("p", { className: "muted", textContent:
+        "Create a journal, or click one on a machine: its quorum shape and its acceptors show here." }));
+      return { label: null };
     }
     const q = place.quorum;
     const n = place.members.length;
-    const round = roundAt(ix, key, t, place, this.pinned);
-    const chosen = chosenAt(ix, key, t);
+    const round = roundAt(u, key, t, place);
     const head = el("h3", {}, el("span", { className: "swatch" }), info.label);
     head.style.setProperty("--tenant", info.tenant.color);
     const parts = [head];
-    const leader = place.leader !== null ? `leader m${place.leader}` : "no leader yet";
+    const leader = place.leader !== null ? `leader m${place.leader}` : "no leader";
+    const status = el("p", { className: "chips" },
+      chip(place.leader !== null ? "led" : "electing", place.leader !== null ? "done" : "gap"),
+      chip(q.system, "accent"),
+      ...(place.matchmakers.length ? [chip("matchmakers", "shared")] : []));
+    parts.push(status);
     if (q.system === "grid") {
       parts.push(el("p", { textContent: `grid ${q.rows}×${q.cols} · ${n} acceptors · ${leader}` }));
       const grid = el("div", { className: "grid" });
@@ -413,14 +411,11 @@ export class Stage {
       }
       for (let r = 0; r < q.rows; r++) {
         grid.append(el("span", { className: "axis", textContent: `row ${r}` }));
-        for (let c = 0; c < q.cols; c++) {
-          const m = place.members[r * q.cols + c];
-          grid.append(this.cell(m, place, round));
-        }
+        for (let c = 0; c < q.cols; c++) grid.append(this.cell(place.members[r * q.cols + c], place, round));
       }
       parts.push(grid);
       parts.push(el("p", { className: "muted", textContent:
-        "A full row is a Phase-1 quorum (election, read). A full column is a Phase-2 quorum: slot s goes to column s mod " + q.cols + "." }));
+        `A full row is a Phase-1 quorum (election, read). A full column is a Phase-2 quorum: slot s goes to column s mod ${q.cols}.` }));
     } else {
       const need = Math.floor(n / 2) + 1;
       parts.push(el("p", { textContent: `majority · any ${need} of ${n} decide · ${leader}` }));
@@ -436,13 +431,8 @@ export class Stage {
         `Slot ${round.slot}: Accept sent to ${[...round.addressed].map((m) => `m${m}`).join(", ")}; ${got} accepted.` }));
     }
     if (place.acceptors?.length) parts.push(acceptorTable(place));
-    const log = el("div", { className: "logbar" });
-    const count = chosen === null ? 0 : chosen + 1;
-    const shown = Math.min(count, 48);
-    for (let s = count - shown; s < count; s++) log.append(el("span", { title: `slot ${s} chosen` }));
-    parts.push(el("p", { className: "muted", textContent: `Log: ${count} slot${count === 1 ? "" : "s"} chosen` }), log);
     rail.replaceChildren(...parts);
-    rail.style.setProperty("--tenant", info.tenant.color);
+    return { label: info.label };
   }
 
   cell(m, place, round) {
@@ -454,8 +444,12 @@ export class Stage {
   }
 }
 
+export function chip(text, kind = "") {
+  return el("span", { className: `chip-status${kind ? ` ${kind}` : ""}`, textContent: text });
+}
+
 /// Each machine's acceptor state for the followed journal, as its `Inspect`
-/// answered after the last step: a read only.
+/// answered at the last look: a read only.
 function acceptorTable(place) {
   const ballot = (b) => (b ? `${b.round}.${b.node}` : "–");
   const num = (v) => (v === null || v === undefined ? "–" : String(v));
@@ -463,37 +457,58 @@ function acceptorTable(place) {
   table.append(el("tr", {}, ...["", "promised", "accepted", "chosen", "floor"].map((h) => el("th", { textContent: h }))));
   for (const a of place.acceptors) {
     const last = a.tail.length ? a.tail[a.tail.length - 1] : null;
-    const accepted = a.accepted ? `${a.accepted}${last ? ` (s${last[0]} @${last[1].round})` : ""}` : "0";
-    const row = el("tr", { className: a.member ? "" : "out",
+    const accepted = a.accepted ? `${a.accepted}${last ? ` (s${last[0]})` : ""}` : "0";
+    table.append(el("tr", { className: a.member ? "" : "out",
       title: a.member
-        ? `m${a.machine}: promised ballot ${ballot(a.promised)}, holds ${a.accepted} accepted records, vote watermark ${num(a.watermark)}. Last accepted: ${a.tail.map(([s, b]) => `s${s}@${b.round}`).join(" ") || "none"}.`
+        ? `m${a.machine}: promised ballot ${ballot(a.promised)}, holds ${a.accepted} accepted records.`
         : `m${a.machine} serves this journal but is not an acceptor of the configuration in force.` },
       el("td", { textContent: `m${a.machine}${a.machine === place.leader ? " L" : ""}` }),
       el("td", { textContent: ballot(a.promised) }),
       el("td", { textContent: accepted }),
       el("td", { textContent: num(a.chosen) }),
-      el("td", { textContent: String(a.floor) }));
-    table.append(row);
+      el("td", { textContent: String(a.floor) })));
   }
-  const wrap = el("div", {}, el("p", { className: "muted", textContent:
-    "Acceptor state after the last step, from each machine's Inspect: the ballot it promised (round.node), the records it accepted (the last slot @ its round), the highest slot it knows chosen, and its floor." }), table);
-  return wrap;
+  return el("div", { className: "table-wrap" }, el("p", { className: "muted", textContent:
+    "Each machine's Inspect: the ballot it promised (round.node), the records it accepted, the highest slot it knows chosen, and its floor." }), table);
 }
 
-/// The Paxos flavour a message or an event belongs to.
-export function role(ix, m, t) {
-  if (m.name) {
-    if (m.name.startsWith("cell_init") || m.name === "cell_initialized") return "single-decree Paxos";
-    if (m.name.startsWith("matchmaking")) return "Matchmaker Paxos";
-    if (m.name === "msg_sent" || m.name === "leader_elected" || m.name === "value_chosen") return "Multi-Paxos";
-    return null;
+/// The machines and the roles each holds, from the newest topology.
+export function roles(u) {
+  const topo = u.topo;
+  const cellOf = u.cellOf();
+  const rows = [];
+  const capacity = 32;
+  for (let m = 0; m < u.config.machines; m++) {
+    let acceptor = 0, leads = 0, matchmaker = 0;
+    for (const tenant of topo?.tenants ?? []) {
+      for (const j of tenant.journals) {
+        if (j.members.includes(m)) acceptor++;
+        if (j.leader === m) leads++;
+        if (j.name === "control" && j.matchmakers.includes(m)) matchmaker++;
+      }
+    }
+    const down = topo?.down?.includes(m);
+    const cut = topo?.isolated?.includes(m);
+    const state = down ? chip("crashed", "gap") : cut ? chip("cut off", "gap")
+      : cellOf[m] ? chip("up", "done") : chip("idle");
+    // The site's meter (site.css): its fill is the slots held.
+    const meter = el("span", { className: "meter slots", title: `${acceptor} acceptor slots of ${capacity}`,
+      style: `--fill:${Math.min(100, (acceptor / capacity) * 100)}%` });
+    rows.push(el("tr", {},
+      el("td", { textContent: `m${m}` }),
+      el("td", { textContent: cellOf[m] ?? "–" }),
+      el("td", { textContent: topo ? topo.zones[m] : `zone-${m % 3}` }),
+      el("td", {}, state),
+      el("td", { textContent: acceptor ? `acceptor ×${acceptor}` : "–" }),
+      el("td", { textContent: leads ? `leader ×${leads}` : "–" }),
+      el("td", { textContent: matchmaker ? `matchmaker ×${matchmaker}` : "–" }),
+      el("td", {}, meter)));
   }
-  const ti = topoAt(ix, t);
-  const place = ti >= 0 ? placeOf(ix.topos[ti], m.key) : null;
-  if (PHASE1.has(m.kind) && m.kind !== "catchup_request" && m.kind !== "catchup_response" && place?.matchmakers.length) {
-    return "Matchmaker Paxos, Phase 1";
-  }
-  return "Multi-Paxos";
+  const table = el("table", { className: "roles" });
+  table.append(el("tr", {}, ...["machine", "cell", "zone", "state", "acceptor", "leader", "matchmaker", "slots"]
+    .map((h) => el("th", { textContent: h }))));
+  table.append(...rows);
+  return table;
 }
 
 // ---- drawing ----
@@ -524,7 +539,7 @@ function dot(ctx, a, b, f, kind, color, focus) {
     ctx.fillStyle = color;
     ctx.beginPath(); ctx.moveTo(x, y - 5); ctx.lineTo(x + 5, y + 4); ctx.lineTo(x - 5, y + 4); ctx.closePath(); ctx.fill();
   } else if (kind === "client") {
-    ctx.fillStyle = color; ctx.strokeStyle = getComputedStyle(document.body).color; ctx.lineWidth = 1.5;
+    ctx.fillStyle = color; ctx.strokeStyle = paint("var(--fg)"); ctx.lineWidth = 1.5;
     ctx.beginPath(); ctx.arc(x, y, 7, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
   } else {
     ctx.fillStyle = color;
@@ -534,106 +549,78 @@ function dot(ctx, a, b, f, kind, color, focus) {
 }
 
 /// The legend: one swatch per tenant, one glyph per message family.
-export function legend(ix) {
+export function legend(u) {
   const items = [];
-  for (const t of ix.tenants.values()) {
-    const s = el("span", { className: "key" }, el("span", { className: "swatch" }), t.internal ? `${t.label} (internal)` : t.label);
+  const seen = new Set();
+  for (const t of u.tenants.values()) {
+    const label = t.internal ? "internal" : t.label;
+    if (seen.has(label)) continue;
+    seen.add(label);
+    const s = el("span", { className: "key" }, el("span", { className: "swatch" }), label);
     s.style.setProperty("--tenant", t.color);
     items.push(s);
   }
-  items.push(el("span", { className: "key", textContent: "◇ Phase 1 · ● Phase 2 · ■ chosen · ▲ read · · heartbeat · ◯ client call" }));
+  items.push(el("span", { className: "key", textContent: "◇ Phase 1 · ● Phase 2 · ■ chosen · ▲ read · ◯ client call" }));
   return items;
 }
 
-/// The timeline: messages per 100 ms stacked by tenant, the acts, the steps.
-export function drawTimeline(canvas, ix, t) {
+/// The timeline: the last `WINDOW_MS` of simulated time, messages per bin
+/// stacked by tenant, and the operator's steps as marks.
+export function drawTimeline(canvas, u, t, marks) {
   const ratio = window.devicePixelRatio || 1;
   const w = canvas.clientWidth, h = canvas.clientHeight;
-  if (canvas.width !== Math.round(w * ratio)) { canvas.width = Math.round(w * ratio); canvas.height = Math.round(h * ratio); }
+  if (!w || !h) return;
+  if (canvas.width !== Math.round(w * ratio) || canvas.height !== Math.round(h * ratio)) {
+    canvas.width = Math.round(w * ratio); canvas.height = Math.round(h * ratio);
+  }
   const ctx = canvas.getContext("2d");
   ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
   ctx.clearRect(0, 0, w, h);
-  const x = (ms) => (ms / ix.end) * w;
-  const styles = getComputedStyle(document.body);
-  // Acts as bands.
-  ix.acts.forEach((act, i) => {
-    if (act.start === null) return;
-    const next = ix.acts.slice(i + 1).find((a) => a.start !== null);
-    if (!(i % 2)) return;
-    ctx.fillStyle = paint("var(--panel)");
-    ctx.fillRect(x(act.start), 0, x(next ? next.start : ix.end) - x(act.start), h);
-  });
-  // Histogram.
-  const order = [...ix.tenants.values()].sort((a, b) => Number(b.internal) - Number(a.internal));
-  const bins = ix.hist.values().next().value?.length ?? 0;
+  const start = t - WINDOW_MS;
+  const x = (ms) => ((ms - start) / WINDOW_MS) * w;
+  const order = [...u.tenants.values()].sort((a, b) => Number(b.internal) - Number(a.internal));
   let max = 1;
-  for (let b = 0; b < bins; b++) {
+  for (const counts of u.bins.values()) {
     let s = 0;
-    for (const arr of ix.hist.values()) s += arr[b];
+    for (const v of counts.values()) s += v;
     max = Math.max(max, s);
   }
-  const bw = Math.max(1, w / bins);
-  for (let b = 0; b < bins; b++) {
-    let y = h - 12;
+  const bw = Math.max(1, (BIN_MS / WINDOW_MS) * w - 1);
+  const base = h - 14;
+  for (const [bin, counts] of u.bins) {
+    const bx = x(bin * BIN_MS);
+    if (bx < -bw || bx > w) continue;
+    let y = base;
     for (const tenant of order) {
-      const arr = ix.hist.get(tenant.name);
-      if (!arr || !arr[b]) continue;
-      const bh = (arr[b] / max) * (h - 22);
+      const v = counts.get(tenant.name);
+      if (!v) continue;
+      const bh = (v / max) * (base - 4);
       ctx.fillStyle = paint(tenant.color);
-      ctx.fillRect(x(b * ix.bin), y - bh, bw, bh);
+      ctx.fillRect(bx, y - bh, bw, bh);
       y -= bh;
     }
   }
-  // Steps.
-  ctx.fillStyle = styles.getPropertyValue("--muted");
+  ctx.fillStyle = paint("var(--rule)");
+  ctx.fillRect(0, base, w, 1);
   ctx.font = `10px ${paint("var(--font-mono)")}`;
-  for (const s of ix.run.steps) {
-    ctx.fillRect(x(s.start_ms), h - 12, 1, 12);
-    const a = ix.run.actions[s.index];
-    if (a) ctx.fillText(a.op.kind.replace("create_", ""), x(s.start_ms) + 2, h - 2);
+  // A label that would overlap the one before it is left out.
+  let free = -Infinity;
+  for (const mark of [...marks].sort((a, b) => a.t - b.t)) {
+    const mx = x(mark.t);
+    if (mx < 0 || mx > w) continue;
+    ctx.fillStyle = paint(mark.fault ? "var(--gap)" : "var(--accent)");
+    ctx.fillRect(mx, 0, 1, h);
+    if (mx < free) continue;
+    ctx.fillText(mark.label, mx + 3, h - 3);
+    free = mx + 6 + ctx.measureText(mark.label).width;
   }
-  // Now.
-  ctx.fillStyle = styles.getPropertyValue("--accent");
-  ctx.fillRect(x(t) - 1, 0, 2, h);
-}
-
-/// Why a message is sent, in one sentence a newcomer can read.
-export function explain(ix, m, t) {
-  const j = ix.journals.get(m.key);
-  const name = j ? j.label : "a journal";
-  const ti = topoAt(ix, t);
-  const place = ti >= 0 ? placeOf(ix.topos[ti], m.key) : null;
-  const q = place?.quorum;
-  const n = place?.members.length ?? 0;
-  const slot = m.slot;
-  const flavour = role(ix, m, t);
-  const head = `[${flavour}] ${m.kind} from m${m.from} to m${m.to}, ${name}${slot !== null ? `, slot ${slot}` : ""}${m.round ? `, ballot ${m.round}` : ""}. `;
-  const why = {
-    prepare: flavour.startsWith("Matchmaker")
-      ? `Phase 1: the candidate registered ballot ${m.round} with a matchmaker quorum first. Now it asks the acceptors of every configuration still in force to promise it and to tell what they accepted.`
-      : `Phase 1: a candidate asks the acceptors to promise ballot ${m.round} and to tell what they accepted.`,
-    promise: `Phase 1: m${m.from} promises ballot ${m.round}. With a Phase-1 quorum of promises, the candidate leads.`,
-    accept: q?.system === "grid"
-      ? `Phase 2: the leader asks column ${slot % q.cols} (slot ${slot} mod ${q.cols}) to accept the record. Only that column decides it.`
-      : `Phase 2: the leader asks every acceptor to accept the record. Any ${Math.floor(n / 2) + 1} of ${n} decide.`,
-    accepted: `Phase 2: m${m.from} accepted slot ${slot}. The leader counts it toward a Phase-2 quorum.`,
-    commit: `Slot ${slot} is chosen. The leader tells m${m.to}, so it can apply the record.`,
-    heartbeat: "The leader's heartbeat: it is still in charge, so nobody campaigns.",
-    heartbeat_ack: "An acceptor answers the heartbeat: the leader still has a quorum.",
-    pre_read: "A read asks a Phase-1 quorum (a grid row) how far the journal is chosen.",
-    pre_read_ack: `m${m.from} answers the read with what it accepted.`,
-    catchup_request: `m${m.from} asks for chosen slots it does not hold yet.`,
-    catchup_response: `m${m.from} sends chosen slots that m${m.to} missed.`,
-    nack: `m${m.from} refuses: it promised a higher ballot.`,
-  }[m.kind] ?? "";
-  return head + why;
 }
 
 export function el(tag, attrs = {}, ...children) {
   const node = document.createElement(tag);
-  Object.assign(node, attrs);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === "style") node.setAttribute("style", v); else node[k] = v;
+  }
   node.append(...children);
   return node;
 }
-
-export { lowerBound, BEATS };

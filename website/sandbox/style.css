@@ -1,6 +1,6 @@
-/* The paros playground (website/sandbox). Colours, fonts, the top bar,
-   buttons and callouts come from website/shared/ (#804 (flat engineering
-   redesign)); this file holds only the playground's own layout. */
+/* The paros playground (website/sandbox, #813 (live playground)). Colours,
+   fonts, panels, the strip, buttons and chips come from website/shared/;
+   this file holds only the playground's own layout. No colour literal. */
 
 .intro {
   max-width: 980px;
@@ -38,31 +38,22 @@ code {
 }
 
 .app {
-  padding: 16px;
+  padding: 16px 16px 140px;
 }
 
-section {
-  position: relative;
+.app .panel {
   margin-bottom: 16px;
-  padding: 14px 12px 12px;
   min-width: 0;
-  border: 1px solid var(--rule);
-  background: var(--bg);
 }
 
-section h2 {
-  margin: 0 0 10px;
-  font-size: var(--label);
-  font-weight: 400;
-  letter-spacing: var(--tracking);
-  text-transform: uppercase;
+.muted {
   color: var(--muted);
 }
 
 label {
   display: inline-flex;
   flex-direction: column;
-  margin: 0 8px 8px 0;
+  gap: 2px;
   font-size: 11px;
   letter-spacing: var(--tracking);
   text-transform: uppercase;
@@ -73,12 +64,10 @@ label.inline {
   flex-direction: row;
   align-items: center;
   gap: 6px;
-  margin: 0;
 }
 
 input,
-select,
-textarea {
+select {
   font: 13px var(--font-mono);
   color: var(--fg);
   background: var(--bg);
@@ -90,116 +79,72 @@ textarea {
 }
 
 input[type="number"] {
-  width: 90px;
+  width: 80px;
 }
 
-/* Every button is the flat shared button. */
-button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
+/* ---- 00 operator: the button groups and what they act on ---- */
+
+.groups {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 14px;
+}
+
+.group {
+  display: flex;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  gap: 8px;
+}
+
+.group > .label {
+  flex-basis: 100%;
+  padding-bottom: 2px;
+  border-bottom: 1px solid var(--rule);
+}
+
+.group .btn {
   min-height: 30px;
   padding: 3px 10px;
-  font: 600 var(--label) var(--font-mono);
-  letter-spacing: var(--tracking);
-  text-transform: uppercase;
-  color: var(--fg);
-  background: var(--button);
-  border: 1px solid var(--fg);
-  border-radius: 0;
-  box-shadow: 2px 2px 0 var(--shadow);
-  cursor: pointer;
 }
 
-button:hover {
-  border-color: var(--accent);
-}
-
-button:active {
-  transform: translate(2px, 2px);
-  box-shadow: none;
-}
-
-button.primary {
-  background: var(--accent);
-  color: var(--accent-fg);
-  border-color: var(--fg);
-}
-
-button:disabled {
-  opacity: 0.45;
-  cursor: default;
-  transform: none;
-}
-
-.topbar button.tool,
-.topbar .menu-btn {
-  min-height: 0;
-  box-shadow: none;
-  font-weight: 400;
-}
-
-.topbar .menu-btn {
-  border-color: var(--rule-strong);
-  background: var(--bg);
-  padding: 0;
-}
-
-.topbar button.tool {
-  border: 0;
-  background: none;
-  color: var(--muted);
-}
-
-.muted {
-  color: var(--muted);
-}
-
-.row {
+.picks {
   display: flex;
   flex-wrap: wrap;
-  align-items: flex-end;
-  gap: 8px;
+  gap: 10px 14px;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--rule);
 }
 
-/* ---- the acts ---- */
-
-.acts {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 12px;
+.picks select {
+  max-width: 260px;
 }
 
-.act {
-  box-shadow: none;
-  background: var(--bg);
-  border-color: var(--rule-strong);
-  font-weight: 400;
-}
-
-.act.on {
-  background: var(--accent-tint);
-  color: var(--fg);
-  border-color: var(--accent);
-}
-
-/* ---- the stage: the cell, the outside world, and the wires over both ---- */
+/* ---- 01 cells: the cells, the idle machines, the client, the wires ---- */
 
 .stage-wrap {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 300px;
-  gap: 12px;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  gap: 16px;
+}
+
+.panel-head .meta .key {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 10px;
+  text-transform: none;
+  letter-spacing: normal;
 }
 
 .stage {
   position: relative;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 90px;
+  grid-template-columns: minmax(0, 1fr) 80px;
   gap: 12px;
-  min-height: 300px;
+  min-height: 320px;
+  padding: 14px 12px;
 }
 
 .stage canvas {
@@ -209,10 +154,21 @@ button:disabled {
   z-index: 2;
 }
 
+.cells {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+  min-width: 0;
+}
+
 .cell {
   position: relative;
   padding: 18px 10px 10px;
-  border: 4px double var(--fg);
+  border: 3px double var(--fg);
+}
+
+.cell.idle-pool {
+  border: 1px dashed var(--rule-strong);
 }
 
 .cell-name {
@@ -224,6 +180,11 @@ button:disabled {
   color: var(--accent);
   font-weight: 600;
   font-size: 13px;
+}
+
+.idle-pool .cell-name {
+  color: var(--muted);
+  font-weight: 400;
 }
 
 .zones {
@@ -251,7 +212,7 @@ button:disabled {
   display: flex;
   flex-direction: column;
   gap: 3px;
-  min-height: 52px;
+  min-height: 46px;
   padding: 6px;
   border: 1px solid var(--fg);
   background: var(--bg);
@@ -259,7 +220,7 @@ button:disabled {
 }
 
 .machine.idle {
-  opacity: 0.55;
+  opacity: 0.6;
   border-color: var(--rule-strong);
 }
 
@@ -389,10 +350,6 @@ button:disabled {
 /* ---- the rail: the followed journal ---- */
 
 .rail {
-  padding: 10px;
-  border: 1px solid var(--rule);
-  border-top: 4px solid var(--tenant, var(--rule));
-  background: var(--bg);
   font-size: 12px;
 }
 
@@ -483,156 +440,151 @@ button:disabled {
   color: var(--muted);
 }
 
-.role {
-  display: inline-block;
-  margin-right: 6px;
-  padding: 0 5px;
-  border: 1px solid var(--rule-strong);
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.table-wrap {
+  overflow-x: auto;
+}
+
+/* ---- 03 roles ---- */
+
+.roles {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.roles th,
+.roles td {
+  padding: 4px 10px 4px 0;
+  text-align: left;
+  white-space: nowrap;
+  border-bottom: 1px solid var(--rule);
+}
+
+.roles th {
+  color: var(--muted);
   font-size: 10px;
+  font-weight: 400;
   letter-spacing: var(--tracking);
   text-transform: uppercase;
 }
 
-.replaying {
-  padding: 6px 8px;
-  border: 1px solid var(--accent);
-  background: var(--accent-tint);
+.meter.slots {
+  display: inline-block;
+  width: 80px;
+  vertical-align: middle;
 }
 
-label.wide {
-  display: flex;
-  width: 100%;
+/* ---- 04 the operator log ---- */
+
+.lower {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 16px;
 }
 
-label.wide textarea {
-  width: 100%;
+.log {
+  max-height: 360px;
+  overflow-y: auto;
   font-size: 12px;
 }
 
-label.file input {
-  max-width: 200px;
+.log .entry {
+  padding: 6px 0;
+  border-bottom: 1px solid var(--rule);
 }
 
-.logbar {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 2px;
+.log .line {
+  color: var(--fg);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
-.logbar span {
-  width: 10px;
-  height: 10px;
-  background: var(--tenant);
-  animation: pop 0.4s;
+.log .line.struck {
+  color: var(--gap);
 }
 
-.caption {
-  min-height: 3em;
-  margin: 10px 0;
-  font-size: 14px;
+.log .line.note {
+  color: var(--muted);
+}
+
+.log .result {
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.log .entry.ok .result {
+  color: var(--done);
+}
+
+.log .entry.failed .result {
+  color: var(--gap);
+}
+
+/* ---- the dock: the clock and the timeline, always in view ---- */
+
+.dock {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 30;
+  padding: 8px 16px;
+  background: var(--bg);
+  border-top: 1px solid var(--rule-strong);
 }
 
 .controls {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
+  gap: 8px 14px;
 }
 
-.time {
-  font-size: 12px;
-  color: var(--muted);
-  font-variant-numeric: tabular-nums;
-}
-
-.legend {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-  font-size: 11px;
-  color: var(--muted);
-}
-
-.legend .key {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
+.controls .btn {
+  min-height: 28px;
+  padding: 2px 10px;
 }
 
 .timeline {
+  display: block;
   width: 100%;
-  height: 64px;
-  margin-top: 10px;
-  border: 1px solid var(--rule-strong);
-  background: var(--bg);
-  cursor: ew-resize;
-  touch-action: none;
+  height: 56px;
+  margin-top: 6px;
 }
 
-/* ---- below: the editor and the events ---- */
-
-.lower {
-  display: grid;
-  grid-template-columns: 440px minmax(0, 1fr);
-  gap: 16px;
-}
-
-ol.actions {
-  margin: 8px 0;
-  padding-left: 26px;
-  font-size: 13px;
-}
-
-ol.actions li {
-  margin: 2px 0;
-}
-
-ol.actions .ok {
-  color: var(--done);
-}
-
-ol.actions .bad {
-  color: var(--gap);
-}
-
-ol.actions button {
-  min-height: 0;
-  margin-left: 4px;
-  padding: 0 6px;
-  box-shadow: none;
-}
-
-ol.actions input {
-  width: 56px;
-  padding: 0 4px;
-}
-
-.log {
-  max-height: 360px;
-  overflow: auto;
-  font-size: 12px;
-  line-height: 1.45;
-  white-space: pre;
-}
-
-@media (max-width: 900px) {
+@media (max-width: 1000px) {
   .stage-wrap,
   .lower {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
+}
 
+@media (max-width: 600px) {
   .stage {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .outside {
     justify-content: flex-start;
   }
 
-  .row > button.primary {
-    width: 100%;
+  .zones {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .timeline {
+    height: 40px;
+  }
+
+  .app {
+    padding-bottom: 170px;
   }
 }
-
-/* The one-click buttons (#808). */
-.quick { margin: 8px 0 4px; gap: 6px; }
