@@ -23,7 +23,7 @@ pub(crate) const MACHINE_CLIENT_BASE: u64 = 1 << 32;
 /// scope's `NodeAudit` (#294).
 pub(crate) fn machine_audits(
     ctx: &SimContext,
-    (audit_addr, my_ip): (Address, &str),
+    (audit_addr, _my_ip): (Address, &str),
     (rank, draw): (usize, &crate::shape::MachineDraw),
 ) -> impl Fn(AuditScope) -> NodeAudit<SimTimeProvider> + Clone + Send + Sync + 'static {
     // The registry's fold oracles judge the machines' cell control journal
@@ -32,7 +32,6 @@ pub(crate) fn machine_audits(
     let registry = crate::audit::system::system_board(ctx.state());
     let time = ctx.time().clone();
     let state = ctx.state().clone();
-    let my_ip = my_ip.to_string();
     move |scope: AuditScope| -> NodeAudit<SimTimeProvider> {
         match scope {
             AuditScope::Machine => NodeAudit::new(time.clone(), crate::audit::audit_world(&state))
@@ -56,10 +55,6 @@ pub(crate) fn machine_audits(
                     .in_journal(journal, journal_board(&state))
                     .with_tenants(crate::audit::tenants::tenant_board(&state))
                     .on_registry(registry.clone(), plane)
-                    // A created journal's store commits under the mode its
-                    // create recorded: a `Batched` one's commits are cut
-                    // under a budget (#599 (durability mode per journal)).
-                    .with_cut_budget(state.clone(), my_ip.clone())
             }
             // The frontend the machine serves (#723 (frontend as a parosd
             // role)): each resolution judged against the tenant board, and

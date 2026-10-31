@@ -38,7 +38,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use moonpool_sim::{
-    Chaos, ChaosMode, FaultContext, FaultInjector, OUTAGE_STATE_KEY, Outage, OutageLanded,
+    Chaos, ChaosMode, FaultContext, FaultInjector, OUTAGE_STATE_KEY, Outage, OutageLanded, Shards,
     SimulationResult, StateHandle, TimeProvider, assert_reachable, buggify_with_prob,
     sim_random_range,
 };
@@ -199,7 +199,7 @@ impl FaultInjector for OutageLosses {
                     } else {
                         draw_loss()
                     };
-                    let _ = plan_losses(ctx.state(), loss);
+                    let _ = plan_losses(ctx.state(), &ctx.shards(), loss);
                 }
                 return Ok(());
             }
@@ -233,18 +233,22 @@ fn draw_loss() -> LossShape {
 
 /// Plan the outage's losses in every genesis journal (see the module doc).
 /// Returns the holders the main journal's plan left clean: the copies the
-/// cluster must wait for.
-pub(super) fn plan_losses(state: &StateHandle, loss: LossShape) -> Vec<u64> {
+/// cluster must wait for. Outside the loss budget, a plan keeps the clean
+/// copies each journal's shard declares it needs (`shards`, #760
+/// (moonpool owns fault placement)), since its damage lands past the gate.
+pub(super) fn plan_losses(state: &StateHandle, shards: &Shards, loss: LossShape) -> Vec<u64> {
     let plan = crate::shape::journals(state);
     let mut kept = Vec::new();
     for journal in plan.ids {
         let audit = crate::audit::audit_world_for(state, journal);
         let decided = audit.decided_slots();
         let world = super::storage_world_for(state, journal);
+        let shard = format!("journal/{journal}");
+        let keeps = |slot: u64, lost: &[String]| shard_keeps(shards, &shard, slot, lost);
         let planned = world
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .plan_outage_loss(loss, &decided);
+            .plan_outage_loss(loss, &decided, &keeps);
         if let Some(planned) = planned {
             audit.note_outage_loss(planned.slot, &planned.holders, &planned.damaged);
             if journal == plan.main {
@@ -258,6 +262,26 @@ pub(super) fn plan_losses(state: &StateHandle, loss: LossShape) -> Vec<u64> {
         }
     }
     kept
+}
+
+/// Whether `shard` keeps the clean copies of `slot` it declares it needs
+/// (`durable`) once the copies on the stores at `lost` (their keys) are
+/// lost too. An undeclared or switched-off shard needs nothing.
+fn shard_keeps(shards: &Shards, shard: &str, slot: u64, lost: &[String]) -> bool {
+    let Some(declared) = shards.get(shard).filter(|_| !shards.is_off(shard)) else {
+        return true;
+    };
+    let clean = shards.clean_copies(shard, slot);
+    let on = |address: &str, key: &str| {
+        address
+            .parse::<std::net::SocketAddr>()
+            .map_or(address == key, |at| at.ip().to_string() == key)
+    };
+    declared.replications().iter().all(|replication| {
+        replication.durable.holds(&|replica| {
+            clean.contains(replica) && !lost.iter().any(|key| on(replica.address(), key))
+        })
+    })
 }
 
 /// What [`super::StorageWorld::plan_outage_loss`] planned for one journal.

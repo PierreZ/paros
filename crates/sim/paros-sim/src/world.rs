@@ -74,16 +74,6 @@ pub(crate) enum ParkReason {
     Retired,
 }
 
-/// A double fault's reserved corruption park (#351, see
-/// [`StorageWorld::reserve_park`]): the injection, and whether its every
-/// write and sync confirmed. Only a confirmed one is judged strictly; any
-/// other may have landed whole, in part or not at all.
-#[derive(Clone, Debug)]
-pub(crate) struct Reserved {
-    pub(crate) injection: injector::Injection,
-    pub(crate) landed: bool,
-}
-
 /// One entry of the operators' reconfiguration ledger (#198).
 struct RequestedConfiguration {
     /// The acceptor set asked for.
@@ -132,14 +122,16 @@ pub(crate) struct StorageWorld {
     /// first reason wins — a corruption park on an identity already wiped
     /// or retired changes nothing.
     parked: BTreeMap<String, ParkReason>,
-    /// Double faults a boot planned, by identity, whose journal gave no
-    /// verdict yet (#351): the plan reserved a corruption park against the
-    /// dead-node budget, and the damage may not have landed (the apply
-    /// failed, or the process died during it or before the scan's answer).
-    /// The next boot judges the same injection, never a second one, and
-    /// until then the park is not honored: it is terminal only once the
-    /// journal refused to open ([`StorageWorld::judged`]).
-    unjudged: BTreeMap<String, Reserved>,
+    /// Double faults that landed, by identity, whose journal gave no
+    /// verdict yet (#351): the corruption park counts against the
+    /// dead-node budget, but it is not honored until the journal refused
+    /// to open ([`StorageWorld::judged`]). The next boot judges the same
+    /// injection, never a second one.
+    unjudged: BTreeMap<String, injector::Injection>,
+    /// Double faults planned and not yet landed, by identity: the plan
+    /// reserves the corruption park at once, so no other loss takes the
+    /// budget while the apply flushes ([`StorageWorld::reserve_park`]).
+    landing: BTreeSet<String>,
     /// The operator's provisioning ledger (#147): every identity whose
     /// store has ever been formatted, kept **outside** the disks so a wipe
     /// erases the marker but not the memory of having provisioned the node
@@ -193,18 +185,6 @@ pub(crate) struct StorageWorld {
     /// exercised-detected oracle's count.
     injections: usize,
     injected_crashes: u64,
-    /// Acceptors (#176) whose power a `Batched` commit's cut may have left
-    /// with an ambiguous last batch: lost copies, budgeted like rot (see
-    /// [`StorageWorld::permit_power_cut`]).
-    cut_nodes: BTreeSet<String>,
-    /// Slots a permitted cut marked lost on its node (#331), until that
-    /// node's next open says which of them came back faulty: the open keeps
-    /// those marks and clears the rest.
-    cut_marks: BTreeMap<String, BTreeSet<u64>>,
-    /// The sector neighbours of each node's planned flip, until its apply
-    /// syncs (`injector::Exposure`): a kill before the sync may resolve every
-    /// sector the flip dirtied, so the next open taints them.
-    exposed: BTreeMap<String, injector::Exposure>,
     /// The matchmaker (#176) a `Batched` commit's cut may have left with an
     /// ambiguous registration, a crash verdict: the run's one matchmaker
     /// loss (see [`StorageWorld::permit_matchmaker_power_cut`]).
@@ -229,62 +209,65 @@ impl StorageWorld {
     /// library, not the harness, refuses its empty store.
     pub(crate) fn park_reason(&self, ip: &str) -> Option<ParkReason> {
         match self.parked.get(ip).copied() {
-            Some(ParkReason::Corruption) if self.unjudged.contains_key(ip) => None,
+            Some(ParkReason::Corruption)
+                if self.unjudged.contains_key(ip) || self.landing.contains(ip) =>
+            {
+                None
+            }
             reason => reason,
         }
     }
 
-    /// The double fault `ip`'s boot planned and its journal never judged,
+    /// The double fault that landed on `ip` and its journal never judged,
     /// if any.
-    pub(crate) fn unjudged(&self, ip: &str) -> Option<Reserved> {
+    pub(crate) fn unjudged(&self, ip: &str) -> Option<injector::Injection> {
         self.unjudged.get(ip).cloned()
     }
 
-    /// Reserve a corruption park for the double fault `injection` a boot of
-    /// `key` plans (#351): the dead-node budget counts it from now on, but
-    /// the process honors it only once the journal refuses to open.
-    pub(super) fn reserve_park(&mut self, key: &str, node: u64, injection: injector::Injection) {
+    /// Reserve a corruption park for the double fault a boot of `key` plans
+    /// (#351, node `node`): the dead-node budget counts it from the plan on,
+    /// because the apply awaits its flushes and another boot may plan a
+    /// loss meanwhile (witness 3435493108874258629 on #774 (moonpool places
+    /// the harness faults): reserved only once landed, two parks passed the
+    /// budget). The process honors it only once the journal refuses to open.
+    pub(super) fn reserve_park(&mut self, key: &str, node: u64) {
         self.park_as(key, node, ParkReason::Corruption);
-        self.unjudged.insert(
-            key.to_owned(),
-            Reserved {
-                injection,
-                landed: false,
-            },
-        );
+        self.landing.insert(key.to_owned());
     }
 
-    /// `ip`'s boot applied its planned injection, every write and sync
-    /// confirmed: a reserved double fault is then judged strictly.
-    pub(crate) fn note_applied(&mut self, ip: &str) {
-        if let Some(reserved) = self.unjudged.get_mut(ip) {
-            reserved.landed = true;
-        }
-    }
-
-    /// `ip`'s journal gave its verdict on the reserved double fault (#351):
-    /// `refused` when the open returned `StorageError::Corruption`. A refusal
-    /// makes the park terminal. Any other verdict releases it: the damage
-    /// never landed whole. `slot` is the double fault's slot; an entry the
-    /// open reported faulty there (`entry_lost`) is a lost copy, inside the
-    /// budget the park reserved, and the slot stays rotted until a rewrite.
-    pub(crate) fn judged(&mut self, ip: &str, refused: bool, slot: u64, entry_lost: bool) {
-        if self.unjudged.remove(ip).is_none() {
-            return;
-        }
-        if !refused && self.parked.get(ip) == Some(&ParkReason::Corruption) {
-            self.parked.remove(ip);
-            self.rotted.entry(ip.to_owned()).or_default().insert(slot);
-            if entry_lost {
-                self.marks.entry(ip.to_owned()).or_default().insert(slot);
-            }
-            assert_reachable!("storage: a double fault that never landed whole releases its park");
-        }
-        // The park's own claim: a corruption park follows a refused open.
+    /// `key`'s reserved double fault `injection` landed: its next open
+    /// judges it ([`StorageWorld::judged`]).
+    pub(super) fn park_landed(&mut self, key: &str, injection: injector::Injection) {
+        let reserved = self.landing.remove(key);
+        // Pair of `reserve_park`: a double fault lands only on its plan's
+        // reservation.
         assert_always!(
-            self.parked.get(ip) != Some(&ParkReason::Corruption) || refused,
-            "storage: a corruption park follows a refused open"
+            reserved,
+            "storage: a landed double fault had its park reserved"
         );
+        self.unjudged.insert(key.to_owned(), injection);
+    }
+
+    /// `ip`'s reserved double fault never landed: its apply was refused or
+    /// failed, or a kill took the boot inside a flush (the bytes flip after
+    /// the last await, so nothing landed). The reservation goes.
+    pub(crate) fn release_landing(&mut self, ip: &str) {
+        if self.landing.remove(ip) && self.parked.get(ip) == Some(&ParkReason::Corruption) {
+            self.parked.remove(ip);
+        }
+    }
+
+    /// `ip`'s journal gave its verdict on the double fault that landed
+    /// (#351): `refused` when the open returned `StorageError::Corruption`,
+    /// which makes the park terminal. The injector's `judge` holds the
+    /// journal to that verdict; an open that is not one releases the park.
+    pub(crate) fn judged(&mut self, ip: &str, refused: bool) {
+        if self.unjudged.remove(ip).is_some()
+            && !refused
+            && self.parked.get(ip) == Some(&ParkReason::Corruption)
+        {
+            self.parked.remove(ip);
+        }
     }
 
     /// Whether `ip`'s disk was wiped (a wiped node is also parked).
@@ -349,6 +332,11 @@ impl StorageWorld {
         self.parked_matchmakers.contains(ip)
     }
 
+    /// Whether [`StorageWorld::wipe`] would fire for `key` now.
+    pub(crate) fn may_wipe(&self, key: &str) -> bool {
+        !self.parked.contains_key(key) && self.may_park(key)
+    }
+
     /// Wipe `ip`'s disk at a restart (#124): every record gone, the format
     /// marker with them, the identity parked for the **budget**. Permitted
     /// under the same dead-node budget as a corruption park — a wipe is one
@@ -363,17 +351,11 @@ impl StorageWorld {
             return false;
         }
         self.marks.remove(key);
-        self.cut_marks.remove(key);
         self.rotted.remove(key);
-        self.exposed.remove(key);
         self.custody.remove(key);
         // A copy an outage planned to lose goes with the whole disk.
         self.pending.remove(key);
         self.park_as(key, node, ParkReason::Wiped);
-        assert_always!(
-            self.marked_slots_keep_quorum(),
-            "storage: cut and parked acceptors fit one loss budget"
-        );
         tracing::info!(node, "storage_wiped");
         true
     }
@@ -520,87 +502,6 @@ impl StorageWorld {
         self.parked_matchmakers.insert(key.to_string());
         tracing::info!(matchmaker = %key, "matchmaker_wiped");
         true
-    }
-
-    /// Whether acceptor `key` may lose power inside a `Batched` journal
-    /// commit that writes `slots` now (#176). Such a cut can leave the
-    /// commit ambiguous, its entries reported faulty: a lost copy of every
-    /// slot the commit wrote, which on a quorum system that tolerates no loss
-    /// (`q2 = 1`, a grid) leaves a slot that may have been chosen with no
-    /// value anywhere, a correct wait forever. So the cut nodes are budgeted
-    /// like rot: at most `tolerated` distinct acceptors per run (the floor
-    /// minus the clean copies every record keeps), a node already cut
-    /// staying permitted, and every slot the commit writes is a lost copy
-    /// the per-record budget must permit (#331).
-    ///
-    /// The cut marks those slots on `key` like rot, so the other losses
-    /// (a wipe, a corruption park, rot, an outage's plan) and the oracle's
-    /// [`storage_fault_stats`] count them too: before #331 a cut spent only
-    /// its own node budget, and a wipe of a second member of a majority of
-    /// three left a slot chosen through the two lost copies undecidable (a
-    /// correct wait forever, which the oracle called unexplained). The next
-    /// open of `key` clears the marks of the slots that came back whole.
-    pub(crate) fn permit_power_cut(&mut self, key: &str, tolerated: usize, slots: &[u64]) -> bool {
-        if !self.may_cut_node(key, tolerated, slots) {
-            return false;
-        }
-        self.cut_nodes.insert(key.to_string());
-        for &slot in slots {
-            if self.marks.entry(key.to_string()).or_default().insert(slot) {
-                self.cut_marks
-                    .entry(key.to_string())
-                    .or_default()
-                    .insert(slot);
-            }
-        }
-        assert_always!(
-            self.marked_slots_keep_quorum(),
-            "storage: cut and parked acceptors fit one loss budget"
-        );
-        true
-    }
-
-    /// [`StorageWorld::permit_power_cut`]'s answer, spending nothing.
-    pub(crate) fn may_cut_node(&self, key: &str, tolerated: usize, slots: &[u64]) -> bool {
-        (self.cut_nodes.contains(key) || self.cut_nodes.len() < tolerated)
-            && slots.iter().all(|&slot| self.may_corrupt_record(key, slot))
-    }
-
-    /// `key`'s store opened and reported `faulty`: a slot a cut marked lost
-    /// that came back whole was never lost, so its mark goes (#331).
-    fn settle_cut_marks(&mut self, key: &str, faulty: &[u64]) {
-        let Some(cut) = self.cut_marks.remove(key) else {
-            return;
-        };
-        if let Some(marks) = self.marks.get_mut(key) {
-            for slot in cut.iter().filter(|slot| !faulty.contains(slot)) {
-                marks.remove(slot);
-            }
-        }
-    }
-
-    /// Whether every marked slot outside the loss budget's spent ones keeps
-    /// a clean quorum under the oracle's own formula
-    /// ([`storage_fault_stats`]): cut, rotted and parked acceptors share one
-    /// loss budget (#331).
-    fn marked_slots_keep_quorum(&self) -> bool {
-        let marked: BTreeSet<u64> = self
-            .marks
-            .values()
-            .flatten()
-            .copied()
-            .filter(|slot| !self.lossy.contains(slot) && !self.trimmed_live(*slot))
-            .collect();
-        marked.into_iter().all(|slot| {
-            let unclean: BTreeSet<&String> = self
-                .marks
-                .iter()
-                .filter(|(_, marks)| marks.contains(&slot))
-                .map(|(node, _)| node)
-                .chain(self.parked.keys())
-                .collect();
-            self.cluster_size.saturating_sub(unclean.len()) >= self.quorum()
-        })
     }
 
     /// Whether matchmaker `key` may lose power inside a `Batched` registry
@@ -856,23 +757,6 @@ impl StorageWorld {
         self.parked.entry(key.to_string()).or_insert(reason);
         tracing::info!(node, reason = ?reason, "storage_parked_identity");
     }
-
-    /// Whether a **recoverable** corruption of the accepted record at `slot`
-    /// on `node_key` is inside the per-record budget: the record must keep a
-    /// clean quorum of live copies (#70's rule, re-counted over live copies at
-    /// injection time).
-    fn may_corrupt_record(&self, node_key: &str, slot: u64) -> bool {
-        if self.cluster_size == 0 {
-            return false;
-        }
-        let already = self
-            .marks
-            .get(node_key)
-            .is_some_and(|marks| marks.contains(&slot));
-        self.clean_copies(slot)
-            .saturating_sub(usize::from(!already))
-            >= self.quorum()
-    }
 }
 
 // --- storage-fault ground truth for the oracles -------------------------------
@@ -882,18 +766,17 @@ impl StorageWorld {
 pub(crate) struct StorageFaultStats {
     /// I/O faults the journal stores surfaced from the simulated disk.
     pub(crate) injected: usize,
-    /// Re-derived from current world state: every fault-marked accepted
-    /// record still has at least a quorum of clean live copies. Under the
-    /// injection-time budget this must always hold; it is re-derived
-    /// independently so an unavailable run can be judged against it
-    /// (`TigerBeetle`'s excuse-list doctrine — the bound is never trusted to be
-    /// sufficient on its own).
+    /// Every slot a fault marked keeps the copies its journal's shard needs
+    /// (`durable`), read from moonpool's disks (#760 (moonpool owns fault
+    /// placement)): the gate's promise, judged by what the faults left.
     pub(crate) clean_quorum_everywhere: bool,
 }
 
-/// Fold the storage world's ground truth (empty world = no faults).
+/// Fold the storage world's ground truth (empty world = no faults), with
+/// the clean copies `shards` reads off the disks.
 pub(crate) fn storage_fault_stats(
     handle: &StateHandle,
+    shards: &moonpool_sim::Shards,
     journal: paros::core::journal::JournalIdentifier,
 ) -> StorageFaultStats {
     let world = storage_world_for(handle, journal);
@@ -902,11 +785,14 @@ pub(crate) fn storage_fault_stats(
         injected: guard.disk_faults,
         clean_quorum_everywhere: true,
     };
-    let quorum = guard.quorum();
+    let shard = format!("journal/{journal}");
+    let Some(declared) = shards.get(&shard).filter(|_| !shards.is_off(&shard)) else {
+        return stats;
+    };
     // A slot the loss budget spent (#263) is excused: it lost its clean
-    // quorum by permission, and the audit judges what it must do instead.
-    // So is a slot a live acceptor truncated past (`trimmed_live`): its
-    // trim point serves it.
+    // quorum on purpose, and the audit judges what it must do instead. So
+    // is a slot a live acceptor truncated past (`trimmed_live`): its trim
+    // point serves it.
     let marked: BTreeSet<u64> = guard
         .marks
         .values()
@@ -914,27 +800,18 @@ pub(crate) fn storage_fault_stats(
         .filter(|slot| !guard.lossy.contains(slot) && !guard.trimmed_live(*slot))
         .collect();
     for slot in marked {
-        // The availability re-derivation deliberately differs from the
-        // injection-time budget formula: here a peer that truncated past the
-        // slot counts as *clean* — its truncation was decided, so it answers a
-        // laggard with its trim point — while only a live damage mark or a
-        // terminally parked node makes a copy unclean. The budget stays
-        // conservative (truncated peers don't count there); this independent
-        // count is what an unavailable run is judged against.
-        let unclean: BTreeSet<&String> = guard
-            .marks
+        let clean = shards.clean_copies(&shard, slot);
+        if !declared
+            .replications()
             .iter()
-            .filter(|(_, marks)| marks.contains(&slot))
-            .map(|(node, _)| node)
-            .chain(guard.parked.keys())
-            .collect();
-        if guard.cluster_size.saturating_sub(unclean.len()) < quorum {
-            // Red-path diagnostic: name the slot and the unclean set, so an
+            .all(|r| r.durable.holds(&|replica| clean.contains(replica)))
+        {
+            // Red-path diagnostic: name the slot and the copies left, so an
             // availability violation is attributable without a re-run.
-            let parked: BTreeSet<&String> = guard.parked.keys().collect();
             eprintln!(
-                "clean-quorum lost: slot={slot} unclean={unclean:?} parked={parked:?} marks={:?}",
-                guard.marks
+                "clean copies lost: slot={slot} clean={clean:?} marks={:?} needs={:?}",
+                guard.marks,
+                declared.replications()
             );
             stats.clean_quorum_everywhere = false;
         }
@@ -1012,9 +889,10 @@ pub(crate) fn corruption_stats(
 #[tracing::instrument(level = "debug", skip_all)]
 pub(crate) fn check_storage_gates(
     handle: &StateHandle,
+    shards: &moonpool_sim::Shards,
     journal: paros::core::journal::JournalIdentifier,
 ) {
-    let stats = storage_fault_stats(handle, journal);
+    let stats = storage_fault_stats(handle, shards, journal);
     let corruption = corruption_stats(handle, journal);
     let detected = crate::audit::audit_world_for(handle, journal).storage_faults_detected();
     // Surfaced I/O fault ↔ crash decision correlate 1:1, typed, with no
@@ -1030,7 +908,7 @@ pub(crate) fn check_storage_gates(
     );
     assert_always!(
         stats.clean_quorum_everywhere,
-        "storage: injected faults never cost a record its clean quorum of live copies"
+        "storage: faults never cost a record the clean copies its shard needs"
     );
     // Every injected damage the journal refused is exactly one typed crash
     // decision: a spontaneous corruption detection (nothing injected) or a

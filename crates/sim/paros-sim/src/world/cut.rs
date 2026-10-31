@@ -1,14 +1,17 @@
-//! The budget of a power loss **inside** a journal commit (#176, #294).
+//! The budget of a power loss **inside** a matchmaker's registry commit
+//! (#176, #294).
 //!
 //! The shipped stores name the moments of a commit with `hint!`:
 //! `moonpool-journal` inside one commit (entries written, records written,
 //! metainfo stale), and `paros::storage::journal` between the commits of one sync.
-//! The seed's attrition regime decides whether the process dies there. The
-//! harness only keeps the budget the simulator cannot see, through
+//! The seed's attrition regime decides whether the process dies there.
+//! Moonpool's shard gate keeps every acceptor's and machine's cut inside its
+//! journal's needs (#760 (moonpool owns fault placement)): their stores
+//! publish their layouts, and a crash that would tear the last clean copies
+//! of a slot keeps the page cache instead. The matchmakers' registries
+//! declare no shard yet, so the harness keeps their budget, through
 //! moonpool's [`HintVeto`]: a `Batched` commit cut partway may leave its
-//! last batch ambiguous, so its entries come back faulty, a lost copy of
-//! every slot it wrote. The cut acceptors are budgeted like rot
-//! ([`StorageWorld::permit_power_cut`]), and an ambiguous registration is
+//! last batch ambiguous, a crash verdict, so an ambiguous registration is
 //! the run's one matchmaker loss
 //! ([`StorageWorld::permit_matchmaker_power_cut`]).
 //!
@@ -20,16 +23,6 @@
 //! reboot lands inside a commit too, and under whole-run chaos one tore a
 //! matchmaker's one-sync registry commit outside its budget (#454 (control
 //! plane meets chaos), witness seed 6698767524067190541).
-//!
-//! A machine's journals run on a bare disk, with no store to register
-//! through (#294). A created journal stores `Batched` when its create asked
-//! for it (#599 (durability mode per journal)), so the driver's own report
-//! of each commit registers it ([`open_machine_commit`] from
-//! `Audit::commit_started`, [`close_machine_commit`] from
-//! `Audit::commit_ended`), under the journal's budget: at most as many
-//! distinct machines cut inside its commits over the run as copies of one
-//! slot its configurations may lose (the tenant board's `cut_budget`). A
-//! permitted kill closes every commit the dead process had in flight.
 //!
 //! A correlated outage kills every acceptor and proxy leader at one instant
 //! (#332): moonpool's `Chaos::Outage` asks the published [`OutageVeto`],
@@ -55,10 +48,8 @@
 //! 26230:17833651999620246342 on 31d4aed: a matchmaker's registry sync
 //! failed, and its next open found the batch torn).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, PoisonError, Weak};
-
-use paros::core::journal::JournalIdentifier;
 
 use moonpool_sim::{HintVeto, OutageVeto, StateHandle, assert_always, assert_reachable};
 
@@ -68,24 +59,9 @@ use super::scenarios::thin_sets::ThinSets;
 /// The [`StateHandle`] key of the run's [`Commits`].
 const COMMITS_KEY: &str = "paros-commits-in-flight";
 
-/// Whose store a commit belongs to: each one's cut is its own reachable.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Owner {
-    /// An acceptor's or a replica's `JournalStorage`.
-    Node,
-    /// A matchmaker's `JournalMatchmakerStorage`.
-    Matchmaker,
-}
-
 /// What a cut of one commit spends.
 #[derive(Clone, Debug)]
 pub(crate) enum Budget {
-    /// Nothing: an `Ordered` commit is torn or whole, never ambiguous.
-    Free,
-    /// An acceptor's `Batched` commit writing `slots`: at most `tolerated`
-    /// distinct cut acceptors per journal, and a lost copy of each slot
-    /// inside the per-record budget (#331).
-    Node { tolerated: usize, slots: Vec<u64> },
     /// A matchmaker's commit: on a `Batched` registry, over a bootstrap set
     /// of `bootstrap` members (`None` on an `Ordered` one, spending
     /// nothing); `held` is whether the registry held a registration, which
@@ -102,20 +78,16 @@ pub(crate) enum Budget {
 impl Budget {
     /// Whether a cut of this commit spends a budget.
     fn spends(&self) -> bool {
-        match self {
-            Budget::Free => false,
-            Budget::Node { .. } => true,
-            Budget::Matchmaker {
-                bootstrap, held, ..
-            } => bootstrap.is_some() || *held,
-        }
+        let Budget::Matchmaker {
+            bootstrap, held, ..
+        } = self;
+        bootstrap.is_some() || *held
     }
 }
 
 /// One commit in flight.
 struct Commit {
     ip: String,
-    owner: Owner,
     budget: Budget,
     world: Weak<Mutex<StorageWorld>>,
 }
@@ -125,12 +97,6 @@ struct Commit {
 pub(crate) struct Commits {
     next: u64,
     open: BTreeMap<u64, Commit>,
-    /// A machine's commit in flight of a `Batched` journal a tenant created
-    /// (#599 (durability mode per journal)), by `(ip, journal)`: the copies
-    /// of a slot the journal may lose.
-    machine: BTreeMap<(String, JournalIdentifier), usize>,
-    /// Per `Batched` journal, the machines a kill cut inside its commits.
-    machine_cuts: BTreeMap<JournalIdentifier, BTreeSet<String>>,
     /// The commits a failed sync left in the file image, by store key: in
     /// flight until that store opens or syncs again.
     parked: BTreeMap<String, u64>,
@@ -144,10 +110,10 @@ fn commits(state: &StateHandle) -> Arc<Mutex<Commits>> {
     }
     let commits = crate::state::published(state, COMMITS_KEY, Commits::default);
     let veto = Arc::clone(&commits);
-    let run = state.clone();
     HintVeto::new(move |ip, _label| {
-        let mut commits = veto.lock().unwrap_or_else(PoisonError::into_inner);
-        !commits.holds_machine(&run, ip) && commits.permit_kill(ip)
+        veto.lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .permit_kill(ip)
     })
     .publish(state);
     let veto = Arc::clone(&commits);
@@ -191,38 +157,11 @@ impl Commits {
             .values()
             .filter(|commit| victims.contains(&commit.ip))
             .filter(|commit| commit.world.strong_count() > 0)
-            .any(|commit| commit.budget.spends())
-            || self.machine.keys().any(|(ip, _)| victims.contains(ip));
+            .any(|commit| commit.budget.spends());
         if blocked {
             assert_reachable!("outage: a commit in flight holds an outage back");
         }
         !blocked
-    }
-
-    /// Whether a kill of the process at `ip` waits, on a batched-journals
-    /// seed (#599 (durability mode per journal), `shape::batched_journals`):
-    /// a machine dies there only inside a commit of a `Batched` journal
-    /// that may lose a copy. The machines' kills are kept for the moment
-    /// the scenario exists for. A cell whose machines die every few seconds
-    /// never creates a tenant in the chaos window: over 120 hunt seeds,
-    /// every one of the 25 batched-journals seeds whose machines were
-    /// killed created no journal before the tail, so no kill ever met a
-    /// batched commit. Held, the cell forms, creates and appends, and the
-    /// attrition regime strikes at the journal commit's own `hint!`s (or a
-    /// timed reboot lands inside the commit). It holds nothing on any other
-    /// seed or process.
-    fn holds_machine(&self, state: &StateHandle, ip: &str) -> bool {
-        if !crate::shape::batched_journals_drawn(state)
-            || self
-                .machine
-                .iter()
-                .any(|((at, _), tolerated)| at == ip && *tolerated > 0)
-            || !crate::machine::is_machine_ip(state, ip)
-        {
-            return false;
-        }
-        assert_reachable!("journal store: a machine kill waits for a batched commit");
-        true
     }
 
     /// Whether the process at `ip` may die now, spending the budget of every
@@ -236,83 +175,38 @@ impl Commits {
             .collect();
         let fits = open.iter().all(|(commit, world)| {
             let world = world.lock().unwrap_or_else(PoisonError::into_inner);
-            match &commit.budget {
-                Budget::Free => true,
-                Budget::Node { tolerated, slots } => world.may_cut_node(ip, *tolerated, slots),
-                Budget::Matchmaker {
-                    bootstrap,
-                    thin: (thin, matchmaker),
-                    ..
-                } => bootstrap.is_none_or(|bootstrap| {
-                    let spared = thin.spares(*matchmaker);
-                    if !spared {
-                        assert_reachable!("matchmaker: a thin set holds a matchmaker loss back");
-                    }
-                    spared && world.may_cut_matchmaker(ip, bootstrap)
-                }),
-            }
+            let Budget::Matchmaker {
+                bootstrap,
+                thin: (thin, matchmaker),
+                ..
+            } = &commit.budget;
+            bootstrap.is_none_or(|bootstrap| {
+                let spared = thin.spares(*matchmaker);
+                if !spared {
+                    assert_reachable!("matchmaker: a thin set holds a matchmaker loss back");
+                }
+                spared && world.may_cut_matchmaker(ip, bootstrap)
+            })
         });
-        let machine: Vec<(JournalIdentifier, usize)> = self
-            .machine
-            .iter()
-            .filter(|((at, _), _)| at == ip)
-            .map(|((_, journal), tolerated)| (*journal, *tolerated))
-            .collect();
-        // The machines cut with this one fit the journal's budget, as it
-        // stands now (a configure may have lowered it).
-        let machine_fits = machine.iter().all(|(journal, tolerated)| {
-            let cut = self.machine_cuts.get(journal);
-            let counted = cut.map_or(0, BTreeSet::len);
-            let fresh = usize::from(!cut.is_some_and(|cut| cut.contains(ip)));
-            counted + fresh <= *tolerated
-        });
-        if !fits || !machine_fits {
+        if !fits {
             assert_reachable!("journal store: the copy budget refuses a cut mid-commit");
             return false;
         }
-        for (journal, tolerated) in machine {
-            let cut = self.machine_cuts.entry(journal).or_default();
-            cut.insert(ip.to_string());
-            assert_always!(
-                cut.len() <= tolerated,
-                "journal store: a batched journal's cut machines fit its loss budget"
-            );
-            // Paired with the faulty boot the journal then reports
-            // (`TenantBoard::note_faulty`).
-            assert_reachable!("journal store: a machine loses power inside a batched commit");
-        }
-        // The process dies: none of its commits is in flight any more.
-        self.machine.retain(|(at, _), _| at != ip);
         for (commit, world) in &open {
             let mut world = world.lock().unwrap_or_else(PoisonError::into_inner);
-            match &commit.budget {
-                Budget::Free => {}
-                Budget::Node { tolerated, slots } => {
-                    let spent = world.permit_power_cut(ip, *tolerated, slots);
-                    assert!(spent, "a cut that fits the budget spends it");
-                }
-                Budget::Matchmaker {
-                    bootstrap, held, ..
-                } => {
-                    if let Some(bootstrap) = *bootstrap {
-                        let spent = world.permit_matchmaker_power_cut(ip, bootstrap);
-                        assert!(spent, "a cut that fits the budget spends it");
-                    }
-                    if *held {
-                        world.note_registry_cut(ip);
-                    }
-                }
+            let Budget::Matchmaker {
+                bootstrap, held, ..
+            } = &commit.budget;
+            if let Some(bootstrap) = *bootstrap {
+                let spent = world.permit_matchmaker_power_cut(ip, bootstrap);
+                assert!(spent, "a cut that fits the budget spends it");
+            }
+            if *held {
+                world.note_registry_cut(ip);
             }
             // Paired with the recovery gates the journal reports at the
             // next boot.
-            match commit.owner {
-                Owner::Node => {
-                    assert_reachable!("journal store: a node loses power mid-commit");
-                }
-                Owner::Matchmaker => {
-                    assert_reachable!("journal store: a matchmaker loses power mid-commit");
-                }
-            }
+            assert_reachable!("journal store: a matchmaker loses power mid-commit");
         }
         true
     }
@@ -330,12 +224,11 @@ pub(crate) struct InFlight {
 }
 
 impl InFlight {
-    /// Register a commit of `owner`'s store at `ip`, judged against
+    /// Register a commit of the matchmaker store at `ip`, judged against
     /// `world`'s budget.
     pub(crate) fn open(
         state: &StateHandle,
         ip: &str,
-        owner: Owner,
         budget: Budget,
         world: Weak<Mutex<StorageWorld>>,
     ) -> Self {
@@ -348,7 +241,6 @@ impl InFlight {
                 id,
                 Commit {
                     ip: ip.to_string(),
-                    owner,
                     budget,
                     world,
                 },
@@ -394,33 +286,6 @@ pub(crate) fn release_parked(state: &StateHandle, key: &str) {
         if let Some(id) = guard.parked.remove(key) {
             guard.open.remove(&id);
         }
-    }
-}
-
-/// Register `ip`'s commit of `journal` in flight (#599 (durability mode per
-/// journal)): a `Batched` journal a tenant created, whose slots may each
-/// lose `tolerated` copies. A machine commits one batch of a journal at a
-/// time, so a registration left by a kill the veto never saw (a scenario's
-/// crash) is replaced here.
-pub(crate) fn open_machine_commit(
-    state: &StateHandle,
-    ip: &str,
-    journal: JournalIdentifier,
-    tolerated: usize,
-) {
-    let commits = commits(state);
-    let mut guard = commits.lock().unwrap_or_else(PoisonError::into_inner);
-    guard.machine.insert((ip.to_string(), journal), tolerated);
-}
-
-/// `ip`'s commit of `journal` returned: nothing of it is in flight (#599).
-pub(crate) fn close_machine_commit(state: &StateHandle, ip: &str, journal: JournalIdentifier) {
-    if let Some(commits) = state.get::<Arc<Mutex<Commits>>>(COMMITS_KEY) {
-        commits
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .machine
-            .remove(&(ip.to_string(), journal));
     }
 }
 
