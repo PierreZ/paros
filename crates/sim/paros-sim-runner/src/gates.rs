@@ -1385,6 +1385,10 @@ pub const RARE: &[Rare] = &[
         msg: "maintenance: an operator ends a window while its machine is down",
         reason: "needs a gone-machine seed whose gone machine a window covers while a window step runs inside its 13 to 18 s outage: fired once in PR #710's (recycled segments) first sweep, missed by every shard of its second and of PR #712's; a coin that puts the down machine in maintenance fired 0 of 300 hunt seeds (#661 (maintenance windows), #475 (re-place after the Down bound))",
     },
+    Rare {
+        msg: "coordinator: a mode change waits for a member that is down",
+        reason: "a mode change whose new configuration names a member marked down but not gone, its leader found on the others: every shard of main's sweep on 3a98b47 missed it, PR #775's on the same base fired it; 0 of 106 hunt seeds, and a coin that held a machine down once a journal was placed on a changed-mode seed fired it on 0 of 200 (#777 (mode change meets a down member))",
+    },
 ];
 
 /// What the sweep ran of the declared gates.
