@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="website/zola/static/paros-logo.png" alt="paros" width="200" />
+  <img src="website/site/public/paros-logo.png" alt="paros" width="200" />
   <h1>paros</h1>
   <p><strong>Paxos, in Rust.</strong> A learning implementation of the Paxos family of
   consensus algorithms, built and validated with deterministic simulation testing.</p>

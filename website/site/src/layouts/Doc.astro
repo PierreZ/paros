@@ -1,0 +1,57 @@
+---
+// A reading page: the title block, the text, and the pages of its section.
+import Base from "./Base.astro";
+import { url } from "../nav";
+
+interface Sibling { title: string; path: string }
+interface Props {
+  frontmatter?: { title: string; description?: string; kicker?: string; section?: string; siblings?: string };
+  title?: string;
+  description?: string;
+  kicker?: string;
+  section?: string;
+  siblings?: Sibling[];
+}
+const fm = Astro.props.frontmatter ?? {};
+const title = Astro.props.title ?? fm.title;
+const description = Astro.props.description ?? fm.description;
+const kicker = Astro.props.kicker ?? fm.kicker ?? "";
+const section = Astro.props.section ?? fm.section ?? "";
+const PAGES: Record<string, Sibling[]> = {
+  "paxos/": [
+    { title: "Single-decree Paxos", path: "paxos/single-decree/" },
+    { title: "Multi-Paxos", path: "paxos/multi-paxos/" },
+    { title: "Matchmaker Paxos", path: "paxos/matchmaker/" },
+    { title: "Compartmentalized Paxos", path: "paxos/compartmentalized/" },
+    { title: "Quorums", path: "paxos/quorums/" },
+  ],
+  "docs/": [
+    { title: "Quickstart", path: "docs/quickstart/" },
+    { title: "Reference", path: "docs/reference/" },
+    { title: "The playground", path: "docs/playground/" },
+  ],
+};
+const siblings = Astro.props.siblings ?? PAGES[section] ?? [];
+const here = Astro.url.pathname;
+const i = siblings.findIndex((s) => here.endsWith("/" + s.path));
+const prev = i > 0 ? siblings[i - 1] : undefined;
+const next = i >= 0 && i < siblings.length - 1 ? siblings[i + 1] : undefined;
+---
+<Base title={title} description={description} section={section}>
+  <div class="page">
+    <div class="titleblock">
+      {kicker && <div class="kicker label">{kicker}</div>}
+      <h1>{title}</h1>
+      {description && <p class="lede">{description}</p>}
+    </div>
+    <article class="prose">
+      <slot />
+    </article>
+    {(prev || next) && (
+      <nav class="pager label" aria-label="Next and previous pages">
+        {prev ? <a href={url(prev.path)}>← {prev.title}</a> : <span />}
+        {next ? <a href={url(next.path)}>{next.title} →</a> : <span />}
+      </nav>
+    )}
+  </div>
+</Base>

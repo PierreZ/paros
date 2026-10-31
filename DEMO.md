@@ -201,8 +201,8 @@ Add `--json` after `parosctl` for machine-readable output, e.g.
 `docker compose run --rm parosctl --json tenant list`.
 
 The journal `orders` is single-writer: a writer must hold the current leader uuid. The
-four calls, the two writer modes and the limits are on the site's journal API page
-(`website/zola/content/parosd/journal-api.md`).
+four calls, the two writer modes and the limits are on the site's reference page
+(`website/site/src/pages/docs/reference.md`).
 
 ## Locally, without Docker
 

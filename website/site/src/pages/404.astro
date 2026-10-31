@@ -1,0 +1,7 @@
+---
+import Doc from "../layouts/Doc.astro";
+import { url } from "../nav";
+---
+<Doc title="Not found" kicker="404" description="No page has this address. The site was rebuilt on 2026-10-31, so an old link can point here.">
+  <p><a href={url()}>Home</a> · <a href={url("paxos/")}>Paxos</a> · <a href={url("playground/")}>Playground</a> · <a href={url("docs/")}>Docs</a></p>
+</Doc>

@@ -24,8 +24,8 @@ The four gates, the same ones CI runs:
 nix develop --command bash -c 'cd website/play && npm ci && npm run check && npm test && npm run build'
 ```
 
-The full deploy build — wasm, bundle, and the copy into `website/zola/public/play/` —
-is `nix develop --command scripts/build-wasm.sh`, after `website/zola/build.sh`.
+The game is not on the site since #810 (website redo 1/4). Its code stays as the base of the
+step-through diagrams of the Paxos pages (#811); CI still checks it.
 
 ## Layout
 
@@ -157,4 +157,4 @@ All the text in this directory follows ASD-STE100: short active sentences,
 present tense, one instruction per sentence, no idioms, and `must` for an
 obligation. The `field_guide` field is a bare chapter filename (`safety.html`). The app is
 served at `/play/`, so a link to it is `../` plus that name; the site's alias for
-the old mdbook URL redirects it to the chapter (`website/zola/content/paxos/`).
+the old mdbook URL redirects it to the chapter (the Paxos pages, `website/site/src/pages/paxos/`).
