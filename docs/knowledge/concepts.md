@@ -17,9 +17,9 @@ yet; the sources are known), **waits for a source** (no source outside paros yet
 | Leader | Paging a campaign (`keep_alive_from`) | | waits for a source | `proposer/election.rs`, `node/election.rs` | to find: etcd-raft message size limits, or frankenpaxos recovery |
 | Leader | Leadership fence and CheckQuorum | [check-quorum](concepts/check-quorum.md) | verified | `proposer/authority.rs`, `node/authority.rs` | etcd-raft CheckQuorum (`../references/etcd-raft/check-quorum.md`), flexible-paxos §3, paxos-made-live §5.2, foundationdb §6 |
 | Leader | Leader handoff (`relinquish_to`) | [leader-handoff](concepts/leader-handoff.md) | verified | `node/handoff.rs` | dpaxos §4.4, paxos-made-moderately-complex §2, etcd-raft leader transfer (`../references/etcd-raft/check-quorum.md` §6) |
-| Quorums | Flexible quorums | | planned | `membership/quorum_system.rs` | flexible-paxos |
-| Quorums | Grid quorums (acceptor partitions) | | planned | `membership/quorum_system.rs` | flexible-paxos, scaling-rsm-compartmentalization |
-| Quorums | Zone rule | | planned | `membership/zone_rule.rs` | wpaxos |
+| Quorums | Flexible quorums | [flexible-quorums](concepts/flexible-quorums.md) | verified | `membership/quorum_system.rs`, `membership/acceptor_config.rs` | flexible-paxos §3–§5/§7, generalised-distributed-consensus §4.1 |
+| Quorums | Grid quorums (acceptor partitions) | [grid-quorums](concepts/grid-quorums.md) | verified | `membership/quorum_system.rs`, `node/policy.rs` (`move_round`), `paros-roles` `node/grid.rs` | scaling-rsm-compartmentalization §3.2, flexible-paxos §4, wpaxos §3.1, frankenpaxos `04-compartmentalization.md` |
+| Quorums | Zone rule | [zone-rule](concepts/zone-rule.md) | verified | `membership/zone_rule.rs`, `membership/failure_domain.rs`, `paros-model` `placement.rs` | wpaxos §3.1/§5.3, flexible-paxos §3, aws-cell-based-architecture |
 | Compartmentalization | Proxy leaders | | planned | `proxy_leader.rs`, `proposer/rounds.rs` | scaling-rsm-compartmentalization; frankenpaxos |
 | Compartmentalization | Batchers and unbatchers | | planned | `batcher.rs` | scaling-rsm-compartmentalization; frankenpaxos |
 | Compartmentalization | Replica tier | | planned | `replica_node.rs` | scaling-rsm-compartmentalization; frankenpaxos |
