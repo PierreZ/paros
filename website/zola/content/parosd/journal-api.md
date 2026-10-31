@@ -149,8 +149,10 @@ FoundationDB:
   tenant's default, and `--frontend-count` sets the tenant's frontends. A count that the command does
   not name keeps its value. A count of 0 runs the job in the leader's process. The cell places
   proxy leaders and batchers on its `stateless` machines, replicas on `storage` machines, and
-  the journal's leader runs the counts by a round change. `parosctl resolve acme` names the
-  batchers and the frontends, each with its machine's zone. With `--zone eu-1`, the machines
+  the journal's leader runs the counts by a round change. Each machine runs the proxy leaders
+  and replicas booked on it. A replica serves reads of its journal from its own copy of the
+  log. `parosctl resolve acme` names the batchers, the frontends and the replicas, each with its
+  machine's zone. With `--zone eu-1`, the machines
   and frontends in zone `eu-1` come first: a client in that zone calls them first and saves a
   cross-zone hop.
 

@@ -33,6 +33,7 @@ message FleetEntry {
     SetTenantTags set_tenant_tags = 11;
     SetCellTags set_cell_tags = 12;
     RemoveCell remove_cell = 13;
+    AssignBuckets assign_buckets = 14;
   }
 }
 
@@ -110,6 +111,25 @@ message RegisterTenant {
   // The tenant's first user tags (#575 (key:value tags)): a reserved key
   // is refused, and so is a set over the cap.
   repeated paros.common.v1.Tag tags = 7;
+  // How the tenant was placed (#713 (bucket placement)): 1 by its bucket
+  // (`cell_id` must be the bucket table's cell for the name), 2 by an
+  // override entry. 0 is a tenant written before buckets (metadata version
+  // 5 and below), read as an override.
+  uint32 placement = 8;
+  // The override's reason, for people: at most 64 bytes, empty for a
+  // bucket placement.
+  string reason = 9;
+}
+
+// `universe buckets assign` (#713 (bucket placement)): the buckets
+// `first..=last` (inclusive, below 16384) name the `READY` cell `cell_id`.
+// Refused while a tenant placed by one of these buckets lives in another
+// cell: tenant moves (#232) are not built. The same assignment again
+// changes nothing. Metadata version 6.
+message AssignBuckets {
+  uint32 first = 1;
+  uint32 last = 2;
+  uint64 cell_id = 3;
 }
 
 // Move tenant `tenant` to `state` (see `TenantState` for the transitions).
@@ -192,6 +212,17 @@ message FleetDirectoryState {
   // The tombstoned cell ids, in id order (#232 (multiple cells)): never
   // added again.
   repeated uint64 removed_cells = 11;
+  // The bucket table (#713 (bucket placement)) as runs, in bucket order:
+  // none before the first cell, else runs that cover the 16384 buckets
+  // once.
+  repeated BucketRun buckets = 12;
+}
+
+// Buckets `first..=last` name the cell `cell_id`.
+message BucketRun {
+  uint32 first = 1;
+  uint32 last = 2;
+  uint64 cell_id = 3;
 }
 
 message CellEntry {
@@ -222,4 +253,7 @@ message TenantEntry {
   // The tenant's tags (#575): its reserved tags (`paros/kind`,
   // `paros/role`, `paros/movable`), then its user tags.
   repeated paros.common.v1.Tag tags = 12;
+  // How a `users` tenant was placed, as in `RegisterTenant` (#713).
+  uint32 placement = 13;
+  string reason = 14;
 }

@@ -4,7 +4,10 @@
 //! the run's cell hosts (`parosctl universe add-cell`). Its later steps
 //! create a tenant in it, resolve that tenant through the run's machines,
 //! and, on a coin, remove the tenant and the cell, and try to add the cell
-//! again, which must be refused. A phase the chaos cuts short is taken
+//! again, which must be refused. The tenant lands there by an override
+//! entry (`--cell`), or, on a coin, by its bucket: the operator first gives
+//! the tenant's bucket to the second cell (`universe buckets assign`, #713
+//! (bucket placement)), and gives it back before the cell is removed. A phase the chaos cuts short is taken
 //! again at the next step, and one that ends goes on to the next one up to
 //! the tenant's creation; one operator at a time.
 //!
@@ -61,6 +64,9 @@ pub(super) struct SecondCell {
     joined: bool,
     /// Its tenant, once created.
     tenant: Option<TenantId>,
+    /// The cell the tenant's bucket was given to (#713): the bucket goes
+    /// back to the run's cell before that cell is removed.
+    bucket: Option<u64>,
     /// The cell was removed from the directory.
     removed: bool,
     /// The machines racked for it in the middle of the run (#490 (second
@@ -451,7 +457,37 @@ impl FleetOps {
         let Some(session) = self.second_session(cell, policy) else {
             return;
         };
-        let mut session = session.with_cell(cell_id);
+        // By its bucket (#713): the tenant's bucket names the second cell
+        // first. Else by an override entry.
+        let by_bucket =
+            buggify_with_prob!(0.5) || with_second(ctx.state(), |s| s.bucket == Some(cell_id));
+        let mut session = if by_bucket {
+            let mut session = session;
+            let run = session
+                .assign_buckets(
+                    &cell.client,
+                    cell.first(draw),
+                    hooli_bucket(),
+                    cell_id,
+                    self.patience,
+                )
+                .await;
+            judge_folds(&session);
+            run.steps.iter().copied().for_each(reach);
+            if !matches!(run.outcome, Step::Done { .. }) {
+                return;
+            }
+            assert_always!(
+                session.directory().bucket_cell_of(NAME) == Some(cell_id),
+                "universe: an assigned bucket names its cell",
+                { "cell" => cell_id }
+            );
+            assert_reachable!("universe: a bucket is given to a second cell");
+            with_second(ctx.state(), |second| second.bucket = Some(cell_id));
+            session
+        } else {
+            session.with_cell(cell_id)
+        };
         let draws = [
             tenant_identifier(draw),
             tenant_identifier(draw.rotate_left(29) ^ 0x5ec0),
@@ -475,6 +511,13 @@ impl FleetOps {
             { "tenant" => result.0, "cell" => cell_id }
         );
         assert_reachable!("universe: a tenant is created in a second cell");
+        if session
+            .directory()
+            .tenant(result)
+            .is_some_and(|tenant| tenant.placement.is_bucket())
+        {
+            assert_reachable!("universe: a tenant lands in a second cell by its bucket");
+        }
         with_second(ctx.state(), |second| second.tenant = Some(result));
         self.resolve_in_second(ctx, formed, draw).await;
     }
@@ -590,8 +633,14 @@ impl FleetOps {
             .remove_cell(&cell.client, first, cell_id, self.patience)
             .await;
         judge_folds(&session);
-        if let Step::Refused(FleetRefusal::CellNotEmpty { .. }) = early.outcome {
-            assert_reachable!("universe: a cell that hosts a tenant is not removed");
+        match early.outcome {
+            Step::Refused(FleetRefusal::CellNotEmpty { .. }) => {
+                assert_reachable!("universe: a cell that hosts a tenant is not removed");
+            }
+            Step::Refused(FleetRefusal::CellHoldsBuckets { .. }) => {
+                assert_reachable!("universe: a cell that holds a bucket is not removed");
+            }
+            _ => {}
         }
         // A phase an earlier step cut short may have removed the tenant
         // already: then the cell is empty, and its removal is due.
@@ -613,6 +662,25 @@ impl FleetOps {
         removal.steps.iter().copied().for_each(reach);
         if !matches!(removal.outcome, Step::Done { .. }) {
             return;
+        }
+        if with_second(&self.state, |second| second.bucket == Some(cell_id)) {
+            // The tenant's bucket goes back to the run's cell first: a cell
+            // that holds a bucket is not removed.
+            let back = session
+                .assign_buckets(
+                    &cell.client,
+                    first,
+                    hooli_bucket(),
+                    cell.journals.cell_id,
+                    self.patience,
+                )
+                .await;
+            judge_folds(&session);
+            back.steps.iter().copied().for_each(reach);
+            if !matches!(back.outcome, Step::Done { .. }) {
+                return;
+            }
+            with_second(&self.state, |second| second.bucket = None);
         }
         let run: Run<u64> = session
             .remove_cell(&cell.client, first, cell_id, self.patience)
@@ -707,6 +775,15 @@ impl FleetOps {
     }
 }
 
+/// The bucket of the second cell's tenant (#713 (bucket placement)): what
+/// an operator gives the second cell. No other name the workload creates
+/// falls in it (`no_workload_name_shares_the_second_cells_bucket`).
+fn hooli_bucket() -> paros::model::fleet::buckets::BucketRange {
+    let bucket = paros::model::fleet::buckets::bucket_of(NAME);
+    paros::model::fleet::buckets::BucketRange::new(bucket, bucket)
+        .expect("a bucket is below the bucket count")
+}
+
 /// The second cell's id, once formed: a tenant created there is dropped on
 /// its registry, not on the run's cell's.
 pub(super) fn cell_id(state: &moonpool_sim::StateHandle) -> Option<u64> {
@@ -732,4 +809,22 @@ pub(super) fn joined_journal(state: &moonpool_sim::StateHandle) -> Option<Journa
 /// cells)) and has not removed it: its later phases are due.
 pub(super) fn started(state: &moonpool_sim::StateHandle) -> bool {
     with_second(state, |second| second.formed.is_some() && !second.removed)
+}
+
+#[cfg(test)]
+mod tests {
+    use paros::model::fleet::buckets::bucket_of;
+
+    /// A tenant the workload creates on the run's cell by its bucket never
+    /// shares the bucket an operator gives the second cell: it would land
+    /// there.
+    #[test]
+    fn no_workload_name_shares_the_second_cells_bucket() {
+        let mut names: Vec<&[u8]> = super::super::NAMES.to_vec();
+        names.extend(super::super::journals::TAIL_NAMES);
+        names.extend([super::super::resolve::NEVER_CREATED, b"nobody".as_slice()]);
+        for name in names {
+            assert_ne!(bucket_of(name), bucket_of(super::NAME), "{name:?}");
+        }
+    }
 }

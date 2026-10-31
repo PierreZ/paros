@@ -85,6 +85,7 @@ fn a_cell_is_removed_only_empty_and_removing_and_never_comes_back() {
         cell_id: OTHER,
         survives: Survives::Az,
         tags: UserTags::none(),
+        placement: buckets::Placement::override_for("named"),
     });
     assert!(matches!(
         directory.fold(6, &tenant),
@@ -210,6 +211,7 @@ fn register(tenant: u64, name: &[u8]) -> Vec<u8> {
         cell_id: CELL,
         survives: Survives::Az,
         tags: UserTags::none(),
+        placement: buckets::Placement::Bucket,
     })
 }
 
@@ -229,6 +231,10 @@ fn remove(tenant: u64) -> Vec<u8> {
 #[test]
 fn every_entry_round_trips() {
     let commands = [
+        FleetCommand::AssignBuckets {
+            range: buckets::BucketRange::new(10, 20).unwrap(),
+            cell_id: CELL,
+        },
         FleetCommand::FormFleet {
             control: fleet_control(),
             name: Vec::new(),
@@ -250,6 +256,7 @@ fn every_entry_round_trips() {
             cell_id: CELL,
             survives: Survives::Region,
             tags: UserTags::none(),
+            placement: buckets::Placement::Bucket,
         },
         FleetCommand::MarkTenant {
             tenant: TenantId(300),
@@ -519,6 +526,7 @@ fn a_users_tenant_id_and_name_are_checked_at_registration() {
                 cell_id: CELL,
                 survives: Survives::Az,
                 tags: UserTags::none(),
+                placement: buckets::Placement::Bucket,
             })
         ),
         FleetEvent::Refused(FleetDirectoryRefusal::TenantIdTaken {
@@ -862,4 +870,231 @@ fn a_root_key_needs_a_formed_fleet() {
             label: "current".into()
         })
     );
+}
+
+fn assign(first: u16, last: u16, cell_id: u64) -> Vec<u8> {
+    entry(FleetCommand::AssignBuckets {
+        range: buckets::BucketRange::new(first, last).unwrap(),
+        cell_id,
+    })
+}
+
+#[test]
+fn the_first_cell_takes_every_bucket_and_a_new_cell_none() {
+    let directory = two_cells();
+    assert_eq!(
+        directory.buckets().count(CELL),
+        usize::from(buckets::BUCKETS)
+    );
+    assert_eq!(directory.buckets().count(OTHER), 0);
+    assert_eq!(directory.bucket_cell_of(b"acme"), Some(CELL));
+}
+
+#[test]
+fn a_bucket_placed_tenant_names_its_buckets_cell() {
+    let mut directory = two_cells();
+    let bucket = buckets::bucket_of(b"acme");
+    // To the other cell by its bucket: the bucket names this cell.
+    let elsewhere = entry(FleetCommand::RegisterTenant {
+        control: identifier(0x700, 0x701),
+        name: b"acme".to_vec(),
+        cell_id: OTHER,
+        survives: Survives::Az,
+        tags: UserTags::none(),
+        placement: buckets::Placement::Bucket,
+    });
+    assert_eq!(
+        directory.fold(5, &elsewhere),
+        FleetEvent::Refused(FleetDirectoryRefusal::BucketElsewhere {
+            bucket,
+            cell_id: CELL
+        })
+    );
+    // Move its bucket, then the same entry lands.
+    assert_eq!(
+        directory.fold(6, &assign(bucket, bucket, OTHER)),
+        FleetEvent::BucketsAssigned {
+            range: buckets::BucketRange::new(bucket, bucket).unwrap(),
+            cell_id: OTHER
+        }
+    );
+    assert_eq!(
+        directory.fold(7, &assign(bucket, bucket, OTHER)),
+        FleetEvent::Unchanged
+    );
+    assert!(matches!(
+        directory.fold(8, &elsewhere),
+        FleetEvent::TenantRegistered { cell_id: OTHER, .. }
+    ));
+    assert_eq!(directory.misplaced(), None);
+    // The bucket holds a tenant now: it does not move back.
+    assert_eq!(
+        directory.fold(9, &assign(0, buckets::BUCKETS - 1, CELL)),
+        FleetEvent::Refused(FleetDirectoryRefusal::BucketNotEmpty {
+            bucket,
+            tenant: TenantId(0x700)
+        })
+    );
+    // A checkpoint keeps the table and the placement.
+    let mut restored = FleetDirectory::default();
+    restored.restore(9, &directory.checkpoint()).unwrap();
+    assert_eq!(restored.buckets(), directory.buckets());
+    assert_eq!(
+        restored
+            .tenant(TenantId(0x700))
+            .map(|t| t.placement.clone()),
+        Some(buckets::Placement::Bucket)
+    );
+}
+
+#[test]
+fn an_override_wins_over_the_bucket_and_never_blocks_a_move() {
+    let mut directory = two_cells();
+    let named = entry(FleetCommand::RegisterTenant {
+        control: identifier(0x700, 0x701),
+        name: b"acme".to_vec(),
+        cell_id: OTHER,
+        survives: Survives::Az,
+        tags: UserTags::none(),
+        placement: buckets::Placement::override_for("dedicated"),
+    });
+    assert!(matches!(
+        directory.fold(5, &named),
+        FleetEvent::TenantRegistered { cell_id: OTHER, .. }
+    ));
+    assert_eq!(
+        directory
+            .tenant(TenantId(0x700))
+            .map(|t| t.placement.label()),
+        Some("override (dedicated)".to_string())
+    );
+    // The universe tenant and the cell tenants are placed by their kind.
+    assert!(
+        directory
+            .tenants()
+            .all(|(_, t)| t.kind == TenantKind::Users || !t.placement.is_bucket())
+    );
+    // Every bucket can move to the other cell: no tenant is placed by one.
+    assert!(matches!(
+        directory.fold(6, &assign(0, buckets::BUCKETS - 1, OTHER)),
+        FleetEvent::BucketsAssigned { .. }
+    ));
+    assert_eq!(directory.bucket_cell_of(b"acme"), Some(OTHER));
+}
+
+#[test]
+fn buckets_go_only_to_a_ready_cell_and_hold_a_cell_in_the_universe() {
+    let mut directory = two_cells();
+    assert_eq!(
+        directory.fold(5, &assign(0, 9, 0x5eed)),
+        FleetEvent::Refused(FleetDirectoryRefusal::UnknownCell { cell_id: 0x5eed })
+    );
+    assert!(matches!(
+        directory.fold(6, &assign(0, 9, OTHER)),
+        FleetEvent::BucketsAssigned { .. }
+    ));
+    let removing = entry(FleetCommand::MarkCell {
+        cell_id: OTHER,
+        state: CellState::Removing,
+    });
+    assert!(matches!(
+        directory.fold(7, &removing),
+        FleetEvent::CellMarked { .. }
+    ));
+    assert_eq!(
+        directory.fold(8, &assign(10, 19, OTHER)),
+        FleetEvent::Refused(FleetDirectoryRefusal::CellNotReady { cell_id: OTHER })
+    );
+    let remove_cell = entry(FleetCommand::RemoveCell { cell_id: OTHER });
+    assert_eq!(
+        directory.fold(9, &remove_cell),
+        FleetEvent::Refused(FleetDirectoryRefusal::CellHoldsBuckets {
+            cell_id: OTHER,
+            buckets: 10
+        })
+    );
+    assert!(matches!(
+        directory.fold(10, &assign(0, 9, CELL)),
+        FleetEvent::BucketsAssigned { .. }
+    ));
+    assert_eq!(
+        directory.fold(11, &remove_cell),
+        FleetEvent::CellRemoved { cell_id: OTHER }
+    );
+}
+
+#[test]
+fn a_version_5_registration_reads_as_an_override() {
+    let mut record = FleetEntry::new(
+        FLEET,
+        FleetCommand::RegisterTenant {
+            control: identifier(0x700, 0x701),
+            name: b"acme".to_vec(),
+            cell_id: CELL,
+            survives: Survives::Az,
+            tags: UserTags::none(),
+            placement: buckets::Placement::Bucket,
+        },
+    );
+    let mut wire = paros_wire::fleet::FleetEntry::decode(record.encode().as_slice()).unwrap();
+    wire.version = 5;
+    if let Some(paros_wire::fleet::fleet_entry::Kind::RegisterTenant(register)) = &mut wire.kind {
+        register.placement = 0;
+    }
+    let decoded = FleetEntry::decode(&wire.encode_to_vec()).unwrap();
+    record.version = 5;
+    record.command = match record.command {
+        FleetCommand::RegisterTenant {
+            control,
+            name,
+            cell_id,
+            survives,
+            tags,
+            ..
+        } => FleetCommand::RegisterTenant {
+            control,
+            name,
+            cell_id,
+            survives,
+            tags,
+            placement: buckets::Placement::override_for("placed before buckets"),
+        },
+        other => other,
+    };
+    assert_eq!(decoded, record);
+    // At version 6, a registration names its placement.
+    wire.version = 6;
+    assert!(FleetEntry::decode(&wire.encode_to_vec()).is_err());
+}
+
+#[test]
+fn a_selector_picks_a_ready_matching_cell_with_the_fewest_tenants() {
+    let mut directory = two_cells();
+    let tag = |request, cell_id, text: &str| {
+        entry(FleetCommand::SetCellTags {
+            request,
+            cell_id,
+            tags: UserTags::parse(&[text]).unwrap(),
+        })
+    };
+    assert!(matches!(
+        directory.fold(5, &tag(1, CELL, "env:prod")),
+        FleetEvent::CellTagged { .. }
+    ));
+    assert!(matches!(
+        directory.fold(6, &tag(2, OTHER, "env:prod")),
+        FleetEvent::CellTagged { .. }
+    ));
+    let prod: crate::tags::Selector = "env:prod".parse().unwrap();
+    // Both match and hold no tenant: the first by name (the cell is unnamed).
+    assert_eq!(directory.select_cell(&prod, Survives::Az), Some(CELL));
+    assert!(matches!(
+        directory.fold(7, &register(0x700, b"acme")),
+        FleetEvent::TenantRegistered { .. }
+    ));
+    assert_eq!(directory.select_cell(&prod, Survives::Az), Some(OTHER));
+    // No regional cell carries a tenant that survives a region.
+    assert_eq!(directory.select_cell(&prod, Survives::Region), None);
+    let staging: crate::tags::Selector = "env:staging".parse().unwrap();
+    assert_eq!(directory.select_cell(&staging, Survives::Az), None);
 }

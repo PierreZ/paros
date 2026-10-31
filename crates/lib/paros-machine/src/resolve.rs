@@ -287,17 +287,15 @@ impl Folds {
                         "every machine of the book is answered"
                     );
                     // The tenant's batchers (#145, #753 (per-journal
-                    // proxies)): each machine the registry books a `batcher`
-                    // slot of one of the tenant's journals on, at the
-                    // address the book holds for it.
-                    ack.batchers = registry
-                        .map(|registry| booked_on(registry, tenant, Role::Batcher, &self.book))
-                        .unwrap_or_default();
-                    // Its frontends (#723 (frontend as a parosd role)),
-                    // likewise.
-                    ack.frontends = registry
-                        .map(|registry| booked_on(registry, tenant, Role::Frontend, &self.book))
-                        .unwrap_or_default();
+                    // proxies)), frontends (#723 (frontend as a parosd
+                    // role)) and replicas (#765 (booked proxies and
+                    // replicas)): each machine the registry books a slot of
+                    // the role on, at the address the book holds for it.
+                    if let Some(registry) = registry {
+                        ack.batchers = booked_on(registry, tenant, Role::Batcher, &self.book);
+                        ack.frontends = booked_on(registry, tenant, Role::Frontend, &self.book);
+                        ack.replicas = booked_on(registry, tenant, Role::Replica, &self.book);
+                    }
                 } else {
                     moonpool_assertions::reachable!(
                         "resolve: a machine points at the tenant's other cell"
@@ -502,8 +500,8 @@ fn booked_on(
     book: &[(NodeId, Address)],
 ) -> Vec<wire::Member> {
     assert!(
-        matches!(role, Role::Batcher | Role::Frontend),
-        "resolve names a tenant's batchers and frontends"
+        matches!(role, Role::Batcher | Role::Frontend | Role::Replica),
+        "resolve names a tenant's batchers, frontends and replicas"
     );
     let nodes: std::collections::BTreeSet<NodeId> = registry
         .bookings()
@@ -525,6 +523,9 @@ fn booked_on(
         match role {
             Role::Frontend => {
                 moonpool_assertions::reachable!("resolve: a machine names a tenant's frontends");
+            }
+            Role::Replica => {
+                moonpool_assertions::reachable!("resolve: a machine names a tenant's replicas");
             }
             _ => moonpool_assertions::reachable!("resolve: a machine names a tenant's batchers"),
         }

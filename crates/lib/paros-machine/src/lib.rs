@@ -86,7 +86,7 @@ use paros_storage::RunError;
 use paros_tunables::DriverTunables;
 
 pub use admitted::AdmittedMachine;
-pub use cache::spawn_writer;
+pub use cache::{WriterEnd, spawn_writer};
 pub use disk::ProviderDisk;
 pub(crate) use disk::{read_all, write_all};
 pub use formed::{FormationToken, FormedCell};

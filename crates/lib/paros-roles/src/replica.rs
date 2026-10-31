@@ -77,7 +77,7 @@ use paros_wire::{
 /// and its floor. Nothing is replayed — a replica runs no application
 /// (#186); its chosen prefix is its whole state.
 #[tracing::instrument(level = "debug", skip_all, fields(replica = self_id))]
-fn report_boot<A: Audit>(replica: &ReplicaNode, self_id: u64, audit: &A) {
+pub(crate) fn report_boot<A: Audit>(replica: &ReplicaNode, self_id: u64, audit: &A) {
     let chosen_index = replica.replica().chosen_index();
     let floor = replica.first_slot();
     audit.replica_booted(NodeId(self_id), chosen_index, floor);
@@ -235,7 +235,7 @@ fn serve_reads<A: Audit>(
 
 /// Surface an inbound message's arrival for a human reading the trace, the
 /// mirror of the sender's `msg_sent`.
-fn trace_received(self_id: u64, msg: &paros_core::Message) {
+pub(crate) fn trace_received(self_id: u64, msg: &paros_core::Message) {
     let kind = message_kind(msg);
     if let Some((from, ballot, slot)) = message_route(msg) {
         tracing::info!(
@@ -257,7 +257,7 @@ fn trace_received(self_id: u64, msg: &paros_core::Message) {
 /// force, and the read is served once the row answered whole and this
 /// replica folded the maximum watermark — parked until then. The row
 /// override is the node's hook, asked only under a grid, from the loop.
-fn open_read<A: Audit>(
+pub(crate) fn open_read<A: Audit>(
     replica: &mut ReplicaNode,
     reads: &mut JournalReads,
     req: Read,
@@ -289,7 +289,11 @@ fn open_read<A: Audit>(
 
 /// Scan the replica's store and check its format marker against `boot`;
 /// the replica's id.
-async fn boot_store<S, A>(storage: &mut S, boot: BootKind, audit: &A) -> Result<u64, RunError>
+pub(crate) async fn boot_store<S, A>(
+    storage: &mut S,
+    boot: BootKind,
+    audit: &A,
+) -> Result<u64, RunError>
 where
     S: LogStorage,
     A: Audit + Clone + Send + Sync + 'static,
@@ -305,17 +309,17 @@ where
 
 /// One journal this replica serves (#193): its own `ReplicaNode`, store,
 /// reads and audit port. Nothing crosses journals.
-struct ReplicaRt<S, A> {
-    replica: ReplicaNode,
-    storage: S,
-    reads: JournalReads,
-    audit: A,
+pub(crate) struct ReplicaRt<S, A> {
+    pub(crate) replica: ReplicaNode,
+    pub(crate) storage: S,
+    pub(crate) reads: JournalReads,
+    pub(crate) audit: A,
 }
 
 impl<S: LogStorage, A: Audit + Clone + Send + Sync + 'static> ReplicaRt<S, A> {
     /// Drain this journal's batch and serve the reads it confirmed, `expire`
     /// as [`serve_and_advance`] takes it; whether a read was confirmed.
-    async fn settle(
+    pub(crate) async fn settle(
         &mut self,
         out: &Outbound,
         self_id: u64,
@@ -344,7 +348,7 @@ impl<S: LogStorage, A: Audit + Clone + Send + Sync + 'static> ReplicaRt<S, A> {
 
 /// Note that `journal`'s replica confirmed a read: one replica serving reads
 /// for two journals is the shared process #193 makes of it.
-fn note_read(read: &mut BTreeSet<JournalIdentifier>, journal: JournalIdentifier) {
+pub(crate) fn note_read(read: &mut BTreeSet<JournalIdentifier>, journal: JournalIdentifier) {
     if read.insert(journal) && read.len() >= 2 {
         moonpool_assertions::reachable!("replica: one replica serves reads for two journals");
     }

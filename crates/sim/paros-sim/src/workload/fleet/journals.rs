@@ -64,7 +64,7 @@ const JOURNAL_NAMES: [&[u8]; 3] = [b"orders", b"events", b"audit"];
 
 /// The names of the journals the admitted-slot scenario creates after
 /// chaos, apart from the ones the run's steps use.
-const TAIL_NAMES: [&[u8]; 3] = [b"tail-one", b"tail-two", b"tail-three"];
+pub(super) const TAIL_NAMES: [&[u8]; 3] = [b"tail-one", b"tail-two", b"tail-three"];
 
 impl FleetOps {
     /// The journal name `draw` picks: always the first on a reused-name

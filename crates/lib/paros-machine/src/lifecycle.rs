@@ -634,13 +634,13 @@ where
         matchmakers: plan.matchmakers(),
         spares: Vec::new(),
     };
-    let cache = super::spawn_writer(
+    let (cache, writer) = super::spawn_writer(
         &providers,
         disk.clone(),
         audits(AuditScope::Machine),
         node_id,
         cell.cached.clone(),
-        shutdown.clone(),
+        &shutdown,
     );
     // A founding member hosts every tenant's matchmaker set (#190).
     let matchmaker = MatchmakerConfig {
@@ -678,7 +678,7 @@ where
     );
     tracing::info!(machine = %cell.facts.name, addr = %cell.facts.addr, %listen, "machine_serving");
     cell.facts.metrics.set_phase(Phase::Serving);
-    paros_roles::node::run_journals(
+    let ran = paros_roles::node::run_journals(
         providers,
         stores,
         node_id,
@@ -696,8 +696,9 @@ where
         transport,
         shutdown,
     )
-    .await
-    .map_err(MachineError::Run)
+    .await;
+    writer.stop().await;
+    ran.map_err(MachineError::Run)
 }
 
 /// Serve the journals placed on the admitted machine `admitted` until
@@ -763,13 +764,13 @@ where
             .collect(),
         spares: Vec::new(),
     };
-    let cache = super::spawn_writer(
+    let (cache, writer) = super::spawn_writer(
         &providers,
         disk.clone(),
         audits(AuditScope::Machine),
         node_id,
         admitted.cached.clone(),
-        shutdown.clone(),
+        &shutdown,
     );
     let mut stores = MachineStores::admitted(disk, record, admission.cell.cell, audits);
     // A storage machine hosts the matchmaker sets the registry books on it
@@ -797,7 +798,7 @@ where
     let listen = admitted.facts.listen;
     tracing::info!(machine = %admitted.facts.name, addr = %admitted.facts.addr, %listen, "machine_serving_admitted_journals");
     admitted.facts.metrics.set_phase(Phase::Serving);
-    paros_roles::node::run_journals(
+    let ran = paros_roles::node::run_journals(
         providers,
         stores,
         node_id,
@@ -815,8 +816,9 @@ where
         transport,
         shutdown,
     )
-    .await
-    .map_err(MachineError::Run)
+    .await;
+    writer.stop().await;
+    ran.map_err(MachineError::Run)
 }
 
 /// The record on `disk` of machine `node`, as it stands now.

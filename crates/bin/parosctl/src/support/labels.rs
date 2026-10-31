@@ -122,6 +122,25 @@ impl Labels {
         }
     }
 
+    /// The names of the universe's cells and tenants, from its directory
+    /// (#713 (bucket placement)): what a universe command that read the
+    /// directory prints a refusal with.
+    pub fn from_directory(directory: &paros::model::fleet::FleetDirectory) -> Self {
+        let mut labels = Self::default();
+        for (cell_id, _) in directory.cells() {
+            let name = directory.cell_name(cell_id);
+            if !name.is_empty() {
+                labels.cells.insert(cell_id, record_text(name));
+            }
+        }
+        for (tenant, entry) in directory.tenants() {
+            if entry.kind == paros::model::fleet::TenantKind::Users {
+                labels.tenants.insert(tenant.0, record_text(&entry.name));
+            }
+        }
+        labels
+    }
+
     /// Name machine `id` `name`, unless a view already named it.
     pub fn name_machine(&mut self, id: u64, name: &str) {
         self.machines.entry(id).or_insert_with(|| name.to_string());

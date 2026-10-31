@@ -1737,6 +1737,9 @@ fn reach(stage: Stage) {
             assert_reachable!("fleet: a step adds a root key to the universe entry");
         }
         Stage::SetTags => assert_reachable!("fleet: a step sets an entity's tags"),
+        Stage::AssignBuckets => {
+            assert_reachable!("universe: a step assigns buckets to a cell");
+        }
         Stage::RemoveRootKey => {
             assert_reachable!("fleet: a step removes a root key from the universe entry");
         }
@@ -1748,6 +1751,12 @@ fn reach(stage: Stage) {
 /// registry's owner too, and a fold that meets a checkpoint with the whole prefix folded compares
 /// the two — the registry owner's oracle, for both of a session's journals.
 fn judge_folds(session: &FleetSession) {
+    let misplaced = session.directory().misplaced();
+    assert_always!(
+        misplaced.is_none(),
+        "universe: a tenant placed by its bucket lives in its bucket's cell",
+        { "tenant" => misplaced.map_or(0, |t| t.0) }
+    );
     let diverged = session.diverged();
     assert_always!(
         diverged.is_none(),
