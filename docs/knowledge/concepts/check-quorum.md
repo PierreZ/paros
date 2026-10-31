@@ -140,7 +140,8 @@ length) and of `Authority::holds` (why Phase 2).
 
 - `"a leader deposed by a promise-majority stops beating within an election timeout
   (CheckQuorum)"` (`assert_always!`): the budget is `2 × timeout + DEPOSED_TICK_SLACK` ticks
-  of beats after a promise majority moves past the leader's ballot.
+  of beats after a promise majority moves past the leader's ballot, or after its last ack at
+  that ballot, whichever is later.
 - `"a leader without an ack quorum steps down (CheckQuorum)"` (`assert_sometimes!`): some seed
   really makes the step-down happen.
 - Unit tests: `a_leader_without_an_ack_quorum_steps_down_after_its_window` and

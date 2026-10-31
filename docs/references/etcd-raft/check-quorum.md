@@ -66,7 +66,7 @@ func (r *raft) tickHeartbeat() {
 
 **(b) principle.** A leader keeps an election clock too. The clock does not start an election
 on a leader; it closes an **activity window**. The window has the same length as a follower's
-election timeout. The same clock also bounds a leader transfer (§5).
+election timeout. The same clock also bounds a leader transfer (§6).
 
 **(c) maps to sans-IO.** The check is a local message (`MsgCheckQuorum`) that the leader steps
 into itself. No I/O, no wall clock: the caller's `Tick` drives it.
@@ -140,7 +140,7 @@ reset is `Authority::renew`, and a failed check is `become_follower(None)`. Two 
   (`Authority::holds` calls `AcceptorConfig::has_phase2_quorum`). etcd-raft has only majority
   quorums, where the two are equal. Under flexible or grid quorums they differ.
 - paros credits an ack only when it echoes the leader's own ballot
-  (`on_heartbeat_ack`, `on_accepted`). etcd-raft ignores a lower-term response (`raft.go:1181`) before
+  (`on_heartbeat_ack`, `on_accepted`). etcd-raft ignores a lower-term response (`raft.go:1182`) before
   `stepLeader` runs, so the effect is the same.
 
 ## 5. The vote lease: the follower half

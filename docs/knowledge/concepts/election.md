@@ -19,8 +19,8 @@ same value. If it proposes another value, two values are chosen for one slot.
 A pipelined leader adds a second problem. The old leader can get slot 8 chosen while slot 7
 reached only one acceptor. No quorum reports slot 7, so the new leader has nothing to
 re-propose there. If it starts its allocator at 9, no node ever proposes slot 7 again, and the
-contiguous chosen prefix stops at 6 for ever ([paxos-vs-raft §5]: classic Paxos decides out
-of order "plus a gap-filling protocol").
+contiguous chosen prefix stops at 6 for ever ([paxos-vs-raft §5]: "classic Paxos often allows
+out-of-order decisions + a gap-filling protocol").
 
 ## 2. Model
 
@@ -89,7 +89,7 @@ sequenceDiagram
 
 - **The candidate loses.** A `Nack` at the campaign's ballot (`on_nack`) or a higher `Prepare`
   closes the campaign. The node waits for its next election timeout and campaigns again above
-  everything it saw ([PMMC §3]: preempted, go passive, bump the ballot).
+  everything it saw ([PMMC §2 "Leaders, Commanders, Scouts"]: preempted, go passive, bump the ballot).
 - **The candidate crashes.** Leadership is volatile: `ColocatedNode::new` boots a `Follower`.
   The durable promise stays, so the next campaign is at a strictly higher round.
 - **The new leader crashes mid-recovery.** The re-proposals it sent are ordinary accepted
@@ -108,7 +108,7 @@ The invariant is [PMMC §2] **A5**: if a quorum accepted `⟨b, s, c⟩`, every 
    If a value `v` was chosen at ballot `b0`, a quorum accepted it, and that quorum meets the
    promise quorum. By A5 every acceptance above `b0` carries `v`, so the highest report is `v`.
    This is the same rule in [PML §4.1] ("adopt the value with the highest sequence number")
-   and in [paxos-vs-raft §3.3] ("adopts the received entry with the greatest term").
+   and in [paxos-vs-raft §3.3] (the candidate adopts the received entry with the greatest term).
 2. **A slot with no report.** Nothing can be chosen there below `b`. A chosen value would have
    a quorum, the quorum would meet the promise quorum, and one `Promise` would report it.
    Nothing reported means free; the leader may propose anything, and paros proposes `Noop`
@@ -206,7 +206,8 @@ lists two of them under "Protocol invariants to remember".
   promise past the campaign's ballot. The win then skipped every self-accept, `next_slot`
   landed under an in-flight slot, and a second command could go to one `(slot, ballot)`.
   `phase1_won` now refuses a ballot below the promise (commit `5bef695`), and every path that
-  raises the promise closes the campaign (witness 13099780746496209636, PR #556).
+  raises the promise closes the campaign (witness 13099780746496209636, found on PR #556,
+  fixed in commit `629aa62`, #577).
 - **Union quorum is not enough (#121).** See §6. `Election::covered` is one predicate in one
   place for that reason.
 - **The read basis before recovery (#263).** Under `q2 = 1` the leader's own accept decides a

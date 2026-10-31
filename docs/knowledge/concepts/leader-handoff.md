@@ -86,8 +86,8 @@ sequenceDiagram
 ## 5. Recovery flow
 
 - **The message is lost.** A already stepped down, so nobody leads. The next election timeout
-  starts an ordinary election, which runs Phase 1. Availability cost only ([DPaxos §4.4]: "if
-  the message is lost, neither the old nor the new leader may act").
+  starts an ordinary election, which runs Phase 1. Availability cost only ([DPaxos §4.4]: "If the
+  `relinquish()` message is lost, neither the old nor the new leader may act as leader").
 - **The message is duplicated or sent to the wrong node.** The payload names `to`. Any other
   node refuses it (`rejected_target`). A second copy at C finds the authority already held or
   the frontier already past (`rejected_stale`).
@@ -112,10 +112,11 @@ structural instead of checked:
 1. **Abdication is synchronous.** `relinquish_to` queues the message and demotes the node in one
    call on the single-threaded core. The message cannot exist without the abdication, and it
    cannot reach the transport before the `Ready` batch that holds it.
-2. **A crash is an abdication.** `ColocatedNode::new` boots a follower; only
-   `try_become_leader` sets `Leader`, only from `Candidate`, and only at a fresh round strictly
-   above the promise and the operating ballot (`next_campaign_round`). So a restarted A can
-   never lead at `b` again.
+2. **A crash is an abdication.** `ColocatedNode::new` boots a follower. Only two paths set
+   `Leader`: `try_become_leader`, from `Candidate` and only at a fresh round strictly above the
+   promise and the operating ballot (`next_campaign_round`), and `on_relinquish`, for a ballot
+   another node minted and sent to it. A restarted A minted `b` and nobody may hand `b` back to
+   it (rule 5), so A can never lead at `b` again.
 3. **The successor is in the payload.** The transport is never trusted with uniqueness.
 4. **The successor checks its own durable promise and frontier.** `ballot < promised` means
    some node already ran Phase 1 past `b`. A frontier below its own means a replay.
