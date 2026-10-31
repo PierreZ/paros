@@ -152,8 +152,8 @@ position, and the journal judges it (a single-writer journal merges in its `Pipe
 #709 (merge fenced writes)). An empty write also goes alone.
 
 Every machine serves the batcher endpoint over the cell's address book. The tenant coordinator
-books a tenant's batchers, by its `batchers=` count, on the cell's `stateless` machines (section
-3.4), and `Resolve` names them (section 3.5). A client of a multi-writer journal sends its writes
+books each multi-writer journal's batchers, by its `batchers=` count, on the cell's `stateless`
+machines (section 3.4, #753 (per-journal proxies)), and `Resolve` names them (section 3.5). A client of a multi-writer journal sends its writes
 to a batcher it was given (`Resolved::batcher_servers`). `paros::roles::batcher::run_batcher` runs a
 batcher on its own address, in front of a fixed list of nodes.
 

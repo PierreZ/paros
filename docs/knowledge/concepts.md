@@ -20,9 +20,9 @@ yet; the sources are known), **waits for a source** (no source outside paros yet
 | Quorums | Flexible quorums | [flexible-quorums](concepts/flexible-quorums.md) | verified | `membership/quorum_system.rs`, `membership/acceptor_config.rs` | flexible-paxos §3–§5/§7, generalised-distributed-consensus §4.1 |
 | Quorums | Grid quorums (acceptor partitions) | [grid-quorums](concepts/grid-quorums.md) | verified | `membership/quorum_system.rs`, `node/policy.rs` (`move_round`), `paros-roles` `node/grid.rs` | scaling-rsm-compartmentalization §3.2, flexible-paxos §4, wpaxos §3.1, frankenpaxos `04-compartmentalization.md` |
 | Quorums | Zone rule | [zone-rule](concepts/zone-rule.md) | verified | `membership/zone_rule.rs`, `membership/failure_domain.rs`, `paros-model` `placement.rs` | wpaxos §3.1/§5.3, flexible-paxos §3, aws-cell-based-architecture |
-| Compartmentalization | Proxy leaders | | planned | `proxy_leader.rs`, `proposer/rounds.rs` | scaling-rsm-compartmentalization; frankenpaxos |
-| Compartmentalization | Batchers and unbatchers | | planned | `batcher.rs` | scaling-rsm-compartmentalization; frankenpaxos |
-| Compartmentalization | Replica tier | | planned | `replica_node.rs` | scaling-rsm-compartmentalization; frankenpaxos |
+| Compartmentalization | Proxy leaders | [proxy-leaders](concepts/proxy-leaders.md) | verified | `proxy_leader.rs`, `proposer/rounds.rs`, `node/policy.rs`, `models/proxy.rs`, `paros-roles` `proxy_leader.rs` | scaling-rsm-compartmentalization §3.1/§8.1, frankenpaxos `04-compartmentalization.md` §3 |
+| Compartmentalization | Batchers and unbatchers | [batchers](concepts/batchers.md) | verified | `batcher.rs`, `paros-roles` `batcher.rs` | scaling-rsm-compartmentalization §4.1–§4.2/§8.4, frankenpaxos `04-compartmentalization.md` §2 |
+| Compartmentalization | Replica tier | [replica-tier](concepts/replica-tier.md) | verified | `replica_node.rs`, `replica.rs`, `paros-roles` `replica.rs` | scaling-rsm-compartmentalization §3.3–§3.5/§8.5, frankenpaxos `04-compartmentalization.md` §4 |
 | Reads | Leaderless quorum reads | | planned | `quorum_read.rs`, `node/quorum_reads.rs` | scaling-rsm-compartmentalization §3.4; Paxos Quorum Reads (transcript to add) |
 | Reconfiguration | Matchmaking and Phase 1 over every configuration | | planned | `matchmaking.rs`, `node/matchmaking.rs` | matchmaker-paxos; frankenpaxos |
 | Reconfiguration | Reconfiguration as a round change, beliefs and the membership probe | | planned | `node/reconfigure.rs`, `matchmaking/probe.rs` | matchmaker-paxos |

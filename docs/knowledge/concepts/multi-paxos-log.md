@@ -168,7 +168,7 @@ never covers Phase-1-shaped work).
 - [Election, P2c merge and gap fill](election.md): the one Phase 1 for the whole suffix.
 - [Persist before send](persist-before-send.md), [pipelining and resend](pipelining-and-resend.md),
   [catch-up](catch-up.md): the rest of the Kernel group.
-- Proxy leaders, batchers, replica tier (planned): the same log with the leader's work split.
+- [Proxy leaders](proxy-leaders.md), [batchers](batchers.md), [replica tier](replica-tier.md): the same log with the leader's work split.
 - Writer fence (planned): what the journal fold judges at apply.
 
 ## 12. Sources
