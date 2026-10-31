@@ -25,6 +25,7 @@ fn tenant(at_ms: u64, tenant: &str) -> Action {
         at_ms,
         Op::CreateTenant {
             tenant: tenant.into(),
+            cell: None,
         },
     )
 }
@@ -36,6 +37,7 @@ fn journal(at_ms: u64, tenant: &str, journal: &str, mode: &str) -> Action {
             tenant: tenant.into(),
             journal: journal.into(),
             mode: mode.into(),
+            multi: false,
         },
     )
 }
@@ -166,9 +168,11 @@ fn a_crashed_leader_is_replaced_and_acceptors_show_their_state() {
 
     // Crash the leader: the journal elects another and takes writes again.
     let mut actions = base.clone();
-    actions.push(at(400, Op::Crash { machine: leader }));
-    actions.push(write(500, "acme", "orders", 2));
-    actions.push(at(20_000, Op::Restart { machine: leader }));
+    // A fault strikes at its time, even inside a step: crash the leader
+    // once the steps before it ended.
+    actions.push(at(10_000, Op::Crash { machine: leader }));
+    actions.push(write(10_100, "acme", "orders", 2));
+    actions.push(at(25_000, Op::Restart { machine: leader }));
     let second = run(&config, &actions);
     assert_eq!(second.error, None, "{second:#?}");
     for step in &second.steps {
@@ -295,4 +299,138 @@ fn adding_a_machine_already_in_the_cell_fails_and_outside_the_universe_is_refuse
         ],
     );
     assert!(refused.error.is_some(), "{refused:#?}");
+}
+
+/// The DEMO's steps a cell can take (#813 (live playground)).
+fn demo_steps() -> Vec<Action> {
+    let names = |tenant: &str, journal: &str| (tenant.to_string(), journal.to_string());
+    let (acme, orders) = names("acme", "orders");
+    let (initech, events) = names("initech", "events");
+    vec![
+        at(0, Op::Init { machines: 3 }),
+        at(100, Op::AddMachine { machine: 3 }),
+        at(
+            200,
+            Op::AddCell {
+                machines: vec![5, 6, 7],
+            },
+        ),
+        at(
+            300,
+            Op::CreateTenant {
+                tenant: acme.clone(),
+                cell: Some("cell-1".into()),
+            },
+        ),
+        at(
+            400,
+            Op::CreateTenant {
+                tenant: initech.clone(),
+                cell: Some("cell-2".into()),
+            },
+        ),
+        journal(500, "acme", "orders", "machines=1"),
+        at(
+            600,
+            Op::CreateJournal {
+                tenant: initech.clone(),
+                journal: events.clone(),
+                mode: "machines=1".into(),
+                multi: true,
+            },
+        ),
+        write(700, "acme", "orders", 2),
+        write(800, "initech", "events", 2),
+        at(
+            900,
+            Op::SetLeader {
+                tenant: acme.clone(),
+                journal: orders.clone(),
+            },
+        ),
+        at(
+            1_000,
+            Op::Stream {
+                tenant: acme.clone(),
+                journal: orders.clone(),
+                on: true,
+            },
+        ),
+        // Steps queue behind the slow ones: the writer runs from about 6 s.
+        at(
+            12_000,
+            Op::Stream {
+                tenant: acme.clone(),
+                journal: orders.clone(),
+                on: false,
+            },
+        ),
+        read(12_100, "acme", "orders", 3),
+        at(
+            12_200,
+            Op::Configure {
+                tenant: acme.clone(),
+                journal: orders.clone(),
+                mode: "machines=1,replicas=1".into(),
+            },
+        ),
+        at(12_300, Op::Resolve { tenant: initech }),
+        at(
+            12_400,
+            Op::Maintenance {
+                machine: 3,
+                for_ms: 10_000,
+            },
+        ),
+        at(12_500, Op::Drain { machine: 3 }),
+    ]
+}
+
+#[test]
+fn a_second_cell_a_new_leader_a_multi_writer_journal_and_the_cell_commands() {
+    // #813 (live playground): the DEMO's steps a cell can take, in one run.
+    let config = Config {
+        machines: 8,
+        run_ms: 40_000,
+        ..Config::default()
+    };
+    let actions = demo_steps();
+    let view = run(&config, &actions);
+    assert_eq!(view.error, None, "{view:#?}");
+    assert_eq!(view.steps.len(), actions.len(), "{:#?}", view.steps);
+    for step in &view.steps {
+        assert!(step.ok, "step failed: {step:#?}");
+    }
+    let detail = |index: usize| {
+        view.steps
+            .iter()
+            .find(|s| s.index == index)
+            .map(|s| s.detail.clone())
+            .expect("the step ran")
+    };
+    assert!(detail(9).contains("refused"), "{}", detail(9));
+    // The started writer appended past the two first records.
+    assert!(detail(12).starts_with("3 records"), "{}", detail(12));
+    assert!(!detail(12).contains("orders-1,"), "{}", detail(12));
+    assert!(detail(14).contains("cell=cell-2"), "{}", detail(14));
+
+    let last = view.topology.last().expect("a topology");
+    let cells: Vec<&str> = last.cells.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(cells, ["cell-1", "cell-2"], "{last:#?}");
+    assert_eq!(last.cells[1].machines, [5, 6, 7], "{last:#?}");
+    let initech = last
+        .tenants
+        .iter()
+        .find(|t| t.name == "initech")
+        .expect("initech");
+    assert_eq!(initech.cell, "cell-2", "{initech:#?}");
+    let events = initech
+        .journals
+        .iter()
+        .find(|j| j.name == "events")
+        .expect("initech/events");
+    assert!(
+        events.members.iter().all(|m| [5, 6, 7].contains(m)),
+        "{events:#?}"
+    );
 }
