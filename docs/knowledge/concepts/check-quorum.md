@@ -185,7 +185,8 @@ length) and of `Authority::holds` (why Phase 2).
   fence.
 - [Leader handoff](leader-handoff.md): an install opens a fresh window and an inherited fence,
   with a deadline to cover it.
-- Flexible quorums and grid quorums (planned): why the window asks for a Phase-2 quorum.
+- [Flexible quorums](flexible-quorums.md) and [grid quorums](grid-quorums.md): why the window
+  asks for a Phase-2 quorum.
 - Leaderless quorum reads (planned): why paros needs no lease.
 - Configuration GC (planned): it counts chosen indices past the fence.
 
