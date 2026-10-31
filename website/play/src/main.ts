@@ -9,6 +9,7 @@ import './styles.css';
 import init, { WasmGame } from './wasm/paros_paxos.js';
 import { Game, decodeLevels } from './game';
 import { parseHash, type Route } from './route';
+import { parseOptions, runLink, type Theme } from './replay';
 import { h, replace } from './render/dom';
 import { wipedNodes } from './render/disk';
 import { gridCells, gridOf } from './render/grid';
@@ -39,6 +40,44 @@ let game: Game | null = null;
 let controls: ControlState = newControlState();
 let route: Route = parseHash(window.location.hash);
 
+// ---- page options: embed, replay, theme --------------------------------------
+//
+// `?embed` mounts one level alone: the site's `scenario` shortcode puts it in
+// a frame. `?log=` replays a run when its level opens, once. `?theme=` and the
+// holding page's messages set the colours; without them, the system setting
+// decides.
+
+const options = parseOptions(window.location.search);
+let pendingLog = options.log;
+if (options.embed) document.documentElement.classList.add('embed');
+
+const darkQuery = window.matchMedia('(prefers-color-scheme: dark)');
+let theme: Theme | null = options.theme;
+
+function applyTheme(): void {
+  const resolved: Theme = theme ?? (darkQuery.matches ? 'dark' : 'light');
+  document.documentElement.dataset['theme'] = resolved;
+}
+applyTheme();
+darkQuery.addEventListener('change', applyTheme);
+
+// The holding page tells the frame when its reader flips the theme.
+window.addEventListener('message', (event) => {
+  if (event.origin !== window.location.origin) return;
+  const data = event.data as { parosTheme?: unknown } | null;
+  if (data && (data.parosTheme === 'light' || data.parosTheme === 'dark')) {
+    theme = data.parosTheme;
+    applyTheme();
+  }
+});
+
+/** Tell the holding page how tall the scenario is, so the frame never scrolls. */
+function reportHeight(): void {
+  if (!options.embed || window.parent === window) return;
+  const height = Math.ceil(document.documentElement.scrollHeight);
+  window.parent.postMessage({ parosScenarioHeight: height, level: route.kind === 'level' ? route.id : null }, window.location.origin);
+}
+
 // ---- the viewport -----------------------------------------------------------
 //
 // The stage is drawn for the width it is given, not for the screen. A phone
@@ -64,6 +103,8 @@ function reducedMotion(): boolean {
 // ---- progress ---------------------------------------------------------------
 
 function recordProgress(view: GameView): void {
+  // A scenario on a site page is a demonstration, not a play-through.
+  if (options.embed) return;
   const summary = levels.find((level) => level.id === view.level.id);
   if (view.goal.status === 'reached') {
     progress = recordPass(view.level.id, view.mistakes, summary?.unlocks ?? []);
@@ -187,9 +228,12 @@ function render(): void {
       fold: (folded: boolean) => {
         progress = foldBriefing(view.level.id, folded);
       },
+      embed: options.embed,
+      runLink: runLink(window.location.pathname, view.level.id, game.actions),
     }),
   );
   restoreFocus(memory);
+  reportHeight();
 }
 
 // ---- the stage's own interactions ------------------------------------------
@@ -363,6 +407,9 @@ const sizes = new ResizeObserver(() => {
   render();
 });
 sizes.observe(app);
+// A scenario grows and shrinks without a render too (a folded briefing, a
+// details block), and the frame follows it.
+if (options.embed) new ResizeObserver(reportHeight).observe(document.body);
 
 // ---- routing ----------------------------------------------------------------
 
@@ -378,6 +425,10 @@ function openRoute(next: Route): void {
   }
   try {
     game = new Game(new WasmGame(next.id));
+    if (pendingLog) {
+      game.replay(pendingLog);
+      pendingLog = null;
+    }
   } catch (cause) {
     game = null;
     if (app) {

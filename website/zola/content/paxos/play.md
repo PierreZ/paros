@@ -120,6 +120,17 @@ is where paros proves its claims, over thousands of seeded runs with network
 faults, crashes and storage faults. Every chapter's "Proven, not asserted" section
 reports what that simulation holds.
 
+## Scenarios on the pages
+
+A level can also run inside a page, as a **scenario**. The pages of
+[the tricky parts](@/paxos/tricky/_index.md) mount the levels that show their rule. A
+scenario is the same build as the game, with one level and no level map. It follows the
+theme of the page.
+
+A run depends only on two things: the level and your moves. The game draws no randomness,
+so it has no seed. "Link to this run" in the panel holds the level and your moves, and the
+link replays the run exactly.
+
 ## How this book relates to it
 
 The levels teach the mechanism. The chapters are the **field guide** beside them:
