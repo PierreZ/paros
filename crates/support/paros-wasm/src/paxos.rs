@@ -517,6 +517,20 @@ mod wasm {
     /// every action is validated before it reaches `paros-core`, whose own
     /// `assert!`s would abort the module — and
     /// `console_error_panic_hook` is installed for whatever is left.
+    /// The step-through trace of one `/paxos/` page (#811 (Paxos flavor
+    /// pages)), recorded now by `paros-core` in the browser, as JSON.
+    ///
+    /// # Errors
+    ///
+    /// A JS exception when no page has that name.
+    #[wasm_bindgen]
+    pub fn paxos_trace(page: &str) -> Result<String, JsError> {
+        console_error_panic_hook::set_once();
+        let trace = crate::paxos::trace::trace_of(page)
+            .ok_or_else(|| JsError::new(&format!("no Paxos page {page:?}")))?;
+        Ok(json(&trace))
+    }
+
     #[wasm_bindgen]
     pub struct WasmGame {
         inner: crate::paxos::Game,

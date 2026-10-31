@@ -61,6 +61,8 @@ calls the core (a core `assert!` in wasm is an abort): every player-reachable re
   script per page on a level's setup (`Game::act_freely`, so a run may use any verb), each
   message one step with the engine's narration (sentences to the player removed) and every
   lane's state. A "what if" run's `fork` is its first step that differs from the base run.
+  The wasm export `paxos_trace(page)` records one page in the browser; the page draws that
+  live run (bundle `paros_paxos`, staged into `website/site/public/paxos/wasm/`).
 - `tests/paxos_traces.rs` → writes `website/site/src/traces/*.json` (committed, diffed in CI).
 - `tests/paxos_bindings.rs` → writes `website/play/src/generated/` from the `ts_rs::TS` derives.
 - `tests/paxos_levels.rs` → every reference reaches its goal; wrong answers refused and inert; undo/replay bit-exact; ids unique; act order; field-guide links bare; unlocks pinned manual.

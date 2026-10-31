@@ -48,7 +48,10 @@ or the Paxos tools. The playground says that the network, the disk and the clock
 A Paxos page names its trace in its front matter (`trace: single-decree`) and puts
 `<div data-steps>` where the diagram goes. `src/layouts/Doc.astro` inlines
 `src/traces/<name>.json`, and `public/steps.js` draws it: one lane per role, one row per
-message, play / step / back / restart, and one button per "what if" run. The traces are
-recorded from the real `paros-core` by `cargo test -p paros-wasm --test paxos_traces`
-(`crates/support/paros-wasm/src/paxos/trace/pages.rs`); never edit the JSON by hand. To
-change a run, change its script there and re-run the test.
+message, play / step / back / restart, and one button per "what if" run. Then `steps.js`
+loads `paros-core` compiled to wasm (`public/paxos/wasm/`, staged by `scripts/build-wasm.sh`,
+gitignored), calls `paxos_trace(page)` and draws the live run at the same step. The JSON is
+the fallback when the wasm does not load (`npm run dev` without `scripts/build-wasm.sh`).
+`cargo test -p paros-wasm --test paxos_traces` writes the JSON from the same scripts
+(`crates/support/paros-wasm/src/paxos/trace/pages.rs`) and proves a page recorded alone is
+the same run; never edit the JSON by hand.

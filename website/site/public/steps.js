@@ -1,21 +1,48 @@
 // The step-through diagram of the Paxos pages (#811 (Paxos flavor pages)).
 //
-// It draws one recorded trace (src/traces/<page>.json, written by
-// `cargo test -p paros-wasm --test paxos_traces` from the real paros-core)
-// as a sequence diagram: one lane per role, one row per message. The page
+// It first draws the recorded trace (src/traces/<page>.json, written by
+// `cargo test -p paros-wasm --test paxos_traces` from the real paros-core),
+// then loads paros-core compiled to wasm and draws the same runs computed
+// live in the browser. A trace is a sequence diagram: one lane per role,
+// one row per message. The page
 // holds the trace in <script type="application/json" id="trace"> and a
-// <div data-steps> where the diagram goes. No protocol logic here: every
+// <div data-steps> where the diagram goes; the script's data-wasm names the
+// wasm bundle. No protocol logic here: every
 // message, note and lane state comes from the trace.
 (function () {
   var data = document.getElementById("trace");
-  var mount = document.querySelector("[data-steps]");
-  if (!data || !mount) return;
-  var trace = JSON.parse(data.textContent);
+  var first = document.querySelector("[data-steps]");
+  if (!data || !first) return;
+  var wasm = data.dataset.wasm;
+  var current = draw(JSON.parse(data.textContent), first, false, null);
+
+  // Then run the same scripts live: paros-core compiled to wasm (the
+  // `paxos` feature of paros-wasm) records the trace again in the browser,
+  // and the diagram switches to it at the same step.
+  if (wasm) {
+    import(wasm)
+      .then(function (engine) {
+        return engine.default().then(function () {
+          return JSON.parse(engine.paxos_trace(current.page));
+        });
+      })
+      .then(function (live) {
+        current = draw(live, current.panel, true, current.position());
+      })
+      .catch(function (err) {
+        console.warn("paros-core in wasm did not load; the diagram shows the recorded run", err);
+      });
+  }
+
+  function draw(trace, mount, live, keep) {
   var lanes = trace.lanes;
   var index = {};
   lanes.forEach(function (lane, i) { index[lane.id] = i; });
 
   var run = trace.scenarios[0];
+  if (keep) {
+    trace.scenarios.forEach(function (scenario) { if (scenario.id === keep.run) run = scenario; });
+  }
   var at = 0; // how many steps are shown
   var timer = null;
   var PACE = 900;
@@ -43,6 +70,9 @@
   var panel = el("section", "panel steps");
   var head = el("div", "panel-head label");
   head.appendChild(el("span", "title", "Step through"));
+  var source = el("span", "chip-status" + (live ? " done" : ""), live ? "live" : "recorded");
+  source.title = live ? "paros-core, compiled to wasm, runs this page's scripts now" : "recorded from paros-core at build time";
+  head.appendChild(source);
   var count = el("span", "meta tnum");
   head.appendChild(count);
   panel.appendChild(head);
@@ -162,7 +192,9 @@
     count.textContent = "step " + n + " / " + run.steps.length;
     note.textContent = "";
     if (!step) {
-      note.appendChild(el("p", "steps-hint", "Press Play or Step. Each step is one message that the real paros-core sent, delivered or lost."));
+      note.appendChild(el("p", "steps-hint", live
+        ? "Press Play or Step. paros-core, compiled to wasm, runs these scripts in this page. Each step is one message it sent, delivered or lost."
+        : "Press Play or Step. Each step is one message that the real paros-core sent, delivered or lost."));
     } else {
       step.notes.forEach(function (text) {
         var p = el("p");
@@ -226,5 +258,11 @@
   window.addEventListener("resize", function () {
     rows.querySelectorAll(".steps-msg").forEach(place);
   });
-  show(0);
+  show(keep ? keep.at : 0);
+  return {
+    panel: panel,
+    page: trace.page,
+    position: function () { stop(); return { run: run.id, at: at }; },
+  };
+  }
 })();

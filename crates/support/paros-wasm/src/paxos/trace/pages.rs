@@ -6,16 +6,31 @@ use crate::paxos::action::Action;
 use crate::paxos::trace::{Recorder, Trace, trace};
 use crate::paxos::view::{MessageView, PartyView};
 
+/// The script that records one page's trace.
+type Record = fn() -> Trace;
+
+/// The pages, in site order, and the script that records each.
+const PAGES: &[(&str, Record)] = &[
+    ("single-decree", single_decree),
+    ("multi-paxos", multi_paxos),
+    ("matchmaker", matchmaker),
+    ("compartmentalized", compartmentalized),
+    ("quorums", quorums),
+];
+
 /// Every page's trace, in site order.
 #[must_use]
 pub fn traces() -> Vec<Trace> {
-    vec![
-        single_decree(),
-        multi_paxos(),
-        matchmaker(),
-        compartmentalized(),
-        quorums(),
-    ]
+    PAGES.iter().map(|(_, record)| record()).collect()
+}
+
+/// The trace of one page, recorded now; `None` for an unknown page.
+#[must_use]
+pub fn trace_of(page: &str) -> Option<Trace> {
+    PAGES
+        .iter()
+        .find(|(name, _)| *name == page)
+        .map(|(_, record)| record())
 }
 
 // ---- shorthands --------------------------------------------------------------

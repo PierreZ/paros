@@ -9,7 +9,7 @@
 
 use std::path::PathBuf;
 
-use paros_wasm::paxos::trace::traces;
+use paros_wasm::paxos::trace::{trace_of, traces};
 
 fn out_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -46,4 +46,19 @@ fn traces_are_written() {
 #[test]
 fn traces_are_reproducible() {
     assert_eq!(traces(), traces(), "a trace draws no randomness");
+}
+
+#[test]
+fn a_page_is_recorded_alone_as_in_the_whole_set() {
+    // The browser records one page (`paxos_trace`); the committed files come
+    // from the whole set. They must be the same run.
+    for trace in traces() {
+        assert_eq!(
+            trace_of(&trace.page).as_ref(),
+            Some(&trace),
+            "{}",
+            trace.page
+        );
+    }
+    assert_eq!(trace_of("no-such-page"), None);
 }

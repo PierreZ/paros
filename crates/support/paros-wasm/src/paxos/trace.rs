@@ -18,7 +18,7 @@
 
 mod pages;
 
-pub use pages::traces;
+pub use pages::{trace_of, traces};
 
 use std::fmt::Write as _;
 
