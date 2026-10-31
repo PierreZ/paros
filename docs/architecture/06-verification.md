@@ -31,8 +31,13 @@ Simulation is the investment. Every milestone lands with its share of:
   creation, each step with its own reachable; a crash inside a checkpoint run and between its
   `End` and its truncate, for the registry and for the universe tenant; a truncate refused from a stale leader; the universe tenant
   unavailable while tenants serve; a coordinator killed mid-operation and its successor finishing
-  it. In M12: a second cell, a tenant move and a move of the universe tenant (a crash at each phase, then
-  a cell with a stale universe pointer still reaches it). With recovery (deferred): a lost cell
+  it. A second cell, formed under chaos on a layout machine or on 1 to 3 machines an operator
+  racks in the middle of the run (#490 (second cell mid-run), moonpool's `spawn_group`). An
+  operator lane (#489 (operator workload)): on a seed that draws it, one operator runs admin
+  processes one after another for the whole chaos phase (an admission, a drain, a window, a
+  tenant operation, a candidacy, a tag) while every client writes and reads; a write acknowledged
+  while each kind is open is a gate. In M12: a tenant move and a move of the universe tenant (a
+  crash at each phase, then a cell with a stale universe pointer still reaches it). With recovery (deferred): a lost cell
   control quorum recovered by `init --recover`.
 - Storage chaos on the shipped stores: every role runs on moonpool-journal (landed, #176, #261),
   with the ledgered journal-aware injector aimed through `Journal::regions` (striped by slot)
