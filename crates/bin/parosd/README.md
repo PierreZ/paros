@@ -22,22 +22,28 @@ From a fresh clone, Docker alone (the image is a plain multi-stage Rust build,
 the one build outside Nix):
 
 ```sh
-docker compose up -d --build        # five machines; each formats and waits
-docker compose run --rm init        # forms the cell
+docker compose up -d --build        # nine machines; each formats and waits
+docker compose run --rm init        # forms cell-1 and the universe
 docker compose run --rm parosctl tenant create acme
 docker compose run --rm parosctl journal create acme orders
 docker compose run --rm parosctl write acme/orders hello world --leader 7
 docker compose run --rm parosctl read acme/orders
 ```
 
-`docker-compose.yml` runs one cell of five `parosd` machines over three failure
-domains, every one the same image configured by `PAROS_*` variables alone:
+`docker-compose.yml` runs two cells of `parosd` machines over three zones, every one the same
+image configured by `PAROS_*` variables alone:
 
-| machine | class | zone | role today |
+| machine | class | zone | role |
 |---|---|---|---|
-| `node1`, `node2`, `node3` | `storage` | `zone-a`, `zone-b`, `zone-c` | the founding members: one network alias, `members`, resolves to the three |
-| `storage4` | `storage` | `zone-a` | waits for placement (M9, #211, #212) |
-| `stateless1` | `stateless` | `zone-b` | waits for placement (M9) |
+| `node1`, `node2`, `node3` | `storage` | `zone-a`, `zone-b`, `zone-c` | the founding members of `cell-1`: one network alias, `members`, resolves to the three |
+| `storage4` | `storage` | `zone-a` | admitted into `cell-1` with `cell add-machine` |
+| `stateless1` | `stateless` | `zone-b` | admitted into `cell-1`: proxy leaders, batchers, frontends and tenant coordinators |
+| `cell2-a`, `cell2-b`, `cell2-c` | `storage` | `zone-a`, `zone-b`, `zone-c` | the founding members of `cell-2` (`init-cell2`, then `add-cell2`): the alias `cell2` |
+| `cell2-stateless` | `stateless` | `zone-a` | admitted into `cell-2` |
+
+Every machine serves the resolver and the frontend once it is in a cell (#233 (resolver),
+#723 (frontend as a parosd role)). The site's pages "Cells and the universe" and "Machines and
+roles" describe the second cell, the bucket placement and the roles.
 
 **Start and wait.** A machine starts with its listen address (every
 interface), its advertised address (its service name), its data

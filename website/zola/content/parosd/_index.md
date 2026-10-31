@@ -42,11 +42,16 @@ and placement uses a machine with less than 1 GiB free (`PAROS_FREE_BYTES_FLOOR`
 other machine has a slot.
 
 [The journal API](@/parosd/journal-api.md) describes the four calls, the two writer modes and
-the limits. [Admin views](@/parosd/admin-views.md) shows the machines, tenants and roles of a
-cell with `parosctl`. [TLS](@/parosd/tls.md) encrypts every session and proves every caller with
-mutual TLS. [Tokens and root keys](@/parosd/tokens.md) signs tokens offline, pins the machines
-and rotates the root keys. [Bench](@/parosd/bench.md) measures throughput and latency per call
-with `paros-bench`. [Metrics and probes](@/parosd/metrics.md) reads the counts, the probes and
-the usage per journal of each machine. `parosd` is a work in progress. Later pages of this part will describe the control
-hierarchy, the bootstrap, multi-tenancy, the cell design and how to run the Compose demo
-(`DEMO.md` in the repository).
+the limits. [Cells and the universe](@/parosd/cells.md) adds cells to a universe, places
+tenants in cells by bucket or by override, and finds the cell of a tenant through the
+resolver. [Machines and roles](@/parosd/roles.md) describes the machine classes, the roles
+and how the coordinators place them. [Admin views](@/parosd/admin-views.md) shows the
+machines, tenants and roles of a cell with `parosctl`. [TLS](@/parosd/tls.md) encrypts every
+session and proves every caller with mutual TLS. [Tokens and root keys](@/parosd/tokens.md)
+signs tokens offline, pins the machines and rotates the root keys.
+[Bench](@/parosd/bench.md) measures throughput and latency per call with `paros-bench`.
+[Metrics and probes](@/parosd/metrics.md) reads the counts, the probes and the usage per
+journal of each machine.
+
+`parosd` is a work in progress. `DEMO.md` in the repository runs two cells with every role in
+Docker Compose.
