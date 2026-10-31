@@ -225,7 +225,9 @@ lists two of them under "Protocol invariants to remember".
 - [Leader handoff](leader-handoff.md): a leadership without Phase 1, and the reason
   `RecoveryPolicy::Inherited` exists.
 - Paging a campaign (`keep_alive_from`, #428): card waits for a source.
-- Kernel cards (planned): single-decree Paxos, the Multi-Paxos log, persist before send.
+- [Single-decree Paxos](single-decree-paxos.md), [the Multi-Paxos log](multi-paxos-log.md),
+  [persist before send](persist-before-send.md), [pipelining and resend](pipelining-and-resend.md),
+  [catch-up](catch-up.md): the Kernel cards.
 - Reconfiguration cards (planned): matchmaking, `H_b` and `C_b`.
 - Storage cards (planned): the CTRL repair probe that takes the slots Phase 1 cannot decide.
 
