@@ -108,7 +108,7 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   `parosd` ships, or an oracle the doc lists is missing, harness work ranks ahead of new features
   in #69. A feature lands only on a harness that can prove it.
 - **Keep the docs in step with the code** (decided on 2026-10-11): a PR that adds a feature or
-  changes behaviour also updates the site (`website/zola/`, the `update-the-site` skill), the
+  changes behaviour also updates the site (`website/site/`, the `update-the-site` skill), the
   `README.md` and `docs/architecture/` where they describe it. A feature PR without its
   docs is not done.
 - **Keep the knowledge base in step with the protocol** (decided on 2026-10-27, #745): a PR
@@ -593,14 +593,15 @@ in this list:
   frontend)). It depends on `paros` for that trait; Biscuit never enters the library.
   `biscuit-auth` is pinned by git rev, so the crate is `publish = false`.
 - `paros-wasm` — the site's wasm tools, one crate with one feature per tool (#540, decided on
-  2026-10-15), each built alone into its own bundle: `paxos`, the interactive Paxos game on
-  `paros-core` only (the app is `website/play/`), and `playground`, the paros playground (#518):
+  2026-10-15), each built alone into its own bundle: `paxos`, the Paxos game on
+  `paros-core` only (the app is `website/play/`, off the site since #810; #811 builds the
+  step-through diagrams of the Paxos pages on it), and `playground`, the paros playground (#518):
   a paros universe on moonpool's simulated providers, the shipped `run_machine` and
   `paros::client`, replayed from a seed, a config and an action log (the page is
   `website/sandbox/`). Never depends on `paros-sim` or `parosd`.
 - `xtask` — `cargo xtask sim` (the sancov runner) and `cargo xtask mutants` (the mutation hunt, #269).
 
-Elsewhere: `website/` holds everything a browser loads (decided on 2026-10-13): `website/zola/` (the website, Zola + Goyo, #254; `website/zola/AGENTS.md`, the `update-the-site` skill; built by `website/zola/build.sh`), `website/play/` (the game's app), `website/sandbox/` (the sandbox page); `scripts/build-wasm.sh` builds and stages both; the Rust behind them stays in `crates/`,
+Elsewhere: `website/` holds everything a browser loads (decided on 2026-10-13): `website/site/` (the website, Astro, one style for every page, #810; `website/site/AGENTS.md`, the `update-the-site` skill; `npm run build` there), `website/shared/` (the design system: tokens, components, fonts, logo), `website/sandbox/` (the playground app, served at `/playground/`), `website/play/` (the Paxos game's app, not on the site); `scripts/build-wasm.sh` builds the wasm and stages the playground; the Rust behind them stays in `crates/`,
 `docs/architecture/`, `docs/knowledge/` (the Paxos knowledge base: one card per concept paros
 uses, #745), `docs/analysis/` (design notes), `docs/references/` (papers and source
 references), `scripts/` (`sancov-rustc.sh`, `build-wasm.sh`, `check-sim-wasm.sh`, `check-dockerfile-toolchain.sh`, `check-module-style.sh`, `check-core-layers.sh`, `mutants-report.sh`), `.claude/skills/` and

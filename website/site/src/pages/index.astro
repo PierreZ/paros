@@ -1,0 +1,112 @@
+---
+// The home page sells parosd (#810 (website redo 1/4)): what it is, what you
+// get, a session, the path of a write, measured numbers, how to run it, and
+// the Paxos flavors it is made of.
+import Base from "../layouts/Base.astro";
+import Panel from "../components/Panel.astro";
+import { url } from "../nav";
+---
+<Base>
+  <div class="home">
+    <div class="titleblock hero">
+      <div class="kicker label">parosd · a journal service on Paxos</div>
+      <h1>Ordered, durable logs for many tenants</h1>
+      <p class="lede">parosd keeps ordered journals for many tenants on a cell of machines. Paxos chooses
+        every record. The control plane is made of paros journals, elections and Paxos flavors too, so
+        there is no external coordination service to run.</p>
+      <div class="actions">
+        <a class="btn primary" href={url("playground/")}>▶ Open the playground</a>
+        <a class="btn" href={url("docs/quickstart/")}>Run it in 5 minutes</a>
+        <a class="btn" href={url("paxos/")}>The Paxos flavors</a>
+      </div>
+    </div>
+
+    <div class="strip" aria-label="parosd in figures">
+      <div><span class="k">Data plane</span><span class="v">4 calls</span></div>
+      <div><span class="k">Writes/s · 8×8</span><span class="v">845</span></div>
+      <div><span class="k">p99 · 1×1</span><span class="v">3.6 ms</span></div>
+      <div><span class="k">Paxos flavors</span><span class="v">5</span></div>
+      <div><span class="k">Coordination service</span><span class="v">none</span></div>
+    </div>
+
+    <Panel num="01" title="What you get">
+      <ul class="caps">
+        <li><b>Four calls</b><span><code>Write</code>, <code>Read</code>, <code>Truncate</code>, <code>SetLeader</code>. Nothing else on the data plane.</span></li>
+        <li><b>Fenced writers</b><span>A single-writer journal refuses a superseded writer. A retry is safe: it gets <code>Duplicate</code>.</span></li>
+        <li><b>Change with no stop</b><span>Add, drain and remove machines, or change the durability of a live journal. Matchmaker Paxos moves the acceptors while writes go on.</span></li>
+        <li><b>Many tenants</b><span>Tenants and journals by name, a token per tenant, many cells in one universe.</span></li>
+        <li><b>Each role scales alone</b><span>Acceptors, replicas, proxy leaders, batchers and frontends, counted per journal (Compartmentalized Paxos).</span></li>
+        <li><b>Heals itself</b><span>The cell coordinator places the roles of a lost machine again.</span></li>
+        <li><b>Tested with faults on</b><span>The same code runs in production and in a deterministic simulator that crashes machines, cuts links and fails disks.</span></li>
+      </ul>
+    </Panel>
+
+    <Panel num="02" title="A session">
+      <div class="term" aria-label="An example parosctl session">
+        <div class="term-head label"><span>shell</span><span>a cell of three machines</span></div>
+<pre><code><span class="c"># Form a cell from three machines.</span>
+<span class="p">$ </span>parosctl init --members node1:4500,node2:4500,node3:4500
+<span class="c"># A tenant owns journals. A journal is an ordered log of records.</span>
+<span class="p">$ </span>parosctl tenant create acme
+<span class="p">$ </span>parosctl journal create acme orders --survive machines=1
+<span class="c"># Claim the journal as writer 7, then write and read.</span>
+<span class="p">$ </span>parosctl write acme/orders hello world --leader 7
+<span class="p">$ </span>parosctl read acme/orders
+<span class="c"># A new writer takes over. Writer 7 is refused from now on.</span>
+<span class="p">$ </span>parosctl set-leader acme/orders --new 8</code></pre>
+      </div>
+    </Panel>
+
+    <Panel num="03" title="The path of a write" meta="cell-1">
+      <div class="arch" role="img" aria-label="A client calls a frontend in the cell. The frontend forwards the write to a proxy leader. The proxy leader sends Phase 2 to the acceptors of the journal, and each acceptor syncs the record to its disk before it answers.">
+        <div class="box">client <small>parosctl · paros::client</small></div>
+        <div class="arrow">▼ <small>Write · Read · Truncate · SetLeader</small></div>
+        <div class="cellframe">
+          <span class="cellname">cell-1</span>
+          <div class="row"><div class="box">frontend <small>checks the token, finds the journal</small></div><div class="box side">coordinator · matchmakers <small>place roles, keep configurations</small></div></div>
+          <div class="arrow">▼</div>
+          <div class="row"><div class="box lead">leader → proxy leader <small>runs Phase 2</small></div></div>
+          <div class="arrow">▼ <small>Accept → Accepted from a majority</small></div>
+          <div class="row three"><div class="box">acceptor</div><div class="box">acceptor</div><div class="box">acceptor</div></div>
+          <div class="arrow">▼ <small>sync before the answer</small></div>
+          <div class="row three"><div class="box disk">disk</div><div class="box disk">disk</div><div class="box disk">disk</div></div>
+        </div>
+      </div>
+    </Panel>
+
+    <Panel num="04" title="Numbers" meta="2026-10-17">
+      <table class="tnum">
+        <thead><tr><th>Clients × journals</th><th>Writes/s</th><th>p50</th><th>p99</th></tr></thead>
+        <tbody>
+          <tr><td>1 × 1</td><td>622</td><td>1.4 ms</td><td>3.6 ms</td></tr>
+          <tr><td>8 × 8</td><td>845</td><td>8.7 ms</td><td>28.5 ms</td></tr>
+        </tbody>
+      </table>
+      <pre class="cmdline"><code>paros-bench --local 3 --clients 8 --journals 8 --duration 20s --ramp 2s</code></pre>
+      <p class="aside">A cell of three machines in one process, on one 4-vCPU cloud host, ext4, 256-byte
+        records, one record per write, every write synced to disk on a majority. Measured on 2026-10-17. The
+        numbers compare commits on one host; they are not production numbers.</p>
+    </Panel>
+
+    <Panel num="05" title="Run it">
+      <div class="term">
+        <div class="term-head label"><span>shell</span><span>Docker with Compose, nothing else</span></div>
+<pre><code><span class="p">$ </span>git clone https://github.com/PierreZ/paros && cd paros
+<span class="p">$ </span>docker compose up -d --build
+<span class="p">$ </span>docker compose run --rm init
+<span class="p">$ </span>docker compose run --rm parosctl tenant create acme</code></pre>
+      </div>
+      <p class="aside"><a class="act-link" href={url("docs/quickstart/")}>Quickstart</a>: write, read, kill a machine, add a cell.</p>
+    </Panel>
+
+    <Panel num="06" title="Made of Paxos flavors">
+      <ol class="index-list">
+        <li><a href={url("paxos/single-decree/")}>Single-decree Paxos</a><span class="desc">Forms the cell: <code>cell init</code> chooses the cell plan once.</span></li>
+        <li><a href={url("paxos/multi-paxos/")}>Multi-Paxos</a><span class="desc">Each journal is a log of slots with a stable leader.</span></li>
+        <li><a href={url("paxos/matchmaker/")}>Matchmaker Paxos</a><span class="desc">Changes the acceptors of a journal with no stop.</span></li>
+        <li><a href={url("paxos/compartmentalized/")}>Compartmentalized Paxos</a><span class="desc">Splits the leader into roles that scale alone.</span></li>
+        <li><a href={url("paxos/quorums/")}>Quorums</a><span class="desc">Majority, grid and partitions: who must answer.</span></li>
+      </ol>
+    </Panel>
+  </div>
+</Base>

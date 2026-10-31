@@ -8,13 +8,13 @@ tests cover both tools; each wasm bundle is built alone with `--no-default-featu
 
 - `paxos` → `src/paxos.rs` + `src/paxos/` → the interactive Paxos game (#308). Depends on
   `paros-core` only (`default-features = false`, `serde`) and `ts-rs`. Bundle `paros_paxos`,
-  page `website/play/`. Spec: `docs/analysis/play/game-plan.md`; read it before adding a level
+  page `website/play/` (off the site since #810 (website redo 1/4)). Spec: `docs/analysis/play/game-plan.md`; read it before adding a level
   or a verb.
 - `playground` → `src/playground.rs` + `src/playground/` → the paros playground (#518 (Paxos
   visualization sandbox)): a paros universe on moonpool's simulated network, disk and clock, run
   from a `Config` and an action log. Depends on `paros` (no `tls`) and `moonpool-sim` with
-  default features off (no exploration). Bundle `paros_playground`, page `website/sandbox/`;
-  the page rules are in `website/zola/AGENTS.md`.
+  default features off (no exploration). Bundle `paros_playground`, page `website/sandbox/`, served at
+  `/playground/`; the site rules are in `website/site/AGENTS.md`.
 
 **Never** a dependency on `paros-sim` or `parosd`, and no wasm-only protocol path: the tools
 run the code paros ships. The proof that `paros-sim` itself runs the same on wasm32 is the
@@ -137,8 +137,8 @@ both features through the workspace.
 - `scripts/build-wasm.sh --wasm-only` (wasm-bindgen output into `website/play/src/wasm/` and
   `website/sandbox/wasm/`, both gitignored)
 - `bash -c 'cd website/play && npm ci --no-audit --no-fund && npm run check && npm test && npm run build'`
-- Full deploy build: `scripts/build-wasm.sh` after `website/zola/build.sh` (stages into
-  `website/zola/public/play/` and `website/zola/public/sandbox/app/`; the Pages workflow).
+- Full deploy build: `scripts/build-wasm.sh` (stages the playground into
+  `website/site/public/playground/app/`), then `npm run build` in `website/site/` (the Pages workflow).
 
 ## Deps & pins (`Cargo.toml`)
 

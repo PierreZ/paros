@@ -1,0 +1,15 @@
+---
+import Doc from "../../layouts/Doc.astro";
+import { url } from "../../nav";
+---
+<Doc title="The Paxos flavors" kicker="Paxos" section="paxos/" siblings={[]}
+  description="paros is made of five Paxos flavors. Each page gives the problem, the messages, why it is safe and where it lives in the code.">
+  <ol class="index-list">
+    <li><a href={url("paxos/single-decree/")}>Single-decree Paxos</a><span class="desc">Choose one value. Forms the cell.</span></li>
+    <li><a href={url("paxos/multi-paxos/")}>Multi-Paxos</a><span class="desc">A log of slots with a stable leader. Each journal.</span></li>
+    <li><a href={url("paxos/matchmaker/")}>Matchmaker Paxos</a><span class="desc">Change the acceptors with no stop.</span></li>
+    <li><a href={url("paxos/compartmentalized/")}>Compartmentalized Paxos</a><span class="desc">Roles that scale alone, and leader handoff.</span></li>
+    <li><a href={url("paxos/quorums/")}>Quorums</a><span class="desc">Majority, flexible, grid and partitions.</span></li>
+  </ol>
+  <p>To see the flavors run together, open the <a href={url("playground/")}>playground</a>: a paros cell in your browser.</p>
+</Doc>

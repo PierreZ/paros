@@ -77,4 +77,4 @@ coverage gate that never fired, or convergence timeout. A docs-only change can s
   not noise; do not delete the gate (`/adding-an-audit-check`).
 
 The site is built by `pages.yml`, not by `rust.yml`; if you touched
-`website/zola/`, also run `RUN website/zola/build.sh` (`/update-the-site`).
+`website/site/`, also run `RUN bash -c 'cd website/site && npm ci && npm run build'` (`/update-the-site`).

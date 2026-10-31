@@ -2,12 +2,19 @@
 
 The page of the paros playground (#518 (paros playground)); the engine is the `playground` feature of
 `crates/support/paros-wasm` (#540), compiled to wasm by `scripts/build-wasm.sh` into `wasm/` (bundle
-`paros_playground`, gitignored) and staged at `/sandbox/app/`. Plain
-HTML, CSS and ES modules, no build step: `main.js` (editor, replay link, playback, the three
+`paros_playground`, gitignored) and staged at `/playground/app/`. The page markup is
+`website/site/src/pages/playground/index.astro` (#810 (website redo 1/4)), in the site's layout;
+this folder holds plain CSS and ES modules, no build step: `main.js` (editor, replay link, playback, the three
 acts and their captions), `stage.js` (the cluster view: machines by zone, each journal a chip,
 every message and client call a dot in flight, the followed journal's quorum and log, the
 timeline; a pure function of the simulated time), `worker.js` (runs the wasm off the page's
-thread), `style.css` (light and dark).
+thread), `style.css` (the page's own layout).
+
+- **Look (#804 (flat engineering redesign)).** Colours, fonts, the top bar, buttons and callouts
+  come from `website/shared/` (the site serves it at `/shared/`). `style.css` defines no colour. A tenant colour is a token
+  (`var(--tenant-N)`); CSS takes it as is and the canvas resolves it with `paint()` in
+  `stage.js`, again after a theme switch (`paros-theme` event). The page shares the book's theme
+  choice (`localStorage["theme"]`).
 
 - **No protocol logic here.** The page draws what a run returns. A fact it needs belongs in the
   engine's `RunView`, read from paros through a read-only accessor.

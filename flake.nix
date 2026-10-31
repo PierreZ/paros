@@ -14,25 +14,15 @@
       url = "git+https://github.com/oxalica/rust-overlay?shallow=1";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-    # Zola for the site (#254). Goyo's templates need Zola 0.22: 0.23 changed the
-    # template engine and refuses them. nixos-26.05 ships 0.22.1; unstable has 0.23.
-    nixpkgs-zola.url = "git+https://github.com/NixOS/nixpkgs?ref=nixos-26.05&shallow=1";
-    # The Goyo theme (v0.7.1), pinned by rev, not a flake. website/zola/build.sh copies
-    # it into website/zola/themes/goyo (decided on 2026-10-07: no git submodule).
-    goyo = {
-      url = "git+https://github.com/hahwul/goyo?rev=25054f8f9f0b4eafa3d3380ec120b7e9cd7fd021&shallow=1";
-      flake = false;
-    };
   };
 
-  outputs = { self, nixpkgs, systems, flake-utils, rust-overlay, nixpkgs-zola, goyo }:
+  outputs = { self, nixpkgs, systems, flake-utils, rust-overlay }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         overlays = [ (import rust-overlay) ];
         pkgs = import nixpkgs {
           inherit system overlays;
         };
-        zola = nixpkgs-zola.legacyPackages.${system}.zola;
 
         # Read rust toolchain version from rust-toolchain.toml
         toolchainFile = builtins.fromTOML (builtins.readFile ./rust-toolchain.toml);
@@ -123,11 +113,9 @@
             cargo-mutants
             protobuf
 
-            # The site (website/zola/, Zola + Goyo, #254): website/zola/build.sh.
-            zola
-
-            # The site's wasm tools (crates/support/paros-wasm, #540: the game at
-            # website/play, the playground at website/sandbox) and the paros-sim
+            # The site (website/site/, Astro, #810) needs only node and npm.
+            # The site's wasm tools (crates/support/paros-wasm, #540: the playground
+            # at website/sandbox, the paxos bundle for website/play) and the paros-sim
             # wasm check (crates/sim/paros-sim-wasm-check, #307).
             # wasm-bindgen-cli's version MUST equal the `wasm-bindgen` crate pin
             # in crates/support/paros-wasm/Cargo.toml and crates/sim/paros-sim-wasm-check/Cargo.toml
@@ -148,8 +136,6 @@
 
             # Set environment variables
             export RUST_BACKTRACE=1
-            # The pinned Goyo theme; website/zola/build.sh copies it into website/zola/themes/goyo.
-            export PAROS_GOYO="${goyo}"
             export RUST_LOG=debug
             # RUSTC_WRAPPER for selective LLVM SanitizerCoverage instrumentation,
             # gated by SANCOV_CRATES (see scripts/sancov-rustc.sh). No-op unless
@@ -165,7 +151,7 @@
             echo "  • Use 'cargo nextest run' for better test output with timeouts"
             echo "  • Use 'cargo fmt' to format code"
             echo "  • wasm-bindgen $(wasm-bindgen --version | cut -d' ' -f2), node $(node --version): scripts/build-wasm.sh builds the wasm tools"
-            echo "  • zola $(zola --version | cut -d' ' -f2): website/zola/build.sh builds the site"
+            echo "  • website/site: npm ci && npm run build builds the site (Astro)"
           '';
 
           # Environment variables

@@ -1,0 +1,11 @@
+---
+import Doc from "../../layouts/Doc.astro";
+import { url } from "../../nav";
+---
+<Doc title="Docs" kicker="Docs" section="docs/" siblings={[]} description="Run parosd and look things up.">
+  <ol class="index-list">
+    <li><a href={url("docs/quickstart/")}>Quickstart</a><span class="desc">Docker Compose to a written record, a lost machine and a second cell.</span></li>
+    <li><a href={url("docs/reference/")}>Reference</a><span class="desc">The four calls, durability, roles, tokens and parosctl.</span></li>
+    <li><a href={url("docs/playground/")}>The playground</a><span class="desc">What runs in the browser and how a run replays.</span></li>
+  </ol>
+</Doc>

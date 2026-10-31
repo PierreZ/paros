@@ -471,6 +471,7 @@ document.addEventListener("keydown", (e) => {
   if (e.key === ".") stepAction(1);
 });
 window.addEventListener("resize", () => { if (ix) { stage.layout(); render(false); } });
+window.addEventListener("paros-theme", () => { if (ix) render(true); });
 
 renderConfig();
 renderActions();

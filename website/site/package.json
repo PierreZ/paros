@@ -1,0 +1,13 @@
+{
+  "name": "paros-site",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "sync": "node scripts/sync-shared.mjs",
+    "dev": "npm run sync && astro dev",
+    "build": "npm run sync && astro build && node scripts/flatten-redirects.mjs"
+  },
+  "dependencies": {
+    "astro": "7.4.0"
+  }
+}
