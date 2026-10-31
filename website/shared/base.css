@@ -385,7 +385,7 @@ a:hover {
 
 /* ---- link glyphs ---- */
 
-.act::before {
+.act-link::before {
   content: "▶";
   display: inline-block;
   margin-right: 8px;
@@ -398,4 +398,31 @@ a:hover {
 
 .out::after {
   content: " →";
+}
+
+/* The phone menu of play and the sandbox: the top bar's section list opens as
+   a full-width panel under the bar. (The book opens its section tree.) */
+@media (max-width: 900px) {
+  .topnav.open {
+    display: flex;
+    flex-direction: column;
+    position: fixed;
+    top: var(--bar);
+    left: 0;
+    right: 0;
+    height: auto;
+    margin: 0;
+    padding: 8px 0;
+    background: var(--bg);
+    border-bottom: 1px solid var(--rule);
+  }
+
+  .topnav.open a {
+    padding: 10px 16px;
+    border-bottom: 0;
+  }
+}
+
+.brand svg .leader {
+  fill: var(--accent);
 }

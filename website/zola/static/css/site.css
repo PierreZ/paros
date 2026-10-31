@@ -16,9 +16,6 @@
   background: var(--bg);
 }
 
-.brand svg .leader {
-  fill: var(--accent);
-}
 
 /* ---- layout: sidebar | content | table of contents ---- */
 

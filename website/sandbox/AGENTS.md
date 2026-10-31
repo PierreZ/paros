@@ -7,7 +7,14 @@ HTML, CSS and ES modules, no build step: `main.js` (editor, replay link, playbac
 acts and their captions), `stage.js` (the cluster view: machines by zone, each journal a chip,
 every message and client call a dot in flight, the followed journal's quorum and log, the
 timeline; a pure function of the simulated time), `worker.js` (runs the wasm off the page's
-thread), `style.css` (light and dark).
+thread), `style.css` (the page's own layout).
+
+- **Look (#804 (flat engineering redesign)).** Colours, fonts, the top bar, buttons and callouts
+  come from `website/shared/` (`shared/` here is a link to it; `scripts/build-wasm.sh` copies it
+  into `/sandbox/app/shared/`). `style.css` defines no colour. A tenant colour is a token
+  (`var(--tenant-N)`); CSS takes it as is and the canvas resolves it with `paint()` in
+  `stage.js`, again after a theme switch (`paros-theme` event). The page shares the book's theme
+  choice (`localStorage["theme"]`).
 
 - **No protocol logic here.** The page draws what a run returns. A fact it needs belongs in the
   engine's `RunView`, read from paros through a read-only accessor.

@@ -1,6 +1,6 @@
 # site
 
-The paros website: Zola with the Goyo theme (#254), replacing the mdbook. Two parts:
+The paros website: Zola (#254), replacing the mdbook. Two parts:
 `content/parosd/` (the system) and `content/paxos/` (the Paxos implementation, told as a
 learning path). Pages are written for people and stand on their own: they never send a
 reader to `docs/architecture/`, which is the agents' map, not human documentation.
@@ -12,6 +12,39 @@ reader to `docs/architecture/`, which is the agents' map, not human documentatio
   every internal link and anchor, so a broken `@/` link fails the build.
 - `website/zola/build.sh serve` previews live.
 - The flake pins Zola 0.22 (`nixpkgs-zola`): Goyo's templates do not parse on Zola 0.23.
+- `build.sh` also writes `updated.toml` (gitignored): the day of the last commit of each page,
+  shown in the title block. The Pages workflow fetches the whole history for it.
+
+## Look and feel (#804 (flat engineering redesign))
+
+Flat engineering design with a terminal feel, shared by the book, paros play and the sandbox.
+
+- **Tokens.** `website/shared/tokens.css` is the only file that defines a colour (light and dark,
+  every text pair WCAG AA). The theme choice is `localStorage["theme"]` (`goyo-light` or
+  `goyo-dark`, on `<html data-theme>`), written by `website/shared/theme.js`; without a choice
+  the page follows `prefers-color-scheme`. The one exception to "no colour literal" is a mermaid
+  `classDef` (below).
+- **Shared components** are in `website/shared/base.css`: the top bar, `.label` (mono, uppercase,
+  12px, muted), `.chip-status` (`done`, `gap`, `shared`, `accent`, default `open`), `.btn` (a
+  rectangle with a hard 2px offset shadow; `.primary` uses the accent), `.callout` with
+  `data-tag`, `.kv` (key-value table), `.act-link` (a boxed `▶` before an action link).
+- **Templates are the site's own** (`templates/`): `base.html` (skeleton), `page.html`,
+  `section.html`, `landing.html` (the home page), `macros/site.html` (top bar, section tree,
+  breadcrumbs, title block). Goyo stays the theme only for `static/js/mermaid.min.js`; its
+  DaisyUI layout fought every rule here. Do not add DaisyUI or Tailwind classes.
+- **Behaviour** is `static/js/site.js`: code block headers with copy, a `$` prompt on each shell
+  command line (CSS, so copy leaves it out), blockquotes as callouts (`NOTE` by default, `PLAY`
+  for a "Play it." callout), tables in their own scroll box, mermaid themed from the tokens,
+  search over Zola's index (`/` or Ctrl-K).
+- **Rules:** flat (no soft shadow, no gradient, no blur), 1px rules, radius 0, monospace
+  everywhere (`page.extra.sans = true` switches a page to IBM Plex Sans), one accent colour
+  (amber) for links, the current item, focus and the primary button only; green only for `done`.
+  Headings get a muted `##` from CSS; never write it in the Markdown.
+- **Fonts** are self-hosted woff2 in `website/shared/fonts/` (JetBrains Mono, IBM Plex Sans, OFL).
+- **Logo:** `website/shared/logo/mark.svg` (six islands, the leader in the accent) and
+  `mark-small.svg` (three islands, for the header and favicons). `static/` holds the favicons and
+  the 1200x630 `social-card.png` made from them.
+- Check a change in light and dark, at 1280px and 390px wide.
 - Internal links are `@/paxos/<page>.md#anchor`. Old mdbook URLs keep working through each
   page's `aliases` (`/safety.html` redirects to `/paxos/safety/`); keep them when you move a page.
 - All diagrams are **mermaid only** (`flowchart`, `sequenceDiagram`, `stateDiagram-v2`), written
@@ -29,10 +62,11 @@ reader to `docs/architecture/`, which is the agents' map, not human documentatio
 
 ## Diagram colours MUST survive both themes
 
-This is the rule that is easy to get wrong. `website/zola/config.toml` sets the light Goyo theme as
-the default, and Goyo initializes mermaid with the light theme or the `dark` theme to match
-the reader's toggle. So any hardcoded colour has to read on **both** a light (white) and a
-dark page.
+This is the rule that is easy to get wrong. `static/js/site.js` initializes mermaid's `base`
+theme with variables read from the tokens, and draws the diagrams again when the reader
+switches the theme, so the default node, line and note colours follow the page. A hardcoded
+colour does not follow it, so it has to read on **both** the light page (`#f6f6f3`) and the dark
+page (`#0b0c0d`).
 
 - **Highlight bands** (`rect` in a `sequenceDiagram`): use a **translucent `rgba` tint**
   with low alpha, never an opaque dark `rgb` fill. An opaque dark band (e.g.

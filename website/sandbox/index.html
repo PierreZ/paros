@@ -4,19 +4,41 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>paros playground</title>
+  <script src="shared/theme.js"></script>
+  <link rel="stylesheet" href="shared/tokens.css" />
+  <link rel="stylesheet" href="shared/base.css" />
   <link rel="stylesheet" href="style.css" />
+  <link rel="icon" type="image/svg+xml" href="../../favicon.svg" />
 </head>
 <body>
-<header>
+<header class="topbar">
+  <button class="menu-btn" type="button" data-menu-toggle aria-controls="site-menu" aria-expanded="false" aria-label="Menu">
+    <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M1 3.5h14M1 8h14M1 12.5h14" stroke="currentColor" stroke-width="1.5"/></svg>
+  </button>
+  <a class="brand" href="../../"><svg viewBox="0 0 32 32" aria-hidden="true" focusable="false"><g stroke="currentColor" stroke-width="1.5" stroke-dasharray="1.5 3" stroke-linecap="round" fill="none" opacity="0.6"><path d="M8 15L24 13"/><path d="M8 15L16 25"/><path d="M24 13L16 25"/></g><path d="M8 8L15 18H1Z" fill="currentColor"/><path d="M24 6L31 16H17Z" class="leader"/><path d="M16 18L23 28H9Z" fill="currentColor"/></svg><span>paros <span class="tilde">~</span></span></a>
+  <nav class="topnav" id="site-menu" aria-label="Sections">
+    <a href="../../parosd/">parosd</a>
+    <a href="../../paxos/">Paxos</a>
+    <a href="../../play/">Play</a>
+    <a href="../" aria-current="true">Playground</a>
+  </nav>
+  <div class="tools">
+    <button class="tool" type="button" data-theme-toggle aria-label="Switch light or dark">
+      <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><circle cx="7" cy="7" r="6" fill="none" stroke="currentColor"/><path d="M7 1a6 6 0 0 1 0 12Z" fill="currentColor"/></svg>
+    </button>
+    <a class="tool" href="https://github.com/PierreZ/paros"><span class="wide">GitHub&nbsp;</span>→</a>
+  </div>
+</header>
+<div class="intro">
+  <div class="kicker label">Playground</div>
   <h1>paros playground</h1>
-  <div>A tool to understand Paxos and paros: run a paros universe in your browser, drive it, break it
+  <p class="lede">A tool to understand Paxos and paros: run a paros universe in your browser, drive it, break it
     and watch it recover. Every machine runs the same code as <code>parosd</code>, and the operator uses
-    the same calls as <code>parosctl</code>.
-    <a href="../">How the playground works</a> · <a href="../../">paros</a></div>
-  <div class="notice">The network, the disks and the clock are simulated. Times are simulated
+    the same calls as <code>parosctl</code>. <a href="../">How the playground works</a></p>
+  <div class="callout" data-tag="NOTE">The network, the disks and the clock are simulated. Times are simulated
     milliseconds, not production numbers. A run depends only on its seed, its configuration and its
     action log, so the link to this page replays it exactly.</div>
-</header>
+</div>
 <main>
   <section class="stage-section">
     <div class="acts" id="acts"></div>

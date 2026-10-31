@@ -65,4 +65,7 @@ mkdir -p website/zola/public/sandbox/app
 cp website/sandbox/index.html website/sandbox/main.js website/sandbox/stage.js \
   website/sandbox/worker.js website/sandbox/style.css website/zola/public/sandbox/app/
 cp -r website/sandbox/wasm website/zola/public/sandbox/app/wasm
+# The shared tokens, components and fonts (#804 (flat engineering redesign)).
+# website/sandbox/shared is a link to them for a local preview.
+cp -rL website/shared website/zola/public/sandbox/app/shared
 echo "done: website/zola/public/play/ and website/zola/public/sandbox/app/"
