@@ -456,9 +456,9 @@ fn a_reboot_may_take_more_roles_never_fewer() {
         reg.fold(3, &book(2, 100, Class::Storage)),
         RegistryEvent::Booked { .. }
     ));
-    for narrower in [Class::Storage, Class::Stateless] {
+    for (seq, narrower) in [(4, Class::Storage), (5, Class::Stateless)] {
         assert_eq!(
-            reg.fold(4, &register(100, narrower, 2)),
+            reg.fold(seq, &register(100, narrower, 2)),
             RegistryEvent::Refused(RegistryRefusal::ClassChanged { id: NodeId(100) })
         );
     }
@@ -515,14 +515,14 @@ fn a_machine_carries_its_reserved_tags_and_its_user_tags_once_per_request() {
     let node = reg.get(NodeId(100)).unwrap();
     assert_eq!(
         node.all_tags().label(),
-        "disk:ssd,paros/class:storage,paros/rack:r1,paros/zone:zone-b"
+        "disk:ssd,paros/rack:r1,paros/roles:storage,paros/zone:zone-b"
     );
     // A registration carrying a user tag, or no class, is malformed.
     let mut forged = wire::SystemEntry::decode(placed("z").as_slice()).unwrap();
     if let Some(wire::system_entry::Kind::RegisterNode(register)) = &mut forged.kind {
         register
             .tags
-            .retain(|tag| tag.key != crate::tags::reserved::CLASS);
+            .retain(|tag| tag.key != crate::tags::reserved::ROLES);
     }
     assert_eq!(
         reg.fold(6, &forged.encode_to_vec()),
