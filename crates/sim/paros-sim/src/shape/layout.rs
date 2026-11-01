@@ -278,7 +278,7 @@ pub(crate) fn system_journals(state: &StateHandle) -> bool {
 /// first, for `count` joiners in rank order. The role map's class draw: the
 /// first joiner is a `storage` machine — a spare a reconfiguration may name
 /// (the system board's joiner gates need one) — and every other one is
-/// `storage` or `stateless` on a coin. The capacity is one `buggify_knob!`
+/// `storage`, `stateless` or `all` on a coin. The capacity is one `buggify_knob!`
 /// for the run (default 2, extreme 1..=4; floor 1: a machine with no slot is
 /// one the cell coordinator can never book, a registration that means
 /// nothing).
@@ -295,6 +295,9 @@ pub(crate) fn joiner_machines(state: &StateHandle, count: usize) -> Vec<JoinerMa
                     let class = if rank > 0 && moonpool_sim::sim_random_bool(0.5) {
                         assert_reachable!("registry: a joiner is a stateless machine");
                         paros::model::registry::Class::Stateless
+                    } else if rank > 0 && moonpool_sim::sim_random_bool(0.3) {
+                        assert_reachable!("registry: a joiner takes every role");
+                        paros::model::registry::Class::All
                     } else {
                         paros::model::registry::Class::Storage
                     };
@@ -547,6 +550,10 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
                     let class = if !stores && (stateless || moonpool_sim::sim_random_bool(0.3)) {
                         assert_reachable!("machine: a machine outside the seeds is stateless");
                         paros::machine::Class::Stateless
+                    } else if moonpool_sim::sim_random_bool(0.4) {
+                        // `parosd`'s default: every role.
+                        assert_reachable!("machine: a machine takes every role");
+                        paros::machine::Class::All
                     } else {
                         paros::machine::Class::Storage
                     };

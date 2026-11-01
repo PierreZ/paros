@@ -623,6 +623,16 @@ impl<P: ParosProviders> MatchmakerClient<P> {
         }
     }
 
+    /// The address this client dials now.
+    #[must_use]
+    pub fn address(&self) -> Address {
+        self.target
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .address
+            .clone()
+    }
+
     /// Dial this matchmaker at `address`, through the hosting member's
     /// machine `interface` (#404; one that does not decode is none), from
     /// the next call on (#349).

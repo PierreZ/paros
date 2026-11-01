@@ -24,7 +24,7 @@ request that changes this folder. The file format and the verdicts are in
 | `storage-quarantine-never-ends` | node: storage dead | A quarantined journal never opens again. | caught |
 | `wipe-amnesiac-store-boots-fresh` | node: wiped | A wiped member boots again with an empty store (no amnesia refusal). | red elsewhere (by construction) |
 | `gc-retire-on-stale-belief` | node: retired | A node may retire on a stale belief of the configuration in force. | survives #773 |
-| `machine-released-booking-never-restarts` | node: left pool | A journal released once never starts again on that machine. | survives #773 |
+| `machine-released-booking-never-restarts` | node: left pool | A journal released once never starts again on that machine. | caught |
 | `heal-machine-free-one-short` | heal: cell cannot hold shape | Placement sees one free slot less on each machine. | survives #773 |
 | `heal-maintenance-never-ends` | heal: maintenance window | A maintenance window holds a down machine's roles for good. | survives #773 |
 | `heal-replace-after-never` | skip heal: re-place past tail | The coordinator never re-places a down machine's roles. | survives #773 |
@@ -32,6 +32,7 @@ request that changes this folder. The file format and the verdicts are in
 | `cell-lost-not-refused` | skip converge: cell lost | `cell init` does not refuse a plan that lost its quorum. | survives #773 |
 | `ledger-damaged-record-reads-empty` | none (fault ledger, #760) | A damaged record reads back as nothing accepted. | caught |
 | `ledger-promise-not-durable-first` | none (fault ledger, #760) | A raised promise is not durable before the entries under it. | caught |
+| `registry-clears-before-registrations` | none (fault ledger, #760) | A matchmaker registry commits its clears before its registrations and metainfo. | caught |
 
 The `expect` key of each file holds its verdict. `red elsewhere` means
 the hunt is red, but never on a seed where the excuse fired. The wipe
@@ -66,5 +67,6 @@ Each piece gets a mutant before it goes; the mutant must stay red after.
 | Ledger piece | Mutant |
 |---|---|
 | Custody ledger, `may_corrupt_record`, `may_park_for_copies` | `ledger-damaged-record-reads-empty` |
-| Commit registry and `HintVeto` (`world/cut.rs`), `permit_power_cut` | `ledger-promise-not-durable-first` |
-| `OutageVeto`, `may_park`, `may_cut_node`, quiet seats | none yet |
+| Commit registry and `HintVeto` (`world/cut.rs`), `permit_power_cut` | `ledger-promise-not-durable-first` (deleted) |
+| Matchmaker cut budget, `HintVeto`, `OutageVeto` (`world/cut.rs`) | `registry-clears-before-registrations` (deleted) |
+| `may_park`, `may_cut_node`, quiet seats | none yet |

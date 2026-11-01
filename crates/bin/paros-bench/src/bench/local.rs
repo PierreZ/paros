@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use moonpool_core::{CompioProviders, CompioResolver, CompioStorageProvider};
 use paros::client::initialize::{self, InitParams, InitRun};
-use paros::machine::{AdminPin, Class, MachineAddresses, MachineSettings, ProviderDisk};
+use paros::machine::{AdminPin, MachineAddresses, MachineSettings, ProviderDisk};
 use paros::model::address::{Address, Names};
 use paros::net::transport::Transport;
 use paros::observe::audit::NoAudit;
@@ -129,7 +129,8 @@ async fn machine(
     stop: CancellationToken,
 ) -> Result<(), String> {
     let settings = MachineSettings {
-        class: Class::Storage,
+        // parosd's default: every role (`PAROS_ROLES=all`).
+        class: None,
         // parosd's default (`PAROS_CAPACITY`): since #556 (tenant birth
         // footprint) a tenant's birth books slots before its first journal.
         capacity: 32,

@@ -205,7 +205,7 @@ async fn cell_status(asker: &Asker<'_>, out: &Printer, cell: Option<&str>) -> En
                 coordinator_text(&reply, &names),
                 summary.available,
                 summary.machines,
-                indent(&table(["CLASS", "BOOKED", "FREE", "TOTAL"], &slot_rows)),
+                indent(&table(["ROLES", "BOOKED", "FREE", "TOTAL"], &slot_rows)),
                 words_text(&summary),
                 indent(&table(JOURNAL_HEADERS, &rows)),
             );

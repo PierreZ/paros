@@ -23,8 +23,9 @@ The image can also be built with Nix: `nix build .#image && docker load < result
 `docker compose up -d` without `--build`; it uses the loaded `paros:local` and pulls nothing.
 
 ```sh
-# Nine machines: node1..node3 (storage, zones a/b/c), storage4, stateless1 (stateless) for
-# cell-1; cell2-a..cell2-c (storage) and cell2-stateless for cell-2.
+# Nine machines: node1..node4 and stateless1 for cell-1, cell2-a..cell2-d for cell-2, over
+# zones a/b/c. Every machine takes every role (`PAROS_ROLES=all`, the default), except
+# stateless1, which shows the one limit: `PAROS_ROLES=stateless`.
 # After an upgrade, start over with `docker compose down -v`: a volume an older version wrote
 # can make a machine refuse to start (exit 78).
 docker compose up -d --build
@@ -83,12 +84,12 @@ docker compose run --rm parosctl configure --tenant acme --survive machines=1
 
 # Admit the two idle machines into the cell (#216): each is registered in the cell
 # control journal, then records its cell. A re-run prints `unchanged`.
-docker compose run --rm parosctl cell add-machine storage4:4500
+docker compose run --rm parosctl cell add-machine node4:4500
 docker compose run --rm parosctl cell add-machine stateless1:4500
 
 # Every role of a journal (#604 (role counts), #753 (per-journal proxies)): a multi-writer
-# journal with two replicas on the storage machines, and a proxy leader and a batcher on the
-# stateless machine; and the tenant's frontend there too. `cell show` and `roles` then list
+# journal with two replicas, a proxy leader, a batcher, and the tenant's frontend. Placement
+# puts each role on a machine that takes it. `cell show` and `roles` then list
 # acceptors, matchmakers, replicas, proxy leaders, batchers and frontends.
 docker compose run --rm parosctl journal create acme feed --writers multi --layout compartmentalized --proxies 1 --batchers 1
 docker compose run --rm parosctl configure --tenant acme --frontend-count 1
@@ -116,11 +117,11 @@ docker compose start node2
 # down while it is open (the coordinator re-places them past `machine_replace_after`
 # otherwise, #475). `--for 0` ends it. Then drain the admitted machine: once
 # `machine list` shows it `drained`, remove it for good.
-docker compose run --rm parosctl cell maintenance storage4 --for 30m
-docker compose run --rm parosctl cell maintenance storage4 --for 0
-docker compose run --rm parosctl cell drain-machine storage4
+docker compose run --rm parosctl cell maintenance node4 --for 30m
+docker compose run --rm parosctl cell maintenance node4 --for 0
+docker compose run --rm parosctl cell drain-machine node4
 docker compose run --rm parosctl machine list
-docker compose run --rm parosctl cell remove-machine storage4
+docker compose run --rm parosctl cell remove-machine node4
 
 # Bench (#517, #194): closed-loop clients write the journals bench-0..bench-3 of tenant
 # `bench` (both created when missing) and print throughput and latency per call each
@@ -141,10 +142,10 @@ docker compose run --rm add-cell2
 docker compose run --rm parosctl tenant create initech --cell cell-2
 docker compose run --rm parosctl journal create initech orders
 
-# Every role in cell-2 too: admit its stateless machine (`--servers cell2:4500` asks cell-2),
+# Every role in cell-2 too: admit its fourth machine (`--servers cell2:4500` asks cell-2),
 # then give initech a multi-writer journal with two replicas, a proxy leader and a batcher,
 # and a frontend. `cell show` on cell-2 and `roles` list them.
-docker compose run --rm parosctl --servers cell2:4500 cell add-machine cell2-stateless:4500
+docker compose run --rm parosctl --servers cell2:4500 cell add-machine cell2-d:4500
 docker compose run --rm parosctl journal create initech feed --writers multi --layout compartmentalized --proxies 1 --batchers 1
 docker compose run --rm parosctl configure --tenant initech --frontend-count 1
 docker compose run --rm parosctl --servers cell2:4500 cell show
@@ -309,7 +310,7 @@ parosctl universe key remove demo-1
 
 Every machine serves the frontend once it is in a cell (#723 (frontend as a parosd role)). A
 frontend checks each call's token against the keys in the universe, and resolves the journal by
-its name. The tenant coordinator books a tenant's frontends on the `stateless` machines, and
+its name. The tenant coordinator books a tenant's frontends on machines that take the `stateless` roles, and
 `parosctl resolve` names them:
 
 ```sh
@@ -327,8 +328,8 @@ parosctl --frontends "$PAROSCTL_SERVERS" --token-file /tmp/paros-demo/acme.token
   (`already_initialized`).
 - `parosctl` exit codes: `0` success, `3` refused, `4` ambiguous (run it again), `5` no server
   answered.
-- A machine that exits with `78` refuses to start on purpose (amnesia, a changed class, a lost
-  identity): do not restart it blindly; see `crates/bin/parosd/README.md`.
+- A machine that exits with `78` refuses to start on purpose (amnesia, fewer `PAROS_ROLES` than
+  at format, a lost identity): do not restart it blindly; see `crates/bin/parosd/README.md`.
 - A restarted container can get a new IP. Its peers find it again at its name: each machine
   advertises its service name (`PAROS_ADVERTISE`, #257), and a peer resolves the name when it
   dials.

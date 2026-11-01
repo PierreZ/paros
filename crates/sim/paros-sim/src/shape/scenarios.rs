@@ -686,7 +686,7 @@ pub(crate) fn untagged(state: &StateHandle) -> bool {
 /// location. On such a seed a create asks for `Batched` on three draws in
 /// four, so a cell serves journals of both modes side by side; on every
 /// other seed each create is `Ordered`, production's default. The
-/// machines' cut budget (`crate::world::cut`) lets a power loss strike
+/// machines' crash gate (moonpool's, #760) lets a power loss strike
 /// inside a batched commit, so its last batch may come back faulty. That
 /// needs a batched journal that tolerates a loss and takes many commits:
 /// without more, a 100-seed hunt opened 4 batched commits, none with a
@@ -698,7 +698,7 @@ pub(crate) fn untagged(state: &StateHandle) -> bool {
 /// failure) on seven draws in eight, and each create first appends to
 /// journals the client created before (`crate::workload`). The
 /// machines' attrition kills a machine only inside a batched commit with a
-/// copy to spare (`crate::world::cut`), so the cell lives to create and
+/// copy to spare (moonpool's crash gate), so the cell lives to create and
 /// append, and the kills it asks for land where the scenario needs them.
 #[tracing::instrument(level = "debug", skip_all)]
 pub(crate) fn batched_journals(state: &StateHandle) -> bool {

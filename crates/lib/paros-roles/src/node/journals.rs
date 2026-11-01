@@ -458,6 +458,20 @@ pub(crate) struct Journals<S, A> {
 }
 
 impl<S, A> Journals<S, A> {
+    /// The matchmaker set `tenant`'s live journals here believe in force:
+    /// the latest generation any of them knows (#760 (moonpool owns fault
+    /// placement)). `None` when no live journal of the tenant runs one.
+    pub(crate) fn believed_matchmakers(
+        &self,
+        tenant: paros_core::journal::TenantId,
+    ) -> Option<&paros_core::membership::MatchmakerSet> {
+        self.live
+            .iter()
+            .filter(|(id, _)| id.tenant == tenant)
+            .filter_map(|(_, rt)| rt.node.matchmaker_set())
+            .max_by_key(|set| set.generation)
+    }
+
     /// Whether a batch's flush still flies, a live journal's or one that
     /// left `live` meanwhile (#560 (clean Ctrl-C shutdown): a clean stop
     /// waits for each to land).

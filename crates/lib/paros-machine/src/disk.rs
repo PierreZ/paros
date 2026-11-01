@@ -301,6 +301,21 @@ impl<S: LocalStorageProvider + Clone> ProviderDisk<S> {
             .unwrap_or(true)
     }
 
+    /// Whether the disk holds any store of a role with a durable store: a
+    /// journal's, a replica's or a matchmaker set's. A machine that holds one
+    /// cannot stop taking the `storage` roles (`PAROS_ROLES`).
+    ///
+    /// Fails closed, as [`Self::holds_journals`].
+    #[tracing::instrument(level = "debug", skip_all, fields(root = %self.root))]
+    pub async fn holds_stores(&self) -> bool {
+        for dir in ["journals", "replicas", "matchmakers"] {
+            if self.provider.exists(&self.path(dir)).await.unwrap_or(true) {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Format the store of every journal `plan` names for member `node_id`
     /// ([`paros_storage::provision::provision_store`]). An interrupted run resumes: a store
     /// already formatted under the same configuration is left as it is, and

@@ -337,7 +337,9 @@ impl Modes {
             .into_iter()
             .filter(|m| cell.registry().keeps_roles(m.node))
             .collect();
-        let Ok(steps) = placement::plan(want, &machines, slots, want.target.tenant().0) else {
+        // Apart from the journal's other roles (placement's rule 2).
+        let current = placement::with_others(cell.registry(), (want.role, want.target), slots);
+        let Ok(steps) = placement::plan(want, &machines, &current, want.target.tenant().0) else {
             return Some(ModeStep::Waiting);
         };
         desk.book(client, cell, want, &steps).await.ok()?;

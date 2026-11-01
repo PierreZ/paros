@@ -19,7 +19,13 @@
 //!    coordinator saw admitted ([`Registry::serves`], #511).
 //! 2. **One machine, one storage instance.** A machine never holds two
 //!    storage instances (acceptor, replica, matchmaker) of one target, and
-//!    never two instances of one role of one target.
+//!    never two instances of one role of one target. A machine that takes
+//!    every role (`PAROS_ROLES=all`) never holds a storage instance and a
+//!    stateless one (proxy leader, batcher) of one target either: the
+//!    roles of a journal stay compartmentalized (decided on 2026-11-01,
+//!    #839 (`PAROS_ROLES`): a proxy leader beside an acceptor of its own
+//!    journal left the journal with no leader, sweep seed
+//!    10855700503579227314 on 2f14583).
 //! 3. **Zone by zone in round robin.** The next instance goes to the zone
 //!    (failure domain) that holds the fewest instances of the target so far.
 //! 4. **Least-loaded inside a zone.** Inside that zone, the machine with the
@@ -180,10 +186,40 @@ pub fn zoned(members: &[NodeId], machines: &[Machine], system: QuorumSystem) -> 
 pub fn zone_rule_binds(survive_machines: u32, class: Class, machines: &[Machine]) -> bool {
     let zones: BTreeSet<&str> = machines
         .iter()
-        .filter(|m| m.class == class && domain(&m.zone).is_some())
+        .filter(|m| m.class.takes(class) && domain(&m.zone).is_some())
         .map(|m| m.zone.as_str())
         .collect();
     survive_machines >= 1 && zones.len() >= 3
+}
+
+/// `slots` of `role` for `target`, with the target's bookings of every
+/// other role in `registry`: the `current` a placement of `role` needs to
+/// keep a new instance apart from them (rule 2), for a caller that tracks
+/// only the slots of its own role.
+///
+/// # Panics
+///
+/// If a slot of `slots` is not of `role` and `target`.
+#[must_use]
+pub fn with_others(
+    registry: &Registry,
+    (role, target): (Role, BookingTarget),
+    slots: &[(u64, Booking)],
+) -> Vec<(u64, Booking)> {
+    assert!(
+        slots
+            .iter()
+            .all(|(_, b)| b.role == role && b.target == target),
+        "the slots are of the role and the target"
+    );
+    let mut current = slots.to_vec();
+    current.extend(
+        registry
+            .bookings()
+            .filter(|(_, b)| b.target == target && b.role != role)
+            .map(|(id, b)| (id, *b)),
+    );
+    current
 }
 
 /// What a placement asks for: `count` instances of `role` for `target`.
@@ -327,7 +363,8 @@ fn release(
 }
 
 /// `missing` new instances for `want`, never on a machine `current` already
-/// uses for the target in a way rule 2 forbids.
+/// uses for the target in a way rule 2 forbids: the same role, another
+/// storage role for a storage one, or a role of the other kind.
 fn add(
     want: &Want,
     machines: &[Machine],
@@ -338,12 +375,16 @@ fn add(
     let storage = want.role.class() == Class::Storage;
     let excluded: BTreeSet<NodeId> = current
         .iter()
-        .filter(|(_, b)| b.role == want.role || (storage && b.role.class() == Class::Storage))
+        .filter(|(_, b)| {
+            b.role == want.role
+                || (storage && b.role.class() == Class::Storage)
+                || b.role.class() != want.role.class()
+        })
         .map(|(_, b)| b.node)
         .collect();
     let fitting: Vec<&Machine> = machines
         .iter()
-        .filter(|m| m.class == want.role.class() && !excluded.contains(&m.node))
+        .filter(|m| m.class.takes(want.role.class()) && !excluded.contains(&m.node))
         .collect();
     // A weightless booking takes no slot (#753 (per-journal proxies)).
     let weighs = Booking::weighs_for(want.role, want.target);
@@ -544,6 +585,38 @@ mod tests {
         let mut counts: Vec<usize> = per_zone.into_values().collect();
         counts.sort_unstable();
         assert_eq!(counts, vec![1, 2, 2]);
+    }
+
+    #[test]
+    fn an_all_machine_takes_either_kind_but_keeps_a_journals_kinds_apart() {
+        let mut machines: Vec<Machine> = (1..=4).map(|n| machine(n, "a", 4)).collect();
+        for m in &mut machines {
+            m.class = Class::All;
+        }
+        let mut bookings = Vec::new();
+        let acceptors = want(journal(1), 3);
+        let steps = plan(&acceptors, &machines, &[], 9).expect("fits");
+        apply(&mut machines, &mut bookings, &acceptors, &steps);
+        let storage: BTreeSet<NodeId> = bookings.iter().map(|(_, b)| b.node).collect();
+        let proxy = Want {
+            role: Role::ProxyLeader,
+            target: journal(1),
+            count: 1,
+        };
+        let steps = plan(&proxy, &machines, &of(&bookings, journal(1)), 9).expect("fits");
+        let placed = booked(&steps);
+        assert_eq!(placed.len(), 1);
+        assert!(
+            !storage.contains(&placed[0]),
+            "a proxy leader beside no acceptor"
+        );
+        // No machine of the journal left: the second proxy leader waits.
+        apply(&mut machines, &mut bookings, &proxy, &steps);
+        let two = Want { count: 2, ..proxy };
+        assert!(plan(&two, &machines, &of(&bookings, journal(1)), 9).is_err());
+        // Another journal's acceptor may share that machine.
+        let other = want(journal(2), 4);
+        assert!(plan(&other, &machines, &[], 9).is_ok());
     }
 
     #[test]
@@ -793,6 +866,52 @@ mod tests {
             &SystemCommand::MachineAdmitted { id: NodeId(2) }.encode(),
         );
         assert_eq!(offered(&registry), [NodeId(1), NodeId(2)]);
+    }
+
+    /// A caller that tracks only its own role's slots learns the target's
+    /// other roles, and nothing of another target (rule 2).
+    #[test]
+    fn with_others_adds_the_targets_other_roles_only() {
+        use crate::registry::SystemCommand;
+        let mut registry = Registry::new([NodeId(1)]);
+        registry.fold(
+            0,
+            &SystemCommand::RegisterNode {
+                id: NodeId(1),
+                addr: "n1".into(),
+                class: Class::All,
+                capacity: 8,
+                locality: crate::machine::Locality::zone("z"),
+                name: "m1".into(),
+                incarnation: 1,
+                machine_interface: Vec::new(),
+            }
+            .encode(),
+        );
+        let book = |booking: u64, role: Role, target: BookingTarget| {
+            SystemCommand::BookCapacity {
+                booking,
+                node: NodeId(1),
+                role,
+                target,
+            }
+            .encode()
+        };
+        registry.fold(1, &book(10, Role::Acceptor, journal(1)));
+        registry.fold(2, &book(11, Role::ProxyLeader, journal(1)));
+        registry.fold(3, &book(12, Role::ProxyLeader, journal(2)));
+        let acceptor = Booking {
+            node: NodeId(1),
+            role: Role::Acceptor,
+            target: journal(1),
+        };
+        let current = with_others(&registry, (Role::Acceptor, journal(1)), &[(10, acceptor)]);
+        let ids: Vec<u64> = current.iter().map(|(id, _)| *id).collect();
+        assert_eq!(ids, [10, 11], "the proxy leader of journal 1 joins");
+        assert!(
+            current.iter().all(|(_, b)| b.target == journal(1)),
+            "no slot of another target"
+        );
     }
 
     /// The zone rule binds only where it can hold, and a round-robin plan

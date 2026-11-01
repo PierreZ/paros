@@ -132,7 +132,7 @@ tag**: opaque to paros, and no code reads one to decide. A user tag never change
 | `paros/kind` | tenant | `RegisterTenant`, `init`, adding a cell | `internal` or `users` |
 | `paros/role` | internal tenant | the same | `universe` or `cell` |
 | `paros/movable` | tenant | the same | `true` or `false`; a cell tenant is always `false` |
-| `paros/class` | machine | `RegisterNode`, from `PAROS_CLASS` | `storage` or `stateless` |
+| `paros/roles` | machine | `RegisterNode`, from `PAROS_ROLES` | `all`, `storage` or `stateless` (`paros/class` before 2026-11-01, still read) |
 | `paros/zone`, `paros/rack` | machine | `RegisterNode`, from `PAROS_ZONE`, `PAROS_RACK` | where it runs; placement spreads over zones |
 | `paros/kind` | cell | `AddCell` | `regional` or `multi-region` |
 | `paros/region`, `paros/regions`, `paros/witness` | cell | `AddCell` | the regions of its kind |
@@ -150,7 +150,8 @@ The decisions (Pierre, 2026-10-15):
 3. **Reserved tags change only through their own commands**: the tag commands refuse a
    `paros/` key at decode, so a reserved tag is enforced at apply. The cell tenant is always
    pinned.
-4. **The machine class is a reserved tag** (`paros/class:storage`).
+4. **The roles a machine takes are a reserved tag** (`paros/roles:all`; renamed from
+   `paros/class` on 2026-11-01).
 5. **The caps** are 32 tags per entity, keys of at most 63 bytes, values of at most 255 bytes.
 6. **Authorization by tag** (Biscuit `tag(...)` facts) is a follow-up.
 7. **No prefix marks an internal name.** An internal tenant shows as `<kind>:<name>`, its

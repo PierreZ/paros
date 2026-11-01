@@ -167,7 +167,7 @@ fn a_tenant_scope_sees_only_its_own_spread() {
         Some("zone-a")
     );
     assert!(
-        crate::tags::value_of(&reply.machines[0].tags, crate::tags::reserved::CLASS).is_none(),
+        crate::tags::value_of(&reply.machines[0].tags, crate::tags::reserved::ROLES).is_none(),
         "a tenant scope sees no machine's class"
     );
     // An admin asking the same view sees the addresses.

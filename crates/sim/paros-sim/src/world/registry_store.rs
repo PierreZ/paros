@@ -9,12 +9,14 @@
 //! landed when that sync returns), and a process killed in between leaves the
 //! operator honestly unsure, which the next boot resolves by reading the disk
 //! ([`resolve_registry_provisioning`]). A commit may lose power partway
-//! through, at the store's own `hint!`s, budgeted by [`super::cut`].
-//! moonpool's storage chaos fails syncs on the simulated disk itself.
+//! through, at the store's own `hint!`s: the store publishes its layout in
+//! its set's shard, and moonpool's gate keeps a crash off a registry the set
+//! cannot afford to lose (#760 (moonpool owns fault placement)). moonpool's
+//! storage chaos fails syncs on the simulated disk itself.
 
 use std::sync::{Mutex, PoisonError, Weak};
 
-use moonpool_sim::{SimStorageProvider, StateHandle, assert_reachable, assert_sometimes};
+use moonpool_sim::{SimStorageProvider, assert_reachable};
 use paros::core::Ballot;
 use paros::core::journal::JournalId;
 use paros::core::journal::JournalIdentifier;
@@ -29,7 +31,6 @@ use paros::storage::StorageError;
 use paros::storage::journal::JournalMatchmakerStorage;
 
 use super::StorageWorld;
-use super::cut::{Budget, InFlight, release_parked};
 
 /// The directory a matchmaker's registries live in on its simulated disk.
 pub(crate) const REGISTRY_DIR: &str = "paros/matchmaker";
@@ -61,36 +62,18 @@ pub(crate) struct LedgeredRegistry {
     key: String,
     /// A format was staged and its sync has not returned yet.
     format_pending: bool,
-    /// The run's state: where a commit in flight registers for the cut's
-    /// budget ([`super::cut`]).
-    state: StateHandle,
-    /// On a `Batched` registry, the bootstrap set's size: a cut may leave an
-    /// ambiguous registration, a crash verdict, so it is the run's one
-    /// matchmaker loss ([`StorageWorld::permit_matchmaker_power_cut`]).
-    /// `None` on an `Ordered` registry, never ambiguous.
-    cut_budget: Option<usize>,
-    /// The run's thin matchmaker sets and this matchmaker's id: a cut never
-    /// takes a member of a set that cannot spare it (#496).
-    thin: (super::scenarios::thin_sets::ThinSets, u64),
 }
 
 impl LedgeredRegistry {
     /// The registry of `tenant`'s set at `ip`. What a commit has in flight
     /// is the driver's to report (`Audit::matchmaker_in_flight`, #190).
-    // The store's own arguments, then the budget's (#496: the matchmaker's
-    // id, which the thin sets name).
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         provider: SimStorageProvider,
         tenant: TenantId,
         layout: paros::storage::journal::JournalStoreConfig,
         world: Weak<Mutex<StorageWorld>>,
         ip: String,
-        state: StateHandle,
-        cut_budget: Option<usize>,
-        matchmaker: u64,
     ) -> Self {
-        let thin = (super::scenarios::thin_sets::thin_sets(&state), matchmaker);
         Self {
             inner: JournalMatchmakerStorage::new(
                 provider,
@@ -102,9 +85,6 @@ impl LedgeredRegistry {
             key: set_key(&ip, tenant),
             ip,
             format_pending: false,
-            state,
-            cut_budget,
-            thin,
         }
     }
 
@@ -169,20 +149,7 @@ impl RegistryStorage for LedgeredRegistry {
 impl MatchmakerStorage for LedgeredRegistry {
     #[tracing::instrument(level = "debug", skip_all, fields(ip = %self.ip))]
     async fn boot_scan(&mut self) -> Result<(), StorageError> {
-        self.inner.boot_scan().await?;
-        // The open synced what it keeps: a batch a failed sync left in the
-        // file image is durable or gone.
-        release_parked(&self.state, &self.key);
-        // The outcome a cut registry must reach: what it held before the
-        // cut is still there after it.
-        let ip = self.ip.clone();
-        if self.with_world(|w| w.take_registry_cut(&ip)) == Some(true) {
-            assert_sometimes!(
-                !self.inner.registered().is_empty(),
-                "journal store: a matchmaker registration survives a power cut"
-            );
-        }
-        Ok(())
+        self.inner.boot_scan().await
     }
 
     fn formatted_config(&self) -> Option<MatchmakerConfig> {
@@ -233,31 +200,7 @@ impl MatchmakerStorage for LedgeredRegistry {
 
     #[tracing::instrument(level = "trace", skip_all)]
     async fn sync(&mut self) -> Result<(), StorageError> {
-        let writes = self.inner.has_staged();
-        let held = !self.inner.registered().is_empty();
-        // A commit that writes is in flight until the sync returns: a hint
-        // that kills the process now spends the matchmaker loss budget.
-        let in_flight = writes.then(|| {
-            let budget = Budget::Matchmaker {
-                bootstrap: self.cut_budget,
-                held,
-                thin: self.thin.clone(),
-            };
-            InFlight::open(&self.state, &self.ip, budget, self.world.clone())
-        });
-        let synced = self.inner.sync().await;
-        match (&synced, in_flight) {
-            // A failed sync leaves its batch volatile in the file image: a
-            // kill may still tear it, so the commit stays in flight.
-            (Err(_), Some(in_flight)) => in_flight.park(&self.key),
-            (_, in_flight) => {
-                drop(in_flight);
-                if synced.is_ok() {
-                    release_parked(&self.state, &self.key);
-                }
-            }
-        }
-        synced?;
+        self.inner.sync().await?;
         if std::mem::take(&mut self.format_pending) {
             // The marker is durable: the provisioning landed.
             let key = self.key.clone();

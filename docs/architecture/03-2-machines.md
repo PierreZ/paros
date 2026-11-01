@@ -29,7 +29,7 @@ At start a machine registers in the cell control journal with
 `RegisterNode { node_id, addr, machine_interface, capacity, tags }`, publishing
 its machine interface (moonpool-rpc's incarnation-bearing `InterfaceRef`, #404), and it starts the driver
 for every `(tenant, journal, role)` assigned to it. Its `tags` are its reserved tags only:
-`paros/class`, `paros/zone` and `paros/rack` (section 3.7, #575 (key:value tags)). A
+`paros/roles`, `paros/zone` and `paros/rack` (section 3.7, #575 (key:value tags)). A
 `RegisterNode` for an existing `node_id`
 with a new incarnation is the reboot signal: the cell coordinator learns at publication time, not
 after a heartbeat window (Akka identifies nodes by `host:port:uid`, and a new incarnation joining
@@ -421,16 +421,28 @@ there it calls `Resolve` (below).
   any machine of that cell the frontend half (the tenant's frontends, from its registry fold),
   section 3.5. `Resolve` landed on 2026-10-10 (#216, `0x5041_030A`), section 3.5.
 
-The decision and its alternatives are #216. Classes are FDB's:
+The decision and its alternatives are #216. Each role is of one kind, as FDB's classes:
 
 - `storage`: anything with a durable store. Acceptors, replicas, matchmakers.
 - `stateless`: frontends, resolvers, proxy leaders, batchers, unbatchers, coordinators. The cell
-  and universe coordinators run on the founding members until a `stateless` machine registers
-  (section 3.3).
+  and universe coordinators run on the founding members until a machine that takes the
+  `stateless` roles registers (section 3.3).
 
-**Capacity is role slots** (decided on 2026-10-04). A machine offers `capacity` opaque slots of
-its class; one slot holds one role instance (an acceptor, replica, matchmaker, coordinator,
+**A machine takes every role by default** (decided by Pierre on 2026-11-01). `PAROS_ROLES` sets
+the roles a machine takes: `all` (the default), `storage` or `stateless`. The reserved tag
+`paros/roles` carries it (it was `PAROS_CLASS` and `paros/class`; a record written before the
+rename is still read). A founding member takes the `storage` roles (`all` or `storage`).
+`PAROS_ROLES` is set at format. A restart may widen it to `all`. A restart that narrows the roles
+of a machine that joined a cell is refused, at the machine and at the registry: the cell may book
+a role on it that it would no longer take. To take fewer roles, remove the machine from its cell
+and wipe its disk. A narrowing that moves the roles off first waits for #687 (rebalance a cell).
+In code the type is still `Class`. On a machine that takes every role, placement still keeps a
+journal's kinds apart: a proxy leader or a batcher never shares a machine with an acceptor or a
+replica of its own journal (placement's rule 2, section 3.4).
+
+**Capacity is role slots** (decided on 2026-10-04). A machine offers `capacity` opaque slots for
+the roles it takes; one slot holds one role instance (an acceptor, replica, matchmaker, coordinator,
 frontend, batcher or unbatcher) of one journal or tenant. A booking is keyed
 `(tenant, journal or matchmaker set, role)` and holds one slot; only the cell coordinator writes
 bookings. Bytes, IOPS and weighted roles are not modelled. Scaling a role for a tenant is adding
-machines of the right class and raising the tenant's desired counts.
+machines that take the role and raising the tenant's desired counts.

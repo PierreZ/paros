@@ -64,7 +64,9 @@ use paros_tunables::DriverTunables;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MachineSettings {
     /// Its class, fixed at format: a later start under another is refused.
-    pub class: Class,
+    /// `None` keeps the class of its record, and formats an empty disk as
+    /// [`Class::All`] (every role).
+    pub class: Option<Class>,
     /// Its capacity, in the placement's units; may change across starts.
     pub capacity: u64,
     /// Its zone and rack (#575: its reserved tags `paros/zone` and
@@ -324,7 +326,7 @@ where
     let audit = audits(AuditScope::Machine);
     let MachineAddresses { listen, advertise } = addresses;
     let record = identity(&providers, &disk, &audit, &advertise, settings).await?;
-    assert_eq!(record.class, settings.class, "the class is fixed at format");
+    assert!(settings.class.is_none_or(|c| c == record.class), "roles");
     let mut facts = facts_of(
         &record,
         (advertise.clone(), listen),
@@ -487,7 +489,7 @@ async fn identity<P: ParosProviders, S: LocalStorageProvider + Clone, A: Audit>(
         };
         let record = MachineRecord {
             node_id,
-            class: settings.class,
+            class: settings.class.unwrap_or(Class::All),
             capacity: settings.capacity,
             locality: settings.locality.clone(),
             name: settings.name.clone(),
@@ -516,14 +518,29 @@ async fn identity<P: ParosProviders, S: LocalStorageProvider + Clone, A: Audit>(
             );
         }
     }
-    if record.class != settings.class {
-        return Err(MachineError::Refused(format!(
-            "this machine was formatted as {}, not {}: a class is fixed at format",
-            record.class.as_str(),
-            settings.class.as_str()
-        )));
+    let mut changed = false;
+    if let Some(class) = settings.class.filter(|class| *class != record.class) {
+        // A machine may take more roles at a restart (`all`), never fewer:
+        // the cell may book a role on it that a narrower class drops. A
+        // machine that never joined a cell holds no role yet.
+        let joined = record.formed().is_some()
+            || record.admitted.is_some()
+            || record.promised != Ballot::default()
+            || disk.holds_stores().await;
+        if class != Class::All && joined {
+            return Err(MachineError::Refused(format!(
+                "this machine takes {} roles: a restart may set PAROS_ROLES=all, never \
+                 {}; to take fewer roles, remove it from its cell and wipe its disk",
+                record.class.as_str(),
+                class.as_str()
+            )));
+        }
+        moonpool_assertions::reachable!("machine: a machine restarts taking other roles");
+        tracing::info!(machine = %record.name, from = record.class.as_str(), to = class.as_str(), "machine_roles_changed");
+        record.class = class;
+        changed = true;
     }
-    let changed = record.capacity != settings.capacity
+    changed |= record.capacity != settings.capacity
         || record.locality != settings.locality
         || record.name != settings.name;
     record.capacity = settings.capacity;
@@ -776,7 +793,7 @@ where
     // A storage machine hosts the matchmaker sets the registry books on it
     // (#501 (matchmaker sets off the founders)): never a member of a
     // bootstrap generation, it opens only those.
-    if admitted.facts.class == Class::Storage {
+    if admitted.facts.class.stores() {
         stores = stores.with_matchmakers(MatchmakerConfig {
             id: MatchmakerId(node_id.0),
             bootstrap: control.matchmakers.clone(),
@@ -788,7 +805,7 @@ where
         .collect();
     // Its own journals register with the sets it hosts like with any
     // member: at the address it advertises, as a founding member does.
-    if admitted.facts.class == Class::Storage {
+    if admitted.facts.class.stores() {
         assert!(
             matchmakers.iter().all(|(id, _)| id.0 != node_id.0),
             "an admitted machine is not a founding member"

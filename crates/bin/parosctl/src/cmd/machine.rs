@@ -75,10 +75,10 @@ pub async fn machine(asker: &Asker<'_>, out: &Printer, args: MachineArgs) -> End
             out.emit(
                 || {
                     let mut text = format!(
-                        "name:            {}\naddress:         {}\nclass:           {}\nslots:           {} booked of {}\nzone:            {}\nrack:            {}\ntags:            {}\nstanding:        {}\nstate:           {}\nfounding member: {}\ncell:            {}",
+                        "name:            {}\naddress:         {}\nroles:           {}\nslots:           {} booked of {}\nzone:            {}\nrack:            {}\ntags:            {}\nstanding:        {}\nstate:           {}\nfounding member: {}\ncell:            {}",
                         machine_names(&reply)[&m.node_id],
                         m.addr,
-                        tag(&m.tags, paros::model::tags::reserved::CLASS),
+                        tag(&m.tags, paros::model::tags::reserved::ROLES),
                         m.booked,
                         m.capacity,
                         tag(&m.tags, paros::model::tags::reserved::ZONE),
@@ -133,7 +133,7 @@ async fn machine_list(
             [
                 machine_names(&reply)[&m.node_id].clone(),
                 m.addr.clone(),
-                tag(&m.tags, paros::model::tags::reserved::CLASS),
+                tag(&m.tags, paros::model::tags::reserved::ROLES),
                 format!("{}/{}", m.booked, m.capacity),
                 tag(&m.tags, paros::model::tags::reserved::ZONE),
                 m.standing.clone(),
@@ -149,7 +149,7 @@ async fn machine_list(
         || {
             table(
                 [
-                    "NAME", "ADDRESS", "CLASS", "SLOTS", "ZONE", "STANDING", "STATE", "CPU",
+                    "NAME", "ADDRESS", "ROLES", "SLOTS", "ZONE", "STANDING", "STATE", "CPU",
                     "MACHINE", "DISK", "TAGS",
                 ],
                 &rows,

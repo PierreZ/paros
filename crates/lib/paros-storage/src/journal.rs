@@ -82,7 +82,7 @@ use serde::de::DeserializeOwned;
 use crate::{MetadataFault, StorageError, StorageRecord, WriteOutcome};
 use paros_model::corruption::{CorruptionVerdict, IntegrityFault};
 
-pub use matchmaker::JournalMatchmakerStorage;
+pub use matchmaker::{JournalMatchmakerStorage, matchmaker_shard};
 /// The journal's commit protocol and segment shape, re-exported so a store's
 /// caller configures it without depending on `moonpool-journal`.
 pub use moonpool_core::LayoutRegion;

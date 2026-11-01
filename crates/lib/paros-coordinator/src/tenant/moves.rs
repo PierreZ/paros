@@ -658,7 +658,9 @@ impl Moves {
             .into_iter()
             .filter(|m| stays(cell.registry(), gone, m.node))
             .collect();
-        let Ok(steps) = placement::plan(&want, &machines, staying, journal.tenant.0) else {
+        // Apart from the journal's other roles (placement's rule 2).
+        let current = placement::with_others(cell.registry(), (want.role, want.target), staying);
+        let Ok(steps) = placement::plan(&want, &machines, &current, journal.tenant.0) else {
             moonpool_assertions::reachable!("coordinator: a move has no machine to go to");
             return Some(MoveStep::Waiting);
         };

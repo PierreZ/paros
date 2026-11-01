@@ -114,6 +114,14 @@ pub(super) async fn run_matchmaker_role(
         && world
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
+            .may_wipe_matchmaker(bootstrap.len())
+        // Moonpool's shard gate: the set keeps a majority of clean
+        // registries without this one (#760 (moonpool owns fault
+        // placement)).
+        && ctx.storage().lose_replica().unwrap_or(false)
+        && world
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
             .wipe_matchmaker(my_ip, bootstrap.len())
     {
         // The disk is genuinely emptied: every set's registry files go,
@@ -195,10 +203,6 @@ pub(super) async fn run_matchmaker_role(
                     layout,
                     Arc::downgrade(&world),
                     my_ip.to_string(),
-                    ctx.state().clone(),
-                    (layout.durability == paros::storage::journal::Durability::Batched)
-                        .then_some(bootstrap.len()),
-                    id.0,
                 ),
                 boot: boots[tenant],
             })
@@ -221,29 +225,25 @@ pub(super) async fn run_matchmaker_role(
             // matchmaker-set reconfiguration.
             Err(RunError::Storage(failure)) => {
                 // A failed sync is a fail-stop the process restarts from. A
-                // journal registry the budgeted cut left with an ambiguous
-                // live registration refuses to open for good (a crash
-                // verdict): the matchmaker is the run's one matchmaker loss,
-                // down for the run and replaced by a handover, like a wiped
-                // one.
+                // journal registry a crash left with an ambiguous live
+                // registration refuses to open for good (a crash verdict):
+                // the matchmaker is down for the run and replaced by a
+                // handover, like a wiped one.
                 if matches!(failure, paros::storage::StorageError::Corruption { .. }) {
-                    // Only the budgeted cut, or a failed writeback the
-                    // open then resolved torn (`world::cut`'s module doc),
-                    // may leave a registry this way; any other is a fault
-                    // beyond the budget.
-                    let cut = world
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .is_cut_matchmaker(my_ip);
-                    let stranded = tenants.keys().any(|tenant| {
-                        crate::world::cut::is_parked(
-                            ctx.state(),
-                            &crate::world::registry_store::set_key(my_ip, *tenant),
-                        )
-                    });
+                    // Moonpool's gate let the crash or the damage land only
+                    // where the set keeps a majority of clean registries
+                    // (#760 (moonpool owns fault placement)). A torn last
+                    // batch loses the registry with no damaged sector, so
+                    // the gate still counts it clean: tell it, and check
+                    // that the set keeps a clean majority without it.
+                    // Witness 13903612984429872394 (a hunt on the #760 slice
+                    // 2 branch): a second registry of a set was torn while
+                    // the gate counted the first one clean.
+                    let _ = ctx.storage().lose_replica_past_gate();
+                    let tenants: Vec<TenantId> = tenants.keys().copied().collect();
                     assert_always!(
-                        cut || stranded,
-                        "matchmaker: only the budgeted cut loses a registry for good",
+                        sets_keep_a_clean_majority(&ctx.shards(), &tenants),
+                        "matchmaker: a lost registry leaves its set a clean majority",
                         { "matchmaker" => id.0 }
                     );
                     assert_reachable!(
@@ -322,4 +322,21 @@ fn spared(state: &moonpool_sim::StateHandle, id: MatchmakerId) -> bool {
         assert_reachable!("matchmaker: a thin set holds a matchmaker loss back");
     }
     spared
+}
+
+/// Whether every matchmaker set of `tenants` that moonpool's gate covers
+/// keeps its `durable` need on the registries it counts clean.
+fn sets_keep_a_clean_majority(shards: &moonpool_sim::Shards, tenants: &[TenantId]) -> bool {
+    tenants.iter().all(|tenant| {
+        let name = paros::storage::journal::matchmaker_shard(*tenant);
+        let Some(state) = shards.get(&name).filter(|_| !shards.is_off(&name)) else {
+            return true;
+        };
+        let clean = shards.clean_copies(&name, 0);
+        state.replications().iter().all(|replication| {
+            replication
+                .durable
+                .holds(&|replica| clean.contains(replica))
+        })
+    })
 }

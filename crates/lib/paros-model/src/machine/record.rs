@@ -30,7 +30,7 @@
 //!
 //! ```text
 //! node_id 6150928431937019931
-//! class storage
+//! roles storage
 //! capacity 1
 //! zone zone-a
 //! rack rack-1
@@ -161,7 +161,7 @@ impl MachineRecord {
     #[must_use]
     pub fn render(&self) -> String {
         let mut text = format!(
-            "node_id {}\nclass {}\ncapacity {}\n",
+            "node_id {}\nroles {}\ncapacity {}\n",
             self.node_id.0,
             self.class.as_str(),
             self.capacity,
@@ -244,7 +244,7 @@ impl MachineRecord {
             let identifier =
                 || parse_identifier(value).ok_or_else(|| format!("bad {key} {value:?}"));
             match key {
-                "node_id" | "class" | "capacity" | "zone" | "rack" | "name" => {
+                "node_id" | "roles" | "class" | "capacity" | "zone" | "rack" | "name" => {
                     fields.insert(key, value);
                 }
                 "promised" => {
@@ -318,7 +318,8 @@ impl MachineRecord {
                     .parse()
                     .map_err(|e| format!("bad node id: {e}"))?,
             ),
-            class: field("class")?.parse()?,
+            // A record written before the rename names its roles `class`.
+            class: field("roles").or_else(|_| field("class"))?.parse()?,
             capacity: field("capacity")?
                 .parse()
                 .map_err(|e| format!("bad capacity: {e}"))?,
@@ -384,6 +385,19 @@ mod tests {
             admitted: None,
             created: Vec::new(),
         }
+    }
+
+    #[test]
+    fn a_record_written_before_the_rename_names_its_roles_class() {
+        let all = MachineRecord {
+            class: Class::All,
+            ..record(Ballot::default(), None)
+        };
+        let text = all.render();
+        assert!(text.contains("\nroles all\n"), "a record names its roles");
+        assert_eq!(MachineRecord::parse(&text), Ok(all.clone()));
+        let old = text.replace("\nroles all\n", "\nclass all\n");
+        assert_eq!(MachineRecord::parse(&old), Ok(all));
     }
 
     #[test]

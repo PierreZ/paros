@@ -1992,9 +1992,9 @@ impl MatchmakerAudit {
     }
 
     /// The registry's store surfaced a fault (#125). The sim injects
-    /// exactly one — a whole-batch fsync failure, whose batch stays in
-    /// flight for the cut's budget until the store opens again
-    /// (`world::cut`) — and the driver's only honest answer
+    /// exactly one — a whole-batch fsync failure, whose batch stays
+    /// volatile in the file image until the store opens again — and the
+    /// driver's only honest answer
     /// is to fail-stop: the registry has no in-place repair, and a
     /// matchmaker whose disk keeps failing is *replaced* through a
     /// matchmaker-set reconfiguration.

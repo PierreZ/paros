@@ -242,7 +242,8 @@ pub(crate) async fn register<P: ParosProviders>(
     // registers once, for its name (#399), and again on every start that
     // serves another machine interface (#404).
     let held = session.registry().get(id).is_some_and(|node| {
-        node.name == identity.name && node.machine_interface == identity.machine_interface
+        (&node.name, &node.machine_interface, node.class)
+            == (&identity.name, &identity.machine_interface, class)
     });
     if *known == addr && held {
         return registered;
@@ -299,6 +300,10 @@ pub(crate) async fn register<P: ParosProviders>(
         // The term's first write that did not land ends its watch.
         park(watching, parked);
         return refuse("unavailable");
+    }
+    // The registry refuses fewer roles than it holds (`PAROS_ROLES`).
+    if session.registry().get(id).is_some_and(|n| n.class != class) {
+        return refuse("fewer_roles");
     }
     let book = paros_model::machine::cell_book(session.founders(), session.registry());
     if !book.iter().any(|entry| *entry == (id, addr.clone())) {

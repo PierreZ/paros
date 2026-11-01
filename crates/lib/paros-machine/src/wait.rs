@@ -19,7 +19,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::admitted::AdmittedMachine;
 use super::formed::{FormationToken, FormedCell, FormedExt as _, vote_ballot};
-use super::{AdminPin, Admission, CellPlan, Class, MachineFacts, ballot_from_wire, ballot_to_wire};
+use super::{AdminPin, Admission, CellPlan, MachineFacts, ballot_from_wire, ballot_to_wire};
 use paros_net::transport::Transport;
 use paros_net::{Inbound, ReplySender, serve_well_known};
 use paros_roles::frontend::Operation;
@@ -324,7 +324,7 @@ async fn answer_prepare<L: CellLedger>(
         refusal: refusal.into(),
         ..wire::PrepareCellAck::default()
     };
-    if facts.class != Class::Storage {
+    if !facts.class.stores() {
         return answer("stateless");
     }
     let Some(ballot) = ballot_from_wire(request.init.as_ref()) else {
@@ -395,7 +395,7 @@ async fn answer_form<L: CellLedger>(
         refusal: refusal.into(),
         promise: None,
     };
-    if facts.class != Class::Storage {
+    if !facts.class.stores() {
         return refuse("stateless");
     }
     let (Ok(plan), Some(ballot)) = (CellPlan::from_form(request), vote_ballot(request)) else {

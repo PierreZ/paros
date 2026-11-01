@@ -32,7 +32,6 @@ use paros_client::names::{
 use paros_client::{Client, Server};
 use paros_model::address::Address;
 use paros_model::fleet::{FleetDirectory, RootKeyEntry};
-use paros_model::machine::Class;
 use paros_model::name::JournalName;
 use paros_model::registry::Registry;
 use paros_net::NodeClient;
@@ -281,7 +280,7 @@ fn registered_servers<P: ParosProviders>(
 ) -> Vec<Server<P>> {
     let servers: Vec<Server<P>> = registry
         .nodes()
-        .filter(|(id, node)| node.class == Class::Storage && client.index_of(id.0).is_none())
+        .filter(|(id, node)| node.class.stores() && client.index_of(id.0).is_none())
         .filter_map(|(id, _)| {
             let address = Address::parse(registry.address(id)?).ok()?;
             Some(Server {

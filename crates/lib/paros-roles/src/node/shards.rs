@@ -19,10 +19,18 @@
 //! (`durable`), and makes progress while a Phase-1 quorum and a Phase-2
 //! quorum are up (`progress`). A grid's partitions map to `All` and `Any`
 //! of one need per partition.
+//!
+//! A tenant's **matchmaker set** is a shard too (`matchmakers/<tenant>`):
+//! each member's registry is one whole copy, and the set keeps its
+//! registrations, and makes progress, while a majority is intact and up. A
+//! node declares the set its journals believe in force, and a handover it
+//! drives is a move to the members it names. Moonpool keeps one view per
+//! process, so the node declares once per tenant, never per journal.
 
 use moonpool_buggify::shard;
 use moonpool_buggify::shard::{Need, Replica, Replication};
-use paros_core::membership::{AcceptorConfig, QuorumSystem};
+use paros_core::journal::TenantId;
+use paros_core::membership::{AcceptorConfig, MatchmakerId, QuorumSystem};
 use paros_core::{ColocatedNode, NodeId};
 
 /// What a journal declared last: the `current` and `next` it named.
@@ -88,6 +96,54 @@ pub(crate) fn declare_move(
     let next = declared.1.clone().unwrap_or_else(|| declared.0.clone());
     shard!(shard_name(node), current = declared.0.clone(), next = next);
     *last = Some(declared);
+}
+
+/// What a matchmaker set declared last from this process: the members its
+/// `current` and `next` named.
+pub(crate) type DeclaredSet = Option<(Vec<MatchmakerId>, Option<Vec<MatchmakerId>>)>;
+
+/// Declare `tenant`'s matchmaker set if it changed since `last`: `current`
+/// the members this node believes in force, `next` the members a handover
+/// it drives moves the set to. `replica` names a matchmaker by the address
+/// its link dials.
+pub(crate) fn declare_matchmakers(
+    tenant: TenantId,
+    current: &[MatchmakerId],
+    next: Option<Vec<MatchmakerId>>,
+    last: &mut DeclaredSet,
+    replica: &dyn Fn(MatchmakerId) -> Replica,
+) {
+    if !shard::is_active() {
+        return;
+    }
+    let next = next.filter(|next| next.as_slice() != current && !next.is_empty());
+    let declared = (current.to_vec(), next);
+    if last.as_ref() == Some(&declared) {
+        return;
+    }
+    let name = paros_storage::journal::matchmaker_shard(tenant);
+    let now = set_replication(&declared.0, replica);
+    match &declared.1 {
+        None => shard!(name, current = now),
+        Some(next) => shard!(name, current = now, next = set_replication(next, replica)),
+    }
+    *last = Some(declared);
+}
+
+/// A matchmaker set's replication: a majority of its members, intact to
+/// keep the registrations and up to make progress (matchmaker quorums are
+/// majorities only).
+pub(crate) fn set_replication(
+    members: &[MatchmakerId],
+    replica: &dyn Fn(MatchmakerId) -> Replica,
+) -> Replication {
+    let replicas: Vec<Replica> = members.iter().map(|id| replica(*id)).collect();
+    let majority = Need::majority(replicas.clone());
+    Replication {
+        replicas,
+        progress: majority.clone(),
+        durable: majority,
+    }
 }
 
 /// One configuration's replication.
@@ -197,5 +253,41 @@ mod tests {
         assert!(r.durable.holds(&ok(&[1, 3, 2, 4])));
         assert!(!r.durable.holds(&ok(&[1, 3, 5, 2])));
         assert!(r.progress.holds(&ok(&[1, 3, 2, 4])));
+    }
+
+    fn matchmaker(id: MatchmakerId) -> Replica {
+        Replica::new(format!("10.0.2.{}", id.0))
+    }
+
+    fn up(ids: &'static [u64]) -> impl Fn(&Replica) -> bool {
+        move |r: &Replica| ids.iter().any(|i| r.0 == format!("10.0.2.{i}"))
+    }
+
+    #[test]
+    fn a_matchmaker_set_keeps_its_registrations_on_a_majority() {
+        let members: Vec<MatchmakerId> = (1..=5).map(MatchmakerId).collect();
+        let r = set_replication(&members, &matchmaker);
+        assert_eq!(r.replicas.len(), 5);
+        assert!(r.durable.holds(&up(&[1, 2, 3])));
+        assert!(!r.durable.holds(&up(&[4, 5])));
+        assert!(r.progress.holds(&up(&[3, 4, 5])));
+        assert!(!r.progress.holds(&up(&[1, 2])));
+    }
+
+    #[test]
+    fn a_matchmaker_set_of_one_or_two_spares_no_member() {
+        let two = set_replication(&[MatchmakerId(1), MatchmakerId(2)], &matchmaker);
+        assert!(!two.durable.holds(&up(&[1])));
+        assert!(two.durable.holds(&up(&[1, 2])));
+        let one = set_replication(&[MatchmakerId(1)], &matchmaker);
+        assert!(!one.durable.holds(&up(&[])));
+    }
+
+    #[test]
+    fn the_matchmaker_shard_names_its_tenant() {
+        assert_eq!(
+            paros_storage::journal::matchmaker_shard(TenantId(7)),
+            "matchmakers/7"
+        );
     }
 }
