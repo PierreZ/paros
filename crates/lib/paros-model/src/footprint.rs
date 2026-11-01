@@ -136,10 +136,7 @@ pub fn plan(
 ) -> Result<Vec<Slot>, Shortfall> {
     assert!(tenant.is_set(), "a footprint is a tenant's");
     let machines = offered(registry);
-    let storage = machines
-        .iter()
-        .filter(|m| m.class.stores())
-        .count() as u64;
+    let storage = machines.iter().filter(|m| m.class.stores()).count() as u64;
     if storage < footprint.storage_machines {
         return Err(Shortfall {
             class: Class::Storage,
