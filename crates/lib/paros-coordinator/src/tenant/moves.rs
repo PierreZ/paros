@@ -178,9 +178,13 @@ fn next_move(
         .filter(|(_, b)| b.role == Role::Acceptor && leaving(b.node))
         .filter_map(|(_, b)| match b.target {
             // A tenant's control journal moves through
-            // `crate::tenant::controls` (#685 (special tenants are tenants)).
+            // `crate::tenant::controls` (#685 (special tenants are tenants)),
+            // and so does a cell plan journal, whose tenant (the cell's or
+            // the universe's) the cell does not host.
             BookingTarget::Journal(journal)
-                if !registry.dropped(journal.tenant) && !is_control(registry, journal) =>
+                if registry.hosted_tenant(journal.tenant).is_some()
+                    && !registry.dropped(journal.tenant)
+                    && !is_control(registry, journal) =>
             {
                 Some(journal)
             }

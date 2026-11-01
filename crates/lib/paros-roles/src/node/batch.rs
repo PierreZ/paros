@@ -98,7 +98,13 @@ pub(crate) fn park_call<S, A: Audit, P: ParosProviders>(
         // A lost redirect is a legal outcome: the client's deadline turns it
         // into a retry elsewhere.
         ProposeResult::NotLeader(hint) => {
-            call.no_verdict(hint.map(|n| n.0), &rt.audit, shared.self_id);
+            // Where this node dials the leader, so a client that knows
+            // only some machines reaches it (#685 (special tenants are
+            // tenants)).
+            let address = hint
+                .and_then(|leader| shared.out.dialed(leader))
+                .map_or_else(String::new, |address| address.to_string());
+            call.no_verdict(hint.map(|n| n.0), address, &rt.audit, shared.self_id);
         }
         ProposeResult::Accepted(slot) => {
             // A held call waits on a slot this leader just allocated.

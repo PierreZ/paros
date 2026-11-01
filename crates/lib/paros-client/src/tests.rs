@@ -768,3 +768,28 @@ fn an_abandoned_write_stops_the_pipeline_until_it_drains() {
     lanes.abandon(1);
     assert_eq!(lanes.admit(), Admit::At(3));
 }
+
+#[test]
+fn a_cell_control_journal_s_genesis_pool_is_its_founders() {
+    use super::bootstrap::genesis_pool;
+    use paros_wire::InspectReply;
+    let grown = InspectReply {
+        members: vec![1, 2, 3, 7, 9],
+        founders: vec![1, 2, 3],
+        ..InspectReply::default()
+    };
+    assert_eq!(
+        genesis_pool(grown),
+        vec![1, 2, 3],
+        "a grown journal keeps its founders"
+    );
+    let unnamed = InspectReply {
+        members: vec![1, 2, 3],
+        ..InspectReply::default()
+    };
+    assert_eq!(
+        genesis_pool(unnamed),
+        vec![1, 2, 3],
+        "no founders named: the members"
+    );
+}

@@ -384,6 +384,19 @@ journal and the universe directory. An `admin` call sets how their `F` is chosen
   (#211) to its matchmaker pool, and links to them, from boot (`ControlPlan::cached`). A name
   only lets a journal reach a matchmaker; the set it believes still comes from a matchmaker's
   answer.
-- The cell control journal and the election journal still run on the founding members, so
-  their `F` in force is the founders'. The next steps move them, then make the founders a boot
-  hint only.
+- **The cell plan's journals grow like a control journal** (#685 step 4): the cell control
+  journal, the election journal and the universe control journal. Each has `2F+1` acceptors, `F`
+  the control plane's (`paros_coordinator::tenant::controls`). The coordinator books one acceptor
+  slot per extra machine and reconfigures the journal onto it. It keeps every founding member
+  until step 5 of #685 drains them, and it never moves these journals between machines.
+- An admitted machine knows each plan journal's bootstrap from its admission: the founders'
+  configuration, with itself as a spare (`paros::model::machine::spare_journal_config`). A
+  booking starts the journal there as a spare, and a released booking stops it. Its store
+  re-opens at every boot (`MachineStores::with_planned`).
+- **A redirect names the leader's address** (#685 step 4): a `WriteAck`, `TruncateAck` or
+  `SetLeaderAck` without a verdict carries `leader_address`, where the answering node dials the
+  leader. A client that does not know the leader adds it to its server list and follows the
+  redirect there (`paros::client`, at most 32 learned servers). So a client that knows only the
+  founders reaches a plan journal's leader on any machine. A frontend client never learns: it
+  dials only its frontend.
+- The next steps make the founders a boot hint only, then drain them.

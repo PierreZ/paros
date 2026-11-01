@@ -46,6 +46,10 @@ pub struct Rare {
 /// window seldom reaches, #485 the double fault, #486 the rest.
 pub const RARE: &[Rare] = &[
     Rare {
+        msg: "machine: a released booking stops a cell plan journal",
+        reason: "a cell plan journal grows past the founders only and never moves, so its slot is released only when a machine it grew onto drains after the coordinator grew it: it ran on no seed of two 400-seed hunts; step 5 of #685 (special tenants are tenants) drains the founders and makes it fire",
+    },
+    Rare {
         msg: "universe: a cell that holds a bucket is not removed",
         reason: "the second cell's tenant is removed while its bucket stays on the cell only when the chaos cuts the phase between the tenant's removal and the bucket's return; the next phase then meets the bucket first (#713 (bucket placement))",
     },

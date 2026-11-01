@@ -576,12 +576,16 @@ async fn answer<P: ParosProviders>(
             }
             for ((token, seq, count), (held_token, _, reply)) in ranges.into_iter().zip(replies) {
                 assert_eq!(token, held_token, "a range answers its own write");
-                let _ = reply.send(WriteAck { seq, count, ..ack });
+                let _ = reply.send(WriteAck {
+                    seq,
+                    count,
+                    ..ack.clone()
+                });
             }
         }
         _ => {
             for (_, _, reply) in replies {
-                let _ = reply.send(ack);
+                let _ = reply.send(ack.clone());
             }
         }
     }

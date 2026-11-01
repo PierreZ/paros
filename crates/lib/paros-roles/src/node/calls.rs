@@ -126,9 +126,23 @@ impl Call {
         }
     }
 
-    /// Answer the call with no verdict, naming `leader` as a hint.
-    pub(crate) fn no_verdict<A: Audit>(self, leader: Option<u64>, audit: &A, self_id: u64) {
+    /// Answer the call with no verdict, naming `leader` as a hint and, when
+    /// this node dials it, its `leader_address` (empty otherwise, #685
+    /// (special tenants are tenants)): a client that does not know the
+    /// leader dials it there.
+    pub(crate) fn no_verdict<A: Audit>(
+        self,
+        leader: Option<u64>,
+        leader_address: String,
+        audit: &A,
+        self_id: u64,
+    ) {
         let me = NodeId(self_id);
+        // An address names the leader the hint names: none without a hint.
+        assert!(
+            leader.is_some() || leader_address.is_empty(),
+            "a redirect names an address only with its leader"
+        );
         match self {
             Call::Write { reply, .. } => answer(
                 audit,
@@ -137,6 +151,7 @@ impl Call {
                 reply,
                 WriteAck {
                     leader,
+                    leader_address,
                     ..WriteAck::default()
                 },
             ),
@@ -147,6 +162,7 @@ impl Call {
                 reply,
                 SetLeaderAck {
                     leader,
+                    leader_address,
                     ..SetLeaderAck::default()
                 },
             ),
@@ -157,6 +173,7 @@ impl Call {
                 reply,
                 TruncateAck {
                     leader,
+                    leader_address,
                     ..TruncateAck::default()
                 },
             ),
